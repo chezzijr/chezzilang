@@ -173,7 +173,8 @@ served.
 TICKET-103, changed by 125; 132, 185 (17 commits); W17-1 is the open perf residual on the H2 path.
 
 **Status:** H1 fixed by `ScopeTable` (TICKET-199): scope ids are never reissued, and a retired id
-reads as absent.
+reads as absent. H2 fixed in `LocalQ::pop` (TICKET-199): a `runnext` pick is `Slice::Inherit` and
+runs on the current slice. W17-1 re-measured: no effect.
 
 ## Isolated
 

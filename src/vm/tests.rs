@@ -2978,7 +2978,7 @@ fn run_one_fiber_resets_a_delivered_cut_left_by_the_previous_fiber() {
     // never reached the catch arm that clears it).
     vm.cut = Some(block::Cut::Delivered { floor: Some(3) });
     let mut fiber = mk_pending_fiber(0);
-    vm.run_one_fiber(&mut fiber, Span::RUNTIME);
+    vm.run_one_fiber(&mut fiber, Span::RUNTIME, Slice::Fresh);
     assert_eq!(
         vm.cut, None,
         "a stale delivered cut must not survive into the next fiber scheduled on this shell"
@@ -3125,7 +3125,7 @@ fn take_run(s: &MnSched) -> Fiber {
     // tick=1 → not a periodic-global-check schedule, so the normal own-local-then-global order
     // applies (what the existing unit tests assert).
     match s.take_runnable(0, 1, 0) {
-        Take::Run(f) => f,
+        Take::Run(f, _) => f,
         Take::Stop => panic!("expected a runnable fiber, got Stop"),
     }
 }
@@ -3267,7 +3267,7 @@ fn mn_register_scope_appends_and_offsets_slots() {
 
 /// TICKET-199 (H1) — a retired scope id is never reissued and reads as absent. A worker that still
 /// holds it after dropping the core lock (`mn_worker_loop`'s `cancel_drain` after `finish`) must
-/// neither panic nor drain the NEXT nursery's parked fibers. Under the old `id = scopes.len()` plus
+/// neither panic nor drain the NEXT nursery's parked fibers. Under the old `id = len()` plus
 /// pop rule, the second registration reissued `a`.
 #[test]
 fn retired_scope_id_is_never_reissued_and_reads_as_absent() {
@@ -3723,10 +3723,44 @@ fn localq_runnext_then_ring_order() {
     q.ring.push_back(mk_fiber(1));
     q.ring.push_back(mk_fiber(2));
     q.runnext = Some(mk_fiber(0));
-    assert_eq!(q.pop().unwrap().task_index, 0, "runnext runs first");
-    assert_eq!(q.pop().unwrap().task_index, 1, "then ring FIFO");
-    assert_eq!(q.pop().unwrap().task_index, 2);
+    assert_eq!(q.pop().unwrap().0.task_index, 0, "runnext runs first");
+    assert_eq!(q.pop().unwrap().0.task_index, 1, "then ring FIFO");
+    assert_eq!(q.pop().unwrap().0.task_index, 2);
     assert!(q.pop().is_none());
+}
+
+/// TICKET-199 (H2) — Go `inheritTime`: a `runnext` pick runs on the current slice (`Inherit`), a
+/// ring pick on a fresh one (`Fresh`). `pop_seeded` reports `Inherit` exactly when it returns the
+/// `runnext` fiber (DEC-167: the seeded pick follows the same rule as `pop`).
+#[test]
+fn localq_pop_inherits_the_slice_only_from_runnext() {
+    let mut q = LocalQ::new();
+    q.ring.push_back(mk_fiber(1));
+    q.runnext = Some(mk_fiber(0));
+    let (f, s) = q.pop().unwrap();
+    assert_eq!((f.task_index, s), (0, Slice::Inherit));
+    let (f, s) = q.pop().unwrap();
+    assert_eq!((f.task_index, s), (1, Slice::Fresh));
+    let rng = sched_seed::SeedRng::new();
+    let mut inherited = 0;
+    for _ in 0..200 {
+        q.ring.push_back(mk_fiber(1));
+        q.ring.push_back(mk_fiber(2));
+        q.runnext = Some(mk_fiber(0));
+        while let Some((f, s)) = q.pop_seeded(&rng) {
+            let want = if f.task_index == 0 {
+                inherited += 1;
+                Slice::Inherit
+            } else {
+                Slice::Fresh
+            };
+            assert_eq!(s, want, "task {}", f.task_index);
+        }
+    }
+    assert_eq!(
+        inherited, 200,
+        "every runnext fiber is picked once per round"
+    );
 }
 
 /// D4b: `take_runnable(wid)` drains the worker's own `locals[wid]` BEFORE the shared global queue.
@@ -3792,7 +3826,7 @@ fn offload_native_panic_still_completes_and_faults() {
     }
     // The fiber came back runnable carrying a fault to raise on resume.
     let f0 = match sched.take_runnable(0, 1, 0) {
-        Take::Run(f) => f,
+        Take::Run(f, _) => f,
         Take::Stop => panic!("fiber not requeued after panicking offload"),
     };
     assert!(
@@ -4325,7 +4359,7 @@ fn offload_runs_native_and_requeues_fiber_with_result() {
 
     // The requeued fiber carries the lowered-pending native result (Int(21)*2 == Int(42)).
     let mut found = None;
-    while let Take::Run(f) = sched.take_runnable(0, 1, 0) {
+    while let Take::Run(f, _) = sched.take_runnable(0, 1, 0) {
         if f.task_index == 0 {
             found = Some(f);
             break;
@@ -4397,7 +4431,7 @@ fn timer_offload_parks_then_requeues_fiber_with_nil() {
     );
 
     let mut found = None;
-    while let Take::Run(f) = sched.take_runnable(0, 1, 0) {
+    while let Take::Run(f, _) = sched.take_runnable(0, 1, 0) {
         if f.task_index == 0 {
             found = Some(f);
             break;
@@ -4447,7 +4481,7 @@ fn schedule_pulls_global_every_61st_tick() {
     periodic.seed(vec![mk_fiber(1)]); // global (bumps runnable)
     periodic.runnable.fetch_add(1, Ordering::Relaxed); // for the local fiber
     let got = match periodic.take_runnable(0, GLOBAL_CHECK_INTERVAL, 0) {
-        Take::Run(f) => f.task_index,
+        Take::Run(f, _) => f.task_index,
         Take::Stop => panic!("expected a runnable fiber"),
     };
     assert_eq!(got, 1, "periodic tick drains the global queue first");
@@ -4458,7 +4492,7 @@ fn schedule_pulls_global_every_61st_tick() {
     normal.seed(vec![mk_fiber(1)]);
     normal.runnable.fetch_add(1, Ordering::Relaxed);
     let got = match normal.take_runnable(0, 1, 0) {
-        Take::Run(f) => f.task_index,
+        Take::Run(f, _) => f.task_index,
         Take::Stop => panic!("expected a runnable fiber"),
     };
     assert_eq!(got, 0, "non-periodic tick drains the own local first");
@@ -4494,7 +4528,7 @@ fn a_periodic_global_pull_recruits_a_worker_for_the_skipped_runnext() {
     ready_rx.recv().unwrap();
 
     let got = match sched.take_runnable(0, GLOBAL_CHECK_INTERVAL, SENTINEL_SCOPE) {
-        Take::Run(f) => f.task_index,
+        Take::Run(f, _) => f.task_index,
         Take::Stop => panic!("expected a runnable fiber"),
     };
     assert_eq!(got, 1, "step 0 must run the global fiber ahead of runnext");
@@ -4734,11 +4768,11 @@ fn mnsched_yield_fiber_reachable_by_other_worker_without_wake() {
     sched.yield_fiber(f0); // requeue task 0 at the global tail — no notify needed for this to work
     // task 1 is still ahead of the requeued task 0 in the global queue.
     match sched.take_runnable(1, 1, SENTINEL_SCOPE) {
-        Take::Run(f) => assert_eq!(f.task_index, 1),
+        Take::Run(f, _) => assert_eq!(f.task_index, 1),
         Take::Stop => panic!("expected a runnable fiber, got Stop"),
     }
     match sched.take_runnable(1, 1, SENTINEL_SCOPE) {
-        Take::Run(f) => assert_eq!(f.task_index, 0),
+        Take::Run(f, _) => assert_eq!(f.task_index, 0),
         Take::Stop => panic!("expected a runnable fiber, got Stop"),
     }
 }
@@ -8427,7 +8461,7 @@ fn mnsched_take_runnable_drains_a_park_whose_ancestor_cancel_tripped_after_it_pa
         "fiber parks while the ancestor is not yet cancelled"
     );
     crate::vm::trip_cancel_flag(&ancestor);
-    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Run(_)));
+    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Run(..)));
     assert_eq!(
         sched.lock().parked_n,
         0,
@@ -8770,7 +8804,7 @@ fn w758_is_deadlocked_ignoring_jobs_matches_is_deadlocked_with_no_executors() {
     sched.close_body(0);
     check(&sched, true, "body closed again");
     // (f) `awaiting_builder` veto — needs a SECOND scope (`all_incomplete_awaiting_builder` returns
-    // false at `scopes.len() == 1`), i.e. exactly the early-enlisted shape it exists for.
+    // false at `scopes.count() == 1`), i.e. exactly the early-enlisted shape it exists for.
     let two = mk_sched(1);
     let s1 = two.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new());
     two.seed(vec![mk_fiber(0)]);
@@ -9563,7 +9597,7 @@ fn w758_nursery_party_is_satisfiable_whenever_the_sched_can_still_move() {
         "a sched with no incomplete scope is not stuck"
     );
     // `awaiting_builder` — needs its own fixture: the veto is defined only for a MULTI-scope sched
-    // (`all_incomplete_awaiting_builder` returns false at `scopes.len() == 1`), i.e. exactly the
+    // (`all_incomplete_awaiting_builder` returns false at `scopes.count() == 1`), i.e. exactly the
     // early-enlisted shape it exists for.
     let two = Arc::new(mk_sched(1));
     let s1 = two.register_scope(1, Arc::new(AtomicBool::new(false)), Vec::new());

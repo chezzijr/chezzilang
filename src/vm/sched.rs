@@ -2438,19 +2438,24 @@ impl Vm {
         self.wid = wid; // D5 owe #3 (Path C) — `demote_recv_block` reuses this for the replacement worker
         let mut tick: u64 = 0;
         loop {
-            tick = tick.wrapping_add(1);
-            let mut fiber = match sched.take_runnable(wid, tick, owner_scope) {
-                Take::Run(f) => f,
+            // TICKET-199 — `tick` counts FRESH slices (Go's `schedtick`): an inherited `runnext`
+            // pick runs on the current slice and leaves it unchanged.
+            let next = tick.wrapping_add(1);
+            let (mut fiber, slice) = match sched.take_runnable(wid, next, owner_scope) {
+                Take::Run(f, slice) => (f, slice),
                 Take::Stop => {
                     debug_assert!(!self.holds_width, "TICKET-141: exit holding a permit");
                     return;
                 }
             };
+            if slice == Slice::Fresh {
+                tick = next;
+            }
             self.width_acquire();
             let task_index = fiber.task_index;
             let scope_id = fiber.scope_id;
             let span = fiber.span;
-            let disp = self.run_one_fiber(&mut fiber, span);
+            let disp = self.run_one_fiber(&mut fiber, span, slice);
             // Also runs on the panic path: `run_one_fiber` catches the panic and returns `Disp::Finish`.
             self.width_release();
             match disp {
@@ -2536,7 +2541,7 @@ impl Vm {
     /// finishes, decide its disposition WHILE its heap is live (the park key and outcome are heap-keyed
     /// reads), then swap the context back out. The run is panic-guarded so a worker-VM panic becomes a
     /// task `Fault` (keeps the loop alive + the slot filled — the join can't hang).
-    pub(super) fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span) -> Disp {
+    pub(super) fn run_one_fiber(&mut self, fiber: &mut Fiber, span: Span, slice: Slice) -> Disp {
         self.swap_ctx(&mut fiber.ctx);
         // Cross-nursery flat scheduler — RE-POINT the shell's `self.cancel` to THIS fiber's SCOPE cancel
         // on every swap-in. One shell runs fibers from MULTIPLE scopes off the global queue; the
@@ -2571,7 +2576,12 @@ impl Vm {
         self.cut = None;
         self.cancel_unwind_faulted = false;
         self.pending_exit = None;
-        self.reds = self.fresh_reds(); // D3 — fresh reduction budget on every schedule-in (BEAM semantics)
+        // D3 — a fresh reduction budget on a fresh slice (BEAM semantics). TICKET-199 — a `runnext`
+        // pick (`Slice::Inherit`, Go `inheritTime`) keeps the budget the previous fiber left, so a
+        // rendezvous pair shares one slice and the local ring is served when it runs out.
+        if slice == Slice::Fresh {
+            self.reds = self.fresh_reds();
+        }
         self.yield_now = false;
         let state = std::mem::replace(&mut fiber.state, FiberState::Ready);
         // D5 — a fiber resumed after a blocking-native offload carries the pool's result. Take it now

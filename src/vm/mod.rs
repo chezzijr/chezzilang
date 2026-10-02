@@ -2075,9 +2075,10 @@ const JOIN_DEADLOCK_MSG: &str = "waiting for this Executor's jobs: deadlock — 
 /// never touches the global core lock. In D4c a local is populated only by the owning worker's
 /// batch-grab from the global queue and by work it steals, and a worker grabs again only once its
 /// local is empty, so a local never accumulates across grabs: it holds at most one grab-batch
-/// (`≤ LOCAL_RING_CAP/2`) or steal-haul at a time (no hard cap or spill is needed). `runnext` is not
-/// populated at runtime yet (only a `recv`-wake/spawn routed through a local would); `try_steal`
-/// already drains it so the deadlock predicate stays sound if a future commit starts using it.
+/// (`≤ LOCAL_RING_CAP/2`) or steal-haul at a time (no hard cap or spill is needed). `runnext` holds
+/// a rendezvous hand-off (`hand_off`, `handoff_wake`; DEC-128). TICKET-199 — a `runnext` pick
+/// inherits the current slice (Go `inheritTime`, [`Slice`]), so a hand-off pair cannot starve the
+/// ring: see [`LocalQ::pop`].
 struct LocalQ {
     runnext: Option<Fiber>,
     /// TICKET-128 (W13-25) — when `runnext` was filed by a handoff wake. `None` when `runnext` is
@@ -2111,7 +2112,10 @@ const HANDOFF_GRACE: std::time::Duration = std::time::Duration::from_micros(200)
 
 /// D4d — every Nth schedule a worker checks the global queue before its own local, bounding the
 /// latency of global work while a worker is continuously fed by stealing. Go uses 61 (prime, to
-/// avoid resonating with common batch sizes).
+/// avoid resonating with common batch sizes). TICKET-199 — a schedule here is a FRESH slice, as
+/// Go's `schedtick`: an inherited `runnext` pick ([`Slice::Inherit`]) does not advance the worker's
+/// `tick`. Otherwise step 0 could line up with every slice end and pull a just-preempted fiber back
+/// from `global` ahead of the ring.
 const GLOBAL_CHECK_INTERVAL: u64 = 61;
 
 /// Cross-nursery flat scheduler — the `owner_scope` a FARMED helper / eager drainer passes to
@@ -2119,6 +2123,16 @@ const GLOBAL_CHECK_INTERVAL: u64 = 61;
 /// scope completing — it drains the global queue until global `terminate`. Only the INLINE OWNER of a
 /// nested nursery passes its real `scope_id` (returns the instant its OWN scope is done).
 const SENTINEL_SCOPE: usize = usize::MAX;
+
+/// TICKET-199 — the reduction budget a picked fiber runs on (Go `inheritTime`). A `runnext` pick is
+/// `Inherit`: it keeps the worker's current reds and does not advance the worker's `tick`, so a
+/// rendezvous pair handing each other through `runnext` shares one `CONTEXT_REDS` slice. A ring,
+/// global or stolen pick is `Fresh`: a new budget and a new `tick`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slice {
+    Fresh,
+    Inherit,
+}
 
 impl LocalQ {
     fn new() -> Self {
@@ -2129,14 +2143,24 @@ impl LocalQ {
         }
     }
     /// Pop the next fiber to run: `runnext` first (locality), then the ring front (FIFO).
-    fn pop(&mut self) -> Option<Fiber> {
+    ///
+    /// TICKET-199 — this is where fairness is decided (Go `inheritTime`). A `runnext` pick is
+    /// `Slice::Inherit`: it runs on the current slice and does not advance `schedtick`, so a hand-off
+    /// pair refilling `runnext` shares one slice. When the slice runs out, the preempted fiber goes to
+    /// `global` (`yield_fiber`), a partner inheriting a spent budget yields at its first op, and the
+    /// ring is served. A ring pick is `Slice::Fresh`.
+    fn pop(&mut self) -> Option<(Fiber, Slice)> {
         self.runnext_at = None;
-        self.runnext.take().or_else(|| self.ring.pop_front())
+        if let Some(f) = self.runnext.take() {
+            return Some((f, Slice::Inherit));
+        }
+        self.ring.pop_front().map(|f| (f, Slice::Fresh))
     }
 
     /// TICKET-167 — seeded-mode pop: uniformly at random over `runnext` (if set) plus the whole
-    /// ring, instead of always taking `runnext`/the ring front. `None` when both are empty.
-    fn pop_seeded(&mut self, rng: &sched_seed::SeedRng) -> Option<Fiber> {
+    /// ring, instead of always taking `runnext`/the ring front. `None` when both are empty. Reports
+    /// the same [`Slice`] as `pop`: `Inherit` exactly when it picks `runnext`.
+    fn pop_seeded(&mut self, rng: &sched_seed::SeedRng) -> Option<(Fiber, Slice)> {
         let has_runnext = self.runnext.is_some();
         let n = self.ring.len() + usize::from(has_runnext);
         if n == 0 {
@@ -2145,9 +2169,11 @@ impl LocalQ {
         let k = rng.below(n as u64) as usize;
         if has_runnext && k == 0 {
             self.runnext_at = None;
-            self.runnext.take()
+            self.runnext.take().map(|f| (f, Slice::Inherit))
         } else {
-            self.ring.remove(k - usize::from(has_runnext))
+            self.ring
+                .remove(k - usize::from(has_runnext))
+                .map(|f| (f, Slice::Fresh))
         }
     }
 }
@@ -2852,7 +2878,7 @@ impl SchedCore {
 /// boxing the `Run` payload would add an allocation on the schedule hot path for no benefit.
 #[allow(clippy::large_enum_variant)]
 enum Take {
-    Run(Fiber),
+    Run(Fiber, Slice),
     Stop,
 }
 
@@ -3435,14 +3461,14 @@ impl MnSched {
         let mut spun = false;
         let t = self.take_runnable_inner(wid, tick, scope_id, &mut spun);
         #[cfg(test)]
-        if matches!(t, Take::Run(_)) {
+        if matches!(t, Take::Run(..)) {
             self.picks.fetch_add(1, Ordering::Relaxed);
         }
         // TICKET-128 (W13-25) — a worker that had to spin before it found this fiber may itself be
         // the one that just consumed a periodic global pull ahead of its own `runnext` (step 0
         // below), or may simply mean other idle siblings should be nudged awake now that there was
         // contention. Recruiting here is a cheap top-up on top of `handoff_wake`'s own recruit.
-        if spun && matches!(t, Take::Run(_)) && self.runnable.load(Ordering::Relaxed) > 0 {
+        if spun && matches!(t, Take::Run(..)) && self.runnable.load(Ordering::Relaxed) > 0 {
             self.recruit();
         }
         t
@@ -3495,7 +3521,7 @@ impl MnSched {
                     if self.lock_local(wid).runnext.is_some() {
                         self.recruit();
                     }
-                    return Take::Run(f);
+                    return Take::Run(f, Slice::Fresh);
                 }
                 drop(c);
             }
@@ -3505,11 +3531,11 @@ impl MnSched {
             } else {
                 self.lock_local(wid).pop()
             };
-            if let Some(f) = popped {
+            if let Some((f, slice)) = popped {
                 let mut c = self.lock();
                 c.running += 1;
                 self.runnable.fetch_sub(1, Ordering::Relaxed); // runnable → running
-                return Take::Run(f);
+                return Take::Run(f, slice);
             }
             // 2. D4c — work-stealing: own local empty, try to steal half from a sibling (B alone, no
             //    core lock). Push the haul onto our own local and re-loop to pop it. Net-zero on
@@ -3558,7 +3584,7 @@ impl MnSched {
                     // after releasing the local lock (B) — `cv` is the core's, not held here.
                     self.notify_waiters();
                 }
-                return Take::Run(first);
+                return Take::Run(first, Slice::Fresh);
             }
             // Cross-nursery flat scheduler — SCOPE-SCOPED owner stop. A nested nursery's inline OWNER
             // (passed its own `scope_id`) returns `Stop` when ITS OWN scope is complete (`done == total`

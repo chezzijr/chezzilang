@@ -11,6 +11,26 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-199 — a `runnext` pick inherits the slice (2026-10-02)
+
+`benches/sched/rendezvous_pingpong.chz` (W17-1), release binaries, wall seconds, n=5 per side.
+The fixed binary runs on the same path as the T=1 fairness fix: a cap-0 hand-off pair now shares one
+`CONTEXT_REDS` slice (Go `inheritTime`) instead of resetting it on every `runnext` pick.
+
+Interleaved base/fixed runs (base = `4932b5e6`, built separately), `uptime` load 7.36 before, 7.04
+after:
+
+| T | base `4932b5e6` | fixed | base median | fixed median |
+|---|---|---|---|---|
+| 0 | 2.75 2.79 2.82 4.04 2.97 | 2.59 3.12 3.86 2.73 2.61 | 2.82 | 2.73 |
+| 4 | 2.80 2.53 2.96 2.93 3.32 | 2.64 2.60 2.98 2.71 3.89 | 2.93 | 2.71 |
+| 1 | 2.80 2.82 2.77 2.70 2.74 | 2.74 2.64 2.69 2.71 2.60 | 2.77 | 2.69 |
+
+The planning stage's base medians (load 1.8-3.4, not interleaved) were T=0 3.35, T=4 2.64, T=1
+2.77. The fixed binary alone, before the interleaved run (load 5.6-7.0): T=0 3.45, T=4 3.22, T=1
+2.75. Every difference is inside the run-to-run spread at this load: the change has no measured
+cost and does not close W17-1.
+
 ## TICKET-192 — a shared map is O(1) per lookup and per insert (2026-10-01)
 
 A stored `RwShared` map now keeps the heap map's hash index, and `set_key`/`remove_key`/

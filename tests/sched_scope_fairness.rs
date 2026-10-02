@@ -247,3 +247,77 @@ fn h1_scope_identity_grid_every_cell_exits_clean() {
         failures.join("\n")
     );
 }
+
+/// `parallel:` with one `spawn:` per item.
+fn par(items: &[&str]) -> String {
+    let mut s = String::from("parallel:\n");
+    for item in items {
+        s += "    spawn:\n";
+        s += &indent(item, 8);
+    }
+    s
+}
+
+/// The H2 grid program for one (placement, channel cap) cell: a sender ping-pongs a receiver
+/// until the sibling `X` runs and stops it.
+fn h2_program(place: &str, cap: &str) -> String {
+    let send = "while stop.load() == 0:\n    c.send(1)\nc.close()";
+    let recv = "for _v in c:\n    pass";
+    let sib = "print(\"sibling ran\")\nstop.store(1)";
+    let body = match place {
+        "same" => par(&[send, recv, sib]),
+        "outer_inner" => par(&[send, &par(&[recv, sib])]),
+        "inner_outer" => par(&[&par(&[send, sib]), recv]),
+        "two_inner" => par(&[&par(&[send]), &par(&[recv, sib])]),
+        _ => unreachable!(),
+    };
+    let chan = match cap {
+        "0" => "Channel[int](0)",
+        "1" => "Channel[int](1)",
+        "unb" => "Channel[int]()",
+        _ => unreachable!(),
+    };
+    let mut src = String::from("import std.concurrency\nfn main():\n");
+    src += &format!("    c := {chan}\n    stop := AtomicInt(0)\n");
+    src += &indent(&body, 4);
+    src += "    print(\"done\")\nmain()\n";
+    src
+}
+
+#[test]
+fn h2_fairness_grid_every_cell_finishes() {
+    let mut failures = Vec::new();
+    for place in ["same", "outer_inner", "inner_outer", "two_inner"] {
+        for cap in ["0", "1", "unb"] {
+            let src = h2_program(place, cap);
+            for t in ["1", "2"] {
+                for seed in [None, Some("1"), Some("2"), Some("3")] {
+                    let s = seed.unwrap_or("none");
+                    let cell = format!("{place}-cap{cap}-T{t}-s{s}");
+                    for i in 0..3 {
+                        match run_env(&src, t, seed, &format!("h2g-{place}-{cap}-{t}-{s}")) {
+                            None => {
+                                failures.push(format!("{cell} run {i}: hang"));
+                                break;
+                            }
+                            Some((out, err, code)) => {
+                                if code != Some(0) || out != "sibling ran\ndone\n" {
+                                    failures.push(format!(
+                                        "{cell} run {i}: code={code:?} stdout={out:?} stderr={err:?}"
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} grid cells failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

@@ -2582,6 +2582,10 @@ handling*, which are downstream of share-nothing and strictly simpler for a byte
   overflow), the `wakep`/spinning-worker wakeup with its StoreLoad barrier, and the netpoller
   (epoll/kqueue) for sockets. Scope ids on a sched are monotonic and never reissued (`ScopeTable`,
   TICKET-199): a worker holding a retired nursery's id reads an absent scope, never a newer one.
+  Fairness follows Go's `inheritTime` (TICKET-199): a `runnext` pick runs on the current reduction
+  slice and does not advance the worker's schedule tick, so a rendezvous pair handing each other
+  through `runnext` shares one `CONTEXT_REDS` slice. When it runs out the preempted fiber goes to
+  the global queue and the local ring is served, so a hand-off pair cannot starve the ring.
 - **From BEAM:** **reduction-counting preemption** instead of Go's signal-based SIGURG — Go needs
   signals only because it runs native code with a *shared GC heap* (stop at any PC, find live
   pointers); a bytecode VM has a natural safepoint every dispatch and share-nothing GC, so neither

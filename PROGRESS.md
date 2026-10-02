@@ -7,6 +7,14 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-199 (2026-10-02): Family S1, scheduler fairness (H2).** At `CHEZZI_THREADS=1` a cap-0
+  ping-pong between an outer-nursery sender and an inner-nursery receiver starved the inner nursery's
+  other task forever (Go prints `inner sibling ran / done`): each hand-off refilled `runnext`, and
+  every pick reset the reduction budget. `LocalQ::pop` now returns a `Slice`: a `runnext` pick is
+  `Inherit` (Go `inheritTime`: keep the current reds, do not advance `tick`), every other pick is
+  `Fresh`. Test: `h2_fairness_grid_every_cell_finishes` (96 cells; on base 2 cells hung). W17-1
+  `rendezvous_pingpong` re-measured: no change (`docs/benchmarks.md` §TICKET-199).
+
 - **TICKET-199 (2026-10-02): Family S1, scheduler scope identity (H1).** A nursery opened inside a
   spawned task, whose child faulted, crashed a worker with `panicked at src/vm/mod.rs:5328:31: index
   out of bounds` (or drained the NEXT nursery's fibers): its scope id was `scopes.len()`, the join
