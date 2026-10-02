@@ -341,6 +341,7 @@ impl Checker {
     /// ctor IS seeded: those have no slot, so in every body the name is the global, in both source
     /// orders (TICKET-180).
     pub(super) fn seed_module_globals(&mut self, stmts: &[Stmt]) {
+        let saved_body_facts = std::mem::replace(&mut self.body_facts_pass, true);
         let mut hoisted: HashSet<&str> = HashSet::new();
         for s in stmts {
             match &s.kind {
@@ -384,6 +385,7 @@ impl Checker {
                 }
             }
         }
+        self.body_facts_pass = saved_body_facts;
     }
 
     /// TICKET-183 — one speculative walk over the first let of every seeded global, in source
@@ -394,6 +396,7 @@ impl Checker {
         let mut changed = false;
         let mark = self.diag_mark();
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
+        let saved_body_facts = std::mem::replace(&mut self.body_facts_pass, true);
         self.ret_memo.clear();
         let saved_reached = self.save_reached();
         let firsts: std::collections::HashMap<Span, Vec<usize>> = self
@@ -432,6 +435,7 @@ impl Checker {
         self.restore_reached(saved_reached);
         self.ret_memo.clear();
         self.inferring_ret = saved_flag;
+        self.body_facts_pass = saved_body_facts;
         self.diag_rollback(mark);
         changed
     }
@@ -609,7 +613,7 @@ impl Checker {
         match &value.kind {
             ExprKind::Closure { .. } => Some(Vec::new()),
             ExprKind::Ident(n) if self.lookup(n).is_none() => {
-                self.functions.contains_key(n).then(Vec::new)
+                self.slot_holds_fn_decl(n).then(Vec::new)
             }
             ExprKind::Ident(n) => self.labels_certain(n).ok(),
             ExprKind::Index { obj, index } => (self.index_as_type(index).is_some()
@@ -3007,31 +3011,6 @@ impl Checker {
                     }
                     let mut sig = self.fn_sig(decl, decl.name_span);
                     self.bind_nested_fn_writes(decl);
-                    // TICKET-142 (W14-33) — a nested fn's default is compiled in MODULE scope (the
-                    // prologue hides the frame's locals), so a free name that resolves innermost-first
-                    // to a non-module scope (a param, a local, a sibling fn, a local shadowing a
-                    // global) would panic the compiler or silently read the global: reject it.
-                    for p in &decl.params {
-                        let Some(def) = &p.default else { continue };
-                        let mut free: Vec<String> = crate::compiler::free_names_of_expr(
-                            def,
-                            &std::collections::HashSet::new(),
-                        )
-                        .into_iter()
-                        .collect();
-                        free.sort();
-                        let local = free
-                            .iter()
-                            .find(|n| self.owning_scope(n).is_some_and(|i| i > 0));
-                        if let Some(n) = local {
-                            self.error(
-                                def.span,
-                                format!(
-                                    "a nested fn's default cannot read the enclosing fn's locals: '{n}' is local here, and a default is evaluated in module scope (pass it as an argument, or read a module-level binding)"
-                                ),
-                            );
-                        }
-                    }
                     // TICKET-139 (W14-2) — a nested fn's own name is certain to hold that one fn (a
                     // keyword call through it is legal). Its two declares below are a same-scope
                     // re-declaration, which `declare` marks as a write; undo that mark unless the
@@ -3108,10 +3087,21 @@ impl Checker {
                         }
                     }
                 }
+                // TICKET-201: the struct-body binders a default could name — every field that
+                // carries a default and every method. Fields and methods interleave, so
+                // `check_default_scope` compares spans to find those before the owner.
+                let binders: Vec<(String, Span, String)> = fields
+                    .iter()
+                    .filter(|f| f.default.is_some())
+                    .map(|f| (f.name.clone(), f.name_span, name.clone()))
+                    .chain(method_binders(methods, name))
+                    .collect();
+                let saved_binders = std::mem::replace(&mut self.default_binders, binders);
                 // A constant-literal field default must be assignable to the field's type (checked
                 // here so a wrong-typed default is caught at the declaration, not only when omitted).
                 for field in fields {
                     if let Some(def) = &field.default {
+                        self.check_default_scope(def, field.name_span);
                         let expected = self.resolve_type(&field.ty, def.span);
                         // Same seeding, same gate, same reasons as the parameter default above.
                         let fseed = ty_fully_concrete(&expected)
@@ -3170,6 +3160,7 @@ impl Checker {
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
+                self.default_binders = saved_binders;
                 self.exit_type_params(saved);
             }
             // Enum methods' bodies are checked here (mirroring the struct path); the variant/payload
@@ -3212,6 +3203,8 @@ impl Checker {
                 }
                 let is_suite = methods.iter().any(|m| m.is_test);
                 let host_key = self.bare_key(name);
+                let saved_binders =
+                    std::mem::replace(&mut self.default_binders, method_binders(methods, name));
                 for m in methods {
                     if m.is_test {
                         self.validate_test_fn_shape(m, Some(&host_key));
@@ -3234,6 +3227,7 @@ impl Checker {
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
+                self.default_binders = saved_binders;
                 self.exit_type_params(saved);
             }
             // Newtype method bodies are checked here, mirroring the enum path (`self` is the newtype).
@@ -3254,6 +3248,8 @@ impl Checker {
                 if self.hover_probe.is_some() {
                     self.hover_record_at(*name_span, &self_ty, HoverKind::Struct, doc.clone());
                 }
+                let saved_binders =
+                    std::mem::replace(&mut self.default_binders, method_binders(methods, name));
                 for m in methods {
                     if m.is_test {
                         // Parser rejects `test fn` in a newtype body, so this is unreachable; guard
@@ -3275,6 +3271,7 @@ impl Checker {
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
+                self.default_binders = saved_binders;
                 self.exit_type_params(saved);
             }
             // A protocol's method signatures are validated during hoisting; pass 2 only records its
@@ -4926,6 +4923,43 @@ impl Checker {
         }
     }
 
+    /// TICKET-201 — the one default-legality rule. A default runs in module scope (its provider
+    /// fn, or the prologue with the frame's locals hidden), so a free name of `def` must not:
+    /// (a) resolve to an enclosing fn's local (TICKET-142: the compiler would panic or silently
+    /// read the global), or (b) name a struct-body binder in `default_binders` declared strictly
+    /// before `owner`, the name of the field or method that owns the default. CPython evaluates
+    /// both where the default is written, so each is declined, never silently rebound. A binder
+    /// inside the default (lambda param, comprehension variable) is not free and never matches.
+    fn check_default_scope(&mut self, def: &Expr, owner: Span) {
+        let mut free: Vec<String> =
+            crate::compiler::free_names_of_expr(def, &std::collections::HashSet::new())
+                .into_iter()
+                .collect();
+        free.sort();
+        for n in &free {
+            if self.owning_scope(n).is_some_and(|i| i > 0) {
+                self.error(
+                    def.span,
+                    format!(
+                        "a nested fn's default cannot read the enclosing fn's locals: '{n}' is local here, and a default is evaluated in module scope (pass it as an argument, or read a module-level binding)"
+                    ),
+                );
+                return;
+            }
+            // `Span` derives no `Ord`: compare `(line, col)` within one file.
+            let body = self.default_binders.iter().find(|(b, sp, _)| {
+                b == n && sp.file == owner.file && (sp.line, sp.col) < (owner.line, owner.col)
+            });
+            if let Some((_, _, ty_name)) = body {
+                let msg = format!(
+                    "default value cannot read '{n}': '{n}' is bound in the body of '{ty_name}' where the default is written (an earlier field default or method), but a default runs in module scope; pass it explicitly or read a module-level binding"
+                );
+                self.error(def.span, msg);
+                return;
+            }
+        }
+    }
+
     pub(super) fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
         let provider = decl
             .name
@@ -5091,6 +5125,17 @@ impl Checker {
         } else {
             std::mem::replace(&mut self.witness_scope, wparams)
         };
+        // TICKET-201: default legality, judged in the scope the default runs in. A nested fn sees
+        // the enclosing fn's locals (declined) but no struct-body binder.
+        let saved_binders = saved_in_fn.then(|| std::mem::take(&mut self.default_binders));
+        for param in &decl.params {
+            if let Some(def) = &param.default {
+                self.check_default_scope(def, decl.name_span);
+            }
+        }
+        if let Some(b) = saved_binders {
+            self.default_binders = b;
+        }
         self.push_scope();
         // Editor hover: record the function's OWN signature at its decl-site name token (no-op
         // off-probe; behavior-neutral — `name_span` is runtime-inert). Covers free fns AND methods,
@@ -5106,18 +5151,18 @@ impl Checker {
             };
             self.hover_record_at(decl.name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
-        for (i, param) in decl.params.iter().enumerate() {
-            let ty = if param.name == "self" {
+        let param_ty = |i: usize, param: &Param| {
+            if param.name == "self" {
                 self_ty.clone().unwrap_or(Ty::Unknown)
             } else {
                 sig.params.get(i).cloned().unwrap_or(Ty::Unknown)
-            };
-            if let Some(acc) = &mut self.gen_frame {
-                acc.tys
-                    .entry(param.name.clone())
-                    .or_default()
-                    .push(ty.clone());
             }
+        };
+        // TICKET-201: every decl-site default is typed before any parameter of this fn is
+        // declared: a default runs in module scope, so a parameter's name there reads the module
+        // binding (CPython), and an unbound one is `unknown name`.
+        for (i, param) in decl.params.iter().enumerate() {
+            let ty = param_ty(i, param);
             // A constant-literal default must itself be assignable to the parameter's type — checked
             // here (where type params are in scope) so a wrong-typed default is caught at the
             // declaration even when every call overrides it.
@@ -5222,6 +5267,15 @@ impl Checker {
                         ),
                     );
                 }
+            }
+        }
+        for (i, param) in decl.params.iter().enumerate() {
+            let ty = param_ty(i, param);
+            if let Some(acc) = &mut self.gen_frame {
+                acc.tys
+                    .entry(param.name.clone())
+                    .or_default()
+                    .push(ty.clone());
             }
             // Editor hover: record the param's declared type at its DECL-site name span (no-op
             // off-probe; covers free fns AND methods, both routed through check_fn_body).
@@ -6129,6 +6183,15 @@ impl Checker {
         }
         false
     }
+}
+
+/// TICKET-201 — each method of type `owner` as a struct-body binder for
+/// [`Checker::check_default_scope`]: `(name, name span, owner)`.
+fn method_binders(methods: &[FnDecl], owner: &str) -> Vec<(String, Span, String)> {
+    methods
+        .iter()
+        .map(|m| (m.name.clone(), m.name_span, owner.to_string()))
+        .collect()
 }
 
 /// M24-5b — the bare type NAME a dotted callee's head spells, peeling either type-level turbofish

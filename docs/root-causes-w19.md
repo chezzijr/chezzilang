@@ -198,6 +198,7 @@ runs on the current slice. W17-1 re-measured: no effect.
 
 1. **S1** (H1 P0 crash, H2 hang) — TICKET-199 — scheduler; two parts, one ticket.
 2. **B3** (C1, C2) — TICKET-200 — after S1 (both touch `mod.rs` drain paths).
-3. **N3** (K6, K5, K1, S3) — TICKET-201 — checker names; independent of 1-2.
+3. **N3** (K6, K5, K1, S3) — TICKET-201 — checker names; independent of 1-2. **Fixed** by
+   `Checker::slot_holds_fn_decl` and `Checker::check_default_scope`; grid `name_denotes_grid`.
 4. **G3** (K2, K3, K4) — TICKET-202 — checker generics; after N3 if they share files.
 5. **A1** — TICKET-203 — a bug against TICKET-191's decision; small (`std/concurrency` task + memoize).

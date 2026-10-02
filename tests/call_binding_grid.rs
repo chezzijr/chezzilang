@@ -45,8 +45,9 @@ const SHAPES: &[(&str, &str, &str)] = &[
     ("omit", "1", "1,20,30"),
 ];
 
-const DFLT_PARAM_REJECT: &str = "default value cannot reference parameter 'a'";
-const DFLT_FIELD_REJECT: &str = "default value cannot reference field 'a'";
+/// A default runs in module scope (TICKET-201), so an earlier parameter or field named there is
+/// unbound unless the module binds it.
+const DFLT_UNBOUND: &str = "unknown name 'a'";
 const CALLEE_FILLED_HOLE: &str =
     "is filled by the callee and can only be omitted from the END of a call";
 const FN_VALUE_KW: &str = "keyword arguments through a function value need a binding";
@@ -343,11 +344,7 @@ fn fixed_cells() -> Vec<Cell> {
             cells.push(Cell {
                 name: format!("{}/dflt_param", k.tag),
                 files: (k.build)(dflt, "1"),
-                expect: Expect::Rejects(if k.ctor {
-                    DFLT_FIELD_REJECT
-                } else {
-                    DFLT_PARAM_REJECT
-                }),
+                expect: Expect::Rejects(DFLT_UNBOUND),
             });
         }
     }

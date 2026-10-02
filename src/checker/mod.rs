@@ -2277,6 +2277,16 @@ struct Checker {
     /// `current_ret`/`in_fn_body` around this copy for `?`. Read by
     /// [`Checker::report_uninferable_result_params`]. Saved/restored 1:1 around each copy.
     decl_site_default: bool,
+    /// TICKET-201 — true while a pass computes facts that bodies read: the global seed
+    /// (`seed_module_globals`), the global typing pass (`type_globals_pass`) and the write-summary
+    /// fixpoint (`infer_fn_writers`). Read by [`Checker::runs_after_later_decls`]. Saved/restored
+    /// around each pass; never left set by a body walk.
+    body_facts_pass: bool,
+    /// TICKET-201 — the struct-body binders a default of the type being checked could name:
+    /// `(name, binder span, owner type name)` for each field that carries a default and each
+    /// method. Read by [`Checker::check_default_scope`]. Set and restored by the struct, enum and
+    /// newtype arms around their field defaults and method bodies.
+    default_binders: Vec<(String, Span, String)>,
     /// W8-21 — true while checking (or inferring the return of) a fn/closure body whose return type
     /// is DECLARED (a `fn`'s `decl.ret.is_some()`, always true for a closure with an explicit `->`).
     /// The sole gate for the success-coercion sinks: an UN-annotated sink has no `T?`/`T!E` to coerce

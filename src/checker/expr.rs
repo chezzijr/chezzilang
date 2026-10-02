@@ -2089,7 +2089,7 @@ impl Checker {
     pub(super) fn value_head_resolution(&self, name: &str) -> Resolution {
         match self.head_binding(name) {
             HeadBinding::Local => Resolution::Local,
-            _ if self.functions.contains_key(name) => self.fn_resolution(name),
+            _ if self.slot_holds_fn_decl(name) => self.fn_resolution(name),
             HeadBinding::Module => match self
                 .imported_modules
                 .get(name)
@@ -2940,7 +2940,9 @@ impl Checker {
                     return Some(Ty::Unknown);
                 }
                 // Global function?
-                if let Some(sig) = self.functions.get(name).cloned() {
+                if self.slot_holds_fn_decl(name)
+                    && let Some(sig) = self.functions.get(name).cloned()
+                {
                     let r = self.fn_resolution(name);
                     let diverges = self.resolution_diverges(&r);
                     self.record_resolution(id, r, name_span);

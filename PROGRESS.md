@@ -49,6 +49,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
   reproduces after TICKET-188 (0 of 150 debug runs at T=1; 0 of 210 release runs at T=1/2/0, idle and
   10 at once), so the stage notes stop excusing it.
 
+- **TICKET-201 (2026-10-02): Family N3, what a bare name denotes here (wave 19).** One answer to
+  "does module slot `n` hold its `fn` declaration here": `Checker::slot_holds_fn_decl`. A redeclared
+  slot (`f := o` after `fn f`, `import exit from std.os` then `exit := ...`) holds it only at top
+  level before its first let; bodies, `defer:`/`spawn:` blocks and the body-facts passes never see
+  it. Divergence, keyword labels, the direct-call binder, write summaries and `Resolution::Fn` all
+  read it. K6: `g := f` after `f := o` binds `o`'s labels and defaults (`o a=1 b=2`, CPython same).
+  K5: a call of a rebound `exit` no longer diverges (`can fall off the end`, as Rust). A `spawn:` call
+  through a redeclared slot no longer takes the declaration's write summary (false `'count' is this
+  task's copy`). K1: a default runs in module scope; desugar's name check is gone and
+  `Checker::check_default_scope` is the one rule (`k := 1; fn f(k: int = k)` is `1`; an unbound name
+  is `unknown name`; an enclosing fn's local or a struct-body binder is declined). S3: `Self` in a
+  field default is only `unknown name 'Self'`. Grid: `tests/call_binding_grid.rs::name_denotes_grid`.
+
 - **TICKET-197 (2026-10-02): Family F2, type-parameter identity and fn-value shape.** N1/N2: a
   generic method's signature was substituted twice by bare name (receiver map, then method map), so
   a caller's `U` merged with the method's `[U]` (`go2(Box(1), "s")` checked as `(T, T)` and faulted

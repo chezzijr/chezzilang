@@ -2430,7 +2430,12 @@ impl Checker {
                 {
                     return None;
                 }
-                (name.clone(), self.functions.get(name)?)
+                (
+                    name.clone(),
+                    self.functions
+                        .get(name)
+                        .filter(|_| self.slot_holds_fn_decl(name))?,
+                )
             }
             ExprKind::Field { obj, name, .. } => {
                 let ExprKind::Ident(m) = &obj.kind else {
@@ -2616,7 +2621,7 @@ impl Checker {
             // W7-42r: this expression's type is now fixed against the fn's signature, so a later
             // module-scope `name := …` would retype the ONE slot underneath it (see `fn_reads`).
             self.record_fn_read(name);
-            let r = self.fn_resolution(name);
+            let r = self.value_head_resolution(name);
             self.record_resolution(id, r, span);
             // …and a FROM-IMPORTED fn read above its own `import` is the same use-before-import the
             // value arm rejects (`g := h` above `import h from lib.fns`). Leaving it accepted gave
@@ -4151,7 +4156,7 @@ impl Checker {
         {
             match &obj.kind {
                 ExprKind::Ident(name) => {
-                    let r = self.fn_resolution(name);
+                    let r = self.value_head_resolution(name);
                     self.record_resolution(obj.id, r, obj.span);
                 }
                 ExprKind::Field { obj: m, name, .. } => {

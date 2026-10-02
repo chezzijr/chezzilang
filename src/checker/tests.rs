@@ -37481,3 +37481,62 @@ fn fn_value_slot_grid() {
 fn default_reads_enclosing_scope_not_same_named_param() {
     ok_desugared("k := 1\nfn f(k: int = k) -> int:\n    return k\nprint(f())\n");
 }
+
+/// TICKET-201: the field that owns a default is not a struct-body binder of it, so `k: int = k`
+/// reads module `k` (CPython dataclass: `1`).
+#[test]
+fn n3_default_owner_is_not_its_own_class_body_binder() {
+    ok_desugared("k := 1\nstruct S:\n    k: int = k\nprint(S().k)\n");
+}
+
+/// TICKET-201: a default runs in module scope, so an earlier parameter is not bound there.
+#[test]
+fn n3_default_param_reference_is_an_unknown_name() {
+    rejects_desugared(
+        "fn f(a: int, b: int = a) -> int:\n    return b\n",
+        "unknown name 'a'",
+    );
+}
+
+/// TICKET-201: a default naming an earlier parameter reads the module binding of that name.
+#[test]
+fn n3_default_reads_the_global_not_the_param() {
+    ok_desugared("a := 100\nfn f(a: int, b: int = a) -> int:\n    return b\nprint(f(1))\n");
+}
+
+/// TICKET-201: CPython evaluates a default in the class body, where an earlier field or method
+/// is bound; Chezzi runs it in module scope, so the read is declined, not silently rebound.
+#[test]
+fn n3_default_reading_a_class_body_binder_is_declined() {
+    rejects_desugared(
+        "a := 100\nstruct S:\n    a: int = 1\n    b: int = a\nprint(S().b)\n",
+        "is bound in the body of 'S'",
+    );
+    rejects_desugared(
+        "a := 100\nstruct S:\n    a: int = 1\n    fn m(self, x: int = a) -> int:\n        return x\nprint(S().m())\n",
+        "is bound in the body of 'S'",
+    );
+}
+
+/// TICKET-201 (S3): `Self` in a field default is an unknown name, never a callee-filled binder;
+/// a ctor has no callee, so no fill or arity error may join the true diagnostic.
+#[test]
+fn n3_field_default_naming_self_reports_no_fill_error() {
+    for fields in [
+        "    n: int = Self.mk()\n    m: int = 2\n",
+        "    m: int = 2\n    n: int = Self.mk()\n",
+    ] {
+        let src =
+            format!("struct A:\n{fields}    fn mk() -> int:\n        return 41\nprint(A())\n");
+        let errs = check_desugared(&src);
+        assert!(!errs.is_empty(), "expected an error for {src:?}");
+        for e in &errs {
+            assert!(
+                e.message.contains("unknown name 'Self'")
+                    && !e.message.contains("filled by the callee")
+                    && !e.message.contains("expects"),
+                "unexpected error for {src:?}: {errs:?}"
+            );
+        }
+    }
+}

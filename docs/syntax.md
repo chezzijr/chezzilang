@@ -1100,13 +1100,23 @@ default is evaluated in module scope (pass it as an argument, or read a module-l
 CPython reads the enclosing local at `def` time; Chezzi rejects it rather than silently reading a
 global. A lambda (`fn(x: int) -> int: x`) cannot declare a default, so it keeps exact arity.
 
-Because parameters are not in scope in the declaring module's top level, a param-referencing default
-(`y: int = x + 1`) is rejected: *"default value cannot reference parameter 'x' (a default is evaluated
-on its own, where parameters are not in scope)"* — CPython raises `NameError` on the same shape.
-This includes a reference made from inside an **interpolated fragment** (`x: str = "n={n}"`), which
-used to slip past the check because it runs before `"…{…}…"` is rewritten. Everything else a fragment
-can spell is still fine — a global, a call, arithmetic (`x: str = "{tag()}-{1+2}"` is legal) — so what
-is rejected is the parameter reference, not the interpolation.
+A default is evaluated in **module scope**, where no parameter of its own function is bound
+(TICKET-201). So a default may read a module binding named like a parameter, as CPython does:
+`k := 1; fn f(k: int = k) -> int: return k` returns `1` from `f()`. A name the module does not bind
+is an unknown name: `fn f(a: int, b: int = a)` is *"unknown name 'a'"* (CPython raises `NameError`
+at `def`). The same holds inside an **interpolated fragment**: with `n := 100`,
+`fn f(n: int, x: str = "n={n}")` gives `n=100` for `f(3)` and for `g := f; g(3)`. A binder inside
+the default is its own: `g: fn(int) -> int = fn(x: int) -> int: x * 2` beside a parameter `x`, and
+`xs: List[int] = [n * 2 for n in range(3)]` beside a parameter `n`, both check clean.
+
+A struct field default and a method default are evaluated in module scope too. CPython evaluates
+them in the class body, where an earlier field or method is bound, so Chezzi declines that read
+rather than silently reading the module binding: with `a := 100`, `struct S: a: int = 1; b: int = a`
+is *"default value cannot read 'a': 'a' is bound in the body of 'S' where the default is written (an
+earlier field default or method), but a default runs in module scope; pass it explicitly or read a
+module-level binding"*. A binder is an earlier field that carries a default, or a method; the field
+that owns the default is never its own binder, so `k := 1; struct S: k: int = k` reads module `k`.
+`Self` in a field default is an unknown name.
 
 Callers may also pass arguments **by name**:
 

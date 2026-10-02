@@ -1,6 +1,5 @@
-//! Syntactic desugaring, run inside [`crate::resolver::build_graph`] before the checker: validate
-//! parameter and field defaults ([`validate_defaults`]), synthesize default providers
-//! ([`synthesize_providers`]), fold Python full module paths (`fold_full_path`, DEC-175), and bound
+//! Syntactic desugaring, run inside [`crate::resolver::build_graph`] before the checker: synthesize
+//! default providers ([`synthesize_providers`]), fold Python full module paths (`fold_full_path`, DEC-175), and bound
 //! `fn` nesting ([`MAX_FN_NESTING`], DEC-109).
 //!
 //! **This pass does not bind call arguments.** Which declaration a call binds against, and which
@@ -16,8 +15,8 @@
 //! default chains compose to any depth. See [`Dflt`] and [`SlotSpec`].
 
 use crate::ast::{
-    Block, Chunk, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Param,
-    Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam, WaitArmKind, WaitTarget,
+    Block, Chunk, DeferTarget, Expr, ExprKind, Import, MatchExprArm, Module, OptCall, Pattern,
+    Span, SpawnTarget, Stmt, StmtKind, Type, TypeParam, WaitArmKind, WaitTarget,
 };
 use crate::resolver::{ModuleGraph, ModuleId, ResolveError};
 use std::collections::{HashMap, HashSet};
@@ -256,7 +255,11 @@ pub(crate) fn dflt_for(
     // BODY (`Self()`, `Self.mk()`) needs a mutating expression walker, which is deliberately not part
     // of this change — such a default keeps the inline carve-out for now.
     let mut expr_unbound: Vec<String> = type_params.to_vec();
-    expr_unbound.push("Self".to_string());
+    // TICKET-201 (S3): a field default never runs where `Self` is bound, so `Self` there is an
+    // unknown name, not a callee-filled binder (a ctor has no callee, DEC-035).
+    if field_owner_tps.is_none() {
+        expr_unbound.push("Self".to_string());
+    }
     if expr_mentions_type_param(d, &expr_unbound) {
         return Dflt::CalleeFilled;
     }
@@ -401,13 +404,11 @@ pub(crate) fn field_slots(
         .collect()
 }
 
-/// Desugar every module in place: validate defaults, synthesize default providers, fold full
-/// module paths, lower carriers, bound fn nesting. Errors carry the offending node's span. Call
-/// arguments are bound by the checker (`Checker::bind_call`), not here.
+/// Desugar every module in place: synthesize default providers, fold full module paths, lower
+/// carriers, bound fn nesting. Errors carry the offending node's span. Call arguments are bound by
+/// the checker (`Checker::bind_call`), not here; default legality is the checker's too
+/// (`Checker::check_default_scope`, TICKET-201).
 pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
-    for m in &graph.modules {
-        validate_defaults(&m.ast.stmts)?;
-    }
     // W7-51 — every non-inline default becomes a zero-arg `fn` in the module that DECLARES it.
     synthesize_providers(graph);
     for mi in 0..graph.modules.len() {
@@ -447,7 +448,6 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
 /// to stay consistent with the file-backed graph path.
 #[cfg(test)]
 pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
-    validate_defaults(&module.stmts)?;
     // Mirror [`run`]: synthesize providers into the single module first. Its `file` id is whatever
     // the test's lexer stamped; there is only one module, so any value is unique by construction.
     let file = module.stmts.first().map_or(0, |s| s.span.file);
@@ -738,89 +738,10 @@ pub(crate) fn check_provider_cycles_in(
     Ok(())
 }
 
-/// Reject any parameter/field default that references another parameter/field in the same signature.
-/// A default is evaluated with NO parameter/field bound — in its own provider function, or as a
-/// literal clone at the call site (see [`Dflt`]) — so a non-param-referencing expression
-/// (`compute()`, `1 + 2`, `GLOBAL * 2`) is fine, but `y: int = x + 1` is not. Covers top-level
-/// functions and struct methods/fields (the only places defaults are collected). Runs before
-/// provider synthesis and the call-rewrite pass.
-fn validate_defaults(stmts: &[Stmt]) -> Result<(), ResolveError> {
-    for stmt in stmts {
-        match &stmt.kind {
-            StmtKind::Fn(decl) => check_param_defaults(&decl.params)?,
-            StmtKind::Struct {
-                fields, methods, ..
-            } => {
-                let fnames: HashSet<&str> = fields.iter().map(|f| f.name.as_str()).collect();
-                for fld in fields {
-                    if let Some(d) = &fld.default
-                        && let Some(n) = default_referenced_name(d, &fnames)
-                    {
-                        return Err(err(
-                            d.span,
-                            format!(
-                                "default value cannot reference field '{n}' (a default is evaluated on its own, where fields are not in scope)"
-                            ),
-                        ));
-                    }
-                }
-                for m in methods {
-                    check_param_defaults(&m.params)?;
-                }
-            }
-            StmtKind::Enum { methods, .. } | StmtKind::NewType { methods, .. } => {
-                for m in methods {
-                    check_param_defaults(&m.params)?;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// Reject a param default that references any parameter in the same list.
-fn check_param_defaults(params: &[Param]) -> Result<(), ResolveError> {
-    let names: HashSet<&str> = params.iter().map(|p| p.name.as_str()).collect();
-    for p in params {
-        if let Some(d) = &p.default
-            && let Some(n) = default_referenced_name(d, &names)
-        {
-            return Err(err(
-                d.span,
-                format!(
-                    "default value cannot reference parameter '{n}' (a default is evaluated on its own, where parameters are not in scope)"
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The first name in `names` referenced as an identifier anywhere in `e`, if any. A `Field`'s member
-/// name and a `Closure`'s own params are not treated specially (conservative: a default reusing a
-/// param name as a closure binding is rejected — a non-issue in practice).
-fn default_referenced_name(e: &Expr, names: &HashSet<&str>) -> Option<String> {
-    let mut found: Option<String> = None;
-    walk_idents(e, &mut |n| {
-        if found.is_none() && names.contains(n) {
-            found = Some(n.to_string());
-        }
-    });
-    found
-}
-
 /// Visit every identifier reference in an expression (a `Field`/`OptChain` member name is the member,
-/// not a reference, so only the receiver is visited).
-fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
-    walk_idents_and_types(e, f, &mut |_| {});
-}
-
-/// [`walk_idents`] plus every **type** an expression spells: a turbofish's arguments
-/// (`mk[T]()`, `obj?.m[T]()`), a type-application head's, a `decode[T](…)` target, and a closure's
-/// parameter and return annotations. Only [`expr_mentions_type_param`] passes a non-empty `tf`;
-/// every other caller goes through [`walk_idents`], whose `tf` is a no-op, so no existing name-set
-/// check widened when the type channel was added.
+/// not a reference, so only the receiver is visited), plus every **type** it spells: a turbofish's
+/// arguments (`mk[T]()`, `obj?.m[T]()`), a type-application head's, a `decode[T](…)` target, and a
+/// closure's parameter and return annotations.
 ///
 /// The `decode`/closure arms were added after the rest: without them `dflt_for`'s unbound-`T`
 /// carve-out missed both shapes and gave them a provider whose body spells a type parameter that is
@@ -831,15 +752,9 @@ fn walk_idents(e: &Expr, f: &mut impl FnMut(&str)) {
 fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut(&Type)) {
     match &e.kind {
         ExprKind::Ident(n) => f(n),
-        // A STILL-RAW interpolated literal. `validate_defaults` runs BEFORE the `Str -> Interp`
-        // rewrite, so the only way to see the references a fragment makes is to parse it here. This
-        // used to be skipped, with a comment claiming the checker caught such a reference later — it
-        // does not: the decl-site copy is inferred with the parameters in scope, so
-        // `fn f(n: int, x: str = "n={n}")` type-checked clean. That left the default meaning two
-        // different things (the provider resolves `n` in MODULE scope, so a direct call printed the
-        // global while a call through a function value printed the parameter), and, where no such
-        // global existed at all, reached the backend as `compiler: global 'n' has no slot` — a host
-        // panic on a check-clean program. A parse failure is ignored: the real parse reports it.
+        // A STILL-RAW interpolated literal. `dflt_for` runs BEFORE the `Str -> Interp` rewrite, so
+        // the only way to see the references a fragment makes is to parse it here. A parse failure
+        // is ignored: the real parse reports it.
         ExprKind::Str(raw) => {
             if raw.contains('{')
                 && let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span)
@@ -1133,8 +1048,8 @@ impl Walker<'_> {
             }
             StmtKind::Fn(decl) => {
                 // The DECL-SITE copy of each default is normalized here, outside the param scope
-                // (no param is bound where a default runs; `validate_defaults` guarantees it
-                // references none). This copy is what the checker type-checks against the param's
+                // (no param is bound where a default runs; the checker owns default legality,
+                // `Checker::check_default_scope`). This copy is what the checker type-checks against the param's
                 // declared type, and what `compile_suite_new_thunk` compiles for a test suite's
                 // fields; the provider carries an independent copy of the same expression.
                 for p in decl.params.iter_mut() {
@@ -1163,7 +1078,8 @@ impl Walker<'_> {
                 ..
             } => {
                 // Field defaults: normalize the decl-site copy like param defaults (outside any
-                // scope; they reference no field, per `validate_defaults`).
+                // scope; no field is bound where a default runs, and the checker owns default
+                // legality).
                 for f in fields.iter_mut() {
                     if let Some(d) = &mut f.default {
                         self.walk_expr(d)?;
@@ -2154,37 +2070,6 @@ mod tests {
             .collect()
     }
 
-    /// A default may not reference a parameter — **including through an interpolated fragment**.
-    ///
-    /// `validate_defaults` runs BEFORE the `Str -> Interp` rewrite, so the name walk saw only a raw
-    /// literal and this slipped through. It was not caught later either: the decl-site copy is
-    /// inferred with the parameters in scope, so `fn f(n: int, x: str = "n={n}")` type-checked clean
-    /// and then meant two different things — the provider resolves `n` in MODULE scope, so a direct
-    /// `f(3)` printed the module's `n` while `g := f; g(3)` printed the PARAMETER. Where no such
-    /// global existed at all it reached the backend as `compiler: global 'n' has no slot`, a host
-    /// panic on a check-clean program.
-    #[test]
-    fn a_default_cannot_reference_a_parameter_through_an_interpolated_fragment() {
-        assert!(
-            desugar_err("n := 100\nfn f(n: int, x: str = \"n={n}\") -> str:\n    return x\n")
-                .message
-                .contains("cannot reference parameter 'n'")
-        );
-        // A fragment naming something that is NOT a parameter stays legal.
-        assert!(
-            crate::desugar::run_standalone(
-                &mut crate::parser::parse(
-                    crate::lexer::tokenize(
-                        "g := 1\nfn f(n: int, x: str = \"g={g}\") -> str:\n    return x\n"
-                    )
-                    .unwrap()
-                )
-                .unwrap()
-            )
-            .is_ok()
-        );
-    }
-
     #[test]
     fn builtin_method_name_not_normalized() {
         // `push` is a builtin list method; a 0-arg call must NOT be rewritten even if a struct
@@ -2377,35 +2262,6 @@ mod tests {
                 |st| matches!(&st.kind, StmtKind::Fn(d) if d.name.starts_with(PROVIDER_PREFIX))
             ),
             "no provider is synthesized for a self-contained literal"
-        );
-    }
-
-    #[test]
-    fn param_referencing_default_rejected() {
-        let e = desugar_err("fn f(x: int, y: int = x + 1):\n    print(y)\n");
-        assert!(
-            e.to_string().contains("cannot reference parameter 'x'"),
-            "got: {e}"
-        );
-    }
-
-    #[test]
-    fn field_referencing_default_rejected() {
-        let e = desugar_err("struct S:\n    a: int = 1\n    b: int = a\n");
-        assert!(
-            e.to_string().contains("cannot reference field 'a'"),
-            "got: {e}"
-        );
-    }
-
-    #[test]
-    fn method_param_referencing_default_rejected() {
-        let e = desugar_err(
-            "struct S:\n    n: int\n    fn go(self, x: int, y: int = x):\n        return y\n",
-        );
-        assert!(
-            e.to_string().contains("cannot reference parameter 'x'"),
-            "got: {e}"
         );
     }
 

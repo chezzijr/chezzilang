@@ -367,6 +367,8 @@ fn uses_of(decl: &FnDecl) -> Uses {
 pub(super) struct CallEdge {
     pub callee: String,
     pub args: Vec<Expr>,
+    /// The callee is a bare name no scope of the scanned fn binds: a module slot.
+    pub module_slot: bool,
 }
 
 pub(super) struct Scan {
@@ -655,6 +657,7 @@ impl Scan {
                             self.calls.push(CallEdge {
                                 callee: key.clone(),
                                 args: args.clone(),
+                                module_slot: false,
                             });
                         } else if binding.is_none()
                             && !self.locals.contains(name)
@@ -663,6 +666,7 @@ impl Scan {
                             self.calls.push(CallEdge {
                                 callee: name.clone(),
                                 args: args.clone(),
+                                module_slot: true,
                             });
                         }
                     }
@@ -734,7 +738,9 @@ impl Checker {
                 }
             })
             .collect();
+        let saved_body_facts = std::mem::replace(&mut self.body_facts_pass, true);
         let summaries = self.infer_scan_writes(&scans, &HashMap::new(), true);
+        self.body_facts_pass = saved_body_facts;
         for (name, summary) in summaries {
             if let Some(sig) = self.functions.get_mut(&name) {
                 sig.summary = summary;
@@ -788,16 +794,21 @@ impl Checker {
                 let nested = self.infer_scan_writes(&scan.nested, &visible, false);
                 for edge in &scan.calls {
                     let local_callee = nested.get(&edge.callee);
-                    let callee = local_callee
-                        .map(|s| s.writes.clone())
-                        .or_else(|| old.get(&edge.callee).map(|s| s.writes.clone()))
-                        .or_else(|| known.get(&edge.callee).map(|s| s.writes.clone()))
-                        .or_else(|| {
-                            self.functions
-                                .get(&edge.callee)
-                                .map(|s| s.summary.writes.clone())
-                        })
-                        .unwrap_or_default();
+                    // TICKET-201: a redeclared module slot holds no known fn in a body.
+                    let callee = if edge.module_slot && !self.slot_holds_fn_decl(&edge.callee) {
+                        Vec::new()
+                    } else {
+                        local_callee
+                            .map(|s| s.writes.clone())
+                            .or_else(|| old.get(&edge.callee).map(|s| s.writes.clone()))
+                            .or_else(|| known.get(&edge.callee).map(|s| s.writes.clone()))
+                            .or_else(|| {
+                                self.functions
+                                    .get(&edge.callee)
+                                    .map(|s| s.summary.writes.clone())
+                            })
+                            .unwrap_or_default()
+                    };
                     for effect in callee {
                         if let Some(mapped) = Self::map_write(
                             scan,
@@ -925,6 +936,7 @@ impl Checker {
                 } else {
                     self.functions
                         .get(name)
+                        .filter(|_| self.slot_holds_fn_decl(name))
                         .map(|sig| (name.clone(), sig.summary.clone()))
                 }
             }
@@ -955,7 +967,7 @@ impl Checker {
     ) -> bool {
         let (sig, summary) = match c {
             ArgCallee::Fn(f) => {
-                if self.lookup(f).is_some() {
+                if self.lookup(f).is_some() || !self.slot_holds_fn_decl(f) {
                     return true;
                 }
                 let Some(sig) = self.functions.get(f) else {

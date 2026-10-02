@@ -250,11 +250,16 @@ impl Checker {
             return None;
         }
         let prev = self.scopes[0].get(name).cloned().unwrap_or(Ty::Unknown);
-        let merged = if prev.is_unknown() {
+        let mut merged = if prev.is_unknown() {
             declared.clone()
         } else {
             merge_unknown(&prev, declared)
         };
+        // TICKET-201: labels are equality-neutral, so `merge_unknown` keeps the seed's; the seed
+        // was computed for bodies, and the let's own value names its labels here (K6).
+        if let (Ty::Func { labels, .. }, Ty::Func { labels: own, .. }) = (&mut merged, declared) {
+            *labels = own.clone();
+        }
         (merge_unknown(declared, &merged) == merged).then_some(merged)
     }
 
@@ -262,9 +267,23 @@ impl Checker {
     /// closure body (it runs when called), a `defer:` block (it runs at scope exit) and a `spawn:`
     /// block (it runs concurrently). False at top level and in a `parallel:` body, which run in
     /// source order. A `defer f(..)` call form evaluates its callee at the `defer` (c26), so it is
-    /// not a deferred block.
+    /// not a deferred block. Also true in the global seed, the global typing pass and the
+    /// write-summary fixpoint (`body_facts_pass`): they compute facts that bodies read.
     pub(super) fn runs_after_later_decls(&self) -> bool {
-        self.in_fn_body || self.in_defer_block || self.in_spawn_block
+        self.in_fn_body || self.in_defer_block || self.in_spawn_block || self.body_facts_pass
+    }
+
+    /// TICKET-201 — the one answer to "does module slot `name` hold its `fn` declaration here?".
+    /// A slot declared once does. A redeclared slot does only at a top-level statement of the main
+    /// walk before the walk reaches the slot's first let; a body, a `defer:`/`spawn:` block and a
+    /// body-facts pass never see it as holding the declaration. `self.functions` is a table of
+    /// declarations: read it as slot content only through this.
+    pub(super) fn slot_holds_fn_decl(&self, name: &str) -> bool {
+        self.functions.contains_key(name)
+            && match self.globals.get(name) {
+                Some(g) if g.redeclared() => !self.runs_after_later_decls() && !g.reached,
+                _ => true,
+            }
     }
 
     /// The one decider for keyword-label certainty (TICKET-186): may a keyword call bind `name`'s
@@ -309,7 +328,9 @@ impl Checker {
                 }
             }
             // A fn reached by name through `functions`.
-            None if body_redeclared => Err(KwDeny::Redeclared),
+            None if self.functions.contains_key(name) && !self.slot_holds_fn_decl(name) => {
+                Err(KwDeny::Redeclared)
+            }
             None => Ok(vec![(0, name.to_string())]),
         }
     }
