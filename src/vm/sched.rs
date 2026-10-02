@@ -1982,21 +1982,11 @@ impl Vm {
         // 4. Un-account inflight → running (the `+1` is essential — the fiber's next dispatch does
         //    `running -= 1`, which would underflow without this restore).
         self.block_exit(reg);
-        // Cancel observed during/after the sleep (a sibling faulted): set `cancelled` and fault so the
-        // outcome is SWALLOWED (a cancelled task is dropped, not reported), mirroring `demote_recv_block`
-        // + the snapshot-park recv. Without this, a cancelled task would sleep through every remaining
-        // callback element and then fault NORMALLY at a later back-edge — wrong classification (a
-        // cancelled-task Fault masking the real sibling error) and wasted in-callback sleeps. Faulting
-        // here aborts the native callback loop immediately, so no further elements sleep.
-        if let Some(e) = self.take_halt(span) {
-            return Err(e);
-        }
-        // W7-47 — a run-wide `os.exit` observed during/after the sleep, below cancel like every other
-        // site. Since W7-57 chunked step 3 this aborts the sleep ITSELF within one
-        // `DEMOTE_POLL_BACKOFF`, not merely the rest of the callback loop (measured 3012 ms → 63 ms).
-        if let Some(e) = self.run_exit_err(span) {
-            return Err(e);
-        }
+        // The halts a blocked party observes ([`Vm::block_halts`]), read once after the sleep: a
+        // cancel or child fault aborts the native callback loop, so no further elements sleep; a
+        // run-wide `os.exit` (W7-47) since W7-57 also aborts the sleep itself within one
+        // `DEMOTE_POLL_BACKOFF` (measured 3012 ms → 63 ms).
+        self.block_halts(span)?;
         Ok(Value::nil())
     }
 
@@ -2128,27 +2118,14 @@ impl Vm {
             None
         };
         let out = loop {
-            // W7-18 — the run's `--timeout` deadline, ABOVE the cancel check (it outranks a cancel,
-            // W7-17's ordering). An in-callback socket op is accounted `inflight`, so it VETOES the
-            // deadlock predicate: without this an untimed `accept` here hangs exactly like the
-            // netpoller-park shape. `break`, NOT `?` — this loop is bracketed by
-            // `block_enter`/`block_exit`, and returning past the exit would leak
-            // `running -= 1` / `inflight += 1` for the rest of the process (which is why every other
-            // exit below is a `break` too).
-            if let Err(e) = self.deadline_halt(span) {
-                break Err(e);
-            }
-            // Observe teardown/cancel BEFORE doing more work each iteration. Cancel (a sibling faulted):
-            // set `cancelled` so the outcome is SWALLOWED (a cancelled task is dropped, not reported).
-            // TICKET-188 — …or a child of a nursery this party owns faulted (F2: a `main` owner blocked
-            // in a socket op never saw it).
-            if let Some(e) = self.take_halt(span) {
-                break Err(e);
-            }
-            // W7-47 — a run-wide `os.exit` from another party (an eager `Executor` job). This is the one
-            // blocking wait not routed through `block_halt_check`, so it needs the rung explicitly, in
-            // the same relative order (below cancel). `break`, NOT `?`, for the bracketing reason above.
-            if let Some(e) = self.run_exit_err(span) {
+            // The halts a blocked party observes ([`Vm::block_halts`]: `--timeout`, cancel, child
+            // fault, `os.exit`), BEFORE doing more work each iteration. W7-18 — an in-callback socket
+            // op is accounted `inflight`, so it VETOES the deadlock predicate: without the deadline
+            // read here an untimed `accept` hangs exactly like the netpoller-park shape. `break`, NOT
+            // `?` — this loop is bracketed by `block_enter`/`block_exit`, and returning past the exit
+            // would leak `running -= 1` / `inflight += 1` for the rest of the process (which is why
+            // every other exit below is a `break` too).
+            if let Err(e) = self.block_halts(span) {
                 break Err(e);
             }
             // Nursery torn down (deadlock elsewhere / `os.exit`): fault in place. An `inflight` socket op
