@@ -75,6 +75,8 @@ scope). `functions` stays a table of declarations, never consulted as slot conte
 
 ## Family G3 — when a bound's type arguments are resolved (K2, K3)
 
+**Status (TICKET-202):** K2 and K3 fixed (single source `resolve_bounds`, grid `checker::tests::bound_type_arg_grid`); K4 split to its own ticket.
+
 **Fact:** does type argument A satisfy bound `P[args]` here, with `args` meaning what they mean at
 the declaration?
 

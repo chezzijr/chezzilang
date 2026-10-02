@@ -81,6 +81,21 @@ Single source of truth for "what am I doing next." Update after every work sessi
   read through the one `FnComp::visible_locals()` by both name lookup and closure capture, now hides
   the frame without touching slot allocation.
 
+- **TICKET-202 (2026-10-02): Family G3, bound type arguments resolve at the declaration.** K2: an
+  abstract bound arg always passed (`need(y, x)` with `Y: Conv[str]` was accepted for `Conv[X]`,
+  then faulted `cannot apply Add to str and int`); K3: a method's `[U: Conv[T]]` was resolved in the
+  CALLER's scope, so a caller's own `T` captured it (runtime fault) or it was `unknown type 'T'`.
+  Single source: `Checker::resolve_bounds` (one producer, `resolve_bound`) resolves every bound once
+  in the declaring scope into `TyParam`/`TyBound`; every table, the in-scope map and
+  `ProtocolInfo.embeds` hold that form; `subst_sig`/`instantiate_method` substitute bounds with the
+  params' map; `enforce_bounds` maps the declaring item's unbound params to `Unknown`;
+  `protocol_provides` is the one yes/no (a type param equals only itself). Deleted:
+  `resolve_bound_arg`, `bound_args_match`, `bound_provides`, `key_bounds`, `key_param_bounds`,
+  `rename_type_params`, `embed_arg_tys` and the nested-embed-param veto (`Contains[List[T]]` is now
+  accepted, as in Rust). Grid: `checker::tests::bound_type_arg_grid` (8 bound sites x 6 argument
+  kinds, embeds, witnesses, static receiver bounds; 37 cells red on base), plus
+  `tests/chz/spec/bound_type_args_test.chz`. K4 split to TICKET-204.
+
 - **TICKET-197 (2026-10-02): Family F2, type-parameter identity and fn-value shape.** N1/N2: a
   generic method's signature was substituted twice by bare name (receiver map, then method map), so
   a caller's `U` merged with the method's `[U]` (`go2(Box(1), "s")` checked as `(T, T)` and faulted

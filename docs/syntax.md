@@ -879,6 +879,14 @@ independently (`Pair[A, B]` pins both), and the recovery runs on a generic **met
 Precedence is turbofish > arguments > this recovery > a result annotation, and a recovered type
 that disagrees with what an argument already pinned is discarded — the mismatch is still reported.
 
+**A bound's type arguments mean what they mean at the declaration.** A method's `[U: Conv[T]]`
+inside `struct Box[T]` names the receiver's `T`, never a caller's: `Box(v="s").pick(i)` needs
+`Conv[str]`, whatever the calling function calls its own params. An abstract argument satisfies
+`P[X]` only through its own bound `P[X]` for the same `X`, as in Rust and Go: inside
+`fn go[X, Y: Conv[str]](y: Y, x: X)`, the call `need(y, x)` to `fn need[S, B: Conv[S]](u: B, s: S)`
+is rejected (`type Y does not satisfy Conv[X]`). An embed line resolves the same way, in its own
+protocol, so `protocol Bag[T]:` with the embed line `Contains[List[T]]` is accepted.
+
 Where the recovery cannot reach, the checker says so — `cannot infer type parameter R for
 'produce_as'; add a result annotation or explicit type arguments` — and both escapes work, on a
 free function and on a method alike. Three cases reach it, each measured:
@@ -2597,10 +2605,10 @@ still satisfies the protocols it embeds, and `Self` in the **return** is fine (i
 protocol), which is why `fn neg(self) -> Self` and unary `-` stay usable. Rust's object-safety rule
 is the same; Go bans `Self` from interfaces outright.
 
-An embed's type argument must name a real type, and may name the owner's type parameter only as the
-whole argument (`protocol Bag[T]: Contains[T]`) — nested inside another type (`Contains[List[T]]`),
-or naming a type that does not exist, is rejected at the declaration rather than silently becoming a
-requirement that accepts anything.
+An embed's type argument must name a real type; one naming a type that does not exist is rejected
+at the declaration rather than silently becoming a requirement that accepts anything. It may name
+the owner's type parameter anywhere, as the whole argument (`protocol Bag[T]: Contains[T]`) or
+nested (`Contains[List[T]]`, so a `Bag[int]` requires `Contains[List[int]]`).
 
 ```chezzi
 protocol Arithmetic:        # builtin/reserved — shape file-backed in std/prelude.chz
