@@ -256,6 +256,7 @@ impl Vm {
     /// TICKET-194: a free guard is taken with no cancellation point. Only a guard that would wait
     /// reaches `wait_halt`. Stage 1 (bounded by `GUARD_DEMOTE_BUDGET`, in place, DEC-016) then waits
     /// holding no permit (DEC-141), the same order as `guard_wait_block` ([`Vm::guard_free_then_take`]).
+    /// Stage 1 reads the halts when the guard comes free (TICKET-200).
     pub(super) fn take_update_guard(
         &mut self,
         key: usize,
@@ -275,16 +276,18 @@ impl Vm {
                 self.width_release();
                 let staged = loop {
                     let left = until.saturating_duration_since(std::time::Instant::now());
-                    match self.guard_free_then_take(key, left) {
-                        Ok(Some(g)) => break Some(Ok(g)),
-                        Err(c) => break Some(Err(c)),
-                        Ok(None) if left.is_zero() => break None,
-                        Ok(None) => {}
+                    // No `?` in this loop: a halt must still reach `width_acquire` below.
+                    match self.guard_free_then_take(key, left, span) {
+                        Err(halt) => break Some(Err(halt)),
+                        Ok(Ok(Some(g))) => break Some(Ok(Ok(g))),
+                        Ok(Err(c)) => break Some(Ok(Err(c))),
+                        Ok(Ok(None)) if left.is_zero() => break None,
+                        Ok(Ok(None)) => {}
                     }
                 };
                 self.width_acquire();
                 match staged {
-                    Some(r) => r,
+                    Some(r) => r?,
                     None => self.guard_wait_block(key, what, span)?,
                 }
             }
@@ -310,22 +313,34 @@ impl Vm {
     /// permit. `Ok(Some)` and `Err` return holding the permit; `Ok(None)` (still held after
     /// `budget`, or lost the race) returns without it. Stage 1 of [`Vm::take_update_guard`] and
     /// [`Vm::guard_wait_block`] both call it.
+    ///
+    /// TICKET-200 — a wait that ends because the guard came free reads the halts
+    /// ([`Vm::block_halts`]) before it takes the guard, because the free may be the halt's own cut
+    /// of the holder (an `os.exit` or a cancel unwinding the holder's `update`). A halt returns
+    /// `Err` holding no permit, like `Ok(None)`.
     fn guard_free_then_take(
         &mut self,
         key: usize,
         budget: std::time::Duration,
-    ) -> Result<Option<core::UpdateGuard>, GuardCycle> {
-        if !core::await_update_guard_free(key, self.guard_token, Some(budget))? {
-            return Ok(None);
+        span: Span,
+    ) -> Result<Result<Option<core::UpdateGuard>, GuardCycle>, RuntimeError> {
+        match core::await_update_guard_free(key, self.guard_token, Some(budget)) {
+            Err(c) => return Ok(Err(c)),
+            Ok(false) => return Ok(Ok(None)),
+            Ok(true) => {}
         }
+        self.block_halts(span)?;
         self.width_acquire();
-        match acquire_update_guard_within(key, self.guard_token, Some(std::time::Duration::ZERO)) {
-            Ok(None) => {
-                self.width_release();
-                Ok(None)
-            }
-            r => r,
-        }
+        let zero = Some(std::time::Duration::ZERO);
+        Ok(
+            match acquire_update_guard_within(key, self.guard_token, zero) {
+                Ok(None) => {
+                    self.width_release();
+                    Ok(None)
+                }
+                r => r,
+            },
+        )
     }
 
     /// TICKET-063 — the unbounded half of [`Vm::take_update_guard`], reached once the 5 ms bounded
@@ -352,10 +367,11 @@ impl Vm {
             // take the permit, then take the guard without waiting. Taking the guard first parks
             // its OWNER behind permit holders that wait in place for that same guard, so every
             // handoff cost one GUARD_DEMOTE_BUDGET (T=2: 7172 timeouts, 18.9 s).
-            match self.guard_free_then_take(key, super::DEMOTE_POLL_BACKOFF) {
-                Ok(Some(g)) => break Ok(Ok(g)),
-                Err(cycle) => break Ok(Err(cycle)),
-                Ok(None) => {}
+            match self.guard_free_then_take(key, super::DEMOTE_POLL_BACKOFF, span) {
+                Ok(Ok(Some(g))) => break Ok(Ok(g)),
+                Ok(Err(cycle)) => break Ok(Err(cycle)),
+                Err(e) => break Err(e),
+                Ok(Ok(None)) => {}
             }
             if let Err(e) = self.block_halt_check(super::DEADLOCK_MSG, span) {
                 break Err(e);
@@ -2354,11 +2370,12 @@ impl Vm {
         Some(self.err("exit".to_string(), span))
     }
 
-    /// The halts a party blocked in place must observe. Split out of [`Vm::block_wait_tick`] so the
-    /// multi-channel `wait:` path — which polls N arms instead of waiting on one condvar, and so
-    /// cannot share the tick — honours exactly the same three, rather than being the one blocking op a
-    /// `--timeout` cannot reach.
-    fn block_halt_check(&mut self, deadlock_msg: &str, span: Span) -> Result<(), RuntimeError> {
+    /// TICKET-200 — the one list of halts a party blocked in place observes, read with no lock held.
+    /// [`Vm::block_halt_check`] adds the deadlock verdict and the pool-slot yield;
+    /// [`Vm::guard_free_then_take`] reads it when the guard comes free; the in-place socket and
+    /// sleep waits in `sched.rs` read it directly. A new wait loop calls one of the two; it never
+    /// copies a rung.
+    pub(super) fn block_halts(&mut self, span: Span) -> Result<(), RuntimeError> {
         // Checked HERE because a blocked job never reaches `jump_checked`'s loop back-edge, which is
         // where every other path observes the deadline. Without it `chezzi test --timeout` could not
         // kill a job blocked forever on a channel — exactly the hang eager execution makes easier to
@@ -2383,6 +2400,15 @@ impl Vm {
         if let Some(e) = self.take_halt(span) {
             return Err(e);
         }
+        Ok(())
+    }
+
+    /// The halts a party blocked in place must observe. Split out of [`Vm::block_wait_tick`] so the
+    /// multi-channel `wait:` path — which polls N arms instead of waiting on one condvar, and so
+    /// cannot share the tick — honours exactly the same three, rather than being the one blocking op a
+    /// `--timeout` cannot reach.
+    fn block_halt_check(&mut self, deadlock_msg: &str, span: Span) -> Result<(), RuntimeError> {
+        self.block_halts(span)?;
         // TICKET-134 — test-only seam: widen the check-then-check window between the rung above and
         // the verdict below so a racing fault is deterministically reachable in a test. No-op outside
         // `#[cfg(test)]` and unless armed.
