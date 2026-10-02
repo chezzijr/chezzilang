@@ -323,7 +323,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 98] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 100] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -371,7 +371,7 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 98] = [
     "d5_owe3_path_c_socket_read_in_callback_demotes",
     "d5_owe3_recv_in_iter_map_callback_parks",
     "deregister_reinjects_and_disarms",
-    "drain_sched_reinjects_matching_and_disarms",
+    "drain_family_reinjects_matching_and_disarms",
     "eager_job_os_exit_beats_a_blocked_nurserys_deadlock_verdict",
     "eager_job_os_exit_kills_a_recv_parked_nursery_task",
     "eager_job_os_exit_kills_a_sleeping_nursery_task",
@@ -442,6 +442,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 98] = [
     // final rc and stdout, not an ordering the sleep enforces here.
     "shutdown_now_cancels_a_depth_two_nursery_child",
     "shutdown_now_cancels_a_jobs_nursery_child_blocked_on_recv",
+    // TICKET-200. Same as TICKET-118's: the `time.sleep_ms` is inside the fixture .chz program's
+    // SOURCE STRING; the test asserts the child's exit and its output, not an ordering here.
+    "shutdown_now_reaches_a_job_nursery_fiber_parked_in_accept",
     // TICKET-101. The sleep is a deadline poll (20ms) over a child process that hangs before the
     // fix and never closes its pipes, not a happens-before edge between two events in this test.
     "sibling_send_wakes_receiver_in_a_deeper_nursery_at_eight_workers",
@@ -461,6 +464,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 98] = [
     "ticket_016_cross_task_set_racing_update_is_not_lost",
     "ticket_063_guard_waiter_is_not_faulted_while_a_sibling_can_feed_the_holder",
     "timeout_aborts_a_sleeping_test_everywhere",
+    // TICKET-200. The `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING; the test
+    // asserts the report `chezzi test --timeout=500` prints, not an ordering here.
+    "unjoined_job_fault_before_timeout_is_reported",
     "vm_wait_in_native_callback_demotes_under_parallel",
     "vm_wait_timer_loses_to_send_in_native_callback_parallel",
     "w8_7_demoted_fiber_yield_after_demote_does_not_strand_replacement",
