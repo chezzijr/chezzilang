@@ -1209,10 +1209,13 @@ impl EagerState {
 
     /// TICKET-195 — the first finished job that FAULTED and is not yet reduced by a join, with its
     /// own trace. A job's deadlock verdict is skipped: it is the verdict, not a fault that outranks
-    /// one.
+    /// one. So is a job cut by the run's own `--timeout` (TICKET-200): that is the run's cause, not
+    /// an earlier fault.
     pub(super) fn first_fault(&self) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
         self.slots.iter().find_map(|s| match s {
-            Some(super::TaskOutcome::Fault { err, trace, .. }) if !err.is_deadlock => {
+            Some(super::TaskOutcome::Fault { err, trace, .. })
+                if !err.is_deadlock && !err.is_timed_out =>
+            {
                 Some((err.clone(), trace.clone()))
             }
             _ => None,
@@ -2242,6 +2245,40 @@ pub fn value_core_bytes_structural(
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
+
+    /// TICKET-200 — `first_fault` skips a job's deadlock verdict and a job cut by the run's own
+    /// `--timeout` (that is the run's cause, not an earlier fault); a plain fault in a later slot is
+    /// still found.
+    #[test]
+    fn first_fault_skips_a_deadlock_and_a_timed_out_job() {
+        let err = |m: &str| super::super::RuntimeError {
+            message: m.to_string(),
+            span: super::super::Span::RUNTIME,
+            is_assert: false,
+            is_over_memory: false,
+            is_timed_out: false,
+            is_deadlock: false,
+            is_panic: false,
+        };
+        let fault = |e| super::super::TaskOutcome::Fault {
+            err: e,
+            out: Vec::new(),
+            stderr: Vec::new(),
+            trace: Vec::new(),
+        };
+        let mut s = EagerState::default();
+        for _ in 0..3 {
+            s.reserve();
+        }
+        s.finish(0, (0, false), fault(err("dl").deadlock()));
+        s.finish(1, (0, false), fault(err("cut").timed_out()));
+        assert!(s.first_fault().is_none(), "no earlier fault yet");
+        s.finish(2, (0, false), fault(err("boom")));
+        assert_eq!(
+            s.first_fault().map(|(e, _)| e.message).as_deref(),
+            Some("boom")
+        );
+    }
 
     /// TICKET-192 — `adjust` keeps UNKNOWN, moves bytes by the delta (saturating), turns CLEAN into
     /// DIRTY on a dirty piece, and never turns DIRTY into CLEAN.

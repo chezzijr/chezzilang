@@ -810,7 +810,10 @@ fn invoke_all(
         }
         let start = Instant::now();
         let mark = vm.exec_registry_mark();
-        let mut verdict = match vm.invoke_test(*proto) {
+        // TICKET-200 — `rank_end` before the reap: an unjoined job fault recorded before this
+        // test's own cause outranks it (the reap would take the slots it reads).
+        let ran = vm.invoke_test(*proto);
+        let mut verdict = match vm.rank_end(mark, ran) {
             Ok(()) => Verdict::Pass,
             Err(e) => {
                 let site = fault_site(&mut vm, &e, &files, &fallback);
@@ -967,8 +970,12 @@ fn run_suite(
         }
         // The test method itself (only if before_each passed). This is the ONE place an `assert`
         // fault reads as FAIL; any other fault in the body is ERROR (via `verdict_from_fault`).
+        // TICKET-200 — ranked by `rank_end` before the reap, like a free test.
         if matches!(verdict, Verdict::Pass)
-            && let Err(e) = vm.invoke_suite_method(*proto, instance)
+            && let Err(e) = {
+                let ran = vm.invoke_suite_method(*proto, instance);
+                vm.rank_end(mark, ran.map(|_| ()))
+            }
         {
             let site = fault_site(vm, &e, files, fallback);
             verdict = verdict_from_fault(e, site);
@@ -1052,7 +1059,7 @@ fn run_after_all(
     // own fault takes priority, same as the per-test policy: whichever failure says more wins.
     let result = match result {
         Ok(_) => vm.reap_executors_since(mark),
-        Err(e) => Err(e),
+        Err(e) => vm.rank_end(mark, Err(e)),
     };
     let duration = start.elapsed();
     let captured = vm.take_out_bytes();

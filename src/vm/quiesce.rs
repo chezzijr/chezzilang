@@ -514,19 +514,24 @@ impl QuiesceState {
 
     /// TICKET-195 — THE "unjoined job fault": the first fault an `Executor` job recorded that no
     /// join has reduced yet, derived from the executor slots (never kept in a cell of its own).
-    /// `Vm::on_step_fault` reports it in place of a deadlock verdict — Go prints the job's panic.
-    /// Same clone-then-lock pattern as [`QuiesceState::outstanding_jobs`].
+    /// `Vm::rank_end` reports it in place of the run's own cause (TICKET-200) — Go prints the job's
+    /// panic. Skips the first `from` registry cores (a test's mark). Same clone-then-lock pattern as
+    /// [`QuiesceState::outstanding_jobs`].
     ///
     /// Only a core no `shutdown()` has marked `shut` counts as unjoined: a deadlock inside that
     /// executor's own join keeps its verdict (`tests/deadlock_is_fatal.rs`
     /// `a_deadlocked_executor_job_aborts_shutdown`, the plan's step-9 fallback).
     pub(super) fn unjoined_job_fault(
         exec_registry: &ExecRegistry,
+        from: usize,
     ) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
         let cores: Vec<_> = exec_registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .iter()
+            .skip(from)
+            .cloned()
+            .collect();
         cores.iter().find_map(|c| {
             if c.inner.lock().unwrap_or_else(|e| e.into_inner()).shut {
                 return None;

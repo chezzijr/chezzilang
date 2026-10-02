@@ -4233,7 +4233,7 @@ impl Vm {
     /// discarded, and the verdict and its trace stand. Any other fault, and a pending exit, skip the
     /// drain as before.
     pub(crate) fn finish_run(&mut self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
-        match r {
+        match self.rank_end(0, r) {
             Ok(()) => self.drain_live_executors(),
             Err(e) if e.is_deadlock && self.pending_exit.is_none() => {
                 let trace = (self.fault_trace.take(), self.fault_trace_depth);

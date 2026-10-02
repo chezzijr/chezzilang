@@ -985,6 +985,37 @@ impl Vm {
             .len()
     }
 
+    /// TICKET-200 — THE end-of-run ranking: which cause a run (or one test) reports. The order is
+    /// exit, then an unjoined `Executor` job fault recorded before the run's own cause reached the
+    /// top, then that cause (`--timeout`, `--max-heap`, an own fault, a deadlock). Go's first panic
+    /// ends the process, so a job that faulted first is the report, with the job's frames; an own
+    /// fault that happened first stays the report, because the job fault does not exist yet.
+    /// "Earlier" means recorded when the cause reaches the top: a job fault recorded while the
+    /// top's `defer`s unwind counts too (no timestamp is kept). Only executors created since `mark`
+    /// count (a test's own; `0` for a whole run).
+    ///
+    /// Call it BEFORE any drain or reap: a drain takes the slots this reads. A replaced deadlock
+    /// keeps its `.deadlock()` stamp (DEC-135), so `finish_run` still drains on it.
+    pub fn rank_end(
+        &mut self,
+        mark: usize,
+        r: Result<(), RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        let Err(e) = r else {
+            return r;
+        };
+        if self.pending_exit.is_some() {
+            return Err(e);
+        }
+        match crate::vm::quiesce::QuiesceState::unjoined_job_fault(&self.exec_registry, mark) {
+            Some((je, trace)) => {
+                self.adopt_child_fault(None, trace);
+                Err(if e.is_deadlock { je.deadlock() } else { je })
+            }
+            None => Err(e),
+        }
+    }
+
     /// The per-test A2 join: drain (join) only the executors created SINCE `mark`, i.e. by the test
     /// that took it. An executor built at module top level or in `before_all` sits before every
     /// mark and is left alive for the tests that follow — draining from `0` instead would mark it
@@ -1581,21 +1612,6 @@ impl Vm {
         // bypass just below, drops it here instead of surviving to decorate an unrelated
         // later fault.
         let gen_prefix = std::mem::take(&mut self.gen_fault_prefix);
-        // TICKET-195 — an `Executor` job's fault that no join has reduced outranks a deadlock
-        // verdict: the job is why nobody can make progress (Go prints the job's panic). Every
-        // verdict reaches user code through this funnel, so this is the one place to swap it in.
-        // It stays deadlock-marked, so it is still fatal and recover-transparent (DEC-135,
-        // DEC-152); a pending exit outranks both (DEC-181).
-        let rte = match (rte.is_deadlock && self.pending_exit.is_none())
-            .then(|| crate::vm::quiesce::QuiesceState::unjoined_job_fault(&self.exec_registry))
-            .flatten()
-        {
-            Some((e, trace)) => {
-                self.adopt_child_fault(None, trace);
-                e.deadlock()
-            }
-            None => rte,
-        };
         // TICKET-135 (D1): a deadlock verdict is fatal like Go's `all goroutines are asleep`.
         // `recover:` is transparent to it: the fault takes the uncaught path (defers and
         // escaped-nursery reports unchanged) and the marker is re-stamped so a faulting
