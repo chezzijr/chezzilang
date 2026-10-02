@@ -192,8 +192,8 @@ TICKET-103, changed by 125; 132, 185 (17 commits); W17-1 is the open perf residu
 
 ## Plan order
 
-1. **S1** (H1 P0 crash, H2 hang) — scheduler; two parts, one ticket.
-2. **B3** (C1, C2) — after S1 (both touch `mod.rs` drain paths).
-3. **N3** (K6, K5, K1, S3) — checker names; independent of 1-2.
-4. **G3** (K2, K3, K4) — checker generics; after N3 if they share files.
-5. **A1** — depends on decision 1; small (`std/concurrency` task + memoize).
+1. **S1** (H1 P0 crash, H2 hang) — TICKET-199 — scheduler; two parts, one ticket.
+2. **B3** (C1, C2) — TICKET-200 — after S1 (both touch `mod.rs` drain paths).
+3. **N3** (K6, K5, K1, S3) — TICKET-201 — checker names; independent of 1-2.
+4. **G3** (K2, K3, K4) — TICKET-202 — checker generics; after N3 if they share files.
+5. **A1** — TICKET-203 — a bug against TICKET-191's decision; small (`std/concurrency` task + memoize).
