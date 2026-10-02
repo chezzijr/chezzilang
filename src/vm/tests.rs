@@ -21678,18 +21678,18 @@ fn mnsched_drain_scan_reruns_after_a_cancel_generation_bump() {
     let f = take_run(&sched);
     sched.park(core_key(&core), Arc::clone(&core), f);
     assert_eq!(
-        sched.lock().drain_scan_due(),
+        sched.lock().drain_scan_due(&sched),
         None,
         "nothing tripped: no scope owes a drain"
     );
     crate::vm::trip_cancel_flag(&ancestor);
     assert_eq!(
-        sched.lock().drain_scan_due(),
+        sched.lock().drain_scan_due(&sched),
         Some(0),
         "a trip after a clean scan must re-arm the scan"
     );
     assert_eq!(
-        sched.lock().drain_scan_due(),
+        sched.lock().drain_scan_due(&sched),
         Some(0),
         "a scan that found a scope must not record the generation"
     );

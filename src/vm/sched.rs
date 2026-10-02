@@ -952,8 +952,7 @@ impl Vm {
             c.scopes[scope_id].awaiting_builder = false;
             Arc::clone(&c.scopes[scope_id].cancel)
         };
-        sched.cancel_drain(scope_id);
-        poller::drain_sched(&sched);
+        sched.drain_family(scope_id);
         let wid = self.wid;
         // W6-2 — a shell needs no snapshot (see `join_enlisted_scope`), which also retires the
         // `.expect("no fault possible")` this teardown path used to carry.
@@ -1088,13 +1087,13 @@ impl Vm {
         if gate_body {
             shell.width_gated = true;
         }
-        let drain_sched = Arc::clone(&sched);
+        let drainer_sched = Arc::clone(&sched);
         let drainer = std::thread::Builder::new()
             .stack_size(VM_STACK_BYTES)
             .name("chezzi-eager".into())
             .spawn(move || {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    shell.mn_worker_loop(&drain_sched, 1, 0)
+                    shell.mn_worker_loop(&drainer_sched, 1, 0)
                 }));
             })
             .ok()?; // no drainer ⇒ no worker during the body ⇒ fall back to lazy (see the doc above)
@@ -1403,7 +1402,7 @@ impl Vm {
     /// `continue` or a `recover:` catch jumped past its `JoinNursery`). The injected handlers are live
     /// fibers, so (unlike a lazy nursery's unstarted `PendingCall`s) they must be cancelled, not just
     /// dropped: trip the inner cancel, drain channel- and socket-parked handlers (D6b
-    /// `cancel_drain` + `drain_sched`), run the inline worker to settle them, then flush their output
+    /// `drain_family`), run the inline worker to settle them, then flush their output
     /// (Decision F). The body's own escape error is what propagates, so a handler fault here is
     /// swallowed (only its buffered output + any `os.exit` are honored via `reduce_task_slots`).
     ///
@@ -1431,16 +1430,9 @@ impl Vm {
         // handlers as `Deadlocked` — dropping them without `unwind_deferred`, skipping their `defer`s).
         sched.trip_scope_cancel(sid);
         sched.close_body(sid);
-        sched.cancel_drain(sid);
-        // §2c1 — scope-selective: a nested eager nursery shares the enclosing scope's sched, so
-        // draining by sched alone would unpark the OUTER scope's socket-parked fibers too.
-        if drainer.is_some() {
-            poller::drain_sched(&sched);
-        } else {
-            for &s in &sids {
-                poller::drain_scope(&sched, s);
-            }
-        }
+        // §2c1 — family-scoped (`drain_family`): a nested eager nursery shares the enclosing scope's
+        // sched, so draining by sched alone would unpark the OUTER scope's socket-parked fibers too.
+        sched.drain_family(sid);
         let mut shell = self.spawn_shell(&sched, &cancel);
         // §2c1 — a NESTED scope settles and reduces only ITSELF, then retires (see
         // `join_eager_nursery`'s nested arm); the owner's drainer and sibling scopes are untouched.
@@ -2480,14 +2472,13 @@ impl Vm {
                     let aborts = sched.finish(task_index, scope_id, outcome);
                     // A fault/exit tripped the FIBER's SCOPE cancel (in `classify_mn_outcome`, via the
                     // re-pointed `self.cancel`); requeue THAT scope's parked siblings so they observe it
-                    // and unwind (running ones see it at a back-edge). `cancel_drain(scope_id)` reaches
-                    // channel-`recv`-parked fibers in this scope ONLY (never outer siblings — structured
-                    // concurrency); `drain_sched` reaches the netpoller-parked ones. Together they cover
-                    // every parked fiber of the faulting scope, so a net server sharing a nursery with a
-                    // faulting sibling now unwinds instead of hanging (D6b — the production-ready gate).
+                    // and unwind (running ones see it at a back-edge). `drain_family(scope_id)` reaches
+                    // the channel-parked and the netpoller-parked fibers of this scope's family ONLY
+                    // (never outer siblings — structured concurrency), so a net server sharing a
+                    // nursery with a faulting sibling unwinds instead of hanging (D6b — the
+                    // production-ready gate).
                     if aborts {
-                        sched.cancel_drain(scope_id);
-                        poller::drain_sched(sched);
+                        sched.drain_family(scope_id);
                     }
                 }
             }
@@ -6593,10 +6584,7 @@ impl Vm {
 /// `Vm::park_escaped_abort` and `Vm::abort_fiber_owned_nursery`.
 fn cancel_fiber_owned_family(scope: &EagerScope) {
     scope.sched.trip_scope_cancel(scope.scope);
-    scope.sched.cancel_drain(scope.scope);
-    for sid in scope.sids() {
-        poller::drain_scope(&scope.sched, sid);
-    }
+    scope.sched.drain_family(scope.scope);
 }
 
 /// W8-8 — the wid range of the pool helpers an outermost eager nursery farms. wid 0 is the inline

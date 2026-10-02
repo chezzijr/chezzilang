@@ -4883,7 +4883,7 @@ fn example_socket_timeout_matches_expected() {
 
 /// D6b — the production-ready gate (regression for the documented HANG): a `parallel:` runs a
 /// fiber parked on `accept` (no client ever connects, so it parks on the netpoller forever) beside
-/// a sibling that faults. Before D6b's `poller::drain_sched`, the faulting sibling tripped cancel
+/// a sibling that faults. Before D6b's `poller::drain_family`, the faulting sibling tripped cancel
 /// but never reached the poller-parked acceptor — its task stayed `inflight`, the fault never
 /// propagated, and the nursery wedged. Now the drain re-injects the acceptor, it unwinds on the
 /// cancel flag, and the original fault surfaces. Watchdog-guarded: a regression re-hangs here.
@@ -4930,7 +4930,7 @@ main()
 /// unroutable TEST-NET-1 address (RFC 5737 `192.0.2.0/24` — the SYN gets no reply, so the
 /// non-blocking connect stays `EINPROGRESS` and the fiber parks on writability *indefinitely*),
 /// while a sibling faults. A blocking v1 connect would have pinned a worker on the dead handshake;
-/// the parked connect must instead be reached by `poller::drain_sched` so the fault propagates and
+/// the parked connect must instead be reached by `poller::drain_family` so the fault propagates and
 /// the nursery joins. Deterministic (the address never completes) and watchdog-guarded.
 #[test]
 fn net_connect_parks_and_is_drained_on_fault() {
@@ -5229,7 +5229,7 @@ main()
 /// Per-connection spawn — a per-connection HANDLER fault propagates as the acceptor's fault and
 /// tears the run down WITHOUT hanging. One injected handler faults (index-out-of-bounds — a real
 /// runtime fault, since a spawned task's `Result` *return value* is discarded); the eager inner
-/// nursery trips its own cancel (D6b `cancel_drain` + `drain_sched` reach sibling handlers), the
+/// nursery trips its own cancel (D6b `drain_family` reach sibling handlers), the
 /// join surfaces the fault as the acceptor's body fault, and the OUTER nursery then cancels the
 /// clients (so a client stranded without its echo unwinds instead of blocking on `read` forever).
 #[test]

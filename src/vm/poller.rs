@@ -24,8 +24,9 @@
 //!
 //! **Cancel/fault draining (D6b).** A poller-parked fiber lives in this service's registry, *not* in
 //! the scheduler's `parked` buckets — so B3.4's `cancel_drain` (which walks `parked`) does not reach
-//! it. [`drain_sched`] closes that gap: when a sibling faults / `os.exit`s, [`super::Vm::mn_worker_loop`]
-//! calls it alongside `cancel_drain`, re-injecting every fiber parked on this nursery's sockets. The
+//! it. [`drain_family`] closes that gap: every cancel site (a sibling fault, `os.exit`, `shutdown_now`)
+//! calls [`super::MnSched::drain_family`], which runs it beside `cancel_drain` and re-injects every
+//! fiber of the cancelled family parked on its sockets (TICKET-200). The
 //! re-injected fiber resumes and hits the cancel check at [`super::Vm::run_until`]'s loop-top BEFORE
 //! its rewound socket op re-runs, so it unwinds as `cancelled` and the fault propagates — the
 //! `parallel:` joins instead of wedging. A net server may now share a nursery with a fallible sibling.
@@ -134,9 +135,9 @@ static SERVICE: OnceLock<NetPoller> = OnceLock::new();
 /// ancestor's (DEC-118, TICKET-200: a sibling faulted, or an `Executor`'s `shutdown_now` fired, while
 /// this fiber was on its way to park), OR iff `closed` (W15-1: the owning `SocketCore`/`ListenerCore` was `close()`d while
 /// this op was on its way to park) is already set. The caller must re-inject it so it resumes and
-/// unwinds or re-faults on the closed handle, rather than parking on a poller that [`drain_sched`] may
+/// unwinds or re-faults on the closed handle, rather than parking on a poller that [`drain_family`] may
 /// have already swept or arming an fd `close` is about to drop. `None` on a normal park. The cancel +
-/// closed reads + the insert happen under the registry lock that `drain_sched` also holds, so park and
+/// closed reads + the insert happen under the registry lock that `drain_family` also holds, so park and
 /// drain/close are serialized: the fiber is either registered-then-drained or rejected.
 #[allow(clippy::too_many_arguments)] // the park identity + the scope cancel + the W15-1 closed flag + the D6c deadline
 #[must_use]
@@ -164,28 +165,32 @@ pub fn deregister(key: usize) -> bool {
     SERVICE.get_or_init(NetPoller::new).deregister(key)
 }
 
-/// D6b — the cancel/fault hook: re-inject every fiber parked on a socket belonging to `sched` (a
-/// nursery whose sibling faulted / `os.exit`ed), disarming each fd. A re-injected fiber resumes,
-/// hits the cancel check at [`super::Vm::run_until`]'s loop-top (BEFORE its rewound socket op
-/// re-runs), and unwinds as `cancelled` — so the fault propagates and the nursery joins instead of
-/// hanging on a poller-parked peer. Called from [`super::Vm::mn_worker_loop`]'s abort branch beside
-/// [`super::MnSched::cancel_drain`] (which drains the channel-`recv` park set); together they reach
-/// every parked fiber. A no-op if this nursery has nothing parked on the poller (the common case).
-pub fn drain_sched(sched: &Arc<MnSched>) {
-    SERVICE.get_or_init(NetPoller::new).drain_sched(sched, None);
-}
-
-/// §2c1 — [`drain_sched`] narrowed to ONE scope of a sched.
+/// D6b — the netpoller half of the cancel drain: re-inject every fiber of `sched` parked on a socket
+/// that a cancel of scope family `family` wakes ([`Fiber::woken_by`]), disarming each fd. A
+/// re-injected fiber resumes, hits the cancel check at [`super::Vm::run_until`]'s loop-top (BEFORE
+/// its rewound socket op re-runs), and unwinds as `cancelled` — so the fault propagates and the
+/// nursery joins instead of hanging on a poller-parked peer. A no-op if the family has nothing
+/// parked on the poller (the common case).
 ///
-/// Selecting by sched alone was scope-selective for free while every eager nursery owned a private
-/// sched. It no longer is: a nested eager nursery is a SCOPE on the enclosing scope's sched
-/// (`EagerScope::scope`), so a nested escape draining by sched would yank every socket-parked fiber
-/// of the OUTER scope off the netpoller and re-inject it. The latched `poll_deadline` keeps that
-/// safe, but it is a gratuitous unpark/re-arm of siblings that are not being cancelled.
-pub fn drain_scope(sched: &Arc<MnSched>, scope_id: usize) {
+/// Family-scoped, not sched-wide (§2c1): a nested eager nursery is a SCOPE on the enclosing scope's
+/// sched, so a sched-wide sweep would yank the OUTER scope's socket-parked fibers off the poller too.
+/// Called only by [`super::MnSched::drain_family`], which drains the `parked` half beside it
+/// (TICKET-200: a socket-parked fiber is counted `inflight`, not `parked`, so a drain of one half
+/// strands it).
+pub fn drain_family(sched: &MnSched, family: &[usize]) {
     SERVICE
         .get_or_init(NetPoller::new)
-        .drain_sched(sched, Some(scope_id));
+        .drain_family(sched, family);
+}
+
+/// TICKET-200 — is any fiber of `sched` that a cancel of `family` wakes still parked on the poller,
+/// i.e. still owed its [`drain_family`]? The registry half of the drain predicate
+/// (`SchedCore::scope_has_undrained_park`). Takes only the registry lock, a leaf: the caller may hold
+/// core lock A.
+pub fn any_parked(sched: &MnSched, family: &[usize]) -> bool {
+    SERVICE
+        .get_or_init(NetPoller::new)
+        .any_parked(sched, family)
 }
 
 /// D6b — schedule `job` to run on (or just after) `deadline`, on the netpoller's single poll thread
@@ -232,7 +237,7 @@ impl NetPoller {
         closed: Arc<AtomicBool>,
         deadline: Option<Instant>,
     ) -> Option<Fiber> {
-        // The whole op runs under the registry lock so that registration is atomic w.r.t. `drain_sched`
+        // The whole op runs under the registry lock so that registration is atomic w.r.t. `drain_family`
         // / the fire path / `deregister` (all reg-locked): the cancel check + the insert + the fd `add`
         // never interleave with a sweep that would observe a half-armed entry or delete an fd this is
         // about to arm. Filing the entry before arming also keeps the poll thread from ever seeing an
@@ -242,7 +247,7 @@ impl NetPoller {
         // fiber passed the `run_until` loop-top cancel check but before it reached here. `cancel` is the
         // PARKING FIBER'S SCOPE cancel (handed in by `poll_park_offload`) — reading `sched.cancel` here
         // would only see the OUTERMOST nursery's flag and let a fiber of a cancelled INNER scope park on
-        // an already-swept poller. Read it under the SAME lock `drain_sched` sweeps under, so the two are
+        // an already-swept poller. Read it under the SAME lock `drain_family` sweeps under, so the two are
         // serialized — hand the fiber back to unwind rather than park it on a poller a past sweep drained.
         // TICKET-188: a tripped flag of a nursery this fiber OWNS (a child faulted) hands it back too.
         // TICKET-200: so does an ANCESTOR's flag (`ScopeCancel::tripped`, an `Executor`'s
@@ -318,21 +323,31 @@ impl NetPoller {
         }
     }
 
-    fn drain_sched(&self, sched: &Arc<MnSched>, scope_id: Option<usize>) {
+    /// TICKET-200 — the one match [`Self::drain_family`] and [`Self::any_parked`] share: parked on
+    /// `sched` (same scheduler instance) and woken by a cancel of `family`.
+    fn wakes(p: &Parked, sched: &MnSched, family: &[usize]) -> bool {
+        std::ptr::eq(Arc::as_ptr(&p.sched), sched) && p.fiber.woken_by(family)
+    }
+
+    fn any_parked(&self, sched: &MnSched, family: &[usize]) -> bool {
+        self.lock_registry()
+            .values()
+            .any(|p| Self::wakes(p, sched, family))
+    }
+
+    fn drain_family(&self, sched: &MnSched, family: &[usize]) {
         // Collect-and-remove the matching entries UNDER the registry lock, then release it before
         // touching the scheduler: `complete_offload` takes the sched lock, so doing it here (registry
         // lock held) would nest registry→sched, whereas the fire path nests sched alone — keep the
-        // registry lock leaf-level to rule out any lock-order inversion. Selection is by `Arc::ptr_eq`
-        // (same scheduler instance), not the deadlock-error/cancel token — plus, when `scope_id` is
-        // given, the fiber's own scope, because §2c1 makes NESTED nurseries share one sched and
-        // sched-identity alone stopped being scope-selective. Sibling nurseries are never disturbed.
+        // registry lock leaf-level to rule out any lock-order inversion. Selection is by pointer
+        // identity (same scheduler instance), not the deadlock-error/cancel token — plus the fiber's
+        // family, because §2c1 makes NESTED nurseries share one sched and sched-identity alone stopped
+        // being scope-selective. Sibling nurseries are never disturbed.
         let drained: Vec<Parked> = {
             let mut reg = self.lock_registry();
             let keys: Vec<usize> = reg
                 .iter()
-                .filter(|(_, p)| {
-                    Arc::ptr_eq(&p.sched, sched) && scope_id.is_none_or(|s| p.fiber.woken_by(&[s]))
-                })
+                .filter(|(_, p)| Self::wakes(p, sched, family))
                 .map(|(k, _)| *k)
                 .collect();
             keys.into_iter()
@@ -441,7 +456,7 @@ fn poll_loop(inner: &Inner) {
 /// removed the entry first — readiness wins because the events loop runs before this), disarm each fd
 /// (delete-before-drop; the fd is still open — its fiber hasn't resumed to close it), THEN re-inject
 /// with the lock released (`complete_offload` takes the sched lock — keep the registry lock leaf-level,
-/// matching `drain_sched`). The marker is set on the detached fiber's `ctx` (swapped into the live `Vm`
+/// matching `drain_family`). The marker is set on the detached fiber's `ctx` (swapped into the live `Vm`
 /// on its next schedule-in) — the poll thread never runs VM bytecode, only mutates this flag.
 fn fire_due_socket_timeouts(inner: &Inner) {
     let now = Instant::now();
@@ -642,7 +657,7 @@ mod tests {
 
     /// N4 (liveness) — the netpoller park is gated on the PARKING FIBER'S SCOPE cancel, not the
     /// outermost nursery's. A fiber whose INNER scope was cancelled (a sibling faulted, so `cancel_drain`
-    /// and `drain_sched` already swept) must be handed back so it resumes and unwinds its `defer`s; if it
+    /// and `drain_family` already swept) must be handed back so it resumes and unwinds its `defer`s; if it
     /// were parked on the already-swept poller instead it would be stranded, its scope would never reach
     /// `done == total`, and the cancel-teardown veto in `is_deadlocked` would become PERMANENT (deadlock
     /// detection disabled sched-wide). `register` used to read the sched-level (outermost) flag, which is
@@ -939,12 +954,13 @@ mod tests {
         drop(server);
     }
 
-    /// D6b — `drain_sched` (the cancel/fault hook): every fiber parked on `target`'s sockets is
-    /// re-injected (so it resumes, observes the nursery cancel flag at `run_until`'s loop-top, and
-    /// unwinds) and its fd disarmed; a fiber parked on a *different* sched is untouched. This is the
+    /// D6b — `drain_family` (the cancel/fault hook): every fiber of the family parked on `target`'s
+    /// sockets is re-injected (so it resumes, observes the nursery cancel flag at `run_until`'s
+    /// loop-top, and unwinds) and its fd disarmed; a fiber parked on a *different* sched is untouched,
+    /// and `any_parked` reads the same match (TICKET-200). This is the
     /// fix for the documented hang — a faulting sibling can now abort an `accept`/`read`-parked peer.
     #[test]
-    fn drain_sched_reinjects_matching_and_disarms() {
+    fn drain_family_reinjects_matching_and_disarms() {
         let (mut client_a1, server_a1) = loopback_pair();
         let (_client_a2, server_a2) = loopback_pair();
         let (_client_b, server_b) = loopback_pair();
@@ -1003,7 +1019,18 @@ mod tests {
             "a non-cancel park registers (returns None)"
         );
 
-        drain_sched(&sched_a);
+        // TICKET-200 — the drain predicate's registry read: matched by sched AND family.
+        assert!(any_parked(&sched_a, &[0]), "sched_a family 0 is parked");
+        assert!(
+            !any_parked(&sched_a, &[1]),
+            "no fiber of family 1 is parked"
+        );
+        drain_family(&sched_a, &[0]);
+        assert!(!any_parked(&sched_a, &[0]), "the drain emptied family 0");
+        assert!(
+            any_parked(&sched_b, &[0]),
+            "another sched's park is not drained"
+        );
 
         // sched_a's two parked fibers were re-injected (inflight→runnable) and their guards cleared.
         assert_eq!(
@@ -1140,7 +1167,7 @@ mod tests {
             own: Arc::new(AtomicBool::new(false)),
             ancestors: vec![Arc::clone(a)],
         };
-        let key = usize::MAX - 10;
+        let key = usize::MAX - 40;
         let park = |cancel| {
             register(
                 key,

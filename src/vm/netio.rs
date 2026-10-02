@@ -777,7 +777,7 @@ impl Vm {
             span,
         });
         // A `connect` never carries a user timeout (the `connect` surface takes only an address), so it
-        // parks until readiness, a `drain_sched` re-inject on a sibling fault — or, W7-18, the RUN's
+        // parks until readiness, a `drain_family` re-inject on a sibling fault — or, W7-18, the RUN's
         // `--timeout` deadline, which is the only thing that can set `deadline` here. That makes
         // `poll_timed_out` on a connect resume unambiguous: it is always the hard halt, never an op
         // timeout, and the `pending_connect` arm in `run_one_fiber` raises it as one.
@@ -1544,7 +1544,7 @@ impl Vm {
         // (the single choke point for `accept`/`read`/`write`): the check sits OUTSIDE the
         // `mn.is_some()` gate, because top-level `main` (and any other non-worker-shell context) runs
         // the op as a BLOCKING syscall below and would otherwise have no cancel-delivery point at a
-        // socket at all. On M:N a cancelled fiber must also not RE-park: `poller::drain_sched`
+        // socket at all. On M:N a cancelled fiber must also not RE-park: `poller::drain_family`
         // re-injects a poller-parked fiber on cancel and the rewound op re-runs here — without this
         // check it would would-block and re-park forever (the every-instruction check that used to
         // kill it at the dispatch loop top is gone; see `run_until`), wedging the nursery.

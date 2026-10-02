@@ -2769,17 +2769,20 @@ impl SchedCore {
     /// no longer needed. A cancelled scope cannot RE-accumulate parked fibers after its drain: every
     /// park path re-checks this scope's cancel OR an ancestor's (`park`/`park_send`/`park_wait` re-read
     /// `c.scope_cancel_tripped(fiber.scope_id)` under the core lock and requeue `Ready` instead of
-    /// parking; `poll_park_offload` hands the netpoller's `register` the scope's own flag only, which
-    /// rejects the park under the registry lock `drain_sched` sweeps under) — pinned by
+    /// parking; `poll_park_offload` hands the netpoller's `register` the same `ScopeCancel`, which
+    /// rejects the park under the registry lock `drain_family` sweeps under) — pinned by
     /// `mnsched_park_requeues_when_cancel_tripped` and `poll_park_rejects_cancelled_inner_scope`. The
-    /// NETPOLLER half of the drain window needs no veto at all: a poll-parked fiber is deliberately NOT
-    /// in `parked` and `poll_park_offload` accounts it running→`inflight`, and `is_deadlocked` already
-    /// requires `inflight == 0` (if that accounting ever changes, this argument changes with it).
+    /// NETPOLLER half counts too (TICKET-200): a poll-parked fiber is deliberately NOT in `parked` and
+    /// `poll_park_offload` accounts it running→`inflight`, so `is_deadlocked` (which requires
+    /// `inflight == 0`) never judges it — but nothing wakes it either, so the drain scan must still
+    /// find it. `scope_has_undrained_park` reads the poller registry for it, under the registry lock
+    /// taken while this core lock A is held; the registry is a leaf (nothing under it takes a core
+    /// lock or calls `complete_offload`), so the order A → registry cannot invert.
     /// A cancelled scope whose last unsettled fiber is DEMOTED-blocked forever inside its own cleanup is
     /// therefore a REAL deadlock, and `demote_recv_block`'s self-detect reports it instead of hanging
     /// (`mnsched_cancelled_scope_whose_only_fiber_is_demoted_is_deadlock`).
-    fn any_cancelled_scope_awaiting_drain(&self) -> bool {
-        self.cancelled_scope_awaiting_drain().is_some()
+    fn any_cancelled_scope_awaiting_drain(&self, me: &MnSched) -> bool {
+        self.cancelled_scope_awaiting_drain(me).is_some()
     }
 
     /// TICKET-118 (W13-8) — is scope `sid`'s cancel flag itself set, or any ancestor's (an
@@ -2803,7 +2806,7 @@ impl SchedCore {
     /// still incomplete, and still owing a `cancel_drain` to some parked fiber. `MnSched::take_runnable`
     /// drains it before judging a deadlock; every other caller reads the own-flag-only
     /// `any_cancelled_scope_awaiting_drain` above.
-    fn cancelled_scope_awaiting_drain(&self) -> Option<usize> {
+    fn cancelled_scope_awaiting_drain(&self, me: &MnSched) -> Option<usize> {
         #[cfg(test)]
         CANCEL_SCAN_CALLS.fetch_add(1, Ordering::Relaxed);
         self.scopes
@@ -2811,7 +2814,7 @@ impl SchedCore {
             .find(|&(sid, s)| {
                 s.done < s.total
                     && self.scope_cancel_tripped(sid)
-                    && self.scope_has_undrained_park(sid)
+                    && self.scope_has_undrained_park(me, sid)
             })
             .map(|(sid, _)| sid)
     }
@@ -2825,24 +2828,29 @@ impl SchedCore {
     /// The load is `Acquire`, against the `Release` bump in [`trip_cancel_flag`]. That pair is what
     /// orders a flag store before this scan, so seeing a newer generation means seeing the flag. The
     /// flag loads in `scope_cancel_tripped` stay `Relaxed`: this one acquire orders them all.
-    fn drain_scan_due(&mut self) -> Option<usize> {
+    fn drain_scan_due(&mut self, me: &MnSched) -> Option<usize> {
         let cancel_gen = CANCEL_GEN.load(Ordering::Acquire);
         if self.drain_scan_gen == cancel_gen {
             return None;
         }
-        let found = self.cancelled_scope_awaiting_drain();
+        let found = self.cancelled_scope_awaiting_drain(me);
         if found.is_none() {
             self.drain_scan_gen = cancel_gen;
         }
         found
     }
 
-    /// Is any fiber of scope `sid` still sitting in `parked`, i.e. still owed its `cancel_drain`?
-    /// Scans the same structure `cancel_drain` empties, in the same way (a `Recv` entry's scope by
-    /// reference; a `Wait` token's PEEKED under its fiber lock without claiming), under the same core
-    /// lock — so no new lock order, and no new state to keep in sync (a flag would have to be
-    /// set/cleared at every trip + drain seam; a missed clear re-creates the hang).
-    fn scope_has_undrained_park(&self, sid: usize) -> bool {
+    /// Is any fiber of scope `sid` still sitting in `parked`, or parked on `me`'s sockets in the
+    /// poller registry, i.e. still owed its `drain_family`? Scans the same structures `drain_family`
+    /// empties, in the same way (a `Recv` entry's scope by reference; a `Wait` token's PEEKED under its
+    /// fiber lock without claiming; a poll-parked fiber by `poller::any_parked`, TICKET-200) — so no
+    /// new state to keep in sync (a counter would have to be set/cleared at every trip + drain seam;
+    /// a missed clear re-creates the hang). The registry read takes the registry lock under this core
+    /// lock A; the registry is a leaf (see `any_cancelled_scope_awaiting_drain`).
+    fn scope_has_undrained_park(&self, me: &MnSched, sid: usize) -> bool {
+        if poller::any_parked(me, &self.scope_family(sid)) {
+            return true;
+        }
         self.parked.values().flatten().any(|e| match e {
             ParkedEntry::Recv(f) => f.woken_by(&[sid]),
             ParkedEntry::Send(f) => f.woken_by(&[sid]),
@@ -3643,9 +3651,9 @@ impl MnSched {
             // 10:59Z) — `awaiting_drain` threads this ONE read into both calls below instead.
             // TICKET-126 — gated by `CANCEL_GEN` (see `SchedCore::drain_scan_due`); the generation
             // read is this pass's one cancel read.
-            if let Some(sid) = c.drain_scan_due() {
+            if let Some(sid) = c.drain_scan_due(self) {
                 drop(c);
-                self.cancel_drain(sid);
+                self.drain_family(sid);
                 continue;
             }
             let awaiting_drain = Some(false);
@@ -4667,7 +4675,7 @@ impl MnSched {
     }
 
     /// gaps.md W7-57 — the run-wide `os.exit` analogue of the intra-nursery abort teardown
-    /// (`mn_worker_loop`'s `if aborts { cancel_drain; drain_sched }`): trip **every** scope's cancel and
+    /// (`mn_worker_loop`'s `if aborts { drain_family }`): trip **every** scope's cancel and
     /// drain every parked fiber, so a nursery that is not the exiting party's own still dies now instead
     /// of at its natural end. Called for each live sched by [`Vm::halt_all_scheds`].
     ///
@@ -4676,8 +4684,8 @@ impl MnSched {
     /// lock to evaluate `is_deadlocked` could legally still read `false` and reap the scope's parked
     /// fibers as `Deadlocked`, dropping their `defer`s.
     ///
-    /// The lock is DROPPED before `cancel_drain`/`drain_sched`, which take it themselves (`drain_sched`
-    /// keeps the poller registry leaf-level and calls `complete_offload`, which locks this core).
+    /// The lock is DROPPED before `drain_family`, which takes it itself (its poller half keeps the
+    /// registry leaf-level and calls `complete_offload`, which locks this core).
     ///
     /// The live scope ids are snapshotted: a scope registered after this instant is a nursery created
     /// after the exit was published, whose fibers are covered by `jump_checked`'s back-edge exit rung
@@ -4692,10 +4700,22 @@ impl MnSched {
             c.scopes.ids()
         };
         for scope_id in ids {
-            self.cancel_drain(scope_id);
+            self.drain_family(scope_id);
         }
-        poller::drain_sched(self);
         self.notify_waiters();
+    }
+
+    /// TICKET-200 — THE cancel drain: after scope `scope_id`'s cancel (or an ancestor's) is tripped,
+    /// requeue every fiber of its family that is parked, in both halves: `cancel_drain` (the `parked`
+    /// buckets) and `poller::drain_family` (the netpoller registry). A socket-parked fiber is counted
+    /// `inflight`, not `parked`, so a drain of one half strands it — the `shutdown_now` hang of a
+    /// job's nursery fiber parked in `accept`/`read`/`write`/`connect`. Every cancel site calls this;
+    /// never call either half on its own. A retired id has an empty family (TICKET-199, DEC-199), so
+    /// both halves are no-ops.
+    fn drain_family(&self, scope_id: usize) {
+        let family = self.lock().scope_family(scope_id);
+        self.cancel_drain(scope_id);
+        poller::drain_family(self, &family);
     }
 
     /// B3.4 — after a scope's cancel is tripped, move every parked fiber **belonging to that scope**
@@ -5058,7 +5078,7 @@ impl MnSched {
         // `deferring > 0`) IS a genuine deadlock and is reported, not hung. Evaluated only at the
         // quiesce (after the counter gate above), so the scan is off the idle/steal hot path. A GENUINE
         // deadlock (nothing cancelled anywhere) is untouched.
-        if awaiting_drain.unwrap_or_else(|| c.any_cancelled_scope_awaiting_drain()) {
+        if awaiting_drain.unwrap_or_else(|| c.any_cancelled_scope_awaiting_drain(self)) {
             return false;
         }
         // TICKET-181 — the ONE waiter veto. A registered waiter the counters cannot see (a demoted
@@ -5234,7 +5254,7 @@ impl MnSched {
         // OUTERMOST nursery's) while we hold the core lock anyway: they are the flags `register` must
         // gate the park on, exactly like `park`/`park_wait`'s gap re-check. Reading
         // the global one here would let a fiber of a CANCELLED INNER scope park on a poller that
-        // `drain_sched` had already swept — stranding it, and (N4) holding the cancel-teardown veto
+        // `drain_family` had already swept — stranding it, and (N4) holding the cancel-teardown veto
         // forever.
         let cancel = {
             let mut c = self.lock();
@@ -5244,7 +5264,7 @@ impl MnSched {
         };
         // `register` rejects (returns the fiber) iff that scope's cancel was tripped before it could
         // park — a sibling faulted in the park-vs-cancel gap. Re-inject so the fiber resumes and unwinds
-        // on the cancel flag, rather than parking on a poller a past `drain_sched` already swept (→ a
+        // on the cancel flag, rather than parking on a poller a past `drain_family` already swept (→ a
         // hang).
         if let Some(fiber) = poller::register(
             pp.key,
