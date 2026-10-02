@@ -145,6 +145,12 @@ unjoined job fault".
 with a predicate that counts poll-parked fibers of a tripped scope. One end-of-run ranking (beside
 `unwind_result`/`finish_run`) that every driver and the test reap use for every terminal cause.
 
+**Status:** C1 and C2 fixed by TICKET-200: one `MnSched::drain_family` (both halves, all six sites,
+predicate reads `poller::any_parked`), one `ScopeCancel::tripped`, and one `Vm::rank_end` called by
+`finish_run` and the three test-runner sites. Open: in the TICKET-200 grid, `os.exit` x a `Shared`
+guard waiter x the main nursery prints the line after the op (`guard_wait_block` takes the guard
+the exit freed before it checks the halt); not a drain cause.
+
 ## Family S1 — scheduler identity and fairness (H1, H2)
 
 **H1 fact:** what a scope id names. A nursery opened inside a spawned task registers its scope on

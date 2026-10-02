@@ -1261,11 +1261,15 @@ fn serve(tok: Token, io: Channel[str]):
 > `os.exit` from another party still outranks that verdict (Go: the exit status). A cleanup a live
 > task WILL feed is not judged: that task keeps `blocked < live`.
 >
-> **A fault delivered from another party is reported as THAT party's fault (TICKET-195).** An
-> `Executor` job's fault that no join has reduced yet is reported instead of a deadlock verdict (Go
-> prints the job's panic); it stays fatal, so `recover:` cannot catch it. This applies only to an
-> executor no `shutdown()` has started on: a deadlock inside that executor's own join keeps its
-> `deadlock` verdict. A child's or a job's fault
+> **A fault delivered from another party is reported as THAT party's fault (TICKET-195, TICKET-200).**
+> At the end of a run (and of each test in `chezzi test`) one ranking picks the report: `os.exit`
+> first, then an `Executor` job's fault that no join has reduced and that was recorded before the
+> run's own cause reached the top, then that cause (`--timeout`, `--max-heap`, an own fault, a
+> deadlock). Go's first panic ends the process, so the earlier job fault is reported with the job's
+> frames; an own fault that happened first stays the report. A job fault replacing a deadlock stays
+> fatal, so `recover:` cannot catch it. This applies only to an executor no `shutdown()` has started
+> on: a deadlock inside that executor's own join keeps its `deadlock` verdict. A job cut by the run's
+> own `--timeout` is that cause, not an earlier fault. A child's or a job's fault
 > prints the faulting party's frames, never the frames of the owner that received it. A run that ends
 > in a deadlock verdict still drains its executors, so a finished job's buffered output is not lost.
 >
@@ -2255,7 +2259,7 @@ fn main():
 |--------|-----------|
 | `submit(f)` | **start** a detached, side-effect-only job at once on the shared pool (results leave via a `Channel`, like `spawn`); returns immediately without waiting for it. **Faults** on an executor that no longer accepts work: after its own `shutdown()`/`shutdown_now()` (`submit on a shut-down Executor`), or — because the inherited cancel chain is sticky — after the job that CREATED it was cancelled (`submit on an Executor whose creating job was cancelled`); the alternative was accepting work that is immediately cancelled and silently vanishes |
 | `shutdown()` | **graceful** — stop accepting new work, then **wait** for the submitted work (every job runs on an ordinary fault, per W7-5's fault contract above; a hard halt is a separate kill switch — see the engine-asymmetry note above and `docs/gaps.md` **W7-5d**) |
-| `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point (a bare CPU loop with no back-edge, a syscall already in the kernel) still finishes, so on the default engine this is not a guarantee the job did not run. A job **sleeping, waiting a timer, or parked in a nested `Executor` join IS ended** — that wait's deadline is ours, so it is a continuous checkpoint (see §cancellation points; the join rung is `W7-60`), **and so is a task of a nursery the job opened that is parked on a channel** (TICKET-118, W13-8). **It reaches jobs of a NESTED executor too** — an executor a job creates inherits that job's cancel, so the whole subtree stops at its checkpoints. Unaffected by the W7-5 run-all contract above |
+| `shutdown_now()` | **attempt to stop** — drop work that has not started and ask running jobs to stop at their next cancellation point, then wait for them (Java `shutdownNow`). **Cooperative, not pre-emptive:** a job with no cancellation point (a bare CPU loop with no back-edge, a syscall already in the kernel) still finishes, so on the default engine this is not a guarantee the job did not run. A job **sleeping, waiting a timer, or parked in a nested `Executor` join IS ended** — that wait's deadline is ours, so it is a continuous checkpoint (see §cancellation points; the join rung is `W7-60`), **and so is a task of a nursery the job opened that is parked on a channel** (TICKET-118, W13-8) **or in a socket `accept`/`read`/`write`/`connect`** (TICKET-200). **It reaches jobs of a NESTED executor too** — an executor a job creates inherits that job's cancel, so the whole subtree stops at its checkpoints. Unaffected by the W7-5 run-all contract above |
 
 - **`defer` is the lifetime knob.** A task "persists through scopes" because its *owner* — the
   `Executor` — does. Bind that owner's reaping to any scope with `defer ex.shutdown()` (a function, a

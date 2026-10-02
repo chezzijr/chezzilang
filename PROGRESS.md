@@ -7,6 +7,19 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-200 (2026-10-02): Family B3, cancel reaches every parked party (C1) and one end-of-run
+  ranking (C2).** `ex.shutdown_now()` hung forever on a job's nursery task parked in a socket
+  `accept`/`read`/`write`/`connect` (CPython's `job.cancel()` runs the defers): the drain scan
+  drained only `parked`, while a socket-parked fiber is `inflight` in the poller registry. One
+  `MnSched::drain_family` now drains both halves at all six cancel sites, the drain predicate reads
+  `poller::any_parked`, and `poller::register` refuses a park under a tripped ANCESTOR flag through
+  the one `ScopeCancel::tripped`. C2: `chezzi test --timeout` / `--max-heap` and a later own fault
+  dropped an earlier unjoined job fault; one `Vm::rank_end` (exit > earlier unjoined job fault > the
+  run's own cause) replaces the deadlock-only swap in `on_step_fault`, called by `finish_run` and the
+  test runner. Tests: `tests/cancel_reaches_every_parked_party.rs` (C1 grid 369 cells: base 39 red;
+  ranking grid 12 cells: base 4 red). Open: `os.exit` x guard waiter x main nursery still prints the
+  line after the op (a `guard_wait_block` race, not a drain cause).
+
 - **TICKET-199 (2026-10-02): Family S1, scheduler fairness (H2).** At `CHEZZI_THREADS=1` a cap-0
   ping-pong between an outer-nursery sender and an inner-nursery receiver starved the inner nursery's
   other task forever (Go prints `inner sibling ran / done`): each hand-off refilled `runnext`, and
