@@ -1,7 +1,7 @@
 // checker::sig — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Function signatures and return-type inference passes.
 
-use super::setup::HeadBinding;
+use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
 impl Checker {
@@ -619,20 +619,16 @@ impl Checker {
                 self.slot_holds_fn_decl(n).then(Vec::new)
             }
             ExprKind::Ident(n) => self.labels_certain(n).ok(),
-            ExprKind::Index { obj, index } => (self.index_as_type(index).is_some()
-                && self.generic_fn_value_sig(obj).is_some())
-            .then(Vec::new),
-            // TICKET-187: `g := m.f` holds one known function exactly as `g := f` does.
-            ExprKind::Field { obj, name, .. } => match &obj.kind {
-                ExprKind::Ident(m) => (matches!(self.head_binding(m), HeadBinding::Module)
-                    && self
-                        .imported_modules
-                        .get(m)
-                        .and_then(|id| self.module_sigs.get(id))
-                        .is_some_and(|sig| sig.certain_fn(name).is_some()))
-                .then(Vec::new),
-                _ => None,
-            },
+            // TICKET-187/204: `g := m.f`, a type-applied fn value (`pair[str, int]`) and a type
+            // path value (`Bx[int].make`) hold one known function exactly as `g := f` does.
+            ExprKind::Index { .. } | ExprKind::TypeApply { .. } | ExprKind::Field { .. } => {
+                crate::ast::type_application(value)
+                    .map_or_else(
+                        || self.path_fn(value).is_some(),
+                        |app| self.path_fn(app.head).is_some(),
+                    )
+                    .then(Vec::new)
+            }
             _ => None,
         }
     }
@@ -6172,11 +6168,13 @@ impl Checker {
         };
         // `Enum.Variant(…)` / `Enum[T].Variant(…)`
         if let Some(ename) = bare_head_name(&obj.kind)
-            && !self.head_hides_type(ename)
-            && self.enum_names.contains(ename)
-            && self
-                .variants
-                .contains_key(&(self.bare_key(ename), name.clone()))
+            && let Some(TypeHead {
+                kind: TypeHeadKind::Enum,
+                key,
+                pinned: None,
+                ..
+            }) = self.bare_type_head(ename)
+            && self.variants.contains_key(&(key, name.clone()))
         {
             return true;
         }
@@ -6184,11 +6182,11 @@ impl Checker {
         // A reserved native handle (`net.Socket`) has a `struct_defs` entry for its method table but
         // no constructor; `infer_call` skips it the same way, so its own diagnostic stays single.
         if let ExprKind::Ident(mname) = &obj.kind
-            && !self.head_is_value(mname)
             && self.qualified_builtin_ty(name, &[]).is_none()
-            && let Some(mid) = self.imported_modules.get(mname)
-            && let Some(sig) = self.module_sigs.get(mid)
-            && (sig.struct_defs.contains_key(name) || sig.newtype_defs.contains_key(name))
+            && self.qualified_type_head(mname, name).is_some_and(|th| {
+                th.pinned.is_none()
+                    && matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Newtype)
+            })
         {
             return true;
         }
@@ -6212,11 +6210,13 @@ impl Checker {
         }
         // `module.Enum.Variant(…)` / `module.Enum[T].Variant(…)`
         if let Some((mname, ename)) = qualified_head_names(&obj.kind)
-            && !self.head_is_value(mname)
-            && let Some(mid) = self.imported_modules.get(mname)
-            && let Some(sig) = self.module_sigs.get(mid)
-            && let Some(edef) = sig.enum_defs.get(ename)
-            && edef.variant_names.iter().any(|v| v == name)
+            && let Some(TypeHead {
+                kind: TypeHeadKind::Enum,
+                key,
+                pinned: None,
+                ..
+            }) = self.qualified_type_head(mname, ename)
+            && self.variants.contains_key(&(key, name.clone()))
         {
             return true;
         }
@@ -6238,8 +6238,7 @@ fn method_binders(methods: &[FnDecl], owner: &str) -> Vec<(String, Span, String)
 fn bare_head_name(kind: &ExprKind) -> Option<&str> {
     match kind {
         ExprKind::Ident(n) => Some(n),
-        ExprKind::TypeApply { name, .. } => Some(name),
-        ExprKind::Index { obj, .. } => match &obj.kind {
+        ExprKind::Index { obj, .. } | ExprKind::TypeApply { head: obj, .. } => match &obj.kind {
             ExprKind::Ident(n) => Some(n),
             _ => None,
         },
@@ -6251,7 +6250,7 @@ fn bare_head_name(kind: &ExprKind) -> Option<&str> {
 /// (`module.Enum[T]` is an `Index` over the `Field`).
 fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
     let field = match kind {
-        ExprKind::Index { obj, .. } => &obj.kind,
+        ExprKind::Index { obj, .. } | ExprKind::TypeApply { head: obj, .. } => &obj.kind,
         k => k,
     };
     match field {

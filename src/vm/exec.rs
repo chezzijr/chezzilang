@@ -2684,6 +2684,30 @@ impl Vm {
                 let h = self.heap.alloc(Obj::Func { proto, home });
                 self.push(Value::obj(h));
             }
+            // A type path's method read as a value (TICKET-204): the proto and home `CallStatic`
+            // would use, resolved at run time because the type's module may compile after this one.
+            Op::MakeMethodFunc { type_key, method } => {
+                let Some((proto, midx)) = self.type_method_proto(type_key, method) else {
+                    return Err(self.err(
+                        format!(
+                            "internal: no method '{method}' on type {}",
+                            crate::compiler::bare_display(type_key)
+                        ),
+                        span,
+                    ));
+                };
+                let Some(&home) = self.module_objs.get(midx) else {
+                    return Err(self.err(
+                        format!(
+                            "the module that declares {} has not been initialized yet",
+                            crate::compiler::bare_display(type_key)
+                        ),
+                        span,
+                    ));
+                };
+                let h = self.heap.alloc(Obj::Func { proto, home });
+                self.push(Value::obj(h));
+            }
             // Body in an `#[inline(never)]` helper so `step`'s frame stays small (the deep-recursion
             // depth-guard test overflows in debug if `step` grows — same discipline as `ToStrFmt`).
             Op::MakeCffi(id) => self.op_make_cffi(*id, span)?,

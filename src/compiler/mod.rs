@@ -228,6 +228,9 @@ struct Compiler {
     /// Default-argument provider NAME → `(its proto, the index of the module declaring it)`, filled
     /// as each declaring module is compiled. Materialized into `Program::providers` at the end.
     provider_defs: HashMap<String, (ProtoId, usize)>,
+    /// `(enum key, variant)` → the synthesized constructor fn of a payload variant read as a value
+    /// (`R1[int].L`, TICKET-204). See [`Compiler::variant_fn_proto`].
+    variant_fns: HashMap<(String, String), ProtoId>,
     /// M19 Phase 2b — the current module's global name → slot map, rebuilt at the start of each
     /// `compile_module`. Shared across the toplevel proto and every fn/method/closure compiled for
     /// the module, so a global reference anywhere in the module resolves to the same slot.
@@ -575,6 +578,7 @@ impl Compiler {
             globals: HashMap::new(),
             provider_ids: HashMap::new(),
             provider_defs: HashMap::new(),
+            variant_fns: HashMap::new(),
             fn_names: std::collections::HashSet::new(),
             global_slots: Vec::new(),
             global_let_lines: Vec::new(),
@@ -3514,6 +3518,20 @@ impl Compiler {
                     Resolution::Variant { enum_key, variant } => {
                         self.emit_new_enum(fc, &enum_key, &variant, 0, expr.span);
                     }
+                    // A type path's method read as a value (`Bx[int].make`, `Pt.getx`): its proto
+                    // resolves at run time, as `CallStatic`'s does. The type head is never lowered.
+                    Resolution::MethodFn { type_key, method } => {
+                        fc.emit(Op::MakeMethodFunc { type_key, method }, expr.span);
+                    }
+                    // A payload variant read as a value (`R1[int].L`): its constructor fn.
+                    Resolution::VariantFn {
+                        enum_key,
+                        variant,
+                        arity,
+                    } => {
+                        let p = self.variant_fn_proto(&enum_key, &variant, arity);
+                        fc.emit(Op::MakeFunc(p), expr.span);
+                    }
                     // `Fn`: the head of a value turbofish `m.f[int]`, a member of the module.
                     Resolution::Member
                     | Resolution::ModuleMember { .. }
@@ -3537,22 +3555,7 @@ impl Compiler {
                 }
             }
             ExprKind::Index { obj, index } => {
-                // Generic-fn-as-value turbofish erase: `ident[int]` where `ident` is a (non-shadowed)
-                // top-level fn is a generic-fn turbofish the checker already validated/accepted. The
-                // runtime is generic-ERASED — the value IS the underlying function — so drop the type
-                // index and load only the plain fn value. The checker rejects EVERY non-generic-fn
-                // `fn`-typed Index, so the only fn Index that reaches codegen is exactly this case;
-                // a shadowing local/capture (`xs := [1,2]; xs[0]`) is never in `fn_names`, so a real
-                // index still compiles below.
-                // TICKET-197: the head is an `Ident` or a non-tuple `Field` (`m.f[int]`), and the
-                // checker's `Resolution::Fn` on it is the one fact this erase reads.
-                let named_head = match &obj.kind {
-                    ExprKind::Ident(_) => true,
-                    ExprKind::Field { name, .. } => !crate::ast::is_tuple_index(name),
-                    _ => false,
-                };
-                if named_head && matches!(self.resolution(obj)?, Resolution::Fn { .. }) {
-                    self.compile_expr(fc, obj)?;
+                if self.compile_type_applied_fn_value(fc, expr)? {
                     return Ok(());
                 }
                 self.compile_expr(fc, obj)?;
@@ -3675,14 +3678,18 @@ impl Compiler {
                 }
                 self.compile_expr(fc, &c)?;
             }
-            // A `TypeApply` (`Type[T1, T2]`) is only ever the receiver of a member access / call;
-            // the checker resolves it into a variant ctor / static-method call (`infer_call`) or a
-            // nullary variant value (`infer_field`). Once type-checking passes, the compiler walks
-            // the resolved call/field, so a bare `TypeApply` never reaches codegen.
-            ExprKind::TypeApply { name, .. } => {
-                unreachable!(
-                    "type-application head `{name}[…]` must be consumed by the checker before compiling"
-                )
+            // A `TypeApply` in value position is a type-applied fn value (`pair[str, int]`); as the
+            // receiver of a member access / call the checker resolved it into a variant ctor,
+            // static-method call or nullary variant, which never lowers the head.
+            ExprKind::TypeApply { .. } => {
+                if !self.compile_type_applied_fn_value(fc, expr)? {
+                    return Err(CompileError {
+                        message:
+                            "internal: a type application reached codegen without a fn-like head"
+                                .to_string(),
+                        span: expr.span,
+                    });
+                }
             }
             ExprKind::Closure { params, body, .. } => {
                 self.compile_closure(fc, params, body, expr.span)?
@@ -4996,6 +5003,61 @@ impl Compiler {
         Ok(())
     }
 
+    /// THE one lowering of a type-applied fn value `head[T…]`, either carrier
+    /// (`ast::type_application`). Generic-fn-as-value turbofish erase: the checker validated the
+    /// type args, and the runtime is generic-ERASED — the value IS the underlying function, method
+    /// or variant constructor — so drop the type args and lower only the head. The head is an
+    /// `Ident` or a non-tuple `Field` (`m.f[int]`, `Bx[int].put[str]`), and the checker's `Fn`,
+    /// `MethodFn` or `VariantFn` on it is the one fact this erase reads (TICKET-197/204). `false`
+    /// when `e` is no such value (a real index), which then compiles as an index.
+    fn compile_type_applied_fn_value(
+        &mut self,
+        fc: &mut FnComp,
+        e: &Expr,
+    ) -> Result<bool, CompileError> {
+        let Some(app) = crate::ast::type_application(e) else {
+            return Ok(false);
+        };
+        let named_head = match &app.head.kind {
+            ExprKind::Ident(_) => true,
+            ExprKind::Field { name, .. } => !crate::ast::is_tuple_index(name),
+            _ => false,
+        };
+        if !named_head
+            || !matches!(
+                self.resolution(app.head)?,
+                Resolution::Fn { .. } | Resolution::MethodFn { .. } | Resolution::VariantFn { .. }
+            )
+        {
+            return Ok(false);
+        }
+        self.compile_expr(fc, app.head)?;
+        Ok(true)
+    }
+
+    /// A payload variant has no proto of its own; its value is this constructor fn (Rust
+    /// `E::<T>::V`), synthesized once per `(enum key, variant)`.
+    fn variant_fn_proto(&mut self, enum_key: &str, variant: &str, arity: usize) -> ProtoId {
+        let k = (enum_key.to_string(), variant.to_string());
+        if let Some(&p) = self.variant_fns.get(&k) {
+            return p;
+        }
+        let mut vf = FnComp::new(
+            format!("{}.{variant}", bare_display(enum_key)),
+            arity,
+            false,
+        );
+        for i in 0..arity {
+            let slot = vf.add_local(format!("$v{i}"));
+            vf.emit_get_local_raw(slot, Span::RUNTIME);
+        }
+        self.emit_new_enum(&mut vf, enum_key, variant, arity, Span::RUNTIME);
+        vf.emit(Op::Return, Span::RUNTIME);
+        let p = self.finish(vf);
+        self.variant_fns.insert(k, p);
+        p
+    }
+
     /// TICKET-180 — what the name head `e` denotes: the checker's recorded [`Resolution`], the
     /// ONLY source. A miss is an internal error: a checker arm returned without recording, so fix
     /// that arm and never add a fallback here. A compiler-synthesized node
@@ -5006,9 +5068,12 @@ impl Compiler {
     /// The position rule: the compiler calls this only on a node it lowers as a name.
     /// (1) A call callee `Ident`. (2) A call callee `Field`, and the `Field` inside a callee
     /// `Index { obj: Field }` (`Type[T].m[U](..)`, `Type.m[U](..)`, `m.f[int](..)`). (3) An `Ident`
-    /// it compiles as a value. (4) A value `Field`. (5) The `obj` of a `Field` is compiled, and so
-    /// falls under (3), only when that `Field`'s entry is `Member`, `ModuleMember` or `Fn`.
-    /// (6) The `Field` head of a value turbofish `Index` (`m.f[int]`), recorded as `Fn`. It never asks
+    /// it compiles as a value. (4) A value `Field`, including `MethodFn` and `VariantFn` (a type
+    /// path's method or payload variant read as a value). (5) The `obj` of a `Field` is compiled,
+    /// and so falls under (3), only when that `Field`'s entry is `Member`, `ModuleMember` or `Fn`.
+    /// (6) The `Ident` or `Field` head of a type-applied fn value, `Index` or `TypeApply`
+    /// (`m.f[int]`, `pair[str, int]`, `Bx[int].put[str]`), recorded as `Fn`, `MethodFn` or
+    /// `VariantFn`. It never asks
     /// about a type head (`T` in `T.m()`, `E` in `E.V`, `Box` in `Box[int].of()`) or a type
     /// argument, because it never lowers them. No `ast` shape predicate can state this rule:
     /// `xs[i].k` and `Box[int].k` share one shape.
@@ -5773,8 +5838,8 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Pass
-        | ExprKind::Ident(_)
-        | ExprKind::TypeApply { .. } => {}
+        | ExprKind::Ident(_) => {}
+        ExprKind::TypeApply { head, .. } => find_boundary_free_expr(head, out),
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| find_boundary_free_expr(x, out))
         }
@@ -6287,8 +6352,8 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
-        | ExprKind::Pass
-        | ExprKind::TypeApply { .. } => {}
+        | ExprKind::Pass => {}
+        ExprKind::TypeApply { head, .. } => free_names_expr(head, bound, out),
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| free_names_expr(x, bound, out))
         }
@@ -6438,8 +6503,8 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Pass
-        | ExprKind::Ident(_)
-        | ExprKind::TypeApply { .. } => {}
+        | ExprKind::Ident(_) => {}
+        ExprKind::TypeApply { head, .. } => collect_frame_binds_expr(head, out),
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| collect_frame_binds_expr(x, out))
         }
@@ -6582,8 +6647,8 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Pass
-        | ExprKind::Ident(_)
-        | ExprKind::TypeApply { .. } => false,
+        | ExprKind::Ident(_) => false,
+        ExprKind::TypeApply { head, .. } => expr_has_bare_spawn(head),
         ExprKind::Interp(chunks) => chunk_exprs(chunks).into_iter().any(expr_has_bare_spawn),
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().any(expr_has_bare_spawn)

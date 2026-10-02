@@ -152,8 +152,8 @@ impl Scan {
             | ExprKind::RawStr(_)
             | ExprKind::Bool(_)
             | ExprKind::Pass
-            | ExprKind::Ident(_)
-            | ExprKind::TypeApply { .. } => {}
+            | ExprKind::Ident(_) => {}
+            ExprKind::TypeApply { head, .. } => self.expr(head),
             ExprKind::List(items, _) | ExprKind::Tuple(items) | ExprKind::Set(items) => {
                 items.iter().for_each(|item| self.expr(item));
             }

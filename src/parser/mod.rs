@@ -2784,16 +2784,16 @@ impl Parser {
                     }
                 }
                 Token::LBracket => {
-                    // `Type[T1, T2].member` / `Type[T1, T2].member(args)` — declaration-site turbofish
-                    // for a generic TYPE (enum variant ctor or generic static method). Fires ONLY when
-                    // `e` is a bare ident AND the bracket holds a COMMA-separated type list AND `]` is
-                    // immediately followed by `.`. A comma inside a subscript is otherwise ALWAYS a
-                    // parse error, so this multi-arg shape is unambiguous and steals nothing legitimate.
-                    // The SINGLE-arg form (`Box[int].member`) is left on the index path — the parser
-                    // cannot distinguish it from `arr[i].field` without the disambiguating comma, so
-                    // the checker reinterprets that `Index{Ident, …}` instead.
-                    let bare_ident = matches!(e.kind, ExprKind::Ident(_));
-                    let type_apply = if bare_ident {
+                    // `head[T1, T2, …]` — a multi-arg type application on an `Ident` or `Field`
+                    // head: a type-level head (`Result[int, str].Ok(5)`, `lib.Pair[int, str].N`) or a
+                    // generic fn instantiated as a value (`pair[str, int]`, `lib.tri[A, B, C]`). Fires
+                    // only on a COMMA-separated type list whose `]` is not followed by `(` (that is
+                    // the `[types](` call below). A comma inside a subscript is otherwise always a
+                    // parse error, so this shape steals nothing legitimate. The one-arg form stays an
+                    // `Index`: `idt[int]` and `xs[i]` share one shape, and only name resolution
+                    // separates them (`ast::type_application` reads both carriers).
+                    let headed = matches!(e.kind, ExprKind::Ident(_) | ExprKind::Field { .. });
+                    let type_apply = if headed {
                         self.try_parse_type_apply(&e)?
                     } else {
                         None
@@ -2814,9 +2814,7 @@ impl Parser {
                     // ALWAYS parses as a method turbofish; index-then-call of a fn-VALUED field therefore
                     // needs parens — `(recv.name[k])(args)` — on ANY receiver (the bare-ident receiver
                     // already required this; non-bare receivers now match it).
-                    let steal = matches!(e.kind, ExprKind::Ident(_))
-                        || matches!(&e.kind, ExprKind::Field { .. });
-                    let type_call = if steal {
+                    let type_call = if headed {
                         self.try_parse_type_arg_call(&e, span)?
                     } else {
                         None
@@ -2976,19 +2974,17 @@ impl Parser {
         Ok((args, named))
     }
 
-    /// Speculatively parse a declaration-site type-application head `Type[T1, T2, …]` that is the
-    /// receiver of a member access (`Result[int, str].Ok(5)` / nullary `Box[int, str].Empty`),
-    /// assuming the `[` has NOT yet been consumed and `name` is a bare ident. Commits ONLY when the
-    /// bracket holds a COMMA-separated type list (≥2 types — the comma is what disambiguates from a
-    /// plain `arr[i].field` index) AND `]` is immediately followed by `.`. Returns `Ok(None)`
-    /// (position restored) otherwise, so the single-arg form and ordinary indexing fall through
-    /// unchanged. Produces an `ExprKind::TypeApply`; the trailing `.member` / `(args)` attach via the
-    /// normal postfix loop.
-    fn try_parse_type_apply(&mut self, name_expr: &Expr) -> PResult<Option<Expr>> {
-        let ExprKind::Ident(name) = &name_expr.kind else {
+    /// Speculatively parse a multi-arg type application `head[T1, T2, …]`, assuming the `[` has NOT
+    /// yet been consumed and `head` is an `Ident` or a `Field`. Commits on two or more types (the
+    /// comma disambiguates from a plain `arr[i]` index) whose `]` is NOT followed by `(`: `[types](`
+    /// is `try_parse_type_arg_call`'s call, and one type stays an `Index`. Returns `Ok(None)`
+    /// (position restored) otherwise. Produces an `ExprKind::TypeApply`; a trailing `.member` /
+    /// `(args)` attaches through the normal postfix loop.
+    fn try_parse_type_apply(&mut self, head: &Expr) -> PResult<Option<Expr>> {
+        if !matches!(head.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) {
             return Ok(None);
-        };
-        let span = name_expr.span;
+        }
+        let span = head.span;
         let save = self.pos;
         // `parse_type` bumps `self.depth` and only unwinds it on success; restore on backtrack.
         // `fold_depth` rides along for the same reason (see `MAX_AST_DEPTH`).
@@ -3013,9 +3009,9 @@ impl Parser {
                 break;
             }
         }
-        // Require the disambiguating comma (multi-arg) AND a member access (`] .`); single-arg
-        // `Type[int].x` is indistinguishable from `arr[i].field` here, so leave it to the checker.
-        if !saw_comma || !self.eat(&Token::RBracket) || !self.check(&Token::Dot) {
+        // Require the disambiguating comma (multi-arg) and no call (`] (`): one type stays an
+        // `Index`, and `[types](` is the explicit type-argument call.
+        if !saw_comma || !self.eat(&Token::RBracket) || self.check(&Token::LParen) {
             self.pos = save;
             self.depth = save_depth;
             self.fold_depth = save_fold;
@@ -3024,7 +3020,7 @@ impl Parser {
         Ok(Some(Expr {
             id: crate::ast::NodeId::fresh(),
             kind: ExprKind::TypeApply {
-                name: name.clone(),
+                head: Box::new(head.clone()),
                 args,
             },
             span,
@@ -3067,11 +3063,6 @@ impl Parser {
         }
         self.advance(); // '(' — committed to a type-argument call now.
         let (args, named) = self.parse_call_args()?;
-        if !named.is_empty() {
-            return Err(self.err(
-                "named arguments are not supported with explicit type arguments".to_string(),
-            ));
-        }
         Ok(Some(Expr {
             id: crate::ast::NodeId::fresh(),
             kind: ExprKind::Call {
@@ -5805,10 +5796,10 @@ mod tests {
             panic!("expected Field callee, got {:?}", callee.kind)
         };
         assert_eq!(name, "Ok");
-        let ExprKind::TypeApply { name, args } = obj.kind else {
+        let ExprKind::TypeApply { head, args } = obj.kind else {
             panic!("expected TypeApply obj, got {:?}", obj.kind)
         };
-        assert_eq!(name, "Result");
+        assert!(matches!(&head.kind, ExprKind::Ident(n) if n == "Result"));
         assert_eq!(args.len(), 2);
 
         // Single-type-arg in CALL position stays on the Index path (no comma to disambiguate):
@@ -5837,6 +5828,42 @@ mod tests {
             panic!("expected TypeApply obj, got {:?}", obj.kind)
         };
         assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn type_apply_value_form() {
+        // TICKET-204: a multi-arg type application is a `TypeApply` in value position too, on an
+        // `Ident` or a `Field` head; `[types](` stays a call and one arg stays an `Index`.
+        let StmtKind::Expr(e) = only("pair[str, int]\n") else {
+            panic!()
+        };
+        let ExprKind::TypeApply { head, args } = e.kind else {
+            panic!("expected TypeApply, got {:?}", e.kind)
+        };
+        assert!(matches!(&head.kind, ExprKind::Ident(n) if n == "pair"));
+        assert_eq!(args.len(), 2);
+
+        let StmtKind::Expr(e) = only("lib.tri[str, int, bool]\n") else {
+            panic!()
+        };
+        let ExprKind::TypeApply { head, args } = e.kind else {
+            panic!("expected TypeApply, got {:?}", e.kind)
+        };
+        assert!(matches!(&head.kind, ExprKind::Field { name, .. } if name == "tri"));
+        assert_eq!(args.len(), 3);
+
+        let StmtKind::Expr(e) = only("pair[str, int](\"a\", 1)\n") else {
+            panic!()
+        };
+        let ExprKind::Call { type_args, .. } = e.kind else {
+            panic!("expected Call, got {:?}", e.kind)
+        };
+        assert_eq!(type_args.len(), 2);
+
+        let StmtKind::Expr(e) = only("xs[i]\n") else {
+            panic!()
+        };
+        assert!(matches!(e.kind, ExprKind::Index { .. }), "{:?}", e.kind);
     }
 
     #[test]

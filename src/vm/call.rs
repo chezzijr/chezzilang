@@ -1914,6 +1914,27 @@ impl Vm {
         }
     }
 
+    /// The proto of method `method` on the struct, enum or newtype `type_key`, and the index of
+    /// the type's declaring module (its home). The one lookup `CallStatic` and `MakeMethodFunc`
+    /// share (TICKET-204).
+    pub(super) fn type_method_proto(
+        &self,
+        type_key: &str,
+        method: &str,
+    ) -> Option<(ProtoId, usize)> {
+        let prog = &self.program;
+        if let Some(def) = prog.structs.get(type_key) {
+            return def.methods.get(method).map(|&p| (p, def.module_idx));
+        }
+        if let Some(ms) = prog.enum_methods.get(type_key) {
+            return ms
+                .get(method)
+                .map(|&p| (p, self.enum_home_module(type_key)));
+        }
+        let p = *prog.newtype_methods.get(type_key)?.get(method)?;
+        Some((p, *prog.newtype_home.get(type_key)?))
+    }
+
     /// `Type.method(args)` — STATIC (associated) method dispatch (the "no self ⇒ static" rule).
     /// Stack: `[arg0, …]` — exactly `argc` values, NO receiver. Resolves `method` in the named
     /// struct's (`program.structs[key].methods`) or enum's (`program.enum_methods[key]`) method
@@ -1928,36 +1949,14 @@ impl Vm {
         argc: usize,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        let prog = Arc::clone(&self.program);
-        // Resolve the proto + home module from the struct table first, then the enum table. The
-        // compiler only emits `CallStatic` for a static method that exists on a known struct/enum,
-        // so a miss here is an internal invariant break — surface it as a clear runtime error.
-        let (proto, home_idx) = if let Some(def) = prog.structs.get(type_key) {
-            match def.methods.get(method).copied() {
-                Some(p) => (p, def.module_idx),
-                None => {
-                    return Err(self.err(
-                        format!(
-                            "type '{}' has no static method '{method}'",
-                            def.display_name
-                        ),
-                        span,
-                    ));
-                }
-            }
-        } else if let Some(ms) = prog.enum_methods.get(type_key) {
-            match ms.get(method).copied() {
-                Some(p) => (p, self.enum_home_module(type_key)),
-                None => {
-                    let display = crate::compiler::bare_display(type_key);
-                    return Err(self.err(
-                        format!("type {display} has no static method '{method}'"),
-                        span,
-                    ));
-                }
-            }
-        } else {
-            let display = crate::compiler::bare_display(type_key);
+        // The compiler only emits `CallStatic` for a static method that exists on a known
+        // struct/enum, so a miss here is an internal invariant break — surface it as a clear
+        // runtime error.
+        let Some((proto, home_idx)) = self.type_method_proto(type_key, method) else {
+            let display = match self.program.structs.get(type_key) {
+                Some(def) => format!("'{}'", def.display_name),
+                None => crate::compiler::bare_display(type_key),
+            };
             return Err(self.err(
                 format!("type {display} has no static method '{method}'"),
                 span,

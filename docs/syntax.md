@@ -1357,7 +1357,7 @@ shape; **(2)**
 first-class **built-in** function values (`p := ord`) take **no** keyword arguments (labels are a
 user-function surface).
 
-**Two call shapes take no keyword arguments** (documented limits, W12-16): a keyword call through a fn-typed struct field or a tuple slot (`h.f(x=4)`, `t.0(x=4)`) is refused, because member-call syntax resolves as a method before it is seen as a value, so bind the function first (`g := h.f` then `g(x=4)`); and a call with an explicit turbofish takes no named arguments (`S[str]("x", n=2)` is a parse error), so annotate the binding instead (`s: S[str] = S("x", n=2)`).
+**One call shape takes no keyword arguments** (a documented limit, W12-16): a keyword call through a fn-typed struct field or a tuple slot (`h.f(x=4)`, `t.0(x=4)`) is refused, because member-call syntax resolves as a method before it is seen as a value, so bind the function first (`g := h.f` then `g(x=4)`).
 
 How few arguments a function value may be called with is part of what it means to store one: a
 binding typed from `fn a(x: int = 1)` may be called with none, so a function that *requires* an
@@ -1387,6 +1387,7 @@ fn ident[T](x: T) -> T:
 
 g := ident[int]                      # turbofish pins T=int  ⇒ g : fn(int) -> int
 print(g(5) + 1)                      # 6
+p := pair[str, int]                  # one type argument per parameter ⇒ p : fn(str, int) -> (str, int)
 
 h: fn(int) -> int = ident            # annotation pins T=int
 print(h(5) + 1)                      # 6
@@ -1400,6 +1401,26 @@ print([1, 2, 3].map(ident))          # [1, 2, 3] — a builtin HOF slot fn(int) 
 fn getf() -> fn(int) -> int:
     return ident                     # return position pins T against the declared return type
 ```
+
+**Path values (Rust's rule, TICKET-204).** A type path is a value when it names something callable:
+a payload variant (a constructor fn), a static method, and an instance method named through its type
+(the receiver is the first argument, keyword `self`), at any type-argument arity, bare, imported or
+module-qualified. An alias head pins its own type arguments.
+
+```chezzi
+f := R1[int].L                       # fn(int) -> R1[int]
+m := Bx[int].make                    # fn(int) -> Bx[int]
+g := Bx[int].get   # g(b): the receiver is the first argument
+type B = Bx[int]
+m2 := B.make   # an alias head pins its args
+```
+
+Three paths are refused, each with its own message: a bound method `b.get` (`a bound method is not
+a value`), a type `Bx[int]` (`'Bx' is a type, not a value — constructors are not values`), and a
+protocol method `Show.show` (`a protocol method is not a value`). A reserved native handle's method
+(`io.Reader.close`) is not a value either (`a native method is not a value`): it has no compiled body
+to point at. A bare generic path nothing pins (`f := R1.L`) is the same `not determined here` error
+as `g := ident`.
 
 The pin is checked strictly: an **unsatisfiable** target (`g: fn(str) -> int = ident` — `ident` can't be
 both) is a type error, a **bound violation** (`addone[str]` where `str` is not `Add`) is rejected, a
@@ -1428,9 +1449,8 @@ The same read is the same error inside a `[...]`/`{...}` literal, in a `return` 
 **inferred** return type, as a `print` argument, and in a generic **constructor** / generic **free fn**
 argument whose slot is not a function type (`Bx(ident)`, `take(ident)` on `fn take[U](f: U) -> int`) —
 nothing there determines `T` either. A generic with
-**two or more** type parameters is only fixable by giving the position a concrete function type: a
-fn-value turbofish carries exactly one type argument (`pair[int]` for `pair[A, B]` is an arity error),
-so the diagnostic does not offer it. First-class (rank-N) polymorphism — one binding used at two
+**two or more** type parameters takes them all in one turbofish (`pair[str, int]`, Go's
+`pair[string, int]`), and the diagnostic offers `pair[<A>, <B>]`. First-class (rank-N) polymorphism — one binding used at two
 different types — is a future addition; Go and Rust refuse it too.
 
 **Argument position asks the same question.** A bare generic fn handed to a HOF — a user one, or any
@@ -1806,11 +1826,13 @@ The one place a struct *is* snapshotted is as a `Map`/`Set` **key** or a `Set` *
 island; everything else is by reference. A `spawn:`/`parallel:` boundary is a third model again:
 values cross **by copy** through the airlock (§11b).
 
-**Methods are not first-class values.** `p.dist` is not an expression — a method exists only to be
-**called** (`p.dist()`); there is no bound-method value. To pass one around, wrap it in a closure:
-`f := fn(): p.dist()`. (A struct **field** that is *fn-typed* — `f: fn(int) -> int` — is an ordinary
-value: `s.f(3)` and `g := s.f; g(3)` both work. The distinction is field vs method.) Reading a method
-name as a value is a check-time error: `type Point has no field 'dist' ('dist' is a method — …)`.
+**A bound method is not a value; a method named through its type is** (Rust's path rule,
+TICKET-204). `p.dist` is not an expression — it would hide its `self` capture (Rust E0615) — so
+reading it is a check-time error: `type Point has no field 'dist' ('dist' is a method — a bound
+method is not a value: …)`. Name it through its TYPE instead: `d := Point.dist` is a fn that takes
+the receiver first (`d(p)`, or `d(self=p)`), and a static method `Point.origin` is a fn too. Or wrap
+it in a closure: `f := fn(): p.dist()`. (A struct **field** that is *fn-typed* — `f: fn(int) -> int`
+— is an ordinary value: `s.f(3)` and `g := s.f; g(3)` both work.) See "Path values" in §5.
 
 ### 7a. Static (associated) methods — the "no self ⇒ static" rule
 
@@ -1907,9 +1929,8 @@ The type-level turbofish takes **one or more** type args — multi-param types u
 A **module-qualified** base takes the **single-arg** type-level turbofish too:
 `shapes.Tree[int].Leaf(9)` (qualified enum-variant ctor) and `shapes.Box[int].make(5)` (qualified
 static method) both work in expression position, as does the combined form
-`shapes.Box[int].make[str]("hi")`. (A *multi-arg* qualified turbofish —
-`shapes.Pair[int, str].X` — is not yet supported; write the base same-module, or let the args
-infer from the call: `shapes.Pair.X(...)`.)
+`shapes.Box[int].make[str]("hi")`, and so does the *multi-arg* qualified form
+`shapes.Pair[int, str].X` (TICKET-204).
 
 A static method may **also declare its OWN `[U]`** type parameters — they sit on the **member**
 (`make[U]`), the **declaration-site rule**: a type argument is written where its parameter is

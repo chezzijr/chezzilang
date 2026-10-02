@@ -480,11 +480,13 @@
 <fnParamList> ::= <fnParam> | <fnParam> "COMMA" <fnParamList>
 <fnParam>     ::= <type> | "IDENT" "COLON" <type>
 
-# A declaration-site type-application HEAD: a bare TYPE name applied to a MULTI type-arg list
-# (`Result[int, str]`, `Pair[int, str]`). Only ever the receiver of a `.member` access / call. The
-# multi-arg requirement (≥2 types, i.e. a comma) is what makes it unambiguous against a plain index
-# `arr[i]` — a single-arg `Type[int].member` rides the index path and the checker reinterprets it.
-<typeApply>     ::= "IDENT" "LBRACKET" <typeListMulti> "RBRACKET"
+# A type application with two or more type args on an IDENT or field head (TICKET-204): a
+# type-level head (`Result[int, str].Ok(5)`, `lib.Pair[int, str].Neither`) or a generic fn value
+# (`pair[str, int]`, `lib.tri[A, B, C]`). The parser commits it when `]` is NOT followed by `(` —
+# `[types](` is the explicit type-argument call below. The comma is what makes it unambiguous
+# against a plain index `arr[i]`; a single-arg `Type[int]` / `idt[int]` rides the index path and
+# the checker reinterprets it.
+<typeApply>     ::= <postfix> "LBRACKET" <typeListMulti> "RBRACKET"
 <typeListMulti> ::= <type> "COMMA" <typeList>
 
 # ===== expressions (precedence cascade, loosest -> tightest) =====
@@ -587,13 +589,10 @@
                                                             # NOT in <lvalue>, and `t[0]` is a type error)
             | <postfix> "LBRACKET" <subscript> "RBRACKET"   # plain index (no colon) or a Python slice
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
-            | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <exprList> "RPAREN"
-            # declaration-site turbofish on a generic TYPE — MULTI type-arg head (`<typeApply>`),
-            # followed by a member access / call (`Result[int, str].Ok(5)`) or nullary value
-            # (`Pair[int, str].Neither`). The comma is what disambiguates from a plain index.
-            | <typeApply> "DOT" "IDENT"
-            | <typeApply> "DOT" "IDENT" "LPAREN" "RPAREN"
-            | <typeApply> "DOT" "IDENT" "LPAREN" <argList> "RPAREN"
+            | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
+            # a MULTI type-arg application (`<typeApply>`): a generic fn value (`pair[str, int]`)
+            # or a type-level head; its `.member` and `(args)` attach through the productions above.
+            | <typeApply>
             # member-side declaration-site turbofish — a method's OWN type args (`xs.map[str](f)`,
             # `s.first[int, str](1, "x")`). The receiver is ANY postfix expression: a bare ident, a call
             # result (`W(1).cast[str]("a")`), a field (`h.w.cast[str](x)`), or an index (`xs[0].cast[U](x)`).

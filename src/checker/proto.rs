@@ -5447,7 +5447,7 @@ impl Checker {
     /// preserving the Category-1 leak guard and every clean reject. A FRESH substitution map per call
     /// means two distinct pins never launder.
     fn try_pin_generic_fn_value_arg(&mut self, arg: &Expr, want: &Ty, span: Span) -> Option<Ty> {
-        let (_, sig) = self.generic_fn_value_sig(arg)?;
+        let (_, sig, _) = self.generic_fn_value_sig(arg)?;
         let declared = fn_value_ty(&sig);
         // Accept ONLY the fully-pinned verdict. A slot position that is still a free method param
         // (`.fold` arg1 before `init` binds `U`) or a return-only arg-fn param never pinned leaves the
@@ -5487,7 +5487,7 @@ impl Checker {
         span: Span,
     ) {
         for (decl, arg) in arg_decls.iter().zip(args) {
-            let Some((name, sig)) = self.generic_fn_value_sig(arg) else {
+            let Some((name, sig, spelling)) = self.generic_fn_value_sig(arg) else {
                 continue;
             };
             // The witness wall (`reject_witness_fn_value`) is a stricter, unconditional refusal with
@@ -5516,7 +5516,7 @@ impl Checker {
                 } else {
                     arg.span
                 };
-                self.reject_undetermined_generic_fn_value(&name, &sig, at);
+                self.reject_undetermined_generic_fn_value(&name, &sig, &spelling, at);
             }
         }
     }

@@ -1,7 +1,7 @@
 // checker::expr — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Expression & call inference, keyword calls, type application, indexing.
 
-use super::setup::HeadBinding;
+use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
 /// Result of resolving a bodied/native method on one of the reserved native handles
@@ -264,17 +264,17 @@ impl Checker {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner_obj.kind
-                && !self.head_is_value(mname)
-                && let Some(mid) = self.imported_modules.get(mname).cloned()
-                && let Some(sig) = self.module_sigs.get(&mid).cloned()
-                && let Some(edef) = sig.enum_defs.get(ename)
+                && let Some(TypeHead {
+                    kind: TypeHeadKind::Enum,
+                    key,
+                    spelled,
+                    pinned: None,
+                    ..
+                }) = self.qualified_type_head(mname, ename)
             {
-                if let Some(vinfo) = edef
-                    .variant_names
-                    .iter()
-                    .position(|v| v == name)
-                    .map(|i| edef.variants[i].clone())
-                {
+                // `import lib` registers every variant under `type_key(mid, ename)` with its
+                // `enum_name` already re-keyed (DEC-066).
+                if let Some(vinfo) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
                     // The OLD gliding form `module.Enum.Variant[T](args)` (type args on the VARIANT)
                     // is removed — explicit type args go on the TYPE: `module.Enum[T].Variant(args)`.
                     if !targs.is_empty() {
@@ -289,10 +289,7 @@ impl Checker {
                         );
                         return Ty::Unknown;
                     }
-                    let mut vi = vinfo;
-                    // The result `Ty::Enum` carries the DECLARING module's runtime key (bare unless a
-                    // genuine clash), matching the layout tables + the declaring module's signatures.
-                    vi.enum_name = self.type_key(&mid, ename);
+                    let vi = vinfo;
                     let r = Resolution::Variant {
                         enum_key: vi.enum_name.clone(),
                         variant: name.clone(),
@@ -305,12 +302,10 @@ impl Checker {
                 // bare enum-static path: variant-first ran above (a variant always wins, disjointness
                 // enforced at decl), so delegate to `infer_static_call` keyed by the declaring module's
                 // runtime key. Emits "type 'Enum' has no static method 'm'" for a genuine miss.
-                let key = self.type_key(&mid, ename);
                 // The SPELLING this callee was reached by, prefix included — every diagnostic
                 // `infer_static_call` writes quotes it back, and the witness pin advice
                 // (`WitnessCallee::Dotted`) has to name a form that actually compiles: bare
                 // `Enum.method[T](...)` here answers "unknown type 'Enum'".
-                let spelled = format!("{mname}.{ename}");
                 self.record_static(callee, &key, name);
                 return self.infer_static_call(
                     &key,
@@ -335,15 +330,16 @@ impl Checker {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner_obj.kind
-                && !self.head_is_value(mname)
-                && let Some(mid) = self.imported_modules.get(mname).cloned()
-                && let Some(sig) = self.module_sigs.get(&mid).cloned()
-                && sig.struct_defs.contains_key(tname)
+                && let Some(TypeHead {
+                    kind: TypeHeadKind::Struct,
+                    key,
+                    spelled,
+                    pinned: None,
+                    ..
+                }) = self.qualified_type_head(mname, tname)
             {
-                let key = self.type_key(&mid, tname);
                 // …and the same for a qualified STRUCT static (`lib.Holder.build()`): the advice
                 // must carry `lib.`, which is the prefix the user reached it by (an alias included).
-                let spelled = format!("{mname}.{tname}");
                 self.record_static(callee, &key, name);
                 return self.infer_static_call(
                     &key,
@@ -365,10 +361,14 @@ impl Checker {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner_obj.kind
-                && let Some(Ty::Enum(key, head_targs) | Ty::Struct(key, head_targs)) =
-                    self.qualified_alias_ty(mname, aname)
+                && let Some(TypeHead {
+                    kind: TypeHeadKind::Enum | TypeHeadKind::Struct,
+                    key,
+                    spelled,
+                    pinned: Some(head_targs),
+                    ..
+                }) = self.qualified_type_head(mname, aname)
             {
-                let spelled = format!("{mname}.{aname}");
                 self.record_type_member(callee, &key, name);
                 return self.infer_alias_member_call(
                     &key,
@@ -419,10 +419,12 @@ impl Checker {
             // static call. `head_targs` (the alias body's pinned type arguments) is threaded through
             // both, so `type IS = Box[str]; IS.of(3)` still infers against `Box[str]`, not `Box[int]`.
             if let ExprKind::Ident(aname) = &obj.kind
-                && !self.head_hides_type(aname)
-                && let Some((key, head_targs)) = self
-                    .alias_enum_head(aname)
-                    .or_else(|| self.alias_struct_head(aname))
+                && let Some(TypeHead {
+                    kind: TypeHeadKind::Enum | TypeHeadKind::Struct,
+                    key,
+                    pinned: Some(head_targs),
+                    ..
+                }) = self.bare_type_head(aname)
             {
                 self.record_type_member(callee, &key, name);
                 return self.infer_alias_member_call(
@@ -442,10 +444,13 @@ impl Checker {
             // bare-written enum name is gated by `enum_names` (bare visibility) and resolved to its
             // runtime key (`bare_key`) for the layout lookup.
             if let ExprKind::Ident(ename) = &obj.kind
-                && !self.head_hides_type(ename)
-                && self.enum_names.contains(ename)
+                && let Some(TypeHead {
+                    kind: TypeHeadKind::Enum,
+                    key: ekey,
+                    pinned: None,
+                    ..
+                }) = self.bare_type_head(ename)
             {
-                let ekey = self.bare_key(ename);
                 // Editor hover (probe-gated no-op): record the receiver `Col` of `Col.Val(3)` /
                 // `Col.method()` as its enum type. Covers both the variant-ctor and enum-static paths.
                 if self.hover_probe.is_some() {
@@ -508,10 +513,13 @@ impl Checker {
             // enum branch above already handled enums; this covers structs. The type name must be a
             // known (unbound) struct; a static method is one whose first param is not `self`.
             if let ExprKind::Ident(tname) = &obj.kind
-                && !self.head_hides_type(tname)
-                && self.struct_names.contains(tname)
+                && let Some(TypeHead {
+                    kind: TypeHeadKind::Struct,
+                    key,
+                    pinned: None,
+                    ..
+                }) = self.bare_type_head(tname)
             {
-                let key = self.bare_key(tname);
                 self.record_static(callee, &key, name);
                 // Editor hover (probe-gated no-op): record the receiver `Foo` of `Foo.default()` as
                 // its struct type.
@@ -542,8 +550,9 @@ impl Checker {
             // there is no other valid `Newtype.member` form, so any such call is rejected with a clear
             // message here rather than falling through to the value path's cryptic "unknown name".
             if let ExprKind::Ident(tname) = &obj.kind
-                && !self.head_hides_type(tname)
-                && self.newtype_names.contains(tname)
+                && self
+                    .bare_type_head(tname)
+                    .is_some_and(|th| th.kind == TypeHeadKind::Newtype && th.pinned.is_none())
             {
                 self.infer_all(args);
                 self.error(
@@ -667,16 +676,18 @@ impl Checker {
             // Resolve the enclosing-type head + its type args. A bare `Ident(Box).member[U]` head has
             // NO enclosing type args; a `Box[int].member[U]` head carries them via `type_apply_head`.
             let resolved_head = self.type_apply_head(head).or_else(|| match &head.kind {
-                ExprKind::Ident(tn)
-                    if !self.head_hides_type(tn)
-                        && (self.struct_names.contains(tn) || self.enum_names.contains(tn)) =>
-                {
-                    Some((tn.clone(), self.bare_key(tn), Vec::new()))
-                }
+                ExprKind::Ident(tn) => self
+                    .bare_type_head(tn)
+                    .filter(|th| {
+                        th.pinned.is_none()
+                            && matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Enum)
+                    })
+                    .map(|th| (th.name, th.key, Vec::new())),
                 _ => None,
             });
             if let Some((tname, key, type_exprs)) = resolved_head
-                && let Some(mt_ty) = self.index_as_type(mt).map(|t| self.resolve_type(&t, span))
+                && let Some(mt_ty) =
+                    crate::ast::index_as_type(mt).map(|t| self.resolve_type(&t, span))
             {
                 self.record_type_member(callee_obj, &key, name);
                 let enclosing: Vec<Ty> = type_exprs
@@ -1247,104 +1258,16 @@ impl Checker {
 
     /// Resolve a `Type[T…]` member-access head — the receiver of `Type[T…].member(args)` /
     /// nullary `Type[T…].member` — into `(type-name, runtime-key, type-arg-exprs)` when `obj` is a
-    /// declaration-site turbofish on a KNOWN struct/enum name. Three carriers converge:
-    ///   • `Index{obj: Ident(Type), index}` — bare SINGLE-arg (`Box[int].x`); reinterpret the index
-    ///     expression as one type via `index_as_type`. Keyed by `bare_key`.
-    ///   • `Index{obj: Field{Ident(mod), Type}, index}` — QUALIFIED single-arg (`mod.Box[int].x`) on a
-    ///     whole-module-imported generic type. Keyed by `type_key(mid, Type)` (B1).
-    ///   • `TypeApply{name, args}` — the (bare) MULTI-arg form (`Result[int, str].x`); the parser
-    ///     already parsed real `Type`s. Keyed by `bare_key`.
-    /// Returns `None` when `obj` is not such a head (a real index-then-member, a local binding, an
-    /// unknown name, or a non-type index), so the caller falls back to the ordinary method path.
-    /// The bare NAME under a type-level turbofish head, in either carrier the parser produces
-    /// (`Type[int]` = `Index` over an `Ident`, `Type[int, str]` = `TypeApply`). Syntax only — the
-    /// caller decides what the name means; [`Checker::shadowing_type_param`] is what asks whether it
-    /// is a shadowing type parameter, so that question keeps its one answer.
+    /// declaration-site turbofish on a KNOWN struct/enum name: both carriers, bare or qualified,
+    /// through `ast::type_application` and `type_head` (B1: a qualified head keys by
+    /// `type_key(mid, Type)`). Returns `None` when `obj` is not such a head (a real
+    /// index-then-member, a local binding, an unknown name, or a non-type index), so the caller
+    /// falls back to the ordinary method path.
     pub(super) fn type_apply_head(&self, obj: &Expr) -> Option<(String, String, Vec<Type>)> {
-        match &obj.kind {
-            ExprKind::TypeApply { name, args } => {
-                if !self.head_hides_type(name)
-                    && (self.struct_names.contains(name) || self.enum_names.contains(name))
-                {
-                    Some((name.clone(), self.bare_key(name), args.clone()))
-                } else {
-                    None
-                }
-            }
-            ExprKind::Index { obj: tobj, index } => {
-                // Bare `Type[int]` — a bare-visible struct/enum name resolved via `bare_key`.
-                if let ExprKind::Ident(tname) = &tobj.kind
-                    && !self.head_hides_type(tname)
-                    && (self.struct_names.contains(tname) || self.enum_names.contains(tname))
-                {
-                    return Some((
-                        tname.clone(),
-                        self.bare_key(tname),
-                        vec![self.index_as_type(index)?],
-                    ));
-                }
-                // Qualified `mod.Type[int]` — a whole-module-imported generic type reached through a
-                // bound (non-local) module name. Whole-module `import mod` registers the type in
-                // `module_sigs.{struct_defs,enum_defs}` but NOT in the bare gates, so key it by the
-                // owning module's identity key (`type_key`). Downstream variant/static resolution is
-                // already key-driven, so only the head recognition + key were missing (B1).
-                if let ExprKind::Field {
-                    obj: mobj,
-                    name: typename,
-                    ..
-                } = &tobj.kind
-                    && let ExprKind::Ident(m) = &mobj.kind
-                    && !self.head_is_value(m)
-                    && let Some(mid) = self.imported_modules.get(m)
-                    && let Some(sig) = self.module_sigs.get(mid)
-                    && (sig.struct_defs.contains_key(typename)
-                        || sig.enum_defs.contains_key(typename))
-                {
-                    return Some((
-                        typename.clone(),
-                        self.type_key(mid, typename),
-                        vec![self.index_as_type(index)?],
-                    ));
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    /// Reinterpret the index of a `Type[..]` subscript (in a generic-static turbofish like
-    /// `Box[int].empty()`) as a single type argument. The parser produced an EXPRESSION (the index
-    /// of an `Index` node); only the expression shapes that name a type are convertible: a bare
-    /// ident (`int`/`T`), a generic application (`list[int]`), and a module-qualified name
-    /// (`geo.Point`). Anything else (a literal, an arithmetic expr) is not a type → `None`, and the
-    /// caller falls back to the ordinary index-then-method path so a real index error still surfaces.
-    pub(super) fn index_as_type(&self, index: &Expr) -> Option<Type> {
-        match &index.kind {
-            ExprKind::Ident(n) => Some(Type::named(n.clone())),
-            ExprKind::Index { obj, index } => {
-                if let ExprKind::Ident(n) = &obj.kind {
-                    Some(Type::Generic(
-                        n.clone(),
-                        vec![self.index_as_type(index)?],
-                        Span::default(),
-                    ))
-                } else {
-                    None
-                }
-            }
-            ExprKind::Field { obj, name, .. } => {
-                if let ExprKind::Ident(m) = &obj.kind {
-                    Some(Type::Qualified {
-                        module: m.clone(),
-                        name: name.clone(),
-                        args: Vec::new(),
-                    })
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+        let app = crate::ast::type_application(obj)?;
+        let th = self.type_head(app.head)?;
+        (th.pinned.is_none() && matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Enum))
+            .then_some((th.name, th.key, app.args))
     }
 
     /// Type-check a STATIC (associated) method call `Type.method(args)` (the "no self ⇒ static"
@@ -5582,11 +5505,12 @@ pub(super) fn callable_slots(
 /// the whole body, and `g[0]` under `fn h[g](…)` is the parameter — Go answers the same.
 fn type_apply_param_head(obj: &Expr) -> Option<String> {
     match &obj.kind {
-        ExprKind::TypeApply { name, .. } => Some(name.clone()),
-        ExprKind::Index { obj: tobj, .. } => match &tobj.kind {
-            ExprKind::Ident(n) => Some(n.clone()),
-            _ => None,
-        },
+        ExprKind::TypeApply { head: tobj, .. } | ExprKind::Index { obj: tobj, .. } => {
+            match &tobj.kind {
+                ExprKind::Ident(n) => Some(n.clone()),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

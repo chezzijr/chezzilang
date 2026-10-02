@@ -61,6 +61,32 @@ pub(super) enum HeadBinding {
     Unbound,
 }
 
+/// Which kind of user type a head expression names (`Checker::type_head`, TICKET-204).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TypeHeadKind {
+    Struct,
+    Enum,
+    Newtype,
+    Protocol,
+}
+
+/// A head expression that names a user type here (`Checker::type_head`, TICKET-204).
+#[derive(Debug, Clone)]
+pub(super) struct TypeHead {
+    pub kind: TypeHeadKind,
+    /// The canonical type key (`bare_key`, `type_key(mid, ..)`, `protocol_key`, or an alias
+    /// body's target key).
+    pub key: String,
+    /// The name the head spells (`Bx` in `vlib.Bx`).
+    pub name: String,
+    /// `name` bare, `{module}.{name}` qualified.
+    pub spelled: String,
+    /// `None` for a declared type; `Some(<body type args>)` for a type alias head (DEC-172).
+    pub pinned: Option<Vec<Ty>>,
+    /// A reserved native handle (`net.Socket`): its methods dispatch natively and have no proto.
+    pub native_handle: bool,
+}
+
 impl Checker {
     pub(super) fn new() -> Self {
         let mut c = Checker {
@@ -2680,6 +2706,81 @@ impl Checker {
             HeadBinding::Local | HeadBinding::Global
         )
     }
+    /// THE one answer to "does this head expression name a user type here, which kind, under which
+    /// key" (TICKET-204). The binding question is `head_hides_type`/`head_is_value` (DEC-180); a
+    /// type head site reads this and filters on `kind`, never a type table. A name is one kind of
+    /// type (a second declaration is `type 'A' is already defined`), so the kind order is total.
+    pub(super) fn type_head(&self, head: &Expr) -> Option<TypeHead> {
+        match &head.kind {
+            ExprKind::Ident(n) => self.bare_type_head(n),
+            ExprKind::Field { obj, name, .. } => match &obj.kind {
+                ExprKind::Ident(m) => self.qualified_type_head(m, name),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    /// The bare half of [`Checker::type_head`]: a declared type, else a type alias of one.
+    pub(super) fn bare_type_head(&self, name: &str) -> Option<TypeHead> {
+        if self.head_hides_type(name) {
+            return None;
+        }
+        let kind = if self.struct_names.contains(name) {
+            TypeHeadKind::Struct
+        } else if self.enum_names.contains(name) {
+            TypeHeadKind::Enum
+        } else if self.newtype_names.contains(name) {
+            TypeHeadKind::Newtype
+        } else if self.protocols.contains_key(&self.protocol_key(name)) {
+            TypeHeadKind::Protocol
+        } else {
+            return alias_type_head(name, name.to_string(), self.alias_body_ty(name)?);
+        };
+        let key = if kind == TypeHeadKind::Protocol {
+            self.protocol_key(name)
+        } else {
+            self.bare_key(name)
+        };
+        Some(TypeHead {
+            kind,
+            key,
+            name: name.to_string(),
+            spelled: name.to_string(),
+            pinned: None,
+            native_handle: false,
+        })
+    }
+    /// The `module.Name` half of [`Checker::type_head`]: a type the whole-module import `module`
+    /// declares, else an exported alias of one.
+    pub(super) fn qualified_type_head(&self, module: &str, name: &str) -> Option<TypeHead> {
+        if self.head_is_value(module) {
+            return None;
+        }
+        let mid = self.imported_modules.get(module)?;
+        let sig = self.module_sigs.get(mid)?;
+        let spelled = format!("{module}.{name}");
+        let kind = if sig.struct_defs.contains_key(name) {
+            TypeHeadKind::Struct
+        } else if sig.enum_defs.contains_key(name) {
+            TypeHeadKind::Enum
+        } else if sig.newtype_defs.contains_key(name) {
+            TypeHeadKind::Newtype
+        } else if sig.protocol_defs.contains_key(name) {
+            TypeHeadKind::Protocol
+        } else {
+            return alias_type_head(name, spelled, self.qualified_alias_ty(module, name)?);
+        };
+        Some(TypeHead {
+            kind,
+            key: self.type_key(mid, name),
+            name: name.to_string(),
+            spelled,
+            pinned: None,
+            // The same test the import loop uses to skip a handle.
+            native_handle: kind == TypeHeadKind::Struct
+                && self.qualified_builtin_ty(name, &[]).is_some(),
+        })
+    }
     /// TICKET-032 A1 — record that `alias` (in `alias_scope`) and `src` name the SAME runtime
     /// collection. Self-referential and duplicate pairs are dropped.
     ///
@@ -4828,4 +4929,23 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
             _ => return None,
         }
     }
+}
+
+/// The [`TypeHead`] of a type alias whose nominal body is `body`: the target's kind and canonical
+/// key, with the body's type args pinned (DEC-172). No alias reaches a native handle.
+fn alias_type_head(name: &str, spelled: String, body: Ty) -> Option<TypeHead> {
+    let (kind, key, args) = match body {
+        Ty::Struct(k, a) => (TypeHeadKind::Struct, k, a),
+        Ty::Enum(k, a) => (TypeHeadKind::Enum, k, a),
+        Ty::NewType(k, a) => (TypeHeadKind::Newtype, k, a),
+        _ => return None,
+    };
+    Some(TypeHead {
+        kind,
+        key,
+        name: name.to_string(),
+        spelled,
+        pinned: Some(args),
+        native_handle: false,
+    })
 }

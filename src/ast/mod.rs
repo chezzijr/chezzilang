@@ -1022,16 +1022,13 @@ pub enum ExprKind {
         obj: Box<Expr>,
         index: Box<Expr>,
     },
-    /// `Type[T1, T2, …]` used ONLY as the head of a member access / call: `Result[int, str].Ok(5)`
-    /// or nullary `Box[int].Empty`. A type-application carrier with REAL parsed `Type`s — the
-    /// declaration-site turbofish for a generic TYPE (enum variant ctor or generic static method).
-    /// Produced by the parser ONLY in the multi-type-arg case (`[T1, T2]`); the single-arg case
-    /// (`Box[int].x`) stays an `Index{Ident, …}` reinterpreted by the checker, because the parser
-    /// cannot distinguish `arr[i].field` from `Type[T].member` without the disambiguating comma.
-    /// Never evaluable on its own: the checker consumes it inside `infer_call`/`infer_field`; the
-    /// compiler/vm/interp never see a bare `TypeApply`.
+    /// `head[T1, T2, …]` with two or more parsed type arguments: a type-level head
+    /// (`Result[int, str].Ok(5)`, `lib.Pair[int, str].Neither`) or a generic fn instantiated as a
+    /// value (`pair[str, int]`, `lib.pair[str, int]`). `head` is an `Ident` or a `Field`. One type
+    /// argument stays an `Index` (`idt[int]` and `xs[i]` share one shape); read both through
+    /// [`type_application`].
     TypeApply {
-        name: String,
+        head: Box<Expr>,
         args: Vec<Type>,
     },
     /// `obj[start:end:step]` — Python-style slice. Emitted when the subscript holds at least one
@@ -1177,6 +1174,70 @@ pub enum BinaryOp {
     In,
 }
 
+/// A type application `head[T…]`: the head expression, its type arguments, and the span the
+/// arguments' diagnostics anchor on.
+pub struct TypeApplication<'a> {
+    pub head: &'a Expr,
+    pub args: Vec<Type>,
+    /// The index's span for the one-arg `Index` carrier, the node's span for `TypeApply`, so a
+    /// one-arg diagnostic keeps its column.
+    pub args_span: Span,
+}
+
+/// THE one syntactic answer to "is `e` a type application, with which head and type arguments",
+/// for both carriers: a `TypeApply` (two or more arguments) and an `Index` whose index is
+/// type-shaped (one argument). What the head denotes is the checker's question.
+pub fn type_application(e: &Expr) -> Option<TypeApplication<'_>> {
+    match &e.kind {
+        ExprKind::TypeApply { head, args } => Some(TypeApplication {
+            head,
+            args: args.clone(),
+            args_span: e.span,
+        }),
+        ExprKind::Index { obj, index } => Some(TypeApplication {
+            head: obj,
+            args: vec![index_as_type(index)?],
+            args_span: index.span,
+        }),
+        _ => None,
+    }
+}
+
+/// Reinterpret the index of a `Type[..]` subscript (in a generic-static turbofish like
+/// `Box[int].empty()`) as a single type argument. The parser produced an EXPRESSION (the index
+/// of an `Index` node); only the expression shapes that name a type are convertible: a bare
+/// ident (`int`/`T`), a generic application (`list[int]`), and a module-qualified name
+/// (`geo.Point`). Anything else (a literal, an arithmetic expr) is not a type → `None`, and the
+/// caller falls back to the ordinary index-then-method path so a real index error still surfaces.
+pub fn index_as_type(index: &Expr) -> Option<Type> {
+    match &index.kind {
+        ExprKind::Ident(n) => Some(Type::named(n.clone())),
+        ExprKind::Index { obj, index } => {
+            if let ExprKind::Ident(n) = &obj.kind {
+                Some(Type::Generic(
+                    n.clone(),
+                    vec![index_as_type(index)?],
+                    Span::default(),
+                ))
+            } else {
+                None
+            }
+        }
+        ExprKind::Field { obj, name, .. } => {
+            if let ExprKind::Ident(m) = &obj.kind {
+                Some(Type::Qualified {
+                    module: m.clone(),
+                    name: name.clone(),
+                    args: Vec::new(),
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Collect every `recover:` block reachable from expression `e`, in source order, **without
 /// descending into a nested closure** (a closure's body is its own scope). `recover:` is the only
 /// expression form carrying a statement block, so generator analyses that must see statements buried
@@ -1193,9 +1254,8 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Pass
-        | ExprKind::Ident(_)
-        // A type-application head carries only `Type`s (no sub-expressions, no recover blocks).
-        | ExprKind::TypeApply { .. } => {}
+        | ExprKind::Ident(_) => {}
+        ExprKind::TypeApply { head, .. } => go(head),
         // An interpolation fragment is an ordinary expression, so walk it like any other child.
         // (No fragment can currently hold a `recover:` — `split_spec` claims its `:` — so this arm
         // is a structural completeness guard, not a live path.)
@@ -1642,8 +1702,8 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Pass
-        | ExprKind::Ident(_)
-        | ExprKind::TypeApply { .. } => {}
+        | ExprKind::Ident(_) => {}
+        ExprKind::TypeApply { head, .. } => go(head, f),
         ExprKind::Interp(chunks) => {
             for c in chunks {
                 if let Chunk::Expr(x, _, nested) = c {

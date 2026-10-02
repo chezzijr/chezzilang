@@ -1049,6 +1049,17 @@ pub enum Resolution {
     Variant { enum_key: String, variant: String },
     /// A static method of a struct or enum, by the type's runtime key (`Op::CallStatic`).
     Static { type_key: String, method: String },
+    /// A struct, enum or newtype method read as a VALUE through its type path (`Bx[int].make`,
+    /// `Pt.getx`); `Op::MakeMethodFunc`. An instance method takes its receiver as the first
+    /// argument.
+    MethodFn { type_key: String, method: String },
+    /// A payload variant read as a VALUE (`R1[int].L`); a synthesized constructor fn,
+    /// `Op::MakeFunc`.
+    VariantFn {
+        enum_key: String,
+        variant: String,
+        arity: usize,
+    },
     /// A static-witness call `T.m()` on the named type parameter (`Op::CallStaticDyn`).
     WitnessStatic(String),
     /// A member of a whole-module import reached as `m.x` (`Op::CallMethod` / `Op::GetField` on

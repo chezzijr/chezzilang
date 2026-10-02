@@ -1,0 +1,58 @@
+# TICKET-204: a turbofish with two or more type arguments is a value in every position (Go:
+# `p := pair[string, int]`), and a type path follows Rust's path-value rule: a payload variant, a
+# static method and an instance method named through its type are fn values.
+fn pair[A, B](a: A, b: B) -> (A, B):
+    return (a, b)
+
+fn tri[A, B, C](a: A, b: B, c: C) -> (A, B, C):
+    return (a, b, c)
+
+fn ap(f: fn(str, int) -> (str, int)) -> (str, int):
+    return f("a", 1)
+
+fn give() -> fn(str, int) -> (str, int):
+    return pair[str, int]
+
+fn dflt(f: fn(str, int) -> (str, int) = pair[str, int]) -> (str, int):
+    return f("a", 1)
+
+struct Bx[T]:
+    v: T
+    fn make(v: T) -> Bx[T]:
+        return Bx(v=v)
+    fn get(self) -> T:
+        return self.v
+
+enum R2[T, U]:
+    L(T)
+    R(U)
+    N
+
+test fn multi_arg_turbofish_value_in_every_position():
+    p := pair[str, int]
+    assert p("a", 1) == ("a", 1), "got {p(\"a\", 1)}"
+    q: fn(str, int) -> (str, int) = pair[str, int]
+    assert q("a", 1) == ("a", 1), "got {q(\"a\", 1)}"
+    assert ap(pair[str, int]) == ("a", 1), "got {ap(pair[str, int])}"
+    assert give()("a", 1) == ("a", 1), "got {give()(\"a\", 1)}"
+    assert dflt() == ("a", 1), "got {dflt()}"
+    assert p(b=1, a="a") == ("a", 1), "got {p(b=1, a=\"a\")}"
+    t := tri[str, int, bool]
+    assert t("a", 1, true) == ("a", 1, true), "got {t(\"a\", 1, true)}"
+    assert '{pair[str, int]("a", 1)}' == "('a', 1)", "got {pair[str, int](\"a\", 1)}"
+
+test fn type_path_values_are_fns():
+    mk := Bx[int].make
+    assert mk(2).get() == 2, "got {mk(2).get()}"
+    g := Bx[int].get
+    assert g(Bx(v=3)) == 3, "got {g(Bx(v=3))}"
+    assert g(self=Bx(v=4)) == 4, "got {g(self=Bx(v=4))}"
+    l := R2[int, str].L
+    assert '{l(1)}' == "L(1)", "got {l(1)}"
+    r: fn(str) -> R2[int, str] = R2.R
+    assert '{r("x")}' == "R('x')", "got {r(\"x\")}"
+    ch := Channel[str](1)
+    parallel:
+        spawn:
+            ch.send('{l(7)}')
+    assert ch.recv() == "L(7)"

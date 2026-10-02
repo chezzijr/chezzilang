@@ -27741,8 +27741,7 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
             "must not blame a 'closure' the user never wrote: {joined}"
         );
     }
-    // TWO type params: both are named, and the turbofish is NOT offered — it carries exactly one
-    // type argument, so `pair[int]` is an arity error, not a fix.
+    // TWO type params: both named, and the turbofish names both.
     let errs = check_src(
         "fn pair[A, B](a: A, b: B) -> A:\n    return a\n\nfn main():\n    g := pair\n    print(1)\n",
     );
@@ -27754,8 +27753,8 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
     assert!(
         joined.contains("'pair' is generic and A, B are not determined here")
             && joined.contains("fn(<A>, <B>) -> <A>")
-            && !joined.contains("`pair[<"),
-        "expected a two-param diagnostic without turbofish advice, got: {joined}"
+            && joined.contains("instantiate it (`pair[<A>, <B>]`)"),
+        "expected a two-param diagnostic with the two-arg turbofish, got: {joined}"
     );
     // …and the same read in a collection literal, where no element hint reaches it either. EXACTLY
     // ONE error: the guard returns `Ty::Unknown`, which made the one-element list look like an
@@ -27978,7 +27977,7 @@ fn undetermined_generic_fn_value_rejected_in_argument_position() {
             && !joined.contains("give this position a concrete function type"),
         "an unused type parameter must not be told to annotate the position, got: {joined}"
     );
-    // …and with TWO unused parameters, the turbofish is not offered either (it carries one type arg).
+    // …and with TWO unused parameters, the turbofish names both (TICKET-204).
     let joined = joined_errs(
         "fn two[A, B](n: int) -> bool:\n    return true\nfn main():\n    print([1,2,3].filter(two))\n",
     );
@@ -27986,8 +27985,8 @@ fn undetermined_generic_fn_value_rejected_in_argument_position() {
         joined.contains("'two' is generic and A, B are not determined here")
             && joined.contains("A, B appear nowhere in its signature (`fn(int) -> bool`)")
             && joined.contains("drop the unused type parameters")
-            && !joined.contains("`two[<"),
-        "two unused parameters take neither remedy but deletion, got: {joined}"
+            && joined.contains("`two[<A>, <B>]`"),
+        "two unused parameters take the turbofish or deletion, got: {joined}"
     );
 }
 
@@ -29446,7 +29445,8 @@ fn d3_widen_variadic_float_param_int_consts_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// Bound methods are NOT first-class values (check-OK -> runtime-fault hole).
+// Bound methods are NOT first-class values (check-OK -> runtime-fault hole); a method named
+// through its TYPE is (Rust's path-value rule, TICKET-204).
 // A struct field-read that misses the data fields must NOT fall back to the
 // method table: it used to hand back a `Ty::Func` still carrying the un-bound
 // `self` slot typed `Ty::Unknown`, which (a) has no runtime lowering (the
@@ -29472,70 +29472,59 @@ fn bound_method_as_value_rejected() {
 }
 
 #[test]
-fn static_method_as_value_on_local_struct_should_say_method_not_value() {
-    // W12-22: `C.zero` (a static/ctor-head method spelling used as a VALUE, not called) currently
-    // rejects with the generic "unknown name 'C'" -- the false claim that `C` isn't a struct at
-    // all. It should get the SAME "methods are not values" diagnosis the instance-method spelling
-    // (`bound_method_as_value_rejected` above) already gives.
+fn static_method_is_a_value_on_a_local_struct() {
+    // TICKET-204: a static method read through its type head is a fn value (Rust `S::zero`).
     const STATIC_S: &str = "\
 struct S:
     n: int
     fn zero() -> S:
         return S(0)
 ";
-    entry_rejects(
-        &format!("{STATIC_S}h := S.zero\n"),
-        "methods are not values",
-    );
+    entry_ok(&format!("{STATIC_S}h := S.zero\nprint(h().n)\n"));
 }
 
 #[test]
-fn static_method_as_value_through_an_import_says_method_not_value() {
-    // W12-22: the same false "unknown name"/"has no member" claim on the two import-qualified
-    // static-head spellings.
+fn static_method_is_a_value_through_an_import() {
+    // TICKET-204: the two import-qualified static-head spellings are fn values too.
     const LIB: &str = "\
 struct Cnt:
     n: int
     fn zero() -> Cnt:
         return Cnt(0)
 ";
-    files_reject(
-        &[
-            ("lib/types.chz", LIB),
-            ("main.chz", "import Cnt from lib.types\nh := Cnt.zero\n"),
-        ],
-        "'zero' is a static method of 'Cnt'",
-    );
-    files_reject(
-        &[
-            ("lib/types.chz", LIB),
-            ("main.chz", "import lib.types\nh := types.Cnt.zero\n"),
-        ],
-        "'zero' is a static method of 'types.Cnt'",
-    );
+    files_ok(&[
+        ("lib/types.chz", LIB),
+        (
+            "main.chz",
+            "import Cnt from lib.types\nh := Cnt.zero\nprint(h().n)\n",
+        ),
+    ]);
+    files_ok(&[
+        ("lib/types.chz", LIB),
+        (
+            "main.chz",
+            "import lib.types\nh := types.Cnt.zero\nprint(h().n)\n",
+        ),
+    ]);
 }
 
 #[test]
-fn instance_method_through_the_type_head_says_method_not_value() {
-    // W12-22: an INSTANCE method read through the TYPE head (not a value, not a receiver) gets the
-    // instance wording, not "unknown name".
+fn instance_method_through_the_type_head_is_a_value() {
+    // TICKET-204: an INSTANCE method read through the TYPE head is a fn value that takes the
+    // receiver first (Rust `S::get`).
     const S: &str = "\
 struct S:
     n: int
     fn get(self) -> int:
         return self.n
 ";
-    entry_rejects(
-        &format!("{S}h := S.get\n"),
-        "'get' is an instance method of 'S'",
-    );
+    entry_ok(&format!("{S}h := S.get\nprint(h(S(1)))\n"));
 }
 
 #[test]
 fn type_head_member_value_keeps_its_decline_neighbours() {
     // W12-22 scope fence: a shadowing parameter keeps `type int has no field`, and an unknown
-    // member on a real struct head keeps `unknown name` -- the new arm fires ONLY when the member
-    // IS a declared method.
+    // member on a real struct head reports the type-as-value message (TICKET-204).
     const S: &str = "\
 struct S:
     n: int
@@ -29546,7 +29535,7 @@ struct S:
         &format!("{S}fn f(S: int) -> int:\n    return S.zero\n"),
         "type int has no field 'zero'",
     );
-    entry_rejects(&format!("{S}h := S.nosuch\n"), "unknown name 'S'");
+    entry_rejects(&format!("{S}h := S.nosuch\n"), "'S' is a type, not a value");
 }
 
 #[test]
@@ -29624,7 +29613,7 @@ fn method_neighbors_still_ok() {
     entry_ok(
         "struct C:\n    get: fn(int) -> int\n    fn other(self) -> int:\n        return 1\nfn dbl(x: int) -> int:\n    return x * 2\nc := C(dbl)\nprint(c.get(3))\nprint(c.other())\n",
     );
-    // 4. a static/associated CALL (a bare `P.make` VALUE is refused: methods are not values).
+    // 4. a static/associated CALL (a bare `P.make` is a fn value too, TICKET-204).
     entry_ok(
         "struct P:\n    n: int\n    fn make(n: int) -> P:\n        return P(n)\np := P.make(3)\nprint(p.n)\n",
     );
@@ -31236,11 +31225,11 @@ fn witness_member_as_value_rejected() {
     let head = "protocol Default:\n    fn default() -> Self\nstruct Counter:\n    n: int\n    fn default() -> Counter:\n        return Counter(0)\nstruct Holder:\n    k: int\n    fn make[T: Default](self, old: T) -> T:\n        return T.default()\n    fn build[T: Default](old: T) -> T:\n        return T.default()\n";
     entry_rejects(
         &format!("{head}fn main():\n    g := Holder(1).make\n    print(1)\nmain()\n"),
-        "methods are not values",
+        "a bound method is not a value",
     );
     entry_rejects(
         &format!("{head}fn main():\n    g := Holder.build\n    print(1)\nmain()\n"),
-        "'build' is a static method of 'Holder'",
+        "'Holder.build' cannot be used as a function value",
     );
 }
 

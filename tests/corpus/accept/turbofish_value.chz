@@ -1,0 +1,12 @@
+# rule: postfix, typeApply, letStmt
+# A multi-arg type application is a value (TICKET-204): a generic fn instantiated in value
+# position, bare or module-qualified, and a qualified type-level head.
+import lib
+fn pair[A, B](a: A, b: B) -> (A, B):
+    return (a, b)
+p := pair[str, int]
+q: fn(str, int) -> (str, int) = pair[str, int]
+r := lib.tri[str, int, bool]
+v := lib.Pair[int, str].Neither
+w := lib.Pair[int, str].Both
+n := pair[str, int](b=1, a="a")

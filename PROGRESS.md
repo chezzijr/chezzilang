@@ -7,6 +7,27 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-204 (2026-10-02): a multi-arg turbofish is a value; type paths follow Rust's path-value
+  rule (wave 19 K4).** `p := pair[str, int]` was `expected ']', found ','`; it is now a value in
+  every position (let, typed let, HOF argument, return, default, keyword call), through a
+  same-module, `import F from`, `lib.F`, static-method or method-turbofish head. The parser emits one
+  `TypeApply { head, args }` for any `Ident`/`Field` head with two or more type args not followed by
+  `(`, and both carriers (one-arg `Index`, multi-arg `TypeApply`) are read through
+  `ast::type_application`, so the qualified multi-arg type-level head `lib.Pair[int, str].Both(1, "x")`
+  works too. Path values (owner decision, Rust's rule): a payload variant (`R1[int].L`, a synthesized
+  constructor fn), a static method (`Bx[int].make`) and an instance method named through its type
+  (`Bx[int].get`, receiver first, keyword `self`) are fn values, bare, imported, module-qualified or
+  through an alias head (`B.make`); `Checker::path_fn` is the one decider and `Checker::type_head` the
+  one "does this head name a user type" answer. Refusals, each with its own message: a bound method
+  (`a bound method is not a value`), a type (`'Bx' is a type, not a value — constructors are not
+  values`), a protocol method, and a reserved native handle's method (`a native method is not a
+  value`). `xs[i, j]` is `a subscript takes one index, found 2` (Go: `more than one index`); the
+  undetermined-generic diagnostic offers the turbofish at every arity (`pair[<A>, <B>]`); explicit
+  type args combine with named args (`Box[int](v=1)`). A method value is the new
+  `Op::MakeMethodFunc`, resolved at run time through `Vm::type_method_proto` (the lookup
+  `CallStatic` uses). Grid: `tests/turbofish_value_grid.rs` (376 cells); spec test
+  `tests/chz/spec/turbofish_value_multi_arg_test.chz`.
+
 - **TICKET-200 (2026-10-02): Family B3, cancel reaches every parked party (C1) and one end-of-run
   ranking (C2).** `ex.shutdown_now()` hung forever on a job's nursery task parked in a socket
   `accept`/`read`/`write`/`connect` (CPython's `job.cancel()` runs the defers): the drain scan

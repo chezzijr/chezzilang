@@ -773,8 +773,11 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Pass => {}
-        // A type-application head names a TYPE (not a value reference); its args are `Type`s.
-        ExprKind::TypeApply { args, .. } => args.iter().for_each(tf),
+        // A type application's head is an expression (`pair`, `lib.Pair`); its args are `Type`s.
+        ExprKind::TypeApply { head, args } => {
+            walk_idents_and_types(head, f, tf);
+            args.iter().for_each(tf);
+        }
         // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Reached once
         // `desugar` has rewritten the literal; before that the raw-`Str` arm above parses it.
         ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
@@ -1515,10 +1518,9 @@ impl Walker<'_> {
             | ExprKind::Str(_)
             | ExprKind::Bytes(_)
             | ExprKind::RawStr(_)
-            // A type-application head holds only `Type`s — nothing to walk; the checker consumes it.
-            | ExprKind::TypeApply { .. }
             | ExprKind::Bool(_)
             | ExprKind::Pass => {}
+            ExprKind::TypeApply { head, .. } => self.walk_expr(head)?,
         }
         Ok(())
     }

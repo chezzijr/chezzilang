@@ -1,7 +1,7 @@
 // checker::pattern — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Pattern / match-arm binding and or-pattern consistency.
 
-use super::setup::HeadBinding;
+use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
 /// The one diagnostic for a range used where it has no runtime value. It names every legal position
@@ -1740,7 +1740,7 @@ impl Checker {
                 name,
                 name_span,
             } => self.infer_field(expr.id, obj, name, *name_span),
-            ExprKind::Index { obj, index } => self.infer_index(obj, index),
+            ExprKind::Index { obj, index } => self.infer_index(expr, obj, index),
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
             // W7-43 — optional-chaining `?.` / null-coalescing `??` are CARRIER nodes: the checker
             // types the operand, picks the lowering, then clone-lowers and infers the clone. The
@@ -1764,18 +1764,24 @@ impl Checker {
                 self.infer_if_else(cond, then, els, ret_sink, expr.span)
             }
             ExprKind::Recover(block) => self.infer_recover(block),
-            // `Type[T1, T2]` is a type-application HEAD — only valid as the receiver of a member
-            // access / call (`Result[int, str].Ok(5)`, nullary `Box[int].Empty`). The `infer_call`
-            // and `infer_field` paths consume it before it reaches here; a bare one in value
-            // position is a use of a type as a value.
-            ExprKind::TypeApply { name, .. } => {
-                self.error(
-                    expr.span,
-                    format!(
-                        "'{name}' is a type, not a value; access a member (`{name}[…].member`)"
-                    ),
-                );
-                Ty::Unknown
+            // `head[T1, T2]`: a type-applied fn value, a type used as a value, or a multi-index
+            // subscript (Go: "more than one index").
+            ExprKind::TypeApply { head, args } => {
+                if let Some(t) = self.infer_type_applied_fn_value(expr) {
+                    t
+                } else if let Some(th) = self.type_head(head) {
+                    self.type_not_value(&th, expr.span);
+                    Ty::Unknown
+                } else {
+                    let t = self.infer_value(head);
+                    if !t.is_unknown() {
+                        self.error(
+                            expr.span,
+                            format!("a subscript takes one index, found {}", args.len()),
+                        );
+                    }
+                    Ty::Unknown
+                }
             }
         }
     }
@@ -2360,6 +2366,7 @@ impl Checker {
         &mut self,
         name: &str,
         sig: &FnSig,
+        spelling: &str,
         span: Span,
     ) -> Option<Ty> {
         if sig.type_params.is_empty() {
@@ -2405,7 +2412,7 @@ impl Checker {
                 if !self.generic_fn_value_prepass
                     && hint.as_ref().is_none_or(fn_slot_params_concrete) =>
             {
-                self.reject_undetermined_generic_fn_value(name, sig, span);
+                self.reject_undetermined_generic_fn_value(name, sig, spelling, span);
                 return Some(Ty::Unknown);
             }
             // Not this rule's business (see [`FnValuePin::Skip`]) — fall through to the rigid
@@ -2416,12 +2423,40 @@ impl Checker {
         None
     }
 
-    /// TICKET-187 — is `e` a read of a GENERIC fn as a value, and which one: a bare name bound to
-    /// no local (a same-module or from-imported fn), or `m.f` on a whole-module import. Returns the
-    /// display name (`f` or `m.f`) and the callee's sig. The one answer for the read rule
-    /// ([`Self::generic_fn_value_ty`]) and the deferred argument check.
-    pub(super) fn generic_fn_value_sig(&self, e: &Expr) -> Option<(String, FnSig)> {
-        let (display, sig) = match &e.kind {
+    /// TICKET-187 — is `e` a read of a GENERIC fn-like path as a value, and which one. Returns the
+    /// display name, the sig with any head args (written or alias-pinned) substituted, and the
+    /// instantiation hint. A view over [`Self::path_fn`] (TICKET-204): `Bx[int].put` and `B.put`
+    /// answer with only `put`'s own `U` free, exactly as `Bx.put` is re-pinned.
+    pub(super) fn generic_fn_value_sig(&self, e: &Expr) -> Option<(String, FnSig, String)> {
+        self.path_fn(e)
+            .and_then(|pf| self.pin_path_head(pf))
+            .filter(|pf| !pf.sig.type_params.is_empty())
+            .map(|pf| (pf.display, pf.sig, pf.spelling))
+    }
+
+    /// The `m.f` half of [`Self::path_fn`]: `m` is a whole-module import here and `f` is one of its
+    /// fns.
+    fn module_fn(&self, m: &str, name: &str) -> Option<(String, FnSig)> {
+        if !matches!(self.head_binding(m), HeadBinding::Module) {
+            return None;
+        }
+        let msig = self.module_sigs.get(self.imported_modules.get(m)?)?;
+        let sig = msig.certain_fn(name)?;
+        Some((format!("{m}.{name}"), sig.clone()))
+    }
+
+    /// [`Self::module_fn`] when `f` is GENERIC.
+    fn generic_module_fn(&self, m: &str, name: &str) -> Option<(String, FnSig)> {
+        self.module_fn(m, name)
+            .filter(|(_, sig)| !sig.type_params.is_empty())
+    }
+
+    /// THE one answer to "is this path a fn-like item read as a value, with which signature"
+    /// (TICKET-204, Rust's path-value rule): a same-module or from-imported fn no local shadows,
+    /// `m.f` on a whole-module import, or a type member — a static method, an instance method named
+    /// through its type (receiver first), or a payload variant. Generic or not; the caller filters.
+    pub(super) fn path_fn(&self, e: &Expr) -> Option<PathFn> {
+        match &e.kind {
             ExprKind::Ident(name) => {
                 if !matches!(
                     self.head_binding(name),
@@ -2430,33 +2465,384 @@ impl Checker {
                 {
                     return None;
                 }
-                (
-                    name.clone(),
-                    self.functions
-                        .get(name)
-                        .filter(|_| self.slot_holds_fn_decl(name))?,
-                )
+                let sig = self
+                    .functions
+                    .get(name)
+                    .filter(|_| self.slot_holds_fn_decl(name))?;
+                Some(PathFn::of_fn(name.clone(), sig.clone()))
             }
             ExprKind::Field { obj, name, .. } => {
-                let ExprKind::Ident(m) = &obj.kind else {
-                    return None;
-                };
-                return self.generic_module_fn(m, name);
+                if let ExprKind::Ident(m) = &obj.kind
+                    && let Some((display, sig)) = self.module_fn(m, name)
+                {
+                    return Some(PathFn::of_fn(display, sig));
+                }
+                let (th, head_args) = self.peel_type_path(obj)?;
+                self.type_member_fn(&th, head_args, name)
             }
-            _ => return None,
-        };
-        (!sig.type_params.is_empty()).then(|| (display, sig.clone()))
+            _ => None,
+        }
     }
 
-    /// The `m.f` half of [`Self::generic_fn_value_sig`]: `m` is a whole-module import here and `f`
-    /// is one of its GENERIC fns.
-    fn generic_module_fn(&self, m: &str, name: &str) -> Option<(String, FnSig)> {
-        if !matches!(self.head_binding(m), HeadBinding::Module) {
+    /// The type head of a member path's receiver `obj`, with its written type arguments: `Bx`,
+    /// `Bx[int]`, `vlib.R2[int, str]`, or an alias `B`. An alias takes no type arguments, so
+    /// `A[int]` is no type path.
+    fn peel_type_path(&self, obj: &Expr) -> Option<(TypeHead, Option<WrittenTypeArgs>)> {
+        let (head, args) = match crate::ast::type_application(obj) {
+            Some(app) => (app.head, Some((app.args, app.args_span))),
+            None => (obj, None),
+        };
+        let th = self.type_head(head)?;
+        if th.pinned.is_some() && args.is_some() {
             return None;
         }
-        let msig = self.module_sigs.get(self.imported_modules.get(m)?)?;
-        let sig = msig.certain_fn(name)?;
-        (!sig.type_params.is_empty()).then(|| (format!("{m}.{name}"), sig.clone()))
+        Some((th, args))
+    }
+
+    /// The fn-like member `name` of type head `th`: a payload variant (a constructor fn) or a
+    /// method (an instance method takes its receiver first, keyword `self`). `None` for a nullary
+    /// variant, a protocol, a miss, and a native handle, whose methods have no proto.
+    fn type_member_fn(
+        &self,
+        th: &TypeHead,
+        head_args: Option<WrittenTypeArgs>,
+        name: &str,
+    ) -> Option<PathFn> {
+        if th.native_handle {
+            return None;
+        }
+        let key = &th.key;
+        let params_of = |tps: &[TyParam]| {
+            tps.iter()
+                .map(|tp| Ty::Param(tp.name.clone()))
+                .collect::<Vec<_>>()
+        };
+        let method = |tps: Vec<TyParam>, msig: &FnSig, recv: Ty| {
+            let res = Resolution::MethodFn {
+                type_key: key.clone(),
+                method: name.to_string(),
+            };
+            (method_value_sig(msig, &tps, recv), tps, res)
+        };
+        let (mut sig, head_decl, res) = match th.kind {
+            TypeHeadKind::Enum => {
+                let tps = self.enum_type_params.get(key).cloned().unwrap_or_default();
+                let recv = Ty::Enum(key.clone(), params_of(&tps));
+                if let Some(v) = self.variants.get(&(key.clone(), name.to_string())) {
+                    if v.payload.is_empty() {
+                        return None;
+                    }
+                    let res = Resolution::VariantFn {
+                        enum_key: key.clone(),
+                        variant: name.to_string(),
+                        arity: v.payload.len(),
+                    };
+                    let mut sig = FnSig::plain(v.payload.clone(), recv);
+                    sig.type_params = tps.clone();
+                    (sig, tps, res)
+                } else {
+                    method(tps, self.enum_methods.get(key)?.get(name)?, recv)
+                }
+            }
+            TypeHeadKind::Struct => {
+                let info = self.struct_shape(key)?;
+                let tps = info.type_params.clone();
+                let recv = Ty::Struct(key.clone(), params_of(&tps));
+                method(tps, info.methods.get(name)?, recv)
+            }
+            TypeHeadKind::Newtype => {
+                let tps = self
+                    .newtype_type_params
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_default();
+                let recv = Ty::NewType(key.clone(), params_of(&tps));
+                method(tps, self.newtype_defs.get(key)?.1.get(name)?, recv)
+            }
+            TypeHeadKind::Protocol => return None,
+        };
+        // A head param the instantiated sig no longer names (`Box[int].make2`) leaves the sig but
+        // stays in `head_decl`, so written head args still arity-check against the declaration.
+        let mut occurring = Vec::new();
+        for t in sig.params.iter().chain(std::iter::once(&sig.ret)) {
+            ty_collect_params(t, None, &mut occurring);
+        }
+        let own = sig.type_params.split_off(head_decl.len());
+        let kept: Vec<TyParam> = head_decl
+            .iter()
+            .filter(|tp| occurring.contains(&tp.name))
+            .cloned()
+            .collect();
+        let head_params = kept.len();
+        sig.type_params = kept.iter().cloned().chain(own.iter().cloned()).collect();
+        let head_text = match &head_args {
+            Some((args, _)) => format!(
+                "{}[{}]",
+                th.spelled,
+                args.iter()
+                    .map(|t| self.resolve_ty_ro(t).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => th.spelled.clone(),
+        };
+        let display = format!("{head_text}.{name}");
+        let hint_head = if head_args.is_none() && th.pinned.is_none() {
+            fn_spelling(&th.spelled, &kept)
+        } else {
+            head_text
+        };
+        Some(PathFn {
+            display,
+            head_spelled: th.spelled.clone(),
+            sig,
+            head_decl,
+            head_params,
+            head_args,
+            head_pinned: th.pinned.clone(),
+            res: Some(res),
+            spelling: fn_spelling(&format!("{hint_head}.{name}"), &own),
+        })
+    }
+
+    /// The one place head args become a substitution for a `&self` reader: the alias-pinned args,
+    /// else the written ones (resolved with `resolve_ty_ro`), else none (`pf` unchanged). `None` on
+    /// an arity mismatch, which [`Self::path_fn_value_ty`] reports at the read.
+    fn pin_path_head(&self, mut pf: PathFn) -> Option<PathFn> {
+        let args: Vec<Ty> = if let Some(p) = &pf.head_pinned {
+            p.clone()
+        } else if let Some((a, _)) = &pf.head_args {
+            a.iter().map(|t| self.resolve_ty_ro(t)).collect()
+        } else {
+            return Some(pf);
+        };
+        if args.len() != pf.head_decl.len() {
+            return None;
+        }
+        let map: HashMap<String, Ty> = pf
+            .head_decl
+            .iter()
+            .map(|tp| tp.name.clone())
+            .zip(args)
+            .collect();
+        let mut sig = subst_sig(&pf.sig, &map);
+        sig.type_params = sig.type_params.split_off(pf.head_params);
+        pf.spelling = fn_spelling(&pf.display, &sig.type_params);
+        pf.sig = sig;
+        pf.head_params = 0;
+        pf.head_decl = Vec::new();
+        pf.head_args = None;
+        pf.head_pinned = None;
+        Some(pf)
+    }
+
+    /// The value type of fn-like path `pf` read here, with its own written type args `own_args`
+    /// (a turbofish), if any: the witness wall, the head and own arity checks, the bounds over the
+    /// type's declared params followed by the item's own (DEC-202), then the substituted fn type —
+    /// or, with params left free, the pin-or-reject rule of [`Self::generic_fn_value_ty`].
+    fn path_fn_value_ty(
+        &mut self,
+        pf: PathFn,
+        own_args: Option<WrittenTypeArgs>,
+        span: Span,
+    ) -> Ty {
+        // M24 — the fn-as-value wall: pinning the type params does NOT recover the witness (the pin
+        // is checker-only, the runtime value is the same erased function).
+        if self.reject_witness_fn_value(&pf.display, &pf.sig.witness_params, span) {
+            return Ty::Unknown;
+        }
+        let own = pf.sig.type_params[pf.head_params..].to_vec();
+        let mut map = HashMap::new();
+        let mut arity_ok = true;
+        if let Some((args, aspan)) = &pf.head_args {
+            let resolved: Vec<Ty> = args.iter().map(|t| self.resolve_type(t, *aspan)).collect();
+            arity_ok &= resolved.len() == pf.head_decl.len();
+            map.extend(self.seed_targs(&pf.head_spelled, &pf.head_decl, &resolved, span));
+        } else if let Some(pinned) = &pf.head_pinned {
+            for (tp, t) in pf.head_decl.iter().zip(pinned) {
+                map.insert(tp.name.clone(), t.clone());
+            }
+        }
+        if let Some((args, aspan)) = &own_args {
+            let resolved: Vec<Ty> = args.iter().map(|t| self.resolve_type(t, *aspan)).collect();
+            arity_ok &= resolved.len() == own.len();
+            // `seed_targs` emits the clean "'name' expects N type argument(s), found M".
+            map.extend(self.seed_targs(&pf.display, &own, &resolved, span));
+        }
+        if !arity_ok {
+            return Ty::Unknown;
+        }
+        let tps: Vec<TyParam> = pf.head_decl.iter().chain(own.iter()).cloned().collect();
+        self.enforce_bounds(&tps, &tps, &map, span);
+        let mut sig = subst_sig(&pf.sig, &map);
+        sig.type_params.retain(|tp| !map.contains_key(&tp.name));
+        if sig.type_params.is_empty() {
+            return fn_value_ty(&sig);
+        }
+        let spelling = if map.is_empty() {
+            pf.spelling.clone()
+        } else {
+            fn_spelling(&pf.display, &sig.type_params)
+        };
+        self.generic_fn_value_ty(&pf.display, &sig, &spelling, span)
+            .unwrap_or_else(|| fn_value_ty(&sig))
+    }
+
+    /// THE one checker resolution of a type-applied fn value `head[T…]`, either carrier
+    /// (`ast::type_application`): `pair[str, int]`, `lib.idt[int]`, `Bx[int].put[str]`. `None` when
+    /// the head is no fn-like path with type params of its own.
+    pub(super) fn infer_type_applied_fn_value(&mut self, e: &Expr) -> Option<Ty> {
+        let app = crate::ast::type_application(e)?;
+        let pf = self.path_fn(app.head)?;
+        if pf.sig.type_params.len() == pf.head_params {
+            return None;
+        }
+        let head = app.head;
+        match &pf.res {
+            Some(r) => self.record_resolution(head.id, r.clone(), head.span),
+            // A fn head records `Resolution::Fn`, the one fact the compiler erases on (DEC-197).
+            None => match &head.kind {
+                ExprKind::Ident(name) => {
+                    let r = self.value_head_resolution(name);
+                    self.record_resolution(head.id, r, head.span);
+                }
+                ExprKind::Field { obj: m, name, .. } => {
+                    if let Resolution::ModuleMember { module, name } =
+                        self.member_resolution(m, name)
+                    {
+                        self.record_resolution(head.id, Resolution::Fn { module, name }, head.span);
+                    }
+                    // The compiler loads the module head as a value (`Compiler::resolution` (5)).
+                    if let ExprKind::Ident(mn) = &m.kind {
+                        let r = self.value_head_resolution(mn);
+                        self.record_resolution(m.id, r, m.span);
+                    }
+                }
+                _ => {}
+            },
+        }
+        Some(self.path_fn_value_ty(pf, Some((app.args.clone(), app.args_span)), head.span))
+    }
+
+    /// A type path `Head.name` / `Head[T…].name` read as a value (TICKET-204): a nullary variant, a
+    /// fn-like member through [`Self::type_member_fn`], or one of the refusals (a protocol method,
+    /// a native method, a missing variant). `None` when `obj` is no type head or `name` is no member
+    /// this decides; the caller falls through to the ordinary field path.
+    fn type_member_value(
+        &mut self,
+        id: crate::ast::NodeId,
+        obj: &Expr,
+        name: &str,
+        name_span: Span,
+    ) -> Option<Ty> {
+        let (th, head_args) = self.peel_type_path(obj)?;
+        let spelled = th.spelled.clone();
+        if th.kind == TypeHeadKind::Protocol {
+            let has = self
+                .protocols
+                .get(&th.key)
+                .is_some_and(|p| p.methods.iter().any(|(m, _)| m == name));
+            if !has {
+                return None;
+            }
+            self.error(
+                name_span,
+                format!(
+                    "'{name}' is a method of protocol '{spelled}' -- a protocol method is not a \
+                      value: name it through a concrete type (`<Type>.{name}`, which takes the \
+                      receiver first) or wrap it (`fn(x): x.{name}()`)"
+                ),
+            );
+            return Some(Ty::Unknown);
+        }
+        if th.native_handle {
+            if !self
+                .structs
+                .get(&th.key)
+                .is_some_and(|info| info.methods.contains_key(name))
+            {
+                return None;
+            }
+            self.error(
+                name_span,
+                format!(
+                    "'{name}' is a method of the native type '{spelled}' -- \
+                     a native method is not a value: call it on a value (`x.{name}(…)`) or wrap \
+                     it in a closure (`fn(x): x.{name}()`)"
+                ),
+            );
+            return Some(Ty::Unknown);
+        }
+        let key = th.key.clone();
+        if th.kind == TypeHeadKind::Enum
+            && self
+                .variants
+                .get(&(key.clone(), name.to_string()))
+                .is_some_and(|v| v.payload.is_empty())
+        {
+            // A nullary variant is a value of the enum: explicit head args resolve and arity-check,
+            // an alias head pins its own, a bare head leaves them Unknown.
+            self.record_variant(id, &key, name, name_span);
+            let tps = self.enum_type_params.get(&key).cloned().unwrap_or_default();
+            let args = if let Some((targs, _)) = &head_args {
+                let resolved: Vec<Ty> = targs
+                    .iter()
+                    .map(|t| self.resolve_type(t, obj.span))
+                    .collect();
+                self.seed_targs(&spelled, &tps, &resolved, obj.span);
+                resolved
+            } else {
+                match th.pinned {
+                    Some(p) if p.len() == tps.len() => p,
+                    _ => vec![Ty::Unknown; tps.len()],
+                }
+            };
+            return Some(Ty::Enum(key, args));
+        }
+        if let Some(pf) = self.type_member_fn(&th, head_args, name) {
+            if let Some(r) = pf.res.clone() {
+                self.record_resolution(id, r, name_span);
+            }
+            return Some(self.path_fn_value_ty(pf, None, name_span));
+        }
+        if th.kind == TypeHeadKind::Enum {
+            // A declared enum is named bare, as the call path names it; an alias as written.
+            let ename = if th.pinned.is_some() {
+                &spelled
+            } else {
+                &th.name
+            };
+            let names = self.variant_names(&key);
+            self.error_help(
+                name_span,
+                format!("enum '{ename}' has no variant '{name}'"),
+                suggest::did_you_mean(name, &names),
+            );
+            return Some(Ty::Unknown);
+        }
+        None
+    }
+
+    /// The one message for a type name read as a value, bare, imported, qualified or type-applied
+    /// (TICKET-204). It decides nothing about the head; it formats from `th`.
+    fn type_not_value(&mut self, th: &TypeHead, span: Span) {
+        let spelled = &th.spelled;
+        let msg = if th.native_handle {
+            format!("'{spelled}' is a type, not a value")
+        } else {
+            match th.kind {
+                TypeHeadKind::Struct | TypeHeadKind::Newtype => format!(
+                    "'{spelled}' is a type, not a value — constructors are not values: call it \
+                      (`{spelled}(…)`) or wrap it in a closure"
+                ),
+                TypeHeadKind::Enum => format!(
+                    "'{spelled}' is a type, not a value — use one of its variants \
+                      (`{spelled}.<Variant>`)"
+                ),
+                TypeHeadKind::Protocol => format!("'{spelled}' is a protocol, not a value"),
+            }
+        };
+        self.error(span, msg);
     }
 
     /// THE ONE diagnostic for "this read of generic fn `name` cannot become a function value here",
@@ -2469,6 +2855,7 @@ impl Checker {
         &mut self,
         name: &str,
         decl: &FnSig,
+        spelling: &str,
         span: Span,
     ) {
         let type_params = &decl.type_params;
@@ -2488,17 +2875,9 @@ impl Checker {
             .collect::<Vec<_>>()
             .join(", ");
         let sig = sig.to_string();
-        // A turbofish carries exactly ONE type argument (`infer_index` / `seed_targs`), so it is only
-        // a fix for a single-parameter generic — offering it for two would be advice that cannot work
-        // (measured: `pair[int]` → "expects 2 type argument(s), found 1"; `pair[int, str]` → a parse
-        // error).
-        // TICKET-197: the value-position turbofish works for a same-module, from-imported or `m.f`
-        // head alike (`infer_index` asks `generic_fn_value_sig`).
-        let turbofish = if type_params.len() == 1 {
-            format!("instantiate it (`{name}[<{names}>]`), or ")
-        } else {
-            String::new()
-        };
+        // TICKET-204: a turbofish takes every parameter at once (`pair[<A>, <B>]`), on any fn-like
+        // path (`R1[<T>].L`, `Bx[<T>].put[<U>]`); `spelling` is the hint `path_fn` built.
+        let turbofish = format!("instantiate it (`{spelling}`), or ");
         // Which parameters actually OCCUR in the signature? Only those can be reached by giving the
         // position a concrete function type. One that appears NOWHERE (`pred[T](n: int) -> bool`,
         // reachable from a HOF slot) renders no `<…>` hole at all, so the "write a real type in place
@@ -2526,7 +2905,7 @@ impl Checker {
             )
         } else {
             // The genuinely-unused parameter. A type at this position can never reach it, so the only
-            // honest remedies are the turbofish (single-parameter generics only) and deleting it.
+            // honest remedies are the turbofish and deleting it.
             let plural = if absent.len() == 1 { "s" } else { "" };
             format!(
                 "{} appear{plural} nowhere in its signature (`{sig}`), so no type at this position \
@@ -2645,7 +3024,8 @@ impl Checker {
             // and we return the CONCRETE `fn(str) -> str` — NEVER `expected` — leaving the existing
             // assignability / arg / return check to reject it against `fn(str) -> int`.
             if !type_params.is_empty()
-                && let Some(ty) = self.generic_fn_value_ty(name, &sig, span)
+                && let Some(ty) =
+                    self.generic_fn_value_ty(name, &sig, &fn_spelling(name, &type_params), span)
             {
                 return ty;
             }
@@ -2694,6 +3074,11 @@ impl Checker {
             };
             self.record_resolution(id, r, span);
             return Ty::option(Ty::Unknown);
+        }
+        // A type name read as a value (`f := Box`, `f := Meters`, TICKET-204).
+        if let Some(th) = self.bare_type_head(name) {
+            self.type_not_value(&th, span);
+            return Ty::Unknown;
         }
         // A bare user-variant name used as a value (`Red`, `Leaf`) is no longer allowed — variants are
         // scoped under their enum and must be written qualified (`Color.Red`, `Tree.Leaf`).
@@ -3722,85 +4107,6 @@ impl Checker {
         }
     }
 
-    /// Is `obj` a STRUCT TYPE head (bare or module-qualified), not a value — the same two shapes
-    /// `infer_static_call`'s bare/qualified arms resolve a static CALL through (`expr.rs`'s
-    /// `ExprKind::Ident`/`ExprKind::Field` arms). Returns the struct's runtime key and the spelling to
-    /// quote back at the user. `None` for anything else, including a LOCAL binding that merely
-    /// shadows a struct name (W12-22).
-    fn struct_value_head(&self, obj: &Expr) -> Option<(String, String)> {
-        match &obj.kind {
-            ExprKind::Ident(t) if !self.head_hides_type(t) && self.struct_names.contains(t) => {
-                Some((self.bare_key(t), t.clone()))
-            }
-            ExprKind::Field {
-                obj: inner,
-                name: t,
-                ..
-            } => {
-                let ExprKind::Ident(m) = &inner.kind else {
-                    return None;
-                };
-                if self.head_is_value(m) {
-                    return None;
-                }
-                let mid = self.imported_modules.get(m)?;
-                let sig = self.module_sigs.get(mid)?;
-                if !sig.struct_defs.contains_key(t) {
-                    return None;
-                }
-                Some((self.type_key(mid, t), format!("{m}.{t}")))
-            }
-            _ => None,
-        }
-    }
-
-    /// `Alias.Variant` as a value, for an alias (spelled `spelled`) of the enum `ekey` pinning
-    /// `head_targs`. Mirrors the `Enum.Variant`-as-value block in `infer_field`, but keys on the
-    /// alias's resolved identity + its pinned type arguments instead of `enum_type_params`'s count
-    /// alone — a bare alias of a generic enum leaves the args Unknown, same as the bare-enum path.
-    fn alias_variant_value(
-        &mut self,
-        ekey: String,
-        head_targs: Vec<Ty>,
-        spelled: &str,
-        name: &str,
-        obj_span: Span,
-        name_span: Span,
-    ) -> Ty {
-        let resolved = self
-            .variants
-            .get(&(ekey.clone(), name.to_string()))
-            .cloned();
-        match resolved {
-            Some(v) if v.payload.is_empty() => {
-                let nparams = self.enum_type_params.get(&ekey).map_or(0, |t| t.len());
-                if head_targs.len() == nparams {
-                    Ty::Enum(ekey, head_targs)
-                } else {
-                    Ty::Enum(ekey, vec![Ty::Unknown; nparams])
-                }
-            }
-            Some(_) => {
-                self.error(
-                    obj_span,
-                    format!(
-                        "variant '{name}' of enum '{spelled}' carries a payload; construct it as {spelled}.{name}(...)"
-                    ),
-                );
-                Ty::Unknown
-            }
-            None => {
-                let names = self.variant_names(&ekey);
-                self.error_help(
-                    name_span,
-                    format!("enum '{spelled}' has no variant '{name}'"),
-                    suggest::did_you_mean(name, &names),
-                );
-                Ty::Unknown
-            }
-        }
-    }
-
     pub(super) fn infer_field(
         &mut self,
         id: crate::ast::NodeId,
@@ -3850,63 +4156,6 @@ impl Checker {
                 return Ty::Unknown;
             }
         }
-        // `module.Enum.Variant` used as a value: a bound module dotted with one of its enums dotted
-        // with a nullary variant — the qualified analogue of the bare `Enum.Variant` value form.
-        if let ExprKind::Field {
-            obj: inner_obj,
-            name: ename,
-            ..
-        } = &obj.kind
-            && let ExprKind::Ident(mname) = &inner_obj.kind
-            && !self.head_is_value(mname)
-            && let Some(mid) = self.imported_modules.get(mname).cloned()
-            && let Some(sig) = self.module_sigs.get(&mid).cloned()
-            && let Some(edef) = sig.enum_defs.get(ename)
-        {
-            match edef.variant_names.iter().position(|v| v == name) {
-                Some(i) if edef.variants[i].payload.is_empty() => {
-                    let r = Resolution::Variant {
-                        enum_key: self.type_key(&mid, ename),
-                        variant: name.to_string(),
-                    };
-                    self.record_resolution(id, r, name_span);
-                    return Ty::Enum(
-                        self.type_key(&mid, ename),
-                        vec![Ty::Unknown; edef.type_params.len()],
-                    );
-                }
-                Some(_) => {
-                    self.error(
-                        obj.span,
-                        format!("variant '{name}' of enum '{ename}' carries a payload; construct it as {mname}.{ename}.{name}(…)"),
-                    );
-                    return Ty::Unknown;
-                }
-                None => {
-                    let names = edef.variant_names.clone();
-                    self.error_help(
-                        name_span,
-                        format!("enum '{ename}' has no variant '{name}'"),
-                        suggest::did_you_mean(name, &names),
-                    );
-                    return Ty::Unknown;
-                }
-            }
-        }
-        // `module.Alias.Variant` used as a value: an EXPORTED alias of an enum reached qualified
-        // (TICKET-172). Same rules as the local `Alias.Variant` value form below.
-        if let ExprKind::Field {
-            obj: inner_obj,
-            name: aname,
-            ..
-        } = &obj.kind
-            && let ExprKind::Ident(mname) = &inner_obj.kind
-            && let Some(Ty::Enum(ekey, head_targs)) = self.qualified_alias_ty(mname, aname)
-        {
-            let spelled = format!("{mname}.{aname}");
-            self.record_variant(id, &ekey, name, name_span);
-            return self.alias_variant_value(ekey, head_targs, &spelled, name, obj.span, name_span);
-        }
         // MEMBER-as-a-value position, and the same shadowing rule: `Col.Red` inside
         // `fn f[Col: Tagged]` is the PARAMETER, so the enum/struct arms below must never see the
         // name. Nothing is reachable through an erased type parameter except a STATIC method its
@@ -3924,127 +4173,11 @@ impl Checker {
                 obj.span,
             );
         }
-        // `Alias.Variant` used as a value: a LOCAL `type` alias of an enum dotted with one of its
-        // nullary variants. Mirrors the `Enum.Variant`-as-value block below, arm for arm, but keys
-        // on the alias's resolved identity + its pinned type arguments (`head_targs`) instead of
-        // `enum_type_params`'s count alone — a bare alias of a generic enum leaves the args Unknown,
-        // same as the bare-enum path.
-        if let ExprKind::Ident(aname) = &obj.kind
-            && !self.head_hides_type(aname)
-            && let Some((ekey, head_targs)) = self.alias_enum_head(aname)
-        {
-            self.record_variant(id, &ekey, name, name_span);
-            return self.alias_variant_value(ekey, head_targs, aname, name, obj.span, name_span);
-        }
-        // `Enum.Variant` used as a value: a bare *unbound* name that is an enum, dotted with one of
-        // its nullary variants — sugar for the bare `Variant`. A real binding (struct/tuple/local
-        // named like the enum) wins, so only when `lookup` finds nothing. The bare enum name is gated
-        // by `enum_names` (visibility) and resolved to its runtime key for the layout lookup.
-        if let ExprKind::Ident(ename) = &obj.kind
-            && !self.head_hides_type(ename)
-            && self.enum_names.contains(ename)
-        {
-            let ekey = self.bare_key(ename);
-            let resolved = self
-                .variants
-                .get(&(ekey.clone(), name.to_string()))
-                .cloned();
-            match resolved {
-                Some(v) if v.payload.is_empty() => {
-                    let nparams = self.enum_type_params.get(&ekey).map_or(0, |t| t.len());
-                    self.record_variant(id, &ekey, name, name_span);
-                    return Ty::Enum(ekey, vec![Ty::Unknown; nparams]);
-                }
-                Some(_) => {
-                    self.error(
-                        obj.span,
-                        format!("variant '{name}' of enum '{ename}' carries a payload; construct it as {ename}.{name}(…)"),
-                    );
-                    return Ty::Unknown;
-                }
-                None => {
-                    let names = self.variant_names(&ekey);
-                    self.error_help(
-                        name_span,
-                        format!("enum '{ename}' has no variant '{name}'"),
-                        suggest::did_you_mean(name, &names),
-                    );
-                    return Ty::Unknown;
-                }
-            }
-        }
-        // `Type[T…].Variant` used as a VALUE (no call) — the declaration-site turbofish on a nullary
-        // variant: `Box[int].Empty`. Mirrors the bare `Enum.Variant` value form above, but returns
-        // the EXPLICIT type args (resolved), not `Unknown`. Three carriers converge through
-        // `type_apply_head`: single-arg `Index`, multi-arg `TypeApply`, and the module-qualified
-        // form `Index{Field{Ident(mod), Type}, idx}` (`mod.Box[int]`) — a whole-module import keys
-        // that one into `self.enums`/`self.variants` under `type_key(mid, name)`, never into the
-        // bare `enum_names` visibility set, so the gate must also test the keyed table.
-        if let Some((tname, ekey, type_exprs)) = self.type_apply_head(obj)
-            && (self.enum_names.contains(&tname) || self.enums.contains_key(&ekey))
-        {
-            let resolved: Vec<Ty> = type_exprs
-                .iter()
-                .map(|t| self.resolve_type(t, obj.span))
-                .collect();
-            // Arity-check the explicit args against the enum's params (reuse `seed_targs`).
-            let tps = self
-                .enum_type_params
-                .get(&ekey)
-                .cloned()
-                .unwrap_or_default();
-            self.seed_targs(&tname, &tps, &resolved, obj.span);
-            match self
-                .variants
-                .get(&(ekey.clone(), name.to_string()))
-                .cloned()
-            {
-                Some(v) if v.payload.is_empty() => {
-                    self.record_variant(id, &ekey, name, name_span);
-                    return Ty::Enum(ekey, resolved);
-                }
-                Some(_) => {
-                    self.error(
-                        obj.span,
-                        format!("variant '{name}' of enum '{tname}' carries a payload; construct it as {tname}[…].{name}(…)"),
-                    );
-                    return Ty::Unknown;
-                }
-                None => {
-                    let names = self.variant_names(&ekey);
-                    self.error_help(
-                        name_span,
-                        format!("enum '{tname}' has no variant '{name}'"),
-                        suggest::did_you_mean(name, &names),
-                    );
-                    return Ty::Unknown;
-                }
-            }
-        }
-        // `Type.method` or `module.Type.method` read as a VALUE (not called): resolve through the
-        // same static-call head `infer_static_call` uses, and if `name` IS a declared method, refuse
-        // it with the "methods are not values" wording instead of falling into `self.infer(obj)`
-        // (which does not know `obj` names a type and says "unknown name") (W12-22).
-        if let Some((key, spelled)) = self.struct_value_head(obj)
-            && let Some(is_static) = self
-                .structs
-                .get(&key)
-                .and_then(|info| info.methods.get(name))
-                .map(|sig| sig.is_static)
-        {
-            let msg = if is_static {
-                format!(
-                    "'{name}' is a static method of '{spelled}' -- methods are not values: call it \
-                     (`{spelled}.{name}(…)`) or wrap it (`fn(): {spelled}.{name}()`)"
-                )
-            } else {
-                format!(
-                    "'{name}' is an instance method of '{spelled}' -- methods are not values: call \
-                     it on a value (`x.{name}(…)`) or wrap it (`fn(): x.{name}()`)"
-                )
-            };
-            self.error(name_span, msg);
-            return Ty::Unknown;
+        // A type path read as a value (Rust's path-value rule, TICKET-204): `E.V`, `R1[int].L`,
+        // `Bx[int].make`, `Pt.getx`, `lib.E.V`, an alias head `A.L` — every head through
+        // `type_head`, every member through `type_member_fn`.
+        if let Some(t) = self.type_member_value(id, obj, name, name_span) {
+            return t;
         }
         let r = self.member_resolution(obj, name);
         self.record_resolution(id, r, name_span);
@@ -4068,18 +4201,22 @@ impl Checker {
                     if let Some((_, ty)) = info.fields.iter().find(|(f, _)| f == name) {
                         return subst(ty, &map);
                     }
-                    // A METHOD is not a field, and methods are NOT first-class values (a bound
-                    // method has no runtime representation — the compiler lowers a field-read to a
-                    // plain field load, which the VM would fault on). Reject like every sibling
-                    // receiver kind (enum/newtype/protocol) already does, but say WHY: reading a
-                    // method used to hand back a `Ty::Func` still carrying the un-bound `self` slot
-                    // typed `Ty::Unknown`, which laundered types (the `?` unified with anything).
+                    // A METHOD is not a field, and a BOUND method is not a value (Rust E0615
+                    // "attempted to take value of method"): it would hide its `self` capture, and
+                    // the compiler lowers a field-read to a plain field load. The method named
+                    // through its TYPE (`Bx[int].get`, receiver first) is the value form.
                     if info.methods.contains_key(name) {
+                        let recv = match &obj.kind {
+                            ExprKind::Ident(n) => n.as_str(),
+                            _ => "x",
+                        };
                         self.error(
                             name_span,
                             format!(
-                                "type {obj_ty} has no field '{name}' ('{name}' is a method — methods \
-                                 are not values: call it (`x.{name}(…)`) or wrap it (`fn(): x.{name}()`))"
+                                "type {obj_ty} has no field '{name}' ('{name}' is a method — a bound \
+                                 method is not a value: call it (`{recv}.{name}(…)`), wrap it \
+                                 (`fn(): {recv}.{name}()`), or name it through its type \
+                                 (`{obj_ty}.{name}`, which takes the receiver first))"
                             ),
                         );
                         return Ty::Unknown;
@@ -4111,7 +4248,12 @@ impl Checker {
                 // bare read — its rigid `T` must never reach the caller's scope.
                 if let ExprKind::Ident(m) = &obj.kind
                     && let Some((display, sig)) = self.generic_module_fn(m, name)
-                    && let Some(ty) = self.generic_fn_value_ty(&display, &sig, name_span)
+                    && let Some(ty) = self.generic_fn_value_ty(
+                        &display,
+                        &sig,
+                        &fn_spelling(&display, &sig.type_params),
+                        name_span,
+                    )
                 {
                     return ty;
                 }
@@ -4124,12 +4266,18 @@ impl Checker {
                 match member {
                     Some(Some(ty)) => ty,
                     _ => {
-                        let names = self.module_member_names(mname);
-                        self.error_help(
-                            name_span,
-                            format!("module '{mname}' has no member '{name}'"),
-                            suggest::did_you_mean(name, &names),
-                        );
+                        if let ExprKind::Ident(m) = &obj.kind
+                            && let Some(th) = self.qualified_type_head(m, name)
+                        {
+                            self.type_not_value(&th, name_span);
+                        } else {
+                            let names = self.module_member_names(mname);
+                            self.error_help(
+                                name_span,
+                                format!("module '{mname}' has no member '{name}'"),
+                                suggest::did_you_mean(name, &names),
+                            );
+                        }
                         Ty::Unknown
                     }
                 }
@@ -4142,56 +4290,18 @@ impl Checker {
         }
     }
 
-    pub(super) fn infer_index(&mut self, obj: &Expr, index: &Expr) -> Ty {
-        // Scope B — turbofish on a generic fn VALUE: `ident[int]` pins the fn's type params from the
-        // explicit type arg and yields the CONCRETE `fn(int) -> int` value (`ident[int]` parses as
-        // `Index { Ident(ident), int }`, so it lands here). TICKET-197: the head is whatever
-        // `generic_fn_value_sig` calls a generic fn value — a same-module or from-imported fn not
-        // shadowed by a local, or `m.f` on a whole-module import — indexed by a type-shaped
-        // expression. The head records `Resolution::Fn`, the one fact the compiler erases on. Runs
-        // BEFORE `infer_value(obj)`/inferring the index (which would wrongly report `int` as an
-        // unknown name and "cannot index into fn").
-        if let Some((display, sig)) = self.generic_fn_value_sig(obj)
-            && let Some(ty_expr) = self.index_as_type(index)
+    pub(super) fn infer_index(&mut self, e: &Expr, obj: &Expr, index: &Expr) -> Ty {
+        // A type-applied fn value `idt[int]` (TICKET-197/204): one resolution for both carriers.
+        // Runs BEFORE `infer_value(obj)`/inferring the index, which would wrongly report `int` as
+        // an unknown name and "cannot index into fn".
+        if let Some(t) = self.infer_type_applied_fn_value(e) {
+            return t;
+        }
+        // A type applied in value position (`Box[int]`, `Wrap[int]`) is a type, not a value.
+        if let Some(app) = crate::ast::type_application(e)
+            && let Some(th) = self.type_head(app.head)
         {
-            match &obj.kind {
-                ExprKind::Ident(name) => {
-                    let r = self.value_head_resolution(name);
-                    self.record_resolution(obj.id, r, obj.span);
-                }
-                ExprKind::Field { obj: m, name, .. } => {
-                    if let Resolution::ModuleMember { module, name } =
-                        self.member_resolution(m, name)
-                    {
-                        self.record_resolution(obj.id, Resolution::Fn { module, name }, obj.span);
-                    }
-                    // The compiler loads the module head as a value (`Compiler::resolution` (5)).
-                    if let ExprKind::Ident(mn) = &m.kind {
-                        let r = self.value_head_resolution(mn);
-                        self.record_resolution(m.id, r, m.span);
-                    }
-                }
-                _ => {}
-            }
-            let (type_params, wparams) = (sig.type_params.clone(), sig.witness_params.clone());
-            // M24 — the fn-as-value wall again: pinning the type params does NOT recover the
-            // witness (the pin is checker-only, the runtime value is the same erased function),
-            // so `reset[Counter]` is as unlowerable as a bare `reset`.
-            if self.reject_witness_fn_value(&display, &wparams, obj.span) {
-                return Ty::Unknown;
-            }
-            let targ = self.resolve_type(&ty_expr, index.span);
-            // `seed_targs` arity-checks the single type arg against the param count and emits the
-            // clean "'name' expects N type argument(s), found 1" error on a mismatch.
-            let map = self.seed_targs(&display, &type_params, &[targ], obj.span);
-            if type_params.iter().all(|tp| map.contains_key(&tp.name)) {
-                // Enforce declared bounds against the binding (`addone[str]` where `str: Add`
-                // fails), then yield the CONCRETE substituted fn type. Runtime is generic-ERASED.
-                self.enforce_bounds(&type_params, &type_params, &map, obj.span);
-                return subst(&fn_value_ty(&sig), &map);
-            }
-            // Arity mismatch (seed_targs already reported) — degrade to Unknown instead of
-            // falling through to the "cannot index into fn" double-report.
+            self.type_not_value(&th, e.span);
             return Ty::Unknown;
         }
         // Map keys are NOT int — infer the object first and check the index against the key type.
@@ -4972,8 +5082,11 @@ impl Checker {
             // `?.`/`??` carriers are lowered before checking. `recover:` carries a statement block
             // (which can introduce its own bindings); it is NOT scanned — a param pinnable only from
             // inside a `recover:` body stays un-inferable and requires an annotation (sound: this is
-            // the conservative v1 fallback, never a mis-pin). Leaves (`Ident`/literals/`TypeApply`/
-            // `RawStr`) have no child to scan.
+            // the conservative v1 fallback, never a mis-pin). Leaves (`Ident`/literals/`RawStr`)
+            // have no child to scan.
+            ExprKind::TypeApply { head, .. } => {
+                self.scan_expr_for_pin(name, head, match_pin, member_pin)
+            }
             _ => {}
         }
     }
@@ -5381,4 +5494,90 @@ fn renders_as_text(ty: &Ty) -> bool {
         | Ty::Module(_)
         | Ty::Unknown => false,
     }
+}
+
+/// Written type arguments and the span their diagnostics anchor on.
+pub(super) type WrittenTypeArgs = (Vec<Type>, Span);
+
+/// One fn-like path read as a value (TICKET-204): a fn, `m.f`, or a type member (a static method,
+/// an instance method through its type, a payload variant). Built by [`Checker::path_fn`].
+pub(super) struct PathFn {
+    /// The path as written, head args included (`pair`, `lib.pair`, `Bx[int].put`).
+    pub(super) display: String,
+    /// The type's spelling (`Bx`, `vlib.Bx`) for head-arg diagnostics; empty for a fn.
+    pub(super) head_spelled: String,
+    /// The value's signature; `type_params` holds the kept head params (the first `head_params`)
+    /// then the item's own.
+    pub(super) sig: FnSig,
+    /// The type's declared params, against which head args are arity-checked and mapped.
+    pub(super) head_decl: Vec<TyParam>,
+    pub(super) head_params: usize,
+    /// The written head args (`Bx[int].make`).
+    pub(super) head_args: Option<WrittenTypeArgs>,
+    /// An alias head's pinned args (`B.make`); at most one of this and `head_args` is `Some`.
+    pub(super) head_pinned: Option<Vec<Ty>>,
+    /// `None` for a fn (it records `Resolution::Fn`), else `MethodFn` / `VariantFn`.
+    pub(super) res: Option<Resolution>,
+    /// The instantiation hint (`pair[<A>, <B>]`, `R1[<T>].L`, `Bx[<T>].put[<U>]`).
+    pub(super) spelling: String,
+}
+
+impl PathFn {
+    fn of_fn(display: String, sig: FnSig) -> PathFn {
+        PathFn {
+            spelling: fn_spelling(&display, &sig.type_params),
+            display,
+            head_spelled: String::new(),
+            sig,
+            head_decl: Vec::new(),
+            head_params: 0,
+            head_args: None,
+            head_pinned: None,
+            res: None,
+        }
+    }
+}
+
+/// `display[<P>, …]` over `tps`, or `display` alone when there are none.
+pub(super) fn fn_spelling(display: &str, tps: &[TyParam]) -> String {
+    if tps.is_empty() {
+        return display.to_string();
+    }
+    let holes = tps
+        .iter()
+        .map(|tp| format!("<{}>", tp.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{display}[{holes}]")
+}
+
+/// A method sig as a value over its type's params `tps` (DEC-197: through `instantiate_method`):
+/// the type's params lead `type_params`, and an instance method's receiver slot becomes `recv`,
+/// keyword `self`.
+fn method_value_sig(msig: &FnSig, tps: &[TyParam], recv: Ty) -> FnSig {
+    let recv_map: HashMap<String, Ty> = tps
+        .iter()
+        .map(|tp| (tp.name.clone(), Ty::Param(tp.name.clone())))
+        .collect();
+    let mut sig = instantiate_method(msig, &recv_map);
+    if !msig.is_static {
+        if let Some(p) = sig.params.first_mut() {
+            *p = recv;
+        }
+        if let Some(l) = sig.labels.first_mut() {
+            *l = Some("self".to_string());
+        }
+        if let Some(slots) = &mut sig.slots {
+            slots.insert(
+                0,
+                crate::desugar::SlotSpec {
+                    name: Some("self".to_string()),
+                    default: None,
+                    is_variadic: false,
+                },
+            );
+        }
+    }
+    sig.type_params = tps.iter().cloned().chain(sig.type_params).collect();
+    sig
 }

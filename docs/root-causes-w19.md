@@ -23,7 +23,7 @@ the bare-name premise wave 16 named, surviving in three consumers TICKET-186/196
 | K1 | P1 | `k := 1; fn f(k: int = k)`; `g: fn(int)->int = fn(x: int) -> int: x*2` beside param `x`; `[x for x in ..]` | `default value cannot reference parameter 'k'` | CPython accepts (`1`, `6`) |
 | A1 | P1 (owner) | owner `xs := t.get(); xs.push(99)`; a spawned task reads `xs` and `t.get()` | `captured xs: [1, 99]  t.get(): [1]` (same for `memoize1`) | CPython both `[1, 99]` — **fixed TICKET-203** |
 | C2 | P2 | `chezzi test --timeout=500`: a job faults at 0 ms, the test then sleeps 3 s | only `TIMED-OUT`; the job's index fault is dropped | Go: the goroutine panic ends the run |
-| K4 | P2 | `p := pair[str, int]` | `expected ']', found ','` (the call form and one-arg `idt[int]` work) | Go accepts |
+| K4 | P2 | `p := pair[str, int]` | `expected ']', found ','` (the call form and one-arg `idt[int]` work) | Go accepts; fixed TICKET-204 |
 | A2 | P2 | `t.0.1` | `expected identifier, found float 0.1` | Rust `2` — **fixed in place 7e0581a3** |
 | S1 | P3 | `print(b"'")` | `b'\''` | CPython `b"'"` — **fixed in place c0a4c4e5** |
 | S2 | P3 | `json.decode` of a recursive struct | names `'s2::Node'` | bare name — **fixed in place c0a4c4e5** |
@@ -110,7 +110,9 @@ arguments by identity (`Param(X) == Param(X)`) and passes only on `Unknown`. K4 
 turbofish as a value) is a neighbour in the same "type-argument application" area: the one-arg
 value form goes through the checker's `Index{Ident, ..}` reinterpretation and the multi-arg form
 only parses before `.member` (`parser/mod.rs:2787`) — two deciders of one form; folded into this
-ticket.
+ticket. Fixed by TICKET-204: one `TypeApply { head, args }` carrier for every head, read with the
+one-arg `Index` through `ast::type_application`; type-path values (variants, static methods,
+methods through their type) go through `Checker::path_fn`.
 
 ## Family B3 — reaching every parked party on a cancel, and ranking at the end (C1, C2)
 

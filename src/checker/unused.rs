@@ -258,8 +258,8 @@ impl Scan {
             | ExprKind::Bytes(_)
             | ExprKind::RawStr(_)
             | ExprKind::Bool(_)
-            | ExprKind::Pass
-            | ExprKind::TypeApply { .. } => {}
+            | ExprKind::Pass => {}
+            ExprKind::TypeApply { head, .. } => self.expr(head),
             ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
                 es.iter().for_each(|x| self.expr(x))
             }
