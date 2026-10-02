@@ -202,3 +202,14 @@ runs on the current slice. W17-1 re-measured: no effect.
    `Checker::slot_holds_fn_decl` and `Checker::check_default_scope`; grid `name_denotes_grid`.
 4. **G3** (K2, K3) — TICKET-202; K4 split out to TICKET-204 (parser/AST, no shared code) — checker generics; after N3 if they share files.
 5. **A1** — TICKET-203 — a bug against TICKET-191's decision; small (`std/concurrency` task + memoize).
+
+## Owner decision (2026-10-02): what a type-applied name may be
+
+TICKET-204's scope. A type-applied FUNCTION is a value at any arity (`g := pair[str, int]`, Go/Rust),
+a module path takes a multi-arg type turbofish (`lib.R2[int, str].L(1)`), and a call with explicit
+type args takes named args (`Box[int](v=1)`, Go/Rust/Python). Types, constructors, enum variants and
+methods (instance, static, generic) are NOT values: a type name is never an expression (aliases need
+the `type` keyword), and a bound method would hide its `self` capture (copy or alias? Go copies a value
+receiver at binding time; Python shares the object) — write the closure (`a := fn(): b.get()`). Each
+rejection must say so correctly; today `f := Box[int]` reports "unknown type 'Box'; import it from
+lib" for an imported `Box`.
