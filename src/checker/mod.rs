@@ -635,6 +635,42 @@ struct GenFrameAcc {
     tys: HashMap<String, Vec<Ty>>,
 }
 
+/// A protocol bound with its type args RESOLVED (`Conv[S]` -> name `Conv`, args `[Ty::Param("S")]`).
+/// The args are resolved once, in the DECLARING scope, by [`Checker::resolve_bound`] (TICKET-202):
+/// a use site substitutes them, never re-resolves them in the caller's scope.
+#[derive(Clone, Debug, PartialEq)]
+struct TyBound {
+    name: String,
+    args: Vec<Ty>,
+}
+
+/// A declared type parameter with its bounds resolved once in the declaring scope (TICKET-202) by
+/// [`Checker::resolve_bounds`]. The resolved twin of the AST [`TypeParam`].
+#[derive(Clone, Debug, PartialEq)]
+struct TyParam {
+    name: String,
+    name_span: Span,
+    bounds: Vec<TyBound>,
+}
+
+/// [`subst`] over every bound arg of `tps` (names unchanged).
+fn subst_ty_params(tps: &[TyParam], map: &HashMap<String, Ty>) -> Vec<TyParam> {
+    tps.iter()
+        .map(|tp| TyParam {
+            name: tp.name.clone(),
+            name_span: tp.name_span,
+            bounds: tp
+                .bounds
+                .iter()
+                .map(|b| TyBound {
+                    name: b.name.clone(),
+                    args: b.args.iter().map(|a| subst(a, map)).collect(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// A function (or method) signature: parameter types and return type. `type_params` is non-empty
 /// only for generic functions (`fn max[T: Comparable]`), where `params`/`ret` contain `Ty::Param`s.
 #[derive(Clone)]
@@ -648,13 +684,13 @@ struct FnSig {
     /// type identity). Empty for synthetic/native sigs built via `plain`/`optional_tail`.
     labels: Vec<Option<String>>,
     ret: Ty,
-    type_params: Vec<TypeParam>,
+    type_params: Vec<TyParam>,
     /// `where T: Bound` clauses (empty for the common case). For a NATIVE method sig they name the
     /// enclosing native struct's type param and are enforced at each call site by the container
     /// method-dispatch arm (`enforce_bounds`); for a USER fn they are already MERGED into
     /// `type_params` by `fn_sig`, so this stays empty there. Excluded from `fn_sig_eq` (bound
     /// documentation, not type identity) — see the note there.
-    where_bounds: Vec<TypeParam>,
+    where_bounds: Vec<TyParam>,
     /// D6c — the minimum number of arguments this signature accepts; `params.len()` for an ordinary
     /// fixed-arity signature (set by [`FnSig::plain`]), but smaller when trailing params are optional
     /// (the net socket ops' optional `timeout_ms`). [`Checker::check_args`] accepts any arg count in
@@ -751,7 +787,7 @@ enum StructOrigin {
 /// naming the struct's type parameters; they're substituted at each use site.
 #[derive(Clone)]
 struct StructInfo {
-    type_params: Vec<TypeParam>,
+    type_params: Vec<TyParam>,
     fields: Vec<(String, Ty)>,
     methods: HashMap<String, FnSig>,
     origin: StructOrigin,
@@ -783,7 +819,7 @@ struct ProtocolInfo {
     /// in `methods`. Empty for an ordinary protocol. Reuses [`Bound`] — an embed ref is identical to
     /// a type-param bound (name + optional `[args]`). The builtin `Arithmetic` bundle is built with
     /// this same field (`embeds: [Add, Sub, Mul, Div]`, no own methods) — uniform machinery.
-    embeds: Vec<Bound>,
+    embeds: Vec<TyBound>,
 }
 
 /// A user enum variant: which enum it belongs to and its payload field types.
@@ -939,7 +975,7 @@ struct NewTypeSigInfo {
     underlying: Ty,
     /// The newtype's generic type params (empty for a scalar newtype), ferried across the module
     /// boundary so an imported generic newtype's instantiation/dispatch/cast-unwrap resolves.
-    type_params: Vec<TypeParam>,
+    type_params: Vec<TyParam>,
     methods: HashMap<String, FnSig>,
     /// The newtype's own decl docstring, carried across the module boundary for an importer's hover
     /// (see [`StructInfo::doc`]). Editor-only; never read by checking/codegen.
@@ -951,7 +987,7 @@ struct NewTypeSigInfo {
 #[derive(Clone)]
 struct EnumSigInfo {
     variant_names: Vec<String>,
-    type_params: Vec<TypeParam>,
+    type_params: Vec<TyParam>,
     variants: Vec<VariantInfo>,
     /// The enum's methods (`fn area(self) …`), name-keyed like `StructInfo.methods`. Ferried across
     /// the module boundary so an imported enum's methods resolve in the importer.
@@ -2178,12 +2214,12 @@ struct Checker {
     /// Generic type parameters currently in scope (name → its protocol bounds), set while
     /// building/checking a generic fn's signature and body. Save/restore to nest. Bounds carry their
     /// type args (`Iterator[T]`) so element-type recovery can read them in scope.
-    type_params: HashMap<String, Vec<Bound>>,
+    type_params: HashMap<String, Vec<TyBound>>,
     /// enum name → its variant names, in declaration order (for exhaustiveness).
     enums: HashMap<String, Vec<String>>,
     /// enum name → its generic type parameters (empty for a non-generic enum). Used to build the
     /// substitution from `Tree[int]`'s args onto each variant's payload (which may name `T`).
-    enum_type_params: HashMap<String, Vec<TypeParam>>,
+    enum_type_params: HashMap<String, Vec<TyParam>>,
     /// enum name (runtime key) → its methods (`fn area(self) …`), name-keyed exactly like
     /// `StructInfo.methods`. Resolves `enumval.method(args)` and protocol satisfaction for enums.
     enum_methods: HashMap<String, HashMap<String, FnSig>>,
@@ -2207,7 +2243,7 @@ struct Checker {
     /// `enum_type_params`: builds the substitution from a `Ty::NewType(key, args)`'s args onto the
     /// underlying type + method signatures (which may name the params). A non-empty entry marks the
     /// newtype as generic — gating off the scalar-newtype native operator auto-flow (methods-only).
-    newtype_type_params: HashMap<String, Vec<TypeParam>>,
+    newtype_type_params: HashMap<String, Vec<TyParam>>,
     /// Transparent type aliases (`type UserId = int`): name → the aliased AST type, resolved on
     /// demand in `resolve_type`. `alias_resolving` is the active resolution stack (cycle guard).
     aliases: HashMap<String, Type>,
@@ -2969,7 +3005,7 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         "Comparable".to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
-            embeds: vec![Bound {
+            embeds: vec![TyBound {
                 name: "Eq".to_string(),
                 args: Vec::new(),
             }],
@@ -3101,19 +3137,19 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         ProtocolInfo {
             type_params: Vec::new(),
             embeds: vec![
-                Bound {
+                TyBound {
                     name: "Add".to_string(),
                     args: Vec::new(),
                 },
-                Bound {
+                TyBound {
                     name: "Sub".to_string(),
                     args: Vec::new(),
                 },
-                Bound {
+                TyBound {
                     name: "Mul".to_string(),
                     args: Vec::new(),
                 },
-                Bound {
+                TyBound {
                     name: "Div".to_string(),
                     args: Vec::new(),
                 },
@@ -3368,7 +3404,7 @@ fn fn_slot_params_have_unknown(t: &Ty) -> bool {
 /// .fold(0, add)`'s slot reads `fn(int, ?) -> int` because the receiver is empty, yet argument ZERO
 /// pins `T = int` completely and Go's `Fold([]int{}, 0, add)` returns `0`. The carve-out belongs to
 /// the REPORT (see [`fn_slot_params_concrete`]), which each reporting caller applies itself.
-fn pin_generic_fn_value(type_params: &[TypeParam], declared: &Ty, want: &Ty) -> FnValuePin {
+fn pin_generic_fn_value(type_params: &[TyParam], declared: &Ty, want: &Ty) -> FnValuePin {
     let (Ty::Func { params: dp, .. }, Ty::Func { params: wp, .. }) = (declared, want) else {
         return FnValuePin::Skip;
     };
@@ -3524,12 +3560,15 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
     }
 }
 
-/// [`subst`] lifted to a whole signature — params + return only. Every other field (labels,
-/// arity, `is_static`, doc) is vocabulary-independent and rides along unchanged.
+/// [`subst`] lifted to a whole signature — params, return, and the bound args of `type_params` and
+/// `where_bounds` (TICKET-202). Every other field (labels, arity, `is_static`, doc) is
+/// vocabulary-independent and rides along unchanged.
 fn subst_sig(sig: &FnSig, map: &HashMap<String, Ty>) -> FnSig {
     FnSig {
         params: sig.params.iter().map(|t| subst(t, map)).collect(),
         ret: subst(&sig.ret, map),
+        type_params: subst_ty_params(&sig.type_params, map),
+        where_bounds: subst_ty_params(&sig.where_bounds, map),
         ..sig.clone()
     }
 }
@@ -3540,42 +3579,6 @@ fn fresh_param_name(base: &str, taken: &std::collections::BTreeSet<String>) -> S
         .map(|n| format!("{base}{n}"))
         .find(|c| !taken.contains(c))
         .expect("an unbounded counter finds a free name")
-}
-
-/// Rename every type-param reference in the annotation `t` found in `ren` (a `Named` name or a
-/// `Generic` head). Same five-variant walk as `ty_mentions`.
-fn rename_type_params(t: &Type, ren: &HashMap<String, String>) -> Type {
-    let go = |ts: &[Type]| {
-        ts.iter()
-            .map(|a| rename_type_params(a, ren))
-            .collect::<Vec<_>>()
-    };
-    match t {
-        Type::Named { name, span } => Type::Named {
-            name: ren.get(name).cloned().unwrap_or_else(|| name.clone()),
-            span: *span,
-        },
-        Type::Qualified { module, name, args } => Type::Qualified {
-            module: module.clone(),
-            name: name.clone(),
-            args: go(args),
-        },
-        Type::Generic(head, args, span) => Type::Generic(
-            ren.get(head).cloned().unwrap_or_else(|| head.clone()),
-            go(args),
-            *span,
-        ),
-        Type::Func {
-            params,
-            ret,
-            labels,
-        } => Type::Func {
-            params: go(params),
-            ret: Box::new(rename_type_params(ret, ren)),
-            labels: labels.clone(),
-        },
-        Type::Tuple(items) => Type::Tuple(go(items)),
-    }
 }
 
 /// Instantiate a method signature on a receiver whose type args are `recv_map`, with ONE
@@ -3610,22 +3613,14 @@ fn instantiate_method(sig: &FnSig, recv_map: &HashMap<String, Ty>) -> FnSig {
     FnSig {
         params: sig.params.iter().map(|t| subst(t, &map)).collect(),
         ret: subst(&sig.ret, &map),
-        type_params: sig
-            .type_params
-            .iter()
-            .map(|tp| TypeParam {
+        type_params: subst_ty_params(&sig.type_params, &map)
+            .into_iter()
+            .map(|tp| TyParam {
                 name: rename(&tp.name),
-                name_span: tp.name_span,
-                bounds: tp
-                    .bounds
-                    .iter()
-                    .map(|b| Bound {
-                        name: b.name.clone(),
-                        args: b.args.iter().map(|a| rename_type_params(a, &ren)).collect(),
-                    })
-                    .collect(),
+                ..tp
             })
             .collect(),
+        where_bounds: subst_ty_params(&sig.where_bounds, &map),
         witness_params: sig.witness_params.iter().map(rename).collect(),
         ..sig.clone()
     }
@@ -3781,7 +3776,7 @@ fn method_matches(proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
 /// `Unknown` actuals are ignored so an un-inferable argument doesn't pin a param).
 /// The `Ty::Param` vector for a list of type parameters — the type-arg slots of a generic type's
 /// declared SHAPE (`Struct(key, [Param(T), …])`). Used to build the expected-type-hint unify target.
-fn param_shape(tps: &[TypeParam]) -> Vec<Ty> {
+fn param_shape(tps: &[TyParam]) -> Vec<Ty> {
     tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect()
 }
 

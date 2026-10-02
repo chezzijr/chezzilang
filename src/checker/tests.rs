@@ -24974,17 +24974,18 @@ fn self_returning_operator_method_widens_through_the_operator_spelling() {
     ));
 }
 
-/// An owner type param NESTED inside an embed's type argument is declined at declare time. The
-/// re-spelling resolver reads the ambient scope, where the owner's params are gone, so a nested `T`
-/// resolved to `Unknown` — and an `Unknown` element type accepts EVERY argument (`["x"] in b` on a
-/// `Bag[int]` type-checked, then faulted). Rejecting is the sound decline; the direct form is fine.
+/// An owner type param NESTED inside an embed's type argument is substituted like any other: the
+/// embed arg is resolved once at the declaration, in its own protocol's scope (TICKET-202), so
+/// `Bag[int]` requires `Contains[List[int]]` and `["x"] in b` is rejected.
 #[test]
-fn a_type_param_nested_in_an_embed_arg_is_rejected() {
-    rejects(
-        "protocol Bag[T]:\n    Contains[List[T]]\n",
-        "nested inside a type argument",
+fn a_type_param_nested_in_an_embed_arg_is_substituted() {
+    ok(
+        "protocol Bag[T]:\n    Contains[List[T]]\nfn has(b: Bag[int]) -> bool:\n    return [1] in b\n",
     );
-    ok("protocol Bag[T]:\n    Contains[T]\n");
+    rejects(
+        "protocol Bag[T]:\n    Contains[List[T]]\nfn has(b: Bag[int]) -> bool:\n    return [\"x\"] in b\n",
+        "cannot test membership of List[str]",
+    );
 }
 
 /// Unary `-` on an existential whose protocol declares `neg` — routed through `satisfies`, so it
@@ -37545,6 +37546,320 @@ fn n3_field_default_naming_self_reports_no_fill_error() {
 fn bound_type_arg_abstract_mismatch_rejected() {
     rejects(
         "protocol Conv[S]:\n    fn conv(self) -> S\nstruct I:\n    n: int\n    fn conv(self) -> str:\n        return \"i{self.n}\"\nfn need[S, B: Conv[S]](u: B, s: S) -> S:\n    return u.conv()\nfn go[X, Y: Conv[str]](y: Y, x: X) -> X:\n    return need(y, x)\nprint(go(I(n=1), 5) + 1)\n",
+        "does not satisfy Conv[",
+    );
+}
+
+/// TICKET-202 (Family G3): a bound's type arguments mean what they mean at the DECLARATION, and an
+/// abstract argument satisfies `P[X]` only through its own bound `P[X]` for the same `X` (Rust
+/// E0277, Go "does not satisfy"). One grid over every bound site x every argument kind; each wrong
+/// cell is collected so a single run names all of them.
+#[test]
+fn bound_type_arg_grid() {
+    const H: &str = "protocol Conv[S]:\n    fn conv(self) -> S\nstruct I:\n    n: int\n    fn conv(self) -> str:\n        return \"i{self.n}\"\nstruct J:\n    n: int\n    fn conv(self) -> int:\n        return 7\n";
+    let mut wrong: Vec<String> = Vec::new();
+    let mut cell = |name: String, src: String, yes: bool, needle: &str| {
+        let errs: Vec<String> = check_src(&src)
+            .into_iter()
+            .filter(|e| e.severity == Severity::Error)
+            .map(|e| e.message)
+            .collect();
+        let good = if yes {
+            errs.is_empty()
+        } else {
+            errs.iter().any(|m| m.contains(needle))
+        };
+        if !good {
+            wrong.push(format!("{name}: {errs:?}"));
+        }
+    };
+    let callers: [(&str, &str, bool); 6] = [
+        ("concrete_ok", "fn go(y: I, x: str) -> str", true),
+        ("concrete_mismatch", "fn go(y: J, x: str) -> str", false),
+        (
+            "param_matching",
+            "fn go[X, Y: Conv[X]](y: Y, x: X) -> X",
+            true,
+        ),
+        (
+            "param_mismatch",
+            "fn go[X, Y: Conv[str]](y: Y, x: X) -> X",
+            false,
+        ),
+        ("param_unbound", "fn go[X, Y](y: Y, x: X) -> X", false),
+        (
+            "param_same_name",
+            "fn go[S, B: Conv[str]](y: B, x: S) -> S",
+            false,
+        ),
+    ];
+    let sites: [(&str, &str, &str); 7] = [
+        (
+            "fn_call",
+            "fn need[S, B: Conv[S]](u: B, s: S) -> S:\n    return u.conv()\n",
+            "need(y, x)",
+        ),
+        (
+            "fn_where",
+            "fn need[S, B](u: B, s: S) -> S where B: Conv[S]:\n    return u.conv()\n",
+            "need(y, x)",
+        ),
+        (
+            "static_call",
+            "struct M:\n    n: int\n    fn mk[S, B: Conv[S]](u: B, s: S) -> S:\n        return u.conv()\n",
+            "M.mk(y, x)",
+        ),
+        (
+            "struct_ctor",
+            "struct W[S, B: Conv[S]]:\n    s: S\n    b: B\n",
+            "W(s=x, b=y).s",
+        ),
+        (
+            "method_own",
+            "struct Bx:\n    n: int\n    fn pick[S, B: Conv[S]](self, u: B, s: S) -> S:\n        return u.conv()\n",
+            "Bx(n=0).pick(y, x)",
+        ),
+        (
+            "method_recv",
+            "struct Box[S]:\n    v: S\n    fn pick[B: Conv[S]](self, u: B) -> S:\n        return u.conv()\n",
+            "Box(v=x).pick(y)",
+        ),
+        (
+            "method_where",
+            "struct Box[S]:\n    v: S\n    fn pick[B](self, u: B) -> S where B: Conv[S]:\n        return u.conv()\n",
+            "Box(v=x).pick(y)",
+        ),
+    ];
+    for (site, decls, call) in sites {
+        for (arg, sig, yes) in callers {
+            cell(
+                format!("{site} x {arg}"),
+                format!("{H}{decls}{sig}:\n    return {call}\n"),
+                yes,
+                "does not satisfy Conv",
+            );
+        }
+    }
+    // Conditional conformance: `Box[S]` provides `Show` only where `S: Conv[str]`.
+    let cond = "protocol Show:\n    fn show(self) -> str\nstruct Box[S]:\n    v: S\n    fn show(self) -> str where S: Conv[str]:\n        return self.v.conv()\nfn sh[A: Show](a: A) -> str:\n    return a.show()\n";
+    for (arg, sig, yes) in [
+        ("concrete_ok", "fn go(y: I) -> str", true),
+        ("concrete_mismatch", "fn go(y: J) -> str", false),
+        ("param_matching", "fn go[Y: Conv[str]](y: Y) -> str", true),
+        ("param_mismatch", "fn go[Y: Conv[int]](y: Y) -> str", false),
+        ("param_unbound", "fn go[Y](y: Y) -> str", false),
+        ("param_same_name", "fn go[S: Conv[int]](y: S) -> str", false),
+    ] {
+        cell(
+            format!("cond_conf x {arg}"),
+            format!("{H}{cond}{sig}:\n    return sh(Box(v=y))\n"),
+            yes,
+            "does not satisfy Show",
+        );
+    }
+    // A type annotation applies the bound with the annotation's args.
+    let w = "struct W[S, B: Conv[S]]:\n    s: S\n    b: B\n";
+    cell(
+        "annotation x W[str, I]".into(),
+        format!("{H}{w}fn g(w: W[str, I]) -> str:\n    return w.s\n"),
+        true,
+        "",
+    );
+    cell(
+        "annotation x W[int, I]".into(),
+        format!("{H}{w}fn f(w: W[int, I]) -> int:\n    return w.s\n"),
+        false,
+        "does not satisfy Conv",
+    );
+    // A caller's type param named like a concrete type in the bound must not capture it.
+    cell(
+        "ctor_shadow".into(),
+        format!(
+            "{H}struct K:\n    n: int\n    fn conv(self) -> I:\n        return I(n=4)\nstruct W2[B: Conv[I]]:\n    b: B\nfn go[I](k: K, i: I) -> int:\n    return W2(b=k).b.conv().n\n"
+        ),
+        true,
+        "",
+    );
+    // The bound reaches `Conv` only through a protocol embed line.
+    let need = "fn need[S, B: Conv[S]](u: B, s: S) -> S:\n    return u.conv()\n";
+    let embed_rows: [(&str, &str, &[(&str, &str, bool)]); 3] = [
+        (
+            "embed_param",
+            "protocol PE[X]:\n    Conv[X]\n",
+            &[
+                ("concrete_ok", "fn go(y: I, x: str) -> str", true),
+                ("concrete_mismatch", "fn go(y: J, x: str) -> str", false),
+                (
+                    "param_matching",
+                    "fn go[X, Y: PE[X]](y: Y, x: X) -> X",
+                    true,
+                ),
+                (
+                    "param_mismatch",
+                    "fn go[X, Y: PE[str]](y: Y, x: X) -> X",
+                    false,
+                ),
+                ("param_unbound", "fn go[X, Y](y: Y, x: X) -> X", false),
+                (
+                    "param_same_name",
+                    "fn go[S, B: PE[str]](y: B, x: S) -> S",
+                    false,
+                ),
+            ],
+        ),
+        (
+            "embed_concrete",
+            "struct T:\n    n: int\nprotocol PT:\n    Conv[T]\n",
+            &[
+                ("concrete_ok", "fn go[Y: PT](y: Y, x: T) -> T", true),
+                ("param_same_name", "fn go[T, Y: PT](y: Y, x: T) -> T", false),
+            ],
+        ),
+        (
+            "embed_nested",
+            "protocol PL[X]:\n    Conv[List[X]]\n",
+            &[
+                (
+                    "param_matching",
+                    "fn go[X, Y: PL[X]](y: Y, x: List[X]) -> List[X]",
+                    true,
+                ),
+                (
+                    "param_mismatch",
+                    "fn go[X, Y: PL[X]](y: Y, x: X) -> X",
+                    false,
+                ),
+            ],
+        ),
+    ];
+    for (row, decls, sigs) in embed_rows {
+        for &(arg, sig, yes) in sigs {
+            cell(
+                format!("{row} x {arg}"),
+                format!("{H}{decls}{need}{sig}:\n    return need(y, x)\n"),
+                yes,
+                "does not satisfy Conv",
+            );
+        }
+    }
+    // A static protocol requirement called through the bounded param.
+    let mk = "protocol Mk[S]:\n    fn mk(s: S) -> Self\nstruct P:\n    n: int\n    fn mk(s: str) -> P:\n        return P(n=1)\nstruct Q:\n    n: int\n    fn mk(s: int) -> Q:\n        return Q(n=2)\n";
+    let need_mk = "fn need[S, B: Mk[S]](y: B, s: S) -> B:\n    return B.mk(s)\n";
+    for (arg, sig, yes) in [
+        ("concrete_ok", "fn go(y: P, x: str) -> P", true),
+        ("concrete_mismatch", "fn go(y: Q, x: str) -> Q", false),
+        (
+            "param_matching",
+            "fn go[X, Y: Mk[X]](y: Y, x: X) -> Y",
+            true,
+        ),
+        (
+            "param_mismatch",
+            "fn go[X, Y: Mk[str]](y: Y, x: X) -> Y",
+            false,
+        ),
+        ("param_unbound", "fn go[X, Y](y: Y, x: X) -> Y", false),
+        (
+            "param_same_name",
+            "fn go[S, B: Mk[str]](y: B, x: S) -> B",
+            false,
+        ),
+    ] {
+        cell(
+            format!("witness_static x {arg}"),
+            format!("{H}{mk}{need_mk}{sig}:\n    return need(y, x)\n"),
+            yes,
+            "does not satisfy Mk",
+        );
+    }
+    // The in-scope bound read by a witness call in the body.
+    cell(
+        "witness_body x param_matching".into(),
+        format!("{H}{mk}fn go[X, Y: Mk[X]](y: Y, x: X) -> Y:\n    return Y.mk(x)\n"),
+        true,
+        "",
+    );
+    cell(
+        "witness_body x param_mismatch".into(),
+        format!("{H}{mk}fn go[X, Y: Mk[str]](y: Y, x: X) -> Y:\n    return Y.mk(x)\n"),
+        false,
+        "expected str, found X",
+    );
+    // A generic struct's static method with a receiver-param bound.
+    let bs = "struct Bs[S]:\n    v: S\n    fn mk[B: Conv[S]](u: B, s: S) -> S:\n        return u.conv()\n";
+    for (arg, sig, yes) in callers {
+        cell(
+            format!("static_recv x {arg}"),
+            format!("{H}{bs}{sig}:\n    return Bs.mk(y, x)\n"),
+            yes,
+            "does not satisfy Conv",
+        );
+    }
+    // `S` is never inferred: the verdict must not depend on the caller's spelling.
+    let by = "struct By[S]:\n    v: S\n    fn mk[B: Conv[S]](u: B) -> int:\n        return 1\n";
+    for (arg, sig) in [
+        ("caller_S", "fn go[S, Y: Conv[S]](y: Y) -> int"),
+        ("caller_X", "fn go[X, Y: Conv[X]](y: Y) -> int"),
+    ] {
+        cell(
+            format!("static_uninf x {arg}"),
+            format!("{H}{by}{sig}:\n    return By.mk(y)\n"),
+            true,
+            "",
+        );
+    }
+    cell(
+        "static_turbo x str".into(),
+        format!("{H}{by}fn go[Y: Conv[str]](y: Y) -> int:\n    return By[str].mk(y)\n"),
+        true,
+        "",
+    );
+    cell(
+        "static_turbo x int".into(),
+        format!("{H}{by}fn go[Y: Conv[str]](y: Y) -> int:\n    return By[int].mk(y)\n"),
+        false,
+        "does not satisfy Conv",
+    );
+    // An embed arg may name a protocol declared later.
+    cell(
+        "embed_forward".into(),
+        "protocol Conv[S]:\n    fn conv(self) -> S\nprotocol PE:\n    Conv[B]\nprotocol B:\n    fn b(self) -> int\nstruct Z:\n    n: int\n    fn b(self) -> int:\n        return self.n\nstruct Y:\n    n: int\n    fn conv(self) -> B:\n        return Z(n=3)\nfn use_it[T: PE](t: T) -> int:\n    return t.conv().b()\nprint(use_it(Y(n=0)))\n".into(),
+        true,
+        "",
+    );
+    assert!(
+        wrong.is_empty(),
+        "{} wrong cells:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// TICKET-202 (K3b): a method's bound `Conv[T]` names the RECEIVER's `T`, so `Box[str]` accepts an
+/// `I` whose `conv` returns `str` (rustc compiles the same program).
+#[test]
+fn method_bound_reads_the_receiver_arg_ok() {
+    ok(
+        "protocol Conv[S]:\n    fn conv(self) -> S\nstruct I:\n    n: int\n    fn conv(self) -> str:\n        return \"i{self.n}\"\nstruct Box[T]:\n    v: T\n    fn pick[U: Conv[T]](self, u: U) -> T:\n        return u.conv()\nprint(Box(v=\"s\").pick(I(n=3)).upper())\n",
+    );
+}
+
+/// TICKET-202 (K3): a caller's own `T` must not capture the method bound's `T`; `Box[int]` needs
+/// `Conv[int]` and `I` provides `Conv[str]` (rustc E0277).
+#[test]
+fn method_bound_receiver_param_not_captured_rejected() {
+    rejects(
+        "protocol Conv[S]:\n    fn conv(self) -> S\nstruct I:\n    n: int\n    fn conv(self) -> str:\n        return \"i{self.n}\"\nstruct Box[T]:\n    v: T\n    fn pick[U: Conv[T]](self, u: U) -> T:\n        return u.conv()\nfn go[T](b: Box[int], u: I, t: T) -> int:\n    return b.pick(u)\nprint(go(Box(v=1), I(n=3), 0) + 1)\n",
+        "does not satisfy Conv",
+    );
+}
+
+/// TICKET-202 (k16/k2): `T: Conv[str]` forwarded as `B: Conv[A]` with `A := T` needs `Conv[T]`,
+/// which `T` does not have; an abstract arg matches only by identity.
+#[test]
+fn bound_on_forwarded_param_by_identity_rejected() {
+    rejects(
+        "protocol Conv[S]:\n    fn conv(self) -> S\nstruct I:\n    n: int\n    fn conv(self) -> str:\n        return \"i{self.n}\"\nfn pick[A, B: Conv[A]](v: A, u: B) -> A:\n    return u.conv()\nfn go[T: Conv[str]](t: T) -> T:\n    return pick(t, t)\nr := go(I(n=3))\nprint(r)\n",
         "does not satisfy Conv[",
     );
 }

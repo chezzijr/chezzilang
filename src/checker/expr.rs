@@ -1474,7 +1474,7 @@ impl Checker {
         // still FREE) and bounds enforce against the hint-pinned concrete type (mirrors the free-fn
         // path, `infer_generic_call`).
         seed_from_hint(hint, &sig.ret, &mut sub);
-        let all_tps: Vec<TypeParam> = tps.iter().chain(sig.type_params.iter()).cloned().collect();
+        let all_tps: Vec<TyParam> = tps.iter().chain(sig.type_params.iter()).cloned().collect();
         self.widen_targs_from_hint(
             hint,
             &sig.ret,
@@ -1489,8 +1489,8 @@ impl Checker {
             let expected = subst(decl, &sub);
             self.check_generic_arg(method, &expected, actual, arg);
         }
-        self.enforce_bounds(&tps, &sub, span);
-        self.enforce_bounds(&sig.type_params, &sub, span);
+        self.enforce_bounds(&tps, &all_tps, &sub, span);
+        self.enforce_bounds(&sig.type_params, &all_tps, &sub, span);
         // Conditional method: a STATIC method may carry a receiver-param `where` bound (naming the
         // enclosing type's own param) too — `fn_sig` is shared and records it regardless of `self`.
         // Enforce it against the enclosing param's inferred concrete type here (the sub map already
@@ -1498,7 +1498,7 @@ impl Checker {
         // conditional factory `Box.of(Q(1))` (Q non-Comparable) would be silently accepted. No-op
         // when `where_bounds` is empty. (The non-generic fast path above cannot carry receiver
         // bounds: `where_bounds` non-empty ⟹ the enclosing type has params ⟹ `tps` non-empty.)
-        self.enforce_bounds(&sig.where_bounds, &sub, span);
+        self.enforce_bounds(&sig.where_bounds, &all_tps, &sub, span);
         // M24 Task 5 — half two of the contract for a STATIC method that declares its own witnessed
         // `[T]` (`Holder.build(c)`). Recorded BEFORE the degrade below so an un-inferable `T` reports
         // "is not determined here" (its own diagnostic) rather than looking bound to `Unknown`.
@@ -1612,7 +1612,7 @@ impl Checker {
             let expected = subst(decl, &sub);
             self.check_generic_arg(name, &expected, actual, arg);
         }
-        self.enforce_bounds(&tps, &sub, span);
+        self.enforce_bounds(&tps, &tps, &sub, span);
         let targs_out = tps
             .iter()
             .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
@@ -1792,7 +1792,7 @@ impl Checker {
             let expected = subst(decl, &sub);
             self.check_generic_arg(name, &expected, actual, arg);
         }
-        self.enforce_bounds(&tps, &sub, span);
+        self.enforce_bounds(&tps, &tps, &sub, span);
         let targs_out = tps
             .iter()
             .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
@@ -1813,7 +1813,7 @@ impl Checker {
         name: &str,
         key: &str,
         underlying: &Ty,
-        tps: &[TypeParam],
+        tps: &[TyParam],
         args: &[Expr],
         targs: &[Ty],
         span: Span,
@@ -1856,7 +1856,7 @@ impl Checker {
             let expected = subst(underlying, &sub);
             self.check_generic_arg(name, &expected, actual, arg);
         }
-        self.enforce_bounds(tps, &sub, span);
+        self.enforce_bounds(tps, tps, &sub, span);
         let targs_out = tps
             .iter()
             .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
@@ -2922,7 +2922,7 @@ impl Checker {
                         let expected = subst(decl, &sub);
                         self.check_generic_arg(name, &expected, actual, arg);
                     }
-                    self.enforce_bounds(&tps, &sub, span);
+                    self.enforce_bounds(&tps, &tps, &sub, span);
                     let targs = tps
                         .iter()
                         .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
@@ -3580,7 +3580,7 @@ impl Checker {
                             // below, so this is compared against `args.len() + 1`.
                             sig.min_params,
                             sig.doc.clone(),
-                            sig.where_bounds.clone(),
+                            inst.where_bounds,
                             map,
                         )
                     })
@@ -3615,7 +3615,7 @@ impl Checker {
                     // static-method diagnostic (not a spurious bound error); a static method's own
                     // receiver bound is enforced on the static-dispatch path (`infer_static_call`).
                     // No-op when `where_bounds` empty. Mirrors the native `Ty::List` enforcement.
-                    self.enforce_bounds(&where_bounds, &rmap, span);
+                    self.enforce_bounds(&where_bounds, &mtps, &rmap, span);
                     let slots = self.method_slots(&obj_ty, method);
                     let Some(bound) = self.bind_call(slots.as_deref(), method, args, 0, span)
                     else {
@@ -3770,7 +3770,7 @@ impl Checker {
                             // Trailing parameters the CALLEE fills; the receiver slot is dropped
                             // below, so this is compared against `args.len() + 1`.
                             sig.min_params,
-                            sig.where_bounds.clone(),
+                            inst.where_bounds,
                             map,
                         )
                     })
@@ -3805,7 +3805,7 @@ impl Checker {
                     // accept-without-enforce soundness hole for INSTANCE newtype methods. Placed
                     // after the is_static rejection so a static-on-value call stays single-diagnostic.
                     // No-op when `where_bounds` empty.
-                    self.enforce_bounds(&where_bounds, &rmap, span);
+                    self.enforce_bounds(&where_bounds, &mtps, &rmap, span);
                     let slots = self.method_slots(&obj_ty, method);
                     let Some(bound) = self.bind_call(slots.as_deref(), method, args, 0, span)
                     else {
@@ -3870,7 +3870,7 @@ impl Checker {
                             // Trailing parameters the CALLEE fills; the receiver slot is dropped
                             // below, so this is compared against `args.len() + 1`.
                             sig.min_params,
-                            sig.where_bounds.clone(),
+                            inst.where_bounds,
                             map,
                         )
                     })
@@ -3903,7 +3903,7 @@ impl Checker {
                     // so a static-on-value call stays single-diagnostic; a static enum method's own
                     // receiver bound is enforced on the static-dispatch path (`infer_static_call`).
                     // No-op when `where_bounds` empty.
-                    self.enforce_bounds(&where_bounds, &rmap, span);
+                    self.enforce_bounds(&where_bounds, &mtps, &rmap, span);
                     let slots = self.method_slots(&obj_ty, method);
                     let Some(bound) = self.bind_call(slots.as_deref(), method, args, 0, span)
                     else {
@@ -4056,6 +4056,7 @@ impl Checker {
                     self.check_args_range_coll(method, &sig.params, sig.min_params, args, span);
                     self.enforce_bounds(
                         &sig.where_bounds,
+                        &sig.type_params,
                         &HashMap::from([("T".to_string(), elem.clone())]),
                         span,
                     );
@@ -4181,6 +4182,7 @@ impl Checker {
                     // other Channel method (empty `where_bounds`). Mirrors the `Ty::List` arm.
                     self.enforce_bounds(
                         &sig.where_bounds,
+                        &sig.type_params,
                         &HashMap::from([("T".to_string(), elem.clone())]),
                         span,
                     );
@@ -4282,7 +4284,7 @@ impl Checker {
                             labels: crate::checker::FnLabels::default(),
                         },
                     ];
-                    let tps = vec![TypeParam {
+                    let tps = vec![TyParam {
                         name: r_name,
                         name_span: Span::default(),
                         bounds: vec![],
@@ -4648,7 +4650,7 @@ impl Checker {
                         .map(|p| p.type_params.clone())
                         .unwrap_or_default();
                     for (pname, parg) in ptps.iter().zip(&proto.args) {
-                        let resolved = self.resolve_type(parg, span);
+                        let resolved = parg.clone();
                         map.insert(pname.clone(), resolved);
                     }
                     let expected: Vec<Ty> = match msig.params.split_first() {
@@ -4666,13 +4668,13 @@ impl Checker {
                     };
                     self.check_args_subst(method, &expected, expected.len(), &bound, span);
                     // `Iterator[T].next()` yields `Option[T]` — its return is the bound's element arg,
-                    // not `Self` (the registered placeholder). Resolve the arg with sibling params in
-                    // scope (we're inside the bounded type's own generic context).
+                    // not `Self` (the registered placeholder); the arg was resolved at the declaration
+                    // (TICKET-202).
                     if proto.name == "Iterator"
                         && method == "next"
                         && let Some(arg) = proto.args.first()
                     {
-                        return Ty::Option(Box::new(self.resolve_type(arg, span)));
+                        return Ty::Option(Box::new(arg.clone()));
                     }
                     // `Iterable[T].iter()` yields the existential cursor `Iterator[T]` — the bound's
                     // element arg, not `Iterator[Self]` (the registered placeholder return).
@@ -4680,10 +4682,7 @@ impl Checker {
                         && method == "iter"
                         && let Some(arg) = proto.args.first()
                     {
-                        return Ty::Struct(
-                            "Iterator".to_string(),
-                            vec![self.resolve_type(arg, span)],
-                        );
+                        return Ty::Struct("Iterator".to_string(), vec![arg.clone()]);
                     }
                     return subst(&msig.ret, &map);
                 }
@@ -5008,7 +5007,7 @@ impl Checker {
     pub(super) fn report_uninferable_closure_params(
         &mut self,
         name: &str,
-        tps: &[TypeParam],
+        tps: &[TyParam],
         decl_tys: &[Ty],
         args: &[Expr],
         sub: &mut HashMap<String, Ty>,
@@ -5288,7 +5287,7 @@ impl Checker {
     pub(super) fn check_ctor_arity(
         &mut self,
         name: &str,
-        tps: &[TypeParam],
+        tps: &[TyParam],
         fields: &[(String, Ty)],
         defaulted: &[String],
         targs: &[Ty],
@@ -5422,9 +5421,12 @@ impl Checker {
     }
 
     /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
-    pub(super) fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Vec<Bound>> {
+    /// The bounds are resolved here, in the declaring scope, by the silent `resolve_bounds`
+    /// (TICKET-202).
+    pub(super) fn enter_type_params(&mut self, tps: &[TypeParam]) -> HashMap<String, Vec<TyBound>> {
+        let resolved = self.resolve_bounds(tps, Span::default());
         let saved = self.type_params.clone();
-        for tp in tps {
+        for (tp, rtp) in tps.iter().zip(resolved) {
             // Editor hover (decl-site): record the bound generic param `T` at its DECLARATION token
             // (`fn id[T]`, `struct Box[T]`, a method `[U]`). This is the single funnel for entering
             // type params, so every generic decl form is covered. The hover renders the bare param
@@ -5439,12 +5441,29 @@ impl Checker {
                     None,
                 );
             }
+            self.type_params.insert(tp.name.clone(), rtp.bounds);
+        }
+        saved
+    }
+
+    /// [`Self::enter_type_params`] for an already-resolved list (a stored signature's).
+    pub(super) fn enter_ty_params(&mut self, tps: &[TyParam]) -> HashMap<String, Vec<TyBound>> {
+        let saved = self.type_params.clone();
+        for tp in tps {
+            if self.hover_probe.is_some() {
+                self.hover_record_at(
+                    tp.name_span,
+                    &Ty::Param(tp.name.clone()),
+                    HoverKind::Struct,
+                    None,
+                );
+            }
             self.type_params.insert(tp.name.clone(), tp.bounds.clone());
         }
         saved
     }
 
-    pub(super) fn exit_type_params(&mut self, saved: HashMap<String, Vec<Bound>>) {
+    pub(super) fn exit_type_params(&mut self, saved: HashMap<String, Vec<TyBound>>) {
         self.type_params = saved;
     }
 

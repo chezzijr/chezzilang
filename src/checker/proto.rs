@@ -601,14 +601,15 @@ impl Checker {
         self.type_params.insert("Self".to_string(), Vec::new());
         // The protocol's own type params are in scope while resolving its method signatures, so
         // `fn get(self, i: int) -> T` resolves `T` to `Ty::Param("T")`.
-        for tp in type_params {
+        let resolved = self.resolve_bounds(type_params, span);
+        for (tp, rtp) in type_params.iter().zip(resolved) {
             if tp.name == "Self" {
                 self.error(
                     span,
                     "protocol type parameter cannot be named 'Self'".to_string(),
                 );
             }
-            self.type_params.insert(tp.name.clone(), tp.bounds.clone());
+            self.type_params.insert(tp.name.clone(), rtp.bounds);
         }
         for tp in type_params {
             self.check_bounds(&tp.bounds, &tp.name, span);
@@ -656,9 +657,46 @@ impl Checker {
             ProtocolInfo {
                 type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
                 methods: sigs,
-                embeds: self.key_bounds(embeds),
+                // Names only: an embed arg may name a protocol declared LATER, so
+                // `resolve_protocol_embeds` fills the args once every protocol is hoisted, before
+                // any reader runs (TICKET-202).
+                embeds: embeds
+                    .iter()
+                    .map(|b| TyBound {
+                        name: self.protocol_key(&b.name),
+                        args: Vec::new(),
+                    })
+                    .collect(),
             },
         );
+    }
+
+    /// TICKET-202 — resolve a protocol's embed args ONCE, in the owner protocol's scope (its own
+    /// params only), after every protocol is hoisted. Silent: `validate_protocol_embeds` reports an
+    /// unknown name in its own words. A use site never re-resolves an embed.
+    pub(super) fn resolve_protocol_embeds(
+        &mut self,
+        name: &str,
+        type_params: &[TypeParam],
+        embeds: &[Bound],
+        span: Span,
+    ) {
+        if is_reserved_protocol(name) {
+            return;
+        }
+        let own: HashMap<String, Vec<TyBound>> = type_params
+            .iter()
+            .map(|tp| (tp.name.clone(), Vec::new()))
+            .collect();
+        let saved = std::mem::replace(&mut self.type_params, own);
+        let m = self.diag_mark();
+        let r: Vec<TyBound> = embeds.iter().map(|b| self.resolve_bound(b, span)).collect();
+        self.diag_rollback(m);
+        self.type_params = saved;
+        let key = self.bare_key(name);
+        if let Some(p) = self.protocols.get_mut(&key) {
+            p.embeds = r;
+        }
     }
 
     /// M22 — validate a protocol's embeds AFTER every protocol is hoisted (so forward/cyclic refs
@@ -687,24 +725,15 @@ impl Checker {
                 );
             }
         }
-        // An embed arg may mention one of the owner's type params only as the WHOLE arg
-        // (`Contains[T]`), never nested inside a constructor (`Contains[List[T]]`). Re-spelling the
-        // pulled-in signature happens through `embed_arg_tys`, which resolves an arg with `&self` —
-        // and `resolve_ty_ro` reads the AMBIENT scope, where the owner's params are long gone. A
-        // nested `T` therefore resolves to `Unknown`, and an `Unknown` element type accepts every
-        // argument: `protocol Bag[T]: Contains[List[T]]` let `["x"] in b` pass on a `Bag[int]` and
-        // then fault at runtime. DECLINE rather than answer wrongly — a rejected declaration is
-        // recoverable, a silently permissive one teaches distrust of the whole check.
         let own: Vec<String> = type_params.iter().map(|tp| tp.name.clone()).collect();
         for emb in embeds {
             for a in &emb.args {
                 // An embed arg naming a type that does not exist (`Contains[T]` where the protocol
                 // declares no `T`) resolves to `Ty::Unknown`, and an `Unknown` element type accepts
                 // EVERY operand — `"oops" in b` type-checked on a `Bag` whose `contains` takes an
-                // `int`, then faulted. Unknown-as-permissive is the same hazard as the nested case
-                // below, reached by a typo instead of a nesting; both must be a hard error, not a
-                // silently wide requirement. Every struct/enum/alias/protocol is hoisted before this
-                // runs, so an unresolvable name here really is unresolvable.
+                // `int`, then faulted. Unknown-as-permissive must be a hard error, not a silently
+                // wide requirement. Every struct/enum/alias/protocol is hoisted before this runs, so
+                // an unresolvable name here really is unresolvable.
                 if let Some(bad) = first_unresolvable_name(a, &own, &|n| {
                     !self.resolve_ty_ro(&Type::named(n)).is_unknown()
                 }) {
@@ -716,28 +745,17 @@ impl Checker {
                             emb.name
                         ),
                     );
-                    continue;
-                }
-                if !matches!(a, Type::Named { name: n, .. } if own.contains(n))
-                    && type_mentions_any(a, &own)
-                {
-                    self.error(
-                        span,
-                        format!(
-                            "embedded protocol '{}' in '{name}' uses a type parameter nested inside \
-                             a type argument, which is not supported — pass the parameter directly \
-                             ({}[{}]) or spell the requirement as an own `fn`",
-                            emb.name,
-                            emb.name,
-                            own.join(", ")
-                        ),
-                    );
                 }
             }
         }
         // Flatten the transitive embed method set, detecting cycles + cross-embed signature conflicts.
-        let mut path = vec![name.to_string()];
-        let (required, cyclic, conflict) = self.flatten_embed_methods(embeds, &mut path);
+        // The walk reads the RESOLVED (keyed) embeds, so the path starts at this protocol's key.
+        let resolved = self
+            .protocol_shape(name)
+            .map(|p| p.embeds.clone())
+            .unwrap_or_default();
+        let mut path = vec![self.bare_key(name)];
+        let (required, cyclic, conflict) = self.flatten_embed_methods(&resolved, &mut path);
         if cyclic {
             self.error(
                 span,
@@ -771,7 +789,7 @@ impl Checker {
     /// method seen with two DIFFERING signatures (rule 2). Read-only over `self.protocols`.
     pub(super) fn flatten_embed_methods(
         &self,
-        embeds: &[Bound],
+        embeds: &[TyBound],
         path: &mut Vec<String>,
     ) -> (HashMap<String, FnSig>, bool, Option<String>) {
         self.flatten_embed_methods_seen(embeds, path, &mut HashSet::new())
@@ -786,7 +804,7 @@ impl Checker {
     /// The `path` check stays FIRST so a cycle is still reported rather than silently skipped.
     fn flatten_embed_methods_seen(
         &self,
-        embeds: &[Bound],
+        embeds: &[TyBound],
         path: &mut Vec<String>,
         seen: &mut HashSet<String>,
     ) -> (HashMap<String, FnSig>, bool, Option<String>) {
@@ -843,7 +861,7 @@ impl Checker {
     ///
     /// Deliberately NOT built on [`Self::flatten_embed_methods`]: that one builds the whole map and
     /// does not substitute `Bound.args` (its callers only inspect `is_static`), which would type an
-    /// embedded method in the EMBEDDED protocol's vocabulary. Depth-capped like `bound_provides` —
+    /// embedded method in the EMBEDDED protocol's vocabulary. Cycle-guarded like `protocol_provides` —
     /// a cyclic embed is rejected at declare time but still reaches here after erroring.
     pub(super) fn protocol_method_sig(&self, pname: &str, method: &str) -> Option<FnSig> {
         self.protocol_method_sig_d(pname, method, &mut HashSet::new())
@@ -875,10 +893,7 @@ impl Checker {
                 .protocol_shape(&emb.name)
                 .map(|p| p.type_params.clone())
                 .unwrap_or_default();
-            let map: HashMap<String, Ty> = etps
-                .into_iter()
-                .zip(self.embed_arg_tys(pinfo, emb))
-                .collect();
+            let map: HashMap<String, Ty> = etps.into_iter().zip(emb.args.clone()).collect();
             return Some(subst_sig(&sig, &map));
         }
         None
@@ -939,26 +954,6 @@ impl Checker {
             .collect();
         hits.sort(); // `required` is a HashMap — pick deterministically so the diagnostic is stable
         hits.first().map(|n| (*n).clone())
-    }
-
-    /// Resolve an embed's type args in the OWNING protocol's vocabulary: a bare name that is one of
-    /// `owner`'s own type params becomes `Ty::Param(name)`.
-    ///
-    /// [`Self::resolve_ty_ro`] reads `self.type_params`, which at a USE site is the *calling*
-    /// function's params — the owning protocol's are long out of scope. So without this,
-    /// `protocol Bag[T]: Contains[T]` resolved its `T` to `Ty::Unknown`, which made every embedded
-    /// method's arg silently permissive (`"x" in b` type-checked on a `Bag[int]`), and resolved it
-    /// to the CALLER's `T` whenever one happened to share the name.
-    fn embed_arg_tys(&self, owner: &ProtocolInfo, emb: &Bound) -> Vec<Ty> {
-        emb.args
-            .iter()
-            .map(|a| match a {
-                Type::Named { name, .. } if owner.type_params.contains(name) => {
-                    Ty::Param(name.clone())
-                }
-                _ => self.resolve_ty_ro(a),
-            })
-            .collect()
     }
 
     /// Why `t` may not be a `map` key / `set` element — as the diagnostic's TAIL, so each of the nine
@@ -1233,7 +1228,7 @@ impl Checker {
             // written back into it — see `invariance_rejects_*` tests). Their type ARGUMENTS are
             // therefore compared with the context-free structural-equality primitive `compatible`
             // (= strict INVARIANCE), mirroring the M14 `compatible` Protocol/Struct/Enum arms and
-            // `bound_args_match`. Docs: spec.md "strictly invariant"; future.md "no covariance holes".
+            // `protocol_provides`. Docs: spec.md "strictly invariant"; future.md "no covariance holes".
             (Option(e), Option(a)) => self.assignable(e, a),
             (List(e), List(a)) | (Set(e), Set(a)) => compatible(e, a),
             (Result(et, ee), Result(at, ae)) => self.assignable(et, at) && self.assignable(ee, ae),
@@ -1502,65 +1497,13 @@ impl Checker {
         }
     }
 
-    /// Do a declared bound's type args (AST `Type`s) match the `required` ones (resolved `Ty`s) for a
-    /// forwarded parameterized bound? Read-only — used inside `satisfies_args`. Conservative: only a
-    /// *fully concrete* mismatch is rejected (so a still-generic arg like a sibling type param keeps
-    /// forwarding loosely, as before), which is what closes the `Container[str]`→`Container[int]` hole
-    /// without breaking valid `[S: Iterator[T], T]` forwards.
-    pub(super) fn bound_args_match(&self, bound_args: &[Type], required: &[Ty]) -> bool {
-        if bound_args.len() != required.len() {
-            return false;
-        }
-        bound_args.iter().zip(required).all(|(ba, want)| {
-            let bt = self.resolve_ty_ro(ba);
-            !ty_fully_concrete(&bt) || !ty_fully_concrete(want) || compatible(&bt, want)
-        })
-    }
-
-    /// M22 — does a declared bound `bound_name[bound_args]` PROVIDE `protocol[required]`, directly or
-    /// transitively through embedded (super-)protocols? This is what makes `a + b` / `a / b` legal
-    /// inside a `[T: Arithmetic]` body (the bound `Arithmetic` flattens to Add/Sub/Mul/Div) and lets a
-    /// `[T: Arithmetic]` value forward into a `[U: Div]` call. Preserves the `Iterator`→`Iterable`
-    /// subsumption. Depth-capped against a (declare-time-rejected, but still-checked) cyclic embed.
-    pub(super) fn bound_provides(
-        &self,
-        bound_name: &str,
-        bound_args: &[Type],
-        protocol: &str,
-        required: &[Ty],
-        depth: usize,
-    ) -> bool {
-        if depth > 64 {
-            return false;
-        }
-        // Direct: the bound names the required protocol with matching args.
-        if self.protocol_key(bound_name) == self.protocol_key(protocol)
-            && self.bound_args_match(bound_args, required)
-        {
-            return true;
-        }
-        // Subsumption: every `Iterator[T]` IS `Iterable[T]` (its `iter()` returns self).
-        if protocol == "Iterable"
-            && bound_name == "Iterator"
-            && self.bound_args_match(bound_args, required)
-        {
-            return true;
-        }
-        // Transitive: any embed of the bound's protocol provides it.
-        if let Some(pinfo) = self.protocol_shape(bound_name) {
-            return pinfo
-                .embeds
-                .iter()
-                .any(|e| self.bound_provides(&e.name, &e.args, protocol, required, depth + 1));
-        }
-        false
-    }
-
     /// M22 — does protocol `p`, with its own type params bound to `pargs`, BE or transitively EMBED
-    /// `protocol` with args matching `required`? The `Ty`-level twin of [`Self::bound_provides`],
-    /// which answers the same question for a declared BOUND (whose args are still AST `Type`s).
-    /// Each embed's args are resolved and then re-spelled through `p`'s own bindings, so
-    /// `protocol P[T]: Container[T]` at `P[int]` provides `Container[int]` and not `Container[T]`.
+    /// `protocol` with args matching `required`? The ONE yes/no for a declared bound and an
+    /// existential alike (TICKET-202): a type param equals only itself, `Unknown` is the only
+    /// wildcard. This is what makes `a + b` legal inside a `[T: Arithmetic]` body and lets a
+    /// `[T: Arithmetic]` value forward into a `[U: Div]` call. Each embed's args (resolved at the
+    /// declaration) are re-spelled through `p`'s own bindings, so `protocol P[T]: Container[T]` at
+    /// `P[int]` provides `Container[int]` and not `Container[T]`.
     pub(super) fn protocol_provides(
         &self,
         p: &str,
@@ -1593,10 +1536,13 @@ impl Checker {
         if !seen.insert(key) {
             return false;
         }
-        if self.protocol_key(p) == self.protocol_key(protocol)
-            && pargs.len() == required.len()
-            && pargs.iter().zip(required).all(|(x, y)| compatible(x, y))
-        {
+        let args_match = pargs.len() == required.len()
+            && pargs.iter().zip(required).all(|(x, y)| compatible(x, y));
+        if self.protocol_key(p) == self.protocol_key(protocol) && args_match {
+            return true;
+        }
+        // Subsumption: every `Iterator[T]` IS `Iterable[T]` (its `iter()` returns self).
+        if protocol == "Iterable" && self.protocol_key(p) == "Iterator" && args_match {
             return true;
         }
         let Some(pinfo) = self.protocol_shape(p) else {
@@ -1609,11 +1555,7 @@ impl Checker {
             .zip(pargs.iter().cloned())
             .collect();
         pinfo.embeds.iter().any(|e| {
-            let eargs: Vec<Ty> = self
-                .embed_arg_tys(pinfo, e)
-                .iter()
-                .map(|t| subst(t, &map))
-                .collect();
+            let eargs: Vec<Ty> = e.args.iter().map(|t| subst(t, &map)).collect();
             self.protocol_provides_d(&e.name, &eargs, protocol, required, seen)
         })
     }
@@ -2078,15 +2020,16 @@ impl Checker {
         // no own methods) short-circuits once its embeds pass — this is what lets int/float/struct
         // satisfy `Arithmetic` (each embed recurses into the intrinsic/structural arms). A `Ty::Param`
         // is NOT flattened here — it forwards through its declared bounds in the `Ty::Param` arm below
-        // (which knows, via `bound_provides`, that an `Arithmetic`-bound param provides Add/Sub/…).
+        // (which knows, via `protocol_provides`, that an `Arithmetic`-bound param provides Add/Sub/…).
         if !pinfo.embeds.is_empty() && !matches!(ty, Ty::Param(_)) {
             // A VISITED SET, not a depth cap: `ty` is fixed across the whole walk, so revisiting
             // one (protocol, args) pair can only re-derive the same answer, while a depth bound of
             // 64 over a branching graph is 2^64 visits — a 42-protocol DAG hung `check` (and the
             // LSP) past 25 s. Same class the sibling walkers close; this one is the third.
             {
-                // The owner's params are re-spelled here too (`embed_arg_tys`, not a bare
-                // `resolve_ty_ro`) and then bound to the args actually being required. Without both,
+                // The embed args were resolved at the declaration (TICKET-202, not by a use-site
+                // `resolve_ty_ro`, which read the CALLER scope) and then bound to the args actually
+                // being required. Without both,
                 // `protocol Bag[T]: Contains[T]` witnessed conformance against an `Unknown` element
                 // and `PBag[str] = B` (a `contains(self, int)`) passed — the CONFORMANCE half of the
                 // same bug the read side had, and the thing that makes the read side's substitution
@@ -2098,11 +2041,7 @@ impl Checker {
                     .zip(args.iter().cloned())
                     .collect();
                 for emb in &pinfo.embeds {
-                    let eargs: Vec<Ty> = self
-                        .embed_arg_tys(pinfo, emb)
-                        .iter()
-                        .map(|t| subst(t, &omap))
-                        .collect();
+                    let eargs: Vec<Ty> = emb.args.iter().map(|t| subst(t, &omap)).collect();
                     let key = format!(
                         "{}[{}]",
                         emb.name,
@@ -2410,16 +2349,23 @@ impl Checker {
         // A bound type parameter satisfies a protocol if that protocol is among its declared bounds —
         // this is what lets a generic forward its `T: P` value into another `[U: P]` call. For a
         // parameterized protocol the bound's type args must also match the required ones, so a
-        // `Container[str]` value is NOT accepted where `Container[int]` is required (forwarding hole).
+        // `Container[str]` value is NOT accepted where `Container[int]` is required (forwarding hole),
+        // and an abstract arg matches only by identity (TICKET-202).
         if let Ty::Param(name) = ty {
             let matched = self.type_params.get(name).is_some_and(|bs| {
                 bs.iter()
-                    .any(|b| self.bound_provides(&b.name, &b.args, protocol, args, 0))
+                    .any(|b| self.protocol_provides(&b.name, &b.args, protocol, args))
             });
             return if matched {
                 Ok(Grant::no_intrinsic_method())
-            } else {
+            } else if args.is_empty() {
                 Err(format!("type {ty} does not satisfy {protocol_display}"))
+            } else {
+                let shown: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                Err(format!(
+                    "type {ty} does not satisfy {protocol_display}[{}]",
+                    shown.join(", ")
+                ))
             };
         }
         // A built-in witnesses a USER protocol out of its own harvested `native struct` method
@@ -2651,7 +2597,7 @@ impl Checker {
                         };
                         for bound in &wb.bounds {
                             let bargs: Vec<Ty> =
-                                bound.args.iter().map(|a| self.resolve_ty_ro(a)).collect();
+                                bound.args.iter().map(|a| subst(a, &tymap)).collect();
                             if self.satisfies_args(concrete, &bound.name, &bargs).is_err() {
                                 return Err(format!(
                                     "type {ty} does not satisfy {protocol_display} (method '{mname}' requires {}: {})",
@@ -3804,7 +3750,7 @@ impl Checker {
                 continue;
             };
             for bound in &wb.bounds {
-                let bargs: Vec<Ty> = bound.args.iter().map(|a| self.resolve_ty_ro(a)).collect();
+                let bargs: Vec<Ty> = bound.args.iter().map(|a| subst(a, &tymap)).collect();
                 if let Err(why) = self.satisfies_args(concrete, &bound.name, &bargs) {
                     // Normally the inner text is redundant with what we say here, so it is dropped.
                     // A BUDGET refusal is the exception: rewording it into "requires X: Eq" would
@@ -3981,7 +3927,7 @@ impl Checker {
     pub(super) fn seed_targs(
         &mut self,
         name: &str,
-        tps: &[TypeParam],
+        tps: &[TyParam],
         targs: &[Ty],
         span: Span,
     ) -> HashMap<String, Ty> {
@@ -4014,7 +3960,7 @@ impl Checker {
         &mut self,
         hint: Option<&Ty>,
         shape: &Ty,
-        tps: &[TypeParam],
+        tps: &[TyParam],
         decls: &[Ty],
         targs: &[Ty],
     ) -> Vec<Option<Ty>> {
@@ -4069,7 +4015,7 @@ impl Checker {
 
     pub(super) fn recover_iter_elems(
         &mut self,
-        tps: &[TypeParam],
+        tps: &[TyParam],
         sub: &mut HashMap<String, Ty>,
         span: Span,
     ) {
@@ -4081,7 +4027,7 @@ impl Checker {
                         && let Some(arg) = b.args.first()
                         && let Some(elem) = self.iter_elem(&concrete)
                     {
-                        binds.push((self.resolve_bound_arg(arg, tps, span), elem));
+                        binds.push((arg.clone(), elem));
                     }
                 }
             }
@@ -4103,7 +4049,7 @@ impl Checker {
     /// so `fn first[C: Index[int, V], V](c: C) -> V` recovers `V` from the argument.
     pub(super) fn recover_index_args(
         &mut self,
-        tps: &[TypeParam],
+        tps: &[TyParam],
         sub: &mut HashMap<String, Ty>,
         span: Span,
     ) {
@@ -4117,10 +4063,10 @@ impl Checker {
                     "Index" | "IndexSet" => {
                         if let Some((k, v)) = self.index_kv(&concrete) {
                             if let Some(a) = b.args.first() {
-                                binds.push((self.resolve_bound_arg(a, tps, span), k));
+                                binds.push((a.clone(), k));
                             }
                             if let Some(a) = b.args.get(1) {
-                                binds.push((self.resolve_bound_arg(a, tps, span), v));
+                                binds.push((a.clone(), v));
                             }
                         }
                     }
@@ -4128,7 +4074,7 @@ impl Checker {
                         if let Some(r) = self.slice_result(&concrete)
                             && let Some(a) = b.args.first()
                         {
-                            binds.push((self.resolve_bound_arg(a, tps, span), r));
+                            binds.push((a.clone(), r));
                         }
                     }
                     _ => {}
@@ -4162,7 +4108,7 @@ impl Checker {
         &mut self,
         hint: Option<&Ty>,
         shape: &Ty,
-        tps: &[TypeParam],
+        tps: &[TyParam],
         decls: &[Ty],
         arg_tys: &[Ty],
         explicit: bool,
@@ -4196,7 +4142,7 @@ impl Checker {
             return;
         }
         let mark = self.diag_mark();
-        self.enforce_bounds(tps, &cand, span);
+        self.enforce_bounds(tps, tps, &cand, span);
         let bounds_fail = self.errors.len() > mark.errors;
         self.diag_rollback(mark);
         if !bounds_fail {
@@ -4338,7 +4284,7 @@ impl Checker {
         // nothing: measured, `protocol Q[R]:` + an embed line `Produces[R]`, used as `[T: Q[R]]`,
         // gave *cannot infer type parameter R for 'use_q'*. `protocol_method_names` /
         // `protocol_method_sig` are the existing pair for this — cycle-guarded, and the sig comes
-        // back RE-SPELLED in this protocol's own type-param vocabulary (`embed_arg_tys`), so
+        // back RE-SPELLED in this protocol's own type-param vocabulary (the embed args resolved at the declaration), so
         // `Q[S]: Produces[S]` binds `S`, not the embedded protocol's `R`.
         for mname in self.protocol_method_names(protocol) {
             let Some(msig) = self.protocol_method_sig(protocol, &mname) else {
@@ -4397,18 +4343,9 @@ impl Checker {
     /// recovered type that DISAGREES with an existing binding is deliberately dropped rather than
     /// reported: the existing binding is the one the user wrote, and `enforce_bounds` below still
     /// rejects it with its own message.
-    pub(super) fn recover_protocol_args(
-        &mut self,
-        tps: &[TypeParam],
-        sub: &mut HashMap<String, Ty>,
-        span: Span,
-    ) {
-        // This pass is SPECULATIVE — it only decides what to bind — but `resolve_bound_arg` reports
-        // into the diagnostic channels, and `enforce_bounds` re-resolves the very same bound args
-        // straight after. Without the rollback a bad bound arg is reported twice per call site
-        // (measured: `T: Produces[Bogus]` printed `unknown type 'Bogus'` twice). Roll back through
-        // the paired helpers rather than truncating a channel by hand, so `warnings` stays in step.
-        let mark = self.diag_mark();
+    pub(super) fn recover_protocol_args(&mut self, tps: &[TyParam], sub: &mut HashMap<String, Ty>) {
+        // Speculative: it only decides what to bind. The bound args were resolved silently at the
+        // declaration (TICKET-202), so nothing here reports.
         let mut binds: Vec<(Ty, Ty)> = Vec::new();
         for tp in tps {
             let Some(concrete) = sub.get(&tp.name).cloned() else {
@@ -4425,11 +4362,10 @@ impl Checker {
                     let Some(rec) = rec else {
                         continue;
                     };
-                    binds.push((self.resolve_bound_arg(arg, tps, span), rec));
+                    binds.push((arg.clone(), rec));
                 }
             }
         }
-        self.diag_rollback(mark);
         for (arg_ty, recovered) in binds {
             // Bind only a still-free param, and never launder `Unknown` into one (a residual Unknown
             // in a type param is a type-check bypass). A pinned param keeps what pinned it.
@@ -4443,14 +4379,21 @@ impl Checker {
     }
 
     /// Enforce each type parameter's declared protocol bounds against its inferred binding. A
-    /// parameterized bound (`Container[int]`) supplies type args, resolved here (sibling params in
-    /// scope) and checked structurally with the protocol's params substituted.
+    /// parameterized bound (`Container[int]`) carries args resolved at the declaration (TICKET-202);
+    /// they are substituted here and checked structurally with the protocol's params substituted.
+    /// `owner` lists every param the declaring item binds: one the call left unbound becomes
+    /// `Unknown`, never a leftover `Ty::Param`, which would equal a same-named caller param.
     pub(super) fn enforce_bounds(
         &mut self,
-        tps: &[TypeParam],
+        tps: &[TyParam],
+        owner: &[TyParam],
         sub: &HashMap<String, Ty>,
         span: Span,
     ) {
+        let mut full = sub.clone();
+        for tp in tps.iter().chain(owner) {
+            full.entry(tp.name.clone()).or_insert(Ty::Unknown);
+        }
         for tp in tps {
             if let Some(concrete) = sub.get(&tp.name) {
                 // OBJECT SAFETY — a protocol EXISTENTIAL may not witness a type param whose bound
@@ -4478,14 +4421,9 @@ impl Checker {
                     continue;
                 }
                 for bound in &tp.bounds {
-                    // Resolve the bound's args, then substitute any params recovered into `sub` (e.g.
-                    // `Index[int, V]` with `V` recovered to `int`) so the structural/intrinsic check
-                    // sees concrete args, not a still-free `Ty::Param`.
-                    let bargs: Vec<Ty> = bound
-                        .args
-                        .iter()
-                        .map(|a| subst(&self.resolve_bound_arg(a, tps, span), sub))
-                        .collect();
+                    // Substitute any params recovered into `sub` (e.g. `Index[int, V]` with `V`
+                    // recovered to `int`) so the structural/intrinsic check sees concrete args.
+                    let bargs: Vec<Ty> = bound.args.iter().map(|a| subst(a, &full)).collect();
                     if let Err(msg) = self.satisfies_args(concrete, &bound.name, &bargs) {
                         // A `Comparable`-shaped bound over a newtype that WROTE `compare`: say why
                         // the method can never satisfy it. The gate is UNCHANGED from M23 — both
@@ -4670,7 +4608,7 @@ impl Checker {
             .map(|p| p.type_params.clone())
             .unwrap_or_default();
         for (pn, parg) in ptps.iter().zip(&bound.args) {
-            let resolved = self.resolve_type(parg, span);
+            let resolved = parg.clone();
             map.insert(pn.clone(), resolved);
         }
         // A STATIC requirement has NO receiver slot, so every declared param is a real argument.
@@ -4844,7 +4782,6 @@ impl Checker {
         &mut self,
         sig: &FnSig,
         sub: &mut HashMap<String, Ty>,
-        span: Span,
     ) -> Vec<String> {
         let wanted: std::collections::HashSet<String> =
             sig.type_params.iter().map(|tp| tp.name.clone()).collect();
@@ -4863,11 +4800,6 @@ impl Checker {
             return Vec::new();
         }
 
-        // Same speculative-pass rollback as `recover_protocol_args`: `resolve_bound_arg` REPORTS,
-        // and `enforce_bounds` re-resolves these very args immediately after, so without the mark a
-        // bad bound arg is printed twice on the call-site span. This helper is the second of the two
-        // pre-`enforce_bounds` passes that resolve bound args; both need the pair.
-        let mark = self.diag_mark();
         let mut needed_by_bound = Vec::new();
         for tp in &sig.type_params {
             if !sub.get(&tp.name).is_some_and(|ty| !ty.is_unknown()) {
@@ -4875,12 +4807,10 @@ impl Checker {
             }
             for bound in &tp.bounds {
                 for arg in &bound.args {
-                    let resolved = self.resolve_bound_arg(arg, &sig.type_params, span);
-                    ty_collect_params(&resolved, Some(&candidates), &mut needed_by_bound);
+                    ty_collect_params(arg, Some(&candidates), &mut needed_by_bound);
                 }
             }
         }
-        self.diag_rollback(mark);
 
         // Preserve declaration order and probe each independently if multiple result params feed
         // parameterized bounds.
@@ -5010,7 +4940,7 @@ impl Checker {
         // …and the same recovery for a USER parameterized bound (`T: Produces[R]` pins `R` from the
         // bound type's own `produce`), so it no longer needs an annotation the way `Iterator[T]`
         // never did.
-        self.recover_protocol_args(&sig.type_params, &mut subst_map, span);
+        self.recover_protocol_args(&sig.type_params, &mut subst_map);
         // Expected-type checking-mode: a `let`/return/param annotation seeds any type param the args
         // left FREE by unifying the declared RETURN type (already `Ty::Param`-bearing) against the
         // hint — so `xs: List[int] = empty()` pins a return-only `T`, and the deadlock probe below
@@ -5060,9 +4990,9 @@ impl Checker {
         // one. Measured, the structural test alone is too wide — a wrong ARITY or a wrong PARAM
         // type leaves the param un-inferred too, and there "add a result annotation" is advice that
         // does not work (`docs/gaps.md` W8-43's neighbour table).
-        let probed = self.probe_uninferable_dependent_result_params(sig, &mut subst_map, span);
+        let probed = self.probe_uninferable_dependent_result_params(sig, &mut subst_map);
         let before = self.errors.len();
-        self.enforce_bounds(&sig.type_params, &subst_map, span);
+        self.enforce_bounds(&sig.type_params, &sig.type_params, &subst_map, span);
         if self.errors.len() == before {
             for pname in probed {
                 self.error(
@@ -5149,7 +5079,7 @@ impl Checker {
         name: &str,
         params: &[Ty],
         ret: &Ty,
-        tps: &[TypeParam],
+        tps: &[TyParam],
         sub: &mut HashMap<String, Ty>,
         span: Span,
     ) {
@@ -5172,7 +5102,7 @@ impl Checker {
             ty_collect_params(p, Some(&wanted), &mut in_params);
         }
         // Declaration order, so a multi-param signature reads left-to-right.
-        let unbound: Vec<&TypeParam> = tps
+        let unbound: Vec<&TyParam> = tps
             .iter()
             .filter(|tp| {
                 in_ret.contains(&tp.name)
@@ -5251,7 +5181,7 @@ impl Checker {
         // Empty declines every license, which reproduces this method's behaviour before this ticket.
         declared: &[Ty],
         ret: &Ty,
-        mtps: &[TypeParam],
+        mtps: &[TyParam],
         wparams: &[String],
         recv_ty: &Ty,
         targs: &[Ty],
@@ -5392,7 +5322,7 @@ impl Checker {
         // Same user-parameterized-bound recovery as the free-fn path. It matters MORE here: this
         // path has no `seed_from_hint`, so before the recovery a `[R, T: Produces[R]]` METHOD could
         // not be pinned by a result annotation either — only turbofish worked.
-        self.recover_protocol_args(mtps, &mut mmap, span);
+        self.recover_protocol_args(mtps, &mut mmap);
         // Expected-type checking-mode, after the recoveries so precedence stays
         // turbofish > arguments > recovery > annotation (`seed_from_hint` only fills a param still
         // FREE). The free-fn path has done this all along; the method path had no hint plumbed to
@@ -5430,9 +5360,9 @@ impl Checker {
             variadic: None,
             slots: None,
         };
-        let probed = self.probe_uninferable_dependent_result_params(&msig, &mut mmap, span);
+        let probed = self.probe_uninferable_dependent_result_params(&msig, &mut mmap);
         let before = self.errors.len();
-        self.enforce_bounds(mtps, &mmap, span);
+        self.enforce_bounds(mtps, mtps, &mmap, span);
         if self.errors.len() == before {
             for pname in probed {
                 self.error(
@@ -5531,7 +5461,7 @@ impl Checker {
             return None;
         };
         // Enforce the arg fn's declared bounds against the bindings, exactly as Scope A does.
-        self.enforce_bounds(&sig.type_params, &m, span);
+        self.enforce_bounds(&sig.type_params, &sig.type_params, &m, span);
         Some(refined)
     }
 
@@ -5634,7 +5564,7 @@ impl Checker {
         arg_tys: &[Ty],
         args: &[Expr],
         all_params: &[Ty],
-        tps: &[TypeParam],
+        tps: &[TyParam],
         map: &mut HashMap<String, Ty>,
         span: Span,
         degrade_unbound_param_pos: bool,
@@ -5689,12 +5619,12 @@ impl Checker {
         // Enforce bounds for params NEWLY bound by the loop-back only (pass-1-bound params were already
         // enforced by the caller — each enforced exactly once avoids a double-report). So a
         // `[U: Add]`/`[U: Comparable]` recovered from a closure body still has its bound checked.
-        let newly_bound: Vec<TypeParam> = tps
+        let newly_bound: Vec<TyParam> = tps
             .iter()
             .filter(|tp| !bound_after_pass1.contains(&tp.name) && map.contains_key(&tp.name))
             .cloned()
             .collect();
-        self.enforce_bounds(&newly_bound, map, span);
+        self.enforce_bounds(&newly_bound, tps, map, span);
         // Degrade a STILL-unbound type param to `Unknown` ONLY when it appears in a PARAMETER position —
         // and ONLY on the method path (`degrade_unbound_param_pos`). It was in principle recoverable
         // from an argument, but that argument's relevant type was itself `Unknown` (the empty-collection

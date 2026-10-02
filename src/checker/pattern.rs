@@ -2384,7 +2384,7 @@ impl Checker {
         };
         match verdict {
             FnValuePin::Pinned(map, refined) => {
-                self.enforce_bounds(&type_params, &map, span);
+                self.enforce_bounds(&type_params, &type_params, &map, span);
                 return Some(refined);
             }
             // …the value can never be formed. Go refuses exactly this spelling, at the READ:
@@ -4187,7 +4187,7 @@ impl Checker {
             if type_params.iter().all(|tp| map.contains_key(&tp.name)) {
                 // Enforce declared bounds against the binding (`addone[str]` where `str: Add`
                 // fails), then yield the CONCRETE substituted fn type. Runtime is generic-ERASED.
-                self.enforce_bounds(&type_params, &map, obj.span);
+                self.enforce_bounds(&type_params, &type_params, &map, obj.span);
                 return subst(&fn_value_ty(&sig), &map);
             }
             // Arity mismatch (seed_targs already reported) — degrade to Unknown instead of
@@ -4219,7 +4219,7 @@ impl Checker {
             // A bounded `[C: Index[K, V]]` type parameter is indexable inside the generic body; its
             // value type is the bound's `V` arg (resolved with sibling params in scope).
             Ty::Param(name) => {
-                if let Some((k, v)) = self.param_index_kv(&name, obj.span) {
+                if let Some((k, v)) = self.param_index_kv(&name) {
                     let idx_ty = self.infer_value(index);
                     if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
                         let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
@@ -4251,45 +4251,29 @@ impl Checker {
 
     /// The `(K, V)` of a bounded type parameter's `Index`/`IndexSet` bound, resolved with the
     /// surrounding params in scope. `None` ⇒ the param has no indexing bound.
-    pub(super) fn param_index_kv(&mut self, name: &str, span: Span) -> Option<(Ty, Ty)> {
+    pub(super) fn param_index_kv(&mut self, name: &str) -> Option<(Ty, Ty)> {
         let bound = self
             .type_params
             .get(name)?
             .iter()
             .find(|b| matches!(b.name.as_str(), "Index" | "IndexSet"))
             .cloned()?;
-        let k = bound
-            .args
-            .first()
-            .map(|a| self.resolve_type(a, span))
-            .unwrap_or(Ty::Unknown);
-        let v = bound
-            .args
-            .get(1)
-            .map(|a| self.resolve_type(a, span))
-            .unwrap_or(Ty::Unknown);
+        let k = bound.args.first().cloned().unwrap_or(Ty::Unknown);
+        let v = bound.args.get(1).cloned().unwrap_or(Ty::Unknown);
         Some((k, v))
     }
 
     /// The `(K, V)` of a bounded type parameter's `IndexSet` bound (write requires `IndexSet`
     /// specifically — a read-only `Index` bound is not assignable). `None` ⇒ no `IndexSet` bound.
-    pub(super) fn param_indexset_kv(&mut self, name: &str, span: Span) -> Option<(Ty, Ty)> {
+    pub(super) fn param_indexset_kv(&mut self, name: &str) -> Option<(Ty, Ty)> {
         let bound = self
             .type_params
             .get(name)?
             .iter()
             .find(|b| b.name == "IndexSet")
             .cloned()?;
-        let k = bound
-            .args
-            .first()
-            .map(|a| self.resolve_type(a, span))
-            .unwrap_or(Ty::Unknown);
-        let v = bound
-            .args
-            .get(1)
-            .map(|a| self.resolve_type(a, span))
-            .unwrap_or(Ty::Unknown);
+        let k = bound.args.first().cloned().unwrap_or(Ty::Unknown);
+        let v = bound.args.get(1).cloned().unwrap_or(Ty::Unknown);
         Some((k, v))
     }
 
@@ -4329,11 +4313,7 @@ impl Checker {
                 .get(name)
                 .and_then(|bs| bs.iter().find(|b| b.name == "Slice").cloned())
         {
-            return bound
-                .args
-                .first()
-                .map(|a| self.resolve_type(a, span))
-                .unwrap_or(Ty::Unknown);
+            return bound.args.first().cloned().unwrap_or(Ty::Unknown);
         }
         match self.slice_result(&obj_ty) {
             Some(r) => r,

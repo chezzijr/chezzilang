@@ -473,28 +473,6 @@ impl Checker {
             .or_else(|| self.owning_protocol_def(&key))
     }
 
-    /// Clone `bs` with each [`Bound::name`] re-spelled to its protocol key (TICKET-027 — a stored
-    /// bound must cross a module boundary keyed, not bare).
-    pub(super) fn key_bounds(&self, bs: &[Bound]) -> Vec<Bound> {
-        bs.iter()
-            .map(|b| Bound {
-                name: self.protocol_key(&b.name),
-                args: b.args.clone(),
-            })
-            .collect()
-    }
-
-    /// Clone `tps` with each [`TypeParam::bounds`] re-spelled via [`Checker::key_bounds`]
-    /// (TICKET-027).
-    pub(super) fn key_param_bounds(&self, tps: &[TypeParam]) -> Vec<TypeParam> {
-        tps.iter()
-            .map(|tp| TypeParam {
-                bounds: self.key_bounds(&tp.bounds),
-                ..tp.clone()
-            })
-            .collect()
-    }
-
     // --- member-resolution fallback by the value's OWN module-scoped identity key ---
     //
     // User types are MODULE-SCOPED: their per-module shape tables (`self.structs` / `self.enums` +
@@ -690,7 +668,7 @@ impl Checker {
     }
 
     /// An enum's type params by identity key: local table first, else the owning `ModuleSig`.
-    pub(super) fn enum_type_params_of(&self, key: &str) -> Option<&Vec<TypeParam>> {
+    pub(super) fn enum_type_params_of(&self, key: &str) -> Option<&Vec<TyParam>> {
         self.enum_type_params
             .get(key)
             .or_else(|| self.owning_enum_def(key).map(|e| &e.type_params))
@@ -714,7 +692,7 @@ impl Checker {
     }
 
     /// A newtype's type params by identity key: local table first, else the owning `ModuleSig`.
-    pub(super) fn newtype_type_params_of(&self, key: &str) -> Option<&Vec<TypeParam>> {
+    pub(super) fn newtype_type_params_of(&self, key: &str) -> Option<&Vec<TyParam>> {
         self.newtype_type_params
             .get(key)
             .or_else(|| self.owning_newtype_def(key).map(|nt| &nt.type_params))
@@ -890,7 +868,7 @@ impl Checker {
                     .collect();
                 self.exit_type_params(saved);
                 let info = StructInfo {
-                    type_params: type_params.clone(),
+                    type_params: self.resolve_bounds(type_params, *span),
                     fields: harvested_fields,
                     // Methods are harvested in PASS 1b below (after every native struct name is
                     // transiently visible so a method return type can reference a sibling native
@@ -1092,6 +1070,10 @@ impl Checker {
             Some(t) => self.resolve_type(t, decl.span),
             None => Ty::Unknown,
         };
+        // TICKET-202: resolve the bounds BEFORE the scope closes, while the enclosing native
+        // struct's `[T]` is still entered (`List.sort`'s `where T: Comparable`).
+        let where_bounds = self.resolve_bounds(&decl.where_bounds, decl.span);
+        let own_tps = self.resolve_bounds(&decl.type_params, decl.span);
         self.exit_type_params(saved_tps);
         let variadic = decl.params.iter().skip(skip).position(|p| p.is_variadic);
         let optional = decl
@@ -1108,10 +1090,10 @@ impl Checker {
         // Carry the `where T: Bound` clause onto the harvested sig — for a native METHOD (e.g.
         // `List.sort`'s `where T: Comparable`) it is enforced at each call site by the container
         // method-dispatch arm (the `T` names the enclosing native struct's type param, in scope here).
-        sig.where_bounds = decl.where_bounds.clone();
+        sig.where_bounds = where_bounds;
         // A native method's OWN `[U]` params land on the sig so it routes through the generic-method
         // inference path (`infer_generic_method`), not the fixed-arity path (empty for the common case).
-        sig.type_params = decl.type_params.clone();
+        sig.type_params = own_tps;
         sig.variadic = variadic;
         // TICKET-187: names serve protocol conformance only; `slots` stays `None`, so a direct
         // native call still takes no named arguments (DEC-182).
@@ -1154,7 +1136,7 @@ impl Checker {
                     .collect();
                 self.exit_type_params(saved);
                 return Some(StructInfo {
-                    type_params: type_params.clone(),
+                    type_params: self.resolve_bounds(type_params, s.span),
                     fields: Vec::new(),
                     methods: table,
                     origin: StructOrigin::Builtin,
@@ -1289,8 +1271,9 @@ impl Checker {
                 let mut saved = self.type_params.clone();
                 std::mem::swap(&mut self.type_params, &mut saved);
                 self.type_params.insert("Self".to_string(), Vec::new());
-                for tp in type_params {
-                    self.type_params.insert(tp.name.clone(), tp.bounds.clone());
+                let resolved = self.resolve_bounds(type_params, s.span);
+                for rtp in resolved {
+                    self.type_params.insert(rtp.name, rtp.bounds);
                 }
                 let sigs: Vec<(String, FnSig)> = methods
                     .iter()
@@ -1313,11 +1296,16 @@ impl Checker {
                         (m.name.clone(), sig)
                     })
                     .collect();
+                // TICKET-202: embeds resolve here, while the protocol's own params are in scope.
+                let embeds: Vec<TyBound> = embeds
+                    .iter()
+                    .map(|b| self.resolve_bound(b, s.span))
+                    .collect();
                 self.type_params = saved;
                 return Some(ProtocolInfo {
                     type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
                     methods: sigs,
-                    embeds: embeds.clone(),
+                    embeds,
                 });
             }
         }
@@ -3758,6 +3746,19 @@ impl Checker {
                 self.hoist_protocol(name, type_params, methods, embeds, s.span);
             }
         }
+        // TICKET-202 — resolve every embed's args once, in its own protocol's scope, now that a
+        // forward protocol name resolves, and before any reader (validation included) runs.
+        for s in stmts {
+            if let StmtKind::Protocol {
+                name,
+                type_params,
+                embeds,
+                ..
+            } = &s.kind
+            {
+                self.resolve_protocol_embeds(name, type_params, embeds, s.span);
+            }
+        }
         // M22 — validate embeds in a SECOND pass, now that every protocol is registered, so a forward
         // (or cyclic) embed reference resolves. Collision/cycle detection lives here (declare-time,
         // authoritative — before any satisfaction check can recurse into a cycle).
@@ -3923,12 +3924,13 @@ impl Checker {
                     // carries the key — resolves its fields/methods here and across the module
                     // boundary. `struct_names` (bare-visibility) stays bare; only the layout is keyed.
                     let key = self.bare_key(name);
+                    let rtps = self.resolve_bounds(type_params, s.span);
                     self.structs.insert(
                         key,
                         StructInfo {
-                            // TICKET-027: re-spell each stored bound to a protocol KEY so it crosses a
-                            // module boundary correctly.
-                            type_params: self.key_param_bounds(type_params),
+                            // TICKET-027 + TICKET-202: each stored bound is keyed and its args
+                            // resolved in the declaring scope.
+                            type_params: rtps,
                             fields,
                             methods,
                             origin,
@@ -4034,9 +4036,9 @@ impl Checker {
                     }
                     self.exit_type_params(saved);
                     self.enums.insert(key.clone(), names);
-                    // TICKET-027: re-spell each stored bound to a protocol KEY.
-                    self.enum_type_params
-                        .insert(key.clone(), self.key_param_bounds(type_params));
+                    // TICKET-027 + TICKET-202: keyed bounds, args resolved in the declaring scope.
+                    let rtps = self.resolve_bounds(type_params, s.span);
+                    self.enum_type_params.insert(key.clone(), rtps);
                     self.enum_methods.insert(key, method_sigs);
                 }
                 StmtKind::NewType {
@@ -4177,9 +4179,9 @@ impl Checker {
                         .collect();
                     self.current_self_ty = saved_self;
                     self.exit_type_params(saved);
-                    // TICKET-027: re-spell each stored bound to a protocol KEY.
-                    self.newtype_type_params
-                        .insert(key.clone(), self.key_param_bounds(type_params));
+                    // TICKET-027 + TICKET-202: keyed bounds, args resolved in the declaring scope.
+                    let rtps = self.resolve_bounds(type_params, s.span);
+                    self.newtype_type_params.insert(key.clone(), rtps);
                     self.newtype_defs.insert(key, (under_ty, method_sigs));
                 }
                 StmtKind::Extern { fns, .. } => {

@@ -92,16 +92,15 @@ impl Checker {
                     // Keep only the bounds the enclosing param does NOT already declare (the
                     // still-in-scope enclosing param is entered by the type's hoist). If nothing is
                     // novel, record no receiver-bound at all (the declared bound already covers it).
+                    // Compared RESOLVED (TICKET-202): the declared side is already a `TyBound`.
                     let declared = self.type_params.get(&w.name).cloned().unwrap_or_default();
+                    let resolved = self.resolve_bounds(std::slice::from_ref(w), span);
                     let novel: Vec<Bound> = w
                         .bounds
                         .iter()
-                        .filter(|b| {
-                            !declared
-                                .iter()
-                                .any(|e| e.name == b.name && e.args == b.args)
-                        })
-                        .cloned()
+                        .zip(&resolved[0].bounds)
+                        .filter(|(_, r)| !declared.contains(r))
+                        .map(|(b, _)| b.clone())
                         .collect();
                     if !novel.is_empty() {
                         receiver_bounds.push(TypeParam {
@@ -154,6 +153,10 @@ impl Checker {
             .as_ref()
             .map(|t| self.resolve_type(t, span))
             .unwrap_or(Ty::Unknown);
+        // TICKET-202: bounds resolve HERE, in the declaration's scope (the receiver's params are
+        // entered by the type hoist), and never again at a use site.
+        let type_params = self.resolve_bounds(&merged, span);
+        let where_bounds = self.resolve_bounds(&receiver_bounds, span);
         self.exit_type_params(saved);
         // STATIC classification (the "no self ⇒ static" rule): a method whose first param is NOT
         // named `self` — or which has no params at all — is a static (associated) method, dispatched
@@ -190,13 +193,13 @@ impl Checker {
             ret,
             // TICKET-027: a stored bound must cross a module boundary keyed, not bare, so a whole-module
             // import re-spells it correctly against the importer's own `Checker::protocols`.
-            type_params: self.key_param_bounds(&merged),
+            type_params,
             // A method's OWN `[U]` where-bounds are merged into `type_params` above (enforced via the
             // ordinary generic-call path). `where_bounds` carries only CONDITIONAL-METHOD receiver
             // bounds — a `where` naming the enclosing type's param — enforced at the struct/enum/newtype
             // method-call dispatch arms against the receiver's concrete type arg (mirrors native sigs,
             // e.g. `List[T].sort`'s `where T: Comparable`). Empty for a free fn or a plain method.
-            where_bounds: self.key_param_bounds(&receiver_bounds),
+            where_bounds,
             is_static,
             doc: decl.doc.clone(),
             // M24 — computed HERE (the one site with the declaration's body in hand) so every
@@ -1778,7 +1781,7 @@ impl Checker {
     fn check_type_arity_and_bounds(
         &mut self,
         n: &str,
-        tps: Option<Vec<TypeParam>>,
+        tps: Option<Vec<TyParam>>,
         resolved: &[Ty],
         span: Span,
     ) {
@@ -1793,9 +1796,16 @@ impl Checker {
                 ),
             );
         }
+        // A bound's args name the type's own params; read them at this annotation's args.
+        let map: HashMap<String, Ty> = tps
+            .iter()
+            .map(|tp| tp.name.clone())
+            .zip(resolved.iter().cloned())
+            .collect();
         for (tp, arg) in tps.iter().zip(resolved) {
             for bound in &tp.bounds {
-                if let Err(msg) = self.satisfies(arg, &bound.name) {
+                let bargs: Vec<Ty> = bound.args.iter().map(|a| subst(a, &map)).collect();
+                if let Err(msg) = self.satisfies_args(arg, &bound.name, &bargs) {
                     self.error(span, msg);
                 }
             }
@@ -2130,13 +2140,11 @@ impl Checker {
                             span
                         };
                         let msg = self.unknown_type_msg(n);
-                        // A bound's own type arg (e.g. `T: Produces[Bogus]`) is resolved once,
-                        // unconditionally, when the owning signature is hoisted, and then AGAIN at
-                        // every call site or witness dispatch that substitutes it (`resolve_bound_arg`
-                        // and several direct `resolve_type` calls in `proto.rs`/`expr.rs`) — all
-                        // resolving the SAME `Type::Named` AST node, so they now share `at` too. Skip
-                        // a report that would be byte-for-byte identical to one already recorded,
-                        // rather than patch every such call site individually.
+                        // A bound's own type arg (e.g. `T: Produces[Bogus]`) can be reported by more
+                        // than one reporting resolution of the SAME `Type::Named` AST node (TICKET-202
+                        // made `resolve_bounds` silent; `check_bounds` is the bound's reporter), so
+                        // they share `at`. Skip a report that would be byte-for-byte identical to
+                        // one already recorded.
                         let attributed = self.attribute(&msg);
                         if !self
                             .errors
@@ -4430,7 +4438,7 @@ impl Checker {
                     }
                     // A bounded `[C: IndexSet[K, V]]` type parameter is index-assignable in the body.
                     Ty::Param(name) => {
-                        if let Some((k, v)) = self.param_indexset_kv(&name, target.span) {
+                        if let Some((k, v)) = self.param_indexset_kv(&name) {
                             let idx_ty = self.infer(index);
                             if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
                                 let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
@@ -4980,7 +4988,7 @@ impl Checker {
         // clause into them, so the body sees a `where`-bounded param as satisfying its bound (e.g. a
         // `where T: Comparable` param may use `<` in the body). Same names as `decl.type_params`
         // (the merge only adds bounds), so the reserved/shadow checks in `fn_sig` still cover them.
-        let saved_tps = self.enter_type_params(&sig.type_params);
+        let saved_tps = self.enter_ty_params(&sig.type_params);
         // CONDITIONAL METHOD: a receiver `where T: Bound` (`T` the ENCLOSING type's param, carried on
         // `sig.where_bounds`) constrains the receiver at call sites — but the method's BODY may also
         // use the bounded operation (e.g. `<` needs `Comparable`), exactly as a free fn's `where`
@@ -4993,7 +5001,7 @@ impl Checker {
         for tp in &sig.where_bounds {
             if let Some(bounds) = self.type_params.get_mut(&tp.name) {
                 for b in &tp.bounds {
-                    if !bounds.iter().any(|e| e.name == b.name && e.args == b.args) {
+                    if !bounds.contains(b) {
                         bounds.push(b.clone());
                     }
                 }
@@ -5585,7 +5593,7 @@ impl Checker {
                     .type_params
                     .iter()
                     .cloned()
-                    .zip(b.args.iter().map(|a| self.resolve_ty_ro(a)))
+                    .zip(b.args.iter().cloned())
                     .collect();
                 return Some(subst(&sig.params[1], &map));
             }
@@ -5697,14 +5705,45 @@ impl Checker {
         }
     }
 
-    /// Resolve a bound's type argument (the `T` in `Iterator[T]`) to a `Ty` with the *callee's* type
-    /// parameters in scope, so a bare param name becomes `Ty::Param` even at a call site where those
-    /// params aren't otherwise visible. Restores the prior scope before returning.
-    pub(super) fn resolve_bound_arg(&mut self, arg: &Type, tps: &[TypeParam], span: Span) -> Ty {
-        let saved = self.enter_type_params(tps);
-        let ty = self.resolve_type(arg, span);
-        self.exit_type_params(saved);
-        ty
+    /// TICKET-202 — the ONE producer of a resolved bound: the protocol name keyed by
+    /// `protocol_key`, every type arg resolved in the CURRENT scope. Callers own the scope (the
+    /// declaration's); a use site never calls this on a stored bound.
+    pub(super) fn resolve_bound(&mut self, b: &Bound, span: Span) -> TyBound {
+        TyBound {
+            name: self.protocol_key(&b.name),
+            args: b.args.iter().map(|a| self.resolve_type(a, span)).collect(),
+        }
+    }
+
+    /// Resolve every bound of `tps` in the declaring scope, with `tps`' own names in scope (so a
+    /// sibling `[S, B: Conv[S]]` resolves to `Ty::Param("S")`). Silent: `check_bounds` is the one
+    /// reporter of a bound's diagnostics, and a declaration's params are entered several times.
+    pub(super) fn resolve_bounds(&mut self, tps: &[TypeParam], span: Span) -> Vec<TyParam> {
+        let has_args = tps
+            .iter()
+            .any(|tp| tp.bounds.iter().any(|b| !b.args.is_empty()));
+        let mark = has_args.then(|| self.diag_mark());
+        let saved = self.type_params.clone();
+        for tp in tps {
+            self.type_params.insert(tp.name.clone(), Vec::new());
+        }
+        let out = tps
+            .iter()
+            .map(|tp| TyParam {
+                name: tp.name.clone(),
+                name_span: tp.name_span,
+                bounds: tp
+                    .bounds
+                    .iter()
+                    .map(|b| self.resolve_bound(b, span))
+                    .collect(),
+            })
+            .collect();
+        self.type_params = saved;
+        if let Some(m) = mark {
+            self.diag_rollback(m);
+        }
+        out
     }
 
     /// Tuple-destructuring `for a, b, … in xs` (N > 1 names): bind each name to the matching slot of
@@ -5815,7 +5854,7 @@ impl Checker {
             Ty::Unknown => unknowns(vars),
             Ty::Param(name) => {
                 // A type parameter bounded `S: Iterator[T]` is iterable; bind the loop var to its
-                // declared element type `T` (resolved with the surrounding params in scope).
+                // declared element type `T` (resolved at the declaration, TICKET-202).
                 let arg = self.type_params.get(name).and_then(|bs| {
                     // `S: Iterator[T]` OR `S: Iterable[T]` is for-iterable; both carry the element as
                     // their single bound arg (an `Iterable` is driven through a one-time `.iter()`).
@@ -5825,7 +5864,7 @@ impl Checker {
                 });
                 match arg {
                     Some(t) => {
-                        let elem = self.resolve_type(&t, iter.span);
+                        let elem = t;
                         if vars.len() == 1 {
                             vec![(vars[0].clone(), elem)]
                         } else if let Some(bindings) =
