@@ -33,7 +33,7 @@
 //! deadlock, so the predicate can't fire while one is parked — only the cancel/fault path could
 //! strand them, and that is now drained.)
 
-use super::{Fiber, MnSched};
+use super::{Fiber, MnSched, ScopeCancel};
 use polling::{Event, Events, Poller};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -130,8 +130,9 @@ static SERVICE: OnceLock<NetPoller> = OnceLock::new();
 /// has done running→inflight, so the fiber is accounted as in-flight before the OS can wake it.
 /// Returns `Some(fiber)` WITHOUT registering iff `cancel` — the PARKING FIBER'S SCOPE cancel, handed
 /// in by `poll_park_offload` (NOT the sched's legacy global/outermost `MnSched::cancel`, which a
-/// cancelled INNER scope does not set) — is already set (a sibling faulted while this fiber was on its
-/// way to park), OR iff `closed` (W15-1: the owning `SocketCore`/`ListenerCore` was `close()`d while
+/// cancelled INNER scope does not set) — is already tripped on the scope's own flag or any
+/// ancestor's (DEC-118, TICKET-200: a sibling faulted, or an `Executor`'s `shutdown_now` fired, while
+/// this fiber was on its way to park), OR iff `closed` (W15-1: the owning `SocketCore`/`ListenerCore` was `close()`d while
 /// this op was on its way to park) is already set. The caller must re-inject it so it resumes and
 /// unwinds or re-faults on the closed handle, rather than parking on a poller that [`drain_sched`] may
 /// have already swept or arming an fd `close` is about to drop. `None` on a normal park. The cancel +
@@ -145,7 +146,7 @@ pub fn register(
     interest: Interest,
     fiber: Fiber,
     sched: Arc<MnSched>,
-    cancel: Arc<AtomicBool>,
+    cancel: ScopeCancel,
     in_flight: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
     deadline: Option<Instant>,
@@ -226,7 +227,7 @@ impl NetPoller {
         interest: Interest,
         fiber: Fiber,
         sched: Arc<MnSched>,
-        cancel: Arc<AtomicBool>,
+        cancel: ScopeCancel,
         in_flight: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
         deadline: Option<Instant>,
@@ -244,8 +245,9 @@ impl NetPoller {
         // an already-swept poller. Read it under the SAME lock `drain_sched` sweeps under, so the two are
         // serialized — hand the fiber back to unwind rather than park it on a poller a past sweep drained.
         // TICKET-188: a tripped flag of a nursery this fiber OWNS (a child faulted) hands it back too.
-        if cancel.load(Ordering::Relaxed) || fiber.owned_tripped() || closed.load(Ordering::Acquire)
-        {
+        // TICKET-200: so does an ANCESTOR's flag (`ScopeCancel::tripped`, an `Executor`'s
+        // `shutdown_now`), or the drain scan that recorded this trip's `CANCEL_GEN` misses this park.
+        if cancel.tripped() || fiber.owned_tripped() || closed.load(Ordering::Acquire) {
             return Some(fiber);
         }
         // The key is never a duplicate: a second op on the same socket is rejected by the `in_flight`
@@ -553,8 +555,11 @@ mod tests {
     }
 
     /// A never-tripped scope cancel (the flag `poll_park_offload` hands `register`).
-    fn no_cancel() -> Arc<AtomicBool> {
-        Arc::new(AtomicBool::new(false))
+    fn no_cancel() -> ScopeCancel {
+        ScopeCancel {
+            own: Arc::new(AtomicBool::new(false)),
+            ancestors: Vec::new(),
+        }
     }
 
     fn mk_fiber() -> Fiber {
@@ -1117,6 +1122,47 @@ mod tests {
             )
             .is_some(),
             "a park on a closed socket is refused, not armed"
+        );
+        assert!(!deregister(key), "the refused park left no registry row");
+        drop(server);
+    }
+
+    /// TICKET-200 — a park whose scope's own flag is clear but whose ANCESTOR's flag is tripped (an
+    /// `Executor`'s `shutdown_now` over a job's nursery) is refused, the same as every other park path
+    /// (DEC-118). An untripped ancestor still parks.
+    #[test]
+    fn register_refuses_a_park_under_a_tripped_ancestor() {
+        let (_client, server) = loopback_pair();
+        let sched = mk_sched();
+        sched.inflight.fetch_add(2, Ordering::Relaxed);
+        let ancestor = Arc::new(AtomicBool::new(false));
+        let under = |a: &Arc<AtomicBool>| ScopeCancel {
+            own: Arc::new(AtomicBool::new(false)),
+            ancestors: vec![Arc::clone(a)],
+        };
+        let key = usize::MAX - 10;
+        let park = |cancel| {
+            register(
+                key,
+                server.as_raw_fd(),
+                Interest::Read,
+                mk_fiber(),
+                Arc::clone(&sched),
+                cancel,
+                new_in_flight(),
+                new_closed(),
+                None,
+            )
+        };
+        assert!(
+            park(under(&ancestor)).is_none(),
+            "an untripped ancestor parks"
+        );
+        assert!(deregister(key), "the park left a registry row");
+        ancestor.store(true, Ordering::Relaxed);
+        assert!(
+            park(under(&ancestor)).is_some(),
+            "a park under a tripped ancestor is refused, not armed"
         );
         assert!(!deregister(key), "the refused park left no registry row");
         drop(server);

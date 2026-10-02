@@ -411,6 +411,22 @@ pub(crate) fn trip_cancel_flag(flag: &AtomicBool) {
     CANCEL_GEN.fetch_add(1, Ordering::Release);
 }
 
+/// TICKET-200 — THE answer to "is this scope cancelled": its own flag or any ancestor's (an
+/// `Executor`'s `shutdown_now` trips a flag a job's nursery scope carries in `JoinScope::ancestors`).
+/// `SchedCore::scope_cancel_tripped` reads it under the core lock; `poller::register` reads a
+/// snapshot of it under the registry lock, so a socket park re-checks the same flags every other
+/// park path does (DEC-118).
+pub(super) struct ScopeCancel {
+    pub(super) own: Arc<AtomicBool>,
+    pub(super) ancestors: Vec<Arc<AtomicBool>>,
+}
+
+impl ScopeCancel {
+    pub(super) fn tripped(&self) -> bool {
+        self.own.load(Ordering::Relaxed) || self.ancestors.iter().any(|a| a.load(Ordering::Relaxed))
+    }
+}
+
 /// A process-wide lock serializing every test that WRITES [`WORKER_OVERRIDE`]. The override is
 /// process-global and the harness runs tests on multiple threads, so an unguarded store would change
 /// the worker count under every concurrent parallel test. Same shape and same reason as
@@ -2770,8 +2786,17 @@ impl SchedCore {
     /// `Executor`'s `shutdown_now` trips a flag a job's nursery scope carries in
     /// `JoinScope::ancestors`, installed by `Vm::run_one_fiber` as this fiber's `cancel_outer`)?
     fn scope_cancel_tripped(&self, sid: usize) -> bool {
+        self.scope_cancel(sid).tripped()
+    }
+
+    /// TICKET-200 — scope `sid`'s own cancel flag and its ancestors' flags, for
+    /// [`ScopeCancel::tripped`].
+    fn scope_cancel(&self, sid: usize) -> ScopeCancel {
         let s = &self.scopes[sid];
-        s.cancel.load(Ordering::Relaxed) || s.ancestors.iter().any(|a| a.load(Ordering::Relaxed))
+        ScopeCancel {
+            own: Arc::clone(&s.cancel),
+            ancestors: s.ancestors.clone(),
+        }
     }
 
     /// TICKET-118 (W13-8) — the first scope (if any) whose own flag or an ancestor's is tripped,
@@ -5204,9 +5229,10 @@ impl MnSched {
     /// fiber back onto the run queue on readiness (inflight→runnable), exactly like the blocking pool.
     /// Takes `&Arc<Self>` so the poller can hold the scheduler for that completion.
     fn poll_park_offload(self: &Arc<Self>, fiber: Fiber, pp: PollPark) {
-        // Cross-nursery flat scheduler — clone THIS fiber's SCOPE cancel (not the sched's legacy global
-        // `cancel`, which is only the OUTERMOST nursery's) while we hold the core lock anyway: it is the
-        // flag `register` must gate the park on, exactly like `park`/`park_wait`'s gap re-check. Reading
+        // Cross-nursery flat scheduler — clone THIS fiber's SCOPE cancel and its ancestors' flags
+        // (TICKET-200, `ScopeCancel`; not the sched's legacy global `cancel`, which is only the
+        // OUTERMOST nursery's) while we hold the core lock anyway: they are the flags `register` must
+        // gate the park on, exactly like `park`/`park_wait`'s gap re-check. Reading
         // the global one here would let a fiber of a CANCELLED INNER scope park on a poller that
         // `drain_sched` had already swept — stranding it, and (N4) holding the cancel-teardown veto
         // forever.
@@ -5214,7 +5240,7 @@ impl MnSched {
             let mut c = self.lock();
             c.running -= 1;
             self.inflight.fetch_add(1, Ordering::Relaxed); // running → inflight
-            Arc::clone(&c.scopes[fiber.scope_id].cancel)
+            c.scope_cancel(fiber.scope_id)
         };
         // `register` rejects (returns the fiber) iff that scope's cancel was tripped before it could
         // park — a sibling faulted in the park-vs-cancel gap. Re-inject so the fiber resumes and unwinds
