@@ -5462,6 +5462,8 @@ impl Checker {
         };
         // Enforce the arg fn's declared bounds against the bindings, exactly as Scope A does.
         self.enforce_bounds(&sig.type_params, &sig.type_params, &m, span);
+        // A method value's receiver `where` bound (`Bx.total`); empty for a fn.
+        self.enforce_bounds(&sig.where_bounds, &sig.type_params, &m, span);
         Some(refined)
     }
 

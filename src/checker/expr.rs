@@ -569,7 +569,7 @@ impl Checker {
             //   • SINGLE type arg — `Field{obj: Index{Ident(Type), idx}, name}` (the `[..]` is
             //     followed by `.` not `(`, so the turbofish-call steal never fires; the parser can't
             //     tell `Type[int].x` from `arr[i].field`, so the checker reinterprets the index).
-            //   • MULTI type arg — `Field{obj: TypeApply{name, args}, name}` (the parser committed a
+            //   • MULTI type arg — `Field{obj: TypeApply{head, args}, name}` (the parser committed a
             //     real type list because of the disambiguating comma).
             // VARIANT-FIRST (a same-named static method is barred at decl time by disjointness); if
             // no variant matches the member name, fall to the static-method path.

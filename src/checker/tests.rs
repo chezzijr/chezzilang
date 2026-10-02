@@ -29522,6 +29522,40 @@ struct S:
 }
 
 #[test]
+fn conditional_method_value_enforces_its_receiver_where_bound() {
+    // TICKET-204 review: a method value read through its type keeps the receiver `where` bound the
+    // call form enforces (Rust rejects `Bx::<P>::total`, E0599). Each position must reject.
+    const S: &str = "\
+struct Bx[T]:
+    v: T
+    fn total(self, o: Bx[T]) -> T where T: Add:
+        return self.v + o.v
+struct P:
+    n: int
+";
+    const AP: &str = "fn ap(f: fn(Bx[P], Bx[P]) -> P) -> int:\n    return 0\n";
+    const AP2: &str = "fn ap2[X](f: fn(Bx[P], X) -> P, x: X) -> int:\n    return 0\n";
+    for tail in [
+        "f := Bx[P].total\n".to_string(),
+        "g: fn(Bx[P], Bx[P]) -> P = Bx.total\n".to_string(),
+        "type B = Bx[P]\nf := B.total\n".to_string(),
+        format!("{AP}print(ap(Bx.total))\n"),
+        format!("{AP}print(ap(Bx[P].total))\n"),
+        format!("{AP2}print(ap2(Bx[P].total, Bx(v=P(n=1))))\n"),
+        format!("{AP2}print(ap2(Bx.total, Bx(v=P(n=1))))\n"),
+    ] {
+        entry_rejects(&format!("{S}{tail}"), "type P does not satisfy Add");
+    }
+    // Neighbours: a satisfying head arg stays a value, written or pinned by the slot.
+    entry_ok(&format!(
+        "{S}f := Bx[int].total\nprint(f(Bx(v=1), Bx(v=2)))\n"
+    ));
+    entry_ok(&format!(
+        "{S}g: fn(Bx[int], Bx[int]) -> int = Bx.total\nprint(g(Bx(v=1), Bx(v=2)))\n"
+    ));
+}
+
+#[test]
 fn type_head_member_value_keeps_its_decline_neighbours() {
     // W12-22 scope fence: a shadowing parameter keeps `type int has no field`, and an unknown
     // member on a real struct head reports the type-as-value message (TICKET-204).

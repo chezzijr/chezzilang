@@ -25,7 +25,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   undetermined-generic diagnostic offers the turbofish at every arity (`pair[<A>, <B>]`); explicit
   type args combine with named args (`Box[int](v=1)`). A method value is the new
   `Op::MakeMethodFunc`, resolved at run time through `Vm::type_method_proto` (the lookup
-  `CallStatic` uses). Grid: `tests/turbofish_value_grid.rs` (376 cells); spec test
+  `CallStatic` uses). A conditional method value keeps its receiver `where` bound (`Bx[P].total`
+  with `where T: Add` rejects, as Rust E0599 does). Grid: `tests/turbofish_value_grid.rs` (381 cells); spec test
   `tests/chz/spec/turbofish_value_multi_arg_test.chz`.
 
 - **TICKET-200 (2026-10-02): Family B3, cancel reaches every parked party (C1) and one end-of-run

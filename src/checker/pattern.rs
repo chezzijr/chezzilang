@@ -2392,6 +2392,8 @@ impl Checker {
         match verdict {
             FnValuePin::Pinned(map, refined) => {
                 self.enforce_bounds(&type_params, &type_params, &map, span);
+                // A method value's receiver `where` bound; empty for a fn.
+                self.enforce_bounds(&sig.where_bounds, &type_params, &map, span);
                 return Some(refined);
             }
             // …the value can never be formed. Go refuses exactly this spelling, at the READ:
@@ -2674,6 +2676,8 @@ impl Checker {
         }
         let tps: Vec<TyParam> = pf.head_decl.iter().chain(own.iter()).cloned().collect();
         self.enforce_bounds(&tps, &tps, &map, span);
+        // A conditional method's receiver `where` bound (`where T: Add`), as its call form enforces.
+        self.enforce_bounds(&pf.sig.where_bounds, &tps, &map, span);
         let mut sig = subst_sig(&pf.sig, &map);
         sig.type_params.retain(|tp| !map.contains_key(&tp.name));
         if sig.type_params.is_empty() {

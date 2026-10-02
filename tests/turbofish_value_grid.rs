@@ -473,6 +473,33 @@ fn neighbour_cells(out: &mut Vec<Cell>) {
         "fn add2[A: Add, B](a: A, b: B) -> A:\n    return a + a\np := add2[bool, int]",
         Expect::Rejects("type bool does not satisfy Add"),
     ));
+    // A conditional method read as a value keeps its receiver `where` bound (Rust E0599 on
+    // `Bx::<P>::total`), in every position that pins the head.
+    let wbx = "struct Bx[T]:\n    v: T\n    fn total(self, o: Bx[T]) -> T where T: Add:\n        return self.v + o.v\nstruct P:\n    n: int\n";
+    let ap2 = "fn ap2[X](f: fn(Bx[P], X) -> P, x: X) -> int:\n    return 0\n";
+    for (name, tail) in [
+        ("where_let", "f := Bx[P].total".to_string()),
+        (
+            "where_typed",
+            "g: fn(Bx[P], Bx[P]) -> P = Bx.total".to_string(),
+        ),
+        ("where_alias", "type B = Bx[P]\nf := B.total".to_string()),
+        (
+            "where_ghof",
+            format!("{ap2}print(ap2(Bx.total, Bx(v=P(n=1))))"),
+        ),
+    ] {
+        out.push(main_only(
+            name,
+            &format!("{wbx}{tail}"),
+            Expect::Rejects("type P does not satisfy Add"),
+        ));
+    }
+    out.push(main_only(
+        "where_ok",
+        &format!("{wbx}f := Bx[int].total\nprint(f(Bx(v=1), Bx(v=2)))"),
+        prints("3"),
+    ));
     out.push(main_only(
         "type_mismatch",
         &format!("{pair}p := pair[str, int]\nprint(p(1, \"x\"))"),
