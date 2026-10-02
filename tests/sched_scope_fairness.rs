@@ -7,14 +7,27 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn run(src: &str, threads: &str, tag: &str) -> Option<(String, String, Option<i32>)> {
+    run_env(src, threads, None, tag)
+}
+
+/// `run` with `CHEZZI_SCHED_SEED` set to `seed`, or removed on `None`.
+fn run_env(
+    src: &str,
+    threads: &str,
+    seed: Option<&str>,
+    tag: &str,
+) -> Option<(String, String, Option<i32>)> {
     let dir = std::env::temp_dir().join(format!("chz-t199-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("p.chz");
     std::fs::write(&path, src).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-        .arg("run")
-        .arg(&path)
-        .env("CHEZZI_THREADS", threads)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg("run").arg(&path).env("CHEZZI_THREADS", threads);
+    match seed {
+        Some(s) => cmd.env("CHEZZI_SCHED_SEED", s),
+        None => cmd.env_remove("CHEZZI_SCHED_SEED"),
+    };
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -142,4 +155,95 @@ fn fiber_owned_nursery_scope_id_is_stable_two_deep_child_fault_at_default_thread
             "round {round}: code={code:?} stdout={out:?} stderr={err:?}"
         );
     }
+}
+
+/// Indent every line of `piece` by `n` spaces.
+fn indent(piece: &str, n: usize) -> String {
+    let pad = " ".repeat(n);
+    piece.lines().map(|l| format!("{pad}{l}\n")).collect()
+}
+
+/// The H1 grid program for one (nesting, cancel source) cell, and its expected stdout.
+fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
+    let second = match cancel {
+        "child" => "panic(\"boom\")",
+        "sibling" => "pass",
+        "shutdown_now" => "started.send(1)\nwhile true:\n    pass",
+        "exit" => "os.exit(0)",
+        _ => unreachable!(),
+    };
+    let owner = match nest {
+        "spawn" | "job" => "core(c, started)",
+        "recover" => "_r := recover: core(c, started)\nc.close()",
+        "two_deep" => "parallel:\n    spawn:\n        core(c, started)",
+        _ => unreachable!(),
+    };
+    let recv = if cancel == "sibling" {
+        "for _i in range(0, 20):\n    _v := c.recv()\npanic(\"boom\")"
+    } else {
+        "for _v in c:\n    pass"
+    };
+    let rounds = if cancel == "exit" { 1 } else { 50 };
+    let run_body = if nest == "job" || cancel == "shutdown_now" {
+        let stop = if cancel == "shutdown_now" {
+            "_ := started.recv()\n_r2 := recover: ex.shutdown_now()"
+        } else {
+            "_r2 := recover: ex.shutdown()"
+        };
+        format!(
+            "c := Channel[int](0)\nstarted := Channel[int](1)\nex := Executor()\nex.submit(fn(): outer(c, started))\n{stop}"
+        )
+    } else {
+        "c := Channel[int](0)\nstarted := Channel[int](1)\n_r := recover: outer(c, started)"
+            .to_string()
+    };
+    let mut src = String::from("import std.concurrency\nimport std.os\n");
+    src += "fn core(c: Channel[int], started: Channel[int]):\n    parallel:\n        spawn:\n";
+    src += "            while true:\n                c.send(1)\n        spawn:\n";
+    src += &indent(second, 12);
+    src += "fn outer(c: Channel[int], started: Channel[int]):\n    parallel:\n        spawn:\n";
+    src += &indent(owner, 12);
+    src += "        spawn:\n";
+    src += &indent(recv, 12);
+    src += "fn run():\n";
+    src += &indent(&run_body, 4);
+    src += &format!("fn main():\n    for _k in range(0, {rounds}):\n        run()\n");
+    src += "    print(\"done\")\nmain()\n";
+    let expected = if cancel == "exit" { "" } else { "done\n" };
+    (src, expected)
+}
+
+#[test]
+fn h1_scope_identity_grid_every_cell_exits_clean() {
+    let mut failures = Vec::new();
+    for nest in ["spawn", "recover", "job", "two_deep"] {
+        for cancel in ["child", "sibling", "shutdown_now", "exit"] {
+            let (src, expected) = h1_program(nest, cancel);
+            for t in ["2", "4", "0"] {
+                let cell = format!("{nest}-{cancel}-T{t}");
+                for i in 0..20 {
+                    match run(&src, t, &format!("h1g-{nest}-{cancel}-{t}")) {
+                        None => {
+                            failures.push(format!("{cell} run {i}: hang"));
+                            break;
+                        }
+                        Some((out, err, code)) => {
+                            if code != Some(0) || err.contains("panicked at") || out != expected {
+                                failures.push(format!(
+                                    "{cell} run {i}: code={code:?} stdout={out:?} stderr={err:?}"
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} grid cells failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

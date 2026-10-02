@@ -172,6 +172,9 @@ served.
 **History:** `cancel_drain` 35 commits, `runnext` 27; `scope_family`/`retire_last_scope` from
 TICKET-103, changed by 125; 132, 185 (17 commits); W17-1 is the open perf residual on the H2 path.
 
+**Status:** H1 fixed by `ScopeTable` (TICKET-199): scope ids are never reissued, and a retired id
+reads as absent.
+
 ## Isolated
 
 - **A2** (fixed in place, 7e0581a3): the lexer read `0.1` after a field `.` as a float.

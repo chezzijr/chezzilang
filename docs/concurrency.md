@@ -2580,7 +2580,8 @@ handling*, which are downstream of share-nothing and strictly simpler for a byte
 
 - **From Go:** the G/M/P split + per-P work-stealing run queues (`runnext` + bounded ring + global
   overflow), the `wakep`/spinning-worker wakeup with its StoreLoad barrier, and the netpoller
-  (epoll/kqueue) for sockets.
+  (epoll/kqueue) for sockets. Scope ids on a sched are monotonic and never reissued (`ScopeTable`,
+  TICKET-199): a worker holding a retired nursery's id reads an absent scope, never a newer one.
 - **From BEAM:** **reduction-counting preemption** instead of Go's signal-based SIGURG — Go needs
   signals only because it runs native code with a *shared GC heap* (stop at any PC, find live
   pointers); a bytecode VM has a natural safepoint every dispatch and share-nothing GC, so neither

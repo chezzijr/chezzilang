@@ -3256,13 +3256,72 @@ fn mn_register_scope_appends_and_offsets_slots() {
     let s1 = sched.register_scope(3, Arc::new(AtomicBool::new(false)), Vec::new());
     assert_eq!(s1, 1, "second scope id");
     let c = sched.lock();
-    assert_eq!(c.scopes.len(), 2);
+    assert_eq!(c.scopes.count(), 2);
     assert_eq!(c.scopes[0].base_index, 0);
     assert_eq!(
         c.scopes[1].base_index, 2,
         "scope 1 starts after scope 0's 2 slots"
     );
     assert_eq!(c.slots.len(), 5, "flat slots grew to 2 + 3");
+}
+
+/// TICKET-199 (H1) — a retired scope id is never reissued and reads as absent. A worker that still
+/// holds it after dropping the core lock (`mn_worker_loop`'s `cancel_drain` after `finish`) must
+/// neither panic nor drain the NEXT nursery's parked fibers. Under the old `id = scopes.len()` plus
+/// pop rule, the second registration reissued `a`.
+#[test]
+fn retired_scope_id_is_never_reissued_and_reads_as_absent() {
+    let sched = mk_sched(1);
+    let a = sched.register_scope_seeded(Arc::new(AtomicBool::new(false)), Vec::new(), Vec::new());
+    sched.retire_scope(a);
+    let b = sched.register_scope_seeded(Arc::new(AtomicBool::new(false)), Vec::new(), Vec::new());
+    assert_ne!(b, a, "a retired id must not be reissued");
+    assert!(sched.lock().scopes.get(a).is_none());
+    assert!(sched.lock().scope_family(a).is_empty());
+    // A parked fiber of a live scope (b) stays parked when a stale holder drains `a`.
+    let mut f = mk_fiber(0);
+    f.scope_id = b;
+    {
+        let mut c = sched.lock();
+        c.parked.insert(1, vec![ParkedEntry::Recv(f)]);
+        c.parked_n = 1;
+    }
+    sched.cancel_drain(a);
+    let c = sched.lock();
+    assert_eq!(
+        c.parked_n, 1,
+        "draining a retired id must not drain another scope"
+    );
+    assert!(c.global.is_empty());
+}
+
+/// TICKET-199 — `retire_scope` removes any done scope, not only the last one (scope order on one
+/// sched is NOT LIFO, DEC-103). A retired middle scope leaves a hole in `slots`; retiring the last
+/// scope truncates `slots` to the newest live scope's end.
+#[test]
+fn retire_scope_removes_a_done_scope_that_is_not_last() {
+    let sched = mk_sched(1); // root: slots 0..1
+    let a = sched.register_scope(2, Arc::new(AtomicBool::new(false)), Vec::new()); // 1..3
+    let b = sched.register_scope(3, Arc::new(AtomicBool::new(false)), Vec::new()); // 3..6
+    sched.lock().scopes[a].done = 2;
+    sched.retire_scope(a);
+    {
+        let c = sched.lock();
+        assert!(c.scopes.get(a).is_none(), "a done middle scope is retired");
+        assert!(c.scopes.get(b).is_some(), "the later scope stays");
+        assert_eq!(c.slots.len(), 6, "a middle removal leaves a hole");
+    }
+    sched.retire_scope(b);
+    assert!(
+        sched.lock().scopes.get(b).is_some(),
+        "an unfinished scope is not retired"
+    );
+    sched.lock().scopes[b].done = 3;
+    sched.retire_scope(b);
+    let c = sched.lock();
+    assert!(c.scopes.get(b).is_none());
+    assert_eq!(c.slots.len(), c.scopes.slot_end());
+    assert_eq!(c.slots.len(), 1, "slots shrink back to the root's range");
 }
 
 /// Scope-scoped owner stop: an owner whose OWN scope is done returns `Stop` (queue empty) even
@@ -9205,7 +9264,7 @@ fn set_body_wait_marks_every_scope_sharing_the_cancel_token() {
     let c = s.lock();
     assert!(
         c.scopes
-            .iter()
+            .values()
             .all(|x| !x.body_blocked && !x.awaiting_builder)
     );
 }

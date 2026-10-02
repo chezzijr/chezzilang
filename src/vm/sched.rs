@@ -1243,7 +1243,7 @@ impl Vm {
                 .flat_map(|&s| sched.take_scope_slots(s))
                 .collect();
             for &s in sids.iter().rev() {
-                sched.retire_last_scope(s);
+                sched.retire_scope(s);
             }
             return self.reduce_task_slots(slots);
         }
@@ -1462,7 +1462,7 @@ impl Vm {
                 .flat_map(|&s| sched.take_scope_slots(s))
                 .collect();
             for &s in sids.iter().rev() {
-                sched.retire_last_scope(s);
+                sched.retire_scope(s);
             }
             return self.escape_child_fault(slots);
         }
@@ -1519,7 +1519,7 @@ impl Vm {
             .flat_map(|&s| scope.sched.take_scope_slots(s))
             .collect();
         for &s in sids.iter().rev() {
-            scope.sched.retire_last_scope(s);
+            scope.sched.retire_scope(s);
         }
         self.reduce_task_slots(slots)
     }
@@ -1546,7 +1546,7 @@ impl Vm {
             .flat_map(|&s| scope.sched.take_scope_slots(s))
             .collect();
         for &s in sids.iter().rev() {
-            scope.sched.retire_last_scope(s);
+            scope.sched.retire_scope(s);
         }
         self.escape_child_fault(slots)
     }

@@ -7,6 +7,16 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-199 (2026-10-02): Family S1, scheduler scope identity (H1).** A nursery opened inside a
+  spawned task, whose child faulted, crashed a worker with `panicked at src/vm/mod.rs:5328:31: index
+  out of bounds` (or drained the NEXT nursery's fibers): its scope id was `scopes.len()`, the join
+  popped it, and `mn_worker_loop`'s `cancel_drain` still held it. `ScopeTable` (`src/vm/mod.rs`) is
+  now the one issuer and resolver of scope ids: ids are monotonic and never reissued, a retired id
+  reads as absent and its `scope_family` is empty. `retire_last_scope` became `retire_scope`, which
+  retires any done scope (scope order is not LIFO, DEC-103). Tests: `tests/sched_scope_fairness.rs`
+  (`h1_scope_identity_grid_every_cell_exits_clean`, 48 cells x 20 runs; on base 12 child-fault cells
+  red) and two `vm::tests` units. q1.chz at T=4: 0 of 20 runs fail (base ~50%).
+
 - **Wave-18 in-place fix (2026-10-01): the `z` format option.** `"{-0.0001:z.1f}"` is `0.0` (CPython
   3.11+): a float that rounds to zero drops its minus sign; `z` is rejected on an integer type and on a
   string, as CPython does. `src/fmtspec.rs`, tests `tests/chz/spec/format_spec_zero_coerce_test.chz`.

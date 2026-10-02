@@ -2407,8 +2407,8 @@ struct MnSched {
 
 /// Cross-nursery flat scheduler (M:N) — one nursery's JOIN RECORD (Trio/Go-style: structured
 /// concurrency = join bookkeeping, not a scheduler frame). The old scalar `{done,total,body_open}`
-/// became a `Vec<JoinScope>` so one global `MnSched` can host every nested nursery at once. Each scope
-/// owns a contiguous `base_index..base_index+total` sub-range of the FLAT `SchedCore::slots`.
+/// became a [`ScopeTable`] of these so one global `MnSched` can host every nested nursery at once.
+/// Each scope owns a contiguous `base_index..base_index+total` sub-range of the FLAT `SchedCore::slots`.
 struct JoinScope {
     /// This scope's offset into the flat `SchedCore::slots`: its tasks occupy `base_index..base_index+total`.
     base_index: usize,
@@ -2490,6 +2490,97 @@ struct JoinScope {
     parent_scope: Option<usize>,
 }
 
+/// TICKET-199 — THE issuer and resolver of scope ids on one sched. Ids are monotonic and never
+/// reissued: `open` hands out the next id, and a retired id reads as absent (`get` is `None`, and
+/// `SchedCore::scope_family` of it is empty). A worker may hold a scope id after dropping the core
+/// lock that proved it live (`mn_worker_loop` after `finish`, the drain scan in `take_runnable`,
+/// `cancel_all`); under the old `id = len()` plus pop rule that id went out of bounds or named the
+/// NEXT nursery, whose fibers were then drained. Only a reader that holds a live fiber of the scope,
+/// or its owner before retire, may index (`table[id]`); every other reader goes through `get`.
+/// There is deliberately no `len()`: an id is not a position.
+struct ScopeTable {
+    next: usize,
+    /// Live scopes, ascending by id.
+    live: Vec<(usize, JoinScope)>,
+}
+
+impl ScopeTable {
+    /// A table holding only the sched's root scope, id 0 (never retired).
+    fn with_root(root: JoinScope) -> Self {
+        Self {
+            next: 1,
+            live: vec![(0, root)],
+        }
+    }
+
+    /// Issue a fresh id for `scope`.
+    fn open(&mut self, scope: JoinScope) -> usize {
+        let id = self.next;
+        self.next += 1;
+        self.live.push((id, scope));
+        id
+    }
+
+    fn pos(&self, id: usize) -> Option<usize> {
+        self.live.binary_search_by_key(&id, |(i, _)| *i).ok()
+    }
+
+    fn get(&self, id: usize) -> Option<&JoinScope> {
+        self.pos(id).map(|p| &self.live[p].1)
+    }
+
+    fn get_mut(&mut self, id: usize) -> Option<&mut JoinScope> {
+        self.pos(id).map(|p| &mut self.live[p].1)
+    }
+
+    /// Live scopes with their ids, ascending.
+    fn iter(&self) -> impl Iterator<Item = (usize, &JoinScope)> {
+        self.live.iter().map(|(i, s)| (*i, s))
+    }
+
+    fn values(&self) -> impl Iterator<Item = &JoinScope> {
+        self.live.iter().map(|(_, s)| s)
+    }
+
+    fn ids(&self) -> Vec<usize> {
+        self.live.iter().map(|(i, _)| *i).collect()
+    }
+
+    fn count(&self) -> usize {
+        self.live.len()
+    }
+
+    /// The newest live scope: the only one that owns the `slots` tail and may grow in place.
+    fn last_id(&self) -> Option<usize> {
+        self.live.last().map(|(i, _)| *i)
+    }
+
+    fn remove(&mut self, id: usize) -> Option<JoinScope> {
+        self.pos(id).map(|p| self.live.remove(p).1)
+    }
+
+    /// The end of the newest live scope's slot range (0 when empty): `slots` is truncated to it
+    /// after every removal, so a retired tail gives its slots back.
+    fn slot_end(&self) -> usize {
+        self.live.last().map_or(0, |(_, s)| s.base_index + s.total)
+    }
+}
+
+impl std::ops::Index<usize> for ScopeTable {
+    type Output = JoinScope;
+    fn index(&self, id: usize) -> &JoinScope {
+        self.get(id)
+            .unwrap_or_else(|| panic!("scope {id} was retired while a live holder indexed it"))
+    }
+}
+
+impl std::ops::IndexMut<usize> for ScopeTable {
+    fn index_mut(&mut self, id: usize) -> &mut JoinScope {
+        self.get_mut(id)
+            .unwrap_or_else(|| panic!("scope {id} was retired while a live holder indexed it"))
+    }
+}
+
 struct SchedCore {
     /// The global overflow / seed queue. Seed + every coordinator-path requeue (deadlock flag,
     /// cancel drain) land here; per-worker requeues go to a worker's `locals[wid]` (D4c). Drained by
@@ -2544,9 +2635,9 @@ struct SchedCore {
     /// eager nursery (built only by the outermost owner); each `register_scope` appends a `JoinScope`
     /// and enlists its fibers into the SAME global run queue. A fiber carries its `scope_id`; the inline
     /// owner of a scope stops when ITS OWN scope is done (scope-scoped owner stop), while it drains the
-    /// global queue (so it naturally runs cross-nursery siblings — the case-A fix). `scopes.len() == 1`
-    /// is the single-nursery FAST PATH (the common case + `benches/run.chz`).
-    scopes: Vec<JoinScope>,
+    /// global queue (so it naturally runs cross-nursery siblings — the case-A fix). TICKET-199 — a
+    /// [`ScopeTable`]: ids are never reissued, and a retired id reads as absent.
+    scopes: ScopeTable,
     terminate: bool, // every worker loop exits once set (all scopes done, deadlock, or os.exit/fault)
     /// TICKET-181 — THE registry of blocked waiters the counters cannot see: every demoted recv
     /// or `wait:`, every M:N guard wait, and every blocked body of this sched's thread
@@ -2562,22 +2653,15 @@ struct SchedCore {
 
 impl SchedCore {
     /// Cross-nursery flat scheduler — every scope's tasks are done (the global terminate condition,
-    /// together with `!any_body_open`). `scopes.len() == 1` is the single-nursery fast path.
+    /// together with `!any_body_open`).
     fn all_scopes_done(&self) -> bool {
-        if self.scopes.len() == 1 {
-            let s = &self.scopes[0];
-            return s.done == s.total;
-        }
-        self.scopes.iter().all(|s| s.done == s.total)
+        self.scopes.values().all(|s| s.done == s.total)
     }
 
     /// Cross-nursery flat scheduler — any scope's eager body is still injecting (vetoes terminate +
     /// the global deadlock predicate, exactly as the old scalar `body_open` did).
     fn any_body_open(&self) -> bool {
-        if self.scopes.len() == 1 {
-            return self.scopes[0].body_open;
-        }
-        self.scopes.iter().any(|s| s.body_open)
+        self.scopes.values().any(|s| s.body_open)
     }
 
     /// §2c1 — the DEADLOCK predicate's half of [`Self::any_body_open`]: any scope whose eager body can
@@ -2585,10 +2669,7 @@ impl SchedCore {
     /// not live work and must not veto the verdict (see [`JoinScope::body_blocked`]). Terminate keeps
     /// asking `any_body_open`, which ignores this flag.
     fn any_body_injecting(&self) -> bool {
-        if self.scopes.len() == 1 {
-            return self.scopes[0].body_open && !self.scopes[0].body_blocked;
-        }
-        self.scopes.iter().any(|s| s.body_open && !s.body_blocked)
+        self.scopes.values().any(|s| s.body_open && !s.body_blocked)
     }
 
     /// Cross-nursery flat scheduler — true when EVERY still-incomplete scope is one merely awaiting the
@@ -2598,11 +2679,11 @@ impl SchedCore {
     /// A single-scope sched never holds an enlisted scope, so the fast path is always `false` (zero cost
     /// on the common path). (Cross-nursery flat scheduler — charges #1/#2.)
     fn all_incomplete_awaiting_builder(&self) -> bool {
-        if self.scopes.len() == 1 {
+        if self.scopes.count() == 1 {
             return false;
         }
         let mut any_incomplete = false;
-        for s in &self.scopes {
+        for s in self.scopes.values() {
             if s.done < s.total {
                 any_incomplete = true;
                 if !s.awaiting_builder {
@@ -2674,10 +2755,14 @@ impl SchedCore {
     fn cancelled_scope_awaiting_drain(&self) -> Option<usize> {
         #[cfg(test)]
         CANCEL_SCAN_CALLS.fetch_add(1, Ordering::Relaxed);
-        (0..self.scopes.len()).find(|&sid| {
-            let s = &self.scopes[sid];
-            s.done < s.total && self.scope_cancel_tripped(sid) && self.scope_has_undrained_park(sid)
-        })
+        self.scopes
+            .iter()
+            .find(|&(sid, s)| {
+                s.done < s.total
+                    && self.scope_cancel_tripped(sid)
+                    && self.scope_has_undrained_park(sid)
+            })
+            .map(|(sid, _)| sid)
     }
 
     /// TICKET-126 (W13-24) — the drain scan, skipped while no cancel flag was tripped since this sched's
@@ -2720,13 +2805,9 @@ impl SchedCore {
     }
 
     /// Cross-nursery flat scheduler — some scope has unfinished tasks (the `done < total` half of the
-    /// global deadlock predicate). Fast path for the common single-nursery case.
+    /// global deadlock predicate).
     pub(super) fn any_scope_incomplete(&self) -> bool {
-        if self.scopes.len() == 1 {
-            let s = &self.scopes[0];
-            return s.done < s.total;
-        }
-        self.scopes.iter().any(|s| s.done < s.total)
+        self.scopes.values().any(|s| s.done < s.total)
     }
 
     /// TICKET-125 (exec_join, DEC-112 bullet 3) — every counted fiber on this sched is an owner
@@ -2800,7 +2881,7 @@ impl MnSched {
                 drain_scan_gen: 0,
                 parked_n: 0,
                 join_parked: Vec::new(),
-                scopes: vec![JoinScope {
+                scopes: ScopeTable::with_root(JoinScope {
                     base_index: 0,
                     total,
                     done: 0,
@@ -2816,7 +2897,7 @@ impl MnSched {
                     owners_blocked: 0,
                     joins_blocked: 0,
                     parent_scope: None,
-                }],
+                }),
                 terminate: false,
                 waiters: std::collections::HashMap::new(),
                 next_waiter_tok: 0,
@@ -2925,11 +3006,12 @@ impl MnSched {
     }
 
     /// Cross-nursery flat scheduler — a NESTED nursery (nested `run_mn_nursery` / eager nursery) enlists
-    /// into THIS one global sched. Appends a `JoinScope` whose `base_index` is the current flat
+    /// into THIS one global sched. Opens a `JoinScope` whose `base_index` is the current flat
     /// `slots.len()`, extends `slots` by `total` `None`s (its contiguous sub-range), and returns the new
-    /// `scope_id`. Append-only (existing scopes' `base_index` never shifts, so live fibers' `task_index`
-    /// stays valid). Holds the core lock so the grow is atomic against the deadlock predicate. `total`
-    /// may be 0 for an eager nursery (it grows via `inject`).
+    /// `scope_id`, issued by [`ScopeTable::open`] (never a reissued id). Existing scopes' `base_index`
+    /// never shifts, so live fibers' `task_index` stays valid. Holds the core lock so the grow is
+    /// atomic against the deadlock predicate. `total` may be 0 for an eager nursery (it grows via
+    /// `inject`).
     fn register_scope(
         &self,
         total: usize,
@@ -2939,8 +3021,7 @@ impl MnSched {
         let mut c = self.lock();
         let base_index = c.slots.len();
         c.slots.extend((0..total).map(|_| None));
-        let scope_id = c.scopes.len();
-        c.scopes.push(JoinScope {
+        let scope_id = c.scopes.open(JoinScope {
             base_index,
             total,
             done: 0,
@@ -2985,8 +3066,7 @@ impl MnSched {
         let mut c = self.lock();
         let base_index = c.slots.len();
         c.slots.extend((0..total).map(|_| None));
-        let scope_id = c.scopes.len();
-        c.scopes.push(JoinScope {
+        let scope_id = c.scopes.open(JoinScope {
             base_index,
             total,
             done: 0,
@@ -3088,7 +3168,7 @@ impl MnSched {
     /// `SchedCore::scope_family`), its ancestors and its `deadlock_err`. Returns the continuation's
     /// id when it opened one, `None` when it grew `scope_id` in place (it was the last scope). The
     /// caller must pass its nursery's TAIL scope, so the last scope still owns the slot tail
-    /// (`retire_last_scope`). Same one-lock grow+runnable atomicity as `inject`; like `inject`, it
+    /// (`retire_scope`). Same one-lock grow+runnable atomicity as `inject`; like `inject`, it
     /// does not un-latch `terminate`.
     fn inject_or_extend(&self, mut fiber: Fiber, scope_id: usize) -> Option<usize> {
         debug_assert!(
@@ -3097,7 +3177,7 @@ impl MnSched {
         );
         let mut c = self.lock();
         let base_index = c.slots.len(); // authoritative flat slot index — the slots END
-        let opened = if scope_id + 1 == c.scopes.len() {
+        let opened = if c.scopes.last_id() == Some(scope_id) {
             c.scopes[scope_id].total += 1;
             fiber.scope_id = scope_id;
             None
@@ -3118,8 +3198,7 @@ impl MnSched {
                 joins_blocked: 0,
                 parent_scope: None,
             };
-            let id = c.scopes.len();
-            c.scopes.push(cont);
+            let id = c.scopes.open(cont);
             fiber.scope_id = id;
             Some(id)
         };
@@ -3147,27 +3226,26 @@ impl MnSched {
         self.notify_waiters();
     }
 
-    /// §2c1 — a NESTED eager scope has joined and every one of its tasks is done: pop it and give its
-    /// slots back, so the enclosing scope is the LAST scope again and its own later `inject`s stay
-    /// contiguous (`inject`'s invariant, and `take_scope_slots`' `base..base+total` slice).
+    /// §2c1 — a NESTED eager scope has joined and every one of its tasks is done: remove it from the
+    /// table and give the slot tail back, so a later `inject` into the enclosing scope can grow it in
+    /// place again when it is once more the last scope (`take_scope_slots`' `base..base+total` slice
+    /// stays contiguous).
     ///
-    /// Sound because eager scopes on one thread nest strictly LIFO — `EnterNursery`/`JoinNursery` are
-    /// properly nested in the bytecode and an escape reclaims innermost-first — so the scope being
-    /// retired owns the TAIL of `slots` and no live fiber holds an index into it (they are all done).
-    /// A no-op if it is somehow not the last scope, which keeps the slot ranges valid at worst-case
-    /// cost of a stale empty scope rather than corrupting a live one.
-    fn retire_last_scope(&self, scope_id: usize) {
+    /// TICKET-199 — any scope whose `done == total` may be retired, not only the last one: scope
+    /// order on one sched is NOT LIFO (DEC-103). A retired middle scope leaves a hole in `slots`
+    /// (nothing indexes it — its tasks are all done); `slots` is truncated to the newest live scope's
+    /// end after every removal. The retired id is never reissued, so a worker still holding it after
+    /// dropping the lock reads an absent scope instead of a foreign one. A no-op for a scope with
+    /// unfinished tasks or an id already retired.
+    fn retire_scope(&self, scope_id: usize) {
         let mut c = self.lock();
-        if scope_id + 1 != c.scopes.len() {
-            return;
+        match c.scopes.get(scope_id) {
+            Some(s) if s.done == s.total => {}
+            _ => return,
         }
-        let s = &c.scopes[scope_id];
-        if s.done < s.total {
-            return;
-        }
-        let base = s.base_index;
-        c.slots.truncate(base);
-        c.scopes.pop();
+        c.scopes.remove(scope_id);
+        let end = c.scopes.slot_end();
+        c.slots.truncate(end);
     }
 
     /// §2c1 — how many of this sched's tasks are still unfinished, across every scope. Used by
@@ -3176,7 +3254,7 @@ impl MnSched {
     pub(super) fn outstanding_tasks(&self) -> usize {
         let c = self.lock();
         c.scopes
-            .iter()
+            .values()
             .map(|s| s.total.saturating_sub(s.done))
             .sum()
     }
@@ -3204,7 +3282,7 @@ impl MnSched {
             }
             let outstanding: usize = c
                 .scopes
-                .iter()
+                .values()
                 .map(|s| s.total.saturating_sub(s.done))
                 .sum();
             if outstanding < 2 {
@@ -3311,22 +3389,21 @@ impl MnSched {
             if scope_id == 0 {
                 self.body_blocked_hint.store(blocked, Ordering::Relaxed);
             }
-            if scope_id < c.scopes.len() {
-                let family = c.scope_family(scope_id);
-                for i in family {
-                    let s = &mut c.scopes[i];
-                    s.body_blocked = blocked;
-                    // §2c1 — a body parked in a NESTED nursery's join is not merely unable to inject:
-                    // it WILL resume the moment that inner scope completes, and may then `send`/`close`
-                    // to a sibling. That is exactly what `awaiting_builder` already means, so say it
-                    // rather than invent a second flag — `all_incomplete_awaiting_builder` then vetoes
-                    // when the inner scope is DONE (the builder is about to resume and feed) and does
-                    // NOT veto while the inner scope is itself incomplete-and-stuck (a genuine nested
-                    // deadlock, which must fault). A body blocked on a CHANNEL leaves it false: that
-                    // body resumes only if somebody feeds it, so it is not a promise of progress.
-                    if awaiting {
-                        s.awaiting_builder = blocked;
-                    }
+            // TICKET-199 — a retired `scope_id` has an empty family, so this is a no-op for it.
+            let family = c.scope_family(scope_id);
+            for i in family {
+                let s = &mut c.scopes[i];
+                s.body_blocked = blocked;
+                // §2c1 — a body parked in a NESTED nursery's join is not merely unable to inject:
+                // it WILL resume the moment that inner scope completes, and may then `send`/`close`
+                // to a sibling. That is exactly what `awaiting_builder` already means, so say it
+                // rather than invent a second flag — `all_incomplete_awaiting_builder` then vetoes
+                // when the inner scope is DONE (the builder is about to resume and feed) and does
+                // NOT veto while the inner scope is itself incomplete-and-stuck (a genuine nested
+                // deadlock, which must fault). A body blocked on a CHANNEL leaves it false: that
+                // body resumes only if somebody feeds it, so it is not a promise of progress.
+                if awaiting {
+                    s.awaiting_builder = blocked;
                 }
             }
             if !blocked
@@ -4551,18 +4628,19 @@ impl MnSched {
     /// The lock is DROPPED before `cancel_drain`/`drain_sched`, which take it themselves (`drain_sched`
     /// keeps the poller registry leaf-level and calls `complete_offload`, which locks this core).
     ///
-    /// `scopes` is snapshotted by length: a scope registered after this instant is a nursery created
+    /// The live scope ids are snapshotted: a scope registered after this instant is a nursery created
     /// after the exit was published, whose fibers are covered by `jump_checked`'s back-edge exit rung
     /// and by every blocking wait's `run_exit_err` — this drain is a promptness lever, not the only one.
+    /// A snapshotted id retired before its drain reads as absent (TICKET-199), so its drain is a no-op.
     pub(super) fn cancel_all(self: &Arc<Self>) {
-        let n = {
+        let ids = {
             let c = self.lock();
-            for s in &c.scopes {
+            for s in c.scopes.values() {
                 crate::vm::trip_cancel_flag(&s.cancel);
             }
-            c.scopes.len()
+            c.scopes.ids()
         };
-        for scope_id in 0..n {
+        for scope_id in ids {
             self.cancel_drain(scope_id);
         }
         poller::drain_sched(self);
@@ -5323,12 +5401,15 @@ impl SchedCore {
 
     /// TICKET-103 — every scope sharing `scope_id`'s cancel token: a nursery's origin scope plus its
     /// continuation scopes (`MnSched::inject_or_extend`). Every other scope owns a distinct Arc, so
-    /// its family is itself.
+    /// its family is itself. TICKET-199 — a retired `scope_id` has an EMPTY family: a worker that
+    /// still holds the id after dropping the lock (`cancel_drain` after `finish`) touches nothing.
     fn scope_family(&self, scope_id: usize) -> Vec<usize> {
-        let tok = &self.scopes[scope_id].cancel;
+        let Some(origin) = self.scopes.get(scope_id) else {
+            return Vec::new();
+        };
+        let tok = &origin.cancel;
         self.scopes
             .iter()
-            .enumerate()
             .filter(|(_, s)| Arc::ptr_eq(&s.cancel, tok))
             .map(|(i, _)| i)
             .collect()
@@ -5354,7 +5435,9 @@ impl SchedCore {
     /// TICKET-103 — some owner blocked at a same-sched join is joining a family whose every scope is
     /// complete. That owner resumes on its next pass (see `MnSched::quiesced_core`).
     fn any_joined_family_done(&self) -> bool {
-        (0..self.scopes.len()).any(|i| self.scopes[i].joins_blocked > 0 && self.family_done(i))
+        self.scopes
+            .iter()
+            .any(|(i, s)| s.joins_blocked > 0 && self.family_done(i))
     }
 
     /// TICKET-103 (W12-4) — the deadlock flag, faulting only the parked fibers of JOINED LEAF
@@ -5398,31 +5481,29 @@ impl SchedCore {
         if provable.is_empty() && !unproven_ok {
             return None;
         }
-        let mut target = vec![false; self.scopes.len()];
         let chosen: Vec<&Vec<usize>> = if provable.is_empty() {
             vec![&candidates[0]]
         } else {
             provable
         };
-        for fam in chosen {
-            for &j in fam {
-                target[j] = true;
-            }
-        }
+        let target: std::collections::HashSet<usize> =
+            chosen.into_iter().flatten().copied().collect();
         let buckets: Vec<(usize, Vec<ParkedEntry>)> = self.parked.drain().collect();
         let mut flagged = 0usize;
         for (key, v) in buckets {
             let mut keep: Vec<ParkedEntry> = Vec::new();
             for entry in v {
                 let fiber = match entry {
-                    ParkedEntry::Recv(f) | ParkedEntry::Send(f) if target[f.scope_id] => Some(f),
+                    ParkedEntry::Recv(f) | ParkedEntry::Send(f) if target.contains(&f.scope_id) => {
+                        Some(f)
+                    }
                     ParkedEntry::Wait(wp) => {
                         if wp.claimed.load(Ordering::Acquire) {
                             continue; // a stale copy of a claimed token: drop it
                         }
                         match Self::peek_wait_scope(&wp) {
                             None => continue, // already taken: drop the stale copy
-                            Some(s) if !target[s] => {
+                            Some(s) if !target.contains(&s) => {
                                 keep.push(ParkedEntry::Wait(wp));
                                 continue;
                             }
@@ -5479,8 +5560,8 @@ impl SchedCore {
         // lowest scope index.
         let mut families: std::collections::BTreeMap<usize, Vec<usize>> =
             std::collections::BTreeMap::new();
-        for i in 0..self.scopes.len() {
-            if self.scopes[i].joins_blocked == 0 {
+        for (i, si) in self.scopes.iter() {
+            if si.joins_blocked == 0 {
                 continue;
             }
             let fam = self.scope_family(i);
@@ -5491,7 +5572,7 @@ impl SchedCore {
             // also interior: faulting that member drops it without unwinding its child scope, which
             // orphans the child and hangs the run. `owners_blocked` alone misses this: it only
             // counts JOIN-parked owners, not one parked on a channel inside the child's own body.
-            if self.scopes.iter().enumerate().any(|(k, s)| {
+            if self.scopes.iter().any(|(k, s)| {
                 !fam.contains(&k)
                     && s.done < s.total
                     && s.parent_scope.is_some_and(|p| fam.contains(&p))
@@ -5543,12 +5624,7 @@ impl SchedCore {
     /// reverse.
     fn provable(&self, member: impl Fn(usize) -> bool) -> bool {
         // A member scope whose body may still `spawn`/`send` is a live feeder this scan cannot see.
-        if self
-            .scopes
-            .iter()
-            .enumerate()
-            .any(|(i, s)| member(i) && s.body_open)
-        {
+        if self.scopes.iter().any(|(i, s)| member(i) && s.body_open) {
             return false;
         }
         let mut recv_fibers: Vec<&Fiber> = Vec::new();
@@ -5573,7 +5649,7 @@ impl SchedCore {
         // Every member scope's undone tasks must be accounted for by a PARKED RECV fiber of that
         // scope: a member fiber blocked some other way (join, native, cancelled) is invisible to the
         // handle scan below, so its channel's true holder count could be anything.
-        for (i, s) in self.scopes.iter().enumerate() {
+        for (i, s) in self.scopes.iter() {
             if !member(i) {
                 continue;
             }
