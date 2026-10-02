@@ -203,13 +203,17 @@ runs on the current slice. W17-1 re-measured: no effect.
 4. **G3** (K2, K3) — TICKET-202; K4 split out to TICKET-204 (parser/AST, no shared code) — checker generics; after N3 if they share files.
 5. **A1** — TICKET-203 — a bug against TICKET-191's decision; small (`std/concurrency` task + memoize).
 
-## Owner decision (2026-10-02): what a type-applied name may be
+## Owner decision (2026-10-02): what a type-applied name may be — follow Rust
 
-TICKET-204's scope. A type-applied FUNCTION is a value at any arity (`g := pair[str, int]`, Go/Rust),
-a module path takes a multi-arg type turbofish (`lib.R2[int, str].L(1)`), and a call with explicit
-type args takes named args (`Box[int](v=1)`, Go/Rust/Python). Types, constructors, enum variants and
-methods (instance, static, generic) are NOT values: a type name is never an expression (aliases need
-the `type` keyword), and a bound method would hide its `self` capture (copy or alias? Go copies a value
-receiver at binding time; Python shares the object) — write the closure (`a := fn(): b.get()`). Each
-rejection must say so correctly; today `f := Box[int]` reports "unknown type 'Box'; import it from
-lib" for an imported `Box`.
+TICKET-204's scope. Rust's rule: a PATH to a fn-like item is a fn value; a method bound to a receiver
+is not. So these are values, at any type-arg arity, same-module, imported or module-qualified:
+a generic fn (`g := pair[str, int]`, Rust `pair::<&str, i32>`), a payload enum variant
+(`f := E[int].V`, Rust `E::<i32>::V`), a static method (`f := Box[int].make`, Rust
+`Box::<i32>::make`), and a method reached through its TYPE, which takes `self` as an explicit first
+argument (`g := Box[int].get; g(b)`, Rust `Box::<i32>::get`). A module path takes a multi-arg type
+turbofish (`lib.R2[int, str].L(1)`), and a call with explicit type args takes named args
+(`Box[int](v=1)`, Rust `Box::<i32>{v: 1}`). NOT values: a bound method `b.get` (Rust E0615: it would
+hide its `self` capture — write `fn(): b.get()`), a named-field struct (`f := Box[int]`; Rust struct
+literals are not fns), and a bare type. Each rejection must say so correctly; today `f := Box[int]`
+reports "unknown type 'Box'; import it from lib" for an imported `Box`. A bare generic path with
+nothing pinning its params stays the Go/Rust error.
