@@ -179,17 +179,16 @@ TICKET-103, changed by 125; 132, 185 (17 commits); W17-1 is the open perf residu
   `repr_quote` with `str_repr`; `json.decode`'s type errors name the bare type.
 - **S3** (P3): folded into N3 (struct field defaults are classified by the same machinery).
 
-## Owner decisions needed
+## Owner decisions (2026-10-02)
 
-1. **A1 — when is a task copy's `Task.get()` / `memoize1` snapshot taken?** (a) at the crossing,
-   like every other value a spawn captures: the copy sees `[1, 99]` (recommended: one rule for every
-   crossing; CPython agrees on the value); (b) at fill time, as today.
-2. **C2 — job fault vs `--timeout`.** (a) an unjoined job fault that happened before the timeout is
-   reported, with the job's frames (recommended: Go's panic ends the run at the fault; it is the root
-   cause); (b) the timeout wins, as today.
-3. **K1 — `k := 1; fn f(k: int = k)`.** (a) accept; the default reads the global `k`, as CPython
-   evaluates a default in the enclosing scope (recommended); (b) reject with a correct message
-   (not the current self-contradicting one).
+1. **A1 is a bug, not a new decision.** TICKET-191's "a copy gets a snapshot" meant the value as of the
+   crossing, like every other value a spawn captures: the copy must see `[1, 99]`. Today `get()` in a
+   copy returns the fill-time value from the shared core and ignores the up-to-date object the copy
+   already holds (`Task.cached`, memoize's `own` map).
+2. **C2: an unjoined job fault that happened before a `--timeout` is reported** (with the job's frames),
+   as Go's panic ends the run at the fault. The timeout wins only when no earlier fault exists.
+3. **K1: accept `k := 1; fn f(k: int = k)`.** The default reads the global `k`, as CPython evaluates a
+   default in the enclosing scope. Every binder (lambda params, comprehension vars) is scoped.
 
 ## Plan order
 
