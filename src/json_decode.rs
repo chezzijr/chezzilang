@@ -142,11 +142,15 @@ pub fn from_ty<F: Clone>(
             }
             if visiting.iter().any(|s| s == name) {
                 return Err(format!(
-                    "decode: recursive struct '{name}' is not decodable; use the Json enum instead"
+                    "decode: recursive struct '{}' is not decodable; use the Json enum instead",
+                    crate::compiler::bare_display(name)
                 ));
             }
             let Some(fields) = shape(name) else {
-                return Err(format!("decode: '{name}' is not a decodable type"));
+                return Err(format!(
+                    "decode: '{}' is not a decodable type",
+                    crate::compiler::bare_display(name)
+                ));
             };
             visiting.push(name.clone());
             let mut descs = Vec::with_capacity(fields.len());

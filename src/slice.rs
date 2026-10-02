@@ -126,22 +126,35 @@ pub fn slice_indices(
     Ok(out)
 }
 
-/// Python `bytes` `repr`: `b'...'` with printable ASCII shown literally, `\n \t \r \\ \'` escaped,
-/// and every other byte as `\xHH` (lowercase hex). This is the single implementation `display_guarded`
-/// calls, so the `b'...'` representation is consistent everywhere bytes are rendered —
-/// `str(bytes)`, interpolation, and bare `print(bytes)` all route through this one function.
+/// CPython's repr quote choice, shared by `str`, `bytes` and `bytearray`: `'` normally, `"` only
+/// when the text holds a `'` and no `"`.
+fn repr_quote(has_single: bool, has_double: bool) -> char {
+    if has_single && !has_double { '"' } else { '\'' }
+}
+
+/// Python `bytes` `repr`: `b'...'` with printable ASCII shown literally, `\n \t \r \\` and the chosen
+/// quote escaped, and every other byte as `\xHH` (lowercase hex). The quote follows [`repr_quote`]
+/// (`b"'"`). This is the single implementation `display_guarded` calls, so the representation is
+/// consistent everywhere bytes are rendered — `str(bytes)`, interpolation, and bare `print(bytes)`.
 pub fn bytes_repr(bytes: &[u8]) -> String {
+    bytes_repr_quoted(bytes, false)
+}
+
+/// [`bytes_repr`]; `always_escape_single` is CPython's `bytearray` quirk: it picks the quote the same
+/// way but still escapes every `'` (`bytearray(b"\'")`).
+fn bytes_repr_quoted(bytes: &[u8], always_escape_single: bool) -> String {
     use std::fmt::Write;
+    let quote = repr_quote(bytes.contains(&b'\''), bytes.contains(&b'"'));
     let mut out = String::with_capacity(bytes.len() + 3);
     out.push('b');
-    out.push('\'');
+    out.push(quote);
     for &b in bytes {
         match b {
             b'\n' => out.push_str("\\n"),
             b'\t' => out.push_str("\\t"),
             b'\r' => out.push_str("\\r"),
             b'\\' => out.push_str("\\\\"),
-            b'\'' => out.push_str("\\'"),
+            b'\'' if always_escape_single || quote == '\'' => out.push_str("\\'"),
             // Printable ASCII (space..=~, the escapes above already handled) prints literally.
             0x20..=0x7E => out.push(b as char),
             // Everything else (control chars, ≥0x80) as `\xHH`.
@@ -150,7 +163,7 @@ pub fn bytes_repr(bytes: &[u8]) -> String {
             }
         }
     }
-    out.push('\'');
+    out.push(quote);
     out
 }
 
@@ -158,7 +171,7 @@ pub fn bytes_repr(bytes: &[u8]) -> String {
 /// `bytearray(...)`. This is the single implementation the VM calls, so the mutable buffer's
 /// `Display`/`str()`/interpolation stay consistent, distinct from `bytes`' bare `b'...'`.
 pub fn bytearray_repr(bytes: &[u8]) -> String {
-    format!("bytearray({})", bytes_repr(bytes))
+    format!("bytearray({})", bytes_repr_quoted(bytes, true))
 }
 
 /// Python `str` `repr`: the quoted, escaped form used whenever a string is rendered **nested inside**
@@ -181,11 +194,7 @@ pub fn bytearray_repr(bytes: &[u8]) -> String {
 /// (`docs/gaps.md` §W7-25).
 pub fn str_repr(s: &str) -> String {
     use std::fmt::Write;
-    let quote = if s.contains('\'') && !s.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
+    let quote = repr_quote(s.contains('\''), s.contains('"'));
     let mut out = String::with_capacity(s.len() + 2);
     out.push(quote);
     for c in s.chars() {
@@ -257,7 +266,9 @@ mod tests {
         assert_eq!(bytes_repr(b"hi\n"), "b'hi\\n'");
         assert_eq!(bytes_repr(&[0xFF]), "b'\\xff'");
         assert_eq!(bytes_repr(&[0x00, 0x01]), "b'\\x00\\x01'");
-        assert_eq!(bytes_repr(b"a'b"), "b'a\\'b'");
+        // CPython's quote choice (W19 S1): `"` when the bytes hold a `'` and no `"`.
+        assert_eq!(bytes_repr(b"a'b"), "b\"a'b\"");
+        assert_eq!(bytes_repr(b"a'b\""), "b'a\\'b\"'");
     }
 
     #[test]

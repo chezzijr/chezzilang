@@ -1,0 +1,15 @@
+# bytes / bytearray repr picks its quote like CPython (W19 S1): `"` when the bytes hold a `'` and no `"`.
+# CPython 3: repr(b"'") == b"'"; repr(bytearray(b"'")) == bytearray(b"\'").
+
+test fn bytes_with_a_single_quote_use_double_quotes():
+    assert str(b"'") == "b\"'\""
+    assert str([b"a'b"]) == "[b\"a'b\"]"
+
+test fn bytes_with_both_quotes_keep_single_quotes_and_escape():
+    assert str(b"a'b\"") == "b'a\\'b\"'"
+    assert str(b"\"") == "b'\"'"
+    assert str(b"x") == "b'x'"
+
+test fn bytearray_picks_the_quote_but_still_escapes_a_single_quote():
+    assert str(bytearray(b"'")) == "bytearray(b\"\\'\")"
+    assert str(bytearray(b"x")) == "bytearray(b'x')"

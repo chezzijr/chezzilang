@@ -15849,7 +15849,8 @@ fn json_decode_rejects_unknown_target_type() {
 fn json_decode_rejects_recursive_struct() {
     entry_rejects(
         "import std.json\nstruct Node:\n    val: int\n    next: Node?\nfn main():\n    x := json.decode[Node](\"x\")\n",
-        "recursive struct",
+        // W19 S2: the bare struct name, never the module-mangled key (`main::Node`).
+        "recursive struct 'Node' is not decodable",
     );
 }
 
