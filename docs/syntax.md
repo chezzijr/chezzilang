@@ -179,7 +179,8 @@ while **`(x,)` is a one-element tuple** — and it RENDERS with the comma too: `
 
 **Tuple elements are read positionally with `.0`, `.1`, … (Rust's spelling), never `t[0]`.** The index
 must be a literal — it is part of the type, not a runtime value — and tuples are **immutable**, so
-`.N` is read-only:
+`.N` is read-only. Accesses chain like Rust's: `t.0.1` is the second element of `t.0` (the lexer
+never reads `0.1` after a field `.` as a float):
 
 ```chezzi
 t := ("a", 1)

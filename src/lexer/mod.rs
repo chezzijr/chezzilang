@@ -1407,6 +1407,12 @@ impl Lexer {
 
         let mut is_float = false;
 
+        // A number right after a single `.` is a tuple-element index (`t.0.1`, Rust's split of the
+        // `0.1` token): it never takes a fraction or an exponent. `0..1.5` keeps its float (`..`).
+        let field_index = start >= 1
+            && self.chars[start - 1] == '.'
+            && (start < 2 || self.chars[start - 2] != '.');
+
         // integer part (digits + group separators)
         while self.peek().is_ascii_digit() || self.peek() == '_' {
             self.advance();
@@ -1414,7 +1420,7 @@ impl Lexer {
 
         // fractional part — ONLY if the dot is followed by a digit
         // (so `1.` keeps its dot, and `0..10` is not eaten as a number)
-        if self.peek() == '.' && self.peek_next().is_ascii_digit() {
+        if !field_index && self.peek() == '.' && self.peek_next().is_ascii_digit() {
             is_float = true;
             self.advance(); // consume the '.'
             while self.peek().is_ascii_digit() || self.peek() == '_' {
@@ -1426,7 +1432,7 @@ impl Lexer {
         // Peek-ahead-before-commit so a bare `e` (e.g. `1e`, `1e+`) is never half-consumed:
         // only advance once we know a full, valid exponent follows. Any number with an
         // exponent is a float (even `1e3` → 1000.0). No underscores in the exponent.
-        if self.peek() == 'e' || self.peek() == 'E' {
+        if !field_index && (self.peek() == 'e' || self.peek() == 'E') {
             // index (relative to the cursor) of the first exponent digit candidate
             let mut probe = self.pos + 1;
             if matches!(self.chars.get(probe), Some('+') | Some('-')) {

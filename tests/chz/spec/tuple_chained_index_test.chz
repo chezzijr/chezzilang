@@ -1,0 +1,21 @@
+# `t.0.1` is two tuple-element accesses (Rust splits the `0.1` token the same way), not `t.(0.1)`.
+
+test fn chained_tuple_index_reads_the_inner_element():
+    t := ((1, 2), 3)
+    assert t.0.1 == 2
+    assert t.0.0 + t.1 == 4
+
+struct P:
+    pair: (int, (int, str))
+
+test fn three_levels_and_a_field_then_index_chain():
+    u := (((7, 8), 9), 0)
+    assert u.0.0.1 == 8
+    p := P(pair=(1, (2, "z")))
+    assert p.pair.1.1 == "z"
+
+test fn floats_and_ranges_beside_a_dot_still_lex_as_before():
+    r := [x for x in 0..3]
+    assert r == [0, 1, 2]
+    assert 1.5 + 0.5 == 2.0
+    assert 1e3 == 1000.0
