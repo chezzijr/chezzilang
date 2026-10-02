@@ -61,6 +61,11 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `Checker::check_default_scope` is the one rule (`k := 1; fn f(k: int = k)` is `1`; an unbound name
   is `unknown name`; an enclosing fn's local or a struct-body binder is declined). S3: `Self` in a
   field default is only `unknown name 'Self'`. Grid: `tests/call_binding_grid.rs::name_denotes_grid`.
+  The callee's default prologue (`emit_default_param_prologue`) no longer replaces the frame's local
+  table to hide it: a comprehension binder in a default got a wrong slot (debug `hidden get on a
+  NAMED slot`, release `cannot apply Mul to bool and int` through `g := f`); `FnComp::name_floor`,
+  read through the one `FnComp::visible_locals()` by both name lookup and closure capture, now hides
+  the frame without touching slot allocation.
 
 - **TICKET-197 (2026-10-02): Family F2, type-parameter identity and fn-value shape.** N1/N2: a
   generic method's signature was substituted twice by bare name (receiver map, then method map), so

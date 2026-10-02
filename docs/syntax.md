@@ -1107,7 +1107,8 @@ is an unknown name: `fn f(a: int, b: int = a)` is *"unknown name 'a'"* (CPython 
 at `def`). The same holds inside an **interpolated fragment**: with `n := 100`,
 `fn f(n: int, x: str = "n={n}")` gives `n=100` for `f(3)` and for `g := f; g(3)`. A binder inside
 the default is its own: `g: fn(int) -> int = fn(x: int) -> int: x * 2` beside a parameter `x`, and
-`xs: List[int] = [n * 2 for n in range(3)]` beside a parameter `n`, both check clean.
+`xs: List[int] = [n * 2 for n in range(3)]` beside a parameter `n`, both check clean and give CPython's value at a direct call, through
+`g := f`, and from another module (the prologue allocates a binder's slot like any other local).
 
 A struct field default and a method default are evaluated in module scope too. CPython evaluates
 them in the class body, where an earlier field or method is bound, so Chezzi declines that read

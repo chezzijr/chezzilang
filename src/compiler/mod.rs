@@ -1367,14 +1367,19 @@ impl Compiler {
             // see the definer. Measured before this hid the locals, `n := 100` at module level and
             // `fn f(n: int, x: str = "n={n}")`: a direct `f(3)` printed `n=100` (provider, module
             // scope) while `g := f; g(3)` printed `n=3` (prologue, callee scope) — the same default,
-            // two answers. Hiding the frame's bindings for the duration of
-            // this one expression makes the prologue resolve exactly as the provider does.
-            let saved_locals = std::mem::take(&mut fc.locals);
-            let saved_slots = fc.slot_count;
+            // two answers. The frame is hidden from name lookup and closure capture for the duration
+            // of this one expression by `name_floor` (read through `FnComp::visible_locals`), never
+            // by replacing `locals`: a binder the default declares (a comprehension variable) must
+            // take its slot from the same `slot_count` as every other local, so `locals[i]` stays
+            // slot `i`.
+            let saved_floor = std::mem::replace(&mut fc.name_floor, fc.locals.len());
             let saved_caps = std::mem::take(&mut fc.captured_names);
             let compiled = self.compile_expr(fc, d);
-            fc.locals = saved_locals;
-            fc.slot_count = saved_slots;
+            debug_assert!(
+                compiled.is_err() || fc.locals.len() == fc.name_floor,
+                "a default left a binder in scope"
+            );
+            fc.name_floor = saved_floor;
             fc.captured_names = saved_caps;
             // Propagate rather than swallow: the checker has ALREADY advertised short entry for this
             // signature (`FnSig::min_params`), so silently declining to emit the fill would leave a
@@ -6809,6 +6814,11 @@ struct FnComp {
     lines: Vec<Span>,
     locals: Vec<LocalVar>,
     scope_depth: usize,
+    /// Locals below this index are hidden from every NAME lookup; read only by
+    /// [`Self::visible_locals`]. Raised only by [`Compiler::emit_default_param_prologue`], so a
+    /// default sees module scope while its own binders still allocate from `slot_count`
+    /// (slot == `locals` index).
+    name_floor: usize,
     /// Number of slots currently in use (== next free slot).
     slot_count: usize,
     max_slots: usize,
@@ -6868,6 +6878,7 @@ impl FnComp {
             lines: Vec::new(),
             locals: Vec::new(),
             scope_depth: 0,
+            name_floor: 0,
             slot_count: 0,
             max_slots: 0,
             captured_names: Vec::new(),
@@ -7130,11 +7141,18 @@ impl FnComp {
         self.add_local(String::new())
     }
 
+    /// The ONE answer to "which of this frame's locals can a name see here", each paired with its
+    /// slot (enumerate before skip, so the index stays the slot). Every name lookup and every
+    /// capture snapshot iterates this; slot allocation (`add_local_claiming`, `end_scope`) and
+    /// slot-indexed reads (`is_boxed_slot`, `emit_hidden_get`/`emit_hidden_set`) use `locals`
+    /// directly because they are about slots, not names.
+    fn visible_locals(&self) -> impl DoubleEndedIterator<Item = (usize, &LocalVar)> {
+        self.locals.iter().enumerate().skip(self.name_floor)
+    }
+
     /// Resolve a name to a local slot (innermost first). `None` ⇒ not a local.
     fn resolve_local(&self, name: &str) -> Option<usize> {
-        self.locals
-            .iter()
-            .enumerate()
+        self.visible_locals()
             .rev()
             .find(|(_, l)| l.name == name)
             .map(|(slot, _)| slot)
@@ -7179,7 +7197,7 @@ impl FnComp {
         let mut seen = std::collections::HashSet::new();
         let mut entries = Vec::new();
         // Innermost local of each name wins; skip the hidden (unnamed) temps.
-        for (slot, l) in self.locals.iter().enumerate().rev() {
+        for (slot, l) in self.visible_locals().rev() {
             if l.name.is_empty() || !seen.insert(l.name.clone()) {
                 continue;
             }
@@ -7560,6 +7578,31 @@ mod capture_prepass_tests {
         fc.boxed_names = HashSet::from(["x".to_string()]);
         assert!(fc.is_boxed_slot(0), "slot 0 (x) is boxed");
         assert!(!fc.is_boxed_slot(1), "slot 1 (y) is not boxed");
+    }
+
+    #[test]
+    fn name_floor_hides_the_frame_from_both_name_readers() {
+        let mut fc = FnComp::new("f".to_string(), 0, false);
+        fc.add_local("n".to_string());
+        fc.name_floor = fc.locals.len();
+        assert_eq!(
+            fc.resolve_local("n"),
+            None,
+            "a local below the floor is invisible to resolve_local"
+        );
+        assert!(
+            fc.snapshot_entries().is_empty(),
+            "a local below the floor is invisible to a capture snapshot"
+        );
+        let slot = fc.add_local("x".to_string());
+        assert_eq!(
+            slot, 1,
+            "a binder above the floor allocates from slot_count"
+        );
+        assert_eq!(fc.resolve_local("x"), Some(1));
+        let snap = fc.snapshot_entries();
+        let names: Vec<&str> = snap.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["x"]);
     }
 }
 
