@@ -37540,3 +37540,11 @@ fn n3_field_default_naming_self_reports_no_fill_error() {
         }
     }
 }
+
+#[test]
+fn bound_type_arg_abstract_mismatch_rejected() {
+    rejects(
+        "protocol Conv[S]:\n    fn conv(self) -> S\nstruct I:\n    n: int\n    fn conv(self) -> str:\n        return \"i{self.n}\"\nfn need[S, B: Conv[S]](u: B, s: S) -> S:\n    return u.conv()\nfn go[X, Y: Conv[str]](y: Y, x: X) -> X:\n    return need(y, x)\nprint(go(I(n=1), 5) + 1)\n",
+        "does not satisfy Conv[",
+    );
+}
