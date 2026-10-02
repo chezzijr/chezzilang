@@ -3580,7 +3580,11 @@ impl Checker {
                             // below, so this is compared against `args.len() + 1`.
                             sig.min_params,
                             sig.doc.clone(),
-                            inst.where_bounds,
+                            // The DECLARED receiver `where` bounds and method params: `enforce_bounds`
+                            // substitutes them with `map` once. `inst.where_bounds` is already
+                            // substituted, and a second pass rewrites a caller param that shares a
+                            // receiver param's name (TICKET-202).
+                            (sig.where_bounds.clone(), sig.type_params.clone()),
                             map,
                         )
                     })
@@ -3594,7 +3598,7 @@ impl Checker {
                     is_static,
                     mminp,
                     mdoc,
-                    where_bounds,
+                    (where_bounds, where_owner),
                     rmap,
                 )) = resolved
                 {
@@ -3615,7 +3619,7 @@ impl Checker {
                     // static-method diagnostic (not a spurious bound error); a static method's own
                     // receiver bound is enforced on the static-dispatch path (`infer_static_call`).
                     // No-op when `where_bounds` empty. Mirrors the native `Ty::List` enforcement.
-                    self.enforce_bounds(&where_bounds, &mtps, &rmap, span);
+                    self.enforce_bounds(&where_bounds, &where_owner, &rmap, span);
                     let slots = self.method_slots(&obj_ty, method);
                     let Some(bound) = self.bind_call(slots.as_deref(), method, args, 0, span)
                     else {
@@ -3770,7 +3774,7 @@ impl Checker {
                             // Trailing parameters the CALLEE fills; the receiver slot is dropped
                             // below, so this is compared against `args.len() + 1`.
                             sig.min_params,
-                            inst.where_bounds,
+                            (sig.where_bounds.clone(), sig.type_params.clone()),
                             map,
                         )
                     })
@@ -3783,7 +3787,7 @@ impl Checker {
                     mwitness,
                     is_static,
                     mminp,
-                    where_bounds,
+                    (where_bounds, where_owner),
                     rmap,
                 )) = resolved
                 {
@@ -3805,7 +3809,7 @@ impl Checker {
                     // accept-without-enforce soundness hole for INSTANCE newtype methods. Placed
                     // after the is_static rejection so a static-on-value call stays single-diagnostic.
                     // No-op when `where_bounds` empty.
-                    self.enforce_bounds(&where_bounds, &mtps, &rmap, span);
+                    self.enforce_bounds(&where_bounds, &where_owner, &rmap, span);
                     let slots = self.method_slots(&obj_ty, method);
                     let Some(bound) = self.bind_call(slots.as_deref(), method, args, 0, span)
                     else {
@@ -3870,7 +3874,7 @@ impl Checker {
                             // Trailing parameters the CALLEE fills; the receiver slot is dropped
                             // below, so this is compared against `args.len() + 1`.
                             sig.min_params,
-                            inst.where_bounds,
+                            (sig.where_bounds.clone(), sig.type_params.clone()),
                             map,
                         )
                     })
@@ -3883,7 +3887,7 @@ impl Checker {
                     mwitness,
                     is_static,
                     mminp,
-                    where_bounds,
+                    (where_bounds, where_owner),
                     rmap,
                 )) = resolved
                 {
@@ -3903,7 +3907,7 @@ impl Checker {
                     // so a static-on-value call stays single-diagnostic; a static enum method's own
                     // receiver bound is enforced on the static-dispatch path (`infer_static_call`).
                     // No-op when `where_bounds` empty.
-                    self.enforce_bounds(&where_bounds, &mtps, &rmap, span);
+                    self.enforce_bounds(&where_bounds, &where_owner, &rmap, span);
                     let slots = self.method_slots(&obj_ty, method);
                     let Some(bound) = self.bind_call(slots.as_deref(), method, args, 0, span)
                     else {

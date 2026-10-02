@@ -37820,6 +37820,43 @@ fn bound_type_arg_grid() {
         false,
         "does not satisfy Conv",
     );
+    // A receiver `where` bound is substituted by the receiver map ONCE: a caller param named like a
+    // receiver param (`A`) must not be rewritten a second time. One row per instance-method arm.
+    let swap_hosts = [
+        (
+            "struct",
+            "struct P[A, B]:\n    a: A\n    fn m(self, b: B) -> B where A: Conv[B]:\n        return b\n",
+        ),
+        (
+            "enum",
+            "enum P[A, B]:\n    V(A)\n    fn m(self, b: B) -> B where A: Conv[B]:\n        return b\n",
+        ),
+        (
+            "newtype",
+            "newtype P[A, B] = List[A]:\n    fn m(self, b: B) -> B where A: Conv[B]:\n        return b\n",
+        ),
+    ];
+    for (host, decl) in swap_hosts {
+        for (arg, sig, yes) in [
+            (
+                "param_matching",
+                "fn go[A, Y: Conv[A]](p: P[Y, A], a: A) -> A",
+                true,
+            ),
+            (
+                "param_swapped",
+                "fn go[A, Y: Conv[Y]](p: P[Y, A], a: A) -> A",
+                false,
+            ),
+        ] {
+            cell(
+                format!("method_where_swap_{host} x {arg}"),
+                format!("{H}{decl}{sig}:\n    return p.m(a)\n"),
+                yes,
+                "does not satisfy Conv",
+            );
+        }
+    }
     // An embed arg may name a protocol declared later.
     cell(
         "embed_forward".into(),
