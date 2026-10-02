@@ -1,0 +1,49 @@
+# TICKET-202: a bound's type arguments mean what they mean at the DECLARATION. A method's
+# `[U: Conv[T]]` names the receiver's `T`, never a caller's; a forwarded abstract arg satisfies
+# `Conv[X]` through its own bound for the same `X`; and a caller's type param named like a concrete
+# type in a bound (`I` below) does not capture it. Rust compiles each program here. Gated by
+# `chz_suite_passes`.
+
+protocol Conv[S]:
+    fn conv(self) -> S
+
+struct I:
+    n: int
+    fn conv(self) -> str:
+        return "i{self.n}"
+
+struct Box[T]:
+    v: T
+    fn pick[U: Conv[T]](self, u: U) -> T:
+        return u.conv()
+    fn pick_where[U](self, u: U) -> T where U: Conv[T]:
+        return u.conv()
+
+fn need[S, B: Conv[S]](u: B, s: S) -> S:
+    return u.conv()
+
+fn fwd[X, Y: Conv[X]](y: Y, x: X) -> X:
+    return need(y, x)
+
+struct K:
+    n: int
+    fn conv(self) -> I:
+        return I(n=4)
+
+struct W[B: Conv[I]]:
+    b: B
+
+fn shadow[I](k: K, i: I) -> int:
+    return W(b=k).b.conv().n
+
+test fn method_bound_names_the_receiver_param():
+    assert Box(v="s").pick(I(n=3)).upper() == "I3"
+
+test fn method_where_bound_names_the_receiver_param():
+    assert Box(v="s").pick_where(I(n=5)) == "i5"
+
+test fn forwarded_param_satisfies_through_its_own_bound():
+    assert fwd(I(n=2), "x") == "i2"
+
+test fn caller_param_does_not_capture_a_concrete_bound_arg():
+    assert shadow(K(n=0), 9) == 4
