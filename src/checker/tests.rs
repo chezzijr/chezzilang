@@ -37476,3 +37476,8 @@ fn fn_value_slot_grid() {
     ));
     assert_clean_files_grid(&cells);
 }
+
+#[test]
+fn default_reads_enclosing_scope_not_same_named_param() {
+    ok_desugared("k := 1\nfn f(k: int = k) -> int:\n    return k\nprint(f())\n");
+}
