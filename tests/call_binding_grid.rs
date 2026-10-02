@@ -857,6 +857,186 @@ fn grid() -> Vec<Cell> {
     cells
 }
 
+/// A default read of a struct-body binder (an earlier field default, or a method) is declined.
+const CLASS_BODY: &str = "is bound in the body of";
+
+/// TICKET-201 (family N3): what a bare name denotes at this point. Each cell is judged against
+/// CPython 3.14.7 (Rust for divergence): after a top-level `:=` rewrites a `fn` slot, every later
+/// reader sees the new value, not the declaration.
+fn n3_cells() -> Vec<Cell> {
+    let f = "fn f(a: int, b: int) -> str:\n    return \"f a={a} b={b}\"\nfn o(b: int, a: int) -> str:\n    return \"o a={a} b={b}\"\n";
+    let c = "count := 0\nfn f() -> int:\n    count = count + 1\n    return 1\nfn o() -> int:\n    return 2\n";
+    let div = "fn f(x: int) -> int:\n    if x > 0:\n        return x\n    exit(3)\n";
+    let run_spawn = "fn run():\n    spawn:\n        f()\n";
+    vec![
+        cell(
+            "n3/labels/hoisted",
+            &format!("{f}g := f\nprint(g(a=1, b=2))\n"),
+            prints("f a=1 b=2"),
+        ),
+        cell(
+            "n3/labels/fn_then_let",
+            &format!("{f}f := o\ng := f\nprint(g(a=1, b=2))\n"),
+            prints("o a=1 b=2"),
+        ),
+        cell(
+            "n3/labels/fn_then_closure",
+            &format!(
+                "{f}f := fn(b: int, a: int) -> str: \"c a={{a}} b={{b}}\"\ng := f\nprint(g(a=1, b=2))\n"
+            ),
+            prints("c a=1 b=2"),
+        ),
+        Cell {
+            name: "n3/labels/import_then_let".to_string(),
+            files: with_lib(
+                "lib.chz",
+                "fn f(a: int, b: int) -> str:\n    return \"f a={a} b={b}\"\n".to_string(),
+                "import f from lib\nfn o(b: int, a: int) -> str:\n    return \"o a={a} b={b}\"\nf := o\ng := f\nprint(g(a=1, b=2))\n".to_string(),
+            ),
+            expect: prints("o a=1 b=2"),
+        },
+        cell(
+            "n3/labels/body_alias_of_redeclared",
+            &format!(
+                "{f}f := o\nfn use() -> str:\n    g := f\n    return g(a=1, b=2)\nprint(use())\n"
+            ),
+            Expect::Rejects(FN_VALUE_KW),
+        ),
+        cell(
+            "n3/defaults/alias_after_let",
+            "fn f(a: int, b: int = 2, c: int = 3) -> str:\n    return \"f a={a} b={b} c={c}\"\nfn o(a: int, c: int = 30, b: int = 20) -> str:\n    return \"o a={a} b={b} c={c}\"\nf := o\ng := f\nprint(g(1, c=9))\n",
+            prints("o a=1 b=20 c=9"),
+        ),
+        cell(
+            "n3/defaults/body_direct_redeclared",
+            "fn f(a: int, b: int = 2) -> str:\n    return \"f a={a} b={b}\"\nfn o(a: int, b: int = 20) -> str:\n    return \"o a={a} b={b}\"\nfn use() -> str:\n    return f(1)\nf := o\nprint(use())\n",
+            prints("o a=1 b=20"),
+        ),
+        cell(
+            "n3/diverge/import_then_let",
+            &format!(
+                "import exit from std.os\nexit := fn(c: int): print(\"fake {{c}}\")\n{div}print(f(-1) + 1)\n"
+            ),
+            Expect::Rejects("can fall off the end"),
+        ),
+        cell(
+            "n3/diverge/import",
+            &format!("import exit from std.os\n{div}print(f(1))\n"),
+            prints("1"),
+        ),
+        cell(
+            "n3/diverge/import_then_destructure",
+            &format!(
+                "import exit from std.os\nexit, n := fn(c: int): print(\"fake {{c}}\"), 0\n{div}print(f(-1) + 1)\n"
+            ),
+            Expect::Rejects("can fall off the end"),
+        ),
+        cell(
+            "n3/writes/spawn_in_body_redeclared",
+            &format!("{c}{run_spawn}f := o\nrun()\nprint(count)\n"),
+            prints("0"),
+        ),
+        cell(
+            "n3/writes/summary_edge_redeclared",
+            &format!("{c}fn run() -> int:\n    return f()\nf := o\nspawn:\n    run()\nprint(count)\n"),
+            prints("0"),
+        ),
+        cell(
+            "n3/writes/spawn_in_body_writer",
+            &format!(
+                "count := 0\nfn f() -> int:\n    return 1\nfn o() -> int:\n    count = count + 1\n    return 2\n{run_spawn}f := o\nrun()\nprint(count)\n"
+            ),
+            Expect::Rejects("is this task's copy"),
+        ),
+        cell(
+            "n3/writes/spawn_in_body_decl",
+            &format!(
+                "count := 0\nfn f() -> int:\n    count = count + 1\n    return 1\n{run_spawn}run()\nprint(count)\n"
+            ),
+            Expect::Rejects("is this task's copy"),
+        ),
+        cell(
+            "n3/turbofish/body_above_redeclared",
+            "fn id[T](x: T) -> T:\n    return x\nfn use() -> str:\n    return id[str](\"a\")\nid := fn(x: int) -> int: x + 1\nprint(use())\n",
+            Expect::Rejects("cannot re-declare module-level binding 'id'"),
+        ),
+        cell(
+            "n3/turbofish/hoisted",
+            "fn id[T](x: T) -> T:\n    return x\nfn use() -> str:\n    return id[str](\"a\")\nprint(use())\n",
+            prints("a"),
+        ),
+        cell(
+            "n3/dflt/same_named_param",
+            "k := 1\nfn f(k: int = k) -> int:\n    return k\nprint(f())\n",
+            prints("1"),
+        ),
+        cell(
+            "n3/dflt/lambda_param",
+            "fn h(x: int, g: fn(int) -> int = fn(x: int) -> int: x * 2) -> int:\n    return g(x)\nprint(h(3))\n",
+            prints("6"),
+        ),
+        cell(
+            "n3/dflt/comprehension_var",
+            "fn f(n: int, xs: List[int] = [n * 2 for n in range(3)]) -> int:\n    return len(xs) + n\nprint(f(1))\n",
+            prints("4"),
+        ),
+        cell(
+            "n3/dflt/field_same_name",
+            "k := 1\nstruct S:\n    k: int = k\nprint(S().k)\n",
+            prints("1"),
+        ),
+        cell(
+            "n3/dflt/earlier_param_unbound",
+            "fn f(a: int, b: int = a) -> int:\n    return b\nprint(f(1))\n",
+            Expect::Rejects("unknown name 'a'"),
+        ),
+        cell(
+            "n3/dflt/earlier_param_global",
+            "a := 100\nfn f(a: int, b: int = a) -> int:\n    return b\nprint(f(1))\n",
+            prints("100"),
+        ),
+        cell(
+            "n3/dflt/class_body_field",
+            "a := 100\nstruct S:\n    a: int = 1\n    b: int = a\nprint(S().b)\n",
+            Expect::Rejects(CLASS_BODY),
+        ),
+        cell(
+            "n3/dflt/class_body_method",
+            "a := 100\nstruct S:\n    a: int = 1\n    fn m(self, x: int = a) -> int:\n        return x\nprint(S().m())\n",
+            Expect::Rejects(CLASS_BODY),
+        ),
+        cell(
+            "n3/dflt/field_reads_earlier_method",
+            "m := fn(s: S) -> int: 100\nstruct S:\n    fn m(self) -> int:\n        return 1\n    f: fn(S) -> int = m\nprint(S().f(S()))\n",
+            Expect::Rejects(CLASS_BODY),
+        ),
+        cell(
+            "n3/dflt/nested_enclosing_local",
+            "fn outer() -> int:\n    n := 5\n    fn inner(x: int = n) -> int:\n        return x\n    return inner()\nprint(outer())\n",
+            Expect::Rejects("a nested fn's default cannot read the enclosing fn's locals"),
+        ),
+        Cell {
+            name: "n3/dflt/imported".to_string(),
+            files: with_lib(
+                "lib.chz",
+                "k := 1\nfn f(k: int = k) -> int:\n    return k\n".to_string(),
+                "import f from lib\nprint(f())\n".to_string(),
+            ),
+            expect: prints("1"),
+        },
+        cell(
+            "n3/dflt/interp_fragment",
+            "n := 100\nfn f(n: int, x: str = \"n={n}\") -> str:\n    return x\nprint(f(3))\ng := f\nprint(g(3))\n",
+            prints("n=100\nn=100"),
+        ),
+        cell(
+            "n3/dflt/self_in_field",
+            "struct A:\n    n: int = Self.mk()\n    m: int = 2\n    fn mk() -> int:\n        return 41\nprint(A())\n",
+            Expect::Rejects("unknown name 'Self'"),
+        ),
+    ]
+}
+
 fn run_cell(root: &Path, idx: usize, c: &Cell) -> Result<(), String> {
     let dir: PathBuf = root.join(format!("c{idx}"));
     for (rel, src) in &c.files {
@@ -913,6 +1093,30 @@ fn call_binding_grid() {
     assert!(
         fails.is_empty(),
         "{} of {} call-binding cells failed:\n{}",
+        fails.len(),
+        cells.len(),
+        fails.join("\n")
+    );
+}
+
+#[test]
+fn name_denotes_grid() {
+    let root = std::env::temp_dir().join(format!("chezzi-n3-grid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let cells = n3_cells();
+    let mut fails = Vec::new();
+    for (i, c) in cells.iter().enumerate() {
+        let pinned = PINNED_RED.contains(&c.name.as_str());
+        match (run_cell(&root, i, c), pinned) {
+            (Err(e), false) => fails.push(e),
+            (Ok(()), true) => fails.push(format!("{}: green; remove it from PINNED_RED", c.name)),
+            _ => {}
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        fails.is_empty(),
+        "{} of {} name-denotes cells failed:\n{}",
         fails.len(),
         cells.len(),
         fails.join("\n")
