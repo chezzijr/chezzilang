@@ -103,3 +103,43 @@ fn fiber_owned_nursery_scope_id_is_stable_under_child_fault_at_threads_4() {
         );
     }
 }
+
+const TWO_DEEP_CHILD_FAULT: &str = r#"import std.concurrency
+fn core(c: Channel[int], started: Channel[int]):
+    parallel:
+        spawn:
+            while true:
+                c.send(1)
+        spawn:
+            panic("boom")
+fn outer(c: Channel[int], started: Channel[int]):
+    parallel:
+        spawn:
+            parallel:
+                spawn:
+                    core(c, started)
+        spawn:
+            for _v in c:
+                pass
+fn run():
+    c := Channel[int](0)
+    started := Channel[int](1)
+    _r := recover: outer(c, started)
+fn main():
+    for _k in range(0, 400):
+        run()
+    print("done")
+main()
+"#;
+
+#[test]
+fn fiber_owned_nursery_scope_id_is_stable_two_deep_child_fault_at_default_threads() {
+    for round in 0..20 {
+        let r = run(TWO_DEEP_CHILD_FAULT, "0", "h1d");
+        let (out, err, code) = r.expect("hang: no exit within 20s");
+        assert!(
+            out == "done\n" && code == Some(0) && !err.contains("panicked at"),
+            "round {round}: code={code:?} stdout={out:?} stderr={err:?}"
+        );
+    }
+}
