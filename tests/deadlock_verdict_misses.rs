@@ -35,7 +35,10 @@ fn run_with_threads(
         if let Some(st) = child.try_wait().expect("try_wait") {
             break st.code();
         }
-        if start.elapsed() > Duration::from_secs(10) {
+        // A hang never exits; 60 s only bounds it. `q3`'s `burn(3000000)` alone takes ~6 s of CPU on a
+        // debug binary (measured 2026-10-02, before and after TICKET-199), so 10 s read as a hang under
+        // nextest load.
+        if start.elapsed() > Duration::from_secs(60) {
             let _ = child.kill();
             let _ = child.wait();
             break None;
