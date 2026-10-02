@@ -147,9 +147,9 @@ with a predicate that counts poll-parked fibers of a tripped scope. One end-of-r
 
 **Status:** C1 and C2 fixed by TICKET-200: one `MnSched::drain_family` (both halves, all six sites,
 predicate reads `poller::any_parked`), one `ScopeCancel::tripped`, and one `Vm::rank_end` called by
-`finish_run` and the three test-runner sites. Open: in the TICKET-200 grid, `os.exit` x a `Shared`
-guard waiter x the main nursery prints the line after the op (`guard_wait_block` takes the guard
-the exit freed before it checks the halt); not a drain cause.
+`finish_run` and the three test-runner sites. The guard waiter's halt order is fixed too:
+`guard_free_then_take` reads the one `Vm::block_halts` between the guard coming free and taking it,
+and the in-place socket and sleep waits read it instead of their hand copies.
 
 ## Family S1 — scheduler identity and fairness (H1, H2)
 

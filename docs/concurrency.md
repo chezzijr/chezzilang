@@ -1123,7 +1123,7 @@ fn serve(tok: Token, io: Channel[str]):
 > **A blocking op is a cancellation point only when it is about to WAIT** (TICKET-194). A send with
 > room, a recv with a value ready, a ready `wait:` arm, an `else`, a `try_*` op, a socket op an `Executor` job refuses (`would block`), and a
 > `Shared.update`/`RwShared.read`/`write` whose guard is free are never cut: the op completes and the
-> task is cut at its next wait or back-edge. A function that returned never loses its result to a
+> task is cut at its next wait or back-edge. A task that waited for a guard re-reads the halts before it takes the guard, so a guard freed by a cancel, a child fault or `os.exit` that cut its holder is not taken (TICKET-200; Go's `os.Exit` runs nothing more, and CPython's cancelled `asyncio.Lock.acquire` raises `CancelledError`). A function that returned never loses its result to a
 > cancel (Go and CPython keep a finished job's result too). An operator or protocol hook (`+`, `<`,
 > `==`, `[]`, `in`, `hash`, `str`, `iter()`) and a generator `.next()` are calls, not checkpoints. A
 > native loop that calls user code per element (`map`, `filter`, `fold`, `sort_by`, `sort_by_key`,

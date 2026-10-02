@@ -17,8 +17,9 @@ Single source of truth for "what am I doing next." Update after every work sessi
   dropped an earlier unjoined job fault; one `Vm::rank_end` (exit > earlier unjoined job fault > the
   run's own cause) replaces the deadlock-only swap in `on_step_fault`, called by `finish_run` and the
   test runner. Tests: `tests/cancel_reaches_every_parked_party.rs` (C1 grid 369 cells: base 39 red;
-  ranking grid 12 cells: base 4 red). Open: `os.exit` x guard waiter x main nursery still prints the
-  line after the op (a `guard_wait_block` race, not a drain cause).
+  ranking grid 12 cells: base 4 red). A `Shared` guard waiter whose holder an `os.exit` cut no
+  longer runs its `update` after the exit: `guard_free_then_take` reads the one `Vm::block_halts`
+  before it takes the guard.
 
 - **TICKET-199 (2026-10-02): Family S1, scheduler fairness (H2).** At `CHEZZI_THREADS=1` a cap-0
   ping-pong between an outer-nursery sender and an inner-nursery receiver starved the inner nursery's
