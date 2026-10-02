@@ -4,7 +4,7 @@
 # `Future.result()`/`done()` answer from any caller. Grid: caller {parent, spawned task, Executor
 # job, two tasks at once} x state {pending, done ok, done faulted}, plus a mutable-result row per
 # caller: the task holding the original handle gets the same object back from every `get()`; a task
-# holding an airlock copy gets a fresh snapshot (D4 forbids it seeing the parent's later writes).
+# holding an airlock copy gets the value as of the crossing, and its write to that value faults (D4).
 # A faulted job's first observer may be a copy (its `get()` latches the fault into the core), and
 # `done()` runs from a spawned task and an Executor job in every state.
 # The `memoize` half (A3) moved to TICKET-192, which owns an O(1) shared cache.
@@ -62,8 +62,10 @@ fn child_mutate(t: Task[List[int]], out: Channel[str]):
 
 fn _mutate_then_get(t: Task[List[int]]) -> str:
     a := t.get()
-    a.push(9)
-    return str(t.get())
+    r := recover: a.push(9)
+    match r:
+        Ok(_): return "push ok {t.get()}"
+        Err(e): return "{t.get()} {e.message()}"
 
 test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
     ex := Executor()
@@ -165,7 +167,7 @@ test fn task_mutable_result_parent_get_returns_the_same_object():
     b.push(4)
     assert str(a) == "[1, 2, 3, 4]", str(a)
 
-test fn task_mutable_result_spawned_copy_gets_a_snapshot():
+test fn task_mutable_result_spawned_copy_sees_the_value_as_of_the_crossing():
     ex := Executor()
     t := submit_task(ex, mk_list)
     ex.shutdown()
@@ -175,10 +177,10 @@ test fn task_mutable_result_spawned_copy_gets_a_snapshot():
     parallel:
         spawn child_mutate(t, out)
     got := out.recv()
-    assert got == "[1, 2]", got
+    assert got == "[1, 2, 3] this value is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()", got
     assert str(t.get()) == "[1, 2, 3]", str(t.get())
 
-test fn task_mutable_result_executor_job_copy_gets_a_snapshot():
+test fn task_mutable_result_executor_job_copy_sees_the_value_as_of_the_crossing():
     ex := Executor()
     t := submit_task(ex, mk_list)
     ex.shutdown()
@@ -189,7 +191,7 @@ test fn task_mutable_result_executor_job_copy_gets_a_snapshot():
     ex2.submit(fn(): child_mutate(t, out))
     ex2.shutdown()
     got := out.recv()
-    assert got == "[1, 2]", got
+    assert got == "[1, 2, 3] this value is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()", got
     assert str(t.get()) == "[1, 2, 3]", str(t.get())
 
 test fn task_faulted_first_observer_is_a_spawned_task():
