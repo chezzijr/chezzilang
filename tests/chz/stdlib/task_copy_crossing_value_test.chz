@@ -1,0 +1,21 @@
+# tests/chz/stdlib/task_copy_crossing_value_test.chz — TICKET-203.
+#
+# A spawn captures the value as of the crossing. A `Task` copy whose owner already called `get()`
+# must see the owner's alias as copied (including the owner's later push), not the core's fill-time value.
+
+import std.concurrency
+import submit_task, Task from std.concurrency.task
+
+fn mk() -> List[int]:
+    return [1]
+
+test fn copy_get_sees_owner_alias_as_of_the_crossing():
+    ex := Executor()
+    t := submit_task(ex, mk)
+    ex.shutdown()
+    xs := t.get()
+    xs.push(99)
+    out := Channel[str](2)
+    parallel:
+        spawn: out.send("captured xs: {xs}  t.get(): {t.get()}")
+    assert out.recv() == "captured xs: [1, 99]  t.get(): [1, 99]"
