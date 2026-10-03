@@ -143,10 +143,23 @@ counting the inline joiner twice. The close-time farm and TICKET-159's hook fold
 - **S3** (P1): `std.request` must retry an idempotent request once when a reused keep-alive connection
   turns out closed before any response byte (Go's rule), one site in the request client.
 
+## Owner decisions (2026-10-04)
+
+1. **Executor is rebuilt on the concurrency design.** A task started by `ex.submit` and a task started
+   by `spawn` are one kind of task with the same rules: globals copied at start (like `fork`), a write
+   to that copy faults (D4), sharing only through `Shared`/`Atomic`/`Channel`, cancel inherited from
+   the parent chain, one runner at a time under the gate. The Executor only manages lifetime and adds
+   pool features on top: at most N at once, handles, not scoped to a block, `shutdown()` instead of the
+   block end. This replaces family E1's "one constructor" fix and absorbs TICKET-207 (`Task.get()`
+   returns `Result[T]`; a fire-and-forget job fault ends the run at once; A1; C2) and TICKET-206's
+   wait 4 (job start). Open idea, not decided: a spawn that returns a handle (`t := spawn foo()`).
+2. **`os.exit` runs no `defer` anywhere** (Go `os.Exit`, Python `os._exit`): no sibling cleanup.
+   Buffered stdout is still flushed. C3 disappears; `docs/concurrency.md` (~1206, "a defer is never
+   itself cancelled ... every registered defer of a cancelled task runs") changes for the exit case.
+
 ## Plan order
 
-1. **E1** (A2 P0, C1, C3, H1) — one ticket; scheduler/party code. Before TICKET-207 merges or after,
-   whichever reaches it first; both touch Executor code, so the conflict order applies.
+1. **E1 = Executor rebuild** (A2 P0, C1, C3, H1, plus TICKET-207 and TICKET-206 wait 4) — one ticket.
 2. **P1** (K1 P0, K2, K3, K4, K5, K6, S1, S2) — one ticket; checker + compiler + vm identity.
 3. **W1** (H2) — one ticket; scheduler recruitment, after E1 (same files).
 4. **S3** — one small ticket.
