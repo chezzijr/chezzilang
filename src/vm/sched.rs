@@ -193,6 +193,15 @@ impl WireMemo {
     }
 }
 
+/// Where [`Vm::spawn_into`] puts the task it starts.
+pub(super) enum SpawnTarget {
+    /// The innermost open `parallel:` of the calling party (`spawn`).
+    Nursery,
+    /// Scope `tail` of `sched`, with no nursery open on the caller (`Executor.submit`).
+    #[allow(dead_code)] // constructed by `Executor.submit` once the job engine is gone
+    Scope { sched: Arc<MnSched>, tail: usize },
+}
+
 impl Vm {
     /// TICKET-111 — the pending adoption capture for `id`, if this is `fault_module`'s own replay
     /// (`adopt_active`) and this task's `snapshot_adopt` still holds one. Consuming (`remove`), so a
@@ -225,6 +234,25 @@ impl Vm {
         let at = self.stack.len() - argc;
         let raw_args: Vec<Value> = self.stack.split_off(at);
         let head = self.pop();
+        if self.nurseries.is_empty() {
+            return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
+        }
+        self.spawn_into(SpawnTarget::Nursery, method, head, raw_args, fresh, span)
+    }
+
+    /// Start one task: the ONE function behind `spawn` and `Executor.submit` (TICKET-208). It pins
+    /// the task's module view ([`Vm::fresh_view`]), crosses the callee and its arguments in one
+    /// serialization, and hands the task to `target`. Everything a new party inherits from its
+    /// starter is decided here or below, once, whichever door started it.
+    pub(super) fn spawn_into(
+        &mut self,
+        target: SpawnTarget,
+        method: Option<String>,
+        head: Value,
+        raw_args: Vec<Value>,
+        fresh: u32,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
         // W7-4: everything that crosses here crosses in ONE serialization, so two sibling closures
         // over the SAME captured local (`spawn work(c.inc, c.get)`) still share their one binding on
         // the far side. Root-by-root `deep_clone` gave each its own [`WireMemo`] → one cell per
@@ -242,9 +270,6 @@ impl Vm {
         // (below) is too late for the first spawn of a view. No user code runs between here and there,
         // so the pinned VALUES are identical — only which fault wins changes when BOTH the snapshot
         // build and the crossing are non-viable, and the snapshot's fault is the more fundamental one.
-        if self.nurseries.is_empty() {
-            return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
-        }
         let pin = self.fresh_view(span);
         let cross_head = method.is_some() || self.spawn_callee_crosses_deep(head);
         let mut batch = raw_args;
@@ -271,7 +296,16 @@ impl Vm {
                 span,
             },
         };
-        self.register_task(task, span, pin, cell_ids, fresh)
+        match target {
+            SpawnTarget::Nursery => self.register_task(task, span, pin, cell_ids, fresh),
+            SpawnTarget::Scope { sched, tail } => {
+                let fiber = self
+                    .prepare_worker(task, pin?, &cell_ids, fresh)?
+                    .into_fiber(0, tail);
+                sched.inject_or_extend(fiber, tail);
+                Ok(())
+            }
+        }
     }
 
     /// Does a `spawn f()` **callee** have to cross the task boundary by DEEP value? A closure that
@@ -1060,8 +1094,23 @@ impl Vm {
         } else {
             None
         };
+        let ancestors = self.scope_ancestors();
+        let mut scope = self.new_detached_sched(nursery_span, ancestors)?;
+        scope.drainer_slot = drainer_slot;
+        Some(scope)
+    }
+
+    /// A private [`MnSched`] with one open scope (scope 0) whose cancel parents are `ancestors`,
+    /// registered with the run and served by its own raw drainer thread. The one builder of a
+    /// sched that is not a scope of an enclosing one: an eager `parallel:` passes its own
+    /// [`Vm::scope_ancestors`] (TICKET-208).
+    pub(super) fn new_detached_sched(
+        &mut self,
+        span: Span,
+        ancestors: Vec<Arc<AtomicBool>>,
+    ) -> Option<EagerScope> {
         let cancel = Arc::new(AtomicBool::new(false));
-        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock();
+        let deadlock_err = self.err(DEADLOCK_MSG.to_string(), span).deadlock();
         // wid 0 = inline join worker, wid 1 = the dedicated raw drainer below, wids 2..n = the pool
         // helpers `join_eager_nursery` farms for an OUTERMOST scope, wids 2..n+1 = the raw helpers
         // `farm_blocked_body_helpers` farms while the body is blocked (TICKET-159). `MnSched::new`
@@ -1093,7 +1142,7 @@ impl Vm {
         self.register_sched(&sched);
         // Structured concurrency — an eager nursery is a nested scope: its handlers must observe the
         // enclosing scopes' cancel too (`JoinScope::ancestors`).
-        sched.lock().scopes[0].ancestors = self.scope_ancestors();
+        sched.lock().scopes[0].ancestors = ancestors;
         sched.open_body(0);
         let shell = self.spawn_shell(&sched, &cancel);
         let gate_body = self.mn.is_none() && worker_count() == 1;
@@ -1118,7 +1167,7 @@ impl Vm {
             sched,
             cancel,
             drainer: Some(drainer),
-            drainer_slot,
+            drainer_slot: None,
             scope: 0,
             fiber_owned: false,
             more_scopes: Vec::new(),
