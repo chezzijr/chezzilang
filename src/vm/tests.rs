@@ -20691,15 +20691,15 @@ fn snapshot_builds_for(src: &str) -> usize {
     vm.snapshot_builds
 }
 
-/// W6-2 — the snapshot cache must actually SHORT-CIRCUIT, not merely be correct: a fix that re-snapshots
-/// per `spawn` passes every correctness test and quietly costs O(all module globals) per spawn (measured
-/// 84x on a spawn storm with a big aggregate global). The two invalidation rules give exactly:
+/// W6-2 / TICKET-208 — the snapshot cache short-circuits only where that is correct. A task sees
+/// its globals as of its own start, so [`Vm::fresh_view`] drops a non-`reusable` snapshot at every
+/// spawn:
 ///
 /// * all-immutable globals (`reusable`) → ONE build for the whole run, however many nurseries;
-/// * a mutable aggregate global → one build per NURSERY (rule 2 drops the cache at `EnterNursery`,
-///   because `q.push(..)` writes no module slot for rule 1 to see) — and, crucially, still only ONE
-///   build for N spawns into the SAME nursery;
-/// * a global ASSIGNMENT between spawns (rule 1) → one build per assignment-then-spawn.
+/// * a mutable aggregate global → one build per SPAWN (`q.push(..)` writes no module slot, so
+///   nothing else can tell the view changed); the cost is O(all module globals) per spawn
+///   (measured 84x on a spawn storm with a big aggregate global), accepted by TICKET-208;
+/// * a global ASSIGNMENT between spawns → one build per assignment-then-spawn.
 #[test]
 fn snapshot_cache_short_circuits_per_epoch_not_per_spawn() {
     let three_nurseries = "\nfor i in range(3):\n    parallel:\n        spawn: pass\n";
@@ -20711,14 +20711,14 @@ fn snapshot_cache_short_circuits_per_epoch_not_per_spawn() {
     assert_eq!(
         snapshot_builds_for(&format!("n: int = 1\nq: List[int] = [1]{three_nurseries}")),
         3,
-        "an aggregate global: one build per nursery (in-place mutation writes no slot)"
+        "an aggregate global: one build per spawn (in-place mutation writes no slot)"
     );
     assert_eq!(
         snapshot_builds_for(
             "q: List[int] = [1]\nparallel:\n    for i in range(50):\n        spawn: pass\n"
         ),
-        1,
-        "50 spawns into ONE nursery must share ONE build, aggregate global or not"
+        50,
+        "50 spawns over an aggregate global: one build per spawn (each sees it as of its start)"
     );
     assert_eq!(
         snapshot_builds_for("g: int = 0\nparallel:\n    spawn: pass\n    g = 1\n    spawn: pass\n"),

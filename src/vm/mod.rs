@@ -1792,18 +1792,6 @@ enum Lowered {
     },
 }
 
-impl Lowered {
-    /// The spawn-site span carried on every variant — used to re-stamp a module-global snapshot fault.
-    fn span(&self) -> Span {
-        match self {
-            Lowered::Closure { span, .. }
-            | Lowered::Func { span, .. }
-            | Lowered::Builtin { span, .. }
-            | Lowered::Method { span, .. } => *span,
-        }
-    }
-}
-
 /// D1 — a heap-independent, read-only snapshot of the parent's initialized module graph, shared
 /// across a nursery's workers via `Arc` (like `Arc<Program>`) and **faulted into each worker heap
 /// lazily, one module at a time, on first global access** (see [`Vm::fault_module`]). It replaces

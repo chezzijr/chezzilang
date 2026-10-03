@@ -242,7 +242,10 @@ impl Vm {
         // (below) is too late for the first spawn of a view. No user code runs between here and there,
         // so the pinned VALUES are identical — only which fault wins changes when BOTH the snapshot
         // build and the crossing are non-viable, and the snapshot's fault is the more fundamental one.
-        let pin = self.pin_snapshot(span)?;
+        if self.nurseries.is_empty() {
+            return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
+        }
+        let pin = self.fresh_view(span);
         let cross_head = method.is_some() || self.spawn_callee_crosses_deep(head);
         let mut batch = raw_args;
         if cross_head {
@@ -331,7 +334,10 @@ impl Vm {
         // (`gi := c.inc; gg := c.get`) must reach the task sharing their single binding.
         // W7-4c: and the snapshot is pinned BEFORE the clone, so a capture over a cell a module global
         // also holds crosses under that global's id — see `do_spawn`.
-        let pin = self.pin_snapshot(span)?;
+        if self.nurseries.is_empty() {
+            return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
+        }
+        let pin = self.fresh_view(span);
         let (captured, cell_ids) = self.deep_clone_all(captured, span)?;
         let h = self.heap.alloc(Obj::Closure {
             proto,
@@ -351,21 +357,28 @@ impl Vm {
         )
     }
 
-    /// W7-4c — the nursery guard + [`Vm::ensure_snapshot`], split out of [`Vm::register_task`] so a
-    /// `spawn` can pin its module view BEFORE `deep_clone_all` mints the task's cells. The guard stays
-    /// FIRST: `spawn` outside a `parallel:` must still report that, not a snapshot fault.
+    /// The module view a task started NOW inherits: the one door every `spawn` and every
+    /// `Executor.submit` reads its globals through (TICKET-208).
     ///
-    /// The `Result` is CARRIED, not raised (W6-2): a snapshot that cannot be built — a module global
-    /// holding a frame-holding generator — faults where the task is PREPARED, so a nursery whose tasks
-    /// are all cancelled before preparation stays faultless.
-    fn pin_snapshot(
-        &mut self,
-        span: Span,
-    ) -> Result<Result<Arc<ModuleSnapshot>, RuntimeError>, RuntimeError> {
-        if self.nurseries.is_empty() {
-            return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
+    /// A cached snapshot that is not `reusable` holds a mutable aggregate, which an in-place
+    /// mutation (`q.push(1)`, `m[k] = v`, `p.x = 1`) changes with no module-slot write for
+    /// `set_global_slot` / `module_define` to see. So it is dropped at every start, and a task sees
+    /// its globals as of its own start (Go: a goroutine sees the heap as of `go`). An all-immutable
+    /// view keeps its one snapshot for the whole run.
+    ///
+    /// A `spawn` calls this BEFORE `deep_clone_all` mints the task's cells, and CARRIES the
+    /// `Result` (W6-2): a snapshot that cannot be built — a module global holding a frame-holding
+    /// generator — faults where the task is PREPARED, so a nursery whose tasks are all cancelled
+    /// before preparation stays faultless.
+    pub(super) fn fresh_view(&mut self, span: Span) -> Result<Arc<ModuleSnapshot>, RuntimeError> {
+        if self.snapshot_memo.as_ref().is_some_and(|s| !s.reusable) {
+            self.snapshot_memo = None;
+            // W7-4c — the registry numbers that snapshot; drop it with the cache.
+            self.snapshot_cells = Arc::new(super::fxhash::FxHashMap::default());
+            // TICKET-111 — the node registry numbers the same snapshot; drop it too.
+            self.snapshot_nodes = Arc::new(super::fxhash::FxHashMap::default());
         }
-        Ok(self.ensure_snapshot(span))
+        self.ensure_snapshot(span)
     }
 
     /// Register a spawned task on the innermost nursery. Per-connection spawn: if that nursery is
@@ -405,7 +418,7 @@ impl Vm {
             // (prepare instant).
             let tail = scope.more_scopes.last().copied().unwrap_or(scope.scope);
             let fiber = self
-                .prepare_worker(task, Some(snap?), &cell_ids, fresh)?
+                .prepare_worker(task, snap?, &cell_ids, fresh)?
                 .into_fiber(0, tail);
             if let Some(n) = sched.inject_or_extend(fiber, tail)
                 && let Some(Some(scope)) = self.eager_scheds.last_mut()
@@ -692,7 +705,7 @@ impl Vm {
             // W6-2 — each task replays the snapshot pinned at its own spawn. scope 0 — the outermost
             // nursery.
             fibers.push(
-                self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids, t.fresh)?
+                self.prepare_worker(t.call, t.snap?, &t.cell_ids, t.fresh)?
                     .into_fiber(i, 0),
             );
         }
@@ -799,7 +812,7 @@ impl Vm {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(tasks.len());
         for t in tasks {
-            workers.push(self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids, t.fresh)?);
+            workers.push(self.prepare_worker(t.call, t.snap?, &t.cell_ids, t.fresh)?);
         }
         let scope_id =
             sched.register_scope_seeded(Arc::clone(&cancel), self.scope_ancestors(), workers);
@@ -866,7 +879,7 @@ impl Vm {
             // global mutated in between.
             let mut prepared = Vec::with_capacity(total);
             for t in clones {
-                prepared.push(self.prepare_worker(t.call, Some(t.snap?), &t.cell_ids, t.fresh)?);
+                prepared.push(self.prepare_worker(t.call, t.snap?, &t.cell_ids, t.fresh)?);
             }
             // COMMIT — nothing fallible remains. Discard the originals (the clones became the fibers),
             // register + seed the scope, and record it for its OWN `JoinNursery` to reduce.
@@ -4837,7 +4850,9 @@ impl Vm {
         &mut self,
         task: PendingCall,
     ) -> Result<WorkerResult, RuntimeError> {
-        self.prepare_worker(task, None, &[], 0)?.run()
+        let (PendingCall::Call { span, .. } | PendingCall::Method { span, .. }) = &task;
+        let snap = self.fresh_view(*span)?;
+        self.prepare_worker(task, snap, &[], 0)?.run()
     }
 
     /// B3.3-threads — the parent-thread half of [`Vm::run_task_isolated`]: lower the task to a `Send`
@@ -4847,13 +4862,11 @@ impl Vm {
     /// nothing in `ReadyWorker::run` touches `self`.
     ///
     /// W6-2 — `snap` is the task's PIN, the module view snapshotted at its `spawn` ([`QueuedTask`]), which
-    /// every nursery path (lazy, early-enlisted, eager per-connection) now passes in. `None` = "snapshot
-    /// the current view here", left for the nursery-less callers whose prepare instant IS now:
-    /// `run_task_isolated` (B3.3) and the `Executor` drain (`prepare_worker_from_wire`).
+    /// every caller passes in; [`Vm::fresh_view`] is the one door that builds it.
     pub(super) fn prepare_worker(
         &mut self,
         task: PendingCall,
-        snap: Option<Arc<ModuleSnapshot>>,
+        snap: Arc<ModuleSnapshot>,
         cell_ids: &[(GcRef, u32)],
         fresh: u32,
     ) -> Result<ReadyWorker, RuntimeError> {
@@ -4877,10 +4890,6 @@ impl Vm {
         //    per task. 3. rebuild the callable/receiver + args into the worker heap (a `home` index
         //    resolves to a pre-alloced empty module that faults on first global read). The actual
         //    invoke is `ReadyWorker::run`.
-        let snap = match snap {
-            Some(s) => s,
-            None => self.ensure_snapshot(lowered.span())?,
-        };
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
         let (call, span) = worker.rebuild_ready(lowered, share, &adopt_ids, fresh);

@@ -2115,19 +2115,6 @@ impl Vm {
     /// `#[inline(never)]` keeps the arm one call instruction.
     #[inline(never)]
     fn op_enter_nursery(&mut self, span: Span) {
-        // W6-2 — invalidation rule 2: a nursery's tasks must see module globals as of THIS open,
-        // and a global holding a mutable aggregate can have been mutated IN PLACE (`q.push(1)`,
-        // `m[k] = v`, `p.x = 1`) since the cached snapshot was built, with no module-slot write
-        // for rule 1 (`set_global_slot`/`module_define`) to catch. So drop a non-`reusable` cache
-        // entry here; an all-immutable view keeps its one snapshot for the whole run (a
-        // nursery-in-a-loop program builds exactly one). See `ModuleSnapshot::reusable`.
-        if self.snapshot_memo.as_ref().is_some_and(|s| !s.reusable) {
-            self.snapshot_memo = None;
-            // W7-4c — the registry numbers that snapshot; drop it with the cache.
-            self.snapshot_cells = std::sync::Arc::new(super::fxhash::FxHashMap::default());
-            // TICKET-111 — the node registry numbers the same snapshot; drop it too.
-            self.snapshot_nodes = std::sync::Arc::new(super::fxhash::FxHashMap::default());
-        }
         self.nurseries.push(Vec::new());
         self.mn_scopes.push(None); // lockstep — set Some(scope_id) only if early-enlisted
         // TASK B — capture this parallel body's defer floor so a recover-scoped `?` can run
