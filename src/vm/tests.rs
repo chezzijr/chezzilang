@@ -22043,3 +22043,25 @@ print(ch.recv())
         assert!(out.contains(line), "job output lost: out={out:?}");
     }
 }
+
+#[test]
+fn executor_job_sees_globals_as_of_its_own_submit() {
+    let src = r#"
+import Executor from std.concurrency
+xs := [1]
+fn show() -> str:
+    return "{xs}"
+fn main():
+    out := Channel[str](4)
+    ex := Executor()
+    ex.submit(fn(): out.send("job1 " + show()))
+    print(out.recv())
+    xs.push(2)
+    ex.submit(fn(): out.send("job2 " + show()))
+    print(out.recv())
+    ex.shutdown()
+main()
+"#;
+    let out = run_capture(src).expect("run");
+    assert_eq!(out, "job1 [1]\njob2 [1, 2]\n");
+}
