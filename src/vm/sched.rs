@@ -1082,25 +1082,13 @@ impl Vm {
         // enclosing scopes' cancel too (`JoinScope::ancestors`).
         sched.lock().scopes[0].ancestors = self.scope_ancestors();
         sched.open_body(0);
-        let mut shell = self.spawn_shell(&sched, &cancel);
+        let shell = self.spawn_shell(&sched, &cancel);
         let gate_body = self.mn.is_none() && worker_count() == 1;
+        let born_gated = gate_body || width::gated();
+        let drainer = spawn_worker_thread(shell, &sched, "chezzi-eager", 1, 0, born_gated).ok()?; // no drainer ⇒ no worker during the body ⇒ fall back to lazy (see the doc above)
         if gate_body {
-            shell.width_gated = true;
-        }
-        let drainer_sched = Arc::clone(&sched);
-        let drainer = std::thread::Builder::new()
-            .stack_size(VM_STACK_BYTES)
-            .name("chezzi-eager".into())
-            .spawn(move || {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    shell.mn_worker_loop(&drainer_sched, 1, 0)
-                }));
-            })
-            .ok()?; // no drainer ⇒ no worker during the body ⇒ fall back to lazy (see the doc above)
-        if gate_body {
-            self.width_gated = true;
-            self.holds_width = true;
-            self.body_gate = Some(Arc::clone(&sched));
+            width::convert();
+            self.slice_in_place = true;
         }
         // §2c1 — an eager nursery publishes itself so the process-wide verdict counts its undone
         // fibers as uncounted senders. Without it, top-level `main` blocked on `ch.recv()` while a
@@ -1267,7 +1255,6 @@ impl Vm {
         }
         if let Some(h) = drainer {
             let _ = h.join();
-            self.body_gate_retire(&sched);
         }
         join_blocked_body_helpers(&sched);
         // TICKET-164 — publish this run's pick count on the joining thread (read by
@@ -1304,17 +1291,15 @@ impl Vm {
             let Some(slot) = NestedDrainerSlot::acquire() else {
                 break;
             };
-            let mut shell = self.spawn_shell(sched, cancel);
-            let sched = Arc::clone(sched);
-            let Ok(handle) = std::thread::Builder::new()
-                .stack_size(VM_STACK_BYTES)
-                .name("chezzi-eager-helper".into())
-                .spawn(move || {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        shell.mn_worker_loop(&sched, wid, sid)
-                    }));
-                })
-            else {
+            let shell = self.spawn_shell(sched, cancel);
+            let Ok(handle) = spawn_worker_thread(
+                shell,
+                sched,
+                "chezzi-eager-helper",
+                wid,
+                sid,
+                width::gated(),
+            ) else {
                 break;
             };
             helpers.push((handle, slot));
@@ -1345,17 +1330,15 @@ impl Vm {
             let Some(slot) = NestedDrainerSlot::acquire() else {
                 break;
             };
-            let mut shell = self.spawn_shell(sched, &cancel);
-            let s = Arc::clone(sched);
-            let Ok(handle) = std::thread::Builder::new()
-                .stack_size(VM_STACK_BYTES)
-                .name("chezzi-eager-helper".into())
-                .spawn(move || {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        shell.mn_worker_loop(&s, wid, SENTINEL_SCOPE)
-                    }));
-                })
-            else {
+            let shell = self.spawn_shell(sched, &cancel);
+            let Ok(handle) = spawn_worker_thread(
+                shell,
+                sched,
+                "chezzi-eager-helper",
+                wid,
+                SENTINEL_SCOPE,
+                width::gated(),
+            ) else {
                 break;
             };
             farmed.push((handle, slot));
@@ -1470,7 +1453,6 @@ impl Vm {
         }
         if let Some(h) = drainer {
             let _ = h.join();
-            self.body_gate_retire(&sched);
         }
         join_blocked_body_helpers(&sched);
         let slots = sched.take_slots();
@@ -1564,7 +1546,6 @@ impl Vm {
         shell.cancel = Some(Arc::clone(cancel));
         // TICKET-141 (W14-14) — the replacement worker, an inline join shell and a farmed helper of a
         // gated thread are gated too; each starts without a permit (see `src/vm/width.rs`).
-        shell.width_gated = self.width_gated;
         shell
     }
 
@@ -1589,10 +1570,7 @@ impl Vm {
         h: GcRef,
         span: Span,
     ) -> Result<RecvStep, RuntimeError> {
-        self.width_release();
-        let r = self.demote_recv_block_in_place(h, span);
-        self.width_acquire();
-        r
+        self.demote_recv_block_in_place(h, span)
     }
 
     fn demote_recv_block_in_place(
@@ -1606,6 +1584,7 @@ impl Vm {
                 .expect("demote_recv_block called with no active M:N scheduler (self.mn is None)"),
         );
         let core = self.channel_core(h);
+        let _gated = self.gated_register(&[&core]);
         // TICKET-185 — a rendezvous receiver publishes its SLOT before it registers (H3: a sender that
         // looks for a receiver while this one is registering must find the slot). Published only when
         // no value is waiting, in the same hold; the loop below takes a waiting value itself.
@@ -1714,10 +1693,12 @@ impl Vm {
                     } else {
                         drop(c);
                         // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
-                        let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                        if p.is_queued() && !q.recv_ready_for(Some(&p)) {
-                            let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
-                        }
+                        width::released(|| {
+                            let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
+                                p.is_queued() && !g.recv_ready_for(Some(&p)) && !width::reserved()
+                            });
+                        });
                         continue;
                     }
                 }
@@ -1739,9 +1720,7 @@ impl Vm {
         op: crate::vm::core::PendingOp,
         span: Span,
     ) -> Result<SendStep, RuntimeError> {
-        self.width_release();
         let r = self.demote_send_block_in_place(&core, &op.p, span);
-        self.width_acquire();
         self.send_settled(op, span)
             .unwrap_or_else(|| r.map(|()| SendStep::Sent))
     }
@@ -1757,6 +1736,7 @@ impl Vm {
                 .as_ref()
                 .expect("demote_send_block called with no active M:N scheduler (self.mn is None)"),
         );
+        let _gated = self.gated_register(&[core]);
         let reg = self.block_enter(
             WaitSpec::Send,
             Some(quiesce::PartyWait::Send(Arc::clone(p))),
@@ -1798,10 +1778,12 @@ impl Vm {
                     return Err(sched.deadlock_err.clone());
                 }
             }
-            let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
-            if p.is_queued() {
-                let _ = core.cv.wait_timeout(q, DEMOTE_POLL_BACKOFF);
-            }
+            width::released(|| {
+                let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = core.cv.wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |_| {
+                    p.is_queued() && !width::reserved()
+                });
+            });
         }
     }
 
@@ -1827,10 +1809,7 @@ impl Vm {
         timer: Option<(usize, std::time::Instant)>,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        self.width_release();
-        let r = self.demote_wait_block_in_place(arms, p, timer, span);
-        self.width_acquire();
-        r
+        self.demote_wait_block_in_place(arms, p, timer, span)
     }
 
     fn demote_wait_block_in_place(
@@ -1845,6 +1824,10 @@ impl Vm {
                 .as_ref()
                 .expect("demote_wait_block called with no active M:N scheduler (self.mn is None)"),
         );
+        let _gated = {
+            let refs: Vec<&Arc<ChannelCore>> = arms.iter().map(|(c, _)| c).collect();
+            self.gated_register(&refs)
+        };
         // TICKET-181 — a timed `wait:` returns at its deadline whatever anyone does, so it is
         // `inflight` (changed cell (a), C1); an untimed one registers its arms as a waiter.
         let spec = WaitSpec::Wait {
@@ -1911,21 +1894,22 @@ impl Vm {
             // FIRST arm's condvar with a timeout so a `send`/`close` to arm 0 wakes promptly, and any
             // other arm is observed within `DEMOTE_POLL_BACKOFF` (the documented lower-throughput path).
             let (first, is_send0) = &arms[0];
-            let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-            // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
-            // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
-            let backoff = match timer {
-                Some((_, d)) => {
-                    DEMOTE_POLL_BACKOFF.min(d.saturating_duration_since(std::time::Instant::now()))
-                }
-                None => DEMOTE_POLL_BACKOFF,
-            };
-            // W7-13r(b) — arm 0 is ready on what the loop above SETTLES on: `p` settled, or (recv arm)
-            // a value to take or a `trip()` latch. `closed` is deliberately NOT a ready condition: the
-            // re-poll SKIPS a closed+empty recv arm, so reporting ready would return instantly,
-            // re-poll, skip, and spin — the parity-perf-0 live-lock.
-            let _ = first.cv.wait_timeout_while(q, backoff, |g| {
-                !(!p.is_queued() || (!is_send0 && recv_ready(first, g)))
+            width::released(|| {
+                let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
+                // Clamp the backoff to the timer deadline so the loop re-polls and fires the timer arm
+                // by its deadline (saturating, so a deadline that already passed yields ~zero wait).
+                let backoff = match timer {
+                    Some((_, d)) => DEMOTE_POLL_BACKOFF
+                        .min(d.saturating_duration_since(std::time::Instant::now())),
+                    None => DEMOTE_POLL_BACKOFF,
+                };
+                // W7-13r(b) — arm 0 is ready on what the loop above SETTLES on: `p` settled, or (recv arm)
+                // a value to take or a `trip()` latch. `closed` is deliberately NOT a ready condition: the
+                // re-poll SKIPS a closed+empty recv arm, so reporting ready would return instantly,
+                // re-poll, skip, and spin — the parity-perf-0 live-lock.
+                let _ = first.cv.wait_timeout_while(q, backoff, |g| {
+                    !(!p.is_queued() || (!is_send0 && recv_ready(first, g))) && !width::reserved()
+                });
             });
         }
     }
@@ -2194,47 +2178,56 @@ impl Vm {
 
     /// TICKET-141 (W14-14) — give this thread's width permit back. A no-op unless it holds one.
     pub(super) fn width_release(&mut self) {
-        if !self.holds_width {
-            return;
-        }
-        self.holds_width = false;
-        if let Some(sched) = self.mn.as_ref().or(self.body_gate.as_ref()) {
-            sched.width.release();
-        }
-    }
-
-    pub(super) fn body_width_yield(&mut self) {
-        if let Some(g) = self.body_gate.as_ref()
-            && g.width.waiting() > 0
-        {
-            self.width_release();
-            self.width_acquire();
-        }
-    }
-
-    fn body_gate_retire(&mut self, sched: &Arc<MnSched>) {
-        if self
-            .body_gate
-            .as_ref()
-            .is_some_and(|g| Arc::ptr_eq(g, sched))
-        {
-            self.body_gate = None;
-            self.width_gated = false;
-            self.holds_width = false;
-        }
+        width::release();
     }
 
     /// TICKET-141 — take a width permit in FIFO order. A no-op for an ungated shell or one that
     /// already holds a permit.
     pub(super) fn width_acquire(&mut self) {
-        if !self.width_gated || self.holds_width {
-            return;
+        width::acquire();
+    }
+
+    /// TICKET-205 — list this gated thread as an in-place waiter of `cores` for as long as the
+    /// guard lives, so the waker (`ChannelCore::wake_all`) queues it for the permit in the waker's
+    /// own order. Called while the permit is held: the list order is the order the waits began.
+    pub(super) fn gated_register(&self, cores: &[&Arc<ChannelCore>]) -> GatedReg {
+        let me = width::gated().then(width::my_slot);
+        if let Some(me) = &me {
+            for (i, c) in cores.iter().enumerate() {
+                let sleeps_on = (i > 0).then(|| Arc::clone(cores[0]));
+                c.gated
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((Arc::clone(me), sleeps_on));
+            }
         }
-        let Some(sched) = self.mn.clone().or_else(|| self.body_gate.clone()) else {
-            return;
-        };
-        sched.width.acquire();
-        self.holds_width = true;
+        GatedReg {
+            cores: cores.iter().map(|c| Arc::clone(c)).collect(),
+            me,
+        }
+    }
+
+    /// TICKET-205 — THE bracket of a one-tick in-place wait on channels: register, release the
+    /// permit, wait, re-take it.
+    pub(super) fn wait_released_on<R>(
+        &mut self,
+        cores: &[&Arc<ChannelCore>],
+        wait: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let _gated = self.gated_register(cores);
+        width::release();
+        let r = wait(self);
+        width::acquire();
+        r
+    }
+
+    /// TICKET-205 — a pool thread about to keep its slot past a slice end makes room for a queued
+    /// job: it turns its slot into a permit and starts one gated pool thread for the queue.
+    pub(super) fn offer_pool_slot(&self) {
+        if crate::vm::pool::job_waits_for_my_slot() {
+            width::convert();
+            crate::vm::pool::yield_slot(None);
+        }
     }
 
     /// TICKET-167 — seeded-mode reduction budget: `CONTEXT_REDS` unseeded, else a random budget so
@@ -2290,26 +2283,28 @@ impl Vm {
     /// TICKET-141 (W14-14) — the D3 budget ran out inside a native callback. The fiber cannot leave
     /// the thread, so the THREAD hands its runner slot to one replacement and takes one back in FIFO
     /// order, keeping `--threads=N` at N runners. Preempts only when someone can use the slot.
-    pub(super) fn callback_preempt(&mut self) {
+    pub(super) fn slice_end_in_place(&mut self) {
         self.reds = CONTEXT_REDS;
-        let Some(sched) = self.mn.clone() else {
-            return;
-        };
-        if sched.runnable.load(Ordering::Relaxed) == 0 && sched.width.waiting() == 0 {
+        let fiber_waits = self
+            .mn
+            .as_ref()
+            .is_some_and(|s| s.runnable.load(Ordering::Relaxed) > 0);
+        let job_waits = crate::vm::pool::job_waits_for_my_slot();
+        if !fiber_waits && !job_waits && width::RUNNERS.waiting() == 0 {
             return;
         }
         // Convert this thread's implicit slot into an explicit permit (`free` stays 0).
-        if !self.width_gated {
-            self.width_gated = true;
-            self.holds_width = true;
-        }
-        if !self.demoted {
+        width::convert();
+        if let Some(sched) = self.mn.clone()
+            && !self.demoted
+        {
             // A refused replacement thread returns without handing off: the thread keeps running.
             if !self.spawn_replacement_worker(&sched, self.wid) {
                 return;
             }
             self.demoted = true;
         }
+        self.offer_pool_slot();
         self.width_release();
         self.width_acquire();
     }
@@ -2379,21 +2374,20 @@ impl Vm {
             .cancel
             .as_ref()
             .expect("Path C replacement worker without a cancel token");
-        let mut shell = self.spawn_shell(sched, cancel);
-        let sched = Arc::clone(sched);
-        std::thread::Builder::new()
-            .stack_size(VM_STACK_BYTES)
-            .name("chezzi-mn-repl".into())
-            .spawn(move || {
-                // SENTINEL — the replacement covers the demoted thread's `wid` and drains the GLOBAL
-                // queue (across all scopes) until global terminate; the demoted owner returns on its own
-                // (its fiber settles → `self.demoted` exits its loop), so the replacement must not stop
-                // early on any single scope.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    shell.mn_worker_loop(&sched, wid, SENTINEL_SCOPE)
-                }));
-            })
-            .is_ok()
+        let shell = self.spawn_shell(sched, cancel);
+        // SENTINEL — the replacement covers the demoted thread's `wid` and drains the GLOBAL queue
+        // (across all scopes) until global terminate; the demoted owner returns on its own (its
+        // fiber settles → `self.demoted` exits its loop), so the replacement must not stop early on
+        // any single scope.
+        spawn_worker_thread(
+            shell,
+            sched,
+            "chezzi-mn-repl",
+            wid,
+            SENTINEL_SCOPE,
+            width::gated(),
+        )
+        .is_ok()
     }
 
     /// D2b — a worker shell's lifetime: pull a runnable fiber, run it to its next park/finish, settle,
@@ -2413,7 +2407,7 @@ impl Vm {
             let (mut fiber, slice) = match sched.take_runnable(wid, next, owner_scope) {
                 Take::Run(f, slice) => (f, slice),
                 Take::Stop => {
-                    debug_assert!(!self.holds_width, "TICKET-141: exit holding a permit");
+                    debug_assert!(!width::holds(), "TICKET-141: exit holding a permit");
                     return;
                 }
             };
@@ -2425,6 +2419,7 @@ impl Vm {
             let scope_id = fiber.scope_id;
             let span = fiber.span;
             let disp = self.run_one_fiber(&mut fiber, span, slice);
+            self.offer_pool_slot();
             // Also runs on the panic path: `run_one_fiber` catches the panic and returns `Disp::Finish`.
             self.width_release();
             match disp {
@@ -2499,7 +2494,7 @@ impl Vm {
             //       `eager_joiner_runs_fibers`' own hazard note).
             if self.demoted {
                 sched.notify_waiters();
-                debug_assert!(!self.holds_width, "TICKET-141: exit holding a permit");
+                debug_assert!(!width::holds(), "TICKET-141: exit holding a permit");
                 return;
             }
         }
@@ -5214,6 +5209,7 @@ impl Vm {
         // takes `core.inner`. It is also the fallible half (`ensure_snapshot` on a frame-holding
         // generator global), and that fault must surface out of `submit` before any slot is reserved.
         let mut rw = self.prepare_worker_from_wire(task, span)?;
+        rw.worker.slice_in_place = true;
         rw.worker.eager_core = Some(Arc::clone(core));
         rw.worker.cancel = Some(Arc::clone(&core.cancel));
         // …and the ENCLOSING EXECUTOR's flag with it, when this executor was CREATED inside an eager
@@ -6605,6 +6601,58 @@ static NESTED_EAGER_DRAINERS: AtomicUsize = AtomicUsize::new(0);
 /// A held share of [`NESTED_EAGER_DRAINERS`]. Released by `Drop`, never by hand: an `EagerScope`
 /// moves across `Vm::swap_ctx` and is consumed by `join_eager_nursery` OR `abort_eager_nursery`, and a
 /// hand-written release in only those two consumers would leak a slot on every other drop path.
+/// TICKET-205 — THE spawn of a raw worker thread of `sched` (the drainer, an eager helper, the
+/// replacement of a demoted worker). A thread started by a gated thread is gated from birth, and
+/// its SPAWNER lists its slot with the sched, so a wake queues it for the runner permit in the
+/// waker's order instead of on the child's own start time. A refused thread withdraws the slot.
+fn spawn_worker_thread(
+    mut shell: Vm,
+    sched: &Arc<MnSched>,
+    name: &str,
+    wid: usize,
+    owner_scope: usize,
+    born_gated: bool,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let child_slot = width::new_slot();
+    if born_gated {
+        sched.idle_register_child(&child_slot);
+    }
+    let (s, adopted) = (Arc::clone(sched), Arc::clone(&child_slot));
+    let r = std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .name(name.into())
+        .spawn(move || {
+            width::born_gated(born_gated);
+            width::adopt(adopted);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                shell.mn_worker_loop(&s, wid, owner_scope)
+            }));
+        });
+    if r.is_err() && born_gated {
+        sched.idle_forget(&child_slot);
+    }
+    r
+}
+
+/// TICKET-205 — see [`Vm::gated_register`].
+pub(super) struct GatedReg {
+    cores: Vec<Arc<ChannelCore>>,
+    me: Option<Arc<width::Slot>>,
+}
+impl Drop for GatedReg {
+    fn drop(&mut self) {
+        if let Some(me) = &self.me {
+            for c in &self.cores {
+                c.gated
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|(s, _)| !Arc::ptr_eq(s, me));
+            }
+            width::cancel(me);
+        }
+    }
+}
+
 pub(super) struct NestedDrainerSlot;
 
 impl NestedDrainerSlot {
@@ -6678,8 +6726,10 @@ pub(super) fn dispatch_eager_job(
     sched_registry: &crate::vm::SchedRegistry,
 ) {
     let span = rw.span;
-    // W7-26r sibling — this job's rebuilt worker heap belongs to the SUBMITTER until a pool thread
-    // picks it up (see `ExecutorCore::pending`). `0` when the cap is off, so this is a no-op then.
+    // W7-26r sibling — charged to the submitter until the job finishes: the bytes stay live while
+    // it runs, and a preempted CPU job no longer holds its pool slot, so "until started" stopped
+    // bounding a backlog (TICKET-205); after `catch_unwind`, so a panicking job still discharges.
+    // See `ExecutorCore::pending`. `0` when the cap is off, so this is a no-op then.
     core.pending
         .fetch_add(pending, std::sync::atomic::Ordering::Relaxed);
     let idx = core
@@ -6690,18 +6740,13 @@ pub(super) fn dispatch_eager_job(
     let core = Arc::clone(core);
     let sched_registry = Arc::clone(sched_registry);
     pool::submit(Box::new(move || {
-        // W7-26r sibling — the job leaves the queue HERE: from this point its bytes are the worker
-        // heap's own (charged against the worker's copy of the cap by its own sweeps), so the
-        // submitter must stop counting them or the two double-count. Before `catch_unwind`, so a
-        // panicking job cannot leave the charge stranded on the core forever.
-        core.pending
-            .fetch_sub(pending, std::sync::atomic::Ordering::Relaxed);
         // A Rust panic in the worker VM becomes a `Fault` slot rather than unwinding into the pool
         // thread and leaving `outstanding` short — which would hang `shutdown`'s condvar wait forever.
         // Everything after the `catch_unwind` is panic-free (an in-range `Vec` index; the lock is
         // poison-tolerant), so the outcome is always recorded and `outstanding` always reaches 0.
         // This is the invariant B3.3-threads' retired `DoneSignal` guard used to carry for the batch
         // join; `executor_faulting_job_does_not_hang_shutdown` covers it.
+        width::acquire();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rw.run_outcome()))
             .unwrap_or_else(|p| TaskOutcome::Fault {
                 err: panic_to_fault(p, span),
@@ -6709,6 +6754,12 @@ pub(super) fn dispatch_eager_job(
                 stderr: Vec::new(),
                 trace: Vec::new(),
             });
+        // W7-26r sibling — charged to the submitter until the job finishes: the bytes stay live
+        // while it runs, and a preempted CPU job no longer holds its pool slot, so "until started"
+        // stopped bounding a backlog (TICKET-205); after `catch_unwind`, so a panicking job still
+        // discharges.
+        core.pending
+            .fetch_sub(pending, std::sync::atomic::Ordering::Relaxed);
         // W7-26 — summarised for the `--max-heap` byte walk BEFORE the lock is taken: the walk is
         // O(result) and this lock is contended by every `submit` (`reserve`, below, runs while the
         // submitter holds `inner`) and by every `live_bytes`. Same hoist as `SharedCore::store`.

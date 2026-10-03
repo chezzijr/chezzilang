@@ -7,6 +7,32 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-205 (2026-10-03): Family S1 follow-up, one runner gate for every party (wave 19).** At
+  `CHEZZI_THREADS=1` an `Executor` job in a CPU loop starved every other job until the loop ended:
+  `os.exit` from a second executor's job landed after 23 s (Go `GOMAXPROCS=1`: ~100 ms). A job's
+  `Vm` skipped the budget safepoint. Fix, one mechanism and no Executor-only yield: the width gate
+  is one per process (`width::RUNNERS`, state per OS thread); a callback, a job and a gated body all
+  end a slice through `Vm::slice_end_in_place`; a gated thread picks and draws from the seeded RNG
+  only under the permit (`take_runnable_inner`); the waker queues the woken thread
+  (`ChannelCore::wake_all`, `MnSched::notify_waiters`, one `width::reserve`); one channel
+  registration (`Vm::gated_register`) and one worker spawn (`spawn_worker_thread`). Deleted:
+  `body_width_yield`, `body_gate_retire`, `Vm::body_gate`/`width_gated`/`holds_width`, the per-sched
+  gate, four raw thread spawns, twelve bare channel notifies. Supersedes DEC-141, DEC-168, DEC-167.
+  **Replay:** T=1 seeded replay is byte-for-byte for seven wait shapes (80/80 idle and under 8 hogs;
+  base 22-80); `docs/gaps.md` **W15-10** stays OPEN, narrowed to `wait:` in a native callback, the
+  in-place nursery join, a `Shared` guard wait and an `Executor` join. **`--max-heap`:** a job's
+  submit-time bytes are charged to the submitter until the job FINISHES, not until it starts (300
+  jobs under an 8 MB cap: 280 MB peak without the rule, 18 MB with it). **Probe:** the
+  `CHEZZI_THREADS` CLI probe is a cores measurement now; a starvation probe cannot exist. Tests:
+  `tests/runner_handover_grid.rs` (672 cells: spinner x victim x action x worker count; 36 red
+  before, all job-versus-job at T=1), `tests/sched_seed_cli.rs` (7 fixtures x 8 seeds, no retries),
+  `vm::width` unit test, `tests/chezzi_threads_cli.rs`. **Perf, a measured cost at T=1:**
+  `benches/sched/rendezvous_pingpong.chz` 1.10x-1.25x and `examples/primes_parallel.chz` 1.03x,
+  both outside the run-to-run spread; T=4, T=0 and the 11 `benches/run.chz` programs are inside it
+  (`docs/benchmarks.md` §TICKET-205). Owner decision 2026-10-03: the T=1 cost is accepted, bounded at 1.3x (ping-pong) and 1.05x (`primes_parallel`).
+  Docs: `docs/concurrency.md`, `docs/bug-discovery.md`, `docs/gaps.md`, `docs/root-causes-w19.md`,
+  `docs/benchmarks.md`, `CLAUDE.md`.
+
 - **TICKET-204 (2026-10-02): a multi-arg turbofish is a value; type paths follow Rust's path-value
   rule (wave 19 K4).** `p := pair[str, int]` was `expected ']', found ','`; it is now a value in
   every position (let, typed let, HOF argument, return, default, keyword call), through a
@@ -421,7 +447,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   burn) 152% → 99%; T=2/T=0 unchanged. Closes `docs/gaps.md` **W15-2**. Two shapes stay open by
   owner decision: **W15-9** (a body that blocks once then burns runs n+1 runners at T>=2, a TICKET-159
   blocked-helper-retirement gap) and **W15-10** (byte-for-byte T=1 seeded replay — two residual races
-  in the drainer's pick-then-acquire order and a woken body's queue timing). Tests:
+  in the drainer's pick-then-acquire order and a woken body's queue timing; both fixed by TICKET-205,
+  which narrowed the row to four other in-place waits). Tests:
   `tests/chezzi_threads_cli.rs` (+4: the triage repro plus a blocked-then-burn repro, a T>=2/default
   two-wide pin, and 11 blocking-point probes). Docs: `docs/gaps.md`, `docs/concurrency.md`,
   `docs/bug-discovery.md`, `docs/future.md`, `docs/benchmarks.md`, `CLAUDE.md`,
@@ -433,7 +460,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   runnable fiber a pop returns (`LocalQ::pop`, the three `global.pop_front()` sites), the
   step-0/`GLOBAL_CHECK_INTERVAL` cadence, `try_steal`'s start, `handoff_wake`'s `runnext` coin flip,
   the reds-refill count — from a seeded PRNG instead of OS timing. At `CHEZZI_THREADS=1` the same seed
-  replays the same schedule **at a measured rate**, not byte-for-byte (see the W15-10 limit below); at
+  replays the same schedule **at a measured rate**, not byte-for-byte (see the W15-10 limit below;
+  byte-for-byte for channel waits since TICKET-205); at
   `CHEZZI_THREADS>=2` it also injects random yields/spins/sleeps at every sync point, widening real
   thread-timing race windows. Behind a cached `AtomicBool::load(Relaxed)` — unset cost is noise-level on
   all 11 `benches/run.chz` cases (`docs/benchmarks.md` "TICKET-167"). A `src/schedfuzz/` +
@@ -450,7 +478,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   fixed): T=1 replay of a top-level fan-out still holds only at a measured rate, not byte-for-byte
   (nested-in-`spawn:` fixture 144/160 pre-fix, flat fixture 86/160 pre-fix / 58/160 post-fix), because
   the drainer's pick still runs before its width-permit acquire and a woken body still queues only
-  once its own thread runs; fixing it is a separate ticket. Tests: `tests/sched_seed_cli.rs` (5
+  once its own thread runs; fixing it is a separate ticket (done: TICKET-205 fixed both, and W15-10
+  now lists only the four in-place waits that are still a measured rate). Tests: `tests/sched_seed_cli.rs` (5
   interface/replay tests + 1 smoke gate, ~4s wall);
   `tests/sched_seed/*.chz` fixtures. Docs: `docs/future.md` §2b (Scheduler-races row now BUILT),
   `docs/bug-discovery.md`, `CLAUDE.md`, `docs/benchmarks.md`, `docs/gaps.md`.

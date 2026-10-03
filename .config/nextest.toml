@@ -1,7 +1,8 @@
 # cargo-nextest config (2026-09-30). Runs every test binary IN PARALLEL, one process per test,
 # instead of `cargo test`'s one-binary-after-another. The scheduler/timing targets below share
 # the box badly (every M:N test spawns its own worker pool), so they run in the capped `timing` group.
-# Sampled n=5 on main (2026-09-30): 146-211 s vs `cargo test` 764-800 s, same flakes (W15-10, 2/5 each).
+# Sampled n=5 on main (2026-09-30): 146-211 s vs `cargo test` 764-800 s, same red rate (2/5 each; the
+# replay test that was red then is byte-for-byte since TICKET-205).
 # `timing` at 1 thread made the group itself the bottleneck (~500 s); 4 matches cargo test's in-binary parallelism.
 
 [profile.default]
@@ -16,9 +17,10 @@ timing = { max-threads = 4 }
 filter = 'binary(chezzi_threads_cli) | binary(blocking_context_grid) | binary(channel_handoff_grid) | binary(examples_golden) | binary(native_callback_stdin_read_frees_width) | binary(mn_pool_ignores_cpu_quota_hangs) | binary(sched_seed_cli) | binary(chezzi_nested_nursery_deadlock) | binary(deadlock_verdict_misses) | binary(chz_suite)'
 test-group = 'timing'
 
-# Known flakes tracked in docs/gaps.md, retried so they do not fail the verifying gate on load alone
-# (the `cargo test` gate failed W15-10 in 2 of 5 runs on clean main, 2026-09-30). A retry that then
+# Known flakes tracked in docs/gaps.md, retried so they do not fail the verifying gate on load alone.
+# The T=1 seeded replay test left this list with TICKET-205: it is byte-for-byte now, so a red run is
+# a regression. A retry that then
 # passes is reported as FLAKY, never hidden. Delete an entry when its ledger row closes.
 [[profile.default.overrides]]
-filter = 'test(~the_same_seed_replays_at_one_worker_at_the_measured_rate) | test(~an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout)'
+filter = 'test(~an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout)'
 retries = 2

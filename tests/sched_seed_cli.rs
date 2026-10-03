@@ -102,52 +102,48 @@ fn a_passing_run_under_sched_seed_changes_no_output() {
     assert_eq!(err1, err2);
 }
 
-/// Part 1: replay at `CHEZZI_THREADS=1`, held to a MEASURED rate, not byte-for-byte.
+/// Part 1: replay at `CHEZZI_THREADS=1` is byte-for-byte for every fixture below (TICKET-205).
 ///
-/// W15-2 (the T=1 top-level body racing its `chezzi-eager` drainer) is FIXED (TICKET-168): the two
-/// now share one width permit, so the CPU-runner count at `--threads=1` is the ceiling the seeded
-/// oracle's replay was originally meant to rely on. Byte-for-byte replay is still not reachable —
-/// `docs/gaps.md` **W15-10** carries two residual races the fix does not touch: the drainer's
-/// `take_runnable` pick runs BEFORE `width_acquire` (so a pick sees 1..4 injected fibers depending on
-/// OS timing), and a woken body only joins the permit queue once its own thread runs (so the drainer
-/// can re-take the permit first). So the fixture still nests its fan-out inside ONE spawned task: the
-/// inner nursery is fiber-owned and runs on the drainer alone, sidestepping the top-level race this
-/// test doesn't exercise. Measured on the pre-fix debug binary, 8 seeds x 20 runs: the modal output
-/// per seed appeared in 144 of 160 runs idle and 143 of 160 under load (per-seed minimum 16 of 20).
-/// The flat `interleave.chz` measured 86 of 160 pre-fix, and TICKET-168's own paired sample (this
-/// fixture, `target/t168/replay.sh`, 8 seeds x 10 runs) read base 75-77 of 80 idle and 51-63 of 80
-/// under 28 bounded spinners, prototype/fixed 75-79 of 80 idle and 71-78 of 80 under the same load —
-/// the fix does not regress this test's own rate, it just doesn't reach byte-for-byte. This test goes
-/// red if a draw reads OS time or a racing thread's stream, or if the fixture loses its nesting.
-/// Raise the bar to byte-for-byte only once W15-10's two races are fixed (owner decision, TICKET-168
-/// `## Decisions`).
+/// One fixture per wait site the waker-reserves rule covers: a fiber-owned nested fan-out, a flat
+/// fan-out, a body `recv` on a rendezvous and on a bounded channel, a body `wait:`, and a `recv` and
+/// a `send` inside a native callback. This test goes red when a gated thread picks or draws from the
+/// seeded RNG without the runner permit, when an in-place channel wait stops listing its slot
+/// (`Vm::gated_register`), or when a channel wake bypasses `ChannelCore::wake_all`. `docs/gaps.md`
+/// **W15-10** lists the wait sites that are NOT byte-for-byte yet; add a fixture here when one closes.
 #[test]
-fn the_same_seed_replays_at_one_worker_at_the_measured_rate() {
+fn the_same_seed_replays_byte_for_byte_at_one_worker() {
     const RUNS: usize = 10;
-    const MIN_PER_SEED: usize = 4;
-    const MIN_TOTAL: usize = 60;
-    let prog = fixture("nested_interleave.chz");
-    let mut total = 0;
-    let mut report = Vec::new();
-    for seed in 1..=8u64 {
-        let mut counts: std::collections::HashMap<String, usize> = Default::default();
-        for _ in 0..RUNS {
-            let (out, err, rc) = run_chezzi(&prog, Some(seed), 1);
-            assert_eq!(rc, 0, "seed {seed} should pass: {err}");
-            *counts.entry(out).or_default() += 1;
+    const FIXTURES: [&str; 7] = [
+        "nested_interleave.chz",
+        "interleave.chz",
+        "body_recv_interleave.chz",
+        "body_recv_bounded_interleave.chz",
+        "body_wait_interleave.chz",
+        "callback_recv_interleave.chz",
+        "callback_send_interleave.chz",
+    ];
+    let mut red = Vec::new();
+    for name in FIXTURES {
+        let prog = fixture(name);
+        for seed in 1..=8u64 {
+            let mut counts: std::collections::HashMap<String, usize> = Default::default();
+            for _ in 0..RUNS {
+                let (out, err, rc) = run_chezzi(&prog, Some(seed), 1);
+                assert_eq!(rc, 0, "seed {seed} on {name} should pass: {err}");
+                *counts.entry(out).or_default() += 1;
+            }
+            if counts.len() != 1 {
+                red.push(format!(
+                    "seed {seed} on {name} gave {} distinct outputs at T=1: {counts:?}",
+                    counts.len()
+                ));
+            }
         }
-        let modal = counts.values().copied().max().unwrap_or(0);
-        assert!(
-            modal >= MIN_PER_SEED,
-            "seed {seed} replayed its modal output in only {modal} of {RUNS} runs at T=1: {counts:?}"
-        );
-        total += modal;
-        report.push((seed, modal));
     }
     assert!(
-        total >= MIN_TOTAL,
-        "seeded T=1 replay rate fell to {total} of {} runs (need {MIN_TOTAL}); per seed: {report:?}",
-        8 * RUNS
+        red.is_empty(),
+        "seeded T=1 replay is not byte-for-byte:\n{}",
+        red.join("\n")
     );
 }
 

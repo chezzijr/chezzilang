@@ -28,6 +28,7 @@
 
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,6 +46,17 @@ struct Pool {
 
 static POOL: OnceLock<Pool> = OnceLock::new();
 
+/// Jobs submitted and not yet picked up by a pool thread.
+static QUEUED: AtomicUsize = AtomicUsize::new(0);
+
+/// Pool threads parked on the queue condvar. A queued job with an idle thread is not waiting.
+static IDLE: AtomicUsize = AtomicUsize::new(0);
+
+/// TICKET-205 — is a job waiting for a pool thread that this job's thread can still make room for.
+pub(super) fn job_waits_for_my_slot() -> bool {
+    QUEUED.load(Ordering::Relaxed) > 0 && IDLE.load(Ordering::Relaxed) == 0 && may_yield_slot()
+}
+
 /// Get (or lazily create) the process-wide pool. First call spawns `available_parallelism()` worker
 /// threads (min 1); subsequent calls return the same pool.
 fn pool() -> &'static Pool {
@@ -52,19 +64,25 @@ fn pool() -> &'static Pool {
         let n = super::worker_count();
         let queue: Queue = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         for _ in 0..n {
-            assert!(spawn_worker(&queue), "failed to spawn chezzi pool thread");
+            assert!(
+                spawn_worker(&queue, false),
+                "failed to spawn chezzi pool thread"
+            );
         }
         Pool { queue }
     })
 }
 
 /// Spawn one pool worker thread over `queue`. `false` iff the OS refused the thread.
-fn spawn_worker(queue: &Queue) -> bool {
+fn spawn_worker(queue: &Queue, gated: bool) -> bool {
     let q = Arc::clone(queue);
     thread::Builder::new()
         .stack_size(super::VM_STACK_BYTES)
         .name("chezzi-pool".into())
-        .spawn(move || worker_loop(&q))
+        .spawn(move || {
+            super::width::born_gated(gated);
+            worker_loop(&q)
+        })
         .is_ok()
 }
 
@@ -130,7 +148,7 @@ pub(super) fn yield_slot(budget: Option<Duration>) -> bool {
     if !should_yield_slot(first_seen, now, budget) {
         return false;
     }
-    if spawn_worker(&pool().queue) {
+    if spawn_worker(&pool().queue, super::width::gated()) {
         SLOT.with(|c| c.set(Slot::Yielded));
         true
     } else {
@@ -149,9 +167,12 @@ fn worker_loop(queue: &Queue) {
             let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if let Some(job) = q.pop_front() {
+                    QUEUED.fetch_sub(1, Ordering::Relaxed);
                     break job;
                 }
+                IDLE.fetch_add(1, Ordering::Relaxed);
                 q = cv.wait(q).unwrap_or_else(|e| e.into_inner());
+                IDLE.fetch_sub(1, Ordering::Relaxed);
             }
         };
         ON_JOB.with(|c| c.set(true));
@@ -163,6 +184,7 @@ fn worker_loop(queue: &Queue) {
         // the next job instead of silently shrinking the pool.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
         ON_JOB.with(|c| c.set(false));
+        super::width::release();
         if SLOT.with(|c| c.get()) == Slot::Yielded {
             return;
         }
@@ -172,7 +194,10 @@ fn worker_loop(queue: &Queue) {
 /// Enqueue `job` and wake one idle pool thread to run it.
 pub fn submit(job: Job) {
     let (lock, cv) = &*pool().queue;
-    lock.lock().unwrap().push_back(job);
+    let mut q = lock.lock().unwrap();
+    q.push_back(job);
+    QUEUED.fetch_add(1, Ordering::Relaxed);
+    drop(q);
     cv.notify_one();
 }
 

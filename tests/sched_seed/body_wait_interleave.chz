@@ -1,0 +1,18 @@
+fn main():
+    a := Channel[str]()
+    b := Channel[str](1)
+    out := []
+    parallel:
+        for i in range(4):
+            spawn:
+                for j in range(3):
+                    if i % 2 == 0:
+                        a.send("a{i}.{j}")
+                    else:
+                        b.send("b{i}.{j}")
+        for _ in range(12):
+            wait:
+                v := a.recv(): out.push(v)
+                w := b.recv(): out.push(w)
+    print(" ".join(out))
+main()

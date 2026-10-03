@@ -1186,6 +1186,14 @@ fn serve(tok: Token, io: Channel[str]):
 >   is a nursery/`Executor` sibling sharing its cancel scope (measured 365 ms). A sleeping top-level
 >   `main` has no cancel flag and its own heap is not the one growing, so it sleeps out (3005 ms) before
 >   the OVER-MEMORY verdict lands. `--max-heap` is a per-heap cap, not a process-wide signal.
+> - **`--max-heap` charges an `Executor` job's submit-time bytes to the submitter
+>   until the job finishes** (TICKET-205). The bytes stay live while the job runs. Before, the charge
+>   ended when the job STARTED; a preempted CPU job now gives its pool slot away, so every submitted
+>   job starts at once and "until started" bounded nothing. Measured, 300 jobs capturing ~1 MB each under an 8 MB
+>   cap, peak RSS at `CHEZZI_THREADS` 1 / 2 / default: 18 / 18 / 18 MB with this rule (each run
+>   `OVER-MEMORY`), 24 / 34 / 280 MB with preemption and the old rule, 18 / 20 / 46 MB before
+>   TICKET-205. Consequence: a test whose unfinished jobs together exceed the cap trips, sleeping jobs
+>   included.
 >
 > A cancelled task then unwinds through its `defer`s — cancelled while running (back-edge), while parked
 > on a `recv`/`wait:`, while parked on a socket, or while parked when a *sibling*'s fault tore the
@@ -1355,9 +1363,43 @@ now rests on a single-runner measurement.
 **The budget also preempts a CPU loop inside a native callback** (`List.map`/`sort`/`Shared.update`
 closures; `docs/gaps.md` **W14-14**, TICKET-141). That fiber cannot leave its thread — the callback's
 loop state is on the host stack — so the THREAD hands its runner slot to one replacement worker and
-takes a slot back in FIFO order (`src/vm/width.rs`, a per-scheduler width gate). `--threads=N` stays N
+takes a slot back in FIFO order (`src/vm/width.rs`). `--threads=N` stays N
 runners, like Go's `GOMAXPROCS=1`: a callback spin no longer starves a sibling, a sleeper or a
 cancelling fault. It fires only when a sibling is runnable or queued, so a lone spin costs nothing.
+
+**The budget also preempts an `Executor` job and a job's nursery (TICKET-205).** A job runs to its
+end on a pool thread and cannot leave it either, so it is one more party of the same gate. Before
+this fix a job's `Vm` skipped the safepoint: at `CHEZZI_THREADS=1` a job in a CPU loop starved every
+other job, of its own executor or another, until the loop ended (`os.exit` from a second executor's
+job landed after 23 s; Go at `GOMAXPROCS=1` exits at ~100 ms). The rules, one mechanism for every
+kind of party:
+
+- **One gate per process, `width::RUNNERS`.** Its state is per OS thread, not per `Vm` or per
+  scheduler. A party that cannot leave its thread at a slice end (a native callback, an `Executor`
+  job, a gated `--threads=1` nursery body) hands its runner slot over through
+  `Vm::slice_end_in_place`. A fiber that can leave its thread yields as before.
+- **A job hands its slot over only when a job waits and no pool thread is idle**
+  (`pool::job_waits_for_my_slot`). K CPU jobs at `--threads=1` then run on up to K pool threads that
+  share one permit: threads grow with the parties that cannot leave their thread, runners do not.
+- **A gated thread picks a fiber, and draws from the seeded RNG, only while it holds the permit.**
+  `take_runnable_inner` takes the permit before the pick and releases it before every wait.
+- **The waker queues the woken thread.** `ChannelCore::wake_all` reserves a FIFO ticket for each
+  gated in-place channel waiter (listed once per wait by `Vm::gated_register`), and
+  `MnSched::notify_waiters` does the same for each gated idle worker, before it notifies. Wake order
+  is the waker's order, not the order the OS runs the woken threads in. A thread spawned by a gated
+  thread starts gated and its spawner lists its slot (`spawn_worker_thread`).
+- **A gated idle worker never sleeps untimed**: a ticket can land just before its sleep, and a ticket
+  nobody takes blocks every gated thread. Its sleep is bounded by one `DEMOTE_POLL_BACKOFF` tick. An
+  ungated idle worker still sleeps untimed on `idle_cv`.
+- **Cost.** A hand-over has no CPU cost of its own, but a serialized `--threads=1` run of two CPU
+  jobs costs more wall time than one sequential run when the kernel's `schedutil` governor ramps
+  each thread separately: 0.90 s serial, 1.52 s with hand-overs, 0.91 s pinned to one core with
+  `taskset`. A longer hand-over quantum (64 slices) measured worse (2.24 s); there is none.
+  A T=1 channel hand-off costs more too: `rendezvous_pingpong` measured 1.10x pinned and 1.22x not
+  pinned, accepted by the owner on 2026-10-03 (`docs/benchmarks.md` §TICKET-205).
+
+Grid: `tests/runner_handover_grid.rs` (spinner kind x victim kind x action x worker count, 672
+cells; 36 were red before the fix, all job-versus-job at one worker).
 A gated thread releases its slot around every wait in place (demotes, guard waits, inline nursery
 joins and aborts, inline sleeps, `Executor.shutdown()`, blocking natives). Since TICKET-181 an
 `Executor.shutdown()` in a fiber also DEMOTES for the join, so the slot promise holds at T=1 too
@@ -1385,9 +1427,9 @@ inside a callback, so a runnable sibling runs while stdin is withheld, as under 
 > TICKET-141), so `--threads=1` runs at most one CPU runner including the main-thread body: fixed
 > measured 96% on the same shape, matching Go `GOMAXPROCS=1`'s 100%. This does NOT close the contract
 > everywhere: `docs/gaps.md` **W15-9** stays open for a body that blocks once then burns at T>=2 (n+1
-> runners, a separate cause — sentinel blocked-body helpers outliving the unblock). An `Executor` job
-> runs in its own `Vm` and is not covered by this gate at all. Full tables: `docs/benchmarks.md`
-> §TICKET-168.
+> runners, a separate cause — sentinel blocked-body helpers outliving the unblock). Since TICKET-205
+> the gate is one per process and an `Executor` job is a party of it too (see above); the body has no
+> gate of its own. Full tables: `docs/benchmarks.md` §TICKET-168.
 
 ### 6c'. `Channel.trip()` — the manual level-trigger latch
 

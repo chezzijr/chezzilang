@@ -1,0 +1,14 @@
+fn main():
+    ch := Channel[str]()
+    out := []
+    fn put(i: int, j: int) -> int:
+        ch.send("t{i}.{j}")
+        return j
+    parallel:
+        for i in range(4):
+            spawn:
+                _ := [0, 1, 2].map(fn(j: int) -> int: put(i, j))
+        for _ in range(12):
+            out.push(ch.recv())
+    print(" ".join(out))
+main()

@@ -1709,7 +1709,7 @@ impl Vm {
                     sched.close_wake(key, &core);
                 } else {
                     // Wake any demoted OS thread blocked on this core's condvar (in-callback recv).
-                    core.cv.notify_all();
+                    core.wake_all();
                     // Cooperative engine: re-add every sibling fiber parked on this channel's `recv`.
                     self.wake_on_send(h);
                 }
@@ -1741,7 +1741,7 @@ impl Vm {
                     let key = self.channel_core_ptr(h);
                     sched.close_wake(key, &core);
                 } else {
-                    core.cv.notify_all();
+                    core.wake_all();
                     self.wake_on_send(h);
                 }
                 Ok(Value::nil())
@@ -1823,7 +1823,7 @@ impl Vm {
         // published in the same `core.q` hold as its "not ready" check, so the failed `give` proves
         // no parked fiber can take this offer. Only a party blocking in place (or demoted) re-checks
         // a predicate, and the channel's condvar reaches it.
-        core.cv.notify_all();
+        core.wake_all();
         if mode == BlockMode::Park {
             // A real M:N WORKER snapshot-parks: the worker loop drives `send_suspend` →
             // `Disp::SendPark`.
@@ -1914,7 +1914,7 @@ impl Vm {
             .unwrap_or_else(|e| e.into_inner())
             .send(core.cap, sum, w, offer);
         if matches!(out, SendOutcome::Sent) {
-            core.cv.notify_all();
+            core.wake_all();
             self.wake_on_send(h); // wake a receiver parked on this channel's `recv`
         }
         out
@@ -1961,7 +1961,7 @@ impl Vm {
         } else if let Some(sched) = self.mn_enlist_sched.clone() {
             sched.recv_wake(key, core);
         } else {
-            core.cv.notify_all();
+            core.wake_all();
             self.wake_on_send_key_kind(Arc::as_ptr(core) as usize, WakeKind::Settled);
         }
     }
@@ -2190,10 +2190,9 @@ impl Vm {
         span: Span,
         ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
     ) -> Result<(), RuntimeError> {
-        self.width_release();
-        let r = self.block_wait_tick_in_place(core, deadlock_msg, span, ready);
-        self.width_acquire();
-        r
+        self.wait_released_on(&[core], |vm| {
+            vm.block_wait_tick_in_place(core, deadlock_msg, span, ready)
+        })
     }
 
     fn block_wait_tick_in_place(
@@ -2208,7 +2207,9 @@ impl Vm {
         #[cfg_attr(not(test), allow(unused_mut))]
         let (mut guard, waited) = core
             .cv
-            .wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| !ready(g))
+            .wait_timeout_while(q, DEMOTE_POLL_BACKOFF, |g| {
+                !ready(g) && !super::width::reserved()
+            })
             .unwrap_or_else(|e| e.into_inner());
         #[cfg(test)]
         {
@@ -2748,7 +2749,7 @@ impl Vm {
         // holds a live slot, so the failed `give` proves none can take it. Only a party blocking in
         // place re-checks a predicate, and the channel's condvar reaches it.
         for h in offered {
-            self.channel_core(h).cv.notify_all();
+            self.channel_core(h).wake_all();
         }
         // M:N (`--parallel`) snapshot-park, top level: rewind to re-run `WaitPoll` on wake and set
         // `wait_suspend`; the worker loop captures each arm's (key, core) WHILE the fiber heap is live
@@ -2868,6 +2869,8 @@ impl Vm {
             // The registration is an OR-set over every arm (§2d's OR-edge: ready on ANY arm is
             // progress), so the verdict declines while any one of them is feedable.
             let (first, is_send0) = arms[0].clone(); // non-empty: an all-closed arm set returned above
+            let arm_cores: Vec<Arc<ChannelCore>> =
+                arms.iter().map(|(c, _)| Arc::clone(c)).collect();
             let party =
                 self.block_party_guard(quiesce::PartyWait::Wait(arms, Some(Arc::clone(&p))));
             if let Err(e) = self.block_halt_check(EMPTY_WAIT_DEADLOCK, span) {
@@ -2898,22 +2901,23 @@ impl Vm {
                         && (g.recv_ready_for(Some(&p)) || first.done_latch.load(Ordering::Relaxed)))
             };
             // TICKET-168 — DEC-141's bracket list missed this wait; a body wait: hangs at T=1 without it.
-            self.width_release();
-            let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
-            #[cfg_attr(not(test), allow(unused_mut))]
-            let (mut guard, waited) = first
-                .cv
-                .wait_timeout_while(q, tick, |g| !arm0_ready(g))
-                .unwrap_or_else(|e| e.into_inner());
-            #[cfg(test)]
-            {
-                WAIT_ARM0_BLOCKS.fetch_add(1, Ordering::Relaxed);
-                if waited.timed_out() && arm0_ready(&mut guard) {
-                    WAIT_ARM0_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
+            let refs: Vec<&Arc<ChannelCore>> = arm_cores.iter().collect();
+            self.wait_released_on(&refs, |_| {
+                let q = first.q.lock().unwrap_or_else(|e| e.into_inner());
+                #[cfg_attr(not(test), allow(unused_mut))]
+                let (mut guard, waited) = first
+                    .cv
+                    .wait_timeout_while(q, tick, |g| !arm0_ready(g) && !super::width::reserved())
+                    .unwrap_or_else(|e| e.into_inner());
+                #[cfg(test)]
+                {
+                    WAIT_ARM0_BLOCKS.fetch_add(1, Ordering::Relaxed);
+                    if waited.timed_out() && arm0_ready(&mut guard) {
+                        WAIT_ARM0_SLEPT_WHILE_READY.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-            }
-            drop((guard, waited));
-            self.width_acquire();
+                drop((guard, waited));
+            });
             drop(party);
             self.pending = Some(op);
             self.frames.last_mut().unwrap().ip -= 1;

@@ -11,6 +11,109 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-205 — one runner gate for every party: a T=1 cost on channel hand-off (2026-10-03)
+
+**Owner decision 2026-10-03: the T=1 cost is accepted.** Reason: at T=1 a thread hand-over takes
+the runner permit before every pick, and a waker queues the woken thread. Both are what make seeded
+T=1 replay exact, and the starvation fix needs the one gate. Bound:
+`benches/sched/rendezvous_pingpong.chz` at T=1 at most 1.3x base, pinned and not pinned;
+`examples/primes_parallel.chz` at T=1 at most 1.05x; T=4, the default count and the 11
+`benches/chz` programs inside base's spread. Command:
+`python3 target/t205/bound.py <base> <fixed> pp1 primes1 wide run`. Measured on the landed branch
+(load 3.22 before the T=1 rows, 1.56 before the others), median (min-max) wall seconds:
+
+| row | base | fixed | ratio | bound |
+|---|---|---|---|---|
+| ping-pong T=1, `taskset -c 3`, n=7 | 2.824 (2.744-2.861) | 3.000 (2.969-3.085) | 1.062 | 1.30 |
+| ping-pong T=1, not pinned, n=7 | 2.669 (2.622-2.868) | 3.283 (2.905-4.131) | 1.230 | 1.30 |
+| `primes_parallel` T=1, n=3 | 28.216 (28.099-28.356) | 29.269 (29.107-29.309) | 1.037 | 1.05 |
+| ping-pong T=4, n=5 | 3.308 (2.579-4.330) | 3.095 (2.756-4.415) | 0.936 | ranges overlap |
+| ping-pong T unset, n=5 | 2.640 (2.553-3.486) | 3.879 (2.671-4.257) | 1.470 | ranges overlap |
+| `primes_parallel` T=4, n=3 | 9.815 (9.813-10.527) | 9.763 (9.748-9.823) | 0.995 | ranges overlap |
+| `primes_parallel` T unset, n=3 | 10.208 (10.159-11.968) | 10.178 (10.124-11.320) | 0.997 | ranges overlap |
+
+The ping-pong row at T unset passes the overlap rule, but its median ratio is 1.470 in this sample
+(0.956 in the planning sample); the spread of both binaries is wide there. Of the 33 `benches/chz`
+rows, 31 overlapped at n=5. `primes` at T=4 and at T unset missed at n=5 and overlapped at n=15
+(T=4: base 1.114 (1.082-1.165), fixed 1.141 (1.095-1.177), ratio 1.024; T unset: base 1.100
+(1.072-1.127), fixed 1.146 (1.099-1.352), ratio 1.041).
+
+The earlier samples follow. Release binaries, wall seconds, n=5 per side, base and fixed runs interleaved, `CHEZZI_THREADS`
+1 / 4 / 0 (0 = default). Base = `target/t205/bin/chezzi-base` (the branch base, built before the
+change). Stdout and exit code were identical across every run and both binaries. Sample 1, load 2.04 before, 3.06 after:
+
+| program | T | base (5 runs) | fixed (5 runs) | base median | fixed median | fixed/base |
+|---|---|---|---|---|---|---|
+| `benches/sched/rendezvous_pingpong.chz` | 1 | 2.620 2.608 2.649 2.760 2.713 | 3.322 3.262 3.229 3.316 4.479 | 2.649 | 3.316 | 1.25 |
+| `benches/sched/rendezvous_pingpong.chz` | 4 | 3.485 3.524 4.116 3.026 4.713 | 2.977 3.028 4.468 4.567 4.490 | 3.524 | 4.468 | 1.27 |
+| `benches/sched/rendezvous_pingpong.chz` | 0 | 3.068 3.520 2.551 2.595 3.482 | 3.836 4.018 2.604 4.089 2.830 | 3.068 | 3.836 | 1.25 |
+| `examples/primes_parallel.chz` | 1 | 28.337 28.393 28.393 28.273 28.439 | 29.352 29.116 29.223 29.579 29.257 | 28.393 | 29.257 | 1.03 |
+| `examples/primes_parallel.chz` | 4 | 10.003 9.807 9.790 9.861 10.027 | 9.868 9.755 9.735 9.819 9.730 | 9.861 | 9.755 | 0.99 |
+| `examples/primes_parallel.chz` | 0 | 10.997 10.160 10.107 10.092 10.444 | 9.999 10.045 10.206 10.515 9.966 | 10.160 | 10.045 | 0.99 |
+
+**`rendezvous_pingpong` at T=1 is slower, outside the run-to-run spread.** Sample 1: base 2.61-2.76,
+fixed 3.23-4.48 (median 2.65 vs 3.32, 1.25x). Sample 2 (load 2.41 before, 2.17 after, `wait4` rusage
+per child, medians):
+
+| binary | wall (5 runs) | wall | user | sys | voluntary ctx switches |
+|---|---|---|---|---|---|
+| base | 2.70 2.67 2.78 2.68 2.62 | 2.68 | 2.72 | 1.18 | 401945 |
+| planning prototype (`chezzi-M`) | 3.05 3.92 3.02 3.34 4.63 | 3.34 | 3.12 | 1.45 | 453324 |
+| fixed | 2.85 3.02 2.93 3.55 2.94 | 2.94 | 2.99 | 1.32 | 438815 |
+
+The two samples give 1.10x and 1.25x; the base and fixed ranges do not overlap in either. At T=1 the
+body and the drainer hand one permit back and forth 400000 times, and each in-place channel wait
+now registers its slot (`Vm::gated_register`) and each wake reserves a ticket
+(`ChannelCore::wake_all`). The fixed binary also makes 9% more voluntary context switches. Planning
+split the cost (n=7, medians). Pinned to one CPU: the starvation fix alone measured 2.78 s against
+base 2.79 s; permit-before-pick adds about 4%; the waker-reserve bookkeeping adds about 6%. Not
+pinned, the starvation fix alone is 1.10x with 4% more voluntary switches; the cause of that is not
+established. The `primes_parallel` 3-4% enters with the replay work, and no bypass removes it.
+
+**`primes_parallel` at T=1 is 3% slower, outside the spread** (base 28.27-28.44, fixed 29.12-29.58).
+T=4 and T=0 are inside the spread for both programs.
+
+The 11 `benches/run.chz` programs (single task, no scheduler work), medians:
+
+| program | T | base median | fixed median | fixed/base |
+|---|---|---|---|---|
+| `benches/chz/fib.chz` | 1 | 0.501 | 0.478 | 0.95 |
+| `benches/chz/fib.chz` | 4 | 0.478 | 0.463 | 0.97 |
+| `benches/chz/fib.chz` | 0 | 0.482 | 0.471 | 0.98 |
+| `benches/chz/str.chz` | 1 | 0.278 | 0.282 | 1.01 |
+| `benches/chz/str.chz` | 4 | 0.251 | 0.255 | 1.02 |
+| `benches/chz/str.chz` | 0 | 0.277 | 0.274 | 0.99 |
+| `benches/chz/primes.chz` | 1 | 1.117 | 1.161 | 1.04 |
+| `benches/chz/primes.chz` | 4 | 1.093 | 1.115 | 1.02 |
+| `benches/chz/primes.chz` | 0 | 1.118 | 1.117 | 1.00 |
+| `benches/chz/loop.chz` | 1 | 1.643 | 1.712 | 1.04 |
+| `benches/chz/loop.chz` | 4 | 1.682 | 1.706 | 1.01 |
+| `benches/chz/loop.chz` | 0 | 1.682 | 1.721 | 1.02 |
+| `benches/chz/list.chz` | 1 | 0.669 | 0.661 | 0.99 |
+| `benches/chz/list.chz` | 4 | 0.666 | 0.669 | 1.00 |
+| `benches/chz/list.chz` | 0 | 0.683 | 0.667 | 0.98 |
+| `benches/chz/struct.chz` | 1 | 0.832 | 0.837 | 1.01 |
+| `benches/chz/struct.chz` | 4 | 0.785 | 0.836 | 1.07 |
+| `benches/chz/struct.chz` | 0 | 0.819 | 0.832 | 1.02 |
+| `benches/chz/poly_method.chz` | 1 | 2.440 | 2.412 | 0.99 |
+| `benches/chz/poly_method.chz` | 4 | 2.417 | 2.424 | 1.00 |
+| `benches/chz/poly_method.chz` | 0 | 2.393 | 2.419 | 1.01 |
+| `benches/chz/map.chz` | 1 | 0.241 | 0.242 | 1.00 |
+| `benches/chz/map.chz` | 4 | 0.242 | 0.242 | 1.00 |
+| `benches/chz/map.chz` | 0 | 0.235 | 0.265 | 1.13 |
+| `benches/chz/map_str.chz` | 1 | 0.351 | 0.349 | 0.99 |
+| `benches/chz/map_str.chz` | 4 | 0.349 | 0.355 | 1.02 |
+| `benches/chz/map_str.chz` | 0 | 0.349 | 0.351 | 1.01 |
+| `benches/chz/unique.chz` | 1 | 0.125 | 0.118 | 0.94 |
+| `benches/chz/unique.chz` | 4 | 0.146 | 0.124 | 0.85 |
+| `benches/chz/unique.chz` | 0 | 0.148 | 0.147 | 1.00 |
+| `benches/chz/empty.chz` | 1 | 0.007 | 0.007 | 1.05 |
+| `benches/chz/empty.chz` | 4 | 0.007 | 0.007 | 1.00 |
+| `benches/chz/empty.chz` | 0 | 0.006 | 0.006 | 1.00 |
+
+The base and fixed ranges of the five runs overlap in every row. The largest ratios are `map` at
+T=0 (1.13) and `struct` at T=4 (1.07); neither repeats at the other two worker counts.
+
 ## TICKET-199 — a `runnext` pick inherits the slice (2026-10-02)
 
 `benches/sched/rendezvous_pingpong.chz` (W17-1), release binaries, wall seconds, n=5 per side.

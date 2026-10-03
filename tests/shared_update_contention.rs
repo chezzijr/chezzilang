@@ -164,7 +164,7 @@ fn contended_guard_ops_grid_is_fast_at_every_worker_count() {
 }
 
 /// TICKET-194 (G1): two `Shared` boxes, 6 tasks x 500 iterations of `a.update` then `b.update`.
-/// Seeded mode forces a `callback_preempt` inside about 25% of the update closures; a waiter whose
+/// Seeded mode forces a `slice_end_in_place` inside about 25% of the update closures; a waiter whose
 /// first guard wait held its width permit then sat out the full 5 ms stage 1. Base debug at T=1:
 /// 9.24-9.76 s (0.04 s unseeded).
 const TWO_BOX_SRC: &str = "import std.concurrency

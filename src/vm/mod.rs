@@ -1405,15 +1405,9 @@ pub struct Vm {
     /// [`Vm::run_one_fiber`] and NOT part of [`FiberCtx`] (a demoted thread runs exactly one fiber to
     /// settle, then exits, so it never carries the flag into another fiber).
     demoted: bool,
-    /// TICKET-141 (W14-14) — this shell runs Chezzi code only while it holds a permit of
-    /// [`MnSched::width`]. Set by [`Vm::callback_preempt`] on the thread that first preempts inside a
-    /// native callback; [`Vm::spawn_shell`] copies it into every shell it builds (the replacement
-    /// worker, inline join shells, farmed helpers). Per-shell like `demoted`.
-    width_gated: bool,
-    /// TICKET-141 — this shell currently holds a width permit. Only meaningful while `width_gated`;
-    /// per-shell like `demoted`. See `src/vm/width.rs`.
-    holds_width: bool,
-    body_gate: Option<Arc<MnSched>>,
+    /// TICKET-205 — this `Vm` cannot leave its OS thread at a slice end (an Executor job, a gated
+    /// nursery body), so it counts reductions and hands its runner slot over in place.
+    slice_in_place: bool,
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its
@@ -2327,8 +2321,6 @@ enum ParkedEntry {
 struct MnSched {
     core: Mutex<SchedCore>,
     cv: Condvar,
-    /// TICKET-141 (W14-14) — per-sched FIFO width gate; see `src/vm/width.rs`.
-    width: width::WidthGate,
     // N4 — the legacy sched-level `cancel` field is GONE. It held only the OUTERMOST nursery's flag, so
     // every read of it was a latent bug for a nested/enlisted scope: `park`/`park_wait` had already moved
     // to the per-fiber `scopes[fiber.scope_id].cancel`, and its last reader (the netpoller's `register`,
@@ -2375,6 +2367,9 @@ struct MnSched {
     /// TICKET-167 — this sched's seeded-mode RNG stream, keyed by creation order (see `## Decisions`
     /// "One RNG stream per `MnSched`"). Draws are cheap under `sched_seed::on()` and unused otherwise.
     rng: sched_seed::SeedRng,
+    /// TICKET-205 — gated worker threads with nothing to pick. A wake that leaves a fiber runnable
+    /// queues each for the permit ([`MnSched::notify_waiters`]), in registration order.
+    gated_idle: Mutex<Vec<Arc<width::Slot>>>,
     /// TICKET-099 — every live `MnSched` of this run (the same registry `Vm::sched_registry` publishes
     /// to and `Vm::wake_on_send_key` already walks). A `send`/`close` on THIS sched must be able to
     /// wake a receiver parked on ANY other sched — sibling, ancestor or descendant — not just an
@@ -2928,7 +2923,6 @@ impl MnSched {
         mem_cap: usize,
     ) -> Self {
         MnSched {
-            width: Default::default(),
             core: Mutex::new(SchedCore {
                 global: std::collections::VecDeque::new(),
                 parked: std::collections::HashMap::new(),
@@ -2971,6 +2965,7 @@ impl MnSched {
             inflight: AtomicUsize::new(0),
             mem_cap,
             rng: sched_seed::SeedRng::new(),
+            gated_idle: Mutex::new(Vec::new()),
             // TICKET-099 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no peers to wake or veto against).
             sched_registry: Default::default(),
@@ -3023,6 +3018,9 @@ impl MnSched {
     ) -> JoinerStep {
         if c.pool_joiner != Some(me) || !crate::vm::pool::may_yield_slot() {
             return JoinerStep::Untimed;
+        }
+        if width::gated() && crate::vm::pool::job_waits_for_my_slot() {
+            return JoinerStep::Yield;
         }
         if c.running != 0 || self.runnable.load(Ordering::Relaxed) != 0 {
             *idle_since = None;
@@ -3168,7 +3166,47 @@ impl MnSched {
     /// too. Every site that used to broadcast `cv` alone for a wake reachable by an idle worker now
     /// calls this instead, so narrowing the idle sleep to its own condvar never strands a sleeper
     /// that the old broadcast would have reached.
+    /// TICKET-205 — list a gated worker's slot as idle (once).
+    pub(super) fn idle_register(&self, slot: &Arc<width::Slot>) {
+        if !width::gated() && Arc::ptr_eq(slot, &width::my_slot()) {
+            return;
+        }
+        let mut g = self.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.iter().any(|s| Arc::ptr_eq(s, slot)) {
+            g.push(Arc::clone(slot));
+        }
+    }
+
+    /// TICKET-205 — the spawner of a gated worker lists the child's slot, and queues it for the
+    /// permit when a fiber is already runnable.
+    pub(super) fn idle_register_child(&self, slot: &Arc<width::Slot>) {
+        let mut g = self.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
+        g.push(Arc::clone(slot));
+        if self.runnable.load(Ordering::Relaxed) > 0 {
+            width::reserve(slot);
+        }
+    }
+
+    /// TICKET-205 — drop a slot whose thread the OS refused, with any ticket reserved for it.
+    pub(super) fn idle_forget(&self, slot: &Arc<width::Slot>) {
+        self.gated_idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|s| !Arc::ptr_eq(s, slot));
+        width::cancel(slot);
+    }
+
     fn notify_waiters(&self) {
+        if self.runnable.load(Ordering::Relaxed) > 0 {
+            for s in self
+                .gated_idle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+            {
+                width::reserve(s);
+            }
+        }
         self.cv.notify_all();
         if self.idle_sleepers.load(Ordering::Relaxed) > 0 {
             self.idle_cv.notify_all();
@@ -3531,6 +3569,21 @@ impl MnSched {
         let mut judged = false;
         let mut idle_since = None;
         let me = std::thread::current().id();
+        struct IdleReg<'a>(&'a MnSched);
+        impl Drop for IdleReg<'_> {
+            fn drop(&mut self) {
+                if width::gated() {
+                    let me = width::my_slot();
+                    self.0
+                        .gated_idle
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .retain(|s| !Arc::ptr_eq(s, &me));
+                    width::cancel(&me);
+                }
+            }
+        }
+        let _idle = IdleReg(self);
         loop {
             // 0. D4d — every `GLOBAL_CHECK_INTERVAL`th schedule, pull from the global queue FIRST
             //    (before own local / stealing). Without this a worker continuously refilled by
@@ -3540,11 +3593,20 @@ impl MnSched {
             //    TICKET-128 (W13-25) — this pulled fiber runs AHEAD of this worker's own `runnext`
             //    and may block its thread in a `Kind::Inline` native, so if `runnext` is occupied an
             //    idle worker is recruited to steal it (nobody else is left to run it otherwise).
-            let global_first = if sched_seed::on() {
-                self.rng.below(8) == 0
-            } else {
-                tick.is_multiple_of(GLOBAL_CHECK_INTERVAL)
-            };
+            if width::gated()
+                && !width::holds()
+                && (self.runnable.load(Ordering::Relaxed) > 0 || width::reserved())
+            {
+                width::acquire();
+            }
+            let may_pick =
+                !width::gated() || (width::holds() && self.runnable.load(Ordering::Relaxed) > 0);
+            let global_first = may_pick
+                && if sched_seed::on() {
+                    self.rng.below(8) == 0
+                } else {
+                    tick.is_multiple_of(GLOBAL_CHECK_INTERVAL)
+                };
             if global_first {
                 let mut c = self.lock();
                 if let Some(f) = self.pop_global(&mut c) {
@@ -3559,7 +3621,9 @@ impl MnSched {
                 drop(c);
             }
             // 1. Own local queue — lock B alone, release before touching the core lock.
-            let popped = if sched_seed::on() {
+            let popped = if !may_pick {
+                None
+            } else if sched_seed::on() {
                 self.lock_local(wid).pop_seeded(&self.rng)
             } else {
                 self.lock_local(wid).pop()
@@ -3573,7 +3637,11 @@ impl MnSched {
             // 2. D4c — work-stealing: own local empty, try to steal half from a sibling (B alone, no
             //    core lock). Push the haul onto our own local and re-loop to pop it. Net-zero on
             //    `runnable`, so this never perturbs the deadlock predicate.
-            let stolen = self.try_steal(wid);
+            let stolen = if may_pick {
+                self.try_steal(wid)
+            } else {
+                Vec::new()
+            };
             if !stolen.is_empty() {
                 let mut lq = self.lock_local(wid);
                 for f in stolen {
@@ -3584,7 +3652,12 @@ impl MnSched {
             // 3. Global queue (batch-grab) + termination/deadlock + park (core lock A).
             let mut c = self.lock();
             if c.terminate {
+                width::release();
                 return Take::Stop;
+            }
+            if !may_pick && self.runnable.load(Ordering::Relaxed) > 0 {
+                drop(c);
+                continue;
             }
             if !c.global.is_empty() {
                 // D4c — Go-style `globrunqget`: grab a *capped* batch into our own local (one core-lock
@@ -3633,6 +3706,8 @@ impl MnSched {
             // The owner stops only when its whole FAMILY — the origin scope plus any TICKET-103
             // continuation scopes sharing its cancel token — is done, not the origin alone
             // (`SchedCore::owner_scope_done`, TICKET-128/W13-25).
+            self.idle_register(&width::my_slot());
+            width::release();
             if scope_id != SENTINEL_SCOPE && c.owner_scope_done(scope_id) {
                 self.notify_waiters();
                 return Take::Stop;
@@ -3822,6 +3897,20 @@ impl MnSched {
                     .wait_timeout(c, DEMOTE_POLL_BACKOFF)
                     .unwrap_or_else(|e| e.into_inner());
                 drop(guard);
+            } else if width::gated() {
+                // TICKET-205 — a waker reserves this thread's permit ticket WITHOUT `c`, so a ticket
+                // can land between the checks above and this wait, and the waker's `idle_sleepers`
+                // read can miss it. A gated sleeper therefore never sleeps untimed: asleep with a
+                // ticket at the head of the queue it would block every other gated thread.
+                if !width::reserved() {
+                    self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+                    let (guard, _) = self
+                        .idle_cv
+                        .wait_timeout(c, DEMOTE_POLL_BACKOFF)
+                        .unwrap_or_else(|e| e.into_inner());
+                    self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
+                    drop(guard);
+                }
             } else {
                 // TICKET-128 (W13-25) — a worker with NOTHING runnable sleeps on `idle_cv`, not `cv`,
                 // so a rendezvous handoff can recruit exactly this one sleeper (`recruit`) instead of
@@ -4073,7 +4162,7 @@ impl MnSched {
         let mut c = self.lock();
         let n = self.wake_bucket(&mut c, key, kind);
         self.hand_off(c, n, wid, recruit);
-        core.cv.notify_all();
+        core.wake_all();
         self.wake_run_wide(key, kind);
     }
 
@@ -4149,7 +4238,7 @@ impl MnSched {
             // keeps running) — a global push plus a broadcast migrates the pair every message.
             let n = self.wake_bucket(&mut c, key, WakeKind::Settled);
             self.hand_off(c, n, wid, true);
-            core.cv.notify_all();
+            core.wake_all();
             self.wake_run_wide(key, WakeKind::Settled);
             return out;
         }
@@ -4157,7 +4246,7 @@ impl MnSched {
         drop(c);
         self.notify_waiters();
         self.wake_run_wide(key, WakeKind::All);
-        core.cv.notify_all();
+        core.wake_all();
         out
     }
     /// A `recv` took a value on `key` (TICKET-185): requeue every parked party whose hand-off
@@ -4169,7 +4258,7 @@ impl MnSched {
         self.wake_bucket(&mut c, key, kind);
         drop(c);
         self.notify_waiters();
-        core.cv.notify_all();
+        core.wake_all();
         self.wake_run_wide(key, kind);
     }
 
@@ -4588,7 +4677,7 @@ impl MnSched {
         // above + woken via `self.cv`; a demoted thread instead waits on the channel's OWN condvar, so
         // it must be notified here. Without this it would only re-check on its bounded poll timeout
         // (added latency, not a hang). No-op when no thread is demoted on this channel.
-        core.cv.notify_all();
+        core.wake_all();
     }
 
     /// A `close()` on channel `key`: wake EVERY fiber parked on it (not just one, as a `send` would —
@@ -4602,7 +4691,7 @@ impl MnSched {
         self.wake_bucket(&mut c, key, WakeKind::All);
         drop(c);
         self.notify_waiters();
-        core.cv.notify_all();
+        core.wake_all();
         // gaps.md B5 — a close from inside an eager body must also wake a receiver ranging over this
         // channel in an ANCESTOR nursery so it observes the close and ends (no-op for ordinary scheds).
         self.wake_run_wide(key, WakeKind::All);

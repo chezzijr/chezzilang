@@ -655,7 +655,8 @@ hand-built program against Go, not by a mechanical oracle — this is the mechan
 **How it works.** `CHEZZI_SCHED_SEED=<u64>` (`src/vm/sched_seed.rs`) makes every scheduler free choice
 — which fiber a pop returns, the step-0/steal cadence, `handoff_wake`'s `runnext` coin flip, the reds
 refill — come from a seeded PRNG. At `CHEZZI_THREADS=1` this replays the SAME seed to the SAME
-schedule at a MEASURED RATE (see the limit below, not byte-for-byte); at `CHEZZI_THREADS>=2` it also
+schedule, byte-for-byte for channel waits and at a measured rate for the waits W15-10 lists (see the
+limit below); at `CHEZZI_THREADS>=2` it also
 injects random yields/spins/sleeps at every sync point, widening real OS-thread race windows the way
 loom/shuttle-style fuzzing does.
 
@@ -682,14 +683,14 @@ CHEZZI_SCHED_SEED=12345 CHEZZI_THREADS=1 cargo run -- run <file>
 ```
 
 **Replay limit (measured 2026-09-22/23, release binary; W15-2 fixed 2026-09-23, TICKET-168).** T=1
-replay is a rate, not a guarantee, for two reasons. (1) `docs/gaps.md` **W15-10**'s two residual
-races: the `chezzi-eager` drainer's `take_runnable` pick runs BEFORE its `width_acquire`, so a pick
-sees 1..4 injected fibers depending on OS timing, and a woken body only joins the permit queue once
-its own thread runs, so the drainer can re-take the permit first. (W15-2 — the top-level body and the
-drainer racing as two UNGATED CPU runners — is fixed; that fix raised, not lowered, this rate: a
-fan-out NESTED inside one `spawn:` replays at a measured 144/160 pre-fix (seeds 1-8 x 20 runs,
-per-seed minimum 16/20) against a FLAT top-level fan-out's 86/160 pre-fix, 58/160 post-fix on the same
-flat fixture.) (2) Timers, sockets, blocking natives and eager-nursery programs are outside what the
+replay has two limits. (1) Since TICKET-205 it is byte-for-byte for the seven wait shapes of
+`tests/sched_seed_cli.rs::the_same_seed_replays_byte_for_byte_at_one_worker` (a fiber-owned nested
+fan-out, a flat fan-out, a body `recv` on a rendezvous and on a bounded channel, a body `wait:`, a
+`recv` and a `send` inside a native callback): 80/80 on each, idle and under 8 CPU hogs (seeds 1-8 x
+10 runs, release; base was 22-80 of 80). A gated thread picks and draws only while it holds the
+runner permit, and the waker queues the woken thread (`docs/concurrency.md`). It stays a MEASURED
+RATE for the waits `docs/gaps.md` **W15-10** lists: `wait:` inside a native callback, an in-place
+nursery join, a `Shared` guard wait and an `Executor` join. (2) Timers, sockets, blocking natives and eager-nursery programs are outside what the
 RNG stream covers at all — only the sync-point-gated fan-out fixtures are measured.
 
 **Mutation-testing results, all release binary, `--seeds 1..257 --threads 1,2,0` (0 = default/28
@@ -703,8 +704,9 @@ cores this box), full table + method: TICKET-167 `## Thread`.**
 
 **Standing limit, stated for both mutations that DID reproduce:** as landed, seeded perturbation does
 not widen either race's window past what unseeded OS-thread jitter already finds at the SAME worker
-count. Seeding buys a MEASURED-RATE replay at T=1 only — never at T>=2. At T=1 the same seed reruns
-the same choice sequence, so a T=1 finding replays at a measured rate (see "Replay limit" above). At
+count. Seeding buys a replay at T=1 only — never at T>=2. At T=1 the same seed reruns
+the same choice sequence, so a T=1 finding replays byte-for-byte for the channel-wait shapes and at a
+measured rate for the rest (see "Replay limit" above). At
 T>=2 the seed drives random yields/spins/sleeps at the sync points, but real OS-thread timing still
 decides the outcome, so the same seed is NOT guaranteed to reproduce a T>=2 finding — W14-39's T=2
 column (78/256) is a run-to-run RATE over the 256-seed sweep, not a per-seed guarantee. Either way it

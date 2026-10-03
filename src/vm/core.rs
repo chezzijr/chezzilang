@@ -266,7 +266,13 @@ pub struct ChannelCore {
     /// instead of by the clock. `false` for an ordinary `Channel[T]`. A `trip()` reuses `close()`'s
     /// wake fan-out (minus the `closed` flag) so a parked `recv`/`wait` re-runs and observes it.
     pub done_latch: AtomicBool,
+    /// TICKET-205 — gated threads waiting in place on this channel; a wake queues each for the permit.
+    pub(super) gated: Mutex<Vec<GatedWaiter>>,
 }
+
+/// TICKET-205 — one gated in-place waiter of a channel: its permit slot, and the channel whose
+/// condvar it sleeps on when that is not this one (a `wait:` sleeps on its first arm).
+pub(super) type GatedWaiter = (Arc<super::width::Slot>, Option<Arc<ChannelCore>>);
 
 /// The locked interior of a [`ChannelCore`]: the message FIFO plus a `closed` flag. Folding `closed`
 /// into the *same* mutex as the queue is deliberate — every park decision ([`super::Vm::park`],
@@ -377,6 +383,18 @@ pub enum RecvReady {
 }
 
 impl ChannelCore {
+    /// TICKET-205 — THE wake of every thread waiting in place on this channel: the waker queues each
+    /// gated waiter for the runner permit before it notifies, so the hand-over order is the waker's.
+    pub(super) fn wake_all(&self) {
+        for (s, sleeps_on) in self.gated.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            super::width::reserve(s);
+            if let Some(other) = sleeps_on {
+                other.cv.notify_all();
+            }
+        }
+        self.cv.notify_all();
+    }
+
     /// TICKET-194 — THE ready decision of a channel receive, made in the caller's `core.q` hold `q`:
     /// a value > a tripped latch > a fired timer > closed.
     pub fn recv_ready(&self, q: &mut ChanState) -> RecvReady {
@@ -1427,8 +1445,8 @@ pub struct ExecutorCore {
     pub eager: Mutex<EagerState>,
     /// Signalled whenever a job finishes; `shutdown` waits on it for `outstanding == 0`.
     pub eager_cv: Condvar,
-    /// W7-26r sibling — the live heap bytes of jobs DISPATCHED BUT NOT YET STARTED, i.e. the ones
-    /// sitting in the process-global pool queue. `prepare_eager_job` rebuilds each submitted closure
+    /// W7-26r sibling — the submit-time heap bytes of jobs DISPATCHED BUT NOT YET FINISHED: the
+    /// ones sitting in the process-global pool queue and the ones running. `prepare_eager_job` rebuilds each submitted closure
     /// into its own worker `Vm` at submit time, so a deep queue is N fully-built worker heaps: each
     /// one comfortably under a per-heap `--max-heap`, summing to hundreds of MB that were charged to
     /// NOBODY (measured on the release binary: 300 slow jobs capturing ~1 MB each **PASS at 666 MB**
@@ -1436,10 +1454,12 @@ pub struct ExecutorCore {
     /// submitter is it: the work is its own, it can still be reached only through this executor
     /// handle, and the submit loop is running bytecode, so the parent samples it normally.
     ///
-    /// Added at dispatch and removed the instant the pool thread picks the job up (from then on the
-    /// bytes are the worker heap's own, charged against the worker's copy of the cap), so the charge
-    /// never overlaps in TIME. It cannot overlap by ALIASING either, and that took a review to get
-    /// right: the measurement is `Heap::own_bytes`, which excludes `Arc`-shared core payloads — a
+    /// Added at dispatch and removed when the job's `run_outcome` returns (TICKET-205): the bytes
+    /// stay live while the job runs, and a preempted CPU job gives its pool slot away, so every
+    /// submitted job starts at once and "until started" bounded nothing (300 jobs of ~1 MB under an
+    /// 8 MB cap peaked at 280 MB; 18 MB with this rule). A test whose unfinished jobs together
+    /// exceed the cap trips, sleeping jobs included. The charge cannot overlap by ALIASING, and
+    /// that took a review to get right: the measurement is `Heap::own_bytes`, which excludes `Arc`-shared core payloads — a
     /// captured `Shared`/`Channel` crosses as one shared allocation the submitter already counts, and
     /// charging it per queued job reported 60 MB against a true 3.8 MB. What is charged here is only
     /// the deep-copied plain data the submit actually added. Maintained under a live cap only — the

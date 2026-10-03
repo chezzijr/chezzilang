@@ -1768,13 +1768,15 @@ struct Suite:
         }
     }
 
-    /// W7-26r's sibling — a job DISPATCHED BUT NOT STARTED is owned by no heap. `prepare_eager_job`
+    /// W7-26r's sibling — a job DISPATCHED BUT NOT FINISHED is charged to its submitter (the test
+    /// name predates TICKET-205, which moved the discharge from job start to job end).
+    /// `prepare_eager_job`
     /// rebuilds each submitted closure into its own worker `Vm` at submit time, so a queue deeper
     /// than the pool is N fully-built worker heaps sitting in `vm::pool`'s global FIFO: every one of
     /// them comfortably under a per-heap `--max-heap`, and their sum charged to nobody. Measured on
     /// the release binary, 300 slow jobs each capturing ~1 MB: **PASS, rc=0, peak RSS 666 MB**
-    /// against an 8 MB cap. The submitter owns them until the pool picks them up
-    /// (`ExecutorCore::pending`), and — the W6-10 lesson yet again — the same bytes ALSO pace the
+    /// against an 8 MB cap. The submitter is charged for them until they finish
+    /// (`ExecutorCore::pending`, TICKET-205), and — the W6-10 lesson yet again — the same bytes ALSO pace the
     /// submitter's sweeps, without which they were counted and never looked at (measured: still PASS
     /// at 666 MB with the accounting alone, because a loop submitting slow jobs finishes none of
     /// them and allocates almost nothing itself).
@@ -1794,8 +1796,8 @@ struct Suite:
         // Serialize against the other heavy `Executor` `--max-heap` tests — see the lock's doc.
         let _lock = EXEC_MEM_CAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const CAP: usize = 8_000_000;
-        // Only the jobs the pool has NOT started count, so the trip needs the queue to outgrow the
-        // worker threads — hence a body that outlasts the submit loop.
+        // Every job that has NOT FINISHED counts (TICKET-205), so the trip needs the jobs to outlast
+        // the submit loop — hence a body that spins past it.
         let prog = |blob_len: usize, body: &str| {
             format!(
                 "import std.concurrency\nimport std.time\n\ntest fn queued():\n    \
@@ -1808,11 +1810,10 @@ struct Suite:
             )
         };
         let d = TmpDir::new();
-        // The job body is a CPU SPIN on a shared absolute deadline, not `time.sleep_ms`. TICKET-052
-        // made a BLOCKED eager job hand its pool slot to a replacement worker, so a sleeping job no
-        // longer holds a thread: all 60 start within ~25 ms, the queue this test needs never forms,
-        // and the run reported `PASS queued` (measured 2/2 before this vehicle). A spin never blocks,
-        // so it never reaches a yield point and its slot stays held.
+        // The job body is a CPU SPIN on a shared absolute deadline. A job is charged to the submitter
+        // until it finishes (TICKET-205), whether it is queued, running or preempted, so the spin
+        // only needs to outlast the submit loop. (Before TICKET-205 only a job that had not STARTED
+        // was charged, and the spin was what kept a pool slot held.)
         //
         // The deadline is ABSOLUTE and captured before the submit loop, so every job stops at the same
         // instant however many rounds the pool needs — and it stops WITHOUT being told, which is the
@@ -1823,10 +1824,10 @@ struct Suite:
         // idle (a 0.05 s deadline PASSED 3/3 — the queue drained first — and 0.10 s tripped 3/3) and
         // ~0.15-0.30 s under 24 background CPU spinners on a 12-core box (0.15 s passed 3/3, 0.30 s
         // tripped 3/3). Under that window the test goes green-but-vacuous, which is why the margin is
-        // 10x idle and not 2x. Do not put a blocking body back: it cannot hold a pool slot any more.
+        // 10x idle and not 2x.
         let slow = d.write(
             "slow_test.chz",
-            // ~1 MB per job × the ~48 that cannot start at once — many times the cap.
+            // ~1 MB per job × the unfinished ones — many times the cap.
             &prog(
                 100_000,
                 "        while time.monotonic() < deadline:\n            pass\n        return blob.len()",
@@ -1835,7 +1836,7 @@ struct Suite:
         let report = run_tests_capped(&slow, CAP);
         assert!(
             report.text.contains("OVER-MEMORY queued"),
-            "jobs queued but not started must be charged to the submitter; report head:\n{}",
+            "jobs submitted but not finished must be charged to the submitter; report head:\n{}",
             &report.text[..report.text.len().min(2000)]
         );
         let generous = run_tests_capped(&slow, 4_000_000_000);

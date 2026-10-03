@@ -136,67 +136,72 @@ fn chz_suite_passes_at_a_second_worker_count() {
 }
 
 /// The causal proof that `CHEZZI_THREADS` actually reaches the pool through the `chezzi test` CLI
-/// path specifically (not merely `vm::worker_count()` in the lib test binary). TICKET-052 made a
-/// BLOCKED pool thread yield its slot to a replacement, so a shape that starves on a blocking wait
-/// (the channel-close precondition this test used before TICKET-052) no longer starves — it now
-/// dispatches the closer through the replacement worker at every count, including 1. A CPU SPIN never
-/// blocks, so it never yields a slot: one job spins on a flag it can only see change from a second
-/// job, and only a second POOL THREAD — not a replacement, since nothing here ever blocks — can run
-/// that second job. So:
-/// - at 1 worker, the setter can never be dispatched → genuine hang (bounded here by `--timeout`, so
-///   this test cannot itself wedge the runner);
-/// - at ≥2 workers, the setter runs on the second thread, flips the flag, and the spinning job's loop
-///   exits — fast (measured: single-digit ms).
+/// path specifically (not merely `vm::worker_count()` in the lib test binary).
 ///
-/// A dropped/no-op env read would make ALL THREE runs behave like the default (>=2 cores on any CI
-/// box) — i.e. all three would pass fast, none would time out. Seeing the 1-worker run actually time
-/// out is the proof the knob has power, not just that something passed twice.
+/// The probe is a CORES measurement. Two CPU jobs on one `Executor` burn in parallel when the pool
+/// has two runners and one at a time when it has one, so child CPU time over child wall time is
+/// past `MAX_CORES_AT_ONE_WORKER` at `CHEZZI_THREADS=2` and at or under it at `CHEZZI_THREADS=1`.
+/// A dropped/no-op env read would make both runs behave like the default (>= 2 cores on any CI
+/// box), and the `=1` run would then exceed the ceiling.
+///
+/// Until TICKET-205 this test proved the knob by STARVATION: a job spinning on a flag that only a
+/// second job could set timed out at one worker. An Executor job is preempted at the end of its
+/// reduction budget now, so that program finishes at every worker count and a starvation probe
+/// cannot exist. Measured on the debug binary: T=1 wall 5.61 s user 5.44 s, T=2 wall 1.13 s user
+/// 2.22 s.
+#[cfg(unix)]
 #[test]
 fn chezzi_test_cli_honors_chezzi_threads_via_a_two_worker_precondition() {
     let dir = std::env::temp_dir().join(format!("chz-threads-cli-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("needs_two_workers_test.chz");
+    let path = dir.join("two_cpu_jobs_test.chz");
     std::fs::write(
         &path,
         "import std.concurrency\n\n\
-         test fn needs_two_workers():\n    \
-         flag := AtomicInt(0)\n    \
-         fn waiter():\n        \
-         while flag.load() == 0:\n            \
-         pass\n    \
-         fn setter():\n        \
-         flag.store(1)\n    \
+         fn burn(n: int) -> int:\n    \
+         x := 0\n    \
+         i := 0\n    \
+         while i < n:\n        \
+         x = x + i * i - i\n        \
+         i += 1\n    \
+         return x\n\n\
+         fn job():\n    \
+         burn(750000)\n\n\
+         test fn two_cpu_jobs():\n    \
          ex := Executor()\n    \
-         ex.submit(waiter)\n    \
-         ex.submit(setter)\n    \
+         ex.submit(job)\n    \
+         ex.submit(job)\n    \
          ex.shutdown()\n    \
          assert true\n",
     )
     .expect("write program");
+    let path_str = path.to_str().unwrap();
 
-    // Default (auto — >=2 workers on any real box): the setter gets its own pool thread and flips
-    // the flag; the spinning waiter observes it and returns. Bounded to 5s as a smoke guard, not
-    // because this run is expected to need it.
-    let (_, summary, out, _) = run_chz_test(&path, None, Some(5_000));
+    // CHEZZI_THREADS=1: one runner, so the two jobs share one core.
+    let (wall, user, sys, status, stdout) = child_rusage::run_timed(&["test", path_str], "1");
     assert!(
-        summary.contains(" passed, 0 failed, 0 errored"),
-        "default worker count should pass fast on the CPU-spin precondition, not hang: {summary}\n{out}"
+        status.success() && stdout.contains(" passed, 0 failed, 0 errored"),
+        "CHEZZI_THREADS=1 must pass the two-CPU-job test: {stdout}"
+    );
+    let cpu = user + sys;
+    assert!(
+        cpu <= wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
+        "CHEZZI_THREADS=1 must run the two CPU jobs on one runner: cpu={cpu:?} wall={wall:?} (cpu \
+         must be <= wall * {MAX_CORES_AT_ONE_WORKER}) — more means CHEZZI_THREADS did not reach \
+         chezzi test's pool"
     );
 
-    // CHEZZI_THREADS=2: same shape, explicit count instead of auto.
-    let (_, summary, out, _) = run_chz_test(&path, Some("2"), Some(5_000));
+    // CHEZZI_THREADS=2: two runners, so the two jobs burn in parallel.
+    let (wall, user, sys, status, stdout) = child_rusage::run_timed(&["test", path_str], "2");
     assert!(
-        summary.contains(" passed, 0 failed, 0 errored"),
-        "CHEZZI_THREADS=2 should pass fast on the CPU-spin precondition, not hang: {summary}\n{out}"
+        status.success() && stdout.contains(" passed, 0 failed, 0 errored"),
+        "CHEZZI_THREADS=2 must pass the two-CPU-job test: {stdout}"
     );
-
-    // CHEZZI_THREADS=1: the setter can never be dispatched — this must TIME OUT, not pass. If it
-    // instead passes fast, the env var never reached the pool.
-    let (_, summary, out, _) = run_chz_test(&path, Some("1"), Some(2_000));
+    let cpu = user + sys;
     assert!(
-        summary.contains("1 timed out"),
-        "CHEZZI_THREADS=1 must starve the two-worker CPU-spin precondition and TIME OUT — a pass \
-         here means CHEZZI_THREADS did not reach chezzi test's pool: {summary}\n{out}"
+        cpu > wall.mul_f64(MAX_CORES_AT_ONE_WORKER),
+        "CHEZZI_THREADS=2 must run the two CPU jobs on two runners: cpu={cpu:?} wall={wall:?} (cpu \
+         must be > wall * {MAX_CORES_AT_ONE_WORKER}) — less means the pool stayed one-wide"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

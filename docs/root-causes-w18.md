@@ -164,7 +164,7 @@ blocking `select` races `ctx.Done()`.
 **G1 fact:** the order of width permit and update guard. TICKET-193 fixed the post-budget loop
 (`guard_wait_block`) but the first stage (`take_update_guard`, `netio.rs:261-266`) still waits up to
 `GUARD_DEMOTE_BUDGET` for the guard while holding its permit; when the holder is preempted inside its
-closure (`callback_preempt`, `sched.rs:2326`, seeded mode forces it on ~25% of updates) the waiter
+closure (`slice_end_in_place` in `src/vm/sched.rs`, renamed by TICKET-205; seeded mode forces it on ~25% of updates) the waiter
 sits out the full 5 ms. TICKET-193's own Decisions named this remaining wait and judged it bounded;
 seeded mode measures it at 1.33 ms per update.
 

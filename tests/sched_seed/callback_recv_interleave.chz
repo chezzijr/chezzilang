@@ -1,0 +1,15 @@
+fn main():
+    ch := Channel[str]()
+    res := Channel[str](4)
+    parallel:
+        for i in range(4):
+            spawn:
+                for j in range(3):
+                    ch.send("t{i}.{j}")
+        for c in range(2):
+            spawn:
+                got := [0, 1, 2, 3, 4, 5].map(fn(k: int) -> str: ch.recv())
+                res.send("c{c}:" + " ".join(got))
+    print(res.recv())
+    print(res.recv())
+main()

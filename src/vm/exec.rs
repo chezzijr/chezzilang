@@ -166,9 +166,7 @@ impl Vm {
             repr_active: Vec::new(),
             wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false, // D5 owe #3 (Path C)
-            width_gated: false,
-            holds_width: false,
-            body_gate: None,
+            slice_in_place: false,
             cancel: None,
             cancel_outer: Vec::new(),
             cut: None,
@@ -505,9 +503,6 @@ impl Vm {
             if let Some(e) = self.exit_halt(span) {
                 return Err(e);
             }
-        }
-        if sampled && self.holds_width && self.mn.is_none() {
-            self.body_width_yield();
         }
         Ok(())
     }
@@ -1406,22 +1401,24 @@ impl Vm {
             // post-step funnel below (`Cut::Cancelled` ⇒ `unwind_deferred(base_level, false)`).
             //
             // D3: reduction-counting preemption — gated on `self.mn` (an M:N worker shell running fibers
-            // off the shared queue); a shell with no sched in scope is never preempted. Decrement the budget per dispatched op; at
+            // off the shared queue) or on `slice_in_place` (TICKET-205: an `Executor` job or a gated
+            // nursery body, which has no sched of its own but is a party of `width::RUNNERS`).
+            // Decrement the budget per dispatched op; at
             // exhaustion yield this worker so a queued sibling runs (round-robin fairness). A yielded
             // cancelled fiber observes the cancel at its next checkpoint. The
             // `native_reentry == 0` guard mirrors `recv`-park: a yield inside a native callback can't
             // save the caller's Rust-stack state, so the fiber cannot be swapped off. Instead the
             // THREAD hands its width permit to a sibling turn in place (TICKET-141,
-            // `callback_preempt`). Outside a callback this reuses the suspend/rewind contract —
+            // `slice_end_in_place`). Outside a callback this reuses the suspend/rewind contract —
             // frames stay intact, resume re-enters `run_until(0)` — but carries no channel handle (a
             // voluntary park).
-            if self.mn.is_some() {
+            if self.mn.is_some() || self.slice_in_place {
                 if self.reds == 0 {
-                    if self.native_reentry == 0 {
+                    if self.mn.is_some() && self.native_reentry == 0 {
                         self.yield_now = true;
                         return Ok(());
                     } else {
-                        self.callback_preempt();
+                        self.slice_end_in_place();
                     }
                 } else {
                     self.reds -= 1;
@@ -1928,9 +1925,6 @@ impl Vm {
             // flagless one gets the exit sentinel, and what suppresses both inside a `defer`.
             if sampled && let Some(e) = self.exit_halt(span) {
                 return Err(e);
-            }
-            if sampled && self.holds_width && self.mn.is_none() {
-                self.body_width_yield();
             }
         }
         self.frames.last_mut().unwrap().ip = target;

@@ -442,7 +442,7 @@ impl Vm {
         // accounts `running -> inflight` (a read returns on the user's input, so it must veto the
         // deadlock predicate); the width release is DEC-141's bracket, without which a gated thread's
         // own replacement waits on the permit this thread still holds. With only the width bracket a
-        // thread that never preempted moves nothing (`holds_width` is false). Deliberately NOT gated
+        // thread that never preempted moves nothing (`width::holds()` is false). Deliberately NOT gated
         // on `native_reentry > 0`: a direct `io.input` starves a sibling exactly like one in a callback.
         // TICKET-181 — ONE bracket for every native that holds its host thread (`Blocking`,
         // `HostWait`), picked by the table: stdin demotes in every context (DEC-151; with no M:N

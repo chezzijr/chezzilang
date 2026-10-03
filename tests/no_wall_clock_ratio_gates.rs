@@ -72,7 +72,7 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 32] = [
+const CLOCK_READING_TESTS: [&str; 33] = [
     "a_chezzi_hang_python_survives_is_a_finding",
     "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
     "a_shared_field_type_graph_is_walked_once_per_type",
@@ -95,6 +95,9 @@ const CLOCK_READING_TESTS: [&str; 32] = [
     // walk as `nested_fn_decl_check_is_not_exponential` below, which is already listed. The cost
     // is checker re-walking that nothing counts, so there is no counted measure to use.
     "deep_nested_fn_decl_chain_checks_clean_and_fast",
+    // TICKET-205. The grid bounds how long a victim waits behind a spinner; a starved victim never
+    // acts, so there is no event to count. One absolute bound with 20x headroom (0.1 s vs 2 s).
+    "every_victim_acts_while_the_spinner_runs",
     "nested_fn_decl_check_is_not_exponential",
     "parallel_many_spawns_cheap_and_correct",
     "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
@@ -323,7 +326,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 101] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 102] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -378,6 +381,8 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 101] = [
     "eager_job_os_exit_kills_an_in_callback_sleep",
     "eager_job_os_exit_terminates_a_recv_blocked_main",
     "eager_job_os_exit_terminates_a_socket_blocked_main",
+    // TICKET-205. A poll interval against a deadline while a child process runs, not an ordering.
+    "every_victim_acts_while_the_spinner_runs",
     "executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock",
     // TICKET-205. A poll interval against a deadline while a child process runs, not an ordering.
     "executor_job_spin_does_not_starve_second_executor_job_at_t1",

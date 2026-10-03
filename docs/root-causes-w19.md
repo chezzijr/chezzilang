@@ -186,6 +186,11 @@ TICKET-103, changed by 125; 132, 185 (17 commits); W17-1 is the open perf residu
 reads as absent. H2 fixed in `LocalQ::pop` (TICKET-199): a `runnext` pick is `Slice::Inherit` and
 runs on the current slice. W17-1 re-measured: no effect.
 
+**Status (follow-up):** an `Executor` job in a CPU loop starving another executor's job at one
+worker is fixed by TICKET-205: one process-wide runner gate (`width::RUNNERS`), one in-place slice
+end (`Vm::slice_end_in_place`) for a callback, a job and a gated body, every pick under the permit,
+and the waker queues the woken thread. Grid: `tests/runner_handover_grid.rs`.
+
 ## Isolated
 
 - **A2** (fixed in place, 7e0581a3): the lexer read `0.1` after a field `.` as a float.

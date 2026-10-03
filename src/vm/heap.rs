@@ -1194,12 +1194,12 @@ impl Heap {
                     // Both guards are dropped before the drain locks anything nested.
                     let nested =
                         crate::vm::core::drain_pending_core_bytes(&mut cores, &mut pending);
-                    // W7-26r sibling — plus the jobs this executor has DISPATCHED BUT NOT STARTED.
-                    // Each is a fully built worker heap parked in the process-global pool queue,
-                    // owned by no heap and so counted nowhere: 300 of them summing to 666 MB sailed
-                    // past an 8 MB cap while every individual heap stayed well under it. The
-                    // submitter owns them until the pool picks them up (`ExecutorCore::pending`),
-                    // and `Relaxed` is enough — this is a size estimate sampled at a sweep, not a
+                    // W7-26r sibling — plus the jobs this executor has DISPATCHED BUT NOT YET FINISHED.
+                    // Each is a fully built worker heap, queued in the process-global pool or
+                    // running, whose submit-time bytes no other heap counts: 300 of them summing to
+                    // 666 MB sailed past an 8 MB cap while every individual heap stayed well under
+                    // it. The submitter is charged until the job finishes (`ExecutorCore::pending`,
+                    // TICKET-205), and `Relaxed` is enough — this is a size estimate sampled at a sweep, not a
                     // synchronization edge.
                     queued
                         + eager
