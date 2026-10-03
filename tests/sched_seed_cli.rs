@@ -113,7 +113,7 @@ fn a_passing_run_under_sched_seed_changes_no_output() {
 #[test]
 fn the_same_seed_replays_byte_for_byte_at_one_worker() {
     const RUNS: usize = 10;
-    const FIXTURES: [&str; 7] = [
+    const FIXTURES: [&str; 8] = [
         "nested_interleave.chz",
         "interleave.chz",
         "body_recv_interleave.chz",
@@ -121,6 +121,7 @@ fn the_same_seed_replays_byte_for_byte_at_one_worker() {
         "body_wait_interleave.chz",
         "callback_recv_interleave.chz",
         "callback_send_interleave.chz",
+        "callback_wait_interleave.chz",
     ];
     let mut red = Vec::new();
     for name in FIXTURES {

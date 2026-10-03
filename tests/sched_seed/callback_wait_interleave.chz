@@ -1,0 +1,23 @@
+fn pick(a: Channel[str], b: Channel[str]) -> str:
+    wait:
+        v := a.recv(): return v
+        w := b.recv(): return w
+fn main():
+    a := Channel[str]()
+    b := Channel[str](1)
+    res := Channel[str](4)
+    parallel:
+        for i in range(4):
+            spawn:
+                for j in range(3):
+                    if i % 2 == 0:
+                        a.send("a{i}.{j}")
+                    else:
+                        b.send("b{i}.{j}")
+        for c in range(2):
+            spawn:
+                got := [0, 1, 2, 3, 4, 5].map(fn(k: int) -> str: pick(a, b))
+                res.send("c{c}:" + " ".join(got))
+    print(res.recv())
+    print(res.recv())
+main()
