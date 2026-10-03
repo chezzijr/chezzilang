@@ -218,6 +218,7 @@ and the waker queues the woken thread. Grid: `tests/runner_handover_grid.rs`.
 4. **G3** (K2, K3) — TICKET-202; K4 split out to TICKET-204 (parser/AST, no shared code) — checker generics; after N3 if they share files.
 5. **A1** — TICKET-203 — a bug against TICKET-191's decision; small (`std/concurrency` task + memoize).
 6. **S1 follow-up** (found by TICKET-200's implementing stage) — TICKET-205: at T=1 an Executor job's CPU loop starves another Executor's job (23.4 s vs 131 ms at T=2; Go ~100 ms). One runner handover at budget exhaustion for every party kind. Owner decision 2026-10-03: W15-10 (seeded T=1 replay not byte-for-byte; the replay test flakes under load) is folded in — same fact, who gets the runner and when.
+7. **Follow-ups found by TICKET-205's planning** (owner, 2026-10-03): TICKET-206 — byte-for-byte replay for the four remaining in-place waits (W15-10 remainder); TICKET-207 — an unjoined job fault in a second Executor is reported only at the exit drain, 25 s late (Go: 6 ms).
 
 ## Owner decision (2026-10-02): what a type-applied name may be — follow Rust
 
