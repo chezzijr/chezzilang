@@ -7,6 +7,20 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-206 (2026-10-04): seeded T=1 replay is byte-for-byte for `wait:` in a native callback.**
+  `tests/sched_seed/callback_wait_interleave.chz` replayed at 76-78 of 80 (seeds 1-8 x 10 runs,
+  release). Cause: `Vm::mn_worker_loop` released the runner permit, ran its `match disp`
+  bookkeeping, and only then re-queued with a fresh ticket, so its place depended on how long the
+  bookkeeping took. Fix, the one `width::reserve` rule and no second mechanism: a gated worker
+  queues its own next turn while it still holds the permit, when a fiber is runnable or its fiber
+  yielded; the `OwnTurn` guard withdraws a turn the loop exits without taking. A callback thread
+  does the same in `Vm::slice_end_in_place`. Measured: 80 of 80 idle and under 8 CPU hogs. The
+  open fixtures are unchanged in kind (`tests/sched_seed/open/`): nursery join 60 of 80, guard wait
+  35-36, Executor join 69; `docs/gaps.md` **W15-10** stays OPEN (TICKET-209, TICKET-208) and also
+  carries the one-core (`taskset -c 3`) rates. Perf, interleaved n=7, release, wall ms, base median
+  -> fix median, load average 1.6-3.9: `rendezvous_pingpong` T=1 3221 -> 3347 (1.04x), T=4 3221 ->
+  3201, default 4112 -> 3502; `primes_parallel` T=1 29279 -> 29795 (1.018x), T=4 9803 -> 9926,
+  default 10132 -> 10278. Each T=4 and default fix median is below the slowest base run.
 - **TICKET-205 (2026-10-03): Family S1 follow-up, one runner gate for every party (wave 19).** At
   `CHEZZI_THREADS=1` an `Executor` job in a CPU loop starved every other job until the loop ended:
   `os.exit` from a second executor's job landed after 23 s (Go `GOMAXPROCS=1`: ~100 ms). A job's
@@ -19,8 +33,8 @@ Single source of truth for "what am I doing next." Update after every work sessi
   `body_width_yield`, `body_gate_retire`, `Vm::body_gate`/`width_gated`/`holds_width`, the per-sched
   gate, four raw thread spawns, twelve bare channel notifies. Supersedes DEC-141, DEC-168, DEC-167.
   **Replay:** T=1 seeded replay is byte-for-byte for seven wait shapes (80/80 idle and under 8 hogs;
-  base 22-80); `docs/gaps.md` **W15-10** stays OPEN, narrowed to `wait:` in a native callback, the
-  in-place nursery join, a `Shared` guard wait and an `Executor` join. **`--max-heap`:** a job's
+  base 22-80); `docs/gaps.md` **W15-10** stays OPEN, narrowed to the in-place nursery join and a
+  `Shared` guard wait (TICKET-209) and the `Executor` join and job start (TICKET-208). **`--max-heap`:** a job's
   submit-time bytes are charged to the submitter until the job FINISHES, not until it starts (300
   jobs under an 8 MB cap: 280 MB peak without the rule, 18 MB with it). **Probe:** the
   `CHEZZI_THREADS` CLI probe is a cores measurement now; a starvation probe cannot exist. Tests:

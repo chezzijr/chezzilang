@@ -1388,6 +1388,10 @@ kind of party:
   `MnSched::notify_waiters` does the same for each gated idle worker, before it notifies. Wake order
   is the waker's order, not the order the OS runs the woken threads in. A thread spawned by a gated
   thread starts gated and its spawner lists its slot (`spawn_worker_thread`).
+- **A gated worker queues its own next turn.** `Vm::mn_worker_loop` reserves its ticket before it
+  releases the permit after a slice, when a fiber is runnable or its fiber yielded; the `OwnTurn`
+  guard withdraws a turn the loop exits without taking. A callback thread does the same in
+  `Vm::slice_end_in_place`, where the acquire that follows always takes the ticket.
 - **A gated idle worker never sleeps untimed**: a ticket can land just before its sleep, and a ticket
   nobody takes blocks every gated thread. Its sleep is bounded by one `DEMOTE_POLL_BACKOFF` tick. An
   ungated idle worker still sleeps untimed on `idle_cv`.

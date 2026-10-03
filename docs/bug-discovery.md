@@ -683,14 +683,16 @@ CHEZZI_SCHED_SEED=12345 CHEZZI_THREADS=1 cargo run -- run <file>
 ```
 
 **Replay limit (measured 2026-09-22/23, release binary; W15-2 fixed 2026-09-23, TICKET-168).** T=1
-replay has two limits. (1) Since TICKET-205 it is byte-for-byte for the seven wait shapes of
-`tests/sched_seed_cli.rs::the_same_seed_replays_byte_for_byte_at_one_worker` (a fiber-owned nested
-fan-out, a flat fan-out, a body `recv` on a rendezvous and on a bounded channel, a body `wait:`, a
-`recv` and a `send` inside a native callback): 80/80 on each, idle and under 8 CPU hogs (seeds 1-8 x
-10 runs, release; base was 22-80 of 80). A gated thread picks and draws only while it holds the
-runner permit, and the waker queues the woken thread (`docs/concurrency.md`). It stays a MEASURED
-RATE for the waits `docs/gaps.md` **W15-10** lists: `wait:` inside a native callback, an in-place
-nursery join, a `Shared` guard wait and an `Executor` join. (2) Timers, sockets, blocking natives and eager-nursery programs are outside what the
+replay has two limits. (1) Since TICKET-205 and TICKET-206 it is byte-for-byte for the eight wait
+shapes of `tests/sched_seed_cli.rs::the_same_seed_replays_byte_for_byte_at_one_worker` (a fiber-owned
+nested fan-out, a flat fan-out, a body `recv` on a rendezvous and on a bounded channel, a body
+`wait:`, a `recv`, a `send` and a `wait:` inside a native callback): 80/80 on each, idle and under 8
+CPU hogs (seeds 1-8 x 10 runs, release; base was 22-80 of 80). A gated thread picks and draws only
+while it holds the runner permit, the waker queues the woken thread, and a gated worker queues its
+own next turn before it releases the permit (`docs/concurrency.md`). It stays a MEASURED RATE for
+the waits `docs/gaps.md` **W15-10** lists: an in-place nursery join, a `Shared` guard wait, and an
+`Executor` join and job start. Pinned to one core (`taskset -c 3`) two callback fixtures also
+replay at a rate; W15-10 carries the numbers. (2) Timers, sockets, blocking natives and eager-nursery programs are outside what the
 RNG stream covers at all — only the sync-point-gated fan-out fixtures are measured.
 
 **Mutation-testing results, all release binary, `--seeds 1..257 --threads 1,2,0` (0 = default/28

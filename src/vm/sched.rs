@@ -2305,6 +2305,9 @@ impl Vm {
             self.demoted = true;
         }
         self.offer_pool_slot();
+        // TICKET-206 — the thread queues its own next turn while it still holds the permit: the
+        // release wakes the queue head, which could otherwise queue a third thread first.
+        width::reserve(&width::my_slot());
         self.width_release();
         self.width_acquire();
     }
@@ -2399,6 +2402,16 @@ impl Vm {
     /// while `take_runnable`'s stop check uses `owner_scope`.
     pub(super) fn mn_worker_loop(&mut self, sched: &Arc<MnSched>, wid: usize, owner_scope: usize) {
         self.wid = wid; // D5 owe #3 (Path C) — `demote_recv_block` reuses this for the replacement worker
+        // TICKET-206 — withdraws the turn this loop queued for itself when it exits without taking it.
+        struct OwnTurn;
+        impl Drop for OwnTurn {
+            fn drop(&mut self) {
+                if width::gated() {
+                    width::cancel(&width::my_slot());
+                }
+            }
+        }
+        let _turn = OwnTurn;
         let mut tick: u64 = 0;
         loop {
             // TICKET-199 — `tick` counts FRESH slices (Go's `schedtick`): an inherited `runnext`
@@ -2420,6 +2433,14 @@ impl Vm {
             let span = fiber.span;
             let disp = self.run_one_fiber(&mut fiber, span, slice);
             self.offer_pool_slot();
+            // TICKET-206 — a gated worker queues its own next turn while it still holds the permit,
+            // so its place does not depend on how long the bookkeeping below takes.
+            if width::gated()
+                && width::holds()
+                && (sched.runnable.load(Ordering::Relaxed) > 0 || matches!(disp, Disp::Yield))
+            {
+                width::reserve(&width::my_slot());
+            }
             // Also runs on the panic path: `run_one_fiber` catches the panic and returns `Disp::Finish`.
             self.width_release();
             match disp {
