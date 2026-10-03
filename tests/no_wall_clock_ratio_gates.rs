@@ -323,7 +323,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 100] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 101] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
@@ -379,6 +379,8 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 100] = [
     "eager_job_os_exit_terminates_a_recv_blocked_main",
     "eager_job_os_exit_terminates_a_socket_blocked_main",
     "executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock",
+    // TICKET-205. A poll interval against a deadline while a child process runs, not an ordering.
+    "executor_job_spin_does_not_starve_second_executor_job_at_t1",
     // TICKET-103. Same reason as the TICKET-095 entries below — a poll interval against a deadline,
     // over a child that may hang and never close its pipes, not a happens-before edge.
     "fixed_nested_nursery_shapes_complete_at_every_worker_count",
