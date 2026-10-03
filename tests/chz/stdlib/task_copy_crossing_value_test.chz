@@ -13,6 +13,12 @@ import std.concurrency
 import submit_task, Task from std.concurrency.task
 import memoize1 from std.memoize
 
+# A handle carries a `Result`; these tests read a job that did not fault.
+fn must[T](r: Result[T]) -> T:
+    match r:
+        Ok(v): return v
+        Err(e): panic(e.message())
+
 fn mk() -> List[int]:
     return [1]
 
@@ -20,12 +26,12 @@ test fn copy_get_sees_owner_alias_as_of_the_crossing():
     ex := Executor()
     t := submit_task(ex, mk)
     ex.shutdown()
-    xs := t.get()
+    xs := must(t.get())
     xs.push(99)
     out := Channel[str](2)
     parallel:
-        spawn: out.send("captured xs: {xs}  t.get(): {t.get()}")
-    assert out.recv() == "captured xs: [1, 99]  t.get(): [1, 99]"
+        spawn: out.send("captured xs: {xs}  must(t.get()): {must(t.get())}")
+    assert out.recv() == "captured xs: [1, 99]  must(t.get()): [1, 99]"
 
 fn one(k: int) -> List[int]:
     return [k]
@@ -35,7 +41,7 @@ fn task_in_state(state: str) -> Task[List[int]]:
     t := submit_task(ex, mk)
     ex.shutdown()
     if state != "unobserved":
-        xs := t.get()
+        xs := must(t.get())
         if state == "mutated":
             xs.push(99)
     return t
@@ -49,7 +55,7 @@ fn memo_in_state(state: str) -> fn(int) -> List[int]:
     return m
 
 fn read_task(t: Task[List[int]], out: Channel[str]):
-    out.send(str(t.get()))
+    out.send(str(must(t.get())))
 
 fn read_memo(m: fn(int) -> List[int], out: Channel[str]):
     out.send(str(m(1)))
@@ -73,7 +79,7 @@ test fn task_copy_value_through_a_spawn_call():
         out := Channel[str](1)
         parallel:
             spawn read_task(t, out)
-        got.push("{s}: copy {out.recv()} owner {t.get()}")
+        got.push("{s}: copy {out.recv()} owner {must(t.get())}")
     assert str(got) == want(), str(got)
 
 test fn task_copy_value_through_a_spawn_block():
@@ -82,8 +88,8 @@ test fn task_copy_value_through_a_spawn_block():
         t := task_in_state(s)
         out := Channel[str](1)
         parallel:
-            spawn: out.send(str(t.get()))
-        got.push("{s}: copy {out.recv()} owner {t.get()}")
+            spawn: out.send(str(must(t.get())))
+        got.push("{s}: copy {out.recv()} owner {must(t.get())}")
     assert str(got) == want(), str(got)
 
 test fn task_copy_value_through_an_executor_job():
@@ -94,7 +100,7 @@ test fn task_copy_value_through_an_executor_job():
         ex := Executor()
         ex.submit(fn(): read_task(t, out))
         ex.shutdown()
-        got.push("{s}: copy {out.recv()} owner {t.get()}")
+        got.push("{s}: copy {out.recv()} owner {must(t.get())}")
     assert str(got) == want(), str(got)
 
 test fn task_copy_value_through_a_channel_send():
@@ -106,7 +112,7 @@ test fn task_copy_value_through_a_channel_send():
         hc.send(t)
         parallel:
             spawn recv_read_task(hc, out)
-        got.push("{s}: copy {out.recv()} owner {t.get()}")
+        got.push("{s}: copy {out.recv()} owner {must(t.get())}")
     assert str(got) == want(), str(got)
 
 test fn memo_copy_value_through_a_spawn_call():
@@ -161,11 +167,11 @@ test fn owner_get_stays_one_object_after_a_crossing():
         spawn read_memo(m, out)
     out.recv()
     out.recv()
-    a := t.get()
+    a := must(t.get())
     a.push(7)
     b := m(1)
     b.push(7)
-    assert str(t.get()) == "[1, 99, 7]", str(t.get())
+    assert str(must(t.get())) == "[1, 99, 7]", str(must(t.get()))
     assert str(m(1)) == "[1, 99, 7]", str(m(1))
 
 fn send_outcome[T](r: Result[T, Error], out: Channel[str]):
@@ -174,7 +180,7 @@ fn send_outcome[T](r: Result[T, Error], out: Channel[str]):
         Err(e): out.send(e.message())
 
 fn copy_write(t: Task[List[int]], m: fn(int) -> List[int], out: Channel[str]):
-    rt := recover: t.get().push(5)
+    rt := recover: must(t.get()).push(5)
     send_outcome(rt, out)
     rm := recover: m(1).push(5)
     send_outcome(rm, out)
@@ -188,5 +194,5 @@ test fn a_copy_write_to_the_crossing_value_faults_like_a_captured_write():
     d4 := "this value is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"
     got := [out.recv(), out.recv()]
     assert got == [d4, d4], str(got)
-    assert str(t.get()) == "[1, 99]", str(t.get())
+    assert str(must(t.get())) == "[1, 99]", str(must(t.get()))
     assert str(m(1)) == "[1, 99]", str(m(1))

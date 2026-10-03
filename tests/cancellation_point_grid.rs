@@ -500,7 +500,8 @@ const SUBMIT_RESULT_ROUND: &str = "fn round() -> bool:
     ex.shutdown_now()
     ok := false
     match o.try_recv():
-        Some(x): ok = x == 7
+        Some(Ok(x)): ok = x == 7
+        Some(Err(_)): pass
         None: pass
     return ok
 ";
@@ -508,17 +509,14 @@ const SUBMIT_RESULT_ROUND: &str = "fn round() -> bool:
 const SUBMIT_OUTCOME_ROUND: &str = "fn round() -> bool:
     gate := Channel[int](0)
     ex := Executor()
-    out := Channel[int](1)
-    errc := Channel[str](1)
-    ex.submit_outcome(fn() -> int: gate.recv(), out, errc)
+    out := Channel[Result[int]](1)
+    ex.submit_outcome(fn() -> int: gate.recv(), out)
     gate.send(7)
     ex.shutdown_now()
     ok := false
     match out.try_recv():
-        Some(x): ok = x == 7
-        None: pass
-    match errc.try_recv():
-        Some(_): ok = false
+        Some(Ok(x)): ok = x == 7
+        Some(Err(_)): pass
         None: pass
     return ok
 ";

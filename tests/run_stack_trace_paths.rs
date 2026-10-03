@@ -187,7 +187,7 @@ fn std_native_fault_in_a_submit_task_job_names_the_users_call() {
     let t = TmpDir::new();
     t.write(
         "main.chz",
-        "import std.concurrency\nimport submit_task from std.concurrency.task\nex := Executor()\nex.shutdown()\nfn outer(ex: Executor) -> int:\n    inner := submit_task(ex, fn(): 5)\n    return inner.get() + 1\nouter_ex := Executor()\nt2 := submit_task(outer_ex, fn(): outer(ex))\nouter_ex.shutdown()\nprint(t2.get())\n",
+        "import std.concurrency\nimport submit_task from std.concurrency.task\nex := Executor()\nex.shutdown()\nfn outer(ex: Executor) -> int:\n    inner := submit_task(ex, fn(): 5)\n    match inner.get():\n        Ok(v): return v + 1\n        Err(_): return 0\nouter_ex := Executor()\nouter_ex.submit(fn(): outer(ex))\nouter_ex.shutdown()\n",
     );
     let (_stdout, stderr, ok) = run(&t.0, &["run", "main.chz"]);
     assert!(!ok, "the program must fault");

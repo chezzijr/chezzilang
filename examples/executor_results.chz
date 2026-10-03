@@ -1,8 +1,9 @@
-# The Executor fault contract (W7-5): EVERY submitted job runs, and `shutdown()` then raises the first
-# fault in SUBMISSION order. A bad job costs you that job's result — never its siblings' work. Results
-# are read back through `Task` handles in submission order, so the printed order is fixed however the
-# pool threads interleave. Want the siblings to stop early instead? Thread a `std.cancel.Token`
-# (docs/concurrency.md §6e). Run with: chezzi run examples/executor_results.chz
+# The Executor handle contract: a job submitted through `submit_task` never ends the run by its
+# fault. Its `Task.get()` returns `Err(message)`, `shutdown()` raises nothing for it, and every
+# sibling runs (CPython `Future.result()`, with a `Result` in place of a raise). Results are read
+# back through the handles in submission order, so the printed order is fixed however the jobs
+# interleave. A fire-and-forget `ex.submit(f)` fault is different: it ends the run at once (Go).
+# Run with: chezzi run examples/executor_results.chz
 
 import std.concurrency
 import std.concurrency.task
@@ -20,18 +21,11 @@ fn main():
     for r in rows:
         handles.push(task.submit_task(ex, fn() -> int: score(r)))
 
-    reaped := recover: ex.shutdown()
-    match reaped:
-        Ok(_):  print("all jobs clean")
-        Err(e): print("first fault: {e.message()}")
+    ex.shutdown()
 
     for i in 0..rows.len():
-        h := handles[i]
-        # `done()` is true for a faulted job too; its `get()` re-raises that job's fault (CPython
-        # `Future.result()`), so read it under `recover:`.
-        r := recover: h.get()
-        match r:
+        match handles[i].get():
             Ok(v):  print("{rows[i]} -> {v}")
-            Err(_): print("{rows[i]} -> no result")
+            Err(e): print("{rows[i]} -> fault: {e.message()}")
 
 main()

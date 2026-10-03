@@ -89,46 +89,40 @@ native struct Executor:
     native fn shutdown(self) -> nil
     native fn shutdown_now(self) -> nil
     # A BODIED generic method (the first on a native struct): submit `f` and hand back a cap-1
-    # `Channel[T]` that carries its result. The primitive `submit_task`/`Task[T]` wraps. Routes
-    # through `submit_outcome` below so a job fault closes the channel instead of leaving it empty.
-    fn submit_result[T](self, f: fn() -> T) -> Channel[T]:
-        ch := Channel[T](1)
-        self.submit_outcome(f, ch, Channel[str](1))
+    # `Channel[Result[T]]` that carries its outcome. The primitive `submit_task`/`Task[T]` wraps.
+    fn submit_result[T](self, f: fn() -> T) -> Channel[Result[T]]:
+        ch := Channel[Result[T]](1)
+        self.submit_outcome(f, ch)
         return ch
 
-    # A faulted job's outcome is always observable one way or the other: a value into `out`, or on
-    # a fault the message into `err`, `out` CLOSED, and the fault re-raised (so `shutdown()` still
-    # reports it).
-    fn submit_outcome[T](self, f: fn() -> T, out: Channel[T], err: Channel[str]):
-        self.submit(fn(): run_outcome(f, out, err))
+    # A handle job's outcome is one `Result[T]` sent into `out`: `Ok(value)`, or `Err(message)`
+    # for exactly what `recover:` catches. The job itself never faults, so `shutdown()` raises
+    # nothing for it and its siblings keep running (CPython `Future.result()`).
+    fn submit_outcome[T](self, f: fn() -> T, out: Channel[Result[T]]):
+        self.submit(fn(): run_outcome(f, out))
 
 # Chezzi closures are single-expression only, so a multi-statement job body must be a named
 # top-level fn the lambda calls.
 #
-# A `shutdown_now()` cancel is not a fault `recover:` catches, so neither arm below runs for a
-# cancelled job. The `defer:` settles it instead: a cancel message into `err`, then `out` CLOSED,
-# so `Task.done()` is true and `get()`/`recv()` raise at once (TICKET-148, W14-13; CPython's
-# `result()` raises `CancelledError`). `settled` marks a job an arm already settled, and each arm
-# sends it LAST. A send into a channel with room never waits, so it is not a cancellation point
-# (docs/concurrency.md "Cancellation is delivered at CHECKPOINTS"): a job that returned always
-# delivers `v` and never also reports cancelled (TICKET-194). A cancel lands only at an
-# `out.send(v)` that waits, where `settled` is still empty, so the `defer:` closes `out`.
-fn run_outcome[T](f: fn() -> T, out: Channel[T], err: Channel[str]):
+# `recover:` decides what becomes an `Err`; there is no second list. What it cannot catch
+# (`os.exit`, `--timeout`, `--max-heap`, a deadlock verdict) ends the run with its own report.
+#
+# A `shutdown_now()` cancel is not a fault `recover:` catches, so the `defer:` settles a cancelled
+# job instead: an `Err` with the cancel message, so `Task.done()` is true and `get()`/`recv()`
+# return at once (TICKET-148, W14-13; CPython's `result()` raises `CancelledError`). `settled`
+# marks a job the body already settled, and the body sends it LAST. A send into a channel with
+# room never waits, so it is not a cancellation point (docs/concurrency.md "Cancellation is
+# delivered at CHECKPOINTS"): a job that returned always delivers its outcome and never also
+# reports cancelled (TICKET-194). A cancel lands only at an `out.send(r)` that waits, where
+# `settled` is still empty.
+fn run_outcome[T](f: fn() -> T, out: Channel[Result[T]]):
     settled := Channel[bool](1)
     defer:
         if settled.len() == 0:
-            err.try_send("task cancelled: shutdown_now() stopped it before it finished")
-            out.close()
+            out.try_send(Err("task cancelled: shutdown_now() stopped it before it finished"))
     r := recover: f()
-    match r:
-        Ok(v):
-            out.send(v)
-            settled.send(true)
-        Err(e):
-            err.send(e.message())
-            out.close()
-            settled.send(true)
-            panic(e.message())
+    out.send(r)
+    settled.send(true)
 
 # True when `v` is an airlock copy in the calling task: a write to it would fault `this value is
 # this task's copy`. Reads the same predicate as that write check (`Heap::is_copied`), so std code

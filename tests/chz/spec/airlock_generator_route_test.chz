@@ -3,6 +3,12 @@
 import std.concurrency
 import std.time as time
 
+# A handle carries a `Result`; these tests read a job that did not fault.
+fn must[T](r: Result[T]) -> T:
+    match r:
+        Ok(v): return v
+        Err(e): panic(e.message())
+
 fn t190_gen() -> Iterator[int]:
     acc: List[int] = []
     for i in range(3):
@@ -23,7 +29,7 @@ test fn started_generator_drained_in_executor_job_runs():
     g := t190_gen()
     _ := g.next()
     ex := Executor()
-    got := ex.submit_result(fn() -> str: t190_drain(g)).recv()
+    got := must(ex.submit_result(fn() -> str: t190_drain(g)).recv())
     ex.shutdown()
     assert got == "5"
 
@@ -149,7 +155,7 @@ fn t190_route(route: str, g: Iterator[int]) -> str:
         ex.shutdown()
     elif route == "submit_result":
         ex := Executor()
-        r := ex.submit_result(fn() -> str: t190_cell(g)).recv()
+        r := must(ex.submit_result(fn() -> str: t190_cell(g)).recv())
         ex.shutdown()
         return r
     elif route == "channel":

@@ -13,6 +13,12 @@ import std.concurrency
 import ConcurrentMap from std.concurrency.collection
 import memoize1 from std.memoize
 
+# A handle carries a `Result`; these tests read a job that did not fault.
+fn must[T](r: Result[T]) -> T:
+    match r:
+        Ok(v): return v
+        Err(e): panic(e.message())
+
 struct P:
     n: int
     fn hash(self) -> int:
@@ -165,7 +171,7 @@ fn _grid[K: Hashable + Eq](keys: List[K]) -> str:
     o2 := ex.submit_result(fn(): _rw_ops(b2, keys))
     o3 := ex.submit_result(fn(): _cm_ops(c2, keys))
     ex.shutdown()
-    for got in [o1.recv(), o2.recv(), o3.recv()]:
+    for got in [must(o1.recv()), must(o2.recv()), must(o3.recv())]:
         if got != want:
             bad = bad + "executor: " + got + " != " + want + "\n"
     for seen in [_map_items(s2.get()), _rw_items(b2), _map_items(c2.snapshot())]:
@@ -214,7 +220,7 @@ fn _memo_grid[K: Hashable + Eq](keys: List[K]) -> str:
     ex := Executor()
     o := ex.submit_result(fn(): _call_all(m2, keys))
     ex.shutdown()
-    got2 := o.recv()
+    got2 := must(o.recv())
     if got2 != want or _call_all(m2, keys) != want or c2.load() != keys.len():
         bad = bad + "executor: " + got2 + " calls=" + str(c2.load()) + "\n"
     return bad

@@ -2585,7 +2585,9 @@ fn task_submit_get_submission_order_both_engines() {
                \x20       ts.push(submit_task(ex, fn() -> int: work(x)))\n\
                \x20   ex.shutdown()\n\
                \x20   for t in ts:\n\
-               \x20       print(t.get())\n\
+               \x20       match t.get():\n\
+               \x20           Ok(v): print(v)\n\
+               \x20           Err(e): print(e.message())\n\
                main()\n";
     assert_eq!(pmap_both("task_order", src), "1\n4\n9\n16\n25\n");
 }
@@ -2601,8 +2603,12 @@ fn task_get_idempotent_and_done_both_engines() {
                \x20   t := submit_task(ex, fn() -> int: 42)\n\
                \x20   ex.shutdown()\n\
                \x20   print(t.done())\n\
-               \x20   print(t.get())\n\
-               \x20   print(t.get())\n\
+               \x20   match t.get():\n\
+               \x20       Ok(v): print(v)\n\
+               \x20       Err(e): print(e.message())\n\
+               \x20   match t.get():\n\
+               \x20       Ok(v): print(v)\n\
+               \x20       Err(e): print(e.message())\n\
                \x20   print(t.done())\n\
                main()\n";
     assert_eq!(pmap_both("task_idem", src), "true\n42\n42\ntrue\n");
@@ -2625,7 +2631,9 @@ fn executor_submit_result_both_engines() {
                \x20       chs.push(ex.submit_result(fn() -> int: work(x)))\n\
                \x20   ex.shutdown()\n\
                \x20   for ch in chs:\n\
-               \x20       print(ch.recv())\n\
+               \x20       match ch.recv():\n\
+               \x20           Ok(v): print(v)\n\
+               \x20           Err(e): print(e.message())\n\
                main()\n";
     assert_eq!(pmap_both("submit_result", src), "1\n4\n9\n16\n25\n");
 }
@@ -21823,31 +21831,25 @@ fn returned_job_keeps_its_result_across_shutdown_now() {
     let src = r#"
 import std.concurrency
 lost := 0
-both := 0
 for _ in 0..20:
     ex := Executor()
     gate := Channel[int](0)
     fn job() -> int:
         v := gate.recv()
         return v
-    out := Channel[int](1)
-    err := Channel[str](1)
-    ex.submit_outcome(job, out, err)
+    out := Channel[Result[int]](1)
+    ex.submit_outcome(job, out)
     gate.send(7)
     ex.shutdown_now()
-    got := out.try_recv()
-    bad := err.try_recv()
-    match got:
-        Some(_):
-            match bad:
-                Some(_): both += 1
-                None: pass
+    match out.try_recv():
+        Some(Ok(_)): pass
+        Some(Err(_)): lost += 1
         None: lost += 1
-print("lost={lost} both={both}")
+print("lost={lost}")
 "#;
     let out = pmap_both("t194_x1", src);
     assert_eq!(
-        out, "lost=0 both=0\n",
+        out, "lost=0\n",
         "a returned job's result was cut by shutdown_now"
     );
 }

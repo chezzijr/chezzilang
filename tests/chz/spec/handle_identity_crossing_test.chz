@@ -10,6 +10,12 @@ import std.fs
 import std.math
 import std.ffi
 
+# A handle carries a `Result`; these tests read a job that did not fault.
+fn must[T](r: Result[T]) -> T:
+    match r:
+        Ok(v): return v
+        Err(e): panic(e.message())
+
 test fn channel_equal_to_its_alias_inside_a_spawned_task():
     c1 := Channel[int]()
     c2 := c1
@@ -83,7 +89,7 @@ fn via_atomic[T](x: T) -> T:
 
 fn via_executor[T](x: T) -> T:
     ex := Executor()
-    got := ex.submit_result(fn() -> T: x).recv()
+    got := must(ex.submit_result(fn() -> T: x).recv())
     ex.shutdown()
     return got
 

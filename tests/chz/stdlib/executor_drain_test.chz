@@ -12,6 +12,7 @@
 
 import std.concurrency
 import std.cancel
+import submit_task from std.concurrency.task
 
 fn bump(c: AtomicInt, by: int):
     c.add(by)
@@ -21,6 +22,17 @@ fn blow_up():
 
 fn blow_up_late():
     panic("late boom")
+
+fn blow_up_int() -> int:
+    panic("boom")
+
+fn blow_up_late_int() -> int:
+    panic("late boom")
+
+fn err_of(r: Result[int]) -> str:
+    match r:
+        Ok(_): return "no fault"
+        Err(e): return e.message()
 
 fn guarded_bump(tok: cancel.Token, c: AtomicInt):
     if tok.cancelled():
@@ -69,7 +81,7 @@ test fn a_later_jobs_result_survives_an_earlier_fault():
         Ok(_): assert false, "the faulting job must propagate"
         Err(e): assert e.message().contains("boom"), e.message()
     assert ch.len() == 1, "a job that RAN must not have its result discarded"
-    assert ch.recv() == 7, "the surviving result must be the job's real value"
+    assert (ch.recv() ?? 0) == 7, "the surviving result must be the job's real value"
 
 test fn the_queue_is_empty_after_a_faulting_drain():
     # Run-all means nothing is left behind for a later reap: a second shutdown is a clean no-op.
@@ -86,6 +98,45 @@ test fn the_queue_is_empty_after_a_faulting_drain():
         Ok(_): pass
         Err(e): assert false, "the second reap must be a clean no-op: " + e.message()
     assert c.load() == 1, "the second reap must not re-run anything, got " + str(c.load())
+
+# A HANDLE job's fault is its handle's `Err`: `shutdown()` raises nothing, and no sibling is cut.
+test fn every_job_runs_despite_a_handle_job_fault():
+    ex := Executor()
+    c := AtomicInt(0)
+    t := submit_task(ex, blow_up_int)
+    ex.submit(fn(): bump(c, 1))
+    ex.submit(fn(): bump(c, 10))
+    ex.submit(fn(): bump(c, 100))
+    ex.shutdown()
+    assert err_of(t.get()).contains("boom"), err_of(t.get())
+    assert c.load() == 111, "every non-faulting job must run, got " + str(c.load())
+
+test fn each_handle_carries_its_own_fault():
+    ex := Executor()
+    a := submit_task(ex, blow_up_int)
+    b := submit_task(ex, blow_up_late_int)
+    ex.shutdown()
+    assert err_of(a.get()).contains("boom"), err_of(a.get())
+    assert not err_of(a.get()).contains("late"), err_of(a.get())
+    assert err_of(b.get()).contains("late boom"), err_of(b.get())
+
+test fn a_later_jobs_result_survives_an_earlier_handle_fault():
+    ex := Executor()
+    t := submit_task(ex, blow_up_int)
+    ch := ex.submit_result(fn() -> int: 7)
+    ex.shutdown()
+    assert err_of(t.get()).contains("boom"), err_of(t.get())
+    assert (ch.recv() ?? 0) == 7, "the surviving result must be the job's real value"
+
+test fn a_second_shutdown_after_a_handle_fault_is_a_no_op():
+    ex := Executor()
+    c := AtomicInt(0)
+    t := submit_task(ex, blow_up_int)
+    ex.submit(fn(): bump(c, 1))
+    ex.shutdown()
+    ex.shutdown()
+    assert err_of(t.get()).contains("boom"), err_of(t.get())
+    assert c.load() == 1, "the second shutdown must not re-run anything, got " + str(c.load())
 
 test fn a_pre_cancelled_token_stops_the_jobs():
     # The abort-siblings behaviour is not gone, it moved into the caller's hands. Cancel the token on

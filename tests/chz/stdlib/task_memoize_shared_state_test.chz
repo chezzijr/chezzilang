@@ -12,6 +12,12 @@
 import std.concurrency
 import submit_task, Task from std.concurrency.task
 
+# A handle carries a `Result`; these tests read a job that did not fault.
+fn must[T](r: Result[T]) -> T:
+    match r:
+        Ok(v): return v
+        Err(e): panic(e.message())
+
 fn forty_two() -> int:
     return 42
 
@@ -30,14 +36,8 @@ fn gated_boom(gate: Channel[int]) -> int:
         panic("boom")
     return 0
 
-fn shutdown_fault(ex: Executor) -> str:
-    r := recover: ex.shutdown()
-    match r:
-        Ok(_): return "no fault"
-        Err(e): return e.message()
-
 fn show(t: Task[int]) -> str:
-    r := recover: t.get()
+    r := recover: must(t.get())
     match r:
         Ok(v): return str(v)
         Err(e): return e.message()
@@ -49,7 +49,7 @@ fn child_done3(p: Task[int], ok: Task[int], bad: Task[int], out: Channel[str]):
     out.send("{p.done()} {ok.done()} {bad.done()}")
 
 fn _child_get(t: Task[int], ch: Channel[str]):
-    r := recover: t.get()
+    r := recover: must(t.get())
     match r:
         Ok(v): ch.send(str(v))
         Err(e): ch.send(e.message())
@@ -61,11 +61,11 @@ fn child_mutate(t: Task[List[int]], out: Channel[str]):
         Err(e): out.send(e.message())
 
 fn _mutate_then_get(t: Task[List[int]]) -> str:
-    a := t.get()
+    a := must(t.get())
     r := recover: a.push(9)
     match r:
-        Ok(_): return "push ok {t.get()}"
-        Err(e): return "{t.get()} {e.message()}"
+        Ok(_): return "push ok {must(t.get())}"
+        Err(e): return "{must(t.get())} {e.message()}"
 
 test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
     ex := Executor()
@@ -76,7 +76,7 @@ test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
         spawn _child_get(t, ch)
     child := ch.recv()
     assert child == "42", child
-    r := recover: t.get()
+    r := recover: must(t.get())
     match r:
         Ok(v): assert v == 42, "parent get() after child get()"
         Err(e): assert false, e.message()
@@ -111,7 +111,7 @@ test fn task_pending_executor_job_caller():
     gate := Channel[int](1)
     t := submit_task(ex, fn() -> int: gated(gate))
     ex2 := Executor()
-    t2 := submit_task(ex2, fn() -> int: t.get() + 1)
+    t2 := submit_task(ex2, fn() -> int: must(t.get()) + 1)
     gate.send(1)
     ex.shutdown()
     ex2.shutdown()
@@ -138,10 +138,7 @@ test fn task_done_ok_every_caller():
 test fn task_done_faulted_every_caller():
     ex := Executor()
     t := submit_task(ex, boom)
-    r0 := recover: ex.shutdown()
-    match r0:
-        Ok(_): assert false, "shutdown must raise the job fault"
-        Err(e): assert e.message() == "boom", e.message()
+    ex.shutdown()
     assert t.done()
     out := Channel[str](3)
     parallel:
@@ -160,10 +157,10 @@ test fn task_mutable_result_parent_get_returns_the_same_object():
     ex := Executor()
     t := submit_task(ex, mk_list)
     ex.shutdown()
-    a := t.get()
+    a := must(t.get())
     a.push(3)
-    assert str(t.get()) == "[1, 2, 3]", str(t.get())
-    b := t.get()
+    assert str(must(t.get())) == "[1, 2, 3]", str(must(t.get()))
+    b := must(t.get())
     b.push(4)
     assert str(a) == "[1, 2, 3, 4]", str(a)
 
@@ -171,20 +168,20 @@ test fn task_mutable_result_spawned_copy_sees_the_value_as_of_the_crossing():
     ex := Executor()
     t := submit_task(ex, mk_list)
     ex.shutdown()
-    a := t.get()
+    a := must(t.get())
     a.push(3)
     out := Channel[str](1)
     parallel:
         spawn child_mutate(t, out)
     got := out.recv()
     assert got == "[1, 2, 3] this value is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()", got
-    assert str(t.get()) == "[1, 2, 3]", str(t.get())
+    assert str(must(t.get())) == "[1, 2, 3]", str(must(t.get()))
 
 test fn task_mutable_result_executor_job_copy_sees_the_value_as_of_the_crossing():
     ex := Executor()
     t := submit_task(ex, mk_list)
     ex.shutdown()
-    a := t.get()
+    a := must(t.get())
     a.push(3)
     out := Channel[str](1)
     ex2 := Executor()
@@ -192,12 +189,12 @@ test fn task_mutable_result_executor_job_copy_sees_the_value_as_of_the_crossing(
     ex2.shutdown()
     got := out.recv()
     assert got == "[1, 2, 3] this value is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()", got
-    assert str(t.get()) == "[1, 2, 3]", str(t.get())
+    assert str(must(t.get())) == "[1, 2, 3]", str(must(t.get()))
 
 test fn task_faulted_first_observer_is_a_spawned_task():
     ex := Executor()
     t := submit_task(ex, boom)
-    assert shutdown_fault(ex) == "boom"
+    ex.shutdown()
     out := Channel[str](1)
     parallel:
         spawn child_show(t, out)
@@ -209,7 +206,7 @@ test fn task_faulted_first_observer_is_a_spawned_task():
 test fn task_faulted_first_observer_is_an_executor_job():
     ex := Executor()
     t := submit_task(ex, boom)
-    assert shutdown_fault(ex) == "boom"
+    ex.shutdown()
     out := Channel[str](1)
     ex2 := Executor()
     ex2.submit(fn(): child_show(t, out))
@@ -222,7 +219,7 @@ test fn task_faulted_first_observer_is_an_executor_job():
 test fn task_faulted_first_observers_are_two_tasks_at_once():
     ex := Executor()
     t := submit_task(ex, boom)
-    assert shutdown_fault(ex) == "boom"
+    ex.shutdown()
     out := Channel[str](2)
     parallel:
         spawn child_show(t, out)
@@ -244,7 +241,7 @@ test fn task_pending_then_faulted_spawned_waiter_sees_the_fault():
         gate.send(1)
     got := out.recv()
     assert got == "boom", got
-    assert shutdown_fault(ex) == "boom"
+    ex.shutdown()
     assert show(t) == "boom", show(t)
     assert t.done()
 
@@ -254,7 +251,7 @@ test fn task_done_from_a_spawned_task_in_every_state():
     ex_ok.shutdown()
     ex_bad := Executor()
     bad := submit_task(ex_bad, boom)
-    assert shutdown_fault(ex_bad) == "boom"
+    ex_bad.shutdown()
     ex_p := Executor()
     gate := Channel[int](1)
     p := submit_task(ex_p, fn() -> int: gated(gate))
@@ -275,7 +272,7 @@ test fn task_done_from_an_executor_job_in_every_state():
     ex_ok.shutdown()
     ex_bad := Executor()
     bad := submit_task(ex_bad, boom)
-    assert shutdown_fault(ex_bad) == "boom"
+    ex_bad.shutdown()
     ex_p := Executor()
     gate := Channel[int](1)
     p := submit_task(ex_p, fn() -> int: gated(gate))

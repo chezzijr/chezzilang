@@ -1,10 +1,10 @@
 # tests/chz/stdlib/task_fault_test.chz — TICKET-045.
 #
-# A faulted job's `Task.get()` must surface the job's own error, not a deadlock, and `Task.done()`
+# A faulted job's `Task.get()` must return the job's own error as `Err`, not a deadlock, and `Task.done()`
 # must become true once the job has finished (faulted or not). See docs/gaps.md / TICKET-045.
 #
 # Reference — CPython `concurrent.futures.ThreadPoolExecutor` (the owning ancestor for the Executor
-# family), measured: `shutdown()` does not raise; `future.result()` re-raises the job's own exception;
+# family), measured: `shutdown()` does not raise; `future.result()` re-raises the job's own exception (Chezzi returns it as `Err`);
 # `future.done()` is `True` once the job has finished.
 
 import std.concurrency
@@ -16,14 +16,10 @@ fn bad() -> int:
 test fn task_get_on_a_faulted_job_reports_the_job_error_not_deadlock():
     ex := Executor()
     t0 := submit_task(ex, bad)
-    r := recover: ex.shutdown()
-    match r:
-        Ok(_): assert false, "the faulting job must propagate out of shutdown()"
-        Err(e): assert e.message().contains("job failed"), e.message()
-    g := recover: t0.get()
-    match g:
+    ex.shutdown()
+    match t0.get():
         Ok(_): assert false, "get() on a faulted job must not return Ok"
-        Err(e): assert not e.message().contains("deadlock"), e.message()
+        Err(e): assert e.message().contains("job failed"), e.message()
     assert t0.done(), "done() must be true once the faulted job has finished"
 
 fn ok_job() -> int:
@@ -32,40 +28,31 @@ fn ok_job() -> int:
 test fn raw_submit_result_on_a_faulted_job_does_not_report_deadlock():
     ex := Executor()
     c := ex.submit_result(bad)
-    r := recover: ex.shutdown()
-    match r:
-        Ok(_): assert false, "the faulting job must propagate out of shutdown()"
-        Err(e): assert e.message().contains("job failed"), e.message()
-    g := recover: c.recv()
-    match g:
+    ex.shutdown()
+    match c.recv():
         Ok(_): assert false, "recv() on a faulted job's channel must not return Ok"
-        Err(e):
-            assert not e.message().contains("deadlock"), e.message()
-            assert e.message().contains("closed"), e.message()
+        Err(e): assert e.message().contains("job failed"), e.message()
 
 test fn a_successful_task_is_unchanged_by_the_fault_path():
     ex := Executor()
     t := submit_task(ex, ok_job)
     ex.shutdown()
     assert t.done(), "done() must be true after a successful job"
-    assert t.get() == 42, "get() must return the job's value"
-    assert t.get() == 42, "get() must be memoized"
+    assert (t.get() ?? 0) == 42, "get() must return the job's value"
+    assert (t.get() ?? 0) == 42, "get() must be memoized"
 
     ex2 := Executor()
     ch := ex2.submit_result(fn() -> int: 7)
     ex2.shutdown()
     assert ch.len() == 1, "the result channel must carry the value"
-    assert ch.recv() == 7, "recv() must return the value"
+    assert (ch.recv() ?? 0) == 7, "recv() must return the value"
 
 test fn a_faulted_tasks_error_is_memoized():
     ex := Executor()
     t := submit_task(ex, bad)
-    r := recover: ex.shutdown()
-    match r:
-        Ok(_): assert false, "the faulting job must propagate out of shutdown()"
-        Err(_): pass
-    g1 := recover: t.get()
-    g2 := recover: t.get()
+    ex.shutdown()
+    g1 := t.get()
+    g2 := t.get()
     match g1:
         Ok(_): assert false, "first get() on a faulted job must not return Ok"
         Err(e):
@@ -77,19 +64,11 @@ test fn a_faulted_tasks_error_is_memoized():
             assert e.message().contains("job failed"), e.message()
             assert not e.message().contains("closed"), e.message()
 
-test fn a_faulted_jobs_origin_is_the_users_panic_site_never_the_stdlib():
+test fn a_faulted_tasks_error_carries_no_origin():
     ex := Executor()
     t0 := submit_task(ex, bad)
-    r := recover: ex.shutdown()
-    match r:
-        Ok(_): assert false, "the faulting job must propagate out of shutdown()"
-        Err(e):
-            match e.file():
-                Some(path): assert path.ends_with("task_fault_test.chz"), path
-                None: assert false, "shutdown()'s error must carry the user's panic site"
-            assert e.line() == Some(14), "shutdown()'s error must point at bad()'s panic line"
-    g := recover: t0.get()
-    match g:
+    ex.shutdown()
+    match t0.get():
         Ok(_): assert false, "get() on a faulted job must not return Ok"
         Err(e):
             assert e.file() == None, "Task.get()'s error crosses an airlock and must answer None"

@@ -1,7 +1,7 @@
 # tests/chz/stdlib/task_cancel_test.chz — TICKET-148 (W14-13).
 #
-# `shutdown_now()` must not strand a `submit_task` Task: `get()` must promptly raise a catchable
-# error and `done()` must be true. Reference — CPython 3.14 `shutdown(cancel_futures=True)`:
+# `shutdown_now()` must not strand a `submit_task` Task: `get()` must promptly return an `Err`
+# and `done()` must be true. Reference — CPython 3.14 `shutdown(cancel_futures=True)`:
 # `future.result()` raises `CancelledError` at once.
 #
 # No sleep here (DEC-050). `slow` parks on a channel nothing ever sends to, so only a cancel ends
@@ -21,17 +21,17 @@ test fn shutdown_now_does_not_strand_a_submitted_task():
     ex.shutdown_now()
     assert t.done(), "done() must be true after shutdown_now()"
 
-test fn a_cancelled_tasks_get_raises_a_catchable_cancel_error():
+test fn a_cancelled_tasks_get_returns_the_cancel_error():
     hold := Channel[int](1)
     ex := Executor()
     t := submit_task(ex, fn(): slow(hold))
     ex.shutdown_now()
     assert t.done(), "done() must be true before get() is called"
-    r := recover: t.get()
+    r := t.get()
     match r:
         Ok(_): assert false, "a cancelled task must not yield a value"
         Err(e): assert e.message() == "task cancelled: shutdown_now() stopped it before it finished"
-    again := recover: t.get()
+    again := t.get()
     match again:
         Ok(_): assert false, "get() must replay the cancel"
         Err(e): assert e.message() == "task cancelled: shutdown_now() stopped it before it finished"
@@ -47,20 +47,20 @@ test fn every_task_is_done_after_shutdown_now_started_or_not():
             n += 1
     assert n == 30, "all 30 tasks must be done, got {n}"
 
-test fn shutdown_now_closes_a_submit_result_channel():
+test fn shutdown_now_settles_a_submit_result_channel():
     hold := Channel[int](1)
     ex := Executor()
     ch := ex.submit_result(fn(): slow(hold))
     ex.shutdown_now()
-    r := recover: ch.recv()
-    match r:
+    match ch.recv():
         Ok(_): assert false, "a cancelled job must not send a value"
-        Err(e): assert e.message() == "receive on a closed channel"
+        Err(e): assert e.message() == "task cancelled: shutdown_now() stopped it before it finished"
 
 test fn a_task_that_finished_carries_no_cancel_message():
     ex := Executor()
     t := submit_task(ex, fn(): 5)
     ex.shutdown()
     ex.shutdown_now()
-    assert t.get() == 5
-    assert t.err.len() == 0, "a finished job must not queue a cancel message"
+    match t.get():
+        Ok(v): assert v == 5
+        Err(e): assert false, "a finished job must not report a cancel: " + e.message()

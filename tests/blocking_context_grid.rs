@@ -434,7 +434,7 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "task_get",
-            "    ex3 := Executor()\n    t := submit_task(ex3, recv7)\n    print(t.get())\n    ex3.shutdown()",
+            "    ex3 := Executor()\n    t := submit_task(ex3, recv7)\n    match t.get():\n        Ok(v): print(v)\n        Err(e): print(e.message())\n    ex3.shutdown()",
             send7,
             "",
             false,

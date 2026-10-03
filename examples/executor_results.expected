@@ -1,5 +1,4 @@
-first fault: empty row
 alpha -> 5
- -> no result
+ -> fault: empty row
 beta -> 4
 gamma -> 5

@@ -104,15 +104,12 @@ test fn map_and_struct_globals_in_place():
     assert a.get() == 2, "task saw map len {a.get()}"
     assert b.get() == 7, "task saw p.x {b.get()}"
 
-# --- the pin instant is a SOURCE POSITION (one build per epoch) -------------------
+# --- the pin instant is the task's own START -----------------------------------------
 #
-# In-place mutation writes no module slot, so nothing REFRESHES a task's view mid-nursery: every spawn
-# between two cache invalidations (a global assignment, or a nursery open) replays ONE build. Both
-# tasks below therefore see len 1 — the view built at the first spawn — at every
-# `--threads` count. An earlier cut refreshed the view at "the next slot write, else the join" instead, which
-# made the M:N EAGER per-connection path pin at the spawn and the lazy path pin later: the
-# since-removed cooperative engine
-# printed 2, bare `run` 1, and `--threads=1` flipped it back to 2.
+# A task sees its globals as of its own `spawn` (TICKET-208; Go: a goroutine sees the heap as of
+# `go`). In-place mutation writes no module slot, so every spawn re-reads a view that holds a
+# mutable aggregate: the first task below sees len 1, the second len 2, at every `--threads` count.
+# Before TICKET-208 both saw len 1, the view built at the nursery's first spawn.
 aq: List[int] = [1]
 
 test fn in_place_mutation_between_two_spawns_of_one_nursery():
@@ -123,7 +120,7 @@ test fn in_place_mutation_between_two_spawns_of_one_nursery():
         aq.push(2)
         spawn: b.set(aq.len())
     assert a.get() == 1, "first task saw len {a.get()}"
-    assert b.get() == 1, "second task saw len {b.get()}"
+    assert b.get() == 2, "second task saw len {b.get()}"
     assert aq.len() == 2, "parent saw len {aq.len()}"
 
 # The same shape one level down — a nursery NESTED inside a task, which on M:N with >= 2 hardware

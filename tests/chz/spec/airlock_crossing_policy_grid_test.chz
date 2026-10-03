@@ -17,6 +17,12 @@
 import std.concurrency
 import airlock_crossing_policy_lib as lib
 
+# A handle carries a `Result`; these tests read a job that did not fault.
+fn must[T](r: Result[T]) -> T:
+    match r:
+        Ok(v): return v
+        Err(e): panic(e.message())
+
 fn t189_out(res: Result[int]) -> str:
     match res:
         Ok(n): return "ok {n}"
@@ -427,14 +433,14 @@ test fn grid_policy_r17_executor_submit_named():
 test fn grid_policy_r46_executor_submit_result_named():
     xs := [1]
     ex := Executor()
-    got := ex.submit_result(fn() -> str: t189_try(xs)).recv()
+    got := must(ex.submit_result(fn() -> str: t189_try(xs)).recv())
     ex.shutdown()
     assert got == "fault"
     assert xs == [1]
 
 test fn grid_policy_r47_executor_submit_result_fresh():
     ex := Executor()
-    got := ex.submit_result(fn() -> str: t189_try([1])).recv()
+    got := must(ex.submit_result(fn() -> str: t189_try([1])).recv())
     ex.shutdown()
     assert got == "ok 2"
 
