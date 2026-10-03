@@ -1,0 +1,20 @@
+import std.concurrency
+fn job(tag: str, ch: Channel[str]) -> int:
+    for j in range(3):
+        ch.send("{tag}.{j}")
+    return 0
+fn main():
+    ch := Channel[str](64)
+    parallel:
+        for c in range(3):
+            spawn:
+                ex := Executor()
+                for k in range(3):
+                    ex.submit(fn() -> int: job("c{c}k{k}", ch))
+                ex.shutdown()
+                ch.send("joined{c}")
+    out := []
+    for _ in range(30):
+        out.push(ch.recv())
+    print(" ".join(out))
+main()

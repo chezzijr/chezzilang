@@ -1,0 +1,18 @@
+import std.concurrency
+fn slow(xs: List[str], tag: str) -> List[str]:
+    i := 0
+    while i < 30000:
+        i = i + 1
+    xs.push(tag)
+    return xs
+fn bump(box: Shared[List[str]], tag: str) -> int:
+    box.update(fn(xs: List[str]) -> List[str]: slow(xs, tag))
+    return 0
+fn main():
+    box := Shared[List[str]]([])
+    parallel:
+        for c in range(4):
+            spawn:
+                _r := [0, 1, 2].map(fn(k: int) -> int: bump(box, "c{c}.{k}"))
+    print(" ".join(box.get()))
+main()
