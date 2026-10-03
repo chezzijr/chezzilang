@@ -152,6 +152,51 @@ fn the_same_seed_replays_byte_for_byte_at_one_worker() {
     );
 }
 
+/// TICKET-206: a `send` inside a native callback replays byte-for-byte at one worker even when the
+/// whole process is pinned to one core (`taskset -c 3`). A callback thread must queue its own next
+/// turn before it releases the permit (`Vm::slice_end_in_place`), and a gated worker likewise
+/// (`Vm::mn_worker_loop`); otherwise the order depends on how long the bookkeeping between the
+/// release and the re-queue takes, which on one core is a scheduling accident.
+#[test]
+fn callback_send_replays_byte_for_byte_pinned_to_one_core() {
+    const RUNS: usize = 10;
+    let prog = fixture("callback_send_interleave.chz");
+    let mut red = Vec::new();
+    for seed in 1..=8u64 {
+        let mut counts: std::collections::HashMap<String, usize> = Default::default();
+        for _ in 0..RUNS {
+            let out = Command::new("taskset")
+                .args(["-c", "3"])
+                .arg(env!("CARGO_BIN_EXE_chezzi"))
+                .arg("run")
+                .arg(&prog)
+                .env("CHEZZI_SCHED_SEED", seed.to_string())
+                .env("CHEZZI_THREADS", "1")
+                .output()
+                .expect("spawn taskset chezzi");
+            assert!(
+                out.status.success(),
+                "seed {seed} pinned to one core should pass: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            *counts
+                .entry(String::from_utf8_lossy(&out.stdout).into_owned())
+                .or_default() += 1;
+        }
+        if counts.len() != 1 {
+            red.push(format!(
+                "seed {seed} pinned to one core gave {} distinct outputs at T=1: {counts:?}",
+                counts.len()
+            ));
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "seeded T=1 replay pinned to one core is not byte-for-byte:\n{}",
+        red.join("\n")
+    );
+}
+
 /// Part 1: the seed must actually drive the schedule, not be ignored. Unseeded T=1 is FIFO (measured
 /// in `## Digest`); with the seed wired in, different seeds must produce at least two distinct
 /// schedules, and at least one must differ from the FIFO order.
