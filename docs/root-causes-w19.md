@@ -212,6 +212,7 @@ runs on the current slice. W17-1 re-measured: no effect.
    `Checker::slot_holds_fn_decl` and `Checker::check_default_scope`; grid `name_denotes_grid`.
 4. **G3** (K2, K3) — TICKET-202; K4 split out to TICKET-204 (parser/AST, no shared code) — checker generics; after N3 if they share files.
 5. **A1** — TICKET-203 — a bug against TICKET-191's decision; small (`std/concurrency` task + memoize).
+6. **S1 follow-up** (found by TICKET-200's implementing stage) — TICKET-205: at T=1 an Executor job's CPU loop starves another Executor's job (23.4 s vs 131 ms at T=2; Go ~100 ms). One runner handover at budget exhaustion for every party kind.
 
 ## Owner decision (2026-10-02): what a type-applied name may be — follow Rust
 
