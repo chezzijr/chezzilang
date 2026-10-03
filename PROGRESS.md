@@ -7,14 +7,18 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
-- **TICKET-206 (2026-10-04): seeded T=1 replay is byte-for-byte for `wait:` in a native callback.**
-  `tests/sched_seed/callback_wait_interleave.chz` replayed at 76-78 of 80 (seeds 1-8 x 10 runs,
+- **TICKET-206 (2026-10-04): a gated worker and a callback thread queue their own next turn; callback replay rates rise, `wait:` and `recv` in a callback stay a measured rate when the box is oversubscribed.**
+  `tests/sched_seed/open/callback_wait_interleave.chz` replayed at 76-78 of 80 (seeds 1-8 x 10 runs,
   release). Cause: `Vm::mn_worker_loop` released the runner permit, ran its `match disp`
   bookkeeping, and only then re-queued with a fresh ticket, so its place depended on how long the
   bookkeeping took. Fix, the one `width::reserve` rule and no second mechanism: a gated worker
   queues its own next turn while it still holds the permit, when a fiber is runnable or its fiber
   yielded; the `OwnTurn` guard withdraws a turn the loop exits without taking. A callback thread
-  does the same in `Vm::slice_end_in_place`. Measured: 80 of 80 idle and under 8 CPU hogs. The
+  does the same in `Vm::slice_end_in_place`. Measured: 80 of 80 idle and under 8 CPU hogs.
+  Under 40 CPU hogs on 28 cores `callback_wait_interleave.chz` replays at 77-80 of 80 (base 71) and
+  `callback_recv_interleave.chz` at 79-80 on the debug binary (base 75-80); both fixtures moved to
+  `tests/sched_seed/open/` (TICKET-209). `callback_send_interleave.chz` pinned to one core went
+  from 67-77 to 80 and has its own test. The
   open fixtures are unchanged in kind (`tests/sched_seed/open/`): nursery join 60 of 80, guard wait
   35-36, Executor join 69; `docs/gaps.md` **W15-10** stays OPEN (TICKET-209, TICKET-208) and also
   carries the one-core (`taskset -c 3`) rates. Perf, interleaved n=7, release, wall ms, base median

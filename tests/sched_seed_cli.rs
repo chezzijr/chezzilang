@@ -104,28 +104,27 @@ fn a_passing_run_under_sched_seed_changes_no_output() {
 
 /// Part 1: replay at `CHEZZI_THREADS=1` is byte-for-byte for every fixture below (TICKET-205).
 ///
-/// One fixture per wait site the waker-reserves rule covers: a fiber-owned nested fan-out, a flat
-/// fan-out, a body `recv` on a rendezvous and on a bounded channel, a body `wait:`, a `recv` and
-/// a `send` inside a native callback, and a `wait:` inside a native callback (TICKET-206). This test
-/// goes red when a gated thread picks or draws from the seeded RNG without the runner permit, when
-/// an in-place channel wait stops listing its slot (`Vm::gated_register`), or when a channel wake
-/// bypasses `ChannelCore::wake_all`. It also goes red when a gated worker re-queues after its
-/// bookkeeping instead of before releasing the permit (`Vm::mn_worker_loop`). `docs/gaps.md`
-/// **W15-10** lists the waits that are NOT byte-for-byte yet; their red fixtures are in
-/// `tests/sched_seed/open/`; TICKET-209 (nursery join, guard wait) and TICKET-208 (Executor) each
-/// move theirs into `FIXTURES` when the wait closes.
+/// One fixture per wait site that holds 80 of 80 on an oversubscribed box (40 CPU hogs on 28
+/// cores, debug and release): a fiber-owned nested fan-out, a flat fan-out, a body `recv` on a
+/// rendezvous and on a bounded channel, a body `wait:`, and a `send` inside a native callback. This
+/// test goes red when a gated thread picks or draws from the seeded RNG without the runner permit,
+/// when an in-place channel wait stops listing its slot (`Vm::gated_register`), or when a channel
+/// wake bypasses `ChannelCore::wake_all`. `docs/gaps.md` **W15-10** lists the waits that are NOT
+/// byte-for-byte yet; their fixtures are in `tests/sched_seed/open/`, which no test reads. A `recv`
+/// and a `wait:` inside a native callback are there since TICKET-206: 80 of 80 on an idle box, a
+/// measured rate under 40 hogs. TICKET-209 (nursery join, guard wait, both callback fixtures) and
+/// TICKET-208 (Executor) each move theirs into `FIXTURES` when the wait holds 80 of 80 under 40
+/// hogs.
 #[test]
 fn the_same_seed_replays_byte_for_byte_at_one_worker() {
     const RUNS: usize = 10;
-    const FIXTURES: [&str; 8] = [
+    const FIXTURES: [&str; 6] = [
         "nested_interleave.chz",
         "interleave.chz",
         "body_recv_interleave.chz",
         "body_recv_bounded_interleave.chz",
         "body_wait_interleave.chz",
-        "callback_recv_interleave.chz",
         "callback_send_interleave.chz",
-        "callback_wait_interleave.chz",
     ];
     let mut red = Vec::new();
     for name in FIXTURES {

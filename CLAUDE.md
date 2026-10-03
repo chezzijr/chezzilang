@@ -79,7 +79,7 @@ cargo run -- run --parallel examples/primes_parallel.chz   # accepted no-op alia
 cargo run -- run --threads=4 examples/primes_parallel.chz  # size the OS-thread pool (0/omitted = all cores; env CHEZZI_THREADS)
 cargo run -- test examples/              # run every `test fn` in *_test.chz (M20); file or dir, default cwd
 CHEZZI_THREADS=4 cargo run -- test tests/chz   # `test` sizes the same pool as `run`, env-only (no `--threads` flag on `test`)
-CHEZZI_SCHED_SEED=<u64> cargo run -- run <file>   # seeded scheduler mode (TICKET-167): replay at T=1 (byte-for-byte for channel waits; W15-10 lists the rest), perturbation at T>=2; a failing run reports its seed on stderr
+CHEZZI_SCHED_SEED=<u64> cargo run -- run <file>   # seeded scheduler mode (TICKET-167): replay at T=1 (byte-for-byte for body channel waits and a callback `send`; W15-10 lists the rest), perturbation at T>=2; a failing run reports its seed on stderr
 cargo build --release --bin schedfuzz --bin chezzi && target/release/schedfuzz --seeds 1..33 --threads 1,2,0   # long-running seeded-scheduler sweep over tests/chz + concurrency examples/*.chz (0 = default worker count too — W15-1 only reproduces there); see docs/bug-discovery.md "Seeded scheduler oracle"
 cargo run -- docs                        # print docs: no topic = full LLM reference bundle; `docs <topic>` = one (spec/syntax/stdlib); `docs topics` lists them
 
