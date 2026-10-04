@@ -12,4 +12,13 @@ fn is_task_copy(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     Ok(NativeRet::Bool(h.arg_is_task_copy(0)?))
 }
 
-pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[("is_task_copy", is_task_copy, Kind::Inline)];
+fn mark_task_copy(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "mark_task_copy", 1)?;
+    h.arg_mark_task_copy(0)?;
+    Ok(NativeRet::Nil)
+}
+
+pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
+    ("is_task_copy", is_task_copy, Kind::Inline),
+    ("mark_task_copy", mark_task_copy, Kind::Inline),
+];

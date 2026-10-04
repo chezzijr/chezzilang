@@ -85,12 +85,18 @@ pub enum Route {
     /// A Channel/Shared/RwShared/Atomic read or an Executor job root: the sender gave the value
     /// away, so the receiver owns it (DEC-179 item 6).
     Handoff,
+    /// A value a task copy read through a handle whose owner aliases it: `Task.get`, a
+    /// `memoize1` wrapper (TICKET-213).
+    CopyRead,
 }
 
 /// Whether a rebuild on `route` marks what it allocates, given the `enclosing` mark in force.
 pub fn marks(route: Route, enclosing: bool) -> bool {
     match route {
-        Route::Spawn | Route::ModuleSnapshot | Route::ClosureCaptures { same_heap: false } => true,
+        Route::Spawn
+        | Route::CopyRead
+        | Route::ModuleSnapshot
+        | Route::ClosureCaptures { same_heap: false } => true,
         Route::ClosureCaptures { same_heap: true } => enclosing,
         Route::Handoff => false,
     }
@@ -143,6 +149,7 @@ mod tests {
         for enclosing in [false, true] {
             assert!(marks(Route::Spawn, enclosing));
             assert!(marks(Route::ModuleSnapshot, enclosing));
+            assert!(marks(Route::CopyRead, enclosing));
             assert!(marks(
                 Route::ClosureCaptures { same_heap: false },
                 enclosing

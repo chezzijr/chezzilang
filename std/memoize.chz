@@ -10,7 +10,8 @@
 # visible). A task copy of the wrapper carries that map as it was at the crossing and reads it first,
 # so it sees the value as of the crossing, like every other captured value; a write to it there faults
 # (D4). A copy never writes the alias (`concurrency.is_task_copy`); a key the owner had not cached
-# reads a fresh snapshot from the shared cache. Two tasks missing one key at the same moment may both
+# reads a snapshot from the shared cache, marked as the task's copy (TICKET-213), so a write to it
+# faults too. Two tasks missing one key at the same moment may both
 # run `f`; CPython's `functools.cache` does the same.
 #
 # ponytail: single-argument only — `memoize1(f: fn(K) -> V)`, keyed by the arg (`K: Hashable + Eq`,
@@ -29,12 +30,32 @@ fn _memo_get[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], own: Map[K, V], f
             return v
         None:
             pass
+    if concurrency.is_task_copy(own):
+        return _memo_copy_read(shared, f, k)
     v := match shared.get_key(k):
         Some(x): x
         None: _memo_fill(shared, f, k)
-    if not concurrency.is_task_copy(own):
-        own[k] = v
+    own[k] = v
     return v
+
+# A copy's read is a snapshot of the shared cache, marked as the task's copy; on a miss it fills the
+# cache once and reads it back once, because `_memo_fill` returns the caller's own object and marking
+# that would mark what the task owns; a key that never equals itself is not found by the read-back,
+# and the fill's own value is returned unmarked (no recursion: `f` runs once per call, as on base).
+fn _memo_copy_read[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
+    match shared.get_key(k):
+        Some(x):
+            concurrency.mark_task_copy(x)
+            return x
+        None:
+            pass
+    v := _memo_fill(shared, f, k)
+    match shared.get_key(k):
+        Some(x):
+            concurrency.mark_task_copy(x)
+            return x
+        None:
+            return v
 
 fn _memo_fill[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
     v := f(k)

@@ -8,6 +8,12 @@
 # {copy, owner}, judged against CPython (`Future.result()`, `functools.cache`: the one object) and
 # Chezzi's spawn rule (the value current at the crossing). Plus: the owner's `get()` stays one object
 # after a crossing, and a copy's write to the crossing value faults (D4), as a captured write does.
+#
+# TICKET-213 (A1): `a_copy_write_faults_in_every_owner_state` and its `_in_an_executor_job` twin run
+# {Task.get, memoize1} x owner state x carrier {spawn call, Executor job}: a copy's write faults in
+# the `unobserved` state too. `a_handoff_receiver_write_is_never_silently_lost` is the channel-handoff
+# carrier, `a_task_owned_key_reachable_from_a_memo_result_stays_writable` the over-mark cell, and
+# `a_copy_miss_on_a_key_that_never_equals_itself_returns_the_fill` the bounded read-back.
 
 import std.concurrency
 import submit_task, Task from std.concurrency.task
@@ -196,3 +202,115 @@ test fn a_copy_write_to_the_crossing_value_faults_like_a_captured_write():
     assert got == [d4, d4], str(got)
     assert str(must(t.get())) == "[1, 99]", str(must(t.get()))
     assert str(m(1)) == "[1, 99]", str(m(1))
+
+fn d4_msg() -> str:
+    return "this value is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()"
+
+fn want_owner(state: str) -> str:
+    if state == "mutated":
+        return "[1, 99]"
+    return "[1]"
+
+test fn a_copy_write_faults_in_every_owner_state():
+    for state in ["mutated", "observed", "unobserved"]:
+        t := task_in_state(state)
+        m := memo_in_state(state)
+        out := Channel[str](2)
+        parallel:
+            spawn copy_write(t, m, out)
+        got := [out.recv(), out.recv()]
+        assert got == [d4_msg(), d4_msg()], "{state}: {got}"
+        assert str(must(t.get())) == want_owner(state), "{state}: {must(t.get())}"
+        assert str(m(1)) == want_owner(state), "{state}: {m(1)}"
+
+test fn a_copy_write_faults_in_every_owner_state_in_an_executor_job():
+    for state in ["mutated", "observed", "unobserved"]:
+        t := task_in_state(state)
+        m := memo_in_state(state)
+        out := Channel[str](2)
+        ex := Executor()
+        ex.submit(fn(): copy_write(t, m, out))
+        ex.shutdown()
+        got := [out.recv(), out.recv()]
+        assert got == [d4_msg(), d4_msg()], "{state}: {got}"
+        assert str(must(t.get())) == want_owner(state), "{state}: {must(t.get())}"
+        assert str(m(1)) == want_owner(state), "{state}: {m(1)}"
+
+fn handoff_write(tc: Channel[Task[List[int]]], mc: Channel[fn(int) -> List[int]], out: Channel[str]):
+    t := tc.recv()
+    m := mc.recv()
+    rt := recover: must(t.get()).push(5)
+    send_outcome(rt, out)
+    out.send(str(must(t.get())))
+    rm := recover: m(1).push(5)
+    send_outcome(rm, out)
+
+test fn a_handoff_receiver_write_is_never_silently_lost():
+    t := task_in_state("unobserved")
+    m := memo_in_state("unobserved")
+    tc := Channel[Task[List[int]]](1)
+    mc := Channel[fn(int) -> List[int]](1)
+    tc.send(t)
+    mc.send(m)
+    out := Channel[str](3)
+    parallel:
+        spawn handoff_write(tc, mc, out)
+    got := [out.recv(), out.recv(), out.recv()]
+    assert got == ["write ok", "[1, 5]", d4_msg()], str(got)
+    assert str(must(t.get())) == "[1]", str(must(t.get()))
+    assert str(m(1)) == "[1]", str(m(1))
+
+struct Key:
+    id: int
+    log: List[int]
+
+    fn hash(self) -> int:
+        return self.id
+
+    fn eq(self, other: Key) -> bool:
+        return self.id == other.id
+
+fn same(k: Key) -> Key:
+    return k
+
+fn own_key_write(m: fn(Key) -> Key, out: Channel[str]):
+    k := Key(7, [])
+    r := m(k)
+    rk := recover: k.log.push(1)
+    send_outcome(rk, out)
+    out.send(str(k.log))
+    rr := recover: r.log.push(2)
+    send_outcome(rr, out)
+
+test fn a_task_owned_key_reachable_from_a_memo_result_stays_writable():
+    m := memoize1(same)
+    out := Channel[str](3)
+    parallel:
+        spawn own_key_write(m, out)
+    got := [out.recv(), out.recv(), out.recv()]
+    assert got == ["write ok", "[1]", d4_msg()], str(got)
+    assert str(m(Key(7, [])).log) == "[]"
+
+struct NeverEq:
+    id: int
+
+    fn hash(self) -> int:
+        return self.id
+
+    fn eq(self, other: NeverEq) -> bool:
+        return false
+
+fn never_list(k: NeverEq) -> List[int]:
+    return [k.id]
+
+fn never_use(m: fn(NeverEq) -> List[int], out: Channel[str]):
+    out.send(str(m(NeverEq(1))))
+
+# A key that never equals itself is not found by the copy's read-back: the fill's own value is
+# returned and the call ends (a retry loop there hangs).
+test fn a_copy_miss_on_a_key_that_never_equals_itself_returns_the_fill():
+    m := memoize1(never_list)
+    out := Channel[str](1)
+    parallel:
+        spawn never_use(m, out)
+    assert out.recv() == "[1]"
