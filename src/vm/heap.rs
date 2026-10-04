@@ -1153,8 +1153,8 @@ impl Heap {
                 // `Executor(pending=…)` display already makes. The locks are taken SEQUENTIALLY,
                 // and even nested they would keep the `inner → eager` order the submit arm
                 // establishes (`Vm::executor_method` holds `inner` across `dispatch_eager_job`,
-                // which takes `eager` alone). `core::nested_core_bytes`'s `Executor` arm reads both
-                // halves too and MUST stay in lockstep: the `cores` set is shared between the two
+                // which takes `eager` alone). `core::nested_core_bytes`'s `Executor` arm reads the
+                // same `ExecutorCore::held_bytes`: the `cores` set is shared between the two
                 // walks, so a half missing from either arm is dropped whenever that walk gets there
                 // first.
                 //
@@ -1178,33 +1178,15 @@ impl Heap {
                             g.summary().0
                         }
                     };
-                    let eager = {
-                        let g = core.eager.lock().unwrap_or_else(|e| e.into_inner());
-                        if deep {
-                            crate::vm::core::queue_bytes_structural(
-                                g.summary(),
-                                g.values(),
-                                &mut cores,
-                                &mut pending,
-                            )
-                        } else {
-                            g.summary().0
-                        }
-                    };
-                    // Both guards are dropped before the drain locks anything nested.
+                    // The guard is dropped before the drain locks anything nested.
                     let nested =
                         crate::vm::core::drain_pending_core_bytes(&mut cores, &mut pending);
-                    // W7-26r sibling — plus the jobs this executor has DISPATCHED BUT NOT YET FINISHED.
-                    // Each is a fully built worker heap, queued in the process-global pool or
-                    // running, whose submit-time bytes no other heap counts: 300 of them summing to
-                    // 666 MB sailed past an 8 MB cap while every individual heap stayed well under
-                    // it. The submitter is charged until the job finishes (`ExecutorCore::pending`,
-                    // TICKET-205), and `Relaxed` is enough — this is a size estimate sampled at a sweep, not a
-                    // synchronization edge.
-                    queued
-                        + eager
-                        + nested
-                        + core.pending.load(std::sync::atomic::Ordering::Relaxed)
+                    // W7-26r sibling — plus what the Executor holds outside every heap: its finished
+                    // jobs' retained output, and the submit-time bytes of the jobs DISPATCHED BUT
+                    // NOT YET FINISHED (300 of them summing to 666 MB sailed past an 8 MB cap while
+                    // every individual heap stayed well under it; the submitter is charged until the
+                    // job finishes, TICKET-205). One facade, `ExecutorCore::held_bytes`.
+                    queued + nested + core.held_bytes()
                 }
                 Obj::Shared(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
                     if deep {
@@ -1910,20 +1892,6 @@ mod iter_obj_tests {
             h.live_bytes(),
             with_results,
             "the eager charge must not depend on the cap"
-        );
-
-        // A core nested in a result IS charged under a cap, through the shared `cores` de-dup.
-        let nested = Arc::new(SharedCore::default());
-        nested.store(wlist(500));
-        {
-            let mut g = core.eager.lock().unwrap();
-            let i = g.reserve();
-            let w = crate::vm::wire::WireValue::Shared(Arc::clone(&nested));
-            finish_done(&mut g, i, w);
-        }
-        assert!(
-            h.live_bytes() >= with_results + nested.summary.bytes(),
-            "a core nested inside an eager result must be charged under a cap"
         );
 
         // The join drains the slots — the charge goes with them.

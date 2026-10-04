@@ -2366,12 +2366,7 @@ impl Vm {
                 // `pending=0` while jobs are running. Exactly one term is ever non-zero today.
                 Obj::Executor(core) => Ok(format!(
                     "Executor(pending={})",
-                    core.inner.lock().unwrap().len()
-                        + core
-                            .eager
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .outstanding()
+                    core.inner.lock().unwrap().len() + core.outstanding()
                 )),
                 // D6: render open/closed without exposing the fd; matches no interp counterpart (net
                 // is VM-only) but mirrors the core handles' structural `Display`.
@@ -2530,7 +2525,10 @@ impl Vm {
                 )
             }
             WireValue::Executor(core) => {
-                format!("Executor(pending={})", core.inner.lock().unwrap().len())
+                format!(
+                    "Executor(pending={})",
+                    core.inner.lock().unwrap().len() + core.outstanding()
+                )
             }
             // D6: render open/closed without exposing the fd (mirrors the heap `Display`).
             WireValue::Socket(core) => {

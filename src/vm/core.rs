@@ -1302,21 +1302,6 @@ impl EagerState {
     pub fn summary(&self) -> (usize, bool) {
         (self.bytes, self.dirty)
     }
-
-    /// The finished jobs' return values, for the nested-core walk in
-    /// [`queue_bytes_deep`] — the [`ExecState::iter`] counterpart. Only `Done` carries a value; the
-    /// other outcomes own buffered output only, already in `bytes`.
-    ///
-    /// W7-27: in the bin build every `Done` value is `WireValue::Nil` (nothing can read a job's
-    /// result, so it is dropped rather than retained), which makes this walk a `Nil` match per slot.
-    /// Kept anyway — it is what the accounting would need again the day a result IS stored, and the
-    /// `Nil` arm costs nothing; the unit tests store real values through `EagerState::finish`.
-    pub fn values(&self) -> impl Iterator<Item = &WireValue> {
-        self.slots.iter().filter_map(|s| match s {
-            Some(super::TaskOutcome::Done(r)) => Some(&r.value),
-            _ => None,
-        })
-    }
 }
 
 /// W7-26 — one finished job's `(owned bytes, holds a nested core)`, the [`wire_summary`] of a
@@ -1509,6 +1494,28 @@ pub struct ExecutorCore {
     /// its `JOIN_DEADLOCK_MSG` fault names the `Executor()` call instead of claiming a false
     /// `line 1, col 1`.
     pub created_at: Span,
+}
+
+impl ExecutorCore {
+    /// Jobs submitted and not yet finished. With [`held_bytes`](Self::held_bytes), the one facade
+    /// over what an Executor holds outside every heap; every production reader goes through it.
+    pub fn outstanding(&self) -> usize {
+        self.eager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .outstanding()
+    }
+
+    /// Bytes this Executor holds outside every heap: its finished jobs' retained output plus the
+    /// submit-time bytes of its unfinished jobs. Both `--max-heap` walks read this one number.
+    pub fn held_bytes(&self) -> usize {
+        self.eager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .summary()
+            .0
+            + self.pending.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Every `ExecutorCore` created during one run, in creation order — the list the program-exit join
@@ -2021,17 +2028,14 @@ pub fn drain_pending_core_bytes(
                 let g = c.q.lock().unwrap();
                 acc += queue_bytes_structural(g.summary(), g.iter(), seen, pending);
             }
-            // W7-26 — BOTH halves, each under its OWN scoped guard so the two are never held at once.
+            // W7-26 — the queue half under its own scoped guard, then `ExecutorCore::held_bytes` (the
+            // one facade `Heap::live_bytes`'s `Obj::Executor` arm reads too), never both held at once.
             WireValue::Executor(c) => {
                 let queued = {
                     let g = c.inner.lock().unwrap();
                     queue_bytes_structural(g.summary(), g.iter(), seen, pending)
                 };
-                let eager = {
-                    let g = c.eager.lock().unwrap_or_else(|e| e.into_inner());
-                    queue_bytes_structural(g.summary(), g.values(), seen, pending)
-                };
-                acc += queued + eager;
+                acc += queued + c.held_bytes();
             }
             WireValue::Shared(c) => {
                 let g = c.v.lock().unwrap();
