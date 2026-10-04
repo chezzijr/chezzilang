@@ -37936,18 +37936,20 @@ fn multi_arg_turbofish_is_a_value() {
 /// TICKET-213: `Executor(n)` caps the running jobs; the checker accepts zero arguments or one `int`.
 #[test]
 fn executor_accepts_a_worker_limit() {
-    ok("import std.concurrency\nfn main():\n    ex := Executor(2)\n    ex.shutdown()\nmain()\n");
+    entry_ok(
+        "import std.concurrency\nfn main():\n    ex := Executor(2)\n    ex.shutdown()\nmain()\n",
+    );
 }
 
 #[test]
 fn executor_rejects_a_bad_worker_limit() {
-    rejects(
+    entry_rejects(
         "import std.concurrency\nex := Executor(\"x\")\n",
         "argument 1 of 'Executor': expected int, found str",
     );
-    rejects(
+    entry_rejects(
         "import std.concurrency\nex := Executor(1, 2)\n",
         "'Executor' expects 0–1 argument(s), got 2",
     );
-    ok("import std.concurrency\nex := Executor()\nex.shutdown()\n");
+    entry_ok("import std.concurrency\nex := Executor()\nex.shutdown()\n");
 }
