@@ -791,21 +791,12 @@ print("after nursery")
     assert!(out.contains("after nursery"), "the nursery joined: {out:?}");
 }
 
-/// W7-57 review defect 1 — **a cancelled sibling's `defer` runs to COMPLETION**. This is the test
-/// `quiesce.rs` used to cite `exit_in_spawned_child_aborts_siblings` for; that
-/// program contains no `defer` at all, so the citation pinned nothing.
-///
-/// The first cut of the W7-57 rungs broke this two ways at once: M:N stopped running the defer while
-/// the serial engine still did (an engine divergence, and the code asserted the opposite of what it did), and
-/// worse, a defer that had already STARTED was killed part-way — measured at 2/8 and 6/6 depending on
-/// timing. A half-executed cleanup is worse than either running or skipping it: inconsistent state,
-/// nondeterministically. Fixed by suppressing the exit rung inside a `defer` (`run_exit_err`) and by
-/// routing a fiber that HOLDS a cancel flag down the `Cancelled` path (`Vm::exit_halt`).
-///
-/// The defer body here is deliberately long AND crosses a native HOF — the two checkpoints W7-57 added
-/// — so a partial run would show up as `DEFER ENTER` without `DEFER EXIT`.
+/// TICKET-213 (owner decision 5) — **an exit runs no `defer` of a cancelled sibling** (Go `os.Exit`,
+/// Python `os._exit`). Until TICKET-213 this test asserted the opposite rule (W7-57: the sibling's
+/// `defer` ran whole). The job's exit is published while `sib` sleeps; the halt wakes `sib`, it
+/// unwinds, and its `defer` must not start: no `DEFER ENTER`, and the body never resumes.
 #[test]
-fn a_cancelled_siblings_defer_runs_whole_on_both_engines() {
+fn an_exit_runs_no_defer_of_a_cancelled_sibling() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
@@ -841,19 +832,105 @@ print("after nursery")
     let (status, out) = run_capped(&entry, 30);
     assert_eq!(status, 3, "the job's exit is the status (out: {out:?})");
     assert!(
-        out.contains("DEFER ENTER"),
-        "the sibling's defer ran (out: {out:?})"
+        !out.contains("DEFER ENTER"),
+        "an exit runs no defer of a sibling (out: {out:?})"
     );
     assert!(
-        out.contains("DEFER EXIT 3000000 0"),
-        "…and ran to COMPLETION, never truncated mid-body (out: {out:?})"
+        !out.contains("sib body done"),
+        "the sibling's body never resumes (out: {out:?})"
     );
 }
 
-/// W7-57 review defect 1, the other half — the shapes the `defer` suppression must NOT rescue. A
-/// party with no cancel flag of its own (a top-level `main`) and one whose only flag is its executor's
-/// `shutdown_now` token (an eager job) are still killed promptly, because `exit_halt`'s suppression is
-/// `deferring`/`cancelled`, never "this party is flagless".
+/// TICKET-213 — an exit CUTS a `defer` body that is already running. The `defer` body sends the
+/// handshake, so the job's exit lands while the body sleeps.
+#[test]
+fn an_exit_cuts_a_running_defer_body() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        r#"import std.concurrency
+import std.time
+import std.os
+hs := Channel[int](1)
+fn cleanup():
+    hs.send(1)
+    time.sleep_ms(3000)
+    print("DEFER EXIT")
+fn work():
+    defer cleanup()
+fn bail():
+    hs.recv()
+    os.exit(3)
+ex := Executor()
+ex.submit(bail)
+work()
+print("after work")
+"#,
+    );
+    let (status, out) = run_capped(&entry, 30);
+    assert_eq!(status, 3, "the job's exit is the status (out: {out:?})");
+    assert!(
+        !out.contains("DEFER EXIT"),
+        "the exit cut the defer body (out: {out:?})"
+    );
+    assert!(
+        !out.contains("after work"),
+        "main did not run on (out: {out:?})"
+    );
+}
+
+/// TICKET-213 — the `is_cancelled()` cell of `exit_halt`: `boom` cancels `sib`, whose `defer` body
+/// is spinning on the CPU when the job's exit lands. A fiber already cut as `Cancelled` runs user
+/// code only inside a `defer` of its own unwind, and the exit must cut that body too. With
+/// `exit_halt` keeping `self.is_cancelled() ||` the program hangs and the cap kills it.
+#[test]
+fn an_exit_cuts_a_spinning_defer_body_of_a_cancelled_sibling() {
+    let t = TmpDir::new();
+    let entry = t.write(
+        "main.chz",
+        r#"import std.concurrency
+import std.time
+import std.os
+hs := Channel[int](1)
+fn cleanup():
+    hs.send(1)
+    i := 0
+    while i < 400000000:
+        i = i + 1
+    print("DEFER EXIT")
+fn sib():
+    defer cleanup()
+    time.sleep_ms(3000)
+    print("sib body done")
+fn boom():
+    panic("boom")
+fn bail():
+    hs.recv()
+    os.exit(3)
+ex := Executor()
+ex.submit(bail)
+parallel:
+    spawn sib()
+    spawn boom()
+print("after nursery")
+"#,
+    );
+    let (status, out) = run_capped(&entry, 30);
+    assert_eq!(status, 3, "the job's exit is the status (out: {out:?})");
+    assert!(
+        !out.contains("DEFER EXIT"),
+        "the exit cut the spinning defer body (out: {out:?})"
+    );
+    assert!(
+        !out.contains("after nursery"),
+        "main did not run on (out: {out:?})"
+    );
+}
+
+/// W7-57 review defect 1, the other half — a spinning party with no cancel flag of its own (a
+/// top-level `main`) and one whose only flag is its executor's `shutdown_now` token (an eager job)
+/// are killed promptly by an exit. Since TICKET-213 `exit_halt` has no suppression at all: an exit
+/// cuts a running `defer` body and an already-cancelled fiber too.
 #[test]
 fn the_defer_suppression_does_not_rescue_a_spinning_flagless_party() {
     for (name, tail) in [

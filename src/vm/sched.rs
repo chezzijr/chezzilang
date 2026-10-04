@@ -3138,12 +3138,10 @@ impl Vm {
         // ranks last (TICKET-062). This changes ONLY which error propagates; it does not
         // touch the `Exit`-over-`Fault` rule above or the nursery's abort semantics (every fault
         // still trips the shared cancel flag the same way it always did).
-        // W7-47 — `first_exit` only ever comes from a SLOT, so an `os.exit` issued by an eager
-        // `Executor` job (which owns no slot) is invisible here, and a nursery whose tasks are all
-        // blocked reported a `deadlock` — a confident WRONG verdict about the user's program, the
-        // `parked-is-not-stuck` class. The run-scoped cell carries that exit, folded in as an ordinary
-        // `first_exit` so there is ONE precedence table (Go's rule: the first `os.Exit` wins).
-        let first_exit = first_exit.or_else(|| self.quiesce.pending());
+        // W7-47 — `first_exit` only ever comes from a SLOT, so an `os.exit` issued by an `Executor`
+        // job of another sched is invisible in it, and a nursery whose tasks are all blocked would
+        // report a `deadlock` — a confident WRONG verdict, the `parked-is-not-stuck` class. The
+        // `run_exit_err` guard below delivers that run-wide exit, inside a `defer` too (TICKET-213).
         // TICKET-208 — the run-wide halt, read through its one funnel after a slot's own exit and
         // before any slot fault: a `recover:` around this nursery must not catch a sibling fault
         // and outlive a job fault that ends the run. Every slot's output is already flushed.

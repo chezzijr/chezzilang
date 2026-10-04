@@ -493,9 +493,9 @@ impl Vm {
         // two were found together and are fixed together; see it for why it is first and unthrottled by
         // `deferring`.)
         //
-        // [`Vm::exit_halt`], not `run_exit_err`: it is suppressed while `deferring > 0` — which is the
-        // whole reason this fn raises that counter before calling here — and it sends a fiber that
-        // holds a cancel flag down the `Cancelled` path so its `defer`s still run.
+        // [`Vm::exit_halt`], not `run_exit_err`: it sends a fiber that holds a cancel flag down the
+        // `Cancelled` path. An exit is delivered inside a `defer` body too (TICKET-213); a job
+        // fault is not.
         if self.quiesce.run_halt_hint()
             && let Some(fr) = self.frames.last()
         {
@@ -2042,8 +2042,8 @@ impl Vm {
     /// halts a spinning party ever reaches, and they need one thing the blocking rungs' bare
     /// [`Vm::run_exit_err`] does not give them:
     ///
-    /// **A fiber that HOLDS a cancel flag unwinds as `Cancelled`, not as an exit** — so it runs its
-    /// `defer`s exactly as it does for a sibling fault, matching the pre-W7-57 behaviour. Ordering the publication (`request_exit` → `halt_all_scheds` → flag) does NOT
+    /// **A fiber that HOLDS a cancel flag unwinds as `Cancelled`, not as an exit.** Its unwind runs
+    /// no `defer`: `Vm::next_deferred` reads the published exit before each pop. Ordering the publication (`request_exit` → `halt_all_scheds` → flag) does NOT
     /// achieve this and the claim that it did was wrong: an `Acquire` load orders only the reads that
     /// FOLLOW it, and both sites read cancel BEFORE exit, so `cancel == false` + `exit == true` is a
     /// legal interleaving. Measured as a nondeterministic `defer`: 2/8 runs, and one killed mid-body.
@@ -2054,11 +2054,14 @@ impl Vm {
     /// forever. An eager `Executor` job DOES hold one (its executor's `shutdown_now` token), so it
     /// takes the cancel path — it still dies promptly, and its submitter's join reports the code.
     ///
-    /// `cancel_suppressed()` gates both arms, so a `defer` body is never entered *or* truncated by
-    /// this rung; and `pending()` — the `Mutex` cell, the authority — is confirmed before either arm,
-    /// because the atomic is only a lock-free HINT and a `chezzi test` reset clears the cell.
+    /// Nothing suppresses this rung (TICKET-213, owner decision 5): an exit cuts a running `defer`
+    /// body, and it cuts an already-cancelled fiber too, which runs user code only inside a `defer`
+    /// of its own unwind (keeping an `is_cancelled()` exemption hangs the exit on a spinning
+    /// `defer`, measured). A job fault still waits for a `defer` to end: `run_halt_due` holds that.
+    /// `pending()` — the `Mutex` cell, the authority — is confirmed before either arm, because the
+    /// atomic is only a lock-free HINT and a `chezzi test` reset clears the cell.
     fn exit_halt(&mut self, span: Span) -> Option<RuntimeError> {
-        if self.cancel_suppressed() || !self.quiesce.run_halt_hint() || !self.run_halt_due() {
+        if !self.quiesce.run_halt_hint() || !self.run_halt_due() {
             return None;
         }
         if self.quiesce.pending().is_some() && self.cancel_flags().next().is_some() {

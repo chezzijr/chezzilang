@@ -2355,16 +2355,11 @@ impl Vm {
     /// their un-accounting (`running += 1`, `unregister_waiter`, …) BETWEEN learning
     /// of the exit and returning it, exactly as their cancel arms do.
     pub(super) fn run_exit_err(&mut self, span: Span) -> Option<RuntimeError> {
-        // gaps.md W7-57 — NEVER while a `defer` is running, the one suppression `halt_requested`
-        // has always had. A `defer` IS the cleanup a halt exists to run; killing it PART-WAY leaves
-        // inconsistent state and is worse than either running it or skipping it — and it is
-        // nondeterministic, since whether the exit lands mid-body depends on timing (measured: a
-        // sibling `defer` that printed 2/8, and one killed after its `ENTER` line). Guarded HERE, at
-        // the single funnel every rung routes through, rather than at the seven call sites.
-        //
-        // Cost: an infinitely-looping `defer` delays the exit. That is a pathological program and
-        // `--timeout` (checked ABOVE this rung at every site) already covers it; a half-run cleanup on
-        // an ordinary program does not trade for it.
+        // TICKET-213 (owner decision 5) — an exit cuts a `defer` body; a job fault does not, a
+        // cleanup still runs whole for a fault. `run_halt_due` holds that split (it keeps
+        // `deferring == 0` on the job-fault arm alone), so this funnel returns the exit whenever the
+        // exit cell is set, inside a `defer` too. (W7-57 suppressed the exit here while a `defer`
+        // ran; Go `os.Exit` and Python `os._exit` run no cleanup.)
         if !self.run_halt_due() {
             return None;
         }
@@ -2382,9 +2377,10 @@ impl Vm {
     /// TICKET-208 — THE predicate "a run-wide halt is pending for this party": an `os.exit` from
     /// another party, or a fire-and-forget `Executor` job's fault. A CPU-side or in-place
     /// checkpoint reads this (behind the lock-free `run_halt_hint`); it never reads the exit cell
-    /// or the job-fault cell by itself.
+    /// or the job-fault cell by itself. An exit is due inside a `defer` too (TICKET-213); a job
+    /// fault waits for the `defer` to end.
     pub(super) fn run_halt_due(&self) -> bool {
-        self.deferring == 0 && (self.quiesce.pending().is_some() || self.quiesce.has_job_fault())
+        self.quiesce.pending().is_some() || (self.deferring == 0 && self.quiesce.has_job_fault())
     }
 
     /// The halts of a party that comes back from a wait it could not poll (a nursery join, an
@@ -2451,14 +2447,10 @@ impl Vm {
             if let Some(e) = self.take_halt(span) {
                 return Err(e);
             }
-            // TICKET-136 — `run_exit_err` is suppressed inside a `defer` (W7-57), so a pending run-wide
-            // `os.exit` from another party must be read HERE, or a `defer` judged deadlocked would
-            // report `deadlock` for somebody else's exit. The exit outranks the verdict (Go: exit 3).
-            if self.deferring > 0
-                && let Some(code) = self.quiesce.pending()
-            {
-                self.pending_exit = Some(code);
-                return Err(self.err("exit".to_string(), span));
+            // A pending run-wide `os.exit` from another party outranks the verdict (Go: exit 3),
+            // inside a `defer` too: read through the one funnel (TICKET-136, TICKET-213).
+            if let Some(e) = self.run_exit_err(span) {
+                return Err(e);
             }
             return Err(self.err(deadlock_msg.to_string(), span).deadlock());
         }

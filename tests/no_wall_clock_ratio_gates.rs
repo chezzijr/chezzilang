@@ -326,7 +326,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 109] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 111] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     // TICKET-208, `tests/executor_task_grid.rs`. Every `time.sleep_ms` of these five is inside a
     // fixture .chz program's SOURCE STRING: a job's long work (3 s, 6 s) that a cut must end, or a
@@ -341,7 +341,9 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 109] = [
     "executor_limit_shutdown_now_ends_held_jobs",
     "executor_limit_shutdown_now_never_starts_a_held_job",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
-    "a_cancelled_siblings_defer_runs_whole_on_both_engines",
+    "an_exit_runs_no_defer_of_a_cancelled_sibling",
+    "an_exit_cuts_a_running_defer_body",
+    "an_exit_cuts_a_spinning_defer_body_of_a_cancelled_sibling",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
     "a_finished_jobs_output_survives_a_timeout_bail",
     // TICKET-118. Its 300ms `time.sleep_ms` is inside the fixture .chz program's SOURCE STRING, not

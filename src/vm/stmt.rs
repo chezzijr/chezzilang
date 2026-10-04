@@ -30,29 +30,60 @@ impl Vm {
         Ok(())
     }
     /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's
-    /// own list so the not-yet-run records stay GC-rooted in the frame. Skipped on a hard
-    /// `std.os.exit` (Go: `os.Exit` does not run deferred calls). Returns the latest fault, if any.
+    /// own list so the not-yet-run records stay GC-rooted in the frame. Stops once any party's
+    /// `std.os.exit` is published, between two `defer`s too (Go: `os.Exit` does not run deferred
+    /// calls). Returns the latest fault, if any.
     pub(super) fn drain_top_frame_deferred(&mut self) -> Option<RuntimeError> {
-        if self.pending_exit.is_some() {
-            return None;
+        self.drain_frame_to(0)
+    }
+
+    /// THE one pop and the one read of the exit rule, asked before EACH pop: `Ok(None)` when no
+    /// `defer` is left or this party is already exiting; `Err` when another party's exit is
+    /// published with a `defer` still pending. The exit is delivered here, so no `recover:` catches
+    /// the unwind and no caller runs on.
+    ///
+    /// The length test comes first, so a return with no `defer` takes no mutex. The read is the
+    /// exit cell (`quiesce.pending()`), never `run_halt_hint()`: the hint is stored after the scheds
+    /// are halted, and a party woken by that halt would still run its `defer` (TICKET-213, measured
+    /// at two workers).
+    fn next_deferred(
+        &mut self,
+        fi: usize,
+        marker: usize,
+    ) -> Result<Option<Deferred>, RuntimeError> {
+        if self.frames[fi].deferred.len() <= marker || self.pending_exit.is_some() {
+            return Ok(None);
         }
-        let fi = self.frames.len() - 1;
+        if self.quiesce.pending().is_some()
+            && let Some(e) = self.run_exit_err(Span::RUNTIME)
+        {
+            return Err(e);
+        }
+        Ok(self.frames[fi].deferred.pop())
+    }
+
+    /// Run frame `fi`'s pending `defer`s down to `marker`, LIFO, each popped by
+    /// [`Vm::next_deferred`]. Returns the latest fault; an exit ends the drain and is the result.
+    fn drain_deferred(&mut self, fi: usize, marker: usize) -> Option<RuntimeError> {
         let mut err = None;
-        while let Some(d) = self.frames[fi].deferred.pop() {
-            if let Err(e) = self.run_one_deferred(d) {
-                err = Some(e);
-                if self.pending_exit.is_some() {
-                    break;
+        loop {
+            match self.next_deferred(fi, marker) {
+                Ok(Some(d)) => {
+                    if let Err(e) = self.run_one_deferred(d) {
+                        err = Some(e);
+                    }
                 }
+                Ok(None) => return err,
+                Err(exit) => return Some(exit),
             }
         }
-        err
     }
 
     /// Leave a lexical defer scope (`LeaveDeferScope`): pop the top marker and run the current
     /// frame's defers registered since it, LIFO. This is the block-scoped analogue of
     /// `drain_top_frame_deferred` — it drains down to a marker, not to the bottom of the frame.
-    /// Skipped on a hard `std.os.exit`. Returns the latest fault from a deferred call, if any.
+    /// Stops once any party's `std.os.exit` is published, between two `defer`s too. Returns the
+    /// latest fault from a deferred call, if any.
     pub(super) fn leave_defer_scope(&mut self) -> Option<RuntimeError> {
         let fi = self.frames.len() - 1;
         debug_assert!(
@@ -65,24 +96,12 @@ impl Vm {
 
     /// Drain the current (top) frame's pending defers down to `marker` (the count to leave behind),
     /// LIFO. The block-scoped analogue of `drain_top_frame_deferred` for an explicit marker — used
-    /// by `LeaveDeferScope` and by every `recover:` boundary path. Skipped on a hard `std.os.exit`.
-    /// Returns the latest fault from a deferred call, if any.
+    /// by `LeaveDeferScope` and by every `recover:` boundary path. Stops once any party's
+    /// `std.os.exit` is published, between two `defer`s too. Returns the latest fault from a
+    /// deferred call, if any.
     pub(super) fn drain_frame_to(&mut self, marker: usize) -> Option<RuntimeError> {
-        if self.pending_exit.is_some() {
-            return None;
-        }
         let fi = self.frames.len() - 1;
-        let mut err = None;
-        while self.frames[fi].deferred.len() > marker {
-            let d = self.frames[fi].deferred.pop().unwrap();
-            if let Err(e) = self.run_one_deferred(d) {
-                err = Some(e);
-                if self.pending_exit.is_some() {
-                    break;
-                }
-            }
-        }
-        err
+        self.drain_deferred(fi, marker)
     }
 
     /// Unwind frames from the current depth down to `target_frame_len`, running each discarded
@@ -195,15 +214,8 @@ impl Vm {
                 let child = self.drain_escaped_nursery(floor.min(self.nurseries.len()));
                 escaped_err = escaped_err.or(child);
             }
-            if run_defers && self.pending_exit.is_none() {
-                while let Some(d) = self.frames[fi].deferred.pop() {
-                    if let Err(e) = self.run_one_deferred(d) {
-                        err = Some(e);
-                        if self.pending_exit.is_some() {
-                            break;
-                        }
-                    }
-                }
+            if run_defers && let Some(e) = self.drain_deferred(fi, 0) {
+                err = Some(e);
             }
             let frame = self.frames.pop().unwrap();
             if frame.counted {

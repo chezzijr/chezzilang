@@ -483,8 +483,91 @@ fn a_job_fault_is_delivered_by_its_handle_or_ends_the_run() {
     judge(misses);
 }
 
+/// The two-`defer` exit programs: `tail` (the first `defer` to run) sends the handshake and then
+/// sorts, so the job's exit is published while that `defer` runs. At one worker the job cannot run
+/// while `main` sorts, so the exit is published after `main` ends; only the status is asserted there.
+const TWO_DEFER_HEAD: &str = "import std.concurrency
+import std.os
+hs := Channel[int](1)
+xs: List[int] = []
+for i in range(400000):
+    xs.push((i * 7919) % 400009)
+fn bail():
+    hs.recv()
+    os.exit(3)
+ex := Executor()
+ex.submit(bail)
+";
+
+fn exit_between_defers(name: &str, tail: &str, misses: &mut Vec<String>) {
+    let src = format!("{TWO_DEFER_HEAD}{tail}");
+    for t in THREADS {
+        let g = run(name, &src, Mode::Run, t, None);
+        if g.code != Some(3) || (t != "1" && !g.out.is_empty()) {
+            misses.push(format!("{name} T={t}: {}", g.show()));
+        }
+    }
+}
+
+/// An exit published while one `defer` runs stops the frame's NEXT `defer` too, and the party
+/// does not run on.
 #[test]
-#[ignore = "TICKET-213: os.exit runs no defer"]
+fn an_exit_starts_no_later_defer_of_a_frame() {
+    let mut misses = Vec::new();
+    exit_between_defers(
+        "twodefer",
+        "fn tail():
+    hs.send(1)
+    xs.sort()
+fn work():
+    defer print(\"SECOND DEFER\")
+    defer tail()
+work()
+print(\"after work\")
+",
+        &mut misses,
+    );
+    judge(misses);
+}
+
+/// The same on a fault unwind: it stops before `SECOND DEFER`, and no `recover:` catches it.
+/// First program: `work` faults with both `defer`s pending. Second: the first `defer` faults
+/// after the exit is published.
+#[test]
+fn an_exit_stops_a_fault_unwind_before_its_next_defer() {
+    let mut misses = Vec::new();
+    exit_between_defers(
+        "twodefer_recover",
+        "fn tail():
+    hs.send(1)
+    xs.sort()
+fn work():
+    defer print(\"SECOND DEFER\")
+    defer tail()
+    panic(\"x\")
+r := recover: work()
+print(\"after work\")
+",
+        &mut misses,
+    );
+    exit_between_defers(
+        "twodefer_deferfault",
+        "fn tail():
+    hs.send(1)
+    xs.sort()
+    panic(\"y\")
+fn work():
+    defer print(\"SECOND DEFER\")
+    defer tail()
+r := recover: work()
+print(\"after work\")
+",
+        &mut misses,
+    );
+    judge(misses);
+}
+
+#[test]
 fn os_exit_runs_no_defer_for_any_party() {
     let mut misses = Vec::new();
     for p in &PARTIES {
