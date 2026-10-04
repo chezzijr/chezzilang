@@ -135,14 +135,13 @@ which under eager execution is its **`submit`**. Reading a global that is mutate
 and the `shutdown()` is racing a running job, not observing a defined state. The view is identical at
 every `--threads`.
 
-One sub-statement caveat, because in-place aggregate mutation writes no module slot for the runtime to
-notice: **within one nursery**, consecutive `spawn`s share one view, which is refreshed by a global
-*assignment* (`g = …`, `q = […]`) but not by an in-place mutation. So if a `spawn` is followed by
+**Within one nursery** the same rule holds: a task's view is refreshed by a global *assignment*
+(`g = …`, `q = […]`) and by an in-place mutation alike. So if a `spawn` is followed by
 `q.push(x)` and then another `spawn` into the SAME nursery — with no assignment in between — the second
-task still sees the pre-`push` `q`. Every task's view is a single coherent instant (never a mix of old
-and new values), and it is the same instant; only its freshness stops at the last
-assignment / nursery open. Open a new `parallel:`, assign the global, pass the value as a spawn argument,
-or send it through a `Channel` if a task must see an in-place mutation made mid-nursery.
+task sees the post-`push` `q` too (TICKET-208). Every task's view is a single coherent instant (never
+a mix of old and new values): its own `spawn` / `submit`. The runtime rebuilds the view only when
+something a global reaches was mutated since the last build (TICKET-213: the heap's one `&mut` door
+moves a view epoch), so a spawn storm that mutates nothing shares one snapshot.
 To actually **share** mutable cross-task state, use `Shared[T]` / `RwShared[T]` / `Atomic[T]` (below) or a
 `Channel[T]` — those cross by shared handle, not by copy, so a task-side write IS visible to the parent.
 
@@ -515,8 +514,9 @@ into each task by value. See `docs/stdlib.md` for signatures.
 ### 5b. `std.concurrency.task` — result handles for `Executor` work
 
 Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. The result-returning primitive is
-`Executor.submit_result[T](f: fn() -> T) -> Channel[T]`: submit `f` and get a cap-1 `Channel[T]` you
-`.recv()` for its result after `shutdown()`. `std.concurrency.task` wraps that channel in a
+`Executor.submit_result[T](f: fn() -> T) -> Channel[Result[T]]`: submit `f` and get a cap-1 channel you
+`.recv()` for its outcome (`Ok(value)` or `Err(message)`, TICKET-208; the `Task.get() -> T` raise
+described below is now `Task.get() -> Result[T]`). `std.concurrency.task` wraps that channel in a
 future-style handle over one shared state core (every copy of the handle, in any task, reads it):
 
 - `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle (builds over
@@ -1203,18 +1203,21 @@ fn serve(tok: Token, io: Channel[str]):
 > a queued value, a tripped `done()` latch and a fired timer win over a cancel; the task is cut at its
 > next wait or back-edge (TICKET-194).
 >
-> Exactly one thing deliberately skips a `defer`: **`std.os.exit`**, a hard halt by design. (An
-> `os.exit` executed *by* a cancelled task's `defer` is honored — it beats the sibling's fault and sets
-> the process exit code, identically.)
+> Exactly one thing deliberately skips a `defer`: **`std.os.exit`**. **`os.exit` runs no `defer` in
+> any task, and cuts a `defer` body that is running; buffered stdout is flushed** (Go `os.Exit`,
+> Python `os._exit`; owner decision 2026-10-04, TICKET-213). The task that calls it, its siblings and
+> every Executor job stop where they are: a `defer` not yet started never starts, in a frame's
+> remaining `defer`s and in a fault unwind alike, and no `recover:` catches the unwind. (An `os.exit`
+> executed *by* a `defer` is honored — it beats the sibling's fault and sets the process exit code.)
 >
 > **Every spawned task starts — even into an already-cancelled scope.** A `spawn`ed task is *always*
 > run: M:N cannot do otherwise (a scope completes only at `done == total`, so a queued fiber is picked
 > up even after a sibling has faulted). So the task runs its prologue, prints what it prints, registers
-> its `defer`, and dies at its first checkpoint. (This is why
-> a sibling of a task that calls `std.os.exit` still runs its prologue: the exit is a hard halt for the
-> *program*, reduced at the nursery join, not a freeze-frame on already-spawned tasks.)
+> its `defer`, and dies at its first checkpoint. (A sibling of a task that calls `std.os.exit` may
+> still run its prologue before the exit reaches it; it runs no `defer`.)
 >
-> **A `defer` is never itself cancelled.** No cancellation point fires *inside* a deferred call — a
+> **A `defer` is never itself cancelled** (by a cancel; an `os.exit` does cut it, see above, and a
+> fire-and-forget job fault does not). No cancellation point fires *inside* a deferred call — a
 > `defer` is the cleanup the cancel exists to run. Every registered `defer` of a cancelled task runs, in
 > LIFO order (loops, blocking ops and HOF callbacks inside a defer body included), whether the task was
 > cancelled at a checkpoint, returned normally, or faulted on its own while a sibling had already
@@ -2134,8 +2137,25 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 
 ### The escape hatch (C5): `Executor` — a separately-owned work queue
 
-> **Status (shipped — EAGER):** `submit` **starts the job immediately** on the shared pool and
+> **Status (shipped — EAGER):** `submit` **starts the job immediately** and
 > `shutdown()` **waits** for the submitted work — the `ThreadPoolExecutor` / `ExecutorService` model.
+>
+> **An Executor is spawned tasks plus a pool (TICKET-208, TICKET-213).** A job is a spawned task: it
+> starts through the function `spawn` uses, copies its globals at the `submit`, inherits its creator's
+> cancel chain, and parks like any fiber. The pool is the Executor's own runner threads, started on
+> demand up to the worker count; an idle runner waits 5 ms for a next job, then leaves, so an idle
+> Executor holds no thread. `Executor(n)` caps the jobs running at once at `n` (`Executor()` has no
+> cap; `n < 1` faults `Executor(n) needs n >= 1`). A job over the cap is held: it starts when a
+> running job finishes, and a parked job still counts as running (CPython `ThreadPoolExecutor(n)`).
+> `shutdown_now()` never starts a held job; a RUNNING job is cut at its first cancellation point.
+> `n` jobs that each wait for a held job are a deadlock, reported at the parked job's blocking op
+> (CPython hangs there).
+>
+> **The drain contract (TICKET-208).** A fire-and-forget job's fault ends the run at once: no
+> `recover:` catches it, and the first fault is the report. A handle job (`submit_result`,
+> `submit_task`) never faults by itself: its fault is its handle's `Err`, and `shutdown()` raises no
+> job fault. Paragraphs below that describe `shutdown()` raising the lowest-index fault predate that
+> rule.
 > **The usage shape that keeps you out of a race: read or assert after `shutdown()`, never between it
 > and the `submit`** — in that window the job is already running.
 >

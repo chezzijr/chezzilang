@@ -478,23 +478,36 @@ parallel:
 `spawn print(concurrency.is_task_copy(xs))` prints `false`: a spawn's call arguments run in the
 parent (Go `go f(x)`), so the query runs before the crossing.
 
+### `concurrency.mark_task_copy` — mark a value as this task's copy
+`mark_task_copy(v) -> nil` (after `import std.concurrency`). Marks `v` and everything it reaches as
+this task's copy, so a later write to it faults `this value is this task's copy` (D4). It is for std
+code that reads a shared core on behalf of a handle its owner aliases: `Task.get()` and a
+`memoize1` wrapper call it on the snapshot a task copy reads, because a write to that snapshot would
+never reach the owner (TICKET-213). A plain `Shared.get()` or `ch.recv()` result is the receiver's
+own and is not marked. `Kind::Inline`, like `is_task_copy`.
+
 ### `Executor` — task pool
-`submit(task: fn() -> _) -> nil` — **starts the job immediately** on the shared pool (detached,
-fire-and-forget), like Python's `ThreadPoolExecutor.submit` ·
-`shutdown() -> nil` (**wait** for the submitted work — every job runs; raises the lowest-index fault,
-see `concurrency.md` §8) ·
-`shutdown_now() -> nil` (drop work that has not started, ask running jobs to stop **cooperatively**,
-then wait — Java `shutdownNow`; a job with no cancellation point still finishes, but one **sleeping,
-waiting a timer, or parked in a nested `Executor` join is ended** — see `concurrency.md`
-§cancellation points) ·
-`submit_result[T](f: fn() -> T) -> Channel[T]` — submit `f` and get back a cap-1 `Channel[T]` carrying
-its result (`.recv()` it **after** `shutdown()`). If the job faults **or `shutdown_now()` cancels it**, the channel is **CLOSED** rather
-than left empty forever — `.recv()` then faults `receive on a closed channel` instead of deadlocking,
-and `shutdown()` still raises the job's own fault. This is the result-returning primitive
-`std.concurrency.task.submit_task` / `Task[T]` wraps.
-`submit_outcome[T](f: fn() -> T, out: Channel[T], err: Channel[str]) -> nil` — the lower-level
-primitive `submit_result` builds on: submit `f`, send its value into `out` on success, or on a fault
-send the message into `err`, close `out`, and re-raise (so `shutdown()` still reports it); a job `shutdown_now()` cancels sends `task cancelled: shutdown_now() stopped it before it finished` into `err` and closes `out`.
+`Executor()` — a pool with no cap on the jobs running at once ·
+`Executor(n: int)` — **at most `n` jobs run at once** (Python `ThreadPoolExecutor(n)`); a job over the
+cap is held and starts when a running one finishes. `Executor(0)` (or any `n < 1`) faults
+`Executor(n) needs n >= 1`. A job parked in a blocking op still counts toward the cap, so `n` jobs
+that each wait for a held job are a deadlock, reported at the parked job's blocking op ·
+`submit(task: fn() -> _) -> nil` — **starts the job immediately** (detached, fire-and-forget), like
+Python's `ThreadPoolExecutor.submit`. **A job is a spawned task** (TICKET-208): it copies its
+globals at the submit, inherits its creator's cancel chain and parks like any `spawn`ed task. A
+fire-and-forget job's fault ends the run; no `recover:` catches it ·
+`shutdown() -> nil` (**wait** for the submitted work; it raises no job fault: a handle job's fault
+is its handle's `Err`, see `concurrency.md` §8) ·
+`shutdown_now() -> nil` (ask running jobs to stop **cooperatively**, then wait — Java `shutdownNow`;
+a RUNNING job with no cancellation point still finishes, but one **sleeping, waiting a timer, or
+parked in a nested `Executor` join is ended**; a job held by the `Executor(n)` cap never starts
+(CPython `shutdown(cancel_futures=True)`) — see `concurrency.md` §cancellation points) ·
+`submit_result[T](f: fn() -> T) -> Channel[Result[T]]` — submit `f` and get back a cap-1 channel
+carrying its outcome: `Ok(value)`, or `Err(message)` when the job faulted or `shutdown_now()`
+cancelled it. This is the result-returning primitive `std.concurrency.task.submit_task` / `Task[T]`
+wraps.
+`submit_outcome[T](f: fn() -> T, out: Channel[Result[T]]) -> nil` — the lower-level primitive
+`submit_result` builds on: submit `f` and send its one `Result[T]` outcome into `out`.
 
 **Jobs do not print in submission order, and `shutdown()` does not withhold their output.** Under
 `chezzi run` a job's `print` reaches stdout the moment it runs, so concurrent jobs interleave in
@@ -1723,7 +1736,7 @@ gap that bare `Executor.submit(f)` is fire-and-forget (returns nothing).
 | item | signature | semantics |
 | --- | --- | --- |
 | `submit_task` | `submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]` | submit `f` to `ex` for detached execution and get a handle for its result. The work STARTS at the submit and is waited for by `shutdown()` (or the program-exit join). |
-| `Task.get` | `get(self) -> T` | block until the result is available, then return it, or re-raise the job's own fault message if the job faulted (CPython `Future.result()`). Idempotent, and the same answer in every task. **Identity:** in the task that holds the original handle every call returns the same object, so `a := t.get(); a.push(3)` shows in the next `t.get()` (CPython `fut.result() is fut.result()`). A task holding an airlock copy of the handle gets the value as of the crossing: the owner's object as copied with the handle, including the owner's writes before the spawn (CPython: the same object). A write to it in the copy faults `this value is this task's copy` (D4), as for any captured value. A copy whose owner had not called `get()` before the crossing gets a fresh snapshot from the core on each call. A task `shutdown_now()` cancelled raises `task cancelled: shutdown_now() stopped it before it finished` at once (CPython: `CancelledError`). |
+| `Task.get` | `get(self) -> Result[T]` | block until the outcome is available, then return it: `Ok(value)`, or `Err(message)` when the job faulted or `shutdown_now()` cancelled it (CPython `Future.result()`, a `Result` in place of a raise). A task copy of the handle whose owner had not called `get()` before the crossing reads a snapshot marked as the task's copy, so a write to it faults (D4, TICKET-213); `.copy()` gives a writable value. Idempotent, and the same answer in every task. **Identity:** in the task that holds the original handle every call returns the same object, so `a := t.get(); a.push(3)` shows in the next `t.get()` (CPython `fut.result() is fut.result()`). A task holding an airlock copy of the handle gets the value as of the crossing: the owner's object as copied with the handle, including the owner's writes before the spawn (CPython: the same object). A write to it in the copy faults `this value is this task's copy` (D4), as for any captured value. A copy whose owner had not called `get()` before the crossing gets a fresh snapshot from the core on each call. A task `shutdown_now()` cancelled raises `task cancelled: shutdown_now() stopped it before it finished` at once (CPython: `CancelledError`). |
 | `Task.done` | `done(self) -> bool` | `true` once the job has finished, faulted, or been cancelled by `shutdown_now()`, in every task holding a copy of the handle. Never blocks. A faulted job is done; `get()` then re-raises its fault. |
 
 Canonical shape: submit every task, `shutdown()`, then `.get()` each. **Determinism rule:** a `Task`'s
@@ -1765,8 +1778,7 @@ result cached (`K: Hashable + Eq` — a map key needs both, `docs/gaps.md` W7-53
 Executor job reads and fills the same cache as its creator, as CPython `functools.cache` does from any
 thread. Lookups and inserts are O(1) expected. The task holding the original wrapper gets the **same
 object** on every call (CPython `f(1) is f(1)`; a mutation of the result stays visible), through a
-private alias map; a task copy of the wrapper reads that map as copied at the crossing, so it sees the value as of the crossing and its write to that value faults (D4); a key the owner had not cached gives the copy a fresh snapshot of the shared cache's value
-(`concurrency.is_task_copy`, DEC-191). Two tasks missing one key at the same moment may both run `f`,
+private alias map; a task copy of the wrapper reads that map as copied at the crossing, so it sees the value as of the crossing and its write to that value faults (D4); a key the owner had not cached gives the copy a snapshot of the shared cache's value, marked as the task's copy, so a write to it faults too (`concurrency.mark_task_copy`, TICKET-213; `.copy()` gives a writable value). Two tasks missing one key at the same moment may both run `f`,
 as with CPython's `functools.cache`.
 **v1 limit (not a bug):** single-argument only. A general N-arg cache would key a `Map[(A, B), V]` on
 the argument tuple: a tuple of Hashable args is a valid key (TICKET-161), so an N-arg wrapper can be

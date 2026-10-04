@@ -155,7 +155,7 @@ already the right machinery and is what jobs are now dispatched onto.
 
 - **D1 — Lifetime: detached, joined at program exit.** Shipped. A2 is reworded from "run the backlog
   nobody ran" to "wait for in-flight work".
-- **D2 — Concurrency: shared process pool, no size parameter.** Shipped; `Executor()` stays zero-arg.
+- **D2 — Concurrency: shared process pool, no size parameter.** Shipped; since TICKET-213 `Executor(n)` caps the jobs running at once (`Executor()` has no cap).
   **Accepted known limits:** the old parent-participation mitigation is gone with the batch join.
   TICKET-052 (2026-09) closed the starvation limit this row used to accept: a job blocking on a
   `Channel`, a `Shared`/`RwShared` guard, `time.sleep_ms`/a timer, or a nested `Executor` join now

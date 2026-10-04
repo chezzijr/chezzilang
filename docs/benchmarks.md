@@ -3229,3 +3229,75 @@ The round-trip cost is TICKET-208's (249 vs 254, inside the spread). The storm c
 for the larger part (5449 -> 10464). The 1061 ms between the TICKET-208 tip and the branch is inside
 the larger spread (1458), but all five branch runs are slower than all five TICKET-208-tip runs; that
 difference is not resolved. `benches/run.chz` was not run: the plan stops at this result.
+
+### After the fix (TICKET-213, commit `812877f6`)
+
+The table above is the BEFORE state. Three causes, each measured, each fixed at one site.
+
+1. **Storm: one module snapshot per spawn.** TICKET-208's `Vm::fresh_view` dropped the cached
+   snapshot at every task start when a global held a mutable aggregate; base dropped it once per
+   nursery. Each task keeps its snapshot until it finishes, so at one worker 2000 snapshots of the
+   100000-item list were alive at the join (debug: 11.7 MB per task; 400 spawns reached max RSS
+   4709920 KB). Fix: `Heap::get_mut`, the sole `&mut Obj` door, moves a view epoch when it hands
+   out an object the cached snapshot reaches; `fresh_view` rebuilds only when the snapshot's
+   `(heap id, epoch)` stamp is stale. A task still sees its globals as of its own start.
+2. **Round trips: one runner thread per `submit`.** An Executor runner left the moment no job was
+   unfinished. `clone` calls per run (`/proc/stat` `processes` delta, 3 samples): base 8-11,
+   TICKET-208 2007-2014, after the fix 8-12. Fix: an idle runner waits 5 ms
+   (`EXEC_RUNNER_LINGER`) for a next job before it leaves.
+3. **Round trips at the default worker count: `available_parallelism()` per call.**
+   `worker_count()` asked the OS on every call, and the task-start path calls it several times per
+   task. With cause 2 fixed: 374 ms at the default count, 117 ms at `--threads=28` (the same
+   count). Fix: the auto count is read once per process.
+
+Release, n=5 per side, interleaved, wall time and max RSS from `wait4` rusage
+(`target/t213/meas.py`), every run inside `systemd-run --user --scope -p MemoryMax=6G -p
+MemorySwapMax=0`. `/proc/loadavg` at the start of the three runs: `3.98`, `13.53`, `3.20`. Cells are
+`median ms (spread) / max RSS MB`. The TICKET-208 tip is `0038805e`; it was not run at one worker
+(the storm there is killed at the 6 GB cap, 3 of 3, monitor measurement).
+
+| program | workers | base `fcbe2596` | TICKET-208 tip | branch |
+|---|---|---|---|---|
+| storm | 1 | 4422 (89) / 39 | killed at 6 GB | 4340 (191) / 39 |
+| storm | 4 | 5425 (80) / 87 | 9156 (1745) / 1822 | 5440 (121) / 87 |
+| storm | 0 | 5598 (32) / 519 | 8992 (480) / 885 | 5586 (82) / 423 |
+| trips | 1 | 113 (11) / 15 | - | 124 (12) / 15 |
+| trips | 4 | 116 (74) / 15 | 286 (43) / 15 | 100 (10) / 15 |
+| trips | 0 | 209 (91) / 15 | 579 (101) / 15 | 109 (12) / 15 |
+| `examples/primes_parallel.chz` | 1 | 29697 (977) / 15 | - | 28482 (804) / 15 |
+| `examples/primes_parallel.chz` | 4 | 9879 (149) / 15 | - | 9871 (242) / 15 |
+| `examples/primes_parallel.chz` | 0 | 10315 (382) / 15 | - | 10209 (306) / 15 |
+
+Every branch median is within the larger spread of its pair, or below base. Storm max RSS equals
+base at one and four workers and is below base at the default count. `trips` at one worker is
+11 ms over base with spreads 11 and 12. The `primes_parallel` rows were measured on the build
+before cause 3 was fixed.
+
+`benches/run.chz` needs `hyperfine`, which this box does not have. Its programs were run directly
+instead: `benches/chz/*.chz`, default worker count, n=5 per side, interleaved, base `fcbe2596` vs
+branch, `median ms (spread)`.
+
+| bench | base | branch |
+|---|---|---|
+| closure | 2356 (45) | 2417 (63) |
+| empty | 7 (2) | 7 (3) |
+| enum | 3644 (277) | 3767 (86) |
+| fib | 520 (39) | 489 (34) |
+| hof | 647 (62) | 645 (82) |
+| hof_nursery | 659 (43) | 688 (47) |
+| list | 698 (43) | 711 (49) |
+| loop | 1675 (42) | 1716 (15) |
+| many_list | 642 (29) | 651 (66) |
+| many_map | 470 (36) | 456 (40) |
+| many_struct | 775 (70) | 772 (86) |
+| map | 243 (33) | 241 (33) |
+| map_str | 348 (31) | 350 (32) |
+| poly_method | 2393 (56) | 2472 (98) |
+| primes | 1098 (28) | 1149 (69) |
+| str | 268 (29) | 258 (28) |
+| struct | 798 (58) | 827 (15) |
+| unique | 148 (37) | 126 (28) |
+
+No bench moved beyond the larger spread of its pair. `loop` (41 ms, spread 42) and `closure`
+(61 ms, spread 63) are at the edge; `Heap::get_mut` gained one predictable branch (`any_viewed`),
+which is false in every one of these programs.

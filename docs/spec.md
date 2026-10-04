@@ -152,7 +152,8 @@ registered `defer` runs in full (LIFO) — and a `recover:` installed *inside* a
 raised beneath it, so a panic in cleanup step 1 does not skip cleanup step 2 (it buys the defer body, not
 the task's life). Cancelling a scope also cancels its **nested** scopes. A `recover:` *outside* the defer in a
 cancelled task never catches the cancel (a cancelled task must die). `std.os.exit` is the one thing that
-skips `defer`s by design. Genuine deadlock is the one known limit (`docs/gaps.md` N5). **Cross-task
+skips `defer`s by design: it runs no `defer` in any task and cuts a `defer` body that is running
+(Go `os.Exit`; TICKET-213). Genuine deadlock is the one known limit (`docs/gaps.md` N5). **Cross-task
 stdout order is nondeterministic** (one `print` = one locked, line-atomic write); the
 line *set*, the exit code and whether a `defer` ran are what IS guaranteed.
 

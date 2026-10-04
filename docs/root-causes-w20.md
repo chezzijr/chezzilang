@@ -160,6 +160,7 @@ counting the inline joiner twice. The close-time farm and TICKET-159's hook fold
 ## Plan order
 
 1. **Executor rebuild** (A2 P0, C1, C3, H1; TICKET-207's fault rules, A1, C2; TICKET-206 wait 4) — TICKET-208. TICKET-207 closed into it.
+   Status (2026-10-04): TICKET-208 landed the engine. TICKET-213 landed A1 (a copy's write to an unread `Task.get()` / `memoize1` result faults), `Executor(n)` and the exit rule (`os.exit` runs no `defer`), which deletes C3. Seeded replay of the Executor stays a measured rate (W15-10).
 2. **P1** (K1 P0, K2, K3, K4, K5, K6, S1, S2) — TICKET-210.
 3. **W1** (H2) — TICKET-211; after TICKET-208 if they share scheduler files.
 4. **S3** — TICKET-212.
