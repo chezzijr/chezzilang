@@ -138,6 +138,7 @@ impl Vm {
             join_suspend: None,
             wait_suspend: None,
             send_suspend: None,
+            park_site: None,
             pending: None,
             offload: None,
             poll_park: None,

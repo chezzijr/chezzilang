@@ -2940,6 +2940,7 @@ fn mk_fiber(task_index: usize) -> Fiber {
         span: Span::RUNTIME,
         resume_native: None,
         pending: None,
+        park_site: None,
     }
 }
 /// An UNSTARTED fiber (`Pending`) — what `inject`/`seed` require so `run_one_fiber` runs the task
@@ -2958,6 +2959,7 @@ fn mk_pending_fiber(task_index: usize) -> Fiber {
         span: Span::RUNTIME,
         resume_native: None,
         pending: None,
+        park_site: None,
     }
 }
 fn empty_core() -> Arc<ChannelCore> {
@@ -15228,6 +15230,32 @@ y.shutdown()
     assert!(
         msg.contains("recv on an empty channel: deadlock"),
         "fault was: {msg}"
+    );
+}
+
+/// TICKET-208 — a deadlocked job is reported at its OWN blocking op, with the text the in-place
+/// path raises for that op: line 3 (the `recv`), not line 2 (the `Executor()`), and never the
+/// nursery text. Watchdogged like its neighbours.
+#[test]
+fn a_deadlocked_job_is_reported_at_its_own_recv_not_at_the_executor() {
+    let src = "ch := Channel[int](1)\nex := Executor()\nex.submit(fn(): print(ch.recv()))\nex.shutdown()\n";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_capture(src));
+    });
+    let res = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a job parked on a channel nobody feeds must fault, not hang");
+    let err = res.expect_err("the job waits on a channel nobody sends to — a deadlock");
+    assert!(
+        err.message.contains("recv on an empty channel: deadlock"),
+        "fault was: {}",
+        err.message
+    );
+    assert_eq!(
+        err.span.line, 3,
+        "the report must name the job's `recv`, got {:?}",
+        err.span
     );
 }
 

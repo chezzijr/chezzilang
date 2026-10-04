@@ -1228,6 +1228,7 @@ impl Vm {
                 let mut c = sched.lock();
                 c.scopes[0].body_open = true;
                 c.scopes[0].body_blocked = true;
+                c.leaf_site = true;
             }
             self.quiesce.register_eager_body(&sched);
             return Some(EagerScope {
@@ -2898,6 +2899,8 @@ impl Vm {
         }))
         .unwrap_or_else(|p| Disp::Finish(self.panic_outcome(p, span)));
         fiber.pending = self.pending.take();
+        // A fiber that parks carries its site; one that runs on carries `None`.
+        fiber.park_site = self.park_site.take();
         self.swap_ctx(&mut fiber.ctx);
         disp
     }

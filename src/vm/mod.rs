@@ -1036,6 +1036,10 @@ pub struct Vm {
     /// exclusive with `suspend`/`wait_suspend` (a fiber parks via exactly one). VM-global like
     /// `suspend` (one fiber runs at once).
     send_suspend: Option<GcRef>,
+    /// TICKET-208 — where and why the running fiber asked to park: the deadlock text the in-place
+    /// path raises for the same op, and the op's span. Set beside `suspend` / `send_suspend` /
+    /// `wait_suspend`, moved to [`Fiber::park_site`] by `run_one_fiber`.
+    park_site: Option<(&'static str, Span)>,
     /// TICKET-185 — the blocked party this `Vm` is running (a parked `send`'s offer, a parked
     /// `recv`'s slot, a `wait:`'s offers and slots), carried across a park by [`Fiber::pending`].
     /// The re-run op settles it first ([`crate::vm::core::PendingOp::settle`]).
@@ -1641,6 +1645,9 @@ struct Fiber {
     /// parked `recv` holds its channel here even without a slot, which [`SchedCore::provable`]
     /// counts. Dropping a parked fiber settles it, so none of its entries outlive it.
     pending: Option<crate::vm::core::PendingOp>,
+    /// TICKET-208 — the site this fiber parked at ([`Vm::park_site`]); `None` while it runs on.
+    /// A deadlocked `Executor` job is reported there (see [`SchedCore::record_deadlocked`]).
+    park_site: Option<(&'static str, Span)>,
 }
 
 impl Fiber {
@@ -2654,6 +2661,9 @@ struct SchedCore {
     exec_wids: Vec<bool>,
     /// The scope a detached sched's next `submit` grows (see [`MnSched::reserve_slot`]).
     exec_tail: usize,
+    /// A deadlocked fiber of this sched is reported at its own blocking op. True for a detached
+    /// sched (an `Executor`) alone: a nursery sched reports at the nursery.
+    leaf_site: bool,
     /// Task index to submit-time bytes, an entry only for a nonzero charge (DEC-205).
     slot_charge: fxhash::FxHashMap<usize, usize>,
     /// The sum of `slot_charge`: bytes of tasks reserved and not yet finished.
@@ -2964,6 +2974,7 @@ impl MnSched {
                 next_waiter_tok: 0,
                 exec_wids: vec![false; nworkers.max(1)],
                 exec_tail: 0,
+                leaf_site: false,
                 slot_charge: Default::default(),
                 unfinished_bytes: 0,
                 charged: 0,
@@ -5719,10 +5730,18 @@ impl SchedCore {
         // A scope with its own `deadlock_err` (the owner-fiber arm of `run_mn_nursery_nested`)
         // reports ITS span instead of the sched-wide `err` — see `JoinScope::deadlock_err` and
         // DEC-048.
-        let scope_err = self.scopes[sid]
-            .deadlock_err
-            .clone()
-            .unwrap_or_else(|| err.clone());
+        // TICKET-208 — else, on an `Executor`'s sched, the fiber's own blocking op: the text and
+        // span the in-place path raises there. Else the sched-wide `err`.
+        let scope_err = match (&self.scopes[sid].deadlock_err, f.park_site) {
+            (Some(e), _) => e.clone(),
+            (None, Some((msg, span))) if self.leaf_site => {
+                let mut e = err.clone();
+                e.message = msg.to_string();
+                e.span = span;
+                e
+            }
+            _ => err.clone(),
+        };
         self.slots[ti] = Some(TaskOutcome::Deadlocked {
             err: scope_err,
             out: f.ctx.out,
@@ -6169,6 +6188,7 @@ impl ReadyWorker {
             span,
             resume_native: None,
             pending: None,
+            park_site: None,
         }
     }
 }

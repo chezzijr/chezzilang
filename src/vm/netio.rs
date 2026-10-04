@@ -1787,7 +1787,7 @@ impl Vm {
             if op.p.is_queued() && !(self.native_reentry == 0 && self.halt_requested().is_some()) {
                 // A stray wake: still queued — re-park on the same offer.
                 self.pending = Some(op);
-                self.park_send(h, orig);
+                self.park_send(h, orig, core.cap, span);
                 return Ok(SendStep::Parked);
             }
             if let Some(r) = self.send_settled(op, span) {
@@ -1828,7 +1828,7 @@ impl Vm {
             // A real M:N WORKER snapshot-parks: the worker loop drives `send_suspend` →
             // `Disp::SendPark`.
             self.pending = Some(op);
-            self.park_send(h, orig);
+            self.park_send(h, orig, core.cap, span);
             return Ok(SendStep::Parked);
         }
         if mode == BlockMode::Demote {
@@ -1926,11 +1926,12 @@ impl Vm {
     /// the `send_suspend` sentinel. The scheduler / worker loop files the fiber into the channel's wait
     /// set; a sibling `recv` freeing a slot ([`Vm::wake_senders`]) wakes it. The value is re-serialized
     /// on the re-run (`to_wire_at(orig)` is idempotent), so the wire form built before parking is dropped.
-    pub(super) fn park_send(&mut self, h: GcRef, value: Value) {
+    pub(super) fn park_send(&mut self, h: GcRef, value: Value, cap: Option<usize>, span: Span) {
         self.push(Value::obj(h)); // receiver (deeper on the stack)
         self.push(value); // its one arg, back on top
         self.frames.last_mut().unwrap().ip -= 1;
         self.send_suspend = Some(h);
+        self.park_site = Some((send_deadlock_msg(cap), span));
     }
 
     /// Bounded-channel backpressure — after a `recv` frees a slot on a BOUNDED channel, wake any fiber
@@ -2072,7 +2073,7 @@ impl Vm {
                             sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
                         }),
                     );
-                    self.park_recv(h);
+                    self.park_recv(h, span);
                     return Ok(RecvStep::Parked);
                 }
                 // TICKET-181 changed cell (e) — an M:N fiber inside a native callback DEMOTES for
@@ -2105,7 +2106,7 @@ impl Vm {
         // `recv_ready` at `block_recv`'s loop head.
         let recv_mode = self.block_mode(WaitSpec::Recv);
         if recv_mode == BlockMode::Park {
-            self.park_recv(h);
+            self.park_recv(h, span);
             return Ok(RecvStep::Parked);
         }
         // An eagerly-dispatched `Executor` job has no scheduler, and neither does the top-level `main`
@@ -2131,10 +2132,11 @@ impl Vm {
     /// `ip` so the current op (`CallMethod(recv)` or `ChanRecvOrClosed`) re-executes on resume, and
     /// set the `suspend` sentinel. The scheduler / worker loop files the fiber into the channel's
     /// wait set; a sibling `send`/`close` wakes it.
-    pub(super) fn park_recv(&mut self, h: GcRef) {
+    pub(super) fn park_recv(&mut self, h: GcRef, span: Span) {
         self.push(Value::obj(h));
         self.frames.last_mut().unwrap().ip -= 1;
         self.suspend = Some(h);
+        self.park_site = Some((EMPTY_RECV_DEADLOCK, span));
     }
 
     /// One tick of a blocking wait: honour the halts, then wait up to [`DEMOTE_POLL_BACKOFF`]. Shared
@@ -2831,6 +2833,12 @@ impl Vm {
             }
             self.pending = Some(op);
             self.frames.last_mut().unwrap().ip -= 1; // re-run this WaitPoll on resume
+            let msg = if has_send {
+                FULL_SEND_DEADLOCK
+            } else {
+                EMPTY_WAIT_DEADLOCK
+            };
+            self.park_site = Some((msg, span));
             self.wait_suspend = Some(keys);
             return Ok(());
         }
