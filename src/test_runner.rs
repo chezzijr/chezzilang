@@ -2524,16 +2524,12 @@ struct Suite:
     }
 
     #[test]
-    fn executor_timeout_not_demoted_by_earlier_ordinary_fault() {
-        // W7-5 review Fix 1: `Executor.shutdown()`'s M:N drain (`reduce_task_slots`) must select the
-        // lowest-index HARD-HALT fault over an earlier ordinary one, not just the lowest index overall
-        // — else a `--timeout`/`--max-heap` abort gets demoted to a plain catchable error by an
-        // earlier sibling's fault. Job 0 faults immediately (ordinary); job 1 spins past the wall-clock
-        // cap (hard halt, `is_timed_out`). PRE-FIX: `reduce_task_slots` picks job 0's error purely by
-        // index, `recover:` catches it (it carries no hard-halt marker), and control falls through to
-        // the trailing assert — the test lands FAIL, not TIMED-OUT. POST-FIX: job 1's `is_timed_out`
-        // fault wins selection, bypasses `recover:` entirely (the marker-keyed bypass in `exec.rs`),
-        // and the test lands TIMED-OUT with control never reaching the trailing assert.
+    fn an_earlier_job_fault_outranks_a_later_timeout_in_a_test() {
+        // TICKET-208 (owner decision 3) — job 0's fire-and-forget fault ends the run at once: it
+        // cancels job 1's spin and cuts the test past its `recover:`, long before the wall-clock
+        // cap. So the test errors with `ordinary`, the trailing assert never runs, and no timeout
+        // is reported. (It replaces W7-5 review Fix 1, where the drain ran both jobs and the later
+        // hard-halt timeout won selection.)
         let d = TmpDir::new();
         let f = d.write(
             "exhalt_test.chz",
@@ -2543,13 +2539,17 @@ struct Suite:
         assert!(!report.passed, "report:\n{}", report.text);
         assert!(
             !report.text.contains("SWALLOWED"),
-            "an earlier ordinary fault demoted the later hard-halt timeout to a catchable error; \
-             report:\n{}",
+            "a recover: caught the job fault; report:\n{}",
             report.text
         );
         assert!(
-            report.text.contains("TIMED-OUT t"),
-            "the hard-halt fault must win selection and bucket TIMED-OUT; report:\n{}",
+            report.text.contains("ordinary"),
+            "the job's fault is the report; report:\n{}",
+            report.text
+        );
+        assert!(
+            !report.text.contains("TIMED-OUT t"),
+            "the job fault ends the test before the cap; report:\n{}",
             report.text
         );
     }

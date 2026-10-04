@@ -13716,7 +13716,9 @@ fn executor_faulting_job_does_not_hang_shutdown() {
     let got = rx
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("shutdown() must not hang when a job ends abnormally");
-    assert_eq!(got.unwrap(), "caught: boom\n");
+    // TICKET-208 — a fire-and-forget fault ends the run; no `recover:` catches it.
+    let err = got.expect_err("the job's fault ends the run");
+    assert!(err.message.contains("boom"), "fault was: {}", err.message);
 }
 
 /// B3.3-threads (decision F, review coverage gap): each worker buffers its own stdout and the join
@@ -16334,14 +16336,12 @@ fn prod():
     for i in range(0, 200):
         a.send(i)
     a.close()
-fn cons():
-    s := 0
-    for v in a:
-        s = s + v
-    print(\"sum {s}\")
 ex := Executor()
 ex.submit(prod)
-ex.submit(cons)
+s := 0
+for v in a:
+    s = s + v
+print(\"sum {s}\")
 ex.shutdown()
 ";
     let entry = write_temp_chz("w713_handshake_wakeups", src);
@@ -16352,7 +16352,7 @@ ex.shutdown()
     let stalls0 = crate::vm::netio::BLOCK_WAITS_SLEPT_WHILE_READY.load(Relaxed);
     std::thread::spawn(move || {
         let mut bad = Vec::new();
-        for _ in 0..6 {
+        for _ in 0..30 {
             let (o, _e2, r, _c) = run_file(&e);
             if r.is_err() || o != "sum 19900\n" {
                 bad.push(format!("{r:?} / out={o:?}"));
@@ -16387,9 +16387,11 @@ ex.shutdown()
          `block_wait_tick` reverted to a bare `wait_timeout`, same 6 runs)"
     );
     // Coverage floor, not a measurement — a concurrent test's own blocking also lands in
-    // `BLOCK_WAITS`, so this can only ever be too GENEROUS. 6 runs × 200 handoffs at cap 1 cannot
+    // `BLOCK_WAITS`, so this can only ever be too GENEROUS. 30 runs × 200 handoffs at cap 1 cannot
     // hand off without blocking; if this trips, the program stopped exercising `block_wait_tick` and
-    // the assertion above went vacuous.
+    // the assertion above went vacuous. TICKET-208 — 30 runs, not 6: the producer is a parking
+    // fiber now, so `main` is the only party that blocks in place (measured alone: 45 to 304 waits
+    // per 6 runs, 193 to 968 per 30).
     assert!(
         waits >= 100,
         "only {waits} blocking waits — this cap-1 pipeline no longer reaches `block_wait_tick`, so \
@@ -16520,26 +16522,22 @@ import std.concurrency
 data: Channel[int] = Channel[int](1)
 other: Channel[int] = Channel[int](1)
 gate: Channel[bool] = Channel[bool](1)
-done: Channel[int] = Channel[int](1)
 fn prod():
     for i in range(0, 300):
         _ := gate.recv()
         data.send(i)
-fn cons():
-    s := 0
-    for i in range(0, 300):
-        gate.send(true)
-        wait:
-            v := data.recv():
-                s = s + v
-            w := other.recv():
-                s = s + w
-    done.send(s)
 ex := Executor()
 ex.submit(prod)
-ex.submit(cons)
+s := 0
+for i in range(0, 300):
+    gate.send(true)
+    wait:
+        v := data.recv():
+            s = s + v
+        w := other.recv():
+            s = s + w
 ex.shutdown()
-print(done.recv())
+print(s)
 ";
     let entry = write_temp_chz("w713a_wait_wakeups", src);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -17375,29 +17373,29 @@ fn executor_autodrain_survives_gc_stress() {
 }
 
 #[test]
-fn executor_fault_during_drain_still_runs_every_sibling() {
-    // W7-5 run-all review Fix 3: this used to pin the OLD abort contract (a mid-drain fault leaves
-    // not-yet-run siblings queued; a `defer ex.shutdown()` then reaps them on the fault exit path,
-    // which produces the SAME "A\nC\ndone\n" string as the new contract — that version of this test
-    // could not discriminate between the two contracts). With the `defer` removed, `ex.shutdown()`'s
-    // own explicit call is the only drain: under run-all it runs `A`, then `boom` (fault noted, not
-    // yet raised), then `C`, and only then raises the lowest-submission-index fault (`boom`'s) out of
-    // `shutdown()` — genuinely pinning "every submitted job runs, in one drain, even when an earlier
-    // one faults". Pre-fix (abort-on-first-fault) this would print only `A` (the drain stops at
-    // `boom`, `C` never runs, and there is no `defer` left to reap it on the fault exit path).
+fn a_fire_and_forget_fault_ends_the_run_past_recover() {
+    // TICKET-208 (owner decision 3) — a fire-and-forget job's fault ends the whole run (Go: a
+    // goroutine panic). It replaces the W7-5 run-all contract, where `shutdown()` raised the
+    // lowest-index fault and a `recover:` around it caught it: the fault reaches `main` as a
+    // run-wide halt no `recover:` catches, so `done` never prints.
     let src = "fn boom():\n    x := [1]\n    print(x[9])\nfn run():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): boom())\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\nfn main():\n    r := recover:\n        run()\n        0\n    print(\"done\")\nmain()\n";
-    let vm = run_capture(src).expect("vm run");
-    assert_eq!(vm, "A\nC\ndone\n");
-    // Cooperative-engine invariant: the M:N engine runs the Executor on a real thread pool, so its
-    // drain ordering differs — not a serial-vs-M:N parity comparison.
+    let (out, res) = run_program(src);
+    let err = res.expect_err("the job's fault ends the run");
+    assert!(
+        err.message.contains("index 9 out of bounds"),
+        "fault was: {}",
+        err.message
+    );
+    assert!(
+        !out.contains("done"),
+        "a recover: caught the fault: {out:?}"
+    );
 }
 
-/// W7-5c — `reduce_task_slots` used to flush a faulting task's buffered output only for the FIRST
-/// fault (`if first_fault.is_none()`), so with run-all drains (W7-5) a second faulting job's stdout
-/// vanished on M:N while serial printed it live. Both faulters' lines must survive; only the
-/// lowest-index error propagates.
+/// TICKET-208 — with two faulting fire-and-forget jobs, the FIRST fault to land is the run's
+/// report (first writer wins), and that job's own output survives.
 #[test]
-fn executor_second_faulting_job_keeps_its_output_both_engines() {
+fn the_first_fire_and_forget_fault_is_the_report() {
     let src = r#"
 import std.concurrency
 
@@ -17420,17 +17418,17 @@ fn main():
 
 main()
 "#;
-    let serial = run_capture(src).expect("run");
-    let mn = run_capture(src).expect("M:N run");
-    for out in [&serial, &mn] {
-        assert!(out.contains("a-before-fault"), "lost job 0's output: {out}");
-        assert!(out.contains("b-before-fault"), "lost job 1's output: {out}");
-        assert!(
-            out.contains("fault: boom a"),
-            "lowest index must propagate: {out}"
-        );
-    }
-    assert_same_lines(&serial, &mn);
+    let (out, res) = run_program(src);
+    let msg = res.expect_err("a job fault ends the run").message;
+    let who = match msg.as_str() {
+        "boom a" => "a",
+        "boom b" => "b",
+        _ => panic!("the report must be one job's own fault, got: {msg}"),
+    };
+    assert!(
+        out.contains(&format!("{who}-before-fault")),
+        "lost the reporting job's output: {out:?}"
+    );
 }
 
 #[test]

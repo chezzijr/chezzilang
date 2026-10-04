@@ -4262,125 +4262,6 @@ main()
     assert_eq!(peer.join().unwrap(), "echo:hi");
 }
 
-/// The other `mn == None` context — an EAGER `Executor` job — deliberately does NOT block in place,
-/// and this pins that: it keeps `Err("accept would block: …")`.
-///
-/// A job does not own its thread. It runs on the bounded, process-wide `vm::pool` (`worker_count()`,
-/// never grown on demand) and has no `MnSched` under it to spin a replacement worker, so a job that
-/// blocks in `accept` starves every other job and every `parallel:` nursery sharing that pool.
-/// Measured with the block-in-place path open to jobs, at `CHEZZI_THREADS=1`: an `accept` job plus a
-/// later `connect` job hung outright (`rc=124`); at ≥2 workers the same program passed — a
-/// pool-width-dependent hang, which is the worst possible failure mode to ship.
-///
-/// That measurement is UNAFFECTED by W8-8 (`--threads=1` used to run two CPU runners; fixed 2026-08-18)
-/// and structurally so: `vm::pool` is sized straight off `worker_count()`, whereas W8-8's extra runner
-/// lived in the nursery enlist/owner path in `sched.rs`. So `CHEZZI_THREADS=1` gave this pool exactly one
-/// thread before that fix and still does — re-derived on the 1-wide binary the same day (`Err` in
-/// 0.006 s, rc=0, no hang).
-///
-/// The check is written as the `Err` rather than as the starvation repro on purpose: the pool width is
-/// process-global (`CHEZZI_THREADS` read once), so a width-1 test would be both flaky under the
-/// parallel test harness and a 30 s hang when it regressed. `Err`-promptly is the contract the
-/// starvation shape follows from, and it fails fast. Socket work belongs in `spawn`/`parallel:`, which
-/// parks on the netpoller instead of blocking.
-#[test]
-fn accept_inside_an_executor_job_errs_instead_of_starving_the_pool() {
-    let addr = free_addr();
-    // NO `net_peer` here, deliberately. The assertion is that `accept()` in an eager job reports the
-    // would-block Err instead of pinning a worker — which only happens when the backlog is EMPTY. A
-    // peer thread retries `connect` every 10ms from before the program starts, so as soon as
-    // `net.listen` binds, a connection can land in the backlog and `accept()` returns `Ok` instead:
-    // the test then reads `GOT:hi` and fails. That race is decided by how wide the window between
-    // `listen()` and the job's `accept()` is, so it flips on unrelated scheduling changes (measured:
-    // green 2/2 full `--lib` runs, then red 2/2 after three checker tests were added elsewhere in the
-    // suite). The hang this test guards against is caught by `run_net_timeout_watchdog`'s 30s
-    // timeout, not by the peer — so the peer only ever subtracted determinism.
-    let src = format!(
-        "\
-import std.net
-
-fn server(l: Listener):
-    match l.accept():
-        Ok(conn):
-            match conn.read(64):
-                Ok(msg):
-                    print(\"GOT:\" + msg)
-                    conn.write(\"echo:\" + msg)
-                    conn.close()
-                Err(e): print(\"ERR:\" + e.message())
-        Err(e): print(\"ERR:\" + e.message())
-
-fn main():
-    match net.listen(\"{addr}\"):
-        Ok(l):
-            print(\"listening\")
-            ex := Executor()
-            ex.submit(fn(): server(l))
-            ex.shutdown()
-            l.close()
-            print(\"done\")
-        Err(e): print(\"ERR:\" + e.message())
-
-main()
-"
-    );
-    let out = run_net_timeout_watchdog("accept_in_executor_job", &src);
-    assert_eq!(
-        out,
-        "listening\nERR:accept would block: an Executor job doesn't own its thread — blocking \
-        here would starve every other job and `parallel:` nursery sharing the pool. Do this \
-        socket op inside `spawn:` or a `parallel:` nursery instead, where it parks rather than \
-        blocking a shared thread.\ndone\n"
-    );
-}
-
-/// W7-59 — the `connect` twin of the test above. `net.connect` was the FIFTH would-block socket op
-/// and the only one that never asked the socket block-in-place gate: it tested a bare `mn.is_some()`,
-/// so an eager `Executor` job fell into the private blocking spin and pinned a pool worker for up to
-/// the 10 s connect cap. Same family as `W7-40`'s R2, which the four other ops closed.
-///
-/// TEST-NET-1 (`192.0.2.0/24`, RFC 5737) is a documented black hole: no RST, no SYN-ACK, so
-/// `SO_ERROR` never sets and the fd never becomes writable — the handshake cannot settle and the
-/// pre-fix spin ran the full cap. Measured on the pre-fix release binary via the `chezzi run` shape
-/// of this program: **10 009 ms**; post-fix **210 ms**, the wait replaced by the prompt `Err`.
-///
-/// Written as the `Err` rather than as the starvation repro for the reason spelled out above: pool
-/// width is process-global, so a width-1 test would be flaky under the parallel harness and a 30 s
-/// hang when it regressed.
-#[test]
-fn connect_inside_an_executor_job_errs_instead_of_pinning_a_pool_worker() {
-    let src = "\
-import std.net
-
-fn dial():
-    match net.connect(\"192.0.2.1:9\"):
-        Ok(_): print(\"ERR:connected to a black hole\")
-        Err(e): print(\"ERR:\" + e.message())
-
-fn main():
-    ex := Executor()
-    ex.submit(dial)
-    ex.shutdown()
-    print(\"done\")
-
-main()
-"
-    .to_string();
-    let out = run_net_timeout_watchdog("connect_in_executor_job", &src);
-    assert_eq!(
-        out,
-        "ERR:connect would block: an Executor job doesn't own its thread — blocking here \
-        would starve every other job and `parallel:` nursery sharing the pool. Do this socket \
-        op inside `spawn:` or a `parallel:` nursery instead, where it parks rather than \
-        blocking a shared thread.\ndone\n"
-    );
-    // The byte-exact assertion above is the discriminator (TICKET-059): reverting `net.connect`'s
-    // eager gate at `src/vm/netio.rs` (`} else if self.the job's sched.is_some() {` back to `} else if
-    // false {`) makes it read `left: "ERR:timeout"` followed by `done` (measured 2026-09-04), not a
-    // timing bound -- the pre-fix path pins a pool worker for the full 10 s connect cap, which
-    // `run_net_timeout_watchdog`'s own 30 s watchdog is wide enough to let complete rather than hang.
-}
-
 /// B1 — an incomplete codepoint left over when the peer CLOSES (`b"ok\xC3"` ⇒ `error_len() == None`,
 /// then EOF) is a real error, never a silent drop and never U+FFFD. The valid prefix is still
 /// delivered; the dangling lead byte errors on the read that sees the close.
@@ -8036,8 +7917,8 @@ fn deferred_fault_trace_supersedes_on_both_engines() {
 ///
 /// TICKET-195 changed all three to the FAULTING party's frames: the job's `[boom, <closure>]`, the
 /// child's `[boom, <spawned task>]`, at a join or at the exit drain alike (Go prints the panicking
-/// goroutine's stack; CPython the job's traceback). Edge 2 is unchanged: a join INSIDE a `defer`
-/// is the cleanup's own fault, so it supersedes the outer panic and reports the receiver's frames.
+/// goroutine's stack; CPython the job's traceback). Edge 2 changed with TICKET-208: a
+/// fire-and-forget job's fault ends the run, so it is the report there too, with the job's frames.
 #[test]
 fn executor_task_fault_trace_matches_on_both_engines() {
     let dir = std::env::temp_dir().join("chezzi_b4_executor_trace");
@@ -8111,11 +7992,9 @@ fn executor_task_fault_trace_matches_on_both_engines() {
         "M:N implicit-drain trace == the job's"
     );
 
-    // B4 review edge 2 (the medium charge): `defer ex.shutdown()` while `main` is unwinding from
-    // an outer panic. The drain must drop ONLY the inline task's frames, NOT the superseding outer
-    // fault already captured — else serial nukes it to [] while M:N keeps [main] (re-introducing the
-    // serial != M:N divergence this fix exists to kill). The submitted task's fault supersedes; it
-    // reports `kaboom` at `[main]`.
+    // B4 review edge 2: `defer ex.shutdown()` while `main` is unwinding from an outer panic.
+    // TICKET-208 — the fire-and-forget job's fault ends the run and outranks `main`'s own cause
+    // (DEC-200), so the report is `kaboom` with the job's frames.
     let df_src = "import std.concurrency\nfn boom():\n    panic(\"kaboom\")\nfn main():\n    ex := Executor()\n    ex.submit(fn(): boom())\n    defer ex.shutdown()\n    panic(\"outer\")\nmain()\n";
     let df_path = dir.join("defer_unwind.chz");
     std::fs::write(&df_path, df_src).unwrap();
@@ -8125,8 +8004,17 @@ fn executor_task_fault_trace_matches_on_both_engines() {
     let dmn = dmn.expect_err("M:N defer-unwind should fault");
     let dse_names: Vec<&str> = dse.trace.iter().map(|f| f.function.as_str()).collect();
     let dmn_names: Vec<&str> = dmn.trace.iter().map(|f| f.function.as_str()).collect();
-    assert_eq!(dse_names, vec!["main"], "defer-unwind trace == [main]");
-    assert_eq!(dmn_names, vec!["main"], "M:N defer-unwind trace == [main]");
+    assert_eq!(dse.message, "kaboom", "the job's fault is the report");
+    assert_eq!(
+        dse_names,
+        vec!["boom", "<closure>"],
+        "defer-unwind trace == the job's"
+    );
+    assert_eq!(
+        dmn_names,
+        vec!["boom", "<closure>"],
+        "M:N defer-unwind trace == the job's"
+    );
     assert_eq!(dse.message, dmn.message, "defer-unwind same fault message");
     assert_eq!(dse.span, dmn.span, "defer-unwind same fault location");
 }
