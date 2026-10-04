@@ -37932,3 +37932,9 @@ fn multi_arg_turbofish_is_a_value() {
         "fn pair[A, B](a: A, b: B) -> (A, B):\n    return (a, b)\np := pair[str, int]\nprint(p(\"a\", 1))\n",
     );
 }
+
+/// TICKET-213: `Executor(n)` caps the running jobs; the checker accepts zero arguments or one `int`.
+#[test]
+fn executor_accepts_a_worker_limit() {
+    ok("import std.concurrency\nfn main():\n    ex := Executor(2)\n    ex.shutdown()\nmain()\n");
+}
