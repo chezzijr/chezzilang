@@ -14,6 +14,8 @@
 # the `unobserved` state too. `a_handoff_receiver_write_is_never_silently_lost` is the channel-handoff
 # carrier, `a_task_owned_key_reachable_from_a_memo_result_stays_writable` the over-mark cell, and
 # `a_copy_miss_on_a_key_that_never_equals_itself_returns_the_fill` the bounded read-back.
+# `a_function_valued_copy_result_leaves_the_readers_globals_writable` is the module cell: a marked
+# result that holds a function must not mark the reader's globals through the function's module.
 
 import std.concurrency
 import submit_task, Task from std.concurrency.task
@@ -314,3 +316,37 @@ test fn a_copy_miss_on_a_key_that_never_equals_itself_returns_the_fill():
     parallel:
         spawn never_use(m, out)
     assert out.recv() == "[1]"
+
+struct FnBox:
+    f: fn(int) -> int
+    xs: List[int]
+
+fn inc(x: int) -> int:
+    return x + 1
+
+fn mk_box(k: int) -> FnBox:
+    return FnBox(inc, [k])
+
+owner_global: List[int] = [1]
+
+fn send_memo(mc: Channel[fn(int) -> FnBox]):
+    mc.send(memoize1(mk_box))
+
+# A wrapper received from a channel returns a marked snapshot. A function inside it points at this
+# heap's module; the mark stops there, so the reader's own global stays writable.
+test fn a_function_valued_copy_result_leaves_the_readers_globals_writable():
+    mc := Channel[fn(int) -> FnBox](1)
+    parallel:
+        spawn send_memo(mc)
+    m := mc.recv()
+    b := m(1)
+    assert b.f(1) == 2
+    rb := recover: b.xs.push(5)
+    match rb:
+        Ok(_): assert false, "the marked result took a write"
+        Err(e): assert e.message() == d4_msg(), e.message()
+    rg := recover: owner_global.push(3)
+    match rg:
+        Ok(_): pass
+        Err(e): assert false, e.message()
+    assert str(owner_global) == "[1, 3]", str(owner_global)

@@ -480,7 +480,8 @@ parent (Go `go f(x)`), so the query runs before the crossing.
 
 ### `concurrency.mark_task_copy` — mark a value as this task's copy
 `mark_task_copy(v) -> nil` (after `import std.concurrency`). Marks `v` and everything it reaches as
-this task's copy, so a later write to it faults `this value is this task's copy` (D4). It is for std
+this task's copy, so a later write to it faults `this value is this task's copy` (D4). The mark
+stops at a module: a function inside `v` does not mark the globals of the module it lives in. It is for std
 code that reads a shared core on behalf of a handle its owner aliases: `Task.get()` and a
 `memoize1` wrapper call it on the snapshot a task copy reads, because a write to that snapshot would
 never reach the owner (TICKET-213). A plain `Shared.get()` or `ch.recv()` result is the receiver's

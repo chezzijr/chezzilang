@@ -6783,7 +6783,9 @@ impl crate::native::Host for VmHost<'_> {
         }
         let mut work: Vec<GcRef> = v.as_obj().into_iter().collect();
         while let Some(h) = work.pop() {
-            if self.vm.heap.is_copied(h) {
+            // A function value's `home` is this heap's live module (`Heap::children`). The walk
+            // stops there: a module's globals belong to whoever runs this heap, not to the copy.
+            if self.vm.heap.is_copied(h) || matches!(self.vm.heap.get(h), Obj::Module(_)) {
                 continue;
             }
             self.vm.heap.set_copied(h);

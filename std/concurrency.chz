@@ -131,6 +131,7 @@ native fn is_task_copy(v) -> bool
 
 # Marks `v` and everything it reaches as this task's copy; called by std code on a value a task
 # copy read from a shared core (`Task.get`, a `memoize1` wrapper), so a write to it faults instead
-# of vanishing (TICKET-213). Not for a general read path: a plain `Shared.get()` or `ch.recv()` is
+# of vanishing (TICKET-213). The mark stops at a module, so a function inside `v` leaves the
+# module's globals unmarked. Not for a general read path: a plain `Shared.get()` or `ch.recv()` is
 # a handoff, and the receiver owns it.
 native fn mark_task_copy(v) -> nil
