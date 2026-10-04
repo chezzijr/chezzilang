@@ -2363,12 +2363,39 @@ impl Vm {
         // Cost: an infinitely-looping `defer` delays the exit. That is a pathological program and
         // `--timeout` (checked ABOVE this rung at every site) already covers it; a half-run cleanup on
         // an ordinary program does not trade for it.
-        if self.deferring > 0 {
+        if !self.run_halt_due() {
             return None;
         }
-        let code = self.quiesce.pending()?;
-        self.pending_exit = Some(code);
-        Some(self.err("exit".to_string(), span))
+        if let Some(code) = self.quiesce.pending() {
+            self.pending_exit = Some(code);
+            return Some(self.err("exit".to_string(), span));
+        }
+        // TICKET-208 — a fire-and-forget `Executor` job faulted: the run ends with THAT fault, and
+        // no `recover:` of this party catches it (`Cut::RunFault`).
+        let (err, trace) = self.quiesce.job_fault()?;
+        self.adopt_run_fault(trace);
+        Some(err)
+    }
+
+    /// TICKET-208 — THE predicate "a run-wide halt is pending for this party": an `os.exit` from
+    /// another party, or a fire-and-forget `Executor` job's fault. A CPU-side or in-place
+    /// checkpoint reads this (behind the lock-free `run_halt_hint`); it never reads the exit cell
+    /// or the job-fault cell by itself.
+    pub(super) fn run_halt_due(&self) -> bool {
+        self.deferring == 0 && (self.quiesce.pending().is_some() || self.quiesce.has_job_fault())
+    }
+
+    /// The halts of a party that comes back from a wait it could not poll (a nursery join, an
+    /// in-place blocking native): a cancel or a child fault, then the run-wide halt. No
+    /// `--timeout` rung: at a return that would turn a post-hoc timeout into an abort.
+    pub(super) fn resume_halts(&mut self, span: Span) -> Result<(), RuntimeError> {
+        if let Some(e) = self.take_halt(span) {
+            return Err(e);
+        }
+        if let Some(e) = self.run_exit_err(span) {
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// TICKET-200 — the one list of halts a party blocked in place observes, read with no lock held.
@@ -2383,19 +2410,12 @@ impl Vm {
         // write. No `back_edge_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
         self.deadline_halt(span)?;
         // `shutdown_now`'s cooperative stop (D4), an enclosing scope's cancel and (TICKET-188) a child
-        // fault of a nursery this party owns all arrive here.
-        if let Some(e) = self.take_halt(span) {
-            return Err(e);
-        }
-        // W7-47 — a run-wide `os.exit` from another party. BELOW cancel, so a party that already holds
-        // a cancel flag keeps unwinding as `Cancelled` exactly as before (only a party with no cancel
-        // flag at all — precisely top-level `main` — reaches this rung). ABOVE the deadlock verdict,
-        // because an `Exit` outranks a synthesized `Deadlocked` — the same precedence
-        // `reduce_task_slots` encodes, and what makes a `recv`-blocked `main` report the exit code
-        // instead of a "deadlock" that is really somebody else's exit.
-        if let Some(e) = self.run_exit_err(span) {
-            return Err(e);
-        }
+        // fault of a nursery this party owns arrive first; then W7-47, the run-wide halt (an
+        // `os.exit` or a job fault from another party). BELOW cancel, so a party that already holds
+        // a cancel flag keeps unwinding as `Cancelled` (only a party with no cancel flag at all —
+        // precisely top-level `main` — reaches that rung). ABOVE the deadlock verdict, because an
+        // `Exit` outranks a synthesized `Deadlocked` — the precedence `reduce_task_slots` encodes.
+        self.resume_halts(span)?;
         // TICKET-062 (W10-16) / TICKET-096 — a child fault recorded while the exit rung ran (DEC-134:
         // read again below the exit, and again after a positive verdict).
         if let Some(e) = self.take_halt(span) {
@@ -4201,9 +4221,12 @@ impl Vm {
     /// discarded, and the verdict and its trace stand. Any other fault, and a pending exit, skip the
     /// drain as before.
     pub(crate) fn finish_run(&mut self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
-        match self.rank_end(0, r) {
+        // TICKET-208 — a run ended by a job fault drains too: every scope is already cancelled,
+        // and a finished job's buffered output must still reach the sink.
+        let job = self.quiesce.has_job_fault();
+        match self.rank_end(r) {
             Ok(()) => self.drain_live_executors(),
-            Err(e) if e.is_deadlock && self.pending_exit.is_none() => {
+            Err(e) if (e.is_deadlock || job) && self.pending_exit.is_none() => {
                 let trace = (self.fault_trace.take(), self.fault_trace_depth);
                 let _ = self.drain_live_executors();
                 (self.fault_trace, self.fault_trace_depth) = trace;

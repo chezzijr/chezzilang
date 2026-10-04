@@ -6761,7 +6761,7 @@ impl crate::native::Host for VmHost<'_> {
         // ordering; this sequence is only about publishing the code and the teardown before the hint.
         self.vm.quiesce.request_exit(code);
         self.vm.halt_all_scheds();
-        self.vm.quiesce.mark_exit_pending();
+        self.vm.quiesce.mark_run_halt();
     }
 }
 

@@ -286,7 +286,10 @@ pub(super) struct QuiesceState {
     /// nothing else. [`clear_exit`](Self::clear_exit) still clears it (paired with the cell it
     /// mirrors, and it saves that lock), but correctness does not rest on that store — it rests on the
     /// cell, which every `chezzi test` entry point resets via `Vm::reset_for_invoke`.
-    exit_pending: AtomicBool,
+    run_halt_hint: AtomicBool,
+    /// TICKET-208 — the fault of a fire-and-forget `Executor` job: the second cause of a run-wide
+    /// halt, beside `exit`. Read through the one funnel `Vm::run_exit_err`, taken by `Vm::rank_end`.
+    job_fault: Mutex<Option<(super::RuntimeError, Vec<super::TraceFrame>)>>,
 }
 
 impl QuiesceState {
@@ -304,15 +307,15 @@ impl QuiesceState {
 
     /// W7-57 — latch the back-edge flag. Called by the host `request_exit` AFTER the code is published
     /// and after every live sched has been halted; see the field's doc for why the order is required.
-    pub(super) fn mark_exit_pending(&self) {
-        self.exit_pending.store(true, Ordering::Release);
+    pub(super) fn mark_run_halt(&self) {
+        self.run_halt_hint.store(true, Ordering::Release);
     }
 
     /// W7-57 — the lock-free "is there a run-wide exit?" the CPU-side checkpoints ask, so they need no
     /// mutex on the hot path. A `true` is only a HINT: `Vm::exit_halt` and `Vm::run_exit_err` both
     /// confirm `pending()` before acting, so a spurious `true` is a self-healing no-op.
-    pub(super) fn exit_pending(&self) -> bool {
-        self.exit_pending.load(Ordering::Acquire)
+    pub(super) fn run_halt_hint(&self) -> bool {
+        self.run_halt_hint.load(Ordering::Acquire)
     }
 
     /// Drop a latched exit — the per-invocation reset (`Vm::reset_for_invoke`, shared by every
@@ -320,7 +323,45 @@ impl QuiesceState {
     /// atomic is cleared with it to keep the mirror honest and to save the confirming lock.
     pub(super) fn clear_exit(&self) {
         *self.exit.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.exit_pending.store(false, Ordering::Release);
+        // The hint covers a pending job fault too, and this reset never clears that.
+        self.run_halt_hint
+            .store(self.has_job_fault(), Ordering::Release);
+    }
+
+    /// TICKET-208 — publish a fire-and-forget `Executor` job's fault: it ends the whole run. First
+    /// writer wins (Go: the first panic is the report). The caller halts every sched and then
+    /// latches the hint ([`Self::mark_run_halt`]), the order `request_exit` uses.
+    pub(super) fn request_job_fault(
+        &self,
+        err: super::RuntimeError,
+        trace: Vec<super::TraceFrame>,
+    ) {
+        let mut g = self.job_fault.lock().unwrap_or_else(|e| e.into_inner());
+        g.get_or_insert((err, trace));
+    }
+
+    /// The pending job fault, if any.
+    pub(super) fn job_fault(&self) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
+        self.job_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(super) fn has_job_fault(&self) -> bool {
+        self.job_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Take the job fault out of its cell. ONE caller, `Vm::rank_end`, which reports what it
+    /// takes; nothing else clears the cell, so a fault is never dropped unreported.
+    pub(super) fn take_job_fault(&self) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
+        self.job_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     /// Register a blocked party for as long as the returned guard lives.

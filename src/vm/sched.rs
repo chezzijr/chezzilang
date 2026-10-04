@@ -2113,12 +2113,9 @@ impl Vm {
                 break;
             }
             std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now));
-            // `deferring == 0` mirrors the suppression `run_exit_err` (and `halt_requested`) apply
-            // below: inside a `defer` neither arm will fire, so cutting the sleep short here would
-            // silently SHORTEN a deferred `sleep_ms` instead of halting anything.
-            if self.halt_requested().is_some()
-                || (self.deferring == 0 && self.quiesce.pending().is_some())
-            {
+            // The one predicate for a run-wide halt (`run_halt_due`): it answers `false` wherever
+            // `run_exit_err` below will not fire, so the sleep is never cut short for nothing.
+            if self.halt_requested().is_some() || self.run_halt_due() {
                 break;
             }
         }
@@ -2479,10 +2476,8 @@ impl Vm {
     /// owner learns that nursery's fault from the join itself), and never inside a `defer`. A join that parked
     /// (`join_suspend`) re-runs after the wake, so it is not checked here.
     pub(super) fn cancel_at_join(&mut self, span: Span) -> Result<(), RuntimeError> {
-        if self.join_suspend.is_none()
-            && let Some(e) = self.take_halt(span)
-        {
-            return Err(e);
+        if self.join_suspend.is_none() {
+            self.resume_halts(span)?;
         }
         Ok(())
     }
@@ -2621,6 +2616,20 @@ impl Vm {
                     // `finish` reports whether the STORED outcome aborts: it may itself turn a `Done`
                     // into a hard-halt over-memory `Fault` (W7-26r), which needs the same sibling
                     // drain a task's own fault does.
+                    // TICKET-208 — a fire-and-forget `Executor` job faulted: that ends the whole
+                    // run (Go: a goroutine panic). Published BEFORE `finish` records the outcome, so
+                    // no join sees the job finished while the cell is empty; in `request_exit`'s
+                    // order: the cell, every sched halted, then the hint. A deadlock verdict and a
+                    // `--timeout` cut are the run's own causes, never a job fault.
+                    if sched.detached.is_some()
+                        && let TaskOutcome::Fault { err, trace, .. } = &outcome
+                        && !err.is_deadlock
+                        && !err.is_timed_out
+                    {
+                        self.quiesce.request_job_fault(err.clone(), trace.clone());
+                        self.halt_all_scheds();
+                        self.quiesce.mark_run_halt();
+                    }
                     let aborts = sched.finish(task_index, scope_id, outcome);
                     // A fault/exit tripped the FIBER's SCOPE cancel (in `classify_mn_outcome`, via the
                     // re-pointed `self.cancel`); requeue THAT scope's parked siblings so they observe it
@@ -2929,7 +2938,7 @@ impl Vm {
                 out: std::mem::take(&mut self.out),
                 stderr: std::mem::take(&mut self.stderr),
             }
-        } else if self.is_cancelled() {
+        } else if self.is_cancelled() || matches!(self.cut, Some(crate::vm::block::Cut::RunFault)) {
             // TICKET-147 (W14-12) — the cancel funnel replaced the `cancelled` sentinel with a real
             // fault from the task's own `defer` / an aborted nested nursery: report it, ranked below
             // every ordinary fault. No `trip_cancel`: the scope is already cancelled.
@@ -3127,6 +3136,14 @@ impl Vm {
         // `parked-is-not-stuck` class. The run-scoped cell carries that exit, folded in as an ordinary
         // `first_exit` so there is ONE precedence table (Go's rule: the first `os.Exit` wins).
         let first_exit = first_exit.or_else(|| self.quiesce.pending());
+        // TICKET-208 — the run-wide halt, read through its one funnel after a slot's own exit and
+        // before any slot fault: a `recover:` around this nursery must not catch a sibling fault
+        // and outlive a job fault that ends the run. Every slot's output is already flushed.
+        if first_exit.is_none()
+            && let Some(e) = self.run_exit_err(Span::RUNTIME)
+        {
+            return (Err(e), None);
+        }
         let fault = first_hard_fault.or(first_fault).or(first_cancel_fault);
         match (first_exit, fault, deadlock_err) {
             // A child `os.exit` hard-halts the parent: set `pending_exit` and return the exit
@@ -5399,9 +5416,27 @@ impl Vm {
             let Some(scope) = take_scope(core) else {
                 return Ok(());
             };
-            return self.reduce_task_slots(scope.sched.take_slots());
+            // `shutdown()` raises no job fault: a fire-and-forget fault is the run-wide halt, which
+            // the reduce reads through its funnel, and a handle job never faults its fiber. A hard
+            // halt, a deadlock, an exit and a cancelled job's `defer` fault still raise.
+            let slots = scope
+                .sched
+                .take_slots()
+                .into_iter()
+                .map(|s| match s {
+                    Some(TaskOutcome::Fault {
+                        err, out, stderr, ..
+                    }) if !executor_hard_halt(&err) && !err.is_deadlock => {
+                        Some(TaskOutcome::Cancelled { out, stderr })
+                    }
+                    s => s,
+                })
+                .collect();
+            return self.reduce_task_slots(slots);
         };
-        let flush = e.is_timed_out || self.pending_exit.is_some();
+        let flush = e.is_timed_out
+            || self.pending_exit.is_some()
+            || matches!(self.cut, Some(crate::vm::block::Cut::RunFault));
         if e.is_timed_out {
             crate::vm::trip_cancel_flag(&core.cancel);
             sched.drain_family(0);

@@ -189,6 +189,10 @@ pub(super) enum Cut {
     /// nursery below which a `recover:` must not catch, DEC-096), a join that reduced a child's or
     /// a job's fault, or an unjoined job fault reported in place of a verdict (`floor = None`)
     Delivered { floor: Option<usize> },
+    /// TICKET-208 — the run-wide job fault was delivered to this party: a fire-and-forget
+    /// `Executor` job faulted, which ends the run. No `recover:` catches it (Go: a goroutine's
+    /// panic cannot be recovered from `main`); the party's `defer`s still run.
+    RunFault,
 }
 
 /// TICKET-188 (W17 Family B) — why a party must stop now: [`halt_of`]'s answer.

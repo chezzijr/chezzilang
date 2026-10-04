@@ -152,7 +152,7 @@ impl Vm {
             return replaced.unwrap_or(cause);
         }
         match self.cut {
-            Some(Cut::Delivered { .. }) => match replaced {
+            Some(Cut::Delivered { .. } | Cut::RunFault) => match replaced {
                 Some(r) if r.is_over_memory || r.is_timed_out => r,
                 _ => cause,
             },

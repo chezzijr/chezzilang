@@ -813,7 +813,7 @@ fn invoke_all(
         // TICKET-200 — `rank_end` before the reap: an unjoined job fault recorded before this
         // test's own cause outranks it (the reap would take the slots it reads).
         let ran = vm.invoke_test(*proto);
-        let mut verdict = match vm.rank_end(mark, ran) {
+        let mut verdict = match vm.rank_end(ran) {
             Ok(()) => Verdict::Pass,
             Err(e) => {
                 let site = fault_site(&mut vm, &e, &files, &fallback);
@@ -842,7 +842,7 @@ fn invoke_all(
             captured_err: if opts.show_output { err } else { Vec::new() },
         });
         if opts.fail_fast && non_pass {
-            vm.reap_after_tests();
+            reap_after_tests_row(&mut vm, &mut outcomes, &file_label, &files, &fallback);
             return Ok((outcomes, filtered_out));
         }
     }
@@ -865,8 +865,30 @@ fn invoke_all(
         }
     }
 
-    vm.reap_after_tests();
+    reap_after_tests_row(&mut vm, &mut outcomes, &file_label, &files, &fallback);
     Ok((outcomes, filtered_out))
+}
+
+/// The end-of-file reap. A job fault that lands after the last test is reported as its own
+/// errored row, `(executor job)`: it is never dropped (TICKET-208, C2).
+fn reap_after_tests_row(
+    vm: &mut Vm,
+    outcomes: &mut Vec<Outcome>,
+    file_label: &str,
+    files: &[(u32, PathBuf)],
+    fallback: &Path,
+) {
+    if let Err(e) = vm.reap_after_tests() {
+        let site = fault_site(vm, &e, files, fallback);
+        outcomes.push(Outcome {
+            name: "(executor job)".to_string(),
+            file: file_label.to_string(),
+            verdict: verdict_from_fault(e, site),
+            duration: Duration::ZERO,
+            captured_out: Vec::new(),
+            captured_err: Vec::new(),
+        });
+    }
 }
 
 /// True if `--filter` is active and the displayed test `name` does not contain the substring.
@@ -974,7 +996,7 @@ fn run_suite(
         if matches!(verdict, Verdict::Pass)
             && let Err(e) = {
                 let ran = vm.invoke_suite_method(*proto, instance);
-                vm.rank_end(mark, ran.map(|_| ()))
+                vm.rank_end(ran.map(|_| ()))
             }
         {
             let site = fault_site(vm, &e, files, fallback);
@@ -1059,7 +1081,7 @@ fn run_after_all(
     // own fault takes priority, same as the per-test policy: whichever failure says more wins.
     let result = match result {
         Ok(_) => vm.reap_executors_since(mark),
-        Err(e) => vm.rank_end(mark, Err(e)),
+        Err(e) => vm.rank_end(Err(e)),
     };
     let duration = start.elapsed();
     let captured = vm.take_out_bytes();

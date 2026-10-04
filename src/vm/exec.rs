@@ -495,7 +495,7 @@ impl Vm {
         // [`Vm::exit_halt`], not `run_exit_err`: it is suppressed while `deferring > 0` — which is the
         // whole reason this fn raises that counter before calling here — and it sends a fiber that
         // holds a cancel flag down the `Cancelled` path so its `defer`s still run.
-        if self.quiesce.exit_pending()
+        if self.quiesce.run_halt_hint()
             && let Some(fr) = self.frames.last()
         {
             let span = fr.call_span;
@@ -770,7 +770,7 @@ impl Vm {
         self.fault_trace_depth = 0;
         self.gen_fault_prefix.clear();
         // TICKET-195 — a delivered cut belongs to the invoke it unwound; a cancel stays (DEC-010).
-        if matches!(self.cut, Some(Cut::Delivered { .. })) {
+        if matches!(self.cut, Some(Cut::Delivered { .. } | Cut::RunFault)) {
             self.cut = None;
         }
     }
@@ -963,10 +963,10 @@ impl Vm {
     }
 
     /// `chezzi test` — drain anything the program left running (e.g. an Executor a test forgot to
-    /// shut down), mirroring the ordinary run's graceful reap. Best-effort: ignore drain faults so a
-    /// stray resource doesn't mask the test verdict.
-    pub fn reap_after_tests(&mut self) {
-        let _ = self.drain_live_executors();
+    /// shut down), as the ordinary run's end does ([`Vm::finish_run`]). An `Err` is a job fault
+    /// that landed after the last test: the caller reports it (TICKET-208, C2).
+    pub fn reap_after_tests(&mut self) -> Result<(), RuntimeError> {
+        self.finish_run(Ok(()))
     }
 
     /// The current length of `exec_registry` — a mark of "every `Executor` created so far". Safe to
@@ -990,26 +990,22 @@ impl Vm {
     ///
     /// Call it BEFORE any drain or reap: a drain takes the slots this reads. A replaced deadlock
     /// keeps its `.deadlock()` stamp (DEC-135), so `finish_run` still drains on it.
-    pub fn rank_end(
-        &mut self,
-        mark: usize,
-        r: Result<(), RuntimeError>,
-    ) -> Result<(), RuntimeError> {
-        let Err(e) = r else {
+    pub fn rank_end(&mut self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
+        // The ONLY taker of the job-fault cell, and it reports what it takes — for an `Ok` run
+        // too: a job can fault while a passing run reads no halt.
+        let job = self.quiesce.take_job_fault();
+        if self.pending_exit.is_some() {
+            return r;
+        }
+        let Some((je, trace)) = job else {
             return r;
         };
-        if self.pending_exit.is_some() {
-            return Err(e);
-        }
-        let _ = mark;
-        let job: Option<(RuntimeError, Vec<TraceFrame>)> = None;
-        match job {
-            Some((je, trace)) => {
-                self.adopt_child_fault(None, trace);
-                Err(if e.is_deadlock { je.deadlock() } else { je })
-            }
-            None => Err(e),
-        }
+        self.adopt_child_fault(None, trace);
+        Err(if matches!(&r, Err(e) if e.is_deadlock) {
+            je.deadlock()
+        } else {
+            je
+        })
     }
 
     /// The per-test A2 join: drain (join) only the executors created SINCE `mark`, i.e. by the test
@@ -1017,7 +1013,9 @@ impl Vm {
     /// mark and is left alive for the tests that follow — draining from `0` instead would mark it
     /// `shut` after the first test, and the next test's `submit` on it would fault.
     pub fn reap_executors_since(&mut self, mark: usize) -> Result<(), RuntimeError> {
-        self.drain_live_executors_from(mark)
+        let r = self.drain_live_executors_from(mark);
+        // A job fault that lands during the reap is taken here, by the test that reaped.
+        self.rank_end(r)
     }
 
     pub(super) fn run_module(&mut self, idx: usize) -> Result<(), RuntimeError> {
@@ -1617,7 +1615,10 @@ impl Vm {
         let fatal = rte.is_deadlock;
         let caught_here =
             !fatal && matches!(self.handlers.last().copied(), Some(h) if h.frame_len > base_level);
-        let cancel_bypass = self.is_cancelled() && !(self.deferring > 0 && caught_here);
+        // TICKET-208 — a delivered job fault (`Cut::RunFault`) bypasses `recover:` as a cancel
+        // does: it ends the run, and this party's `defer`s still run.
+        let cancel_bypass = (self.is_cancelled() || matches!(self.cut, Some(Cut::RunFault)))
+            && !(self.deferring > 0 && caught_here);
         // TICKET-096 — a nursery OWNER's cut is `Delivered { floor: Some(n) }` while a child fault
         // recorded at `nurseries` index `n` is unwinding it. A handler with `Handler::nursery_len
         // > n` was installed INSIDE nursery `n`'s body — in the cancelled scope — and must not
@@ -1971,7 +1972,7 @@ impl Vm {
         block::halt_of(
             self.cancel_flags().map(|a| &**a),
             super::open_nurseries(&self.eager_scheds),
-            self.quiesce.exit_pending(),
+            self.quiesce.run_halt_hint(),
         )
     }
 
@@ -2022,6 +2023,14 @@ impl Vm {
         self.fault_trace_depth = usize::MAX;
     }
 
+    /// TICKET-208 — this party is cut by the run-wide job fault: no `recover:` of its own catches
+    /// it ([`Cut::RunFault`]), and the report carries the faulting job's frames.
+    pub(super) fn adopt_run_fault(&mut self, trace: Vec<TraceFrame>) {
+        self.cut = Some(Cut::RunFault);
+        self.fault_trace = Some(trace);
+        self.fault_trace_depth = usize::MAX;
+    }
+
     /// TICKET-195 — is this party unwinding a cancel ([`Cut::Cancelled`])?
     pub(super) fn is_cancelled(&self) -> bool {
         matches!(self.cut, Some(Cut::Cancelled))
@@ -2048,13 +2057,10 @@ impl Vm {
     /// this rung; and `pending()` — the `Mutex` cell, the authority — is confirmed before either arm,
     /// because the atomic is only a lock-free HINT and a `chezzi test` reset clears the cell.
     fn exit_halt(&mut self, span: Span) -> Option<RuntimeError> {
-        if self.cancel_suppressed()
-            || !self.quiesce.exit_pending()
-            || self.quiesce.pending().is_none()
-        {
+        if self.cancel_suppressed() || !self.quiesce.run_halt_hint() || !self.run_halt_due() {
             return None;
         }
-        if self.cancel_flags().next().is_some() {
+        if self.quiesce.pending().is_some() && self.cancel_flags().next().is_some() {
             self.cut = Some(Cut::Cancelled);
             return Some(self.err("cancelled".to_string(), span));
         }
