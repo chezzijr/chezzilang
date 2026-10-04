@@ -1,3 +1,4 @@
+# golden: unordered — the jobs and main print concurrently; neither line's position is causally forced.
 # C5 concurrency: program-exit join. An `Executor` is DETACHED — it outlives the scope that created
 # it, and work you submit but never explicitly `shutdown`/`shutdown_now` is still waited for at program
 # exit, exactly as a top-level `defer ex.shutdown()` would. Without this the program could exit with
