@@ -139,8 +139,6 @@ enum Sat {
 enum Expect {
     /// exit 0 with exactly this stdout
     Out(&'static str),
-    /// exit 0 with stdout starting with this text (a documented `Err` value)
-    Starts(&'static str),
     /// exit non-zero with this text on stderr
     Fault(&'static str),
     /// still running at the 2 s probe (a declined verdict: nothing can satisfy it)
@@ -152,7 +150,6 @@ struct Ctx {
     name: &'static str,
     call: &'static str,
     /// an Executor job
-    job: bool,
     /// the outcome when nothing can satisfy the op
     nothing: Expect,
 }
@@ -176,7 +173,6 @@ struct Cell {
 }
 
 const DEADLOCK: &str = "deadlock";
-const SOCK_IN_JOB: &str = "err read would block: an Executor job doesn't own its thread";
 
 const PROGRAM: &str = "import std.concurrency
 import std.time
@@ -227,10 +223,9 @@ fn main():
 ";
 
 fn contexts() -> Vec<Ctx> {
-    let ctx = |name, call, _demote: bool, job, nothing| Ctx {
+    let ctx = |name, call, _demote: bool, _job: bool, nothing| Ctx {
         name,
         call,
-        job,
         nothing,
     };
     let dead = Expect::Fault(DEADLOCK);
@@ -291,7 +286,7 @@ fn contexts() -> Vec<Ctx> {
             "        ex := Executor()\n        ex.submit(job_cb)\n        ex.shutdown()\n",
             false,
             true,
-            Expect::Hang,
+            dead,
         ),
     ]
 }
@@ -460,10 +455,6 @@ fn expect(op: &Op, ctx: &Ctx, sat: Sat, out: &'static str) -> Expect {
     if op.name == "nested" && sat == Sat::Nothing {
         return Expect::Fault(DEADLOCK);
     }
-    // Refuse: a socket op in an Executor job returns the "doesn't own its thread" `Err`.
-    if ctx.job && op.name == "socket" {
-        return Expect::Starts(SOCK_IN_JOB);
-    }
     match sat {
         Sat::Nothing => ctx.nothing,
         _ => Expect::Out(out),
@@ -529,7 +520,6 @@ fn check_cell(c: &Cell) -> Vec<String> {
         let ok = match (&got, c.expect) {
             (None, Expect::Hang) => true,
             (Some((0, out, _)), Expect::Out(w)) => out == w,
-            (Some((0, out, _)), Expect::Starts(w)) => out.starts_with(w),
             (Some((code, _, err)), Expect::Fault(w)) => *code != 0 && err.contains(w),
             _ => false,
         };

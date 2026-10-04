@@ -1770,7 +1770,7 @@ struct Suite:
 
     /// W7-26r's sibling — a job DISPATCHED BUT NOT FINISHED is charged to its submitter (the test
     /// name predates TICKET-205, which moved the discharge from job start to job end).
-    /// `prepare_eager_job`
+    /// `spawn_into`
     /// rebuilds each submitted closure into its own worker `Vm` at submit time, so a queue deeper
     /// than the pool is N fully-built worker heaps sitting in `vm::pool`'s global FIFO: every one of
     /// them comfortably under a per-heap `--max-heap`, and their sum charged to nobody. Measured on
@@ -3041,7 +3041,7 @@ struct Suite:
     }
 
     /// W7-60 — `chezzi test --timeout` must reach a test whose executor job cannot be cancelled at
-    /// all. `join_eager_jobs` observed only the deadlock verdict, so `ex.shutdown()` ignored the
+    /// all. `join_executor` observed only the deadlock verdict, so `ex.shutdown()` ignored the
     /// wall-clock cap outright and the run continued for as long as the job did.
     ///
     /// **`process.run` is the point, not a detail.** It is documented as having no cancellation
@@ -3090,9 +3090,9 @@ struct Suite:
     /// `reduce_task_slots` entirely — which is the ONLY writer of a finished job's buffered bytes
     /// (W7-5c). So a `print` that ran to completion at 50 ms simply never reached stdout. Measured
     /// pre-fix: this fixture reported `BODY OUT` alone; post-fix `BODY OUT` + `QUICK DONE`.
-    /// `EagerState::take_finished` is the length-preserving flush that fixes it.
+    /// `MnSched::take_finished_streams` is the length-preserving flush that fixes it.
     ///
-    /// This is the same loss the `join_eager_jobs` doc cites when explaining the `os.exit` rung — so
+    /// This is the same loss the `join_executor` doc cites when explaining the `os.exit` rung — so
     /// leaving it in the deadline path would have been the very inconsistency that doc warns about.
     #[test]
     fn a_finished_jobs_output_survives_a_timeout_bail() {
@@ -3177,7 +3177,7 @@ struct Suite:
     /// program-EXIT drain, under a generous cap and under no cap at all.
     ///
     /// This is the shape the new rungs are most likely to break. `Vm::drain_live_executors` calls
-    /// `join_eager_jobs` at every clean program end, so `--timeout` and cancel are now evaluated
+    /// `join_executor` at every clean program end, so `--timeout` and cancel are now evaluated
     /// there on every run — and every pre-existing exit-drain fence completes in under 10 ms, i.e.
     /// they exercise the rungs against near-instant completion rather than against a job that
     /// legitimately outlives a poll interval. A wrongly-armed deadline (or a cancel flag that

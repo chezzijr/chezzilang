@@ -4375,7 +4375,7 @@ main()
         blocking a shared thread.\ndone\n"
     );
     // The byte-exact assertion above is the discriminator (TICKET-059): reverting `net.connect`'s
-    // eager gate at `src/vm/netio.rs` (`} else if self.eager_core.is_some() {` back to `} else if
+    // eager gate at `src/vm/netio.rs` (`} else if self.the job's sched.is_some() {` back to `} else if
     // false {`) makes it read `left: "ERR:timeout"` followed by `done` (measured 2026-09-04), not a
     // timing bound -- the pre-fix path pins a pool worker for the full 10 s connect cap, which
     // `run_net_timeout_watchdog`'s own 30 s watchdog is wide enough to let complete rather than hang.

@@ -8716,56 +8716,6 @@ fn mnsched_cancelled_scope_with_a_parked_and_a_demoted_fiber_is_not_deadlock() {
     let _ = d;
 }
 
-/// W7-56 (the veto, BOTH directions): an eager `Executor` job outstanding anywhere in the run is a
-/// live sender none of the predicate's counters can see — it runs on the shared pool with no fiber of
-/// this sched, so it bumps neither `running`/`runnable` nor `inflight`, and a nursery task parked on
-/// the channel that job is about to feed reads as an all-parked quiesce. Without the veto,
-/// `ex.submit(feeder)` beside `parallel: spawn waiter()` faulted `deadlock` at ~7 ms — before the job
-/// had even run (repro: `executor_job_feeds_a_parked_nursery_task_instead_of_a_false_deadlock`).
-///
-/// Both directions in ONE test on purpose. The FIRST half is the fence against over-vetoing (this is
-/// the `parked-is-not-stuck` family: three predicates in a row have shipped green and faulted healthy
-/// programs); the SECOND pins that the veto LIFTS at `finish()`, because a veto that never expires is
-/// a permanent silent hang, which is strictly worse than the false fault it replaces.
-#[test]
-fn mnsched_outstanding_eager_job_vetoes_the_deadlock_until_it_finishes() {
-    let sched = mk_sched(1);
-    let exec = Arc::new(crate::vm::core::ExecutorCore::default());
-    sched.exec_registry.lock().unwrap().push(Arc::clone(&exec));
-    let chan = empty_core();
-    sched.seed(vec![mk_fiber(0)]);
-    let f = take_run(&sched);
-    // `submit` reserves the slot BEFORE the job is dispatched, so it counts from here.
-    let idx = exec.eager.lock().unwrap().reserve();
-    sched.park(core_key(&chan), Arc::clone(&chan), f);
-    {
-        let c = sched.lock();
-        assert_eq!(c.parked_n, 1, "the nursery's only task is parked");
-        assert!(
-            !sched.is_deadlocked(&c),
-            "an outstanding eager job is an UNCOUNTED sender — it may still feed the parked task, so \
-             this is not a deadlock (the same veto `quiesce::QuiesceState::quiesced` applies \
-             process-wide via `parties.len() < live`)"
-        );
-    }
-    // The job ends without sending. Nothing can feed the parked task now, so the verdict must fire —
-    // `dispatch_eager_job`'s completion closure pokes every live sched so an idle worker re-runs this.
-    exec.eager.lock().unwrap().finish(
-        idx,
-        (0, false),
-        TaskOutcome::Cancelled {
-            out: Vec::new(),
-            stderr: Vec::new(),
-        },
-    );
-    let c = sched.lock();
-    assert!(
-        sched.is_deadlocked(&c),
-        "once the job is finished the veto must LIFT — a veto that never expires is a silent hang, \
-         which is worse than the false fault it replaces"
-    );
-}
-
 // ----- gaps.md W7-58 — the nursery OWNER is a counted party of the process-wide verdict -----
 
 /// W7-58, the REFACTOR FENCE. `is_deadlocked` was split into "the W7-56 outstanding-job veto" plus
@@ -9638,10 +9588,14 @@ fn w758_nursery_party_is_satisfiable_whenever_the_sched_can_still_move() {
 #[test]
 fn w758_quiesced_counts_a_nursery_owner_against_live() {
     let state: Arc<crate::vm::quiesce::QuiesceState> = Arc::default();
-    let registry: crate::vm::core::ExecRegistry = Arc::default();
-    let exec = Arc::new(crate::vm::core::ExecutorCore::default());
-    registry.lock().unwrap().push(Arc::clone(&exec));
-    let _idx = exec.eager.lock().unwrap().reserve(); // live == 1 (main) + 1 (the job)
+    // A stuck Executor job: a parked fiber of a second, registered sched (TICKET-208: a job is a
+    // fiber, not a party). It cannot move, so it adds nothing to `live`.
+    let jobs = Arc::new(mk_sched(1));
+    jobs.seed(vec![mk_fiber(0)]);
+    let jf = take_run(&jobs);
+    let jchan = empty_core();
+    jobs.park(core_key(&jchan), Arc::clone(&jchan), jf);
+    state.register_eager_body(&jobs);
 
     // A stuck nursery: its only fiber is parked with nothing to feed it.
     let sched = Arc::new(mk_sched(1));
@@ -9650,13 +9604,9 @@ fn w758_quiesced_counts_a_nursery_owner_against_live() {
     let chan = empty_core();
     sched.park(core_key(&chan), Arc::clone(&chan), f);
 
-    let job = state.block(
-        crate::vm::quiesce::PartyWait::Recv(empty_core(), None),
-        crate::vm::block::WakeSet::default(),
-    );
     assert!(
-        !state.quiesced(&registry),
-        "the owner is not registered yet — 1 party < live 2, so the verdict must decline (this IS \
+        !state.quiesced(),
+        "the owner is not registered yet — 0 parties < live 1, so the verdict must decline (this IS \
          the W7-58 hang)"
     );
     let owner = state.block(
@@ -9664,23 +9614,23 @@ fn w758_quiesced_counts_a_nursery_owner_against_live() {
         crate::vm::block::WakeSet::default(),
     );
     assert!(
-        state.quiesced(&registry),
-        "owner + job == live, both unsatisfiable → the run really is stuck"
+        state.quiesced(),
+        "owner == live, unsatisfiable, and the job cannot move → the run really is stuck"
     );
     // The nursery becomes able to move → the owner's wait is satisfiable → veto.
     sched.inject(mk_pending_fiber(1), 0);
     assert!(
-        !state.quiesced(&registry),
+        !state.quiesced(),
         "a runnable fiber makes the owner's wait satisfiable, which must veto the verdict"
     );
     let g = take_run(&sched);
     sched.park(core_key(&chan), Arc::clone(&chan), g);
-    assert!(state.quiesced(&registry), "stuck again");
+    assert!(state.quiesced(), "stuck again");
     // The other direction: fewer parties than `live` must always veto.
-    drop(job);
+    jobs.inject(mk_pending_fiber(1), 0);
     assert!(
-        !state.quiesced(&registry),
-        "1 party < live 2 — an unregistered job is a RUNNING job, which may yet send"
+        !state.quiesced(),
+        "1 party < live 2 — a runnable job is a live sender, which may yet send"
     );
     drop(owner);
 }
@@ -13742,7 +13692,7 @@ fn parallel_nested_nursery_on_pool() {
 /// Eager `Executor` — the successor to B3.3-threads' `done_signal_bumps_counter_on_panic`. That test
 /// constructed the retired `DoneSignal` guard directly and asserted its `Drop` bumped the batch join's
 /// counter on unwind. Eager execution replaced the batch farm/join (`run_workers_on_pool`) with a
-/// per-job dispatch, so the invariant is now `EagerState::outstanding` always reaching 0 — and it is
+/// per-job dispatch, so the invariant is now `the Executor's sched::outstanding` always reaching 0 — and it is
 /// testable on the REAL path instead of on a guard in isolation: a job that ends abnormally must still
 /// record its outcome, or `shutdown`'s condvar wait never wakes and the program hangs forever.
 ///
@@ -15287,7 +15237,7 @@ y.shutdown()
 /// W7-12's `JoinGuard` was armed at the `shutdown()` call site and deliberately NOT at the exit drain,
 /// because the drain joins every live executor one at a time and a per-executor verdict would have let
 /// REGISTRY ORDER decide whose job faulted. A process-wide verdict has no such ordering problem, so
-/// `join_eager_jobs` registers its party for every join, this one included.
+/// `join_executor` registers its party for every join, this one included.
 ///
 /// Neither ancestor faults here, and that is stated rather than glossed: Go returns from `main` and
 /// ABANDONS the goroutine (measured, rc=0), CPython's `ThreadPoolExecutor` joins its non-daemon
@@ -15399,7 +15349,7 @@ wait:
 /// The process-wide verdict's FALSE-FAULT regression, also caught by adversarial review: an
 /// already-drained `shutdown()` must not be read as a blocked joiner.
 ///
-/// `join_eager_jobs` registers its `PartyWait::Join` before it can take the executor lock, so a join
+/// `join_executor` registers its `PartyWait::Join` before it can take the executor lock, so a join
 /// with nothing outstanding — `Executor(); e.shutdown()`, and the whole window while the last job's
 /// `finish` wakes a real joiner — briefly puts a party in the registry for a thread that is about to
 /// return and keep running. While `Join` answered a flat "never satisfiable", a sibling sampling in
@@ -15729,7 +15679,7 @@ parallel:
 /// This is the direction that makes W7-56 dangerous. Idle M:N workers `cv.wait` with no timeout, so a
 /// veto nobody revokes is a permanent SILENT HANG — strictly worse than the false fault it replaces,
 /// and it would have converted this exact program (which correctly faults at ~8 ms today) into a
-/// hang. `dispatch_eager_job`'s completion closure therefore pokes every live sched after `finish()`,
+/// hang. `spawn_into`'s completion closure therefore pokes every live sched after `finish()`,
 /// taking each core lock briefly rather than a bare `notify_all` so a worker that already read
 /// `outstanding == 1` cannot miss it. Post-fix this faults at ~59 ms (once the job ends) instead of
 /// ~8 ms — later, but still a fault.
@@ -16039,7 +15989,7 @@ print(\"done\")
 }
 
 /// W7-58 residual — a cycle of `Executor` joins with NO other party in it hung forever, because
-/// `join_eager_jobs` REGISTERED a party and then waited on a plain untimed condvar: it never asked
+/// `join_executor` REGISTERED a party and then waited on a plain untimed condvar: it never asked
 /// the verdict it had just made answerable.
 ///
 /// Measured pre-fix: three executors whose jobs each `shutdown()` the next, plus `main` joining the
@@ -16069,7 +16019,7 @@ print(\"done\")
 ///    executor. It was 40/40 and it kept the fault reaching `main`, but its ring was an ARTEFACT of
 ///    the bug this file now fixes, not a property of the program. The job was waiting for
 ///    `outstanding` to reach 0 while being the only thing keeping it above 0 — waiting for itself.
-///    `Vm::join_eager_jobs` now discounts the joiner's own slot, so that program is healthy (it is
+///    `Vm::join_executor` now discounts the joiner's own slot, so that program is healthy (it is
 ///    the `shutdown_now`-from-inside-its-own-job shape, which CPython 3.14.6 completes: measured
 ///    `A\nC\nend`, rc 0, 40/40) and this test would have been pinning the false fault in place.
 ///
@@ -16135,7 +16085,7 @@ print(\"after\")
 }
 
 /// A job that shuts down the executor it is running under leaves that core's submission slots
-/// UNREDUCED — its own slot is still live, so `join_eager_jobs` may not `mem::take` the vector. The
+/// UNREDUCED — its own slot is still live, so `join_executor` may not `mem::take` the vector. The
 /// program-exit drain must therefore pick the core up even though it is already `shut`, or every
 /// sibling's buffered output and every sibling's fault is dropped on the floor.
 ///
@@ -16193,7 +16143,7 @@ print(\"end\")
     .expect("a job shutting down its own executor is healthy — see the self-join fix");
     // `end` first: `main` prints it before the exit drain, which is what then flushes the slots.
     // A before C is the W7-5c per-slot flush on the buffered sink, in SUBMISSION order — that half
-    // IS ordered, unlike the streamed `chezzi run` path (see `EagerState`'s doc).
+    // IS ordered, unlike the streamed `chezzi run` path (see `the Executor's sched`'s doc).
     assert_eq!(
         out, "end\nA\nC\n",
         "a self-shut executor's buffered job output must survive to the captured stdout"
@@ -16222,7 +16172,7 @@ done.recv()
 }
 
 /// W7-60 — an `Executor.shutdown_now()` must reach a job that is itself parked in an INNER
-/// `shutdown()`. Before this, `join_eager_jobs` observed only the deadlock verdict, so the inner
+/// `shutdown()`. Before this, `join_executor` observed only the deadlock verdict, so the inner
 /// join was uncancellable and the outer `shutdown_now` waited for work it had just asked to stop.
 ///
 /// **The inner job is deliberately uninterruptible.** `process.run` is documented as having no
@@ -16794,7 +16744,7 @@ ex.shutdown()
 ///
 /// `main` is a counted party with no scheduler under it (`mn == None`), so it took the identical
 /// inline-sleep and gave the identical wrong answer while an eager job was about to send. Fixing only
-/// `eager_core` parties would have left this live.
+/// `the job's sched` parties would have left this live.
 ///
 /// Also fences the verdict: `main` registers as a blocked party for this wait, so a timer arm MUST
 /// veto the process-wide deadlock verdict (`quiesce::PartyWait::Wait` answers satisfiable for any
@@ -17114,7 +17064,7 @@ print("main done")
 /// `shutdown_now()` must reach a job running inside a NESTED executor, not just the job it submitted
 /// directly.
 ///
-/// `prepare_eager_job` was the one seam in the tree that installed a cancel token WITHOUT the
+/// `spawn_into` was the one seam in the tree that installed a cancel token WITHOUT the
 /// `scope_ancestors()` half every nursery seam pairs it with (`spawn_shell`, `run_one_fiber`), so an
 /// inner executor's job had the flag chain `[inner.cancel]` and never observed the outer trip. The
 /// program then paid the full inner sleep at the exit drain.
@@ -17177,7 +17127,7 @@ print("done")
 /// CREATED, never one that merely had work submitted to it from inside that job.
 ///
 /// An `Executor` crosses the airlock by `Arc`, so any job can `submit` to any executor it can name. A
-/// first cut keyed cancel inheritance on the SUBMITTER (`if self.eager_core.is_some() {
+/// first cut keyed cancel inheritance on the SUBMITTER (`if self.the job's sched.is_some() {
 /// rw.worker.cancel_outer = self.scope_ancestors() }`), which handed `other`'s cancel chain to a job
 /// belonging to `main`'s executor: `other.shutdown_now()` then killed an already-started job that was
 /// none of its business, AND `shared.shutdown()` — a GRACEFUL join that promises to wait for its work
@@ -22066,4 +22016,159 @@ main()
 "#;
     let out = run_capture(src).expect("run");
     assert_eq!(out, "job1 [1]\njob2 [1, 2]\n");
+}
+
+/// A sched under a live cap whose first `n` fibers are seeded and unstarted.
+fn capped_sched(n: usize) -> Arc<MnSched> {
+    let sched = Arc::new(MnSched::new(
+        n,
+        1,
+        Arc::new(AtomicBool::new(false)),
+        dl_err(),
+        usize::MAX,
+    ));
+    sched.seed((0..n).map(mk_fiber).collect());
+    sched
+}
+
+/// Run the next fiber of `sched` and finish it with a 4000-byte buffered `out`.
+fn finish_with_output(sched: &MnSched) {
+    let f = take_run(sched);
+    sched.finish(
+        f.task_index,
+        0,
+        TaskOutcome::Cancelled {
+            out: vec![0u8; 4000],
+            stderr: Vec::new(),
+        },
+    );
+}
+
+/// W7-26, the sampling half (TICKET-208: the sched owns it) — `take_charge` reports GROWTH, never
+/// the running total: charging the total per submit would sweep on every submit, and charging
+/// nothing leaves the cap unsampled. Fails if `take_charge` returns the total twice, or if
+/// `take_finished_streams` leaves the retained bytes charged.
+#[test]
+fn mnsched_take_charge_reports_growth_only() {
+    let sched = capped_sched(2);
+    assert_eq!(sched.take_charge(), 0, "nothing finished yet");
+    finish_with_output(&sched);
+    let first = sched.take_charge();
+    assert!(first >= 4000, "one finished task's output: {first}");
+    assert_eq!(sched.take_charge(), 0, "no growth since the last call");
+    let (out, _) = sched.take_finished_streams();
+    assert_eq!(out.len(), 4000);
+    assert_eq!(
+        sched.held_bytes(),
+        0,
+        "the streams left, the charge with them"
+    );
+    finish_with_output(&sched);
+    assert_eq!(
+        sched.take_charge(),
+        first,
+        "the second task grows it by the same"
+    );
+}
+
+/// W7-26 / DEC-205 (TICKET-208: one facade) — `Heap::live_bytes` counts what an Executor holds
+/// outside every heap: its finished tasks' retained output and its unfinished tasks' submit-time
+/// bytes. Fails if `held_bytes` omits either half, or if a reduced Executor stays charged.
+#[test]
+fn live_bytes_counts_an_executors_held_bytes() {
+    use crate::vm::heap::{Heap, Obj};
+    let mut h = Heap::new();
+    let core = Arc::new(crate::vm::core::ExecutorCore::default());
+    let r = h.alloc(Obj::Executor(Arc::clone(&core)));
+    let base = h.live_bytes();
+
+    let sched = capped_sched(10);
+    core.attach_test_sched(Arc::clone(&sched));
+    for _ in 0..10 {
+        finish_with_output(&sched);
+    }
+    let with_results = h.live_bytes();
+    assert!(
+        with_results >= base + 40_000,
+        "ten finished tasks' output must register: {base} -> {with_results}"
+    );
+    {
+        let mut f = mk_pending_fiber(10);
+        let mut c = sched.lock();
+        sched.reserve_slot(&mut c, &mut f, 0, 5000);
+    }
+    assert!(
+        h.live_bytes() >= with_results + 5000,
+        "an unfinished task's submit-time bytes must register"
+    );
+    *core.scope.lock().unwrap() = None;
+    assert_eq!(h.live_bytes(), base, "a reduced Executor holds nothing");
+    let _ = r;
+}
+
+/// W7-26 (the second arm) — the two `--max-heap` walks share one de-dup set, so whichever meets
+/// the Executor first must charge its held bytes. Both visit orders. Fails if
+/// `drain_pending_core_bytes` and `Heap::live_bytes` read different numbers.
+#[test]
+fn nested_executor_charges_its_held_bytes_in_either_visit_order() {
+    use crate::vm::core::SharedCore;
+    use crate::vm::heap::{Heap, Obj};
+    let ex = Arc::new(crate::vm::core::ExecutorCore::default());
+    let sched = capped_sched(10);
+    ex.attach_test_sched(Arc::clone(&sched));
+    for _ in 0..10 {
+        finish_with_output(&sched);
+    }
+    let eager_bytes = ex.held_bytes();
+    assert!(eager_bytes >= 40_000);
+
+    // (a) reachable ONLY through a `Shared`'s payload — no `Obj::Executor` slot at all.
+    let mut h = Heap::new();
+    h.set_mem_cap(1);
+    let outer = Arc::new(SharedCore::default());
+    outer.store(crate::vm::wire::WireValue::Executor(Arc::clone(&ex)));
+    let base = h.live_bytes();
+    let sr = h.alloc(Obj::Shared(Arc::clone(&outer)));
+    assert!(
+        h.live_bytes() >= base + eager_bytes,
+        "a nested executor's held bytes must be charged"
+    );
+    let _ = sr;
+
+    // (b) the executor DOES have its own slot, but the enclosing `Shared` is met first.
+    let mut h = Heap::new();
+    h.set_mem_cap(1);
+    let base = h.live_bytes();
+    let sr = h.alloc(Obj::Shared(Arc::clone(&outer)));
+    let er = h.alloc(Obj::Executor(Arc::clone(&ex)));
+    assert!(
+        h.live_bytes() >= base + eager_bytes,
+        "visit order must not decide whether the held bytes are counted"
+    );
+    let (_, _) = (sr, er);
+}
+
+/// TICKET-208, the lift direction of W7-56 — an Executor job that has FINISHED is no live sender,
+/// so a nursery task parked on a channel nobody feeds must still fault as a deadlock. Fails (the
+/// watchdog fires) if a finished job keeps vetoing the verdict, or if the nursery prints `after`.
+#[test]
+fn a_finished_executor_job_no_longer_vetoes_a_parked_nursery_task() {
+    let src = "import std.concurrency\n\
+               c := Channel[int](0)\n\
+               fn noop():\n    pass\n\
+               fn waiter():\n    _v := c.recv()\n\
+               ex := Executor()\n\
+               ex.submit(noop)\n\
+               parallel:\n    spawn waiter()\n\
+               print(\"after\")\n";
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_program(src));
+    });
+    let (out, res) = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("a finished job must not veto the deadlock verdict forever");
+    let msg = res.expect_err("expected a deadlock fault").message;
+    assert!(msg.contains("deadlock"), "got: {msg}");
+    assert!(!out.contains("after"), "the nursery returned: {out:?}");
 }

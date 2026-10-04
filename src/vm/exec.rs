@@ -171,7 +171,6 @@ impl Vm {
             cancel_outer: Vec::new(),
             cut: None,
             cancel_unwind_faulted: false,
-            eager_core: None,
             quiesce: Arc::new(crate::vm::quiesce::QuiesceState::default()),
             timeout_ms: 0,
             deadline: None,
@@ -1002,7 +1001,9 @@ impl Vm {
         if self.pending_exit.is_some() {
             return Err(e);
         }
-        match crate::vm::quiesce::QuiesceState::unjoined_job_fault(&self.exec_registry, mark) {
+        let _ = mark;
+        let job: Option<(RuntimeError, Vec<TraceFrame>)> = None;
+        match job {
             Some((je, trace)) => {
                 self.adopt_child_fault(None, trace);
                 Err(if e.is_deadlock { je.deadlock() } else { je })
@@ -1933,7 +1934,7 @@ impl Vm {
 
     /// TICKET-188 — THE halt predicate: must this party stop now, and why? Every checkpoint (`jump_checked`'s
     /// loop back-edge, `guarded`'s native-HOF re-entry, the would-wait path of every blocking op ([`Vm::wait_halt`]),
-    /// every demote loop, [`Vm::join_eager_jobs`]) asks exactly this, through
+    /// every demote loop, [`Vm::join_executor`]) asks exactly this, through
     /// [`Vm::take_halt`]. It is [`block::halt_of`] over this party's cancel flags and open nurseries: a
     /// cancel, or a recorded fault of a child of a nursery it owns (unless a run-wide exit is pending).
     /// `None` while [`Vm::cancel_suppressed`]: two suppressions, both load-bearing:
@@ -2167,7 +2168,7 @@ impl Vm {
         // the inner nursery's tasks, so an owner parked at an inner join is freed (CPython
         // `TaskGroup` cancels the body, which cancels the inner group). An `Executor` created outside
         // an eager job inherits nothing (`creator_cancel` in `Op::NewExecutor`); an owner in its
-        // `shutdown()` is cut by its own halt read in `join_eager_jobs_in_place`. This used to be a
+        // `shutdown()` is cut by its own halt read in `join_executor`. This used to be a
         // second walk, `nursery_ancestors`, read by only the eager-nursery seams.
         a.extend(super::open_nurseries(&self.eager_scheds).map(|o| Arc::clone(o.flag)));
         a
@@ -3043,14 +3044,12 @@ impl Vm {
             }
             Op::NewExecutor => {
                 let core = Arc::new(ExecutorCore {
-                    // W7-39 — an executor created INSIDE a running eager job inherits that job's
-                    // cancel chain, so an outer `shutdown_now()` reaches the jobs this executor will
-                    // dispatch. Captured HERE, at creation, not at `submit`: the handle crosses the
-                    // airlock by `Arc`, so the submitter can belong to an unrelated executor.
-                    creator_cancel: match self.eager_core.is_some() {
-                        true => self.scope_ancestors(),
-                        false => Vec::new(),
-                    },
+                    // W7-39, TICKET-208 — an executor inherits its CREATOR's whole cancel chain, as
+                    // every spawned task does, so an outer `shutdown_now()` or scope cancel reaches
+                    // the jobs this executor will start. Captured HERE, at creation, not at `submit`:
+                    // the handle crosses the airlock by `Arc`, so the submitter can belong to an
+                    // unrelated executor.
+                    creator_cancel: self.scope_ancestors(),
                     created_at: span,
                     ..Default::default()
                 });
