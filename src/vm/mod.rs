@@ -1186,6 +1186,20 @@ pub struct Vm {
     /// replaced the `cancelled` sentinel with a real, non-deadlock fault. Read (and cleared) by
     /// [`Vm::classify_mn_outcome`], which then reports `CancelledFault` instead of swallowing it.
     cancel_unwind_faulted: bool,
+    /// Set only on the worker `Vm` of an EAGERLY-dispatched `Executor` job (M:N) — to that job's own
+    /// executor core. Such a worker has no nursery scheduler and no [`MnSched`], so a blocking op
+    /// falls to the "no scheduler" arm of `chan_recv_step` / `send` / `wait:`, which faults
+    /// `deadlock — no runnable task can send`. That verdict was true while jobs only ran at the drain
+    /// (the submitter was blocked inside `shutdown()`, so nobody COULD send) and is a LIE once jobs
+    /// start at `submit` — the submitter is still running and may well send next statement. When this
+    /// is `Some` those arms block on the channel's own condvar instead ([`Vm::block_recv`]),
+    /// matching Python.
+    ///
+    /// It carries the CORE (not a bare flag) because a job's outcome slot and its cooperative cancel
+    /// flag both hang off it. Whether a blocked job is DEADLOCKED is no longer asked of this core —
+    /// that is the process-wide verdict in [`quiesce`] (`future.md` §2d step 0), which replaced
+    /// W7-12's per-executor counters.
+    eager_core: Option<Arc<ExecutorCore>>,
     /// The run's registry of blocked parties — the process-wide deadlock verdict (`future.md` §2d
     /// step 0, closing `gaps.md` `W7-12r`). Shared (not copied) with every worker by
     /// [`Vm::spawn_worker`], and per-run rather than process-global for the same reason
@@ -1994,12 +2008,30 @@ enum TaskOutcome {
     },
 }
 
+impl TaskOutcome {
+    /// W7-60 — the buffered `(stdout, stderr)` this outcome carries, whatever its variant. Every
+    /// variant owns a pair and `reduce_task_slots` flushes all five unconditionally (W7-5c), so a
+    /// caller that wants only the OUTPUT — the bail-out path in [`Vm::join_eager_jobs`], which must
+    /// not also propagate a finished job's fault over the halt that is already unwinding — needs one
+    /// accessor rather than a second five-arm `match` that could drift from the first.
+    fn streams(&self) -> (&[u8], &[u8]) {
+        match self {
+            TaskOutcome::Done(wr) => (&wr.out, &wr.stderr),
+            TaskOutcome::Cancelled { out, stderr }
+            | TaskOutcome::CancelledFault { out, stderr, .. }
+            | TaskOutcome::Exit { out, stderr, .. }
+            | TaskOutcome::Fault { out, stderr, .. }
+            | TaskOutcome::Deadlocked { out, stderr, .. } => (out, stderr),
+        }
+    }
+}
+
 // B3.3-threads had a `TaskSlots` alias + a `DoneSignal` completion guard here, both owned by the
 // batch farm/join helper `run_workers_on_pool`. Eager `Executor` execution retired that helper (its
 // last caller was the `Executor` drain — the legacy `run_parallel_nursery` was already gone, and the
 // M:N nursery joins through `MnSched`), so both went with it. The panic-safety invariant they existed
-// for is unchanged and now lives inline in `Vm::spawn_into`: a Rust panic in a job's worker VM
-// becomes a `Fault` slot instead of leaving `the Executor's sched::outstanding` short and hanging `shutdown`
+// for is unchanged and now lives inline in `Vm::dispatch_eager_job`: a Rust panic in a job's worker VM
+// becomes a `Fault` slot instead of leaving `EagerState::outstanding` short and hanging `shutdown`
 // forever. Covered by `executor_faulting_job_does_not_hang_shutdown`.
 
 /// The `deadlock` fault message raised by the M:N detector ([`MnSched::take_runnable`]).
@@ -2007,9 +2039,10 @@ const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is bloc
      cannot proceed on (an empty recv() or a full send()) and no sibling can unblock it — the nursery \
      cannot progress";
 
-/// TICKET-208 — `Executor.submit` could start no runner thread for its job.
-const EXEC_NO_RUNNER_MSG: &str =
-    "Executor.submit could not start a runner thread (OS thread limit reached)";
+/// gaps.md W7-58 residual — the fault a thread blocked in an `Executor` join takes when the
+/// process-wide verdict says nothing in the run can move again. See [`Vm::join_eager_jobs`].
+const JOIN_DEADLOCK_MSG: &str = "waiting for this Executor's jobs: deadlock — every task in this run \
+     is blocked and none of them can make progress, so no job can ever finish";
 
 /// D2b — the M:N scheduler shared by every worker enlisted on one `parallel:` nursery (the joining
 /// thread + the pool shells it farms). It replaces the legacy `--parallel` "one OS thread per task,
@@ -2340,10 +2373,6 @@ struct MnSched {
     /// `is_deadlocked_ignoring_jobs`'s own-verdict decline both read this flag. Always `false` for an
     /// OUTERMOST eager sched, whose body runs on its own dedicated drainer thread.
     body_is_fiber: bool,
-    /// TICKET-208 — `Some` for an `Executor`'s sched: a scope with no body thread, whose submitters
-    /// are other parties. Such a sched never judges itself locally ([`MnSched::is_deadlocked_given`])
-    /// and its runners leave when no task is unfinished.
-    detached: Option<std::sync::Weak<ExecutorCore>>,
     /// gaps.md W7-56 — the run's [`ExecRegistry`], so [`MnSched::is_deadlocked`] can see an eager
     /// `Executor` job as a live, UNCOUNTED feeder. The predicate's counters model fibers of THIS
     /// sched only; an `ex.submit(f)` job runs on the shared pool with no fiber, no `runnable`, no
@@ -2538,10 +2567,6 @@ impl ScopeTable {
         self.live.iter().map(|(_, s)| s)
     }
 
-    fn values_mut(&mut self) -> impl Iterator<Item = &mut JoinScope> {
-        self.live.iter_mut().map(|(_, s)| s)
-    }
-
     fn ids(&self) -> Vec<usize> {
         self.live.iter().map(|(i, _)| *i).collect()
     }
@@ -2649,17 +2674,6 @@ struct SchedCore {
     /// entry is removed in the same lock hold as the pop that ends it (DEC-176).
     waiters: std::collections::HashMap<u64, crate::vm::block::Waiter>,
     next_waiter_tok: u64,
-    /// TICKET-208 — a detached sched's (an `Executor`'s) claimed runner wids, index 0 unused. Set by
-    /// `submit`'s top-up, cleared by the runner under this lock when it leaves.
-    exec_wids: Vec<bool>,
-    /// The scope a detached sched's next `submit` grows (see [`MnSched::reserve_slot`]).
-    exec_tail: usize,
-    /// Task index to submit-time bytes, an entry only for a nonzero charge (DEC-205).
-    slot_charge: fxhash::FxHashMap<usize, usize>,
-    /// The sum of `slot_charge`: bytes of tasks reserved and not yet finished.
-    unfinished_bytes: usize,
-    /// How much of the scopes' retained-output `bytes` [`MnSched::take_charge`] already reported.
-    charged: usize,
 }
 
 impl SchedCore {
@@ -2862,44 +2876,10 @@ impl SchedCore {
 
     /// TICKET-181 — the ONE waiter veto: could any registered waiter already be satisfied? Runs
     /// under A and takes only Q and the guard registry G (a leaf), the order `send_wake` uses.
-    /// `me` is the sched this core belongs to. A `Join` waiter is answered here, never through
-    /// [`quiesce::PartyWait::satisfiable`], which would lock a sched core under this one: a join of
-    /// `me` reads `self`, and a join of another sched uses `try_lock` (a busy core answers `true`,
-    /// which only declines the verdict).
-    fn any_waiter_satisfiable(&self, me: &MnSched) -> bool {
-        self.waiters.values().any(|w| match &*w.wait {
-            quiesce::PartyWait::Join(s, slack) => {
-                if w.cancel.iter().any(|f| f.load(Ordering::Relaxed)) {
-                    return true;
-                }
-                if std::ptr::eq(Arc::as_ptr(s), me) {
-                    self.undone_tasks() <= *slack
-                } else {
-                    match s.core.try_lock() {
-                        Ok(c) => c.undone_tasks() <= *slack,
-                        Err(std::sync::TryLockError::Poisoned(e)) => {
-                            e.into_inner().undone_tasks() <= *slack
-                        }
-                        Err(std::sync::TryLockError::WouldBlock) => true,
-                    }
-                }
-            }
-            _ => w.satisfiable(),
-        })
-    }
-
-    /// Tasks registered and not yet finished, over every scope.
-    fn undone_tasks(&self) -> usize {
-        self.scopes
+    fn any_waiter_satisfiable(&self) -> bool {
+        self.waiters
             .values()
-            .map(|s| s.total.saturating_sub(s.done))
-            .sum()
-    }
-
-    fn release_runner(&mut self, wid: usize) {
-        if let Some(b) = self.exec_wids.get_mut(wid) {
-            *b = false;
-        }
+            .any(crate::vm::block::Waiter::satisfiable)
     }
 
     /// TICKET-181 — is any demoted fiber blocked here (a victim the verdict may claim)?
@@ -2962,11 +2942,6 @@ impl MnSched {
                 terminate: false,
                 waiters: std::collections::HashMap::new(),
                 next_waiter_tok: 0,
-                exec_wids: vec![false; nworkers.max(1)],
-                exec_tail: 0,
-                slot_charge: Default::default(),
-                unfinished_bytes: 0,
-                charged: 0,
             }),
             cv: Condvar::new(),
             deadlock_err,
@@ -2984,7 +2959,6 @@ impl MnSched {
             sched_registry: Default::default(),
             // TICKET-112 — false by default; `activate_eager_nursery` sets it for a nested sched.
             body_is_fiber: false,
-            detached: None,
             // gaps.md W7-56 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no veto).
             exec_registry: Default::default(),
@@ -3282,49 +3256,11 @@ impl MnSched {
     /// (`retire_scope`). Same one-lock grow+runnable atomicity as `inject`; like `inject`, it
     /// does not un-latch `terminate`.
     fn inject_or_extend(&self, mut fiber: Fiber, scope_id: usize) -> Option<usize> {
-        let mut c = self.lock();
-        let opened = self.reserve_slot(&mut c, &mut fiber, scope_id, 0);
-        self.enqueue_locked(&mut c, fiber);
-        drop(c);
-        self.notify_waiters();
-        opened
-    }
-
-    /// Make a reserved fiber runnable (the second half of [`MnSched::inject_or_extend`]).
-    fn enqueue_locked(&self, c: &mut SchedCore, fiber: Fiber) {
-        c.global.push_back(fiber);
-        self.runnable.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// [`MnSched::enqueue_locked`] under its own lock hold, for `Executor.submit`, which starts its
-    /// runners between the reserve and the enqueue.
-    fn enqueue(&self, fiber: Fiber) {
-        let mut c = self.lock();
-        self.enqueue_locked(&mut c, fiber);
-        drop(c);
-        self.notify_waiters();
-    }
-
-    /// Claim `fiber`'s outcome slot (the first half of [`MnSched::inject_or_extend`]): it grows the
-    /// tail scope, or opens a continuation scope when `scope_id` is no longer the sched's last. A
-    /// detached sched (an `Executor`) keeps its own tail, because its submitters are many parties.
-    /// A nonzero `charge` is the task's submit-time bytes, held until [`MnSched::finish`].
-    fn reserve_slot(
-        &self,
-        c: &mut SchedCore,
-        fiber: &mut Fiber,
-        scope_id: usize,
-        charge: usize,
-    ) -> Option<usize> {
         debug_assert!(
             matches!(fiber.state, FiberState::Pending(_)),
             "an injected handler must be unstarted (Pending) so `run_one_fiber` runs its body via `start_task`"
         );
-        let scope_id = if self.detached.is_some() {
-            c.exec_tail
-        } else {
-            scope_id
-        };
+        let mut c = self.lock();
         let base_index = c.slots.len(); // authoritative flat slot index — the slots END
         let opened = if c.scopes.last_id() == Some(scope_id) {
             c.scopes[scope_id].total += 1;
@@ -3349,109 +3285,15 @@ impl MnSched {
             };
             let id = c.scopes.open(cont);
             fiber.scope_id = id;
-            if self.detached.is_some() {
-                c.exec_tail = id;
-            }
             Some(id)
         };
         fiber.task_index = base_index;
         c.slots.push(None);
-        if charge != 0 {
-            c.slot_charge.insert(base_index, charge);
-            c.unfinished_bytes += charge;
-        }
+        c.global.push_back(fiber);
+        self.runnable.fetch_add(1, Ordering::Relaxed);
+        drop(c);
+        self.notify_waiters();
         opened
-    }
-
-    /// The runner wids `Executor.submit` must start now: the first free wids while fewer runners
-    /// are claimed than `min(worker count, undone tasks)`. Called in the lock hold that reserved
-    /// the slot, so a runner leaving (it clears its claim under this lock) is never counted.
-    fn claim_runners(&self, c: &mut SchedCore) -> Vec<usize> {
-        let undone: usize = c
-            .scopes
-            .values()
-            .map(|s| s.total.saturating_sub(s.done))
-            .sum();
-        let want = (c.exec_wids.len() - 1).min(undone);
-        let mut claimed = c.exec_wids.iter().filter(|b| **b).count();
-        let mut out = Vec::new();
-        for wid in 1..c.exec_wids.len() {
-            if claimed >= want {
-                break;
-            }
-            if !c.exec_wids[wid] {
-                c.exec_wids[wid] = true;
-                claimed += 1;
-                out.push(wid);
-            }
-        }
-        out
-    }
-
-    /// A runner thread could not start: give its claim back. Returns whether any runner is left.
-    fn unclaim_runner(&self, wid: usize) -> bool {
-        let mut c = self.lock();
-        c.exec_wids[wid] = false;
-        c.exec_wids.iter().any(|b| *b)
-    }
-
-    /// What this sched holds outside every heap: the submit-time bytes of its unfinished tasks plus
-    /// its finished tasks' retained output (kept under a live cap only). Takes the core lock.
-    pub(super) fn held_bytes(&self) -> usize {
-        let c = self.lock();
-        c.unfinished_bytes + c.scopes.values().map(|s| s.bytes).sum::<usize>()
-    }
-
-    /// W7-26, the sampling half — the growth of the retained-output bytes since the last call, for
-    /// the submitting heap's GC pacing counter. A delta: the counter is monotonic between sweeps.
-    pub(super) fn take_charge(&self) -> usize {
-        let mut c = self.lock();
-        let sum: usize = c.scopes.values().map(|s| s.bytes).sum();
-        let old = std::mem::replace(&mut c.charged, sum);
-        sum.saturating_sub(old)
-    }
-
-    /// W7-60 — the buffered output of every task that has ALREADY finished, in slot order, for a
-    /// joiner that leaves while other tasks are unfinished. Length-preserving (a running task keeps
-    /// its index) and idempotent (a second call returns nothing).
-    fn take_finished_streams(&self) -> (Vec<u8>, Vec<u8>) {
-        let mut c = self.lock();
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        for o in c.slots.iter_mut().flatten() {
-            let (o_out, o_err) = match o {
-                TaskOutcome::Done(wr) => (&mut wr.out, &mut wr.stderr),
-                TaskOutcome::Cancelled { out, stderr }
-                | TaskOutcome::CancelledFault { out, stderr, .. }
-                | TaskOutcome::Exit { out, stderr, .. }
-                | TaskOutcome::Fault { out, stderr, .. }
-                | TaskOutcome::Deadlocked { out, stderr, .. } => (out, stderr),
-            };
-            out.append(o_out);
-            err.append(o_err);
-        }
-        for s in c.scopes.values_mut() {
-            s.bytes = 0;
-        }
-        c.charged = 0;
-        (out, err)
-    }
-
-    /// One tick of an `Executor` join: wait on the sched's condvar while more than `slack` tasks
-    /// are undone, for at most `tick`.
-    fn join_tick(&self, slack: usize, tick: std::time::Duration) {
-        let c = self.lock();
-        let undone: usize = c
-            .scopes
-            .values()
-            .map(|s| s.total.saturating_sub(s.done))
-            .sum();
-        if undone > slack {
-            drop(
-                self.cv
-                    .wait_timeout(c, tick)
-                    .unwrap_or_else(|e| e.into_inner()),
-            );
-        }
     }
 
     /// Per-connection spawn — mark `scope_id`'s (eager) body as still producing tasks: a transient
@@ -3798,7 +3640,6 @@ impl MnSched {
             // 3. Global queue (batch-grab) + termination/deadlock + park (core lock A).
             let mut c = self.lock();
             if c.terminate {
-                c.release_runner(wid);
                 width::release();
                 return Take::Stop;
             }
@@ -3855,12 +3696,6 @@ impl MnSched {
             // (`SchedCore::owner_scope_done`, TICKET-128/W13-25).
             self.idle_register(&width::my_slot());
             width::release();
-            // TICKET-208 — an Executor holds a thread only while a job is unfinished: its runner
-            // leaves here and gives its wid back under this lock, so `submit` starts a new one.
-            if self.detached.is_some() && c.all_scopes_done() {
-                c.release_runner(wid);
-                return Take::Stop;
-            }
             if scope_id != SENTINEL_SCOPE && c.owner_scope_done(scope_id) {
                 self.notify_waiters();
                 return Take::Stop;
@@ -3940,7 +3775,7 @@ impl MnSched {
                     continue;
                 }
                 drop(c);
-                let verdict = self.quiesce.quiesced();
+                let verdict = self.quiesce.quiesced(&self.exec_registry);
                 c = self.lock();
                 if verdict && self.is_deadlocked_ignoring_jobs(&c) {
                     // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict
@@ -4863,10 +4698,6 @@ impl MnSched {
     fn finish(&self, task_index: usize, scope_id: usize, outcome: TaskOutcome) -> bool {
         let mut c = self.lock();
         c.running -= 1;
-        // DEC-205 — a task's submit-time bytes stay charged until it FINISHES.
-        if let Some(charge) = c.slot_charge.remove(&task_index) {
-            c.unfinished_bytes -= charge;
-        }
         // W7-26r — this thread is the only party that can observe the cap for a nursery whose parent
         // is blocked in the join (see `core::halt_over_backlog`). These slots live outside every
         // `Heap`, so `live_bytes` never counted them either: this is the accounting AND the
@@ -5078,7 +4909,7 @@ impl MnSched {
             (s.base_index, s.total)
         };
         // W7-26r — the retained bytes leave with the slots, so the backlog total returns to zero with
-        // them (`the Executor's sched::take_slots` does the same for the executor half). Today every caller
+        // them (`EagerState::take_slots` does the same for the executor half). Today every caller
         // takes only after `wait_for_scope`, so no fiber of this scope can still be running; this
         // keeps the counter honest if that ever stops being true, instead of leaving a stale
         // watermark that would fault the NEXT program to reach this scope id.
@@ -5157,7 +4988,7 @@ impl MnSched {
         // veto. `outstanding` is bumped at `reserve()` (at `submit`, before dispatch) and dropped at
         // `finish()`, so a job still queued behind a saturated pool already counts.
         //
-        // The veto EXPIRES: `spawn_into`'s completion closure pokes every live sched after
+        // The veto EXPIRES: `dispatch_eager_job`'s completion closure pokes every live sched after
         // `finish()`, so a job that ends without ever sending lets an idle worker re-evaluate and
         // report the genuine deadlock (the idle wait is untimed — without that poke this veto would
         // be a permanent silent hang instead of a fault).
@@ -5170,7 +5001,7 @@ impl MnSched {
         // Lock order: this holds `SchedCore` (A) and takes `exec_registry` → one `ExecutorCore::eager`
         // beneath it, matching the waiter veto's A-then-`q`. Nothing acquires a sched core
         // lock while holding either, so no cycle.
-        if self.detached.is_some() {
+        if crate::vm::quiesce::QuiesceState::outstanding_jobs(&self.exec_registry) > 0 {
             return false;
         }
         self.is_deadlocked_ignoring_jobs_given(c, awaiting_drain)
@@ -5335,7 +5166,7 @@ impl MnSched {
         // deadlock would drop every parked fiber without its `defer`s and latch `terminate`.
         // Each vetoing state makes the waiter return on its next poll and unregister, so the veto
         // cannot pin a hang. Lock order A → Q, A → G (a leaf), as `send_wake`.
-        if c.any_waiter_satisfiable(self) {
+        if c.any_waiter_satisfiable() {
             return false;
         }
         true
@@ -6080,7 +5911,6 @@ impl ReadyWorker {
         })
     }
 
-    #[cfg(test)]
     /// Invoke the prepared task on the worker VM, leaving its return value on the stack popped into
     /// `ret`. Borrows `worker` and consumes `call` (disjoint fields), so the caller keeps `worker`
     /// afterward to inspect `pending_exit`/`cancelled` (B3.4).
@@ -6101,6 +5931,97 @@ impl ReadyWorker {
                     ));
                 }
                 Ok(worker.pop())
+            }
+        }
+    }
+
+    /// B3.4 — the `--parallel` join's entry point: run the task and classify how it ended into a
+    /// [`TaskOutcome`]. W7-5 — an ordinary fault does NOT trip the cancel flag: the drain runs every
+    /// queued job and the join raises the lowest-index fault. Only a hard halt trips it — `os.exit`
+    /// (the `pending_exit` arm) or [`executor_hard_halt`] (over-memory / timeout). W7-5d: a fault
+    /// raised on a dead stdout is ORDINARY and does not trip it, so a broken pipe kills the printing
+    /// job and leaves its siblings alone — see [`executor_hard_halt`] for the measured ancestors.
+    /// Precedence: a deliberate `os.exit` (worker `pending_exit`) → `Exit`; an observed sibling
+    /// cancel (`worker.is_cancelled()`) → `Cancelled` (swallowed); else the invoke result maps to
+    /// `Fault`/`Done`. Output buffers are moved out only on the paths that flush them.
+    fn run_outcome(mut self) -> TaskOutcome {
+        let span = self.span;
+        let res = Self::invoke(&mut self.worker, self.call, span);
+        // Classify the outcome (legacy `Executor`-drain pool path; the nursery engine is M:N now).
+        if let Some(code) = self.worker.pending_exit {
+            // A child `std.os.exit(code)` is a fault-that-cancels: it surfaces as an `Err` sentinel
+            // with `pending_exit` set. Trip cancel, flush its output, hand the code up for a halt.
+            self.worker.trip_cancel();
+            TaskOutcome::Exit {
+                code,
+                out: std::mem::take(&mut self.worker.out),
+                stderr: std::mem::take(&mut self.worker.stderr),
+            }
+        } else if self.worker.is_cancelled() {
+            // This worker observed a sibling's cancel and unwound — its output still flushes.
+            // TICKET-147 — unless its own `defer` faulted during that unwind (see `classify_mn_outcome`).
+            match res {
+                Err(err) if std::mem::take(&mut self.worker.cancel_unwind_faulted) => {
+                    TaskOutcome::CancelledFault {
+                        err,
+                        out: std::mem::take(&mut self.worker.out),
+                        stderr: std::mem::take(&mut self.worker.stderr),
+                    }
+                }
+                _ => TaskOutcome::Cancelled {
+                    out: std::mem::take(&mut self.worker.out),
+                    stderr: std::mem::take(&mut self.worker.stderr),
+                },
+            }
+        } else {
+            match res {
+                Err(e) => {
+                    if executor_hard_halt(&e) {
+                        self.worker.trip_cancel();
+                    }
+                    TaskOutcome::Fault {
+                        err: e,
+                        out: std::mem::take(&mut self.worker.out),
+                        stderr: std::mem::take(&mut self.worker.stderr),
+                        trace: self.worker.take_fault_trace(),
+                    }
+                }
+                Ok(ret) => {
+                    // Re-stamp with the task's real span: a returned non-sendable value (a
+                    // frame-holding generator) faults gracefully at the submit/spawn site, not line 0.
+                    let crossed = self.worker.to_wire_at(ret, span).and_then(|value| {
+                        self.worker.ensure_crossable(&value, span).map(|()| value)
+                    });
+                    match crossed {
+                        // W7-27 — the crossed value is DROPPED here, not stored. Nothing can read
+                        // it: `submit` returns nil (no futures) and `reduce_task_slots` reads only
+                        // `out`/`stderr`, so retaining it held every job's result for the executor's
+                        // whole lifetime — 300 × ~1 MB measured at 336 MB peak RSS against CPython
+                        // `ThreadPoolExecutor`'s 42 MB. The M:N nursery path stores `Nil` for the
+                        // same reason (`sched.rs`, `run_mn_nursery`'s outcome). The crossing above
+                        // still runs, and dropping its product does not make it dead: `to_wire_at`
+                        // is FALLIBLE — a return value that cannot cross (a generator closing a
+                        // reference cycle, a depth/size cap) must fault at the submit site with the
+                        // task's real span. (A plain non-sendable generator is not that case: it
+                        // wires to an inert `Nil` and faults only when reached — B3.3's Option B.)
+                        Ok(_) => TaskOutcome::Done(WorkerResult {
+                            value: WireValue::Nil,
+                            out: std::mem::take(&mut self.worker.out),
+                            stderr: std::mem::take(&mut self.worker.stderr),
+                        }),
+                        Err(e) => {
+                            if executor_hard_halt(&e) {
+                                self.worker.trip_cancel();
+                            }
+                            TaskOutcome::Fault {
+                                err: e,
+                                out: std::mem::take(&mut self.worker.out),
+                                stderr: std::mem::take(&mut self.worker.stderr),
+                                trace: Vec::new(),
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -6761,7 +6682,7 @@ impl crate::native::Host for VmHost<'_> {
         // ordering; this sequence is only about publishing the code and the teardown before the hint.
         self.vm.quiesce.request_exit(code);
         self.vm.halt_all_scheds();
-        self.vm.quiesce.mark_run_halt();
+        self.vm.quiesce.mark_exit_pending();
     }
 }
 

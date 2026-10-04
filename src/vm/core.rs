@@ -1155,6 +1155,155 @@ impl ExecState {
     }
 }
 
+/// The eager (M:N) half of an [`ExecutorCore`]. Eager dispatch is the only path: a job starts at its
+/// `submit` and `shutdown` is purely the join.
+///
+/// `slots` is indexed by SUBMISSION ORDER, which is the whole reason eager execution keeps the W7-5
+/// fault contract for free: `shutdown` hands this vector straight to `Vm::reduce_task_slots`, so
+/// lowest-index-fault selection, hard-halt-over-ordinary precedence and the per-slot output flush
+/// (W7-5c) are inherited rather than re-implemented.
+///
+/// **What that flush does and does NOT order.** It governs the BUFFERED stdout sink only — the
+/// `out`/`stderr` a job's worker `Vm` accumulates when [`HostConfig::stream`] is off, which is what
+/// every test helper and every embedder gets. `chezzi run` sets `stream`, and a streamed `print`
+/// goes to the real fd at the moment it runs (line-atomic, never withheld — the D5 invariant in
+/// [`Vm::emit_out`]); a job's slot buffers are then EMPTY and this flush reorders nothing. So under
+/// `chezzi run` an `Executor`'s jobs interleave their output in COMPLETION order, with no
+/// submission-order guarantee — exactly like the `parallel:` nursery, and exactly like the ancestor
+/// (`ThreadPoolExecutor`, CPython 3.14.6, three jobs each doing real work: measured 0/30 runs in
+/// submission order; three jobs that only `print`: 30/30, because they are too short to overlap).
+/// Do not read the submission-order slot indexing as a promise about interleaved live output — it is
+/// a promise about WHICH fault wins and about the buffered sink's byte order.
+#[derive(Debug, Default)]
+pub struct EagerState {
+    /// Submitted-but-not-yet-finished jobs. `shutdown` waits for this to reach 0.
+    outstanding: usize,
+    /// One slot per `submit`, in submission order; `None` until that job finishes.
+    /// PRIVATE on purpose — see [`ChanState::queue`]: the cached `(bytes, dirty)` summary below is
+    /// only trustworthy while `finish`/`take_slots` are the sole ways to change this vector.
+    slots: Vec<Option<super::TaskOutcome>>,
+    /// W7-26 — cached `(bytes, dirty)` of the collected outcomes, the shape `ChanState`/`ExecState`
+    /// already carry. Without it a finished job's result was reachable by `Heap::live_bytes`
+    /// NOWHERE: `--max-heap` reads the executor core, and the only half it could read was `inner`, the
+    /// lazy QUEUE half — which eager execution leaves empty forever (and which, since the cooperative
+    /// engine was removed, no execution path fills at all).
+    bytes: usize,
+    dirty: bool,
+    /// How much of `bytes` has already been reported to a submitting heap's GC pacing counter — see
+    /// [`take_charge`](EagerState::take_charge).
+    charged: usize,
+}
+
+impl EagerState {
+    /// Claim the next submission-order slot. Called under the core lock at `submit`, BEFORE the job
+    /// is handed to the pool, so slot order is submission order even when jobs finish out of order.
+    pub(super) fn reserve(&mut self) -> usize {
+        self.outstanding += 1;
+        self.slots.push(None);
+        self.slots.len() - 1
+    }
+
+    /// Record a finished job's outcome with its PRE-COMPUTED [`outcome_summary`] — see
+    /// [`ChanState::push`], and hoisted for the same reason `SharedCore::store` hoists its walk: the
+    /// summary is a recursive O(result) walk, and this lock is contended by every `submit`
+    /// (`dispatch_eager_job`'s `reserve`, taken while the submitter holds `inner`) and by every
+    /// `live_bytes`. Lock hold time must not scale with user payload size. The caller must
+    /// `notify_all` the core's `eager_cv` after dropping the guard so a waiting `shutdown` re-checks.
+    pub(super) fn finish(&mut self, idx: usize, sum: (usize, bool), outcome: super::TaskOutcome) {
+        // `take_slots` empties the vector, which would invalidate a live job's index. It only ever runs
+        // at `outstanding == 0` (the join waits for that first) and `submit` reserves under the `shut`
+        // check, so no job can be holding a stale index here. Asserted rather than defended: the
+        // failure mode is a panic on a pool thread AFTER its `catch_unwind`, which would leave
+        // `outstanding` short and hang `shutdown` forever — worth catching in tests, not papering over.
+        debug_assert!(
+            idx < self.slots.len(),
+            "eager slot {idx} was taken while a job was still outstanding"
+        );
+        self.bytes += sum.0;
+        self.dirty |= sum.1;
+        self.slots[idx] = Some(outcome);
+        self.outstanding -= 1;
+    }
+
+    /// TICKET-195 — the first finished job that FAULTED and is not yet reduced by a join, with its
+    /// own trace. A job's deadlock verdict is skipped: it is the verdict, not a fault that outranks
+    /// one. So is a job cut by the run's own `--timeout` (TICKET-200): that is the run's cause, not
+    /// an earlier fault.
+    pub(super) fn first_fault(&self) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
+        self.slots.iter().find_map(|s| match s {
+            Some(super::TaskOutcome::Fault { err, trace, .. })
+                if !err.is_deadlock && !err.is_timed_out =>
+            {
+                Some((err.clone(), trace.clone()))
+            }
+            _ => None,
+        })
+    }
+
+    /// Take the collected outcomes, leaving the slot vector empty. A second `shutdown` therefore
+    /// reduces an empty vector — a clean no-op.
+    pub(super) fn take_slots(&mut self) -> Vec<Option<super::TaskOutcome>> {
+        self.bytes = 0;
+        self.dirty = false;
+        self.charged = 0;
+        std::mem::take(&mut self.slots)
+    }
+
+    /// W7-60 — take the outcomes of the jobs that have ALREADY finished, leaving the slot vector at
+    /// its current LENGTH (each taken slot becomes `None` again). For the bail-out paths in
+    /// [`super::Vm::join_eager_jobs`], which unwind while other jobs are still outstanding: those jobs
+    /// hold indices into this vector and will `finish` into them, so [`take_slots`](Self::take_slots)'s
+    /// `mem::take` is not available — but the jobs that DID finish still own buffered output, and
+    /// dropping it is a silent loss (a `print` that ran, completed, and never reached stdout).
+    ///
+    /// Length-preserving, so a concurrent `finish` stays in range; idempotent, so a second call
+    /// returns nothing and the same bytes can never be flushed twice. The byte accounting is reset
+    /// for what leaves, exactly as `take_slots` does — what remains is re-accrued by the outstanding
+    /// jobs' own `finish` calls.
+    pub(super) fn take_finished(&mut self) -> Vec<super::TaskOutcome> {
+        let taken: Vec<_> = self.slots.iter_mut().filter_map(Option::take).collect();
+        if !taken.is_empty() {
+            self.bytes = 0;
+            self.dirty = false;
+            self.charged = 0;
+        }
+        taken
+    }
+
+    /// W7-26, the SAMPLING half — the growth in `bytes` since this was last called, to be charged
+    /// against the SUBMITTING heap's GC pacing counter (`Heap::charge_bytes`).
+    ///
+    /// Counting the results is worthless if the cap is never sampled (the W6-10 review lesson):
+    /// `over_cap` is only evaluated in `sweep()`, `sweep()` only runs when `should_collect()` fires,
+    /// and a `for … : ex.submit(f)` loop over a job that BUILDS its own payload allocates almost
+    /// nothing in the parent and wires almost nothing at submit — so the parent never swept and
+    /// 300 × ~1 MB of results measured PASS at 330 MB against an 8 MB cap even with the accounting
+    /// above in place. A DELTA rather than the absolute total: the pacing counter is monotonic and
+    /// reset at each sweep, so charging the total again per submit would sweep on every submit.
+    ///
+    /// Known ceiling, and safe by the same "fails open only by under-triggering" argument the
+    /// pacing counter itself carries: `charged` is ONE watermark on a core that any number of heaps
+    /// can submit to (an `Executor` handle crosses by `Arc`), so with two tasks sharing an executor
+    /// the growth is charged to whichever submits next, not split. Detection is mis-attributed or
+    /// delayed, never lost — every heap that can reach the core still counts its FULL bytes in its
+    /// own `live_bytes`; this only decides who gets swept sooner.
+    pub(super) fn take_charge(&mut self) -> usize {
+        let d = self.bytes.saturating_sub(self.charged);
+        self.charged = self.bytes;
+        d
+    }
+
+    pub fn outstanding(&self) -> usize {
+        self.outstanding
+    }
+
+    /// Cached GC summary of the collected outcomes: `(approximate owned bytes, holds a nested core)`
+    /// — the [`ExecState::summary`] counterpart for the eager half (W7-26).
+    pub fn summary(&self) -> (usize, bool) {
+        (self.bytes, self.dirty)
+    }
+}
+
 /// W7-26 — one finished job's `(owned bytes, holds a nested core)`, the [`wire_summary`] of a
 /// [`TaskOutcome`](super::TaskOutcome). Every variant owns two buffered-output `Vec<u8>`s (W7-5c
 /// flushes them at the slot's task-order position, so they are retained until `shutdown`); only
@@ -1168,7 +1317,7 @@ impl ExecState {
 /// separate: Go's `runtime.MemStats` vs `GOMEMLIMIT`). [`ChanState::push`] charges unconditionally
 /// for the same reason.
 ///
-/// Called OFF the `eager` lock (see [`the Executor's sched::finish`]) — the walk is O(result).
+/// Called OFF the `eager` lock (see [`EagerState::finish`]) — the walk is O(result).
 pub(super) fn outcome_summary(o: &super::TaskOutcome) -> (usize, bool) {
     use super::TaskOutcome as T;
     let (out, stderr, value) = match o {
@@ -1273,13 +1422,34 @@ pub(super) fn halt_over_backlog(
 /// `ExecutorService`) and [`ExecState::queue`] stays empty — the pending work lives in `eager`.
 /// `shut` lives in the **shared** core, so any handle aliasing this core sees the same shutdown state
 /// (this is what prevents a `from_wire`'d alias from being drained twice at program exit).
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ExecutorCore {
     pub inner: Mutex<ExecState>,
-    /// TICKET-208 — the detached scope this Executor's jobs run in: a sched built at the first
-    /// `submit` and taken by the join that reduces its slots. The Executor's tasks, their results
-    /// and their byte charge live in that sched and nowhere else.
-    pub(super) scope: Mutex<Option<super::EagerScope>>,
+    /// Eager (M:N) execution state. Guarded by its OWN lock, never `inner`'s: a finishing pool job
+    /// touches only this one, so it can never contend with a `submit` mid-`wire_callable`.
+    pub eager: Mutex<EagerState>,
+    /// Signalled whenever a job finishes; `shutdown` waits on it for `outstanding == 0`.
+    pub eager_cv: Condvar,
+    /// W7-26r sibling — the submit-time heap bytes of jobs DISPATCHED BUT NOT YET FINISHED: the
+    /// ones sitting in the process-global pool queue and the ones running. `prepare_eager_job` rebuilds each submitted closure
+    /// into its own worker `Vm` at submit time, so a deep queue is N fully-built worker heaps: each
+    /// one comfortably under a per-heap `--max-heap`, summing to hundreds of MB that were charged to
+    /// NOBODY (measured on the release binary: 300 slow jobs capturing ~1 MB each **PASS at 666 MB**
+    /// against an 8 MB cap). The cap is per-heap by definition, so this needs an OWNER — and the
+    /// submitter is it: the work is its own, it can still be reached only through this executor
+    /// handle, and the submit loop is running bytecode, so the parent samples it normally.
+    ///
+    /// Added at dispatch and removed when the job's `run_outcome` returns (TICKET-205): the bytes
+    /// stay live while the job runs, and a preempted CPU job gives its pool slot away, so every
+    /// submitted job starts at once and "until started" bounded nothing (300 jobs of ~1 MB under an
+    /// 8 MB cap peaked at 280 MB; 18 MB with this rule). A test whose unfinished jobs together
+    /// exceed the cap trips, sleeping jobs included. The charge cannot overlap by ALIASING, and
+    /// that took a review to get right: the measurement is `Heap::own_bytes`, which excludes `Arc`-shared core payloads — a
+    /// captured `Shared`/`Channel` crosses as one shared allocation the submitter already counts, and
+    /// charging it per queued job reported 60 MB against a true 3.8 MB. What is charged here is only
+    /// the deep-copied plain data the submit actually added. Maintained under a live cap only — the
+    /// walk is O(the new worker's slots) and would be pure cost otherwise.
+    pub pending: AtomicUsize,
     /// The cooperative cancel flag shared by every job this executor has dispatched. Per-CORE, not
     /// per-drain (the pre-eager model had no running jobs to cancel): `shutdown_now` trips it so
     /// already-started jobs die at their next back-edge (decision D4 — "attempts to stop",
@@ -1298,9 +1468,30 @@ pub struct ExecutorCore {
     /// Set once at construction and read-only afterwards — the core crosses threads by `Arc`, so a
     /// plain `Vec` (no lock) is only sound because nothing ever writes it again.
     pub creator_cancel: Vec<Arc<AtomicBool>>,
+    /// This core was marked `shut` by a join that will reduce NOTHING, so its submission slots are
+    /// still owed a reduce. Set by exactly one site: `Vm::join_eager_jobs`, on entry, when the
+    /// joining thread is itself one of this core's jobs (`slack > 0`) and therefore may not
+    /// `take_slots` — its own index is still live. Cleared by the two paths that actually discharge
+    /// the debt: the `take_slots` that finally reduces the vector (always `slack == 0`), and an
+    /// ORDINARY (non-self, `slack == 0`) bail-out, which flushes what finished and has no successor
+    /// to promise. A SELF-join's own bail (`slack > 0`) does **not** clear it — a self-join never
+    /// discharges the debt, bail or not, so clearing there would drop a mark this call did not set
+    /// (an earlier self-join may have left it true, promising a later join) and leave the vector
+    /// unreduced with nothing left to pick it up.
+    ///
+    /// Without it, `shut` was read as "already handled" and [`Vm::drain_live_executors`] skipped the
+    /// core, dropping every sibling's buffered `out`/`stderr` and any fault they raised. Invisible
+    /// under `chezzi run` (streamed output already reached fd 1) and a silent loss on the buffered
+    /// sink, where the slot is the only copy.
+    ///
+    /// A dedicated flag rather than "the slot vector is non-empty": the deadlock-BAIL path also
+    /// leaves a non-empty vector behind (`take_finished` is length-preserving), and re-joining a
+    /// core whose join just reported a deadlock would undo the "last chance to ask" reasoning in
+    /// `join_eager_jobs`. Only the self-join promises someone else will reduce, so only it marks.
+    pub unreduced: AtomicBool,
     /// TICKET-048 — the source span of the `Op::NewExecutor` that built this core. The program-exit
     /// drain (`Vm::drain_live_executors`) joins this executor from no source position of its own, so
-    /// its fault names the `Executor()` call instead of claiming a false
+    /// its `JOIN_DEADLOCK_MSG` fault names the `Executor()` call instead of claiming a false
     /// `line 1, col 1`.
     pub created_at: Span,
 }
@@ -1309,43 +1500,21 @@ impl ExecutorCore {
     /// Jobs submitted and not yet finished. With [`held_bytes`](Self::held_bytes), the one facade
     /// over what an Executor holds outside every heap; every production reader goes through it.
     pub fn outstanding(&self) -> usize {
-        self.sched().map_or(0, |s| s.outstanding_tasks())
-    }
-
-    /// This Executor's sched, when a `submit` has built it and no join has reduced it. Clones the
-    /// `Arc` out and drops the `scope` lock before it returns.
-    pub(super) fn sched(&self) -> Option<Arc<super::MnSched>> {
-        self.scope
+        self.eager
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|s| Arc::clone(&s.sched))
-    }
-
-    /// Test seam: attach `sched` as this Executor's scope, as `new_detached_sched` does.
-    #[cfg(test)]
-    pub(super) fn attach_test_sched(&self, sched: Arc<super::MnSched>) {
-        *self.scope.lock().unwrap() = Some(super::EagerScope {
-            sched,
-            cancel: Arc::clone(&self.cancel),
-            drainer: None,
-            drainer_slot: None,
-            scope: 0,
-            fiber_owned: false,
-            more_scopes: Vec::new(),
-        });
+            .outstanding()
     }
 
     /// Bytes this Executor holds outside every heap: its finished jobs' retained output plus the
     /// submit-time bytes of its unfinished jobs. Both `--max-heap` walks read this one number.
     pub fn held_bytes(&self) -> usize {
-        self.sched().map_or(0, |s| s.held_bytes())
-    }
-}
-
-impl std::fmt::Debug for ExecutorCore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExecutorCore").finish_non_exhaustive()
+        self.eager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .summary()
+            .0
+            + self.pending.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -2101,6 +2270,40 @@ mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
 
+    /// TICKET-200 — `first_fault` skips a job's deadlock verdict and a job cut by the run's own
+    /// `--timeout` (that is the run's cause, not an earlier fault); a plain fault in a later slot is
+    /// still found.
+    #[test]
+    fn first_fault_skips_a_deadlock_and_a_timed_out_job() {
+        let err = |m: &str| super::super::RuntimeError {
+            message: m.to_string(),
+            span: super::super::Span::RUNTIME,
+            is_assert: false,
+            is_over_memory: false,
+            is_timed_out: false,
+            is_deadlock: false,
+            is_panic: false,
+        };
+        let fault = |e| super::super::TaskOutcome::Fault {
+            err: e,
+            out: Vec::new(),
+            stderr: Vec::new(),
+            trace: Vec::new(),
+        };
+        let mut s = EagerState::default();
+        for _ in 0..3 {
+            s.reserve();
+        }
+        s.finish(0, (0, false), fault(err("dl").deadlock()));
+        s.finish(1, (0, false), fault(err("cut").timed_out()));
+        assert!(s.first_fault().is_none(), "no earlier fault yet");
+        s.finish(2, (0, false), fault(err("boom")));
+        assert_eq!(
+            s.first_fault().map(|(e, _)| e.message).as_deref(),
+            Some("boom")
+        );
+    }
+
     /// TICKET-192 — `adjust` keeps UNKNOWN, moves bytes by the delta (saturating), turns CLEAN into
     /// DIRTY on a dirty piece, and never turns DIRTY into CLEAN.
     #[test]
@@ -2233,6 +2436,47 @@ mod summary_tests {
 
     fn list(items: Vec<WireValue>) -> WireValue {
         WireValue::List { id: 0, items }
+    }
+
+    /// W7-26, the sampling half — `take_charge` reports GROWTH, never the running total. Charging
+    /// the total per submit would re-trigger a sweep on every submit once any results exist (the
+    /// pacing counter is monotonic and reset at each sweep), and charging nothing leaves the cap
+    /// unsampled: 300 × ~1 MB of results tripped at **313 MB → 180 MB → 11 MB peak RSS** as the
+    /// accounting and then this charge landed.
+    #[test]
+    fn eager_charge_reports_growth_only() {
+        fn done(g: &mut EagerState) {
+            let o = crate::vm::TaskOutcome::Done(crate::vm::WorkerResult {
+                value: list((0..1000).map(WireValue::Int).collect()),
+                out: Vec::new(),
+                stderr: Vec::new(),
+            });
+            let i = g.reserve();
+            let sum = outcome_summary(&o);
+            g.finish(i, sum, o);
+        }
+        let mut g = EagerState::default();
+        assert_eq!(g.take_charge(), 0, "an empty executor charges nothing");
+
+        done(&mut g);
+        let first = g.take_charge();
+        assert!(
+            first >= 1000 * std::mem::size_of::<WireValue>(),
+            "the finished result's bytes must be charged once: {first}"
+        );
+        assert_eq!(g.take_charge(), 0, "a re-read charges nothing new");
+        assert_eq!(g.summary().0, first, "the total itself is unchanged");
+
+        // The join drains the slots: the next result starts from zero again, not from a stale
+        // `charged` watermark that would swallow it.
+        g.take_slots();
+        assert_eq!(g.summary(), (0, false));
+        done(&mut g);
+        assert_eq!(
+            g.take_charge(),
+            first,
+            "a post-drain result must charge in full"
+        );
     }
 
     /// W6-7/W6-10 — one walk yields both GC facts: approximate owned bytes, and whether the payload

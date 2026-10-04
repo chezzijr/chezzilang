@@ -225,7 +225,6 @@ fn deferring():
     hs.send(1)
     _ := stuck.recv()
 fn boomer():
-    hs.send(1)
     panic(\"boom\")
 fn bad_int() -> int:
     panic(\"boom\")
@@ -339,7 +338,7 @@ fn cancel_reaches_every_party() {
         let mut cells: Vec<(&str, Vec<&str>, &str, Mode, &str, Option<i32>)> = vec![
             (
                 "sibling-fault",
-                vec!["$S(parked)", "hs.recv()", "$S(boomer)", "hs.recv()"],
+                vec!["$S(parked)", "hs.recv()", "$S(boomer)"],
                 "ex.shutdown()",
                 Mode::Run,
                 "boom",

@@ -22,9 +22,11 @@ pub(super) enum BlockCtx {
     /// `Shared.update` closure: the host stack cannot be unwound, so the worker blocks in place and
     /// hands its runner slot to a replacement.
     Demote,
-    /// The inline outermost-`parallel:` builder (`mn_enlist_sched`). It has no worker loop to
-    /// drive a park.
-    Builder,
+    /// The inline outermost-`parallel:` builder (`mn_enlist_sched`), with an eager `Executor` core
+    /// (`job`) or without one. It has no worker loop to drive a park.
+    Builder { job: bool },
+    /// An eager `Executor` job on a `vm::pool` thread.
+    PoolJob { judged: bool, reentered: bool },
     /// A thread that owns itself: `main`, a `main` `defer:`, `main` inside a callback.
     OwnThread { judged: bool, reentered: bool },
 }
@@ -42,7 +44,10 @@ impl BlockCtx {
     /// re-entry: registering such a party deletes that veto and turns a safe hang into a false
     /// fault. See [`crate::vm::quiesce`] for the full argument.
     pub(super) fn judged(self) -> bool {
-        matches!(self, BlockCtx::OwnThread { judged: true, .. })
+        matches!(
+            self,
+            BlockCtx::OwnThread { judged: true, .. } | BlockCtx::PoolJob { judged: true, .. }
+        )
     }
 }
 
@@ -87,13 +92,10 @@ impl WaitSpec {
             | WaitSpec::Offload
             | WaitSpec::Stdin
             | WaitSpec::Socket
-            | WaitSpec::Connect => true,
+            | WaitSpec::Connect
+            | WaitSpec::Join => true,
             WaitSpec::Wait { deadline, .. } => deadline,
-            WaitSpec::Recv
-            | WaitSpec::Send
-            | WaitSpec::Guard
-            | WaitSpec::Join
-            | WaitSpec::Nursery => false,
+            WaitSpec::Recv | WaitSpec::Send | WaitSpec::Guard | WaitSpec::Nursery => false,
         }
     }
 
@@ -151,16 +153,43 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             | W::Socket
             | W::Guard => Demote,
         },
-        BlockCtx::Builder => match spec {
+        BlockCtx::Builder { job } => match spec {
             W::Recv
             | W::Send
             | W::Wait {
                 deadline: false, ..
+            } => {
+                if job {
+                    InPlace
+                } else {
+                    Refuse
+                }
             }
-            | W::Socket => Refuse,
-            W::Wait { deadline: true, .. } | W::Timer | W::Sleep => InlineSleep,
+            W::Wait { deadline: true, .. } => {
+                if job {
+                    InPlace
+                } else {
+                    InlineSleep
+                }
+            }
+            W::Timer | W::Sleep => InlineSleep,
             W::Stdin | W::Guard => Demote,
-            W::Connect | W::Offload | W::Join | W::Nursery => InPlace,
+            W::Socket => Refuse,
+            W::Connect => {
+                if job {
+                    Refuse
+                } else {
+                    InPlace
+                }
+            }
+            W::Offload | W::Join | W::Nursery => InPlace,
+        },
+        BlockCtx::PoolJob { .. } => match spec {
+            W::Timer | W::Sleep => InlineSleep,
+            W::Stdin | W::Guard => Demote,
+            // An Executor job does not own its thread: a socket op returns its `Err`.
+            W::Socket | W::Connect => Refuse,
+            W::Recv | W::Send | W::Wait { .. } | W::Offload | W::Join | W::Nursery => InPlace,
         },
         BlockCtx::OwnThread { .. } => match spec {
             W::Timer | W::Sleep => InlineSleep,
@@ -189,10 +218,6 @@ pub(super) enum Cut {
     /// nursery below which a `recover:` must not catch, DEC-096), a join that reduced a child's or
     /// a job's fault, or an unjoined job fault reported in place of a verdict (`floor = None`)
     Delivered { floor: Option<usize> },
-    /// TICKET-208 — the run-wide job fault was delivered to this party: a fire-and-forget
-    /// `Executor` job faulted, which ends the run. No `recover:` catches it (Go: a goroutine's
-    /// panic cannot be recovered from `main`); the party's `defer`s still run.
-    RunFault,
 }
 
 /// TICKET-188 (W17 Family B) — why a party must stop now: [`halt_of`]'s answer.
@@ -421,11 +446,14 @@ impl Vm {
     }
 
     /// The blocking context of the running code, derived from `mn`, `mn_enlist_sched`,
-    /// `native_reentry` and `deferring` on every call. An `Executor` job is a fiber (TICKET-208).
+    /// `eager_core`, `native_reentry` and `deferring` on every call.
     pub(super) fn block_ctx(&self) -> BlockCtx {
         let judged = self.native_reentry == self.deferring;
         let reentered = self.native_reentry > 0;
         if self.mn.is_some() {
+            // A worker shell never carries an eager core: `exec.rs` inits it `None` and only a job
+            // worker sets it.
+            debug_assert!(self.eager_core.is_none());
             return if reentered {
                 BlockCtx::Demote
             } else {
@@ -433,7 +461,12 @@ impl Vm {
             };
         }
         if self.mn_enlist_sched.is_some() {
-            return BlockCtx::Builder;
+            return BlockCtx::Builder {
+                job: self.eager_core.is_some(),
+            };
+        }
+        if self.eager_core.is_some() {
+            return BlockCtx::PoolJob { judged, reentered };
         }
         BlockCtx::OwnThread { judged, reentered }
     }
@@ -464,7 +497,17 @@ mod tests {
 
     /// Every context, in the column order of [`TABLE`].
     fn contexts() -> Vec<BlockCtx> {
-        let mut v = vec![BlockCtx::Park, BlockCtx::Demote, BlockCtx::Builder];
+        let mut v = vec![
+            BlockCtx::Park,
+            BlockCtx::Demote,
+            BlockCtx::Builder { job: false },
+            BlockCtx::Builder { job: true },
+        ];
+        for judged in [false, true] {
+            for reentered in [false, true] {
+                v.push(BlockCtx::PoolJob { judged, reentered });
+            }
+        }
         for judged in [false, true] {
             for reentered in [false, true] {
                 v.push(BlockCtx::OwnThread { judged, reentered });
@@ -495,24 +538,25 @@ mod tests {
     }
 
     /// One row per spec, one letter per context: P Park, D Demote, I InPlace, S InlineSleep,
-    /// R Refuse. Columns: Park, Demote, Builder, then OwnThread as (judged, reentered) =
-    /// (f,f) (f,t) (t,f) (t,t). The last column is `will_return`.
+    /// R Refuse. Columns: Park, Demote, Builder{job: false}, Builder{job: true}, then PoolJob and
+    /// OwnThread each as (judged, reentered) = (f,f) (f,t) (t,f) (t,t). The last column is
+    /// `will_return`.
     const TABLE: [(&str, &str, bool); 15] = [
-        ("Recv", "PDR IIII", false),
-        ("Timer", "PDS SSSS", true),
-        ("Send", "PDR IIII", false),
-        ("Wait", "PDR IIII", false),
-        ("Wait+send", "PDR IIII", false),
-        ("Wait+deadline", "PDS IIII", true),
-        ("Wait+deadline+send", "PDS IIII", true),
-        ("Sleep", "PDS SSSS", true),
-        ("Offload", "PDI IIII", true),
-        ("Stdin", "DDD DDDD", true),
-        ("Socket", "PDR IIII", true),
-        ("Connect", "PII IIII", true),
-        ("Guard", "DDD DDDD", false),
-        ("Join", "DDI IIII", false),
-        ("Nursery", "PII IIII", false),
+        ("Recv", "PDRI IIII IIII", false),
+        ("Timer", "PDSS SSSS SSSS", true),
+        ("Send", "PDRI IIII IIII", false),
+        ("Wait", "PDRI IIII IIII", false),
+        ("Wait+send", "PDRI IIII IIII", false),
+        ("Wait+deadline", "PDSI IIII IIII", true),
+        ("Wait+deadline+send", "PDSI IIII IIII", true),
+        ("Sleep", "PDSS SSSS SSSS", true),
+        ("Offload", "PDII IIII IIII", true),
+        ("Stdin", "DDDD DDDD DDDD", true),
+        ("Socket", "PDRR RRRR IIII", true),
+        ("Connect", "PIIR RRRR IIII", true),
+        ("Guard", "DDDD DDDD DDDD", false),
+        ("Join", "DDII IIII IIII", true),
+        ("Nursery", "PIII IIII IIII", false),
     ];
 
     #[test]
@@ -673,32 +717,39 @@ mod tests {
     #[test]
     fn a_party_whose_owned_nursery_faulted_vetoes_the_verdict() {
         let state: Arc<crate::vm::quiesce::QuiesceState> = Arc::default();
-        let joined = owned_sched(false, false).1; // one undone task: the join is not satisfiable
+        let registry: crate::vm::core::ExecRegistry = Arc::default();
+        let exec = Arc::new(crate::vm::core::ExecutorCore::default());
+        registry.lock().unwrap().push(Arc::clone(&exec));
+        let _slot = exec.eager.lock().unwrap().reserve(); // live == 1 (main) + 1 (the job)
+        let _job = state.block(
+            PartyWait::Recv(Arc::new(crate::vm::core::ChannelCore::default()), None),
+            WakeSet::default(),
+        );
 
         let (flag, sched) = owned_sched(true, true);
         let owner = state.block(
-            PartyWait::Join(Arc::clone(&joined), 0),
+            PartyWait::Join(Arc::clone(&exec), 0),
             WakeSet {
                 cancel: vec![],
                 owned: vec![OwnedScope::of(&owned_ref(0, &flag, &sched))],
             },
         );
         assert!(
-            !state.quiesced(),
+            !state.quiesced(&registry),
             "an owner whose child faulted will be cut: the verdict must decline"
         );
         drop(owner);
 
         let (flag, sched) = owned_sched(true, false);
         let _owner = state.block(
-            PartyWait::Join(Arc::clone(&joined), 0),
+            PartyWait::Join(Arc::clone(&exec), 0),
             WakeSet {
                 cancel: vec![],
                 owned: vec![OwnedScope::of(&owned_ref(0, &flag, &sched))],
             },
         );
         assert!(
-            state.quiesced(),
+            state.quiesced(&registry),
             "a tripped flag with no recorded fault is not a halt: a genuine deadlock still faults"
         );
     }
@@ -706,16 +757,23 @@ mod tests {
     #[test]
     fn a_cancelled_party_does_not_veto_the_verdict() {
         let state: Arc<crate::vm::quiesce::QuiesceState> = Arc::default();
-        let joined = owned_sched(false, false).1; // one undone task: the join is not satisfiable
+        let registry: crate::vm::core::ExecRegistry = Arc::default();
+        let exec = Arc::new(crate::vm::core::ExecutorCore::default());
+        registry.lock().unwrap().push(Arc::clone(&exec));
+        let _slot = exec.eager.lock().unwrap().reserve(); // live == 1 (main) + 1 (the job)
+        let _job = state.block(
+            PartyWait::Recv(Arc::new(crate::vm::core::ChannelCore::default()), None),
+            WakeSet::default(),
+        );
         let _owner = state.block(
-            PartyWait::Join(Arc::clone(&joined), 0),
+            PartyWait::Join(Arc::clone(&exec), 0),
             WakeSet {
                 cancel: vec![Arc::new(AtomicBool::new(true))],
                 owned: vec![],
             },
         );
         assert!(
-            state.quiesced(),
+            state.quiesced(&registry),
             "a pending cancel is not a promise of progress: the verdict must still judge"
         );
     }
