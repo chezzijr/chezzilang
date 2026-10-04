@@ -59,7 +59,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::block::{Halt, WakeSet};
-use super::core::{ChannelCore, ExecRegistry, Pending};
+use super::core::{ChannelCore, Pending};
 
 /// What one registered party is waiting for — and, through [`PartyWait::satisfiable`], whether that
 /// wait could already be over.
@@ -91,7 +91,7 @@ pub(super) enum PartyWait {
     /// see `main`-inside-`shutdown()`.
     ///
     /// **It carries the core, and the reason is a measured FALSE FAULT.** A `Join` that answered a
-    /// flat "never satisfiable" was wrong for an ALREADY-DRAINED join: `join_eager_jobs` registers
+    /// flat "never satisfiable" was wrong for an ALREADY-DRAINED join: `join_executor` registers
     /// before it can take the executor lock, so `Executor(); e.shutdown()` — and the whole window
     /// while the last job's `finish` wakes the joiner — put a permanently-unsatisfiable party in the
     /// registry for a thread that was about to return and keep running. A sibling sampling in that
@@ -106,10 +106,10 @@ pub(super) enum PartyWait {
     /// the run could do would ever satisfy it, which is exactly the shape the verdict reads as
     /// "unfeedable". Measured on a healthy program whose every job ran to completion (`A` and `C`
     /// both printed), `main`'s join faulted `deadlock` in 8/60 debug runs with `shutdown_now` and
-    /// 8/8 with `shutdown`. [`super::Vm::join_eager_jobs`] computes the identical slack for its own
+    /// 8/8 with `shutdown`. [`super::Vm::join_executor`] computes the identical slack for its own
     /// wait loop — the two must agree, or a joiner would return while its party still claimed to be
     /// stuck.
-    Join(Arc<super::core::ExecutorCore>, usize),
+    Join(Arc<super::MnSched>, usize),
     /// gaps.md W7-58 — a thread blocked inside a `parallel:` nursery join, waiting on that nursery's
     /// tasks to finish. This is the node whose absence hung the W7-58 repro: `live` counts the
     /// top-level `main` thread unconditionally (`1 +`), but a `main` sitting in `mn_worker_loop` never
@@ -191,7 +191,7 @@ impl PartyWait {
             // A join is over exactly when the executor owes nothing BUT this joiner's own job. See
             // the variant's doc: answering a flat `false` here faulted an already-drained
             // `shutdown()`, and ignoring `slack` faulted a job that shut down its own executor.
-            PartyWait::Join(core, slack) => core.outstanding() <= *slack,
+            PartyWait::Join(sched, slack) => sched.outstanding_tasks() <= *slack,
             // W7-58 — a nursery join is over exactly when the nursery can still move: the sched's OWN
             // deadlock predicate, minus its W7-56 outstanding-job veto.
             //
@@ -286,7 +286,10 @@ pub(super) struct QuiesceState {
     /// nothing else. [`clear_exit`](Self::clear_exit) still clears it (paired with the cell it
     /// mirrors, and it saves that lock), but correctness does not rest on that store — it rests on the
     /// cell, which every `chezzi test` entry point resets via `Vm::reset_for_invoke`.
-    exit_pending: AtomicBool,
+    run_halt_hint: AtomicBool,
+    /// TICKET-208 — the fault of a fire-and-forget `Executor` job: the second cause of a run-wide
+    /// halt, beside `exit`. Read through the one funnel `Vm::run_exit_err`, taken by `Vm::rank_end`.
+    job_fault: Mutex<Option<(super::RuntimeError, Vec<super::TraceFrame>)>>,
 }
 
 impl QuiesceState {
@@ -304,15 +307,15 @@ impl QuiesceState {
 
     /// W7-57 — latch the back-edge flag. Called by the host `request_exit` AFTER the code is published
     /// and after every live sched has been halted; see the field's doc for why the order is required.
-    pub(super) fn mark_exit_pending(&self) {
-        self.exit_pending.store(true, Ordering::Release);
+    pub(super) fn mark_run_halt(&self) {
+        self.run_halt_hint.store(true, Ordering::Release);
     }
 
     /// W7-57 — the lock-free "is there a run-wide exit?" the CPU-side checkpoints ask, so they need no
     /// mutex on the hot path. A `true` is only a HINT: `Vm::exit_halt` and `Vm::run_exit_err` both
     /// confirm `pending()` before acting, so a spurious `true` is a self-healing no-op.
-    pub(super) fn exit_pending(&self) -> bool {
-        self.exit_pending.load(Ordering::Acquire)
+    pub(super) fn run_halt_hint(&self) -> bool {
+        self.run_halt_hint.load(Ordering::Acquire)
     }
 
     /// Drop a latched exit — the per-invocation reset (`Vm::reset_for_invoke`, shared by every
@@ -320,7 +323,45 @@ impl QuiesceState {
     /// atomic is cleared with it to keep the mirror honest and to save the confirming lock.
     pub(super) fn clear_exit(&self) {
         *self.exit.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.exit_pending.store(false, Ordering::Release);
+        // The hint covers a pending job fault too, and this reset never clears that.
+        self.run_halt_hint
+            .store(self.has_job_fault(), Ordering::Release);
+    }
+
+    /// TICKET-208 — publish a fire-and-forget `Executor` job's fault: it ends the whole run. First
+    /// writer wins (Go: the first panic is the report). The caller halts every sched and then
+    /// latches the hint ([`Self::mark_run_halt`]), the order `request_exit` uses.
+    pub(super) fn request_job_fault(
+        &self,
+        err: super::RuntimeError,
+        trace: Vec<super::TraceFrame>,
+    ) {
+        let mut g = self.job_fault.lock().unwrap_or_else(|e| e.into_inner());
+        g.get_or_insert((err, trace));
+    }
+
+    /// The pending job fault, if any.
+    pub(super) fn job_fault(&self) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
+        self.job_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(super) fn has_job_fault(&self) -> bool {
+        self.job_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Take the job fault out of its cell. ONE caller, `Vm::rank_end`, which reports what it
+    /// takes; nothing else clears the cell, so a fault is never dropped unreported.
+    pub(super) fn take_job_fault(&self) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
+        self.job_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     /// Register a blocked party for as long as the returned guard lives.
@@ -365,64 +406,36 @@ impl QuiesceState {
     /// **Lock discipline.** Order is `parties` (P) → `SchedCore` (A) → (`exec_registry` → one
     /// `ExecutorCore::eager`) → `ChannelCore::q`, one at a time. Nothing anywhere acquires `parties`
     /// while holding a channel, executor OR sched-core lock: every blocking site in `netio.rs`
-    /// registers BEFORE it locks the queue it then waits on, `join_eager_jobs` registers before it
+    /// registers BEFORE it locks the queue it then waits on, `join_executor` registers before it
     /// takes `eager`, W7-58's nursery owner registers with no core lock held, and the W7-58 judge
     /// inside `MnSched::take_runnable` DROPS its `SchedCore` guard before calling this. So this adds no
     /// cycle. `parties` is globally exclusive, so at most one thread is ever inside this function and
     /// it takes each `SchedCore` singly — there is no A→A' edge either. (Same rule the deleted
     /// `eager_join_deadlocked` documented; it is tightened here, not relaxed.)
-    pub(super) fn quiesced(&self, exec_registry: &ExecRegistry) -> bool {
-        self.verdict(exec_registry).is_some()
+    pub(super) fn quiesced(&self) -> bool {
+        self.verdict()
     }
 
-    /// The verdict, PLUS "and every registered party is an [`PartyWait::Join`]" — the narrow question
-    /// [`super::Vm::join_eager_jobs`] asks (gaps.md W7-58 residual).
-    ///
-    /// A joiner must not fault while any OTHER kind of party is registered, and the reason is the
-    /// quality of the diagnostic, not caution. Every non-`Join` party has a judge of its own — a
-    /// channel/`wait:` party polls [`super::Vm::block_halt_check`] at the same 5 ms cadence, and a
-    /// `Nursery` party is judged by its own sched's idle worker — and those faults name the actual
-    /// blocking SITE (`recv on an empty channel: deadlock` at the offending line) instead of the join
-    /// that is merely downstream of it. Letting the joiner race them would make WHICH message a user
-    /// sees a coin flip (measured: `two_executors_deadlocking_each_other_fault`'s shape flipped
-    /// between the two). When every party IS a `Join`, there is no other judge at all — that is
-    /// exactly the residual, and then the joiner must speak.
-    pub(super) fn quiesced_only_joins(&self, exec_registry: &ExecRegistry) -> bool {
-        self.verdict(exec_registry) == Some(true)
-    }
-
-    /// `None` = not stuck. `Some(only_joins)` = stuck, and `only_joins` says whether every registered
-    /// party is a [`PartyWait::Join`]. One evaluation under ONE hold of the party lock, so the two
-    /// public questions can never disagree about the party set (see this function's `quiesced` doc).
-    fn verdict(&self, exec_registry: &ExecRegistry) -> Option<bool> {
+    /// One evaluation under ONE hold of the party lock (see [`Self::quiesced`]).
+    fn verdict(&self) -> bool {
         let parties = self.parties.lock().unwrap_or_else(|e| e.into_inner());
-        // `1 +` is the main thread, which is a party for the whole run and is the only one not owned
-        // by an executor slot. Read under the party lock so a `submit` cannot slip a new job past a
-        // count already taken (it could only be issued by a RUNNING party, which is unregistered and
-        // therefore already vetoes — but the read is free here and the invariant is worth pinning).
-        // §2c1 — plus one per eager nursery (nested ones since TICKET-112) that still holds an undone task: those fibers
-        // are uncounted senders, and this is the term that stops a healthy `spawn: ch.send(1)` beside
+        // `1 +` is the main thread, which is a party for the whole run. Plus one per registered
+        // sched (an eager nursery, nested ones since TICKET-112, or an `Executor`'s detached
+        // sched since TICKET-208) that still holds an undone task that can move: those fibers are
+        // uncounted senders, and this is the term that stops a healthy `spawn: ch.send(1)` beside
         // a blocking `ch.recv()` on `main` from reading as a deadlock. See `eager_bodies`.
-        let live = 1 + Self::outstanding_jobs(exec_registry) + self.live_eager_bodies();
+        let live = 1 + self.live_eager_bodies();
         if parties.len() < live {
-            return None; // somebody is still running — they may yet send.
+            return false; // somebody is still running — they may yet send.
         }
         // TICKET-188 — a party whose wake set holds a recorded child fault resumes at its next halt
         // read, so its cut is progress; `WakeSet::halt` takes owned scheds' core locks (A), legal
         // under P. A tripped flag with no recorded fault is not a halt, so a genuine deadlock still
         // faults. The veto reads only `Halt::ChildFault`: a pending cancel is not a promise of
         // progress (a cancelled owner at its join waits on a child in an uncancellable `defer`).
-        if parties
+        !parties
             .iter()
             .any(|p| p.wait.satisfiable() || matches!(p.wake.halt(), Some(Halt::ChildFault { .. })))
-        {
-            return None;
-        }
-        Some(
-            parties
-                .iter()
-                .all(|p| matches!(*p.wait, PartyWait::Join(..))),
-        )
     }
 
     /// §2c1 — publish an eager nursery's sched (every eager nursery since TICKET-112), so
@@ -483,50 +496,6 @@ impl QuiesceState {
                     && !s.quiesced_core(&c, !(s.body_is_fiber || c.only_blocked_owners()))
             })
             .count()
-    }
-
-    /// Σ `outstanding` over every executor created in this run. Snapshots the registry and drops its
-    /// lock before taking any per-core lock (see [`Self::quiesced`]'s lock discipline).
-    ///
-    /// Also the nursery predicate's W7-56 veto ([`super::MnSched::is_deadlocked`]) — the same count,
-    /// for the same reason: an outstanding job is an UNCOUNTED sender.
-    pub(super) fn outstanding_jobs(exec_registry: &ExecRegistry) -> usize {
-        let cores: Vec<_> = exec_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        cores.iter().map(|c| c.outstanding()).sum()
-    }
-
-    /// TICKET-195 — THE "unjoined job fault": the first fault an `Executor` job recorded that no
-    /// join has reduced yet, derived from the executor slots (never kept in a cell of its own).
-    /// `Vm::rank_end` reports it in place of the run's own cause (TICKET-200) — Go prints the job's
-    /// panic. Skips the first `from` registry cores (a test's mark). Same clone-then-lock pattern as
-    /// [`QuiesceState::outstanding_jobs`].
-    ///
-    /// Only a core no `shutdown()` has marked `shut` counts as unjoined: a deadlock inside that
-    /// executor's own join keeps its verdict (`tests/deadlock_is_fatal.rs`
-    /// `a_deadlocked_executor_job_aborts_shutdown`, the plan's step-9 fallback).
-    pub(super) fn unjoined_job_fault(
-        exec_registry: &ExecRegistry,
-        from: usize,
-    ) -> Option<(super::RuntimeError, Vec<super::TraceFrame>)> {
-        let cores: Vec<_> = exec_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .skip(from)
-            .cloned()
-            .collect();
-        cores.iter().find_map(|c| {
-            if c.inner.lock().unwrap_or_else(|e| e.into_inner()).shut {
-                return None;
-            }
-            c.eager
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .first_fault()
-        })
     }
 }
 

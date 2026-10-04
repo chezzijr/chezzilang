@@ -2363,12 +2363,39 @@ impl Vm {
         // Cost: an infinitely-looping `defer` delays the exit. That is a pathological program and
         // `--timeout` (checked ABOVE this rung at every site) already covers it; a half-run cleanup on
         // an ordinary program does not trade for it.
-        if self.deferring > 0 {
+        if !self.run_halt_due() {
             return None;
         }
-        let code = self.quiesce.pending()?;
-        self.pending_exit = Some(code);
-        Some(self.err("exit".to_string(), span))
+        if let Some(code) = self.quiesce.pending() {
+            self.pending_exit = Some(code);
+            return Some(self.err("exit".to_string(), span));
+        }
+        // TICKET-208 — a fire-and-forget `Executor` job faulted: the run ends with THAT fault, and
+        // no `recover:` of this party catches it (`Cut::RunFault`).
+        let (err, trace) = self.quiesce.job_fault()?;
+        self.adopt_run_fault(trace);
+        Some(err)
+    }
+
+    /// TICKET-208 — THE predicate "a run-wide halt is pending for this party": an `os.exit` from
+    /// another party, or a fire-and-forget `Executor` job's fault. A CPU-side or in-place
+    /// checkpoint reads this (behind the lock-free `run_halt_hint`); it never reads the exit cell
+    /// or the job-fault cell by itself.
+    pub(super) fn run_halt_due(&self) -> bool {
+        self.deferring == 0 && (self.quiesce.pending().is_some() || self.quiesce.has_job_fault())
+    }
+
+    /// The halts of a party that comes back from a wait it could not poll (a nursery join, an
+    /// in-place blocking native): a cancel or a child fault, then the run-wide halt. No
+    /// `--timeout` rung: at a return that would turn a post-hoc timeout into an abort.
+    pub(super) fn resume_halts(&mut self, span: Span) -> Result<(), RuntimeError> {
+        if let Some(e) = self.take_halt(span) {
+            return Err(e);
+        }
+        if let Some(e) = self.run_exit_err(span) {
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// TICKET-200 — the one list of halts a party blocked in place observes, read with no lock held.
@@ -2383,19 +2410,12 @@ impl Vm {
         // write. No `back_edge_tick` throttle: this runs once per `DEMOTE_POLL_BACKOFF`, not per op.
         self.deadline_halt(span)?;
         // `shutdown_now`'s cooperative stop (D4), an enclosing scope's cancel and (TICKET-188) a child
-        // fault of a nursery this party owns all arrive here.
-        if let Some(e) = self.take_halt(span) {
-            return Err(e);
-        }
-        // W7-47 — a run-wide `os.exit` from another party. BELOW cancel, so a party that already holds
-        // a cancel flag keeps unwinding as `Cancelled` exactly as before (only a party with no cancel
-        // flag at all — precisely top-level `main` — reaches this rung). ABOVE the deadlock verdict,
-        // because an `Exit` outranks a synthesized `Deadlocked` — the same precedence
-        // `reduce_task_slots` encodes, and what makes a `recv`-blocked `main` report the exit code
-        // instead of a "deadlock" that is really somebody else's exit.
-        if let Some(e) = self.run_exit_err(span) {
-            return Err(e);
-        }
+        // fault of a nursery this party owns arrive first; then W7-47, the run-wide halt (an
+        // `os.exit` or a job fault from another party). BELOW cancel, so a party that already holds
+        // a cancel flag keeps unwinding as `Cancelled` (only a party with no cancel flag at all —
+        // precisely top-level `main` — reaches that rung). ABOVE the deadlock verdict, because an
+        // `Exit` outranks a synthesized `Deadlocked` — the precedence `reduce_task_slots` encodes.
+        self.resume_halts(span)?;
         // TICKET-062 (W10-16) / TICKET-096 — a child fault recorded while the exit rung ran (DEC-134:
         // read again below the exit, and again after a positive verdict).
         if let Some(e) = self.take_halt(span) {
@@ -2422,7 +2442,7 @@ impl Vm {
         // out "a value landed a microsecond before I looked", and the satisfiability re-check
         // ([`quiesce::PartyWait::satisfiable`]) answers that question directly instead of waiting a
         // tick to guess at it — a value that landed IS a satisfiable wait, so the verdict declines.
-        if self.block_ctx().judged() && self.quiesce.quiesced(&self.exec_registry) {
+        if self.block_ctx().judged() && self.quiesce.quiesced() {
             // TICKET-134 — the child can record its fault and complete between the rung above and
             // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
             // child's fault-slot write, so this re-read sees the fault.
@@ -4106,88 +4126,41 @@ impl Vm {
                         span,
                     ));
                 }
-                // The task closure crosses the airlock **by value**
-                // (`wire_callable` → `to_wire`: proto + deep-copied captures + home index), exactly
-                // like plain `spawn` (`cross_spawn_callee`). Routing every submit through this SAME
-                // wire path runs the generator airlock enforcement uniformly, and isolates captures at
-                // submit time, for every submitted closure. (Before 2026-08-16 the since-removed
-                // engine instead queued the callable's own `Handle` — captures shared by reference,
-                // bypassing `to_wire` — to mirror the also-removed tree-walk `interp` oracle; both are
-                // gone, so the by-handle preservation was pure divergence and was retired with them.)
-                // A pool thread runs the closure the moment it is submitted — the queue never holds a
-                // pending closure to drain later. Queued captures stay rooted via the
-                // executor handle's `children()` (the `Closure` arm of `collect_core_gcrefs`) — which
-                // on M:N now roots nothing, since nothing sits in the queue.
-                let w = self.wire_callable(args[0], span)?;
-                // EAGER (D1/D2): start the job NOW on the shared pool. The queue stays empty on
-                // this engine — the work lives in the core's `eager` slots instead.
-                //
-                // Building the worker happens with **NO executor lock held**, deliberately.
-                // `prepare_worker_from_wire` rebuilds the closure into the worker's heap, and a
-                // closure that captured this executor puts an `Obj::Executor` over THIS core into
-                // that heap — so a GC there marks the core, and `Heap`'s mark arm takes
-                // `core.inner.lock()`. `std::sync::Mutex` is not reentrant, so holding it across
-                // the rebuild would self-deadlock on `ex.submit(fn(): ex.…)` under GC pressure.
-                // Faulting here (`ensure_snapshot` on a frame-holding generator global) must also
-                // happen BEFORE a slot is reserved, or the reservation would leave `outstanding`
-                // permanently short and hang `shutdown` forever.
-                let rw = self.prepare_eager_job(&core, w, span)?;
-                // W7-26r sibling — measure the worker heap this submit just built, so its bytes
-                // are OWNED by this submitter while the job waits in the pool queue (see
-                // `ExecutorCore::pending`). Under a live cap only: the walk is O(this worker's
-                // slots), and with no cap there is nothing to compare it against.
-                //
-                // `own_bytes`, NOT `live_bytes`, and OUTSIDE the `inner` lock below — both were
-                // adversarial-review findings, each a real failure: the full walk charges
-                // `Arc`-SHARED core payloads the submitter already counts (60 jobs capturing one
-                // 1 MB `Shared` reported 60 MB against a true 3.8 MB → false OVER-MEMORY), and it
-                // re-takes `core.inner`, which a job capturing its own executor turned into a
-                // self-deadlock (hang, rc=124) — precisely the hazard the comment above names.
-                let pending = if self.heap.mem_cap() != 0 {
-                    rw.worker.heap.own_bytes()
-                } else {
-                    0
+                // TICKET-208 — a job IS a spawned task. `spawn_into` is the one function behind
+                // `spawn` and `submit`: it pins the globals view as of this submit, crosses the
+                // closure by value, and starts a fiber on the Executor's detached sched, built on
+                // first use. No `ExecutorCore` lock is held across it: a job that captures its own
+                // Executor puts an `Obj::Executor` over THIS core into the worker heap, and the heap
+                // walk locks the core. A submit racing a `shutdown()` is rejected by the slot
+                // reservation itself (the join closes scope 0 under the sched's core lock), so a job
+                // is either rejected or counted by that join.
+                if !args[0].as_obj().is_some_and(|c| {
+                    matches!(self.heap.get(c), Obj::Func { .. } | Obj::Closure { .. })
+                }) {
+                    return Err(self.err("submit requires a function or closure".to_string(), span));
+                }
+                let sched = {
+                    let mut g = core.scope.lock().unwrap_or_else(|e| e.into_inner());
+                    if g.is_none() {
+                        *g = self.new_detached_sched(
+                            core.created_at,
+                            core.creator_cancel.clone(),
+                            Some(&core),
+                        );
+                    }
+                    g.as_ref().map(|s| Arc::clone(&s.sched))
                 };
-                // Now the atomic part: re-check `shut` and reserve the submission slot under ONE
-                // lock, so a job racing an `ex.shutdown()` is either rejected or is counted by
-                // that shutdown's join — never dispatched into a shut executor nobody waits for.
-                // Lock order is inner → eager; a finishing job takes only `eager`, so it can never
-                // contend here.
-                let g = core.inner.lock().unwrap();
-                if g.shut {
-                    return Err(self.err(
-                        "submit on a shut-down Executor (it no longer accepts work)".to_string(),
-                        span,
-                    ));
-                }
-                crate::vm::sched::dispatch_eager_job(
-                    &core,
-                    rw,
-                    self.heap.mem_cap(),
-                    pending,
-                    &self.sched_registry,
-                );
-                drop(g);
-                // W7-26 (the SAMPLING half) — charge the results this executor has ACCUMULATED
-                // against this heap's GC pacing counter, so a live `--max-heap` actually gets
-                // sampled. `wire_callable` above charges only what the submit itself sends; a
-                // job that builds its own payload wires ~nothing, so the parent's loop would
-                // never sweep and the cap would fail OPEN with the results counted but never
-                // looked at. Gated on a live cap, exactly like `to_wire_crossable`'s charge:
-                // cap-off pays one `!= 0` load and does not take the `eager` lock at all.
-                if self.heap.mem_cap() != 0 {
-                    let grown = core
-                        .eager
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .take_charge();
-                    // W7-26r sibling — and the queued job just handed off, for exactly the same
-                    // reason: counting it in `live_bytes` is worthless if nothing looks. A loop
-                    // submitting slow jobs finishes none of them, so `take_charge` stays 0 and
-                    // the parent (which allocates ~nothing per submit) would never sweep —
-                    // measured PASS at 666 MB against an 8 MB cap with the accounting alone.
-                    self.heap.charge_bytes(grown + pending);
-                }
+                let Some(sched) = sched else {
+                    return Err(self.err(super::EXEC_NO_RUNNER_MSG.to_string(), span));
+                };
+                self.spawn_into(
+                    crate::vm::sched::SpawnTarget::Scope { sched, tail: 0 },
+                    None,
+                    args[0],
+                    Vec::new(),
+                    0,
+                    span,
+                )?;
                 Ok(Value::nil())
             }
             "shutdown" => {
@@ -4195,16 +4168,9 @@ impl Vm {
                 let core = self.executor_core(h);
                 // Mark shut first so a task that re-enters this executor (submit/shutdown) sees it.
                 core.inner.lock().unwrap().shut = true;
-                // EAGER (D1/D4): every job started at its `submit`, so there is no queue to
-                // drain — `shutdown` is purely the JOIN. Wait for in-flight work, then reduce the
-                // submission-ordered slots: output flushes in submission order and the
-                // lowest-index fault propagates, exactly as the drain did.
-                //
-                // The join itself registers this thread as a blocked party (`join_eager_jobs`),
-                // which is what lets a job blocked on a channel only THIS caller could have filled
-                // fault instead of hanging both of us forever. Nothing to arm here any more: the
-                // verdict is process-wide, so it no longer matters WHICH join a thread is in.
-                self.join_eager_jobs(&core, span)?;
+                // Every job started at its `submit`, so `shutdown` is purely the JOIN: wait for the
+                // unfinished jobs, then reduce the submission-ordered slots.
+                self.join_executor(&core, span)?;
                 self.cancel_at_join(span)?; // TICKET-147 (W14-15): the join is a cancellation point
                 Ok(Value::nil())
             }
@@ -4214,31 +4180,23 @@ impl Vm {
                 {
                     let mut g = core.inner.lock().unwrap();
                     g.shut = true;
-                    g.clear(); // always empty (eager submit never fills it); cleared defensively
+                    g.clear(); // always empty (submit never fills it); cleared defensively
                 }
                 // D4 — "attempts to stop", COOPERATIVE not preemptive: trip the per-core cancel
-                // flag so a job already running dies at its next back-edge, and one the pool has
-                // not started yet observes it in its prologue. A job with no cancellation point
-                // still runs to completion; that is Java's contract too.
+                // flag (the Executor scope's own flag) so a running job dies at its next
+                // cancellation point, and drain the scope's parked fibers so each is cut at its
+                // own wait. A job with no cancellation point still runs to completion.
                 crate::vm::trip_cancel_flag(&core.cancel);
-                // TICKET-118 (W13-8) — a cancel is a wake source too: without this poke, a worker
-                // deciding under its own core lock could read the flag on both sides of the trip and
-                // park untimed, leaving a job's cancelled nursery child un-drained until some later
-                // unrelated wake reached it.
+                if let Some(sched) = core.sched() {
+                    sched.drain_family(0);
+                }
+                // TICKET-118 (W13-8) — a cancel is a wake source too.
                 crate::vm::sched::poke_live_scheds(&self.sched_registry);
-                // …then JOIN, exactly like `shutdown`. Java's `shutdownNow` returns without
-                // waiting because it hands back the never-started tasks and you follow up with
-                // `awaitTermination`; Chezzi has no such follow-up call, so not waiting here
-                // would leave detached jobs running past a `shut` executor with the program
-                // still exiting mid-job. (`drain_live_executors` no longer treats `shut` alone as
-                // "already handled" — see `ExecutorCore::unreduced` — but that only closes the
-                // self-join hand-off; it still does not WAIT for a job this call has not joined
-                // itself, so skipping the join here would still be an exit-mid-job hazard.)
-                // A cancelled job is swallowed by `reduce_task_slots` (its output still flushes at
-                // its slot), except that its own `defer` fault is a real fault (TICKET-147, W14-12):
-                // it raises here, ranked below any ordinary fault. So this raises a fault if a job
-                // genuinely faulted, or a cancelled job's cleanup did.
-                self.join_eager_jobs(&core, span)?;
+                // …then JOIN, exactly like `shutdown`: Chezzi has no `awaitTermination`, so not
+                // waiting here would leave detached jobs running past a `shut` executor. A
+                // cancelled job is swallowed by `reduce_task_slots`, except that its own `defer`
+                // fault is a real fault (TICKET-147, W14-12), which raises here.
+                self.join_executor(&core, span)?;
                 self.cancel_at_join(span)?; // TICKET-147 (W14-15): the join is a cancellation point
                 Ok(Value::nil())
             }
@@ -4263,9 +4221,12 @@ impl Vm {
     /// discarded, and the verdict and its trace stand. Any other fault, and a pending exit, skip the
     /// drain as before.
     pub(crate) fn finish_run(&mut self, r: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
-        match self.rank_end(0, r) {
+        // TICKET-208 — a run ended by a job fault drains too: every scope is already cancelled,
+        // and a finished job's buffered output must still reach the sink.
+        let job = self.quiesce.has_job_fault();
+        match self.rank_end(r) {
             Ok(()) => self.drain_live_executors(),
-            Err(e) if e.is_deadlock && self.pending_exit.is_none() => {
+            Err(e) if (e.is_deadlock || job) && self.pending_exit.is_none() => {
                 let trace = (self.fault_trace.take(), self.fault_trace_depth);
                 let _ = self.drain_live_executors();
                 (self.fault_trace, self.fault_trace_depth) = trace;
@@ -4292,17 +4253,13 @@ impl Vm {
         // Re-scan from the top each round rather than snapshotting: a job joined here can itself
         // construct and submit to a NEW executor, which must also be joined.
         //
-        // `shut` alone is NOT "already handled", and reading it as such lost work: a job that shuts
-        // down the executor it runs under marks it `shut` while reducing NOTHING, so with no
-        // enclosing `shutdown()` this drain used to skip the core and drop every sibling's buffered
-        // output and every sibling's fault. `ExecutorCore::unreduced` is that job's hand-off — see
-        // its doc for why it is a flag and not "the slot vector is non-empty".
+        // `shut` alone is NOT "already handled": a job that shuts down the executor it runs under,
+        // or a joiner that was cut, marks it `shut` while reducing NOTHING. What says "still owed a
+        // join" is the core's scope: `Some` until a join reduced its slots.
         //
-        // Termination is the same one-way step as before: a picked core is marked `shut` AND joined,
-        // and a join on this thread always has `slack == 0` (a top-level/`main` `Vm` is never one of
-        // the core's eager jobs — see the caller table on `join_eager_jobs`), so it ends in
-        // `take_slots`, which clears `unreduced`. Each core is therefore picked at most twice: once
-        // while live, once to collect what a self-join left behind.
+        // Termination: a picked core is marked `shut` AND joined, and a join on this thread always
+        // has `slack == 0` (`main` is never a fiber of the Executor's sched), so it ends with the
+        // scope taken, or with an `Err` that leaves the loop.
         loop {
             let next = self
                 .exec_registry
@@ -4310,17 +4267,14 @@ impl Vm {
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
                 .skip(from)
-                .find(|c| {
-                    !c.inner.lock().unwrap_or_else(|e| e.into_inner()).shut
-                        || c.unreduced.load(std::sync::atomic::Ordering::Acquire)
-                })
+                .find(|c| c.sched().is_some())
                 .map(Arc::clone);
             let Some(core) = next else { break };
             core.inner.lock().unwrap_or_else(|e| e.into_inner()).shut = true;
             // TICKET-048 — the program-exit drain has no call site of its own, so it names where
             // this Executor was created.
-            self.join_eager_jobs(&core, core.created_at)?;
-            if self.pending_exit.is_some() {
+            self.join_executor(&core, core.created_at)?;
+            if self.pending_exit.is_some() || core.sched().is_some() {
                 break; // a joined job called os.exit — hard halt, stop joining
             }
         }

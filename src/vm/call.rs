@@ -476,8 +476,8 @@ impl Vm {
         // TICKET-188 — a native that held its host thread has no checkpoint until it returns
         // (`docs/stdlib.md` "Blocking calls cannot be interrupted"), so the halt is delivered AT the
         // return, as the offload resume delivers it: the value that completed with it is dropped.
-        if in_place && let Some(e) = self.take_halt(span) {
-            return Err(e);
+        if in_place {
+            self.resume_halts(span)?;
         }
         let ret = raw.map_err(|e| RuntimeError {
             message: e.message,
