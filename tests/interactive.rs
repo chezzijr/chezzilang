@@ -544,19 +544,34 @@ fn fault_under_broken_pipe_is_not_success_mn() {
 /// that fails again the moment either gate becomes reachable.
 ///
 /// A broken pipe is an ORDINARY fault (`Vm::stream_halt` sets neither `is_over_memory` nor
-/// `is_timed_out`), so the W7-5 run-all contract applies to it unchanged. `writes` picks which half
-/// this run fences: 1 marker write per job exercises (1) alone, 3 exercise (2) as well.
+/// `is_timed_out`), so `recover:` catches it and a HANDLE job carries it as `Err` — a handle job's
+/// fault cancels nobody (TICKET-208). `writes` picks which half this run fences: 1 marker write per
+/// job exercises (1) alone, 3 exercise (2) as well.
 ///
 /// **Ancestors, measured on the 3-job shape under `| head -1`:** CPython `ThreadPoolExecutor` runs
 /// every submitted job and completes all three writes at `max_workers` 1/2/4 — the ancestor that owns
-/// `Executor` semantics, and what this asserts. Go has no executor; its goroutines take SIGPIPE on
-/// fd 1 and the whole process dies, which is a signal policy Chezzi deliberately does not adopt
-/// (`Vm::stream_halt` explains why: restoring SIGPIPE would break `std.net`'s EPIPE contract).
+/// `Executor` semantics, where every job has a handle (a `Future`), and what this asserts. Go has no
+/// executor; its goroutines take SIGPIPE on fd 1 and the whole process dies — which is what a
+/// FIRE-AND-FORGET job's fault does here since TICKET-208 (it ends the run at once), pinned by
+/// `dead_stdout_in_a_fire_and_forget_job_ends_the_run_naming_the_pipe` below.
 ///
 /// The `spew` job is what breaks the pipe. The markers write FILES, never stdout, so they are
-/// observable after the pipe is gone — and the run must STILL fault non-zero naming the pipe, or this
-/// would pass with `stream_halt` deleted outright.
+/// observable after the pipe is gone — and the run must STILL fault non-zero naming the pipe (main
+/// re-raises the handle's `Err`), or this would pass with `stream_halt` deleted outright.
 fn dead_stdout_does_not_cancel_sibling_executor_jobs(threads: Option<usize>, writes: usize) {
+    dead_stdout_under_an_executor(threads, writes, true);
+}
+
+/// `handle` picks how `spew` is submitted: `submit_task` (the fault is the handle's `Err`, siblings
+/// run to completion) or a bare `ex.submit` (the fault ends the run; no marker is asserted, because
+/// whether the sibling wrote before the cut is a race).
+fn dead_stdout_under_an_executor(threads: Option<usize>, writes: usize, handle: bool) {
+    let tail = if handle {
+        "t := submit_task(ex, spew)\nex.submit(markers)\nex.shutdown()\n\
+         match t.get():\n    Ok(_): pass\n    Err(e): panic(e.message())\n"
+    } else {
+        "ex.submit(spew)\nex.submit(markers)\nex.shutdown()\n"
+    };
     let t = TmpDir::new();
     let dir = t.0.display().to_string();
     let markers: Vec<String> = (1..=writes).map(|i| format!("m{i}.txt")).collect();
@@ -568,10 +583,10 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs(threads: Option<usize>, wri
     let entry = t.write(
         "main.chz",
         &format!(
-            "import std.concurrency\nimport std.fs\n\n\
+            "import std.concurrency\nimport submit_task from std.concurrency.task\nimport std.fs\n\n\
              fn spew():\n    i := 0\n    while i < 500000:\n        print(\"x{{i}}\")\n        i = i + 1\n\n\
              fn markers():\n{body}\n\
-             ex := Executor()\nex.submit(spew)\nex.submit(markers)\nex.shutdown()\n"
+             ex := Executor()\n{tail}"
         ),
     );
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
@@ -593,8 +608,8 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs(threads: Option<usize>, wri
     let mut err = String::new();
     use std::io::Read;
     let _ = stderr.read_to_string(&mut err);
-    let cfg = format!("threads={threads:?}, writes={writes}");
-    for m in &markers {
+    let cfg = format!("threads={threads:?}, writes={writes}, handle={handle}");
+    for m in markers.iter().filter(|_| handle) {
         assert!(
             t.0.join(m).exists(),
             "a dead stdout stopped sibling Executor work at {m} ({cfg}) — a broken pipe is an \
@@ -631,6 +646,12 @@ fn dead_stdout_does_not_tear_a_multi_native_sibling_mn() {
 #[test]
 fn dead_stdout_does_not_tear_a_multi_native_sibling_mn_one_thread() {
     dead_stdout_does_not_cancel_sibling_executor_jobs(Some(1), 3);
+}
+
+#[test]
+fn dead_stdout_in_a_fire_and_forget_job_ends_the_run_naming_the_pipe() {
+    dead_stdout_under_an_executor(None, 1, false);
+    dead_stdout_under_an_executor(Some(1), 1, false);
 }
 
 /// A stdout that CANNOT be written (`> /dev/full` → ENOSPC) must not be silently dropped: the run
