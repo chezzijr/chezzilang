@@ -7,6 +7,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-208 (2026-10-04): an Executor job is a spawned task on a detached sched; the job engine is deleted.** `ex.submit(f)` starts its task through `Vm::spawn_into`, the function `spawn` calls, so a job copies its globals at submit, inherits its creator's cancel chain, parks like any fiber (socket ops included) and runs under the one runner gate. `Task.get()`, `submit_result` and `submit_outcome` return `Result[T]`: a handle job's fault is its handle's `Err`, and `shutdown()` raises no job fault. A fire-and-forget job's fault ends the run at once, past every `recover:`, with that job's frames. A deadlocked job is reported at its own blocking op. TICKET-213 owns A1, `Executor(n)`, the exit rule (`os.exit` runs no `defer`), replay, perf and the reference docs.
 - **TICKET-206 (2026-10-04): a gated worker and a callback thread queue their own next turn; callback replay rates rise, `wait:` and `recv` in a callback stay a measured rate when the box is oversubscribed.**
   `tests/sched_seed/open/callback_wait_interleave.chz` replayed at 76-78 of 80 (seeds 1-8 x 10 runs,
   release). Cause: `Vm::mn_worker_loop` released the runner permit, ran its `match disp`

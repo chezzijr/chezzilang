@@ -326,8 +326,18 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 102] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 107] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
+    // TICKET-208, `tests/executor_task_grid.rs`. Every `time.sleep_ms` of these five is inside a
+    // fixture .chz program's SOURCE STRING: a job's long work (3 s, 6 s) that a cut must end, or a
+    // delay before a fault whose assertion holds for either arrival order. None is a
+    // happens-before edge in the Rust test's own control flow; the ordering edges are channel
+    // handshakes (DEC-050).
+    "a_cut_joiner_leaves_inside_the_bound_and_the_job_survives",
+    "a_fire_and_forget_fault_cuts_main_in_every_state",
+    "a_test_run_reports_a_job_fault_that_lands_past_a_passing_test",
+    "a_test_run_reports_a_top_level_job_fault",
+    "executor_limit_caps_running_jobs",
     "a_bailed_join_stops_its_jobs_from_starting_new_work",
     "a_cancelled_siblings_defer_runs_whole_on_both_engines",
     "a_finished_executor_job_lets_the_genuine_nursery_deadlock_fire",
