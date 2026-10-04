@@ -5243,7 +5243,7 @@ impl Vm {
         task: WireValue,
         span: Span,
     ) -> Result<ReadyWorker, RuntimeError> {
-        let snap = self.ensure_snapshot(span)?;
+        let snap = self.fresh_view(span)?;
         let mut worker = self.spawn_worker();
         worker.install_snapshot(snap);
         let callee = worker.from_wire(task);
