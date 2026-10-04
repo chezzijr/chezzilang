@@ -5422,6 +5422,7 @@ impl Vm {
             // `shutdown()` raises no job fault: a fire-and-forget fault is the run-wide halt, which
             // the reduce reads through its funnel, and a handle job never faults its fiber. A hard
             // halt, a deadlock, an exit and a cancelled job's `defer` fault still raise.
+            let cancelled = core.cancel.load(Ordering::Relaxed);
             let slots = scope
                 .sched
                 .take_slots()
@@ -5436,6 +5437,12 @@ impl Vm {
                         // First writer wins: a no-op when the faulting job already published.
                         self.quiesce.request_job_fault(err, trace);
                         self.quiesce.mark_run_halt();
+                        Some(TaskOutcome::Cancelled { out, stderr })
+                    }
+                    // Cancel outranks a deadlock verdict (DEC-135): a job the verdict ended after
+                    // `shutdown_now()` cancelled it is a cancelled job. It is parked in its own
+                    // nursery join there, behind a child whose `defer` blocks, so no cut reaches it.
+                    Some(TaskOutcome::Deadlocked { out, stderr, .. }) if cancelled => {
                         Some(TaskOutcome::Cancelled { out, stderr })
                     }
                     s => s,
