@@ -3306,8 +3306,7 @@ impl MnSched {
     }
 
     /// Claim `fiber`'s outcome slot (the first half of [`MnSched::inject_or_extend`]): it grows the
-    /// tail scope, or opens a continuation scope when `scope_id` is no longer the sched's last. A
-    /// detached sched (an `Executor`) keeps its own tail, because its submitters are many parties.
+    /// tail scope, or opens a continuation scope when `scope_id` is no longer the sched's last.
     /// A nonzero `charge` is the task's submit-time bytes, held until [`MnSched::finish`].
     fn reserve_slot(
         &self,
@@ -3320,11 +3319,6 @@ impl MnSched {
             matches!(fiber.state, FiberState::Pending(_)),
             "an injected handler must be unstarted (Pending) so `run_one_fiber` runs its body via `start_task`"
         );
-        let scope_id = if self.detached.is_some() {
-            c.exec_tail
-        } else {
-            scope_id
-        };
         let base_index = c.slots.len(); // authoritative flat slot index — the slots END
         let opened = if c.scopes.last_id() == Some(scope_id) {
             c.scopes[scope_id].total += 1;
@@ -3349,9 +3343,6 @@ impl MnSched {
             };
             let id = c.scopes.open(cont);
             fiber.scope_id = id;
-            if self.detached.is_some() {
-                c.exec_tail = id;
-            }
             Some(id)
         };
         fiber.task_index = base_index;
@@ -3361,6 +3352,29 @@ impl MnSched {
             c.unfinished_bytes += charge;
         }
         opened
+    }
+
+    /// [`MnSched::reserve_slot`] on the Executor's own tail scope, for `Executor.submit` alone: its
+    /// submitters are many parties, so the sched keeps the tail. A `spawn` in a job's nursery
+    /// reserves on that nursery's scope instead, so a nursery child is never a job.
+    fn reserve_job_slot(
+        &self,
+        c: &mut SchedCore,
+        fiber: &mut Fiber,
+        charge: usize,
+    ) -> Option<usize> {
+        let tail = c.exec_tail;
+        let opened = self.reserve_slot(c, fiber, tail, charge);
+        if let Some(id) = opened {
+            c.exec_tail = id;
+        }
+        opened
+    }
+
+    /// Whether `scope_id` is one of the Executor's own scopes, so its fiber is a job and not a
+    /// job's nursery child.
+    fn is_job_scope(&self, scope_id: usize) -> bool {
+        self.detached.is_some() && self.lock().scope_family(0).contains(&scope_id)
     }
 
     /// The runner wids `Executor.submit` must start now: the first free wids while fewer runners

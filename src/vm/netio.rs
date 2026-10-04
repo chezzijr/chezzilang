@@ -4154,7 +4154,7 @@ impl Vm {
                     return Err(self.err(super::EXEC_NO_RUNNER_MSG.to_string(), span));
                 };
                 self.spawn_into(
-                    crate::vm::sched::SpawnTarget::Scope { sched, tail: 0 },
+                    crate::vm::sched::SpawnTarget::Scope { sched },
                     None,
                     args[0],
                     Vec::new(),

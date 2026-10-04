@@ -197,8 +197,8 @@ impl WireMemo {
 pub(super) enum SpawnTarget {
     /// The innermost open `parallel:` of the calling party (`spawn`).
     Nursery,
-    /// Scope `tail` of `sched`, with no nursery open on the caller (`Executor.submit`).
-    Scope { sched: Arc<MnSched>, tail: usize },
+    /// The own tail scope of `sched`, with no nursery open on the caller (`Executor.submit`).
+    Scope { sched: Arc<MnSched> },
 }
 
 impl Vm {
@@ -297,7 +297,7 @@ impl Vm {
         };
         match target {
             SpawnTarget::Nursery => self.register_task(task, span, pin, cell_ids, fresh),
-            SpawnTarget::Scope { sched, tail } => {
+            SpawnTarget::Scope { sched } => {
                 let rw = self.prepare_worker(task, pin?, &cell_ids, fresh)?;
                 // W7-26r — the worker heap this start just built is owned by the starter until the
                 // task FINISHES (DEC-205). `own_bytes`, never `live_bytes`: the full walk counts
@@ -307,7 +307,7 @@ impl Vm {
                 } else {
                     0
                 };
-                let mut fiber = rw.into_fiber(0, tail);
+                let mut fiber = rw.into_fiber(0, 0);
                 // Reserve the slot and claim the runners it needs in ONE core-lock hold. A scope
                 // whose join already closed it takes no new task: that is what makes a submit
                 // racing a `shutdown()` either rejected or counted by that join.
@@ -326,7 +326,7 @@ impl Vm {
                             span,
                         ));
                     };
-                    sched.reserve_slot(&mut c, &mut fiber, tail, charge);
+                    sched.reserve_job_slot(&mut c, &mut fiber, charge);
                     (cancel, sched.claim_runners(&mut c))
                 };
                 // At one worker the starter and the runner share the one runner slot (DEC-205): a
@@ -2621,7 +2621,7 @@ impl Vm {
                     // no join sees the job finished while the cell is empty; in `request_exit`'s
                     // order: the cell, every sched halted, then the hint. A deadlock verdict and a
                     // `--timeout` cut are the run's own causes, never a job fault.
-                    if sched.detached.is_some()
+                    if sched.is_job_scope(scope_id)
                         && let TaskOutcome::Fault { err, trace, .. } = &outcome
                         && !err.is_deadlock
                         && !err.is_timed_out
@@ -5425,8 +5425,14 @@ impl Vm {
                 .into_iter()
                 .map(|s| match s {
                     Some(TaskOutcome::Fault {
-                        err, out, stderr, ..
+                        err,
+                        out,
+                        stderr,
+                        trace,
                     }) if !executor_hard_halt(&err) && !err.is_deadlock => {
+                        // First writer wins: a no-op when the faulting job already published.
+                        self.quiesce.request_job_fault(err, trace);
+                        self.quiesce.mark_run_halt();
                         Some(TaskOutcome::Cancelled { out, stderr })
                     }
                     s => s,
