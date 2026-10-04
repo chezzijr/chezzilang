@@ -338,6 +338,9 @@ impl Vm {
                 }
                 let born_gated = worker_count() == 1 || width::gated();
                 let mut runner = true;
+                if let Some(core) = sched.detached.as_ref().and_then(|w| w.upgrade()) {
+                    core.runner_starts.fetch_add(wids.len(), Ordering::Relaxed);
+                }
                 for wid in wids {
                     let shell = self.spawn_shell(&sched, &cancel);
                     if spawn_worker_thread(
@@ -469,16 +472,25 @@ impl Vm {
     ///
     /// A cached snapshot that is not `reusable` holds a mutable aggregate, which an in-place
     /// mutation (`q.push(1)`, `m[k] = v`, `p.x = 1`) changes with no module-slot write for
-    /// `set_global_slot` / `module_define` to see. So it is dropped at every start, and a task sees
-    /// its globals as of its own start (Go: a goroutine sees the heap as of `go`). An all-immutable
-    /// view keeps its one snapshot for the whole run.
+    /// `set_global_slot` / `module_define` to see. It is dropped when its `view` stamp is no longer
+    /// this heap's `(id, view_epoch)`: something a global reaches was handed out mutably since the
+    /// build (`Heap::get_mut`), or the snapshot was built from another heap. So a task sees its
+    /// globals as of its own start (Go: a goroutine sees the heap as of `go`), and a spawn storm
+    /// that mutates nothing shares ONE snapshot (TICKET-213: one per spawn held 2000 copies of a
+    /// 100000-item global at one worker). An all-immutable view keeps its one snapshot for the
+    /// whole run. This is the ONE site that decides it.
     ///
     /// A `spawn` calls this BEFORE `deep_clone_all` mints the task's cells, and CARRIES the
     /// `Result` (W6-2): a snapshot that cannot be built — a module global holding a frame-holding
     /// generator — faults where the task is PREPARED, so a nursery whose tasks are all cancelled
     /// before preparation stays faultless.
     pub(super) fn fresh_view(&mut self, span: Span) -> Result<Arc<ModuleSnapshot>, RuntimeError> {
-        if self.snapshot_memo.as_ref().is_some_and(|s| !s.reusable) {
+        let now = (self.heap.id(), self.heap.view_epoch());
+        if self
+            .snapshot_memo
+            .as_ref()
+            .is_some_and(|s| !s.reusable && s.view != now)
+        {
             self.snapshot_memo = None;
             // W7-4c — the registry numbers that snapshot; drop it with the cache.
             self.snapshot_cells = Arc::new(super::fxhash::FxHashMap::default());
@@ -5542,9 +5554,9 @@ impl Vm {
     ///
     /// W6-2 — this is resolved per task at its `spawn` ([`Vm::register_task`]), not frozen for the run.
     /// `snapshot_memo` is a CACHE with two invalidation rules, not a forever-memo: a module-slot write
-    /// drops it (`set_global_slot` / `module_define`), and `Op::EnterNursery` drops it when the cached
+    /// drops it (`set_global_slot` / `module_define`), and [`Vm::fresh_view`] drops it when the cached
     /// snapshot is not `reusable` (some global holds a mutable aggregate, which in-place mutation changes
-    /// with no slot write). So a global initialized or mutated after an earlier nursery is SEEN by later
+    /// with no slot write) and its `view` stamp is stale. So a global initialized or mutated after an earlier nursery is SEEN by later
     /// tasks (it used to replay as the frozen first-nursery copy, or as `nil` if it had not been
     /// initialized yet), while a program whose globals are only scalars / `Channel` / `Shared` / `Atomic`
     /// still builds exactly one snapshot for the run, and a spawn storm inside one nursery builds one.
@@ -5571,6 +5583,7 @@ impl Vm {
                 self.fault_module(i);
             }
         }
+        self.mark_view();
         // W7-4c — seed the build from the MONOTONIC counter, and keep the cell registry it produces
         // so a later `deep_clone_all`/`lower_task` can serialize the same binding under the same id.
         // On failure nothing is stored (the build path caches only on success), so a faulted snapshot
@@ -5588,6 +5601,27 @@ impl Vm {
         // aggregate global). Freshness comes from the two invalidation rules, not from refusing to cache.
         self.snapshot_memo = Some(Arc::clone(&snap));
         Ok(snap)
+    }
+
+    /// TICKET-213 — mark every object this view's module globals reach as viewed, so
+    /// `Heap::get_mut` moves the view epoch when one of them is mutated in place. Runs right before
+    /// the build that stamps the snapshot; nothing mutates the heap between the two. The module
+    /// objects themselves stay unmarked: a slot write already drops the cache
+    /// (`set_global_slot` / `module_define`), and a worker's lazy fault replay writes slots.
+    fn mark_view(&mut self) {
+        self.heap.begin_view();
+        let mut stack: Vec<GcRef> = Vec::new();
+        for &pm in &self.module_objs {
+            if let Obj::Module(m) = self.heap.get(pm) {
+                stack.extend(m.slots.iter().filter_map(|v| v.as_obj()));
+            }
+        }
+        while let Some(h) = stack.pop() {
+            if self.module_objs.contains(&h) || !self.heap.set_viewed(h) {
+                continue;
+            }
+            stack.extend(self.heap.children(h));
+        }
     }
 
     /// D1 — read this VM's initialized module graph (read-only) into a heap-independent
@@ -5667,7 +5701,11 @@ impl Vm {
             });
         }
         Ok((
-            ModuleSnapshot { modules, reusable },
+            ModuleSnapshot {
+                modules,
+                reusable,
+                view: (self.heap.id(), self.heap.view_epoch()),
+            },
             Arc::new(memo.cells),
             Arc::new(nodes),
             memo.next_id,
@@ -5688,8 +5726,9 @@ impl Vm {
     /// never cached: the nursery rebuilds. A WHITELIST on purpose — a new `Obj` variant defaults to
     /// "rebuild" (slower, never stale).
     ///
-    /// (A precise per-mutation invalidation — hooking the mutating intrinsics themselves — is the
-    /// recorded follow-up; it needs `src/vm/call.rs`, fenced while W6-3 is in flight.)
+    /// TICKET-213 — a non-reusable snapshot is still cached while nothing it reaches was mutated:
+    /// `Heap::get_mut`, the sole `&mut Obj` door, moves the view epoch the snapshot is stamped with
+    /// (`ModuleSnapshot::view`, read by [`Vm::fresh_view`]). No mutating intrinsic is hooked.
     fn slot_snapshot_reusable(&self, v: Value) -> bool {
         let Some(h) = v.as_obj() else {
             return true; // inline scalar (int/bool/nil) — immutable

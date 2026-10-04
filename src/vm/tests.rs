@@ -20675,14 +20675,15 @@ fn snapshot_builds_for(src: &str) -> usize {
     vm.snapshot_builds
 }
 
-/// W6-2 / TICKET-208 — the snapshot cache short-circuits only where that is correct. A task sees
-/// its globals as of its own start, so [`Vm::fresh_view`] drops a non-`reusable` snapshot at every
-/// spawn:
+/// W6-2 / TICKET-208 / TICKET-213 — the snapshot cache short-circuits only where that is correct.
+/// A task sees its globals as of its own start, and [`Vm::fresh_view`] rebuilds the view only when
+/// it CHANGED since the cached build:
 ///
 /// * all-immutable globals (`reusable`) → ONE build for the whole run, however many nurseries;
-/// * a mutable aggregate global → one build per SPAWN (`q.push(..)` writes no module slot, so
-///   nothing else can tell the view changed); the cost is O(all module globals) per spawn
-///   (measured 84x on a spawn storm with a big aggregate global), accepted by TICKET-208;
+/// * a mutable aggregate global nobody mutates → ONE build too: the heap's view epoch
+///   (`Heap::view_epoch`) did not move, so every spawn shares the snapshot (TICKET-208 built one
+///   per spawn: 2000 spawns over a 100000-item global held 2000 copies at one worker);
+/// * an in-place mutation of anything a global reaches → one build per mutate-then-spawn;
 /// * a global ASSIGNMENT between spawns → one build per assignment-then-spawn.
 #[test]
 fn snapshot_cache_short_circuits_per_epoch_not_per_spawn() {
@@ -20694,21 +20695,56 @@ fn snapshot_cache_short_circuits_per_epoch_not_per_spawn() {
     );
     assert_eq!(
         snapshot_builds_for(&format!("n: int = 1\nq: List[int] = [1]{three_nurseries}")),
-        3,
-        "an aggregate global: one build per spawn (in-place mutation writes no slot)"
+        1,
+        "an unmutated aggregate global: 3 nurseries share ONE build"
     );
     assert_eq!(
         snapshot_builds_for(
             "q: List[int] = [1]\nparallel:\n    for i in range(50):\n        spawn: pass\n"
         ),
-        50,
-        "50 spawns over an aggregate global: one build per spawn (each sees it as of its start)"
+        1,
+        "50 spawns over an unmutated aggregate global: ONE build"
+    );
+    assert_eq!(
+        snapshot_builds_for(
+            "q: List[int] = [1]\nxs: List[int] = [1, 2, 3]\nparallel:\n    for x in xs:\n        spawn: pass\n"
+        ),
+        1,
+        "walking a global list between spawns mutates nothing a global reaches: ONE build"
     );
     assert_eq!(
         snapshot_builds_for("g: int = 0\nparallel:\n    spawn: pass\n    g = 1\n    spawn: pass\n"),
         2,
         "a global assignment between two spawns must refresh the view (one build each)"
     );
+}
+
+/// TICKET-213 — every in-place mutation of something a global reaches refreshes the view: one row
+/// per mutating door, at the root and nested. Each program spawns, mutates, then spawns twice: the
+/// mutation costs exactly one rebuild and the third spawn reuses it.
+#[test]
+fn an_in_place_mutation_between_spawns_refreshes_the_view_once() {
+    let decls = "struct P:\n    x: int\n    ys: List[int]\nq: List[int] = [1]\nqq: List[List[int]] = [[1]]\nmp: Map[str, int] = {\"a\": 1}\nst: Set[int] = {1}\np := P(1, [1])\nps: List[P] = [P(1, [1])]\n";
+    for mutation in [
+        "q.push(2)",
+        "q[0] = 5",
+        "q.pop()",
+        "qq[0].push(2)",
+        "mp[\"b\"] = 2",
+        "st.add(2)",
+        "p.x = 2",
+        "p.ys.push(2)",
+        "ps[0].x = 2",
+        "ps[0].ys.push(2)",
+    ] {
+        assert_eq!(
+            snapshot_builds_for(&format!(
+                "{decls}parallel:\n    spawn: pass\n    {mutation}\n    spawn: pass\n    spawn: pass\n"
+            )),
+            2,
+            "`{mutation}` between two spawns: one rebuild, and the third spawn reuses it"
+        );
+    }
 }
 
 /// W6-2 — a snapshot BUILD failure is CARRIED on the queued task and raised where the task is PREPARED
@@ -22197,4 +22233,34 @@ fn a_finished_executor_job_no_longer_vetoes_a_parked_nursery_task() {
     let msg = res.expect_err("expected a deadlock fault").message;
     assert!(msg.contains("deadlock"), "got: {msg}");
     assert!(!out.contains("after"), "the nursery returned: {out:?}");
+}
+
+/// TICKET-213 — an Executor's runner thread waits briefly for the next job before it leaves, so a
+/// loop of sequential submit-then-wait round trips reuses its runner. TICKET-208 let the runner
+/// leave the moment no job was unfinished: 2000 round trips started 2000 threads (measured
+/// `clone` count 2007-2014 per run, base `fcbe2596` 8-11) and ran 2.5x slower. The bound is loose
+/// on purpose: a starter descheduled longer than the wait costs one extra start, never a failure
+/// of the rule.
+#[test]
+fn sequential_executor_round_trips_reuse_their_runner() {
+    let vm = ran_standalone(
+        "ex := Executor()\nch := Channel[int](0)\nn := 0\nfor i in range(200):\n    ex.submit(fn(): ch.send(1))\n    n = n + ch.recv()\n",
+    );
+    let Obj::Module(m) = vm.heap.get(vm.module_objs[0]) else {
+        panic!("module_objs[0] is the entry module");
+    };
+    let core = m
+        .slots
+        .iter()
+        .filter_map(|v| v.as_obj())
+        .find_map(|h| match vm.heap.get(h) {
+            Obj::Executor(core) => Some(Arc::clone(core)),
+            _ => None,
+        })
+        .expect("the `ex` global");
+    let starts = core.runner_starts.load(Ordering::Relaxed);
+    assert!(
+        starts < 100,
+        "200 sequential round trips started {starts} runner threads: the runner is not reused"
+    );
 }

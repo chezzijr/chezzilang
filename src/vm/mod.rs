@@ -510,11 +510,17 @@ pub(crate) fn test_baseline_worker_count() -> usize {
 pub fn worker_count() -> usize {
     #[cfg(test)]
     test_baseline_worker_count();
+    // TICKET-213 — the auto count is read from the OS once per process: `available_parallelism()`
+    // is a syscall plus cgroup file reads, and the task-start path asks several times per task
+    // (measured: 2000 Executor round trips at the default count 374 ms, at `--threads=28` 117 ms).
+    static AUTO: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     match WORKER_OVERRIDE.load(Ordering::Relaxed) {
-        0 => std::thread::available_parallelism()
-            .map(|x| x.get())
-            .unwrap_or(1)
-            .max(1),
+        0 => *AUTO.get_or_init(|| {
+            std::thread::available_parallelism()
+                .map(|x| x.get())
+                .unwrap_or(1)
+                .max(1)
+        }),
         n => n.max(1),
     }
 }
@@ -1243,10 +1249,11 @@ pub struct Vm {
     /// nurseries in a mutation-free program) build exactly one. Invalidated by exactly two rules:
     ///
     /// 1. a module-slot write — `set_global_slot`/`module_define`, the only two slot mutators;
-    /// 2. `Op::EnterNursery`, iff the cached snapshot is NOT `reusable` — i.e. some global holds a
-    ///    mutable aggregate, which can be mutated IN PLACE (`q.push(1)`) with no slot write for rule 1
-    ///    to see. So every nursery re-snapshots such a view, while an all-immutable view keeps one
-    ///    snapshot for the whole run.
+    /// 2. a task start ([`Vm::fresh_view`]), iff the cached snapshot is NOT `reusable` — some global
+    ///    holds a mutable aggregate, which can be mutated IN PLACE (`q.push(1)`) with no slot write
+    ///    for rule 1 to see — AND its `view` stamp is stale: `Heap::get_mut` handed out an object
+    ///    the snapshot reaches since the build (TICKET-213). An unmutated view and an all-immutable
+    ///    view keep one snapshot.
     ///
     /// Swapped per fiber with `module_snapshot`: it describes the swapped-in view, not the VM. See
     /// [`Vm::ensure_snapshot`].
@@ -1428,6 +1435,11 @@ const CONNECT_BLOCK_TIMEOUT_SECS: u64 = 10;
 /// immediately; this bounded poll only backstops a lost wakeup (≤ this much added latency, never a
 /// hang) and bounds how fast a demoted thread observes `terminate`/`cancel` (a sibling fault/deadlock).
 const DEMOTE_POLL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// TICKET-213 — how long an Executor's runner thread waits for a next job before it leaves. It
+/// decides thread reuse only, never what a program computes: a `submit` during the wait wakes the
+/// runner through the sched's condvar, and one after it starts a fresh runner as before.
+const EXEC_RUNNER_LINGER: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// TICKET-118 (W13-7) — what a marked pool-slot joiner does on its next wait/park pass:
 /// `Untimed` (not the marked joiner, or its sched still has work), `Timed` (marked and idle, but
@@ -1802,10 +1814,16 @@ struct ModuleSnapshot {
     /// whose CONTENTS can change without a module-slot write (the two hooked mutators `set_global_slot`
     /// / `module_define`). A module global holding a mutable aggregate (`List`/`Map`/`Set`/`Struct`/…) is
     /// mutated IN PLACE (`q.push(1)`, `m[k] = v`, `p.x = 1`) with no slot write for the hooks to see, so
-    /// a snapshot holding one is dropped from the cache at every `Op::EnterNursery` and the nursery
-    /// re-snapshots — conservative, never stale between nurseries. A WHITELIST, so a future `Obj`
-    /// variant defaults to "rebuild" (slower, never unsound).
+    /// a snapshot holding one stays cached only while its `view` stamp is current
+    /// ([`Vm::fresh_view`]). A WHITELIST, so a future `Obj` variant defaults to "check the stamp"
+    /// (slower, never unsound).
     reusable: bool,
+    /// TICKET-213 — the stamp of the build: `(Heap::id, Heap::view_epoch)` of the heap it was read
+    /// from, taken after every object the globals reach was marked viewed. The snapshot still
+    /// describes the view exactly while the current heap's pair equals it: `Heap::get_mut` moves the
+    /// epoch at any in-place mutation of a marked object, and another heap (a worker seeded with its
+    /// starter's snapshot) never matches the id.
+    view: (u64, u64),
 }
 
 /// D1 — one module in a [`ModuleSnapshot`]: its name plus its top-level globals as heap-independent
@@ -3754,6 +3772,8 @@ impl MnSched {
         // notify — they do not, which is why the idle wait below is BOUNDED whenever this is set (see
         // there). Cleared at every wait site.
         let mut judged = false;
+        // TICKET-213 — an idle Executor runner has already waited once for a next job.
+        let mut lingered = false;
         let mut idle_since = None;
         let me = std::thread::current().id();
         struct IdleReg<'a>(&'a MnSched);
@@ -3896,9 +3916,23 @@ impl MnSched {
             // (`SchedCore::owner_scope_done`, TICKET-128/W13-25).
             self.idle_register(&width::my_slot());
             width::release();
-            // TICKET-208 — an Executor holds a thread only while a job is unfinished: its runner
-            // leaves here and gives its wid back under this lock, so `submit` starts a new one.
+            // TICKET-208 — an Executor holds no thread while it is idle: its runner leaves here and
+            // gives its wid back under this lock, so `submit` starts a new one.
+            // TICKET-213 — but not at once: it waits `EXEC_RUNNER_LINGER` for the next job first,
+            // with its wid still claimed, so a submit-then-wait loop reuses one runner instead of
+            // starting a thread per job. `admit_or_hold` notifies this `cv`; the leave decision is
+            // re-made under the lock on the next pass, so a job enqueued during the wait is never
+            // left without a runner. `terminate` is read at the top of step 3 and ends the wait.
             if self.detached.is_some() && c.all_scopes_done() {
+                if !lingered {
+                    lingered = true;
+                    let (guard, _) = self
+                        .cv
+                        .wait_timeout(c, EXEC_RUNNER_LINGER)
+                        .unwrap_or_else(|e| e.into_inner());
+                    drop(guard);
+                    continue;
+                }
                 c.release_runner(wid);
                 return Take::Stop;
             }

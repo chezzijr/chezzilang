@@ -1277,6 +1277,9 @@ pub(super) fn halt_over_backlog(
 pub struct ExecutorCore {
     /// At most this many jobs run at once; zero means no cap; set once at construction.
     pub limit: usize,
+    /// TICKET-213 — runner threads this Executor has started, over its whole life. Observability
+    /// only (the runner-reuse test reads it); no scheduling decision reads it.
+    pub(super) runner_starts: AtomicUsize,
     pub inner: Mutex<ExecState>,
     /// TICKET-208 — the detached scope this Executor's jobs run in: a sched built at the first
     /// `submit` and taken by the join that reduces its slots. The Executor's tasks, their results

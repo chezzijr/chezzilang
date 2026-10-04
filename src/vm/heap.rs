@@ -506,6 +506,19 @@ pub struct Heap {
     /// skip straight past the bit test.
     copied: Vec<u64>,
     any_copied: bool,
+    /// TICKET-213 — a side bitset marking every object the cached module snapshot of this heap's
+    /// view reaches (set by `Vm::ensure_snapshot`, through [`Heap::begin_view`] and
+    /// [`Heap::set_viewed`]). [`get_mut`](Heap::get_mut), the sole `&mut Obj` door, moves
+    /// `view_epoch` when it hands out a viewed object, so `Vm::fresh_view` can tell "something a
+    /// global reaches was mutated in place" from "nothing changed" without a slot write to hook.
+    /// `any_viewed` keeps a heap that never built a snapshot of an aggregate at one predictable
+    /// branch, like `any_copied`.
+    viewed: Vec<u64>,
+    any_viewed: bool,
+    /// TICKET-213 — moves at every `get_mut` of a viewed object and at every `begin_view`. A
+    /// snapshot is stamped with `(heap_id, view_epoch)` at its build and is current exactly while
+    /// both still match.
+    view_epoch: u64,
     /// A per-heap identity, assigned once at construction from a process-wide counter. Lets
     /// `Sched::from_wire_memo`'s `Closure` arm tell a same-task `Channel`/`Shared` round-trip
     /// (the value never actually left this heap) from a genuine cross-task crossing (the D4
@@ -601,6 +614,9 @@ impl Default for Heap {
             marks: Vec::new(),
             copied: Vec::new(),
             any_copied: false,
+            viewed: Vec::new(),
+            any_viewed: false,
+            view_epoch: 0,
             heap_id: NEXT_HEAP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             free: Vec::new(),
             live: 0,
@@ -674,6 +690,52 @@ impl Heap {
         self.heap_id
     }
 
+    /// TICKET-213 — start marking a new view: forget the previous view's objects and move the
+    /// epoch, so a snapshot stamped by any earlier marking of this heap stops being current (two
+    /// parties that share one heap each rebuild rather than trust the other's marks).
+    pub fn begin_view(&mut self) {
+        self.viewed.fill(0);
+        self.any_viewed = false;
+        self.view_epoch += 1;
+    }
+
+    /// TICKET-213 — mark `h` as reached by the view being built. Returns `false` when it was
+    /// already marked in this view (the walk's visited test).
+    pub fn set_viewed(&mut self, h: GcRef) -> bool {
+        let i = h.0 as usize;
+        if self.viewed.len() <= i >> 6 {
+            self.viewed.resize((i >> 6) + 1, 0);
+        }
+        let bit = 1u64 << (i & 63);
+        let fresh = self.viewed[i >> 6] & bit == 0;
+        self.viewed[i >> 6] |= bit;
+        self.any_viewed = true;
+        fresh
+    }
+
+    #[inline]
+    fn is_viewed(&self, i: usize) -> bool {
+        self.viewed
+            .get(i >> 6)
+            .is_some_and(|w| (w >> (i & 63)) & 1 == 1)
+    }
+
+    /// Clear the viewed bit for slot `i` — a reused slot must not inherit a stale mark.
+    #[inline]
+    fn clear_viewed(&mut self, i: usize) {
+        if self.any_viewed
+            && let Some(w) = self.viewed.get_mut(i >> 6)
+        {
+            *w &= !(1u64 << (i & 63));
+        }
+    }
+
+    /// TICKET-213 — the half of a snapshot's stamp that moves: see the `view_epoch` field.
+    #[inline]
+    pub fn view_epoch(&self) -> u64 {
+        self.view_epoch
+    }
+
     /// Clear the copied bit for slot `i` (no-op if the word is absent) — a freed or reused slot
     /// must not inherit a stale mark.
     #[inline]
@@ -704,6 +766,7 @@ impl Heap {
             self.slots[idx as usize].obj = Some(obj);
             self.clear_mark(idx as usize); // defensive: already 0 post-sweep (matches old mark=false)
             self.clear_copied(idx as usize); // a reused slot must not inherit a stale copy mark
+            self.clear_viewed(idx as usize);
             GcRef(idx)
         } else {
             let idx = self.slots.len() as u32;
@@ -731,6 +794,11 @@ impl Heap {
             self.settle_pending_mut();
             self.pending_mut
                 .set(Some((h, obj_bytes_shallow(self.get(h)))));
+        }
+        // TICKET-213 — the same sole-door argument decides view freshness: a `&mut` to an object
+        // the cached module snapshot reaches is the only way that view can change in place.
+        if self.any_viewed && self.is_viewed(h.0 as usize) {
+            self.view_epoch += 1;
         }
         self.slots[h.0 as usize]
             .obj
@@ -1306,6 +1374,56 @@ mod iter_obj_tests {
     #[test]
     fn slot_element_is_64b() {
         assert_eq!(std::mem::size_of::<Slot>(), 64);
+    }
+
+    /// TICKET-213: the view epoch moves when a viewed object is handed out mutably, and at a new
+    /// view; a read, an unviewed object, a fresh allocation and a reused slot leave it alone.
+    #[test]
+    fn view_epoch_moves_only_for_a_viewed_object() {
+        let mut heap = Heap::new();
+        let a = heap.alloc(Obj::List(Vec::new()));
+        let b = heap.alloc(Obj::List(Vec::new()));
+        heap.begin_view();
+        assert!(heap.set_viewed(a), "first mark of `a` is fresh");
+        assert!(
+            !heap.set_viewed(a),
+            "second mark of `a` is the visited answer"
+        );
+        let e = heap.view_epoch();
+        let _ = heap.get(a);
+        let _ = heap.get_mut(b);
+        let x = heap.alloc(Obj::List(Vec::new()));
+        assert_eq!(
+            heap.view_epoch(),
+            e,
+            "a read, an unviewed write and an alloc do not move it"
+        );
+        let _ = heap.get_mut(a);
+        assert_ne!(
+            heap.view_epoch(),
+            e,
+            "a mutable borrow of a viewed object moves it"
+        );
+        let e = heap.view_epoch();
+        heap.begin_view();
+        assert_ne!(heap.view_epoch(), e, "a new view moves it");
+        let e = heap.view_epoch();
+        let _ = heap.get_mut(a);
+        assert_eq!(
+            heap.view_epoch(),
+            e,
+            "the new view forgot the old view's objects"
+        );
+        // A swept slot handed to a new object carries no stale mark.
+        assert!(heap.set_viewed(a));
+        heap.mark(b);
+        heap.mark(x);
+        heap.sweep();
+        let c = heap.alloc(Obj::List(Vec::new()));
+        assert_eq!(c, a, "the freed slot is reused");
+        let e = heap.view_epoch();
+        let _ = heap.get_mut(c);
+        assert_eq!(heap.view_epoch(), e, "a reused slot is not viewed");
     }
 
     /// D4 layer C (TICKET-169): the copy mark is per-slot and cleared when the slot is reused.

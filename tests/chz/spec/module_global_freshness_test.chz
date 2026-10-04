@@ -361,3 +361,54 @@ test fn nursery_in_a_loop_pins_per_iteration():
             spawn: seen.set(loopg)
         total = total + seen.get()
     assert total == 45, "sum of per-iteration views was {total}"
+
+# TICKET-213 — the view is rebuilt only when something a global reaches was mutated since the last
+# build, so EVERY in-place mutation door must be seen: each row spawns, mutates, then spawns again,
+# and each task must read the globals as of its own spawn. The last spawn follows no mutation and
+# reads the same view as the one before it. A door the runtime missed would hand a task the
+# previous task's view.
+struct Box213:
+    n: int
+    xs: List[int]
+
+g_nested: List[List[int]] = [[1]]
+g_map: Map[str, int] = {"a": 1}
+g_set: Set[int] = {1}
+g_box := Box213(1, [1])
+g_boxes: List[Box213] = [Box213(1, [1])]
+g_pop: List[int] = [1, 2]
+g_idx: List[int] = [1]
+
+fn view213() -> str:
+    return "{g_nested[0].len()} {g_map.len()} {g_set.len()} {g_box.n} {g_box.xs.len()} {g_boxes[0].n} {g_boxes[0].xs.len()} {g_pop.len()} {g_idx[0]}"
+
+test fn every_in_place_mutation_door_refreshes_the_next_tasks_view():
+    seen := Channel[str](32)
+    parallel:
+        spawn: seen.send(view213())
+        g_nested[0].push(2)
+        spawn: seen.send(view213())
+        g_map["b"] = 2
+        spawn: seen.send(view213())
+        g_set.add(2)
+        spawn: seen.send(view213())
+        g_box.n = 2
+        spawn: seen.send(view213())
+        g_box.xs.push(2)
+        spawn: seen.send(view213())
+        g_boxes[0].n = 2
+        spawn: seen.send(view213())
+        g_boxes[0].xs.push(2)
+        spawn: seen.send(view213())
+        _ := g_pop.pop()
+        spawn: seen.send(view213())
+        g_idx[0] = 2
+        spawn: seen.send(view213())
+        spawn: seen.send(view213())
+    got: List[str] = []
+    for _ in range(11):
+        got.push(seen.recv())
+    got.sort()
+    want := ["1 1 1 1 1 1 1 2 1", "2 1 1 1 1 1 1 2 1", "2 2 1 1 1 1 1 2 1", "2 2 2 1 1 1 1 2 1", "2 2 2 2 1 1 1 2 1", "2 2 2 2 2 1 1 2 1", "2 2 2 2 2 2 1 2 1", "2 2 2 2 2 2 2 2 1", "2 2 2 2 2 2 2 1 1", "2 2 2 2 2 2 2 1 2", "2 2 2 2 2 2 2 1 2"]
+    want.sort()
+    assert got == want, "views were {got}"
