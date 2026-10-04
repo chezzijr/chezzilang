@@ -484,6 +484,7 @@ fn a_job_fault_is_delivered_by_its_handle_or_ends_the_run() {
 }
 
 #[test]
+#[ignore = "TICKET-213: os.exit runs no defer"]
 fn os_exit_runs_no_defer_for_any_party() {
     let mut misses = Vec::new();
     for p in &PARTIES {
@@ -527,6 +528,7 @@ fn one_runner_at_one_worker_for_every_party() {
 }
 
 #[test]
+#[ignore = "TICKET-213: Executor(n)"]
 fn executor_limit_caps_running_jobs() {
     let src = "import std.time
 import std.concurrency

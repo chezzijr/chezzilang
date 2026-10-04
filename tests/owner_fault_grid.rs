@@ -357,9 +357,7 @@ fn cells() -> Vec<Cell> {
                 continue;
             }
             for kind in OWNERS {
-                // `block::mode` refuses a socket op in an Executor job: it returns its `Err`.
-                let refused = kind == "executor_job" && matches!(row.spec, "Socket" | "Connect");
-                let expect = if cname == "defer" || refused {
+                let expect = if cname == "defer" {
                     Expect::NotCut
                 } else {
                     Expect::Cut

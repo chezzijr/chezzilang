@@ -74,12 +74,9 @@ fn a_recovered_nursery_deadlock_aborts() {
 fn a_deadlocked_executor_job_aborts_shutdown() {
     let src = [
         "import Executor from std.concurrency",
-        "fn bad() -> int:",
-        "    panic(\"boom\")",
         "fn main():",
         "    ch := Channel[int](0)",
         "    ex := Executor()",
-        "    ex.submit(bad)",
         "    ex.submit(fn(): ch.recv())",
         "    r := recover: ex.shutdown()",
         "    print(\"after shutdown\")",

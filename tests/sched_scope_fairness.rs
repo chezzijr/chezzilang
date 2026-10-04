@@ -190,8 +190,10 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
         } else {
             "_r2 := recover: ex.shutdown()"
         };
+        // A fire-and-forget job's own fault ends the run, so the job cell recovers inside the job.
+        let job = if nest == "job" { "guarded" } else { "outer" };
         format!(
-            "c := Channel[int](0)\nstarted := Channel[int](1)\nex := Executor()\nex.submit(fn(): outer(c, started))\n{stop}"
+            "c := Channel[int](0)\nstarted := Channel[int](1)\nex := Executor()\nex.submit(fn(): {job}(c, started))\n{stop}"
         )
     } else {
         "c := Channel[int](0)\nstarted := Channel[int](1)\n_r := recover: outer(c, started)"
@@ -205,6 +207,7 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
     src += &indent(owner, 12);
     src += "        spawn:\n";
     src += &indent(recv, 12);
+    src += "fn guarded(c: Channel[int], started: Channel[int]):\n    _r := recover: outer(c, started)\n";
     src += "fn run():\n";
     src += &indent(&run_body, 4);
     src += &format!("fn main():\n    for _k in range(0, {rounds}):\n        run()\n");

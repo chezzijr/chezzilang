@@ -380,6 +380,10 @@ fn slowbad():
     time.sleep_ms(300)
     xs := [1]
     print(xs[3])
+fn late_exit():
+    defer:
+        time.sleep_ms(100)
+        os.exit(3)
 ";
 
 const SUBMIT_BAD: &str = "ex := Executor()\nex.submit(bad)\ntime.sleep_ms(100)\n";
@@ -421,9 +425,27 @@ fn ranking_cells() -> Vec<RankCell> {
     let index = "index 3 out of bounds";
     vec![
         rank("run deadlock", None, bad(DEADLOCK), vec![index], vec![]),
+        // An exit published AFTER an earlier job fault outranks it (DEC-200). The exit sits in a
+        // `defer`, which a job fault does not cut; `main`'s own sleep would be cut before it.
         RankCell {
             rc: Some(3),
-            ..rank("run exit", None, bad("os.exit(3)\n"), vec![], vec![])
+            ..rank(
+                "run exit",
+                None,
+                "ex := Executor()\nex.submit(bad)\nlate_exit()\n".to_string(),
+                vec![],
+                vec![],
+            )
+        },
+        RankCell {
+            rc: Some(3),
+            ..rank(
+                "run exit first",
+                None,
+                first("os.exit(3)\n"),
+                vec![],
+                vec![],
+            )
         },
         rank(
             "run own fault after",
