@@ -3191,3 +3191,41 @@ Re-measured on the fixed branch binary, `su.chz`, 8 runs each, ms (load average 
 Every grid cell, 5 runs each at T=2 and T=4 on the fixed binary (load 2.80): max 59 ms
 (`RwShared.write` x6 T=4); every run printed `12000`. Go (`sync.Mutex`, GOMAXPROCS=2, same work):
 0.007 s.
+
+## TICKET-213 — Executor rebuild, base vs branch (2026-10-04)
+
+Release builds, n=5 per side, interleaved (base, branch, base, ...), wall time by `date +%s.%N`.
+Base is `fcbe2596` (the commit before TICKET-208). Branch is TICKET-213 on top of TICKET-208.
+`uptime` at the start: `load average: 3.34, 2.78, 2.19`. Cells are `median (spread = max - min)` in ms.
+
+`storm`: 2000 spawns in one nursery over a global `List[int]` of 100000 items.
+`trips`: 2000 sequential `submit_task(ex, f).get()` round trips on one `Executor()`.
+
+| program | workers | base | branch | ratio |
+|---|---|---|---|---|
+| storm | 1 | 4709 (395) | OOM-killed, see below | - |
+| storm | 4 | 5449 (61) | 11610 (157) | 2.13x |
+| storm | 0 | 5607 (98) | 11658 (263) | 2.08x |
+| trips | 1 | 109 (501) | 281 (267) | 2.58x |
+| trips | 4 | 113 (13) | 278 (22) | 2.46x |
+| trips | 0 | 194 (16) | 545 (90) | 2.81x |
+| `examples/primes_parallel.chz` | 1 | 29717 (449) | 28644 (878) | 0.96x |
+| `examples/primes_parallel.chz` | 4 | 9889 (167) | 9756 (137) | 0.99x |
+| `examples/primes_parallel.chz` | 0 | 10354 (194) | 10386 (357) | 1.00x |
+
+**The storm and the round trips are slower on the branch, outside the spread.** `storm` at one
+worker: all five branch runs ended with exit status 137 after 7113-11392 ms; the session cgroup
+(`MemoryMax=10G`) recorded `oom_kill 5`. All five base runs exited 0. Peak memory was not measured.
+
+Attribution, same method, `--threads=4`, inside a `MemoryMax=6G` scope: the TICKET-208 tip
+(`0038805e`, no TICKET-213 code) against the branch.
+
+| program | TICKET-208 tip | branch |
+|---|---|---|
+| storm | 10464 (1458) | 11525 (224) |
+| trips | 249 (12) | 254 (17) |
+
+The round-trip cost is TICKET-208's (249 vs 254, inside the spread). The storm cost is TICKET-208's
+for the larger part (5449 -> 10464). The 1061 ms between the TICKET-208 tip and the branch is inside
+the larger spread (1458), but all five branch runs are slower than all five TICKET-208-tip runs; that
+difference is not resolved. `benches/run.chz` was not run: the plan stops at this result.
