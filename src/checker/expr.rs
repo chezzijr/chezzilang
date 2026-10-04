@@ -2648,9 +2648,9 @@ impl Checker {
             "Executor" => {
                 self.record_resolution(id, Resolution::Builtin("Executor".into()), name_span);
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
-                // Non-generic and zero-arg; a `[T]` type arg is rejected upstream. NOT a global
+                // Non-generic; zero arguments, or one `int` cap on the jobs running at once; a `[T]` type arg is rejected upstream. NOT a global
                 // builtin: requires `import std.concurrency` (the name STAYS reserved).
-                self.check_arity("Executor", 0, args, span);
+                self.check_args_range("Executor", &[Ty::Int], 0, args, span);
                 if self.concurrency_licensed("Executor") {
                     Some(Ty::Executor)
                 } else {
