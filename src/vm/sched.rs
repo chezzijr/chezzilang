@@ -355,7 +355,11 @@ impl Vm {
                 }
                 if !runner {
                     // No thread can run it: fill the slot so no join waits for it.
-                    sched.lock().running += 1;
+                    {
+                        let mut c = sched.lock();
+                        c.running += 1;
+                        c.exec_active += 1;
+                    }
                     sched.finish(
                         fiber.task_index,
                         fiber.scope_id,
@@ -366,7 +370,7 @@ impl Vm {
                     );
                     return Err(self.err(super::EXEC_NO_RUNNER_MSG.to_string(), span));
                 }
-                sched.enqueue(fiber);
+                sched.admit_or_hold(fiber);
                 // W7-26, the sampling half — charge what this Executor retains, and the task just
                 // started, against this heap's GC pacing counter, so a live cap gets sampled.
                 if self.heap.mem_cap() != 0 {
@@ -1220,7 +1224,7 @@ impl Vm {
         // Structured concurrency — an eager nursery is a nested scope: its handlers must observe the
         // enclosing scopes' cancel too (`JoinScope::ancestors`).
         sched.lock().scopes[0].ancestors = ancestors;
-        if detached.is_some() {
+        if let Some(core) = detached {
             // TICKET-208 — an `Executor`'s scope: no body thread and no drainer. Its submitters are
             // other parties, which the process-wide verdict counts, so scope 0 is open (it takes
             // submits until a join closes it) and never "injecting". `submit` starts the runners.
@@ -1229,6 +1233,7 @@ impl Vm {
                 c.scopes[0].body_open = true;
                 c.scopes[0].body_blocked = true;
                 c.leaf_site = true;
+                c.exec_limit = core.limit;
             }
             self.quiesce.register_eager_body(&sched);
             return Some(EagerScope {

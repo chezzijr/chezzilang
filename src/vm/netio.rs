@@ -4193,9 +4193,12 @@ impl Vm {
                 // D4 — "attempts to stop", COOPERATIVE not preemptive: trip the per-core cancel
                 // flag (the Executor scope's own flag) so a running job dies at its next
                 // cancellation point, and drain the scope's parked fibers so each is cut at its
-                // own wait. A job with no cancellation point still runs to completion.
+                // own wait. A RUNNING job with no cancellation point still runs to completion;
+                // a held job never started, so it never starts (CPython
+                // `shutdown(cancel_futures=True)`).
                 crate::vm::trip_cancel_flag(&core.cancel);
                 if let Some(sched) = core.sched() {
+                    sched.lock().drop_held_jobs();
                     sched.drain_family(0);
                 }
                 // TICKET-118 (W13-8) — a cancel is a wake source too.

@@ -4653,9 +4653,15 @@ impl Compiler {
             fc.emit(Op::NewTimer, span);
             return Ok(());
         }
-        // C5: `Executor()` → a fresh work queue (checker validated 0 args).
+        // C5: `Executor()` → a fresh work queue; `Executor(n)` → one capped at `n` running jobs
+        // (checker validated zero arguments or one `int`).
         if name == "Executor" {
-            fc.emit(Op::NewExecutor, span);
+            if args.is_empty() {
+                fc.emit(Op::NewExecutor, span);
+                return Ok(());
+            }
+            self.compile_args(fc, args)?;
+            fc.emit(Op::NewExecutorN, span);
             return Ok(());
         }
         // Native-prelude direct-call dispatch (single source of truth): a table row lowers by its

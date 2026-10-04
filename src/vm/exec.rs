@@ -3050,34 +3050,51 @@ impl Vm {
                 self.push(v);
             }
             Op::NewExecutor => {
-                let core = Arc::new(ExecutorCore {
-                    // W7-39, TICKET-208 — an executor inherits its CREATOR's whole cancel chain, as
-                    // every spawned task does, so an outer `shutdown_now()` or scope cancel reaches
-                    // the jobs this executor will start. Captured HERE, at creation, not at `submit`:
-                    // the handle crosses the airlock by `Arc`, so the submitter can belong to an
-                    // unrelated executor.
-                    creator_cancel: self.scope_ancestors(),
-                    created_at: span,
-                    ..Default::default()
-                });
-                // Heap-independent registration for the program-exit join (W7-5b) — this is the one
-                // that survives its creating task/heap. Creation order across the whole run.
-                self.exec_registry
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(Arc::clone(&core));
-                let h = self.heap.alloc(Obj::Executor(core));
-                // The handle is also a GC root here, so the executor's queued work survives even
-                // after every in-program handle is gone. `self.executors` is no longer itself walked
-                // to drain anything — that was the deleted `--serial` engine's own reap mechanism
-                // (draining through the handle, re-rooted on the operand stack); today it exists
-                // purely as this heap's GC root, and the program-exit join walks `exec_registry`
-                // (registered just above) instead.
-                self.executors.push(h);
-                self.push(Value::obj(h));
+                let v = self.new_executor(0, span);
+                self.push(v);
+            }
+            Op::NewExecutorN => {
+                let v = self.pop();
+                let n = self.int_val(v).unwrap_or(0);
+                if n < 1 {
+                    return Err(self.err("Executor(n) needs n >= 1".to_string(), span));
+                }
+                let v = self.new_executor(n as usize, span);
+                self.push(v);
             }
         }
         Ok(())
+    }
+
+    /// `Executor()` / `Executor(n)`: a fresh, registered Executor whose `limit` caps the jobs
+    /// running at once (zero means no cap).
+    fn new_executor(&mut self, limit: usize, span: Span) -> Value {
+        let core = Arc::new(ExecutorCore {
+            limit,
+            // W7-39, TICKET-208 — an executor inherits its CREATOR's whole cancel chain, as
+            // every spawned task does, so an outer `shutdown_now()` or scope cancel reaches
+            // the jobs this executor will start. Captured HERE, at creation, not at `submit`:
+            // the handle crosses the airlock by `Arc`, so the submitter can belong to an
+            // unrelated executor.
+            creator_cancel: self.scope_ancestors(),
+            created_at: span,
+            ..Default::default()
+        });
+        // Heap-independent registration for the program-exit join (W7-5b) — this is the one
+        // that survives its creating task/heap. Creation order across the whole run.
+        self.exec_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Arc::clone(&core));
+        let h = self.heap.alloc(Obj::Executor(core));
+        // The handle is also a GC root here, so the executor's queued work survives even
+        // after every in-program handle is gone. `self.executors` is no longer itself walked
+        // to drain anything — that was the deleted `--serial` engine's own reap mechanism
+        // (draining through the handle, re-rooted on the operand stack); today it exists
+        // purely as this heap's GC root, and the program-exit join walks `exec_registry`
+        // (registered just above) instead.
+        self.executors.push(h);
+        Value::obj(h)
     }
 
     // ----- arithmetic / comparison -----

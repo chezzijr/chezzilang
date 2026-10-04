@@ -1275,6 +1275,8 @@ pub(super) fn halt_over_backlog(
 /// (this is what prevents a `from_wire`'d alias from being drained twice at program exit).
 #[derive(Default)]
 pub struct ExecutorCore {
+    /// At most this many jobs run at once; zero means no cap; set once at construction.
+    pub limit: usize,
     pub inner: Mutex<ExecState>,
     /// TICKET-208 — the detached scope this Executor's jobs run in: a sched built at the first
     /// `submit` and taken by the join that reduces its slots. The Executor's tasks, their results

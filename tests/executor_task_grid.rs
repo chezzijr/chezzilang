@@ -528,7 +528,104 @@ fn one_runner_at_one_worker_for_every_party() {
 }
 
 #[test]
-#[ignore = "TICKET-213: Executor(n)"]
+fn executor_limit_shutdown_now_ends_held_jobs() {
+    let src = "import std.time
+import std.concurrency
+fn job():
+    time.sleep_ms(300)
+    print(\"ran\")
+ex := Executor(1)
+ex.submit(job)
+ex.submit(job)
+ex.submit(job)
+time.sleep_ms(50)
+ex.shutdown_now()
+print(\"done\")
+";
+    let mut misses = Vec::new();
+    for t in THREADS {
+        let g = run("held", src, Mode::Run, t, None);
+        if g.out != "done\n" || g.code != Some(0) {
+            misses.push(format!("T={t}: {}", g.show()));
+        }
+    }
+    judge(misses);
+}
+
+/// `quick` has no cancellation point, so only the drop keeps a held `quick` from printing.
+#[test]
+fn executor_limit_shutdown_now_never_starts_a_held_job() {
+    let src = "import std.time
+import std.concurrency
+fn slow():
+    time.sleep_ms(300)
+    print(\"slow ran\")
+fn quick():
+    print(\"quick ran\")
+ex := Executor(1)
+ex.submit(slow)
+ex.submit(quick)
+ex.submit(quick)
+time.sleep_ms(50)
+ex.shutdown_now()
+print(\"done\")
+";
+    let mut misses = Vec::new();
+    for t in THREADS {
+        let g = run("held2", src, Mode::Run, t, None);
+        if g.out != "done\n" || g.code != Some(0) {
+            misses.push(format!("T={t}: {}", g.show()));
+        }
+    }
+    judge(misses);
+}
+
+#[test]
+fn executor_limit_below_one_faults() {
+    let src = "import std.concurrency
+ex := Executor(0)
+";
+    let mut misses = Vec::new();
+    for t in THREADS {
+        let g = run("zero", src, Mode::Run, t, None);
+        if g.code != Some(1) || !g.err.contains("Executor(n) needs n >= 1") {
+            misses.push(format!("T={t}: {}", g.show()));
+        }
+    }
+    judge(misses);
+}
+
+/// A parked job still counts toward the cap: the one running job waits for a held one. CPython
+/// `ThreadPoolExecutor(1)` hangs on this shape; the deadlock reap drops the held job and reports.
+#[test]
+fn executor_limit_deadlock_on_a_held_job_faults() {
+    let src = "import std.concurrency
+ch := Channel[int](0)
+fn waiter():
+    print(\"got\", ch.recv())
+fn feeder():
+    ch.send(1)
+ex := Executor(1)
+ex.submit(waiter)
+ex.submit(feeder)
+ex.shutdown()
+print(\"after\")
+";
+    let mut misses = Vec::new();
+    for t in THREADS {
+        let g = run("dl", src, Mode::Run, t, None);
+        if g.code != Some(1)
+            || !g.err.contains("recv on an empty channel: deadlock")
+            || g.out.contains("got")
+            || g.out.contains("after")
+        {
+            misses.push(format!("T={t}: {}", g.show()));
+        }
+    }
+    judge(misses);
+}
+
+#[test]
 fn executor_limit_caps_running_jobs() {
     let src = "import std.time
 import std.concurrency

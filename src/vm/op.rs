@@ -560,6 +560,8 @@ pub enum Op {
     NewTimer,
     /// `Executor()` — push a fresh, empty, explicitly-owned work queue (`Obj::Executor`). C5.
     NewExecutor,
+    /// `Executor(n)`: pops an int, faults below one.
+    NewExecutorN,
 }
 
 /// Static layout for an [`Op::WaitPoll`]: the arm count `n`, each arm's body target ip (the

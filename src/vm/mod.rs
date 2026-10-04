@@ -2661,6 +2661,13 @@ struct SchedCore {
     exec_wids: Vec<bool>,
     /// The scope a detached sched's next `submit` grows (see [`MnSched::reserve_slot`]).
     exec_tail: usize,
+    /// `Executor(n)`'s cap on the jobs running at once; zero means no cap.
+    exec_limit: usize,
+    /// Job slots admitted and not yet filled. Decremented by [`SchedCore::job_ended`] alone.
+    exec_active: usize,
+    /// Jobs submitted over the cap, slot reserved, not yet started. A held job leaves at
+    /// [`MnSched::finish`] (released) or [`SchedCore::drop_held_jobs`] (never starts).
+    exec_held: std::collections::VecDeque<Fiber>,
     /// A deadlocked fiber of this sched is reported at its own blocking op. True for a detached
     /// sched (an `Executor`) alone: a nursery sched reports at the nursery.
     leaf_site: bool,
@@ -2974,6 +2981,9 @@ impl MnSched {
                 next_waiter_tok: 0,
                 exec_wids: vec![false; nworkers.max(1)],
                 exec_tail: 0,
+                exec_limit: 0,
+                exec_active: 0,
+                exec_held: std::collections::VecDeque::new(),
                 leaf_site: false,
                 slot_charge: Default::default(),
                 unfinished_bytes: 0,
@@ -3309,11 +3319,17 @@ impl MnSched {
 
     /// [`MnSched::enqueue_locked`] under its own lock hold, for `Executor.submit`, which starts its
     /// runners between the reserve and the enqueue.
-    fn enqueue(&self, fiber: Fiber) {
+    /// Under `Executor(n)` a job over the cap is held instead, and starts when a running one ends.
+    fn admit_or_hold(&self, fiber: Fiber) {
         let mut c = self.lock();
-        self.enqueue_locked(&mut c, fiber);
-        drop(c);
-        self.notify_waiters();
+        if c.exec_limit == 0 || c.exec_active < c.exec_limit {
+            c.exec_active += 1;
+            self.enqueue_locked(&mut c, fiber);
+            drop(c);
+            self.notify_waiters();
+        } else {
+            c.exec_held.push_back(fiber);
+        }
     }
 
     /// Claim `fiber`'s outcome slot (the first half of [`MnSched::inject_or_extend`]): it grows the
@@ -3385,7 +3401,7 @@ impl MnSched {
     /// Whether `scope_id` is one of the Executor's own scopes, so its fiber is a job and not a
     /// job's nursery child.
     fn is_job_scope(&self, scope_id: usize) -> bool {
-        self.detached.is_some() && self.lock().scope_family(0).contains(&scope_id)
+        self.lock().is_job_scope(scope_id)
     }
 
     /// The runner wids `Executor.submit` must start now: the first free wids while fewer runners
@@ -4919,6 +4935,18 @@ impl MnSched {
         );
         c.slots[task_index] = Some(outcome);
         c.scopes[scope_id].done += 1;
+        if c.job_ended(scope_id) {
+            // The loop condition, not a bare pop, keeps the cap: the no-runner path of
+            // `spawn_into` admits a slot without testing the cap, and its `finish` must start
+            // nothing while `exec_active` is still at the cap.
+            while c.exec_active < c.exec_limit {
+                let Some(f) = c.exec_held.pop_front() else {
+                    break;
+                };
+                c.exec_active += 1;
+                self.enqueue_locked(&mut c, f);
+            }
+        }
         // TICKET-103 — a join-parked owner of the family this task completed resumes. Its own slot
         // is still `None`, so the `terminate` latch below cannot fire while one is requeued.
         self.wake_completed_joins(&mut c);
@@ -5748,6 +5776,43 @@ impl SchedCore {
             stderr: f.ctx.stderr,
         });
         self.scopes[sid].done += 1;
+        if self.job_ended(sid) {
+            self.drop_held_jobs();
+        }
+    }
+
+    /// Whether `scope_id` is one of the Executor's own scopes, so its fiber is a job and not a
+    /// job's nursery child. `leaf_site` is true for an Executor's sched alone.
+    fn is_job_scope(&self, scope_id: usize) -> bool {
+        self.leaf_site && self.scope_family(0).contains(&scope_id)
+    }
+
+    /// A started job's slot was just filled: the one decrement of `exec_active`, called at both
+    /// slot-fill sites. False for a fiber that is not a job.
+    fn job_ended(&mut self, scope_id: usize) -> bool {
+        if !self.is_job_scope(scope_id) {
+            return false;
+        }
+        self.exec_active -= 1;
+        true
+    }
+
+    /// The ONE drop of the held jobs. A deadlock reap of a job drops every held job:
+    /// `flag_deadlock` sets `terminate`, so a released job would never run and its `None` slot
+    /// would hang the join; a held job never started, so its slot is `Cancelled` and the parked
+    /// job's `Deadlocked` is the report. `shutdown_now` drops them too: a held job never started,
+    /// so it never starts.
+    fn drop_held_jobs(&mut self) {
+        for h in std::mem::take(&mut self.exec_held) {
+            if let Some(charge) = self.slot_charge.remove(&h.task_index) {
+                self.unfinished_bytes -= charge;
+            }
+            self.slots[h.task_index] = Some(TaskOutcome::Cancelled {
+                out: Vec::new(),
+                stderr: Vec::new(),
+            });
+            self.scopes[h.scope_id].done += 1;
+        }
     }
 
     /// TICKET-103 — every scope sharing `scope_id`'s cancel token: a nursery's origin scope plus its
