@@ -112,9 +112,11 @@ fn a_passing_run_under_sched_seed_changes_no_output() {
 /// wake bypasses `ChannelCore::wake_all`. `docs/gaps.md` **W15-10** lists the waits that are NOT
 /// byte-for-byte yet; their fixtures are in `tests/sched_seed/open/`, which no test reads. A `recv`
 /// and a `wait:` inside a native callback are there since TICKET-206: 80 of 80 on an idle box, a
-/// measured rate under 40 hogs. TICKET-209 (nursery join, guard wait, both callback fixtures) and
-/// TICKET-208 (Executor) each move theirs into `FIXTURES` when the wait holds 80 of 80 under 40
-/// hogs.
+/// measured rate under 40 hogs. Both Executor fixtures (`executor_join.chz`,
+/// `executor_interleave.chz`) stay in `open/` with a measured rate after TICKET-208 and TICKET-213
+/// (join 72 of 80, job start one differing run in 480, under 40 hogs). TICKET-209 (nursery join,
+/// Executor join, guard wait, both callback fixtures) moves each into `FIXTURES` when the wait holds
+/// 80 of 80 under 40 hogs.
 #[test]
 fn the_same_seed_replays_byte_for_byte_at_one_worker() {
     const RUNS: usize = 10;

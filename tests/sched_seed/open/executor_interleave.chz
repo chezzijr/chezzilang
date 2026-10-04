@@ -1,0 +1,10 @@
+import std.concurrency
+fn main():
+    ch := Channel[int](0)
+    ex := Executor()
+    for i in range(6):
+        ex.submit(fn(): ch.send(i))
+    for _ in range(6):
+        print(ch.recv())
+    ex.shutdown()
+main()
