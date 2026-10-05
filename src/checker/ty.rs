@@ -1045,6 +1045,9 @@ pub enum Resolution {
     NewTypeCtor(String),
     /// A desugar-synthesized default provider the module cannot name (`Op::MakeFuncIn`).
     Provider,
+    /// Recorded on a CALL node: this call indexes its callee with the call's `bracket`, then calls
+    /// the element (`fs[k](10)`, `Op::GetIndex` + `Op::Call`).
+    IndexCall,
     /// An enum variant, by the enum's runtime key (`Op::NewEnum`).
     Variant { enum_key: String, variant: String },
     /// A static method of a struct or enum, by the type's runtime key (`Op::CallStatic`).

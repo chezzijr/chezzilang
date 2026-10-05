@@ -19,12 +19,14 @@ enum NativeHandleMethod {
 }
 
 impl Checker {
+    #[allow(clippy::too_many_arguments)] // the call node's parts, its bracket reading, span and id
     pub(super) fn infer_call(
         &mut self,
         callee: &Expr,
         args: &[Expr],
         named: &[(String, Expr)],
         type_args: &[Type],
+        bracket: Option<&Expr>,
         span: Span,
         call_id: crate::ast::NodeId,
     ) -> Ty {
@@ -34,6 +36,7 @@ impl Checker {
             pack_origin: crate::checker::witness_key_span(callee, span),
             consumed: false,
             span,
+            bracket: bracket.cloned(),
         };
         let saved = self.call_ctx.replace(ctx);
         let t = self.infer_call_dispatch(callee, args, named, type_args, span);
@@ -162,6 +165,18 @@ impl Checker {
         {
             self.record_resolution(callee.id, Resolution::Provider, callee.span);
             return expected.cloned().unwrap_or(Ty::Unknown);
+        }
+        // `head[k](args)` with a head that denotes data: index, then call the element (Go,
+        // CPython). The one choice between that reading and the type-argument reading.
+        if type_args.len() == 1
+            && let Some(ix) = self.call_ctx.as_ref().and_then(|c| c.bracket.clone())
+            && self.bracket_is_index(callee)
+        {
+            if let Some(id) = self.call_ctx.as_ref().map(|c| c.id) {
+                self.record_resolution(id, Resolution::IndexCall, span);
+            }
+            let callee_ty = self.index_value(callee, &ix);
+            return self.apply_value_call(callee, callee_ty, args, named, span);
         }
         // Explicit call-site type arguments `name[T, …](…)`. Resolved once here; only generic
         // by-name calls (fn / struct / variant constructors) can consume them.
@@ -806,6 +821,20 @@ impl Checker {
         }
         // Fall back: the callee is an arbitrary expression; it must evaluate to a function.
         let callee_ty = self.infer(callee);
+        self.apply_value_call(callee, callee_ty, args, named, span)
+    }
+
+    /// A call of an arbitrary callee expression whose type is `callee_ty`: it must evaluate to a
+    /// function. The value-call fallback of `infer_call_dispatch`, shared by the index-then-call
+    /// reading of a call bracket and by a call through a type parameter's member (`T.get(v)`).
+    fn apply_value_call(
+        &mut self,
+        callee: &Expr,
+        callee_ty: Ty,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        span: Span,
+    ) -> Ty {
         match callee_ty {
             // A user fn / closure VALUE carrying keyword arguments (`g := greet; g(name="Bob")`):
             // resolve each label to a positional slot against the value's surface labels (Swift-style
@@ -1257,6 +1286,56 @@ impl Checker {
                 .map(|f| f.expect("no hole remains"))
                 .collect(),
         ))
+    }
+
+    /// The member a call `recv.member(..)` reads as data, not as a method: a struct field when the
+    /// struct has no method of that name (a method wins), or a module global that holds no fn.
+    /// `None` for every other receiver and member.
+    pub(super) fn data_member_ty(&self, recv_ty: &Ty, member: &str) -> Option<Ty> {
+        match recv_ty {
+            Ty::Struct(sname, targs) => {
+                if self
+                    .struct_shape(sname)
+                    .is_some_and(|info| info.methods.contains_key(member))
+                {
+                    return None;
+                }
+                self.struct_field_ty(sname, targs, member)
+            }
+            Ty::Module(mname) => self
+                .imported_modules
+                .get(mname)
+                .and_then(|id| self.module_sigs.get(id))
+                .and_then(|sig| sig.member(member))
+                .filter(|m| !m.holds_fn())
+                .map(|m| m.ty.clone()),
+            _ => None,
+        }
+    }
+
+    /// The one answer to whether a call's one-arg bracket indexes its head (`fs[k](10)`) or passes
+    /// a type argument (`idt[int](3)`). Never an index when the head is a fn-like path; a bare name
+    /// indexes when it binds a local or a global; a member head indexes when its member is data
+    /// ([`Self::data_member_ty`]) for the receiver's type, learned by a speculative probe.
+    fn bracket_is_index(&mut self, callee: &Expr) -> bool {
+        if self.path_fn(callee).is_some() {
+            return false;
+        }
+        match &callee.kind {
+            ExprKind::Ident(n) => {
+                matches!(
+                    self.head_binding(n),
+                    HeadBinding::Local | HeadBinding::Global
+                )
+            }
+            ExprKind::Field { obj, name, .. } if !crate::ast::is_tuple_index(name) => {
+                let mark = self.diag_mark();
+                let recv = self.infer(obj);
+                self.diag_rollback(mark);
+                self.data_member_ty(&recv, name).is_some()
+            }
+            _ => false,
+        }
     }
 
     /// Resolve a `Type[T…]` member-access head — the receiver of `Type[T…].member(args)` /
@@ -3582,14 +3661,8 @@ impl Checker {
                 // No method named `method`: fall back to a function-typed *field* of the same name —
                 // `recv.f(x)` where `f: fn(T) -> U` is field-access-then-call. (Parsed as a method
                 // call; the desugar pass leaves fn-field names un-normalized so no method default is
-                // injected here.) Mirrors `infer_field`'s field lookup + type-arg substitution.
-                let field_fn = self.struct_shape(sname).and_then(|info| {
-                    let map = struct_param_map(info, targs);
-                    info.fields
-                        .iter()
-                        .find(|(f, _)| f == method)
-                        .map(|(_, ty)| subst(ty, &map))
-                });
+                // injected here.)
+                let field_fn = self.data_member_ty(&obj_ty, method);
                 if let Some(Ty::Func { params, ret, .. }) = field_fn {
                     // STRICT — a fn-typed FIELD holds a function VALUE, and a `Ty::Func` does not say
                     // which declaration it came from (a generic fn instantiated at float has an erased

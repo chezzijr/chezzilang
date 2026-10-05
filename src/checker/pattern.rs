@@ -1734,8 +1734,16 @@ impl Checker {
                 args,
                 named,
                 type_args,
-                ..
-            } => self.infer_call(callee, args, named, type_args, expr.span, expr.id),
+                bracket,
+            } => self.infer_call(
+                callee,
+                args,
+                named,
+                type_args,
+                bracket.as_deref(),
+                expr.span,
+                expr.id,
+            ),
             ExprKind::Field {
                 obj,
                 name,
@@ -4202,6 +4210,17 @@ impl Checker {
         }
     }
 
+    /// The one lookup of a struct field's type at the receiver's type args (`Stack[int].items` is
+    /// `List[int]`). `None` when `sname` has no field `field`.
+    pub(super) fn struct_field_ty(&self, sname: &str, targs: &[Ty], field: &str) -> Option<Ty> {
+        self.struct_shape(sname).and_then(|info| {
+            info.fields
+                .iter()
+                .find(|(f, _)| f == field)
+                .map(|(_, ty)| subst(ty, &struct_param_map(info, targs)))
+        })
+    }
+
     pub(super) fn infer_field(
         &mut self,
         id: crate::ast::NodeId,
@@ -4291,11 +4310,10 @@ impl Checker {
                 }
             },
             Ty::Struct(sname, targs) => {
+                if let Some(ty) = self.struct_field_ty(sname, targs, name) {
+                    return ty;
+                }
                 if let Some(info) = self.struct_shape(sname) {
-                    let map = struct_param_map(info, targs);
-                    if let Some((_, ty)) = info.fields.iter().find(|(f, _)| f == name) {
-                        return subst(ty, &map);
-                    }
                     // A METHOD is not a field, and a BOUND method is not a value (Rust E0615
                     // "attempted to take value of method"): it would hide its `self` capture, and
                     // the compiler lowers a field-read to a plain field load. The method named

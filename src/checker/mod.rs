@@ -623,6 +623,8 @@ struct CallCtx {
     consumed: bool,
     /// The call span, where a refusal is reported.
     span: Span,
+    /// The expression reading of a one-arg call bracket (`ExprKind::Call::bracket`).
+    bracket: Option<Expr>,
 }
 
 /// TICKET-190 — the facts a generator body's check collects for its frame verdict.

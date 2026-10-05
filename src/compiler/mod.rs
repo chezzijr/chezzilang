@@ -3493,9 +3493,11 @@ impl Compiler {
                 callee,
                 args,
                 named,
+                bracket,
                 ..
             } => {
-                self.compile_call(fc, callee, args, named, expr.span, expr.id)?;
+                let bracket = bracket.as_deref();
+                self.compile_call(fc, callee, args, named, bracket, expr.span, expr.id)?;
                 // TICKET-190: a call that creates a generator stamps its param crossings.
                 if let Some(c) = self
                     .gen_crossings
@@ -4366,6 +4368,7 @@ impl Compiler {
             callee,
             &params,
             &[],
+            None,
             span,
             crate::ast::NodeId::SYNTH,
         )?;
@@ -4742,15 +4745,35 @@ impl Compiler {
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // the call's parts + its bracket reading + span + id
     fn compile_call(
         &mut self,
         fc: &mut FnComp,
         callee: &Expr,
         args: &[Expr],
         named: &[(String, Expr)],
+        bracket: Option<&Expr>,
         span: Span,
         call_id: crate::ast::NodeId,
     ) -> Result<(), CompileError> {
+        // `fs[k](10)`: the checker chose the bracket's index reading. Index the head (its own
+        // recorded resolution lowers it), then call the element.
+        if let Some(Resolution::IndexCall) =
+            self.resolutions.get(&(self.current_module_idx, call_id.0))
+        {
+            let Some(ix) = bracket else {
+                return Err(CompileError {
+                    message: "internal: an index-call has no bracket expression".to_string(),
+                    span,
+                });
+            };
+            self.compile_expr(fc, callee)?;
+            self.compile_expr(fc, ix)?;
+            fc.emit(Op::GetIndex, span);
+            let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
+            fc.emit(Op::Call(argc), span);
+            return Ok(());
+        }
         // A default-argument provider call whose declaring module this one cannot name — no synthetic
         // import was (or could be) emitted for it, so there is no global slot to read. Lower it to a
         // direct, call-time reference to the definer's proto. See [`Op::MakeFuncIn`] and

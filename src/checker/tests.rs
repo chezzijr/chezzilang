@@ -24313,22 +24313,18 @@ fn iter_method_turbofish_errors() {
     );
 }
 
-/// AUTHORIZED REGRESSION (broadened parser steal): the new UNIFORM rule is `recv.name[X](args)`
-/// parses as a method turbofish on ANY receiver. So a VARIABLE-index fn-field index-then-call on a
-/// non-bare receiver — `arr[i].handlers[k](10)` — now parses as a method turbofish (`k` reads as a
-/// type name) and errors. This is intentionally uniform with the bare-ident case `w.handlers[k](10)`,
-/// which ALREADY required parens. Workaround: parens, `(arr[i].handlers[k])(10)` (see the `_ok` test).
+/// TICKET-210: `recv.name[X](args)` keeps both readings, and the checker chooses. A fn-list FIELD
+/// on an indexed receiver, `arr[i].handlers[k](10)`, is data, so the bracket indexes it and the
+/// element is called (Go, CPython). It used to read `k` as a type and reject.
 #[test]
-fn var_index_then_call_on_indexed_receiver_now_turbofish_errors() {
-    rejects(
+fn var_index_then_call_on_indexed_receiver_indexes() {
+    ok(
         "struct Cell:\n    handlers: List[fn(int) -> int]\nfn main():\n    arr := [Cell([fn(x: int) -> int: x + 1])]\n    i := 0\n    k := 0\n    print(arr[i].handlers[k](10))\n",
-        "type argument",
     );
 }
 
-/// The documented workaround for the authorized regression: parenthesize the index-then-call —
-/// `(arr[i].handlers[k])(10)` — so the `(` no longer immediately follows the `]` and the steal does
-/// not fire. Must type-check (the fn-valued field is indexed then the value is called).
+/// The parenthesized index-then-call, `(arr[i].handlers[k])(10)`, still type-checks (the fn-valued
+/// field is indexed then the value is called).
 #[test]
 fn parenthesized_var_index_then_call_ok() {
     ok(
