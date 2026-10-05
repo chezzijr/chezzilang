@@ -169,14 +169,16 @@ counting the inline joiner twice. The close-time farm and TICKET-159's hook fold
 1. **An unpinned generic path value is rejected, natives included.** `g := math.abs` is an error with
    the hint `math.abs[int]` (the DEC-204 rule); `[-1, 2].map(math.abs)` stays accepted, pinned by the
    expected type; `math.abs[int]` is legal.
-2. **`Num` protocol.** A reserved structural protocol satisfied by `int`, `float` and numeric
-   `newtype`s; `math.abs`/`math.sign` become `[T: Num](x: T) -> T` and the call-only
+2. **`Num` protocol.** A reserved structural protocol satisfied by `int` and `float`; `math.abs`/`math.sign` become `[T: Num](x: T) -> T` and the call-only
    `MODULE_NUMERIC_POLY` side-set goes. A `T: Num` body gets only the operators whose result type is
    `T` for both `int` and `float`.
 3. **The seed is a fuzzer first.** Byte-for-byte T=1 replay is not required for every wait kind. Waits
    that replay exactly stay exact; the `Shared` guard wait and the Executor wait stay rate fixtures in
    `tests/sched_seed/open/` (W15-10). No guard hand-off queue; a replay fix ships only if it costs
    nothing unseeded.
+4. **`newtype` is removed** (TICKET-216). It inherited operators for numeric underlyings only and
+   nothing else; a one-field `struct` plus protocol methods replaces it (Rust's tuple struct). `Num`
+   (decision 2) is satisfied by `int` and `float` only.
 
 ## Plan order
 
