@@ -1,0 +1,71 @@
+# TICKET-215: the cross-module rows of `path_value_identity_test.chz`'s grid. Path {from-imported fn,
+# from-imported type's method, `lib.T.m`, `lib.E.V`, alias head} x {read twice, bound then re-read,
+# read in two modules, inside a spawned task, captured into one} x {==, !=}.
+import path_value_identity_lib
+import Q, F, top from path_value_identity_lib
+
+fn cell(bad: List[str], name: str, ok: bool):
+    if not ok:
+        bad.push(name)
+
+# Every read in the current heap, this module only.
+fn import_cells() -> List[str]:
+    bad: List[str] = []
+    cell(bad, "from-imported fn read twice", top == top)
+    a1 := top
+    cell(bad, "from-imported fn bound then re-read", a1 == top)
+    cell(bad, "from-imported fn !=", not (a1 != top))
+    cell(bad, "from-imported type's method read twice", Q.mk == Q.mk)
+    a2 := Q.mk
+    cell(bad, "from-imported type's method bound then re-read", a2 == Q.mk)
+    cell(bad, "from-imported type's method !=", not (a2 != Q.mk))
+    cell(bad, "lib.T.m read twice", path_value_identity_lib.Q.mk == path_value_identity_lib.Q.mk)
+    a3 := path_value_identity_lib.Q.mk
+    cell(bad, "lib.T.m bound then re-read", a3 == Q.mk)
+    cell(bad, "lib.T.m !=", not (a3 != path_value_identity_lib.Q.mk))
+    cell(bad, "lib.E.V vs from-imported E.V", path_value_identity_lib.F.X == F.X)
+    cell(bad, "lib alias head vs its target", path_value_identity_lib.QA.mk == Q.mk)
+    return bad
+
+# One path read in `path_value_identity_lib` and again here.
+fn module_cells() -> List[str]:
+    bad: List[str] = []
+    cell(bad, "plain fn in two modules", path_value_identity_lib.read_top() == top)
+    cell(bad, "static method in two modules", path_value_identity_lib.read_q_mk() == Q.mk)
+    cell(bad, "instance method in two modules", path_value_identity_lib.read_q_get() == Q.get)
+    cell(bad, "payload variant in two modules", path_value_identity_lib.read_f_x() == F.X)
+    cell(bad, "alias head in two modules", path_value_identity_lib.read_qa_mk() == Q.mk)
+    cell(bad, "two modules !=", not (path_value_identity_lib.read_q_mk() != Q.mk))
+    return bad
+
+test fn grid_an_imported_path_value_read_in_one_heap_is_one_value():
+    bad := import_cells()
+    assert bad.len() == 0, "red cells: {bad}"
+
+test fn grid_a_path_value_read_in_two_modules_is_one_value():
+    bad := module_cells()
+    assert bad.len() == 0, "red cells: {bad}"
+
+# A spawned task runs on its own heap, with each module's globals copied in from a snapshot.
+test fn grid_a_path_value_read_in_two_modules_inside_a_spawned_task_is_one_value():
+    r := Channel[List[str]](1)
+    parallel:
+        spawn:
+            bad := import_cells()
+            for c in module_cells():
+                bad.push(c)
+            r.send(bad)
+    bad := r.recv()
+    assert bad.len() == 0, "red cells: {bad}"
+
+test fn grid_an_imported_path_value_captured_into_a_spawned_task_is_one_value():
+    t := top
+    q := Q.mk
+    l := path_value_identity_lib.Q.mk
+    v := F.X
+    r := Channel[List[bool]](1)
+    parallel:
+        spawn:
+            r.send([t == top, q == Q.mk, l == path_value_identity_lib.Q.mk, v == path_value_identity_lib.F.X, q != Q.mk])
+    got := r.recv()
+    assert got == [true, true, true, true, false], "from-import fn, from-import type, lib.T.m, lib.E.V, !=: {got}"

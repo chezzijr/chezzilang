@@ -1,10 +1,9 @@
 # TICKET-215: a path value has one identity (wave 20 family P1). `P.mk == P.mk` and `E.A == E.A`
 # are `true` (CPython `P.mk == P.mk` -> True; Rust fn items compare equal). The `grid_` tests enumerate
 # path {plain fn, turbofish, static method, instance method through its type, payload variant,
-# from-import, `lib.T.m`, alias head, `T.m` through a type param} x {read twice, bound then re-read,
-# in two modules, inside a spawned task, captured into one, through a Channel or an Atomic} x {==, !=}.
-import path_value_identity_lib
-import Q, F, top from path_value_identity_lib
+# alias head, `T.m` through a type param} x {read twice, bound then re-read, inside a spawned task,
+# captured into one, through a Channel or an Atomic} x {==, !=}. The cross-module rows live in
+# `path_value_identity_modules_test.chz`, so this file imports no user module.
 import Atomic from std.concurrency
 
 struct P:
@@ -87,43 +86,15 @@ fn local_cells() -> List[str]:
     a5 := E.A
     cell(bad, "payload variant bound then re-read", a5 == E.A)
     cell(bad, "payload variant !=", not (a5 != E.A))
-    cell(bad, "from-imported fn read twice", top == top)
-    a6 := top
-    cell(bad, "from-imported fn bound then re-read", a6 == top)
-    cell(bad, "from-imported fn !=", not (a6 != top))
-    cell(bad, "from-imported type's method read twice", Q.mk == Q.mk)
-    a7 := Q.mk
-    cell(bad, "from-imported type's method bound then re-read", a7 == Q.mk)
-    cell(bad, "from-imported type's method !=", not (a7 != Q.mk))
-    cell(bad, "lib.T.m read twice", path_value_identity_lib.Q.mk == path_value_identity_lib.Q.mk)
-    a8 := path_value_identity_lib.Q.mk
-    cell(bad, "lib.T.m bound then re-read", a8 == Q.mk)
-    cell(bad, "lib.T.m !=", not (a8 != path_value_identity_lib.Q.mk))
-    cell(bad, "lib.E.V vs from-imported E.V", path_value_identity_lib.F.X == F.X)
     cell(bad, "alias head read twice", PA.mk == PA.mk)
-    a9 := PA.mk
-    cell(bad, "alias head bound then re-read through its target", a9 == P.mk)
-    cell(bad, "alias head !=", not (a9 != PA.mk))
+    a6 := PA.mk
+    cell(bad, "alias head bound then re-read through its target", a6 == P.mk)
+    cell(bad, "alias head !=", not (a6 != PA.mk))
     param_cells(bad, P("p"))
-    return bad
-
-# One path read in `path_value_identity_lib` and again here.
-fn module_cells() -> List[str]:
-    bad: List[str] = []
-    cell(bad, "plain fn in two modules", path_value_identity_lib.read_top() == top)
-    cell(bad, "static method in two modules", path_value_identity_lib.read_q_mk() == Q.mk)
-    cell(bad, "instance method in two modules", path_value_identity_lib.read_q_get() == Q.get)
-    cell(bad, "payload variant in two modules", path_value_identity_lib.read_f_x() == F.X)
-    cell(bad, "alias head in two modules", path_value_identity_lib.read_qa_mk() == Q.mk)
-    cell(bad, "two modules !=", not (path_value_identity_lib.read_q_mk() != Q.mk))
     return bad
 
 test fn grid_a_path_value_read_in_one_heap_is_one_value():
     bad := local_cells()
-    assert bad.len() == 0, "red cells: {bad}"
-
-test fn grid_a_path_value_read_in_two_modules_is_one_value():
-    bad := module_cells()
     assert bad.len() == 0, "red cells: {bad}"
 
 # A spawned task runs on its own heap, with its globals copied in from a snapshot.
@@ -131,10 +102,7 @@ test fn grid_a_path_value_read_inside_a_spawned_task_is_one_value():
     r := Channel[List[str]](1)
     parallel:
         spawn:
-            bad := local_cells()
-            for c in module_cells():
-                bad.push(c)
-            r.send(bad)
+            r.send(local_cells())
     bad := r.recv()
     assert bad.len() == 0, "red cells: {bad}"
 
@@ -145,15 +113,13 @@ test fn grid_a_path_value_captured_into_a_spawned_task_is_one_value():
     m := P.mk
     x := P.name
     a := E.A
-    t := top
-    q := path_value_identity_lib.Q.mk
     pa := PA.mk
     r := Channel[List[bool]](1)
     parallel:
         spawn:
-            r.send([f == plainf, i == idt[int], m == P.mk, x == P.name, a == E.A, t == top, q == Q.mk, pa == P.mk, m != P.mk])
+            r.send([f == plainf, i == idt[int], m == P.mk, x == P.name, a == E.A, pa == P.mk, m != P.mk])
     got := r.recv()
-    assert got == [true, true, true, true, true, true, true, true, false], "plain, turbofish, static, instance, variant, from-import, lib.T.m, alias, !=: {got}"
+    assert got == [true, true, true, true, true, true, false], "plain, turbofish, static, instance, variant, alias, !=: {got}"
 
 test fn grid_a_path_value_through_a_channel_or_an_atomic_is_one_value():
     ch := Channel[fn(str) -> P](1)
