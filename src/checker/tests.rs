@@ -30154,7 +30154,7 @@ fn ref_surface_removed_fails_to_compile() {
 
 // ===== FIX 1a — member-level turbofish on a RESERVED built-in receiver whose harvested method
 // declares its OWN `[U]` params (`List.map`) is ACCEPTED, not rejected "takes no type argument(s)".
-// Before the fix `method_has_own_type_params` fell to `_ => false` for reserved receivers, so the
+// Before the fix `member_own_type_params` fell to `_ => false` for reserved receivers, so the
 // turbofish gate rejected even a shipped generic method. =====
 #[test]
 fn reserved_receiver_generic_method_turbofish_ok() {
@@ -30173,7 +30173,7 @@ fn reserved_receiver_nongeneric_method_turbofish_rejected() {
 
 // ===== W6-17 — FIX 1a's sibling hole: the `RwShared` read-view `fold`/`fold_entries` are genuinely
 // generic in `R` but ARM-ONLY (hand-built in the `Ty::RwShared` dispatch arm, since `R` is not
-// nameable in `RwShared[T]`'s harvested surface), so `method_has_own_type_params`' `structs` lookup
+// nameable in `RwShared[T]`'s harvested surface), so `member_own_type_params`' `structs` lookup
 // answered false and the turbofish gate rejected them — while the un-turbofished form and the
 // harvested `[1,2].fold[int](…)` both worked. Over-rejection, so the fix only ACCEPTS more. =====
 #[test]

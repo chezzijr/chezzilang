@@ -4332,8 +4332,21 @@ impl Checker {
             self.type_not_value(&th, e.span);
             return Ty::Unknown;
         }
+        self.index_value(obj, index)
+    }
+
+    /// `obj[index]` read as a value index, once the type-application readings declined. When
+    /// inferring `obj` reported an error and `index` is type-shaped (`Nope[int]`), the index is not
+    /// inferred: that reading would report `int` as an unknown name on top of the head's error
+    /// (DEC-158: the mark counts errors only).
+    pub(super) fn index_value(&mut self, obj: &Expr, index: &Expr) -> Ty {
+        let mark = self.errors.len();
+        let obj_ty = self.infer_value(obj);
+        if self.errors.len() > mark && crate::ast::index_as_type(index).is_some() {
+            return Ty::Unknown;
+        }
         // Map keys are NOT int — infer the object first and check the index against the key type.
-        match self.infer_value(obj) {
+        match obj_ty {
             Ty::Map(k, v) => {
                 let idx_ty = self.infer_value(index);
                 if !compatible(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {

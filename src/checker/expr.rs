@@ -2898,7 +2898,23 @@ impl Checker {
     /// Does the method `method` on receiver type `recv_ty` declare its OWN `[U]` type params? Only a
     /// user struct/enum/newtype method can; a builtin (`str`/`list`/…) member never does. Used to gate
     /// the member-level turbofish (`obj.method[A](x)`): a turbofish on anything else is an arity error.
-    pub(super) fn method_has_own_type_params(&self, recv_ty: &Ty, method: &str) -> bool {
+    /// `None` when the receiver is a module with no member (and no type) `method`: a miss, which the
+    /// module arm reports as one before any turbofish arity.
+    pub(super) fn member_own_type_params(&self, recv_ty: &Ty, method: &str) -> Option<bool> {
+        if let Ty::Module(mname) = recv_ty
+            && let Some(sig) = self
+                .imported_modules
+                .get(mname)
+                .and_then(|id| self.module_sigs.get(id))
+            && sig.member(method).is_none()
+            && !sig.types.contains(method)
+        {
+            return None;
+        }
+        Some(self.method_own_type_params(recv_ty, method))
+    }
+
+    fn method_own_type_params(&self, recv_ty: &Ty, method: &str) -> bool {
         match recv_ty {
             Ty::Struct(sname, _) => self
                 .structs
@@ -3182,7 +3198,7 @@ impl Checker {
         // declares its OWN `[U]` type params. On a builtin (`xs.len[int]()`, `xs.iter[int]()`) or a
         // non-generic user method it is an arity error — checked BEFORE the `.iter` fast-path below
         // so `xs.iter[int]()` is rejected like `xs.len[int]()` (it was silently swallowed otherwise).
-        if !type_args.is_empty() && !self.method_has_own_type_params(&obj_ty, method) {
+        if !type_args.is_empty() && self.member_own_type_params(&obj_ty, method) == Some(false) {
             self.infer_all(args);
             self.error(
                 span,
