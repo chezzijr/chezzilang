@@ -179,3 +179,4 @@ counting the inline joiner twice. The close-time farm and TICKET-159's hook fold
 3. **W1** (H2) — TICKET-211; after TICKET-208 if they share scheduler files.
 4. **S3** — TICKET-212. Status (2026-10-05): landed; `std.request` retries a request Go would retry (`isReplayable`), once, on fresh connections.
 5. **W15-10 remainder** (in-place nursery join only, if free unseeded; the `Shared` guard wait stays a rate, decision 3 above) — TICKET-209; TICKET-206 landed wait 1.
+   Status (2026-10-05): TICKET-209 shipped no engine change. Both waits stay rate fixtures in `tests/sched_seed/open/` and W15-10 stays open: the exact fixes cost about 2x (join) and 7.6x (guard) unseeded, and the owner ruled that a wait becomes exact only when that is free.

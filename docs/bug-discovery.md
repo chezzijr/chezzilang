@@ -696,6 +696,8 @@ rate under 40 hogs). Pinned to one core (`taskset -c 3`) two callback fixtures a
 replay at a rate; W15-10 carries the numbers. (2) Timers, sockets, blocking natives and eager-nursery programs are outside what the
 RNG stream covers at all — only the sync-point-gated fan-out fixtures are measured.
 
+**Owner decision 2026-10-05: the seed is a fuzzer first.** Byte-for-byte T=1 replay is not required for every wait kind. A wait that replays exactly today stays in `FIXTURES`, and seeded mode still adds no seeded-only gate, queue or park path. The waits W15-10 lists stay rate fixtures in `tests/sched_seed/open/`. A fix that makes one of them exact ships only if unseeded runs pay nothing for it: release, interleaved, n >= 5, `tests/shared_update_contention.rs`, `benches/sched/rendezvous_pingpong.chz` and `examples/primes_parallel.chz` at T=1/2/0 inside base's spread. TICKET-209 measured both candidate fixes outside that spread: a direct `Shared` guard hand-off cost 7.6x at T=1 (225 ms against 29 ms), and the exact nursery-join fix about 2x (67 ms against 34 ms).
+
 **Mutation-testing results, all release binary, `--seeds 1..257 --threads 1,2,0` (0 = default/28
 cores this box), full table + method: TICKET-167 `## Thread`.**
 

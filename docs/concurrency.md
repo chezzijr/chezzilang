@@ -1395,6 +1395,13 @@ kind of party:
   releases the permit after a slice, when a fiber is runnable or its fiber yielded; the `OwnTurn`
   guard withdraws a turn the loop exits without taking. A callback thread does the same in
   `Vm::slice_end_in_place`, where the acquire that follows always takes the ticket.
+- **Seeded replay is exact only where that is free (owner decision 2026-10-05).** The seed is a
+  fuzzer first. A nursery join in place, a `Shared` guard wait, an `Executor` join and job start,
+  and a `recv` or `wait:` inside a native callback replay at a measured rate (`docs/gaps.md`
+  W15-10). A fix that makes one exact ships only if unseeded runs pay nothing for it, and never as
+  a seeded-only gate, queue or park path. A direct guard hand-off (the releaser gives the guard to
+  the first queued waiter) is ruled out: every contended update then costs one thread switch
+  (`tests/shared_update_contention.rs` one-box source at T=1: 225 ms against 29 ms).
 - **A gated idle worker never sleeps untimed**: a ticket can land just before its sleep, and a ticket
   nobody takes blocks every gated thread. Its sleep is bounded by one `DEMOTE_POLL_BACKOFF` tick. An
   ungated idle worker still sleeps untimed on `idle_cv`.

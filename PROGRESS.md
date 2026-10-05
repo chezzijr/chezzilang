@@ -7,6 +7,7 @@ Single source of truth for "what am I doing next." Update after every work sessi
 > and are kept verbatim — that is what this tracker is for. Since 2026-08-16 there is **one engine**
 > and no cross-engine gate; see the entry directly below.
 
+- **TICKET-209 (2026-10-05): seeded T=1 replay of the nursery join and the `Shared` guard wait stays a measured rate (owner decision).** The seed is a fuzzer first; byte-for-byte replay is not required for every wait kind, and a wait becomes exact only when the fix costs nothing unseeded. Both measured fixes failed that: a direct guard hand-off 7.6x at T=1, the exact nursery-join fix about 2x. `nursery_join_in_callback.chz` and `guard_wait_in_callback.chz` stay in `tests/sched_seed/open/` (60 and 33 of 80 idle); `docs/gaps.md` **W15-10** stays OPEN with the rates. No engine change. Decision text: `docs/bug-discovery.md` "Seeded scheduler oracle", `docs/concurrency.md`.
 - **TICKET-212 (2026-10-05): `std.request` retries a request dropped on a reused keep-alive connection, Go's rule (wave 20 S3).**
   A server that closes an idle keep-alive connection as the next request goes out made a pooled
   request fail with `io: Peer disconnected` on 0-5 of 40 GETs. Fix: `LenientHead` tags a read
