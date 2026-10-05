@@ -957,37 +957,98 @@ mod tests {
         assert_eq!(field(&ret, "body"), &NativeRet::Str("done".into()));
     }
 
-    /// Answer every connection once without `Connection: close`, then close the socket (RFC 9112
-    /// allows it). The accept loop runs for the life of the test process.
-    fn serve_close_after_response() -> String {
+    /// Reads one request (head, then a `content-length` body); returns its request line, `None` on EOF.
+    fn read_request(s: &mut std::net::TcpStream) -> Option<String> {
+        let mut data = Vec::new();
+        let mut byte = [0u8; 1];
+        while !data.ends_with(b"\r\n\r\n") {
+            if s.read(&mut byte).ok()? == 0 {
+                return None;
+            }
+            data.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&data).into_owned();
+        let len = head
+            .lines()
+            .find_map(|l| {
+                let l = l.to_ascii_lowercase();
+                let v = l.strip_prefix("content-length:")?;
+                Some(v.trim().parse::<usize>().unwrap_or(0))
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; len];
+        s.read_exact(&mut body).ok()?;
+        Some(head.lines().next().unwrap_or("").to_string())
+    }
+
+    /// Per connection: answer request 1, keep the socket open, then read request 2 and drop the socket
+    /// without answering — a server closing an idle keep-alive connection as the request goes out.
+    fn serve_drop_second_request(
+        respond: fn(&str) -> &'static [u8],
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let lg = Arc::clone(&log);
         thread::spawn(move || {
             while let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
-                drop(stream);
+                let lg = Arc::clone(&lg);
+                thread::spawn(move || {
+                    let Some(line) = read_request(&mut stream) else {
+                        return;
+                    };
+                    lg.lock().unwrap().push(line.clone());
+                    let _ = stream.write_all(respond(&line));
+                    if let Some(line2) = read_request(&mut stream) {
+                        lg.lock().unwrap().push(line2);
+                    }
+                    drop(stream);
+                });
             }
         });
-        format!("http://{addr}/")
+        (format!("http://{addr}/"), log)
+    }
+
+    fn ok_empty(_: &str) -> &'static [u8] {
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
     }
 
     #[test]
-    fn a_reused_connection_the_server_closed_is_retried_not_peer_disconnected() {
-        let url = serve_close_after_response();
-        let mut errs = Vec::new();
-        for i in 0..200 {
-            if let NativeRet::Err(m) = do_get(&url, None) {
-                errs.push(format!("{i}: {m}"));
+    fn a_request_dropped_on_a_reused_connection_is_retried_iff_go_would_retry_it() {
+        // (method, body, headers, retried) — Go's `Request.isReplayable`.
+        let cases: &[(&str, &str, &[(&str, &str)], bool)] = &[
+            ("GET", "", &[], true),
+            ("HEAD", "", &[], true),
+            ("OPTIONS", "", &[], true),
+            ("TRACE", "", &[], true),
+            ("PUT", "x", &[], false),
+            ("DELETE", "", &[], false),
+            ("POST", "x", &[], false),
+            ("POST", "", &[], false),
+            ("PATCH", "x", &[], false),
+            ("POST", "x", &[("Idempotency-Key", "k")], true),
+            ("DELETE", "", &[("X-Idempotency-Key", "k")], true),
+        ];
+        let mut wrong = Vec::new();
+        for (method, body, hdrs, retried) in cases {
+            let (url, log) = serve_drop_second_request(ok_empty);
+            // Setup: one request opens the pooled connection.
+            let _ = do_get(&url, None);
+            let headers: Vec<(String, String)> = hdrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let ret = do_request(method, &url, body, &headers, None);
+            thread::sleep(Duration::from_millis(100));
+            let got = (!matches!(ret, NativeRet::Err(_)), log.lock().unwrap().len());
+            let want = if *retried { (true, 3) } else { (false, 2) };
+            if got != want {
+                wrong.push(format!(
+                    "{method} body={body:?} headers={hdrs:?}: (ok, requests) = {got:?}, want {want:?}, ret {ret:?}"
+                ));
             }
         }
-        assert!(
-            errs.is_empty(),
-            "spurious errors: {} of 200, first: {:?}",
-            errs.len(),
-            errs.first()
-        );
+        assert!(wrong.is_empty(), "{}", wrong.join("; "));
     }
 
     #[test]
