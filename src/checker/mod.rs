@@ -3328,40 +3328,33 @@ fn struct_param_map(info: &StructInfo, targs: &[Ty]) -> HashMap<String, Ty> {
 /// parameterized bound's args can be compared strictly (only a concrete-vs-concrete mismatch is an
 /// error; anything still generic forwards loosely).
 fn ty_fully_concrete(ty: &Ty) -> bool {
+    ty_all_holes(ty, &|_| false)
+}
+
+/// True iff every `Ty::Param` and `Ty::Unknown` leaf of `ty` satisfies `ok`. The one structural
+/// walk under [`ty_fully_concrete`], [`ty_concrete_but`] and [`pin_generic_fn_value`]; they differ only at
+/// the leaves. A type with no such leaf (a scalar, a module) answers `true`.
+fn ty_all_holes(ty: &Ty, ok: &dyn Fn(&Ty) -> bool) -> bool {
+    let all = |ts: &[Ty]| ts.iter().all(|t| ty_all_holes(t, ok));
     match ty {
-        Ty::Unknown | Ty::Param(_) => false,
-        Ty::List(x) | Ty::Option(x) | Ty::Set(x) => ty_fully_concrete(x),
-        Ty::Map(k, v) => ty_fully_concrete(k) && ty_fully_concrete(v),
-        Ty::Result(a, b) => ty_fully_concrete(a) && ty_fully_concrete(b),
-        Ty::Struct(_, a) | Ty::Enum(_, a) => a.iter().all(ty_fully_concrete),
+        Ty::Unknown | Ty::Param(_) => ok(ty),
+        Ty::List(x) | Ty::Option(x) | Ty::Set(x) => ty_all_holes(x, ok),
+        Ty::Map(k, v) | Ty::Result(k, v) => ty_all_holes(k, ok) && ty_all_holes(v, ok),
         // A parameterized protocol existential carrying a free type-param (`Container[T]`) is NOT
         // concrete — recurse into the carried args (no catch-all Protocol laundering).
-        Ty::Protocol(_, a) => a.iter().all(ty_fully_concrete),
-        Ty::Tuple(ts) => ts.iter().all(ty_fully_concrete),
-        Ty::Func { params, ret, .. } => {
-            params.iter().all(ty_fully_concrete) && ty_fully_concrete(ret)
-        }
+        Ty::Struct(_, a) | Ty::Enum(_, a) | Ty::Protocol(_, a) => all(a),
+        Ty::Tuple(ts) => all(ts),
+        Ty::Func { params, ret, .. } => all(params) && ty_all_holes(ret, ok),
         _ => true,
     }
 }
 
-/// Does `ty` still mention a type PARAMETER anywhere? Strictly weaker than `!ty_fully_concrete`: a
-/// `Ty::Unknown` does NOT count. That split is the whole point — an `Unknown` is the empty-collection
-/// / cascade sentinel (a slot nothing filled), whereas a surviving `Ty::Param` is a type parameter
-/// that was never determined. Arm-for-arm identical to `ty_fully_concrete`, so the two stay in
-/// lockstep as `Ty` grows.
-fn ty_has_param(ty: &Ty) -> bool {
-    match ty {
-        Ty::Param(_) => true,
-        Ty::Unknown => false,
-        Ty::List(x) | Ty::Option(x) | Ty::Set(x) => ty_has_param(x),
-        Ty::Map(k, v) => ty_has_param(k) || ty_has_param(v),
-        Ty::Result(a, b) => ty_has_param(a) || ty_has_param(b),
-        Ty::Struct(_, a) | Ty::Enum(_, a) | Ty::Protocol(_, a) => a.iter().any(ty_has_param),
-        Ty::Tuple(ts) => ts.iter().any(ty_has_param),
-        Ty::Func { params, ret, .. } => params.iter().any(ty_has_param) || ty_has_param(ret),
-        _ => false,
-    }
+/// Is `ty` concrete up to the type params `rigid` accepts — an in-scope param standing as a type
+/// here ([`Checker::rigid_param`])? An `Unknown` leaf, or any other param, answers `false`. The gate
+/// of every hint that only SEEDS `expected_hint`; a gate that feeds `assignable` keeps
+/// [`ty_fully_concrete`] (DEC-054, DEC-025).
+fn ty_concrete_but(ty: &Ty, rigid: &dyn Fn(&str) -> bool) -> bool {
+    ty_all_holes(ty, &|h| matches!(h, Ty::Param(n) if rigid(n)))
 }
 
 /// The verdict of [`pin_generic_fn_value`] — the ONE answer to *"does this position determine every
@@ -3391,8 +3384,8 @@ enum FnValuePin {
 ///   bindings were substituted in — i.e. one the receiver's element type contributed
 ///   (`[].map(ident)`'s `fn(?) -> U`), not one `recover_return_only_params` degraded a live `[U]`
 ///   into (`Bx(0).two(ident, ident)`'s `fn(U) -> U`, which nothing determines and Go refuses).
-fn fn_slot_params_concrete(t: &Ty) -> bool {
-    matches!(t, Ty::Func { params, .. } if params.iter().all(ty_fully_concrete))
+fn fn_slot_params_concrete(t: &Ty, rigid: &dyn Fn(&str) -> bool) -> bool {
+    matches!(t, Ty::Func { params, .. } if params.iter().all(|p| ty_concrete_but(p, rigid)))
 }
 
 /// See [`fn_slot_params_concrete`] — the declared-slot half: does a PARAMETER position of `t` hold
@@ -3414,31 +3407,63 @@ fn fn_slot_params_have_unknown(t: &Ty) -> bool {
 /// been inferred — `[1,2,3].fold(0, pick)` pins `pick`'s `T` from the FIRST argument while `pick` is
 /// the SECOND, so asking per-argument would refuse a program Go accepts.
 ///
-/// NOTHING about the SLOT gates the pin — only the RESULT does (`ty_has_param` + `ty_fully_concrete`
-/// on `refined`). A non-concrete slot position is not evidence the read is un-instantiable: `[]
+/// NOTHING about the SLOT gates the pin — only the RESULT does (a non-rigid param left: `Undetermined`; an `Unknown`
+/// left, the empty-collection sentinel: `Skip`). A non-concrete slot position is not evidence the read is un-instantiable: `[]
 /// .fold(0, add)`'s slot reads `fn(int, ?) -> int` because the receiver is empty, yet argument ZERO
 /// pins `T = int` completely and Go's `Fold([]int{}, 0, add)` returns `0`. The carve-out belongs to
 /// the REPORT (see [`fn_slot_params_concrete`]), which each reporting caller applies itself.
-fn pin_generic_fn_value(type_params: &[TyParam], declared: &Ty, want: &Ty) -> FnValuePin {
+///
+/// The callee's own params are renamed fresh first ([`freshen_params`], the rule
+/// `instantiate_method` uses), so a caller's param spelled like one of them stays the caller's. A
+/// param left in the result counts as concrete only when `rigid` accepts it
+/// ([`Checker::rigid_param`]): a caller's in-scope param pins like a concrete type.
+fn pin_generic_fn_value(
+    type_params: &[TyParam],
+    declared: &Ty,
+    want: &Ty,
+    rigid: &dyn Fn(&str) -> bool,
+) -> FnValuePin {
     let (Ty::Func { params: dp, .. }, Ty::Func { params: wp, .. }) = (declared, want) else {
         return FnValuePin::Skip;
     };
     if dp.len() != wp.len() {
         return FnValuePin::Skip;
     }
+    let mut clash = Vec::new();
+    ty_collect_params(want, None, &mut clash);
+    let ren = freshen_params(type_params, &clash);
+    let new_name = |n: &str| ren.get(n).cloned().unwrap_or_else(|| n.to_string());
+    let ren_map: HashMap<String, Ty> = ren
+        .iter()
+        .map(|(old, new)| (old.clone(), Ty::Param(new.clone())))
+        .collect();
+    let renamed = subst(declared, &ren_map);
     let mut map: HashMap<String, Ty> = HashMap::new();
-    unify(declared, want, &mut map);
-    if !type_params.iter().all(|tp| map.contains_key(&tp.name)) {
+    unify(&renamed, want, &mut map);
+    if !type_params
+        .iter()
+        .all(|tp| map.contains_key(&new_name(&tp.name)))
+    {
         return FnValuePin::Undetermined;
     }
-    let refined = subst(declared, &map);
-    if ty_has_param(&refined) {
+    let refined = subst(&renamed, &map);
+    if !ty_all_holes(&refined, &|h| match h {
+        Ty::Param(n) => rigid(n),
+        _ => true,
+    }) {
         return FnValuePin::Undetermined;
     }
-    if !ty_fully_concrete(&refined) {
+    if !ty_concrete_but(&refined, rigid) {
         return FnValuePin::Skip;
     }
-    FnValuePin::Pinned(map, refined)
+    let pinned = type_params
+        .iter()
+        .filter_map(|tp| {
+            map.get(&new_name(&tp.name))
+                .map(|t| (tp.name.clone(), t.clone()))
+        })
+        .collect();
+    FnValuePin::Pinned(pinned, refined)
 }
 
 /// True iff `t` is a COMPOUND type whose recursive structure contains a `Ty::Unknown` anywhere in a
@@ -3596,6 +3621,24 @@ fn fresh_param_name(base: &str, taken: &std::collections::BTreeSet<String>) -> S
         .expect("an unbounded counter finds a free name")
 }
 
+/// The one rename rule for a generic item's own params `tps` meeting names `clash` that are not
+/// its own (DEC-197): each param named in `clash` maps to a fresh name (`{name}{n}`), never one in
+/// `clash` or `tps`. Params not in `clash` keep their names and are absent from the map. Read by
+/// [`instantiate_method`] and [`pin_generic_fn_value`].
+fn freshen_params(tps: &[TyParam], clash: &[String]) -> HashMap<String, String> {
+    let mut taken: std::collections::BTreeSet<String> = clash.iter().cloned().collect();
+    taken.extend(tps.iter().map(|tp| tp.name.clone()));
+    let mut ren: HashMap<String, String> = HashMap::new();
+    for tp in tps {
+        if clash.contains(&tp.name) {
+            let new = fresh_param_name(&tp.name, &taken);
+            taken.insert(new.clone());
+            ren.insert(tp.name.clone(), new);
+        }
+    }
+    ren
+}
+
 /// Instantiate a method signature on a receiver whose type args are `recv_map`, with ONE
 /// substitution keyed on the declaration's own params. A method type param whose name occurs free
 /// in a receiver argument (a generic caller's `U` on `Box[U].pair[U]`) gets a fresh name first, so
@@ -3607,16 +3650,7 @@ fn instantiate_method(sig: &FnSig, recv_map: &HashMap<String, Ty>) -> FnSig {
     for v in recv_map.values() {
         ty_collect_params(v, None, &mut free);
     }
-    let mut taken: std::collections::BTreeSet<String> = free.iter().cloned().collect();
-    taken.extend(sig.type_params.iter().map(|tp| tp.name.clone()));
-    let mut ren: HashMap<String, String> = HashMap::new();
-    for tp in &sig.type_params {
-        if free.contains(&tp.name) {
-            let new = fresh_param_name(&tp.name, &taken);
-            taken.insert(new.clone());
-            ren.insert(tp.name.clone(), new);
-        }
-    }
+    let ren = freshen_params(&sig.type_params, &free);
     if ren.is_empty() {
         return subst_sig(sig, recv_map);
     }

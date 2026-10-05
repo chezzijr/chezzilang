@@ -4657,8 +4657,8 @@ impl Checker {
             .unwrap_or(Ty::Unknown)
     }
 
-    /// TICKET-124 (W13-13): like [`Checker::one_arg`], but reaches a `ty_fully_concrete` expected
-    /// type into the single argument (`Some`/`Ok`/`Err`'s payload), so `Some([A()])` under an
+    /// TICKET-124 (W13-13): like [`Checker::one_arg`], but reaches an expected type that is
+    /// concrete up to in-scope type params (`ty_concrete_but` + `rigid_param`) into the single argument (`Some`/`Ok`/`Err`'s payload), so `Some([A()])` under an
     /// `Option[List[Named]]` hint infers the list literal's elements as `Named`, not `A`.
     pub(super) fn one_arg_hinted(
         &mut self,
@@ -4672,7 +4672,9 @@ impl Checker {
             return Ty::Unknown;
         };
         match h {
-            Some(t) if ty_fully_concrete(t) => self.infer_arg(a, Some(t)),
+            Some(t) if ty_concrete_but(t, &|n| self.rigid_param(n, &[])) => {
+                self.infer_arg(a, Some(t))
+            }
             _ => self.infer_value(a),
         }
     }

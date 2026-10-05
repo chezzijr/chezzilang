@@ -1661,7 +1661,7 @@ impl Checker {
                         .iter()
                         .zip(&hs)
                         .map(|(e, h)| {
-                            if ty_fully_concrete(h) {
+                            if ty_concrete_but(h, &|n| self.rigid_param(n, &[])) {
                                 self.infer_arg(e, Some(h))
                             } else {
                                 self.infer_value(e)
@@ -2385,7 +2385,9 @@ impl Checker {
             Some(h) => Some(h.clone()),
         };
         let verdict = match &hint {
-            Some(h) => pin_generic_fn_value(&type_params, &declared, h),
+            Some(h) => {
+                pin_generic_fn_value(&type_params, &declared, h, &|n| self.rigid_param(n, &[]))
+            }
             // No hint at all: nothing in this position can determine anything.
             None => FnValuePin::Undetermined,
         };
@@ -2412,7 +2414,9 @@ impl Checker {
             // arm's assignability diagnostic owns it. No hint at all still reports (`g := id`).
             FnValuePin::Undetermined
                 if !self.generic_fn_value_prepass
-                    && hint.as_ref().is_none_or(fn_slot_params_concrete) =>
+                    && hint.as_ref().is_none_or(|h| {
+                        fn_slot_params_concrete(h, &|n| self.rigid_param(n, &[]))
+                    }) =>
             {
                 self.reject_undetermined_generic_fn_value(name, sig, spelling, span);
                 return Some(Ty::Unknown);

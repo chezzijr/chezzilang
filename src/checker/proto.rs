@@ -3954,7 +3954,7 @@ impl Checker {
     /// the expected type reaches a NESTED ctor argument too (`Box[Box[Named]] = Box(Box(A()))`),
     /// not only the outermost one. The seed is the turbofish binding when explicit type args were
     /// given, else the annotation's binding via [`Self::hint_want`]; a decl whose substitution under
-    /// that seed is `ty_fully_concrete` gets that hint, else `None` (an under-determined slot keeps
+    /// that seed is concrete up to in-scope type params gets that hint, else `None` (an under-determined slot keeps
     /// its ordinary bottom-up inference).
     pub(super) fn ctor_arg_hints(
         &mut self,
@@ -3975,11 +3975,17 @@ impl Checker {
                 None => return Vec::new(),
             }
         };
+        // A ctor's own still-unbound param never passes as a caller's same-named param.
+        let free: Vec<String> = tps
+            .iter()
+            .filter(|tp| !seed.contains_key(&tp.name))
+            .map(|tp| tp.name.clone())
+            .collect();
         decls
             .iter()
             .map(|d| {
                 let s = subst(d, &seed);
-                ty_fully_concrete(&s).then_some(s)
+                ty_concrete_but(&s, &|n| self.rigid_param(n, &free)).then_some(s)
             })
             .collect()
     }
@@ -4151,15 +4157,17 @@ impl Checker {
     }
 
     /// TICKET-124 (W13-12/W13-13): the expected type's binding for a ctor's own type params, used
-    /// to pin a bare-`T` slot the same way a turbofish does. Declines unless the hint is
-    /// `ty_fully_concrete` (DEC-054), so it never widens against a partially-known annotation.
+    /// to pin a bare-`T` slot the same way a turbofish does. Declines unless the hint is concrete
+    /// up to in-scope type params (`ty_concrete_but` + `rigid_param`): an `Unknown` leaf or a
+    /// non-rigid param still declines, so it never widens against a partially-known annotation
+    /// (DEC-054). Its output only seeds `ctor_arg_hints`.
     pub(super) fn hint_want(
         &mut self,
         hint: Option<&Ty>,
         shape: &Ty,
     ) -> Option<HashMap<String, Ty>> {
         let h = hint?;
-        if !ty_fully_concrete(h) {
+        if !ty_concrete_but(h, &|n| self.rigid_param(n, &[])) {
             return None;
         }
         let mut w = HashMap::new();
@@ -4487,6 +4495,13 @@ impl Checker {
     /// rule.
     pub(super) fn shadowing_type_param(&self, name: &str) -> bool {
         matches!(self.head_binding(name), HeadBinding::TypeParam)
+    }
+
+    /// The one answer to "does a `Ty::Param` named `n` stand as a concrete type here": an in-scope
+    /// type param ([`Self::shadowing_type_param`]) that is not one of `call_free`, the still-unbound
+    /// params of the call being inferred (a HOF callee's free `U` spelled like the caller's `U`).
+    pub(super) fn rigid_param(&self, n: &str, call_free: &[String]) -> bool {
+        self.shadowing_type_param(n) && !call_free.iter().any(|f| f == n)
     }
 
     /// The dead end that [`Self::shadowing_type_param`] leads to in every position except the
@@ -4882,7 +4897,10 @@ impl Checker {
             // a bare-ident generic fn that pins FULLY concrete; otherwise nothing changes here.
             if self.generic_fn_value_sig(&args[i]).is_some() {
                 let want = subst(decl, &subst_map);
-                if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
+                let free = unbound_params(&sig.type_params, &subst_map);
+                if let Some(refined) =
+                    self.try_pin_generic_fn_value_arg(&args[i], &want, &free, span)
+                {
                     arg_tys[i] = refined;
                 } else {
                     deferred_fn_args.push(i);
@@ -4967,7 +4985,8 @@ impl Checker {
         // now every real binding has already won, so the leak can no longer displace one.
         for i in std::mem::take(&mut deferred_fn_args) {
             let want = subst(&sig.params[i], &subst_map);
-            if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
+            let free = unbound_params(&sig.type_params, &subst_map);
+            if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, &free, span) {
                 arg_tys[i] = refined;
             }
             unify(&sig.params[i], &arg_tys[i].clone(), &mut subst_map);
@@ -5023,7 +5042,8 @@ impl Checker {
         // uninstantiated-generic-fn-value rule, the verdict the silenced prepass wall handed over.
         // The SAME reporter the method path calls, so `applyg(ident, 5)` and `[1,2,3].fold(0, pick)`
         // get one answer from one derivation.
-        self.report_undetermined_generic_fn_value_args(args, &sig.params, &subst_map, span);
+        let free = unbound_params(&sig.type_params, &subst_map);
+        self.report_undetermined_generic_fn_value_args(args, &sig.params, &subst_map, &free, span);
         // PART A — the empty-collection pin, at the LAST moment the substitution can still change.
         // Neither generic path routes through `check_args_range_decl`, so a bare empty binding passed
         // into a parameter that a SIBLING argument made concrete used to pin nothing: measured
@@ -5273,7 +5293,8 @@ impl Checker {
             // fires on a bare-ident generic fn that pins FULLY concrete; otherwise `arg_tys[i]` is
             // unchanged and behavior is byte-identical.
             let want = subst(decl, &mmap);
-            if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
+            let free = unbound_params(mtps, &mmap);
+            if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, &free, span) {
                 arg_tys[i] = refined;
             } else if self.generic_fn_value_sig(&args[i]).is_some() {
                 // …and when the slot can NOT pin it yet, the rigid prepass type (`fn(T) -> T`, the
@@ -5311,7 +5332,8 @@ impl Checker {
         // binding has already won, so the leak can no longer displace one.
         for i in std::mem::take(&mut deferred_fn_args) {
             let want = subst(&expected[i], &mmap);
-            if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, span) {
+            let free = unbound_params(mtps, &mmap);
+            if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, &free, span) {
                 arg_tys[i] = refined;
             }
             unify(&expected[i], &arg_tys[i].clone(), &mut mmap);
@@ -5400,7 +5422,8 @@ impl Checker {
         // uninstantiated-generic-fn-value rule. This is the LAST possible moment, which is the whole
         // design: `[1,2,3].fold(0, pick)` is pinned by the accumulator, argument ZERO, while `pick` is
         // argument one.
-        self.report_undetermined_generic_fn_value_args(args, expected, &mmap, span);
+        let free = unbound_params(mtps, &mmap);
+        self.report_undetermined_generic_fn_value_args(args, expected, &mmap, &free, span);
         // PART A — the empty-collection pin, at the LAST moment the substitution can still change.
         // Neither generic path routes through `check_args_range_decl`, so a bare empty binding passed
         // into a parameter that a SIBLING argument made concrete used to pin nothing: measured
@@ -5446,7 +5469,13 @@ impl Checker {
     /// `U`) or a genuinely un-inferable return-only arg-fn param defers to the existing path unchanged,
     /// preserving the Category-1 leak guard and every clean reject. A FRESH substitution map per call
     /// means two distinct pins never launder.
-    fn try_pin_generic_fn_value_arg(&mut self, arg: &Expr, want: &Ty, span: Span) -> Option<Ty> {
+    fn try_pin_generic_fn_value_arg(
+        &mut self,
+        arg: &Expr,
+        want: &Ty,
+        call_free: &[String],
+        span: Span,
+    ) -> Option<Ty> {
         let (_, sig, _) = self.generic_fn_value_sig(arg)?;
         let declared = fn_value_ty(&sig);
         // Accept ONLY the fully-pinned verdict. A slot position that is still a free method param
@@ -5456,7 +5485,9 @@ impl Checker {
         // verdict is re-asked once, at the end of the call, by
         // [`Checker::report_undetermined_generic_fn_value_args`].
         let FnValuePin::Pinned(m, refined) =
-            pin_generic_fn_value(&sig.type_params, &declared, want)
+            pin_generic_fn_value(&sig.type_params, &declared, want, &|n| {
+                self.rigid_param(n, call_free)
+            })
         else {
             return None;
         };
@@ -5486,6 +5517,7 @@ impl Checker {
         args: &[Expr],
         arg_decls: &[Ty],
         map: &HashMap<String, Ty>,
+        call_free: &[String],
         span: Span,
     ) {
         for (decl, arg) in arg_decls.iter().zip(args) {
@@ -5509,7 +5541,9 @@ impl Checker {
             }
             let declared = fn_value_ty(&sig);
             if matches!(
-                pin_generic_fn_value(&sig.type_params, &declared, &subst(decl, map)),
+                pin_generic_fn_value(&sig.type_params, &declared, &subst(decl, map), &|n| {
+                    self.rigid_param(n, call_free)
+                }),
                 FnValuePin::Undetermined
             ) {
                 // The argument's own span, not the call's: the mistake is this read.
@@ -5686,4 +5720,13 @@ fn ty_mentions_error_existential(ty: &Ty) -> bool {
         }
         _ => false,
     }
+}
+
+/// The names of `tps` with no binding in `map` yet: a call's still-free params, which never stand
+/// as a caller's rigid param ([`Checker::rigid_param`]).
+fn unbound_params(tps: &[TyParam], map: &HashMap<String, Ty>) -> Vec<String> {
+    tps.iter()
+        .filter(|tp| !map.contains_key(&tp.name))
+        .map(|tp| tp.name.clone())
+        .collect()
 }

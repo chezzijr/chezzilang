@@ -2879,14 +2879,14 @@ impl Checker {
                         target.kind,
                         ExprKind::Ident(_) | ExprKind::Index { .. } | ExprKind::Field { .. }
                     )
-                    && matches!(
+                    && (matches!(
                         value.kind,
                         ExprKind::Call { .. }
                             | ExprKind::List(..)
                             | ExprKind::Map(_)
                             | ExprKind::Set(_)
                             | ExprKind::Tuple(_)
-                    )
+                    ) || self.generic_fn_value_sig(value).is_some())
                 {
                     // TICKET-124 (W13-14): the hint that seeds a FRESH literal/call value used to
                     // exist only at DECLARATION (an annotated `let`, a call argument, a return) —
@@ -2896,7 +2896,7 @@ impl Checker {
                     let mark = self.diag_mark();
                     let target_ty = self.infer(target);
                     self.diag_rollback(mark);
-                    if ty_fully_concrete(&target_ty) {
+                    if ty_concrete_but(&target_ty, &|n| self.rigid_param(n, &[])) {
                         self.infer_arg(value, Some(&target_ty))
                     } else {
                         self.infer_value(value)
@@ -3108,7 +3108,7 @@ impl Checker {
                         self.check_default_scope(def, field.name_span);
                         let expected = self.resolve_type(&field.ty, def.span);
                         // Same seeding, same gate, same reasons as the parameter default above.
-                        let fseed = ty_fully_concrete(&expected)
+                        let fseed = ty_concrete_but(&expected, &|n| self.rigid_param(n, &[]))
                             || self.generic_fn_value_sig(def).is_none();
                         let fhint = fseed.then(|| expected.clone());
                         let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
@@ -5244,14 +5244,13 @@ impl Checker {
                 // its `where` bound went unenforced while the bare `= mkl()` twin was correctly
                 // rejected — same declaration, opposite verdicts, decided by a wrapper.
                 //
-                // The one shape that genuinely must not be seeded is a BARE GENERIC FN VALUE at a
-                // non-concrete slot (`f: fn(U) -> U = ident`): there `try_pin_generic_fn_value_arg`
-                // declines — its result is not fully concrete — and falls back to comparing the rigid
-                // un-substituted type, whose verdict then depends on what the two sides SPELL.
-                // Measured, that shape was accepted for `fn ident[U]` and rejected for the
-                // alpha-renamed `fn ident[T]`, with the true diagnostic deleted; excluded, both
-                // spellings report the true *'ident' is generic and … is not determined here*.
-                let seed = ty_fully_concrete(&ty) || self.generic_fn_value_sig(def).is_none();
+                // A BARE GENERIC FN VALUE is seeded when its slot is concrete up to in-scope type
+                // params (`f: fn(U) -> U = ident` inside `fn g[U]`): the caller's `U` pins like a
+                // concrete type (`rigid_param`), whatever the callee's own param is spelled. Only a
+                // slot with an `Unknown` leaf stays unseeded; there the read reports *'ident' is
+                // generic and … is not determined here* in every spelling.
+                let seed = ty_concrete_but(&ty, &|n| self.rigid_param(n, &[]))
+                    || self.generic_fn_value_sig(def).is_none();
                 let hint = seed.then(|| ty.clone());
                 let saved_dsd = std::mem::replace(&mut self.decl_site_default, true);
                 let actual = self.infer_arg(def, hint.as_ref());

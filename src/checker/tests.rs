@@ -3901,21 +3901,28 @@ fn a_try_in_a_generic_struct_field_default_is_now_judged_by_its_provider() {
     rejects_desugared(src, "a default expression cannot propagate with");
 }
 
-/// A decl-site default whose declared type is FULLY CONCRETE is pinned by that slot: a generic fn
-/// value there is instantiated instead of reported. Measured before: *'ident' is generic and T is not
-/// determined here*; after, the program runs and prints `5`.
-///
-/// The companion refusal — a declared type carrying a FREE param must NOT be seeded — is what keeps
-/// the verdict independent of binder names. Both spellings below report the same thing.
+/// A decl-site default is pinned by its slot: a generic fn value there is instantiated instead of
+/// reported, when the slot is concrete (`fn(int) -> int`) and when it names only the enclosing
+/// item's own params (`fn(U) -> U` inside `fn g[U]` or `struct H[U]`), which pin like concrete
+/// types. A default whose callee has a param the slot cannot determine (`two`'s `B`) still reports.
+/// Both verdicts are independent of the binder's spelling.
 #[test]
-fn a_concrete_decl_site_default_is_pinned_by_its_slot() {
+fn a_decl_site_default_is_pinned_by_its_slot() {
     ok_desugared(
         "fn ident[T](x: T) -> T:\n    return x\n\nfn run(x: int, f: fn(int) -> int = ident) -> int:\n    return f(x)\n\nfn main():\n    print(run(5))\n",
     );
     for own in ["U", "T"] {
+        ok_desugared(&format!(
+            "fn ident[{own}](x: {own}) -> {own}:\n    return x\nfn g[U](x: U, f: fn(U) -> U = ident) -> U:\n    return f(x)\nprint(g(1))\n"
+        ));
+        ok_desugared(&format!(
+            "fn ident[{own}](x: {own}) -> {own}:\n    return x\nstruct H[U]:\n    n: U\n    f: fn(U) -> U = ident\nh := H[int](3)\nprint(h.f(h.n))\n"
+        ));
+    }
+    for own in ["U", "T"] {
         rejects(
             &format!(
-                "fn ident[{own}](x: {own}) -> {own}:\n    return x\nfn g[U](x: U, f: fn(U) -> U = ident) -> U:\n    return f(x)\nn := g(1)\n"
+                "fn two[{own}, B](a: {own}) -> {own}:\n    return a\nfn g[U](x: U, f: fn(U) -> U = two) -> U:\n    return f(x)\nn := g(1)\n"
             ),
             "is generic and",
         );
