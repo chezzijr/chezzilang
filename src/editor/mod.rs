@@ -661,16 +661,6 @@ fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(us
             }
         }
         StmtKind::TypeAlias { ty, .. } => overlay_type(ty, map),
-        StmtKind::NewType {
-            underlying,
-            methods,
-            ..
-        } => {
-            overlay_type(underlying, map);
-            for m in methods {
-                overlay_fndecl(m, map);
-            }
-        }
         StmtKind::If {
             branches,
             else_block,
@@ -1803,16 +1793,6 @@ mod tests {
     }
 
     #[test]
-    fn hover_newtype_ctor_callee() {
-        // Hovering the ctor callee `UserId` of `UserId(10)` reports a fn from the underlying to the
-        // newtype (mirrors the struct-ctor path).
-        let src = "newtype UserId = int\nUserId(10)\n";
-        let h = hov(src, 1, 0).expect("hover on newtype-ctor callee");
-        assert_eq!(h.display, "fn(int) -> UserId");
-        assert_eq!(h.kind, crate::checker::HoverKind::Func);
-    }
-
-    #[test]
     fn hover_enum_variant_callee() {
         // Hovering the variant-name `Val` of `Col.Val(3)` reports the variant's ctor signature.
         let src = "enum Col:\n    Red\n    Val(int)\nCol.Val(3)\n";
@@ -2069,13 +2049,6 @@ mod tests {
     fn hover_enum_decl_name() {
         let h = hov("enum Col:\n    Val(int)\n", 0, 5).expect("hover on enum decl name");
         assert_eq!(h.display, "Col");
-        assert_eq!(h.kind, crate::checker::HoverKind::Struct);
-    }
-
-    #[test]
-    fn hover_newtype_decl_name() {
-        let h = hov("newtype UserId = int\n", 0, 8).expect("hover on newtype decl name");
-        assert_eq!(h.display, "UserId");
         assert_eq!(h.kind, crate::checker::HoverKind::Struct);
     }
 

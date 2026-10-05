@@ -5275,19 +5275,6 @@ impl Checker {
         Ty::Enum(key, args)
     }
 
-    /// The `Ty::NewType` of a newtype's own `self`: keyed by its runtime key, parameterized by its
-    /// own generic type params as `Ty::Param`s (so `fn peek(self) -> Option[T]` inside
-    /// `newtype Stack[T]` resolves `T`). Mirrors `enum_self_ty`.
-    pub(super) fn newtype_self_ty(&self, name: &str) -> Ty {
-        let key = self.bare_key(name);
-        let args = self
-            .newtype_type_params
-            .get(&key)
-            .map(|tps| tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
-            .unwrap_or_default();
-        Ty::NewType(key, args)
-    }
-
     /// Reject a reserved builtin type name used as a generic type-PARAMETER identifier (`struct
     /// Box[int]` / `[List]` / `[Result]`, a method's own `[U]`, a `protocol P[int]`). A reserved name
     /// as a param is a one-way-ratchet violation that otherwise type-checks clean and then shadows

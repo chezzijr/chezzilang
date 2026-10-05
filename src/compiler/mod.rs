@@ -160,7 +160,6 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     for s in &module.stmts {
         if let StmtKind::Struct { name, .. }
         | StmtKind::Enum { name, .. }
-        | StmtKind::NewType { name, .. }
         | StmtKind::TypeAlias { name, .. } = &s.kind
         {
             c.module_types[0].insert(name.clone());
@@ -650,7 +649,6 @@ impl Compiler {
             for s in &lm.ast.stmts {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
-                | StmtKind::NewType { name, .. }
                 | StmtKind::TypeAlias { name, .. } = &s.kind
                 {
                     self.module_types[idx].insert(name.clone());
@@ -867,13 +865,6 @@ impl Compiler {
                         }
                     }
                 }
-                // A newtype's key must be known (via `newtype_home`) BEFORE any method body compiles,
-                // so that a `Name(...)` ctor inside a method resolves as `Op::NewType`, not a global
-                // call. Methods themselves are compiled (into `newtype_methods`) in pass 2.
-                StmtKind::NewType { name, .. } => {
-                    let key = self.type_key(module_idx, name);
-                    self.program.newtype_home.insert(key, module_idx);
-                }
                 // `std/json.chz`'s bodyless `native fn _to_json` — record its home module so the
                 // bare-call lowering (mirroring the `timer` arm) can gate on it. Runs in pass 1
                 // (every module) before pass 2 compiles any module's bare calls.
@@ -1036,26 +1027,6 @@ impl Compiler {
                     .or_default()
                     .extend(compiled);
                 self.program.native_home.insert(name.clone(), module_idx);
-            }
-        }
-        // Compile newtype methods (name-keyed, like enum methods), recording proto ids under the
-        // newtype's module-scoped runtime key. A newtype ALWAYS gets a `newtype_home` entry (even
-        // method-less) so the runtime can recognize the key as a newtype.
-        for stmt in &module.stmts {
-            if let StmtKind::NewType { name, methods, .. } = &stmt.kind {
-                let key = self.type_key(module_idx, name);
-                let mut compiled: HashMap<String, ProtoId> = HashMap::new();
-                for m in methods {
-                    self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
-                    let pid = self.compile_fn(m, false)?;
-                    compiled.insert(m.name.clone(), pid);
-                }
-                self.program
-                    .newtype_methods
-                    .entry(key.clone())
-                    .or_default()
-                    .extend(compiled);
-                self.program.newtype_home.insert(key, module_idx);
             }
         }
         // The synthetic toplevel function: top-level `fn`s are hoisted as globals before the body.
@@ -1650,7 +1621,6 @@ impl Compiler {
             }
             StmtKind::Struct { .. }
             | StmtKind::Enum { .. }
-            | StmtKind::NewType { .. } // methods compiled in compile_module; ctor is a named call
             | StmtKind::Protocol { .. }
             | StmtKind::Extern { .. } // bound at module init (see compile_module), like top-level fn
             // A `native fn`/`native ctor` decl is a compile-time SIGNATURE source only — it gets no
@@ -6941,7 +6911,6 @@ fn stmt_has_bare_spawn(s: &Stmt) -> bool {
         | StmtKind::Protocol { .. }
         | StmtKind::Enum { .. }
         | StmtKind::TypeAlias { .. }
-        | StmtKind::NewType { .. }
         | StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Pass

@@ -3255,50 +3255,6 @@ impl Checker {
                 self.default_binders = saved_binders;
                 self.exit_type_params(saved);
             }
-            // Newtype method bodies are checked here, mirroring the enum path (`self` is the newtype).
-            StmtKind::NewType {
-                name,
-                name_span,
-                type_params,
-                methods,
-                doc,
-                ..
-            } => {
-                let self_ty = self.newtype_self_ty(name);
-                let key = self.bare_key(name);
-                // The newtype's type parameters are in scope across its method bodies (like the
-                // struct/enum path), so a generic `fn peek(self) -> Option[T]` resolves `T`.
-                let saved = self.enter_type_params(type_params);
-                // Editor hover (decl-site): record the newtype at its declared-name token + doc.
-                if self.hover_probe.is_some() {
-                    self.hover_record_at(*name_span, &self_ty, HoverKind::Struct, doc.clone());
-                }
-                let saved_binders =
-                    std::mem::replace(&mut self.default_binders, method_binders(methods, name));
-                for m in methods {
-                    if m.is_test {
-                        // Parser rejects `test fn` in a newtype body, so this is unreachable; guard
-                        // anyway to keep the suite invariants explicit.
-                        self.validate_test_fn_shape(m, Some(&key));
-                    }
-                    // Skip a duplicate-named method's body check (see the struct arm) — its clear
-                    // hoist-time dup error stands alone instead of a misleading return-type mismatch.
-                    if methods.iter().filter(|x| x.name == m.name).count() > 1 {
-                        continue;
-                    }
-                    if let Some(sig) = self
-                        .newtype_defs
-                        .get(&key)
-                        .and_then(|(_, ms)| ms.get(&m.name))
-                        .cloned()
-                    {
-                        self.record_method_decl_hover(m.name_span, &sig);
-                        self.check_fn_body(m, Some(self_ty.clone()), sig);
-                    }
-                }
-                self.default_binders = saved_binders;
-                self.exit_type_params(saved);
-            }
             // A protocol's method signatures are validated during hoisting; pass 2 only records its
             // decl-site hover (the protocol existential at the protocol-name token + doc).
             StmtKind::Protocol {

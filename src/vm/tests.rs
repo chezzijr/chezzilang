@@ -11815,23 +11815,6 @@ fn vm_generator_struct_method() {
     assert_eq!(run(src), "5\n6\n");
 }
 
-/// `List[<numeric newtype>].sum()` over a 200-element list plus the empty case, run once under GC
-/// stress and once normally.
-///
-/// **This does NOT discriminate the fold's `with_roots` today** — traced: the only two `collect()`
-/// call sites are `run_until`'s instruction boundary (`exec.rs:1109`, which `gc_stress` forces) and
-/// `sample_mem_cap` (`sched.rs:2314`, per task dispatch). `Heap::alloc` only bumps counters. The fold
-/// runs entirely inside one opcode and `newtype_arith` is pure native, so no collection happens
-/// between the accumulator leaving the stack and the next `alloc`. Removing the root would keep this
-/// green. What it does cover is the fold's arithmetic and the empty case's compiler-minted `T(0)`
-/// seed under a heap that is being swept around it.
-#[test]
-fn vm_newtype_sum_fold_survives_gc_stress() {
-    let src = "newtype Cents = int\nfn main():\n    xs := [Cents(i) for i in range(0, 200)]\n    print(int(xs.sum()))\n    e: List[Cents] = []\n    print(int(e.sum()))\nmain()\n";
-    assert_eq!(run_capture_stress(src), "19900\n0\n");
-    assert_eq!(run(src), "19900\n0\n");
-}
-
 /// A generator yielding heap values (strings) survives GC stress between/within `.next()` calls:
 /// the suspended frames + yielded objects must stay rooted across collections.
 #[test]
@@ -11910,7 +11893,7 @@ fn golden_container_ctor_chz_matches_expected_and_interp() {
 /// First-class native-type golden: `examples/native_qualified.chz` exercises the ADDITIVE
 /// qualified / aliased module-member path for import-gated native types — `concurrency.Shared(0)`,
 /// aliased `c.Shared(0)`, qualified RwShared/Atomic/Executor, `time.timer(0)`, plus a type-alias
-/// and a newtype over a qualified `concurrency.Shared`. These lower to the SAME opcodes as the
+/// and a struct over a qualified `concurrency.Shared`. These lower to the SAME opcodes as the
 /// bare-after-import names, so output is byte-identical — the gate for the qualified-ctor lowering.
 #[test]
 fn golden_native_qualified_chz_matches_expected_and_interp() {
@@ -12363,15 +12346,6 @@ fn golden_raw_string_chz_matches_expected_and_interp() {
         vm_out, expected,
         "vm output drifted from raw_string.expected"
     );
-}
-
-/// Same numeric newtype `/` and `%` auto-flow the underlying op and re-wrap, just like `+ - *`.
-/// Regression: the checker's `Div|Mod` arm previously rejected these even though the runtime
-/// handled them (dead runtime path) — now checker + this holds.
-#[test]
-fn newtype_div_mod_same_type_flows() {
-    let src = "newtype Meters = float\nnewtype Count = int\nfn main():\n    a := Meters(8.0) / Meters(2.0)\n    print(int(a))\n    c := Count(7) % Count(3)\n    print(int(c))\nmain()\n";
-    assert_eq!(run_parity(src), "4\n1\n");
 }
 
 /// M19 memory-layout lever #1 golden: `examples/struct_layout.chz` exercises the positional
@@ -20083,11 +20057,9 @@ fn str_hook_nonstr_return_struct_falls_back_to_default_repr() {
 }
 
 #[test]
-fn str_hook_nonstr_return_enum_and_newtype_fall_back() {
+fn str_hook_nonstr_return_enum_falls_back() {
     let enum_src = "enum E:\n    A(int)\n    fn str(self) -> E:\n        return self\nfn main(): print(E.A(5))\nmain()\n";
     assert_mc_parity(enum_src, "A(5)\n");
-    let nt_src = "newtype N = int:\n    fn str(self) -> N:\n        return self\nfn main(): print(N(5))\nmain()\n";
-    assert_mc_parity(nt_src, "N(5)\n");
 }
 
 #[test]
@@ -20659,17 +20631,6 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
             "-",
             "int",
-            "-",
-            "-",
-            "-",
-        ),
-        r(
-            "newtype",
-            "newtype NT = int\n",
-            "NT(7)",
-            "-",
-            "-",
-            "-",
             "-",
             "-",
             "-",

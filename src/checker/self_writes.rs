@@ -60,10 +60,7 @@ impl Scan {
             }
             // A nested function owns a different `self` frame.
             StmtKind::Fn(_) => {}
-            StmtKind::Struct { .. }
-            | StmtKind::Enum { .. }
-            | StmtKind::NewType { .. }
-            | StmtKind::NativeStruct { .. } => {}
+            StmtKind::Struct { .. } | StmtKind::Enum { .. } | StmtKind::NativeStruct { .. } => {}
             StmtKind::If {
                 branches,
                 else_block,

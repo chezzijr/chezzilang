@@ -631,12 +631,6 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
                 type_params,
                 methods,
                 ..
-            }
-            | StmtKind::NewType {
-                name,
-                type_params,
-                methods,
-                ..
             } => {
                 let stps: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
                 for mth in methods {
@@ -1203,14 +1197,9 @@ impl Walker<'_> {
                     self.walk_block(b)?;
                 }
             }
-            // Enum AND newtype method bodies (and param defaults) are rewritten exactly like a
-            // struct's; neither has fields to splice.
+            // Enum method bodies (and param defaults) are rewritten exactly like a struct's; an enum
+            // has no fields to splice.
             StmtKind::Enum {
-                type_params,
-                methods,
-                ..
-            }
-            | StmtKind::NewType {
                 type_params,
                 methods,
                 ..
@@ -1814,7 +1803,6 @@ fn module_level_names(
             StmtKind::Extern { fns, .. } => out.extend(fns.iter().map(|f| f.name.clone())),
             StmtKind::Struct { name, .. }
             | StmtKind::Enum { name, .. }
-            | StmtKind::NewType { name, .. }
             | StmtKind::TypeAlias { name, .. }
             | StmtKind::Protocol { name, .. } => {
                 out.insert(name.clone());

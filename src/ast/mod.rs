@@ -178,24 +178,6 @@ pub enum StmtKind {
         /// Doc-comment (see `Let::doc`). Runtime-inert; surfaced on hover for the alias name.
         doc: Option<String>,
     },
-    /// `newtype Name = <type>` (optionally with a trailing-colon method block) — a DISTINCT nominal
-    /// type that wraps `underlying`. Unlike `TypeAlias` it is NOT interchangeable with the
-    /// underlying: only an explicit construct (`Name(x)`) or cast-unwrap (`int(n)`) crosses the
-    /// boundary. `type_params` is empty for a scalar newtype (`newtype UserId = int`); for
-    /// `newtype Stack[T] = list[T]` the underlying + method signatures may reference `T`. A
-    /// type-parameterized newtype is METHODS-ONLY: no native operator auto-flow (operators come only
-    /// from its own methods + protocol satisfaction). `methods` are name-keyed like struct/enum.
-    NewType {
-        name: String,
-        /// Source span of the declared-NAME token (`UserId` in `newtype UserId = int`).
-        /// Diagnostic-only (decl-site hover); runtime-inert, like `Struct::name_span`.
-        name_span: Span,
-        type_params: Vec<TypeParam>,
-        underlying: Type,
-        methods: Vec<FnDecl>,
-        /// Doc-comment (see `Let::doc`). Runtime-inert; surfaced on hover for the newtype name.
-        doc: Option<String>,
-    },
     /// `if` / `elif` / `else`. Each `(cond, body)` is one branch; `elif` adds another
     /// branch; a final bare `else` is `else_block`.
     If {
@@ -1559,7 +1541,7 @@ fn ids_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
                 ids_in_fn(m, f);
             }
         }
-        StmtKind::Enum { methods, .. } | StmtKind::NewType { methods, .. } => {
+        StmtKind::Enum { methods, .. } => {
             for m in methods {
                 ids_in_fn(m, f);
             }

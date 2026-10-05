@@ -44,7 +44,7 @@ fn tmlanguage_has_core_structure() {
     assert!(g.contains("\"scopeName\": \"source.chezzi\""));
     // single-sourced from the lexer: a keyword and an operator must both appear.
     assert!(
-        g.contains("newtype"),
+        g.contains("protocol"),
         "keyword alternation missing a keyword"
     );
     assert!(g.contains("keyword.control.chezzi"));

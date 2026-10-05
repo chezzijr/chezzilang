@@ -51,7 +51,6 @@ pub enum Token {
     Enum,
     Protocol,
     Type,
-    NewType,
     Match,
     Recover,
     Defer,
@@ -490,7 +489,6 @@ pub const KEYWORDS: &[(&str, Token)] = &[
     ("enum", Token::Enum),
     ("protocol", Token::Protocol),
     ("type", Token::Type),
-    ("newtype", Token::NewType),
     ("match", Token::Match),
     ("recover", Token::Recover),
     ("defer", Token::Defer),
@@ -3095,22 +3093,6 @@ mod tests {
     }
 
     #[test]
-    fn lexes_newtype_keyword() {
-        assert_eq!(keyword("newtype"), Some(Token::NewType));
-        assert_eq!(
-            kinds("newtype Foo = int"),
-            vec![
-                Token::NewType,
-                Token::Ident("Foo".to_string()),
-                Token::Assign,
-                Token::Ident("int".to_string()),
-                Token::Newline,
-                Token::Eof
-            ]
-        );
-    }
-
-    #[test]
     fn lexes_elif_keyword() {
         assert_eq!(keyword("elif"), Some(Token::Elif));
         assert_eq!(
@@ -3135,9 +3117,9 @@ mod tests {
         // The table must cover the full keyword surface the lexer recognizes.
         for w in [
             "fn", "return", "if", "else", "elif", "for", "while", "in", "break", "continue",
-            "pass", "struct", "enum", "protocol", "type", "newtype", "match", "recover", "defer",
-            "assert", "test", "spawn", "parallel", "wait", "yield", "import", "extern", "from",
-            "as", "and", "or", "not", "true", "false",
+            "pass", "struct", "enum", "protocol", "type", "match", "recover", "defer", "assert",
+            "test", "spawn", "parallel", "wait", "yield", "import", "extern", "from", "as", "and",
+            "or", "not", "true", "false",
         ] {
             assert!(
                 KEYWORDS.iter().any(|(k, _)| *k == w),
@@ -3152,7 +3134,6 @@ mod tests {
         assert_eq!(Token::Walrus.lexeme(), Some(":="));
         assert_eq!(Token::ShlEq.lexeme(), Some("<<="));
         assert_eq!(Token::Fn.lexeme(), Some("fn"));
-        assert_eq!(Token::NewType.lexeme(), Some("newtype"));
         // literals / idents / layout have no fixed spelling
         assert_eq!(Token::Ident("x".into()).lexeme(), None);
         assert_eq!(Token::Int(1).lexeme(), None);

@@ -1890,15 +1890,6 @@ fn d3_widen_field_index_assign_targets_reject_untyped_constant() {
     );
 }
 
-/// A newtype boundary stays nominal — NO int→float widening into a `float`-backed newtype ctor.
-#[test]
-fn widen_no_int_into_float_newtype() {
-    rejects_desugared(
-        "newtype Celsius = float\nc := Celsius(3)\nprint(c)\n",
-        "expected",
-    );
-}
-
 // ===== string interpolation fragments are type-checked =====
 
 #[test]
@@ -2255,17 +2246,6 @@ fn generic_max_over_int_ok() {
 fn generic_max_over_float_and_str_ok_after_eq_embed() {
     ok(
         "fn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nf := max(1.5, 2.5)\ns := max(\"a\", \"b\")\n",
-    );
-}
-
-#[test]
-fn generic_newtype_arg_over_comparable_bound_ok_after_eq_embed() {
-    // B5's POSITIVE direction. A bare `a < b` on two `Meters` short-circuits in
-    // `cmp_overload_allowed`'s NewType arm before `satisfies` is ever consulted, so only a
-    // `[T: Comparable]` BOUND walks the embed recursion that the flip added — and a numeric newtype
-    // takes no `eq` (W6-3d), so its `Eq` half must come from the same intrinsic numeric grant.
-    ok(
-        "newtype Meters = float\nfn max[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nm := max(Meters(1.5), Meters(2.5))\n",
     );
 }
 
@@ -4692,44 +4672,6 @@ x := Numeral.Val(1) + Numeral.Val(\"hello\")
     entry_rejects(src, "cannot apply + to Numeral[int] and Numeral[str]");
 }
 
-#[test]
-fn generic_newtype_compare_via_method_rejected() {
-    // BOUNDARY / soundness (Bug 2): a GENERIC newtype's `compare` method is NEVER dispatched at
-    // runtime — same-newtype `<` ALWAYS auto-flows to the underlying's NATIVE ordering (vm
-    // `compare_op` / interp `eval_binop`), ignoring the user `compare`. So the checker must NOT
-    // accept `Comparable`/`<` for a generic newtype via its method (it would be check-ok / run-
-    // divergent: a numeric underlying silently uses the native order; a non-orderable underlying
-    // faults at runtime). The newtype operator-soundness gate must reject `Comparable` too, not
-    // just Add/Sub/Mul/Div/Mod/Neg.
-    let src = "\
-newtype Wrap[T] = T:
-    fn compare(self, other: Wrap[T]) -> int:
-        return 0
-b := Wrap(3) < Wrap(5)
-";
-    entry_rejects(src, "cannot compare");
-}
-
-#[test]
-fn generic_newtype_compare_satisfies_comparable_rejected() {
-    // Bug 2, the protocol-bound form: a generic newtype must NOT satisfy `Comparable` via its
-    // `compare` method (no runtime dispatch path), so it cannot flow into a `[T: Comparable]` bound.
-    let src = "\
-newtype Wrap[T] = T:
-    fn compare(self, other: Wrap[T]) -> int:
-        return 0
-fn pick[T: Comparable](x: T, y: T) -> T:
-    if x < y:
-        return x
-    return y
-v := pick(Wrap(1), Wrap(2))
-";
-    // D1 restores the pre-M23 reading: a newtype's `==` unwraps to the underlying's native equality,
-    // which is a WORKING `==`, so the `Eq` embed is satisfied and the rejection is Comparable's own
-    // — the operator-soundness gate, which is what this test is actually about.
-    entry_rejects(src, "does not satisfy Comparable");
-}
-
 /// `List.min`/`max`/`min_by`/`max_by` return `Option[T]` (empty is `None`, not a fault) — two type
 /// shapes nothing else in `std/prelude.chz` had, so both are pinned here rather than assumed:
 /// (a) `min`/`max` combine a `where T: Comparable` bound with an `Option` return — the bound must
@@ -4818,7 +4760,6 @@ fn eq_is_satisfied_by_every_type_whose_equality_is_structural() {
         ("", "1"),
         ("struct P:\n    x: int\n", "P(1)"),
         ("enum Color:\n    Red\n    Blue\n", "Color.Red"),
-        ("newtype Name = str\n", "Name(\"a\")"),
         // GENERIC nominals — the shape the feature exists for, and the one the first cut of the
         // walk got wrong in BOTH directions (it walked DECLARED field types, so the decl-site `T`
         // reached the `Ty::Param` arm unbound and refused every one of these).
@@ -5175,11 +5116,10 @@ b := Box(Tag(2))
     );
     // `where T: Eq` over the six structurally-equatable-or-Eq-granted payloads the 2026-08-10 revert
     // was caught by. They are green only because Task 1 landed `Eq`-satisfaction-is-what-`==`-accepts
-    // first. Plus a non-numeric newtype and a function value — all measured `true` today.
+    // first. Plus a function value — all measured `true` today.
     const EQB: &str = "\
 struct P:
     n: int
-newtype Name = str
 struct Box[T]:
     val: T
     fn eq(self, other: Box[T]) -> bool where T: Eq:
@@ -5188,12 +5128,7 @@ fn g(x: int) -> int:
     return x
 ";
     for payload in [
-        "[1,2]",
-        "(1,2)",
-        "P(1)",
-        "b\"ab\"",
-        "Some(1)",
-        "Name(\"a\")",
+        "[1,2]", "(1,2)", "P(1)", "b\"ab\"", "Some(1)",
         // W7-54 — a function value now satisfies `Eq` (identity, not structural), so `Box[fn]` is
         // satisfiable again. **rustc 1.97.0, measured:** `Boxy(f) == Boxy(f)` for `f: fn(i32) -> i32`
         // COMPILES — fn pointers implement `PartialEq`. This spelling printed `true` before W7-41,
@@ -6564,50 +6499,6 @@ b := Box(5) == Box(\"hello\")
     entry_rejects(src, "cannot compare Box[int] and Box[str] for equality");
 }
 
-// (`generic_newtype_eq_satisfies_eq_rejected` is DELETED with D1. Its premise — "a generic newtype
-// must not satisfy `Eq` through its `eq` METHOD" — is now answered one step earlier and more
-// strongly: declaring `eq` on ANY newtype is rejected at the DECLARATION, so the bound question
-// never arises, and a newtype's `Eq` comes from the underlying's native `==` rather than a method.
-// `newtype_eq_method_rejected_at_decl` below covers the surviving rule, on the same fixture.)
-
-/// W6-3d extended to `eq` — on EVERY newtype, not just a numeric one (`docs/gaps.md` L5, closed
-/// 2026-08-08). A newtype's `==` always unwraps to the underlying's native equality and never reaches
-/// a user method, while `.eq()` does reach it: two spellings of one protocol operation disagreeing
-/// silently. W6-3d's "a non-numeric newtype has no operator to disagree with" is true for `+`/`<` and
-/// FALSE for `==`, which every underlying defines. Rejected at the declaration site.
-#[test]
-fn newtype_eq_method_rejected_at_decl() {
-    // numeric — was already rejected by W6-3d's list; still is, and with ONE diagnostic.
-    let numeric = "newtype Meters = float:\n    fn eq(self, other: Meters) -> bool:\n        return true\nm := Meters(1.0)\nprint(m == m)\n";
-    entry_rejects(numeric, "never dispatched as an operator");
-    assert_eq!(
-        check_entry(numeric).len(),
-        1,
-        "a numeric newtype's `eq` matches both premises — it must still report exactly once"
-    );
-    // NON-numeric — the L5 hole. `Name("a") == Name("b")` was `false` while `.eq()` said `true`.
-    entry_rejects(
-        "newtype Name = str:\n    fn eq(self, other: Name) -> bool:\n        return true\nn := Name(\"a\")\nprint(n == n)\n",
-        "always unwraps to str's native equality",
-    );
-    // GENERIC — Task 3's generic-operand carve-out does NOT transfer: it disambiguates the hook from
-    // an ordinary method on a type whose `==` dispatches, and a newtype's never does. Both operand
-    // shapes are rejected, so no `eq` on a newtype can be read as equality-that-`==`-ignores.
-    entry_rejects(
-        "newtype Wrap[T] = T:\n    fn eq(self, other: Wrap[T]) -> bool:\n        return true\nw := Wrap(1)\nprint(w == w)\n",
-        "never dispatched as an operator",
-    );
-    entry_rejects(
-        "newtype Wrap[T] = T:\n    fn eq(self, x: T) -> bool:\n        return true\nw := Wrap(1)\nprint(w == w)\n",
-        "never dispatched as an operator",
-    );
-    // BOUNDARY: only the name `eq` moves. Ordinary methods on a non-numeric newtype stay legal, and
-    // so do its `add`/`compare` (no `+`/`<` exists on a `str` newtype to disagree with them).
-    entry_ok(
-        "newtype Name = str:\n    fn same(self, o: Name) -> bool:\n        return true\n    fn compare(self, other: Name) -> int:\n        return 0\nn := Name(\"a\")\nprint(n.same(n))\n",
-    );
-}
-
 /// **B2** (`docs/gaps.md`) — `==`/`!=` between provably-disjoint types is rejected at check time.
 /// Python answers `False` at runtime; a statically-typed language rejects it (mypy
 /// `--strict-equality`, Go/Rust compile errors), so this is a deliberate, documented divergence.
@@ -6686,7 +6577,7 @@ fn disjoint_types_equality_rejected() {
 
 /// The B2 rejection's PREMISE is "provably disjoint" — every pair that can legitimately be equal must
 /// still be accepted. These are the neighbours the rule must not eat (numeric widening, `Unknown`
-/// silencing, container/`Option`/protocol-existential pairs, same struct/enum/newtype).
+/// silencing, container/`Option`/protocol-existential pairs, same struct/enum).
 #[test]
 fn comparable_types_equality_still_ok() {
     entry_ok(
@@ -6696,7 +6587,7 @@ fn comparable_types_equality_still_ok() {
         "fn main():\n    o: Option[int] = Some(1)\n    print(o == None)\n    print(o == Some(2))\n    r: Result[int] = Ok(1)\n    print(r == Ok(2))\nmain()\n",
     );
     entry_ok(
-        "struct P:\n    x: int\nenum C:\n    Red\n    Blue\nnewtype M = float\nfn main():\n    print(P(1) == P(2))\n    print(C.Red != C.Blue)\n    print(M(1.0) == M(2.0))\nmain()\n",
+        "struct P:\n    x: int\nenum C:\n    Red\n    Blue\nfn main():\n    print(P(1) == P(2))\n    print(C.Red != C.Blue)\nmain()\n",
     );
     // A `str` IS an `Error` existential (the intrinsic Go-style conformance), in either operand order.
     entry_ok(
@@ -6854,12 +6745,12 @@ fn atomic_cas_on_fn_payload_rejected() {
 /// The gate must see through EVERY type structural equality recurses into, not just the payload's
 /// own methods. `cas` compares `Atomic[List[P]]` element-by-element, so it reaches `P`'s `eq` on
 /// exactly the compare a bare `Atomic[P]` does — and the `_ => false` arm this replaces let the
-/// container, `Option`, tuple, struct-field, enum-payload and newtype-underlying spellings all walk
+/// container, `Option`, tuple, struct-field and enum-payload spellings all walk
 /// straight past a gate that was the SOLE stated safety argument for holding the value mutex across
 /// the compare (`vm/netio.rs`). M23 adversarial review, CRITICAL 2.
 #[test]
 fn atomic_payload_reaching_a_nested_eq_rejected() {
-    let decl = "import std.concurrency\nstruct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return true\nstruct W:\n    p: P\nenum E:\n    Has(P)\n    Nope\nnewtype NP = List[P]\n";
+    let decl = "import std.concurrency\nstruct P:\n    x: int\n    fn eq(self, other: P) -> bool:\n        return true\nstruct W:\n    p: P\nenum E:\n    Has(P)\n    Nope\n";
     for (payload, rendered) in [
         ("[P(1)]", "Atomic[List[P]]"),
         ("[[P(1)]]", "Atomic[List[List[P]]]"),
@@ -6868,7 +6759,6 @@ fn atomic_payload_reaching_a_nested_eq_rejected() {
         ("{P(1)}", "Atomic[Set[P]]"),
         ("W(P(1))", "Atomic[W]"),
         ("E.Has(P(1))", "Atomic[E]"),
-        ("NP([])", "Atomic[NP]"),
     ] {
         entry_rejects(
             &format!("{decl}fn main():\n    a := Atomic({payload})\n    print(a.load())\nmain()\n"),
@@ -7557,7 +7447,7 @@ print(u(Ver(1)))
 ");
 }
 
-/// The newtype-`compare` hint must NOT over-fire, and the ordinary rejections stay bare. Three
+/// The `Comparable` rejections stay bare. Three
 /// controls: no `compare` at all (Comparable's own requirement is what is missing), a bare `T: Eq`
 /// bound over a struct (now SATISFIED — D1), and a user protocol whose `compare` is mis-typed.
 #[test]
@@ -7591,7 +7481,7 @@ fn u[T: Eq](a: T, b: T) -> bool:
     return a == b
 print(u(Ver(1), Ver(2)))
 ");
-    // (3) A user protocol requiring only `compare` — no `Eq` anywhere, so no newtype sentence.
+    // (3) A user protocol requiring only `compare` — no `Eq` anywhere, so the message stays bare.
     bare(
         "\
 protocol MyCmp:
@@ -7605,54 +7495,6 @@ fn u[T: MyCmp](a: T) -> int:
 print(u(Ver(1)))
 ",
         "type Ver does not satisfy MyCmp (method 'compare' has the wrong signature)",
-    );
-}
-
-/// A GENERIC NEWTYPE is a dead end, not a missing method: `Comparable` embeds `Eq`, and declaring
-/// `eq` on any newtype is itself an error, so the struct/enum sentence ("define `eq` too") would send
-/// this user to a second diagnostic. Say it is unsatisfiable and name the way out instead.
-#[test]
-fn comparable_bound_on_newtype_says_it_is_unsatisfiable() {
-    let src = "\
-newtype Box[T] = T:
-    fn compare(self, other: Box[T]) -> int:
-        return 0
-fn mx[T: Comparable](a: T, b: T) -> T:
-    if a < b:
-        return b
-    return a
-print(mx(Box(1), Box(2)))
-";
-    rejects(
-        src,
-        "type Box[int] does not satisfy Comparable: a newtype's `<` always uses the underlying's native ordering, never a `compare` method, so a `compare` method can never make a newtype satisfy `Comparable` — use a struct if you need your own ordering",
-    );
-    // The sentence is scoped to a `compare`-declaring newtype for a reason: a NUMERIC newtype DOES
-    // satisfy `Comparable`, intrinsically. It can never reach the hint (declaring `compare` on one is
-    // rejected at the decl site, and the intrinsic grant means its bound never fails) — but a wider
-    // claim in the text would have been false.
-    ok(
-        "newtype Meters = float\nfn mx[T: Comparable](a: T, b: T) -> T:\n    if a < b:\n        return b\n    return a\nprint(mx(Meters(1.0), Meters(2.0)))\n",
-    );
-    // The advice must be REACHABLE: adding `eq` — what the struct/enum sentence would tell them — is
-    // itself an error on a newtype, which is exactly why that sentence is wrong here.
-    rejects(
-        "newtype Box[T] = T:\n    fn eq(self, other: Box[T]) -> bool:\n        return true\n",
-        "operator method 'eq' on a newtype is never dispatched as an operator",
-    );
-    // A newtype with NO `compare` keeps the bare wording (same non-over-fire rule as the struct case).
-    let errs = check_src(
-        "\
-newtype Box[T] = T
-fn mx[T: Comparable](a: T, b: T) -> T:
-    return a
-print(mx(Box(1), Box(2)))
-",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message == "type Box[int] does not satisfy Comparable"),
-        "a comparator-less newtype must keep the bare wording, got: {errs:?}"
     );
 }
 
@@ -7739,7 +7581,7 @@ f(true)
     assert_eq!(n, 1, "expected exactly one Comparable diagnostic, got {n}");
 }
 
-// ----- conditional methods: `where` on a user struct/enum/newtype method's RECEIVER type param -----
+// ----- conditional methods: `where` on a user struct/enum method's RECEIVER type param -----
 
 #[test]
 fn conditional_method_where_receiver_param_accepted() {
@@ -7872,31 +7714,6 @@ enum Opt[T]:
         return 1
 o := Opt.Some(Q(1))
 x := o.peek()
-",
-        "does not satisfy Comparable (missing method 'compare')",
-    );
-}
-
-#[test]
-fn conditional_method_newtype_where_receiver_enforced() {
-    // A generic newtype method may carry a receiver-param `where` too — `fn_sig` is shared, so it
-    // must be ENFORCED at the newtype arm (else accept-without-enforce soundness hole).
-    ok("\
-newtype Stack[T] = List[T]:
-    fn top(self) -> int where T: Comparable:
-        return 1
-s := Stack([5])
-x := s.top()
-");
-    rejects(
-        "\
-struct Q:
-    n: int
-newtype Stack[T] = List[T]:
-    fn top(self) -> int where T: Comparable:
-        return 1
-s := Stack([Q(1)])
-x := s.top()
 ",
         "does not satisfy Comparable (missing method 'compare')",
     );
@@ -8080,8 +7897,8 @@ x := b.max2(3)
 
 #[test]
 fn conditional_enum_method_body_uses_receiver_bound() {
-    // BUG-2 mirror for an enum conditional method (check_fn_body is shared across struct/enum/
-    // newtype, so the single fix covers all three).
+    // BUG-2 mirror for an enum conditional method (check_fn_body is shared across struct/enum, so
+    // the single fix covers both).
     ok("\
 enum Wrap[T]:
     V(T)
@@ -9016,14 +8833,6 @@ fn nested_fn_shadows_struct_ctor_accepted() {
     );
 }
 
-/// A nested fn named after a same-module NEWTYPE constructor is accepted as a local (TICKET-180).
-#[test]
-fn nested_fn_shadows_newtype_ctor_accepted() {
-    entry_ok(
-        "newtype UserId = int\nfn outer() -> int:\n    fn UserId() -> int:\n        return 99\n    return UserId()\nprint(outer())\n",
-    );
-}
-
 /// A nested fn named after a BUILTIN variant ctor (`Ok`/`Err`/`Some`/`None`) is accepted as a local.
 #[test]
 fn nested_fn_shadows_builtin_variant_accepted() {
@@ -9428,7 +9237,8 @@ struct Point:
 enum Shade:
     Light
     Dark(int)
-newtype UserId = int
+struct UserId:
+    id: int
 struct Box[T]:
     v: T
     fn of(v: T) -> Box[T]:
@@ -9915,16 +9725,6 @@ fn unrelated_method_name_suggests_nothing() {
         .find(|e| e.message.contains("has no method 'qqqqq'"))
         .unwrap_or_else(|| panic!("expected a 'qqqqq' miss, got: {errs:?}"));
     assert_eq!(e.help, None, "expected no suggestion, got: {e:?}");
-}
-
-/// TICKET-007 criterion 12: a newtype method typo suggests the newtype's own method.
-#[test]
-fn newtype_method_typo_suggests_near_miss() {
-    rejects_help(
-        "newtype Wrap = int:\n    fn tick(self) -> int:\n        return 1\nw := Wrap(1)\nw.tik()\n",
-        "has no method 'tik'",
-        "did you mean 'tick'",
-    );
 }
 
 /// TICKET-007 criterion 13: an enum method typo suggests the enum's own method.
@@ -10436,25 +10236,6 @@ fn struct_ctor_is_replaced_by_a_same_module_fn() {
 }
 
 #[test]
-fn newtype_ctor_is_replaced_by_a_same_module_fn() {
-    // TICKET-055: DEC-029 covers a struct's field ctor; the newtype wrapping ctor must follow the
-    // same rule -- a colliding module-level fn wins bare too. Before the fix this typed `N(3)`
-    // against the newtype's `int` underlying instead of `fn N(s: str)` and emitted no diagnostic.
-    rejects(
-        "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\nv := N(3)\n",
-        "argument 1 of 'N': expected str, found int",
-    );
-}
-
-#[test]
-fn newtype_raw_ctor_survives_inside_the_shadowing_fn_body() {
-    // TICKET-055: DEC-029's escape hatch (`raw_ctor_owner`) must extend to newtype -- inside the
-    // shadowing fn's own body the bare name is still the raw wrapping ctor, or this is infinite
-    // recursion.
-    ok("newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\nprint(N(\"abc\"))\n");
-}
-
-#[test]
 fn variant_name_shared_across_enums_is_allowed() {
     // Variants are scoped under their enum (keyed by `(enum, variant)`), so two enums may share a
     // variant name. Each is reached via its qualified form (`A.X` / `B.X`).
@@ -10508,72 +10289,6 @@ fn dup_enum_method_is_reported() {
 }
 
 #[test]
-fn dup_newtype_method_is_reported() {
-    rejects(
-        "newtype N = int:\n    fn f(self) -> int: return 1\n    fn f(self) -> int: return 2\n",
-        "method 'f' is already defined",
-    );
-}
-
-#[test]
-fn newtype_static_method_is_rejected_with_clear_message() {
-    // Static (associated) methods on a newtype are a deferred v1 limit; reject with a clear
-    // message at the decl site instead of a cryptic 'unknown name' at the call site.
-    let errs = check_src(
-        "newtype Meters = float:\n    fn zero() -> Meters: return Meters(0.0)\nm := Meters.zero()\n",
-    );
-    assert!(
-        errs.iter().any(|e| {
-            e.message.contains("static")
-                && e.message.contains("newtype")
-                && e.message.contains("not supported")
-        }),
-        "expected a clear not-supported message, got: {errs:?}"
-    );
-    assert!(
-        !errs.iter().any(|e| e.message.contains("unknown name")),
-        "should not surface the cryptic 'unknown name' error, got: {errs:?}"
-    );
-}
-
-/// gaps.md W6-3d, ruling (a). A NUMERIC newtype may not define an operator-named method: the
-/// operator always auto-flows to the underlying's native op while `.add()` would dispatch the user
-/// method, so the two spellings of one protocol operation would silently disagree for that receiver.
-/// Rejected at the decl site — the alternative (make the method dispatch as the operator) was
-/// implemented and rejected because it makes `<` intransitive under a heterogeneous `List[Comparable]`.
-#[test]
-fn numeric_newtype_operator_named_method_is_rejected() {
-    for name in ["add", "sub", "mul", "div", "mod", "compare"] {
-        let src =
-            format!("newtype Score = int:\n    fn {name}(self, o: Score) -> int: return 42\n");
-        let errs = check_src(&src);
-        assert!(
-            errs.iter().any(|e| {
-                e.message.contains("operator method")
-                    && e.message.contains("numeric newtype")
-                    && e.message.contains(name)
-            }),
-            "expected the W6-3d reject for '{name}', got: {errs:?}"
-        );
-    }
-}
-
-/// The W6-3d reject is NARROW on purpose — it must not become "a numeric newtype may not have
-/// methods". An ordinary method is still fine, and so is an operator-named method on a NON-numeric
-/// or GENERIC newtype (no operator exists there to disagree with).
-#[test]
-fn numeric_newtype_ordinary_method_and_non_numeric_operator_name_still_ok() {
-    ok("newtype Score = int:\n    fn double(self) -> Score: return Score(int(self) * 2)\n");
-    ok("newtype Name = str:\n    fn add(self, other: Name) -> Name: return self\n");
-    ok("newtype Box[T] = T:\n    fn add(self, other: Box[T]) -> Box[T]: return self\n");
-    // `neg` is NOT rejected: unary `-` has no newtype path (`Neg` is never granted — see
-    // `proto.rs`), so `-m` is already a type error and a `neg` method is the ONLY spelling of
-    // negation on a numeric newtype. Rejecting it would delete working code with no operator to
-    // disagree with. This case is the boundary that keeps the rule honest to its own premise.
-    ok("newtype Meters = float:\n    fn neg(self) -> Meters: return Meters(0.0 - float(self))\n");
-}
-
-#[test]
 fn dup_method_diagnostic_is_clear_not_return_mismatch() {
     // The duplicate-method error must be the headline, not the misleading return-type cascade.
     let errs = check_src(
@@ -10612,7 +10327,7 @@ fn bare_variant_constructor_is_rejected_with_qualify_hint() {
 
 #[test]
 fn bare_generic_variant_turbofish_keeps_qualify_hint_via_graph() {
-    // REGRESSION (same keying class as the name_is_generic struct/newtype fix): a bare GENERIC-enum
+    // REGRESSION (same keying class as the name_is_generic struct fix): a bare GENERIC-enum
     // variant with a turbofish (`Full[int](5)`) must still get the "write it qualified" hint, not the
     // misleading "takes no type arguments". `variant_owners` stores bare enum names but
     // `enum_type_params` is module-keyed, so `name_is_generic`'s variant arm has to go through
@@ -11073,59 +10788,6 @@ s := xs.sum()
     rejects(src, "numeric");
 }
 
-// A SCALAR NUMERIC NEWTYPE is the one non-scalar admitted: it has the monoid (the underlying's native
-// `+`, and a `T(0)` zero the checker hands the backend as a seed). `sum` returns the NEWTYPE — Go's
-// `type Cents int` sums to `main.Cents`. Behaviour, including the empty list, is pinned in
-// `tests/chz/spec/newtype_test.chz`; these pin the check-time verdict + return type only.
-
-#[test]
-fn list_sum_numeric_newtype_returns_the_newtype() {
-    ok("newtype C = int\nxs := [C(1), C(2)]\ny: C = xs.sum()\n");
-    ok("newtype R = float\nxs: List[R] = []\ny: R = xs.sum()\n");
-    // NOT the underlying — a raw-int return would be a check-ok/run-wrong-type regression. The needle
-    // is the ASSIGNMENT diagnostic, not `"int"`: `"int"` is a substring of the PRE-change message
-    // (`sum() requires a numeric list, found List[int]`) too, so it would pass on a binary without
-    // this feature and prove nothing.
-    rejects(
-        "newtype C = int\nxs := [C(1)]\ny: int = xs.sum()\n",
-        "cannot assign C to variable of type int",
-    );
-}
-
-#[test]
-fn list_sum_non_numeric_newtype_still_rejected() {
-    // `newtype N = str` has no native `+` (the same reason it fails `where T: Add`), so `sum` on it
-    // must keep reporting the numeric diagnostic — an `add` METHOD on it is never dispatched as an
-    // operator and does not change that.
-    rejects(
-        "newtype N = str\nxs := [N(\"a\")]\ns := xs.sum()\n",
-        "numeric",
-    );
-    let with_method = "\
-newtype N = str:
-    fn add(self, other: N) -> N:
-        return N(\"x\")
-xs := [N(\"a\")]
-s := xs.sum()
-";
-    rejects(with_method, "numeric");
-}
-
-#[test]
-fn list_sum_nested_and_generic_newtype_rejected() {
-    // A newtype OF a newtype has a non-numeric underlying, so it gets no intrinsic `Add` — `B + B`
-    // and `[B].min()`'s `Comparable` bound already reject it, and `sum` stays consistent with them.
-    rejects(
-        "newtype C = int\nnewtype B = C\nxs := [B(C(1))]\ns := xs.sum()\n",
-        "numeric",
-    );
-    // A GENERIC newtype is methods-only — no native operator auto-flow even over a numeric arg.
-    rejects(
-        "newtype Box[T] = T\nxs := [Box(1)]\ns := xs.sum()\n",
-        "numeric",
-    );
-}
-
 #[test]
 fn method_on_int_rejected() {
     rejects("x := 5\ny := x.upper()\n", "type int has no method 'upper'");
@@ -11152,16 +10814,12 @@ fn user_struct_named_option_rejected() {
 #[test]
 fn user_decl_named_tuple_rejected() {
     // `tuple` is a reserved global (structural tuple type). No decl form may shadow it — matching its
-    // container siblings (`struct List`/`range`/…). Covers all five decl keywords in one place.
+    // container siblings (`struct List`/`range`/…). Covers all four decl keywords in one place.
     rejects(
         "struct tuple:\n    x: int\n",
         "type 'tuple' is reserved (builtin)",
     );
     rejects("enum tuple:\n    A\n", "type 'tuple' is reserved (builtin)");
-    rejects(
-        "newtype tuple = int\n",
-        "type 'tuple' is reserved (builtin)",
-    );
     rejects("type tuple = int\n", "type 'tuple' is reserved (builtin)");
     rejects(
         "protocol tuple:\n    fn f(self)\n",
@@ -11956,26 +11614,6 @@ fn checker_named_fn_import_resolves_enum_method() {
     assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
 }
 
-/// Same bug, NEWTYPE method: a named-imported factory returning a newtype must resolve its method.
-#[test]
-fn checker_named_fn_import_resolves_newtype_method() {
-    let t = TmpDir::new();
-    t.write(
-        "lib.chz",
-        "newtype Meters = int:\n    fn doubled(self) -> int:\n        return int(self) * 2\nfn mk() -> Meters:\n    return Meters(21)\n",
-    );
-    let entry = t.write(
-        "main.chz",
-        "import mk from lib\nfn main():\n    print(mk().doubled())\n",
-    );
-    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
-    let errs = match check_graph(&graph) {
-        Ok(()) => Vec::new(),
-        Err(e) => e,
-    };
-    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
-}
-
 /// Boundary: the fix does NOT over-open. Importing only the factory still leaves the type NAME
 /// out of scope — naming/constructing it must STILL error "unknown type Widget".
 #[test]
@@ -12145,27 +11783,6 @@ fn named_fn_import_satisfies_protocol_enum() {
     t.write(
         "lib.chz",
         "enum Shape:\n    Circle(int)\n    fn describe(self) -> str:\n        match self:\n            Shape.Circle(r): return \"C{r}\"\nfn mk() -> Shape:\n    return Shape.Circle(3)\n",
-    );
-    let entry = t.write(
-        "main.chz",
-        "import mk from lib\nprotocol Describable:\n    fn describe(self) -> str\nfn show[T: Describable](x: T):\n    print(x.describe())\nfn main():\n    show(mk())\n",
-    );
-    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
-    let errs = match check_graph(&graph) {
-        Ok(()) => Vec::new(),
-        Err(e) => e,
-    };
-    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
-}
-
-/// Same, NEWTYPE: a named-fn-imported newtype value whose own method satisfies the protocol is
-/// accepted at a protocol bound.
-#[test]
-fn named_fn_import_satisfies_protocol_newtype() {
-    let t = TmpDir::new();
-    t.write(
-        "lib.chz",
-        "newtype Meters = int:\n    fn describe(self) -> str:\n        return \"M{int(self)}\"\nfn mk() -> Meters:\n    return Meters(5)\n",
     );
     let entry = t.write(
         "main.chz",
@@ -14097,42 +13714,6 @@ fn path_from_import_still_reserves_the_name_against_a_user_struct() {
 }
 
 #[test]
-fn qualified_newtype_call_is_replaced_by_a_colliding_module_fn() {
-    // TICKET-055 — supersedes the TICKET-029 review's opposite pin. DEC-029's `m.S(args)` clause
-    // covers a newtype exactly like a struct: a module-level fn named after a same-module NEWTYPE
-    // DOES shadow the qualified `module.Name(args)` newtype constructor. The old pin only matched
-    // the checker's then-ungated newtype arm; the checker arm is now gated too, so both halves agree
-    // on the fn winning.
-    files_reject(
-        &[
-            (
-                "lib.chz",
-                "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\n",
-            ),
-            ("main.chz", "import lib\nv := lib.N(5)\nprint(v)\n"),
-        ],
-        "argument 1 of 'N': expected str, found int",
-    );
-}
-
-#[test]
-fn from_imported_newtype_ctor_fn_wins_and_binds_the_type() {
-    // TICKET-055 — the newtype twin of DEC-029's "a colliding from-import binds BOTH namespaces".
-    // `import N from lib` must bind the fn (so `N("abcd")` types against `fn N(s: str)`) AND the
-    // type (so `v: N = ...` resolves), same as `bind_imported_struct_name` does for a struct.
-    files_ok(&[
-        (
-            "lib.chz",
-            "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\n",
-        ),
-        (
-            "main.chz",
-            "import N from lib\nv: N = N(\"abcd\")\nprint(v)\n",
-        ),
-    ]);
-}
-
-#[test]
 fn native_fs_mutations_typecheck_as_result_nil() {
     entry_ok(
         "import std.fs\nfn main():\n    match fs.mkdir(\"d\"):\n        Ok(_): print(\"made\")\n        Err(e): print(e)\n    match fs.append(\"f\", \"x\"):\n        Ok(_): print(\"app\")\n        Err(e): print(e)\n    match fs.rename(\"a\", \"b\"):\n        Ok(_): print(\"ren\")\n        Err(e): print(e)\n    match fs.copy(\"a\", \"b\"):\n        Ok(_): print(\"cp\")\n        Err(e): print(e)\n    match fs.remove_file(\"f\"):\n        Ok(_): print(\"rmf\")\n        Err(e): print(e)\n    match fs.remove_dir(\"d\"):\n        Ok(_): print(\"rmd\")\n        Err(e): print(e)\n",
@@ -15243,7 +14824,7 @@ fn user_struct_match_without_import_ok() {
 // bare name as a Builtin-origin layout; a user `struct X` would overwrite the seed and carry the
 // user layout while the runtime returns/constructs the native shape → field trap. These types are
 // NOT reserved (a bare unimported `struct Match` is legal) — the import is an ordinary name
-// collision, exactly like the enum/newtype/typealias siblings already report.
+// collision, exactly like the enum/typealias siblings already report.
 #[test]
 fn import_plus_same_name_struct_decl_rejected() {
     // from-import form, the struct-modeled natives
@@ -18780,7 +18361,7 @@ fn type_param_named_like_reserved_type_rejected() {
 fn reserved_builtin_type_names_rejected_as_type_params() {
     // A reserved builtin type name used as a generic type-PARAMETER identifier must be rejected with
     // the same `type 'X' is reserved (builtin)` error `struct int` produces — across struct, enum,
-    // newtype, free fn, struct method (its own `[U]`), protocol, AND the fixed-width FFI integer
+    // free fn, struct method (its own `[U]`), protocol, AND the fixed-width FFI integer
     // names. Pre-fix every one of these type-checked clean (then shadowed kind-dependently). Uses the
     // real build_graph + check_graph entrypoint path (module-prefixed keys), guarding the CLI path.
     for (src, name) in [
@@ -18792,8 +18373,6 @@ fn reserved_builtin_type_names_rejected_as_type_params() {
         ("struct Box[Result]:\n    v: int\n", "Result"),
         // enum
         ("enum E[int]:\n    A\n", "int"),
-        // newtype
-        ("newtype N[List] = int\n", "List"),
         // free fn
         ("fn id[int](x: int) -> int:\n    return x\n", "int"),
         // struct method's OWN type param (covered at fn_sig, distinct from the struct's `[T]`)
@@ -18989,7 +18568,7 @@ fn reserved_builtin_type_names_rejected_at_decl() {
         );
     }
     // An FFI fixed-width type name (`int32`) is reserved too (via TYPE_NAMES) — `struct int32` / `enum
-    // int32` must be rejected, matching the NewType/TypeAlias guards.
+    // int32` must be rejected, matching the TypeAlias guard.
     for src in [
         "struct int32:\n    x: int\nfn main():\n    print(1)\nmain()\n",
         "enum int32:\n    A\nfn main():\n    print(1)\nmain()\n",
@@ -19832,7 +19411,7 @@ fn extern_owned_str_param_via_alias_rejected() {
 #[test]
 fn protocol_named_types_rejected_at_decl() {
     // The prebuilt PROTOCOL names may be used as bounds (`[T: Comparable]`) but must NOT be
-    // redeclared as a struct/enum/newtype/type alias — left ungated such a decl silently shadowed
+    // redeclared as a struct/enum/type alias — left ungated such a decl silently shadowed
     // the protocol and produced a self-contradictory diagnostic ("type Comparable does not satisfy
     // Comparable"). Mirrors the reserved-TYPE-name reservation (Result/Channel/...). The DECL of the
     // name is reserved; the protocol BOUND of the same name stays legal (see the boundary test).
@@ -19842,7 +19421,6 @@ fn protocol_named_types_rejected_at_decl() {
         for src in [
             format!("struct {name}:\n    x: int\nfn main():\n    print(1)\nmain()\n"),
             format!("enum {name}:\n    A\nfn main():\n    print(1)\nmain()\n"),
-            format!("newtype {name} = int\nfn main():\n    print(1)\nmain()\n"),
             format!("type {name} = int\nfn main():\n    print(1)\nmain()\n"),
         ] {
             let errs = check_entry(&src);
@@ -20968,30 +20546,6 @@ fn extern_named_after_struct_rejected_entry_path() {
         "struct S:\n    a: int\n\nextern \"libc.so.6\":\n    fn S(x: int) -> int\n",
         "builtin/reserved name",
     );
-}
-
-#[test]
-fn extern_named_after_newtype_rejected() {
-    // W6-6, sibling arm: a `newtype` registers a bare-visible one-arg ctor exactly like a struct, so
-    // it shadows an extern the same way. Pre-fix this checked OK and then silently called the CTOR:
-    // `newtype abs = int` + `extern fn abs(x: int) -> int` printed `abs(-7)` instead of `7` on BOTH
-    // engines. Caught by the adversarial review of the first cut of this fix, whose predicate covered
-    // `struct_names` but not `newtype_names` — the same partial-coverage class the sweep closes.
-    entry_rejects(
-        "newtype abs = int\n\nextern \"libc.so.6\":\n    fn abs(x: int) -> int\n",
-        "builtin/reserved name",
-    );
-    // Both decl orders (the sweep runs after the hoist loop, so it must be order-independent).
-    entry_rejects(
-        "extern \"libc.so.6\":\n    fn abs(x: int) -> int\n\nnewtype abs = int\n",
-        "builtin/reserved name",
-    );
-    rejects(
-        "newtype abs = int\n\nextern \"libc.so.6\":\n    fn abs(x: int) -> int\n",
-        "builtin/reserved name",
-    );
-    // Control: a newtype whose name collides with NOTHING leaves the extern reachable.
-    entry_ok("newtype Meters = int\n\nextern \"libc.so.6\":\n    fn abs(x: int) -> int\n");
 }
 
 #[test]
@@ -22413,46 +21967,7 @@ fn enum_add_bound_into_generic_fn_ok() {
     );
 }
 
-// ===== newtype (M21): nominal distinct types =====
-
-#[test]
-fn newtype_construct_ok() {
-    ok("newtype UserId = int\nfn main():\n    uid := UserId(10)\n    print(uid)\nmain()\n");
-}
-
-#[test]
-fn newtype_construct_wrong_arg_rejected() {
-    rejects(
-        "newtype UserId = int\nfn main():\n    uid := UserId(\"hi\")\nmain()\n",
-        "UserId",
-    );
-}
-
-#[test]
-fn newtype_not_assignable_from_underlying_literal() {
-    // A bare int literal is NOT assignable to a UserId binding (nominal distinctness).
-    rejects(
-        "newtype UserId = int\nfn main():\n    x: UserId = 10\nmain()\n",
-        "UserId",
-    );
-}
-
-#[test]
-fn newtype_passed_where_underlying_expected_rejected() {
-    // needs_int wants a raw int; a UserId must NOT flow in.
-    rejects(
-        "newtype UserId = int\nfn needs_int(x: int) -> int:\n    return x\nfn main():\n    uid := UserId(10)\n    print(needs_int(uid))\nmain()\n",
-        "expected int",
-    );
-}
-
-#[test]
-fn newtype_cast_unwrap_ok() {
-    // int(uid) unwraps to the inner int; float(meters) for Meters=float unwraps.
-    ok(
-        "newtype UserId = int\nnewtype Meters = float\nfn main():\n    uid := UserId(10)\n    n: int = int(uid)\n    m := Meters(2.5)\n    f: float = float(m)\n    print(n)\n    print(f)\nmain()\n",
-    );
-}
+// ===== scalar casts =====
 
 #[test]
 fn scalar_cast_rejects_aggregate_arg() {
@@ -22600,14 +22115,12 @@ fn scalar_cast_still_accepts_the_payload_of_a_rejected_kind() {
 }
 
 #[test]
-fn scalar_cast_still_accepts_scalars_newtypes_and_str() {
+fn scalar_cast_still_accepts_scalars_and_str() {
     // W8-31 neighbours: the scalar-cast domain (int/float/bool/str) must stay untouched by the
-    // struct/enum/fn reject — a newtype, a generic type param, and str-casting a struct/enum all
-    // stay clean.
+    // struct/enum/fn reject — a generic type param and str-casting a struct/enum stay clean.
     ok("struct P:\n    x: int\nfn main():\n    print(str(P(1)))\nmain()\n");
     ok("enum C:\n    Red\nfn main():\n    print(str(C.Red))\nmain()\n");
     ok("fn conv[T](x: T) -> int:\n    return int(x)\nfn main():\n    print(conv(1))\nmain()\n");
-    ok("newtype N = int\nfn main():\n    n := N(3)\n    print(int(n))\nmain()\n");
 }
 
 #[test]
@@ -22698,254 +22211,11 @@ fn match_reachable_arms_do_not_warn() {
 }
 
 #[test]
-fn newtype_str_underlying_unwrap_ok() {
-    // For newtype N = str, str(n) unwraps to the inner str.
-    ok(
-        "newtype Name = str\nfn main():\n    n := Name(\"bob\")\n    s: str = str(n)\n    print(s)\nmain()\n",
-    );
-}
-
-#[test]
-fn newtype_same_type_arithmetic_ok() {
-    // Meters + Meters -> Meters; Meters < Meters -> bool.
-    ok(
-        "newtype Meters = float\nfn main():\n    a := Meters(1.0)\n    b := Meters(2.0)\n    c: Meters = a + b\n    lt: bool = a < b\n    print(lt)\nmain()\n",
-    );
-}
-
-#[test]
-fn newtype_plus_raw_underlying_rejected() {
-    rejects(
-        "newtype Meters = float\nfn main():\n    a := Meters(1.0)\n    c := a + 2.0\nmain()\n",
-        "cannot apply",
-    );
-}
-
-#[test]
-fn newtype_plus_other_newtype_rejected() {
-    rejects(
-        "newtype Meters = float\nnewtype Seconds = float\nfn main():\n    a := Meters(1.0)\n    b := Seconds(2.0)\n    c := a + b\nmain()\n",
-        "cannot apply",
-    );
-}
-
-#[test]
-fn newtype_method_dispatch_ok() {
-    ok(
-        "newtype Meters = float:\n    fn double(self) -> Meters:\n        return self + self\nfn main():\n    m := Meters(2.0)\n    d: Meters = m.double()\n    print(d)\nmain()\n",
-    );
-}
-
-#[test]
-fn newtype_add_into_generic_add_bound_ok() {
-    // A newtype with its native same-type + passes into fn twice[T: Add].
-    ok(
-        "newtype Meters = float\nfn twice[T: Add](x: T) -> T:\n    return x + x\nfn main():\n    m := twice(Meters(3.0))\n    print(m)\nmain()\n",
-    );
-}
-
-#[test]
-fn newtype_as_map_key_requires_hash() {
-    // Without hash(self), a newtype is NOT a map/set key even if underlying int is hashable.
-    rejects(
-        "newtype UserId = int\nfn main():\n    m: Map[UserId, str] = {}\nmain()\n",
-        "Hashable",
-    );
-}
-
-#[test]
-fn newtype_with_hash_is_map_key_ok() {
-    ok(
-        "newtype UserId = int:\n    fn hash(self) -> int:\n        return int(self)\nfn main():\n    m: Map[UserId, str] = {}\n    m[UserId(1)] = \"a\"\n    print(m.len())\nmain()\n",
-    );
-}
-
-#[test]
-fn newtype_aggregate_underlying_no_method_inherit() {
-    // newtype Names = List[str] does NOT inherit .push() (v1 limit).
-    rejects(
-        "newtype Names = List[str]\nfn main():\n    ns := Names([\"a\"])\n    ns.push(\"b\")\nmain()\n",
-        "push",
-    );
-}
-
-#[test]
-fn newtype_scalar_aggregate_cast_unwrap_ok() {
-    // A scalar (non-generic) aggregate newtype crosses the boundary the same explicit way a scalar
-    // newtype does: the matching aggregate cast builtin unwraps it. `List(ns)` for `Names = List[str]`
-    // yields `List[str]` (mirrors `int(uid)` for `UserId = int`) — distinct type, explicit cast.
-    ok(
-        "newtype Names = List[str]\nfn main():\n    ns := Names([\"a\", \"b\"])\n    xs: List[str] = List(ns)\n    print(xs.len())\nmain()\n",
-    );
-    // set / map underlyings unwrap via Set() / Map() likewise (the annotated binding is the assertion
-    // that the unwrap yields the matching aggregate type).
-    ok(
-        "newtype Tags = Set[str]\nfn main():\n    t := Tags({\"x\"})\n    s: Set[str] = Set(t)\n    print(s)\nmain()\n",
-    );
-    ok(
-        "newtype Counts = Map[str, int]\nfn main():\n    c := Counts({\"a\": 1})\n    m: Map[str, int] = Map(c)\n    print(m)\nmain()\n",
-    );
-}
-
-#[test]
-fn newtype_scalar_aggregate_cast_unwrap_wrong_target_rejected() {
-    // The unwrap must match the underlying aggregate: `Set(ns)` on a list-backed newtype is rejected
-    // (no cross-aggregate coercion) — the explicit cast still respects the underlying's shape.
-    rejects(
-        "newtype Names = List[str]\nfn main():\n    ns := Names([\"a\"])\n    s := Set(ns)\n    print(s)\nmain()\n",
-        "Set",
-    );
-}
-
-#[test]
 fn raw_string_is_str_type() {
     // A raw string is plain `str` everywhere a normal string is — annotating it `str` is clean.
     ok("fn main():\n    s: str = r\"\\d+\"\n    print(s)\nmain()\n");
     // ...and using it where an `int` is expected is rejected (proves it's classified `str`, not int).
     rejects("fn main():\n    n: int = r\"x\"\nmain()\n", "str");
-}
-
-// ---- generic newtype (M21): type params, methods-only, turbofish ctor, cast-unwrap ----
-
-#[test]
-fn generic_newtype_decl_ok() {
-    // `newtype Stack[T] = List[T]` with methods referencing T type-checks.
-    ok(
-        "newtype Stack[T] = List[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    print(List(s).len())\nmain()\n",
-    );
-}
-
-#[test]
-fn generic_newtype_method_body_and_dispatch_ok() {
-    // Inside a method `self` is Stack[T]; at the call site Stack[int].peek() returns Option[int].
-    ok(
-        "newtype Stack[T] = List[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    x: Option[int] = s.peek()\n    print(x == None)\nmain()\n",
-    );
-}
-
-#[test]
-fn generic_newtype_dispatch_substitutes_targs() {
-    // The substituted return type is enforced: assigning Stack[int].peek() to Option[str] is rejected.
-    rejects(
-        "newtype Stack[T] = List[T]:\n    fn peek(self) -> Option[T]:\n        return None\nfn main():\n    s := Stack([1, 2])\n    x: Option[str] = s.peek()\nmain()\n",
-        "Option[str]",
-    );
-}
-
-#[test]
-fn generic_newtype_ctor_infer_ok() {
-    // `Stack([1, 2])` infers Stack[int].
-    ok(
-        "newtype Stack[T] = List[T]\nfn main():\n    s: Stack[int] = Stack([1, 2])\n    print(List(s).len())\nmain()\n",
-    );
-}
-
-#[test]
-fn generic_newtype_ctor_turbofish_ok() {
-    // `Stack[int]([])` — the empty list can't bind T, so the turbofish supplies it.
-    ok(
-        "newtype Stack[T] = List[T]\nfn main():\n    s: Stack[int] = Stack[int]([])\n    print(List(s).len())\nmain()\n",
-    );
-}
-
-#[test]
-fn generic_newtype_ctor_infer_set_underlying_ok() {
-    // A set-underlying generic newtype infers its param from the arg just like list/map —
-    // `Bag({1, 2, 3})` ⇒ Bag[int] with NO turbofish (regression: `unify` lacked a `Ty::Set` arm).
-    ok(
-        "newtype Bag[T: Hashable + Eq] = Set[T]\nfn main():\n    b: Bag[int] = Bag({1, 2, 3})\n    s: Set[int] = Set(b)\n    print(s)\nmain()\n",
-    );
-}
-
-#[test]
-fn generic_newtype_ctor_wrong_arg_rejected() {
-    // `Stack[int](["a"])` — arg element str vs declared int.
-    rejects(
-        "newtype Stack[T] = List[T]\nfn main():\n    s := Stack[int]([\"a\"])\nmain()\n",
-        "expected",
-    );
-}
-
-#[test]
-fn generic_newtype_cast_unwrap_propagates() {
-    // `List(s)` for s: Stack[int] yields List[int].
-    ok(
-        "newtype Stack[T] = List[T]\nfn main():\n    s := Stack([1, 2])\n    xs: List[int] = List(s)\n    print(xs.len())\nmain()\n",
-    );
-}
-
-#[test]
-fn generic_newtype_cast_unwrap_wrong_elem_rejected() {
-    // `List(s)` for s: Stack[int] is NOT List[str].
-    rejects(
-        "newtype Stack[T] = List[T]\nfn main():\n    s := Stack([1, 2])\n    xs: List[str] = List(s)\nmain()\n",
-        "List[str]",
-    );
-}
-
-#[test]
-fn generic_newtype_box_scalar_cast_unwrap_ok() {
-    // `newtype Box[T] = T`; int(Box(5)) unwraps to the substituted underlying int.
-    ok(
-        "newtype Box[T] = T\nfn main():\n    b: Box[int] = Box(5)\n    n: int = int(b)\n    print(n)\nmain()\n",
-    );
-}
-
-#[test]
-fn generic_newtype_methods_only_no_operator_autoflow() {
-    // `newtype Box[T] = T` — Box(1) + Box(2) is REJECTED (methods-only, no native auto-flow), even
-    // though the underlying int is numeric. Operators come only from the newtype's own methods.
-    rejects(
-        "newtype Box[T] = T\nfn main():\n    a := Box(1)\n    b := Box(2)\n    c := a + b\nmain()\n",
-        "cannot apply",
-    );
-}
-
-#[test]
-fn generic_newtype_not_into_add_bound() {
-    // A generic newtype over a numeric T does NOT satisfy the intrinsic Add bound (methods-only).
-    rejects(
-        "newtype Box[T] = T\nfn twice[U: Add](x: U) -> U:\n    return x + x\nfn main():\n    print(twice(Box(3)))\nmain()\n",
-        "Add",
-    );
-}
-
-#[test]
-fn generic_newtype_own_method_dispatch_ok() {
-    // A generic newtype's OWN method is its only operator surface (methods-only). The method
-    // dispatches with the newtype's type args substituted (`Box[int].combine` returns `Box[int]`).
-    // (NB: satisfying a protocol BOUND from a generic instantiation is a pre-existing limitation
-    // shared with generic structs — `compatible(Box[int], Box[T])` fails — so we test the direct
-    // dispatch, not the `[U: Add]` bound.)
-    ok(
-        "newtype Box[T] = T:\n    fn combine(self, other: Box[T]) -> Box[T]:\n        return self\nfn main():\n    a := Box(1)\n    b := Box(2)\n    c: Box[int] = a.combine(b)\n    print(int(c))\nmain()\n",
-    );
-}
-
-#[test]
-fn generic_newtype_bound_smoke_ok() {
-    // Bounds on newtype params come along for free via enter_type_params/check_bounds/enforce_bounds.
-    ok(
-        "newtype Keyed[T: Hashable] = List[T]\nfn main():\n    k: Keyed[int] = Keyed([1, 2])\n    print(List(k).len())\nmain()\n",
-    );
-}
-
-#[test]
-fn generic_newtype_bound_violation_rejected() {
-    // A type arg that violates the param bound is rejected at the annotation site.
-    rejects(
-        "newtype Keyed[T: Hashable] = List[T]\nfn main():\n    k: Keyed[fn(int) -> int] = Keyed([])\nmain()\n",
-        "Hashable",
-    );
-}
-
-#[test]
-fn generic_newtype_missing_targs_rejected() {
-    // Bare `Stack` as an annotation (no args) on a generic newtype is rejected.
-    rejects(
-        "newtype Stack[T] = List[T]\nfn main():\n    s: Stack = Stack([1])\nmain()\n",
-        "type argument",
-    );
 }
 
 // ============================================================================
@@ -25016,63 +24286,6 @@ fn index_and_slice_on_a_protocol_existential() {
     );
 }
 
-// ===== M22 soundness: a newtype operator METHOD is never dispatched at runtime (the same-newtype
-// arm always auto-flows to the underlying's native op), so the checker must NOT type-check an
-// operator overload defined on a newtype — doing so would accept a program that crashes at runtime
-// on every engine (`check` ok / `run` faults). The ONLY newtype operator support is the numeric
-// underlying's auto-flow. =====
-
-/// A newtype defining a `neg` method must NOT make unary `-` type-check (no newtype Neg dispatch on
-/// any engine; Neg is out of scope for newtypes). Regression: M22 added a `satisfies(Neg)` path that
-/// wrongly admitted newtypes (`check` ok, `run` → "cannot apply Neg to newtype").
-#[test]
-fn newtype_neg_method_rejected() {
-    rejects(
-        "newtype Foo = int:\n    fn neg(self) -> Foo:\n        return Foo(-int(self))\nfn main():\n    print(int(-Foo(5)))\nmain()\n",
-        "cannot negate",
-    );
-}
-
-/// A NON-numeric newtype (`= str`) defining a `div` method must NOT make `/` type-check (the runtime
-/// same-newtype arm auto-flows to `str / str`, which faults; the user `div` is never dispatched).
-/// Regression: M22's `op_overload_result` admitted it (`check` ok, `run` → "cannot apply Div to str
-/// and str").
-#[test]
-fn newtype_nonnumeric_div_method_rejected() {
-    rejects(
-        "newtype Name = str:\n    fn div(self, other: Name) -> Name:\n        return self\nfn use(a: Name) -> Name:\n    return a / a\n",
-        "cannot apply /",
-    );
-}
-
-/// Same as above for `mod` (`%`).
-#[test]
-fn newtype_nonnumeric_mod_method_rejected() {
-    rejects(
-        "newtype Name = str:\n    fn mod(self, other: Name) -> Name:\n        return self\nfn use(a: Name) -> Name:\n    return a % a\n",
-        "cannot apply %",
-    );
-}
-
-/// A numeric scalar newtype STILL gets `/` and `%` via the underlying's native auto-flow (no method
-/// needed) — the fix must not regress the legitimate numeric-newtype operator path.
-#[test]
-fn numeric_newtype_div_mod_still_ok() {
-    ok(
-        "newtype Meters = float\nfn main():\n    a := Meters(7.0)\n    b := Meters(2.0)\n    print(float(a / b))\n    print(float(a % b))\nmain()\n",
-    );
-}
-
-/// A newtype must not satisfy a `[T: Div]` / `[T: Neg]` generic bound via a structural operator
-/// method (bound-site soundness: forwarding such a newtype into the generic would crash at runtime).
-#[test]
-fn newtype_operator_method_fails_generic_bound() {
-    rejects(
-        "newtype Name = str:\n    fn div(self, other: Name) -> Name:\n        return self\nfn d[T: Div](a: T, b: T) -> T:\n    return a / b\nfn use(x: Name) -> Name:\n    return d(x, x)\n",
-        "Div",
-    );
-}
-
 /// Drift guard (editor hover): EVERY reserved callable builtin must have a `builtin_sig` entry, so a
 /// future builtin added to `RESERVED_CALLABLE` can't silently lose hover. The set is exactly the
 /// CALLABLE reserved names — the free functions (`print`/`panic`/`range`/`int`/`float`/`str`/`ord`/
@@ -26889,14 +26102,10 @@ fn qualified_native_ctor_call_infers() {
 }
 
 #[test]
-fn alias_and_newtype_over_qualified_builtin() {
+fn alias_over_qualified_builtin() {
     // type alias over a qualified builtin.
     entry_ok(
         "import std.concurrency\ntype S = concurrency.Shared[int]\nfn f(s: S):\n    print(s.get())\n",
-    );
-    // newtype over a qualified builtin (generic).
-    entry_ok(
-        "import std.concurrency\nnewtype MyS[T] = concurrency.Shared[T]\nfn main():\n    print(\"ok\")\nmain()\n",
     );
 }
 
@@ -28635,7 +27844,7 @@ fn invariance_preserves_legit_container_neighbors() {
 }
 
 // ============================================================================
-// FIX A — `Self` usable in struct/enum/newtype inherent-method signatures/bodies
+// FIX A — `Self` usable in struct/enum inherent-method signatures/bodies
 // ============================================================================
 
 #[test]
@@ -28651,14 +27860,6 @@ fn self_type_in_enum_method_sig() {
     // An enum method returning `Self` resolves to the enclosing enum.
     entry_ok(
         "enum Money:\n    Cents(int)\n    fn double(self) -> Self:\n        match self:\n            Money.Cents(c): return Money.Cents(c * 2)\nfn main():\n    m := Money.Cents(50).double()\n    match m:\n        Money.Cents(c): print(c)\nmain()\n",
-    );
-}
-
-#[test]
-fn self_type_in_newtype_method_sig() {
-    // A newtype method returning `Self` resolves to the enclosing newtype.
-    entry_ok(
-        "newtype Meters = float:\n    fn twice(self) -> Self:\n        return Meters(float(self) * 2.0)\nfn main():\n    print(float(Meters(3.0).twice()))\nmain()\n",
     );
 }
 
@@ -28707,7 +27908,7 @@ fn self_type_generic_struct_method() {
 }
 
 // ============================================================================
-// FIX B — compound assignment honors struct/enum/newtype operator overloading
+// FIX B — compound assignment honors struct/enum operator overloading
 // ============================================================================
 
 #[test]
@@ -28715,14 +27916,6 @@ fn compound_assign_struct_overload() {
     // `a += V(10)` accepted exactly when `a = a + V(10)` is (V has an `add` overload).
     entry_ok(
         "struct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\n    fn str(self) -> str:\n        return \"V({self.x})\"\nfn main():\n    a := V(1)\n    a = a + V(10)\n    a += V(10)\n    print(a)\nmain()\n",
-    );
-}
-
-#[test]
-fn compound_assign_newtype_numeric() {
-    // A numeric newtype supports `+=` via its underlying-numeric auto-flow.
-    entry_ok(
-        "newtype Meters = float\nfn main():\n    m := Meters(1.0)\n    m += Meters(2.0)\n    print(float(m))\nmain()\n",
     );
 }
 
@@ -30324,8 +29517,8 @@ fn module_missing_member_call_message_unchanged() {
 }
 
 /// TICKET-023: a `protocol` declared in one module is unreachable from another module, by either
-/// crossing spelling. `ModuleSig` has no `protocol_defs` field (unlike `struct_defs`/`enum_defs`/
-/// `newtype_defs`), so a qualified `shapes.Drawable` bound reports "has no type" even though the
+/// crossing spelling. `ModuleSig` has no `protocol_defs` field (unlike `struct_defs`/`enum_defs`),
+/// so a qualified `shapes.Drawable` bound reports "has no type" even though the
 /// protocol is declared and importable structurally within its own module.
 #[test]
 fn protocol_reachable_via_qualified_path() {
@@ -30611,33 +29804,6 @@ fn imported_generic_enum_with_a_user_protocol_bound_still_checks() {
             (
                 "main.chz",
                 "import Eb from lib\n\nstruct Dot:\n    n: int\n\nfn main():\n    e: Eb[Dot] = Eb.Has(Dot(1))\n    print(1)\nmain()\n",
-            ),
-        ],
-        "does not satisfy Describable",
-    );
-}
-
-/// TICKET-027 ceiling pin (step 15 funnel: `newtype_type_params`): a generic newtype's stored
-/// protocol bound must cross an import re-spelled to a key, not bare.
-#[test]
-fn imported_generic_newtype_with_a_user_protocol_bound_still_checks() {
-    let lib = (
-        "lib.chz",
-        "protocol Describable:\n    fn describe(self) -> str\n\nnewtype Stack[T: Describable] = List[T]\n",
-    );
-    files_ok(&[
-        lib,
-        (
-            "main.chz",
-            "import Stack from lib\n\nstruct Dot:\n    n: int\n    fn describe(self) -> str:\n        return \"dot\"\n\nfn main():\n    s: Stack[Dot] = Stack([Dot(1)])\n    print(1)\nmain()\n",
-        ),
-    ]);
-    files_reject(
-        &[
-            lib,
-            (
-                "main.chz",
-                "import Stack from lib\n\nstruct Dot:\n    n: int\n\nfn main():\n    s: Stack[Dot] = Stack([Dot(1)])\n    print(1)\nmain()\n",
             ),
         ],
         "does not satisfy Describable",
@@ -31128,26 +30294,6 @@ fn witness_bound_without_that_static_method_rejected() {
     entry_rejects(
         "fn bad[T: Comparable](x: T) -> int:\n    y := T.empty()\n    return 1\nfn main():\n    print(bad(1))\nmain()\n",
         "no bound on 'T' declares a static method 'empty'",
-    );
-}
-
-/// A newtype cannot host methods, so it can neither satisfy a static-requirement protocol nor be a
-/// witness. It emits BOTH errors — the conformance failure and the host failure; pin the pair,
-/// because a later slice that drops one of them is a change in what the user is told.
-#[test]
-fn witness_newtype_host_rejected() {
-    let errs = check_entry(
-        "protocol Default:\n    fn default() -> Self\nnewtype Meters = float\nfn reset[T: Default](old: T) -> T:\n    return T.default()\nfn main():\n    print(reset(Meters(1.0)))\nmain()\n",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("does not satisfy Default")),
-        "the newtype must fail conformance, got: {errs:?}"
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("cannot host a static method")),
-        "the newtype must also be named as an impossible witness host, got: {errs:?}"
     );
 }
 
@@ -32426,7 +31572,7 @@ fn chained_opt_chain_links_get_distinct_carrier_keys() {
 // this project's named checker-superset-of-compiler class, which the editor/LSP shows green on.
 
 /// A dotted CONSTRUCTOR head — a variant ctor in either turbofish carrier, and a module-qualified
-/// struct/newtype/variant ctor — earns the message the bare `defer P(3)` rule already uses, because
+/// struct/variant ctor — earns the message the bare `defer P(3)` rule already uses, because
 /// it IS that rule: the call builds a value and throws it away.
 #[test]
 fn a_dotted_constructor_is_not_a_spawn_or_defer_target_rejected() {
@@ -32440,14 +31586,9 @@ fn a_dotted_constructor_is_not_a_spawn_or_defer_target_rejected() {
     // …and the same three constructor kinds reached through a bound MODULE name.
     let lib = (
         "lib.chz",
-        "enum Col:\n    Val(int)\n    Red\nenum GCol[T]:\n    Val(int)\n    Red\nstruct Pt:\n    x: int\nnewtype Meters = int\n",
+        "enum Col:\n    Val(int)\n    Red\nenum GCol[T]:\n    Val(int)\n    Red\nstruct Pt:\n    x: int\n",
     );
-    for target in [
-        "lib.Col.Val(3)",
-        "lib.GCol[int].Val(3)",
-        "lib.Pt(3)",
-        "lib.Meters(3)",
-    ] {
+    for target in ["lib.Col.Val(3)", "lib.GCol[int].Val(3)", "lib.Pt(3)"] {
         files_reject(
             &[lib, ("main.chz", &format!("import lib\ndefer {target}\n"))],
             NEEDLE,
@@ -32733,7 +31874,7 @@ fn enum_variant_miss_carets_the_variant_name_ticket_021() {
 }
 
 // TICKET-024 -- W8-32: `satisfies_args_d`'s final match falls to `_ => Err(...)` for any `Ty`
-// that is not Struct/Enum/NewType/Param/Protocol, so a built-in `List[int]` can never satisfy a
+// that is not Struct/Enum/Param/Protocol, so a built-in `List[int]` can never satisfy a
 // USER protocol even though the checker's own method table (`self.list_methods` / equivalent)
 // already answers `len()` for it on a direct call. Reproduces docs/gaps.md W8-32 verbatim.
 #[test]
@@ -32825,7 +31966,7 @@ fn builtin_native_method_gates_bound_protocol_satisfaction_ticket_024() {
         "protocol Summable:\n    fn sum(self) -> int\n\nfn total(x: Summable) -> int:\n    return x.sum()\n\nfn main():\n    print(total([1,2,3]))\n",
     );
     rejects(
-        "newtype Cents = int\n\nprotocol SumC:\n    fn sum(self) -> Cents\n\nfn total(x: SumC) -> Cents:\n    return x.sum()\n\nfn main():\n    xs: List[Cents] = [Cents(1), Cents(2)]\n    print(total(xs))\n",
+        "struct Cents:\n    v: int\n\nprotocol SumC:\n    fn sum(self) -> Cents\n\nfn total(x: SumC) -> Cents:\n    return x.sum()\n\nfn main():\n    xs: List[Cents] = [Cents(1), Cents(2)]\n    print(total(xs))\n",
         "type List[Cents] does not satisfy SumC (native method 'sum' needs a numeric element type)",
     );
 }
@@ -32859,14 +32000,6 @@ fn struct_copy_is_not_on_an_enum() {
     rejects(
         "enum E:\n    A\n    B\n\nfn main():\n    e := E.A\n    print(e.copy())\n",
         "type E has no method 'copy'",
-    );
-}
-
-#[test]
-fn struct_copy_is_not_on_a_newtype() {
-    rejects(
-        "newtype N = int\n\nfn main():\n    n := N(1)\n    print(n.copy())\n",
-        "type N has no method 'copy'",
     );
 }
 
@@ -34890,18 +34023,6 @@ fn blank_identifier_redeclared_at_top_level_with_different_types() {
     );
 }
 
-// TICKET-142 (W14-19): a numeric newtype formats as its underlying number, so a numeric spec on it
-// checks against that underlying; a spec the underlying rejects is still an error.
-#[test]
-fn format_spec_on_numeric_newtype_checks_its_underlying() {
-    ok("newtype M = float\nprint(\"{M(1.5):.2f}\")\n");
-    ok("newtype N = int\nprint(\"{N(7):04} {N(255):x} {N(7):+}\")\n");
-    rejects(
-        "newtype M = float\nprint(\"{M(1.5):d}\")\n",
-        "type 'd' not valid for a float",
-    );
-}
-
 // TICKET-142 (W14-19): every other concrete non-numeric type renders as its text form, so a numeric
 // spec on it is a compile error (checked against the string rules), while an alignment spec is fine.
 #[test]
@@ -34914,7 +34035,6 @@ fn format_spec_on_enum_fn_bytes_shared_rejected_at_check() {
         "import std.concurrency\ns := Shared[int](1)\nprint(\"{s:d}\")\n",
         needle,
     );
-    rejects("newtype S = str\nprint(\"{S(\\\"a\\\"):d}\")\n", needle);
     ok("enum E:\n    A\n\ne := E.A\nprint(\"{e:>5}\")\n");
 }
 
@@ -36060,7 +35180,6 @@ fn a_fn_or_type_named_like_a_module_import_is_rejected() {
         ("fn f(a: int) -> int:\n    return a\n", "f"),
         ("struct f:\n    x: int\n", "f"),
         ("enum f:\n    A\n", "f"),
-        ("newtype f = int\n", "f"),
         ("type f = int\n", "f"),
         ("protocol f:\n    fn m(self) -> int\n", "f"),
     ];
@@ -37320,12 +36439,9 @@ fn method_type_param_capture_grid() {
     // it. Receivers x binding (arg, turbofish, hint) x caller names (disjoint, equal, swapped).
     const BOX: &str = "struct Box[T]:\n    v: T\n    fn pair[U](self, u: U) -> (T, U):\n        return (self.v, u)\n";
     const ENU: &str = "enum E[T]:\n    A(T)\n    fn pair[U](self, u: U) -> (T, U):\n        match self:\n            E.A(v): return (v, u)\n";
-    const NEW: &str =
-        "newtype W[T] = T:\n    fn pair[U](self, u: U) -> (W[T], U):\n        return (self, u)\n";
     let recvs = [
         ("struct", BOX, "Box[Q]", "(Q, P)"),
         ("enum", ENU, "E[Q]", "(Q, P)"),
-        ("newtype", NEW, "W[Q]", "(W[Q], P)"),
     ];
     let mut cells: Vec<(String, String, bool)> = Vec::new();
     for (rname, decl, ty, want) in recvs {
@@ -37858,10 +36974,6 @@ fn bound_type_arg_grid() {
         (
             "enum",
             "enum P[A, B]:\n    V(A)\n    fn m(self, b: B) -> B where A: Conv[B]:\n        return b\n",
-        ),
-        (
-            "newtype",
-            "newtype P[A, B] = List[A]:\n    fn m(self, b: B) -> B where A: Conv[B]:\n        return b\n",
         ),
     ];
     for (host, decl) in swap_hosts {

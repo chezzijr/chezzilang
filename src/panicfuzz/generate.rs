@@ -25,9 +25,9 @@ const MAX_LEN: usize = 2048;
 const TOKENS: &[&str] = &[
     // keywords
     "fn", "return", "if", "else", "for", "while", "in", "break", "continue", "struct", "enum",
-    "protocol", "type", "newtype", "match", "recover", "defer", "assert", "test", "spawn",
-    "parallel", "wait", "yield", "import", "extern", "from", "as", "ref", "and", "or", "not",
-    "true", "false", "nil", // operators
+    "protocol", "type", "match", "recover", "defer", "assert", "test", "spawn", "parallel", "wait",
+    "yield", "import", "extern", "from", "as", "ref", "and", "or", "not", "true", "false",
+    "nil", // operators
     "+", "-", "*", "/", "%", "=", ":=", "==", "!=", "<", "<=", ">", ">=", "+=", "-=", "*=", "/=",
     "%=", "&=", "|=", "^=", "<<=", ">>=", "->", "|>", "?", "?.", "??", "!", "&", "^", "|", "<<",
     ">>", // delimiters

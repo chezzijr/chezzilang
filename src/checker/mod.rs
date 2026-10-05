@@ -1536,7 +1536,6 @@ impl Checker {
                 for s in &lm.ast.stmts {
                     if let StmtKind::Struct { name, .. }
                     | StmtKind::Enum { name, .. }
-                    | StmtKind::NewType { name, .. }
                     | StmtKind::TypeAlias { name, .. }
                     | StmtKind::Protocol { name, .. } = &s.kind
                         && !(matches!(s.kind, StmtKind::Protocol { .. })
@@ -1590,7 +1589,6 @@ impl Checker {
             for s in &lm.ast.stmts {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
-                | StmtKind::NewType { name, .. }
                 | StmtKind::TypeAlias { name, .. } = &s.kind
                 {
                     c.types_by_name
@@ -4505,59 +4503,6 @@ mod graph_tests {
             check_entry(&entry).is_ok(),
             "imported enum methods should resolve cross-module: {:?}",
             errors(&entry)
-        );
-    }
-
-    // A whole-module-imported newtype is constructible in QUALIFIED form (`m.UserId(10)`), not just
-    // usable as a qualified type — mirrors qualified struct/enum-variant construction.
-    #[test]
-    fn qualified_newtype_construct_usable() {
-        let t = TmpDir::new();
-        t.write("types.chz", "newtype UserId = int\n");
-        let entry = t.write(
-            "main.chz",
-            "import types\nfn needs(u: types.UserId) -> int:\n    return int(u)\nfn main():\n    u := types.UserId(10)\n    print(needs(u))\nmain()\n",
-        );
-        assert!(
-            check_entry(&entry).is_ok(),
-            "qualified newtype ctor should resolve cross-module: {:?}",
-            errors(&entry)
-        );
-    }
-
-    // A GENERIC newtype declared in module A is importable in B: constructed (ctor inference) and
-    // dispatched with the right instantiation, type-checks clean cross-module.
-    #[test]
-    fn generic_newtype_cross_module_ok() {
-        let t = TmpDir::new();
-        t.write(
-            "types.chz",
-            "newtype Stack[T] = List[T]:\n    fn size(self) -> int:\n        return List(self).len()\n",
-        );
-        let entry = t.write(
-            "main.chz",
-            "import Stack from types\nfn main():\n    s: Stack[int] = Stack([1, 2, 3])\n    print(s.size())\n    xs: List[int] = List(s)\n    print(xs[0])\nmain()\n",
-        );
-        assert!(
-            check_entry(&entry).is_ok(),
-            "generic newtype should resolve cross-module: {:?}",
-            errors(&entry)
-        );
-    }
-
-    // The cross-module generic newtype's type-arg arity is enforced through the import.
-    #[test]
-    fn generic_newtype_cross_module_arity_rejected() {
-        let t = TmpDir::new();
-        t.write("types.chz", "newtype Stack[T] = List[T]\n");
-        let entry = t.write(
-            "main.chz",
-            "import types\nfn main():\n    s: types.Stack[int, str] = types.Stack([1])\n    print(1)\nmain()\n",
-        );
-        let errs = errors(&entry);
-        assert!(
-            errs.iter().any(|e| e.contains("type argument")),
-            "expected an arity error, got: {errs:?}"
         );
     }
 

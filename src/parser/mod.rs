@@ -502,7 +502,6 @@ impl Parser {
             Token::Test => ("test fn", |p| Ok(StmtKind::Fn(p.parse_test_fn(true)?))),
             Token::Struct => ("struct", Parser::parse_struct),
             Token::Enum => ("enum", Parser::parse_enum),
-            Token::NewType => ("newtype", Parser::parse_newtype),
             Token::Protocol => ("protocol", Parser::parse_protocol),
             Token::Type => ("type", |p| {
                 let k = p.parse_type_alias()?;
@@ -1627,56 +1626,6 @@ impl Parser {
             name_span,
             type_params,
             variants,
-            methods,
-            doc,
-        })
-    }
-
-    /// `newtype Name = <type>` (the common, method-less case, terminated like a typeAlias) or
-    /// `newtype Name = <type>:` followed by an indented `fn` method block (compound, ends at its
-    /// Dedent). A DISTINCT nominal type — not a transparent alias. May carry generic type params
-    /// (`newtype Stack[T] = List[T]`), reusing the struct/enum generic-param parser; the underlying
-    /// and method signatures may then reference them. `test fn` in the body is rejected (suites
-    /// aren't wired — enum precedent).
-    fn parse_newtype(&mut self) -> PResult<StmtKind> {
-        let doc = self.doc_above(self.cur_span().line);
-        self.expect(&Token::NewType)?;
-        let name_span = self.cur_span();
-        let name = self.expect_ident()?;
-        let type_params = self.parse_type_params()?;
-        self.expect(&Token::Assign)?;
-        let underlying = self.parse_type()?;
-        let mut methods = Vec::new();
-        // An optional trailing `:` opens a method block. Without it, this is a one-line declaration
-        // terminated by a newline (like a typeAlias).
-        if self.check(&Token::Colon) {
-            self.open_block()?;
-            self.skip_newlines();
-            while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
-                if self.check(&Token::Fn) {
-                    methods.push(self.parse_fn(true)?);
-                } else if self.check(&Token::Test) {
-                    // Like enums: newtype test *suites* aren't wired into discovery, so a `test fn`
-                    // here would silently never run (a false-green). Reject at parse time.
-                    return Err(self.err(
-                        "test methods are not supported on newtypes (only on structs)".to_string(),
-                    ));
-                } else {
-                    return Err(
-                        self.err("expected a method (`fn …`) in the newtype body".to_string())
-                    );
-                }
-                self.skip_newlines();
-            }
-            self.expect(&Token::Dedent)?;
-        } else {
-            self.expect_stmt_end()?;
-        }
-        Ok(StmtKind::NewType {
-            name,
-            name_span,
-            type_params,
-            underlying,
             methods,
             doc,
         })
@@ -3883,7 +3832,6 @@ mod tests {
         let kinds: &[(&str, &str)] = &[
             ("struct", "struct S:\n    x: int\n"),
             ("enum", "enum E:\n    A\n"),
-            ("newtype", "newtype N = int\n"),
             ("protocol", "protocol P:\n    fn m(self) -> int\n"),
             ("type", "type T = int\n"),
             ("test fn", "test fn t():\n    pass\n"),
@@ -5304,81 +5252,6 @@ mod tests {
                 assert_eq!(variants[0].payload, vec![Type::named("int")]);
                 assert_eq!(variants[1].name, "Point");
                 assert!(variants[1].payload.is_empty());
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn newtype_method_less_parses() {
-        match only("newtype UserId = int\n") {
-            StmtKind::NewType {
-                name,
-                type_params,
-                underlying,
-                methods,
-                ..
-            } => {
-                assert!(type_params.is_empty());
-                assert_eq!(name, "UserId");
-                assert_eq!(underlying, Type::named("int"));
-                assert!(methods.is_empty());
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn newtype_with_method_block_parses() {
-        match only("newtype Meters = float:\n    fn double(self) -> Meters:\n        return self\n")
-        {
-            StmtKind::NewType {
-                name,
-                type_params,
-                underlying,
-                methods,
-                ..
-            } => {
-                assert!(type_params.is_empty());
-                assert_eq!(name, "Meters");
-                assert_eq!(underlying, Type::named("float"));
-                assert_eq!(methods.len(), 1);
-                assert_eq!(methods[0].name, "double");
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn newtype_rejects_test_fn() {
-        let e = parse_err("newtype Meters = float:\n    test fn t(self):\n        return\n");
-        assert!(
-            e.to_string().contains("test"),
-            "expected a test-fn rejection, got: {e}"
-        );
-    }
-
-    #[test]
-    fn generic_newtype_parses() {
-        match only(
-            "newtype Stack[T] = List[T]:\n    fn peek(self) -> Option[T]:\n        return None\n",
-        ) {
-            StmtKind::NewType {
-                name,
-                type_params,
-                underlying,
-                methods,
-                ..
-            } => {
-                assert_eq!(name, "Stack");
-                assert_eq!(type_params.len(), 1);
-                assert_eq!(type_params[0].name, "T");
-                assert_eq!(
-                    underlying,
-                    Type::Generic("List".into(), vec![Type::named("T")], Span::default())
-                );
-                assert_eq!(methods.len(), 1);
-                assert_eq!(methods[0].name, "peek");
             }
             other => panic!("{other:?}"),
         }

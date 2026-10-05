@@ -40,7 +40,7 @@
 <module>        ::= "EOF" | <topLevelStmts> "EOF"
 <topLevelStmts> ::= <topLevelStmt> | <topLevelStmt> <topLevelStmts>
 <topLevelStmt>  ::= <item> | <stmt>
-<item>          ::= <testFnDecl> | <structDecl> | <enumDecl> | <newtypeDecl> | <protocolDecl> | <typeAliasDecl> | <importStmt> | <externDecl> | <nativeDecl> | <nativeStructDecl> | <nativeEnumDecl>
+<item>          ::= <testFnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <typeAliasDecl> | <importStmt> | <externDecl> | <nativeDecl> | <nativeStructDecl> | <nativeEnumDecl>
 <stmts>         ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
@@ -338,19 +338,6 @@
 
 # A transparent type alias: `type Name = <type>`. `Name` is interchangeable with the aliased type.
 <typeAliasDecl> ::= "TYPE" "IDENT" "ASSIGN" <type> "NEWLINE"
-
-# A nominal `newtype`: a DISTINCT type wrapping <type> (NOT interchangeable with it — only an explicit
-# construct `Name(x)` or cast-unwrap `int(n)` crosses). May carry generic type params
-# (`newtype Stack[T] = List[T]`): the underlying + method signatures may then reference them, and a
-# type-parameterized newtype is METHODS-ONLY (no native operator auto-flow — operators come only from
-# its own methods + protocol satisfaction). The method-less one-liner is the common case; an optional
-# trailing-colon block adds `fn` methods (no `test fn`, like enums). Contrast `<typeAliasDecl>` above,
-# which is transparent (structurally identical to its body).
-<newtypeDecl> ::= "NEWTYPE" "IDENT" "ASSIGN" <type> "NEWLINE"
-               | "NEWTYPE" "IDENT" "ASSIGN" <type> "COLON" "NEWLINE" "INDENT" <newtypeMethods> "DEDENT"
-               | "NEWTYPE" "IDENT" <typeParams> "ASSIGN" <type> "NEWLINE"
-               | "NEWTYPE" "IDENT" <typeParams> "ASSIGN" <type> "COLON" "NEWLINE" "INDENT" <newtypeMethods> "DEDENT"
-<newtypeMethods> ::= <fnDecl> | <fnDecl> <newtypeMethods>
 
 # ===== control flow =====
 <ifStmt> ::= "IF" <expr> <block>

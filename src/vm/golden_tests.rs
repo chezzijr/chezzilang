@@ -6348,7 +6348,7 @@ fn golden_collection_ops_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// Golden: `Self` usable in inherent struct/enum/newtype method signatures + bodies (not
+/// Golden: `Self` usable in inherent struct/enum method signatures + bodies (not
 /// protocols-only). Runs end-to-end on the VM and byte-matches both the `.expected` file and the
 /// M:N engine.
 #[test]
@@ -6372,7 +6372,7 @@ fn golden_contains_protocol_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// Golden: compound assignment (`+=`/`-=`/…) honors struct/enum/newtype operator overloading —
+/// Golden: compound assignment (`+=`/`-=`/…) honors struct/enum operator overloading —
 /// `a += V(10)` produces the same value as `a = a + V(10)`. Byte-matches the `.expected` file and
 /// the M:N engine.
 #[test]
@@ -10887,8 +10887,8 @@ fn qualified_combined_turbofish_runs() {
     assert_eq!(out, "7\n");
 }
 
-// ----- Map/Set snapshot a struct/enum/newtype key on INSERT (Go value-key model) -----
-// A struct/enum/newtype key/element is deep-copied when STORED, so a later mutation of the
+// ----- Map/Set snapshot a struct/enum key on INSERT (Go value-key model) -----
+// A struct/enum key/element is deep-copied when STORED, so a later mutation of the
 // caller's original value cannot reach (corrupt) the stored key. Scalars pass through unchanged;
 // map VALUES are never copied; the transient lookup key is never snapshotted.
 
@@ -11018,7 +11018,7 @@ main()
 }
 
 // ----- Regression: snapshot must NOT reuse the airlock deep_clone (its fault/identity-remap modes)
-// A struct/enum/newtype key that embeds a cyclic back-edge, a live generator, or an identity-typed
+// A struct/enum key that embeds a cyclic back-edge, a live generator, or an identity-typed
 // (closure/channel/…) sub-value used to be stored BY REFERENCE and worked on a plain serial insert.
 // The first cut routed the snapshot through `deep_clone` (to_wire/from_wire), which FAULTED on the
 // first two and gave the identity sub-value a FRESH handle (so `values_equal`, identity-only for it,
@@ -12910,72 +12910,6 @@ fn ffi_goldens_are_not_unconditionally_linux_gated() {
         "FFI goldens are unconditionally Linux-gated, so cargo test is green on other \
          platforms with the FFI surface unexercised: {unconditionally_gated:?}"
     );
-}
-
-/// TICKET-055 — DEC-029's rule (a module-level fn replaces a same-named struct's field ctor) must
-/// cover the newtype wrapping ctor too. Bare, same module: `fn N` wins.
-#[test]
-fn module_fn_named_after_a_newtype_wins() {
-    let out =
-        golden_entry("newtype N = int\nfn N(n: int) -> int:\n    return n * 3\nprint(N(2))\n");
-    assert_eq!(
-        out, "6\n",
-        "the fn must win, not the newtype ctor; got: {out:?}"
-    );
-}
-
-/// TICKET-055 — DEC-029's escape hatch: inside the shadowing fn's own body, the bare name still
-/// resolves to the raw wrapping ctor.
-#[test]
-fn newtype_raw_ctor_inside_the_shadowing_fn_body() {
-    let out = golden_entry(
-        "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\nprint(N(\"abc\"))\n",
-    );
-    assert_eq!(
-        out, "N(3)\n",
-        "the raw ctor must survive inside the fn body; got: {out:?}"
-    );
-}
-
-/// TICKET-055 — supersedes the TICKET-029 review's opposite pin. DEC-029's `m.S(args)` clause
-/// covers a newtype exactly like a struct: a qualified `module.N(args)` where `N` is a NEWTYPE
-/// (not a struct) IS shadowed by a same-module `fn N`, same as the struct case. The old doc comment
-/// on this test recorded that the review aligned the compiler to the checker's then-ungated newtype
-/// arm; the checker arm is now gated too (TICKET-055), so the fn winning is the continuation of that
-/// review fix, not a reversal of it.
-#[test]
-fn qualified_newtype_ctor_is_shadowed_by_colliding_module_fn() {
-    let out = golden_file_entry(
-        &[
-            (
-                "lib.chz",
-                "newtype N = int\nfn N(n: int) -> N:\n    print(\"FN RAN\")\n    return N(n * 2)\n",
-            ),
-            ("main.chz", "import lib\nv := lib.N(5)\nprint(v)\n"),
-        ],
-        "main.chz",
-    );
-    assert_eq!(out, "FN RAN\nN(10)\n", "fn N must run; got: {out:?}");
-}
-
-/// TICKET-055 — the newtype twin of DEC-029's from-import binding rule: `import N from lib` binds
-/// BOTH the fn (call) and the type (annotation) namespaces, mirroring `bind_imported_struct_name`.
-#[test]
-fn from_imported_newtype_ctor_fn_wins() {
-    let out = golden_file_entry(
-        &[
-            (
-                "lib.chz",
-                "newtype N = int\nfn N(s: str) -> N:\n    return N(s.len())\n",
-            ),
-            (
-                "main.chz",
-                "import N from lib\nv: N = N(\"abcd\")\nprint(v)\n",
-            ),
-        ],
-        "main.chz",
-    );
-    assert_eq!(out, "N(4)\n", "the fn must build the newtype; got: {out:?}");
 }
 
 /// TICKET-183: the verdict of one program through the real pipeline (`build_graph` resolves a

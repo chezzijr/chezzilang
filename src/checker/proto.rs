@@ -301,7 +301,6 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Comparable", "compare", "int"),
     ("Comparable", "compare", "float"),
     ("Comparable", "compare", "str"),
-    ("Comparable", "compare", "newtype"),
     // A tuple / List / Option is Comparable exactly when every element type is (TICKET-146).
     ("Comparable", "compare", "tuple"),
     ("Comparable", "compare", "list"),
@@ -343,7 +342,6 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Eq", "eq", "enum"),
     ("Eq", "eq", "option"),
     ("Eq", "eq", "result"),
-    ("Eq", "eq", "newtype"),
     ("Eq", "eq", "func"),
     ("Eq", "eq", "protocol"),
     // Stringable — all four scalars.
@@ -398,19 +396,14 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     // auto-flow (`Neg` has no newtype path, so it is int/float only).
     ("Add", "add", "int"),
     ("Add", "add", "float"),
-    ("Add", "add", "newtype"),
     ("Sub", "sub", "int"),
     ("Sub", "sub", "float"),
-    ("Sub", "sub", "newtype"),
     ("Mul", "mul", "int"),
     ("Mul", "mul", "float"),
-    ("Mul", "mul", "newtype"),
     ("Div", "div", "int"),
     ("Div", "div", "float"),
-    ("Div", "div", "newtype"),
     ("Mod", "mod", "int"),
     ("Mod", "mod", "float"),
-    ("Mod", "mod", "newtype"),
     ("Neg", "neg", "int"),
     ("Neg", "neg", "float"),
 ];

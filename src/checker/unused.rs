@@ -144,9 +144,7 @@ impl Scan {
                 self.bind(&d.name, d.name_span, false);
                 self.fn_decl(d);
             }
-            StmtKind::Struct { methods, .. }
-            | StmtKind::Enum { methods, .. }
-            | StmtKind::NewType { methods, .. } => {
+            StmtKind::Struct { methods, .. } | StmtKind::Enum { methods, .. } => {
                 for m in methods {
                     self.fn_decl(m);
                 }

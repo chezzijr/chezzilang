@@ -1628,7 +1628,6 @@ impl Checker {
             for s in stmts {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
-                | StmtKind::NewType { name, .. }
                 | StmtKind::TypeAlias { name, .. }
                 | StmtKind::Protocol { name, .. } = &s.kind
                     && !(matches!(s.kind, StmtKind::Protocol { .. }) && is_reserved_protocol(name))
@@ -1703,7 +1702,6 @@ impl Checker {
                 StmtKind::Fn(decl) => &decl.name,
                 StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
-                | StmtKind::NewType { name, .. }
                 | StmtKind::TypeAlias { name, .. }
                 | StmtKind::Protocol { name, .. } => name,
                 _ => continue,
@@ -2391,25 +2389,6 @@ impl Checker {
                                 type_params,
                                 variants,
                                 methods: self.enum_methods.get(&key).cloned().unwrap_or_default(),
-                                doc: self.name_docs.get(name).cloned(),
-                            },
-                        );
-                    }
-                }
-                StmtKind::NewType { name, .. } => {
-                    sig.types.insert(name.clone());
-                    let key = self.bare_key(name);
-                    if let Some((underlying, methods)) = self.newtype_defs.get(&key) {
-                        sig.newtype_defs.insert(
-                            name.clone(),
-                            NewTypeSigInfo {
-                                underlying: underlying.clone(),
-                                type_params: self
-                                    .newtype_type_params
-                                    .get(&key)
-                                    .cloned()
-                                    .unwrap_or_default(),
-                                methods: methods.clone(),
                                 doc: self.name_docs.get(name).cloned(),
                             },
                         );
@@ -3690,23 +3669,6 @@ impl Checker {
                 StmtKind::NativeStruct { name, .. } if self.current_module_is_stdlib => {
                     self.struct_names.insert(name.clone());
                 }
-                StmtKind::NewType { name, .. } => {
-                    if matches!(
-                        name.as_str(),
-                        "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil"
-                    ) || is_reserved_type(name)
-                        || is_reserved_protocol(name)
-                        || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
-                    {
-                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
-                    } else if self.struct_names.contains(name)
-                        || self.enum_names.contains(name)
-                        || self.newtype_names.contains(name)
-                    {
-                        self.error(s.span, format!("type '{name}' is already defined"));
-                    }
-                    self.newtype_names.insert(name.clone());
-                }
                 StmtKind::TypeAlias { name, ty, .. } => {
                     if matches!(
                         name.as_str(),
@@ -3763,9 +3725,6 @@ impl Checker {
                     name, doc: Some(d), ..
                 }
                 | StmtKind::Protocol {
-                    name, doc: Some(d), ..
-                }
-                | StmtKind::NewType {
                     name, doc: Some(d), ..
                 }
                 | StmtKind::TypeAlias {
@@ -4136,149 +4095,6 @@ impl Checker {
                     self.enum_type_params.insert(key.clone(), rtps);
                     self.enum_methods.insert(key, method_sigs);
                 }
-                StmtKind::NewType {
-                    name,
-                    type_params,
-                    underlying,
-                    methods,
-                    ..
-                } => {
-                    if is_reserved_type(name) || is_reserved_protocol(name) {
-                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
-                    }
-                    let key = self.bare_key(name);
-                    if self.newtype_defs.contains_key(&key) {
-                        self.error(s.span, format!("type '{name}' is already defined"));
-                    }
-                    // A type PARAMETER may not be named after a reserved builtin type (`newtype
-                    // N[List] = int`).
-                    self.reject_reserved_type_params(type_params);
-                    // A type-parameterized newtype puts its params in scope across the underlying type
-                    // + method signatures (so `newtype Stack[T] = list[T]` and `fn push(self, x: T)`
-                    // resolve `T`), exactly like the struct/enum generic path. Validate each bound.
-                    let saved = self.enter_type_params(type_params);
-                    for tp in type_params {
-                        self.check_bounds(&tp.bounds, &tp.name, s.span);
-                    }
-                    let under_ty = self.resolve_type(underlying, s.span);
-                    // A newtype cannot wrap itself or another newtype's identity that's still a bare
-                    // newtype value — but a newtype OF a newtype is simply nominal nesting (allowed:
-                    // construct/unwrap one level at a time). No special rejection needed here.
-                    // A repeated method name silently last-wins (the HashMap collapses it) — reject.
-                    self.report_dup_names(
-                        methods.iter().map(|m| (m.name.as_str(), m.name_span)),
-                        "method",
-                    );
-                    // Static (associated) methods on a newtype (`fn zero()` — no `self`) parse but are
-                    // unreachable: the call site (`Meters.zero()`) has no newtype static-dispatch path
-                    // and falls through to a cryptic "unknown name 'Meters'". Reject at the decl site
-                    // with a clear not-supported message (deferred v1 limit; struct/enum only).
-                    for m in methods {
-                        if m.params.first().is_none_or(|p| p.name != "self") {
-                            self.error(
-                                m.name_span,
-                                format!(
-                                    "static (associated) method '{}' on a newtype is not supported yet (only struct and enum have them)",
-                                    m.name
-                                ),
-                            );
-                        }
-                    }
-                    // An OPERATOR-NAMED method on a NUMERIC newtype is rejected at the decl site
-                    // (gaps.md W6-3d; `eq` joined the list with M23's `Eq` protocol, whose numeric
-                    // grant is the same unconditional promise `Comparable`'s is). Same reason as the
-                    // static-method reject above — the dispatch
-                    // path does not exist: same-newtype `+`/`-`/`<`/`==` always auto-flow to the
-                    // UNDERLYING's native op (vm `newtype_arith` / `compare_op`'s `same_newtype_keys`
-                    // fast path), and a newtype's own `add`/`compare` is never dispatched as an
-                    // operator (`docs/syntax.md`). But the intrinsic numeric grant is unconditional on
-                    // such a method existing, and intrinsic dispatch is MISS-ONLY, so `a.add(b)` would
-                    // get the user's method while `a + b` got the native op: two spellings of one
-                    // protocol operation answering differently for the same receiver, silently.
-                    //
-                    // Ruling (a) of three candidates (2026-07-27). (b) — make the method dispatch as
-                    // the operator too — was implemented and REJECTED 2026-07-26: under a
-                    // heterogeneous `List[Comparable]` a same-newtype pair takes the user's order while
-                    // a cross-type pair cannot (the user's `compare(self, o: Self)` does not accept an
-                    // `int`), so one list carries two orders and `<` becomes INTRANSITIVE with no
-                    // fault. (c) — drop the grant when such a method exists — leaves `+` diverging
-                    // still. Only (a) makes the two-orders state unrepresentable. Cost: a numeric
-                    // newtype can no longer define these names at all, even to call deliberately.
-                    // Non-numeric/generic newtypes are NOT affected FOR THE ARITHMETIC AND ORDERING
-                    // names: they have no operator to disagree with (`satisfies` already rejects the
-                    // operator protocols for them).
-                    //
-                    // `eq` is the ONE name where that premise is false, so it is rejected on EVERY
-                    // newtype (gaps.md L5, closed 2026-08-08). "No operator to disagree with" holds for
-                    // `+`/`<` on a `newtype Name = str` — but `==` is defined on EVERY underlying, so
-                    // `Name("a") == Name("b")` unwraps to `str`'s native equality while
-                    // `Name("a").eq(Name("b"))` runs the user's method: the identical two-spellings-
-                    // disagree shape, one type-kind over. The M23 rule is that no type may declare an
-                    // `eq` that `==` silently ignores, and a newtype's `==` ignores ALL of them.
-                    // Task 3's struct/enum carve-out (a generic operand = an ordinary method, not the
-                    // hook) does NOT transfer: it exists to tell the hook apart from a same-named
-                    // ordinary method on a type whose `==` DOES dispatch. A newtype has no hook to tell
-                    // anything apart from, so the name is simply unusable here — rename it, or use a
-                    // struct. Ruling (b) (make `==` dispatch to it, as Rust's `impl PartialEq` on a
-                    // tuple struct and Python's `__eq__` on a wrapper do) is the same one W6-3d
-                    // implemented and rejected for `compare`: a numeric newtype's intrinsic grant is
-                    // unconditional, so a heterogeneous `List[Eq]` would take the user's equality for a
-                    // same-newtype pair and the native one for a newtype/underlying pair — equality
-                    // that is not transitive, with no fault.
-                    // `neg` is deliberately NOT in this list. Unary `-` has no newtype path at all
-                    // (`Neg` is absent from the intrinsic grant — `proto.rs`, and `satisfies`'s
-                    // newtype arm returns `Err` for it), so `-m` on a numeric newtype is ALREADY a
-                    // type error ("cannot negate Meters"). There is therefore no operator for a
-                    // `neg` method to disagree with — it is the only spelling of negation available,
-                    // and rejecting it would delete working code under a false premise.
-                    let numeric = type_params.is_empty() && under_ty.is_numeric();
-                    for m in methods {
-                        // `eq` first, and unconditionally — a numeric newtype hits BOTH premises, and
-                        // one diagnostic per declaration is the point (the `else if` is the dedupe).
-                        if m.name == "eq" {
-                            self.error(
-                                m.name_span,
-                                format!(
-                                    "operator method 'eq' on a newtype is never dispatched as an operator — a newtype's '==' always unwraps to {under_ty}'s native equality, so '.eq()' and '==' would disagree; use a struct if you need your own equality"
-                                ),
-                            );
-                        } else if numeric
-                            && matches!(
-                                m.name.as_str(),
-                                "add" | "sub" | "mul" | "div" | "mod" | "compare"
-                            )
-                        {
-                            self.error(
-                                m.name_span,
-                                format!(
-                                    "operator method '{}' on a numeric newtype is never dispatched as an operator — a numeric newtype inherits {under_ty}'s operators, so '.{}()' and the operator would disagree; use a struct if you need your own arithmetic",
-                                    m.name, m.name
-                                ),
-                            );
-                        }
-                    }
-                    // `Self` in a method sig resolves to this concrete newtype (parameterized by its
-                    // own type params — `newtype_type_params` isn't inserted yet, so build the self-ty
-                    // from the in-scope `type_params`, matching `newtype_self_ty`'s shape).
-                    let self_ty = Ty::NewType(
-                        key.clone(),
-                        type_params
-                            .iter()
-                            .map(|tp| Ty::Param(tp.name.clone()))
-                            .collect(),
-                    );
-                    let saved_self = self.current_self_ty.replace(self_ty);
-                    let method_sigs: HashMap<String, FnSig> = methods
-                        .iter()
-                        .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
-                        .collect();
-                    self.current_self_ty = saved_self;
-                    self.exit_type_params(saved);
-                    // TICKET-027 + TICKET-202: keyed bounds, args resolved in the declaring scope.
-                    let rtps = self.resolve_bounds(type_params, s.span);
-                    self.newtype_type_params.insert(key.clone(), rtps);
-                    self.newtype_defs.insert(key, (under_ty, method_sigs));
-                }
                 StmtKind::Extern { fns, .. } => {
                     // Dynamic C-ABI FFI (`dlopen`/libffi) is unix-only — `int` marshals as C `long`,
                     // which is 64-bit on every supported (LP64) unix target. On a non-unix target
@@ -4489,9 +4305,7 @@ impl Checker {
         // consult it while method charges are still unfinished.
         for s in stmts {
             let methods = match &s.kind {
-                StmtKind::Struct { methods, .. }
-                | StmtKind::Enum { methods, .. }
-                | StmtKind::NewType { methods, .. } => methods,
+                StmtKind::Struct { methods, .. } | StmtKind::Enum { methods, .. } => methods,
                 _ => continue,
             };
             for m in methods {
@@ -4560,9 +4374,9 @@ impl Checker {
         // member's answer depends on another member's.
         for s in stmts {
             let (methods, key) = match &s.kind {
-                StmtKind::Struct { name, methods, .. }
-                | StmtKind::Enum { name, methods, .. }
-                | StmtKind::NewType { name, methods, .. } => (methods, self.bare_key(name)),
+                StmtKind::Struct { name, methods, .. } | StmtKind::Enum { name, methods, .. } => {
+                    (methods, self.bare_key(name))
+                }
                 _ => continue,
             };
             for m in methods {
