@@ -114,19 +114,22 @@ fn a_passing_run_under_sched_seed_changes_no_output() {
 /// and a `wait:` inside a native callback are there since TICKET-206: 80 of 80 on an idle box, a
 /// measured rate under 40 hogs. Both Executor fixtures (`executor_join.chz`,
 /// `executor_interleave.chz`) stay in `open/` with a measured rate after TICKET-208 and TICKET-213
-/// (join 72 of 80, job start one differing run in 480, under 40 hogs). TICKET-209 (nursery join,
-/// Executor join, guard wait, both callback fixtures) moves each into `FIXTURES` when the wait holds
-/// 80 of 80 under 40 hogs.
+/// (join 72 of 80, job start one differing run in 480, under 40 hogs). TICKET-209 adds the nursery
+/// join and the `Shared` guard wait inside a native callback (`nursery_join_in_callback.chz`,
+/// `guard_wait_in_callback.chz`), and moves each callback fixture into `FIXTURES` when the wait
+/// holds 80 of 80 under 40 hogs.
 #[test]
 fn the_same_seed_replays_byte_for_byte_at_one_worker() {
     const RUNS: usize = 10;
-    const FIXTURES: [&str; 6] = [
+    const FIXTURES: [&str; 8] = [
         "nested_interleave.chz",
         "interleave.chz",
         "body_recv_interleave.chz",
         "body_recv_bounded_interleave.chz",
         "body_wait_interleave.chz",
         "callback_send_interleave.chz",
+        "nursery_join_in_callback.chz",
+        "guard_wait_in_callback.chz",
     ];
     let mut red = Vec::new();
     for name in FIXTURES {
