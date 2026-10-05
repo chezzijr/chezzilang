@@ -231,6 +231,9 @@ struct Compiler {
     /// `(enum key, variant)` → the synthesized constructor fn of a payload variant read as a value
     /// (`R1[int].L`, TICKET-204). See [`Compiler::variant_fn_proto`].
     variant_fns: HashMap<(String, String), ProtoId>,
+    /// One synthesized proto per (method, arity) for a bound's instance method read through a type
+    /// parameter (`T.get`, `Resolution::ParamMethodFn`).
+    param_method_fns: HashMap<(String, usize), ProtoId>,
     /// M19 Phase 2b — the current module's global name → slot map, rebuilt at the start of each
     /// `compile_module`. Shared across the toplevel proto and every fn/method/closure compiled for
     /// the module, so a global reference anywhere in the module resolves to the same slot.
@@ -579,6 +582,7 @@ impl Compiler {
             provider_ids: HashMap::new(),
             provider_defs: HashMap::new(),
             variant_fns: HashMap::new(),
+            param_method_fns: HashMap::new(),
             fn_names: std::collections::HashSet::new(),
             global_slots: Vec::new(),
             global_let_lines: Vec::new(),
@@ -3525,6 +3529,11 @@ impl Compiler {
                     Resolution::MethodFn { type_key, method } => {
                         fc.emit(Op::MakeMethodFunc { type_key, method }, expr.span);
                     }
+                    // A bound's instance method through a type parameter (`T.get`).
+                    Resolution::ParamMethodFn { method, arity } => {
+                        let p = self.param_method_fn_proto(&method, arity);
+                        fc.emit(Op::MakeFunc(p), expr.span);
+                    }
                     // A payload variant read as a value (`R1[int].L`): its constructor fn.
                     Resolution::VariantFn {
                         enum_key,
@@ -4313,6 +4322,7 @@ impl Compiler {
                 | Resolution::StructCtor(_)
                 | Resolution::NewTypeCtor(_)
                 | Resolution::WitnessStatic(_)
+                | Resolution::ParamMethodFn { .. }
                 | Resolution::Builtin(_)
                 | Resolution::ModuleMember { .. }
         ))
@@ -4849,6 +4859,13 @@ impl Compiler {
                     )?;
                     return Ok(());
                 }
+                // `T.get(v)`: the path value applied.
+                Resolution::ParamMethodFn { .. } => {
+                    self.compile_expr(fc, callee)?;
+                    let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
+                    fc.emit(Op::Call(argc), span);
+                    return Ok(());
+                }
                 Resolution::WitnessStatic(t) => {
                     let w = fc.witness_ref(&t).ok_or_else(|| CompileError {
                         message: format!("internal: no witness for type parameter '{t}' here"),
@@ -5066,6 +5083,33 @@ impl Compiler {
 
     /// A payload variant has no proto of its own; its value is this constructor fn (Rust
     /// `E::<T>::V`), synthesized once per `(enum key, variant)`.
+    /// The memoised proto of `T.method` as a value: a fn of `arity` params that calls `method` on
+    /// its first, so it dispatches on the receiver's runtime type and needs no witness.
+    fn param_method_fn_proto(&mut self, method: &str, arity: usize) -> ProtoId {
+        let k = (method.to_string(), arity);
+        if let Some(&p) = self.param_method_fns.get(&k) {
+            return p;
+        }
+        let mut vf = FnComp::new(method.to_string(), arity, false);
+        for i in 0..arity {
+            let slot = vf.add_local(format!("$v{i}"));
+            vf.emit_get_local_raw(slot, Span::RUNTIME);
+        }
+        let ic = self.next_method_ic();
+        vf.emit(
+            Op::CallMethod {
+                name: method.to_string(),
+                argc: arity.saturating_sub(1),
+                ic,
+            },
+            Span::RUNTIME,
+        );
+        vf.emit(Op::Return, Span::RUNTIME);
+        let p = self.finish(vf);
+        self.param_method_fns.insert(k, p);
+        p
+    }
+
     fn variant_fn_proto(&mut self, enum_key: &str, variant: &str, arity: usize) -> ProtoId {
         let k = (enum_key.to_string(), variant.to_string());
         if let Some(&p) = self.variant_fns.get(&k) {

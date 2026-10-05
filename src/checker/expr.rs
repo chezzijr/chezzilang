@@ -411,6 +411,12 @@ impl Checker {
             if let ExprKind::Ident(tname) = &obj.kind
                 && self.shadowing_type_param(tname)
             {
+                // A bound's INSTANCE method through the parameter (`T.get(v)`, Rust's
+                // `T::get(&v)`) is the path value `T.get` applied; `infer_field` records it.
+                if self.param_member_fn(tname, name).is_some() {
+                    let callee_ty = self.infer(callee);
+                    return self.apply_value_call(callee, callee_ty, args, named, span);
+                }
                 let r = Resolution::WitnessStatic(tname.clone());
                 self.record_resolution(callee.id, r, callee.span);
                 return self.infer_witness_static_call(tname, name, args, span);
@@ -4614,24 +4620,9 @@ impl Checker {
             Ty::Param(pname) => {
                 // Search the param's bounds for a protocol that declares `method` (multi-bound
                 // `T: Add + Mul` exposes the union of both protocols' methods).
-                let bounds = self.type_params.get(pname).cloned().unwrap_or_default();
-                let found = bounds.iter().find_map(|proto| {
-                    self.protocol_method_sig(&proto.name, method)
-                        .map(|s| (proto.clone(), s))
-                });
-                if let Some((proto, msig)) = found {
-                    // Map `Self` to the receiver, plus the parameterized protocol's own params to the
-                    // bound's concrete args (`Container[int]` ⇒ `T ↦ int`), so a method returning `T`
-                    // resolves to `int` in the caller.
-                    let mut map = HashMap::from([("Self".to_string(), obj_ty.clone())]);
-                    let ptps = self
-                        .protocol_shape(&proto.name)
-                        .map(|p| p.type_params.clone())
-                        .unwrap_or_default();
-                    for (pname, parg) in ptps.iter().zip(&proto.args) {
-                        let resolved = parg.clone();
-                        map.insert(pname.clone(), resolved);
-                    }
+                // `Self` maps to the receiver `Ty::Param(pname)`, and the parameterized protocol's
+                // own params to the bound's args (`Container[int]` ⇒ `T ↦ int`).
+                if let Some((proto, msig, map)) = self.bound_method(pname, method, &|_| true) {
                     let expected: Vec<Ty> = match msig.params.split_first() {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
                         None => Vec::new(),
@@ -4646,26 +4637,10 @@ impl Checker {
                         return Ty::Unknown;
                     };
                     self.check_args_subst(method, &expected, expected.len(), &bound, span);
-                    // `Iterator[T].next()` yields `Option[T]` — its return is the bound's element arg,
-                    // not `Self` (the registered placeholder); the arg was resolved at the declaration
-                    // (TICKET-202).
-                    if proto.name == "Iterator"
-                        && method == "next"
-                        && let Some(arg) = proto.args.first()
-                    {
-                        return Ty::Option(Box::new(arg.clone()));
-                    }
-                    // `Iterable[T].iter()` yields the existential cursor `Iterator[T]` — the bound's
-                    // element arg, not `Iterator[Self]` (the registered placeholder return).
-                    if proto.name == "Iterable"
-                        && method == "iter"
-                        && let Some(arg) = proto.args.first()
-                    {
-                        return Ty::Struct("Iterator".to_string(), vec![arg.clone()]);
-                    }
-                    return subst(&msig.ret, &map);
+                    return self.bound_method_ret(&proto, method, &msig, &map);
                 }
                 self.infer_all(args);
+                let bounds = self.type_params.get(pname).cloned().unwrap_or_default();
                 let mut names: Vec<String> = bounds
                     .iter()
                     .flat_map(|b| self.protocol_method_names(&b.name))

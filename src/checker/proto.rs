@@ -4537,6 +4537,60 @@ impl Checker {
     ///   declaring body, or (Task 4) any nested body inside it, which captures it.
     ///
     /// Anything else keeps the pre-M24 "generics are erased" diagnostic.
+    /// The first bound of type param `tname` whose protocol declares `method` with a sig `pick`
+    /// accepts, that sig, and its map: `Self` ↦ `Ty::Param(tname)` (the body is still checked
+    /// abstractly) plus each protocol param ↦ the bound's arg (`Convert[int]` ⇒ `S ↦ int`). The one
+    /// bound search, read by the static-witness call, a bound-param receiver's method call and
+    /// the path value `T.m`.
+    pub(super) fn bound_method(
+        &self,
+        tname: &str,
+        method: &str,
+        pick: &dyn Fn(&FnSig) -> bool,
+    ) -> Option<(TyBound, FnSig, HashMap<String, Ty>)> {
+        let bounds = self.type_params.get(tname)?;
+        let (bound, msig) = bounds.iter().find_map(|b| {
+            self.protocol_method_sig(&b.name, method)
+                .filter(|s| pick(s))
+                .map(|s| (b.clone(), s))
+        })?;
+        let mut map = HashMap::from([("Self".to_string(), Ty::Param(tname.to_string()))]);
+        let ptps = self
+            .protocol_shape(&bound.name)
+            .map(|p| p.type_params.clone())
+            .unwrap_or_default();
+        for (pn, parg) in ptps.iter().zip(&bound.args) {
+            map.insert(pn.clone(), parg.clone());
+        }
+        Some((bound, msig, map))
+    }
+
+    /// The return of bound `bound`'s `method` (sig `msig`, map `map`): `Iterator[T].next()` yields
+    /// `Option[T]` and `Iterable[T].iter()` the cursor `Iterator[T]` — the bound's element arg,
+    /// resolved at the declaration (TICKET-202), not the registered `Self` placeholder — else the
+    /// substituted declared return.
+    pub(super) fn bound_method_ret(
+        &self,
+        bound: &TyBound,
+        method: &str,
+        msig: &FnSig,
+        map: &HashMap<String, Ty>,
+    ) -> Ty {
+        if bound.name == "Iterator"
+            && method == "next"
+            && let Some(arg) = bound.args.first()
+        {
+            return Ty::Option(Box::new(arg.clone()));
+        }
+        if bound.name == "Iterable"
+            && method == "iter"
+            && let Some(arg) = bound.args.first()
+        {
+            return Ty::Struct("Iterator".to_string(), vec![arg.clone()]);
+        }
+        subst(&msig.ret, map)
+    }
+
     pub(super) fn infer_witness_static_call(
         &mut self,
         tname: &str,
@@ -4562,13 +4616,7 @@ impl Checker {
             );
             return Ty::Unknown;
         }
-        let bounds = self.type_params.get(tname).cloned().unwrap_or_default();
-        let found = bounds.iter().find_map(|b| {
-            self.protocol_method_sig(&b.name, method)
-                .filter(|s| s.is_static)
-                .map(|s| (b.clone(), s))
-        });
-        let Some((bound, msig)) = found else {
+        let Some((_, msig, map)) = self.bound_method(tname, method, &|s| s.is_static) else {
             self.infer_all(args);
             // Name a protocol that ALREADY declares this static method rather than inventing a
             // signature for it — the invented `fn {method}(...) -> Self` was simply wrong for a
@@ -4613,18 +4661,6 @@ impl Checker {
                 ),
             );
             return Ty::Unknown;
-        }
-        // `Self` is the type param itself (the body is still checked abstractly), plus the
-        // parameterized protocol's own params mapped to the bound's concrete args (`Convert[int]`
-        // ⇒ `S ↦ int`), so a requirement `fn convert(x: S) -> Self` types as `(int) -> T`.
-        let mut map = HashMap::from([("Self".to_string(), Ty::Param(tname.to_string()))]);
-        let ptps = self
-            .protocol_shape(&bound.name)
-            .map(|p| p.type_params.clone())
-            .unwrap_or_default();
-        for (pn, parg) in ptps.iter().zip(&bound.args) {
-            let resolved = parg.clone();
-            map.insert(pn.clone(), resolved);
         }
         // A STATIC requirement has NO receiver slot, so every declared param is a real argument.
         let expected: Vec<Ty> = msig.params.iter().map(|t| subst(t, &map)).collect();

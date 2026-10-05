@@ -2449,6 +2449,32 @@ impl Checker {
             .map(|pf| (pf.display, pf.sig, pf.spelling))
     }
 
+    /// The path value `T.m` for an in-scope type param `T`: a bound's INSTANCE method `m`, as a fn
+    /// taking the receiver first (Rust's `T::m`). `None` for a static requirement (call-only,
+    /// through `infer_witness_static_call`) and a miss. Protocol methods take no own type params,
+    /// so the value is never generic.
+    pub(super) fn param_member_fn(&self, tname: &str, name: &str) -> Option<PathFn> {
+        let (bound, msig, map) = self.bound_method(tname, name, &|s| !s.is_static)?;
+        let mut inst = subst_sig(&msig, &map);
+        inst.ret = self.bound_method_ret(&bound, name, &msig, &map);
+        let sig = method_value_sig(&inst, &[], Ty::Param(tname.to_string()));
+        let arity = sig.params.len();
+        Some(PathFn {
+            display: format!("{tname}.{name}"),
+            head_spelled: tname.to_string(),
+            spelling: format!("{tname}.{name}"),
+            sig,
+            head_decl: Vec::new(),
+            head_params: 0,
+            head_args: None,
+            head_pinned: None,
+            res: Some(Resolution::ParamMethodFn {
+                method: name.to_string(),
+                arity,
+            }),
+        })
+    }
+
     /// The `m.f` half of [`Self::path_fn`]: `m` is a whole-module import here and `f` is one of its
     /// fns.
     fn module_fn(&self, m: &str, name: &str) -> Option<(String, FnSig)> {
@@ -2487,6 +2513,12 @@ impl Checker {
                 Some(PathFn::of_fn(name.clone(), sig.clone()))
             }
             ExprKind::Field { obj, name, .. } => {
+                // A type parameter shadows a module or type of that name here, as in a call.
+                if let ExprKind::Ident(t) = &obj.kind
+                    && self.shadowing_type_param(t)
+                {
+                    return self.param_member_fn(t, name);
+                }
                 if let ExprKind::Ident(m) = &obj.kind
                     && let Some((display, sig)) = self.module_fn(m, name)
                 {
@@ -2698,7 +2730,7 @@ impl Checker {
     /// (a turbofish), if any: the witness wall, the head and own arity checks, the bounds over the
     /// type's declared params followed by the item's own (DEC-202), then the substituted fn type —
     /// or, with params left free, the pin-or-reject rule of [`Self::generic_fn_value_ty`].
-    fn path_fn_value_ty(
+    pub(super) fn path_fn_value_ty(
         &mut self,
         pf: PathFn,
         own_args: Option<WrittenTypeArgs>,
@@ -4279,10 +4311,16 @@ impl Checker {
         if let ExprKind::Ident(tname) = &obj.kind
             && self.shadowing_type_param(tname)
         {
+            if let Some(pf) = self.param_member_fn(tname, name) {
+                if let Some(r) = pf.res.clone() {
+                    self.record_resolution(id, r, name_span);
+                }
+                return self.path_fn_value_ty(pf, None, name_span);
+            }
             return self.type_param_shadow_error(
                 tname,
                 &format!(
-                    "a type parameter has no member '{name}'; the only thing reachable through one is a STATIC method declared by one of its bounds, and only as a call (`{tname}.<method>(...)`)"
+                    "a type parameter has no member '{name}'; through one you reach only the methods its bounds declare: an instance method as a value or a call (`{tname}.<method>(value, ...)`), a STATIC method only as a call (`{tname}.<method>(...)`)"
                 ),
                 obj.span,
             );

@@ -1045,6 +1045,9 @@ pub enum Resolution {
     NewTypeCtor(String),
     /// A desugar-synthesized default provider the module cannot name (`Op::MakeFuncIn`).
     Provider,
+    /// A bound's instance method read through a type parameter (`T.get`): a synthesized fn of
+    /// `arity` params that calls `method` on its first argument, dispatched on its runtime type.
+    ParamMethodFn { method: String, arity: usize },
     /// Recorded on a CALL node: this call indexes its callee with the call's `bracket`, then calls
     /// the element (`fs[k](10)`, `Op::GetIndex` + `Op::Call`).
     IndexCall,
