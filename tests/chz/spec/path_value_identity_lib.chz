@@ -1,0 +1,31 @@
+# TICKET-215: the second module of `path_value_identity_test.chz`'s grid.
+struct Q:
+    n: int
+    fn mk(n: int) -> Q:
+        return Q(n)
+    fn get(self) -> int:
+        return self.n
+
+enum F:
+    X(int)
+    Y
+
+type QA = Q
+
+fn top(n: int) -> int:
+    return n
+
+fn read_top() -> fn(int) -> int:
+    return top
+
+fn read_q_mk() -> fn(int) -> Q:
+    return Q.mk
+
+fn read_q_get() -> fn(Q) -> int:
+    return Q.get
+
+fn read_f_x() -> fn(int) -> F:
+    return F.X
+
+fn read_qa_mk() -> fn(int) -> Q:
+    return QA.mk
