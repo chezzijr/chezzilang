@@ -649,7 +649,7 @@ slot, struct field, enum payload or newtype underlying the structural compare wo
 (TICKET-144, W14-24; `Atomic[fn() -> int]`, a struct field or `List` element of `fn` type): every `load()` returns a fresh copy of the closure and
 closures compare by identity, so `cas(a.load(), new)` could never succeed and the standard CAS retry loop would spin forever
 (Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape). The error is at the `cas` call, so
-`load`/`store`/`exchange` of a fn stay legal, and a builtin fn value (`Atomic(ord)`) — which compares equal after a load — keeps `cas`; a std native fn (`math.sqrt`) loads back unequal to itself, so it is rejected like a closure. A generic `fn f[T](a: Atomic[T], …)`
+`load`/`store`/`exchange` of a fn stay legal, and a builtin fn value (`Atomic(ord)`) — which compares equal after a load — keeps `cas`; a named fn, a std native fn (`math.sqrt`) and an `extern` fn load back equal to themselves since TICKET-215, but `cas` still rejects them like a closure: their `==` is heap-slot identity (`Obj::identity`). A generic `fn f[T](a: Atomic[T], …)`
 hides the fn from the checker, so the runtime `cas` faults `Atomic.cas: the payload holds a function value, which cas cannot compare` instead of answering `false` forever. The runtime refusal reads `Obj::identity` (TICKET-177), so an
 extern fn and an iterator payload fault the same way (`Atomic.cas: the payload holds an iterator, which cas cannot compare`). A
 handle payload (`Atomic(ch)`) compares by its core, so `cas(a.load(), …)` on it succeeds. Each method is a single

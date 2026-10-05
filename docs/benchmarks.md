@@ -11,6 +11,26 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-215 — path value read, base vs branch (2026-10-05)
+
+`target/path_read_bench.chz`: a top-level `while` loop reading `P.mk` and `E.A` 1,000,000 times each.
+Release binaries, interleaved base/branch, n=5 each, timed with `date +%s%N` around each run.
+Base is `853a18ab` (each read allocates a new `Obj::Func`); branch reads the heap's one fn object
+from `Vm::fn_values`.
+
+| run | base (ms) | branch (ms) |
+|---|---|---|
+| 1 | 390 | 422 |
+| 2 | 393 | 393 |
+| 3 | 390 | 362 |
+| 4 | 415 | 364 |
+| 5 | 373 | 401 |
+| **median** | **390** | **393** |
+
+Base spread (max − min) 42 ms; the branch median is within it (no measurable change). The memo lookup
+replaces an allocation, and the allocation it saves was cheap. `uptime` before and after:
+`load average: 3.64, 2.74, 2.51`.
+
 ## TICKET-205 — one runner gate for every party: a T=1 cost on channel hand-off (2026-10-03)
 
 **Owner decision 2026-10-03: the T=1 cost is accepted.** Reason: at T=1 a thread hand-over takes

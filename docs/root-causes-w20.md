@@ -185,7 +185,7 @@ counting the inline joiner twice. The close-time farm and TICKET-159's hook fold
 1. **Executor rebuild** (A2 P0, C1, C3, H1; TICKET-207's fault rules, A1, C2; TICKET-206 wait 4) — TICKET-208. TICKET-207 closed into it.
    Status (2026-10-04): TICKET-208 landed the engine. TICKET-213 landed A1 (a copy's write to an unread `Task.get()` / `memoize1` result faults), `Executor(n)` and the exit rule (`os.exit` runs no `defer`), which deletes C3. Seeded replay of the Executor stays a measured rate (W15-10).
 2. **P1** (K2, K3, K4, K5, K6) — TICKET-210. Split off: S1+S2 (native fns as values, `Num`) — TICKET-214; K1 P0 (path-value identity) — TICKET-215.
-   Status (2026-10-05): K2-K6 landed in TICKET-210, plus a bound's instance method through its type parameter (`T.get(v)`); grid `tests/path_call_grid.rs`. S1+S2 and K1 are the split-off tickets.
+   Status (2026-10-05): K2-K6 landed in TICKET-210, plus a bound's instance method through its type parameter (`T.get(v)`); grid `tests/path_call_grid.rs`. S1+S2 and K1 are the split-off tickets. K1 landed in TICKET-215: `Vm::fn_value` is the one allocator of a bare fn value (Chezzi, native, extern), one per fn per heap.
    Status (2026-10-05): S1 and S2 landed in TICKET-214 (`Num`, sealed to int/float; `math.abs`/`math.sign` are `[T: Num]`; `json.decode[T]` is a value).
 3. **W1** (H2) — TICKET-211; after TICKET-208 if they share scheduler files.
 4. **S3** — TICKET-212. Status (2026-10-05): landed; `std.request` retries a request Go would retry (`isReplayable`), once, on fresh connections.

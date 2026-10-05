@@ -2350,7 +2350,11 @@ implicit. A function value compares by IDENTITY, not structurally — two loads 
 top-level/nested `fn` def (or the same builtin) are equal, two calls to a factory minting a fresh
 nested `fn` are not, and two closures with equal captures are not — matching CPython's `f == g`
 exactly and Rust's fn-pointer `PartialEq` (`docs/gaps.md` **W7-54**, fixed 2026-08-12; Go is the one
-ancestor that differs, rejecting `f == g` outright). A protocol-typed value defers entirely to its
+ancestor that differs, rejecting `f == g` outright). A named fn is one value: `P.mk == P.mk`,
+`E.A == E.A`, `PA.mk == P.mk`, `lib.Q.mk == Q.mk`, `T.get == T.get`, `math.sqrt == math.sqrt` and an
+`extern` fn are `true` read in any module, inside a spawned task, and after a `spawn:` capture, a
+`Channel` or an `Atomic.load` (TICKET-215; Rust fn items, CPython `C.m == C.m`,
+`q.get() == math.sqrt`). A protocol-typed value defers entirely to its
 concrete witness — see the deferred-to-runtime paragraph above (`docs/gaps.md` **W7-52**, fixed
 2026-08-12; matches Go 1.20+'s `comparable`, which likewise admits an interface type). The one thing
 that revokes the grant is an
