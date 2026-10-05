@@ -2592,6 +2592,136 @@ print(nested < flat * 1.6 + 0.05)
     );
 }
 
+/// TICKET-211 (W1) — the grid: every nesting shape {flat, nested in a spawned task, two deep,
+/// nested in an Executor job} x outer body {open, closed} x T {2, 4, 8} must reach exactly T runner
+/// threads. A cell may stay below T only when the `NestedDrainerSlot` budget refused a start (another
+/// test holds slots), and never exceed T.
+#[test]
+fn runner_threads_reach_the_worker_count_in_every_nesting_shape() {
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    let header = "
+import std.concurrency
+fn burn():
+    i := 0
+    while i < 200000:
+        i += 1
+fn burn_send(done: Channel[int]):
+    burn()
+    done.send(1)
+fn fan():
+    parallel:
+        for _ in 0..8:
+            spawn burn()
+fn fan2():
+    parallel:
+        spawn fan()
+fn fan_send(done: Channel[int]):
+    fan()
+    done.send(1)
+fn fan2_send(done: Channel[int]):
+    fan2()
+    done.send(1)
+";
+    let shapes: [(&str, &str); 8] = [
+        (
+            "flat_closed",
+            "
+parallel:
+    for _ in 0..8:
+        spawn burn()
+",
+        ),
+        (
+            "flat_open",
+            "
+done := Channel[int](8)
+parallel:
+    for _ in 0..8:
+        spawn burn_send(done)
+    for _ in 0..8:
+        done.recv()
+",
+        ),
+        (
+            "nested_closed",
+            "
+parallel:
+    spawn fan()
+",
+        ),
+        (
+            "nested_open",
+            "
+done := Channel[int](1)
+parallel:
+    spawn fan_send(done)
+    done.recv()
+",
+        ),
+        (
+            "twodeep_closed",
+            "
+parallel:
+    spawn fan2()
+",
+        ),
+        (
+            "twodeep_open",
+            "
+done := Channel[int](1)
+parallel:
+    spawn fan2_send(done)
+    done.recv()
+",
+        ),
+        (
+            "exec_closed",
+            "
+ex := Executor()
+ex.submit(fn(): fan())
+ex.shutdown()
+",
+        ),
+        (
+            "exec_open",
+            "
+done := Channel[int](1)
+ex := Executor()
+ex.submit(fn(): fan_send(done))
+done.recv()
+ex.shutdown()
+",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for t in [2usize, 4, 8] {
+        for (shape, body) in shapes {
+            crate::vm::set_worker_count(t);
+            let entry = write_temp_chz(&format!("w1_grid_{shape}_{t}"), &format!("{header}{body}"));
+            let ((_out, _err, res, _code), peak, denials) =
+                crate::vm::run_file_counting_runners(&entry);
+            let _ = std::fs::remove_file(&entry);
+            assert!(res.is_ok(), "{shape} T={t} faulted: {res:?}");
+            if !(peak <= t && (peak == t || denials > 0)) {
+                failures.push(format!(
+                    "{shape} T={t}: peak runner threads {peak}, slot denials {denials}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "runner-thread grid: {failures:#?}");
+}
+
 /// `pmap_limited`'s token bucket actually BOUNDS in-flight tasks: an Atomic max-in-flight probe never
 /// exceeds `limit` — the semaphore caps concurrent f-execution.
 #[test]

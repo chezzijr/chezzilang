@@ -290,6 +290,16 @@ pub(super) struct QuiesceState {
     /// TICKET-208 — the fault of a fire-and-forget `Executor` job: the second cause of a run-wide
     /// halt, beside `exit`. Read through the one funnel `Vm::run_exit_err`, taken by `Vm::rank_end`.
     job_fault: Mutex<Option<(super::RuntimeError, Vec<super::TraceFrame>)>>,
+    /// TICKET-211 — runner threads of this run inside `Vm::mn_worker_loop` right now, one per OS
+    /// thread however deep its loops nest (`sched::RunnerCount`). Test-only.
+    #[cfg(test)]
+    pub(super) runner_threads: std::sync::atomic::AtomicUsize,
+    /// TICKET-211 — the high-water mark of `runner_threads`. Test-only.
+    #[cfg(test)]
+    pub(super) peak_runner_threads: std::sync::atomic::AtomicUsize,
+    /// TICKET-211 — runner starts refused by the `NestedDrainerSlot` budget. Test-only.
+    #[cfg(test)]
+    pub(super) runner_slot_denials: std::sync::atomic::AtomicUsize,
 }
 
 impl QuiesceState {

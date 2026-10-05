@@ -2573,6 +2573,8 @@ impl Vm {
     /// belong to ANY scope (the queue is global): `finish`/`cancel_drain` use the FIBER's `scope_id`,
     /// while `take_runnable`'s stop check uses `owner_scope`.
     pub(super) fn mn_worker_loop(&mut self, sched: &Arc<MnSched>, wid: usize, owner_scope: usize) {
+        #[cfg(test)]
+        let _runner = RunnerCount::enter(&sched.quiesce);
         self.wid = wid; // D5 owe #3 (Path C) — `demote_recv_block` reuses this for the replacement worker
         // TICKET-206 — withdraws the turn this loop queued for itself when it exits without taking it.
         struct OwnTurn;
@@ -6562,6 +6564,39 @@ fn spawn_worker_thread(
         sched.idle_forget(&child_slot);
     }
     r
+}
+
+#[cfg(test)]
+thread_local! {
+    /// TICKET-211 — this OS thread is already counted in `QuiesceState::runner_threads`.
+    static IN_RUNNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// TICKET-211 — counts one runner thread for the span of its outermost `mn_worker_loop`. A loop
+/// nested on a thread that already runs one (a fiber's inline join) is inert. Test-only.
+#[cfg(test)]
+struct RunnerCount(Option<Arc<crate::vm::quiesce::QuiesceState>>);
+
+#[cfg(test)]
+impl RunnerCount {
+    fn enter(q: &Arc<crate::vm::quiesce::QuiesceState>) -> Self {
+        if IN_RUNNER.with(|f| f.replace(true)) {
+            return RunnerCount(None);
+        }
+        let now = q.runner_threads.fetch_add(1, Ordering::SeqCst) + 1;
+        q.peak_runner_threads.fetch_max(now, Ordering::SeqCst);
+        RunnerCount(Some(Arc::clone(q)))
+    }
+}
+
+#[cfg(test)]
+impl Drop for RunnerCount {
+    fn drop(&mut self) {
+        if let Some(q) = self.0.take() {
+            q.runner_threads.fetch_sub(1, Ordering::SeqCst);
+            IN_RUNNER.with(|f| f.set(false));
+        }
+    }
 }
 
 /// TICKET-205 — see [`Vm::gated_register`].
