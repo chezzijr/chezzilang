@@ -37979,3 +37979,8 @@ fn unknown_type_head_reports_one_error() {
         "a type-shaped index after an errored head is not a value: {errs:?}"
     );
 }
+
+#[test]
+fn native_math_abs_is_a_num_generic_value() {
+    entry_ok("import std.math\nfn main():\n    print([-1, 2].map(math.abs))\n");
+}
