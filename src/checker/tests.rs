@@ -37402,7 +37402,7 @@ fn native_fn_and_num_protocol_grid() {
 fn extern_nested_struct_by_value_is_marshallable() {
     // TICKET-217: a struct field whose type is another C-marshallable struct is accepted as an
     // extern param (raylib `Camera2D {Vector2 offset, Vector2 target, float rotation, float zoom}`).
-    ok(
+    entry_ok(
         "import int32 from std.ffi\nstruct In:\n    a: int32\n    b: int32\nstruct Out:\n    i: In\n    c: int32\nextern \"libt.so\":\n    fn take(o: Out) -> int\n",
     );
 }
