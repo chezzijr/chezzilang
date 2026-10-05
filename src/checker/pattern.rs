@@ -2481,6 +2481,9 @@ impl Checker {
         if !matches!(self.head_binding(m), HeadBinding::Module) {
             return None;
         }
+        if self.json_decode_member(m, name) {
+            return Some((format!("{m}.{name}"), json_decode_sig()));
+        }
         let msig = self.module_sigs.get(self.imported_modules.get(m)?)?;
         let sig = msig.certain_fn(name)?;
         Some((format!("{m}.{name}"), sig.clone()))
@@ -2805,6 +2808,18 @@ impl Checker {
         let pf = self.path_fn(app.head)?;
         if pf.sig.type_params.len() == pf.head_params {
             return None;
+        }
+        // TICKET-214: std.json's decode — `T` is written, so the value always records its
+        // descriptor (or reports a target that does not decode).
+        if let ExprKind::Field { obj: m, name, .. } = &app.head.kind
+            && let ExprKind::Ident(mn) = &m.kind
+            && self.json_decode_member(mn, name)
+        {
+            let r = self.value_head_resolution(mn);
+            self.record_resolution(m.id, r, m.span);
+            let ty =
+                self.path_fn_value_ty(pf, Some((app.args.clone(), app.args_span)), app.head.span);
+            return Some(self.record_decode_value(app.head.id, ty, app.head.span));
         }
         let head = app.head;
         match &pf.res {
@@ -4336,6 +4351,9 @@ impl Checker {
         if let Some(t) = self.type_member_value(id, obj, name, name_span) {
             return t;
         }
+        if let Some(t) = self.decode_value(id, obj, name, name_span) {
+            return t;
+        }
         let r = self.member_resolution(obj, name);
         self.record_resolution(id, r, name_span);
         let obj_ty = self.infer(obj);
@@ -5051,6 +5069,84 @@ impl Checker {
             self.error(span, format!("decode source must be str, found {arg_ty}"));
         }
         let target = self.resolve_type(ty, span);
+        if !self.record_decode(id, &target, span) {
+            return Ty::Unknown;
+        }
+        Ty::result(target)
+    }
+
+    /// THE one answer to "is `m.name` std.json's decode" (TICKET-187/214). Read by the call arm,
+    /// `module_fn` and every decode value record.
+    pub(super) fn json_decode_member(&self, m: &str, name: &str) -> bool {
+        name == "decode"
+            && matches!(self.head_binding(m), HeadBinding::Module)
+            && self.json_module.is_some()
+            && self.imported_modules.get(m) == self.json_module.as_ref()
+    }
+
+    /// A decode value pinned to `ty` (`fn(str) -> Result[X]`): record `X`'s descriptor on `id` and
+    /// return `ty`, or `Unknown` when `X` is not decodable.
+    pub(super) fn record_decode_value(&mut self, id: crate::ast::NodeId, ty: Ty, span: Span) -> Ty {
+        let target = match &ty {
+            Ty::Func { ret, .. } => match ret.as_ref() {
+                Ty::Result(t, _) => (**t).clone(),
+                _ => return ty,
+            },
+            _ => return ty,
+        };
+        if self.record_decode(id, &target, span) {
+            ty
+        } else {
+            Ty::Unknown
+        }
+    }
+
+    /// std.json's decode read as a value (TICKET-214). Its record is its descriptor, so it is
+    /// written only at a FINAL verdict, and only `Pinned` records: a read whose `T` nothing pins is
+    /// rejected, because the value is compiled per `T`. A re-pinning call's immediate argument
+    /// (`generic_fn_value_prepass`) records nothing here; that call's
+    /// `report_undetermined_generic_fn_value_args` records or rejects it. `None` when `obj.name` is
+    /// not that decode.
+    fn decode_value(
+        &mut self,
+        id: crate::ast::NodeId,
+        obj: &Expr,
+        name: &str,
+        name_span: Span,
+    ) -> Option<Ty> {
+        let ExprKind::Ident(m) = &obj.kind else {
+            return None;
+        };
+        if !self.json_decode_member(m, name) {
+            return None;
+        }
+        let r = self.value_head_resolution(m);
+        self.record_resolution(obj.id, r, obj.span);
+        let sig = json_decode_sig();
+        let display = format!("{m}.{name}");
+        let spelling = fn_spelling(&display, &sig.type_params);
+        let ty = self.generic_fn_value_ty(&display, &sig, &spelling, name_span);
+        if self.generic_fn_value_prepass {
+            return Some(ty.unwrap_or_else(|| fn_value_ty(&sig)));
+        }
+        Some(match ty {
+            Some(Ty::Unknown) => Ty::Unknown,
+            Some(t) => self.record_decode_value(id, t, name_span),
+            None => {
+                self.reject_undetermined_generic_fn_value(&display, &sig, &spelling, name_span);
+                Ty::Unknown
+            }
+        })
+    }
+
+    /// Build `target`'s decode descriptor and record it on `id` as `Resolution::Decode`. `false`
+    /// when it reported why `target` is not decodable.
+    pub(super) fn record_decode(
+        &mut self,
+        id: crate::ast::NodeId,
+        target: &Ty,
+        span: Span,
+    ) -> bool {
         // One decision for what is decodable and what the VM decodes: the descriptor built here is
         // the diagnostic when it fails and the compiler's `Op::JsonDecode` operand when it succeeds.
         // Each field's default is the fill `S(...)` takes for it (decodable structs are non-generic,
@@ -5072,15 +5168,17 @@ impl Checker {
                     .collect()
             })
         };
-        match crate::json_decode::from_ty(&target, &shape, &mut Vec::new()) {
-            Ok(desc) => self.record_resolution(id, Resolution::Decode(desc), span),
-            Err(msg) if msg.is_empty() => {}
+        match crate::json_decode::from_ty(target, &shape, &mut Vec::new()) {
+            Ok(desc) => {
+                self.record_resolution(id, Resolution::Decode(desc), span);
+                true
+            }
+            Err(msg) if msg.is_empty() => true,
             Err(msg) => {
                 self.error(span, msg);
-                return Ty::Unknown;
+                false
             }
         }
-        Ty::result(target)
     }
 
     /// A free closure's param type, inferred from how its body USES the param (sources #2/#3 — only
@@ -5725,6 +5823,20 @@ impl PathFn {
             head_pinned: None,
             res: None,
         }
+    }
+}
+
+/// `decode[T](s: str) -> Result[T]`, the one signature of std.json's decode (TICKET-214). It is no
+/// `ModuleSig` member: decode has no runtime slot, and its value is a per-`T` compiled thunk
+/// (`Resolution::Decode`).
+pub(super) fn json_decode_sig() -> FnSig {
+    FnSig {
+        type_params: vec![TyParam {
+            name: "T".to_string(),
+            name_span: Span::default(),
+            bounds: Vec::new(),
+        }],
+        ..FnSig::plain(vec![Ty::Str], Ty::result(Ty::Param("T".to_string())))
     }
 }
 

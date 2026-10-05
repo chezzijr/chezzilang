@@ -1,0 +1,47 @@
+# tests/chz/stdlib/json_decode_value_test.chz — json.decode[T] as a value (TICKET-214).
+import std.json
+
+struct P:
+    x: int
+    y: int = 7
+
+fn app2[V](f: fn(str) -> Result[V], v: V) -> Result[V]:
+    return f("5")
+
+fn id[T](x: T) -> T:
+    return x
+
+test fn let_and_hof():
+    d := json.decode[int]
+    assert d("5") == Ok(5)
+    assert ["1", "2"].map(json.decode[int]) == [Ok(1), Ok(2)]
+    match d("x"):
+        Ok(_): assert false
+        Err(_): assert true
+
+test fn typed_let_struct_default_and_float():
+    dp: fn(str) -> Result[P] = json.decode
+    match dp("{{\"x\": 1}}"):
+        Ok(p): assert p.x == 1 and p.y == 7
+        Err(_): assert false
+    df := (json.decode[float])
+    assert df("2.5") == Ok(2.5)
+
+test fn pinned_by_generic_callee():
+    assert app2(json.decode, 3) == Ok(5)
+
+test fn pinned_through_a_bare_generic_slot_and_an_option():
+    f: fn(str) -> Result[int] = id(json.decode)
+    assert f("5") == Ok(5)
+    o: Option[fn(str) -> Result[int]] = Some(json.decode)
+    match o:
+        Some(g): assert g("6") == Ok(6)
+        None: assert false
+
+test fn crosses_spawn():
+    g := json.decode[int]
+    ch := Channel[int](1)
+    parallel:
+        spawn:
+            ch.send(g("4") ?? 0)
+    assert ch.recv() == 4

@@ -187,13 +187,14 @@ impl Checker {
         // TICKET-187: `.decode[T](s)` is an ordinary member call; only `decode` on the `std.json`
         // module is JSON decode, recorded as `Resolution::Decode` on the callee for the compiler.
         if let ExprKind::Field { obj, name, .. } = &callee.kind
-            && name == "decode"
             && let ExprKind::Ident(m) = &obj.kind
-            && matches!(self.head_binding(m), HeadBinding::Module)
-            && self.json_module.is_some()
-            && self.imported_modules.get(m) == self.json_module.as_ref()
+            && self.json_decode_member(m, name)
         {
-            if args.len() != 1 || type_args.len() != 1 || !named.is_empty() {
+            let sig = super::pattern::json_decode_sig();
+            if args.len() != sig.params.len()
+                || type_args.len() != sig.type_params.len()
+                || !named.is_empty()
+            {
                 self.consume_named();
                 self.infer_all(args);
                 self.error(

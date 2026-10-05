@@ -38130,6 +38130,147 @@ fn native_fn_and_num_protocol_grid() {
             "enum Num:\n    A\n    B",
             Some("reserved (builtin)"),
         ),
+        ("dec_call", "print(json.decode[int](\"5\"))", None),
+        (
+            "dec_call_no_targ",
+            "print(json.decode(\"5\"))",
+            Some("decode takes one type argument and one str argument"),
+        ),
+        (
+            "dec_let",
+            "d := json.decode[int]\nprint(d(\"5\"), d(\"x\"))",
+            None,
+        ),
+        (
+            "dec_let_float",
+            "d := json.decode[float]\nprint(d(\"2.5\"))",
+            None,
+        ),
+        (
+            "dec_let_struct",
+            "struct P:\n    x: int\n    y: int = 7\nd := json.decode[P]\nprint(d(\"{{}}\"))",
+            None,
+        ),
+        (
+            "dec_alias",
+            "import std.json as j\nd := j.decode[int]\nprint(d(\"5\"))",
+            None,
+        ),
+        (
+            "dec_missing",
+            "d := json.decode",
+            Some("'json.decode' is generic and T is not determined here"),
+        ),
+        (
+            "dec_typed",
+            "d: fn(str) -> Result[int] = json.decode\nprint(d(\"5\"))",
+            None,
+        ),
+        (
+            "dec_typed_targ",
+            "d: fn(str) -> Result[int] = json.decode[int]\nprint(d(\"5\"))",
+            None,
+        ),
+        (
+            "dec_typed_mismatch",
+            "d: fn(str) -> Result[str] = json.decode[int]",
+            Some("cannot assign fn(str) -> Result[int] to variable of type fn(str) -> Result[str]"),
+        ),
+        (
+            "dec_hof",
+            "print([\"5\", \"x\"].map(json.decode[int]))",
+            None,
+        ),
+        (
+            "dec_hof_missing",
+            "print([\"5\"].map(json.decode))",
+            Some("'json.decode' is generic and T is not determined here"),
+        ),
+        (
+            "dec_hof_empty",
+            "print([].map(json.decode))",
+            Some("'json.decode' is generic and T is not determined here"),
+        ),
+        (
+            "dec_generic_callee",
+            "fn app2[V](f: fn(str) -> Result[V], v: V) -> Result[V]:\n    return f(\"5\")\nprint(app2(json.decode, 3))",
+            None,
+        ),
+        (
+            "dec_paren",
+            "d := (json.decode[int])\nprint(d(\"5\"))",
+            None,
+        ),
+        (
+            "dec_caller_param",
+            "fn app[U](s: str) -> Result[U]:\n    f: fn(str) -> Result[U] = json.decode\n    return f(s)",
+            Some("decode: cannot decode into U"),
+        ),
+        (
+            "dec_targ_param",
+            "fn app[U](s: str) -> Result[U]:\n    f := json.decode[U]\n    return f(s)",
+            Some("decode: cannot decode into U"),
+        ),
+        (
+            "dec_bad_target",
+            "d := json.decode[Channel[int]]",
+            Some("decode: cannot decode into Channel[int]"),
+        ),
+        (
+            "dec_two_targs",
+            "d := json.decode[int, str]",
+            Some("'json.decode' expects 1 type argument(s), found 2"),
+        ),
+        (
+            "dec_spawn",
+            "fn main():\n    d := json.decode[int]\n    parallel:\n        spawn:\n            print(d(\"4\"))\nmain()",
+            None,
+        ),
+        (
+            "dec_global_in_fn",
+            "d := json.decode[int]\nfn main():\n    print(d(\"5\"))\nmain()",
+            None,
+        ),
+        (
+            "dec_from_import",
+            "import decode from std.json",
+            Some("module 'std.json' has no member 'decode'"),
+        ),
+        (
+            "dec_generic_t_slot",
+            "fn id[T](x: T) -> T:\n    return x\nf := id(json.decode)",
+            Some("'json.decode' is generic and T is not determined here"),
+        ),
+        (
+            "dec_generic_t_slot_typed",
+            "fn id[T](x: T) -> T:\n    return x\nf: fn(str) -> Result[int] = id(json.decode)\nprint(f(\"5\"))",
+            None,
+        ),
+        (
+            "dec_some",
+            "o := Some(json.decode)",
+            Some("'json.decode' is generic and T is not determined here"),
+        ),
+        (
+            "dec_some_typed",
+            "o: Option[fn(str) -> Result[int]] = Some(json.decode)",
+            None,
+        ),
+        (
+            "dec_list",
+            "xs := [json.decode]",
+            Some("'json.decode' is generic and T is not determined here"),
+        ),
+        (
+            "dec_unknown_slot",
+            "fn app2[V](f: fn(str) -> Result[V], v: V) -> Result[V]:\n    return f(\"5\")\nprint(app2(json.decode, []))",
+            Some("'json.decode' is generic and T is not determined here"),
+        ),
+        (
+            "dec_arity_slot",
+            "fn k[U](f: fn(U, U) -> U) -> int:\n    return 1\nprint(k(json.decode))",
+            Some("'json.decode' is generic and T is not determined here"),
+        ),
     ];
     let mut red = Vec::new();
     for (name, body, want) in cells {

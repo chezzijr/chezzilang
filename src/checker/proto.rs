@@ -5578,6 +5578,35 @@ impl Checker {
             let Some((name, sig, spelling)) = self.generic_fn_value_sig(arg) else {
                 continue;
             };
+            // TICKET-214: std.json's decode is compiled per T, so its FINAL verdict here is the one
+            // place a re-pinned decode argument is recorded, and anything short of Pinned
+            // (Undetermined, or Skip: a bare `T` slot, a wrong arity, an Unknown-cored pin such as
+            // `[].map(json.decode)`) is rejected.
+            if let ExprKind::Field {
+                obj, name: member, ..
+            } = &arg.kind
+                && let ExprKind::Ident(m) = &obj.kind
+                && self.json_decode_member(m, member)
+            {
+                let at = if arg.span == Span::default() {
+                    span
+                } else {
+                    arg.span
+                };
+                let verdict = pin_generic_fn_value(
+                    &sig.type_params,
+                    &fn_value_ty(&sig),
+                    &subst(decl, map),
+                    &|n| self.rigid_param(n, call_free),
+                );
+                match verdict {
+                    FnValuePin::Pinned(_, refined) => {
+                        self.record_decode_value(arg.id, refined, at);
+                    }
+                    _ => self.reject_undetermined_generic_fn_value(&name, &sig, &spelling, at),
+                }
+                continue;
+            }
             // The witness wall (`reject_witness_fn_value`) is a stricter, unconditional refusal with
             // different advice, and it already fired at the READ — do not stack a second message on
             // top of it.

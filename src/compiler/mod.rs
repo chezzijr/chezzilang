@@ -3556,6 +3556,10 @@ impl Compiler {
                         let p = self.variant_fn_proto(&enum_key, &variant, arity);
                         fc.emit(Op::MakeFunc(p), expr.span);
                     }
+                    // std.json's decode read as a value (TICKET-214).
+                    Resolution::Decode(desc) => {
+                        self.compile_decode_fn_value(fc, obj, &desc, expr.span)?
+                    }
                     // `Fn`: the head of a value turbofish `m.f[int]`, a member of the module.
                     Resolution::Member
                     | Resolution::ModuleMember { .. }
@@ -4844,19 +4848,9 @@ impl Compiler {
             && let [arg] = args
         {
             let desc = desc.clone();
-            let desc = desc.try_map_defaults(&mut |f| self.compile_default_thunk(f, span))?;
             self.compile_expr(fc, obj)?;
             self.compile_expr(fc, arg)?;
-            let ic = self.next_method_ic();
-            fc.emit(
-                Op::CallMethod {
-                    name: "parse".to_string(),
-                    argc: 1,
-                    ic,
-                },
-                span,
-            );
-            fc.emit(Op::JsonDecode(desc), span);
+            self.emit_json_decode(fc, &desc, span)?;
             return Ok(());
         }
         // Method / module-member call: `obj.name(args)`.
@@ -5106,12 +5100,21 @@ impl Compiler {
             ExprKind::Field { name, .. } => !crate::ast::is_tuple_index(name),
             _ => false,
         };
-        if !named_head
-            || !matches!(
-                self.resolution(app.head)?,
-                Resolution::Fn { .. } | Resolution::MethodFn { .. } | Resolution::VariantFn { .. }
-            )
+        if !named_head {
+            return Ok(false);
+        }
+        let res = self.resolution(app.head)?.clone();
+        // std.json's decode read as a value with its `T` written (TICKET-214).
+        if let Resolution::Decode(desc) = &res
+            && let ExprKind::Field { obj, .. } = &app.head.kind
         {
+            self.compile_decode_fn_value(fc, obj, desc, e.span)?;
+            return Ok(true);
+        }
+        if !matches!(
+            res,
+            Resolution::Fn { .. } | Resolution::MethodFn { .. } | Resolution::VariantFn { .. }
+        ) {
             return Ok(false);
         }
         self.compile_expr(fc, app.head)?;
@@ -5323,6 +5326,48 @@ impl Compiler {
             _ => self.current_module_idx,
         };
         Ok(crate::json_decode::DefaultThunk { proto, module })
+    }
+
+    /// `obj.parse(s)` then the descriptor's coercion, with `obj` and `s` already pushed: the one
+    /// lowering of std.json's decode, for the call and the value thunk.
+    fn emit_json_decode(
+        &mut self,
+        fc: &mut FnComp,
+        desc: &crate::json_decode::TypeDescriptor<crate::checker::ArgFill>,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        let desc = desc.try_map_defaults(&mut |f| self.compile_default_thunk(f, span))?;
+        let ic = self.next_method_ic();
+        fc.emit(
+            Op::CallMethod {
+                name: "parse".to_string(),
+                argc: 1,
+                ic,
+            },
+            span,
+        );
+        fc.emit(Op::JsonDecode(desc), span);
+        Ok(())
+    }
+
+    /// `json.decode[T]` read as a value (TICKET-214): a one-param proto that decodes its argument.
+    /// Homed in the reading module by `MakeFunc`, where the `json` import's slot lives.
+    fn compile_decode_fn_value(
+        &mut self,
+        fc: &mut FnComp,
+        obj: &Expr,
+        desc: &crate::json_decode::TypeDescriptor<crate::checker::ArgFill>,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        let mut vf = FnComp::new("json.decode".to_string(), 1, false);
+        let s = vf.add_local("$s".to_string());
+        self.compile_expr(&mut vf, obj)?;
+        vf.emit_get_local_raw(s, span);
+        self.emit_json_decode(&mut vf, desc, span)?;
+        vf.emit(Op::Return, span);
+        let pid = self.finish(vf);
+        fc.emit(Op::MakeFunc(pid), span);
+        Ok(())
     }
 
     /// Push a call's arguments -- by its plan when the checker bound it, else as written -- and
