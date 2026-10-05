@@ -2543,6 +2543,55 @@ fn pmap_limited_matches_pmap_both_engines() {
     );
 }
 
+/// TICKET-211 (W1): a nursery opened inside a spawned task, after the outer body has closed, runs on
+/// ~2 cores however many workers exist (measured: 8 tasks of 10M iterations, T=8, 199% CPU, 2.6 s).
+/// An Atomic in-flight probe cannot see it (fibers interleave on 2 runners, peak still reads 8), so
+/// the test compares wall time of the same 8 spawns flat vs nested in one program.
+#[test]
+fn nested_nursery_in_spawned_task_uses_all_workers() {
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    crate::vm::set_worker_count(8);
+    let src = "
+import std.time
+fn burn():
+    i := 0
+    while i < 3000000:
+        i += 1
+fn fan():
+    parallel:
+        for _ in 0..8:
+            spawn burn()
+t0 := time.monotonic()
+parallel:
+    for _ in 0..8:
+        spawn burn()
+flat := time.monotonic() - t0
+t1 := time.monotonic()
+parallel:
+    spawn fan()
+nested := time.monotonic() - t1
+print(nested < flat * 1.6 + 0.05)
+";
+    let entry = write_temp_chz("w1_nested_nursery", src);
+    let (out, _err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    res.expect("program runs");
+    assert_eq!(
+        out, "true\n",
+        "8 spawns nested in a spawned task must run within 1.6x of the same 8 spawns flat"
+    );
+}
+
 /// `pmap_limited`'s token bucket actually BOUNDS in-flight tasks: an Atomic max-in-flight probe never
 /// exceeds `limit` — the semaphore caps concurrent f-execution.
 #[test]
