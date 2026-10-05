@@ -957,6 +957,39 @@ mod tests {
         assert_eq!(field(&ret, "body"), &NativeRet::Str("done".into()));
     }
 
+    /// Answer every connection once without `Connection: close`, then close the socket (RFC 9112
+    /// allows it). The accept loop runs for the life of the test process.
+    fn serve_close_after_response() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+                drop(stream);
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[test]
+    fn a_reused_connection_the_server_closed_is_retried_not_peer_disconnected() {
+        let url = serve_close_after_response();
+        let mut errs = Vec::new();
+        for i in 0..200 {
+            if let NativeRet::Err(m) = do_get(&url, None) {
+                errs.push(format!("{i}: {m}"));
+            }
+        }
+        assert!(
+            errs.is_empty(),
+            "spurious errors: {} of 200, first: {:?}",
+            errs.len(),
+            errs.first()
+        );
+    }
+
     #[test]
     fn a_twelve_hop_redirect_chain_stops_with_too_many_redirects() {
         let (url, handle) = serve_redirect_chain(12);
