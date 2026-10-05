@@ -177,5 +177,5 @@ counting the inline joiner twice. The close-time farm and TICKET-159's hook fold
    Status (2026-10-04): TICKET-208 landed the engine. TICKET-213 landed A1 (a copy's write to an unread `Task.get()` / `memoize1` result faults), `Executor(n)` and the exit rule (`os.exit` runs no `defer`), which deletes C3. Seeded replay of the Executor stays a measured rate (W15-10).
 2. **P1** (K2, K3, K4, K5, K6) — TICKET-210. Split off: S1+S2 (native fns as values, `Num`) — TICKET-214; K1 P0 (path-value identity) — TICKET-215.
 3. **W1** (H2) — TICKET-211; after TICKET-208 if they share scheduler files.
-4. **S3** — TICKET-212.
+4. **S3** — TICKET-212. Status (2026-10-05): landed; `std.request` retries a request Go would retry (`isReplayable`), once, on fresh connections.
 5. **W15-10 remainder** (in-place nursery join only, if free unseeded; the `Shared` guard wait stays a rate, decision 3 above) — TICKET-209; TICKET-206 landed wait 1.

@@ -28,11 +28,15 @@
 //! byte or NUL in a header value, with a message naming the line as Go does (ureq 2 accepted it
 //! with the header dropped). An `HTTP/1.2` status line and an obs-fold continuation are accepted,
 //! the folded value joined with one space, as Go does (W14-30c; see `request_head`).
+//!
+//! A request that fails on a reused pooled connection before any response byte is re-run once on
+//! fresh connections when Go would retry it (`Request.isReplayable`; see `send`). ureq follows
+//! redirects inside one call, so the re-run repeats the whole chain (TICKET-212).
 
-use super::request_head::LenientHeadConnector;
+use super::request_head::{LenientHeadConnector, is_closed_idle};
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args, expect_args_range};
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ureq::http::{Request, Response};
 use ureq::unversioned::resolver::DefaultResolver;
 use ureq::unversioned::transport::{Connector, DefaultConnector};
@@ -112,13 +116,51 @@ fn latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }
 
+/// Whether Go's `Request.isReplayable` holds: the method is GET/HEAD/OPTIONS/TRACE, or the request
+/// carries an `Idempotency-Key` or `X-Idempotency-Key` header. Every body here is a held `&str`, so
+/// it always rewinds, which is Go's other condition.
+fn is_replayable(method: &str, headers: &[(String, String)]) -> bool {
+    matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE")
+        || headers.iter().any(|(k, _)| {
+            k.eq_ignore_ascii_case("idempotency-key") || k.eq_ignore_ascii_case("x-idempotency-key")
+        })
+}
+
 /// Build and run one request. `timeout` is a per-request total deadline over the agent's caps.
-fn send<T: AsSendBody>(
+///
+/// Go's retry rule (`Transport.shouldRetryRequest`): a request that fails on a REUSED pooled
+/// connection before any response byte arrives (the server closed it while idle) runs once more,
+/// on fresh connections, iff it is replayable ([`is_replayable`]). A fresh connection's failure, or
+/// one after a response byte, is never retried. ureq follows redirects inside one `run`, so the
+/// retry re-sends the hops before the failed one too; Go re-sends only the failed hop.
+fn send<T: AsSendBody + Copy>(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    timeout: Option<Duration>,
+    body: T,
+) -> Result<Response<Body>, ureq::Error> {
+    AGENT.with(|agent| {
+        let start = Instant::now();
+        match send_on(agent, method, url, headers, timeout, false, body) {
+            Err(e) if is_closed_idle(&e) && is_replayable(method, headers) => {
+                let left = timeout.map(|t| t.saturating_sub(start.elapsed()));
+                send_on(agent, method, url, headers, left, true, body)
+            }
+            r => r,
+        }
+    })
+}
+
+/// Build and run one request on `agent`. `fresh` makes every hop skip the pool: a request-level
+/// `max_idle_age` of zero refuses every pooled connection (ureq 3.4.2 `pool.rs` `get`).
+fn send_on<T: AsSendBody>(
     agent: &Agent,
     method: &str,
     url: &str,
     headers: &[(String, String)],
     timeout: Option<Duration>,
+    fresh: bool,
     body: T,
 ) -> Result<Response<Body>, ureq::Error> {
     let mut builder = Request::builder().method(method).uri(url);
@@ -127,12 +169,16 @@ fn send<T: AsSendBody>(
     }
     let req = builder.body(body).map_err(ureq::Error::Http)?;
     let proxy = proxy_for(url);
-    let req = if timeout.is_some() || proxy.is_some() {
-        agent
+    let req = if timeout.is_some() || proxy.is_some() || fresh {
+        let cfg = agent
             .configure_request(req)
             .timeout_global(timeout)
-            .proxy(proxy)
-            .build()
+            .proxy(proxy);
+        if fresh {
+            cfg.max_idle_age(Duration::ZERO).build()
+        } else {
+            cfg.build()
+        }
     } else {
         req
     };
@@ -262,15 +308,15 @@ fn lower_result_bytes(url: &str, r: Result<Response<Body>, ureq::Error>) -> Nati
 }
 
 fn do_get(url: &str, timeout: Option<Duration>) -> NativeRet {
-    AGENT.with(|a| lower_result(url, send(a, "GET", url, &[], timeout, ())))
+    lower_result(url, send("GET", url, &[], timeout, ()))
 }
 
 fn do_get_bytes(url: &str, timeout: Option<Duration>) -> NativeRet {
-    AGENT.with(|a| lower_result_bytes(url, send(a, "GET", url, &[], timeout, ())))
+    lower_result_bytes(url, send("GET", url, &[], timeout, ()))
 }
 
 fn do_post(url: &str, body: &str, timeout: Option<Duration>) -> NativeRet {
-    AGENT.with(|a| lower_result(url, send(a, "POST", url, &[], timeout, body)))
+    lower_result(url, send("POST", url, &[], timeout, body))
 }
 
 /// Whether ureq 3 frames an empty body on this verb. A `()` body on these puts
@@ -295,14 +341,12 @@ fn do_request(
     headers: &[(String, String)],
     timeout: Option<Duration>,
 ) -> NativeRet {
-    AGENT.with(|a| {
-        let r = if !body.is_empty() || takes_body(method) {
-            send(a, method, url, headers, timeout, body)
-        } else {
-            send(a, method, url, headers, timeout, ())
-        };
-        lower_result(url, r)
-    })
+    let r = if !body.is_empty() || takes_body(method) {
+        send(method, url, headers, timeout, body)
+    } else {
+        send(method, url, headers, timeout, ())
+    };
+    lower_result(url, r)
 }
 
 /// Read an optional trailing `timeout_ms: int` at arg index `idx` (guarded by `arg_count`): absent
@@ -1049,6 +1093,78 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("; "));
+    }
+
+    /// The request lines a fixture logged, cut to `METHOD /path`.
+    fn logged(log: &Mutex<Vec<String>>) -> Vec<String> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .map(|l| {
+                l.rsplit_once(' ')
+                    .map_or(l.as_str(), |(a, _)| a)
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn redirect_root_to_a(line: &str) -> &'static [u8] {
+        if line.starts_with("GET / ") {
+            b"HTTP/1.1 302 Found\r\nLocation: /a\r\nContent-Length: 0\r\n\r\n"
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        }
+    }
+
+    #[test]
+    fn a_redirect_hop_dropped_on_a_reused_connection_reruns_the_chain_on_fresh_connections() {
+        let (url, log) = serve_drop_second_request(redirect_root_to_a);
+        let ret = do_get(&url, None);
+        thread::sleep(Duration::from_millis(100));
+        assert!(matches!(ret, NativeRet::Ok(_)), "got {ret:?}");
+        assert_eq!(field(&ret, "body"), &NativeRet::Str("ok".into()));
+        assert_eq!(logged(&log), ["GET /", "GET /a", "GET /", "GET /a"]);
+    }
+
+    fn redirect_to_root(_: &str) -> &'static [u8] {
+        b"HTTP/1.1 302 Found\r\nLocation: /\r\nContent-Length: 0\r\n\r\n"
+    }
+
+    #[test]
+    fn a_redirect_loop_dropped_on_a_reused_connection_still_stops_at_too_many_redirects() {
+        let (url, _log) = serve_drop_second_request(redirect_to_root);
+        match do_get(&url, None) {
+            NativeRet::Err(m) => assert!(m.contains("too many redirects"), "message: {m}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    /// Per connection: read request 1, log it, drop the socket without answering.
+    fn serve_drop_first_request() -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let lg = Arc::clone(&log);
+        thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                if let Some(line) = read_request(&mut stream) {
+                    lg.lock().unwrap().push(line);
+                }
+            }
+        });
+        (format!("http://{addr}/"), log)
+    }
+
+    #[test]
+    fn a_request_dropped_on_a_fresh_connection_is_err_and_not_retried() {
+        let (url, log) = serve_drop_first_request();
+        let ret = do_get(&url, None);
+        thread::sleep(Duration::from_millis(100));
+        match ret {
+            NativeRet::Err(m) => assert!(m.contains("io: Peer disconnected"), "message: {m}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+        assert_eq!(logged(&log), ["GET /"]);
     }
 
     #[test]

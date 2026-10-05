@@ -133,6 +133,8 @@ impl<In: Transport> Connector<In> for LenientHeadConnector {
             expect_head: true,
             head: Vec::new(),
             pending: Vec::new(),
+            answered: false,
+            got_byte: false,
         }))
     }
 }
@@ -152,9 +154,42 @@ pub struct LenientHead<In> {
     expect_head: bool,
     head: Vec<u8>,
     pending: Vec<u8>,
+    /// A final response head arrived on this connection, so a later request on it is a reuse.
+    answered: bool,
+    /// Whether any byte of the current request's response has arrived.
+    got_byte: bool,
+}
+
+/// Marks a read failure on a reused connection before the first response byte (Go's
+/// `errServerClosedIdle` / `transportReadFromServerError`). `Display` is the wrapped error's, so
+/// the message a caller sees does not change.
+#[derive(Debug)]
+struct ClosedIdle(io::Error);
+
+impl std::fmt::Display for ClosedIdle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for ClosedIdle {}
+
+/// Whether `e` is a read failure that [`LenientHead`] tagged as the server closing a reused
+/// connection before any response byte.
+pub fn is_closed_idle(e: &Error) -> bool {
+    matches!(e, Error::Io(io) if io.get_ref().is_some_and(|r| r.is::<ClosedIdle>()))
 }
 
 impl<In: Transport> LenientHead<In> {
+    /// Tag `e` as [`ClosedIdle`] when this connection is reused and no response byte has arrived.
+    fn tag(&self, e: io::Error) -> Error {
+        if self.answered && !self.got_byte {
+            Error::Io(io::Error::new(e.kind(), ClosedIdle(e)))
+        } else {
+            Error::Io(e)
+        }
+    }
+
     /// Move up to `bufs`' free space out of `pending`. Returns the bytes handed to ureq.
     fn drain_pending(&mut self) -> usize {
         if self.pending.is_empty() {
@@ -192,7 +227,11 @@ impl<In: Transport> Transport for LenientHead<In> {
     }
 
     fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), Error> {
-        // A write means a request is going out, so the next bytes in are a response head.
+        // A write means a request is going out, so the next bytes in are a response head. The
+        // first write after a final head starts a new request, which has no response byte yet.
+        if !self.expect_head {
+            self.got_byte = false;
+        }
         self.expect_head = true;
         let ours = self.bufs.output().len();
         let theirs = self.inner.buffers().output().len();
@@ -226,7 +265,14 @@ impl<In: Transport> Transport for LenientHead<In> {
             return Ok(self.drain_pending() > 0 || (progress && n > 0));
         }
         loop {
-            let (progress, n) = self.pull(timeout)?;
+            let (progress, n) = match self.pull(timeout) {
+                Ok(r) => r,
+                Err(Error::Io(e)) => return Err(self.tag(e)),
+                Err(e) => return Err(e),
+            };
+            if n > 0 {
+                self.got_byte = true;
+            }
             let mut got = std::mem::take(&mut self.pending);
             self.head.append(&mut got);
             if let Some(end) = head_end(&self.head) {
@@ -234,6 +280,9 @@ impl<In: Transport> Transport for LenientHead<In> {
                 let sanitized = sanitize_head(&self.head)
                     .map_err(|m| Error::Io(io::Error::new(io::ErrorKind::InvalidData, m)))?;
                 self.expect_head = sanitized.starts_with(b"HTTP/1.1 1");
+                if !self.expect_head {
+                    self.answered = true;
+                }
                 self.pending = sanitized;
                 self.pending.extend_from_slice(&rest);
                 self.head.clear();
@@ -247,6 +296,10 @@ impl<In: Transport> Transport for LenientHead<In> {
                 return Ok(self.drain_pending() > 0);
             }
             if !progress && n == 0 {
+                if self.answered && !self.got_byte {
+                    let eof = io::Error::new(io::ErrorKind::UnexpectedEof, "Peer disconnected");
+                    return Err(self.tag(eof));
+                }
                 return Ok(false);
             }
         }
@@ -299,6 +352,8 @@ mod tests {
             expect_head: false,
             head: Vec::new(),
             pending: Vec::new(),
+            answered: false,
+            got_byte: false,
         };
         let timeout = NextTimeout {
             after: Duration::from_secs(1),

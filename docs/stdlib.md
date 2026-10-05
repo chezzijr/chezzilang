@@ -1152,6 +1152,17 @@ header value is an `Err` whose message names the offending line
 ureq 2, which answered `Ok` with the header dropped, and CPython still accepts it. The proxy
 environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and the lowercase twins) are
 **honoured**, except that a loopback target (`127.0.0.0/8`, `::1`, `localhost`) goes direct, as in Go.
+**A request that fails on a reused keep-alive connection is retried once, by Go's rule**
+(`net/http` `shouldRetryRequest`). A server may close an idle keep-alive connection just as the next
+request goes out (RFC 9112 allows it). When a request fails on a connection taken from the pool
+before any response byte arrives, and the request is replayable, it runs once more on fresh
+connections. Replayable is Go's `isReplayable`: `GET`, `HEAD`, `OPTIONS`, `TRACE`, or any method
+with an `Idempotency-Key` or `X-Idempotency-Key` header. `PUT`, `DELETE`, `PATCH` and `POST` without
+that header are not retried, and neither is a failure on a fresh connection or after a response
+byte: those stay `Err`. A `timeout_ms` covers both attempts. One measured divergence from Go:
+redirects are followed inside one call, so a retry re-sends the whole chain from the first URL
+(`GET /`, `GET /a` dropped, then `GET /`, `GET /a`); Go re-sends only the failed hop. Every re-sent
+hop is replayable, because only a replayable request is retried.
 `Match`, `Response`, and `ProcResult` are **module-owned** struct types (of `std.regex`, `std.request`,
 and `std.process` respectively), **not** reserved program-global names. Field access on a returned value
 (`.text`/`.status`/`.code`, …) works with **no import**; naming or constructing the type (`m: Match` /
