@@ -2850,10 +2850,10 @@ closed), `fan_flat` (8 `burn` tasks spawned by main's body, then `recv`).
 | `fan_flat` | 8 | 338-380 | 69-74 |
 | `fan_flat` | default (28) | 344-363 | 81-103 |
 
-`fan_open` and `fan_flat` at T=2 land in `fan_closed`'s band (two runners). At T>=8 they beat it: the
-closed shape farms nothing at any count (only one task is outstanding at `close_body`, so
-`farm_outermost_eager_helpers` returns on its `< 2` guard), so it stays drainer plus inline joiner.
-`--threads=1` is unchanged in every shape: the helper range is empty there, W8-8's one-runner rule.
+`fan_open` and `fan_flat` at T=2 land in `fan_closed`'s band (two runners). At T>=8 they beat it on
+this base. Since TICKET-211 the closed shape gets its runners at the spawn (`MnSched::claim_runners`
+at `inject_or_extend`), not at `close_body`; see §TICKET-211 for base vs fixed.
+`--threads=1` is unchanged in every shape: W8-8's one-runner rule.
 
 **Test.** `tests/chz/spec/nested_nursery_open_outer_body_test.chz`, 8 x `burn(1500000)`, one ceiling
 of 1350 ms. Base at T=2: `fan_open took 1680.6 ms`, `fan_flat took 1674.9 ms`. Branch, five runs under a
@@ -3345,40 +3345,41 @@ Every closed and Executor shape at T>=4 now runs at the flat shape's wall time o
 `nested_closed` T=8 goes from 0.907 s to 0.267 s, and `exec_open` T=8 from 1.608 s to 0.313 s.
 T=2 and every flat and open shape stay at base.
 
-**The churn rows are slower, outside base's spread.** Release, n=5 per side, interleaved
-(base, fixed, base, ...), wall time by `perf_counter`, max RSS by `wait4`. `/proc/loadavg` at the
-start: `8.42`. Cells are `median ms (spread = max - min) / max RSS MB`.
+The grid above is one run per cell, measured on `e20548f5`. `runner_cache` (`2f90a26d`) changes
+how many OS threads start, not how many runners serve a nursery, so the grid's runner counts still
+hold.
 
-| program | T | base `87bb7e27` | fixed `e20548f5` | ratio |
-|---|---|---|---|---|
-| churn2.chz | 2 | 2227 (95) / 21 | 2195 (90) / 21 | 0.99x |
-| churn2.chz | 4 | 2324 (202) / 21 | 3272 (88) / 21 | 1.41x |
-| churn2.chz | 8 | 2583 (1408) / 21 | 3105 (2151) / 21 | 1.20x |
-| churn8.chz | 2 | 3244 (224) / 21 | 3274 (257) / 20 | 1.01x |
-| churn8.chz | 4 | 3193 (84) / 20 | 4965 (201) / 21 | 1.55x |
-| churn8.chz | 8 | 3669 (169) / 21 | 5297 (212) / 21 | 1.44x |
+**Runner threads are reused across nurseries (`src/vm/runner_cache.rs`).** On `e20548f5` every
+nursery started and joined up to `n - 1` raw `chezzi-eager-helper` threads, and `churn8` at T=4 ran
+at 1.55x base (3193 ms against 4965 ms). Now a runner that finishes a nursery parks for up to one
+second and serves the next nursery's lease. The table is base `87bb7e27` against fixed `2f90a26d`,
+release, `python3 benches/sched/ab_pair.py <base> <fixed> 5 <prog>:<threads> ...`, n=5 per side,
+interleaved. `/proc/loadavg` was 5.6-13.1 (other tickets on the box), so every run was pinned with
+`AB_CPUS=0-7` (`taskset -c 0-7`). Cells are `median ms (spread = max - min) / max RSS MB`; `ok`
+means the fixed median is at most the base median plus the base spread. Workers 0 = the default count.
 
-Cause, by design: base starts pool jobs at a top-level `close_body`. The fix starts up to `n - 1`
-raw `chezzi-eager-helper` threads per multi-task nursery and joins them at its join. That is
-20 000 rounds x up to 7 thread starts and joins at T=8.
+| program | T | base `87bb7e27` | fixed `2f90a26d` | ratio | verdict |
+|---|---|---|---|---|---|
+| churn2.chz | 2 | 2301 (321) / 22 | 2414 (554) / 21 | 1.05x | ok |
+| churn2.chz | 4 | 2532 (380) / 22 | 2309 (530) / 22 | 0.91x | ok |
+| churn2.chz | 8 | 3061 (473) / 23 | 2694 (553) / 21 | 0.88x | ok |
+| churn8.chz | 2 | 4278 (243) / 22 | 4203 (286) / 22 | 0.98x | ok |
+| churn8.chz | 4 | 3194 (707) / 22 | 2922 (163) / 22 | 0.91x | ok |
+| churn8.chz | 8 | 3319 (148) / 22 | 3059 (94) / 21 | 0.92x | ok |
+| storm.chz | 1 | 4685 (121) / 39 | 4752 (131) / 39 | 1.01x | ok |
+| storm.chz | 4 | 5620 (44) / 76 | 5627 (134) / 87 | 1.00x | ok |
+| storm.chz | 0 | 5542 (128) / 137 | 5555 (36) / 137 | 1.00x | ok |
+| trips.chz | 1 | 123 (22) / 15 | 135 (28) / 15 | 1.09x | ok |
+| trips.chz | 4 | 103 (10) / 15 | 106 (17) / 15 | 1.03x | ok |
+| trips.chz | 0 | 103 (9) / 15 | 104 (14) / 15 | 1.01x | ok |
+| rendezvous_pingpong.chz | 1 | 3385 (814) / 15 | 3623 (570) / 15 | 1.07x | ok |
+| primes_parallel.chz | 1 | 30548 (3190) / 15 | 30517 (662) / 15 | 1.00x | ok |
+| primes_parallel.chz | 4 | 9828 (454) / 15 | 9641 (186) / 15 | 0.98x | ok |
+| primes_parallel.chz | 0 | 9720 (1020) / 15 | 9731 (1843) / 15 | 1.00x | ok |
+| nested_closed.chz | 8 | 317 (35) / 15 | 138 (29) / 15 | 0.44x | ok |
+| exec_open.chz | 8 | 560 (62) / 15 | 152 (29) / 15 | 0.27x | ok |
 
-The other programs the owner named, same method. `/proc/loadavg` at the start: `6.42` (first
-seven rows), `21.35` (primes at 4 and 0), `7.69` (primes at 1). `storm` and `trips` are the
-TICKET-213 programs (2000 spawns over a 100000-item global list; 2000 `submit_task(ex, f).get()`
-round trips). Workers 0 = the default count.
-
-| program | workers | base | fixed | ratio |
-|---|---|---|---|---|
-| `benches/sched/rendezvous_pingpong.chz` | 1 | 3125 (1700) / 16 | 3455 (783) / 16 | 1.11x |
-| trips | 1 | 103 (4) / 15 | 105 (28) / 15 | 1.02x |
-| trips | 4 | 100 (25) / 15 | 102 (32) / 15 | 1.02x |
-| trips | 0 | 100 (12) / 15 | 103 (44) / 15 | 1.03x |
-| storm | 1 | 5840 (1270) / 39 | 5691 (989) / 39 | 0.97x |
-| storm | 4 | 6410 (126) / 77 | 6460 (124) / 87 | 1.01x |
-| storm | 0 | 5937 (134) / 424 | 5903 (33) / 390 | 0.99x |
-| `examples/primes_parallel.chz` | 1 | 30088 (2287) / 15 | 30271 (5148) / 15 | 1.01x |
-| `examples/primes_parallel.chz` | 4 | 10162 (3306) / 15 | 10041 (175) / 15 | 0.99x |
-| `examples/primes_parallel.chz` | 0 | 10562 (314) / 15 | 10292 (3061) / 15 | 0.97x |
-
-Each of these medians is within the larger spread of its pair. `rendezvous_pingpong` at one worker
-is 1.11x, under DEC-205's 1.3x ceiling.
+The `trips.chz` T=1 row is the re-run. Its first run measured base 104 (11) against fixed 119 (17),
+1.14x, outside base's spread; the re-run (load 5.59) is the row above. Executor round trips use
+`chezzi-exec` runners, which stay outside `runner_cache`. `nested_closed.chz` and `exec_open.chz`
+are the grid programs at N = 1000000. The churn, storm and trips programs live in `benches/sched/`.

@@ -1,0 +1,11 @@
+import std.concurrency
+import submit_task from std.concurrency.task
+fn f() -> int:
+    return 1
+ex := Executor()
+s := 0
+for _ in range(2000):
+    r := submit_task(ex, f).get()
+    s += 1
+ex.shutdown()
+print(s)

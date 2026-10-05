@@ -1,0 +1,9 @@
+g: List[int] = []
+for i in range(100000):
+    g.push(i)
+fn work(i: int) -> int:
+    return i + g.len()
+parallel:
+    for i in range(2000):
+        spawn work(i)
+print("done")

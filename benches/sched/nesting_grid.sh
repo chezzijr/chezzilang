@@ -1,8 +1,9 @@
 #!/bin/bash
 # TICKET-211 — runner count by nesting shape. Usage: nesting_grid.sh <chezzi binary> <N>
 # Shapes: {flat, nested in a spawned task, two deep, nested in an Executor job} x outer body
-# {open, closed}, each 8 spawns of a `burn()` of N iterations, then `churn2`/`churn8`: 20000
-# top-level `parallel:` rounds of K tiny spawns (they ignore N). Each cell runs at T in {2, 4, 8}
+# {open, closed}, each 8 spawns of a `burn()` of N iterations, then `churn2.chz`/`churn8.chz`
+# beside this script: 20000 top-level `parallel:` rounds of K tiny spawns (they ignore N). Each
+# cell runs at T in {2, 4, 8}
 # and prints "<shape> T=<t> <real> s real <user> s user".
 set -euo pipefail
 B=$(realpath "$1")
@@ -39,13 +40,17 @@ printf '%s\nparallel:\n    spawn fan2()\n' "$hdr" > "$dir/twodeep_closed.chz"
 printf '%s\ndone := Channel[int](1)\nparallel:\n    spawn fan2_send(done)\n    done.recv()\n' "$hdr" > "$dir/twodeep_open.chz"
 printf '%s\nex := Executor()\nex.submit(fn(): fan())\nex.shutdown()\n' "$hdr" > "$dir/exec_closed.chz"
 printf '%s\ndone := Channel[int](1)\nex := Executor()\nex.submit(fn(): fan_send(done))\ndone.recv()\nex.shutdown()\n' "$hdr" > "$dir/exec_open.chz"
-for k in 2 8; do
-  printf 'fn tiny():\n    i := 0\n    while i < 100:\n        i += 1\nr := 0\nwhile r < 20000:\n    parallel:\n        for _ in 0..%s:\n            spawn tiny()\n    r += 1\n' "$k" > "$dir/churn$k.chz"
-done
+here=$(dirname "$0")
 uptime
-for f in flat_closed flat_open nested_closed nested_open twodeep_closed twodeep_open exec_closed exec_open churn2 churn8; do
+for f in flat_closed flat_open nested_closed nested_open twodeep_closed twodeep_open exec_closed exec_open; do
   for t in 2 4 8; do
     TIMEFORMAT="$f T=$t %R s real %U s user"
     time (timeout 120 "$B" run --threads="$t" "$dir/$f.chz" >/dev/null)
+  done
+done
+for k in 2 8; do
+  for t in 2 4 8; do
+    TIMEFORMAT="churn$k T=$t %R s real %U s user"
+    time (timeout 120 "$B" run --threads="$t" "$here/churn$k.chz" >/dev/null)
   done
 done

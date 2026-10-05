@@ -312,16 +312,19 @@ How a `parallel:` block runs on the M:N engine (`chezzi run` — the default):
    its worker, and is requeued when the scope completes (TICKET-103; every worker count since
    TICKET-131). A `return`, `?`, `break` or `continue` out of such a nursery parks the owner the same
    way, requeuing it once its cancelled tasks settle, instead of waiting on them inline (TICKET-132).
-   While the enclosing nursery's body is still open, those tasks share the enclosing scheduler's
-   runners. TICKET-159 (W13-27): once that body BLOCKS (a channel wait) with at least two tasks
-   outstanding, the scheduler farms `worker_count() - 1` extra RAW `chezzi-eager-helper` threads
-   (`Vm::farm_blocked_body_helpers`, wids `2..n+1`, empty at `--threads=1`) from the same
-   `NestedDrainerSlot` budget a nested join uses — never the bounded pool, because the blocked body
-   may be waiting on an `Executor` job queued behind a pool helper that runs to global terminate
-   (DEC-103). The farm fires at both moments the condition becomes true: a task injected after the
-   body blocked (`register_task`) and the body's own block (`blocked_bodies_guard_with`). With those
-   helpers live the join's inline joiner stands down and skips the join-time pool farm, so the runner
-   count stays `worker_count()`.
+   TICKET-211 (W1): one claim decides how many runners serve a scheduler, in every nesting shape
+   (flat, nested in a spawned task, two deep, inside an `Executor` job; outer body open or closed).
+   `MnSched::claim_runners` runs under the core lock wherever runnable work grows: at
+   `inject_or_extend` (every spawn), at `Executor.submit`, and when a body blocks. It claims runners
+   while fewer than `worker_count()` run and fewer fiber runners run than tasks are undone; the
+   body's own thread counts toward `worker_count()` but not toward fiber runners, so `--threads=1`
+   stays one runner. `Vm::start_runners` starts what it claimed. A non-Executor runner is a RAW
+   `chezzi-eager-helper` thread from the `NestedDrainerSlot` budget — never the bounded pool,
+   because a body may be waiting on an `Executor` job queued behind a pool helper that runs to
+   global terminate (DEC-103, DEC-159). Runner threads are reused: one that finishes a nursery parks
+   in `src/vm/runner_cache.rs` for up to one second and serves the next nursery's runner, so 20 000
+   nursery rounds do not start 20 000 x `n - 1` OS threads. The inline joiner runs fibers only if
+   the claim has a slot left (`claim_joiner`), so the runner count stays `worker_count()`.
 2. The task runs **concurrently** with the statements that follow it and with its siblings. There is
    no FIFO order between tasks and no defined order against the parent's own statements.
 3. The first task to error **aborts the remaining siblings** and propagates out of the `parallel:`
@@ -1441,7 +1444,9 @@ inside a callback, so a runnable sibling runs while stdin is withheld, as under 
 > TICKET-141), so `--threads=1` runs at most one CPU runner including the main-thread body: fixed
 > measured 96% on the same shape, matching Go `GOMAXPROCS=1`'s 100%. This does NOT close the contract
 > everywhere: `docs/gaps.md` **W15-9** stays open for a body that blocks once then burns at T>=2 (n+1
-> runners, a separate cause — sentinel blocked-body helpers outliving the unblock). Since TICKET-205
+> runners, a separate cause — runners claimed while the body was blocked serve to `terminate`, so
+> they outlive the unblock; since TICKET-211 they come from the one claim at the spawn and the body
+> block, and are reused across nurseries through `runner_cache`). Since TICKET-205
 > the gate is one per process and an `Executor` job is a party of it too (see above); the body has no
 > gate of its own. Full tables: `docs/benchmarks.md` §TICKET-168.
 

@@ -117,6 +117,13 @@ defers run (bounded by the halt).
 
 ## Family W1 — how many runners serve a scope family (H2)
 
+**FIXED (TICKET-211, 2026-10-05).** One claim, `MnSched::claim_runners` over
+`SchedCore::runner_wids`, runs at `inject_or_extend`, `Executor.submit` and a body block; the three
+farm functions, the blocked-body latch and the wid ranges are deleted. Runner threads are reused
+across nurseries through `src/vm/runner_cache.rs`. Grid test:
+`vm::tests::runner_threads_reach_the_worker_count_in_every_nesting_shape`; base vs fixed in
+`docs/benchmarks.md` §TICKET-211. The text below is the analysis as filed.
+
 **Fact:** how many workers serve a scheduler's runnable work. Decided once, at the outer
 `close_body` (`farm_outermost_eager_helpers`, `vm/sched.rs:1367`, guard `outstanding_tasks() < 2`), and
 by TICKET-159's hook only while the body is open and blocked (`farm_blocked_body_helpers`, `:1320`).

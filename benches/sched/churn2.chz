@@ -1,0 +1,10 @@
+fn tiny():
+    i := 0
+    while i < 100:
+        i += 1
+r := 0
+while r < 20000:
+    parallel:
+        for _ in 0..2:
+            spawn tiny()
+    r += 1
