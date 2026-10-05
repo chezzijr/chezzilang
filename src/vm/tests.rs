@@ -2708,7 +2708,7 @@ ex.shutdown()
         for (shape, body) in shapes {
             crate::vm::set_worker_count(t);
             let entry = write_temp_chz(&format!("w1_grid_{shape}_{t}"), &format!("{header}{body}"));
-            let ((_out, _err, res, _code), peak, denials) =
+            let ((_out, _err, res, _code), peak, denials, _spawns) =
                 crate::vm::run_file_counting_runners(&entry);
             let _ = std::fs::remove_file(&entry);
             assert!(res.is_ok(), "{shape} T={t} faulted: {res:?}");
@@ -2720,6 +2720,37 @@ ex.shutdown()
         }
     }
     assert!(failures.is_empty(), "runner-thread grid: {failures:#?}");
+}
+
+/// TICKET-211 — a nursery's runners come from parked runner threads when one is free, not from a
+/// new OS thread per claimed wid. Every task blocks on `gate.recv()` until the body sends, so each
+/// of the 200 rounds claims runners at 4 workers; reused threads keep the starts far below 200.
+#[test]
+fn nursery_rounds_reuse_their_runner_threads() {
+    struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for Workers {
+        fn drop(&mut self) {
+            crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+        }
+    }
+    let _workers = Workers(
+        crate::vm::TEST_WORKER_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    crate::vm::set_worker_count(4);
+    let entry = write_temp_chz(
+        "w1_reuse_rounds",
+        "import std.concurrency\nfn hold(gate: Channel[int]):\n    gate.recv()\nr := 0\nwhile r < 200:\n    gate := Channel[int](8)\n    parallel:\n        for _ in 0..8:\n            spawn hold(gate)\n        for _ in 0..8:\n            gate.send(1)\n    r += 1\n",
+    );
+    let ((_out, _err, res, _code), _peak, denials, spawns) =
+        crate::vm::run_file_counting_runners(&entry);
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "{res:?}");
+    assert!(
+        spawns < 100,
+        "200 nursery rounds started {spawns} runner threads at 4 workers: runner threads are not reused across scheds (slot denials {denials})"
+    );
 }
 
 /// `pmap_limited`'s token bucket actually BOUNDS in-flight tasks: an Atomic max-in-flight probe never

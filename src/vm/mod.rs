@@ -7085,10 +7085,11 @@ thread_local! {
     /// nursery join (`sched::run_mn_nursery_outermost` / `sched::join_eager_nursery`) on the VM's own
     /// thread, then read here by [`run_capture_counting_picks`].
     pub(crate) static RUN_PICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// TICKET-211 — `(peak runner threads, runner slot denials)` of the current test's own run, set
-    /// by `run_file_inner` from the run's `QuiesceState`; read by [`run_file_counting_runners`].
-    pub(crate) static RUN_PEAK_RUNNERS: std::cell::Cell<(usize, usize)> =
-        const { std::cell::Cell::new((0, 0)) };
+    /// TICKET-211 — `(peak runner threads, runner slot denials, runner thread spawns)` of the
+    /// current test's own run, set by `run_file_inner` from the run's `QuiesceState`; read by
+    /// [`run_file_counting_runners`].
+    pub(crate) static RUN_PEAK_RUNNERS: std::cell::Cell<(usize, usize, usize)> =
+        const { std::cell::Cell::new((0, 0, 0)) };
 }
 
 /// [`run_capture`], plus the number of scheduler picks the run made (TICKET-164). Runs on its own
@@ -7108,16 +7109,16 @@ pub fn run_capture_counting_picks(src: &str) -> (Result<String, RuntimeError>, u
         .expect("VM thread panicked")
 }
 
-/// Run the file at `entry` and return its output, the run's peak runner-thread count and its
-/// runner slot denials (TICKET-211). Runs on its own thread, since [`RUN_PEAK_RUNNERS`] is
-/// thread-local to the VM's own thread.
+/// Run the file at `entry` and return its output, the run's peak runner-thread count, its runner
+/// slot denials and the OS threads it started for non-Executor runners (TICKET-211). Runs on its
+/// own thread, since [`RUN_PEAK_RUNNERS`] is thread-local to the VM's own thread.
 #[cfg(test)]
-pub fn run_file_counting_runners(entry: &std::path::Path) -> (RunOutput, usize, usize) {
+pub fn run_file_counting_runners(entry: &std::path::Path) -> (RunOutput, usize, usize, usize) {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
-            RUN_PEAK_RUNNERS.with(|p| p.set((0, 0)));
+            RUN_PEAK_RUNNERS.with(|p| p.set((0, 0, 0)));
             let out = to_str_output(run_file_inner(
                 &entry,
                 crate::native::HostConfig::default(),
@@ -7126,8 +7127,8 @@ pub fn run_file_counting_runners(entry: &std::path::Path) -> (RunOutput, usize, 
                 false,
                 None,
             ));
-            let (peak, denials) = RUN_PEAK_RUNNERS.with(|p| p.get());
-            (out, peak, denials)
+            let (peak, denials, spawns) = RUN_PEAK_RUNNERS.with(|p| p.get());
+            (out, peak, denials, spawns)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -7557,6 +7558,7 @@ fn run_file_inner(
         p.set((
             vm.quiesce.peak_runner_threads.load(Ordering::SeqCst),
             vm.quiesce.runner_slot_denials.load(Ordering::SeqCst),
+            vm.quiesce.runner_spawns.load(Ordering::SeqCst),
         ))
     });
     // Memory probe (8B-`Value` gate): report the peak live-bytes high-water mark to real stderr,

@@ -300,6 +300,9 @@ pub(super) struct QuiesceState {
     /// TICKET-211 — runner starts refused by the `NestedDrainerSlot` budget. Test-only.
     #[cfg(test)]
     pub(super) runner_slot_denials: std::sync::atomic::AtomicUsize,
+    /// TICKET-211 — OS threads started for this run's non-Executor runner leases. Test-only.
+    #[cfg(test)]
+    pub(super) runner_spawns: std::sync::atomic::AtomicUsize,
 }
 
 impl QuiesceState {

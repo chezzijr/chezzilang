@@ -1462,6 +1462,10 @@ impl Vm {
             };
             match spawn_worker_thread(shell, sched, name, wid, SENTINEL_SCOPE, born_gated) {
                 Ok(handle) => {
+                    #[cfg(test)]
+                    if slot.is_some() {
+                        sched.quiesce.runner_spawns.fetch_add(1, Ordering::SeqCst);
+                    }
                     if let Some(slot) = slot {
                         helpers.push((handle, slot));
                     }
