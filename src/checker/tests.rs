@@ -37953,3 +37953,10 @@ fn executor_rejects_a_bad_worker_limit() {
     );
     entry_ok("import std.concurrency\nex := Executor()\nex.shutdown()\n");
 }
+
+#[test]
+fn instance_method_called_through_type_path() {
+    ok(
+        "struct P:\n    n: int\n    fn get(self) -> int:\n        return self.n\nprint(P.get(P(1)))\n",
+    );
+}
