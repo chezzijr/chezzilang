@@ -1416,12 +1416,13 @@ impl Vm {
         self.reduce_task_slots(slots)
     }
 
-    /// TICKET-211 — THE starter of runner threads: start one raw thread per wid
-    /// [`MnSched::claim_runners`] claimed, all `SENTINEL_SCOPE` (they drain the global queue until
-    /// `terminate`). An Executor's are `chezzi-exec` threads, counted in `runner_starts` and never
-    /// joined. Any other sched's are `chezzi-eager-helper` threads, each holding a
-    /// [`NestedDrainerSlot`] (never the pool, DEC-103), stored on the sched for `join_helpers`. A
-    /// denied slot or a failed spawn gives its wid back. Returns whether any runner remains, as
+    /// TICKET-211 — THE starter of runner threads: one runner per wid [`MnSched::claim_runners`]
+    /// claimed, all `SENTINEL_SCOPE` (they drain the global queue until `terminate`). An Executor's
+    /// are new `chezzi-exec` threads, counted in `runner_starts` and never joined. Any other sched's
+    /// are leases handed to `runner_cache`, which runs each on a parked raw thread if one is free and
+    /// on a new `chezzi-eager-helper` thread otherwise (never the pool, DEC-103). Each lease holds a
+    /// [`NestedDrainerSlot`] and is counted on the sched for `join_helpers`. A denied slot or a
+    /// failed spawn gives its wid back. Returns whether any runner remains, as
     /// [`MnSched::unclaim_runner`] reports.
     pub(super) fn start_runners(&self, sched: &Arc<MnSched>, wids: Vec<usize>) -> bool {
         if wids.is_empty() {
@@ -1439,13 +1440,17 @@ impl Vm {
         }
         let born_gated = (exec && worker_count() == 1) || width::gated();
         let mut runner = true;
-        let mut helpers = Vec::new();
         for wid in wids {
-            let slot = if exec {
-                None
-            } else if let Some(slot) = NestedDrainerSlot::acquire() {
-                Some(slot)
-            } else {
+            if exec {
+                let shell = self.spawn_shell(sched, &cancel);
+                if spawn_worker_thread(shell, sched, "chezzi-exec", wid, SENTINEL_SCOPE, born_gated)
+                    .is_err()
+                {
+                    runner = sched.unclaim_runner(wid);
+                }
+                continue;
+            }
+            let Some(slot) = NestedDrainerSlot::acquire() else {
                 #[cfg(test)]
                 sched
                     .quiesce
@@ -1454,27 +1459,18 @@ impl Vm {
                 runner = sched.unclaim_runner(wid);
                 continue;
             };
+            sched.helper_started();
             let shell = self.spawn_shell(sched, &cancel);
-            let name = if exec {
-                "chezzi-exec"
-            } else {
-                "chezzi-eager-helper"
+            let lease = super::runner_cache::Lease {
+                sched: Arc::clone(sched),
+                shell,
+                wid,
+                slot,
             };
-            match spawn_worker_thread(shell, sched, name, wid, SENTINEL_SCOPE, born_gated) {
-                Ok(handle) => {
-                    #[cfg(test)]
-                    if slot.is_some() {
-                        sched.quiesce.runner_spawns.fetch_add(1, Ordering::SeqCst);
-                    }
-                    if let Some(slot) = slot {
-                        helpers.push((handle, slot));
-                    }
-                }
-                Err(_) => runner = sched.unclaim_runner(wid),
+            if super::runner_cache::start(lease, born_gated).is_err() {
+                sched.helper_done();
+                runner = sched.unclaim_runner(wid);
             }
-        }
-        if !helpers.is_empty() {
-            sched.push_helpers(helpers);
         }
         runner
     }
@@ -6414,24 +6410,25 @@ fn cancel_fiber_owned_family(scope: &EagerScope) {
     scope.sched.drain_family(scope.scope);
 }
 
-/// TICKET-159/211 — join the raw helpers `Vm::start_runners` started on `sched`. Called after
-/// `wait_for_completion`, so every scope is done and the body is closed. A SENTINEL helper stops only
-/// on `terminate`, and `finish` latches that only for a task that completes while no body is open —
-/// when every task finished BEFORE `close_body` nothing else would, so latch it here first.
+/// TICKET-159/211 — wait for every runner lease `Vm::start_runners` handed to `runner_cache` for
+/// `sched` (the sched's live-helper count, not `JoinHandle`s: a lease's thread parks for the next
+/// sched instead of exiting). Called after `wait_for_completion`, so every scope is done and the
+/// body is closed. A SENTINEL helper stops only on `terminate`, and `finish` latches that only for a
+/// task that completes while no body is open — when every task finished BEFORE `close_body` nothing
+/// else would, so latch it here first.
 fn join_helpers(sched: &Arc<MnSched>) {
-    let helpers = sched.take_helpers();
-    if helpers.is_empty() {
+    if !sched.has_helpers() {
         return;
     }
     sched.latch_terminate_if_done();
-    for (h, _slot) in helpers {
-        let _ = h.join();
-    }
+    sched.wait_helpers();
 }
 
 /// TICKET-073 — the one process-wide budget of EXTRA eager runner threads a NESTED eager nursery may
-/// spend: a per-nursery `chezzi-eager` drainer (`activate_eager_nursery`) and the raw
-/// `chezzi-eager-helper` threads `Vm::start_runners` starts both draw from it. Sized
+/// spend: a per-nursery `chezzi-eager` drainer (`activate_eager_nursery`) and the runner leases
+/// `Vm::start_runners` hands to `runner_cache` both draw from it. A lease holds its share until its
+/// raw `chezzi-eager-helper` thread parks, and the cache starts a thread only when no parked thread
+/// is unpromised, so the budget also bounds the cached runner threads, parked or running. Sized
 /// `worker_count().max(2)` so the bound stays linear in `--threads` and independent of nesting depth
 /// and fan-out (see `src/vm/pool.rs`).
 static NESTED_EAGER_DRAINERS: AtomicUsize = AtomicUsize::new(0);
@@ -6451,20 +6448,33 @@ fn spawn_worker_thread(
     owner_scope: usize,
     born_gated: bool,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let s = Arc::clone(sched);
+    spawn_runner_thread(sched, name, born_gated, move || {
+        shell.mn_worker_loop(&s, wid, owner_scope)
+    })
+}
+
+/// TICKET-211 — THE birth of a runner OS thread, shared by [`spawn_worker_thread`] and
+/// `runner_cache::start`: width registration (born gated, adopted slot), the VM stack size, the
+/// thread name and the `catch_unwind` around `body`. A refused thread withdraws the slot.
+pub(super) fn spawn_runner_thread(
+    sched: &Arc<MnSched>,
+    name: &str,
+    born_gated: bool,
+    body: impl FnOnce() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     let child_slot = width::new_slot();
     if born_gated {
         sched.idle_register_child(&child_slot);
     }
-    let (s, adopted) = (Arc::clone(sched), Arc::clone(&child_slot));
+    let adopted = Arc::clone(&child_slot);
     let r = std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .name(name.into())
         .spawn(move || {
             width::born_gated(born_gated);
             width::adopt(adopted);
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                shell.mn_worker_loop(&s, wid, owner_scope)
-            }));
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
         });
     if r.is_err() && born_gated {
         sched.idle_forget(&child_slot);
@@ -6555,8 +6565,8 @@ impl Drop for NestedDrainerSlot {
 /// its scope's slots unfilled, and at `n == 1` there is nothing else left to fill them, so the
 /// joiner's `wait_for_completion`/`wait_for_scope` blocks forever. Pre-W8-8 the joiner's own fiber
 /// loop covered that. At `n >= 2` a multi-task nursery also has the runners `Vm::start_runners`
-/// started on its claim (TICKET-211, raw `chezzi-eager-helper` threads from the `NestedDrainerSlot`
-/// budget, never the pool), so a dead drainer still leaves runners behind whenever the budget has a
+/// started on its claim (TICKET-211, raw `chezzi-eager-helper` threads from `runner_cache`, each
+/// lease holding a `NestedDrainerSlot`, never the pool), so a dead drainer still leaves runners behind whenever the budget has a
 /// slot; only when the budget is empty does the joiner's own loop become the sole cover, closing the
 /// window at `n >= 2` purely because the gate lets that loop run. Requires a pre-existing scheduler bug
 /// to reach, so no code change here — recorded so the next reader sees the trade.

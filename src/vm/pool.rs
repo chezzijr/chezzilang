@@ -8,8 +8,9 @@
 //! live threads stay bounded at `N` plus the joining threads plus at most `worker_count().max(2)`
 //! extra eager runner threads (TICKET-073). That extra budget is [`super::sched::NestedDrainerSlot`],
 //! spent by two things a nested `parallel:` can build: a nursery's own `chezzi-eager` drainer thread
-//! (one per OPEN nested nursery, not per nesting level) and a nested join's raw `chezzi-eager-helper`
-//! threads. It is what keeps the bound independent of `parallel:` nesting depth AND fan-out: measured,
+//! (one per OPEN nested nursery, not per nesting level) and a nursery's runner leases, served by raw
+//! `chezzi-eager-helper` threads that `runner_cache` reuses across nurseries (TICKET-211). The
+//! budget also bounds those cached runner threads, parked or running. It is what keeps the bound independent of `parallel:` nesting depth AND fan-out: measured,
 //! a depth-11 tree of 2048 sleeping leaves nested in a spawned task peaks at 6 live threads at
 //! `CHEZZI_THREADS=2`, against 2050 before the budget existed.
 //!

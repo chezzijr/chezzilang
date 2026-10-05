@@ -13,6 +13,7 @@ pub mod op;
 mod poller;
 mod pool;
 mod quiesce;
+mod runner_cache;
 pub mod sched_seed;
 mod timer;
 pub mod value;
@@ -2402,11 +2403,13 @@ struct MnSched {
     /// `runnable > 0` but nothing grabbed yet). `recruit` skips waking an idle sleeper while any
     /// worker is already spinning — a spinner will pick up the work on its own next pass.
     spinning: AtomicUsize,
-    /// TICKET-159/211 — the raw `chezzi-eager-helper` threads `Vm::start_runners` started, with the
-    /// [`sched::NestedDrainerSlot`] each holds. They live on the sched because the thread that
-    /// starts them (a spawning fiber, or the body at its own block) is not the thread that joins
-    /// them: `join_eager_nursery` / `abort_eager_nursery` take them.
-    helpers: Mutex<Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)>>,
+    /// TICKET-159/211 — how many runner leases `Vm::start_runners` handed to `runner_cache` for this
+    /// sched are still serving it. The count lives on the sched because the thread that starts them
+    /// (a spawning fiber, or the body at its own block) is not the thread that waits for them:
+    /// `join_eager_nursery` / `abort_eager_nursery` wait on `helpers_gone` until it reaches zero.
+    /// A lease's thread parks in `runner_cache` for the next sched instead of being joined.
+    helpers_live: Mutex<usize>,
+    helpers_gone: Condvar,
     /// TICKET-164 — fibers this sched handed to a worker (`Take::Run` from
     /// [`Self::take_runnable`]). Test-only; published per run by
     /// [`run_capture_counting_picks`].
@@ -3027,7 +3030,8 @@ impl MnSched {
             idle_cv: Condvar::new(),
             idle_sleepers: AtomicUsize::new(0),
             spinning: AtomicUsize::new(0),
-            helpers: Mutex::new(Vec::new()),
+            helpers_live: Mutex::new(0),
+            helpers_gone: Condvar::new(),
             #[cfg(test)]
             picks: AtomicUsize::new(0),
             #[cfg(test)]
@@ -3594,20 +3598,27 @@ impl MnSched {
         c.slots.truncate(end);
     }
 
-    pub(super) fn push_helpers(
-        &self,
-        v: Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)>,
-    ) {
-        self.helpers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(v);
+    /// TICKET-211 — one more runner lease serves this sched.
+    pub(super) fn helper_started(&self) {
+        *self.helpers_live.lock().unwrap_or_else(|e| e.into_inner()) += 1;
     }
 
-    pub(super) fn take_helpers(
-        &self,
-    ) -> Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)> {
-        std::mem::take(&mut *self.helpers.lock().unwrap_or_else(|e| e.into_inner()))
+    /// TICKET-211 — a runner lease stopped serving this sched.
+    pub(super) fn helper_done(&self) {
+        *self.helpers_live.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.helpers_gone.notify_all();
+    }
+
+    pub(super) fn has_helpers(&self) -> bool {
+        *self.helpers_live.lock().unwrap_or_else(|e| e.into_inner()) > 0
+    }
+
+    /// TICKET-211 — wait until every runner lease of this sched is done.
+    pub(super) fn wait_helpers(&self) {
+        let mut n = self.helpers_live.lock().unwrap_or_else(|e| e.into_inner());
+        while *n > 0 {
+            n = self.helpers_gone.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
     }
 
     /// TICKET-159 — `finish`'s completion latch, for a caller that observed the completion itself:
