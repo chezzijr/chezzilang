@@ -203,7 +203,7 @@ quote-doubling with it (unaffected: it always passes a literal `"` as `old`, nev
 | `index_of` | `(x: T) -> int` | First index, or `-1`. A **sentinel, not a carrier** — see the `-1` hazard below. |
 | `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
 | `extend` | `(other: List[T]) -> nil` | *mutates* — append all of `other`. |
-| `sum` | `() -> T` | Numeric lists (`int`→`int`), or a list of a **scalar numeric `newtype`** — `List[Cents]` (`newtype Cents = int`) sums to `Cents`, and an **empty** one to `Cents(0)`, matching Go's `type Cents int`. Integer sums use checked add — overflow raises a recoverable `integer overflow in Add`, never wraps (the newtype path uses the underlying's same checked op); any-float lists accumulate to `float` with CPython 3.12+'s Neumaier compensation (ints included: `[0.1, 0.2, 0.3].sum()` is `0.6`, `[1e16, 1.0, 1.0].sum()` is `1.0000000000000002e+16`; may reach `inf`, never `nan` from the compensation). A `List[newtype = float]` still folds uncompensated. A newtype OF a newtype, a generic newtype and a non-numeric one (`newtype Name = str`) are rejected, exactly as their `+` is. The ELEMENT TYPE decides the numeric kind, not the runtime elements, so an EMPTY one sums to `0.0` for `List[float]` and to `0` for `List[int]`. |
+| `sum` | `() -> T` | Numeric lists (`int`→`int`). Integer sums use checked add — overflow raises a recoverable `integer overflow in Add`, never wraps; any-float lists accumulate to `float` with CPython 3.12+'s Neumaier compensation (ints included: `[0.1, 0.2, 0.3].sum()` is `0.6`, `[1e16, 1.0, 1.0].sum()` is `1.0000000000000002e+16`; may reach `inf`, never `nan` from the compensation). The ELEMENT TYPE decides the numeric kind, not the runtime elements, so an EMPTY one sums to `0.0` for `List[float]` and to `0` for `List[int]`. |
 | `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`, or tuples, `List`s and `Option`s of orderable elements — lexicographic, `None < Some`) or `Comparable` structs or enums. Float `NaN` is handled by a total order (`NaN` sorts to one end), deterministic; `+0.0` and `-0.0` are Equal (input order kept, like CPython). Faults if the callback mutates the receiver (only reachable via a `Comparable` struct's or enum's `compare`). |
 | `sort_by` | `(cmp: fn(T, T) -> int) -> nil` | *mutates* — custom comparator (`<0`, `0`, `>0`). Faults if the callback mutates the receiver. |
 | `sort_by_key` | `(key: fn(T) -> K) -> nil` | *mutates* — sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()`. Faults if the callback mutates the receiver. |
@@ -273,7 +273,7 @@ Keep callbacks pure; if you need both, sort a copy and merge after.
 | `remove` | `(key: K) -> Option[V]` | *mutates* — returns the removed value, or `None`. |
 | `merge` | `(other: Map[K, V]) -> Map[K, V]` | Returns a **new** map (`other` wins on key clash). |
 | `update` | `(other: Map[K, V]) -> nil` | *mutates* — merge `other` into self. |
-| `copy` | `() -> Map[K, V]` | Returns a **new** map, shallow in the values (Python `dict.copy()`); struct/enum/newtype keys are snapshotted, as `merge` does. |
+| `copy` | `() -> Map[K, V]` | Returns a **new** map, shallow in the values (Python `dict.copy()`); struct/enum keys are snapshotted, as `merge` does. |
 
 Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 
@@ -285,7 +285,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | `add` | `(x: T) -> nil` | *mutates* — idempotent insert. |
 | `remove` | `(x: T) -> bool` | *mutates* — returns whether it was present. |
 | `union` / `intersection` / `difference` | `(other: Set[T]) -> Set[T]` | Return a **new** set. Operator forms: `a \| b` / `a & b` / `a - b`. |
-| `copy` | `() -> Set[T]` | Returns a **new** set (shallow, Python `set.copy()`); struct/enum/newtype elements are snapshotted, as `add` does. |
+| `copy` | `() -> Set[T]` | Returns a **new** set (shallow, Python `set.copy()`); struct/enum elements are snapshotted, as `add` does. |
 
 > **Set operators.** `\| & - ^` on two `Set[T]` are union / intersection / difference /
 > symmetric-difference, identical to the methods above (`^` has no method form). Lists support `+`
@@ -341,7 +341,7 @@ These types come from the language/runtime; see [`concurrency.md`](concurrency.m
 > by the module-member path, exactly like a `.chz` module type or `regex.Match`: after
 > `import std.concurrency`, `concurrency.Shared[int]` / `concurrency.Shared(0)` resolve and construct;
 > `import std.concurrency as c` gives `c.Shared(0)`. It works in every position — annotation, ctor call,
-> `type S = concurrency.Shared[int]`, `newtype MyS[T] = concurrency.Shared[T]`, method call — and lowers
+> `type S = concurrency.Shared[int]`, method call — and lowers
 > to the same value as the bare name. Likewise `net.Socket` / `net.Listener` (`import std.net`) and the
 > FFI widths / `ptr` (`import std.ffi`, e.g. `ffi.int32`, valid inside an `extern` signature), except
 > those are **type-only**: `net.Socket(...)` is rejected (no from-nothing ctor). `time.timer(ms)` is a

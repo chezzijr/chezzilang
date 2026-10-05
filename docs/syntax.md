@@ -36,9 +36,9 @@ struct Point:
   method packed onto one line is a parse error.
 - **Identifiers:** letter or `_`, then letters/digits/`_`. Case-sensitive.
 - **Doc-comments:** any plain `#` line(s) *immediately above* a declaration (`fn`/method, `struct`,
-  `enum`, `protocol`, `newtype`, `type` alias, top-level binding) become its doc. The doc surfaces on
+  `enum`, `protocol`, `type` alias, top-level binding) become its doc. The doc surfaces on
   LSP hover above the `chezzi` type fence **today for free functions, methods, struct constructors, and
-  top-level bindings**; for `enum`, `protocol`, `newtype`, and `type` aliases the doc is parsed and
+  top-level bindings**; for `enum`, `protocol`, and `type` aliases the doc is parsed and
   attached to the declaration but does **not** yet surface on hover (their names/constructors record no
   hover info). Enum-variant **constructor names** are the exception: they hover their ctor signature at
   both the declaration and the use site (e.g. `Val(int)` → `fn(int) -> Col`, generic `Full(T)` →
@@ -220,8 +220,8 @@ evaluates the whole right-hand side first. Both are described below.
 **Compound assignment.** `x OP= v` is exactly `x = x OP v`, on variables, list elements, struct
 fields, and map values. The full set is `+= -= *= /= %=` (numeric; `+=` also concatenates `str`)
 and `&= |= ^= <<= >>=` (int-only, mirroring the bitwise operators). Because `x OP= v` is `x = x OP
-v`, it also accepts a **struct/enum/newtype whose operator overload** (an `add`/`sub`/`mul`/… method,
-or a numeric newtype's auto-flow) makes `x = x OP v` type-check — e.g. `a += V(10)` for a `struct V`
+v`, it also accepts a **struct/enum whose operator overload** (an `add`/`sub`/`mul`/… method)
+makes `x = x OP v` type-check — e.g. `a += V(10)` for a `struct V`
 with `add`. It is rejected exactly when `x OP v` is itself a type error (a type with no matching
 overload, or a mismatched operand). No implicit widening — `int /=
 float` is a type error (the result would be a float, which can't flow back into an `int` slot).
@@ -599,7 +599,7 @@ fn; it captures the enclosing scope exactly like a closure value:
   (`f()`, `obj.m()`, `lib.f()`, `lib.K.f()`, a function value); a parameter the callee rebinds
   before writing it (`ys = [1, 2]; ys.push(3)`) is not a task copy (TICKET-189).
 
-`fn` is the only declaration allowed inside a block. `struct`, `enum`, `newtype`, `protocol`, `type`, `test fn`, `import`, `extern` and `native` are top-level only; inside any block each is a parse error (`struct must be a top-level declaration`).
+`fn` is the only declaration allowed inside a block. `struct`, `enum`, `protocol`, `type`, `test fn`, `import`, `extern` and `native` are top-level only; inside any block each is a parse error (`struct must be a top-level declaration`).
 
 ```chezzi
 fn main():
@@ -629,7 +629,7 @@ it at the top level), and **mutual recursion** between two sibling nested fns is
 fn is only in scope *after* its own declaration, so `a` referencing a later-declared sibling `b` is a
 `unknown name 'b'` error (declare such a pair at the top level instead). Both are clean compile-time
 rejects, never a check-OK/run-fault. A nested fn may take **any name a local may take**, including a
-builtin (`ord`), a builtin ctor (`Channel`), a same-module **struct** or **newtype**, and it shadows
+builtin (`ord`), a builtin ctor (`Channel`), a same-module **struct**, and it shadows
 that name in its scope, as a `def ord` inside a Python function does (TICKET-180: the checker records
 what each call head means and the backend reads that record, so the local wins at runtime too).
 
@@ -1777,7 +1777,7 @@ elements and map keys must be `Hashable`.
 
 ## 7. Structs  (M3)
 
-Type declarations (`struct`, `enum`, `newtype`, `protocol`, `type`) are top-level only. Python accepts a `class` inside a function; Chezzi rejects the nested form at parse time (owner decision 2026-09-28, TICKET-178), because a nested type would otherwise be silently ignored.
+Type declarations (`struct`, `enum`, `protocol`, `type`) are top-level only. Python accepts a `class` inside a function; Chezzi rejects the nested form at parse time (owner decision 2026-09-28, TICKET-178), because a nested type would otherwise be silently ignored.
 
 ```chezzi
 struct Point:
@@ -1900,19 +1900,6 @@ never its functions, so the bare spelling there still calls the field ctor (`imp
 (see the v1 limits above) — only a **module-level** fn can win, because it is hoisted into a global
 slot the backend can dispatch through.
 
-**The same rule covers a `newtype`** (TICKET-055) — a module-level `fn` named after a same-module
-`newtype` replaces its wrapping constructor, bare, `from`-imported, and qualified, with the same
-in-body raw-ctor escape:
-
-```chezzi
-newtype Cents = int
-
-fn Cents(s: str) -> Cents:         # module-level, same name as the newtype
-    return Cents(s.len())          # inside THIS body only, Cents(...) is still the raw wrapping ctor
-
-c := Cents("abcd")                 # calls the fn, not the wrapping ctor — int(c) == 4
-```
-
 **Enums** get static methods too (e.g. a `from_str(s) -> Option[Color]`). For an enum, a **variant**
 name **always wins** over a static-method name on `Enum.x` — so a variant and a static method may
 **not** share a name (a collision is a declaration-time error). This keeps `Color.Red` always the
@@ -1958,8 +1945,7 @@ b := Box[int].make[str]("hi")         # combined turbofish: T=int + U=str ⇒ Bo
 A method param name may **not shadow** an enclosing type param (`fn make[T]` inside `Box[T]` is an
 error). A method-level turbofish on a member that declares **no** type params (or a builtin like
 `xs.len[int]()` / `xs.iter[int]()`) is an arity error. **Instance** methods take the same member-level
-turbofish, multi-arg: `pair.first[int, str](1, "x")`. Static methods on `newtype` are not
-supported yet (struct + enum only).
+turbofish, multi-arg: `pair.first[int, str](1, "x")`.
 
 #### Static protocol requirements — calling `T.method(...)` through a bound  (M24)
 
@@ -2014,7 +2000,7 @@ fn make[T: Convert[int]](seed: T, n: int) -> T:
 | `T` declared by the enclosing **TYPE** (`struct Bx[T: Default]` … `T.default()` in a method) | the concrete type is erased once a `Bx` *value* exists — only a value could hold the witness | declare the parameter on the **member** (`fn fresh[T: Default](self, …)`), whose witness rides on the call |
 | reading a witness-taking fn as a **function value** — `g := reset`, `reset[Counter]` as a value, passing it to a HOF, a cross-module read | a `fn` value erases which declaration it came from, so no witness can be recovered. **A permanent wall, not a v1 limit** | call it directly, or take a factory closure: `fn make[T](mk: fn() -> T) -> T` |
 | a `T` **not determined** at the call site | there is no concrete type to build a key from | pin it (`nodet[Counter]()`) or annotate the result |
-| a bound witnessed by a **newtype** or a **scalar** | neither can host a static method | use a struct or an enum |
+| a bound witnessed by a **scalar** | it cannot host a static method | use a struct or an enum |
 | a **manifest entrypoint** that takes a witness or any declared parameter (`entrypoint = "src.main:main"` where `fn main[T: Default]()` or `fn main(a: int)`) | it is invoked with no arguments, so nothing supplies the key (or the argument) | give the entrypoint a nullary, non-generic signature and construct / read inputs in a helper it calls. Reported by `chezzi check` and by bare `chezzi run`; an explicit `chezzi run <file>` is script mode and runs the top level regardless |
 
 The turbofish *call* form is fine — `reset[Counter](Counter(1))` works; it is only reading
@@ -2130,7 +2116,7 @@ fn combine[A, B](a: A, b: B) where A: Add + Mul, B: Comparable:   # multi-entry,
 A `where` entry naming a type parameter that isn't declared in `[…]` **and** isn't the enclosing
 type's own parameter is an error.
 
-**Conditional methods.** A `where` on a *method* may name the **enclosing struct/enum/newtype's own
+**Conditional methods.** A `where` on a *method* may name the **enclosing struct/enum's own
 type parameter** (not the method's `[U]`): the method is then callable only when the receiver's
 concrete type argument satisfies the bound — Rust's `impl<T: Ord> Box<T> { fn top(…) }`. It mirrors
 the built-in `List[T].sort` / `sum` (each a `where T: …` on `T` = the list's element). This is a
@@ -2187,8 +2173,8 @@ Box[Tag] == Box[Tag]  →  type error: cannot compare Box[Tag] and Box[Tag] for 
 
 while `Box(1) == Box(2)` still runs and prints `false`. Rust agrees (`impl<T: Ord> PartialEq for
 Boxy<T>` leaves `Boxy<Tag> == Boxy<Tag>` un-callable, `error[E0369]`). The same rule covers `!=`,
-containers and payloads (`[a] == [b]`, `Some(a) == Some(b)`, tuples, map values, struct fields,
-newtype underlyings), `x in xs`, and the builtins whose runtime is `values_equal` —
+containers and payloads (`[a] == [b]`, `Some(a) == Some(b)`, tuples, map values, struct fields),
+`x in xs`, and the builtins whose runtime is `values_equal` —
 `list.contains`/`index_of`/`dedup`/`unique`, and every map-key / set-element position, each with its
 own message naming the site (*contains() compares List[Box[Tag]] elements for equality — …*,
 *map key type Box[Tag]'s `eq` requires …*).
@@ -2289,7 +2275,7 @@ type indexable, index-assignable, `in`-testable or sliceable, and the operator e
 apply + to W and W (method 'add' parameter 1 is named 'o', but Add declares 'other')`. `==` is not
 affected: it dispatches a user `eq` by its shape, whatever the operand is called.
 
-`Self` is also usable in an **inherent** `struct`/`enum`/`newtype` method's signature and body
+`Self` is also usable in an **inherent** `struct`/`enum` method's signature and body
 (param type, return type, local annotation), where it names the enclosing type — `fn dup(self) ->
 Self` inside `struct P` returns a `P`, and for a generic `Box[T]` it carries the receiver's own type
 args. It resolves to the concrete enclosing type, so a `-> Self` method returning a different type is
@@ -2342,7 +2328,7 @@ defines **no** `eq` keeps the structural (field-by-field) equality it always had
 **`Eq` satisfaction is exactly "`==` works on it"**, and writing an `eq` is not what earns it — the
 language's structural `==` is an automatic derive, and since 2026-08-11 it tells the protocol system so
 (`docs/gaps.md` **W7-41**). So `where T: Eq` is writable over `int`/`float`/`bool`/`str`, `bytes`,
-tuples, `List`/`Map`/`Set`, `Option`/`Result`, newtypes, any struct or enum, a **function value**
+tuples, `List`/`Map`/`Set`, `Option`/`Result`, any struct or enum, a **function value**
 (a user closure/free fn, or a first-class universe builtin like `ord`/`chr`/`panic`/`print`), and a
 **protocol-typed (existential) value** — the same set `==` accepts. Go gives structs `==`
 automatically, Rust spells it `#[derive(PartialEq, Eq)]`, Python `@dataclass(eq=True)`; Chezzi's is
@@ -2358,8 +2344,8 @@ ancestor that differs, rejecting `f == g` outright). A named fn is one value: `P
 concrete witness — see the deferred-to-runtime paragraph above (`docs/gaps.md` **W7-52**, fixed
 2026-08-12; matches Go 1.20+'s `comparable`, which likewise admits an interface type). The one thing
 that revokes the grant is an
-`eq` (its own, or one reached through an element / entry / tuple slot / field / payload / newtype
-underlying) whose `where` bounds do not hold for the instantiation in hand — that is the `Box[Tag]`
+`eq` (its own, or one reached through an element / entry / tuple slot / field / payload)
+whose `where` bounds do not hold for the instantiation in hand — that is the `Box[Tag]`
 case above. **Still outside the grant, and filed:** a bare `T` with no bound (deliberate — a generic
 body is checked once with `T` abstract).
 
@@ -2377,9 +2363,7 @@ print(Ver(1, "alpha") != Ver(1, "beta"))         # false — `!=` is the same di
 ```
 
 For a struct/enum, `a.eq(b)` and `a == b` are **one** dispatch in both directions, so a `[T: Eq]` body
-may spell either. (A *newtype* cannot get into that position at all: its `==` unwraps to the
-underlying's native equality, so declaring an `eq` on one is a compile error — see the newtype section
-below.) Dispatch is by the operands' **runtime type**: both sides must be the same
+may spell either. Dispatch is by the operands' **runtime type**: both sides must be the same
 struct/enum type or the comparison stays structural `false` without calling user code, and for an enum
 it is the *enum* that decides — one `eq` also answers `Shape.Circle == Shape.Square` (Rust `PartialEq` /
 Python `__eq__` compare across variants).
@@ -2433,11 +2417,6 @@ print(eqm(Key(1), Key(2)))                   # false — through the bound: the 
 A real `eq` **hook** is still dispatched through the bound, of course — that is what makes `Eq`
 user-overloadable. The rule is one sentence: through a bound, `.eq()` means whatever `==` means for
 that receiver, so the method spelling and the operator can never disagree (`docs/gaps.md` **W7-53**).
-
-A newtype cannot satisfy `Eq` through its own `eq` **method**: a newtype's `==` always unwraps to the
-underlying's native equality, so declaring `eq` on one is rejected at the declaration site (the method
-could never agree with the operator). It satisfies `Eq` anyway — via that same unwrapped equality, which
-is a working `==` — so `where T: Eq` accepts a newtype over any underlying.
 
 A user `eq` reaches **every** equality site, not just the operator — `Map`/`Set` key lookup (`m[k]`,
 `has`, `get`, `remove`, `in`, `add`), `x in xs`, `list.contains`/`index_of`/`dedup`/`unique`, set
@@ -2500,7 +2479,7 @@ cannot) enforce.
 * **`Atomic[T].cas` compares structurally and never calls a user `eq`** — it holds the value's lock
   across the compare, and re-entering user code there would deadlock. Two layers keep that true:
   the checker **rejects a payload type that REACHES a user `eq`** — its own, or one on any element,
-  entry, tuple slot, struct field, enum payload or newtype underlying the structural compare would
+  entry, tuple slot, struct field or enum payload the structural compare would
   recurse into (use `Shared[T]`, which has no `cas`, for such a type) — and the VM **switches the
   `eq` hook off** for the duration of the compare, so the guarantee does not depend on that walk
   being able to see through a protocol existential. See [`concurrency.md`](concurrency.md).
@@ -2771,7 +2750,7 @@ does **not** conform to it — supply the args (`Container[int]`) to use it as a
 
 > **A protocol crosses a module boundary like any other declaration.** Both `mod.Named` (qualified) and
 > `import Named from mod` (with or without an `as` rename) resolve, exactly as they already do for a
-> `struct`/`enum`/`newtype`/`type` alias. That includes a generic bound: `[T: mod.Named]`,
+> `struct`/`enum`/`type` alias. That includes a generic bound: `[T: mod.Named]`,
 > `where T: mod.Named`, `[T: mod.A + mod.B]`, `[S: mod.Container[int]]` and a protocol embed line
 > `mod.Named` name the same protocol as the bare import, and a static requirement dispatches through
 > the witness exactly as `[T: Named]` does. The last segment is the protocol and the rest is the module:
@@ -2883,159 +2862,21 @@ is a type error, and `IB[str](…)` is rejected — the alias already fixes its 
 scalar or a protocol stays a type spelling only: `type M = int` then `M(5)` is `unknown name 'M'` in
 every spelling.
 
-**Newtypes** (`newtype Name = <type>`, M21) are the *distinct-type* counterpart to a transparent
-`type` alias: `Name` wraps the underlying type but is a **separate, nominal** type that does NOT
-silently mix with the raw underlying (Go's "defined type" model). The point is to catch accidental
-mixing at compile time — a bare `int` is **not** assignable to a `UserId` parameter/binding/field,
-and a `UserId` is **not** accepted where a raw `int` is expected.
+**Distinct types: a one-field struct.** `newtype` was removed in TICKET-216 and is an ordinary
+identifier now. A one-field `struct` with methods is the distinct-type idiom, as Rust's tuple struct
+`struct UserId(i64)` is. Operators and protocols come from the struct's own methods.
 
 ```chezzi
-newtype UserId = int
-newtype Meters = float
+struct UserId:
+    id: int
+    fn is_admin(self) -> bool:
+        return self.id < 100
 
-fn needs_int(x: int): ...
-
-uid := UserId(10)      # construct (a call with one arg of the underlying type)
-n: int = int(uid)      # unwrap via the cast builtin → 10
-# x: UserId = 10       # ERROR: an int literal is not a UserId
-# needs_int(uid)       # ERROR: a UserId is not an int
+struct Meters:
+    v: float
+    fn add(self, other: Meters) -> Meters:
+        return Meters(self.v + other.v)
 ```
-
-In an interpolation hole, a newtype over `int`/`float` formats as its underlying number **when a
-format spec is present** (TICKET-142): `"{UserId(7):04}"` is `0007` and `"{UserId(7):>5}"` is
-`    7`, as Go's `%04d` / `%5v` print. A bare `"{uid}"` / `print(uid)` still prints the `UserId(7)`
-text form (Go and Python both print `7`; the display form is unchanged here).
-
-Crossing the boundary is always **explicit** — either **construct** (`UserId(10)`) or **cast-unwrap**
-via the matching cast builtin: `int(uid)` / `float(m)` return the inner value (and for a
-`newtype N = str`, `str(n)` unwraps the inner string; for an aggregate underlying the matching
-aggregate builtin unwraps too — see *Aggregate underlyings* below). There is no `.value` field and no
-auto-deref.
-From another module the constructor takes the **qualified path** — `geo.UserId(10)`, exactly like a
-qualified enum variant.
-
-For a **numeric** underlying (`int`/`float`), arithmetic and ordering **auto-flow same-type only**:
-`a OP b` where both operands are the *same* newtype applies the underlying's **native** op and
-re-wraps — `Meters + Meters -> Meters` (also `- * / %`), `Meters < Meters -> bool`. Equality
-(`==`/`!=`) works between two values of the same newtype for **any** underlying
-(`UserId == UserId -> bool`). A `str`/`bool` newtype does **not** auto-inherit `+`/`<` in v1 — define
-a method or unwrap to operate (operator auto-flow for non-numeric underlyings is a follow-up).
-Mixing a newtype with its raw underlying (`Meters + 1.0`) or with a *different* newtype
-(`Meters + Seconds`) is a type error — that rejection is the whole point.
-
-The same auto-flow carries the `List` methods that need it: `.sort()`, `.min()`/`.max()` (and
-`.min_by`/`.max_by`) order a `List[Meters]` by the wrapped scalar, and `.sum()` returns the
-**newtype** — `[Cents(3), Cents(1)].sum() -> Cents(4)`, and an *empty* `List[Cents]` sums to
-`Cents(0)` (Go's `type Cents int`). Integer overflow still faults. This is the numeric auto-flow, so
-a *generic* newtype, a newtype **of** a newtype, and a `newtype Name = str` are rejected by `.sum()`
-exactly as their `+` is.
-
-A newtype may carry its own **methods** (a trailing-colon block, like a struct/enum), and satisfies
-the **non-operator** prebuilt protocols by defining the relevant method — `str(self)` (Stringable
-display override) and `hash(self)` (so it can be a `map`/`set` key — opt-in, *not* inherited from the
-underlying) — so it passes into those protocol-bound generics (`fn show[T: Stringable](x: T)`). The
-**operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`/`Eq`) are **not** satisfiable by a
-newtype method: a newtype's own `add`/`div`/`compare`/… is never dispatched as an operator (the
-same-type arm always auto-flows to the underlying's native op/ordering/equality), so only a **numeric**
-underlying supplies them — a numeric newtype satisfies `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable`
-intrinsically (native same-type ops above), while a `newtype Name = str` with an `add` (or `compare`)
-method does **not** pass `fn twice[T: Add](x: T)` (or `fn sorted[T: Comparable](xs: T)`) — its `<`
-would silently use the underlying's native ordering, never the method, so the checker rejects it.
-(`eq` never even reaches that question: declaring one on **any** newtype is a compile error — see
-below — so no newtype satisfies `Eq` through a method, and only a numeric one satisfies it at all.)
-
-Because of that, a **numeric** newtype may not *define* a method named after an operator it actually
-inherits (`add`/`sub`/`mul`/`div`/`mod`/`compare`) — and **no** newtype, numeric or not, may define
-`eq` — it is a **compile error at the declaration**:
-
-```chezzi
-newtype Score = int:
-    fn add(self, other: Score) -> Score:      # error: operator method 'add' on a numeric newtype
-        return Score(99)                  # is never dispatched as an operator …
-    fn doubled(self) -> Score:            # fine — ordinary methods are unaffected
-        return Score(int(self) * 2)
-```
-
-Without the rule the two spellings disagreed for that receiver: `.add()` dispatched the user's method
-(the miss-only intrinsic never shadows one) while `+` auto-flowed to `int`'s native op, so
-`twice(Score(1), Score(2))` gave `99` and `Score(1) + Score(2)` gave `3`. A numeric newtype inherits
-its underlying's operators; **use a `struct` if you need your own arithmetic.** For the *arithmetic and
-ordering* names the rule is narrow — non-numeric and generic newtypes are unaffected, since they have
-no such operator to disagree with.
-
-**`eq` is the one name where that "no operator to disagree with" premise is false, so it is rejected on
-EVERY newtype** — numeric, non-numeric, or generic. `==` is defined on **every** underlying, so a
-`newtype Name = str` with an `eq` method would have `Name("a") == Name("b")` unwrap to `str`'s native
-equality (`false`) while `Name("a").eq(Name("b"))` ran the method — the identical two-spellings-disagree
-shape, one type-kind over:
-
-```chezzi
-newtype Name = str:
-    fn eq(self, other: Name) -> bool:   # error: operator method 'eq' on a newtype is never dispatched
-        return true                 # as an operator — a newtype's '==' always unwraps to str's …
-```
-
-Unlike a struct/enum — where a *generic* operand (`fn eq(self, x: T)`) marks the method as an ordinary
-one and leaves `==` structural — **no** signature rescues `eq` on a newtype: there is no hook to tell it
-apart from, because a newtype's `==` dispatches to no user method at all. Rename the method, or use a
-`struct` (whose `eq` **does** own its `==`). This is deliberate divergence from Rust — where a tuple
-struct may `impl PartialEq` and `==` uses it — and from Python's `__eq__` on a wrapper class: making a
-newtype's `==` dispatch was implemented and rejected for `compare` (a numeric newtype's intrinsic grant
-is unconditional, so a heterogeneous `List[Eq]`/`List[Comparable]` would take the user's answer for a
-same-newtype pair and the native one for a newtype/underlying pair — equality/ordering that is not
-transitive, with no fault).
-`neg` is the one operator-named method a numeric newtype MAY still define, because unary `-` has no
-newtype path at all (`-m` on a `newtype Meters = float` is already the error `cannot negate Meters`).
-With no operator to disagree with, a `neg` method is simply the only spelling of negation available.
-
-```chezzi
-newtype Meters = float:
-    fn str(self) -> str:
-        return "{float(self)}m"
-
-print(Meters(1.5))                 # 1.5m       (str(self) override)
-print(float(Meters(1.0) + Meters(2.0)))  # 3.0  (same-type +)
-```
-
-**Aggregate underlyings.** A `newtype` may wrap an aggregate (`newtype Names = List[str]`), but it
-gets **identity + construct + unwrap + its own methods only** — it does NOT auto-inherit the
-underlying's operations: `names.push(..)`, `names[i]`, and `for x in names` do not resolve. Reach the
-underlying through an explicit method or the **unwrap cast** — the matching aggregate builtin, exactly
-as `int(uid)` unwraps a scalar newtype: `List(names)` returns a copy of the inner `List[str]`
-(likewise `Set(..)` / `Map(..)` for a set/map underlying). (Operation-forwarding for aggregates and
-`derive` remain out of scope.)
-
-**Generic newtypes.** A `newtype` may carry generic type parameters (`newtype Stack[T] = List[T]`),
-the Go defined-type model extended to generics — the underlying and the method signatures may
-reference `T`, and the type args ride on the value's type so a cast-unwrap recovers the
-instantiation. A type-parameterized newtype is **methods-only**: it gets **no native operator
-auto-flow** — even `newtype Box[T] = T` over a numeric `T` does not get `+`/`<` for free. Operators
-come strictly from the newtype's own methods + protocol satisfaction (the scalar `UserId = int` /
-`Meters = float` numeric auto-flow above is unchanged). Construction infers the type args from the
-argument (`Stack([1, 2])` ⇒ `Stack[int]`); when an argument can't bind them (an empty `[]` can't
-pin `T`), an enclosing **annotation** (a `let`/return/parameter type) now pins them
-(`e: Stack[str] = Stack([])`), or supply them with a **turbofish**: `Stack[int]([])` (still needed
-where there is no annotation, e.g. a nested `ConcurrentMap(RwShared({}))` — expected, not a bug). A cast-unwrap propagates the instantiation:
-for `s: Stack[int]`, `List(s)` is `List[int]` (not bare `list`), and `int(b)` for `b: Box[int]`
-unwraps to `int`.
-
-```chezzi
-newtype Stack[T] = List[T]:
-    fn size(self) -> int:
-        return List(self).len()
-    fn top(self) -> Option[T]:
-        xs := List(self)
-        return if xs.len() == 0: None else: Some(xs[xs.len() - 1])
-
-s := Stack([1, 2, 3])      # inferred Stack[int]
-print(s.size())            # 3
-t: Option[int] = s.top()   # method dispatch substitutes T -> int
-xs: List[int] = List(s)    # cast-unwrap propagates: List[int]
-e: Stack[str] = Stack([])        # annotation pins T=str (the empty list can't); turbofish also works
-```
-
-(Static / associated methods like `Type.method()` and typeclass-style associated requirements
-`T.zero()` remain out of scope — a separate follow-up.)
 
 The prebuilt **`Stringable`** protocol (`str(self) -> str`) customises how a value is rendered. A
 struct *or enum* that defines `str(self) -> str` overrides its default repr (`Name(field=value, …)`
@@ -3053,7 +2894,7 @@ a direct `(5).str()` on a concrete scalar is still a compile error — use the f
 **Every intrinsic grant is callable, and equals its operator form.** The same holds for *all* the
 protocols a built-in satisfies intrinsically, not just `Stringable`: inside an erased `[T: P]` body you
 may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/
-`a.div(b)`/`a.mod(b)`/`a.neg()` on `int`/`float`/a numeric `newtype`, `a.compare(b)`, `x.hash()` on
+`a.div(b)`/`a.mod(b)`/`a.neg()` on `int`/`float`, `a.compare(b)`, `x.hash()` on
 `int`/`str`/`bytes`/`bool`/a zero-field struct, and `c.index(k)`/`c.set_index(k, v)`/`c.slice(s, e, st)`
 on `list`/`map`/`str`/`bytes`/`bytearray`. Each is **defined as** the operator form — `a.add(b)` ≡
 `a + b` (same overflow / divide-by-zero fault), `c.index(k)` ≡ `c[k]` (negative indexing and the same
@@ -3067,11 +2908,9 @@ callable** — `neg()`, `str()`, `hash()`, `index(k)`. `add`/`sub`/`mul`/`div`/`
 `method 'add' is not callable through the protocol value Add — ... Bind the receiver with a generic
 parameter instead: `[T: Add]``. Inside an erased `[T: P]` body every grant above is callable.
 
-Still bound-only, and with two documented exceptions (`docs/gaps.md` W6-3b/d):
+Still bound-only, and with one documented exception (`docs/gaps.md` W6-3b):
 `Iterator`'s `next` on a *raw* collection faults (no cursor position — use `for`, or `.iter()` for a real
-cursor); and a numeric `newtype` that DEFINES `add`/`compare`/… gets its own method from `a.add(b)` while
-`a + b` keeps auto-flowing to the underlying's native op, so the two spellings disagree for that type
-only. `a.compare(b)` on a **NaN** operand never faults — it answers the same **total order** `sort()` /
+cursor). `a.compare(b)` on a **NaN** operand never faults — it answers the same **total order** `sort()` /
 `.min()` / `.max()` use (`f64::total_cmp`, NaN to one end), while `<`/`<=`/`>`/`>=` stay IEEE (`false` for
 every NaN comparison): one shared order, one rule. `+0.0` and `-0.0` are EQUAL in that order (a stable sort keeps their input order and `[0.0, -0.0].min()` is `0.0`, like CPython).
 
@@ -3169,7 +3008,7 @@ the map/set key check runs the SAME `Eq`-bound obligation on a type parameter th
 changed is that the check now also reaches a free `T` inside a generic body/signature instead of
 skipping it as "not yet chosen".
 
-**Keys are value types (Go model).** A `struct`/`enum`/`newtype` key or element is **snapshotted
+**Keys are value types (Go model).** A `struct`/`enum` key or element is **snapshotted
 (deep-copied) when it is stored**, so mutating your original value *after* the insert can never reach
 — and corrupt — the stored key. This applies to every insert path: `m[k] = v`, the `{k: v}` and
 `{a, b}` literals, `set.add`, `Map.update` / `Map.merge`, and the `Map(it)` / `Set(it)` constructors.
@@ -3285,7 +3124,7 @@ fn sum(t: Tree[int]) -> int:
 A **payload-carrying** variant's type args are inferred from the payload, but may be pinned
 explicitly at the **declaration site** — the type args go **on the TYPE**, not on the variant:
 `Tree[int].Node(1, Tree.Leaf, Tree.Leaf)`. This is the declaration-site rule (§7b): a generic
-declared on the type (`enum/struct/newtype [T]`) is pinned on the type (`Tree[int].Node`), and a
+declared on the type (`enum/struct [T]`) is pinned on the type (`Tree[int].Node`), and a
 generic declared on the member is pinned on the member. Multi-param enums use the comma form —
 `Result[int, str].Ok(5)`, `Result[int, str].Err("e")`. The same type-level turbofish supplies args
 the payload can't bind (a nullary variant: `Box[int].Empty`) and drives a generic **static** method
@@ -3853,7 +3692,7 @@ constructors** (`int`, `str`, `List`, `Map`, `Channel`, `range`, …) and user s
 are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`.
 That constructor rule reaches **every dotted spelling of a constructor**, since they all merely build
 a value and throw it away: a variant constructor (`defer E.A(3)`, `defer E[int].A(3)`,
-`defer lib.Col.Val(3)`), a module-qualified struct/newtype constructor (`defer lib.Pt(3)`), and a
+`defer lib.Col.Val(3)`), a module-qualified struct constructor (`defer lib.Pt(3)`), and a
 **native constructor reached through its std module** (`defer concurrency.Shared(0)` — likewise
 `RwShared`/`Atomic`/`AtomicInt`/`Executor` — and `defer time.timer(10)`, aliased imports included).
 All are rejected by `chezzi check` with the same message as the bare `defer Shared(0)`. An ordinary
@@ -4251,11 +4090,7 @@ runtime's text-form path): a `List`/`Map`/`Set`/tuple/`Option`/`Result` (TICKET-
 TICKET-142 — a struct, enum, `bytes`, a fn value, and every native struct (`Shared`, `Channel`,
 `AtomicInt`, `Writer`, …). `xs := [1]; "{xs:d}"`, `n: int? = None; "{n:+}"`, a struct `{p:d}` and an
 enum `{e:d}` are all compile errors naming the type; a width/fill spec (`{o:>12}` on an
-`Option[float]`) still passes, exactly as it would on a `str`. A **numeric newtype** (underlying
-`int`/`float`, through any newtype chain) is the exception: with a spec present it formats as its
-underlying number, as Go's `type M int; fmt.Printf("%04d %x", M(7), M(255))` prints `0007 ff` —
-`{M(1.5):.2f}` is `1.50`, `{N(7):04}` is `0007`, `{N(7):>5}` is `    7`. A `str`/`bool`/aggregate
-newtype keeps its text form and is checked against the string rules.
+`Option[float]`) still passes, exactly as it would on a `str`.
 The **runtime** validation stays as an identical backstop (same wording, single-sourced in
 `spec_valid_for_scalar`): it fires only for a value whose type the checker can't pin to a concrete
 type — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an `Unknown`, or a
@@ -4305,7 +4140,7 @@ A character is just a 1-char `str` (Python-style — there is no `char` type): i
 iterate with `for c in s:` or `s.chars()`, and bridge to codepoints with `ord`/`chr`.
 
 List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.contains(v)`
-`xs.index_of(v)` `xs.sum()` (numeric, or a scalar numeric `newtype` → that newtype; empty `-> T(0)`)
+`xs.index_of(v)` `xs.sum()` (numeric; empty `-> 0`, or `0.0` for a `List[float]`)
 `xs.sort()` (ascending, in place); `xs.concat(ys)→list` (new list) and
 `xs.extend(ys)` (append in place, → nil); `xs.copy()→list` (new list, shallow); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
 `xs.sort_by(fn(a, b) -> int)` — a custom comparator (negative = `a` before `b`), stable, in place;
@@ -4557,7 +4392,7 @@ fn fetch_all(urls: List[str]):
   exactly like a `.chz` module type (`geo.Point`) or `regex.Match`: after `import std.concurrency` you
   may write `concurrency.Shared[int]` / `concurrency.Shared(0)`, and `import std.concurrency as c` gives
   `c.Shared[int]` / `c.Shared(0)`. The qualified form works in every position — annotation, constructor
-  call, `type S = concurrency.Shared[int]`, `newtype MyS[T] = concurrency.Shared[T]`, and method calls —
+  call, `type S = concurrency.Shared[int]`, and method calls —
   and lowers to the same value as the bare name. (The full path `std.concurrency.Shared` works too
   after an un-aliased `import std.concurrency`, like every Chezzi module.) The qualified path still requires the `import`
   (qualified access to a non-imported module is an `unknown module` error), so the gate is unchanged.
@@ -4593,7 +4428,7 @@ fn fetch_all(urls: List[str]):
   at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 22
   prebuilt PROTOCOL names (`Any`/`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
   `Neg`/`Arithmetic`/`Num`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`) are reserved the same way — usable
-  as a bound (`[T: Comparable]`) but not as a `struct`/`enum`/`newtype`/`type` decl name (a user
+  as a bound (`[T: Comparable]`) but not as a `struct`/`enum`/`type` decl name (a user
   `protocol Comparable:` is likewise rejected `reserved (builtin)`). Their SHAPE (method sigs + embeds)
   is file-backed in `std/prelude.chz` as plain `protocol` decls (phase 5c) — a drift-guarded mirror of
   the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
@@ -4715,7 +4550,7 @@ parse error: *unexpected 'from' in expression*). Semantics are Python's; only th
 module or name twice in one file is a type error (`'math' is already imported`), where Python silently
 accepts the duplicate. The one accepted re-bind is `import std.math` plus `import math from std`: both
 name one module, which binds `math` once and initializes once. (`import math from std` written twice is
-still the duplicate error.) A same-module top-level `fn`, `struct`, `enum`, `newtype`, `protocol` or
+still the duplicate error.) A same-module top-level `fn`, `struct`, `enum`, `protocol` or
 `type` alias may not take a whole-module import's bound name either (`import lib as f` plus `fn f`,
 `import lib` plus `struct lib`, `import a.b` plus `enum b`), in either order: the same error, on the
 later of the two declarations, as Go's `f redeclared in this block`. The import and a `fn` would share
@@ -5176,7 +5011,7 @@ their width is platform-dependent (LP64 vs LLP64); deferred to a future task. Se
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
 (`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
-(`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), any of your `struct`/`newtype`/
+(`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), any of your `struct`/
 enum-variant names, or a **builtin variant ctor** (`Ok`/`Err`/`Some`/`None`) — those resolve to a special op before a
 plain call, so the extern would be silently shadowed; the checker rejects the collision (*'…' is a
 builtin/reserved name*), in either declaration order and reported exactly **once**. A **type** name is

@@ -124,8 +124,8 @@ gate measures performance; no gate reads a message; no gate executes prose.
   predicate: write the premise, enumerate the neighbours it implies (same shape, different type /
   context / worker count), and run them on the pre-change binary in a separate `CARGO_TARGET_DIR`.
 - **"The rule fires" is not "the rule is right."** A `rejects()` test passes identically whether the
-  reason is true or invented. `fn neg` on a numeric newtype was banned as "operator-named" — but unary
-  `-` has no newtype path at all, so the rule deleted the only spelling of negation while asserting a
+  reason is true or invented. `fn neg` on a numeric newtype (historical: `newtype` was removed in TICKET-216)
+  was banned as "operator-named" — but unary `-` had no path for that type at all, so the rule deleted the only spelling of negation while asserting a
   conflict that cannot occur. For each case in a reject set, prove the harm exists *for that case* on
   the pre-fix binary; derive `ok()` neighbours from the premise, not the name category.
 - **Pick the test shape that can expose the mistake, not the easiest one.** A carve-out was tested on
@@ -298,7 +298,7 @@ the freeze.
   faulted (CPython raises on both). Every production site now uses the guarded form via the
   `seq_slot`/`set_slot`/`map_slot` helpers and the swallowing wrapper is `#[cfg(test)]`-only, so a new
   miss is a compile error. Grep both `self.values_equal(` and `vm.values_equal(`.
-- **Struct/enum/newtype map and set keys are snapshotted on insert** (Go value-key model); values stay
+- **Struct/enum map and set keys are snapshotted on insert** (Go value-key model); values stay
   by reference. A key fetched via `keys()` is the stored key by reference — decided WON'T-FIX, matching
   Python/Java.
 - **Any `+1/-1` counter that gates scheduling must survive a Rust panic.** `Vm::guarded` brackets

@@ -567,7 +567,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   involved. An `Any` slot keeps an `int` an `int` (`xs: List[Any] = [1, -2.5]`, `x: Any = if c: 1 else:
   2.5` stores `1`), as CPython's `[1, -2.5]` and Go's `var x any = 1` do. Lossy conversions stay type
   errors too (`y: int = 2.3`, `-> int: return 2.3`, `float` into `List[int]`, `int`→`float` across a
-  **newtype** boundary). Protocol widening is a separate rule and stays (`Box[Named] = Box(A())`). See
+  one-field struct). Protocol widening is a separate rule and stays (`Box[Named] = Box(A())`). See
   `docs/syntax.md` §3 for the full sink list. The same rule governs
   **un-annotated multi-branch return inference**: sibling `return` branches merge with a join. It does
   **not** widen `int`→`float` across branches, so mixed `if c: return 1 else: return 2.0`
@@ -639,17 +639,15 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   (`Comparable`/`Hashable`/`Add`/…) already had an intrinsic scalar arm but `Stringable` did not.
 - **Shipped (bug-hunt wave-6 W6-3):** *every* intrinsically-granted protocol method is now **callable**
   from an erased generic body, not just `compare`/`str` — `add`/`sub`/`mul`/`div`/`mod`/`neg` on
-  `int`/`float`/a numeric `newtype`, `hash` on `int`/`str`/`bytes`/`bool`/a zero-field struct, and
+  `int`/`float`, `hash` on `int`/`str`/`bytes`/`bool`/a zero-field struct, and
   `index`/`set_index`/`slice` on `list`/`map`/`str`/`bytes`/`bytearray`. Each dispatches to the **same
   primitive its operator form uses**, so `a.add(b)` ≡ `a + b`, `c.index(k)` ≡ `c[k]`, `c.slice(…)` ≡
   `c[a:b:c]` and `x.hash()` is exactly the hash `x` gets as a map/set key — same values, same faults.
   The checker↔runtime pairing is machine-checked per **(protocol × receiver type)**
   (`checker::proto::INTRINSIC_PROTO_METHODS` + `vm::tests::intrinsic_grants_all_have_vm_arms`, which
   sweeps the whole cross product), and a bare `return Ok(())` grant no longer compiles — so neither a
-  new grant nor a WIDENED one can ship without its arm. Two documented exceptions: `Iterator`'s
-  stateful `next` on a *raw* collection (no cursor position, W6-3b), and a numeric `newtype` that defines
-  its own operator-named method (the method form gets the user method, the operator form the underlying's
-  native op, W6-3d). On a **NaN** operand `compare` is total, but by `sort()`'s total order rather than
+  new grant nor a WIDENED one can ship without its arm. One documented exception: `Iterator`'s
+  stateful `next` on a *raw* collection (no cursor position, W6-3b). On a **NaN** operand `compare` is total, but by `sort()`'s total order rather than
   the operators' IEEE rule — one order, one divergence (see the `Comparable` note below).
 - **Shipped since (post-M18 stdlib batch):** `std.request` custom headers + non-GET/POST verbs
   (`put`/`patch`/`delete`/`head` + a general `request(method, url, body, headers)`), carried off-heap
@@ -666,36 +664,20 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `Add`/`Comparable` (`Comparable` embeds `Eq`, but an enum satisfies `Eq` structurally, so `compare`
   alone is enough — M23's "must also define `eq`" rule was dropped 2026-08-11, `docs/gaps.md` W7-41) and
   pass into protocol-bound generics, and `+`/`-`/`*`/`<` operator overloading).
-- **Shipped (M21):** nominal **`newtype`** — `newtype Name = <type>` (optionally with a method block)
-  is a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: only an
-  explicit construct (`Name(x)`) or cast-unwrap (`int(n)`/`float(n)`/`str(n)`) crosses the boundary,
-  so accidental mixing with the raw underlying (or a different newtype) is a compile error. Numeric
-  (`int`/`float`) underlyings auto-flow same-type operators (the underlying's *native* op,
-  unwrap→op→rewrap); a `str`/`bool` newtype does **not** auto-inherit `+`/`<` in v1 (define a method);
-  equality (`==`/`!=`) works for any underlying. A **numeric** (`int`/`float`) newtype additionally
-  satisfies `Comparable` by its underlying's *native* order (not a user `compare` method — the same-type
-  `<`/`>` arm auto-flows to the underlying), so `<`/`>` AND `List[newtype].sort()`/`.min()`/`.max()`
-  order by the wrapped scalar; a `str`/`bool` newtype is not `Comparable` in v1. Methods
-  + `Stringable`/`Hashable` work via the newtype's own methods (`str`/`hash` dispatched at runtime);
-  the **operator** protocols (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`/`Comparable`/`Eq`)
-  are NOT satisfiable by a newtype method (a newtype's own `add`/`div`/`compare`/`eq` is never
-  dispatched as an operator — the same-type arm auto-flows to the underlying's native op/order/
-  equality; W6-3d), so `Comparable` comes only from a numeric underlying's intrinsic auto-flow and
-  `Eq` likewise only from a numeric underlying's intrinsic equality (a numeric newtype must satisfy
-  `Eq`: `Comparable` embeds it, and denying it would make `fn sorted[T: Comparable]` unsatisfiable for
-  `newtype Meters = float`). A numeric newtype *declaring* one of those methods is a decl-site error —
-  and for **`eq`** the error fires on **every** newtype at **every** operand signature (numeric,
-  non-numeric, generic): `==` exists for every underlying, so unlike `+`/`<` there is always an operator
-  for the method to disagree with (`docs/gaps.md` §L5). **Generic newtypes** (`newtype Stack[T] = List[T]`) are methods-only
-  (no native operator auto-flow even for `Box[T] = T`): ctor infers type args (from the binding/
-  return/parameter **annotation** — `e: Stack[str] = Stack([])` — or a turbofish
-  `Stack[int]([])` when an empty literal can't bind `T`), cast-unwrap propagates the instantiation
-  (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get
-  identity+construct+unwrap+own-methods only (no `.push`/index/iterate forwarding); no `derive`;
-  static / associated methods on a **newtype** are a follow-up (they **have** landed for struct +
-  enum — see the "Static methods" milestone note below). Declaring one (`fn zero()` — no `self`)
-  is now **rejected with a clear "not supported yet" error** at the decl site (and at any
-  `Newtype.method()` call site), not the old cryptic "unknown name".
+- **Removed (TICKET-216):** `newtype` is gone and is an ordinary identifier; a one-field `struct`
+  with methods is the distinct-type idiom.
+
+```chezzi
+struct UserId:
+    id: int
+    fn is_admin(self) -> bool:
+        return self.id < 100
+
+struct Meters:
+    v: float
+    fn add(self, other: Meters) -> Meters:
+        return Meters(self.v + other.v)
+```
 
 > **Static (associated) methods — the "no self ⇒ static" rule (landed; struct + enum).** A
 > struct/enum method whose first parameter is **not** `self` (or which has no parameters) is a
@@ -714,13 +696,12 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > at the first mismatching use with the same "un-inferred type parameter … bind it at the construction
 > site" guidance as a bare container ctor (`[]`) or a generic free-function return — it is **not**
 > silently degraded to `Unknown` (which used to swallow any later argument and defeat homogeneity). A
-> method-**own** `[U]` with nothing to bind it stays refinably `Unknown` (genuinely unconstrained). v1 limits: static methods on
-> `newtype` remain a follow-up. **Associated protocol requirements** (`T.zero()`) were a v1 limit and
+> method-**own** `[U]` with nothing to bind it stays refinably `Unknown` (genuinely unconstrained). **Associated protocol requirements** (`T.zero()`) were a v1 limit and
 > **LANDED in M24** — a protocol may require a static method, a type witnesses it statically, and a
 > generic bounded by it may call `T.zero()` through the bound (witness passing; `docs/syntax.md §7a`).
 
 > **Turbofish at the declaration site — type-side (PART 1, landed).** Explicit type args for a generic
-> are pinned **at the site the generic is DECLARED**: declared on the type (`enum/struct/newtype [T]`)
+> are pinned **at the site the generic is DECLARED**: declared on the type (`enum/struct [T]`)
 > → pinned on the type (`Box[int]`); declared on a member (`fn m[U]`) → pinned on the member. For a
 > generic TYPE the args go on the TYPE, uniformly for enum **variant constructors** and **static
 > methods**: `Box[int].Has(5)`, `Result[int, str].Ok(5)`, nullary `Box[int].Empty`, generic static
@@ -750,9 +731,8 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > with no method of that name, a non-fn module global) indexes then calls, so `h.fs[k](10)` needs no
 > parens (Go, CPython); the numeric form `arr[0].handlers[0](20)` always parses as index-then-call. A method turbofish on a generic **variant** ctor (`Box[int].Has[str](5)`) is an error.
 > Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), pinned by the golden
-> `examples/turbofish_member_args.chz`. Still out of scope: static
-> methods on `newtype`. (Associated protocol requirements (`T.zero()`) were out of scope here too;
-> they **landed in M24** — see `docs/syntax.md §7a`.)
+> `examples/turbofish_member_args.chz`. (Associated protocol requirements
+> (`T.zero()`) were out of scope here; they **landed in M24** — see `docs/syntax.md §7a`.)
 
 > **Expected-type inference — an annotation pins a generic ctor / generic fn-call (landed).** Beyond
 > the turbofish above, a type **annotation** that surrounds a generic constructor or generic function
@@ -763,8 +743,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > `take(Heap([], …))` (with `take(h: Heap[int])`) all type-check — previously each needed an explicit
 > turbofish or annotated comparator params. The annotation fills **only** the params the arguments
 > left free (precedence: **turbofish > arguments > annotation**), so a concrete argument still wins and
-> a conflicting annotation is the usual assignability error. It also reaches generic **newtype** ctors
-> (`e: Stack[str] = Stack([])`) and a return-only param of a generic fn (`xs: List[int] = empty()` for
+> a conflicting annotation is the usual assignability error. It also reaches a return-only param of a generic fn (`xs: List[int] = empty()` for
 > `fn empty[T]() -> List[T]`). Checker-only (a new expected-type hint threaded into the ctor/call
 > inference, consumed by `unify` before the un-inferable-closure-param probe); runtime is type-erased,
 > so the lowering stays uniform. **Remaining gap:** the hint does not yet reach a
@@ -946,7 +925,7 @@ Chezzi has **no `as` cast operator**, no `Into`/`TryFrom`, and no general-purpos
 conversion protocol (yet — see `docs/future.md`); a **bound-only** `Convert[S]` conversion protocol
 exists as a generic bound (below). Conversion is done by a small fixed set of explicit builtins — there is no
 implicit `int`→`float` widening at a slot (rule D3). The design is deliberately minimal: prefer an explicit constructor call over silent
-coercion, and keep newtypes nominally distinct so a conversion is always visible in the source.
+coercion, so a conversion is always visible in the source.
 
 **Scalar conversion constructors** (global builtins — see `docs/stdlib.md §1`):
 
@@ -977,22 +956,16 @@ too). The reverse (`float` → `int`) is a lossy type error as well. What stays 
 comparison on VALUES, which the VM promotes by runtime tag (`2 * 1.5` is `3.0`, `i < f`). Nothing is
 coerced at runtime. (Full rules in the numeric-arithmetic section above.)
 
-**Newtype boundary** (`newtype Name = <T>`) — nominally distinct, so crossing is always explicit:
-wrap with `Name(x)`, unwrap with the matching scalar/aggregate cast (`int(n)`, `list(s)`, …; the
-underlying must match exactly). A numeric-scalar newtype auto-flows the underlying's native operators;
-everything else is methods-only. See the M21 note above.
-
 **Stringable** — every scalar (`int`/`float`/`bool`/`str`) intrinsically satisfies the `Stringable`
 protocol, so `[T: Stringable]` generics accept them (an erased `v.str()` body dispatches to the same
-native `stringify` that `str(x)` uses). Structs/enums/newtypes opt in with their own `str(self) -> str`.
+native `stringify` that `str(x)` uses). Structs/enums opt in with their own `str(self) -> str`.
 
 **Intrinsic conformance implies a callable method.** Wherever a built-in satisfies a protocol
 *intrinsically* (no user method), the protocol's method is callable on it inside an erased generic body
 or through a protocol-typed value — and it is defined as **exactly** the operator/primitive form:
 `a.add(b)` ≡ `a + b` (same overflow / divide-by-zero faults, same int↔float coercion), `a.neg()` ≡ `-a`,
 `a.compare(b)` is what `<` orders by, `a.eq(b)` ≡ `a == b` for a struct/enum (M23 — one dispatch,
-both directions: a struct/enum defining `fn eq(self, other: Self) -> bool` OWNS its `==`; a *newtype*'s
-`==` still unwraps to the underlying, so declaring `eq` on one is a compile error; and on a struct/enum
+both directions: a struct/enum defining `fn eq(self, other: Self) -> bool` OWNS its `==`; and on a struct/enum
 an `eq` with a GENERIC operand is an ordinary method the operator leaves alone — but only on a
 CONCRETE receiver: **through a protocol bound `a.eq(b)` is always the protocol's equality, so the
 `≡ a == b` above holds unconditionally there**, matching how rustc resolves `a.eq(b)` under `T: Eq` to
@@ -1037,10 +1010,6 @@ pair compares Equal by the method and by `sort()`/`min`/`max` alike (`float_orde
 
 - `Iterator`'s `next` on a *raw* collection is granted but faults — a raw collection holds no cursor
   position (W6-3b); iterate it with `for`, or call `.iter()` for a real cursor.
-- A numeric `newtype` that **defines** `add`/`sub`/`mul`/`div`/`mod`/`compare` diverges: the method form
-  dispatches ITS method (never shadowed — that rule wins) while `+`/`<` still auto-flow to the
-  underlying's native op (see the newtype note in `docs/syntax.md`). Don't write both spellings over
-  such a type (W6-3d).
 
 **What does NOT exist (current boundaries):**
 
@@ -1137,10 +1106,10 @@ tests/          # Rust unit + golden tests
 | ✅ **M16–M18** | Concurrency + `defer` | `spawn` / `parallel:` nursery, `Channel`/`Shared`/`Executor`, real OS-thread M:N engine (`--parallel`) with work-stealing + reduction-counting preemption + netpoller + `std.net`; `defer` (call + block forms). Design in [`docs/concurrency.md`](concurrency.md), phases in [`docs/concurrency-tier-d.md`](concurrency-tier-d.md) |
 | 🟦 **M19** | Perf track (in progress) | Landed: peephole + const-fold, superinstructions, global-slotting, struct-field inline cache, FxHash, `ConstStr` interning, call-loop flatten, small-string optimization. Behavior-preserving on every change. Backlog ranked in [`docs/future.md §4`](future.md); measured deltas in [`docs/benchmarks.md`](benchmarks.md) |
 | ✅ **M20** | In-language tests | `assert <cond>[, "<msg>"]` (a statement primitive, faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side VM-only runner over `*_test.chz` files (`PASS/FAIL name (file:line:col) msg`, non-zero exit on failure). Surface in [`docs/syntax.md §9c`](syntax.md) |
-| ✅ **M21** | Nominal `newtype` | `newtype Name = <type>` — a DISTINCT type wrapping the underlying (Go defined-type model), not a transparent alias: construct (`Name(x)`) / cast-unwrap (`int(n)`) cross the boundary; accidental mixing with the raw underlying or a different newtype is a compile error. Numeric (`int`/`float`) same-type operators auto-flow (native op, unwrap→op→rewrap); a `str`/`bool` newtype does not auto-inherit `+`/`<` (define a method); methods + `Stringable`/`Hashable` via the newtype's own methods (runtime hash/str dispatch) — the **operator** protocols (`Add`/…/`Neg`/`Comparable`/`Eq`) are never satisfied by a newtype method, only by a numeric underlying's auto-flow (W6-3d). **Generic newtypes** (`newtype Stack[T] = List[T]`, Go defined-type model + generics): methods-only (no native operator auto-flow even for `Box[T] = T`); ctor infers type args (from the binding/return/parameter annotation — `e: Stack[str] = Stack([])` — or a turbofish `Stack[int]([])` when an empty literal can't bind `T`); cast-unwrap propagates the instantiation (`List(s)` for `s: Stack[int]` ⇒ `List[int]`). v1 limits: aggregate underlyings get identity+construct+unwrap+own-methods only; no `derive`; no static / associated methods **on a newtype** (`Type.method()`) yet — a follow-up (static methods HAVE landed for struct + enum; see the "Static methods" note); declaring one is **rejected with a clear "not supported yet" error** (decl site + call site), not a cryptic "unknown name". Surface in [`docs/syntax.md §7b`](syntax.md) |
-| ✅ **M22** | Operator protocols + protocol embedding | New per-operator protocols **`Div`/`Mod`/`Neg`** (methods `div`/`mod`/`neg`, powering `/`/`%`/unary `-`; `int`/`float` intrinsic, structs/enums via the method, numeric scalar newtypes via the underlying's native auto-flow (`Div`/`Mod` only — `Neg` is out of scope for newtypes, and a newtype operator *method* is never dispatched) wired exactly like `Add`/`Sub`/`Mul`. **Protocol embedding** — a protocol body may list embed lines (`Add + Sub`, order-free, interleaved with `fn` sigs); a type satisfies it iff it satisfies every embed (transitively) AND every own method, flattened at every use site — a bound AND an interface value alike (a protocol value also satisfies the protocols it embeds, Go's interface-to-interface assignment). **Object safety** bounds the value form: since a protocol value erases which witness it holds, a method TAKING `Self` is unusable wherever two witnesses could meet — `a.add(b)` on a value, the operator forms (`+ - * / % <`, all `(self, Self) -> Self`), and a protocol value witnessing a generic type param whose bound needs one. Assignability and embed-satisfaction are unaffected, and `Self` in the RETURN widens to the protocol and stays callable. Collision rules: own-fn-vs-embed = error, same-sig embed diamond dedups, differing-sig embed = error, cyclic embed = error. Builtin **`Arithmetic`** bundle = `Add + Sub + Mul + Div`. Builtin **`Num`** (TICKET-214) = `Arithmetic + Mod + Neg + Comparable`, sealed to `int`/`float`; `math.abs`/`math.sign` are `[T: Num]`. Checker/parser/grammar + operator dispatch; golden-tested. Surface in [`docs/syntax.md`](syntax.md) |
-| ✅ **M23** | The `Eq` protocol — user-overloadable `==` | Prebuilt reserved **`Eq`** (`eq(self, other: Self) -> bool`): a struct/enum defining `eq` **owns its `==`/`!=`**, closing the hole where a type could define `compare` (so `<` was yours) but never `==`. All four scalars satisfy it intrinsically (**`bool` included**, unlike `Comparable`); a **newtype** never satisfies it through a METHOD — its `==` unwraps to the underlying's native equality, so declaring `eq` on a newtype (any underlying, any operand signature) is a decl-site error (W6-3d widened, `docs/gaps.md` §L5) — while EVERY newtype satisfies it intrinsically via that same native equality. **`Comparable` embeds `Eq`** (Rust's `Ord: Eq`). **Superseded 2026-08-11 (`docs/gaps.md` W7-41), on two counts:** (a) `Eq` satisfaction is no longer a four-scalar grant — it is exactly what `==` accepts, so `bytes`, tuples, `List`/`Map`/`Set`, `Option`/`Result`, newtypes and every struct/enum satisfy it, and `where T: Eq` is writable over all of them (measured: all ten were *does not satisfy Eq* before and are accepted now); and (b) the "a struct/enum with `compare` must also define `eq`" rule is **DROPPED** — its premise was falsified in both directions by measurement, and Rust permits manual `Ord` beside a derived `Eq`. What replaced it is the enforcement M23 lacked: a conditional `eq` (`where T: Comparable`) is now honoured by `==`/`!=`, by `in`, by `contains`/`index_of`/`dedup`/`unique`, and by every map-key / set-element position, closing a check-OK-then-runtime-fault hole (W7-41 + W7-45). Dispatch is by the operands' **runtime type** and reaches **every** equality site, not just the operator: `in`, `list.contains`/`index_of`/`dedup`/`unique`, `Map`/`Set` key probes, set algebra, and the recursive element/field/entry compares — so `x == y`, `y in xs` and `m[y]` can no longer give three answers. `!=` is the same dispatch negated (no separate hook); `match` never dispatches `eq`; `Atomic[T].cas` stays structural — a payload that REACHES a user `eq` (its own or one nested in an element/entry/field/payload) is a check-time error, and the VM switches the hook off for the compare so the property does not rest on that walk. The hook is gated on its **exact** signature at the declaration, so a method merely sharing the name (a *generic* operand, `Opt[T].eq(self, x: T)`) stays an ordinary method. **Through a protocol bound, though, `.eq()` is the protocol's equality, never that same-named ordinary method** (`docs/gaps.md` **W7-53** I1′, fixed 2026-08-12): a protocol-dispatched `.eq(x)` lowers to the very opcode `==` emits, so the two spellings are one dispatch by construction — a CONCRETE receiver keeps calling the ordinary method, exactly as rustc's inherent-wins rule does, while `fn f[T: Eq](a: T, b: T): a.eq(b)` resolves like `<T as PartialEq>::eq`. Also closes **`docs/gaps.md` §B2**: `==`/`!=` between provably-disjoint types is now a compile error, decided by co-inhabitability (`Checker::may_be_equal`), with the `Any` existential as the escape hatch — a deliberate divergence from Python's runtime `False`, matching Go, Rust and mypy `--strict-equality`. Cost: `map` +4.1%, everything else flat ([`benchmarks.md`](benchmarks.md)). **Comparing two protocol-typed (existential) values defers the witness's `eq` bound check to runtime, as in Go's own interface `==`** — the checker cannot see which concrete type inhabits a protocol at a given site, so it compiles the comparison and it faults cleanly, at the point it runs, if that witness cannot satisfy the bound (`docs/gaps.md` **W7-52**, resolved 2026-08-12 as ancestor-correct, not a checker gap). **A `[T: Eq]` bound over a protocol-typed value now agrees with that operator** (same-day review found the bound was still rejecting it, disagreeing with the `==` that had just been ruled correct — a genuine drift, fixed rather than filed, `docs/gaps.md` **W7-52**): `Ty::Protocol` is now a classified `Eq`-grant receiver kind, matching Go 1.20+'s `comparable`, which likewise admits an interface type and panics at the comparison for an uncomparable witness. `Eq` is the only protocol this applies to — `Eq`-satisfaction is exactly what `==` accepts, and `==` already accepted a protocol-typed operand; every other protocol still requires the witness to structurally provide it. Surface in [`docs/syntax.md §7b`](syntax.md) |
-| ✅ **M24** | Static protocol requirements through a bound — **witness passing** | A protocol may require a **static** (no-`self`) method, and a generic bounded by it may **call it through the type parameter**: `fn reset[T: Default](old: T) -> T: return T.default()`. Generics stay **erased** — a type param whose bound carries a static requirement AND whose body needs it gets a **hidden trailing parameter** holding the concrete type's runtime identity key; `T.method(...)` lowers to a new `Op::CallStaticDyn` that pops that key and runs the same dispatch as `Type.method(...)`. Nothing is monomorphized and no type argument reaches the VM. Charged **only** to a body that uses one, so a generic that merely has a static-carrying bound keeps every position it had. Covers struct + enum hosts, same- and cross-module calls in every import spelling, `T` inferred / turbofish-pinned / annotation-pinned, transitive + recursive + mutual **forwarding** of a still-abstract `T`, a type param declared by a **MEMBER** (instance or static, plain or generic host), and the call inside a closure (incl. an escaping one), a nested `fn`, a `defer:` block and a `spawn:`/`parallel:` block (the witness crosses the airlock by value). Closes `Convert[S]`'s last slice — `fn make[T: Convert[int]](…): return T.convert(n)`. Permanent walls (each a clear diagnostic naming the workaround): a type param of the enclosing **TYPE**, a witness-taking fn read as a **function value** (a `fn` value erases its declaration), an undetermined `T`, a newtype/scalar witness, and a witness-taking manifest entrypoint; a `spawn`/`defer` **statement target** is an ordinary call site — M24-5, fixed 2026-08-14. A type parameter **shadows** a same-named type in static-call position, as in Rust and Go. Bench-neutral (measured). Surface in [`docs/syntax.md §7a`](syntax.md); the strategy ruling in [`docs/future.md §3a1`](future.md) |
+| ~~M21~~ | Nominal `newtype` — **removed (TICKET-216)** | A one-field `struct` with methods is the distinct-type idiom; see the "Removed (TICKET-216)" note above. |
+| ✅ **M22** | Operator protocols + protocol embedding | New per-operator protocols **`Div`/`Mod`/`Neg`** (methods `div`/`mod`/`neg`, powering `/`/`%`/unary `-`; `int`/`float` intrinsic, structs/enums via the method, wired exactly like `Add`/`Sub`/`Mul`. **Protocol embedding** — a protocol body may list embed lines (`Add + Sub`, order-free, interleaved with `fn` sigs); a type satisfies it iff it satisfies every embed (transitively) AND every own method, flattened at every use site — a bound AND an interface value alike (a protocol value also satisfies the protocols it embeds, Go's interface-to-interface assignment). **Object safety** bounds the value form: since a protocol value erases which witness it holds, a method TAKING `Self` is unusable wherever two witnesses could meet — `a.add(b)` on a value, the operator forms (`+ - * / % <`, all `(self, Self) -> Self`), and a protocol value witnessing a generic type param whose bound needs one. Assignability and embed-satisfaction are unaffected, and `Self` in the RETURN widens to the protocol and stays callable. Collision rules: own-fn-vs-embed = error, same-sig embed diamond dedups, differing-sig embed = error, cyclic embed = error. Builtin **`Arithmetic`** bundle = `Add + Sub + Mul + Div`. Builtin **`Num`** (TICKET-214) = `Arithmetic + Mod + Neg + Comparable`, sealed to `int`/`float`; `math.abs`/`math.sign` are `[T: Num]`. Checker/parser/grammar + operator dispatch; golden-tested. Surface in [`docs/syntax.md`](syntax.md) |
+| ✅ **M23** | The `Eq` protocol — user-overloadable `==` | Prebuilt reserved **`Eq`** (`eq(self, other: Self) -> bool`): a struct/enum defining `eq` **owns its `==`/`!=`**, closing the hole where a type could define `compare` (so `<` was yours) but never `==`. All four scalars satisfy it intrinsically (**`bool` included**, unlike `Comparable`). **`Comparable` embeds `Eq`** (Rust's `Ord: Eq`). **Superseded 2026-08-11 (`docs/gaps.md` W7-41), on two counts:** (a) `Eq` satisfaction is no longer a four-scalar grant — it is exactly what `==` accepts, so `bytes`, tuples, `List`/`Map`/`Set`, `Option`/`Result` and every struct/enum satisfy it, and `where T: Eq` is writable over all of them (measured: all ten were *does not satisfy Eq* before and are accepted now); and (b) the "a struct/enum with `compare` must also define `eq`" rule is **DROPPED** — its premise was falsified in both directions by measurement, and Rust permits manual `Ord` beside a derived `Eq`. What replaced it is the enforcement M23 lacked: a conditional `eq` (`where T: Comparable`) is now honoured by `==`/`!=`, by `in`, by `contains`/`index_of`/`dedup`/`unique`, and by every map-key / set-element position, closing a check-OK-then-runtime-fault hole (W7-41 + W7-45). Dispatch is by the operands' **runtime type** and reaches **every** equality site, not just the operator: `in`, `list.contains`/`index_of`/`dedup`/`unique`, `Map`/`Set` key probes, set algebra, and the recursive element/field/entry compares — so `x == y`, `y in xs` and `m[y]` can no longer give three answers. `!=` is the same dispatch negated (no separate hook); `match` never dispatches `eq`; `Atomic[T].cas` stays structural — a payload that REACHES a user `eq` (its own or one nested in an element/entry/field/payload) is a check-time error, and the VM switches the hook off for the compare so the property does not rest on that walk. The hook is gated on its **exact** signature at the declaration, so a method merely sharing the name (a *generic* operand, `Opt[T].eq(self, x: T)`) stays an ordinary method. **Through a protocol bound, though, `.eq()` is the protocol's equality, never that same-named ordinary method** (`docs/gaps.md` **W7-53** I1′, fixed 2026-08-12): a protocol-dispatched `.eq(x)` lowers to the very opcode `==` emits, so the two spellings are one dispatch by construction — a CONCRETE receiver keeps calling the ordinary method, exactly as rustc's inherent-wins rule does, while `fn f[T: Eq](a: T, b: T): a.eq(b)` resolves like `<T as PartialEq>::eq`. Also closes **`docs/gaps.md` §B2**: `==`/`!=` between provably-disjoint types is now a compile error, decided by co-inhabitability (`Checker::may_be_equal`), with the `Any` existential as the escape hatch — a deliberate divergence from Python's runtime `False`, matching Go, Rust and mypy `--strict-equality`. Cost: `map` +4.1%, everything else flat ([`benchmarks.md`](benchmarks.md)). **Comparing two protocol-typed (existential) values defers the witness's `eq` bound check to runtime, as in Go's own interface `==`** — the checker cannot see which concrete type inhabits a protocol at a given site, so it compiles the comparison and it faults cleanly, at the point it runs, if that witness cannot satisfy the bound (`docs/gaps.md` **W7-52**, resolved 2026-08-12 as ancestor-correct, not a checker gap). **A `[T: Eq]` bound over a protocol-typed value now agrees with that operator** (same-day review found the bound was still rejecting it, disagreeing with the `==` that had just been ruled correct — a genuine drift, fixed rather than filed, `docs/gaps.md` **W7-52**): `Ty::Protocol` is now a classified `Eq`-grant receiver kind, matching Go 1.20+'s `comparable`, which likewise admits an interface type and panics at the comparison for an uncomparable witness. `Eq` is the only protocol this applies to — `Eq`-satisfaction is exactly what `==` accepts, and `==` already accepted a protocol-typed operand; every other protocol still requires the witness to structurally provide it. Surface in [`docs/syntax.md §7b`](syntax.md) |
+| ✅ **M24** | Static protocol requirements through a bound — **witness passing** | A protocol may require a **static** (no-`self`) method, and a generic bounded by it may **call it through the type parameter**: `fn reset[T: Default](old: T) -> T: return T.default()`. Generics stay **erased** — a type param whose bound carries a static requirement AND whose body needs it gets a **hidden trailing parameter** holding the concrete type's runtime identity key; `T.method(...)` lowers to a new `Op::CallStaticDyn` that pops that key and runs the same dispatch as `Type.method(...)`. Nothing is monomorphized and no type argument reaches the VM. Charged **only** to a body that uses one, so a generic that merely has a static-carrying bound keeps every position it had. Covers struct + enum hosts, same- and cross-module calls in every import spelling, `T` inferred / turbofish-pinned / annotation-pinned, transitive + recursive + mutual **forwarding** of a still-abstract `T`, a type param declared by a **MEMBER** (instance or static, plain or generic host), and the call inside a closure (incl. an escaping one), a nested `fn`, a `defer:` block and a `spawn:`/`parallel:` block (the witness crosses the airlock by value). Closes `Convert[S]`'s last slice — `fn make[T: Convert[int]](…): return T.convert(n)`. Permanent walls (each a clear diagnostic naming the workaround): a type param of the enclosing **TYPE**, a witness-taking fn read as a **function value** (a `fn` value erases its declaration), an undetermined `T`, a scalar witness, and a witness-taking manifest entrypoint; a `spawn`/`defer` **statement target** is an ordinary call site — M24-5, fixed 2026-08-14. A type parameter **shadows** a same-named type in static-call position, as in Rust and Go. Bench-neutral (measured). Surface in [`docs/syntax.md §7a`](syntax.md); the strategy ruling in [`docs/future.md §3a1`](future.md) |
 | 📋 **M25** | Killable subprocesses — cancellation that actually reaches a child process | **SPEC written, not implemented** — design in [`docs/concurrency.md` §6h](concurrency.md). Today a nursery task in `process.cmd("sleep 5")` ignores a sibling fault (5013 ms), `os.exit` (5015 ms) and `chezzi test --timeout=500` (5008 ms) — a `Kind::Blocking` native is offloaded so it never pins a worker, and a thread inside the libc call has no checkpoint until it returns. For a subprocess we own the PID, so we can end what is being waited on — Go's `exec.CommandContext` answer. Scope is **`std.process` only**: `std.request` wants a client-side timeout instead, and `std.fs`/`std.io` stay uninterruptible *because Go does not cancel those either* (`os.ReadFile` ignores `context`). Three measured traps: kill the process **GROUP** (a `sh -c '… \| cat'` grandchild survives a PID kill **and keeps the stdout pipe open**, so the parent stays blocked), replace `.output()` with `.spawn()` + a retained `Child`, and `TERM`→grace→`KILL` rather than bare `KILL`. One deliberate divergence from Go: cancellation is **ambient by default** (the nursery *is* the context, where Go has no structured scope to inherit) with an explicit `Token` override — ambient is what makes `--timeout`/`os.exit`/a sibling fault reach `sh` at all |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; a late-stage endeavor once the language has matured) |
 

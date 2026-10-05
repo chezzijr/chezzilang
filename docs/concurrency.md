@@ -642,7 +642,7 @@ plain float arithmetic. **`cas` compares *structurally* — it never calls a use
 happens under the value's lock, and re-entering user code there could deadlock. Rather than let
 `a == b` and `atom.cas(a, …)` disagree, a payload type that **reaches** a user `eq` is **rejected at
 check time** — its own (`Atomic[K] payload defines its own 'eq' …`) or one on any element, entry, tuple
-slot, struct field, enum payload or newtype underlying the structural compare would recurse into
+slot, struct field or enum payload the structural compare would recurse into
 (`Atomic[List[K]] payload reaches 'K', which defines its own 'eq' …`); use `Shared[K]`, which has no
 `cas`. Because no checker walk can see through a protocol existential payload, the VM ALSO switches the
 `eq` hook off for the compare — the no-user-code-under-the-lock property is enforced, not assumed. **`cas` on a payload that holds a `fn` value is rejected too**
@@ -1905,7 +1905,7 @@ either.
   native/FFI *fn value* — `math.sqrt`, an `extern` fn — is pure code and now crosses by value, so it is
   NOT caught.)
 - **Self-referential DATA IS sendable (identity-preserving airlock).** A struct/list/map/set/tuple/enum/
-  newtype/cursor that points back at itself (`a.next = b; b.next = a`, a list holding itself, a map whose
+  cursor that points back at itself (`a.next = b; b.next = a`, a list holding itself, a map whose
   value refers to the map) crosses **any** airlock (`spawn:` block, `spawn` arg, `Channel.send`, `Shared`,
   module-global snapshot) and **round-trips** — every container `WireValue` arm carries a per-serialization
   `id` + a `WireValue::Backref(id)` for a back-edge, exactly like `Cell`/`Closure`. `from_wire` ties the
