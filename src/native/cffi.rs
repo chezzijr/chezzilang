@@ -104,6 +104,10 @@ pub enum CType {
     UInt16,
     UInt32,
     UInt64,
+    /// A C `float` (surface type name `float32`, TICKET-217). To the program it is a plain `float`
+    /// (f64): a PARAM rounds to nearest f32 (`as f32`; out of range gives `inf`), a RETURN widens
+    /// exactly. Go `float32(x)` / ctypes `c_float` semantics. Valid as param, return and field.
+    Float32,
     /// A C function pointer passed as a PARAM (callbacks #4): a Chezzi closure marshalled into a
     /// libffi closure trampoline whose code address is the `void*` C receives. Params and the return
     /// are restricted to C SCALARS only (`is_scalar`) — no `str`/struct/nested callback. Sync +
@@ -143,6 +147,7 @@ impl CType {
                 | CType::UInt16
                 | CType::UInt32
                 | CType::UInt64
+                | CType::Float32
         )
     }
 
@@ -154,6 +159,7 @@ impl CType {
             // stand-in libffi-rs itself uses).
             CType::Int => Type::c_long(),
             CType::Float => Type::f64(),
+            CType::Float32 => Type::f32(),
             CType::Bool => Type::u8(),
             // str → `const char*`, ptr → `void*`, and every char*-returning variant — all
             // pointers to libffi (the owned/nullable distinction is a Chezzi-side lowering choice,
@@ -178,6 +184,23 @@ impl CType {
             CType::Callback { .. } => Type::pointer(),
         }
     }
+}
+
+/// The C type a `std.ffi` width name (`native::ffi::TYPE_NAMES`) marshals as -- the one owner of
+/// that map. `None` for any other name.
+pub fn width_ctype(name: &str) -> Option<CType> {
+    Some(match name {
+        "int8" => CType::Int8,
+        "int16" => CType::Int16,
+        "int32" => CType::Int32,
+        "int64" => CType::Int64,
+        "uint8" => CType::UInt8,
+        "uint16" => CType::UInt16,
+        "uint32" => CType::UInt32,
+        "uint64" => CType::UInt64,
+        "float32" => CType::Float32,
+        _ => return None,
+    })
 }
 
 /// Build the libffi structure layout for a flat-scalar struct: the structure [`Type`], its total
@@ -261,6 +284,14 @@ pub(crate) fn write_field(
             };
             put!(f);
         }
+        CType::Float32 => match v {
+            NativeRet::Float(f) => put!((*f as f32)),
+            other => {
+                return Err(HostError {
+                    message: format!("struct field marshal: expected float, got {other:?}"),
+                });
+            }
+        },
         CType::Bool => {
             let b = match v {
                 NativeRet::Bool(b) => *b,
@@ -329,6 +360,7 @@ pub(crate) fn read_field(buf: &[u8], offset: usize, ct: &CType) -> NativeRet {
         // u64 -> i64 reinterprets the top bit (a value > i64::MAX wraps negative — documented v1 limit).
         CType::UInt64 => NativeRet::Int(get!(u64) as i64),
         CType::Float => NativeRet::Float(get!(f64)),
+        CType::Float32 => NativeRet::Float(get!(f32) as f64),
         CType::Bool => {
             // C `_Bool` is one byte at its real offset; any nonzero byte is true.
             let c: u8 = get!(u8);
@@ -376,6 +408,7 @@ unsafe fn read_c_arg(slot: *const c_void, ct: &CType) -> NativeRet {
         // u64 -> i64 reinterprets the top bit (documented v1 limit, same as the return path).
         CType::UInt64 => NativeRet::Int(rd!(u64) as i64),
         CType::Float => NativeRet::Float(rd!(f64)),
+        CType::Float32 => NativeRet::Float(rd!(f32) as f64),
         CType::Bool => NativeRet::Bool(rd!(u8) != 0),
         CType::Ptr => NativeRet::Ptr(rd!(usize)),
         // Non-scalar parts are checker-rejected; default defensively to Nil.
@@ -420,6 +453,14 @@ unsafe fn write_c_result(slot: *mut c_void, ct: &CType, v: &NativeRet) {
                     _ => 0.0,
                 };
                 *(slot as *mut f64) = f;
+            }
+            CType::Float32 => {
+                let f = match v {
+                    NativeRet::Float(f) => *f,
+                    NativeRet::Int(n) => *n as f64,
+                    _ => 0.0,
+                };
+                *(slot as *mut f32) = f as f32;
             }
             CType::Ptr => {
                 let a = match v {
@@ -1068,6 +1109,8 @@ impl Cffi {
         // stay valid for the whole call).
         let mut int_args: Vec<std::os::raw::c_long> = Vec::new();
         let mut float_args: Vec<f64> = Vec::new();
+        // C `float` args (`float32`): the Chezzi f64 rounded to nearest f32.
+        let mut f32_args: Vec<f32> = Vec::new();
         // C `_Bool` args are one byte (0/1); the `u8` backing matches the `_Bool` ffi_type.
         let mut bool_args: Vec<u8> = Vec::new();
         // A `None` slot means a retained buffer whose pointer is already filled in `ptr_args`
@@ -1112,6 +1155,8 @@ impl Cffi {
         enum Slot {
             Int(usize),
             Float(usize),
+            /// A C `float` (`float32`), stored in `f32_args`.
+            F32(usize),
             Bool(usize),
             Ptr(usize),
             /// An opaque `void*` handle, stored in `void_args`.
@@ -1147,6 +1192,10 @@ impl Cffi {
                 CType::Float => {
                     float_args.push(host.arg_float(i)?);
                     slots.push(Slot::Float(float_args.len() - 1));
+                }
+                CType::Float32 => {
+                    f32_args.push(host.arg_float(i)? as f32);
+                    slots.push(Slot::F32(f32_args.len() - 1));
                 }
                 CType::Bool => {
                     // Marshal a Chezzi `bool` into a C `_Bool` (1 byte, 0/1) via the host's typed
@@ -1391,6 +1440,7 @@ impl Cffi {
             match slot {
                 Slot::Int(idx) => ffi_args.push(arg(&int_args[*idx])),
                 Slot::Float(idx) => ffi_args.push(arg(&float_args[*idx])),
+                Slot::F32(idx) => ffi_args.push(arg(&f32_args[*idx])),
                 Slot::Bool(idx) => ffi_args.push(arg(&bool_args[*idx])),
                 Slot::Ptr(idx) => ffi_args.push(arg(&ptr_args[*idx])),
                 Slot::RawPtr(idx) => ffi_args.push(arg(&void_args[*idx])),
@@ -1452,6 +1502,10 @@ impl Cffi {
                 Some(CType::Float) => {
                     let r: f64 = cif.call(code, &ffi_args);
                     NativeRet::Float(r)
+                }
+                Some(CType::Float32) => {
+                    let r: f32 = cif.call(code, &ffi_args);
+                    NativeRet::Float(r as f64)
                 }
                 Some(CType::Bool) => {
                     // A C `_Bool` return is one byte, but libffi rvalue-widens any sub-register
@@ -1912,6 +1966,45 @@ mod tests {
             .expect("dlopen sqrt");
         let mut host = MockHost::default().float(4.0);
         assert_eq!(f.call(&mut host), Ok(NativeRet::Float(2.0)));
+    }
+
+    /// TICKET-217: `float32` is C `float` at the boundary. The C reference (`cc ref.c -lm`) prints
+    /// `sqrtf(2)=1.4142135381698608 fabsf(-2.5)=2.5`; a `double` CIF would give 1.4142135623730951.
+    #[test]
+    fn float32_libm_sqrtf_and_fabsf_match_c() {
+        let sqrtf = Cffi::new("libm", "sqrtf", vec![CType::Float32], Some(CType::Float32))
+            .expect("dlopen sqrtf");
+        let mut host = MockHost::default().float(2.0);
+        assert_eq!(
+            sqrtf.call(&mut host),
+            Ok(NativeRet::Float(1.4142135381698608))
+        );
+        let fabsf = Cffi::new("libm", "fabsf", vec![CType::Float32], Some(CType::Float32))
+            .expect("dlopen fabsf");
+        let mut host = MockHost::default().float(-2.5);
+        assert_eq!(fabsf.call(&mut host), Ok(NativeRet::Float(2.5)));
+    }
+
+    /// A `float32` struct field is 4 bytes: `[Float32, Float32]` (raylib `Vector2`) is size 8 with
+    /// offsets `[0, 4]`, and a field round-trips through the buffer rounded to f32.
+    #[test]
+    fn float32_struct_fields_are_four_bytes() {
+        let fields = [CType::Float32, CType::Float32];
+        let (_ty, size, _align, offsets) = struct_layout(&fields);
+        assert_eq!(size, 8);
+        assert_eq!(offsets, vec![0, 4]);
+        let mut buf = vec![0u8; size];
+        write_field(
+            &mut buf,
+            offsets[1],
+            &CType::Float32,
+            &NativeRet::Float(0.1),
+        )
+        .unwrap();
+        assert_eq!(
+            read_field(&buf, offsets[1], &CType::Float32),
+            NativeRet::Float(0.10000000149011612)
+        );
     }
 
     #[test]

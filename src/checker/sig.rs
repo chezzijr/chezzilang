@@ -1343,7 +1343,7 @@ impl Checker {
             "Writer" => Some(Ty::Writer),
             "Reader" => Some(Ty::Reader),
             "ptr" => Some(Ty::Ptr),
-            _ if crate::native::ffi::TYPE_NAMES.contains(&name) => Some(Ty::Int),
+            _ if crate::native::ffi::TYPE_NAMES.contains(&name) => Some(ffi_width_ty(name)),
             _ => None,
         }
     }
@@ -2053,7 +2053,7 @@ impl Checker {
                                 .last()
                                 .is_some_and(|a| self.ffi_alias_ok.contains(a))
                         {
-                            Ty::Int
+                            ffi_width_ty(n)
                         } else {
                             self.error(
                             span,
@@ -6145,6 +6145,17 @@ impl Checker {
             return true;
         }
         false
+    }
+}
+
+/// The Chezzi type of a `std.ffi` width name (a `native::ffi::TYPE_NAMES` member): `float` for
+/// `float32`, `int` for every integer width. The one owner of that fact -- the qualified, bare and
+/// alias-export resolvers all call it, so an alias's `Ty` agrees with its `CType`.
+pub(super) fn ffi_width_ty(name: &str) -> Ty {
+    if crate::native::ffi::width_is_float(name) {
+        Ty::Float
+    } else {
+        Ty::Int
     }
 }
 

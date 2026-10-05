@@ -1580,9 +1580,12 @@ impl Checker {
                 "ptr" => Ty::Ptr,
                 "owned_str" => Ty::Str,
                 _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
-                // A fixed-width FFI integer name resolves to plain `int` (the width is a marshalling
-                // detail). Needed so an exported alias body `type Len = int32` captures `Ty::Int`.
-                _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => Ty::Int,
+                // An FFI width name resolves to plain `int` (`float` for `float32`); the width is a
+                // marshalling detail. So an exported alias body `type Len = int32` captures
+                // `Ty::Int`, and `type Real = float32` captures `Ty::Float`.
+                _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
+                    super::sig::ffi_width_ty(n)
+                }
                 // A bare alias name resolves to its (recursively-resolved) body.
                 _ if self.aliases.contains_key(n) => {
                     let body = self.aliases[n].clone();
@@ -1735,14 +1738,9 @@ impl Checker {
                 "str" => Some(CType::Str),
                 "ptr" => Some(CType::Ptr),
                 "owned_str" => Some(CType::OwnedStr),
-                "int8" => Some(CType::Int8),
-                "int16" => Some(CType::Int16),
-                "int32" => Some(CType::Int32),
-                "int64" => Some(CType::Int64),
-                "uint8" => Some(CType::UInt8),
-                "uint16" => Some(CType::UInt16),
-                "uint32" => Some(CType::UInt32),
-                "uint64" => Some(CType::UInt64),
+                _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
+                    crate::native::cffi::width_ctype(n)
+                }
                 // A LOCAL transparent alias: recurse on its body in THIS module's scope.
                 _ if self.aliases.contains_key(n) => {
                     let body = self.aliases[n].clone();
@@ -1816,15 +1814,7 @@ impl Checker {
                 if sig.types.contains(name) {
                     let c = match name.as_str() {
                         "ptr" => Some(CType::Ptr),
-                        "int8" => Some(CType::Int8),
-                        "int16" => Some(CType::Int16),
-                        "int32" => Some(CType::Int32),
-                        "int64" => Some(CType::Int64),
-                        "uint8" => Some(CType::UInt8),
-                        "uint16" => Some(CType::UInt16),
-                        "uint32" => Some(CType::UInt32),
-                        "uint64" => Some(CType::UInt64),
-                        _ => None,
+                        _ => crate::native::cffi::width_ctype(name),
                     };
                     if c.is_some() {
                         return c;

@@ -773,15 +773,21 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("free", free, Kind::Inline),
 ];
 
-/// The fixed-width C-ABI integer *type* names that `std.ffi` exports (Chezzi's first type imports).
-/// Each maps 1:1 to a C `int{N}_t`/`uint{N}_t` and is recognized by the checker (resolving to a plain
-/// `Ty::Int`) ONLY in a module that imports it per-name (`import int32, uint32 from std.ffi`), exactly
+/// The fixed-width C-ABI *type* names that `std.ffi` exports (Chezzi's first type imports). Each
+/// integer width maps 1:1 to a C `int{N}_t`/`uint{N}_t` and `float32` to a C `float`; the checker
+/// recognizes one (resolving to a plain `Ty::Int`, or `Ty::Float` for `float32`) ONLY in a module that imports it per-name (`import int32, uint32 from std.ffi`), exactly
 /// like the callable `MEMBERS` above. The width/signedness is a runtime-only marshalling distinction
 /// the backends recover via `ctype_of` — these names are NOT bound as callable values. This list is
 /// the single declaring authority; the checker reads it (see `native_module_sig` + `resolve_type`).
 pub const TYPE_NAMES: &[&str] = &[
-    "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+    "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32",
 ];
+
+/// Whether a [`TYPE_NAMES`] member is a C floating width (`float32`, a C `float`), so the program
+/// sees it as `float` rather than `int`. Every other width is an integer.
+pub fn width_is_float(name: &str) -> bool {
+    name == "float32"
+}
 
 #[cfg(test)]
 mod tests {
