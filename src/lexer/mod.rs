@@ -3083,6 +3083,18 @@ mod tests {
     }
 
     #[test]
+    fn newtype_is_an_ordinary_identifier() {
+        assert_eq!(
+            kinds("newtype"),
+            vec![
+                Token::Ident("newtype".to_string()),
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
     fn lexes_newtype_keyword() {
         assert_eq!(keyword("newtype"), Some(Token::NewType));
         assert_eq!(
