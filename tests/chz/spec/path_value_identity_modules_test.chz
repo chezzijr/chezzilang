@@ -1,8 +1,9 @@
 # TICKET-215: the cross-module rows of `path_value_identity_test.chz`'s grid. Path {from-imported fn,
-# from-imported type's method, `lib.T.m`, `lib.E.V`, alias head} x {read twice, bound then re-read,
-# read in two modules, inside a spawned task, captured into one} x {==, !=}.
+# from-imported type's method, `lib.T.m`, `lib.E.V`, alias head, native std fn} x {read twice,
+# bound then re-read, read in two modules, inside a spawned task, captured into one} x {==, !=}.
 import path_value_identity_lib
 import Q, F, top from path_value_identity_lib
+import std.math
 
 fn cell(bad: List[str], name: str, ok: bool):
     if not ok:
@@ -35,6 +36,7 @@ fn module_cells() -> List[str]:
     cell(bad, "instance method in two modules", path_value_identity_lib.read_q_get() == Q.get)
     cell(bad, "payload variant in two modules", path_value_identity_lib.read_f_x() == F.X)
     cell(bad, "alias head in two modules", path_value_identity_lib.read_qa_mk() == Q.mk)
+    cell(bad, "native fn in two modules", path_value_identity_lib.read_sqrt() == math.sqrt)
     cell(bad, "two modules !=", not (path_value_identity_lib.read_q_mk() != Q.mk))
     return bad
 

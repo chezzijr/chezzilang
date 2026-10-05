@@ -1,4 +1,6 @@
 # TICKET-215: the second module of `path_value_identity_test.chz`'s grid.
+import std.math
+
 struct Q:
     n: int
     fn mk(n: int) -> Q:
@@ -29,3 +31,6 @@ fn read_f_x() -> fn(int) -> F:
 
 fn read_qa_mk() -> fn(int) -> Q:
     return QA.mk
+
+fn read_sqrt() -> fn(float) -> float:
+    return math.sqrt

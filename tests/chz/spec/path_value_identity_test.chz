@@ -1,10 +1,14 @@
 # TICKET-215: a path value has one identity (wave 20 family P1). `P.mk == P.mk` and `E.A == E.A`
 # are `true` (CPython `P.mk == P.mk` -> True; Rust fn items compare equal). The `grid_` tests enumerate
 # path {plain fn, turbofish, static method, instance method through its type, payload variant,
-# alias head, `T.m` through a type param} x {read twice, bound then re-read, inside a spawned task,
-# captured into one, through a Channel or an Atomic} x {==, !=}. The cross-module rows live in
-# `path_value_identity_modules_test.chz`, so this file imports no user module.
+# alias head, `T.m` through a type param, native std fn, extern fn} x {read twice, bound then
+# re-read, inside a spawned task, captured into one, through a Channel or an Atomic} x {==, !=}. The
+# cross-module rows live in `path_value_identity_modules_test.chz`, so this file imports no user module.
 import Atomic from std.concurrency
+import std.math
+
+extern "libm.so.6":
+    fn cos(x: float) -> float
 
 struct P:
     n: str
@@ -91,6 +95,14 @@ fn local_cells() -> List[str]:
     cell(bad, "alias head bound then re-read through its target", a6 == P.mk)
     cell(bad, "alias head !=", not (a6 != PA.mk))
     param_cells(bad, P("p"))
+    cell(bad, "native fn read twice", math.sqrt == math.sqrt)
+    a7 := math.sqrt
+    cell(bad, "native fn bound then re-read", a7 == math.sqrt)
+    cell(bad, "native fn !=", not (a7 != math.sqrt))
+    cell(bad, "extern fn read twice", cos == cos)
+    a8 := cos
+    cell(bad, "extern fn bound then re-read", a8 == cos)
+    cell(bad, "extern fn !=", not (a8 != cos))
     return bad
 
 test fn grid_a_path_value_read_in_one_heap_is_one_value():
@@ -128,3 +140,19 @@ test fn grid_a_path_value_through_a_channel_or_an_atomic_is_one_value():
     at := Atomic[fn(int) -> E](E.A)
     res := [got == P.mk, at.load() == E.A, at.load() == at.load()]
     assert res == [true, true, true], "channel, atomic, atomic twice: {res}"
+
+# A native std fn and an extern fn cross like a path value (CPython threads and queue: True).
+test fn grid_a_native_or_extern_fn_after_a_crossing_is_one_value():
+    s := math.sqrt
+    c := cos
+    r := Channel[List[bool]](1)
+    parallel:
+        spawn:
+            r.send([s == math.sqrt, c == cos, s != math.sqrt])
+    ch := Channel[fn(float) -> float](2)
+    ch.send(math.sqrt)
+    ch.send(cos)
+    an := Atomic[fn(float) -> float](math.sqrt)
+    ac := Atomic[fn(float) -> float](cos)
+    got := r.recv() + [ch.recv() == math.sqrt, ch.recv() == cos, an.load() == math.sqrt, an.load() == an.load(), ac.load() == cos, ac.load() == ac.load()]
+    assert got == [true, true, false, true, true, true, true, true, true], "captured native, captured extern, !=, channel native, channel extern, atomic native, atomic native twice, atomic extern, atomic extern twice: {got}"
