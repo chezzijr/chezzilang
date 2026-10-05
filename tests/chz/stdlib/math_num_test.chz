@@ -1,0 +1,45 @@
+# tests/chz/stdlib/math_num_test.chz — math.abs/math.sign are [T: Num] generics (TICKET-214).
+import std.math
+
+fn twice[T: Num](x: T) -> T:
+    return x + x
+
+fn app[U: Num](x: U) -> U:
+    f: fn(U) -> U = math.abs
+    return f(x)
+
+fn arith[T: Num](a: T, b: T) -> List[T]:
+    return [a + b, a - b, a * b, a / b, a % b, -a]
+
+fn order[T: Num](a: T, b: T) -> List[bool]:
+    return [a < b, a <= b, a > b, a >= b, a == b, a != b]
+
+test fn hof_args():
+    assert [-1, 2].map(math.abs) == [1, 2]
+    assert [-1.5, 2.0].map(math.abs) == [1.5, 2.0]
+    assert [-3, 0, 2].map(math.sign) == [-1, 0, 1]
+
+test fn instantiated_values():
+    g := math.abs[int]
+    assert g(-3) == 3
+    h: fn(float) -> float = math.abs
+    assert h(-2.5) == 2.5
+    assert math.sign[float](-2.5) == -1.0
+    assert app(-4) == 4
+    assert app(-1.5) == 1.5
+
+test fn user_num_generic():
+    assert twice(2) == 4
+    assert twice(2.5) == 5.0
+    assert arith(7, 2) == [9, 5, 14, 3, 1, -7]
+    assert arith(7.5, 2.0) == [9.5, 5.5, 15.0, 3.75, 1.5, -7.5]
+    assert order(7, 2) == [false, false, true, true, false, true]
+    assert order(2.5, 2.5) == [false, true, false, true, true, false]
+
+test fn abs_value_crosses_spawn():
+    g := math.abs[int]
+    ch := Channel[int](1)
+    parallel:
+        spawn:
+            ch.send(g(-4))
+    assert ch.recv() == 4
