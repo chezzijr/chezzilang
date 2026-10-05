@@ -1027,6 +1027,8 @@ mod tests {
 
     /// Per connection: answer request 1, keep the socket open, then read request 2 and drop the socket
     /// without answering — a server closing an idle keep-alive connection as the request goes out.
+    /// Each log push precedes the answer or the drop the client waits on, so the client's return
+    /// orders the log without a sleep (same for `serve_drop_first_request`).
     fn serve_drop_second_request(
         respond: fn(&str) -> &'static [u8],
     ) -> (String, Arc<Mutex<Vec<String>>>) {
@@ -1083,7 +1085,6 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
             let ret = do_request(method, &url, body, &headers, None);
-            thread::sleep(Duration::from_millis(100));
             let got = (!matches!(ret, NativeRet::Err(_)), log.lock().unwrap().len());
             let want = if *retried { (true, 3) } else { (false, 2) };
             if got != want {
@@ -1120,7 +1121,6 @@ mod tests {
     fn a_redirect_hop_dropped_on_a_reused_connection_reruns_the_chain_on_fresh_connections() {
         let (url, log) = serve_drop_second_request(redirect_root_to_a);
         let ret = do_get(&url, None);
-        thread::sleep(Duration::from_millis(100));
         assert!(matches!(ret, NativeRet::Ok(_)), "got {ret:?}");
         assert_eq!(field(&ret, "body"), &NativeRet::Str("ok".into()));
         assert_eq!(logged(&log), ["GET /", "GET /a", "GET /", "GET /a"]);
@@ -1159,7 +1159,6 @@ mod tests {
     fn a_request_dropped_on_a_fresh_connection_is_err_and_not_retried() {
         let (url, log) = serve_drop_first_request();
         let ret = do_get(&url, None);
-        thread::sleep(Duration::from_millis(100));
         match ret {
             NativeRet::Err(m) => assert!(m.contains("io: Peer disconnected"), "message: {m}"),
             other => panic!("expected Err, got {other:?}"),
