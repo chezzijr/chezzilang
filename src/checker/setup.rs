@@ -190,7 +190,6 @@ impl Checker {
             struct_field_asts: HashMap::new(),
             struct_ctypes: HashMap::new(),
             types_by_name: HashMap::new(),
-            imported_poly: std::collections::HashSet::new(),
             imported_values: HashMap::new(),
             imported_ffi_types: std::collections::HashSet::new(),
             imported_concurrency: std::collections::HashSet::new(),
@@ -1573,7 +1572,6 @@ impl Checker {
         self.import_binds.clear();
         self.imported_alias_tys.clear();
         self.imported_alias_ctypes.clear();
-        self.imported_poly.clear();
         self.imported_values.clear();
         self.imported_ffi_types.clear();
         self.imported_concurrency.clear();
@@ -2257,10 +2255,6 @@ impl Checker {
                         self.functions.insert(bind.clone(), fsig.clone());
                         if let Some(&home) = self.module_idx_of.get(&imp.target) {
                             self.fn_homes.insert(bind.clone(), (home, member.clone()));
-                        }
-                        // Carry the numeric-polymorphism marker onto the imported name (gap #12).
-                        if sig.numeric_poly.contains(member) {
-                            self.imported_poly.insert(bind.clone());
                         }
                         // Editor hover (decl-site): record the imported function's signature at the
                         // bound-name token (probe-gated no-op off the probe / outside the entry module).
@@ -4645,6 +4639,9 @@ impl Checker {
     /// native-decl dynamic convention: an UNANNOTATED param → `Ty::Unknown`; no `-> ret` → `Ty::Unknown`
     /// return (native/never, how `panic` is spelled).
     pub(super) fn register_native_decl(&mut self, decl: &NativeDecl) {
+        // TICKET-214: a generic `native fn abs[T: Num](x: T) -> T` names its own `T`; enter it (as
+        // `harvest_native_fn_sig` does) so the standalone check does not read `T` as an unknown type.
+        let saved_tps = self.enter_type_params(&decl.type_params);
         let params: Vec<Ty> = decl
             .params
             .iter()
@@ -4660,6 +4657,7 @@ impl Checker {
             Some(t) => self.resolve_type(t, decl.span),
             None => Ty::Unknown,
         };
+        self.exit_type_params(saved_tps);
         // A defaulted trailing param (`sep`/`end`) is optional; count how many so `min_params` is right.
         let optional = decl.params.iter().filter(|p| p.default.is_some()).count();
         let mut sig = if optional > 0 {

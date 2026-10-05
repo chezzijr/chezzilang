@@ -2007,6 +2007,24 @@ impl Checker {
         if let Ty::Unknown = ty {
             return Ok(Grant::no_intrinsic_method()); // don't cascade
         }
+        // TICKET-214: `Num` is SEALED to int and float. Its embeds are only what a `T: Num` body's
+        // operators read; a struct or enum with all eight methods satisfies that shape and would reach
+        // a native declared `[T: Num]` (`math.abs`), which takes a raw number. A bound `T` falls through
+        // to the `Ty::Param` arm, which matches bounds by name (`protocol_provides`), so
+        // `[T: Arithmetic + Mod + Neg + Comparable]` is not `Num`. A protocol value passes only if its
+        // protocol embeds `Num`, so erasure cannot bypass the seal.
+        if protocol == "Num" {
+            let admitted = match ty {
+                Ty::Int | Ty::Float | Ty::Param(_) => true,
+                Ty::Protocol(p, pargs) => self.protocol_provides(p, pargs, protocol, args),
+                _ => false,
+            };
+            if !admitted {
+                return Err(format!(
+                    "type {ty} does not satisfy Num (only int and float do)"
+                ));
+            }
+        }
         // An EMPTY structural protocol (zero embeds AND zero methods — e.g. the `Any` top type) is
         // satisfied by EVERY type, scalars included. Without this short-circuit a zero-method/zero-embed
         // protocol would fall past every intrinsic arm to the `_ => Err` at the bottom for Int/Float/

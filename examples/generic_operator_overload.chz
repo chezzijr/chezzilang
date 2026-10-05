@@ -15,13 +15,13 @@ struct Box[T]:
     fn eq(self, other: Box[T]) -> bool:
         return true
 
-enum Num[T]:
+enum Numeral[T]:
     Val(T)
-    fn add(self, other: Num[T]) -> Num[T]:
+    fn add(self, other: Numeral[T]) -> Numeral[T]:
         return self
     fn get(self) -> T:
         match self:
-            Num.Val(x): return x
+            Numeral.Val(x): return x
 
 fn twice[T: Add](x: T) -> T:
     return x + x
@@ -31,7 +31,7 @@ fn main():
     print((-Box(7)).v)
     print(Box(3) < Box(4))
     print(twice(Box(8)).v)
-    print((Num.Val(1) + Num.Val(2)).get())
-    print(twice(Num.Val(9)).get())
+    print((Numeral.Val(1) + Numeral.Val(2)).get())
+    print(twice(Numeral.Val(9)).get())
 
 main()

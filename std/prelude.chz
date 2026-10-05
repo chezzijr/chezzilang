@@ -251,7 +251,7 @@ native enum Result[T, E]:
     Ok(T)
     Err(E)
 
-# The builtin/reserved STRUCTURAL PROTOCOLS' shape (phase 5c-protocols). These 20 are UNIVERSE protocols
+# The builtin/reserved STRUCTURAL PROTOCOLS' shape (phase 5c-protocols). These 22 are UNIVERSE protocols
 # (always in scope, usable as a generic bound — `[T: Comparable]` / `[T: Arithmetic]` — but never
 # redeclarable by a user program: `is_reserved_protocol` rejects a user `protocol Comparable:`). Only the
 # SHAPE (method sigs + `+`-joined embeds) is file-backed here, as an ADDITIVE, DRIFT-GUARDED MIRROR: the
@@ -265,7 +265,7 @@ native enum Result[T, E]:
 # VALIDATE-AND-NO-OP in a stdlib module (never inserted into the protocol table), so these decls register
 # no user symbol — they are shape documentation the drift guard pins to the Rust seed.
 #
-# All 21 reserved protocols are mirrored here, including `Iterable` — its `iter(self) -> Iterator[Elem]`
+# All 22 reserved protocols are mirrored here, including `Iterable` — its `iter(self) -> Iterator[Elem]`
 # return type resolves via `resolve_type`'s dedicated `Iterator[T]` value arm to the same
 # `Ty::Struct("Iterator",[Elem])` the seed uses, so the shape ports cleanly like every other one.
 
@@ -312,6 +312,10 @@ protocol Neg:
 
 protocol Arithmetic:
     Add + Sub + Mul + Div
+
+# `Num` — int and float only (sealed in satisfies_args_d); the operators a [T: Num] body may use.
+protocol Num:
+    Arithmetic + Mod + Neg + Comparable
 
 # `Iterator[Elem]` carries one type param (the element) so the generic-arity check treats `Iterator[T]`
 # uniformly, but its `next` sig is `-> Option[Self]` (Elem is arity-only, unused in the sig — matching the

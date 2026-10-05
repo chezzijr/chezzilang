@@ -10,12 +10,12 @@
 # dispatched via `native_members("std.math")`). The backends compile NOTHING for a `native fn` — the
 # front-end reads ONLY the signature.
 #
-# The language has no implicit int→float, so params are `float` (callers pass floats). Two pieces of
-# checker-side metadata are NOT expressible as native decls and are re-attached post-harvest
-# (attach_native_module_metadata): the module constants `pi`/`e` (float values, `math.pi`) via
-# native_consts, and `abs`'s numeric polymorphism (int→int / float→float) via MODULE_NUMERIC_POLY.
+# The language has no implicit int→float, so params are `float` (callers pass floats). `abs`/`sign`
+# are `[T: Num]` generics (int->int, float->float); every other param is `float`. The module
+# constants `pi`/`e` (float values, `math.pi`) are NOT expressible as native decls and are re-attached
+# post-harvest (attach_native_module_metadata) via native_consts.
 
-native fn abs(x: float) -> float
+native fn abs[T: Num](x: T) -> T
 native fn floor(x: float) -> float
 native fn ceil(x: float) -> float
 native fn round(x: float) -> float
@@ -37,8 +37,8 @@ native fn is_nan(x: float) -> bool
 native fn is_inf(x: float) -> bool
 native fn is_finite(x: float) -> bool
 
-# Number theory / integer math (Python `math` semantics). `sign` is numeric-polymorphic like `abs`
-# (int->int / float->float), reattached via MODULE_NUMERIC_POLY. `factorial`/`comb`/`perm`/
+# Number theory / integer math (Python `math` semantics). `sign` is a `[T: Num]` generic like `abs`
+# (int->int / float->float). `factorial`/`comb`/`perm`/
 # `parse_int_base` return `Result[int]` — a clean `Err` (never a fault) on a bad domain or i64 overflow.
 # `gcd`/`lcm` (and `abs` on an `int`) are NOT in that Result-returning group: an i64 overflow there
 # faults recoverably (`integer overflow in gcd` / `integer overflow in lcm` / `integer overflow in abs`)
@@ -53,7 +53,7 @@ native fn lcm(a: int, b: int) -> int
 # here, `(-4, 1)` in Python). `b == 0` faults cleanly like `a / b`.
 fn divmod(a: int, b: int) -> (int, int):
     return (a / b, a % b)
-native fn sign(x: float) -> float
+native fn sign[T: Num](x: T) -> T
 # Truncate toward zero to an `int` (Python `math.trunc`). Faults recoverably on a non-finite `x`
 # (`trunc(): NaN is out of integer range` / `trunc(): inf is out of integer range`) or one outside i64
 # range (`trunc(): 9223372036854776000 is out of integer range`) — CPython raises `ValueError`/

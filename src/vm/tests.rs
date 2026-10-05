@@ -12274,7 +12274,7 @@ fn golden_arithmetic_protocol_chz_matches_expected_and_interp() {
 }
 
 /// Generic operator-overload golden: `examples/generic_operator_overload.chz` — a generic struct
-/// `Box[T]` and generic enum `Num[T]` whose `add`/`neg`/`compare` methods overload `+`/`-`/`<`,
+/// `Box[T]` and generic enum `Numeral[T]` whose `add`/`neg`/`compare` methods overload `+`/`-`/`<`,
 /// satisfy `Add`/`Comparable`, and flow into `twice[T: Add]`. Byte-identical on the VM, the M:N
 /// parallel engine, and the checked-in `.expected`.
 #[test]

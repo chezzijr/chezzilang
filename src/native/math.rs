@@ -2,14 +2,14 @@
 //!
 //! Most functions take and return `float` (Chezzi has no implicit int→float, so callers pass
 //! floats; the checker's `native_module_sig("std.math")` enforces this). The exception is `abs`,
-//! which is numeric-polymorphic (gap #12): int args → int, float args → float. (`min`/`max` are
+//! declared `[T: Num]` in `std/math.chz`: int args → int, float args → float. (`min`/`max` are
 //! NOT here — they live in `std.cmp` as generic `[T: Comparable]` functions, M7-G3.)
 //! Pure Rust `std` — no third-party crates.
 
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 
-// `abs` is numeric-polymorphic (gap #12): int args yield an int result, float args a float. The
-// checker (`infer_numeric_poly`) guarantees the arg is present and numeric, so `arg_is_int(0)`
+// `abs` is declared `[T: Num]` in `std/math.chz`, so the checker guarantees the arg is one int or
+// one float: int args yield an int result, float args a float, and `arg_is_int(0)`
 // decides the whole call.
 
 fn abs(h: &mut dyn Host) -> Result<NativeRet, HostError> {

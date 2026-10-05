@@ -579,6 +579,7 @@ pub(crate) const RESERVED_PROTOCOLS: &[&str] = &[
     "Mod",
     "Neg",
     "Arithmetic",
+    "Num",
     "Iterator",
     "Iterable",
     "Index",
@@ -839,10 +840,6 @@ struct ModuleSig {
     /// from the defining module's `GlobalBinding`. Every importer path reads this and nothing else.
     members: HashMap<String, MemberSig>,
     types: std::collections::HashSet<String>,
-    /// Native functions whose result type follows their argument type (int args → int, float args
-    /// → float) instead of the fixed `FnSig` (gap #12: `std.math` `abs`/`min`/`max`). The `FnSig`
-    /// still records arity; the result/param strictness is handled by `infer_numeric_poly`.
-    numeric_poly: std::collections::HashSet<String>,
     /// Resolved struct definitions this module declares (module-scoped types — D? feature). An
     /// importer injects these into its own per-module `structs`/`struct_names` so a `from`-imported
     /// or qualified-access struct resolves with the right field layout.
@@ -1680,7 +1677,7 @@ impl Checker {
                     c.io_reader_seed = sig.struct_defs.get("Reader").cloned();
                 }
                 // Re-attach the checker-side metadata that native decls can't express (hover docs,
-                // module constants like math.pi/e, numeric-poly fns like math.abs, std.concurrency's
+                // module constants like math.pi/e, std.concurrency's
                 // `RwShared.read`/`Executor.submit` closure-param sigs). Run for EVERY native module
                 // (idempotent for those it doesn't cover) so the doc/const/poly attach no longer lives
                 // in the deleted per-module arms.
@@ -1998,16 +1995,14 @@ fn native_module_sig(name: &str) -> ModuleSig {
 
 /// Re-attach the checker-side metadata a `native fn` decl CANNOT express, on top of a native module's
 /// `ModuleSig` (whether hand-built by `native_module_sig` or harvested from a file-backed `std/M.chz`).
-/// Runs in the graph loop for EVERY native module (idempotent for those it doesn't cover). Three pieces:
+/// Runs in the graph loop for EVERY native module (idempotent for those it doesn't cover). Two pieces:
 ///   (a) editor hover docs (`MODULE_FN_DOCS`) — a concise one-line blurb on each authored fn's `FnSig.doc`
 ///       (excluded from `fn_sig_eq`, so purely informational; `record_method_hover` forwards it at the
 ///       `module.fn` hover site). Drift-guarded by `module_fn_docs_all_resolve`.
 ///   (b) module CONSTANT values (`math.pi`/`e`) — read from `native::native_consts` (the runtime table,
 ///       reused so there is no hardcoded pi/e here) and exposed as `float` module values.
-///   (c) numeric-POLYMORPHIC fns (`math.abs`: int→int / float→float) — the `FnSig` fixes only arity;
-///       `infer_numeric_poly` does the real typing. Listed in the `MODULE_NUMERIC_POLY` side-table.
 /// Moved out of the (now-deleted) per-module `native_module_sig` arms so the file-backed migration
-/// (phase 4d) keeps hover/const/poly byte-identical. The synthetic struct LAYOUTS (Match/Response/
+/// (phase 4d) keeps hover/const byte-identical. The synthetic struct LAYOUTS (Match/Response/
 /// ProcResult) + request's optional-tail fns are NOT here either — they are file-backed (4b/4f) and
 /// harvested from the parsed `.chz` by `harvest_native_module`.
 fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
@@ -2034,11 +2029,6 @@ fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
                 redeclared: false,
             },
         );
-    }
-    if let Some((_, polys)) = MODULE_NUMERIC_POLY.iter().find(|(m, _)| *m == name) {
-        for p in *polys {
-            sig.numeric_poly.insert((*p).to_string());
-        }
     }
     // Phase 4c-concurrency — two method sigs a plain harvested sig CANNOT express, re-attached here.
     // Both are closure params whose expressible constraint is arity + (for `read`) the box's element
@@ -2080,12 +2070,6 @@ fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
         }
     }
 }
-
-/// Numeric-polymorphic native module fns (int args → int, float args → float), keyed by module. The
-/// `FnSig` in the module's `.chz` fixes only arity (`abs(x: float) -> float`); `infer_numeric_poly`
-/// does the real per-call typing when the fn is in its module's `numeric_poly` set. Parallels
-/// `MODULE_FN_DOCS`; applied by `attach_native_module_metadata`. (Was inline in the deleted math arm.)
-const MODULE_NUMERIC_POLY: &[(&str, &[&str])] = &[("std.math", &["abs", "sign"])];
 
 /// Editor hover (Tier C): concise one-line `(module, [(fn, doc)])` blurbs for native stdlib module
 /// functions, paraphrased from `docs/stdlib.md §4`. Applied to `FnSig.doc` in `native_module_sig`
@@ -2574,9 +2558,6 @@ struct Checker {
     /// load order, deps-first) that declare it. Drives the "import it from <module>" hint when a bare
     /// type name is used without importing its declaring module. NOT cleared per-module.
     types_by_name: HashMap<String, Vec<String>>,
-    /// `from`-imported names that are numeric-polymorphic native fns (`abs`/`min`/`max`), so a bare
-    /// call resolves their result type by argument type instead of the float-only `FnSig` (gap #12).
-    imported_poly: std::collections::HashSet<String>,
     /// `from`-imported module GLOBALS (`import COUNT from lib.st`) → the dotted module path they came
     /// from. A from-imported global is a SNAPSHOT copy (Python-identical), so REBINDING the bare name
     /// would write a local alias that is silently lost — rejected in `check_assign`, consistent with
@@ -3171,6 +3152,23 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
                     args: Vec::new(),
                 },
             ],
+            methods: Vec::new(),
+        },
+    );
+    // `Num` (TICKET-214) — the numeric bundle: every operator whose result is `T` for both int and
+    // float (`+ - * / %`, unary `-`), plus ordering and `==`. SEALED to int/float in
+    // `satisfies_args_d`; the embeds are what a `T: Num` body's operators read.
+    m.insert(
+        "Num".to_string(),
+        ProtocolInfo {
+            type_params: Vec::new(),
+            embeds: ["Arithmetic", "Mod", "Neg", "Comparable"]
+                .iter()
+                .map(|n| TyBound {
+                    name: (*n).to_string(),
+                    args: Vec::new(),
+                })
+                .collect(),
             methods: Vec::new(),
         },
     );

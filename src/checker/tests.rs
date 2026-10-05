@@ -4604,16 +4604,16 @@ c := smallest(Box(1), Box(2)).v
 
 #[test]
 fn generic_enum_add_satisfies() {
-    // Generic-enum analogue: `enum Num[T]` with `add` overloads `+` and satisfies `Add`.
+    // Generic-enum analogue: `enum Numeral[T]` with `add` overloads `+` and satisfies `Add`.
     let src = "\
-enum Num[T]:
+enum Numeral[T]:
     Val(T)
-    fn add(self, other: Num[T]) -> Num[T]:
+    fn add(self, other: Numeral[T]) -> Numeral[T]:
         return self
 fn twice[T: Add](x: T) -> T:
     return x + x
-a := Num.Val(1) + Num.Val(2)
-b := twice(Num.Val(3))
+a := Numeral.Val(1) + Numeral.Val(2)
+b := twice(Numeral.Val(3))
 ";
     entry_ok(src);
 }
@@ -4683,13 +4683,13 @@ b := Box(5) < Box(\"hello\")
 fn generic_enum_heterogeneous_add_rejected() {
     // BOUNDARY (Bug 1, enum analogue): a heterogeneous generic-enum pair must not overload `add`.
     let src = "\
-enum Num[T]:
+enum Numeral[T]:
     Val(T)
-    fn add(self, other: Num[T]) -> Num[T]:
+    fn add(self, other: Numeral[T]) -> Numeral[T]:
         return other
-x := Num.Val(1) + Num.Val(\"hello\")
+x := Numeral.Val(1) + Numeral.Val(\"hello\")
 ";
-    entry_rejects(src, "cannot apply + to Num[int] and Num[str]");
+    entry_rejects(src, "cannot apply + to Numeral[int] and Numeral[str]");
 }
 
 #[test]
@@ -14799,10 +14799,6 @@ fn math_io_os_rand_fs_sig_from_file_not_native_module_sig() {
             sig.members.values().all(|m| m.certain_fn.is_some()),
             "{m} values must no longer be hand-built in native_module_sig"
         );
-        assert!(
-            sig.numeric_poly.is_empty(),
-            "{m} numeric_poly must no longer be hand-built in native_module_sig"
-        );
     }
     // native_module_sig is still the home for the residual type-license modules — std.ffi keeps its
     // opaque `ptr` handle + fixed-width C-ABI integer names there (no runtime value, no .chz syntax for
@@ -14829,8 +14825,12 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     // math.pi / math.e are float module VALUES (not fns) — reattached from native_consts.
     assert_eq!(math.value_ty("pi"), Some(&Ty::Float));
     assert_eq!(math.value_ty("e"), Some(&Ty::Float));
-    // math.abs is numeric-polymorphic — reattached from MODULE_NUMERIC_POLY.
-    assert!(math.numeric_poly.contains("abs"));
+    // math.abs is a [T: Num] generic (TICKET-214): one declared sig, no side-set.
+    let abs = math.certain_fn("abs").expect("math.abs");
+    assert_eq!(abs.params, vec![Ty::Param("T".into())]);
+    assert_eq!(abs.ret, Ty::Param("T".into()));
+    assert_eq!(abs.type_params.len(), 1);
+    assert!(abs.type_params[0].bounds.iter().any(|b| b.name == "Num"));
     // `divmod` is a BODIED Chezzi fn harvested as a module member alongside the native decls (the
     // hybrid native+Chezzi module form) — it counts as an exported fn.
     let divmod = math.certain_fn("divmod").expect("math.divmod");
@@ -37983,4 +37983,164 @@ fn unknown_type_head_reports_one_error() {
 #[test]
 fn native_math_abs_is_a_num_generic_value() {
     entry_ok("import std.math\nfn main():\n    print([-1, 2].map(math.abs))\n");
+}
+
+/// TICKET-214 grid: native module fns (math.abs, math.sign, json.decode) x position x type arg, plus Num satisfaction and the operators a T: Num body gets.
+#[test]
+fn native_fn_and_num_protocol_grid() {
+    let num_struct = "struct S:\n    v: int\n    fn add(self, other: S) -> S:\n        return S(self.v + other.v)\n    fn sub(self, other: S) -> S:\n        return S(self.v - other.v)\n    fn mul(self, other: S) -> S:\n        return S(self.v * other.v)\n    fn div(self, other: S) -> S:\n        return S(self.v / other.v)\n    fn mod(self, other: S) -> S:\n        return S(self.v % other.v)\n    fn neg(self) -> S:\n        return S(-self.v)\n    fn compare(self, other: S) -> int:\n        return self.v - other.v\n    fn eq(self, other: S) -> bool:\n        return self.v == other.v\nfn twice[T: Num](x: T) -> T:\n    return x + x\nprint(twice(S(2)).v)";
+    let cells: &[(&str, &str, Option<&str>)] = &[
+        ("call_int", "print(math.abs(-3), math.sign(-3))", None),
+        ("call_float", "print(math.abs(-2.5), math.sign(-2.5))", None),
+        (
+            "call_targ_int",
+            "print(math.abs[int](-3), math.sign[int](-3))",
+            None,
+        ),
+        (
+            "call_targ_float",
+            "print(math.abs[float](-2.5), math.sign[float](2.5))",
+            None,
+        ),
+        (
+            "let_missing",
+            "g := math.abs",
+            Some("'math.abs' is generic and T is not determined here"),
+        ),
+        (
+            "let_missing_sign",
+            "g := math.sign",
+            Some("'math.sign' is generic and T is not determined here"),
+        ),
+        (
+            "let_targ_int",
+            "g := math.abs[int]\ns := math.sign[int]\nprint(g(-3), s(-3))",
+            None,
+        ),
+        (
+            "let_targ_float",
+            "g := math.abs[float]\nprint(g(-2.5))",
+            None,
+        ),
+        (
+            "typed_let_int",
+            "h: fn(int) -> int = math.abs\ns: fn(int) -> int = math.sign\nprint(h(-3), s(-3))",
+            None,
+        ),
+        (
+            "typed_let_float",
+            "h: fn(float) -> float = math.abs\nprint(h(-2.5))",
+            None,
+        ),
+        (
+            "hof_int",
+            "print([-1, 2].map(math.abs), [-3, 0, 2].map(math.sign))",
+            None,
+        ),
+        ("hof_float", "print([-1.5, 2.0].map(math.abs))", None),
+        ("hof_targ", "print([-1, 2].map(math.abs[int]))", None),
+        (
+            "paren_call",
+            "print((math.abs)(-3), (math.sign)(-2.5))",
+            None,
+        ),
+        (
+            "caller_param",
+            "fn app[U: Num](x: U) -> U:\n    f: fn(U) -> U = math.abs\n    return f(x)\nprint(app(-4), app(-1.5))",
+            None,
+        ),
+        (
+            "spawn_capture",
+            "fn main():\n    g := math.abs[int]\n    parallel:\n        spawn:\n            print(g(-4))\nmain()",
+            None,
+        ),
+        (
+            "from_import",
+            "import abs from std.math\nprint(abs(-3), [-1, 2].map(abs))",
+            None,
+        ),
+        (
+            "targ_str",
+            "print(math.abs[str](\"x\"))",
+            Some("type str does not satisfy Num"),
+        ),
+        (
+            "arg_str",
+            "print(math.abs(\"x\"))",
+            Some("type str does not satisfy Num"),
+        ),
+        (
+            "arg_bool",
+            "print(math.abs(true))",
+            Some("type bool does not satisfy Num"),
+        ),
+        (
+            "num_int",
+            "fn twice[T: Num](x: T) -> T:\n    return x + x\nprint(twice(2), twice(2.5))",
+            None,
+        ),
+        (
+            "num_str",
+            "fn twice[T: Num](x: T) -> T:\n    return x + x\nprint(twice(\"a\"))",
+            Some("type str does not satisfy Num"),
+        ),
+        (
+            "num_bool",
+            "fn twice[T: Num](x: T) -> T:\n    return x\nprint(twice(true))",
+            Some("type bool does not satisfy Num"),
+        ),
+        (
+            "num_struct",
+            num_struct,
+            Some("does not satisfy Num (only int and float do)"),
+        ),
+        (
+            "num_ops",
+            "fn ops[T: Num](a: T, b: T) -> T:\n    print(a + b, a - b, a * b, a / b, a % b, -a, a < b, a <= b, a > b, a >= b, a == b, a != b)\n    return a\nops(7, 2)\nops(7.5, 2.0)",
+            None,
+        ),
+        (
+            "num_mix",
+            "fn both[T: Num](a: T, b: T) -> T:\n    return a\nprint(both(7, 2.0))",
+            Some("argument to 'both' has type float, expected int"),
+        ),
+        (
+            "num_lit",
+            "fn inc[T: Num](x: T) -> T:\n    return x + 1",
+            Some("cannot apply + to T and int"),
+        ),
+        (
+            "num_not",
+            "fn f[T: Num](x: T) -> bool:\n    return not x",
+            Some("'not' expects bool, found T"),
+        ),
+        (
+            "unsealed_param",
+            "fn f[T: Arithmetic + Mod + Neg + Comparable](x: T) -> T:\n    return math.abs(x)",
+            Some("type T does not satisfy Num"),
+        ),
+        ("num_value", "x: Num = 2.5\nprint(x)", None),
+        (
+            "num_value_abs",
+            "x: Num = 2.5\nprint(math.abs(x))",
+            Some("cannot use the protocol value Num as type parameter"),
+        ),
+        (
+            "num_reserved",
+            "enum Num:\n    A\n    B",
+            Some("reserved (builtin)"),
+        ),
+    ];
+    let mut red = Vec::new();
+    for (name, body, want) in cells {
+        let errs = check_entry(&format!("import std.math\nimport std.json\n{body}"));
+        let pass = match want {
+            None => errs.is_empty(),
+            Some(n) => errs.iter().any(|e| e.message.contains(n)),
+        };
+        if !pass {
+            red.push(format!("{name}: {errs:?}"));
+        }
+    }
+    assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
 }

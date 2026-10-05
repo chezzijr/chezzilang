@@ -2940,11 +2940,6 @@ impl Checker {
                         self.error(span, super::globals::kw_ambiguous_msg(name));
                         return Some(sig.ret.clone());
                     }
-                    // A `from`-imported numeric-polymorphic native fn (abs/min/max) types by its
-                    // argument type, not the float-only `FnSig` (gap #12).
-                    if self.imported_poly.contains(name) {
-                        return Some(self.infer_numeric_poly(name, sig.params.len(), args, span));
-                    }
                     let Some(bound) = self.bind_call(sig.slots.as_deref(), name, args, 0, span)
                     else {
                         return Some(Ty::Unknown);
@@ -3324,21 +3319,15 @@ impl Checker {
                     .imported_modules
                     .get(mname)
                     .and_then(|id| self.module_sigs.get(id));
-                let is_poly = sig.is_some_and(|s| s.numeric_poly.contains(method));
                 // TICKET-196: the module's one export record for the slot, cloned here so the
                 // `sig` borrow ends before the first `&mut self` call below.
                 let member = sig.and_then(|s| s.member(method)).cloned();
                 let fsig = member.as_ref().and_then(|m| m.certain_fn.clone());
                 let vty = member.as_ref().map(|m| m.ty.clone());
                 // Editor hover (CASE 2): record `module.fn`'s native signature at the method name —
-                // covers plain, numeric-poly (`abs` has an arity fsig), and generic module fns.
+                // covers plain and generic module fns.
                 if let Some(f) = &fsig {
                     self.record_method_hover(name_span, f);
-                }
-                // Numeric-polymorphic native fns (gap #12): result type follows the argument type.
-                if is_poly {
-                    let arity = fsig.as_ref().map_or(2, |f| f.params.len());
-                    return self.infer_numeric_poly(method, arity, args, span);
                 }
                 if let Some(fsig) = fsig {
                     let Some(bound) = self.bind_call(fsig.slots.as_deref(), method, args, 0, span)
@@ -4663,56 +4652,6 @@ impl Checker {
                 self.error(name_span, format!("type {other} has no method '{method}'"));
                 Ty::Unknown
             }
-        }
-    }
-
-    /// Type a numeric-polymorphic native call (`std.math` `abs`/`min`/`max`): every argument must be
-    /// the *same* numeric type (int or float — no implicit int/float mix, matching the language's
-    /// no-implicit-widening rule), and the result type is that argument type. `Ty::Unknown` args are
-    /// tolerated (no cascade); an all-unknown call yields `Ty::Unknown`.
-    pub(super) fn infer_numeric_poly(
-        &mut self,
-        method: &str,
-        arity: usize,
-        args: &[Expr],
-        span: Span,
-    ) -> Ty {
-        self.check_arity(method, arity, args, span);
-        let mut saw_int = false;
-        let mut saw_float = false;
-        let mut bad = false;
-        for a in args {
-            match self.infer(a) {
-                Ty::Int => saw_int = true,
-                Ty::Float => saw_float = true,
-                Ty::Unknown => {}
-                other => {
-                    self.error(
-                        a.span,
-                        format!("argument of '{method}': expected int or float, found {other}"),
-                    );
-                    bad = true;
-                }
-            }
-        }
-        if saw_int && saw_float {
-            self.error(
-                span,
-                format!(
-                    "'{method}' arguments must be the same numeric type (no implicit int/float mix)"
-                ),
-            );
-            return Ty::Unknown;
-        }
-        if bad {
-            return Ty::Unknown;
-        }
-        if saw_float {
-            Ty::Float
-        } else if saw_int {
-            Ty::Int
-        } else {
-            Ty::Unknown
         }
     }
 
