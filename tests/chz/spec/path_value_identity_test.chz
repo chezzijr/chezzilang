@@ -1,0 +1,40 @@
+# TICKET-215: a path value has one identity (wave 20 family P1). `P.mk == P.mk` and `E.A == E.A`
+# are `true` (CPython `P.mk == P.mk` -> True; Rust fn items compare equal).
+struct P:
+    n: str
+    fn name(self) -> str:
+        return self.n
+    fn mk(n: str) -> P:
+        return P(n)
+
+enum E:
+    A(int)
+    B
+
+fn idt[T](v: T) -> T:
+    return v
+
+test fn static_method_bound_then_reread_is_equal():
+    m := P.mk
+    assert m == P.mk
+
+test fn static_method_read_twice_is_equal():
+    assert P.mk == P.mk
+
+test fn instance_method_through_type_is_equal():
+    x := P.name
+    assert x == P.name
+
+test fn payload_variant_bound_then_reread_is_equal():
+    a := E.A
+    assert a == E.A
+
+test fn payload_variant_read_twice_is_equal():
+    assert E.A == E.A
+
+test fn turbofish_instantiation_is_equal():
+    assert idt[int] == idt[int]
+
+test fn path_value_ne_is_false():
+    m := P.mk
+    assert not (m != P.mk)
