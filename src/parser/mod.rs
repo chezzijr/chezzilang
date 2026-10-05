@@ -1071,7 +1071,7 @@ impl Parser {
         self.expect(&Token::Fn)?;
         let name = self.expect_ident()?;
         self.expect(&Token::LParen)?;
-        let params = self.parse_params(false)?;
+        let (params, c_variadic) = self.parse_params_ext(false, true)?;
         self.expect(&Token::RParen)?;
         let ret = if self.eat(&Token::Arrow) {
             Some(self.parse_type()?)
@@ -1083,6 +1083,7 @@ impl Parser {
             params,
             ret,
             span,
+            c_variadic,
         })
     }
 
@@ -1376,11 +1377,43 @@ impl Parser {
     /// that references another parameter (a non-literal default is compiled as a zero-arg fn in its
     /// DEFINING module, where no parameter is in scope).
     fn parse_params(&mut self, allow_defaults: bool) -> PResult<Vec<Param>> {
+        Ok(self.parse_params_ext(allow_defaults, false)?.0)
+    }
+
+    /// [`parse_params`], plus whether the list ended in a bare `...` (C varargs). That `...` is
+    /// legal only as the LAST parameter, and only where `allow_c_variadic` (an `extern` fn).
+    fn parse_params_ext(
+        &mut self,
+        allow_defaults: bool,
+        allow_c_variadic: bool,
+    ) -> PResult<(Vec<Param>, bool)> {
         let mut params = Vec::new();
         let mut seen_default = false;
         let mut seen_variadic = false;
+        let mut c_variadic = false;
         if !self.check(&Token::RParen) {
             loop {
+                // A bare `...` (no name follows): C varargs.
+                if self.check(&Token::DotDotDot)
+                    && matches!(self.peek_at(1), Token::RParen | Token::Comma)
+                {
+                    if !allow_c_variadic {
+                        return Err(self.err(
+                            "a bare `...` (C varargs) is only allowed as the last parameter of an \
+                             extern fn"
+                                .to_string(),
+                        ));
+                    }
+                    if self.peek_at(1) == &Token::Comma {
+                        return Err(self.err(
+                            "C varargs `...` must be the last parameter of an extern fn"
+                                .to_string(),
+                        ));
+                    }
+                    self.advance();
+                    c_variadic = true;
+                    break;
+                }
                 let name_span = self.cur_span();
                 // A leading `...` marks a variadic parameter (`fn f(...args: T)`). It collects the
                 // surplus trailing positional args into a `List[T]`; everything after it is
@@ -1461,7 +1494,7 @@ impl Parser {
                 }
             }
         }
-        Ok(params)
+        Ok((params, c_variadic))
     }
 
     fn parse_struct(&mut self) -> PResult<StmtKind> {
@@ -4556,6 +4589,7 @@ mod tests {
         match only("extern \"libc\":\n    fn printf(fmt: str, ...) -> int\n") {
             StmtKind::Extern { fns, .. } => {
                 assert_eq!(fns[0].params.len(), 1);
+                assert!(fns[0].c_variadic);
             }
             other => panic!("{other:?}"),
         }

@@ -244,8 +244,8 @@
 # per platform, any other string is a verbatim dlopen name). Each `fn` becomes a module-global
 # callable dispatched via dlopen+libffi. The production itself is unchanged.
 # v1 marshals scalars (int/float/bool/str→char*), fixed-width ints (int8..uint64), opaque `ptr`
-# (↔ void*), and a flat-scalar struct by value (a `struct` <type> named in an extern sig) — all are
-# ordinary <type> forms recognized only inside an extern sig (no new grammar).
+# (↔ void*), C `float` (`float32`), and a struct by value (a `struct` <type> named in an extern sig,
+# nested to any depth) — all are ordinary <type> forms recognized only inside an extern sig.
 <externDecl> ::= "EXTERN" "STR" "COLON" "NEWLINE" "INDENT" <externFns> "DEDENT"
               | "EXTERN" "RAWSTR" "COLON" "NEWLINE" "INDENT" <externFns> "DEDENT"
 <externFns>  ::= <externFn> | <externFn> <externFns>
@@ -253,6 +253,11 @@
               | "FN" "IDENT" "LPAREN" <params> "RPAREN" "NEWLINE"
               | "FN" "IDENT" "LPAREN" "RPAREN" "ARROW" <type> "NEWLINE"
               | "FN" "IDENT" "LPAREN" <params> "RPAREN" "ARROW" <type> "NEWLINE"
+              | "FN" "IDENT" "LPAREN" <cVarParams> "RPAREN" "NEWLINE"
+              | "FN" "IDENT" "LPAREN" <cVarParams> "RPAREN" "ARROW" <type> "NEWLINE"
+# C varargs (`fn printf(fmt: str, ...) -> int`): a bare `...` as the LAST extern param. Each call's
+# surplus args are C variadic args. Legal only in an extern fn; the parser rejects it elsewhere.
+<cVarParams> ::= "DOTDOTDOT" | <param> "COMMA" <cVarParams>
 
 # `native fn`/`native ctor` — a body-less universe-builtin SIGNATURE, PRELUDE/STD-ONLY (the checker
 # rejects it in a user module) and TOP-LEVEL-only. The body is bound natively (name-keyed dispatch);

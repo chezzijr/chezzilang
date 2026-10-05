@@ -339,6 +339,9 @@ pub struct ExternFn {
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     pub span: Span,
+    /// A bare trailing `...` (C varargs, `fn printf(fmt: str, ...) -> int`): each call's surplus
+    /// args are C variadic args. Distinct from Chezzi's `...xs: T`, which extern fns reject.
+    pub c_variadic: bool,
 }
 
 /// Whether a [`NativeDecl`] is a first-class universe FUNCTION (`native fn`) or a non-first-class

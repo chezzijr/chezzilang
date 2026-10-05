@@ -1,0 +1,4 @@
+# rule: params
+# expect: only allowed as the last parameter of an extern fn
+fn f(a: int, ...):
+    pass

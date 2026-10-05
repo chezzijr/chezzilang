@@ -1,0 +1,4 @@
+# rule: externFn, cVarParams
+extern "libc":
+    fn printf(fmt: str, ...) -> int
+    fn vlog(...)

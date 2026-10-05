@@ -318,6 +318,7 @@ fn parser_rules_match_fns() {
         ("protocolDecl", "parse_protocol"),
         ("externDecl", "parse_extern"),
         ("externFn", "parse_extern_fn"),
+        ("cVarParams", "parse_params_ext"),
         ("nativeDecl", "parse_native"),
         ("nativeStructDecl", "parse_native_struct"),
         ("nativeEnumDecl", "parse_native_enum"),
