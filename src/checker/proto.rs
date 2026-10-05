@@ -4526,17 +4526,6 @@ impl Checker {
         Ty::Unknown
     }
 
-    /// M24 — `T.method(args)` where `T` is an in-scope generic type PARAMETER: the static-witness
-    /// call. The instance twin is `infer_method_call`'s `Ty::Param` arm; this one differs in that
-    /// there is no receiver (every `msig.params` slot is a real argument) and `Self` maps to
-    /// `Ty::Param(T)` rather than to a receiver type.
-    ///
-    /// Accepted only when BOTH hold, because both are what the compiler can actually lower:
-    /// * one of `T`'s bounds declares `method` as a **static** requirement, and
-    /// * `T`'s hidden `$w:T` witness binding is reachable here ([`Checker::witness_scope`]) — the
-    ///   declaring body, or (Task 4) any nested body inside it, which captures it.
-    ///
-    /// Anything else keeps the pre-M24 "generics are erased" diagnostic.
     /// The first bound of type param `tname` whose protocol declares `method` with a sig `pick`
     /// accepts, that sig, and its map: `Self` ↦ `Ty::Param(tname)` (the body is still checked
     /// abstractly) plus each protocol param ↦ the bound's arg (`Convert[int]` ⇒ `S ↦ int`). The one
@@ -4591,6 +4580,17 @@ impl Checker {
         subst(&msig.ret, map)
     }
 
+    /// M24 — `T.method(args)` where `T` is an in-scope generic type PARAMETER: the static-witness
+    /// call. The instance twin is `infer_method_call`'s `Ty::Param` arm; this one differs in that
+    /// there is no receiver (every `msig.params` slot is a real argument) and `Self` maps to
+    /// `Ty::Param(T)` rather than to a receiver type.
+    ///
+    /// Accepted only when BOTH hold, because both are what the compiler can actually lower:
+    /// * one of `T`'s bounds declares `method` as a **static** requirement, and
+    /// * `T`'s hidden `$w:T` witness binding is reachable here ([`Checker::witness_scope`]) — the
+    ///   declaring body, or (Task 4) any nested body inside it, which captures it.
+    ///
+    /// Anything else keeps the pre-M24 "generics are erased" diagnostic.
     pub(super) fn infer_witness_static_call(
         &mut self,
         tname: &str,

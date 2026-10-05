@@ -2679,13 +2679,18 @@ impl Checker {
 
     /// How many type params the struct, enum or newtype keyed `key` declares.
     pub(super) fn type_param_count(&self, key: &str) -> usize {
+        self.type_params_of(key).map_or(0, |tps| tps.len())
+    }
+
+    /// The type params the struct, enum or newtype keyed `key` declares; `None` for no such type.
+    pub(super) fn type_params_of(&self, key: &str) -> Option<Vec<TyParam>> {
         if let Some(info) = self.struct_shape(key) {
-            return info.type_params.len();
+            return Some(info.type_params.clone());
         }
         if let Some(tps) = self.enum_type_params.get(key) {
-            return tps.len();
+            return Some(tps.clone());
         }
-        self.newtype_type_params_of(key).map_or(0, |tps| tps.len())
+        self.newtype_type_params_of(key).cloned()
     }
 
     /// The one place head args become a substitution for a `&self` reader: the alias-pinned args,

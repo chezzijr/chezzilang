@@ -69,6 +69,11 @@ fn a(x: int) -> int:
 fn b(x: int) -> int:
     return x + 2
 fs := [a, b]
+fn pa(x: int):
+    print(x + 1)
+fn pb(x: int):
+    print(x + 2)
+ps := [pa, pb]
 ";
 
 fn prints(s: &str) -> Expect {
@@ -330,6 +335,28 @@ fn extra_cells(out: &mut Vec<Cell>) {
         "import lib\nprint(lib.Nope[str](1))",
         Expect::Rejects("module 'lib' has no member 'Nope'"),
     ));
+    // An unpinned generic alias takes its target's type arguments in an annotation, as in a
+    // constructor call (`BB[int](9)`); a non-generic alias given any rejects.
+    out.push(cell(
+        "k6/unpinned_annotation".into(),
+        "type BB = Bx\nx: BB[int] = Bx(1)\nprint(x.v + 1)",
+        prints("2"),
+    ));
+    out.push(cell(
+        "k6/unpinned_annotation_mismatch".into(),
+        "type BB = Bx\nx: BB[int] = Bx(\"s\")\nprint(x.v)",
+        Expect::Rejects("cannot assign"),
+    ));
+    out.push(cell(
+        "k6/unpinned_annotation_arity".into(),
+        "type BB = Bx\nx: BB[int, str] = Bx(1)\nprint(x.v)",
+        Expect::Rejects("expects 1 type argument"),
+    ));
+    out.push(cell(
+        "k6/nongeneric_annotation".into(),
+        "type P2 = P\nx: P2[int] = P(1)\nprint(x.n)",
+        Expect::Rejects("already fixes its type arguments"),
+    ));
     for (n, b) in [
         ("static_call", "print(BI[str].make(\"s\").v)"),
         ("annotation", "x: BI[str] = Bx(1)\nprint(x.v)"),
@@ -383,6 +410,36 @@ fn shadow_cells(out: &mut Vec<Cell>) {
             "module_global",
             "import lib\nk := 1\nprint(lib.fs[k](10))",
             prints("12"),
+        ),
+        (
+            "defer_local",
+            "fn pa(x: int):\n    print(x + 1)\nfn pb(x: int):\n    print(x + 2)\nfn run():\n    fs := [pa, pb]\n    k := 1\n    defer fs[k](1)\n    print(\"body\")\nrun()",
+            prints("body\n3"),
+        ),
+        (
+            "defer_field",
+            "fn pa(x: int):\n    print(x + 1)\nfn pb(x: int):\n    print(x + 2)\nstruct H:\n    fs: List[fn(int) -> nil]\nfn run():\n    h := H([pa, pb])\n    k := 1\n    defer h.fs[k](1)\n    print(\"body\")\nrun()",
+            prints("body\n3"),
+        ),
+        (
+            "defer_module_global",
+            "import lib\nfn run():\n    k := 1\n    defer lib.ps[k](1)\n    print(\"body\")\nrun()",
+            prints("body\n3"),
+        ),
+        (
+            "spawn_local",
+            "fn pa(x: int):\n    print(x + 1)\nfn pb(x: int):\n    print(x + 2)\nfs := [pa, pb]\nk := 1\nparallel:\n    spawn fs[k](10)\nprint(\"after\")",
+            prints("12\nafter"),
+        ),
+        (
+            "spawn_field",
+            "fn pa(x: int):\n    print(x + 1)\nfn pb(x: int):\n    print(x + 2)\nstruct H:\n    fs: List[fn(int) -> nil]\nh := H([pa, pb])\nk := 1\nparallel:\n    spawn h.fs[k](10)\nprint(\"after\")",
+            prints("12\nafter"),
+        ),
+        (
+            "spawn_module_global",
+            "import lib\nk := 1\nparallel:\n    spawn lib.ps[k](10)\nprint(\"after\")",
+            prints("12\nafter"),
         ),
         (
             "method_turbofish_wins",

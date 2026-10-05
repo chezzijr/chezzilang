@@ -2360,14 +2360,22 @@ impl Checker {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
                         let th = self.bare_type_head(n).expect("matched by the guard");
-                        self.written_head_args(
-                            n,
-                            self.type_param_count(&th.key),
-                            th.pinned,
-                            resolved,
-                            span,
-                        );
-                        Ty::Unknown
+                        let tps = self.type_params_of(&th.key);
+                        let decl = tps.as_ref().map_or(0, Vec::len);
+                        // A pinning or non-generic alias rejects its written args; an unpinned
+                        // generic alias (`type BB = Box`) takes them, as `BB[int](9)` does.
+                        match self.written_head_args(n, decl, th.pinned, resolved, span) {
+                            None => Ty::Unknown,
+                            Some(targs) => {
+                                self.check_type_arity_and_bounds(n, tps, &targs, span);
+                                match th.kind {
+                                    TypeHeadKind::Struct => Ty::Struct(th.key, targs),
+                                    TypeHeadKind::Enum => Ty::Enum(th.key, targs),
+                                    TypeHeadKind::Newtype => Ty::NewType(th.key, targs),
+                                    TypeHeadKind::Protocol => Ty::Unknown,
+                                }
+                            }
+                        }
                     }
                     _ => {
                         self.error(span, format!("unknown generic type '{n}'"));

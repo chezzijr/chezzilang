@@ -1972,6 +1972,7 @@ impl Compiler {
                     callee,
                     args,
                     named,
+                    bracket,
                     ..
                 } = &call.kind
                 else {
@@ -1980,6 +1981,18 @@ impl Compiler {
                         span,
                     });
                 };
+                // `spawn fs[k](10)`: the indexed element is the spawned value call.
+                if self.compile_index_call_head(
+                    fc,
+                    call.id,
+                    callee,
+                    bracket.as_deref(),
+                    call.span,
+                )? {
+                    let n = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
+                    fc.emit(Op::SpawnCall(n, self.crossing_mask(call.id)), call.span);
+                    return Ok(());
+                }
                 // M24-5b — `spawn Type.m(..)`: no receiver value to hold, so it rides the eager-args
                 // wrapper instead of `Op::SpawnMethod`.
                 if self.receiverless_call_head(callee)? {
@@ -4057,6 +4070,7 @@ impl Compiler {
             callee,
             args,
             named,
+            bracket,
             ..
         } = &call.kind
         else {
@@ -4065,6 +4079,12 @@ impl Compiler {
                 span,
             });
         };
+        // `defer fs[k](1)`: the indexed element is the deferred value call.
+        if self.compile_index_call_head(fc, call.id, callee, bracket.as_deref(), call.span)? {
+            let argc = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
+            fc.emit(Op::DeferCall(argc), call.span);
+            return Ok(());
+        }
         // M24-5b — `defer Type.m(..)`: no receiver value to hold, so it rides the eager-args wrapper
         // instead of `Op::DeferMethod`.
         if self.receiverless_call_head(callee)? {
@@ -4755,6 +4775,36 @@ impl Compiler {
         })
     }
 
+    /// `fs[k](10)`: when the checker chose the bracket's index reading (`Resolution::IndexCall`),
+    /// push the indexed element -- the head through its own recorded resolution, then the bracket,
+    /// then `GetIndex` -- and answer `true`; the caller then calls that value. The one reader of
+    /// `IndexCall`, for an eager call, a `defer` target and a `spawn` target alike.
+    fn compile_index_call_head(
+        &mut self,
+        fc: &mut FnComp,
+        call_id: crate::ast::NodeId,
+        callee: &Expr,
+        bracket: Option<&Expr>,
+        span: Span,
+    ) -> Result<bool, CompileError> {
+        if !matches!(
+            self.resolutions.get(&(self.current_module_idx, call_id.0)),
+            Some(Resolution::IndexCall)
+        ) {
+            return Ok(false);
+        }
+        let Some(ix) = bracket else {
+            return Err(CompileError {
+                message: "internal: an index-call has no bracket expression".to_string(),
+                span,
+            });
+        };
+        self.compile_expr(fc, callee)?;
+        self.compile_expr(fc, ix)?;
+        fc.emit(Op::GetIndex, span);
+        Ok(true)
+    }
+
     #[allow(clippy::too_many_arguments)] // the call's parts + its bracket reading + span + id
     fn compile_call(
         &mut self,
@@ -4766,20 +4816,7 @@ impl Compiler {
         span: Span,
         call_id: crate::ast::NodeId,
     ) -> Result<(), CompileError> {
-        // `fs[k](10)`: the checker chose the bracket's index reading. Index the head (its own
-        // recorded resolution lowers it), then call the element.
-        if let Some(Resolution::IndexCall) =
-            self.resolutions.get(&(self.current_module_idx, call_id.0))
-        {
-            let Some(ix) = bracket else {
-                return Err(CompileError {
-                    message: "internal: an index-call has no bracket expression".to_string(),
-                    span,
-                });
-            };
-            self.compile_expr(fc, callee)?;
-            self.compile_expr(fc, ix)?;
-            fc.emit(Op::GetIndex, span);
+        if self.compile_index_call_head(fc, call_id, callee, bracket, span)? {
             let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
             fc.emit(Op::Call(argc), span);
             return Ok(());
@@ -5081,8 +5118,6 @@ impl Compiler {
         Ok(true)
     }
 
-    /// A payload variant has no proto of its own; its value is this constructor fn (Rust
-    /// `E::<T>::V`), synthesized once per `(enum key, variant)`.
     /// The memoised proto of `T.method` as a value: a fn of `arity` params that calls `method` on
     /// its first, so it dispatches on the receiver's runtime type and needs no witness.
     fn param_method_fn_proto(&mut self, method: &str, arity: usize) -> ProtoId {
@@ -5110,6 +5145,8 @@ impl Compiler {
         p
     }
 
+    /// A payload variant has no proto of its own; its value is this constructor fn (Rust
+    /// `E::<T>::V`), synthesized once per `(enum key, variant)`.
     fn variant_fn_proto(&mut self, enum_key: &str, variant: &str, arity: usize) -> ProtoId {
         let k = (enum_key.to_string(), variant.to_string());
         if let Some(&p) = self.variant_fns.get(&k) {
