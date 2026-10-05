@@ -271,19 +271,11 @@ pub enum Obj {
         variant_id: u32,
         payload: Vec<Value>,
     },
-    /// A `newtype` instance — a DISTINCT nominal wrapper around a single `inner` value (the heap
-    /// analogue of a 1-field `Struct`). `type_key` is the newtype's runtime key. `inner` may be a heap
-    /// object, so it is GC-traced as a child. Method/protocol/hash/str dispatch reuses the struct/enum
-    /// paths via `Program::newtype_methods`; scalar operators unwrap→primitive-op→rewrap.
-    NewType {
-        type_key: Box<str>,
-        inner: Value,
-    },
     /// A heap-allocated mutable CELL — a single boxed `Value` behind a `GcRef`, the runtime home of a
     /// by-reference-captured local (uniform-capture feature, Task A). Two bindings holding the same
     /// cell handle observe each other's writes (`CellStore`), exactly like `List`/`bytearray` mutate
     /// through the shared slot. NON-LEAF: the inner value may be a heap object, so `children()` traces
-    /// it (like a 1-field `NewType`). `Value` is 16B, well within the 64B `Obj` cap.
+    /// it. `Value` is 16B, well within the 64B `Obj` cap.
     Cell(Value),
     /// A named function (top-level `fn` / method) + the module globals it resolves against.
     Func {
@@ -413,8 +405,7 @@ impl Obj {
             | Obj::Map(_)
             | Obj::Set(_)
             | Obj::Struct { .. }
-            | Obj::Enum { .. }
-            | Obj::NewType { .. } => Identity::Content,
+            | Obj::Enum { .. } => Identity::Content,
             // A global builtin fn value is carried by NAME and compares by name — a value, no core.
             Obj::Builtin(_) => Identity::Content,
             Obj::Channel(c) => core(Arc::as_ptr(c) as usize),
@@ -924,7 +915,6 @@ impl Heap {
             Obj::Struct { fields, .. } => fields.iter().for_each(&mut push),
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
             // The wrapped inner value may be a heap object — trace it (like a 1-field struct).
-            Obj::NewType { inner, .. } => push(inner),
             // A boxed local's cell: the inner value may be a heap object — trace it (like `NewType`).
             Obj::Cell(v) => push(v),
             Obj::Func { home, .. } => out.push(*home),

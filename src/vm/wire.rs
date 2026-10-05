@@ -280,14 +280,6 @@ pub enum WireValue {
         variant_id: u32,
         payload: Vec<WireValue>,
     },
-    /// A `newtype` crossing the airlock by value (deep copy) like a 1-field struct: its runtime
-    /// `type_key` (meaningful in any worker, shared `Arc<Program>`) plus its wired inner value. `id` as
-    /// [`List`](WireValue::List).
-    NewType {
-        id: u32,
-        type_key: Box<str>,
-        inner: Box<WireValue>,
-    },
     /// An `Obj::Cell` (a by-reference-captured local's heap box) crossing the airlock by value as a
     /// DEEP COPY: `from_wire` rebuilds a FRESH independent cell wrapping the wired inner value, so a
     /// plain captured local sent into a `spawn` task is an isolated per-task copy — never a shared
@@ -531,7 +523,6 @@ impl WireValue {
                 .any(|(_, k, v)| k.has_handle() || v.has_handle()),
             WireValue::Set { entries, .. } => entries.iter().any(|(_, e)| e.has_handle()),
             WireValue::Struct { fields, .. } => fields.iter().any(|(_, v)| v.has_handle()),
-            WireValue::NewType { inner, .. } => inner.has_handle(),
             // A cursor's snapshot items could themselves embed a `Handle` (e.g. a cursor over a list
             // of closures) — recurse so the snapshot fast-path stays honest.
             WireValue::Iter { items, .. } => items.iter().any(WireValue::has_handle),
@@ -587,7 +578,6 @@ impl WireValue {
             | WireValue::Iter { id, .. }
             | WireValue::Struct { id, .. }
             | WireValue::Enum { id, .. }
-            | WireValue::NewType { id, .. }
             | WireValue::Cell { id, .. }
             | WireValue::Closure { id, .. }
             | WireValue::Backref(id) => Some(*id),
@@ -642,10 +632,6 @@ impl WireValue {
                 WireValue::Struct { id, fields, .. } => {
                     defined.insert(*id);
                     fields.iter().all(|(_, v)| walk(v, defined, known))
-                }
-                WireValue::NewType { id, inner, .. } => {
-                    defined.insert(*id);
-                    walk(inner, defined, known)
                 }
                 // The rebuild short-circuits on a known id without descending — so must this.
                 WireValue::Cell { id, inner } => {

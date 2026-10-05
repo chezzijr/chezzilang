@@ -3582,7 +3582,6 @@ impl Vm {
                 | Obj::Set(_)
                 | Obj::Struct { .. }
                 | Obj::Enum { .. }
-                | Obj::NewType { .. }
                 | Obj::Iter { .. }
                 | Obj::Generator(_)
         )
@@ -3912,21 +3911,6 @@ impl Vm {
                 }
                 // A newtype crosses by value (deep copy), like a 1-field struct: carry its key + the
                 // wired inner. Sendable iff its inner is (the checker's `sendable_rec` agrees).
-                Obj::NewType { type_key, inner } => {
-                    if let Some(id) = memo.seen(h) {
-                        WireValue::Backref(id)
-                    } else {
-                        let id = memo.mint_node(h);
-                        memo.enter(h, id);
-                        let winner = self.to_wire_depth(*inner, depth + 1, memo)?;
-                        memo.exit(h);
-                        WireValue::NewType {
-                            id,
-                            type_key: type_key.clone(),
-                            inner: Box::new(winner),
-                        }
-                    }
-                }
                 // A frame-holding generator crosses the airlock BY VALUE as a DEEP COPY: its `proto`
                 // (shared via `Arc<Program>`), `home` index, backing closure, and lifecycle state, with
                 // every parked slot wired recursively so a non-sendable slot rejects AT SERIALIZE TIME.
@@ -4572,28 +4556,6 @@ impl Vm {
                 match self.heap.get_mut(h) {
                     Obj::Enum { payload, .. } => *payload = cloned,
                     _ => unreachable!("placeholder was alloc'd as Obj::Enum"),
-                }
-                Value::obj(h)
-            }
-            WireValue::NewType {
-                id,
-                type_key,
-                inner,
-            } => {
-                if let Some(h) = self.adopt_node(id) {
-                    rebuild.insert(id, h);
-                    self.from_wire_memo(*inner, rebuild);
-                    return Value::obj(h);
-                }
-                let h = self.heap.alloc(Obj::NewType {
-                    type_key,
-                    inner: Value::nil(),
-                });
-                rebuild.insert(id, h);
-                let inner_v = self.from_wire_memo(*inner, rebuild);
-                match self.heap.get_mut(h) {
-                    Obj::NewType { inner, .. } => *inner = inner_v,
-                    _ => unreachable!("placeholder was alloc'd as Obj::NewType"),
                 }
                 Value::obj(h)
             }
@@ -5949,10 +5911,6 @@ impl Vm {
                 // `to_wire`); replay reuses it as-is against the shared program.
                 SnapValue::Enum { variant_id, payload: out }
             }
-            Obj::NewType { type_key, inner } => SnapValue::NewType {
-                type_key,
-                inner: Box::new(self.to_snap_depth(inner, depth + 1, memo)?),
-            },
             Obj::Map(m) => {
                 let mut out = Vec::with_capacity(m.entries.len());
                 for (hash, k, val) in &m.entries {
@@ -6344,13 +6302,6 @@ impl Vm {
                 Value::obj(self.heap.alloc(Obj::Enum {
                     variant_id: *variant_id,
                     payload: p,
-                }))
-            }
-            SnapValue::NewType { type_key, inner } => {
-                let inner = self.replay_snap(inner, rb);
-                Value::obj(self.heap.alloc(Obj::NewType {
-                    type_key: type_key.clone(),
-                    inner,
                 }))
             }
             // Rebuild ONE independent cell per binding on the worker (deep copy, never shared with the

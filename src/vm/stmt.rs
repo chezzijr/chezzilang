@@ -431,12 +431,6 @@ impl Vm {
         self.program.enum_home.get(enum_key).copied().unwrap_or(0)
     }
 
-    /// The index of the module that declared the newtype keyed by `key` (home-globals for its
-    /// methods). Mirrors [`enum_home_module`]. Defaults to module 0 if unrecorded.
-    pub(super) fn newtype_home_module(&self, key: &str) -> usize {
-        self.program.newtype_home.get(key).copied().unwrap_or(0)
-    }
-
     /// Construct an enum from `Op::NewEnum`. M19 lever #2 — the dense `variant_id` is baked into the op
     /// at compile time (no runtime hash lookup); it is stamped onto the instance instead of the two
     /// per-instance type/variant `Box<str>`s. `variant` is used only for the arity-mismatch message.
@@ -1526,10 +1520,7 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let src: Vec<Value> = match args {
             [] => Vec::new(),
-            [one] => {
-                let it = self.unwrap_newtype_value(*one);
-                self.drain_iterable(it, span)?
-            }
+            [one] => self.drain_iterable(*one, span)?,
             _ => {
                 return Err(self.err(
                     format!("Set() expects 0 or 1 argument(s), got {}", args.len()),
@@ -1590,18 +1581,6 @@ impl Vm {
         Ok(Value::obj(self.heap.alloc(Obj::Set(built?))))
     }
 
-    /// Cast-unwrap a generic aggregate newtype to its inner value for `List(s)`/`Set(s)`/`Map(s)`: a
-    /// `Obj::NewType` (e.g. a `Stack[T] = List[T]`) peels to the wrapped collection. A non-newtype
-    /// value passes through. Type args are erased at runtime; the checker verified the underlying.
-    pub(super) fn unwrap_newtype_value(&self, v: Value) -> Value {
-        if let Some(h) = v.as_obj()
-            && let Obj::NewType { inner, .. } = self.heap.get(h)
-        {
-            return *inner;
-        }
-        v
-    }
-
     /// `List()` → a fresh empty list (the `List[T]()` turbofish form; mirrors `Set()`); `List(it)` →
     /// a list drained from ANY for-iterable.
     pub(super) fn builtin_list(
@@ -1611,10 +1590,7 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let items = match args {
             [] => Vec::new(),
-            [one] => {
-                let it = self.unwrap_newtype_value(*one);
-                self.drain_iterable(it, span)?
-            }
+            [one] => self.drain_iterable(*one, span)?,
             _ => {
                 return Err(self.err(
                     format!("List() expects 0 or 1 argument(s), got {}", args.len()),
@@ -1644,9 +1620,9 @@ impl Vm {
                 ));
             }
         };
-        let it = self.unwrap_newtype_value(*one);
-        // Cast-unwrapping a generic newtype over `Map[K, V]` (`Tally[T] = Map[T, int]`) yields the
-        // inner map DIRECTLY — a copy, not a re-iteration as 2-tuples (iterating a map gives keys).
+        let it = *one;
+        // `Map(m)` over a map yields a COPY of it, not a re-iteration as 2-tuples (iterating a map
+        // gives keys).
         if let Some(h) = it.as_obj()
             && let Obj::Map(inner) = self.heap.get(h)
         {
@@ -1852,31 +1828,22 @@ impl Vm {
         if let Some(b) = v.as_bool() {
             return Ok(Value::int(i64::from(b)));
         }
-        if let Some(h) = v.as_obj() {
-            match self.heap.get(h) {
-                Obj::Str(s) => {
-                    let s = s.to_string();
-                    return match parse_i64_pep515(s.trim()) {
-                        Ok(n) => Ok(self.make_int(n)),
-                        Err(IntParseErr::Overflow) => Err(self.err(
-                            format!(
-                                "int(): '{s}' overflows i64 (range -9223372036854775808..=9223372036854775807)"
-                            ),
-                            span,
-                        )),
-                        Err(IntParseErr::Malformed) => {
-                            Err(self.err(format!("int(): cannot parse '{s}' as an integer"), span))
-                        }
-                    };
+        if let Some(h) = v.as_obj()
+            && let Obj::Str(s) = self.heap.get(h)
+        {
+            let s = s.to_string();
+            return match parse_i64_pep515(s.trim()) {
+                Ok(n) => Ok(self.make_int(n)),
+                Err(IntParseErr::Overflow) => Err(self.err(
+                    format!(
+                        "int(): '{s}' overflows i64 (range -9223372036854775808..=9223372036854775807)"
+                    ),
+                    span,
+                )),
+                Err(IntParseErr::Malformed) => {
+                    Err(self.err(format!("int(): cannot parse '{s}' as an integer"), span))
                 }
-                // `int(newtype)` unwraps the inner value (the cast-unwrap path). The checker has
-                // already verified the underlying is `int`, so recursing yields the inner `Int`.
-                Obj::NewType { inner, .. } => {
-                    let inner = *inner;
-                    return self.builtin_int(&[inner], span);
-                }
-                _ => {}
-            }
+            };
         }
         Err(self.err(format!("int() cannot convert {}", self.type_name(v)), span))
     }
@@ -1898,25 +1865,14 @@ impl Vm {
         if let Some(b) = v.as_bool() {
             return Ok(self.box_float(f64::from(b)));
         }
-        if let Some(h) = v.as_obj() {
-            match self.heap.get(h) {
-                Obj::Str(s) => {
-                    let s = s.to_string();
-                    return match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok())
-                    {
-                        Some(f) => Ok(self.box_float(f)),
-                        None => {
-                            Err(self.err(format!("float(): cannot parse '{s}' as a float"), span))
-                        }
-                    };
-                }
-                // `float(newtype)` unwraps the inner (checker verified the underlying is float).
-                Obj::NewType { inner, .. } => {
-                    let inner = *inner;
-                    return self.builtin_float(&[inner], span);
-                }
-                _ => {}
-            }
+        if let Some(h) = v.as_obj()
+            && let Obj::Str(s) = self.heap.get(h)
+        {
+            let s = s.to_string();
+            return match strip_num_underscores(s.trim()).and_then(|t| t.parse::<f64>().ok()) {
+                Some(f) => Ok(self.box_float(f)),
+                None => Err(self.err(format!("float(): cannot parse '{s}' as a float"), span)),
+            };
         }
         Err(self.err(
             format!("float() cannot convert {}", self.type_name(v)),
@@ -1924,8 +1880,8 @@ impl Vm {
         ))
     }
 
-    /// `bool(x)` — total truthiness cast over the scalars. Never faults on int/float/bool/str
-    /// (+ scalar newtype-unwrap): int 0 -> false else true; float 0.0/-0.0 -> false, NaN -> true
+    /// `bool(x)` — total truthiness cast over the scalars. Never faults on int/float/bool/str:
+    /// int 0 -> false else true; float 0.0/-0.0 -> false, NaN -> true
     /// (Rust `f != 0.0` is already false for both zeros and true for NaN — matches Python), else
     /// true; bool -> identity; str "" -> false else true (non-empty is truthy — NOT a parse, so
     /// `bool(" ")` is true). A non-scalar arg faults exactly like `int()`/`float()`.
@@ -1945,16 +1901,10 @@ impl Vm {
         if let Some(b) = v.as_bool() {
             return Ok(Value::bool(b));
         }
-        if let Some(h) = v.as_obj() {
-            match self.heap.get(h) {
-                Obj::Str(s) => return Ok(Value::bool(!s.is_empty())),
-                // `bool(newtype)` unwraps the inner scalar (mirrors int/float's cast-unwrap).
-                Obj::NewType { inner, .. } => {
-                    let inner = *inner;
-                    return self.builtin_bool(&[inner], span);
-                }
-                _ => {}
-            }
+        if let Some(h) = v.as_obj()
+            && let Obj::Str(s) = self.heap.get(h)
+        {
+            return Ok(Value::bool(!s.is_empty()));
         }
         Err(self.err(format!("bool() cannot convert {}", self.type_name(v)), span))
     }
@@ -1965,21 +1915,6 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         self.arity_err("str", args, 1, span)?;
-        // `str` is dual: a `newtype N = str` with NO `str(self)` override UNWRAPS to its inner str
-        // (the cast-unwrap). A `str(self)` override OR any other underlying goes through `stringify`
-        // (the display cast — which itself honors the override). Mirrors the interp.
-        if let Some(h) = args[0].as_obj()
-            && let Obj::NewType { type_key, inner } = self.heap.get(h)
-            && let Some(ih) = inner.as_obj()
-            && matches!(self.heap.get(ih), Obj::Str(_))
-            && !self
-                .program
-                .newtype_methods
-                .get(type_key.as_ref())
-                .is_some_and(|m| m.contains_key("str"))
-        {
-            return Ok(Value::obj(ih));
-        }
         let s = self.stringify(args[0], span, 0)?;
         Ok(Value::obj(self.heap.alloc(Obj::Str(s.into()))))
     }
@@ -2187,7 +2122,6 @@ impl Vm {
                 Obj::Set(_) => "Set",
                 Obj::Struct { .. } => "struct",
                 Obj::Enum { .. } => "enum",
-                Obj::NewType { .. } => "newtype",
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
                 Obj::Module(_) => "module",
                 Obj::Native { .. } => "function",
@@ -2329,14 +2263,6 @@ impl Vm {
                 }
                 // Raw display fallback (no method dispatch here): `Name(inner)`. The `str(self)`
                 // override is honored by `stringify` (the path print/`str()` actually use).
-                Obj::NewType { type_key, inner } => {
-                    let display = crate::compiler::bare_display(type_key.as_ref());
-                    let inner = *inner;
-                    Ok(format!(
-                        "{display}({})",
-                        self.display_guarded(inner, depth + 1)?
-                    ))
-                }
                 Obj::Func { proto, .. } => Ok(format!("<fn {}>", self.program.protos[*proto].name)),
                 Obj::Closure { .. } => Ok("<closure>".to_string()),
                 Obj::Module(m) => Ok(format!("<module {}>", m.name)),
@@ -2511,12 +2437,6 @@ impl Vm {
                     format!("{variant}({inner})")
                 }
             }
-            WireValue::NewType {
-                type_key, inner, ..
-            } => {
-                let display = crate::compiler::bare_display(type_key.as_ref());
-                format!("{display}({})", self.display_wire(inner))
-            }
             WireValue::Channel(core) => {
                 // TICKET-042a — see the `Obj::Channel` arm above.
                 format!("Channel(len={})", core.q.lock().unwrap().len())
@@ -2676,20 +2596,11 @@ impl Vm {
         };
         let v = self.stack[self.stack.len() - 1]; // leave rooted; rendering may run user code
         let mut out = String::new();
-        // TICKET-142 (W14-19): a newtype over `int`/`float` (through any newtype chain) formats as
-        // its underlying number when a spec is present (`{N(7):04}` is `0007`, as Go's `%04d`).
-        // `v` stays on the stack and roots `inner`; a non-numeric newtype keeps the text-form path.
-        let mut num = v;
-        while let Some(h) = num.as_obj()
-            && let Obj::NewType { inner, .. } = self.heap.get(h)
-        {
-            num = *inner;
-        }
-        if let Some(n) = self.int_val(num) {
+        if let Some(n) = self.int_val(v) {
             crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Int(n), &mut out)
                 .map_err(|m| self.err(m, span))?;
-        } else if num.is_float() {
-            let x = self.float_of(num);
+        } else if v.is_float() {
+            let x = self.float_of(v);
             crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Float(x), &mut out)
                 .map_err(|m| self.err(m, span))?;
         } else if let Some(h) = v.as_obj()
@@ -2946,41 +2857,6 @@ impl Vm {
             }
             // A newtype honors a `str(self) -> str` override (Stringable) exactly like enum/struct;
             // else it renders `Name(inner)` (its raw `Display`).
-            Obj::NewType {
-                type_key,
-                mut inner,
-            } => {
-                if let Some(&proto) = self
-                    .program
-                    .newtype_methods
-                    .get(type_key.as_ref())
-                    .and_then(|m| m.get("str"))
-                    && self.program.protos[proto].arity == 1
-                {
-                    let home = self.module_objs[self.newtype_home_module(&type_key)];
-                    // The hook re-enters the VM and may start its own structural walk, so hand it
-                    // the depth this walk has already consumed — one shared budget (see
-                    // [`Vm::walk_base`]), not a fresh 10 000 per nesting level. The
-                    // `stringify_into(out, res, ...)` below runs AFTER `guarded_walk` restored, at
-                    // the outer `depth` — correct, it is the hook's RESULT, not a nested walk.
-                    let base = self.walk_base + depth;
-                    let res = self.guarded_walk(base, |vm| {
-                        vm.run_proto(proto, home, None, vec![Value::obj(h)], true, false, span)
-                    })?;
-                    if self.is_str_value(res) {
-                        return self.stringify_into(out, res, span, depth);
-                    }
-                    // Non-`str`: re-read the live rooted newtype before the default render
-                    // (GC-safety; see the struct arm).
-                    if let Obj::NewType { inner: cur, .. } = self.heap.get(h) {
-                        inner = *cur;
-                    }
-                }
-                let display = crate::compiler::bare_display(type_key.as_ref());
-                let _ = write!(out, "{display}(");
-                self.stringify_nested_into(out, inner, span, depth + 1)?;
-                out.push(')');
-            }
             Obj::Func { proto, .. } => {
                 let _ = write!(out, "<fn {}>", self.program.protos[proto].name);
             }

@@ -504,8 +504,6 @@ impl Compiler {
             structs: HashMap::new(),
             enum_methods: HashMap::new(),
             enum_home: HashMap::new(),
-            newtype_methods: HashMap::new(),
-            newtype_home: HashMap::new(),
             providers: Vec::new(),
             native_methods: HashMap::new(),
             native_home: HashMap::new(),

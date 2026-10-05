@@ -324,9 +324,6 @@ pub enum Op {
     /// Build a set from the top `n` values (deduped, insertion order kept). Mirrors `NewList`.
     NewSet(usize),
     NewStruct(String, usize),
-    /// Construct a `newtype` wrapper: pop ONE inner value off the stack, allocate an
-    /// `Obj::NewType { type_key, inner }`. The newtype analogue of a single-field `NewStruct`.
-    NewType(String),
     // ----- cells (uniform by-reference capture, Task A — unwired) -----
     /// Pop a value, allocate an `Obj::Cell(v)` heap box, push the cell handle. The box-at-decl op for
     /// a by-reference-captured local (emit wired in a later task).
@@ -705,17 +702,10 @@ pub struct Program {
     /// Enum runtime key → the index of the module that declared it, so an enum method resolves its
     /// top-level names against that module's globals (home-globals), mirroring `StructDef::module_idx`.
     pub enum_home: HashMap<String, usize>,
-    /// Newtype methods, keyed by the newtype's runtime key → (method name → its proto). The newtype
-    /// analogue of `enum_methods` (a newtype is a 1-field nominal wrapper). Looked up by
-    /// `do_method_call`, `resolve_overload_method` (str/hash), and the stringify/hash paths.
-    pub newtype_methods: HashMap<String, HashMap<String, ProtoId>>,
     /// Default-argument providers reachable by [`Op::MakeFuncIn`], indexed by the operand:
     /// `(the provider's proto, the index of the module that declares it)`. Built once every module is
     /// compiled — see `Compiler::build_provider_table`, which errors rather than shipping a hole.
     pub providers: Vec<(ProtoId, usize)>,
-    /// Newtype runtime key → the index of the module that declared it (home-globals for its methods),
-    /// mirroring `enum_home`.
-    pub newtype_home: HashMap<String, usize>,
     /// Native-struct BODIED methods, keyed by the reserved handle's bare name (`"Reader"`) → (method
     /// name → its proto). The native-handle analogue of `enum_methods`: a `native struct` (a reserved
     /// opaque VM handle — no `StructDef`/`tid`) may carry a pure-Chezzi `fn` (e.g. `Reader.lines`)

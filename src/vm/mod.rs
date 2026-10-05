@@ -1940,12 +1940,6 @@ enum SnapValue {
         name: Box<str>,
         fields: Vec<(Box<str>, SnapValue)>,
     },
-    /// A newtype wrapper — its runtime key + its (handle-bearing) inner snap. Reached only when the
-    /// inner embeds a handle (a pure-data newtype takes the `to_wire` fast path above).
-    NewType {
-        type_key: Box<str>,
-        inner: Box<SnapValue>,
-    },
     /// An `Obj::Cell` (a by-reference-captured local's box) embedding a handle — its inner snapped
     /// recursively, replayed as ONE independent cell per BINDING on the worker (design §4 F1). A
     /// pure-data cell takes the `to_wire` fast path above (`SnapValue::Wire(WireValue::Cell { .. })`).

@@ -481,18 +481,6 @@ impl Vm {
             self.box_float(f)
         } else {
             match (l.view(), r.view()) {
-                // Same-newtype arithmetic: `Meters + Meters` etc. UNWRAPS both wrappers, runs the
-                // underlying's NATIVE primitive op (identical overflow/div-by-zero/float semantics — it
-                // recurses through `self.binary` on the inners), then REWRAPS in the same newtype. This
-                // is NOT a user `add` method — it is the underlying's own op (distinct from struct
-                // overloading). The checker has rejected `Meters + float` / `Meters + Seconds`, so a
-                // mismatched pair never reaches here from typechecked code. Must precede struct_arith.
-                (ValueView::Obj(ha), ValueView::Obj(hb))
-                    if matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod)
-                        && self.same_newtype_keys(ha, hb) =>
-                {
-                    self.newtype_arith(op, ha, hb, name, span)?
-                }
                 // Arithmetic overloading: `+`/`-`/`*` on two structs (or two enums) dispatch to
                 // `add`/`sub`/`mul` (the `Add`/`Sub`/`Mul` protocols). The checker has verified
                 // conformance. Must precede the string-concat `Add` arm below (which would otherwise
@@ -766,99 +754,6 @@ impl Vm {
         self.reentered(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))
     }
 
-    /// Do `ha` and `hb` both hold a newtype with the SAME runtime key? (Drives same-type operator
-    /// auto-flow — `Meters + Meters`, never `Meters + Seconds`.)
-    pub(super) fn same_newtype_keys(&self, ha: GcRef, hb: GcRef) -> bool {
-        match (self.heap.get(ha), self.heap.get(hb)) {
-            (Obj::NewType { type_key: a, .. }, Obj::NewType { type_key: b, .. }) => a == b,
-            _ => false,
-        }
-    }
-
-    /// Same-newtype arithmetic: unwrap both inners, run the underlying's NATIVE primitive op (via the
-    /// scalar `arith_scalar` core — identical overflow/div-by-zero/float semantics as a raw int/float
-    /// op), then REWRAP in the same newtype key. NOT a user method (distinct from struct overloading).
-    pub(super) fn newtype_arith(
-        &mut self,
-        op: &Op,
-        ha: GcRef,
-        hb: GcRef,
-        name: &str,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let (key, a) = match self.heap.get(ha) {
-            Obj::NewType { type_key, inner } => (type_key.clone(), *inner),
-            _ => unreachable!(),
-        };
-        let b = match self.heap.get(hb) {
-            Obj::NewType { inner, .. } => *inner,
-            _ => unreachable!(),
-        };
-        let inner = self.arith_scalar(op, a, b, name, span)?;
-        Ok(Value::obj(self.heap.alloc(Obj::NewType {
-            type_key: key,
-            inner,
-        })))
-    }
-
-    /// The underlying primitive `+`/`-`/`*`/`/`/`%` on two scalar values (int or float), with the
-    /// SAME overflow / division-by-zero / float semantics as the inline `binary` arms. Shared by the
-    /// newtype same-type operator path so it byte-matches a raw int/float op.
-    pub(super) fn arith_scalar(
-        &mut self,
-        op: &Op,
-        a: Value,
-        b: Value,
-        name: &str,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        if self.is_integral(a) && self.is_integral(b) {
-            let (a, b) = (self.int_of(a), self.int_of(b));
-            let v = match op {
-                Op::Add => a.checked_add(b),
-                Op::Sub => a.checked_sub(b),
-                Op::Mul => a.checked_mul(b),
-                Op::Div | Op::Mod if b == 0 => {
-                    let kind = if matches!(op, Op::Div) {
-                        "division"
-                    } else {
-                        "modulo"
-                    };
-                    return Err(self.err(format!("{kind} by zero"), span));
-                }
-                Op::Div => a.checked_div(b),
-                // `wrapping_rem` never overflows past the `b == 0` guard above (see `fast_int_bin`'s
-                // `BinKind::Mod` arm) — wrap in `Some` so this shared overflow check never fires for Mod.
-                Op::Mod => Some(a.wrapping_rem(b)),
-                _ => unreachable!(),
-            };
-            let n = v.ok_or_else(|| self.err(format!("integer overflow in {name}"), span))?;
-            Ok(self.make_int(n))
-        } else if self.is_numeric(a) && self.is_numeric(b) {
-            let (x, y) = (self.as_f64(a), self.as_f64(b));
-            // Float arithmetic is total IEEE-754: division/modulo by zero yields inf/-inf/NaN,
-            // never a fault. (The INT arm above still faults on /0 and overflow.)
-            let f = match op {
-                Op::Add => x + y,
-                Op::Sub => x - y,
-                Op::Mul => x * y,
-                Op::Div => x / y,
-                Op::Mod => x % y,
-                _ => unreachable!(),
-            };
-            Ok(self.box_float(f))
-        } else {
-            Err(self.err(
-                format!(
-                    "cannot apply {name} to {} and {}",
-                    self.type_name(a),
-                    self.type_name(b)
-                ),
-                span,
-            ))
-        }
-    }
-
     /// Resolve `(proto, home_module_obj)` for an operator-overload method `method` on receiver `recv`
     /// — a struct (via `program.structs`) or an enum (via `program.enum_methods` + `enum_home`). The
     /// shared dispatch core for arithmetic and ordering overloads on both struct and enum values.
@@ -906,24 +801,6 @@ impl Vm {
             }
             // A newtype's overload/hook methods (`hash`/`str`/user methods) resolve via
             // `newtype_methods`, mirroring the enum path.
-            Obj::NewType { type_key, .. } => {
-                let key = type_key.to_string();
-                let proto = *self
-                    .program
-                    .newtype_methods
-                    .get(&key)
-                    .and_then(|ms| ms.get(method))
-                    .ok_or_else(|| {
-                        self.err(
-                            format!(
-                                "newtype '{}' has no '{method}' method",
-                                crate::compiler::bare_display(&key)
-                            ),
-                            span,
-                        )
-                    })?;
-                Ok((proto, self.module_objs[self.newtype_home_module(&key)]))
-            }
             _ => unreachable!("overload receiver is a struct, enum, or newtype"),
         }
     }
@@ -1110,24 +987,6 @@ impl Vm {
     pub(super) fn compare_op(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
         let r = self.pop();
         let l = self.pop();
-        // Same-newtype ordering: `Meters < Meters` UNWRAPS both and compares the underlyings with
-        // their NATIVE ordering (the checker rejected `Meters < float` / `< Seconds`). Not a user
-        // `compare` method — the underlying's native compare. Must precede the struct/enum overload.
-        if let (Some(hl), Some(hr)) = (l.as_obj(), r.as_obj())
-            && self.same_newtype_keys(hl, hr)
-        {
-            let a = match self.heap.get(hl) {
-                Obj::NewType { inner, .. } => *inner,
-                _ => unreachable!(),
-            };
-            let b = match self.heap.get(hr) {
-                Obj::NewType { inner, .. } => *inner,
-                _ => unreachable!(),
-            };
-            let bres = self.ordered_bool(op, a, b, span)?;
-            self.push(Value::bool(bres));
-            return Ok(());
-        }
         // TICKET-146: a same-kind tuple / List / Option pair orders lexicographically. MUST precede
         // the struct/enum gate below — an `Option` is an `Obj::Enum` with no `compare` method.
         if self.seq_pair(l, r) {
@@ -1386,13 +1245,11 @@ impl Vm {
         // is Obj-tagged and must be treated as the integral scalar it is.
         if let Some(h) = v.as_obj() {
             match self.heap.get(h) {
-                Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. } if depth > 0 => {
+                Obj::Struct { .. } | Obj::Enum { .. } if depth > 0 => {
                     let base = self.walk_base + depth;
                     self.guarded_walk(base, |vm| vm.hash_user(v, span))
                 }
-                Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. } => {
-                    self.hash_user(v, span)
-                }
+                Obj::Struct { .. } | Obj::Enum { .. } => self.hash_user(v, span),
                 // A tuple hashes by combining its elements' hashes, in order. Equal tuples hash
                 // equal because `values_equal` compares element-wise and each element's hash
                 // upholds the invariant. The tuple is rooted: an element's user `hash` can collect.
@@ -1430,7 +1287,7 @@ impl Vm {
         match self.heap.get(h) {
             Obj::Struct { .. } => self.struct_hash(v, span),
             Obj::Enum { .. } => self.enum_hash(v, span),
-            _ => self.newtype_hash(v, span),
+            _ => unreachable!("hash_user receiver is a struct or enum"),
         }
     }
 
@@ -1546,21 +1403,6 @@ impl Vm {
         }
     }
 
-    /// Dispatch a newtype key's user `hash(self) -> int` via the shared resolver (mirrors `enum_hash`;
-    /// re-entrant via `run_proto`). The checker guarantees a key-used newtype defines `hash`.
-    pub(super) fn newtype_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
-        let (proto, home) = self.resolve_overload_method(v, "hash", span)?;
-        let res =
-            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
-        match self.int_val(res) {
-            Some(n) => Ok(n as u64),
-            None => Err(self.err(
-                format!("hash() must return int, got {}", self.type_name(res)),
-                span,
-            )),
-        }
-    }
-
     /// Hash `key`, keeping `roots` alive on the operand stack across the call. A struct key's
     /// `hash()` re-enters the VM and can trigger GC; the map/set receiver and any in-flight
     /// key/value (already popped off the stack before dispatch) must be rooted or the collector
@@ -1595,7 +1437,7 @@ impl Vm {
             ValueView::Obj(h)
                 if matches!(
                     self.heap.get(h),
-                    Obj::Struct { .. } | Obj::Enum { .. } | Obj::NewType { .. } | Obj::Tuple(_)
+                    Obj::Struct { .. } | Obj::Enum { .. } | Obj::Tuple(_)
                 ) =>
             {
                 // A CYCLIC or OVER-DEEP key is stored BY REFERENCE (base behavior): a structural
@@ -1666,7 +1508,6 @@ impl Vm {
         let children: Vec<Value> = match self.heap.get(h) {
             Obj::Struct { fields, .. } => fields.as_slice().to_vec(),
             Obj::Enum { payload, .. } => payload.clone(),
-            Obj::NewType { inner, .. } => vec![*inner],
             Obj::List(items) | Obj::Tuple(items) => items.clone(),
             Obj::Map(m) => m
                 .entries
@@ -1778,16 +1619,6 @@ impl Vm {
                     .collect();
                 if let Obj::Enum { payload, .. } = self.heap.get_mut(nh) {
                     *payload = copied;
-                }
-                Value::obj(nh)
-            }
-            Obj::NewType { type_key, inner } => {
-                let (type_key, inner) = (type_key.clone(), *inner);
-                let nh = self.heap.alloc(Obj::NewType { type_key, inner });
-                visited.insert(h, nh);
-                let ci = self.snapshot_value(inner, visited, depth + 1);
-                if let Obj::NewType { inner, .. } = self.heap.get_mut(nh) {
-                    *inner = ci;
                 }
                 Value::obj(nh)
             }
@@ -1936,21 +1767,6 @@ impl Vm {
     }
 
     pub(super) fn compare(&self, l: Value, r: Value) -> Option<std::cmp::Ordering> {
-        // Numeric-newtype (`Comparable`) unwrap: a `List[newtype=int/float]` reaches `.min()`/`.max()`
-        // through here. Order by the wrapped scalar's NATIVE order — same as bare `<` (see `compare_op`),
-        // never a user `compare` method. Recurse one side per call → converges to scalar operands
-        // (handles both-newtype, defensive one-side, and nested `newtype B = A`). MUST precede the
-        // scalar fast paths below.
-        if let Some(ha) = l.as_obj()
-            && let Obj::NewType { inner, .. } = self.heap.get(ha)
-        {
-            return self.compare(*inner, r);
-        }
-        if let Some(hb) = r.as_obj()
-            && let Obj::NewType { inner, .. } = self.heap.get(hb)
-        {
-            return self.compare(l, *inner);
-        }
         // Both integral (inline or boxed) → exact i64 order. The both-integral arm above has
         // already returned, so at most one side of a mixed numeric pair is integral here — the
         // other side is always a boxed float (`is_numeric` is int | float | integral), so
@@ -2532,24 +2348,6 @@ impl Vm {
                             Ok(true)
                         })
                     }
-                    // Two newtypes are equal iff they are the SAME newtype (key) and their inners are
-                    // structurally equal. A different key is a distinct type ⇒ never equal.
-                    (
-                        Obj::NewType {
-                            type_key: ka,
-                            inner: ia,
-                        },
-                        Obj::NewType {
-                            type_key: kb,
-                            inner: ib,
-                        },
-                    ) => {
-                        if ka != kb {
-                            return Ok(false);
-                        }
-                        let (ia, ib) = (*ia, *ib);
-                        self.elem_equal(ia, ib, depth + 1, span)
-                    }
                     // Two first-class builtin-fn values are equal iff they name the SAME builtin. Each
                     // value-position use emits a fresh `Op::LoadBuiltin` → a distinct handle, so the
                     // `ha == hb` identity short-circuit above never fires; compare by name instead
@@ -2598,20 +2396,6 @@ impl Vm {
     /// int/float/str lists; str elements are read through the heap. Anything else compares Equal.
     pub(super) fn value_order(&self, a: Value, b: Value) -> std::cmp::Ordering {
         use std::cmp::Ordering::Equal;
-        // Numeric-newtype (`Comparable`) unwrap: a `List[newtype=int/float]` reaches `.sort()` through
-        // here. Order by the wrapped scalar's NATIVE order — same as bare `<` (see `compare_op`), never
-        // a user `compare` method. Recurse one side per call → converges to scalar operands. MUST
-        // precede the scalar fast paths below (without it a NewType falls to `_ => Equal` → silent no-op).
-        if let Some(ha) = a.as_obj()
-            && let Obj::NewType { inner, .. } = self.heap.get(ha)
-        {
-            return self.value_order(*inner, b);
-        }
-        if let Some(hb) = b.as_obj()
-            && let Obj::NewType { inner, .. } = self.heap.get(hb)
-        {
-            return self.value_order(a, *inner);
-        }
         // Homogeneous lists only (checker-enforced): both int (inline/boxed) → exact i64; both float
         // → `float_order`; both str → lexical. A mixed/other pair compares Equal.
         if self.is_integral(a) && self.is_integral(b) {

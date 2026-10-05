@@ -1765,8 +1765,6 @@ pub(crate) fn empty_program() -> Program {
         structs: Default::default(),
         enum_methods: Default::default(),
         enum_home: Default::default(),
-        newtype_methods: Default::default(),
-        newtype_home: Default::default(),
         providers: Default::default(),
         native_methods: Default::default(),
         native_home: Default::default(),

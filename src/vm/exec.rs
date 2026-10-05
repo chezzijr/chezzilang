@@ -2593,14 +2593,6 @@ impl Vm {
                 self.push(Value::obj(h));
             }
             Op::NewStruct(name, argc) => self.new_struct(name, *argc, span)?,
-            Op::NewType(type_key) => {
-                let inner = self.pop();
-                let h = self.heap.alloc(Obj::NewType {
-                    type_key: type_key.as_str().into(),
-                    inner,
-                });
-                self.push(Value::obj(h));
-            }
             // ----- cells (uniform by-reference capture, Task A — unwired) -----
             Op::NewCell => {
                 // `v` moves straight into the `Obj` (no rooting window — alloc never GCs mid-op,

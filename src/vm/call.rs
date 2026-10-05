@@ -1848,54 +1848,6 @@ impl Vm {
             }
             // Newtype method dispatch (name-resolved, like enums). Resolves `newtype_methods[key]
             // [method]` off the wrapper's `type_key`. The underlying's methods are NOT inherited.
-            Obj::NewType { type_key, .. } => {
-                let prog = Arc::clone(&self.program);
-                let nt_key = type_key.to_string();
-                let resolved = prog
-                    .newtype_methods
-                    .get(&nt_key)
-                    .and_then(|ms| ms.get(method).copied());
-                if let Some(proto) = resolved {
-                    let home = self.module_objs[self.newtype_home_module(&nt_key)];
-                    self.check_proto_arity(proto, argc + 1, span)?;
-                    if self.program.protos[proto].is_generator {
-                        let mut gen_args = Vec::with_capacity(argc + 1);
-                        gen_args.push(recv);
-                        gen_args.extend(args);
-                        let g = self.alloc_generator(proto, home, None, gen_args);
-                        self.push(g);
-                        return Ok(());
-                    }
-                    if ic != NO_IC {
-                        let base = self.stack.len();
-                        self.stack.push(recv);
-                        self.stack.extend(args);
-                        return self.push_frame_in_place(proto, home, None, base, span);
-                    }
-                    let mut call_args = Vec::with_capacity(argc + 1);
-                    call_args.push(recv);
-                    call_args.extend(args);
-                    let v = self.run_proto(proto, home, None, call_args, true, false, span)?;
-                    if self.paused() {
-                        return Ok(());
-                    }
-                    self.push(v);
-                    return Ok(());
-                }
-                // W6-3 — a SCALAR-underlying newtype intrinsically satisfies `Add`/`Sub`/`Mul`/`Div`/
-                // `Mod`/`Comparable` (`proto.rs`: its same-type `+`/`<` auto-flow to the underlying's
-                // native op, with no user method), so `a.add(b)`/`a.compare(b)` in an erased body
-                // answers with what `a + b` / `a < b` produce. Miss-only, so a newtype that DEFINES
-                // one of those methods got ITS method above (never shadowed) — and for that receiver
-                // the method and operator forms DIVERGE, because the operator always auto-flows to the
-                // underlying's native op. Known, out of scope to reconcile here: `docs/gaps.md` W6-3d.
-                if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
-                    self.push(v);
-                    return Ok(());
-                }
-                let display = crate::compiler::bare_display(&nt_key);
-                Err(self.err(format!("type {display} has no method '{method}'"), span))
-            }
             // W6-3 — a BOXED scalar (`Obj::BigInt`, and any other Obj-tagged scalar) is Obj-tagged, so
             // it never reaches the inline-scalar miss above and lands here instead: it must answer the
             // same intrinsic arith/`Hashable`/`Comparable` methods its inline twin does.
@@ -1924,13 +1876,9 @@ impl Vm {
         if let Some(def) = prog.structs.get(type_key) {
             return def.methods.get(method).map(|&p| (p, def.module_idx));
         }
-        if let Some(ms) = prog.enum_methods.get(type_key) {
-            return ms
-                .get(method)
-                .map(|&p| (p, self.enum_home_module(type_key)));
-        }
-        let p = *prog.newtype_methods.get(type_key)?.get(method)?;
-        Some((p, *prog.newtype_home.get(type_key)?))
+        let ms = prog.enum_methods.get(type_key)?;
+        ms.get(method)
+            .map(|&p| (p, self.enum_home_module(type_key)))
     }
 
     /// The one fn object for `key` in this heap (TICKET-215), and the only allocator of `Obj::Func`,
@@ -2714,24 +2662,6 @@ impl Vm {
         {
             return self.struct_compare(a, b, span);
         }
-        // Numeric-newtype (`Comparable`) unwrap — mirrors `value_order` (arith.rs) so `sort_by_key`/
-        // `.min()`/`.max()`/`.min_by`/`.max_by` on a `List[newtype=int/float]` order by the wrapped
-        // scalar's NATIVE order (never a user `compare`). MUST precede the `is_float` fast-path: a
-        // wrapper is `Obj`-tagged so `is_float()`/`is_numeric()` miss it, and a NaN newtype-float key
-        // would fault. Copy `*inner` to a local first to release the immutable `heap.get` borrow
-        // before the `&mut self` recursion (the sole shape difference from `&self` `value_order`).
-        if let Some(ha) = a.as_obj()
-            && let Obj::NewType { inner, .. } = self.heap.get(ha)
-        {
-            let inner = *inner;
-            return self.order_key(inner, b, span);
-        }
-        if let Some(hb) = b.as_obj()
-            && let Obj::NewType { inner, .. } = self.heap.get(hb)
-        {
-            let inner = *inner;
-            return self.order_key(a, inner, span);
-        }
         // Float keys order by `float_order` for the WHOLE comparison (not just the NaN case), exactly
         // mirroring `sort()`'s `value_order` Float arm — so `sort_by_key` and `sort()` agree on every
         // float pair: `-0.0`/`+0.0` are Equal (stable, first wins, like CPython) and NaN is
@@ -2937,7 +2867,7 @@ impl Vm {
             // branch calls `struct_compare` (a USER `compare`), and intrinsic dispatch must stay
             // miss-only so a user method always wins. A `±0.0` pair therefore still answers via
             // `self.compare` (IEEE-Equal) exactly as before — only NaN comes through here.
-            // `order_key`'s terminal `Err` is unreachable behind the `numeric_unwrapped` gate.
+            // `order_key`'s terminal `Err` is unreachable behind the `is_numeric` gate.
             // TICKET-146: a tuple / List / Option receiver walks lexicographically (total order).
             ("compare", 1) if self.seq_pair(recv, args[0]) => {
                 let other = args[0];
@@ -2945,7 +2875,7 @@ impl Vm {
             }
             ("compare", 1) => match self.compare(recv, args[0]) {
                 Some(ord) => Ok(Some(Value::int(ord as i64))),
-                None if self.numeric_unwrapped(recv) && self.numeric_unwrapped(args[0]) => {
+                None if self.is_numeric(recv) && self.is_numeric(args[0]) => {
                     let other = args[0];
                     Ok(Some(Value::int(self.order_key(recv, other, span)? as i64)))
                 }
@@ -3017,20 +2947,6 @@ impl Vm {
             }
             _ => Ok(None),
         }
-    }
-
-    /// Is `v` numeric AFTER unwrapping any `newtype` layers? The predicate `Vm::ordered_bool` applies
-    /// to decide "a `None` from `compare` means NaN → answer the total order, not incomparable types →
-    /// leave the caller's `has no method` standing" — but applied to the
-    /// values as `compare` sees them (it recurses through `Obj::NewType`, and `compare_op` unwraps a
-    /// same-newtype pair before calling `ordered_bool`), so `newtype M = float` answers like `float`.
-    fn numeric_unwrapped(&self, v: Value) -> bool {
-        if let Some(h) = v.as_obj()
-            && let Obj::NewType { inner, .. } = self.heap.get(h)
-        {
-            return self.numeric_unwrapped(*inner);
-        }
-        self.is_numeric(v)
     }
 
     /// `Option[int]` → the raw `Nil`/`Int` slice component `Vm::get_slice` expects. Gated on the
@@ -3571,49 +3487,13 @@ impl Vm {
                         Ok(Value::nil())
                     }
                     "sum" => {
-                        // A one-argument call carries the CHECKER's seed: either the `T(0)` seed for a
-                        // scalar numeric newtype list (a user cannot spell `.sum(x)` — the harvested
-                        // sig takes no parameters), folded through `newtype_arith`, the same
-                        // unwrap→native-op→rewrap path `Cents + Cents` takes, so overflow faults
-                        // identically and the result is `T`; or a bare `0.0` seed for a plain
-                        // `List[float]`, whose VALUE is the empty list's own answer and only has to
-                        // force the fold below into its float arm. The seed alone is the answer for an
-                        // EMPTY list either way.
+                        // A one-argument call carries the CHECKER's seed: a bare `0.0` for a plain
+                        // `List[float]` (a user cannot spell `.sum(x)` — the harvested sig takes no
+                        // parameters). Its VALUE is the empty list's own answer and only has to force
+                        // the fold below into its float arm.
                         let seed_is_float = if args.len() == 1 {
-                            let seed = args[0];
-                            if seed.is_float() {
-                                true
-                            } else {
-                                let elems = items.clone();
-                                let mut acc = seed;
-                                for &v in &elems {
-                                    // BELT-AND-BRACES, not load-bearing today. `acc` is a heap value held
-                                    // only in a Rust local across `newtype_arith`'s `heap.alloc`, which is
-                                    // the shape `with_roots` exists for — but no collection can land here:
-                                    // the only two `collect()` sites are `run_until`'s instruction boundary
-                                    // (`exec.rs`) and `sample_mem_cap` (per task dispatch, `sched.rs`);
-                                    // `Heap::alloc` merely bumps counters. Unlike the `values_equal_guarded`
-                                    // / `hash_value` `with_roots` sites nearby, `newtype_arith` is pure
-                                    // native and cannot re-enter the VM — the admitted set is exactly the
-                                    // INTRINSIC-`Add` set, so there is no user `add` hook to dispatch. Kept
-                                    // so the fold stays correct if a collect trigger ever moves.
-                                    acc = self.with_roots(&[Value::obj(h), acc, v], |vm| {
-                                        match (acc.as_obj(), v.as_obj()) {
-                                            (Some(ha), Some(hb)) if vm.same_newtype_keys(ha, hb) => {
-                                                vm.newtype_arith(&Op::Add, ha, hb, "Add", span)
-                                            }
-                                            _ => Err(vm.err(
-                                                format!(
-                                                    "sum() expects a numeric list, got an element of type {}",
-                                                    vm.type_name(v)
-                                                ),
-                                                span,
-                                            )),
-                                        }
-                                    })?;
-                                }
-                                return Ok(acc);
-                            }
+                            debug_assert!(args[0].is_float());
+                            true
                         } else {
                             self.arity_err("sum", args, 0, span)?;
                             false

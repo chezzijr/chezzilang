@@ -1548,7 +1548,6 @@ pub fn collect_gcrefs_structural(
         WireValue::Enum { payload, .. } => payload
             .iter()
             .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
-        WireValue::NewType { inner, .. } => collect_gcrefs_structural(inner, out, seen, pending),
         // A cell queued in a channel/executor roots its inner value's handles (like `NewType`).
         WireValue::Cell { inner, .. } => collect_gcrefs_structural(inner, out, seen, pending),
         // A cursor queued in a channel/executor roots its snapshot items' handles (like `List`).
@@ -1760,12 +1759,6 @@ pub fn wire_summary(w: &WireValue) -> (usize, bool) {
             })
         }
         WireValue::Enum { payload, .. } => payload.iter().for_each(|x| walk(&mut acc, x)),
-        WireValue::NewType {
-            type_key, inner, ..
-        } => {
-            acc.0 += type_key.len();
-            walk(&mut acc, inner)
-        }
         WireValue::Cell { inner, .. } => walk(&mut acc, inner),
         WireValue::Iter { items, .. } => items.iter().for_each(|x| walk(&mut acc, x)),
         WireValue::Generator { closure, state, .. } => {
@@ -1928,9 +1921,7 @@ fn nested_core_bytes_structural(
                 acc += nested_core_bytes_structural(x, seen, pending);
             }
         }
-        WireValue::NewType { inner, .. } | WireValue::Cell { inner, .. } => {
-            acc += nested_core_bytes_structural(inner, seen, pending)
-        }
+        WireValue::Cell { inner, .. } => acc += nested_core_bytes_structural(inner, seen, pending),
         WireValue::Iter { items, .. } => {
             for x in items {
                 acc += nested_core_bytes_structural(x, seen, pending);
