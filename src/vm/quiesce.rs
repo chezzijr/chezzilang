@@ -191,7 +191,7 @@ impl PartyWait {
             // A join is over exactly when the executor owes nothing BUT this joiner's own job. See
             // the variant's doc: answering a flat `false` here faulted an already-drained
             // `shutdown()`, and ignoring `slack` faulted a job that shut down its own executor.
-            PartyWait::Join(sched, slack) => sched.outstanding_tasks() <= *slack,
+            PartyWait::Join(sched, slack) => sched.lock().undone_tasks() <= *slack,
             // W7-58 — a nursery join is over exactly when the nursery can still move: the sched's OWN
             // deadlock predicate, minus its W7-56 outstanding-job veto.
             //

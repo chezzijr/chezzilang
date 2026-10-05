@@ -1314,7 +1314,7 @@ impl ExecutorCore {
     /// Jobs submitted and not yet finished. With [`held_bytes`](Self::held_bytes), the one facade
     /// over what an Executor holds outside every heap; every production reader goes through it.
     pub fn outstanding(&self) -> usize {
-        self.sched().map_or(0, |s| s.outstanding_tasks())
+        self.sched().map_or(0, |s| s.lock().undone_tasks())
     }
 
     /// This Executor's sched, when a `submit` has built it and no join has reduced it. Clones the

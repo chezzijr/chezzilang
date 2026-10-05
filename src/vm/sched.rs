@@ -311,23 +311,18 @@ impl Vm {
                 // Reserve the slot and claim the runners it needs in ONE core-lock hold. A scope
                 // whose join already closed it takes no new task: that is what makes a submit
                 // racing a `shutdown()` either rejected or counted by that join.
-                let (cancel, wids) = {
+                let wids = {
                     let mut c = sched.lock();
-                    let Some(cancel) = c
-                        .scopes
-                        .get(0)
-                        .filter(|s| s.body_open)
-                        .map(|s| Arc::clone(&s.cancel))
-                    else {
+                    if !c.scopes.get(0).is_some_and(|s| s.body_open) {
                         drop(c);
                         return Err(self.err(
                             "submit on a shut-down Executor (it no longer accepts work)"
                                 .to_string(),
                             span,
                         ));
-                    };
+                    }
                     sched.reserve_job_slot(&mut c, &mut fiber, charge);
-                    (cancel, sched.claim_runners(&mut c))
+                    sched.claim_runners(&mut c)
                 };
                 // At one worker the starter and the runner share the one runner slot (DEC-205): a
                 // thread still on its implicit slot turns it into a permit, so its waits and its
@@ -336,26 +331,7 @@ impl Vm {
                     width::convert();
                     self.slice_in_place = true;
                 }
-                let born_gated = worker_count() == 1 || width::gated();
-                let mut runner = true;
-                if let Some(core) = sched.detached.as_ref().and_then(|w| w.upgrade()) {
-                    core.runner_starts.fetch_add(wids.len(), Ordering::Relaxed);
-                }
-                for wid in wids {
-                    let shell = self.spawn_shell(&sched, &cancel);
-                    if spawn_worker_thread(
-                        shell,
-                        &sched,
-                        "chezzi-exec",
-                        wid,
-                        SENTINEL_SCOPE,
-                        born_gated,
-                    )
-                    .is_err()
-                    {
-                        runner = sched.unclaim_runner(wid);
-                    }
-                }
+                let runner = self.start_runners(&sched, wids);
                 if !runner {
                     // No thread can run it: fill the slot so no join waits for it.
                     {
@@ -539,14 +515,13 @@ impl Vm {
             let fiber = self
                 .prepare_worker(task, snap?, &cell_ids, fresh)?
                 .into_fiber(0, tail);
-            if let Some(n) = sched.inject_or_extend(fiber, tail)
+            let (opened, wids) = sched.inject_or_extend(fiber, tail);
+            if let Some(n) = opened
                 && let Some(Some(scope)) = self.eager_scheds.last_mut()
             {
                 scope.more_scopes.push(n);
             }
-            // TICKET-159 — a task injected while the outermost body is already blocked has no
-            // `close_body` to wait for: farm now (a no-op unless that body is blocked).
-            self.farm_blocked_body_helpers(&sched);
+            self.start_runners(&sched, wids);
             return Ok(());
         }
         self.nurseries[i].push(QueuedTask {
@@ -853,6 +828,7 @@ impl Vm {
         // behalf of a nursery owner, which never reaches `block_halt_check`.
         inner.quiesce = Arc::clone(&self.quiesce);
         let sched = Arc::new(inner);
+        sched.mark_all_runners_claimed();
         // W7-56 — publish the sched so an eager job's `send`/`close` (which runs with no sched of its
         // own) can wake a fiber parked here: `Vm::wake_on_send`.
         self.register_sched(&sched);
@@ -1200,10 +1176,9 @@ impl Vm {
             None => Arc::new(AtomicBool::new(false)),
         };
         let deadlock_err = self.err(DEADLOCK_MSG.to_string(), span).deadlock();
-        // wid 0 = inline join worker, wid 1 = the dedicated raw drainer below, wids 2..n = the pool
-        // helpers `join_eager_nursery` farms for an OUTERMOST scope, wids 2..n+1 = the raw helpers
-        // `farm_blocked_body_helpers` farms while the body is blocked (TICKET-159). `MnSched::new`
-        // allocates the per-worker local queues up front (`locals: (0..nworkers)`), so the count must
+        // wid 0 = the body's thread (body, then inline joiner), wid 1 = the dedicated raw drainer
+        // below, wids 2..=n = the raw runners `Vm::start_runners` starts on a claim (TICKET-211).
+        // An Executor claims wids 1..=n. `MnSched::new` allocates the per-worker local queues up front (`locals: (0..nworkers)`), so the count must
         // be sized here even though most of those workers are farmed later; an unused local queue is
         // inert.
         let nworkers = worker_count().max(1) + 1;
@@ -1259,6 +1234,12 @@ impl Vm {
             });
         }
         sched.open_body(0);
+        {
+            // TICKET-211 — the body's own thread (wid 0) and the drainer below (wid 1) are runners.
+            let mut c = sched.lock();
+            c.runner_wids[0] = true;
+            c.runner_wids[1] = true;
+        }
         let shell = self.spawn_shell(&sched, &cancel);
         let gate_body = self.mn.is_none() && worker_count() == 1;
         let born_gated = gate_body || width::gated();
@@ -1334,13 +1315,10 @@ impl Vm {
     /// acceptor's body fault, which the outer nursery then sees). Mirrors `run_mn_nursery`'s tail.
     ///
     /// §2c1 — two additions once the OUTERMOST nursery takes this path:
-    /// - **Pool helpers.** The body ran on one raw drainer, which is right for a server whose
-    ///   handlers park on sockets but would cost a CPU-bound fan-out (`examples/primes_parallel.chz`)
-    ///   every core but two. Once the body is CLOSED there is no acceptor left to starve, so farm the
-    ///   bounded pool exactly as `run_mn_nursery_outermost` does — same helper count, same
-    ///   `SENTINEL_SCOPE`, and the same thread-hold window (join → completion) as before this change.
-    ///   Only for an outermost scope: a NESTED eager join already runs on a worker thread whose pool
-    ///   siblings are busy, and farming there is what the old `worker_count() >= 2` gate was about.
+    /// - **The joiner claims its slot.** Runners are started at the spawn, never here
+    ///   (TICKET-211: `MnSched::claim_runners` in `inject_or_extend`, `Vm::start_runners`).
+    ///   `close_body` gives the body's runner bit back, and the inline joiner runs fibers only if
+    ///   `MnSched::claim_joiner` finds a slot left under the worker count.
     /// - **The W7-58 party guard.** The joiner used to be a worker shell by construction, so it was
     ///   never a counted party; a top-level joiner IS one, and without registering, `main` sitting in
     ///   `mn_worker_loop` is invisible to the process-wide verdict (`parties.len() < live` vetoes
@@ -1368,9 +1346,6 @@ impl Vm {
         // enclosing scope is the last scope again. It must NOT touch the sched's drainer or its other
         // scopes' slots — those belong to the owner's join. Mirrors `run_mn_nursery_nested`.
         if drainer.is_none() {
-            // TICKET-073 — a nested join farms its own raw runners from the `NestedDrainerSlot`
-            // budget, scaling this join with `--threads` the way the outermost arm below already does.
-            let helpers = self.farm_nested_eager_helpers(&sched, &cancel, sid);
             {
                 // §2c1 — the ENCLOSING body is parked here for the duration, so it cannot inject:
                 // clear its `body_open` veto or a genuine nested deadlock hangs.
@@ -1390,16 +1365,16 @@ impl Vm {
                 // TICKET-118 (W13-7) — only the top-level `Vm` (`mn.is_none()`) may hand its pool
                 // slot over while it waits here (DEC-052).
                 let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
+                // TICKET-211 — the body's block above handed its runner slot to the claim; this
+                // thread runs fibers only if the claim still has a slot for it.
+                let joiner = eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner();
                 // TICKET-103 — over the nursery's family: its continuation scopes hold the tasks
                 // spawned after a fiber registered a later scope on this sched.
                 for &s in &sids {
-                    if eager_joiner_runs_fibers(worker_count()) {
+                    if joiner {
                         shell.mn_worker_loop(&sched, 0, s);
                     }
                     sched.wait_for_scope(s);
-                }
-                for (h, _slot) in helpers {
-                    let _ = h.join();
                 }
             }
             let slots: Vec<_> = sids
@@ -1411,7 +1386,6 @@ impl Vm {
             }
             return self.reduce_task_slots(slots);
         }
-        self.farm_outermost_eager_helpers(&sched, &cancel);
         {
             let _party = self.nursery_party_guard(&sched);
             // TICKET-099 — this thread's OS-level block on `wait_for_completion` below counts as a
@@ -1423,9 +1397,9 @@ impl Vm {
             // TICKET-118 (W13-7) — only the top-level `Vm` (`mn.is_none()`) may hand its pool slot
             // over while it waits here (DEC-052).
             let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
-            // TICKET-159 — blocked-body helpers already fill the budget (drainer + `n - 1`), so the
-            // inline joiner stands down; it would be runner number `n + 1`.
-            if !sched.has_blocked_body_helpers() && eager_joiner_runs_fibers(worker_count()) {
+            // TICKET-211 — `close_body` gave the body's runner slot back; the inline joiner runs
+            // fibers only if the claim has a slot left (started runners may already fill it).
+            if eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner() {
                 shell.mn_worker_loop(&sched, 0, 0);
             }
             sched.wait_for_completion();
@@ -1433,7 +1407,7 @@ impl Vm {
         if let Some(h) = drainer {
             let _ = h.join();
         }
-        join_blocked_body_helpers(&sched);
+        join_helpers(&sched);
         // TICKET-164 — publish this run's pick count on the joining thread (read by
         // run_capture_counting_picks).
         #[cfg(test)]
@@ -1442,120 +1416,63 @@ impl Vm {
         self.reduce_task_slots(slots)
     }
 
-    /// TICKET-073 — farm RAW `chezzi-eager-helper` threads (never the bounded pool) for a NESTED
-    /// eager join, from the same [`NestedDrainerSlot`] budget the nursery's own drainer draws from.
-    /// The bounded pool is FIFO and fixed at `worker_count()`; a nested join runs while its enclosing
-    /// body is parked, so a pool-submitted helper would hold the pool while the scope it serves waits
-    /// for an `Executor` job queued behind it — measured, that hangs 21 `vm::tests` under
-    /// `--test-threads=28`. A raw thread is not a FIFO resource and has no such hazard.
-    ///
-    /// Returns an empty `Vec` when fewer than 2 tasks are outstanding (same reasoning as
-    /// `farm_outermost_eager_helpers`) or when the budget has no slot left, in which case the nested
-    /// join's own inline loop is the only runner, matching this shape's `--threads=1` behaviour. Each
-    /// returned handle is paired with the [`NestedDrainerSlot`] it holds, so the slot is released only
-    /// once the caller joins the thread.
-    fn farm_nested_eager_helpers(
-        &mut self,
-        sched: &Arc<MnSched>,
-        cancel: &Arc<AtomicBool>,
-        sid: usize,
-    ) -> Vec<(std::thread::JoinHandle<()>, NestedDrainerSlot)> {
-        let mut helpers = Vec::new();
-        if sched.outstanding_tasks() < 2 {
-            return helpers;
-        }
-        for wid in eager_helper_wids(worker_count()) {
-            let Some(slot) = NestedDrainerSlot::acquire() else {
-                break;
-            };
-            let shell = self.spawn_shell(sched, cancel);
-            let Ok(handle) = spawn_worker_thread(
-                shell,
-                sched,
-                "chezzi-eager-helper",
-                wid,
-                sid,
-                width::gated(),
-            ) else {
-                break;
-            };
-            helpers.push((handle, slot));
-        }
-        helpers
-    }
-
-    /// TICKET-159 (W13-27) — farm RAW `chezzi-eager-helper` threads onto an OUTERMOST eager sched
-    /// whose body is BLOCKED (a channel wait), so a CPU-bound fan-out queued on it does not run on the
-    /// drainer alone until `close_body`. Called at both moments the condition can become true: a task
-    /// injected after the body blocked (`register_task`) and the body's own block
-    /// (`blocked_bodies_guard_with`) — a flat nursery spawns everything BEFORE it blocks.
-    ///
-    /// Raw threads from the [`NestedDrainerSlot`] budget, never the pool, for the reason
-    /// `farm_nested_eager_helpers` records: the blocked body may be waiting on an `Executor` job
-    /// queued behind a pool helper that runs to global terminate (DEC-103 bullet 19). The handles are
-    /// stored on the sched for `join_eager_nursery` / `abort_eager_nursery` to join.
-    pub(super) fn farm_blocked_body_helpers(&self, sched: &Arc<MnSched>) {
-        if !sched.claim_blocked_body_helpers() {
-            return;
+    /// TICKET-211 — THE starter of runner threads: start one raw thread per wid
+    /// [`MnSched::claim_runners`] claimed, all `SENTINEL_SCOPE` (they drain the global queue until
+    /// `terminate`). An Executor's are `chezzi-exec` threads, counted in `runner_starts` and never
+    /// joined. Any other sched's are `chezzi-eager-helper` threads, each holding a
+    /// [`NestedDrainerSlot`] (never the pool, DEC-103), stored on the sched for `join_helpers`. A
+    /// denied slot or a failed spawn gives its wid back. Returns whether any runner remains, as
+    /// [`MnSched::unclaim_runner`] reports.
+    pub(super) fn start_runners(&self, sched: &Arc<MnSched>, wids: Vec<usize>) -> bool {
+        if wids.is_empty() {
+            return true;
         }
         let Some(cancel) = sched.scope_cancel(0) else {
-            sched.release_blocked_body_claim();
-            return;
+            for wid in wids {
+                sched.unclaim_runner(wid);
+            }
+            return false;
         };
-        let mut farmed = Vec::new();
-        for wid in blocked_body_helper_wids(worker_count()) {
-            let Some(slot) = NestedDrainerSlot::acquire() else {
-                break;
+        let exec = sched.detached.is_some();
+        if let Some(core) = sched.detached.as_ref().and_then(|w| w.upgrade()) {
+            core.runner_starts.fetch_add(wids.len(), Ordering::Relaxed);
+        }
+        let born_gated = (exec && worker_count() == 1) || width::gated();
+        let mut runner = true;
+        let mut helpers = Vec::new();
+        for wid in wids {
+            let slot = if exec {
+                None
+            } else if let Some(slot) = NestedDrainerSlot::acquire() {
+                Some(slot)
+            } else {
+                #[cfg(test)]
+                sched
+                    .quiesce
+                    .runner_slot_denials
+                    .fetch_add(1, Ordering::SeqCst);
+                runner = sched.unclaim_runner(wid);
+                continue;
             };
             let shell = self.spawn_shell(sched, &cancel);
-            let Ok(handle) = spawn_worker_thread(
-                shell,
-                sched,
-                "chezzi-eager-helper",
-                wid,
-                SENTINEL_SCOPE,
-                width::gated(),
-            ) else {
-                break;
+            let name = if exec {
+                "chezzi-exec"
+            } else {
+                "chezzi-eager-helper"
             };
-            farmed.push((handle, slot));
+            match spawn_worker_thread(shell, sched, name, wid, SENTINEL_SCOPE, born_gated) {
+                Ok(handle) => {
+                    if let Some(slot) = slot {
+                        helpers.push((handle, slot));
+                    }
+                }
+                Err(_) => runner = sched.unclaim_runner(wid),
+            }
         }
-        if farmed.is_empty() {
-            sched.release_blocked_body_claim();
-        } else {
-            sched.push_blocked_body_helpers(farmed);
+        if !helpers.is_empty() {
+            sched.push_helpers(helpers);
         }
-    }
-
-    /// §2c1 — farm the bounded pool onto an OUTERMOST eager sched whose body has just closed, so a
-    /// CPU-bound fan-out gets every core instead of the drainer + the inline joiner. `wid`s 2.. —
-    /// `0` is the inline joiner and `1` is the raw drainer; `activate_eager_nursery` sized `locals`
-    /// for all of them. SENTINEL, as in `run_mn_nursery_outermost`: drain the whole queue until
-    /// global terminate.
-    ///
-    /// Two guards, both measured:
-    /// - **nested scope** (`mn.is_some()`) — a nested eager join already runs on a worker thread
-    ///   whose pool siblings are busy; farming there is what the old `worker_count() >= 2` gate at
-    ///   `EnterNursery` was about.
-    /// - **fewer than 2 tasks left** — the inline joiner alone finishes those, so every submission
-    ///   would be pure overhead. That matters because a `parallel:` INSIDE A LOOP reaches this once
-    ///   per iteration: unguarded, a 20 000-iteration loop submitted ~200 000 pool jobs for nurseries
-    ///   holding a single task each.
-    fn farm_outermost_eager_helpers(&mut self, sched: &Arc<MnSched>, cancel: &Arc<AtomicBool>) {
-        // TICKET-159 — blocked-body helpers already occupy wids `2..n+1`; pool helpers on the same
-        // wids would share a local queue and exceed the budget.
-        if self.mn.is_some() || sched.has_blocked_body_helpers() || sched.outstanding_tasks() < 2 {
-            return;
-        }
-        for wid in eager_helper_wids(worker_count()) {
-            let mut shell = self.spawn_shell(sched, cancel);
-            let sched = Arc::clone(sched);
-            pool::submit(Box::new(move || {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    shell.mn_worker_loop(&sched, wid, SENTINEL_SCOPE)
-                }));
-            }));
-        }
+        runner
     }
 
     /// Per-connection spawn — reclaim an eager nursery whose body ESCAPED early (`?`/`return`/`break`/
@@ -1602,8 +1519,9 @@ impl Vm {
                 let _party = self.nursery_party_guard(&sched);
                 // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above,
                 // over the same family (TICKET-103).
+                let joiner = eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner();
                 for &s in &sids {
-                    if eager_joiner_runs_fibers(worker_count()) {
+                    if joiner {
                         shell.mn_worker_loop(&sched, 0, s);
                     }
                     sched.wait_for_scope(s);
@@ -1623,7 +1541,7 @@ impl Vm {
             // `main`, which must be a counted party for that span or the process-wide verdict vetoes
             // forever. No-op on a worker shell.
             let _party = self.nursery_party_guard(&sched);
-            if eager_joiner_runs_fibers(worker_count()) {
+            if eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner() {
                 shell.mn_worker_loop(&sched, 0, 0);
             }
             sched.wait_for_completion();
@@ -1631,7 +1549,7 @@ impl Vm {
         if let Some(h) = drainer {
             let _ = h.join();
         }
-        join_blocked_body_helpers(&sched);
+        join_helpers(&sched);
         let slots = sched.take_slots();
         // `reduce_task_slots` sets `self.pending_exit` for a handler `os.exit` (decision C — a hard
         // halt wins), which the catch site honors after the drain — so it is NOT lost. A handler
@@ -5408,7 +5326,7 @@ impl Vm {
         };
         let party = self.block_party_guard(PartyWait::Join(Arc::clone(&sched), slack));
         let leave = loop {
-            if sched.outstanding_tasks() <= slack {
+            if sched.lock().undone_tasks() <= slack {
                 break None;
             }
             if let Err(e) = self.block_halts(span) {
@@ -6492,28 +6410,12 @@ fn cancel_fiber_owned_family(scope: &EagerScope) {
     scope.sched.drain_family(scope.scope);
 }
 
-/// W8-8 — the wid range of the pool helpers an outermost eager nursery farms. wid 0 is the inline
-/// joiner and wid 1 the raw `chezzi-eager` drainer, both unconditional threads, so helpers start at
-/// 2 and the range end is the whole runner budget.
-pub(super) fn eager_helper_wids(n: usize) -> std::ops::Range<usize> {
-    2..n.max(2)
-}
-
-/// TICKET-159 (W13-27) — the wid range of the raw helpers an outermost eager sched farms while its
-/// BODY is blocked. There is no inline joiner then (the body is not at the join), so the budget is the
-/// drainer plus `n - 1` helpers `= n`. EMPTY at a budget of one, so W8-8's one-CPU-runner rule holds
-/// by construction. The range end is `n + 1`, which is why `activate_eager_nursery` sizes `locals`
-/// one larger than `eager_helper_wids` needs.
-pub(super) fn blocked_body_helper_wids(n: usize) -> std::ops::Range<usize> {
-    2..n.max(1) + 1
-}
-
-/// TICKET-159 — join the raw helpers `farm_blocked_body_helpers` farmed on `sched`. Called after
+/// TICKET-159/211 — join the raw helpers `Vm::start_runners` started on `sched`. Called after
 /// `wait_for_completion`, so every scope is done and the body is closed. A SENTINEL helper stops only
 /// on `terminate`, and `finish` latches that only for a task that completes while no body is open —
 /// when every task finished BEFORE `close_body` nothing else would, so latch it here first.
-fn join_blocked_body_helpers(sched: &Arc<MnSched>) {
-    let helpers = sched.take_blocked_body_helpers();
+fn join_helpers(sched: &Arc<MnSched>) {
+    let helpers = sched.take_helpers();
     if helpers.is_empty() {
         return;
     }
@@ -6524,8 +6426,8 @@ fn join_blocked_body_helpers(sched: &Arc<MnSched>) {
 }
 
 /// TICKET-073 — the one process-wide budget of EXTRA eager runner threads a NESTED eager nursery may
-/// spend: a per-nursery `chezzi-eager` drainer (`activate_eager_nursery`) and a nested join's raw
-/// `chezzi-eager-helper` threads (`farm_nested_eager_helpers`) both draw from it. Sized
+/// spend: a per-nursery `chezzi-eager` drainer (`activate_eager_nursery`) and the raw
+/// `chezzi-eager-helper` threads `Vm::start_runners` starts both draw from it. Sized
 /// `worker_count().max(2)` so the bound stays linear in `--threads` and independent of nesting depth
 /// and fan-out (see `src/vm/pool.rs`).
 static NESTED_EAGER_DRAINERS: AtomicUsize = AtomicUsize::new(0);
@@ -6648,11 +6550,9 @@ impl Drop for NestedDrainerSlot {
 /// (`activate_eager_nursery`'s `spawn(move || { catch_unwind(...) })`); the thread then exits with
 /// its scope's slots unfilled, and at `n == 1` there is nothing else left to fill them, so the
 /// joiner's `wait_for_completion`/`wait_for_scope` blocks forever. Pre-W8-8 the joiner's own fiber
-/// loop covered that. At `n >= 2` the cover differs BY ARM and only one of them has a fallback: the
-/// OUTERMOST arms farm pool helpers (`farm_outermost_eager_helpers`, called from
-/// `join_eager_nursery` alone) so a dead drainer still leaves runners behind. TICKET-073 — the NESTED
-/// arm now also farms runners (`farm_nested_eager_helpers`, raw `chezzi-eager-helper` threads from the
-/// `NestedDrainerSlot` budget, never the pool), so it has the same fallback whenever the budget has a
+/// loop covered that. At `n >= 2` a multi-task nursery also has the runners `Vm::start_runners`
+/// started on its claim (TICKET-211, raw `chezzi-eager-helper` threads from the `NestedDrainerSlot`
+/// budget, never the pool), so a dead drainer still leaves runners behind whenever the budget has a
 /// slot; only when the budget is empty does the joiner's own loop become the sole cover, closing the
 /// window at `n >= 2` purely because the gate lets that loop run. Requires a pre-existing scheduler bug
 /// to reach, so no code change here — recorded so the next reader sees the trade.

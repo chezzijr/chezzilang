@@ -9450,7 +9450,7 @@ fn inject_or_extend_opens_a_continuation_when_the_target_is_not_last() {
     let tok = Arc::new(AtomicBool::new(false));
     let s1 = s.register_scope(0, Arc::clone(&tok), Vec::new());
     let _s2 = s.register_scope(0, Arc::new(AtomicBool::new(false)), Vec::new());
-    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), s1), Some(3));
+    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), s1).0, Some(3));
     {
         let c = s.lock();
         assert_eq!(c.scopes[3].total, 1);
@@ -9460,8 +9460,45 @@ fn inject_or_extend_opens_a_continuation_when_the_target_is_not_last() {
             "the origin never grows past a later scope"
         );
     }
-    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), 3), None);
+    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), 3).0, None);
     assert_eq!(s.lock().scopes[3].total, 2);
+}
+
+/// TICKET-211 — the one runner claim never claims more than the worker count, a body block hands
+/// the body's slot to a fiber runner, and the joiner is refused once the budget is full. On a lazy
+/// sched (`run_mn_nursery_outermost`), whose runners are fixed at build, the claim starts nothing.
+#[test]
+fn claim_runners_never_exceeds_the_worker_count() {
+    let set_bits = |s: &MnSched| s.lock().runner_wids.iter().filter(|b| **b).count();
+    for n in 1..=12usize {
+        let s = MnSched::new(0, n + 1, Arc::new(AtomicBool::new(false)), dl_err(), 0);
+        {
+            let mut c = s.lock();
+            c.runner_wids[0] = true;
+            c.runner_wids[1] = true;
+        }
+        s.open_body(0);
+        for _ in 0..2 * n {
+            let _ = s.inject_or_extend(mk_pending_fiber(0), 0);
+            assert!(set_bits(&s) <= n.max(2), "n={n}: {} bits", set_bits(&s));
+        }
+        let _ = s.body_runner(true);
+        assert!(
+            !s.lock().runner_wids[0],
+            "n={n}: a blocked body frees bit 0"
+        );
+        assert_eq!(set_bits(&s), if n >= 2 { n } else { 1 }, "n={n}");
+        assert!(!s.claim_joiner(), "n={n}: the budget is full");
+
+        let lazy = MnSched::new(0, n, Arc::new(AtomicBool::new(false)), dl_err(), 0);
+        lazy.mark_all_runners_claimed();
+        let scope =
+            lazy.register_scope_seeded(Arc::new(AtomicBool::new(false)), Vec::new(), Vec::new());
+        for _ in 0..2 * n {
+            let (_, wids) = lazy.inject_or_extend(mk_pending_fiber(0), scope);
+            assert!(wids.is_empty(), "n={n}: the lazy sched claimed {wids:?}");
+        }
+    }
 }
 
 /// TICKET-128 — a scope-scoped owner stop must wait for every continuation scope of its family,
@@ -9472,7 +9509,7 @@ fn owner_stop_waits_for_every_continuation_scope_of_its_family() {
     let tok = Arc::new(AtomicBool::new(false));
     let s1 = s.register_scope(1, Arc::clone(&tok), Vec::new());
     let _s2 = s.register_scope(0, Arc::new(AtomicBool::new(false)), Vec::new());
-    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), s1), Some(3));
+    assert_eq!(s.inject_or_extend(mk_pending_fiber(0), s1).0, Some(3));
     let mut c = s.lock();
     c.scopes[s1].done = 1;
     assert!(
@@ -21153,61 +21190,6 @@ fn chezzi_threads_env_reaches_worker_count() {
             got, want,
             "CHEZZI_THREADS='{want}' did not reach worker_count() — the test-startup hook \
              (vm::test_baseline_worker_count) is not wired"
-        );
-    }
-}
-
-/// W8-8 — the runner-budget invariant: for every worker count `n`, the drainer (always 1) plus the
-/// farmed pool helpers (`eager_helper_wids`) plus the inline joiner (0 or 1, `eager_joiner_runs_fibers`)
-/// must sum to exactly `n`. At `n == 1` the drainer already holds the only slot, so the joiner must NOT
-/// also run a fiber loop — that was the W8-8 bug (`--threads=1` ran two CPU runners, user/real ≈ 1.91
-/// instead of ≈ 1.0). Pure-function check, no threads spawned.
-#[test]
-fn eager_runner_budget_sums_to_worker_count() {
-    for n in 1..=12usize {
-        let drainer = 1;
-        let helpers = sched::eager_helper_wids(n).len();
-        let joiner = usize::from(sched::eager_joiner_runs_fibers(n));
-        assert_eq!(
-            drainer + helpers + joiner,
-            n,
-            "runner budget mismatch at n={n}: drainer=1 + helpers={helpers} + joiner={joiner} != {n}"
-        );
-    }
-    assert!(
-        !sched::eager_joiner_runs_fibers(1),
-        "at --threads=1 the drainer already holds the only slot; the joiner must not also run fibers"
-    );
-    assert!(
-        sched::eager_joiner_runs_fibers(2),
-        "at --threads=2 there is a slot left after the drainer for the joiner"
-    );
-}
-
-/// TICKET-159 (W13-27) — the BLOCKED-BODY runner budget: while an outermost eager body is blocked
-/// there is no inline joiner, so the drainer (always 1) plus the farmed raw helpers
-/// (`blocked_body_helper_wids`) must sum to exactly `n`. The range must be EMPTY at `n == 1` (W8-8's
-/// one-CPU-runner rule by construction), start above the joiner's wid 0 and the drainer's wid 1, and
-/// end inside the `locals` `activate_eager_nursery` allocates (`n + 1`). Pure-function check.
-#[test]
-fn blocked_body_helper_wids_leave_one_runner_per_worker() {
-    assert!(sched::blocked_body_helper_wids(1).is_empty());
-    assert_eq!(sched::blocked_body_helper_wids(2).count(), 1);
-    assert_eq!(sched::blocked_body_helper_wids(8).count(), 7);
-    for n in 1..=12usize {
-        let r = sched::blocked_body_helper_wids(n);
-        assert!(
-            r.is_empty() || r.start == 2,
-            "wids 0 and 1 are the joiner and the drainer (n={n})"
-        );
-        assert!(
-            r.end <= n.max(1) + 1,
-            "wid range escapes the allocated locals at n={n}"
-        );
-        assert_eq!(
-            1 + r.len(),
-            n,
-            "blocked-body runner budget mismatch at n={n}"
         );
     }
 }

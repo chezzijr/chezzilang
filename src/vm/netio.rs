@@ -28,6 +28,10 @@ impl Drop for BlockGuard {
     fn drop(&mut self) {
         for (s, scope) in &self.bodies {
             s.set_body_wait(*scope, self.wait.as_ref(), false, self.awaiting);
+            // TICKET-211 — the body runs again on its own thread: it takes bit 0 back.
+            if *scope == 0 {
+                s.body_runner(false);
+            }
         }
     }
 }
@@ -2311,10 +2315,13 @@ impl Vm {
                 .collect(),
             wait,
         };
-        // TICKET-159 (W13-27) — the body just stopped injecting: farm runners for whatever it already
-        // queued. AFTER `set_body_wait` has published `body_blocked`, which the claim reads.
-        for (sched, _) in &g.bodies {
-            self.farm_blocked_body_helpers(sched);
+        // TICKET-211 — the body's thread just stopped running: its runner slot goes to the claim,
+        // which starts runners for whatever the body already queued.
+        for (sched, scope) in &g.bodies {
+            if *scope == 0 {
+                let w = sched.body_runner(true);
+                self.start_runners(sched, w);
+            }
         }
         g
     }

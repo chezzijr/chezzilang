@@ -2402,20 +2402,11 @@ struct MnSched {
     /// `runnable > 0` but nothing grabbed yet). `recruit` skips waking an idle sleeper while any
     /// worker is already spinning — a spinner will pick up the work on its own next pass.
     spinning: AtomicUsize,
-    /// TICKET-159 (W13-27) — lock-free pre-check for [`MnSched::claim_blocked_body_helpers`]: mirrors
-    /// the OUTERMOST body's (`scope 0`) `body_blocked`, written by `set_body_wait` inside its core-lock
-    /// hold. A stale read only delays or skips a farm attempt; the claim re-reads the real flag under
-    /// the lock.
-    body_blocked_hint: AtomicBool,
-    /// TICKET-159 — latch: the blocked-body helpers of this sched are farmed (or being farmed).
-    /// Released again when nothing could be farmed, so a denied budget never costs the join its inline
-    /// joiner or its pool helpers.
-    blocked_body_claimed: AtomicBool,
-    /// TICKET-159 — the raw `chezzi-eager-helper` threads farmed while the outermost body was blocked,
-    /// with the [`sched::NestedDrainerSlot`] each holds. They live on the sched because the thread that
-    /// farms them (a spawning fiber, or the body at its own block) is not the thread that joins them:
-    /// `join_eager_nursery` / `abort_eager_nursery` take them.
-    blocked_body_helpers: Mutex<Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)>>,
+    /// TICKET-159/211 — the raw `chezzi-eager-helper` threads `Vm::start_runners` started, with the
+    /// [`sched::NestedDrainerSlot`] each holds. They live on the sched because the thread that
+    /// starts them (a spawning fiber, or the body at its own block) is not the thread that joins
+    /// them: `join_eager_nursery` / `abort_eager_nursery` take them.
+    helpers: Mutex<Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)>>,
     /// TICKET-164 — fibers this sched handed to a worker (`Take::Run` from
     /// [`Self::take_runnable`]). Test-only; published per run by
     /// [`run_capture_counting_picks`].
@@ -2674,9 +2665,12 @@ struct SchedCore {
     /// entry is removed in the same lock hold as the pop that ends it (DEC-176).
     waiters: std::collections::HashMap<u64, crate::vm::block::Waiter>,
     next_waiter_tok: u64,
-    /// TICKET-208 — a detached sched's (an `Executor`'s) claimed runner wids, index 0 unused. Set by
-    /// `submit`'s top-up, cleared by the runner under this lock when it leaves.
-    exec_wids: Vec<bool>,
+    /// TICKET-211 — THE claim table of this sched's runner threads, one bit per wid. wid 0 = the
+    /// body's own thread (top-level main: body, then inline joiner); wid 1 = drainer; wids 2..=n =
+    /// started runners; an Executor sched never claims wid 0. Read and written only by
+    /// [`MnSched::claim_runners`] and its callers, under this lock; a runner clears its bit when it
+    /// leaves.
+    runner_wids: Vec<bool>,
     /// The scope a detached sched's next `submit` grows (see [`MnSched::reserve_slot`]).
     exec_tail: usize,
     /// `Executor(n)`'s cap on the jobs running at once; zero means no cap.
@@ -2932,7 +2926,7 @@ impl SchedCore {
     }
 
     fn release_runner(&mut self, wid: usize) {
-        if let Some(b) = self.exec_wids.get_mut(wid) {
+        if let Some(b) = self.runner_wids.get_mut(wid) {
             *b = false;
         }
     }
@@ -2997,7 +2991,7 @@ impl MnSched {
                 terminate: false,
                 waiters: std::collections::HashMap::new(),
                 next_waiter_tok: 0,
-                exec_wids: vec![false; nworkers.max(1)],
+                runner_wids: vec![false; nworkers.max(1)],
                 exec_tail: 0,
                 exec_limit: 0,
                 exec_active: 0,
@@ -3033,9 +3027,7 @@ impl MnSched {
             idle_cv: Condvar::new(),
             idle_sleepers: AtomicUsize::new(0),
             spinning: AtomicUsize::new(0),
-            body_blocked_hint: AtomicBool::new(false),
-            blocked_body_claimed: AtomicBool::new(false),
-            blocked_body_helpers: Mutex::new(Vec::new()),
+            helpers: Mutex::new(Vec::new()),
             #[cfg(test)]
             picks: AtomicUsize::new(0),
             #[cfg(test)]
@@ -3303,7 +3295,10 @@ impl MnSched {
     /// growing it never overruns a later scope's range.
     #[cfg(test)]
     fn inject(&self, fiber: Fiber, scope_id: usize) {
-        let opened = self.inject_or_extend(fiber, scope_id);
+        let (opened, wids) = self.inject_or_extend(fiber, scope_id);
+        for wid in wids {
+            self.unclaim_runner(wid);
+        }
         debug_assert!(
             opened.is_none(),
             "inject only grows the LAST scope (keeps flat slots contiguous)"
@@ -3320,13 +3315,17 @@ impl MnSched {
     /// caller must pass its nursery's TAIL scope, so the last scope still owns the slot tail
     /// (`retire_scope`). Same one-lock grow+runnable atomicity as `inject`; like `inject`, it
     /// does not un-latch `terminate`.
-    fn inject_or_extend(&self, mut fiber: Fiber, scope_id: usize) -> Option<usize> {
+    ///
+    /// TICKET-211 — also returns the runner wids the new work claims ([`MnSched::claim_runners`],
+    /// same lock hold); the caller starts them with `Vm::start_runners`.
+    fn inject_or_extend(&self, mut fiber: Fiber, scope_id: usize) -> (Option<usize>, Vec<usize>) {
         let mut c = self.lock();
         let opened = self.reserve_slot(&mut c, &mut fiber, scope_id, 0);
         self.enqueue_locked(&mut c, fiber);
+        let wids = self.claim_runners(&mut c);
         drop(c);
         self.notify_waiters();
-        opened
+        (opened, wids)
     }
 
     /// Make a reserved fiber runnable (the second half of [`MnSched::inject_or_extend`]).
@@ -3422,36 +3421,73 @@ impl MnSched {
         self.lock().is_job_scope(scope_id)
     }
 
-    /// The runner wids `Executor.submit` must start now: the first free wids while fewer runners
-    /// are claimed than `min(worker count, undone tasks)`. Called in the lock hold that reserved
-    /// the slot, so a runner leaving (it clears its claim under this lock) is never counted.
+    /// TICKET-211 — THE runner-count decision: the wids the caller must start now (`Vm::start_runners`).
+    /// Claims free wids while fewer than `n` (the worker count) are set and fewer fiber runners than
+    /// undone tasks run. The body's own thread (bit 0 while scope 0's body is open) counts toward `n`
+    /// but runs no fiber. For an Executor (bit 0 never set) this is `min(n, undone)`. Called in the
+    /// lock hold that made the work runnable, so a runner leaving (it clears its bit under this
+    /// lock) is never counted.
     fn claim_runners(&self, c: &mut SchedCore) -> Vec<usize> {
-        let undone: usize = c
-            .scopes
-            .values()
-            .map(|s| s.total.saturating_sub(s.done))
-            .sum();
-        let want = (c.exec_wids.len() - 1).min(undone);
-        let mut claimed = c.exec_wids.iter().filter(|b| **b).count();
+        let budget = c.runner_wids.len() - 1;
+        let undone = c.undone_tasks();
+        let mut claimed = c.runner_wids.iter().filter(|b| **b).count();
+        let body = c.runner_wids[0] && c.scopes.get(0).is_some_and(|s| s.body_open);
+        let mut fiber_runners = claimed - usize::from(body);
         let mut out = Vec::new();
-        for wid in 1..c.exec_wids.len() {
-            if claimed >= want {
+        for wid in 1..c.runner_wids.len() {
+            if claimed >= budget || fiber_runners >= undone {
                 break;
             }
-            if !c.exec_wids[wid] {
-                c.exec_wids[wid] = true;
+            if !c.runner_wids[wid] {
+                c.runner_wids[wid] = true;
                 claimed += 1;
+                fiber_runners += 1;
                 out.push(wid);
             }
         }
         out
     }
 
+    /// TICKET-211 — the body's own thread stops (`blocked`) or resumes running: it gives bit 0 back
+    /// or takes it again, in one lock hold. A blocked body returns the runners its freed slot
+    /// claims; the caller starts them. A no-op for an Executor, which has no body thread.
+    pub(super) fn body_runner(&self, blocked: bool) -> Vec<usize> {
+        if self.detached.is_some() {
+            return Vec::new();
+        }
+        let mut c = self.lock();
+        c.runner_wids[0] = !blocked;
+        if blocked {
+            self.claim_runners(&mut c)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// TICKET-211 — may the closed body's thread run fibers as the inline joiner? Only under the
+    /// cap: it claims bit 0 when fewer than `n` bits are set.
+    pub(super) fn claim_joiner(&self) -> bool {
+        let mut c = self.lock();
+        let claimed = c.runner_wids.iter().filter(|b| **b).count();
+        if claimed < c.runner_wids.len() - 1 {
+            c.runner_wids[0] = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// TICKET-211 — the lazy sched's runners are fixed at build -- the owner on wid 0 and pool
+    /// helpers on wids 1..n -- so the claim must never start another.
+    pub(super) fn mark_all_runners_claimed(&self) {
+        self.lock().runner_wids.fill(true);
+    }
+
     /// A runner thread could not start: give its claim back. Returns whether any runner is left.
     fn unclaim_runner(&self, wid: usize) -> bool {
         let mut c = self.lock();
-        c.exec_wids[wid] = false;
-        c.exec_wids.iter().any(|b| *b)
+        c.runner_wids[wid] = false;
+        c.runner_wids.iter().any(|b| *b)
     }
 
     /// What this sched holds outside every heap: the submit-time bytes of its unfinished tasks plus
@@ -3523,8 +3559,16 @@ impl MnSched {
     /// Per-connection spawn — `scope_id`'s eager body reached `JoinNursery`: no more injections. Clear
     /// the flag and wake every worker so the run-out-of-work path can terminate (all scopes done) or
     /// fire a genuine deadlock now that the body is no longer live work.
+    /// TICKET-211 — closing scope 0 also gives the body's runner bit back: the thread is no longer
+    /// the body, and runs fibers only if [`MnSched::claim_joiner`] lets it.
     fn close_body(&self, scope_id: usize) {
-        self.lock().scopes[scope_id].body_open = false;
+        {
+            let mut c = self.lock();
+            c.scopes[scope_id].body_open = false;
+            if scope_id == 0 {
+                c.runner_wids[0] = false;
+            }
+        }
         self.notify_waiters();
     }
 
@@ -3550,83 +3594,20 @@ impl MnSched {
         c.slots.truncate(end);
     }
 
-    /// §2c1 — how many of this sched's tasks are still unfinished, across every scope. Used by
-    /// `Vm::farm_outermost_eager_helpers` to skip the pool entirely for a nursery the inline joiner
-    /// can finish alone.
-    pub(super) fn outstanding_tasks(&self) -> usize {
-        let c = self.lock();
-        c.scopes
-            .values()
-            .map(|s| s.total.saturating_sub(s.done))
-            .sum()
-    }
-
-    /// TICKET-159 (W13-27) — should the caller farm runners for this sched NOW, because its OUTERMOST
-    /// body is blocked on a channel wait and at least two tasks are outstanding? True at most once per
-    /// claim: the caller then owns the farm and MUST end it with `push_blocked_body_helpers` or
-    /// `release_blocked_body_claim`.
-    ///
-    /// Refuses a private nested sched (`body_is_fiber`: its body is a fiber of another sched), a body
-    /// parked in a nested nursery's join (`awaiting_builder`: that join farms its own runners), and a
-    /// fewer-than-two backlog (the same guard `farm_outermost_eager_helpers` keeps).
-    pub(super) fn claim_blocked_body_helpers(&self) -> bool {
-        if self.body_is_fiber
-            || self.blocked_body_claimed.load(Ordering::Acquire)
-            || !self.body_blocked_hint.load(Ordering::Relaxed)
-        {
-            return false;
-        }
-        {
-            let c = self.lock();
-            let s = &c.scopes[0];
-            if !(s.body_open && s.body_blocked && !s.awaiting_builder) {
-                return false;
-            }
-            let outstanding: usize = c
-                .scopes
-                .values()
-                .map(|s| s.total.saturating_sub(s.done))
-                .sum();
-            if outstanding < 2 {
-                return false;
-            }
-        }
-        self.blocked_body_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    }
-
-    /// TICKET-159 — give the claim back: nothing was farmed.
-    pub(super) fn release_blocked_body_claim(&self) {
-        self.blocked_body_claimed.store(false, Ordering::Release);
-    }
-
-    /// TICKET-159 — are blocked-body helpers farmed on this sched? Read by the join to stand its
-    /// inline joiner down and to skip the join-time pool farm, so the runner count stays at
-    /// `worker_count()`.
-    pub(super) fn has_blocked_body_helpers(&self) -> bool {
-        self.blocked_body_claimed.load(Ordering::Acquire)
-    }
-
-    pub(super) fn push_blocked_body_helpers(
+    pub(super) fn push_helpers(
         &self,
         v: Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)>,
     ) {
-        self.blocked_body_helpers
+        self.helpers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .extend(v);
     }
 
-    pub(super) fn take_blocked_body_helpers(
+    pub(super) fn take_helpers(
         &self,
     ) -> Vec<(std::thread::JoinHandle<()>, sched::NestedDrainerSlot)> {
-        std::mem::take(
-            &mut *self
-                .blocked_body_helpers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        )
+        std::mem::take(&mut *self.helpers.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// TICKET-159 — `finish`'s completion latch, for a caller that observed the completion itself:
@@ -3688,9 +3669,6 @@ impl MnSched {
             // TICKET-103 — the whole family, in this same acquisition: an unmarked continuation keeps
             // `all_incomplete_awaiting_builder` false and lets the predicate fault a sibling the body
             // feeds after its nested join.
-            if scope_id == 0 {
-                self.body_blocked_hint.store(blocked, Ordering::Relaxed);
-            }
             // TICKET-199 — a retired `scope_id` has an empty family, so this is a no-op for it.
             let family = c.scope_family(scope_id);
             for i in family {
