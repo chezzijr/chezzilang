@@ -2491,17 +2491,14 @@ impl Checker {
     }
 
     /// The type head of a member path's receiver `obj`, with its written type arguments: `Bx`,
-    /// `Bx[int]`, `vlib.R2[int, str]`, or an alias `B`. An alias takes no type arguments, so
-    /// `A[int]` is no type path.
+    /// `Bx[int]`, `vlib.R2[int, str]`, or an alias `B`. An alias given type arguments (`A[int]`)
+    /// is still a type path; its readers reject it through [`Self::written_head_args`].
     fn peel_type_path(&self, obj: &Expr) -> Option<(TypeHead, Option<WrittenTypeArgs>)> {
         let (head, args) = match crate::ast::type_application(obj) {
             Some(app) => (app.head, Some((app.args, app.args_span))),
             None => (obj, None),
         };
         let th = self.type_head(head)?;
-        if th.pinned.is_some() && args.is_some() {
-            return None;
-        }
         Some((th, args))
     }
 
@@ -2611,10 +2608,56 @@ impl Checker {
         })
     }
 
+    /// The one decision for a type head given type arguments, in every position: an alias
+    /// (`pinned` is `Some`, even `Some([])` for a non-generic alias) given written args reports
+    /// that it already fixes its arguments and answers `None`. Else the written args when there are
+    /// any, else the alias's pinned args, else none. A new site calls this; it never tests `pinned`.
+    pub(super) fn written_head_args(
+        &mut self,
+        spelled: &str,
+        decl_params: usize,
+        pinned: Option<Vec<Ty>>,
+        written: Vec<Ty>,
+        span: Span,
+    ) -> Option<Vec<Ty>> {
+        if head_args_clash(pinned.as_deref(), decl_params, !written.is_empty()) {
+            self.error(
+                span,
+                format!(
+                    "type alias '{spelled}' already fixes its type arguments; write the aliased type to pass your own"
+                ),
+            );
+            return None;
+        }
+        if written.is_empty() {
+            Some(pinned.unwrap_or_default())
+        } else {
+            Some(written)
+        }
+    }
+
+    /// How many type params the struct, enum or newtype keyed `key` declares.
+    pub(super) fn type_param_count(&self, key: &str) -> usize {
+        if let Some(info) = self.struct_shape(key) {
+            return info.type_params.len();
+        }
+        if let Some(tps) = self.enum_type_params.get(key) {
+            return tps.len();
+        }
+        self.newtype_type_params_of(key).map_or(0, |tps| tps.len())
+    }
+
     /// The one place head args become a substitution for a `&self` reader: the alias-pinned args,
     /// else the written ones (resolved with `resolve_ty_ro`), else none (`pf` unchanged). `None` on
     /// an arity mismatch, which [`Self::path_fn_value_ty`] reports at the read.
     fn pin_path_head(&self, mut pf: PathFn) -> Option<PathFn> {
+        if head_args_clash(
+            pf.head_pinned.as_deref(),
+            pf.head_decl.len(),
+            pf.head_args.is_some(),
+        ) {
+            return None;
+        }
         let args: Vec<Ty> = if let Some(p) = &pf.head_pinned {
             p.clone()
         } else if let Some((a, _)) = &pf.head_args {
@@ -2660,13 +2703,25 @@ impl Checker {
         let own = pf.sig.type_params[pf.head_params..].to_vec();
         let mut map = HashMap::new();
         let mut arity_ok = true;
-        if let Some((args, aspan)) = &pf.head_args {
-            let resolved: Vec<Ty> = args.iter().map(|t| self.resolve_type(t, *aspan)).collect();
-            arity_ok &= resolved.len() == pf.head_decl.len();
-            map.extend(self.seed_targs(&pf.head_spelled, &pf.head_decl, &resolved, span));
-        } else if let Some(pinned) = &pf.head_pinned {
-            for (tp, t) in pf.head_decl.iter().zip(pinned) {
-                map.insert(tp.name.clone(), t.clone());
+        let written: Vec<Ty> = match &pf.head_args {
+            Some((args, aspan)) => args.iter().map(|t| self.resolve_type(t, *aspan)).collect(),
+            None => Vec::new(),
+        };
+        let Some(head) = self.written_head_args(
+            &pf.head_spelled,
+            pf.head_decl.len(),
+            pf.head_pinned.clone(),
+            written,
+            span,
+        ) else {
+            return Ty::Unknown;
+        };
+        if pf.head_args.is_some() {
+            arity_ok &= head.len() == pf.head_decl.len();
+            map.extend(self.seed_targs(&pf.head_spelled, &pf.head_decl, &head, span));
+        } else {
+            for (tp, t) in pf.head_decl.iter().zip(head) {
+                map.insert(tp.name.clone(), t);
             }
         }
         if let Some((args, aspan)) = &own_args {
@@ -2812,18 +2867,29 @@ impl Checker {
             // an alias head pins its own, a bare head leaves them Unknown.
             self.record_variant(id, &key, name, name_span);
             let tps = self.enum_type_params.get(&key).cloned().unwrap_or_default();
-            let args = if let Some((targs, _)) = &head_args {
-                let resolved: Vec<Ty> = targs
+            let written: Vec<Ty> = match &head_args {
+                Some((targs, _)) => targs
                     .iter()
                     .map(|t| self.resolve_type(t, obj.span))
-                    .collect();
-                self.seed_targs(&spelled, &tps, &resolved, obj.span);
-                resolved
+                    .collect(),
+                None => Vec::new(),
+            };
+            let Some(head) = self.written_head_args(
+                &spelled,
+                self.type_param_count(&key),
+                th.pinned.clone(),
+                written,
+                obj.span,
+            ) else {
+                return Some(Ty::Unknown);
+            };
+            let args = if head_args.is_some() {
+                self.seed_targs(&spelled, &tps, &head, obj.span);
+                head
+            } else if head.len() == tps.len() {
+                head
             } else {
-                match th.pinned {
-                    Some(p) if p.len() == tps.len() => p,
-                    _ => vec![Ty::Unknown; tps.len()],
-                }
+                vec![Ty::Unknown; tps.len()]
             };
             return Some(Ty::Enum(key, args));
         }
@@ -4329,7 +4395,23 @@ impl Checker {
         if let Some(app) = crate::ast::type_application(e)
             && let Some(th) = self.type_head(app.head)
         {
-            self.type_not_value(&th, e.span);
+            let written: Vec<Ty> = app
+                .args
+                .iter()
+                .map(|t| self.resolve_type(t, e.span))
+                .collect();
+            if self
+                .written_head_args(
+                    &th.spelled,
+                    self.type_param_count(&th.key),
+                    th.pinned.clone(),
+                    written,
+                    e.span,
+                )
+                .is_some()
+            {
+                self.type_not_value(&th, e.span);
+            }
             return Ty::Unknown;
         }
         self.index_value(obj, index)
@@ -5590,6 +5672,15 @@ pub(super) fn fn_spelling(display: &str, tps: &[TyParam]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{display}[{holes}]")
+}
+
+/// Does a head with alias-pinned args `pinned` over a type declaring `decl_params` params clash
+/// with written type args (DEC-204: an alias that fixes its arguments takes no more)? A pinning
+/// alias (`type BI = Bx[int]`) and a non-generic one (`type P2 = P`) clash; an unpinned alias of a
+/// generic type (`type BB = Box`, TICKET-180) takes the target's arguments and does not. The one
+/// predicate under [`Checker::written_head_args`].
+pub(super) fn head_args_clash(pinned: Option<&[Ty]>, decl_params: usize, written: bool) -> bool {
+    written && pinned.is_some_and(|p| !p.is_empty() || decl_params == 0)
 }
 
 /// A method sig as a value over its type's params `tps` (DEC-197: through `instantiate_method`):

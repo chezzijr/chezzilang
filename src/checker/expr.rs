@@ -556,10 +556,20 @@ impl Checker {
             if let Some((th, type_exprs)) = self.type_apply_head(obj) {
                 let (tname, key) = (th.name.clone(), th.key.clone());
                 self.record_type_member(callee, &key, name);
-                let resolved: Vec<Ty> = type_exprs
+                let written: Vec<Ty> = type_exprs
                     .iter()
                     .map(|t| self.resolve_type(t, span))
                     .collect();
+                let Some(resolved) = self.written_head_args(
+                    &th.spelled,
+                    self.type_param_count(&th.key),
+                    th.pinned.clone(),
+                    written,
+                    span,
+                ) else {
+                    self.infer_all(args);
+                    return Ty::Unknown;
+                };
                 if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
                     // A variant ctor takes NO method-level type args. Under the broadened parser steal
                     // the combined `Box[int].Has[str](5)` now arrives here as a Field callee carrying
@@ -672,10 +682,20 @@ impl Checker {
             {
                 let (tname, key) = (th.name.clone(), th.key.clone());
                 self.record_type_member(callee_obj, &key, name);
-                let enclosing: Vec<Ty> = type_exprs
+                let written: Vec<Ty> = type_exprs
                     .iter()
                     .map(|t| self.resolve_type(t, span))
                     .collect();
+                let Some(enclosing) = self.written_head_args(
+                    &th.spelled,
+                    self.type_param_count(&th.key),
+                    th.pinned.clone(),
+                    written,
+                    span,
+                ) else {
+                    self.infer_all(args);
+                    return Ty::Unknown;
+                };
                 // VARIANT-FIRST (a same-named static is barred at decl time); a variant takes no
                 // method-level type args, so a method turbofish on a variant is an error.
                 if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
@@ -1248,8 +1268,7 @@ impl Checker {
     pub(super) fn type_apply_head(&self, obj: &Expr) -> Option<(TypeHead, Vec<Type>)> {
         let app = crate::ast::type_application(obj)?;
         let th = self.type_head(app.head)?;
-        (th.pinned.is_none() && matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Enum))
-            .then_some((th, app.args))
+        matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Enum).then_some((th, app.args))
     }
 
     /// Type-check a call through a type, `Type.method(args)`: the path value `Type.method` applied.
@@ -1556,21 +1575,17 @@ impl Checker {
             self.infer_all(args);
             return Ty::Unknown;
         };
-        if !head_targs.is_empty() && !targs.is_empty() {
+        let Some(targs) = self.written_head_args(
+            spelled,
+            self.type_param_count(key),
+            Some(head_targs.clone()),
+            targs.to_vec(),
+            span,
+        ) else {
             self.infer_all(args);
-            self.error(
-                span,
-                format!(
-                    "type alias '{spelled}' already fixes its type arguments; write the aliased type to pass your own"
-                ),
-            );
             return Ty::Unknown;
-        }
-        let targs = if targs.is_empty() {
-            head_targs.as_slice()
-        } else {
-            targs
         };
+        let targs = targs.as_slice();
         if matches!(target, Ty::Struct(..)) {
             let Some(info) = self.struct_shape(key).cloned() else {
                 self.infer_all(args);
@@ -2081,20 +2096,14 @@ impl Checker {
         // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
         // enum-variant constructor. Reject them on anything else (builtins, non-generic decls)
         // before the dispatch below, so the seeding logic only has to handle the generic paths.
-        // An alias is asked about the type it resolves to, not its own name: an unpinned alias of a
-        // generic type takes the target's type arguments (`type BB = Box; BB[int](9)`, TICKET-180
-        // P2), and one that pins them passes through so the constructor branch below reports
-        // "already fixes its type arguments" (TICKET-172).
-        let alias_takes_targs = match self.alias_body_ty(name) {
-            Some(Ty::Struct(k, p)) => {
-                !p.is_empty()
-                    || self
-                        .struct_shape(&k)
-                        .is_some_and(|i| !i.type_params.is_empty())
-            }
-            Some(Ty::NewType(k, p)) => !p.is_empty() || self.newtype_is_generic(&k),
-            _ => false,
-        };
+        // An alias of a struct or newtype passes through: the constructor branch below decides
+        // through `written_head_args` (an unpinned alias of a generic type takes the target's type
+        // arguments, `type BB = Box; BB[int](9)`, TICKET-180 P2; one that fixes them reports
+        // "already fixes its type arguments", TICKET-172).
+        let alias_takes_targs = matches!(
+            self.alias_body_ty(name),
+            Some(Ty::Struct(..) | Ty::NewType(..))
+        );
         if !targs.is_empty() && !self.name_is_generic(name) && !alias_takes_targs {
             self.error(span, format!("'{name}' takes no type arguments"));
             for a in args {
@@ -2678,28 +2687,25 @@ impl Checker {
                 // generic newtype (`Stack([1,2])` / turbofish `Stack[int]([])`) infers/takes its type
                 // args via `infer_newtype_call`.
                 if (self.newtype_names.contains(name) || self.alias_newtype_head(name).is_some())
-                    && let (key, head_targs) = self
+                    && let (key, pinned) = self
                         .alias_newtype_head(name)
-                        .unwrap_or_else(|| (self.bare_key(name), Vec::new()))
+                        .map(|(k, p)| (k, Some(p)))
+                        .unwrap_or_else(|| (self.bare_key(name), None))
                     && (self.raw_ctor_owner.as_deref() == Some(key.as_str())
                         || !self.functions.contains_key(name))
                 {
                     self.record_resolution(id, Resolution::NewTypeCtor(key.clone()), name_span);
-                    if !head_targs.is_empty() && !targs.is_empty() {
+                    let Some(targs) = self.written_head_args(
+                        name,
+                        self.type_param_count(&key),
+                        pinned,
+                        targs.to_vec(),
+                        span,
+                    ) else {
                         self.infer_all(args);
-                        self.error(
-                            span,
-                            format!(
-                                "type alias '{name}' already fixes its type arguments; write the aliased type to pass your own"
-                            ),
-                        );
                         return Some(Ty::Unknown);
-                    }
-                    let targs = if targs.is_empty() {
-                        head_targs.as_slice()
-                    } else {
-                        targs
                     };
+                    let targs = targs.as_slice();
                     let under = self
                         .newtype_defs
                         .get(&key)
@@ -2720,9 +2726,10 @@ impl Checker {
                 // `struct_names`, so bare `S(...)` is not a constructor — it falls through to the
                 // unknown-name path (with an import hint).
                 if (self.struct_names.contains(name) || self.alias_struct_head(name).is_some())
-                    && let (key, head_targs) = self
+                    && let (key, pinned) = self
                         .alias_struct_head(name)
-                        .unwrap_or_else(|| (self.bare_key(name), Vec::new()))
+                        .map(|(k, p)| (k, Some(p)))
+                        .unwrap_or_else(|| (self.bare_key(name), None))
                     && (self.raw_ctor_owner.as_deref() == Some(key.as_str())
                         || !self.functions.contains_key(name))
                     && let Some((tps, fields, defaulted)) = self.structs.get(&key).map(|i| {
@@ -2734,21 +2741,17 @@ impl Checker {
                     })
                 {
                     self.record_resolution(id, Resolution::StructCtor(key.clone()), name_span);
-                    if !head_targs.is_empty() && !targs.is_empty() {
+                    let Some(targs) = self.written_head_args(
+                        name,
+                        self.type_param_count(&key),
+                        pinned,
+                        targs.to_vec(),
+                        span,
+                    ) else {
                         self.infer_all(args);
-                        self.error(
-                            span,
-                            format!(
-                                "type alias '{name}' already fixes its type arguments; write the aliased type to pass your own"
-                            ),
-                        );
                         return Some(Ty::Unknown);
-                    }
-                    let targs = if targs.is_empty() {
-                        head_targs.as_slice()
-                    } else {
-                        targs
                     };
+                    let targs = targs.as_slice();
                     let slots = self.structs.get(&key).and_then(|i| i.field_slots.clone());
                     let Some(bound) =
                         self.bind_call(slots.as_deref(), name, args, targs.len(), span)

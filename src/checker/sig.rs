@@ -2356,6 +2356,19 @@ impl Checker {
                         self.check_type_arity_and_bounds(n, tps, &resolved, span);
                         Ty::NewType(key, resolved)
                     }
+                    _ if self.bare_type_head(n).is_some_and(|th| th.pinned.is_some()) => {
+                        let resolved: Vec<Ty> =
+                            args.iter().map(|a| self.resolve_type(a, span)).collect();
+                        let th = self.bare_type_head(n).expect("matched by the guard");
+                        self.written_head_args(
+                            n,
+                            self.type_param_count(&th.key),
+                            th.pinned,
+                            resolved,
+                            span,
+                        );
+                        Ty::Unknown
+                    }
                     _ => {
                         self.error(span, format!("unknown generic type '{n}'"));
                         Ty::Unknown

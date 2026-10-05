@@ -36240,7 +36240,7 @@ fn decode_descriptor_fills_equal_the_ctor_plan_fills() {
 }
 
 /// TICKET-180 P2 — an unpinned alias of a generic struct takes the target's type arguments, and
-/// they seed the target's parameters. A non-generic alias still takes none.
+/// they seed the target's parameters. A non-generic alias still takes none: it already fixes its (zero) arguments.
 #[test]
 fn a_generic_alias_takes_its_targets_type_arguments() {
     const BB: &str = "struct Box[T]:\n    v: T\ntype BB = Box\n";
@@ -36251,7 +36251,7 @@ fn a_generic_alias_takes_its_targets_type_arguments() {
     );
     rejects(
         "struct P:\n    x: int\ntype Q = P\nprint(Q[int](1))\n",
-        "'Q' takes no type arguments",
+        "already fixes its type arguments",
     );
 }
 
