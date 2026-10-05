@@ -3301,3 +3301,84 @@ branch, `median ms (spread)`.
 No bench moved beyond the larger spread of its pair. `loop` (41 ms, spread 42) and `closure`
 (61 ms, spread 63) are at the edge; `Heap::get_mut` gained one predictable branch (`any_viewed`),
 which is false in every one of these programs.
+
+## TICKET-211 — one runner claim at the spawn, base vs fixed (2026-10-05)
+
+Base is `main` `87bb7e27`; fixed is `e20548f5`. Release builds, each in its own `CARGO_TARGET_DIR`.
+`bash benches/sched/nesting_grid.sh <binary> 3000000`, base run then fixed run. `uptime` at the start:
+`load average: 7.52, 6.12, 5.30` (base), `6.35, 5.98, 5.29` (fixed). Cells are `real s / user s`, one run each.
+
+| shape | T | base real/user | fixed real/user |
+|---|---|---|---|
+| flat_closed | 2 | 0.860 / 1.703 | 0.832 / 1.640 |
+| flat_closed | 4 | 0.448 / 1.717 | 0.452 / 1.757 |
+| flat_closed | 8 | 0.231 / 1.700 | 0.230 / 1.736 |
+| flat_open | 2 | 0.837 / 1.645 | 0.831 / 1.639 |
+| flat_open | 4 | 0.438 / 1.700 | 0.438 / 1.705 |
+| flat_open | 8 | 0.236 / 1.733 | 0.236 / 1.741 |
+| nested_closed | 2 | 0.908 / 1.791 | 0.911 / 1.801 |
+| nested_closed | 4 | 0.890 / 1.753 | 0.514 / 1.989 |
+| nested_closed | 8 | 0.907 / 1.795 | 0.267 / 1.853 |
+| nested_open | 2 | 0.894 / 1.767 | 0.880 / 1.745 |
+| nested_open | 4 | 0.493 / 1.914 | 0.495 / 1.902 |
+| nested_open | 8 | 0.292 / 2.050 | 0.275 / 1.967 |
+| twodeep_closed | 2 | 0.874 / 1.723 | 0.879 / 1.736 |
+| twodeep_closed | 4 | 0.900 / 1.778 | 0.475 / 1.830 |
+| twodeep_closed | 8 | 0.919 / 1.816 | 0.277 / 1.897 |
+| twodeep_open | 2 | 0.898 / 1.769 | 0.875 / 1.721 |
+| twodeep_open | 4 | 0.523 / 2.031 | 0.502 / 1.941 |
+| twodeep_open | 8 | 0.282 / 1.986 | 0.281 / 1.981 |
+| exec_closed | 2 | 1.663 / 1.688 | 0.867 / 1.738 |
+| exec_closed | 4 | 1.658 / 1.670 | 0.515 / 2.006 |
+| exec_closed | 8 | 1.632 / 1.627 | 0.298 / 2.090 |
+| exec_open | 2 | 1.619 / 1.614 | 0.882 / 1.748 |
+| exec_open | 4 | 1.629 / 1.626 | 0.525 / 2.037 |
+| exec_open | 8 | 1.608 / 1.599 | 0.313 / 2.274 |
+| churn2 | 2 | 2.231 / 1.459 | 2.213 / 1.336 |
+| churn2 | 4 | 2.244 / 1.953 | 3.228 / 2.075 |
+| churn2 | 8 | 2.600 / 3.526 | 3.155 / 1.968 |
+| churn8 | 2 | 3.313 / 3.255 | 3.057 / 3.011 |
+| churn8 | 4 | 3.204 / 4.264 | 5.194 / 5.271 |
+| churn8 | 8 | 3.725 / 6.715 | 8.964 / 5.963 |
+
+Every closed and Executor shape at T>=4 now runs at the flat shape's wall time or near it.
+`nested_closed` T=8 goes from 0.907 s to 0.267 s, and `exec_open` T=8 from 1.608 s to 0.313 s.
+T=2 and every flat and open shape stay at base.
+
+**The churn rows are slower, outside base's spread.** Release, n=5 per side, interleaved
+(base, fixed, base, ...), wall time by `perf_counter`, max RSS by `wait4`. `/proc/loadavg` at the
+start: `8.42`. Cells are `median ms (spread = max - min) / max RSS MB`.
+
+| program | T | base `87bb7e27` | fixed `e20548f5` | ratio |
+|---|---|---|---|---|
+| churn2.chz | 2 | 2227 (95) / 21 | 2195 (90) / 21 | 0.99x |
+| churn2.chz | 4 | 2324 (202) / 21 | 3272 (88) / 21 | 1.41x |
+| churn2.chz | 8 | 2583 (1408) / 21 | 3105 (2151) / 21 | 1.20x |
+| churn8.chz | 2 | 3244 (224) / 21 | 3274 (257) / 20 | 1.01x |
+| churn8.chz | 4 | 3193 (84) / 20 | 4965 (201) / 21 | 1.55x |
+| churn8.chz | 8 | 3669 (169) / 21 | 5297 (212) / 21 | 1.44x |
+
+Cause, by design: base starts pool jobs at a top-level `close_body`. The fix starts up to `n - 1`
+raw `chezzi-eager-helper` threads per multi-task nursery and joins them at its join. That is
+20 000 rounds x up to 7 thread starts and joins at T=8.
+
+The other programs the owner named, same method. `/proc/loadavg` at the start: `6.42` (first
+seven rows), `21.35` (primes at 4 and 0), `7.69` (primes at 1). `storm` and `trips` are the
+TICKET-213 programs (2000 spawns over a 100000-item global list; 2000 `submit_task(ex, f).get()`
+round trips). Workers 0 = the default count.
+
+| program | workers | base | fixed | ratio |
+|---|---|---|---|---|
+| `benches/sched/rendezvous_pingpong.chz` | 1 | 3125 (1700) / 16 | 3455 (783) / 16 | 1.11x |
+| trips | 1 | 103 (4) / 15 | 105 (28) / 15 | 1.02x |
+| trips | 4 | 100 (25) / 15 | 102 (32) / 15 | 1.02x |
+| trips | 0 | 100 (12) / 15 | 103 (44) / 15 | 1.03x |
+| storm | 1 | 5840 (1270) / 39 | 5691 (989) / 39 | 0.97x |
+| storm | 4 | 6410 (126) / 77 | 6460 (124) / 87 | 1.01x |
+| storm | 0 | 5937 (134) / 424 | 5903 (33) / 390 | 0.99x |
+| `examples/primes_parallel.chz` | 1 | 30088 (2287) / 15 | 30271 (5148) / 15 | 1.01x |
+| `examples/primes_parallel.chz` | 4 | 10162 (3306) / 15 | 10041 (175) / 15 | 0.99x |
+| `examples/primes_parallel.chz` | 0 | 10562 (314) / 15 | 10292 (3061) / 15 | 0.97x |
+
+Each of these medians is within the larger spread of its pair. `rendezvous_pingpong` at one worker
+is 1.11x, under DEC-205's 1.3x ceiling.
