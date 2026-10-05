@@ -264,14 +264,15 @@ impl Checker {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner_obj.kind
-                && let Some(TypeHead {
-                    kind: TypeHeadKind::Enum,
-                    key,
-                    spelled,
-                    pinned: None,
-                    ..
-                }) = self.qualified_type_head(mname, ename)
+                && let Some(
+                    th @ TypeHead {
+                        kind: TypeHeadKind::Enum,
+                        pinned: None,
+                        ..
+                    },
+                ) = self.qualified_type_head(mname, ename)
             {
+                let (key, spelled) = (th.key.clone(), th.spelled.clone());
                 // `import lib` registers every variant under `type_key(mid, ename)` with its
                 // `enum_name` already re-keyed (DEC-066).
                 if let Some(vinfo) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
@@ -308,7 +309,7 @@ impl Checker {
                 // `Enum.method[T](...)` here answers "unknown type 'Enum'".
                 self.record_static(callee, &key, name);
                 return self.infer_static_call(
-                    &key,
+                    &th,
                     &spelled,
                     name,
                     args,
@@ -330,19 +331,20 @@ impl Checker {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner_obj.kind
-                && let Some(TypeHead {
-                    kind: TypeHeadKind::Struct,
-                    key,
-                    spelled,
-                    pinned: None,
-                    ..
-                }) = self.qualified_type_head(mname, tname)
+                && let Some(
+                    th @ TypeHead {
+                        kind: TypeHeadKind::Struct,
+                        pinned: None,
+                        ..
+                    },
+                ) = self.qualified_type_head(mname, tname)
             {
+                let (key, spelled) = (th.key.clone(), th.spelled.clone());
                 // …and the same for a qualified STRUCT static (`lib.Holder.build()`): the advice
                 // must carry `lib.`, which is the prefix the user reached it by (an alias included).
                 self.record_static(callee, &key, name);
                 return self.infer_static_call(
-                    &key,
+                    &th,
                     &spelled,
                     name,
                     args,
@@ -361,19 +363,18 @@ impl Checker {
                 ..
             } = &obj.kind
                 && let ExprKind::Ident(mname) = &inner_obj.kind
-                && let Some(TypeHead {
-                    kind: TypeHeadKind::Enum | TypeHeadKind::Struct,
-                    key,
-                    spelled,
-                    pinned: Some(head_targs),
-                    ..
-                }) = self.qualified_type_head(mname, aname)
+                && let Some(
+                    th @ TypeHead {
+                        kind: TypeHeadKind::Enum | TypeHeadKind::Struct,
+                        pinned: Some(_),
+                        ..
+                    },
+                ) = self.qualified_type_head(mname, aname)
             {
-                self.record_type_member(callee, &key, name);
+                self.record_type_member(callee, &th.key, name);
                 return self.infer_alias_member_call(
-                    &key,
-                    &head_targs,
-                    &spelled,
+                    &th,
+                    &th.spelled,
                     name,
                     args,
                     &targs,
@@ -419,24 +420,17 @@ impl Checker {
             // static call. `head_targs` (the alias body's pinned type arguments) is threaded through
             // both, so `type IS = Box[str]; IS.of(3)` still infers against `Box[str]`, not `Box[int]`.
             if let ExprKind::Ident(aname) = &obj.kind
-                && let Some(TypeHead {
-                    kind: TypeHeadKind::Enum | TypeHeadKind::Struct,
-                    key,
-                    pinned: Some(head_targs),
-                    ..
-                }) = self.bare_type_head(aname)
+                && let Some(
+                    th @ TypeHead {
+                        kind: TypeHeadKind::Enum | TypeHeadKind::Struct,
+                        pinned: Some(_),
+                        ..
+                    },
+                ) = self.bare_type_head(aname)
             {
-                self.record_type_member(callee, &key, name);
+                self.record_type_member(callee, &th.key, name);
                 return self.infer_alias_member_call(
-                    &key,
-                    &head_targs,
-                    aname,
-                    name,
-                    args,
-                    &targs,
-                    *name_span,
-                    span,
-                    expected,
+                    &th, aname, name, args, &targs, *name_span, span, expected,
                 );
             }
             // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
@@ -444,13 +438,15 @@ impl Checker {
             // bare-written enum name is gated by `enum_names` (bare visibility) and resolved to its
             // runtime key (`bare_key`) for the layout lookup.
             if let ExprKind::Ident(ename) = &obj.kind
-                && let Some(TypeHead {
-                    kind: TypeHeadKind::Enum,
-                    key: ekey,
-                    pinned: None,
-                    ..
-                }) = self.bare_type_head(ename)
+                && let Some(
+                    th @ TypeHead {
+                        kind: TypeHeadKind::Enum,
+                        pinned: None,
+                        ..
+                    },
+                ) = self.bare_type_head(ename)
             {
+                let ekey = th.key.clone();
                 // Editor hover (probe-gated no-op): record the receiver `Col` of `Col.Val(3)` /
                 // `Col.method()` as its enum type. Covers both the variant-ctor and enum-static paths.
                 if self.hover_probe.is_some() {
@@ -497,7 +493,7 @@ impl Checker {
                     // member-level turbofish (`Enum.method[U](...)`) is the bare carrier of the
                     // method's OWN `[U]` args (PART 2): pass them as `mtargs` (no enclosing turbofish).
                     return self.infer_static_call(
-                        &ekey,
+                        &th,
                         ename,
                         name,
                         args,
@@ -513,13 +509,15 @@ impl Checker {
             // enum branch above already handled enums; this covers structs. The type name must be a
             // known (unbound) struct; a static method is one whose first param is not `self`.
             if let ExprKind::Ident(tname) = &obj.kind
-                && let Some(TypeHead {
-                    kind: TypeHeadKind::Struct,
-                    key,
-                    pinned: None,
-                    ..
-                }) = self.bare_type_head(tname)
+                && let Some(
+                    th @ TypeHead {
+                        kind: TypeHeadKind::Struct | TypeHeadKind::Newtype,
+                        pinned: None,
+                        ..
+                    },
+                ) = self.bare_type_head(tname)
             {
+                let key = th.key.clone();
                 self.record_static(callee, &key, name);
                 // Editor hover (probe-gated no-op): record the receiver `Foo` of `Foo.default()` as
                 // its struct type.
@@ -534,7 +532,7 @@ impl Checker {
                 // The member-level turbofish (`Type.method[U](...)`) is the bare carrier of the
                 // method's OWN `[U]` args (PART 2): pass them as `mtargs` (no enclosing turbofish).
                 return self.infer_static_call(
-                    &key,
+                    &th,
                     tname,
                     name,
                     args,
@@ -544,24 +542,6 @@ impl Checker {
                     span,
                     expected,
                 );
-            }
-            // `Newtype.member(args)` — a bare (unbound) newtype name dotted with a member. Newtypes
-            // have NO static (associated) methods (a deferred v1 limit — only struct and enum do), and
-            // there is no other valid `Newtype.member` form, so any such call is rejected with a clear
-            // message here rather than falling through to the value path's cryptic "unknown name".
-            if let ExprKind::Ident(tname) = &obj.kind
-                && self
-                    .bare_type_head(tname)
-                    .is_some_and(|th| th.kind == TypeHeadKind::Newtype && th.pinned.is_none())
-            {
-                self.infer_all(args);
-                self.error(
-                    span,
-                    format!(
-                        "static (associated) methods on a newtype are not supported yet (only struct and enum have them); '{tname}.{name}' cannot be called"
-                    ),
-                );
-                return Ty::Unknown;
             }
             // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE: a VARIANT
             // constructor (`Box[int].Has(5)`, `E[int, str].Pair(…)`) or a generic STATIC method
@@ -573,7 +553,8 @@ impl Checker {
             //     real type list because of the disambiguating comma).
             // VARIANT-FIRST (a same-named static method is barred at decl time by disjointness); if
             // no variant matches the member name, fall to the static-method path.
-            if let Some((tname, key, type_exprs)) = self.type_apply_head(obj) {
+            if let Some((th, type_exprs)) = self.type_apply_head(obj) {
+                let (tname, key) = (th.name.clone(), th.key.clone());
                 self.record_type_member(callee, &key, name);
                 let resolved: Vec<Ty> = type_exprs
                     .iter()
@@ -598,7 +579,7 @@ impl Checker {
                 // and the method `[str]` in `targs`. Thread `targs` as the static method's `mtargs` so
                 // the combined form composes (was `&[]`, which dropped the method turbofish).
                 return self.infer_static_call(
-                    &key, &tname, name, args, &resolved, &targs, *name_span, span, expected,
+                    &th, &tname, name, args, &resolved, &targs, *name_span, span, expected,
                 );
             }
             // `module.Ctor(args)` — a qualified native builtin CONSTRUCTOR (`concurrency.Shared(0)`,
@@ -682,13 +663,14 @@ impl Checker {
                         th.pinned.is_none()
                             && matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Enum)
                     })
-                    .map(|th| (th.name, th.key, Vec::new())),
+                    .map(|th| (th, Vec::new())),
                 _ => None,
             });
-            if let Some((tname, key, type_exprs)) = resolved_head
+            if let Some((th, type_exprs)) = resolved_head
                 && let Some(mt_ty) =
                     crate::ast::index_as_type(mt).map(|t| self.resolve_type(&t, span))
             {
+                let (tname, key) = (th.name.clone(), th.key.clone());
                 self.record_type_member(callee_obj, &key, name);
                 let enclosing: Vec<Ty> = type_exprs
                     .iter()
@@ -706,8 +688,8 @@ impl Checker {
                     );
                 }
                 return self.infer_static_call(
-                    &key,
-                    &tname,
+                    &th,
+                    &th.name,
                     name,
                     args,
                     &enclosing,
@@ -1263,16 +1245,16 @@ impl Checker {
     /// `type_key(mid, Type)`). Returns `None` when `obj` is not such a head (a real
     /// index-then-member, a local binding, an unknown name, or a non-type index), so the caller
     /// falls back to the ordinary method path.
-    pub(super) fn type_apply_head(&self, obj: &Expr) -> Option<(String, String, Vec<Type>)> {
+    pub(super) fn type_apply_head(&self, obj: &Expr) -> Option<(TypeHead, Vec<Type>)> {
         let app = crate::ast::type_application(obj)?;
         let th = self.type_head(app.head)?;
         (th.pinned.is_none() && matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Enum))
-            .then_some((th.name, th.key, app.args))
+            .then_some((th, app.args))
     }
 
-    /// Type-check a STATIC (associated) method call `Type.method(args)` (the "no self ⇒ static"
-    /// rule). `key` is the type's resolved runtime key; `tname` its display name. Looks the method up
-    /// in the struct/enum method maps; rejects calling an INSTANCE method this way, or an unknown
+    /// Type-check a call through a type, `Type.method(args)`: the path value `Type.method` applied.
+    /// `th` is the type head; `tname` its display name. Reads the sig from `type_member_fn`, so an
+    /// instance method takes its receiver first (`P.get(p)`); rejects a refused member or an unknown
     /// method. The enclosing type's params (`targs`, from `Box[int].empty()`) AND the method's OWN
     /// `[U]` params (`mtargs`, from the combined `Box[int].make[U](x)`) compose into ONE by-name
     /// substitution map: enclosing seeded from `targs`, method from `mtargs`, then `hint` (a `let`/return
@@ -1286,7 +1268,7 @@ impl Checker {
     #[allow(clippy::too_many_arguments)] // enclosing key/name + method + args + enclosing & method targs + span + hint
     pub(super) fn infer_static_call(
         &mut self,
-        key: &str,
+        th: &TypeHead,
         // How the TYPE was spelled at this call site — bare (`Holder`) or module-qualified
         // (`lib.Holder`, or an alias). Diagnostics only, and that includes the witness pin advice,
         // which must name a spelling that compiles.
@@ -1299,44 +1281,21 @@ impl Checker {
         span: Span,
         hint: Option<&Ty>,
     ) -> Ty {
-        // Resolve the method sig + the enclosing type's params, from either map.
-        let resolved = self
-            .structs
-            .get(key)
-            .and_then(|info| {
-                info.methods
-                    .get(method)
-                    .cloned()
-                    .map(|s| (s, info.type_params.clone()))
-            })
-            .or_else(|| {
-                self.enum_methods.get(key).and_then(|ms| {
-                    ms.get(method).cloned().map(|s| {
-                        (
-                            s,
-                            self.enum_type_params.get(key).cloned().unwrap_or_default(),
-                        )
-                    })
-                })
-            });
-        let Some((sig, tps)) = resolved else {
+        // The call through a type is the path's value applied: `type_member_fn` is the value
+        // side's answer, so an instance method takes its receiver first (`P.get(p)`).
+        let Some(pf) = self.type_member_fn(th, None, method) else {
             self.infer_all(args);
-            self.error(
-                span,
-                format!("type '{tname}' has no static method '{method}'"),
-            );
+            if !self.type_member_refusal(th, method, name_span) {
+                self.error(
+                    span,
+                    format!("type '{tname}' has no static method '{method}'"),
+                );
+            }
             return Ty::Unknown;
         };
-        if !sig.is_static {
-            self.infer_all(args);
-            self.error(
-                span,
-                format!(
-                    "'{method}' is an instance method of '{tname}'; call it on a value (`value.{method}(...)`)"
-                ),
-            );
-            return Ty::Unknown;
-        }
+        let tps = pf.head_decl.clone();
+        let mut sig = pf.sig;
+        sig.type_params = sig.type_params.split_off(pf.head_params);
         // Editor hover (probe-gated no-op): record the static method's declared call signature at the
         // method-name token (`Foo.default()` → "fn() -> Foo"), mirroring the free-fn convention
         // (declared `FnSig` params/ret verbatim). Emits no error, changes no checking result.
@@ -1551,8 +1510,7 @@ impl Checker {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn infer_alias_member_call(
         &mut self,
-        key: &str,
-        head_targs: &[Ty],
+        th: &TypeHead,
         spelled: &str,
         name: &str,
         args: &[Expr],
@@ -1561,9 +1519,10 @@ impl Checker {
         span: Span,
         expected: Option<&Ty>,
     ) -> Ty {
+        let head_targs = th.pinned.as_deref().unwrap_or(&[]);
         if let Some(v) = self
             .variants
-            .get(&(key.to_string(), name.to_string()))
+            .get(&(th.key.clone(), name.to_string()))
             .cloned()
         {
             if !targs.is_empty() {
@@ -1577,7 +1536,7 @@ impl Checker {
             return self.infer_variant_call(&v, name, args, head_targs, name_span, span, expected);
         }
         self.infer_static_call(
-            key, spelled, name, args, head_targs, targs, name_span, span, expected,
+            th, spelled, name, args, head_targs, targs, name_span, span, expected,
         )
     }
 

@@ -34377,9 +34377,9 @@ fn a_qualified_static_call_missing_a_defaultless_argument_still_rejects() {
     );
 }
 
-/// TICKET-120 step 2 -- an instance method reached through a qualified TYPE head still rejects.
+/// TICKET-120 step 2 -- an instance method reached through a qualified TYPE head is called receiver first, so a call with no receiver is an arity error.
 #[test]
-fn an_instance_method_through_a_qualified_type_head_still_rejects() {
+fn an_instance_method_through_a_qualified_type_head_needs_its_receiver() {
     files_reject(
         &[
             (
@@ -34388,7 +34388,7 @@ fn an_instance_method_through_a_qualified_type_head_still_rejects() {
             ),
             ("main.chz", "import lib_s3\nprint(lib_s3.L.bump())\n"),
         ],
-        "is an instance method of",
+        "'bump' expects",
     );
 }
 

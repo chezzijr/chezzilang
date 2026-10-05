@@ -2504,7 +2504,7 @@ impl Checker {
     /// The fn-like member `name` of type head `th`: a payload variant (a constructor fn) or a
     /// method (an instance method takes its receiver first, keyword `self`). `None` for a nullary
     /// variant, a protocol, a miss, and a native handle, whose methods have no proto.
-    fn type_member_fn(
+    pub(super) fn type_member_fn(
         &self,
         th: &TypeHead,
         head_args: Option<WrittenTypeArgs>,
@@ -2728,6 +2728,56 @@ impl Checker {
         Some(self.path_fn_value_ty(pf, Some((app.args.clone(), app.args_span)), head.span))
     }
 
+    /// The members a type path names but never yields, reported at `name_span`: a protocol
+    /// method and a native handle's method. Read by the value read ([`Self::type_member_value`])
+    /// and the call read (`infer_static_call`), so both refuse the same paths. `true` when it
+    /// reported.
+    pub(super) fn type_member_refusal(
+        &mut self,
+        th: &TypeHead,
+        name: &str,
+        name_span: Span,
+    ) -> bool {
+        let spelled = th.spelled.clone();
+        if th.kind == TypeHeadKind::Protocol {
+            let has = self
+                .protocols
+                .get(&th.key)
+                .is_some_and(|p| p.methods.iter().any(|(m, _)| m == name));
+            if !has {
+                return false;
+            }
+            self.error(
+                name_span,
+                format!(
+                    "'{name}' is a method of protocol '{spelled}' -- a protocol method is not a \
+                      value: name it through a concrete type (`<Type>.{name}`, which takes the \
+                      receiver first) or wrap it (`fn(x): x.{name}()`)"
+                ),
+            );
+            return true;
+        }
+        if th.native_handle {
+            if !self
+                .structs
+                .get(&th.key)
+                .is_some_and(|info| info.methods.contains_key(name))
+            {
+                return false;
+            }
+            self.error(
+                name_span,
+                format!(
+                    "'{name}' is a method of the native type '{spelled}' -- \
+                     a native method is not a value: call it on a value (`x.{name}(…)`) or wrap \
+                     it in a closure (`fn(x): x.{name}()`)"
+                ),
+            );
+            return true;
+        }
+        false
+    }
+
     /// A type path `Head.name` / `Head[T…].name` read as a value (TICKET-204): a nullary variant, a
     /// fn-like member through [`Self::type_member_fn`], or one of the refusals (a protocol method,
     /// a native method, a missing variant). `None` when `obj` is no type head or `name` is no member
@@ -2741,41 +2791,11 @@ impl Checker {
     ) -> Option<Ty> {
         let (th, head_args) = self.peel_type_path(obj)?;
         let spelled = th.spelled.clone();
-        if th.kind == TypeHeadKind::Protocol {
-            let has = self
-                .protocols
-                .get(&th.key)
-                .is_some_and(|p| p.methods.iter().any(|(m, _)| m == name));
-            if !has {
-                return None;
-            }
-            self.error(
-                name_span,
-                format!(
-                    "'{name}' is a method of protocol '{spelled}' -- a protocol method is not a \
-                      value: name it through a concrete type (`<Type>.{name}`, which takes the \
-                      receiver first) or wrap it (`fn(x): x.{name}()`)"
-                ),
-            );
+        if self.type_member_refusal(&th, name, name_span) {
             return Some(Ty::Unknown);
         }
-        if th.native_handle {
-            if !self
-                .structs
-                .get(&th.key)
-                .is_some_and(|info| info.methods.contains_key(name))
-            {
-                return None;
-            }
-            self.error(
-                name_span,
-                format!(
-                    "'{name}' is a method of the native type '{spelled}' -- \
-                     a native method is not a value: call it on a value (`x.{name}(…)`) or wrap \
-                     it in a closure (`fn(x): x.{name}()`)"
-                ),
-            );
-            return Some(Ty::Unknown);
+        if th.kind == TypeHeadKind::Protocol || th.native_handle {
+            return None;
         }
         let key = th.key.clone();
         if th.kind == TypeHeadKind::Enum
