@@ -346,7 +346,8 @@ pub enum Op {
         variant_id: u32,
         argc: usize,
     },
-    /// Build a `Func` value over `ProtoId`, capturing the current frame's home module.
+    /// Push the heap's one `Func` for `ProtoId` ([`crate::vm::Vm::fn_value`], TICKET-215), homed in
+    /// the current frame's module on first build.
     MakeFunc(ProtoId),
     /// Build a `Func` for a **default-argument provider declared in ANOTHER module**, resolving its
     /// home at CALL time rather than at the caller's module-load time. The operand indexes
@@ -371,6 +372,7 @@ pub enum Op {
     /// `Pt.getx`, TICKET-204), resolving its proto and home module at run time exactly as
     /// `CallStatic` does (`Vm::type_method_proto`). An instance method's receiver is the fn's first
     /// argument.
+    /// The value is the heap's one `Func` for that proto ([`crate::vm::Vm::fn_value`]).
     MakeMethodFunc {
         type_key: String,
         method: String,
@@ -389,6 +391,7 @@ pub enum Op {
     /// Build a `Cffi` value from `Program.cffi_defs[id]`: `dlopen` the library + resolve the symbol
     /// at module init (eager — a missing library/symbol fails here). Pushed onto the stack, then
     /// bound to its global slot by the following `DefineGlobalSlot`.
+    /// The value is the heap's one `Cffi` for that core ([`crate::vm::Vm::fn_value`]).
     MakeCffi(u32),
     /// Build a `Closure`: snapshot each `CapEntry`'s value from the enclosing frame into the new
     /// closure's captured env, and capture the current frame's home module.

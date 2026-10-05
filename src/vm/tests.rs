@@ -801,6 +801,15 @@ fn interned_strings_survive_gc_stress() {
 }
 
 #[test]
+fn path_values_survive_gc_stress() {
+    // TICKET-215: the `fn_values` memo is a GC root — collect-before-every-instruction must not sweep
+    // the one `P.mk` / `E.A` object, or the reused slot (here `xs` / `ys`) answers a later read. The
+    // value goes through a helper so no local keeps it alive (`(P.mk)(i)` lowers to a direct call).
+    let src = "struct P:\n    n: int\n    fn mk(n: int) -> P:\n        return P(n)\nenum E:\n    A(int)\n    B\nfn mkn(f: fn(int) -> P, n: int) -> int:\n    return f(n).n\nfn len1(f: fn(int) -> E, n: int) -> int:\n    return [f(n)].len()\ni := 0\ntotal := 0\nwhile i < 20:\n    a := mkn(P.mk, i)\n    xs := [i, i + 1]\n    b := len1(E.A, i)\n    ys := [i]\n    total = total + a + xs[0] + b + ys.len() - 1\n    i = i + 1\nprint(total)\n";
+    assert_eq!(run_capture_stress(src), "400\n");
+}
+
+#[test]
 fn per_char_sites_render_unchanged() {
     // `for c in str`, string indexing, `chars()`, and `chr()` all build 1-char strs via the
     // single-allocation helper — output must stay byte-identical (same UTF-8).
@@ -2999,11 +3008,15 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
     // M19 Phase 3 — the intern cache is heap-keyed too; it must round-trip with the heap.
     let host_str = vm.heap.alloc(Obj::Str("host-str".into()));
     vm.str_intern.insert(0x10, host_str);
+    // TICKET-215 — the fn-value memo is heap-keyed the same way.
+    let host_fn = vm.heap.alloc(Obj::Str("host-fn".into()));
+    vm.fn_values.insert(FnKey::Proto(0), host_fn);
 
     let mut fiber_heap = Heap::new();
     let fib_mod = fiber_heap.alloc(Obj::Str("fiber-mod".into()));
     let fib_exec = fiber_heap.alloc(Obj::Str("fiber-exec".into()));
     let fib_str = fiber_heap.alloc(Obj::Str("fiber-str".into()));
+    let fib_fn = fiber_heap.alloc(Obj::Str("fiber-fn".into()));
     let mut ctx = FiberCtx {
         heap: Some(fiber_heap),
         out: b"fiber-out".to_vec(),
@@ -3012,6 +3025,7 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
         module_faulted: vec![false],
         executors: vec![fib_exec],
         str_intern: fxhash::FxHashMap::from_iter([(0x20usize, fib_str)]),
+        fn_values: fxhash::FxHashMap::from_iter([(FnKey::Proto(1), fib_fn)]),
         ..FiberCtx::default()
     };
 
@@ -3027,6 +3041,9 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
     assert_eq!(ctx.out, b"host-out");
     assert_eq!(ctx.module_objs, vec![host_mod]);
     assert_eq!(ctx.str_intern.get(&0x10), Some(&host_str));
+    assert_eq!(vm.fn_values.get(&FnKey::Proto(1)), Some(&fib_fn));
+    assert_eq!(vm.fn_values.get(&FnKey::Proto(0)), None);
+    assert_eq!(ctx.fn_values.get(&FnKey::Proto(0)), Some(&host_fn));
 
     // Park out: the shell's side state is restored; the fiber keeps its own.
     vm.swap_ctx(&mut ctx);
@@ -3039,6 +3056,8 @@ fn mn_swap_ctx_round_trips_fiber_side_state() {
     assert_eq!(ctx.out, b"fiber-out");
     assert_eq!(ctx.module_objs, vec![fib_mod]);
     assert_eq!(ctx.str_intern.get(&0x20), Some(&fib_str));
+    assert_eq!(vm.fn_values.get(&FnKey::Proto(0)), Some(&host_fn));
+    assert_eq!(ctx.fn_values.get(&FnKey::Proto(1)), Some(&fib_fn));
 }
 
 /// Per-connection spawn: a fiber running an eager `parallel:` body can PARK (its acceptor blocks

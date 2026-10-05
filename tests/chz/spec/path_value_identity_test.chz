@@ -57,6 +57,24 @@ test fn path_value_ne_is_false():
     m := P.mk
     assert not (m != P.mk)
 
+fn plaing(n: int) -> int:
+    return n
+
+fn mke(n: int) -> E:
+    return E.A(n)
+
+fn adder(k: int) -> fn(int) -> int:
+    fn add(n: int) -> int:
+        return n + k
+    return add
+
+# Must still fail: one value per fn, not one value per signature, and a nested fn stays a fresh
+# closure per call (CPython `outer() == outer()` -> False).
+test fn distinct_fns_and_per_call_closures_stay_unequal():
+    assert plainf != plaing
+    assert E.A != mke
+    assert not (adder(1) == adder(1))
+
 fn cell(bad: List[str], name: str, ok: bool):
     if not ok:
         bad.push(name)

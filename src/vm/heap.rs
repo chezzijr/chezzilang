@@ -430,6 +430,8 @@ impl Obj {
             // Two `ptr` handles are the same iff they hold the same address; `std.ffi.null()` twice,
             // or a `ptr` that crossed, is a distinct slot around one address.
             Obj::Ptr(addr) => core(*addr),
+            // A bare Func, Native or Cffi is one slot per fn per heap (Vm::fn_value, TICKET-215), so its
+            // == survives a crossing; it stays Slot so Atomic.cas refuses it (DEC-177).
             Obj::Func { .. } | Obj::Closure { .. } | Obj::Native { .. } | Obj::Cffi(_) => {
                 Identity::Slot("a function value")
             }

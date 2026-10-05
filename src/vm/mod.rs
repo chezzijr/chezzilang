@@ -889,6 +889,15 @@ impl MethodIcSite {
     };
 }
 
+/// TICKET-215 — what names a bare fn value in [`Vm::fn_values`]: a Chezzi fn item by proto, a native
+/// std fn by member name + fn pointer, an extern fn by its shared `Arc<Cffi>` address.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum FnKey {
+    Proto(ProtoId),
+    Native(Box<str>, usize),
+    Cffi(usize),
+}
+
 pub struct Vm {
     program: Arc<Program>,
     heap: Heap,
@@ -917,6 +926,9 @@ pub struct Vm {
     /// so they're never swept; the cache is heap-keyed, so an M:N fiber swaps it WITH its heap in
     /// [`Vm::swap_ctx`] (like `module_objs`/`executors`).
     str_intern: fxhash::FxHashMap<usize, GcRef>,
+    /// TICKET-215 — the one fn object per [`FnKey`] in this heap (see [`Vm::fn_value`]). GC roots,
+    /// heap-keyed like `str_intern`, swapped with the heap in [`Vm::swap_ctx`].
+    fn_values: fxhash::FxHashMap<FnKey, GcRef>,
     /// M19 Phase 4 — per-call-site struct-field inline caches, indexed by the `ic` id baked into
     /// `GetField`/`SetField` ops (dense `0..program.field_ic_sites`). Holds field indices, not
     /// `GcRef`s, so it carries no heap state: never snapshotted, never swapped in [`Vm::swap_ctx`].
@@ -1592,6 +1604,8 @@ struct FiberCtx {
     /// argument as `module_objs`). Travels with `heap` across [`Vm::swap_ctx`]. Empty for a fiber
     /// with no heap of its own (it aliases the shell's cache).
     str_intern: fxhash::FxHashMap<usize, GcRef>,
+    /// TICKET-215 — travels with heap, like str_intern.
+    fn_values: fxhash::FxHashMap<FnKey, GcRef>,
     /// D6b — a non-blocking `connect` parked on writability (see [`ConnectInProgress`]). Non-heap, so
     /// it carries no `GcRef` and needs no GC rooting; but it MUST travel with the fiber across the
     /// park, so it swaps in [`Vm::swap_ctx`] like the other per-fiber state. `None` unless this fiber
@@ -6266,6 +6280,7 @@ impl ReadyWorker {
             // M19 Phase 3 — the intern cache indexes `worker.heap`, which becomes `ctx.heap`; carry it
             // so the heap-keyed invariant holds (its `GcRef`s stay valid against the heap they travel with).
             str_intern: worker.str_intern,
+            fn_values: worker.fn_values,
             ..FiberCtx::default()
         };
         Fiber {

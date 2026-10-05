@@ -113,6 +113,7 @@ impl Vm {
             call_depth: 0,
             module_objs: Vec::new(),
             str_intern: fxhash::FxHashMap::default(),
+            fn_values: fxhash::FxHashMap::default(),
             field_ic,
             method_ic,
             quicken,
@@ -286,6 +287,7 @@ impl Vm {
             // atomically with the heap (same heap-keyed argument as `module_objs`). A fiber with no
             // heap of its own (`heap: None`) never reaches here and keeps aliasing the shell's cache.
             std::mem::swap(&mut self.str_intern, &mut ctx.str_intern);
+            std::mem::swap(&mut self.fn_values, &mut ctx.fn_values);
             // D6b — a mid-flight `connect` parked on writability swaps WITH its fiber (it owns the
             // connecting fd that the netpoller is watching; it must not be left on the shell where the
             // next fiber would inherit or drop it).
@@ -1054,12 +1056,14 @@ impl Vm {
         // so the import loop below binds those deps (empty/no-op for a pure-native module).
         if let Some(name) = m.native {
             for (mname, func, kind) in crate::native::native_members(name) {
-                let nat = self.heap.alloc(Obj::Native {
-                    name: (*mname).into(),
-                    func: *func,
-                    kind: *kind,
+                let nat = self.fn_value(FnKey::Native((*mname).into(), *func as usize), || {
+                    Obj::Native {
+                        name: (*mname).into(),
+                        func: *func,
+                        kind: *kind,
+                    }
                 });
-                self.module_define(mod_obj, mname, Value::obj(nat));
+                self.module_define(mod_obj, mname, nat);
             }
             for (cname, cval) in crate::native::native_consts(name) {
                 let fv = self.box_float(*cval);
@@ -1843,6 +1847,7 @@ impl Vm {
         // of the same op, so they must never be swept out from under a later push. Heap-keyed, so this
         // roots the cache for *this* heap (an M:N fiber's cache swapped in with its heap).
         work.extend(self.str_intern.values().copied());
+        work.extend(self.fn_values.values().copied());
         // W7-4a — the snapshot rebuild map's cells, heap-keyed like `str_intern` (so this roots them
         // for *this* heap). BELT AND BRACES today, and deliberately kept: every entry is currently
         // also reachable from the module global it was just `module_define`d into, and MEASURED —
@@ -2640,11 +2645,9 @@ impl Vm {
             } => self.new_enum(variant, *variant_id, *argc, span)?,
             Op::MakeFunc(proto) => {
                 let home = self.frames.last().unwrap().home;
-                let h = self.heap.alloc(Obj::Func {
-                    proto: *proto,
-                    home,
-                });
-                self.push(Value::obj(h));
+                let proto = *proto;
+                let v = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
+                self.push(v);
             }
             // A default-argument provider declared in a module this one does not import — see
             // [`Op::MakeFuncIn`]. `home` comes from the DEFINER's module index, not this frame's, so
@@ -2673,8 +2676,8 @@ impl Vm {
                         span,
                     ));
                 };
-                let h = self.heap.alloc(Obj::Func { proto, home });
-                self.push(Value::obj(h));
+                let v = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
+                self.push(v);
             }
             // A type path's method read as a value (TICKET-204): the proto and home `CallStatic`
             // would use, resolved at run time because the type's module may compile after this one.
@@ -2697,8 +2700,8 @@ impl Vm {
                         span,
                     ));
                 };
-                let h = self.heap.alloc(Obj::Func { proto, home });
-                self.push(Value::obj(h));
+                let v = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
+                self.push(v);
             }
             // Body in an `#[inline(never)]` helper so `step`'s frame stays small (the deep-recursion
             // depth-guard test overflows in debug if `step` grows — same discipline as `ToStrFmt`).

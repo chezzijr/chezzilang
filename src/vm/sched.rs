@@ -4404,14 +4404,17 @@ impl Vm {
             WireValue::Ptr(a) => Value::obj(self.heap.alloc(Obj::Ptr(a))),
             // Re-alloc a fresh `Obj::Builtin` from the name carried by value (pure code, no state).
             WireValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name))),
-            // Re-alloc a fresh `Obj::Native` from the name + fn pointer carried by value (pure code) —
-            // same as the `SnapValue::Native` rebuild.
+            // The heap's one `Obj::Native` for this fn ([`Vm::fn_value`], TICKET-215), from the name +
+            // fn pointer carried by value (pure code) — same as the `SnapValue::Native` rebuild.
             WireValue::Native { name, func, kind } => {
-                Value::obj(self.heap.alloc(Obj::Native { name, func, kind }))
+                let key = FnKey::Native(name.clone(), func as usize);
+                self.fn_value(key, || Obj::Native { name, func, kind })
             }
-            // Re-alloc a fresh `Obj::Cffi` sharing the SAME `Arc<Cffi>` (no re-dlopen) — same as the
-            // `SnapValue::Cffi` rebuild.
-            WireValue::Cffi(c) => Value::obj(self.heap.alloc(Obj::Cffi(c))),
+            // The heap's one `Obj::Cffi` for this fn ([`Vm::fn_value`], TICKET-215), sharing the SAME
+            // `Arc<Cffi>` (no re-dlopen) — same as the `SnapValue::Cffi` rebuild.
+            WireValue::Cffi(c) => {
+                self.fn_value(FnKey::Cffi(Arc::as_ptr(&c) as usize), || Obj::Cffi(c))
+            }
             // TIE THE KNOT (see the `Cell`/`Closure` arms): alloc an empty placeholder container
             // FIRST, register its `id` in `rebuild` BEFORE recursing children, so a nested
             // `Backref(id)` (a self-referential list/struct/map) resolves to this exact handle; then
@@ -4694,7 +4697,7 @@ impl Vm {
             // is shared via `Arc<Program>`; `worker_home` resolves the home index like the Closure arm).
             WireValue::Func { proto, home } => {
                 let home = self.worker_home(home);
-                Value::obj(self.heap.alloc(Obj::Func { proto, home }))
+                self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home })
             }
             // F3 path C: rebuild a FRESH, independent `GeneratorCore` on this heap (deep-copy
             // independence, like `Cell`/`Iter`). `worker_home` resolves the home index; the backing
@@ -5225,7 +5228,7 @@ impl Vm {
                 span,
             } => {
                 let home = self.worker_home(home);
-                let callee = Value::obj(self.heap.alloc(Obj::Func { proto, home }));
+                let callee = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
                 let args = self.rebuild_items(args, rb, |w| w);
                 (ReadyCall::Invoke { callee, args }, span)
             }
@@ -6240,11 +6243,8 @@ impl Vm {
         match snap {
             SnapValue::Wire(w) => self.from_wire_memo(w.clone(), rb),
             SnapValue::Func { proto, home } => {
-                let whome = self.worker_home(*home);
-                Value::obj(self.heap.alloc(Obj::Func {
-                    proto: *proto,
-                    home: whome,
-                }))
+                let (proto, whome) = (*proto, self.worker_home(*home));
+                self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home: whome })
             }
             SnapValue::Closure {
                 proto,
@@ -6282,16 +6282,22 @@ impl Vm {
                 }
                 Value::obj(wm)
             }
-            SnapValue::Native { name, func, kind } => Value::obj(self.heap.alloc(Obj::Native {
-                name: name.clone(),
-                func: *func,
-                kind: *kind,
-            })),
+            SnapValue::Native { name, func, kind } => {
+                self.fn_value(FnKey::Native(name.clone(), *func as usize), || {
+                    Obj::Native {
+                        name: name.clone(),
+                        func: *func,
+                        kind: *kind,
+                    }
+                })
+            }
             // Re-alloc a fresh `Obj::Builtin` from the carried name (pure code, no state to share).
             SnapValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name.clone()))),
             SnapValue::Uninit(line) => Value::uninit(*line),
             // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
-            SnapValue::Cffi(c) => Value::obj(self.heap.alloc(Obj::Cffi(Arc::clone(c)))),
+            SnapValue::Cffi(c) => self.fn_value(FnKey::Cffi(Arc::as_ptr(c) as usize), || {
+                Obj::Cffi(Arc::clone(c))
+            }),
             SnapValue::List(xs) => {
                 let v = xs.iter().map(|x| self.replay_snap(x, rb)).collect();
                 let h = self.heap.alloc(Obj::List(v));

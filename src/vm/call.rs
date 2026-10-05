@@ -791,10 +791,8 @@ impl Vm {
                 span,
             )));
         };
-        let f = Value::obj(self.heap.alloc(Obj::Func {
-            proto: t.proto,
-            home,
-        }));
+        let proto = t.proto;
+        let f = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
         self.guarded(|vm| vm.invoke_value(f, Vec::new(), span))
             .map_err(DecodeFail::Fault)
     }
@@ -1933,6 +1931,19 @@ impl Vm {
         }
         let p = *prog.newtype_methods.get(type_key)?.get(method)?;
         Some((p, *prog.newtype_home.get(type_key)?))
+    }
+
+    /// The one fn object for `key` in this heap (TICKET-215), and the only allocator of `Obj::Func`,
+    /// `Obj::Native` and `Obj::Cffi`: a fn read twice, in two modules, or after a crossing is one
+    /// value. A proto is keyed alone: one heap has one module view, so a user proto's home is fixed,
+    /// and a synthesized proto reads no global.
+    pub(super) fn fn_value(&mut self, key: FnKey, make: impl FnOnce() -> Obj) -> Value {
+        if let Some(&h) = self.fn_values.get(&key) {
+            return Value::obj(h);
+        }
+        let h = self.heap.alloc(make());
+        self.fn_values.insert(key, h);
+        Value::obj(h)
     }
 
     /// `Type.method(args)` — STATIC (associated) method dispatch (the "no self ⇒ static" rule).

@@ -98,8 +98,10 @@ impl Vm {
         let def = self.program.cffi_defs[id as usize].clone();
         let cffi = crate::native::cffi::Cffi::new(&def.lib, &def.name, def.params, def.ret)
             .map_err(|e| self.err(e.message, span))?;
-        let h = self.heap.alloc(Obj::Cffi(std::sync::Arc::new(cffi)));
-        self.push(Value::obj(h));
+        let cffi = std::sync::Arc::new(cffi);
+        let key = FnKey::Cffi(std::sync::Arc::as_ptr(&cffi) as usize);
+        let v = self.fn_value(key, || Obj::Cffi(cffi));
+        self.push(v);
         Ok(())
     }
 
