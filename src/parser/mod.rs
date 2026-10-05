@@ -8079,4 +8079,24 @@ mod tests {
             e.message
         );
     }
+
+    /// TICKET-210: a one-arg `head[X](args)` on a bare-name or member head keeps the bracket's
+    /// expression reading beside its type reading; every other shape keeps `None`.
+    #[test]
+    fn a_one_arg_call_bracket_keeps_its_expression_reading() {
+        let bracket = |src: &str| match let_value(src).kind {
+            ExprKind::Call {
+                type_args, bracket, ..
+            } => (type_args.len(), bracket.map(|b| b.kind)),
+            other => panic!("expected a call, got {other:?}"),
+        };
+        assert!(matches!(bracket("x := fs[k](1)\n"), (1, Some(ExprKind::Ident(k))) if k == "k"));
+        assert!(matches!(
+            bracket("x := h.fs[k](1)\n"),
+            (1, Some(ExprKind::Ident(_)))
+        ));
+        assert!(matches!(bracket("x := f[int, str](1)\n"), (2, None)));
+        assert!(matches!(bracket("x := f[fn(int) -> int](1)\n"), (1, None)));
+        assert!(matches!(bracket("x := t.0[k](1)\n"), (_, None)));
+    }
 }
