@@ -37960,3 +37960,19 @@ fn instance_method_called_through_type_path() {
         "struct P:\n    n: int\n    fn get(self) -> int:\n        return self.n\nprint(P.get(P(1)))\n",
     );
 }
+
+#[test]
+fn unknown_type_head_reports_one_error() {
+    let errs = check_src("x := Nope[int].make\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown name 'Nope'")),
+        "want unknown name 'Nope', got {errs:?}"
+    );
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("unknown name 'int'")),
+        "a type-shaped index after an errored head is not a value: {errs:?}"
+    );
+}
