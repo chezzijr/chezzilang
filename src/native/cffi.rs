@@ -152,6 +152,32 @@ impl CType {
         )
     }
 
+    /// The C type this value is passed as through a C `...` (C's default argument promotions) --
+    /// the one table both the checker (`c_vararg_ctype`) and the runtime (`vararg_ctype_of`) end in.
+    /// `float` becomes `double`; `_Bool` and every integer narrower than `int` become `int`; a wider
+    /// integer, `ptr` and `str` (`char*`) pass as themselves. `None`: a struct, callback or
+    /// return-only string form cannot be a C vararg.
+    pub fn vararg_promoted(&self) -> Option<CType> {
+        match self {
+            CType::Float | CType::Float32 => Some(CType::Float),
+            CType::Bool
+            | CType::Int8
+            | CType::Int16
+            | CType::UInt8
+            | CType::UInt16
+            | CType::Int32 => Some(CType::Int32),
+            CType::UInt32 => Some(CType::UInt32),
+            CType::Int | CType::Int64 | CType::UInt64 | CType::Ptr | CType::Str => {
+                Some(self.clone())
+            }
+            CType::Struct { .. }
+            | CType::Callback { .. }
+            | CType::OwnedStr
+            | CType::OptStr
+            | CType::OptOwnedStr => None,
+        }
+    }
+
     /// The libffi argument/result [`Type`] for this type. For a `Struct`, this builds a libffi
     /// structure type from the field types (libffi computes size/alignment/offsets from the ABI).
     fn ffi_type(&self) -> Type {
@@ -2382,6 +2408,46 @@ mod tests {
             v,
             NativeRet::List(vec![NativeRet::Int(3), NativeRet::Int(2)])
         );
+    }
+
+    /// TICKET-217: C's default argument promotions (C11 6.5.2.2p6), one row per `CType` variant.
+    /// `float` becomes `double`; `_Bool` and every integer narrower than `int` become `int`; a
+    /// struct, callback or return-only string form cannot be a C vararg at all.
+    #[test]
+    fn vararg_promotion_table_matches_c_default_promotions() {
+        let st = CType::Struct {
+            name: "S".into(),
+            field_names: vec!["a".into()],
+            fields: vec![CType::Int],
+        };
+        let cb = CType::Callback {
+            params: vec![],
+            ret: None,
+        };
+        let rows: Vec<(CType, Option<CType>)> = vec![
+            (CType::Int, Some(CType::Int)),
+            (CType::Float, Some(CType::Float)),
+            (CType::Float32, Some(CType::Float)),
+            (CType::Bool, Some(CType::Int32)),
+            (CType::Int8, Some(CType::Int32)),
+            (CType::Int16, Some(CType::Int32)),
+            (CType::UInt8, Some(CType::Int32)),
+            (CType::UInt16, Some(CType::Int32)),
+            (CType::Int32, Some(CType::Int32)),
+            (CType::UInt32, Some(CType::UInt32)),
+            (CType::Int64, Some(CType::Int64)),
+            (CType::UInt64, Some(CType::UInt64)),
+            (CType::Ptr, Some(CType::Ptr)),
+            (CType::Str, Some(CType::Str)),
+            (CType::OwnedStr, None),
+            (CType::OptStr, None),
+            (CType::OptOwnedStr, None),
+            (st, None),
+            (cb, None),
+        ];
+        for (ct, want) in rows {
+            assert_eq!(ct.vararg_promoted(), want, "{ct:?}");
+        }
     }
 
     /// TICKET-217: a nested struct field sits at `parent offset + inner offset`, all from libffi.

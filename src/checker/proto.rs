@@ -2488,6 +2488,7 @@ impl Checker {
                 witness_params: Vec::new(),
                 variadic: None,
                 slots: None,
+                c_variadic: false,
             };
             let msig = &want;
             // Pre-substitute the receiving type's params into the ACTUAL (user) method signature so
@@ -5161,6 +5162,7 @@ impl Checker {
             witness_params: Vec::new(),
             variadic: None,
             slots: None,
+            c_variadic: false,
         };
         let probed = self.probe_uninferable_dependent_result_params(&msig, &mut mmap);
         let before = self.errors.len();

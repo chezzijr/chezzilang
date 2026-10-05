@@ -4092,8 +4092,9 @@ impl Checker {
                             // A void extern returns nothing observable; model it as `Nil`.
                             None => Ty::Nil,
                         };
-                        self.functions
-                            .insert(ef.name.clone(), FnSig::plain(params, ret));
+                        let mut sig = FnSig::plain(params, ret);
+                        sig.c_variadic = ef.c_variadic;
+                        self.functions.insert(ef.name.clone(), sig);
                         // ROOT FIX (fix4): harvest the FULLY-RESOLVED, width-bearing C signature for
                         // each extern fn, resolved here in THIS module's import/alias scope (the same
                         // scope `resolve_type` used to accept it). Both backends consume this instead
@@ -4112,6 +4113,7 @@ impl Checker {
                                 ExternCSig {
                                     params: cparams,
                                     ret: cret,
+                                    c_variadic: ef.c_variadic,
                                 },
                             );
                         }
@@ -4594,6 +4596,22 @@ impl Checker {
         visited.remove(name);
         all_ok
     }
+}
+
+/// The C type a value of static type `ty` passes as through a C `...`, after C's default argument
+/// promotions (`CType::vararg_promoted`, the one table the runtime's `vararg_ctype_of` also ends in).
+/// Every FFI width is a plain `int`/`float` to the program, so only the five C-scalar `Ty`s map;
+/// `None` (a struct, closure, `str?`, list, …) cannot be a C vararg.
+pub(super) fn c_vararg_ctype(ty: &Ty) -> Option<CType> {
+    match ty {
+        Ty::Int => Some(CType::Int),
+        Ty::Float => Some(CType::Float),
+        Ty::Bool => Some(CType::Bool),
+        Ty::Str => Some(CType::Str),
+        Ty::Ptr => Some(CType::Ptr),
+        _ => None,
+    }
+    .and_then(|c| c.vararg_promoted())
 }
 
 /// TICKET-165 — walk an lvalue-shaped chain (`xs`, `xs[i]`, `p.f`, `a.b[0].c`) down to the BINDING it

@@ -37,6 +37,8 @@ use ty::{compatible, param_invariant};
 pub struct ExternCSig {
     pub params: Vec<Option<CType>>,
     pub ret: Option<CType>,
+    /// Declared with a trailing bare `...`: each call's surplus args are C varargs.
+    pub c_variadic: bool,
 }
 
 /// Resolved C signatures for every `extern` fn in a module graph, keyed by `(graph module index,
@@ -732,6 +734,11 @@ struct FnSig {
     /// no named arguments, and its `= 0` defaults are arity markers the runtime reads from the
     /// supplied argument count. Excluded from `fn_sig_eq`.
     slots: Option<Vec<crate::desugar::SlotSpec>>,
+    /// An `extern` fn declared with a trailing bare `...` (C varargs): a call takes at least
+    /// `params.len()` args, and each surplus arg is a C variadic arg (`check_c_variadic_args`).
+    /// Distinct from `variadic` (Chezzi's `...xs: T`, collapsed to a `List`). `false` everywhere
+    /// else. Excluded from `fn_sig_eq`.
+    c_variadic: bool,
 }
 
 impl FnSig {
@@ -751,6 +758,7 @@ impl FnSig {
             witness_params: Vec::new(),
             variadic: None,
             slots: None,
+            c_variadic: false,
         }
     }
 
@@ -771,6 +779,7 @@ impl FnSig {
             witness_params: Vec::new(),
             variadic: None,
             slots: None,
+            c_variadic: false,
         }
     }
 }

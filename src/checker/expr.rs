@@ -2719,7 +2719,11 @@ impl Checker {
                     // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
                     // `from`-imported fn with an optional arg); for plain sigs `min_params ==
                     // params.len()`, so this is identical to the old exact-arity check.
-                    self.check_args_range(name, &sig.params, sig.min_params, args, span);
+                    if sig.c_variadic {
+                        self.check_c_variadic_args(name, &sig.params, args, span);
+                    } else {
+                        self.check_args_range(name, &sig.params, sig.min_params, args, span);
+                    }
                     // TICKET-077: a `from`-imported diverging native fn (`exit`, under any bound
                     // name) bottom-types like `panic`, so it type-checks in value position.
                     if diverges {
@@ -3104,7 +3108,11 @@ impl Checker {
                     // Float params are coerced at the callee's prologue. Honor an optional trailing
                     // tail (`min_params < params.len()`, e.g. `request.get(url, timeout_ms?)`); for
                     // plain sigs `min_params == params.len()`, identical to the old exact check.
-                    self.check_args_range(method, &fsig.params, fsig.min_params, args, span);
+                    if fsig.c_variadic {
+                        self.check_c_variadic_args(method, &fsig.params, args, span);
+                    } else {
+                        self.check_args_range(method, &fsig.params, fsig.min_params, args, span);
+                    }
                     // TICKET-077: a diverging native fn (`os.exit`) bottom-types like `panic`, so
                     // it type-checks in value position (e.g. a `match` arm).
                     if mod_id
@@ -4349,6 +4357,44 @@ impl Checker {
         span: Span,
     ) {
         self.check_args_range_decl(name, params, min_params, args, span, false);
+    }
+
+    /// The arg check for a call to a C variadic `extern` fn (`fn printf(fmt: str, ...)`): the fixed
+    /// params check as usual, and each surplus arg must be a C vararg (`c_vararg_ctype`).
+    pub(super) fn check_c_variadic_args(
+        &mut self,
+        name: &str,
+        params: &[Ty],
+        args: &[Expr],
+        span: Span,
+    ) {
+        if args.len() < params.len() {
+            self.error(
+                span,
+                format!(
+                    "'{name}' expects at least {} argument(s), got {}",
+                    params.len(),
+                    args.len()
+                ),
+            );
+            self.infer_all(args);
+            return;
+        }
+        let (fixed, extra) = args.split_at(params.len());
+        self.check_args_range(name, params, params.len(), fixed, span);
+        for (k, arg) in extra.iter().enumerate() {
+            let ty = self.infer_arg(arg, None);
+            if !matches!(ty, Ty::Unknown) && super::setup::c_vararg_ctype(&ty).is_none() {
+                self.error(
+                    arg.span,
+                    format!(
+                        "argument {} to extern fn '{name}' has type '{ty}', which cannot be passed \
+                         to a C variadic parameter (C varargs take int, float, bool, str or ptr)",
+                        params.len() + k + 1
+                    ),
+                );
+            }
+        }
     }
 
     /// Infer a single call argument in *checking mode*: if the argument is a closure literal and the
