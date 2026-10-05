@@ -157,11 +157,25 @@ counting the inline joiner twice. The close-time farm and TICKET-159's hook fold
    Buffered stdout is still flushed. C3 disappears; `docs/concurrency.md` (~1206, "a defer is never
    itself cancelled ... every registered defer of a cancelled task runs") changes for the exit case.
 
+## Owner decisions (2026-10-05)
+
+1. **An unpinned generic path value is rejected, natives included.** `g := math.abs` is an error with
+   the hint `math.abs[int]` (the DEC-204 rule); `[-1, 2].map(math.abs)` stays accepted, pinned by the
+   expected type; `math.abs[int]` is legal.
+2. **`Num` protocol.** A reserved structural protocol satisfied by `int`, `float` and numeric
+   `newtype`s; `math.abs`/`math.sign` become `[T: Num](x: T) -> T` and the call-only
+   `MODULE_NUMERIC_POLY` side-set goes. A `T: Num` body gets only the operators whose result type is
+   `T` for both `int` and `float`.
+3. **The seed is a fuzzer first.** Byte-for-byte T=1 replay is not required for every wait kind. Waits
+   that replay exactly stay exact; the `Shared` guard wait and the Executor wait stay rate fixtures in
+   `tests/sched_seed/open/` (W15-10). No guard hand-off queue; a replay fix ships only if it costs
+   nothing unseeded.
+
 ## Plan order
 
 1. **Executor rebuild** (A2 P0, C1, C3, H1; TICKET-207's fault rules, A1, C2; TICKET-206 wait 4) — TICKET-208. TICKET-207 closed into it.
    Status (2026-10-04): TICKET-208 landed the engine. TICKET-213 landed A1 (a copy's write to an unread `Task.get()` / `memoize1` result faults), `Executor(n)` and the exit rule (`os.exit` runs no `defer`), which deletes C3. Seeded replay of the Executor stays a measured rate (W15-10).
-2. **P1** (K1 P0, K2, K3, K4, K5, K6, S1, S2) — TICKET-210.
+2. **P1** (K2, K3, K4, K5, K6) — TICKET-210. Split off: S1+S2 (native fns as values, `Num`) — TICKET-214; K1 P0 (path-value identity) — TICKET-215.
 3. **W1** (H2) — TICKET-211; after TICKET-208 if they share scheduler files.
 4. **S3** — TICKET-212.
-5. **W15-10 remainder** (in-place nursery join, `Shared` guard wait) — TICKET-209; TICKET-206 lands wait 1.
+5. **W15-10 remainder** (in-place nursery join only, if free unseeded; the `Shared` guard wait stays a rate, decision 3 above) — TICKET-209; TICKET-206 landed wait 1.
