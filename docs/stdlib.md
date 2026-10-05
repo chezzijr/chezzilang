@@ -642,7 +642,11 @@ it returns)`, which is how it reads apart from a real abort.
 ### `std.math`
 Functions: `abs`, `floor`, `ceil`, `round`, `pow(base, exp)`, `sqrt`, `sin`, `cos`, `tan`,
 `asin`, `acos`, `atan`, `atan2(y, x)`, `exp`, `ln`, `log2`, `log10`, `log(value, base)`.
-`abs` is numeric-polymorphic (`int`→`int`, `float`→`float`); the rest take/return `float`. A `float`
+`abs` is `abs[T: Num](x: T) -> T` (`int`→`int`, `float`→`float`; `Num` is the builtin protocol
+satisfied by `int` and `float` only); the rest take/return `float`. `abs` and `sign` are values like any
+generic fn: `[-1, 2].map(math.abs)` is `[1, 2]`, `math.abs[int]` is a `fn(int) -> int`, and an
+unpinned `g := math.abs` is rejected with the instantiate hint (`math.abs[<T>]`), as Go rejects
+`g := Abs`. A `float`
 parameter never accepts an `int` (rule D3, `syntax.md §3`): `sqrt(16)` / `floor(2)` are type errors
 naming `write 1.0 (or float(x))` — write `sqrt(16.0)` / `floor(2.0)`, or `sqrt(float(i))` for a typed
 `int` value.
@@ -663,7 +667,7 @@ Number / integer functions (Python `math` semantics):
   int `/` **truncates toward zero** and `%` carries the **dividend's** sign — NOT Python's floor
   `divmod`. `divmod(17, 5)` → `(3, 2)`; `divmod(-7, 2)` → `(-3, -1)` (Python gives `(-4, 1)`). `b == 0`
   faults like `a / b`. (A bodied Chezzi fn living alongside the native decls — the hybrid module form.)
-- `sign(x)` — numeric-polymorphic like `abs` (`int`→`int`, `float`→`float`); returns `-1`/`0`/`1`
+- `sign[T: Num](x: T) -> T` — like `abs` (`int`→`int`, `float`→`float`); returns `-1`/`0`/`1`
   (numpy/Go convention). `sign(0.0)` is `0.0`, `sign(NaN)` is `NaN`.
 - `trunc(x: float) -> int` — truncate toward zero. Equivalent to the `int(x)` builtin; faults on a
   non-finite or out-of-i64-range input (same as `int()`).
@@ -2051,6 +2055,13 @@ round-trips (also as a struct field or a `List` element); a shorter or longer ar
 `import std.json as j`; TICKET-187). Everywhere else `x.decode[T](s)` is an ordinary method call: a
 user type's own `decode[T]` method runs, a local that shadows `json` is that local, and a receiver
 with no `decode` method is a type error.
+
+`json.decode[T]` is also a value of type `fn(str) -> Result[T]` (Rust's `str::parse::<i32>` as a value;
+TICKET-214): `d := json.decode[int]` then `d("5")` is `Ok(5)`, and `["1", "2"].map(json.decode[int])`
+is `[Ok(1), Ok(2)]`. A typed position pins `T` (`d: fn(str) -> Result[int] = json.decode`); an unpinned
+`d := json.decode` is rejected with the instantiate hint (`json.decode[<T>]`), including
+`[].map(json.decode)`, because each value is compiled for its `T`. `import decode from std.json` stays
+an error: decode has no runtime member.
 
 A JSON *literal in Chezzi source* clashes with string interpolation, so use a raw string
 (`r"""{"k": 1}"""`, verbatim — preferred) or double the braces (`"{{ }}"`); a bare `{…}` in a normal

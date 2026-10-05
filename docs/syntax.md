@@ -2602,7 +2602,10 @@ print((-Vec2(1, 2)).x)               # -1   — unary `-` calls Vec2.neg
 Embeds and `fn` sigs interleave in any order; a body of only embed lines is a *bundle*. A type
 satisfies the protocol iff it satisfies every embed (transitively) **and** has every own method, so a
 bound flattens at use sites (`[T: Arithmetic]` requires add/sub/mul/div). The builtin **`Arithmetic`**
-bundle is `Add + Sub + Mul + Div`. Collision rules: an own `fn` whose name matches an embedded-required
+bundle is `Add + Sub + Mul + Div`. The builtin **`Num`** is `Arithmetic + Mod + Neg + Comparable`,
+satisfied by `int` and `float` only (sealed: a user type never satisfies it, even with all eight
+methods); a `T: Num` body gets `+ - * / %`, unary `-`, `< <= > >= == !=`, each yielding `T`, and
+`x + 1` on a `T` is refused (no int/float mix, Rust's rule). Collision rules: an own `fn` whose name matches an embedded-required
 method is an error; two embeds requiring the same method with the *same* signature dedup silently (a
 legal diamond — so `Arithmetic + Add` is fine), with *differing* signatures it is an error; a cyclic
 embed is an error.
@@ -2654,6 +2657,9 @@ protocol VectorSpace:       # embeds two protocols and adds its own requirement
 
 fn combine[T: Arithmetic](a: T, b: T) -> T:   # +, -, *, / all available on T
     return (a + b) * (a - b) / b
+
+fn twice[T: Num](x: T) -> T:   # int or float, never a mix
+    return x + x
 
 protocol Named:
     fn name(self) -> str
@@ -4580,9 +4586,9 @@ fn fetch_all(urls: List[str]):
   `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
   `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
   (`List`/`Set`/`Map`/`Channel`/`range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
-  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 21
+  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 22
   prebuilt PROTOCOL names (`Any`/`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
-  `Neg`/`Arithmetic`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`) are reserved the same way — usable
+  `Neg`/`Arithmetic`/`Num`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`) are reserved the same way — usable
   as a bound (`[T: Comparable]`) but not as a `struct`/`enum`/`newtype`/`type` decl name (a user
   `protocol Comparable:` is likewise rejected `reserved (builtin)`). Their SHAPE (method sigs + embeds)
   is file-backed in `std/prelude.chz` as plain `protocol` decls (phase 5c) — a drift-guarded mirror of
