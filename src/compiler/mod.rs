@@ -1103,6 +1103,7 @@ impl Compiler {
                         name: ef.name.clone(),
                         params,
                         ret,
+                        c_variadic: sig.is_some_and(|s| s.c_variadic),
                     });
                     fc.emit(Op::MakeCffi(id), stmt.span);
                     fc.emit(Op::DefineGlobalSlot(self.global_slot(&ef.name)), stmt.span);

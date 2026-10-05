@@ -795,6 +795,8 @@ pub struct CffiDef {
     pub name: String,
     pub params: Vec<crate::native::cffi::CType>,
     pub ret: Option<crate::native::cffi::CType>,
+    /// Declared with a trailing bare `...` (C varargs).
+    pub c_variadic: bool,
 }
 
 impl Program {

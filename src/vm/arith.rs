@@ -97,6 +97,7 @@ impl Vm {
     pub(super) fn op_make_cffi(&mut self, id: u32, span: Span) -> Result<(), RuntimeError> {
         let def = self.program.cffi_defs[id as usize].clone();
         let cffi = crate::native::cffi::Cffi::new(&def.lib, &def.name, def.params, def.ret)
+            .map(|c| c.with_c_variadic(def.c_variadic))
             .map_err(|e| self.err(e.message, span))?;
         let cffi = std::sync::Arc::new(cffi);
         let key = FnKey::Cffi(std::sync::Arc::as_ptr(&cffi) as usize);

@@ -258,7 +258,24 @@ impl Vm {
                     Callee::Cffi(cffi) => {
                         // Arity is checker-guaranteed, but guard defensively (a hand-built program
                         // could bypass the checker) so a wrong arg count never indexes out of bounds.
-                        self.check_arity("function", cffi.name(), cffi.param_count(), argc, span)?;
+                        if !cffi.is_c_variadic() {
+                            self.check_arity(
+                                "function",
+                                cffi.name(),
+                                cffi.param_count(),
+                                argc,
+                                span,
+                            )?;
+                        } else if argc < cffi.param_count() {
+                            return Err(self.err(
+                                format!(
+                                    "function '{}' expects at least {} argument(s), got {argc}",
+                                    cffi.name(),
+                                    cffi.param_count()
+                                ),
+                                span,
+                            ));
+                        }
                         let mut host = VmHost { vm: self, args };
                         let ret = cffi.call(&mut host).map_err(|e| RuntimeError {
                             message: e.message,

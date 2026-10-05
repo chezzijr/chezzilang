@@ -997,6 +997,80 @@ pub struct Cffi {
     /// can't be resolved (the lib has no `free`) — then an owned return degrades to the old leak rather
     /// than aborting. Excluded from `PartialEq`: it's a function of the lib, not the signature.
     free_addr: Option<usize>,
+    /// Declared with a trailing bare `...` (C varargs): every call builds its CIF with
+    /// `ffi_prep_cif_var` (fixed count = `params.len()`), and each surplus arg passes as its
+    /// [`vararg_ctype_of`] type.
+    c_variadic: bool,
+}
+
+/// The C type a vararg VALUE passes as through a C `...`: its scalar `CType`, then C's default
+/// argument promotions ([`CType::vararg_promoted`], the one table the checker's `c_vararg_ctype` also
+/// ends in). `None` for a struct, list or any other non-scalar value.
+pub fn vararg_ctype_of(v: &NativeRet) -> Option<CType> {
+    match v {
+        NativeRet::Int(_) => CType::Int,
+        NativeRet::Float(_) => CType::Float,
+        NativeRet::Bool(_) => CType::Bool,
+        NativeRet::Str(_) => CType::Str,
+        NativeRet::Ptr(_) => CType::Ptr,
+        _ => return None,
+    }
+    .vararg_promoted()
+}
+
+/// A CIF for a C variadic call: `Cif::new` builds and owns the arg/result types, then
+/// `ffi_prep_cif_var` re-preps its `ffi_cif` in place with `nfixed` fixed args. A fixed-arity CIF is
+/// not a substitute: on x86-64 it leaves `%al` unset, which breaks `double` varargs.
+fn variadic_cif(nfixed: usize, args: Vec<Type>, ret: Type) -> Result<Cif, HostError> {
+    let ntotal = args.len();
+    let cif = Cif::new(args, ret);
+    let raw = cif.as_raw_ptr();
+    // SAFETY: `raw` is the `ffi_cif` that `cif` owns; its `rtype`/`arg_types` point at the result
+    // type and the `ntotal`-long arg type array `cif` also owns, so both outlive this call and every
+    // later `ffi_call` through `cif`. `nfixed <= ntotal` (the surplus args are appended after the
+    // declared params).
+    let status = unsafe {
+        libffi::low::prep_cif_var(
+            raw,
+            libffi::raw::ffi_abi_FFI_DEFAULT_ABI,
+            nfixed,
+            ntotal,
+            (*raw).rtype,
+            (*raw).arg_types,
+        )
+    };
+    status.map_err(|e| HostError {
+        message: format!("ffi_prep_cif_var failed: {e:?}"),
+    })?;
+    Ok(cif)
+}
+
+/// Marshal one `str` arg into a NUL-terminated C buffer and push it to `cstrings`/`ptr_args`,
+/// returning its index there. The buffer is retained (TICKET-060) when an identical one already is,
+/// or when `out_param_risk` says a `ptr` arg may carry a pointer back into it; otherwise its pointer
+/// is filled in after every arg is read.
+fn marshal_str_arg(
+    s: String,
+    i: usize,
+    fn_name: &str,
+    out_param_risk: bool,
+    cstrings: &mut Vec<Option<CString>>,
+    ptr_args: &mut Vec<*const std::os::raw::c_char>,
+) -> Result<usize, HostError> {
+    let cs = CString::new(s).map_err(|_| HostError {
+        message: format!("argument {i} to '{fn_name}' contains an interior NUL byte"),
+    })?;
+    if let Some(p) = retained_lookup(cs.as_bytes_with_nul()) {
+        cstrings.push(None);
+        ptr_args.push(p);
+    } else if out_param_risk {
+        cstrings.push(None);
+        ptr_args.push(retain_cstring(cs));
+    } else {
+        cstrings.push(Some(cs));
+        ptr_args.push(std::ptr::null());
+    }
+    Ok(cstrings.len() - 1)
 }
 
 /// Resolves a LOGICAL library name (`"libc"`/`"libm"`) to a per-platform candidate list, tried in
@@ -1123,7 +1197,19 @@ impl Cffi {
             ret,
             name: sym_name.to_string(),
             free_addr,
+            c_variadic: false,
         })
+    }
+
+    /// Mark this fn C variadic (`fn printf(fmt: str, ...)`): see [`Cffi::c_variadic`].
+    pub fn with_c_variadic(mut self, on: bool) -> Self {
+        self.c_variadic = on;
+        self
+    }
+
+    /// Whether this fn takes C varargs after its declared params.
+    pub fn is_c_variadic(&self) -> bool {
+        self.c_variadic
     }
 
     /// Copy a non-null `char*` return into an owned Chezzi `String`, then free the C buffer with the
@@ -1240,12 +1326,28 @@ impl Cffi {
             Callback(usize),
         }
         let mut slots: Vec<Slot> = Vec::with_capacity(self.params.len());
+        // C varargs: every arg past the declared params, read up front (all `host.arg_*` reads must
+        // precede the callback host-pointer capture below) with the C type it passes as.
+        let mut varargs: Vec<(CType, NativeRet)> = Vec::new();
+        if self.c_variadic {
+            for i in self.params.len()..host.arg_count() {
+                let v = host.arg_c_value(i)?;
+                let ct = vararg_ctype_of(&v).ok_or_else(|| HostError {
+                    message: format!(
+                        "argument {i} to '{}' cannot be passed to a C variadic parameter",
+                        self.name
+                    ),
+                })?;
+                varargs.push((ct, v));
+            }
+        }
         // A `ptr` PARAM may be a C out-param the callee writes an interior pointer into (`strtol`'s
         // endptr): that write is invisible afterwards, because we can neither size nor safely read
         // the user's buffer, so any `str` arg alongside a `ptr` param is retained EAGERLY rather than
-        // judged retrospectively like a `ptr` return.
-        let out_param_risk = self.params.iter().any(|p| matches!(p, CType::Ptr))
-            && self.params.iter().any(|p| matches!(p, CType::Str));
+        // judged retrospectively like a `ptr` return. A vararg `ptr`/`str` counts too (`sscanf`).
+        let arg_ctypes = || self.params.iter().chain(varargs.iter().map(|(c, _)| c));
+        let out_param_risk = arg_ctypes().any(|p| matches!(p, CType::Ptr))
+            && arg_ctypes().any(|p| matches!(p, CType::Str));
         for (i, p) in self.params.iter().enumerate() {
             match p {
                 CType::Int => {
@@ -1269,23 +1371,15 @@ impl Cffi {
                 }
                 CType::Str => {
                     let s = host.arg_str(i)?;
-                    let cs = CString::new(s).map_err(|_| HostError {
-                        message: format!(
-                            "argument {i} to '{}' contains an interior NUL byte",
-                            self.name
-                        ),
-                    })?;
-                    if let Some(p) = retained_lookup(cs.as_bytes_with_nul()) {
-                        cstrings.push(None);
-                        ptr_args.push(p);
-                    } else if out_param_risk {
-                        cstrings.push(None);
-                        ptr_args.push(retain_cstring(cs));
-                    } else {
-                        cstrings.push(Some(cs));
-                        ptr_args.push(std::ptr::null());
-                    }
-                    slots.push(Slot::Ptr(cstrings.len() - 1));
+                    let idx = marshal_str_arg(
+                        s,
+                        i,
+                        &self.name,
+                        out_param_risk,
+                        &mut cstrings,
+                        &mut ptr_args,
+                    )?;
+                    slots.push(Slot::Ptr(idx));
                 }
                 CType::Ptr => {
                     // An opaque handle: read its raw address and pass it through as a `void*`.
@@ -1457,6 +1551,49 @@ impl Cffi {
                 }
             }
         }
+        // The C varargs, after the declared params, each as its promoted C type.
+        let nparams = self.params.len();
+        for (k, (ct, v)) in varargs.iter().enumerate() {
+            match (ct, v) {
+                (CType::Int, NativeRet::Int(n)) => {
+                    int_args.push(*n as std::os::raw::c_long);
+                    slots.push(Slot::Int(int_args.len() - 1));
+                }
+                (CType::Int32, NativeRet::Bool(b)) => {
+                    i32_args.push(i32::from(*b));
+                    slots.push(Slot::I32(i32_args.len() - 1));
+                }
+                (CType::Float, NativeRet::Float(f)) => {
+                    float_args.push(*f);
+                    slots.push(Slot::Float(float_args.len() - 1));
+                }
+                (CType::Ptr, NativeRet::Ptr(a)) => {
+                    void_args.push(*a as *mut c_void);
+                    slots.push(Slot::RawPtr(void_args.len() - 1));
+                }
+                (CType::Str, NativeRet::Str(s)) => {
+                    let idx = marshal_str_arg(
+                        s.clone(),
+                        nparams + k,
+                        &self.name,
+                        out_param_risk,
+                        &mut cstrings,
+                        &mut ptr_args,
+                    )?;
+                    slots.push(Slot::Ptr(idx));
+                }
+                _ => {
+                    return Err(HostError {
+                        message: format!(
+                            "argument {} to '{}' cannot be passed to a C variadic parameter",
+                            nparams + k,
+                            self.name
+                        ),
+                    });
+                }
+            }
+        }
+
         // Capture the host pointer for every callback trampoline NOW — as the final use of `host`,
         // after all `host.arg_*` reads are done. Deriving it earlier (mid-loop) would be invalidated
         // by the subsequent reborrows for trailing params under Stacked/Tree Borrows; capturing it
@@ -1509,12 +1646,20 @@ impl Cffi {
             }
         }
 
-        let arg_types = self.params.iter().map(|p| p.ffi_type());
+        let arg_types = self
+            .params
+            .iter()
+            .chain(varargs.iter().map(|(c, _)| c))
+            .map(|p| p.ffi_type());
         let result_ty = match &self.ret {
             Some(c) => c.ffi_type(),
             None => Type::void(),
         };
-        let cif = Cif::new(arg_types, result_ty);
+        let cif = if self.c_variadic {
+            variadic_cif(nparams, arg_types.collect(), result_ty)?
+        } else {
+            Cif::new(arg_types.collect::<Vec<_>>(), result_ty)
+        };
         let code = CodePtr::from_ptr(self.sym as *const c_void);
 
         // A by-value struct RETURN cannot use `middle::Cif::call::<R>` (it allocates a `MaybeUninit<R>`
@@ -1783,6 +1928,7 @@ impl PartialEq for Cffi {
             && self.params == other.params
             && self.ret == other.ret
             && self.name == other.name
+            && self.c_variadic == other.c_variadic
     }
 }
 
@@ -1792,6 +1938,7 @@ impl std::fmt::Debug for Cffi {
             .field("name", &self.name)
             .field("params", &self.params)
             .field("ret", &self.ret)
+            .field("c_variadic", &self.c_variadic)
             .finish()
     }
 }
@@ -2408,6 +2555,32 @@ mod tests {
             v,
             NativeRet::List(vec![NativeRet::Int(3), NativeRet::Int(2)])
         );
+    }
+
+    /// TICKET-217: a C variadic call through `ffi_prep_cif_var`. The C reference prints
+    /// `snprintf n=9 buf=x-42-3.14` for `snprintf(buf, 64, "%s-%ld-%.2f", "x", 42L, 3.14159)`. The
+    /// `%.2f` cell needs the variadic CIF: on x86-64 a fixed-arity CIF leaves `%al` unset.
+    #[test]
+    fn snprintf_with_mixed_varargs_matches_c() {
+        let f = Cffi::new(
+            "libc",
+            "snprintf",
+            vec![CType::Ptr, CType::Int, CType::Str],
+            Some(CType::Int32),
+        )
+        .expect("dlopen snprintf")
+        .with_c_variadic(true);
+        let mut buf = vec![0u8; 64];
+        let mut host = MockHost::default()
+            .ptr(buf.as_mut_ptr() as usize)
+            .int(64)
+            .string("%s-%ld-%.2f")
+            .string("x")
+            .int(42)
+            .float(3.14159);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(9)));
+        let s = CStr::from_bytes_until_nul(&buf).unwrap();
+        assert_eq!(s.to_str().unwrap(), "x-42-3.14");
     }
 
     /// TICKET-217: C's default argument promotions (C11 6.5.2.2p6), one row per `CType` variant.
