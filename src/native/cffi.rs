@@ -51,7 +51,8 @@ use super::{Host, HostError, NativeRet};
 
 /// A C-marshallable type — the v1 FFI surface. `int`→C `long`, `float`→C `double`,
 /// `bool`→C `_Bool` (1 byte), `str`→C `const char*`, `ptr`→C `void*` (an opaque handle), the fixed-width
-/// integers (`int8`..`uint64`), and a flat struct-by-value (`Struct`) of those scalar variants.
+/// integers (`int8`..`uint64`), C `float` (`float32`), and a struct-by-value (`Struct`) of those,
+/// nested to any depth.
 ///
 /// Not `Copy`: the `Struct` variant carries owned data (`String`/`Vec`). It carries **only** owned
 /// data, never a libffi `Type`/`Cif` (which are `!Send`/`!Sync`/`!Clone`): the libffi structure
@@ -66,13 +67,13 @@ pub enum CType {
     Str,
     /// An opaque `void*` handle (Chezzi `ptr`): a raw address marshalled by value, in and out.
     Ptr,
-    /// A flat C struct passed/returned BY VALUE (v1: flat scalar fields only — nested structs and
-    /// `str`/`owned_str` fields are rejected by the checker). `name`/`field_names` mirror the Chezzi
+    /// A C struct passed/returned BY VALUE. Fields are C scalars or nested `Struct`s, to any depth
+    /// (`str`/`owned_str` fields are rejected by the checker). `name`/`field_names` mirror the Chezzi
     /// `struct` so a by-value RETURN lowers to a [`NativeRet::Struct`] the VM already knows how to build; the
     /// libffi structure `Type` (and per-field offsets/size/alignment) is computed from `fields` at call
     /// time via [`struct_layout`] — never stored — so the platform ABI (small-struct-in-registers vs
-    /// by-hidden-pointer) is libffi's, not hand-rolled. Fields are the scalar `CType` variants only
-    /// (the checker rejects `Str`/`OwnedStr`/`OptStr`/`OptOwnedStr`/nested `Struct`).
+    /// by-hidden-pointer) is libffi's, not hand-rolled. A nested field sits at its parent's offset
+    /// plus its own libffi offset (`write_field`/`read_field` recurse).
     Struct {
         name: String,
         field_names: Vec<String>,
@@ -315,17 +316,36 @@ pub(crate) fn write_field(
             };
             put!(a);
         }
-        // The checker rejects str / owned / opt / nested-struct / callback fields, so they never
-        // reach here.
+        // A struct (a by-value param, or a nested field): a `NativeRet::List` of its fields in
+        // declaration order, each written at `offset + inner offset` from libffi.
+        CType::Struct { name, fields, .. } => {
+            let NativeRet::List(items) = v else {
+                return Err(HostError {
+                    message: format!("struct field marshal: expected struct '{name}', got {v:?}"),
+                });
+            };
+            if items.len() != fields.len() {
+                return Err(HostError {
+                    message: format!(
+                        "struct '{name}' has {} field(s), expected {}",
+                        items.len(),
+                        fields.len()
+                    ),
+                });
+            }
+            let (_ty, _size, _align, offsets) = struct_layout(fields);
+            for ((ct, off), item) in fields.iter().zip(offsets.iter()).zip(items.iter()) {
+                write_field(buf, offset + off, ct, item)?;
+            }
+        }
+        // The checker rejects str / owned / opt / callback fields, so they never reach here.
         CType::Str
         | CType::OwnedStr
         | CType::OptStr
         | CType::OptOwnedStr
-        | CType::Struct { .. }
         | CType::Callback { .. } => {
             return Err(HostError {
-                message: "struct field marshal: str / nested-struct fields are not supported (v1)"
-                    .into(),
+                message: "struct field marshal: str fields are not supported".into(),
             });
         }
     }
@@ -367,12 +387,29 @@ pub(crate) fn read_field(buf: &[u8], offset: usize, ct: &CType) -> NativeRet {
             NativeRet::Bool(c != 0)
         }
         CType::Ptr => NativeRet::Ptr(get!(usize)),
-        // Unreachable for a well-typed struct (checker rejects str/owned/opt/nested/callback); Nil.
+        // A struct (a by-value return, or a nested field): each field read at `offset + inner
+        // offset` from libffi, as the `NativeRet::Struct` the VM lowers to a native struct.
+        CType::Struct {
+            name,
+            field_names,
+            fields,
+        } => {
+            let (_ty, _size, _align, offsets) = struct_layout(fields);
+            NativeRet::Struct {
+                name: name.clone(),
+                fields: field_names
+                    .iter()
+                    .zip(fields.iter())
+                    .zip(offsets.iter())
+                    .map(|((fname, ct), off)| (fname.clone(), read_field(buf, offset + off, ct)))
+                    .collect(),
+            }
+        }
+        // Unreachable for a well-typed struct (checker rejects str/owned/opt/callback); Nil.
         CType::Str
         | CType::OwnedStr
         | CType::OptStr
         | CType::OptOwnedStr
-        | CType::Struct { .. }
         | CType::Callback { .. } => NativeRet::Nil,
     }
 }
@@ -1265,21 +1302,11 @@ impl Cffi {
                     slots.push(Slot::U64(u64_args.len() - 1));
                 }
                 CType::Struct { fields, .. } => {
-                    // Read the Chezzi struct's fields as engine-neutral scalars (declaration order),
-                    // then write each into a C-ABI struct buffer at its libffi offset. The buffer is
-                    // the `Arg` payload passed by value.
-                    let field_vals = host.arg_struct_fields(i)?;
-                    if field_vals.len() != fields.len() {
-                        return Err(HostError {
-                            message: format!(
-                                "argument {i} to '{}' has {} struct field(s), expected {}",
-                                self.name,
-                                field_vals.len(),
-                                fields.len()
-                            ),
-                        });
-                    }
-                    let (_ty, size, _align, offsets) = struct_layout(fields);
+                    // Read the Chezzi struct as a nested value shape (declaration order), then write
+                    // it into a C-ABI struct buffer at the libffi offsets (`write_field` recurses into
+                    // nested struct fields). The buffer is the `Arg` payload passed by value.
+                    let v = host.arg_c_value(i)?;
+                    let (_ty, size, _align, _offsets) = struct_layout(fields);
                     let words = size.div_ceil(8).max(1);
                     let mut buf: Vec<u64> = vec![0u64; words];
                     {
@@ -1288,11 +1315,9 @@ impl Cffi {
                         let bytes = unsafe {
                             std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, words * 8)
                         };
-                        for ((ct, off), v) in
-                            fields.iter().zip(offsets.iter()).zip(field_vals.iter())
-                        {
-                            write_field(bytes, *off, ct, v)?;
-                        }
+                        write_field(bytes, 0, p, &v).map_err(|e| HostError {
+                            message: format!("argument {i} to '{}': {}", self.name, e.message),
+                        })?;
                     }
                     struct_bufs.push(buf);
                     slots.push(Slot::Struct(struct_bufs.len() - 1));
@@ -1468,13 +1493,8 @@ impl Cffi {
 
         // A by-value struct RETURN cannot use `middle::Cif::call::<R>` (it allocates a `MaybeUninit<R>`
         // for a statically-sized `R`); drop to the raw `ffi_call` with an own sized rvalue buffer.
-        if let Some(CType::Struct {
-            name,
-            field_names,
-            fields,
-        }) = &self.ret
-        {
-            let r = self.call_struct_return(&cif, code, &ffi_args, name, field_names, fields);
+        if let Some(ret @ CType::Struct { .. }) = &self.ret {
+            let r = self.call_struct_return(&cif, code, &ffi_args, ret);
             if let Ok(v) = &r {
                 retain_aliasing_str_args(v, &mut cstrings);
             }
@@ -1679,11 +1699,17 @@ impl Cffi {
         cif: &Cif,
         code: CodePtr,
         ffi_args: &[libffi::middle::Arg],
-        name: &str,
-        field_names: &[String],
-        fields: &[CType],
+        ret: &CType,
     ) -> Result<NativeRet, HostError> {
-        let (_ty, size, align, offsets) = struct_layout(fields);
+        let CType::Struct { fields, .. } = ret else {
+            return Err(HostError {
+                message: format!(
+                    "extern fn '{}': struct return without a struct type",
+                    self.name
+                ),
+            });
+        };
+        let (_ty, size, align, _offsets) = struct_layout(fields);
         let reg = std::mem::size_of::<libffi::raw::ffi_arg>();
         let mut rsize = size.max(reg);
         // Round up to the struct alignment so a register-floor bump can't leave a partial trailing slot.
@@ -1713,21 +1739,12 @@ impl Cffi {
             );
         }
 
-        // Read each field back at its libffi offset and widen to a NativeRet scalar. The name +
-        // field_names make this a `NativeRet::Struct` the VM already lowers to a native struct.
+        // Read the struct back at offset 0 (`read_field` recurses into nested fields at their libffi
+        // offsets) as the `NativeRet::Struct` the VM already lowers to a native struct.
         // SAFETY: byte view over the 8-aligned `u64` rvalue (same lifetime/owner); reads stay within
         // `words*8` bytes (every offset is `< size <= words*8`).
         let rbytes = unsafe { std::slice::from_raw_parts(rvalue.as_ptr() as *const u8, words * 8) };
-        let out_fields: Vec<(String, NativeRet)> = field_names
-            .iter()
-            .zip(fields.iter())
-            .zip(offsets.iter())
-            .map(|((fname, ct), off)| (fname.clone(), read_field(rbytes, *off, ct)))
-            .collect();
-        Ok(NativeRet::Struct {
-            name: name.to_string(),
-            fields: out_fields,
-        })
+        Ok(read_field(rbytes, 0, ret))
     }
 }
 
@@ -1819,7 +1836,8 @@ mod tests {
         floats: Vec<f64>,
         strs: Vec<String>,
         ptrs: Vec<usize>,
-        /// Struct args: each is its fields as engine-neutral [`NativeRet`] scalars (declaration order).
+        /// Struct args: each is its fields as engine-neutral [`NativeRet`]s (declaration order); a
+        /// nested struct field is itself a `NativeRet::List`.
         structs: Vec<Vec<NativeRet>>,
         /// Callback args: each is a [`CbBehavior`] the host's `invoke_callback` applies to the C args.
         callbacks: Vec<CbBehavior>,
@@ -1892,9 +1910,20 @@ mod tests {
             let (_, idx) = self.kinds[i];
             Ok(self.ptrs[idx])
         }
-        fn arg_struct_fields(&mut self, i: usize) -> Result<Vec<NativeRet>, HostError> {
-            let (_, idx) = self.kinds[i];
-            Ok(self.structs[idx].clone())
+        fn arg_c_value(&mut self, i: usize) -> Result<NativeRet, HostError> {
+            let (k, idx) = self.kinds[i];
+            Ok(match k {
+                'i' => NativeRet::Int(self.ints[idx]),
+                'f' => NativeRet::Float(self.floats[idx]),
+                's' => NativeRet::Str(self.strs[idx].clone()),
+                'p' => NativeRet::Ptr(self.ptrs[idx]),
+                'S' => NativeRet::List(self.structs[idx].clone()),
+                _ => {
+                    return Err(HostError {
+                        message: format!("arg {i} is not a C value"),
+                    });
+                }
+            })
         }
         fn invoke_callback(
             &mut self,
@@ -2342,14 +2371,73 @@ mod tests {
         );
     }
 
-    /// The struct PARAM marshal loop reads its fields through `Host::arg_struct_fields` in declaration
+    /// The struct PARAM marshal loop reads its fields through `Host::arg_c_value` in declaration
     /// order: prove the MockHost reader surfaces the fields in order (the cffi `call` loop then writes
     /// them into the C buffer at the libffi offsets, covered by `struct_param_mixed_fields_marshals`).
     #[test]
     fn struct_param_host_reads_fields_in_order() {
         let mut host = MockHost::default().strukt(vec![NativeRet::Int(3), NativeRet::Int(2)]);
-        let fields = host.arg_struct_fields(0).unwrap();
-        assert_eq!(fields, vec![NativeRet::Int(3), NativeRet::Int(2)]);
+        let v = host.arg_c_value(0).unwrap();
+        assert_eq!(
+            v,
+            NativeRet::List(vec![NativeRet::Int(3), NativeRet::Int(2)])
+        );
+    }
+
+    /// TICKET-217: a nested struct field sits at `parent offset + inner offset`, all from libffi.
+    /// `Deep {Out {In {int a, b}, int c}, double d}`: the C reference prints `sizeof Deep=24 off
+    /// Deep.d=16`; `In.b` is at 4 and `Out.c` at 8. A value shaped as nested `NativeRet::List`s
+    /// writes and reads back as nested `NativeRet::Struct`s, and a wrong field count is an error.
+    #[test]
+    fn nested_struct_offsets_are_parent_plus_inner() {
+        let st = |name: &str, names: &[&str], fields: Vec<CType>| CType::Struct {
+            name: name.into(),
+            field_names: names.iter().map(|n| n.to_string()).collect(),
+            fields,
+        };
+        let inn = st("In", &["a", "b"], vec![CType::Int32, CType::Int32]);
+        let out = st("Out", &["i", "c"], vec![inn, CType::Int32]);
+        let deep = st("Deep", &["o", "d"], vec![out, CType::Float]);
+        let CType::Struct { fields, .. } = &deep else {
+            unreachable!()
+        };
+        let (_ty, size, _align, offsets) = struct_layout(fields);
+        assert_eq!(offsets, vec![0, 16]);
+        assert_eq!(size, 24);
+        use NativeRet::{Float, Int, List};
+        let v = List(vec![
+            List(vec![List(vec![Int(1), Int(2)]), Int(3)]),
+            Float(0.5),
+        ]);
+        let mut buf = vec![0u8; size];
+        write_field(&mut buf, 0, &deep, &v).unwrap();
+        assert_eq!(read_field(&buf, 4, &CType::Int32), Int(2));
+        assert_eq!(read_field(&buf, 8, &CType::Int32), Int(3));
+        let s = |name: &str, fs: Vec<(&str, NativeRet)>| NativeRet::Struct {
+            name: name.into(),
+            fields: fs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        };
+        assert_eq!(
+            read_field(&buf, 0, &deep),
+            s(
+                "Deep",
+                vec![
+                    (
+                        "o",
+                        s(
+                            "Out",
+                            vec![
+                                ("i", s("In", vec![("a", Int(1)), ("b", Int(2))])),
+                                ("c", Int(3))
+                            ]
+                        )
+                    ),
+                    ("d", Float(0.5)),
+                ]
+            )
+        );
+        let short = List(vec![List(vec![List(vec![Int(1)]), Int(3)]), Float(0.5)]);
+        assert!(write_field(&mut buf, 0, &deep, &short).is_err());
     }
 
     /// `bool` now means C `_Bool` (1 byte), not C `int` (4 bytes). Pin the libffi layout: a struct

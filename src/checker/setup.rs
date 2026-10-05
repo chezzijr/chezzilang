@@ -4497,10 +4497,9 @@ impl Checker {
                 return;
             }
         }
-        // A flat-scalar struct BY VALUE: every field must itself be a marshallable C *scalar* (no
-        // nested struct, no str/owned_str). Generic structs (non-empty type args) have no fixed C
-        // layout — reject them. `visited` guards a struct cycling back through a field (defensive; a
-        // struct field that is itself a struct is already rejected as nested). `Iterator` is a
+        // A struct BY VALUE: every field must be a C scalar or a C-marshallable struct, recursively
+        // (no str/owned_str). Generic structs (non-empty type args) have no fixed C layout — reject
+        // them. `visited` rejects a struct cycling back through its own fields. `Iterator` is a
         // built-in existential `Struct`, not a real POD — never marshallable.
         if let Ty::Struct(name, args) = ty
             && args.is_empty()
@@ -4516,17 +4515,17 @@ impl Checker {
             span,
             format!(
                 "type '{ty}' is not C-marshallable in extern fn '{fn_name}' \
-                 (v1 supports only int, float, bool, str, ptr, and a flat struct of those)"
+                 (v1 supports only int, float, bool, str, ptr, and a struct of those)"
             ),
         );
     }
 
-    /// Whether every field of struct `name` is a marshallable C *scalar* — the v1 by-value-struct
-    /// rule (flat scalar fields only). On a non-scalar field (str/owned_str, a nested struct, a
-    /// generic `Ty::Param`, a list/map/…) emits a clear error naming the struct AND the offending
-    /// field, and returns `false`. A ZERO-field struct is rejected outright (libffi cannot build a CIF
-    /// for an empty aggregate — it panics). `visited` breaks a (defensive) field-type cycle without
-    /// overflow.
+    /// Whether struct `name` is C-marshallable by value — the one recursive rule: every field is a C
+    /// scalar or itself a C-marshallable (non-generic) struct, to any depth. On any other field
+    /// (str/owned_str, a generic `Ty::Param`, a list/map/…) emits a clear error naming the struct AND
+    /// the offending field, and returns `false`. A ZERO-field struct is rejected outright (libffi
+    /// cannot build a CIF for an empty aggregate — it panics). `visited` is the current struct path:
+    /// a struct reached again through its own fields is recursively defined and rejected.
     pub(super) fn struct_fields_marshallable(
         &mut self,
         name: &str,
@@ -4558,7 +4557,7 @@ impl Checker {
                 span,
                 format!(
                     "struct '{}' has no fields and cannot be C-marshallable (an extern struct \
-                     requires at least one flat scalar field) in extern fn '{fn_name}'",
+                     requires at least one C-marshallable field) in extern fn '{fn_name}'",
                     crate::compiler::bare_display(name)
                 ),
             );
@@ -4567,7 +4566,18 @@ impl Checker {
         }
         let mut all_ok = true;
         for (fname, fty) in &fields {
-            // Only true C *scalars* are valid struct fields (NOT `Str` — str by value is deferred).
+            // A nested non-generic struct recurses with the same `visited` path, so it reports its
+            // own offending field, or the recursion if it cycles back (no by-value C layout exists).
+            if let Ty::Struct(inner, args) = fty
+                && args.is_empty()
+                && inner != "Iterator"
+                && self.structs.contains_key(inner)
+            {
+                all_ok &= self.struct_fields_marshallable(inner, fn_name, span, visited);
+                continue;
+            }
+            // Otherwise only true C *scalars* are valid struct fields (NOT `Str`: whether C may hold
+            // a `char*` into Chezzi memory is an ownership question, out of scope).
             let ok = matches!(fty, Ty::Int | Ty::Float | Ty::Bool | Ty::Ptr | Ty::Unknown);
             if !ok {
                 all_ok = false;
@@ -4575,8 +4585,8 @@ impl Checker {
                     span,
                     format!(
                         "struct '{name}' field '{fname}' of type '{fty}' is not C-marshallable \
-                         (extern structs require flat scalar fields; nested structs and str are not \
-                         supported in v1) in extern fn '{fn_name}'"
+                         (extern struct fields must be C scalars or C-marshallable structs; str \
+                         fields are not supported) in extern fn '{fn_name}'"
                     ),
                 );
             }

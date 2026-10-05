@@ -608,6 +608,27 @@ impl Vm {
         N::Int(0)
     }
 
+    /// A value as a C-marshallable [`crate::native::NativeRet`] shape for the FFI seam
+    /// (`Host::arg_c_value`): a scalar (`int`/`float`/`bool`/`ptr`/`str`) as itself, a struct as a
+    /// `NativeRet::List` of its fields in declaration order, recursively. `None` for anything else.
+    pub(super) fn c_value_of(&self, v: Value) -> Option<crate::native::NativeRet> {
+        use crate::native::NativeRet as N;
+        if self.int_val(v).is_some() || v.is_float() || v.as_bool().is_some() {
+            return Some(self.value_to_native_ret(v));
+        }
+        match self.heap.get(v.as_obj()?) {
+            Obj::Ptr(a) => Some(N::Ptr(*a)),
+            Obj::Str(s) => Some(N::Str(s.to_string())),
+            Obj::Struct { fields, .. } => fields
+                .as_slice()
+                .iter()
+                .map(|f| self.c_value_of(*f))
+                .collect::<Option<Vec<_>>>()
+                .map(N::List),
+            _ => None,
+        }
+    }
+
     pub(super) fn lower_native(&mut self, ret: crate::native::NativeRet) -> Value {
         use crate::native::NativeRet as N;
         match ret {

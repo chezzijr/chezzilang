@@ -1085,7 +1085,7 @@ impl Compiler {
                                 .ok_or_else(|| CompileError {
                                     message: format!(
                                         "type '{}' is not C-marshallable in extern fn '{}' \
-                                         (v1 supports only int, float, bool, str, ptr, and a flat \
+                                         (v1 supports only int, float, bool, str, ptr, and a \
                                          struct of those)",
                                         ffi_type_display(p.ty.as_ref()),
                                         ef.name

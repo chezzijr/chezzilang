@@ -6658,49 +6658,16 @@ impl crate::native::Host for VmHost<'_> {
             None => Err(crate::native::HostError::missing_arg(i)),
         }
     }
-    fn arg_struct_fields(
+    fn arg_c_value(
         &mut self,
         i: usize,
-    ) -> Result<Vec<crate::native::NativeRet>, crate::native::HostError> {
-        use crate::native::NativeRet as N;
+    ) -> Result<crate::native::NativeRet, crate::native::HostError> {
         let Some(v) = self.args.get(i).copied() else {
             return Err(crate::native::HostError::missing_arg(i));
         };
-        let struct_fields = match v.as_obj().map(|h| self.vm.heap.get(h)) {
-            Some(Obj::Struct { fields, .. }) => fields.as_slice().to_vec(),
-            _ => {
-                return Err(crate::native::HostError::arg_type(
-                    i,
-                    "struct",
-                    self.vm.type_name(v),
-                ));
-            }
-        };
-        // Positional, declaration-order fields (the same order the StructDef declares them). Map each
-        // scalar field value to a NativeRet so the cffi layer casts it to its C field width. The
-        // checker guarantees flat scalar fields.
-        let mut out = Vec::with_capacity(struct_fields.len());
-        for fv in &struct_fields {
-            let n = if let Some(k) = self.vm.int_val(*fv) {
-                N::Int(k)
-            } else if fv.is_float() {
-                N::Float(self.vm.float_of(*fv))
-            } else if let Some(b) = fv.as_bool() {
-                N::Bool(b)
-            } else if let Some(fh) = fv.as_obj()
-                && let Obj::Ptr(a) = self.vm.heap.get(fh)
-            {
-                N::Ptr(*a)
-            } else {
-                return Err(crate::native::HostError::arg_type(
-                    i,
-                    "struct scalar field",
-                    "other",
-                ));
-            };
-            out.push(n);
-        }
-        Ok(out)
+        self.vm
+            .c_value_of(v)
+            .ok_or_else(|| crate::native::HostError::arg_type(i, "C value", self.vm.type_name(v)))
     }
     fn invoke_callback(
         &mut self,

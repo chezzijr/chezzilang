@@ -374,16 +374,16 @@ pub trait Host {
             message: "this host does not support pointer arguments".into(),
         })
     }
-    /// `args[i]` as a by-value C struct: its fields as engine-neutral [`NativeRet`] scalars in
-    /// declaration order. Used by the C-ABI FFI (`extern`) to marshal a Chezzi struct into a C struct
-    /// passed by value (v1: flat scalar fields only — `int`/`float`/`bool`/`ptr`/`int8`..`uint64`). Each
-    /// engine surfaces its already-ordered field values; the cffi layer casts each to its C field width.
-    /// The default returns a "no struct args" error so a host that never passes structs (the std-module
-    /// test fixtures / off-heap host) needn't implement it.
-    fn arg_struct_fields(&mut self, i: usize) -> Result<Vec<NativeRet>, HostError> {
+    /// `args[i]` as a C-marshallable value shape, for the C-ABI FFI (`extern`): a scalar
+    /// (`Int`/`Float`/`Bool`/`Str`/`Ptr`) as itself, and a struct as a [`NativeRet::List`] of its fields
+    /// in declaration order, recursively (a nested struct field is itself a `List`). The cffi layer
+    /// writes it at the libffi offsets (`write_field`); struct params and C varargs both read through
+    /// it. The default errors, so a host that never passes these (the std-module test fixtures /
+    /// off-heap host) needn't implement it.
+    fn arg_c_value(&mut self, i: usize) -> Result<NativeRet, HostError> {
         let _ = i;
         Err(HostError {
-            message: "this host does not support struct arguments".into(),
+            message: "this host does not support C struct or vararg arguments".into(),
         })
     }
     /// Synchronously RE-ENTER the engine to invoke the closure passed as extern arg `arg_index`,
