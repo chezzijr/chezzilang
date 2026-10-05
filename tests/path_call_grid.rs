@@ -39,9 +39,6 @@ enum E:
 enum R[T]:
     L(T)
     N
-newtype Cm = int:
-    fn twice(self) -> int:
-        return int(self) * 2
 type BI = Bx[int]
 type RI = R[int]
 fn top(x: int) -> int:
@@ -206,16 +203,6 @@ fn path_cells(out: &mut Vec<Cell>) {
             "E.tag",
             "E.A(8)",
             "fn(E) -> int",
-            "",
-            "8",
-            "cltphs",
-        ),
-        (
-            "newtype",
-            "",
-            "Cm.twice",
-            "Cm(4)",
-            "fn(Cm) -> int",
             "",
             "8",
             "cltphs",

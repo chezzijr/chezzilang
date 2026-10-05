@@ -158,10 +158,6 @@ enum EH:
         match self:
             EH.A(x): return x
 
-newtype NH = int:
-    fn hash(self) -> int:
-        return int(self)
-
 fn gen(v: int) -> Iterator[int]:
     yield v
 
@@ -461,7 +457,7 @@ fn ops() -> Vec<Op> {
 
 /// One row per single-call re-entry site (`## Single source` item 3 of TICKET-194 maps each site
 /// to its row). Ready only; each must leave `got == 7`.
-const HOOKS: [(&str, &str); 13] = [
+const HOOKS: [(&str, &str); 12] = [
     ("+ (struct_arith)", "got.add((PA(v) + PA(0)).x)"),
     ("unary - (neg)", "got.add(0 - (-PA(v)).x)"),
     ("> (struct_compare)", "if PK(v) > PK(0):\n    got.add(7)"),
@@ -484,10 +480,6 @@ const HOOKS: [(&str, &str); 13] = [
     (
         "enum hash",
         "me: Map[EH, int] = {}\nme[EH.A(v)] = v\ngot.add(me.len() * 7)",
-    ),
-    (
-        "newtype hash",
-        "mn: Map[NH, int] = {}\nmn[NH(v)] = v\ngot.add(mn.len() * 7)",
     ),
     ("RwShared.read", "got.add(w.read(fn(x: int) -> int: x + v))"),
 ];

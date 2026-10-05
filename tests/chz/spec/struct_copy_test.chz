@@ -3,7 +3,7 @@
 # `copy()` is a SHALLOW duplicate: each field's VALUE is copied, so a `List`/`Map`/`Set`/nested-struct/
 # handle field is referenced by BOTH the original and the copy. It is resolved MISS-ONLY, after a
 # declared method and after a fn-typed field of the same name, so either keeps priority over the
-# intrinsic. Structs only — enums and newtypes get nothing (see `src/checker/tests.rs`).
+# intrinsic. Structs only — enums get nothing (see `src/checker/tests.rs`).
 #
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 

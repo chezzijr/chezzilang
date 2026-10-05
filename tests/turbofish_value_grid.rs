@@ -58,10 +58,6 @@ const PLIB: &str = "enum Pair[T, U]:
     Neither
 ";
 
-const NLIB: &str = "newtype Meters = int
-newtype Wrap[T] = List[T]
-";
-
 const VLIB: &str = "fn pair[A, B](a: A, b: B) -> (A, B):
     return (a, b)
 struct Bx[T]:
@@ -363,24 +359,6 @@ fn owner_cells(out: &mut Vec<Cell>) {
 
 /// `type_head` rows: every kind of type in value position gets the type-as-value message.
 fn type_head_cells(out: &mut Vec<Cell>) {
-    for (h, pre, m) in heads3(NLIB, "nlib", "Meters, Wrap") {
-        let q = if m.is_empty() {
-            String::new()
-        } else {
-            format!("{m}.")
-        };
-        for (name, body) in [
-            ("nt", format!("f := {q}Meters")),
-            ("nt_g1", format!("f := {q}Wrap[int]")),
-        ] {
-            out.push(with_lib(
-                format!("thead/{h}/{name}"),
-                ("nlib.chz", NLIB),
-                format!("{pre}\n{body}"),
-                Expect::Rejects("is a type, not a value — constructors are not values"),
-            ));
-        }
-    }
     for (h, pre, m) in heads3(OLIB, "olib", "Box, Pr, R1, R2") {
         let q = if m.is_empty() {
             String::new()

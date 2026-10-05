@@ -400,16 +400,6 @@ fn value_cells() -> Vec<Cell> {
             Expect::Rejects(FN_VALUE_KW),
         ),
         cell(
-            "newtype_ctor/pos",
-            "newtype N = int\nprint(N(5))\n",
-            prints("N(5)"),
-        ),
-        cell(
-            "newtype_ctor/kw",
-            "newtype N = int\nprint(N(x=5))\n",
-            Expect::Rejects(ONLY_SUPPORTED),
-        ),
-        cell(
             "value_alias/generic_callee_filled_hole",
             "fn f[T](a: T, b: List[T] = List[T](), c: int = 3) -> int:\n    return c\nk := f[int]\nprint(k(1, c=9))\n",
             Expect::Rejects(CALLEE_FILLED_HOLE),

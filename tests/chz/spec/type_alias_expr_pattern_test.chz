@@ -1,5 +1,5 @@
 # W10-4: a LOCAL `type` alias resolves in expression AND pattern position — a variant ctor, a
-# variant pattern, a struct/newtype ctor, a static method call, and a generic instantiation's static
+# variant pattern, a struct ctor, a static method call, and a generic instantiation's static
 # method — not just type position. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 # TICKET-172: the same forms through an IMPORTED alias (named and `module.Alias`) and through a
 # LOCAL alias whose body is `module.Type`, against `type_alias_expr_pattern_lib.chz`.

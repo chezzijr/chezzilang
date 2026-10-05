@@ -107,11 +107,10 @@ test fn arith_method_faults_match_operator_faults():
 #
 # `i64::MIN % -1` mathematically IS `0`; Rust's `checked_rem` returns `None` there only to dodge the
 # x86 `IDIV` hardware trap, not because the answer overflows. `MIN / -1` is a REAL overflow (the true
-# quotient 2^63 doesn't fit an i64) and keeps its fault. Three runtime arms compute `%`: `fast_int_bin`
-# (both operands inline, i.e. within ±2^62), the general `arith` path (at least one boxed operand —
+# quotient 2^63 doesn't fit an i64) and keeps its fault. Two runtime arms compute `%`: `fast_int_bin`
+# (both operands inline, i.e. within ±2^62) and the general `arith` path (at least one boxed operand —
 # `MIN` itself is ALWAYS boxed, since `Value::INT_MIN_INLINE` is `-(2^62)`, far above `i64::MIN`, so a
-# plain local `%` and a peephole-declined constant expression both land here), and `arith_scalar` (the
-# numeric-newtype same-type path, arm 3 — see `tests/chz/spec/newtype_test.chz`). `MIN` can never be
+# plain local `%` and a peephole-declined constant expression both land here). `MIN` can never be
 # an inline `Value`, so arm 1's own overflow branch is UNREACHABLE from Chezzi source — the regression
 # test below only covers arm 1 with ordinary (non-overflowing) values.
 
@@ -296,30 +295,11 @@ test fn bytes_and_bytearray_index_slice_methods():
     ro := recover: bs[9]
     assert msg_of(rm, "bytes.index") == msg_of(ro, "bs[9]")
 
-# ---- numeric newtype: intrinsic operator protocols ----
-
-newtype Meters = float
-newtype Count = int
-
-test fn numeric_newtype_operator_methods():
-    a := Meters(1.5)
-    b := Meters(2.5)
-    assert float(add_m(a, b)) == float(a + b)
-    assert float(sub_m(a, b)) == float(a - b)
-    assert float(mul_m(a, b)) == float(a * b)
-    assert float(div_m(a, b)) == float(a / b)
-    assert float(mod_m(Meters(7.5), Meters(2.0))) == float(Meters(7.5) % Meters(2.0))
-    p := Count(7)
-    q := Count(2)
-    assert int(add_m(p, q)) == int(p + q)
-    assert int(div_m(p, q)) == int(p / q)
-    assert int(mod_m(p, q)) == int(p % q)
-
 # ---- `Eq`: the method form and the `==` operator are ONE dispatch (M23) ----
 #
 # `.eq()` was already the structural equality `==` used; M23 made `==` route through a user `eq` too,
-# so the two spellings must still answer identically for EVERY receiver — the intrinsic scalar grants,
-# a numeric newtype (whose `==` auto-flows to the underlying), and a struct with its own `eq`.
+# so the two spellings must still answer identically for EVERY receiver — the intrinsic scalar grants
+# and a struct with its own `eq`.
 
 struct Tol:
     n: int
@@ -339,22 +319,11 @@ test fn eq_method_matches_the_equality_operator():
     wide := 4611686018427387900
     assert eq_m(wide, wide) == (wide == wide)
     assert eq_m(wide, wide + 1) == (wide == wide + 1)
-    # a numeric newtype: `==` auto-flows to the underlying, and so does the method
-    assert eq_m(Meters(1.5), Meters(1.5)) == (Meters(1.5) == Meters(1.5))
-    assert eq_m(Count(1), Count(2)) == (Count(1) == Count(2))
     # a USER `eq` wins over the intrinsic in both spellings, and they still agree
     assert eq_m(Tol(5), Tol(6)) == (Tol(5) == Tol(6))
     assert (Tol(5) == Tol(6)) == true, "the user `eq` really is what answers"
     assert eq_m(Tol(5), Tol(9)) == (Tol(5) == Tol(9))
     assert (Tol(5) == Tol(9)) == false
-
-test fn newtype_compare_matches_operator():
-    a := Meters(1.5)
-    b := Meters(2.5)
-    assert (cmp_m(a, b) < 0) == (a < b)
-    assert (cmp_m(b, a) < 0) == (b < a)
-    assert cmp_m(b, b) == 0
-    assert (cmp_m(Count(1), Count(2)) < 0) == (Count(1) < Count(2))
 
 # ---- boxed (wide) scalars reach the same arms ----
 
@@ -438,63 +407,12 @@ test fn compare_on_nan_uses_the_total_order():
     # definition, not a bug
     assert cmp_m(n, n) == 0
     assert (n == n) == false
-    # a numeric newtype over float behaves identically, both spellings (order_key unwraps it)
-    m := Meters(nan())
-    assert (m < Meters(1.0)) == false
-    assert cmp_m(m, Meters(1.0)) == c
     # unchanged: non-NaN floats, ints, and the ±0.0 pair (only NaN routes to the total order)
     assert (cmp_m(1.0, 2.0) < 0) == (1.0 < 2.0)
     assert cmp_m(3, 3) == 0
     assert cmp_m(2, 1) == 1
     nz := -1.0 * 0.0
     assert cmp_m(nz, 0.0) == 0, "non-NaN pairs unchanged: ±0.0 stay IEEE-Equal"
-
-# ---- a numeric newtype may NOT define an operator-named method (W6-3d, RESOLVED 2026-07-27) ----
-#
-# This used to pin a real divergence: the intrinsic numeric grant is unconditional on such a method
-# existing and intrinsic dispatch is miss-only, so `a.add(b)` dispatched the USER method (99) while
-# `a + b` auto-flowed to the underlying's native op (3) — two spellings of one protocol operation
-# disagreeing for the same receiver, silently. Ruling (a) resolved it by making that state
-# UNREPRESENTABLE: `newtype Score = int:` with an `add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare`
-# method is now a CHECKER ERROR at the decl site, so the program below no longer compiles and the
-# assertions it made are moot. The reject is a compile-time diagnostic, so it is pinned in Rust
-# (`checker::tests::numeric_newtype_operator_named_method_is_rejected`) — `assert` cannot express it.
-# What stays asserted HERE is the other half of the ruling: the operator still auto-flows for a
-# numeric newtype that defines NO such method, and ordinary methods on one are still fine.
-#
-# (b) — dispatching the method as the operator — was implemented and rejected: it makes `<`
-# intransitive under a heterogeneous `List[Comparable]`. See docs/gaps.md W6-3d.
-#
-# `eq` is rejected on EVERY newtype, numeric or not (gaps.md L5, closed 2026-08-08): W6-3d's
-# "a non-numeric newtype has no operator to disagree with" is true for `+`/`<` and false for `==`,
-# which every underlying defines. That reject is also a checker diagnostic
-# (`checker::tests::newtype_eq_method_rejected_at_decl`); what stays asserted here is the behavior
-# that remains — a newtype's `==` IS the underlying's equality.
-
-newtype Score = int:
-    fn doubled(self) -> Score:
-        return Score(int(self) * 2)
-
-newtype Tag = str:
-    fn shout(self) -> str:
-        return str(self) + "!"
-
-test fn newtype_equality_is_the_underlyings():
-    assert (Tag("a") == Tag("a")) == true, "a non-numeric newtype's == unwraps to str equality"
-    assert (Tag("a") == Tag("b")) == false, "…including when the values differ"
-    assert (Tag("a") != Tag("b")) == true, "!= is the same dispatch, negated"
-    assert (Score(1) == Score(1)) == true
-    assert (Score(1) == Score(2)) == false
-    assert Tag("a").shout() == "a!", "an ordinary method on a newtype is unaffected"
-
-test fn numeric_newtype_operator_auto_flows_and_ordinary_methods_still_work():
-    a := Score(1)
-    b := Score(2)
-    assert int(a + b) == 3, "the operator auto-flows to the underlying's native op"
-    assert (a < b) == true, "the operator orders by the underlying"
-    assert cmp_m(a, b) == -1, "the intrinsic Comparable grant answers the operator's verdict"
-    assert int(a.doubled()) == 2, "an ordinary method on a numeric newtype is unaffected"
-    assert int(add_m(a, b)) == 3, "the [T: Add] bound uses the intrinsic grant, not a user method"
 
 # ---- `Iterator` = a cursor, `Iterable` = anything you can iterate (W6-3b) ----
 #

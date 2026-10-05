@@ -24,10 +24,11 @@ enum Opt[T]:
     fn peek(self) -> int where T: Comparable:
         return 1
 
-# A generic newtype whose `first()` is conditional on `T: Comparable`.
-newtype Stack[T] = List[T]:
+# A generic one-field struct whose `first()` is conditional on `T: Comparable`.
+struct Stack[T]:
+    items: List[T]
     fn first(self) -> T where T: Comparable:
-        return List(self)[0]
+        return self.items[0]
 
 fn main():
     b := Box(5)

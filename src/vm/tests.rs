@@ -12251,18 +12251,6 @@ fn golden_hello_chz_matches_interpreter() {
     assert_eq!(vm_out, expected);
 }
 
-/// M21 newtype golden: `examples/newtype.chz` exercises construct/unwrap, same-type
-/// arithmetic + compare, a `str(self)` Stringable override, a runtime-dispatched `hash(self)`
-/// for map/set keys, a generic `[T: Add]` bound over a newtype, and a str-newtype unwrap.
-/// Byte-identical on the VM, interp, and the checked-in `.expected`.
-#[test]
-fn golden_newtype_chz_matches_expected_and_interp() {
-    let src = include_str!("../../examples/newtype.chz");
-    let expected = include_str!("../../examples/newtype.expected");
-    let vm_out = run_capture(src).expect("vm run");
-    assert_eq!(vm_out, expected, "vm output drifted from newtype.expected");
-}
-
 /// Golden: a user struct/enum method whose name collides with a built-in method name (`add`,
 /// `map`) still gets named/default-arg support when the receiver's struct type is statically
 /// known (typed local / inline ctor / struct-returning fn), while a genuine builtin receiver
@@ -12348,23 +12336,6 @@ fn golden_static_witness_chz_matches_expected_and_parallel() {
     assert_eq!(
         vm_out, expected,
         "vm output drifted from static_witness.expected"
-    );
-}
-
-/// M21 generic-newtype golden: `examples/newtype_generic.chz` exercises type-parameterized
-/// newtypes — `Stack[T] = List[T]` / `Tally[T: Hashable] = Map[T, int]` with methods that
-/// reference `T`, ctor inference + turbofish construction (`Stack[str]([])`), method dispatch with
-/// the type args substituted (`Option[int]`), and cast-unwrap propagation (`List(s)`→`List[int]`,
-/// `Map(t)`→the inner map). Runtime is type-erased, so byte-identical on the VM, interp, and the
-/// checked-in `.expected`.
-#[test]
-fn golden_newtype_generic_chz_matches_expected_and_interp() {
-    let src = include_str!("../../examples/newtype_generic.chz");
-    let expected = include_str!("../../examples/newtype_generic.expected");
-    let vm_out = run_capture(src).expect("vm run");
-    assert_eq!(
-        vm_out, expected,
-        "vm output drifted from newtype_generic.expected"
     );
 }
 

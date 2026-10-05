@@ -57,12 +57,6 @@ const KINDS: &[Kind] = &[
         arg: 4,
     },
     Kind {
-        tag: "newtype",
-        name: "N",
-        decl: "newtype N = int\n",
-        arg: 4,
-    },
-    Kind {
         tag: "enum",
         name: "E",
         decl: "enum E:\n    A\n",
@@ -201,7 +195,7 @@ fn named_rejection(binder: &str, k: &Kind) -> Option<&'static str> {
         ("import_alias", "imported_fn" | "imported_type" | "module") => Some("already"),
         // A whole-module import and a same-module `fn` or type under one name (owner decisions
         // 2026-09-29; Go: `redeclared in this block`).
-        ("import_alias", "struct" | "newtype" | "enum" | "alias" | "defaulted_fn") => {
+        ("import_alias", "struct" | "enum" | "alias" | "defaulted_fn") => {
             Some("is already imported")
         }
         // A top-level `fn` may not take a builtin / reserved name (`is_reserved_name`).
@@ -377,7 +371,7 @@ fn with_lib(name: &str, main: &str, lib: &str, expect: Expect) -> Cell {
     }
 }
 
-/// DEC-029/055/172: a same-module top-level `fn S` over a struct, newtype or alias `S`.
+/// DEC-029/055/172: a same-module top-level `fn S` over a struct or alias `S`.
 fn same_module_fn_cells() -> Vec<Cell> {
     let p = "struct P:\n    x: int\n";
     let bn = "(n: int) -> str:\n    return \"B{n}\"\n";
@@ -386,11 +380,6 @@ fn same_module_fn_cells() -> Vec<Cell> {
             "toplevel_fn/struct/raw_ctor_in_own_body",
             format!("{p}fn P(n: int) -> P:\n    return P(n)\nprint(P(4))\n"),
             Expect::Prints("P(x=4)".into()),
-        ),
-        one(
-            "toplevel_fn/newtype/raw_ctor_in_own_body",
-            "newtype N = int\nfn N(n: int) -> N:\n    return N(n)\nprint(N(4) == N(4))\n".into(),
-            Expect::Prints("true".into()),
         ),
         // K2: the recursive call inside `fn Q` is the fn, not the alias ctor.
         one(
@@ -404,12 +393,6 @@ fn same_module_fn_cells() -> Vec<Cell> {
             "importer/struct/qualified_call",
             "import lib\nprint(lib.P(4))\n",
             &format!("{p}fn P{bn}"),
-            Expect::Prints("B4".into()),
-        ),
-        with_lib(
-            "importer/newtype/qualified_call",
-            "import lib\nprint(lib.N(4))\n",
-            &format!("newtype N = int\nfn N{bn}"),
             Expect::Prints("B4".into()),
         ),
         with_lib(
@@ -476,7 +459,6 @@ const VV: &str = "V(A=4, k=4, pi=4)";
 #[rustfmt::skip]
 const FIELD_HEADS: &[FieldHead] = &[
     FieldHead { tag: "struct", name: "P", decl: "struct P:\n    x: int\n", member: "k", ty: "V", value: VV },
-    FieldHead { tag: "newtype", name: "N", decl: "newtype N = int\n", member: "k", ty: "V", value: VV },
     FieldHead { tag: "enum", name: "E", decl: "enum E:\n    A\n", member: "A", ty: "V", value: VV },
     FieldHead { tag: "enum_alias", name: "R", decl: "enum E:\n    A\ntype R = E\n", member: "A", ty: "V", value: VV },
     FieldHead { tag: "alias", name: "Q", decl: "struct P:\n    x: int\ntype Q = P\n", member: "k", ty: "V", value: VV },
@@ -545,9 +527,7 @@ fn field_rejection(binder: &str, tag: &str) -> Option<&'static str> {
         }
         ("import_alias", "module" | "qualified_enum" | "imported_type") => Some("already"),
         // A whole-module import and a same-module type under one name.
-        ("import_alias", "struct" | "newtype" | "enum" | "enum_alias" | "alias") => {
-            Some("is already imported")
-        }
+        ("import_alias", "struct" | "enum" | "enum_alias" | "alias") => Some("is already imported"),
         _ => None,
     }
 }

@@ -15,7 +15,8 @@ enum Shade:
             Shade.Light: 0
             Shade.Dark(n): n
 
-newtype UserId = int
+struct UserId:
+    id: int
 
 struct Box[T]:
     v: T
@@ -32,4 +33,4 @@ fn show(p: Point) -> str:
     return "Point(" + str(p.x) + "," + str(p.y) + ")"
 
 fn uid(u: UserId) -> int:
-    return int(u)
+    return u.id

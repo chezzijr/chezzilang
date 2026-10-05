@@ -46,7 +46,7 @@ test fn quote_choice_and_escapes():
     assert str(["a\tb"]) == "['a\\tb']"
     assert str(["back\\slash"]) == "['back\\\\slash']"
 
-# ---- structs, newtypes, enum payloads ----
+# ---- structs, enum payloads ----
 
 struct S:
     name: str

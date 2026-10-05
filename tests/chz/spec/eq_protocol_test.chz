@@ -251,25 +251,8 @@ test fn atomic_cas_never_calls_a_user_eq():
     assert (a == b) == true
     assert eq_calls.len() == 1
 
-# ---- a numeric newtype DOES satisfy `Eq` (the M23 review's newtype ruling) ----
-#
-# `Comparable` embeds `Eq` (M23) and a numeric newtype satisfies `Comparable` intrinsically, so
-# denying it `Eq` would make `fn sorted[T: Comparable]` unsatisfiable for `newtype Meters = float` —
-# a regression of M21. The intrinsic grant is the underlying's NATIVE equality; no newtype ever
-# satisfies `Eq` through a method (declaring `eq` on one is a decl-site error).
-
-newtype Score = int
-
 fn eq_bound[T: Eq](a: T, b: T) -> bool:
     return a == b
-
-fn cmp_bound[T: Comparable](a: T, b: T) -> bool:
-    return a < b
-
-test fn a_numeric_newtype_satisfies_eq_intrinsically():
-    assert eq_bound(Score(1), Score(1)) == true
-    assert eq_bound(Score(1), Score(2)) == false
-    assert cmp_bound(Score(1), Score(2)) == true, "Comparable embeds Eq — both must be satisfiable"
 
 # ---- W7-53 follow-up (M9) — one ERASED [T: Eq] bound, across every join-point kind ----
 #
@@ -337,8 +320,6 @@ enum En:
 struct D1Pt:
     x: int
 
-newtype Nm = str
-
 fn eqm[T: Eq](a: T, b: T) -> bool:
     return a.eq(b)
 
@@ -354,7 +335,6 @@ test fn an_erased_eq_bound_can_call_eq_on_every_granted_receiver():
     assert eqm(Set([1]), Set([1])) == true
     assert eqm(b"ab", b"ab") == true
     assert eqm(D1Pt(1), D1Pt(2)) == false, "a struct with no `eq` of its own"
-    assert eqm(Nm("a"), Nm("a")) == true
 
 test fn the_method_and_the_operator_agree_on_every_granted_receiver():
     assert eqm(Some(1), Some(1)) == (Some(1) == Some(1))
