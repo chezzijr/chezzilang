@@ -4550,6 +4550,37 @@ mod tests {
         parse_err("extern libc:\n    fn strlen(s: str) -> int\n");
     }
 
+    /// TICKET-217: a bare `...` as the last extern param marks a C variadic function.
+    #[test]
+    fn extern_bare_ellipsis_parses() {
+        match only("extern \"libc\":\n    fn printf(fmt: str, ...) -> int\n") {
+            StmtKind::Extern { fns, .. } => {
+                assert_eq!(fns[0].params.len(), 1);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_ellipsis_rejected_outside_extern() {
+        let e = parse_err("fn f(a: int, ...):\n    pass\n");
+        assert!(
+            e.to_string()
+                .contains("only allowed as the last parameter of an extern fn"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn bare_ellipsis_must_be_last_in_extern() {
+        let e = parse_err("extern \"libc\":\n    fn g(..., a: int)\n");
+        assert!(
+            e.to_string()
+                .contains("must be the last parameter of an extern fn"),
+            "{e}"
+        );
+    }
+
     #[test]
     fn parses_parallel_with_spawn_call() {
         match only("parallel:\n    spawn worker(1)\n    spawn worker(2)\n") {

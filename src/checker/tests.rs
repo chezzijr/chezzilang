@@ -20209,18 +20209,6 @@ fn extern_struct_with_no_fields_is_rejected() {
 }
 
 #[test]
-fn extern_struct_with_nested_struct_field_is_rejected() {
-    // A struct field that is itself a struct (nested by value) is deferred in v1 — reject with the
-    // struct + field named.
-    rejects(
-        "struct Inner:\n    x: int\n\
-         \nstruct Outer:\n    inner: Inner\n    y: int\n\
-         \nextern \"libc.so.6\":\n    fn f(o: Outer) -> int\n",
-        "field 'inner'",
-    );
-}
-
-#[test]
 fn extern_struct_alias_behaves_like_bare() {
     // `type P = Point` used as an extern param/return type behaves identically to bare `Point` — a
     // transparent alias to a flat-scalar struct is C-marshallable.
@@ -37404,5 +37392,126 @@ fn extern_nested_struct_by_value_is_marshallable() {
     // extern param (raylib `Camera2D {Vector2 offset, Vector2 target, float rotation, float zoom}`).
     entry_ok(
         "import int32 from std.ffi\nstruct In:\n    a: int32\n    b: int32\nstruct Out:\n    i: In\n    c: int32\nextern \"libt.so\":\n    fn take(o: Out) -> int\n",
+    );
+}
+
+#[test]
+fn extern_float32_param_return_field_and_callback_typecheck() {
+    // TICKET-217: `float32` is a C `float` width, usable as a param, return, struct field and
+    // callback part; the program sees it as `float`.
+    entry_ok(
+        "import float32 from std.ffi\nstruct V:\n    x: float32\n    y: float32\n\
+         extern \"libm\":\n    fn sqrtf(x: float32) -> float32\n    fn vf(v: V) -> V\n    \
+         fn cb(x: float32, f: fn(float32) -> float32) -> float32\n\
+         r: float = sqrtf(2.0)\n",
+    );
+}
+
+#[test]
+fn extern_float32_requires_import() {
+    rejects(
+        "extern \"libm\":\n    fn sqrtf(x: float32) -> float32\n",
+        "float32",
+    );
+}
+
+#[test]
+fn extern_float32_alias_is_float_across_modules() {
+    // An exported `type Real = float32` must cross as `float` (its `Ty`), matching its `CType`.
+    let t = TmpDir::new();
+    t.write(
+        "cdefs.chz",
+        "import float32 from std.ffi\n\ntype Real = float32\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import cdefs\nimport Real from cdefs\n\nextern \"libm\":\n    fn sqrtf(x: Real) -> cdefs.Real\n\
+         \nr: float = sqrtf(2.0)\ns: str = sqrtf(2.0)\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    assert!(
+        errs[0]
+            .message
+            .contains("cannot assign float to variable of type str"),
+        "got: {errs:?}"
+    );
+}
+
+#[test]
+fn extern_nested_struct_depth_two_param_and_return_typecheck() {
+    entry_ok(
+        "import int32 from std.ffi\nstruct In:\n    a: int32\n    b: int32\nstruct Out:\n    i: In\n    c: int32\n\
+         struct Deep:\n    o: Out\n    d: float\nextern \"libt.so\":\n    fn deep_sum(d: Deep) -> float\n    \
+         fn deep_make(a: int32, b: int32, c: int32, d: float) -> Deep\n",
+    );
+}
+
+#[test]
+fn extern_recursive_struct_by_value_is_rejected() {
+    for src in [
+        "import int32 from std.ffi\nstruct Node:\n    v: int32\n    next: Node\n\
+         extern \"libt.so\":\n    fn f(n: Node) -> int\n",
+        "struct A:\n    b: B\nstruct B:\n    a: A\nextern \"libt.so\":\n    fn f(a: A) -> int\n",
+    ] {
+        let errs = check_entry(src);
+        assert!(
+            errs.iter().any(|e| e
+                .message
+                .contains("is recursively defined and cannot be C-marshallable")),
+            "expected a recursive-struct reject for {src:?}, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn extern_nested_str_field_names_the_inner_field() {
+    let errs = check_entry(
+        "import int32 from std.ffi\nstruct N:\n    name: str\nstruct O:\n    n: N\n    k: int32\n\
+         extern \"libt.so\":\n    fn f(o: O) -> int\n",
+    );
+    assert!(
+        errs.iter().any(|e| e.message.contains("field 'name'")),
+        "expected the inner str field named, got: {errs:?}"
+    );
+}
+
+#[test]
+fn extern_c_variadic_call_typechecks() {
+    entry_ok(
+        "import std.ffi\nextern \"libc\":\n    fn printf(fmt: str, ...) -> int\n\
+         printf(\"%ld %f %s %d %p\\n\", 1, 2.5, \"x\", true, ffi.null())\nprintf(\"plain\\n\")\n",
+    );
+}
+
+#[test]
+fn extern_c_variadic_rejects_non_scalar_varargs() {
+    const HEAD: &str = "extern \"libc\":\n    fn printf(fmt: str, ...) -> int\n";
+    for tail in [
+        "struct P:\n    x: int\nprintf(\"x\", P(1))\n",
+        "printf(\"x\", fn(n: int) -> int: n)\n",
+        "s: str? = None\nprintf(\"x\", s)\n",
+        "printf(\"x\", [1])\n",
+    ] {
+        let src = format!("{HEAD}{tail}");
+        let errs = check_entry(&src);
+        assert!(
+            errs.iter().any(|e| e
+                .message
+                .contains("cannot be passed to a C variadic parameter")),
+            "expected a vararg reject for {tail:?}, got: {errs:?}"
+        );
+    }
+}
+
+#[test]
+fn extern_c_variadic_requires_the_fixed_args() {
+    rejects_entry(
+        "extern \"libc\":\n    fn printf(fmt: str, ...) -> int\nprintf()\n",
+        "'printf' expects at least 1 argument(s), got 0",
     );
 }
