@@ -2567,6 +2567,7 @@ mod tests {
     /// `snprintf n=9 buf=x-42-3.14` for `snprintf(buf, 64, "%s-%ld-%.2f", "x", 42L, 3.14159)`. The
     /// `%.2f` cell needs the variadic CIF: on x86-64 a fixed-arity CIF leaves `%al` unset.
     #[test]
+    #[allow(clippy::approx_constant)] // `3.14159` is the C reference's literal, not a stand-in for PI.
     fn snprintf_with_mixed_varargs_matches_c() {
         let f = Cffi::new(
             "libc",
