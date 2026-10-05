@@ -1527,32 +1527,13 @@ impl Checker {
 
     /// The [`crate::fmtspec::ScalarKind`] a format spec on a value of static type `ty` is checked
     /// against, plus whether the value renders as its text form (for the diagnostic). `None` keeps
-    /// the runtime backstop: `Unknown`, a generic `Param(T)`, a protocol existential, a module. A
-    /// newtype is peeled to its underlying first — a numeric one formats as its number (`{N(7):04}`
-    /// is `0007`, as Go's `%04d` prints), any other renders as its text form.
+    /// the runtime backstop: `Unknown`, a generic `Param(T)`, a protocol existential, a module.
     fn format_spec_kind(&self, ty: &Ty) -> Option<(crate::fmtspec::ScalarKind, bool)> {
         use crate::fmtspec::ScalarKind;
-        let mut cur = ty.clone();
-        let mut peeled = false;
-        // A newtype chain is finite (a cyclic one is rejected at declaration); bound the peel anyway.
-        for _ in 0..64 {
-            if !matches!(cur, Ty::NewType(..)) {
-                break;
-            }
-            cur = self.newtype_unwrap_target(&cur)?;
-            peeled = true;
-        }
-        match (&cur, peeled) {
-            (Ty::Int, _) => Some((ScalarKind::Int, false)),
-            (Ty::Float, _) => Some((ScalarKind::Float, false)),
-            (Ty::Param(_) | Ty::Unknown | Ty::Protocol(..), true) => None,
-            // A newtype over text (or anything else) keeps its `Name(inner)` text form.
-            (_, true) => Some((ScalarKind::Str, true)),
-            (_, false) => match scalar_kind_of(&cur) {
-                Some(kind) => Some((kind, false)),
-                None if renders_as_text(&cur) => Some((ScalarKind::Str, true)),
-                None => None,
-            },
+        match scalar_kind_of(ty) {
+            Some(kind) => Some((kind, false)),
+            None if renders_as_text(ty) => Some((ScalarKind::Str, true)),
+            None => None,
         }
     }
 
@@ -2019,24 +2000,6 @@ impl Checker {
                 ret: Box::new(Ty::Struct(name.to_string(), targs)),
                 labels: FnLabels::default(),
             });
-        }
-        // A newtype constructor (`UserId(10)`): one arg of the underlying type → the newtype. Mirrors
-        // the struct branch (module-keyed `bare_key` lookup); a generic newtype keeps its declared
-        // `Ty::Param`s so it Displays "fn(list[T]) -> Stack[T]".
-        if self.newtype_names.contains(name) {
-            let key = self.bare_key(name);
-            if let Some((under, _)) = self.newtype_defs.get(&key) {
-                let targs: Vec<Ty> = self
-                    .newtype_type_params
-                    .get(&key)
-                    .map(|tps| tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
-                    .unwrap_or_default();
-                return Some(Ty::Func {
-                    params: vec![under.clone()],
-                    ret: Box::new(Ty::NewType(name.to_string(), targs)),
-                    labels: crate::checker::FnLabels::default(),
-                });
-            }
         }
         // A free / constructor builtin (`print`/`range`/`List`/`Channel`/…): a DISPLAY-only signature
         // from `builtin_sig` (the inference arms aren't a single queryable sig). Reserved names can't
@@ -2597,15 +2560,6 @@ impl Checker {
                 let recv = Ty::Struct(key.clone(), params_of(&tps));
                 method(tps, info.methods.get(name)?, recv)
             }
-            TypeHeadKind::Newtype => {
-                let tps = self
-                    .newtype_type_params
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_default();
-                let recv = Ty::NewType(key.clone(), params_of(&tps));
-                method(tps, self.newtype_defs.get(key)?.1.get(name)?, recv)
-            }
             TypeHeadKind::Protocol => return None,
         };
         // A head param the instantiated sig no longer names (`Box[int].make2`) leaves the sig but
@@ -2685,15 +2639,12 @@ impl Checker {
         self.type_params_of(key).map_or(0, |tps| tps.len())
     }
 
-    /// The type params the struct, enum or newtype keyed `key` declares; `None` for no such type.
+    /// The type params the struct or enum keyed `key` declares; `None` for no such type.
     pub(super) fn type_params_of(&self, key: &str) -> Option<Vec<TyParam>> {
         if let Some(info) = self.struct_shape(key) {
             return Some(info.type_params.clone());
         }
-        if let Some(tps) = self.enum_type_params.get(key) {
-            return Some(tps.clone());
-        }
-        self.newtype_type_params_of(key).cloned()
+        self.enum_type_params.get(key).cloned()
     }
 
     /// The one place head args become a substitution for a `&self` reader: the alias-pinned args,
@@ -2986,7 +2937,7 @@ impl Checker {
             format!("'{spelled}' is a type, not a value")
         } else {
             match th.kind {
-                TypeHeadKind::Struct | TypeHeadKind::Newtype => format!(
+                TypeHeadKind::Struct => format!(
                     "'{spelled}' is a type, not a value — constructors are not values: call it \
                       (`{spelled}(…)`) or wrap it in a closure"
                 ),
@@ -5760,7 +5711,6 @@ fn renders_as_text(ty: &Ty) -> bool {
         | Ty::BuiltinFn { .. }
         | Ty::Struct(..)
         | Ty::Enum(..)
-        | Ty::NewType(..)
         | Ty::Channel(_)
         | Ty::Shared(_)
         | Ty::Atomic(_)

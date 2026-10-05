@@ -169,16 +169,14 @@ pub enum ForBind {
 
 pub type ForBindTable = HashMap<CarrierKey, ForBind>;
 
-/// Which `.sum()` call sites sum a list of a SCALAR NUMERIC NEWTYPE (`newtype Cents = int`), keyed
-/// exactly like [`CarrierKey`] (the method-NAME token — see there for why the call node's span
-/// aliases across the links of a postfix/pipe chain).
+/// Which `.sum()` call sites sum a `List[float]`, keyed exactly like [`CarrierKey`] (the
+/// method-NAME token — see there for why the call node's span aliases across the links of a
+/// postfix/pipe chain).
 ///
-/// `Some((runtime type key, underlying-is-float))` = the compiler must push a `T(0)` SEED and pass it
-/// as `sum`'s one hidden argument, so the runtime folds through the same-newtype `+` path
-/// (unwrap → native op → rewrap) and returns `T`, matching Go's `type Cents int`. The seed is also
-/// the whole answer for an EMPTY list, which is the case this table exists for: a non-empty list
-/// carries `type_key` on element 0, an empty one carries nothing and the backend is TYPE-BLIND.
-/// `None` = an ordinary `List[int]`/`List[float]` sum, lowered exactly as before.
+/// `Some(SumSeed::Float)` = the compiler must push a `0.0` SEED and pass it as `sum`'s one hidden
+/// argument, so an EMPTY float list sums to `0.0`: an empty list carries no element to read a kind
+/// off, and the backend is TYPE-BLIND. `None` = an ordinary `List[int]` sum, lowered exactly as
+/// before.
 ///
 /// BOTH verdicts are recorded, never just the `Some` one: a `None` entry is what lets
 /// [`crate::checker::record_call_table_entry`] see an aliased key and turn it into a hard compile
@@ -187,8 +185,6 @@ pub type ForBindTable = HashMap<CarrierKey, ForBind>;
 /// never mis-apply it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SumSeed {
-    /// A scalar numeric `newtype`: `ConstInt(0)`/`ConstFloat(0.0)` then `Op::NewType(key)`.
-    NewType { key: String, is_float: bool },
     /// A plain `List[float]`: a bare `ConstFloat(0.0)`. The EMPTY case is why this exists --
     /// the backend is type-blind and an empty list carries no element to read a kind off.
     Float,
@@ -369,12 +365,6 @@ pub enum Ty {
     /// An enum type, with its generic type arguments (empty for a non-generic enum). E.g.
     /// `Tree[int]` is `Enum("Tree", [Int])`; a plain `Shape` is `Enum("Shape", [])`.
     Enum(String, Vec<Ty>),
-    /// A `newtype` — a DISTINCT nominal type wrapping an underlying type, with its generic type
-    /// arguments (empty for a scalar newtype). Keyed by `bare_key` exactly like [`Ty::Struct`]/
-    /// [`Ty::Enum`] (so module-scoping composes for free), and like them the args ride on the type so
-    /// a cast-unwrap can substitute them into the underlying (`list(s)` for `s: Stack[int]` →
-    /// `list[int]`). NOT compatible with its underlying: only an explicit construct/cast crosses.
-    NewType(String, Vec<Ty>),
     /// A bound generic type variable (e.g. `T` inside `fn max[T: Comparable]`). Opaque while
     /// checking a generic body; replaced by a concrete `Ty` at each call site via substitution.
     Param(String),
@@ -582,9 +572,6 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         // A newtype is nominal: compatible ONLY with the same newtype (same key AND type args). It is
         // deliberately NOT compatible with its underlying scalar — that is the entire point of the
         // distinct type. Crossing the boundary needs an explicit construct or cast-unwrap.
-        (NewType(a, aa), NewType(b, ba)) => {
-            a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
-        }
         (AtomicInt, AtomicInt)
         | (Executor, Executor)
         | (Socket, Socket)
@@ -760,10 +747,7 @@ impl Ty {
                 params.iter().for_each(|t| t.collect_nominal_keys(out));
                 ret.collect_nominal_keys(out);
             }
-            Ty::Struct(n, args)
-            | Ty::Enum(n, args)
-            | Ty::NewType(n, args)
-            | Ty::Protocol(n, args) => {
+            Ty::Struct(n, args) | Ty::Enum(n, args) | Ty::Protocol(n, args) => {
                 out.insert(n.clone());
                 args.iter().for_each(|t| t.collect_nominal_keys(out));
             }
@@ -837,10 +821,9 @@ impl Ty {
             // diagnostics render the BARE display name (matching runtime display) unless `names`
             // qualifies it because a different type with the same bare name is in the same message.
             // A newtype renders like struct/enum, plus its type args when generic (`Stack[int]`).
-            Ty::Protocol(n, args)
-            | Ty::Struct(n, args)
-            | Ty::Enum(n, args)
-            | Ty::NewType(n, args) => Self::fmt_nominal(f, n, args, names),
+            Ty::Protocol(n, args) | Ty::Struct(n, args) | Ty::Enum(n, args) => {
+                Self::fmt_nominal(f, n, args, names)
+            }
             Ty::Param(n) => write!(f, "{n}"),
             Ty::Module(n) => write!(f, "module {n}"),
             Ty::Func {
@@ -1041,8 +1024,6 @@ pub enum Resolution {
     Builtin(String),
     /// A struct ctor, by runtime key (`Op::NewStruct`).
     StructCtor(String),
-    /// A newtype ctor, by runtime key (`Op::NewType`).
-    NewTypeCtor(String),
     /// A desugar-synthesized default provider the module cannot name (`Op::MakeFuncIn`).
     Provider,
     /// A bound's instance method read through a type parameter (`T.get`): a synthesized fn of

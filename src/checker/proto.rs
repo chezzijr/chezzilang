@@ -479,7 +479,6 @@ impl Checker {
             // the checker distinguishes them.
             Ty::Option(_) => "option",
             Ty::Result(..) => "result",
-            Ty::NewType(..) => "newtype",
             // `BuiltinFn` (`ord`/`chr`/`panic`/first-class `print`) renders identically to `Ty::Func`
             // ("fn(...) -> ..." — see `impl Display for Ty`) and compares by the same runtime
             // identity (`Obj::Builtin` name-equality, `vm/arith.rs`'s `(Obj::Builtin(a),
@@ -1349,9 +1348,7 @@ impl Checker {
             (Tuple(a), Tuple(b)) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.may_be_equal(x, y))
             }
-            (Struct(n, a), Struct(m, b))
-            | (Enum(n, a), Enum(m, b))
-            | (NewType(n, a), NewType(m, b)) => {
+            (Struct(n, a), Struct(m, b)) | (Enum(n, a), Enum(m, b)) => {
                 n == m
                     && a.len() == b.len()
                     && a.iter().zip(b).all(|(x, y)| self.may_be_equal(x, y))
@@ -1596,7 +1593,6 @@ impl Checker {
                 _ if self.imported_alias_tys.contains_key(n) => self.imported_alias_tys[n].clone(),
                 _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
                 _ if self.enum_names.contains(n) => Ty::Enum(self.bare_key(n), Vec::new()),
-                _ if self.newtype_names.contains(n) => Ty::NewType(self.bare_key(n), Vec::new()),
                 _ if self.protocol_shape(n).is_some() => {
                     Ty::Protocol(self.protocol_key(n), Vec::new())
                 }
@@ -1635,12 +1631,6 @@ impl Checker {
                         .collect(),
                 ),
                 _ if self.enum_names.contains(n) => Ty::Enum(
-                    self.bare_key(n),
-                    args.iter()
-                        .map(|a| self.resolve_ty_ro_d(a, depth + 1))
-                        .collect(),
-                ),
-                _ if self.newtype_names.contains(n) => Ty::NewType(
                     self.bare_key(n),
                     args.iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
@@ -1701,8 +1691,6 @@ impl Checker {
             Ty::Struct(self.type_key(mid, name), args.to_vec())
         } else if sig.enum_defs.contains_key(name) {
             Ty::Enum(self.type_key(mid, name), args.to_vec())
-        } else if sig.newtype_defs.contains_key(name) {
-            Ty::NewType(self.type_key(mid, name), args.to_vec())
         } else if let Some(asig) = sig.type_aliases.get(name) {
             asig.body.clone()
         } else if sig.protocol_defs.contains_key(name) {
@@ -2421,56 +2409,6 @@ impl Checker {
             // (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable`) — its same-type `+`/`<` use the native op
             // (unwrap→op→rewrap), so a `newtype Meters = float` flows into a `[T: Add]` generic with
             // no user `add` method. Hashable/Stringable stay strictly opt-in (the user's own method).
-            Ty::NewType(ntkey, _) => {
-                // The intrinsic numeric-operator satisfaction is for SCALAR newtypes only. A generic
-                // newtype is methods-only — even `newtype Box[T] = T` gets no native Add/Sub/Mul/
-                // Comparable; operators come strictly from its own methods (checked below).
-                let numeric = !self.newtype_is_generic(ntkey)
-                    && self
-                        .newtype_underlying(ntkey)
-                        .is_some_and(|u| u.is_numeric());
-                // (`Eq` is NOT here: D1 grants it to EVERY newtype above, numeric or not — its `==`
-                // unwraps to the underlying's native equality either way — so this arm never sees it.)
-                if numeric
-                    && matches!(
-                        protocol,
-                        "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Comparable"
-                    )
-                {
-                    return self.grant_intrinsic(protocol, ty);
-                }
-                // SOUNDNESS: a newtype operator overload defined as a METHOD is NEVER dispatched at
-                // runtime — the same-newtype operator arm (vm `newtype_arith` / `compare_op`, interp
-                // `eval_binop`) always auto-flows to the UNDERLYING's native op, and unary `-` has no
-                // newtype path at all. So an operator protocol on a newtype is satisfiable ONLY via the
-                // numeric auto-flow above; admitting it structurally here would type-check a call that
-                // diverges on every engine (`check` ok / `run` silently using the native op, or
-                // "cannot apply <Op> to <underlying>"). A non-numeric (or generic) newtype therefore
-                // does NOT satisfy these — its own `add`/`sub`/`mul`/`div`/`mod`/`neg`/`compare` method
-                // is intentionally unreachable as an operator. `Comparable` is in this list for the
-                // same reason: same-newtype `<`/`<=`/`>`/`>=` always uses the underlying's NATIVE
-                // ordering (`compare_op`'s `same_newtype_keys` fast path), never the user `compare`, so
-                // a generic newtype (the only non-numeric case that reaches here after the numeric
-                // short-circuit) must NOT claim `Comparable` via a method — that would be check-ok /
-                // run-divergent. `Eq` is NOT in this list (D1): same-newtype `==` unwrapping to the
-                // UNDERLYING's native equality is a WORKING `==`, so every newtype satisfies `Eq`
-                // intrinsically at the D1 arm above — a method never enters into it, and this arm is
-                // unreachable for `Eq`. (Hashable/Stringable/Iterable/etc. still resolve structurally
-                // below.)
-                if matches!(
-                    protocol,
-                    "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg" | "Comparable"
-                ) {
-                    return Err(format!("type {ty} does not satisfy {protocol_display}"));
-                }
-                // MISS-ONLY identity-key fallback (gap #4): resolve a named-fn-imported newtype value's
-                // method table from the owning `ModuleSig` on a local-table miss (see the struct arm).
-                let Some(methods) = self.newtype_methods_of(ntkey) else {
-                    return Err(format!("type {ty} does not satisfy {protocol_display}"));
-                };
-                self.satisfies_methods(ty, protocol, args, pinfo, methods)
-                    .map(|()| Grant::no_intrinsic_method())
-            }
             _ => Err(format!("type {ty} does not satisfy {protocol_display}")),
         }
     }
@@ -2703,18 +2641,6 @@ impl Checker {
     /// struct or type-parameter that satisfies `protocol` (`Add`/`Sub`/`Mul`). The runtime dispatches
     /// to the `add`/`sub`/`mul` method; the result type is that same type. `None` ⇒ not overloadable.
     pub(super) fn op_overload_result(&self, l: &Ty, r: &Ty, protocol: &str) -> Option<Ty> {
-        // A SAME newtype with a NUMERIC underlying auto-applies the underlying's NATIVE arithmetic op
-        // (unwrap→op→rewrap, NOT a user `add`) and returns the newtype. `Meters + float` /
-        // `Meters + Seconds` don't match (different/non-newtype operands) → the caller's "cannot
-        // apply" error. (A user-defined `add` method also works via the satisfies() path below, but
-        // the native numeric op is the no-method common case.)
-        if let (Ty::NewType(a, _), Ty::NewType(b, _)) = (l, r)
-            && a == b
-            && !self.newtype_is_generic(a)
-            && self.newtype_underlying(a).is_some_and(|u| u.is_numeric())
-        {
-            return Some(l.clone());
-        }
         // SAME generic type REQUIRES matching type ARGS, not just the same name. The user's operator
         // method `add(self, o: Box[T]) -> Box[T]` on a `Box[int]` receiver needs `o: Box[int]`, so a
         // heterogeneous pair like `Box[int] + Box[str]` must NOT overload — admitting it would infer
@@ -2722,9 +2648,7 @@ impl Checker {
         // honor → runtime type confusion). `compatible` checks name + pairwise-compatible targs; an
         // `Unknown` targ on a partially-inferred side still unifies (no false rejection there).
         let same = match (l, r) {
-            (Ty::Struct(..), Ty::Struct(..))
-            | (Ty::Enum(..), Ty::Enum(..))
-            | (Ty::NewType(..), Ty::NewType(..)) => compatible(l, r),
+            (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..)) => compatible(l, r),
             (Ty::Param(a), Ty::Param(b)) => a == b,
             // NOT `(Ty::Protocol, Ty::Protocol)`: every operator protocol's method is
             // `(self, Self) -> Self`, and two values of one protocol need not hold the same witness
@@ -2738,32 +2662,6 @@ impl Checker {
         } else {
             None
         }
-    }
-
-    /// The resolved underlying `Ty` of a newtype (by runtime key), if known. Falls back to the owning
-    /// module's `ModuleSig` on a local-table miss (gap #4), so a named-fn-imported newtype value's
-    /// numeric auto-flow / operator satisfaction is decided identically to a whole-module import.
-    pub(super) fn newtype_underlying(&self, key: &str) -> Option<Ty> {
-        self.newtype_defs
-            .get(key)
-            .map(|(u, _)| u.clone())
-            .or_else(|| self.owning_newtype_def(key).map(|nt| nt.underlying.clone()))
-    }
-
-    /// Is the newtype (by runtime key) type-parameterized? A generic newtype is METHODS-ONLY — it
-    /// gets no native operator auto-flow (even over a numeric/`T` underlying); operators come strictly
-    /// from its own methods + protocol satisfaction. Gates the scalar-newtype auto-flow paths.
-    pub(super) fn newtype_is_generic(&self, key: &str) -> bool {
-        // MISS-ONLY identity-key fallback (gap #4): a named-fn-imported newtype value injects nothing
-        // into the local `newtype_type_params` table, so consult the owning `ModuleSig` on a miss.
-        self.newtype_type_params
-            .get(key)
-            .map(|t| !t.is_empty())
-            .or_else(|| {
-                self.owning_newtype_def(key)
-                    .map(|nt| !nt.type_params.is_empty())
-            })
-            .unwrap_or(false)
     }
 
     /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs
@@ -2797,11 +2695,6 @@ impl Checker {
             // Same SCALAR newtype with a numeric underlying: `Meters < Meters` uses the underlying's
             // native ordering (returns bool). A user `compare` method also enables it via satisfies()
             // (the only path for a generic newtype — methods-only, no native ordering auto-flow).
-            (Ty::NewType(a, _), Ty::NewType(b, _)) if a == b => {
-                (!self.newtype_is_generic(a)
-                    && self.newtype_underlying(a).is_some_and(|u| u.is_numeric()))
-                    || self.satisfies(l, protocol).is_ok()
-            }
             // TICKET-146: a tuple / `List` / `Option` pair orders lexicographically when every
             // element type is Comparable; `compatible` keeps `(int, int) < (int, str)` out.
             (Ty::Tuple(_), Ty::Tuple(_))
@@ -2885,28 +2778,10 @@ impl Checker {
         );
     }
 
-    /// The `T(0)` seed a `List[T].sum()` needs, or `None` for a plain `List[int]`/`List[float]`:
-    /// `Some((runtime type key, underlying-is-float))` exactly when `elem` is a SCALAR numeric
-    /// newtype. The predicate is deliberately the SAME one that grants a numeric newtype its
-    /// intrinsic `Add` (the `Ty::NewType` arm of [`Self::satisfies`]) — non-generic, numeric
-    /// underlying — so `sum`'s `where T: Add` bound and this seed can never disagree. A newtype OF a
-    /// newtype has a non-numeric underlying and so is `None`: it is rejected, exactly as `Cents(1) +
-    /// Cents(1)`'s outer wrapper and `.min()`'s `Comparable` bound already reject it.
+    /// The seed a `List[T].sum()` needs: `Some(SumSeed::Float)` for a `List[float]`, `None` for a
+    /// plain `List[int]`.
     pub(super) fn sum_seed(&self, elem: &Ty) -> Option<SumSeed> {
-        if matches!(elem, Ty::Float) {
-            return Some(SumSeed::Float);
-        }
-        let Ty::NewType(key, _) = elem else {
-            return None;
-        };
-        if self.newtype_is_generic(key) {
-            return None;
-        }
-        let under = self.newtype_underlying(key)?;
-        under.is_numeric().then(|| SumSeed::NewType {
-            key: key.clone(),
-            is_float: matches!(under, Ty::Float),
-        })
+        matches!(elem, Ty::Float).then_some(SumSeed::Float)
     }
 
     /// Record one `.sum()` site's seed for the backend, under the same key derivation
@@ -2942,35 +2817,8 @@ impl Checker {
         match ty {
             Ty::Struct(name, _) => self.struct_shape(name).map(|i| &i.methods),
             Ty::Enum(name, _) => self.enum_methods_of(name),
-            Ty::NewType(key, _) => self.newtype_methods_of(key),
             _ => None,
         }
-    }
-
-    /// A `compare`-declaring NEWTYPE is a dead end, and the bare "does not satisfy Comparable" reads
-    /// as "you forgot the comparator" — exactly wrong for someone who just wrote one. Name the real
-    /// reason instead: a newtype's `<` ALWAYS auto-flows to the underlying's native ordering
-    /// (vm `compare_op`'s same-newtype fast path), so a `compare` METHOD on one is never dispatched
-    /// and can never make it conform. `None` for anything else, so a type that never wrote `compare`
-    /// keeps the bare wording (the hint must not over-fire).
-    ///
-    /// The struct/enum half of this hint is GONE with the M23 use-site rule it advertised: "a type
-    /// defining `compare` must define `eq` too" was enforced only through the `Comparable`→`Eq`
-    /// embed, and D1 makes a plain struct satisfy `Eq`, so the rule no longer fires. It is dropped
-    /// deliberately, not re-homed — its premise was falsified in both directions by measurement (a
-    /// `compare` covering every field in declaration order agrees with structural `==` exactly, and
-    /// the repo's own motivating `Ver` DOES define both and still disagrees), and Rust — which owns
-    /// this — permits manual `Ord` beside a derived `Eq` (a clippy lint, not an error).
-    fn newtype_compare_dead_end(&self, ty: &Ty) -> Option<String> {
-        if !matches!(ty, Ty::NewType(..)) || !self.declared_methods(ty)?.contains_key("compare") {
-            return None;
-        }
-        Some(
-            "a newtype's `<` always uses the underlying's native ordering, never a `compare` \
-             method, so a `compare` method can never make a newtype satisfy `Comparable` — use a \
-             struct if you need your own ordering"
-                .to_string(),
-        )
     }
 
     /// Own methods OR anything an embed requires (M22) — so `protocol Ord2: Comparable` makes
@@ -3096,25 +2944,8 @@ impl Checker {
                 let ok = payloads.iter().all(|pty| self.sendable_rec(pty, stack));
                 stack.pop();
                 ok
-            }
-            // A newtype is sendable iff its underlying type is (it crosses by deep-copy of the inner
-            // value, like a 1-field struct). Cycle-guarded by the newtype key.
-            Ty::NewType(name, _) => {
-                if stack.contains(name) {
-                    return true;
-                }
-                // Substitute the newtype's instantiated type args into its underlying, so a generic
-                // `Stack[int]` checks `list[int]` (not bare `list[T]`) for sendability.
-                match self.newtype_unwrap_target(ty) {
-                    Some(under) => {
-                        stack.push(name.clone());
-                        let ok = self.sendable_rec(&under, stack);
-                        stack.pop();
-                        ok
-                    }
-                    None => true,
-                }
-            }
+            } // A newtype is sendable iff its underlying type is (it crosses by deep-copy of the inner
+              // value, like a 1-field struct). Cycle-guarded by the newtype key.
         }
     }
 
@@ -3248,22 +3079,6 @@ impl Checker {
                 stack.pop();
                 hit
             }
-            Ty::NewType(name, _) => {
-                if self
-                    .newtype_methods_of(name)
-                    .is_some_and(|m| m.contains_key("eq"))
-                {
-                    return Some(ty.to_string());
-                }
-                if stack.contains(name) {
-                    return None;
-                }
-                let under = self.newtype_unwrap_target(ty)?;
-                stack.push(name.clone());
-                let hit = self.reaches_user_eq(&under, stack);
-                stack.pop();
-                hit
-            }
             _ => None,
         }
     }
@@ -3317,16 +3132,6 @@ impl Checker {
                     .collect();
                 stack.push(name.clone());
                 let hit = payloads.iter().find_map(|p| self.reaches_func(p, stack));
-                stack.pop();
-                hit
-            }
-            Ty::NewType(name, _) => {
-                if stack.contains(name) {
-                    return None;
-                }
-                let under = self.newtype_unwrap_target(ty)?;
-                stack.push(name.clone());
-                let hit = self.reaches_func(&under, stack);
                 stack.pop();
                 hit
             }
@@ -3519,7 +3324,6 @@ impl Checker {
             Ty::Tuple(elems)
             | Ty::Struct(_, elems)
             | Ty::Enum(_, elems)
-            | Ty::NewType(_, elems)
             | Ty::Protocol(_, elems) => 1 + elems.iter().map(Self::ty_nodes).sum::<usize>(),
         }
     }
@@ -3648,22 +3452,6 @@ impl Checker {
                     return invisible(ty);
                 };
                 self.walk_eq_members(ty, &payloads, strict)
-            }
-            Ty::NewType(name, _) => {
-                // Declaring `eq` on a newtype is a decl-site error, so the method arm is only ever
-                // reached by an already-errored program — it is here for symmetry, not soundness.
-                if let Some(sig) = self.newtype_methods_of(name).and_then(|m| m.get("eq")) {
-                    return self.eq_where_unsatisfied(ty, sig);
-                }
-                // `newtype_underlying` + `nominal_param_map` rather than `newtype_unwrap_target`:
-                // both halves carry the gap-#4 owning-module fallback, the direct helper does not.
-                let under = self
-                    .newtype_underlying(name)
-                    .map(|u| subst(&u, &self.nominal_param_map(ty)));
-                let Some(under) = under else {
-                    return invisible(ty);
-                };
-                self.walk_eq_members(ty, std::slice::from_ref(&under), strict)
             }
             // A free type PARAMETER reached inside the walk must carry `Eq` among its declared
             // bounds. `may_be_equal` treats a `Param` as ERASED (`[T] == [T]` compiles once, with
@@ -3821,15 +3609,6 @@ impl Checker {
                 .map(|info| struct_param_map(info, targs))
                 .unwrap_or_default(),
             Ty::Enum(name, targs) => self.enum_param_map(name, targs),
-            Ty::NewType(key, targs) => self
-                .newtype_type_params_of(key)
-                .map(|tps| {
-                    tps.iter()
-                        .map(|tp| tp.name.clone())
-                        .zip(targs.iter().cloned())
-                        .collect()
-                })
-                .unwrap_or_default(),
             // Built-in containers (TICKET-024, W8-32): binds a harvested native sig's `Ty::Param`
             // (e.g. `List[T]`'s `T`) to this instantiation's element type, from the SAME harvested
             // `StructInfo` `native_handle_method` reads — never a hardcoded "T"/"K"/"V" — so a
@@ -3903,19 +3682,14 @@ impl Checker {
         // the real `check_graph` path `structs` is keyed `<module>::Name`, so a bare-name lookup
         // always misses and wrongly reports user generic structs as non-generic — which made the
         // `infer_named_call` gate reject explicit call-site type args (`Pair[int, str](…)`) that the
-        // struct-ctor branch fully supports. Mirrors the newtype arm below + the ctor branch itself.
+        // struct-ctor branch fully supports. Mirrors the ctor branch itself.
         if let Some(i) = self.structs.get(&self.bare_key(name)) {
             return !i.type_params.is_empty();
-        }
-        // A generic newtype constructor takes turbofish type args (`Stack[int]([])`) — report it so
-        // the args aren't pre-rejected by `infer_named_call`'s non-generic gate.
-        if self.newtype_names.contains(name) && self.newtype_is_generic(&self.bare_key(name)) {
-            return true;
         }
         // Bare-name query (the qualified path resolves genericity directly). A variant name may now
         // belong to several enums; treat it as generic if any owner enum is generic. `variant_owners`
         // stores BARE enum names but `enum_type_params` is module-keyed, so go through `bare_key`
-        // (same keying fix as the struct/newtype arms above — else a bare generic-enum variant like
+        // (same keying fix as the struct arm above — else a bare generic-enum variant like
         // `Full[int](5)` reports the misleading "takes no type arguments" instead of the
         // "write it qualified as 'Box.Full'" hint under the real `check_graph` path).
         if let Some(owners) = self.variant_owners.get(name) {
@@ -4206,7 +3980,6 @@ impl Checker {
         match ty {
             Ty::Struct(k, _) => self.struct_shape(k).map(|i| &i.methods),
             Ty::Enum(k, _) => self.enum_methods_of(k),
-            Ty::NewType(k, _) => self.newtype_methods_of(k),
             _ => None,
         }
     }
@@ -4444,22 +4217,7 @@ impl Checker {
                     // recovered to `int`) so the structural/intrinsic check sees concrete args.
                     let bargs: Vec<Ty> = bound.args.iter().map(|a| subst(a, &full)).collect();
                     if let Err(msg) = self.satisfies_args(concrete, &bound.name, &bargs) {
-                        // A `Comparable`-shaped bound over a newtype that WROTE `compare`: say why
-                        // the method can never satisfy it. The gate is UNCHANGED from M23 — both
-                        // names, which `Comparable` has (`eq` through its embed) and a user protocol
-                        // with only its own `compare` does not — so the sentence keeps naming
-                        // `Comparable` truthfully and cannot start firing on an unrelated bound.
-                        let note = (self.protocol_has_method(&bound.name, "compare")
-                            && self.protocol_has_method(&bound.name, "eq"))
-                        .then(|| self.newtype_compare_dead_end(concrete))
-                        .flatten();
-                        self.error(
-                            span,
-                            match note {
-                                Some(hint) => format!("{msg}: {hint}"),
-                                None => msg,
-                            },
-                        );
+                        self.error(span, msg);
                     }
                 }
             }
@@ -4472,14 +4230,13 @@ impl Checker {
     /// name. `None` outside a method body, or when the enclosing type does not declare `t`.
     pub(super) fn enclosing_type_declaring(&self, t: &str) -> Option<String> {
         let key = match self.current_self_ty.as_ref()? {
-            Ty::Struct(k, _) | Ty::Enum(k, _) | Ty::NewType(k, _) => k,
+            Ty::Struct(k, _) | Ty::Enum(k, _) => k,
             _ => return None,
         };
         let tps = self
             .struct_shape(key)
             .map(|s| &s.type_params)
-            .or_else(|| self.enum_type_params_of(key))
-            .or_else(|| self.newtype_type_params_of(key))?;
+            .or_else(|| self.enum_type_params_of(key))?;
         tps.iter()
             .any(|tp| tp.name == t)
             .then(|| crate::compiler::bare_display(key))
@@ -5791,7 +5548,7 @@ fn ty_mentions_error_existential(ty: &Ty) -> bool {
         Ty::Map(a, b) | Ty::Result(a, b) => {
             ty_mentions_error_existential(a) || ty_mentions_error_existential(b)
         }
-        Ty::Tuple(xs) | Ty::Struct(_, xs) | Ty::Enum(_, xs) | Ty::NewType(_, xs) => {
+        Ty::Tuple(xs) | Ty::Struct(_, xs) | Ty::Enum(_, xs) => {
             xs.iter().any(ty_mentions_error_existential)
         }
         _ => false,

@@ -4151,8 +4151,7 @@ impl Compiler {
     }
 
     /// The seed a `xs.sum()` site needs, per the checker's [`crate::checker::SumSeedTable`] --
-    /// `Some(SumSeed::NewType { .. })` for a scalar-numeric-newtype list, `Some(SumSeed::Float)` for
-    /// a plain `List[float]`. A MISS, or a recorded `None`, means the plain numeric sum (the pre-fix
+    /// `Some(SumSeed::Float)` for a plain `List[float]`. A MISS, or a recorded `None`, means the plain numeric sum (the pre-fix
     /// lowering), so a stale/absent entry can only under-apply. Keyed on the method-NAME token,
     /// which is distinct per link of a postfix/pipe chain (the call node's span is not -- see
     /// [`crate::checker::CarrierKey`]).
@@ -4175,22 +4174,10 @@ impl Compiler {
             .clone()
     }
 
-    /// Emit `sum`'s hidden seed argument: `T(0)` for a numeric newtype, a bare `0.0` for a plain
-    /// `List[float]`. The value IS the empty list's answer, and its TAG tells the runtime fold
-    /// which kind to accumulate in.
+    /// Emit `sum`'s hidden seed argument: a bare `0.0` for a plain `List[float]`. The value IS the
+    /// empty list's answer, and its TAG tells the runtime fold which kind to accumulate in.
     fn emit_sum_seed(&self, fc: &mut FnComp, seed: &crate::checker::SumSeed, span: Span) {
         match seed {
-            crate::checker::SumSeed::NewType { key, is_float } => {
-                fc.emit(
-                    if *is_float {
-                        Op::ConstFloat(0.0)
-                    } else {
-                        Op::ConstInt(0)
-                    },
-                    span,
-                );
-                fc.emit(Op::NewType(key.clone()), span);
-            }
             crate::checker::SumSeed::Float => fc.emit(Op::ConstFloat(0.0), span),
         }
     }
@@ -4314,7 +4301,6 @@ impl Compiler {
             Resolution::Static { .. }
                 | Resolution::Variant { .. }
                 | Resolution::StructCtor(_)
-                | Resolution::NewTypeCtor(_)
                 | Resolution::WitnessStatic(_)
                 | Resolution::ParamMethodFn { .. }
                 | Resolution::Builtin(_)
@@ -4839,11 +4825,6 @@ impl Compiler {
                     fc.emit(Op::NewStruct(key, argc), span);
                     return Ok(());
                 }
-                Resolution::NewTypeCtor(key) => {
-                    self.compile_args(fc, args)?;
-                    fc.emit(Op::NewType(key), span);
-                    return Ok(());
-                }
                 Resolution::Variant { enum_key, variant } => {
                     self.compile_args(fc, args)?;
                     self.emit_new_enum(fc, &enum_key, &variant, args.len(), span);
@@ -5010,11 +4991,6 @@ impl Compiler {
                 Resolution::StructCtor(key) => {
                     let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
                     fc.emit(Op::NewStruct(key, argc), span);
-                    return Ok(());
-                }
-                Resolution::NewTypeCtor(key) => {
-                    self.compile_args(fc, args)?;
-                    fc.emit(Op::NewType(key), span);
                     return Ok(());
                 }
                 // `std.json`'s own `_to_json` lowers to its opcode. A user module cannot declare a

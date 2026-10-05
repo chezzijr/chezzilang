@@ -264,7 +264,6 @@ fn int_where_float(expected: &Ty, actual: &Ty) -> bool {
         (Ty::Tuple(e), Ty::Tuple(a)) => any_pair(e, a),
         (Ty::Struct(n, e), Ty::Struct(m, a))
         | (Ty::Enum(n, e), Ty::Enum(m, a))
-        | (Ty::NewType(n, e), Ty::NewType(m, a))
         | (Ty::Protocol(n, e), Ty::Protocol(m, a))
             if n == m =>
         {
@@ -847,9 +846,6 @@ struct ModuleSig {
     /// Resolved enum definitions this module declares: variant names (in order), generic type
     /// params, and each variant's payload `VariantInfo`.
     enum_defs: HashMap<String, EnumSigInfo>,
-    /// Resolved newtype definitions this module declares: the underlying `Ty` and the name-keyed
-    /// methods. An importer injects these into its per-module `newtype_defs`/`newtype_names`.
-    newtype_defs: HashMap<String, NewTypeSigInfo>,
     /// Transparent type aliases this module declares, with their body RESOLVED in the DEFINING
     /// module's scope (so a cross-module `type Len = int32` carries its FFI-width license). The bool
     /// records whether the alias was licensed (`ffi_alias_ok`) in the defining module. The
@@ -965,20 +961,6 @@ struct AliasSig {
     /// width across a `from`-import or a `module.Alias` hop — the `body: Ty` cannot, since `Ty`
     /// collapses every FFI width to `Ty::Int`.
     ctype: Option<CType>,
-}
-
-/// A newtype's exported shape inside a `ModuleSig`: its resolved underlying `Ty` and its name-keyed
-/// methods, ferried across the module boundary so an imported newtype constructs/unwraps/dispatches.
-#[derive(Clone)]
-struct NewTypeSigInfo {
-    underlying: Ty,
-    /// The newtype's generic type params (empty for a scalar newtype), ferried across the module
-    /// boundary so an imported generic newtype's instantiation/dispatch/cast-unwrap resolves.
-    type_params: Vec<TyParam>,
-    methods: HashMap<String, FnSig>,
-    /// The newtype's own decl docstring, carried across the module boundary for an importer's hover
-    /// (see [`StructInfo::doc`]). Editor-only; never read by checking/codegen.
-    doc: Option<String>,
 }
 
 /// An enum's exported shape inside a `ModuleSig`: variant names in declaration order, the enum's
@@ -2232,17 +2214,6 @@ struct Checker {
     variant_owners: HashMap<String, Vec<String>>,
     struct_names: std::collections::HashSet<String>,
     enum_names: std::collections::HashSet<String>,
-    /// newtype name (BARE, current-module visibility) — mirrors `enum_names`/`struct_names`.
-    newtype_names: std::collections::HashSet<String>,
-    /// newtype runtime key (`bare_key`) → its (underlying `Ty`, name-keyed methods). Mirrors
-    /// `enum_methods` + the layout tables: drives construct, cast-unwrap, same-type operators,
-    /// method dispatch, and protocol satisfaction. NOT cleared per-module (graph-wide, like `enums`).
-    newtype_defs: HashMap<String, (Ty, HashMap<String, FnSig>)>,
-    /// newtype runtime key → its generic type parameters (empty for a scalar newtype). Mirrors
-    /// `enum_type_params`: builds the substitution from a `Ty::NewType(key, args)`'s args onto the
-    /// underlying type + method signatures (which may name the params). A non-empty entry marks the
-    /// newtype as generic — gating off the scalar-newtype native operator auto-flow (methods-only).
-    newtype_type_params: HashMap<String, Vec<TyParam>>,
     /// Transparent type aliases (`type UserId = int`): name → the aliased AST type, resolved on
     /// demand in `resolve_type`. `alias_resolving` is the active resolution stack (cycle guard).
     aliases: HashMap<String, Type>,
@@ -2448,7 +2419,7 @@ struct Checker {
     /// type). Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See
     /// [`ProtoEqTable`].
     proto_eq_calls: ProtoEqTable,
-    /// Which `.sum()` sites sum a scalar-numeric-newtype list and so need a `T(0)` seed, keyed by
+    /// Which `.sum()` sites sum a `List[float]` and so need a `0.0` seed, keyed by
     /// [`carrier_key`] on the method-name token and consumed verbatim by the compiler (which cannot
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
     /// Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See [`SumSeedTable`].
@@ -3543,13 +3514,6 @@ pub(crate) fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
                 .map(|(x, y)| merge_unknown(x, y))
                 .collect(),
         ),
-        (NewType(an, aa), NewType(sn, sa)) if an == sn && aa.len() == sa.len() => NewType(
-            an.clone(),
-            aa.iter()
-                .zip(sa)
-                .map(|(x, y)| merge_unknown(x, y))
-                .collect(),
-        ),
         // Shape/name/arity mismatch: leave `a` unchanged (no refine — normal mismatch fires later).
         _ => a.clone(),
     }
@@ -3585,9 +3549,6 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
         Ty::RwShared(t) => Ty::rwshared(subst(t, map)),
         Ty::Struct(n, args) => Ty::Struct(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
         Ty::Enum(n, args) => Ty::Enum(n.clone(), args.iter().map(|t| subst(t, map)).collect()),
-        Ty::NewType(n, args) => {
-            Ty::NewType(n.clone(), args.iter().map(|t| subst(t, map)).collect())
-        }
         // A parameterized protocol existential (`Container[int]`) must recurse into its carried args
         // so DECISION-2 method-return recovery is not inert (`c.get(0)` substituting the protocol's
         // param → the carried arg flows through here). A bare `Error` has no args (a no-op).
@@ -3886,7 +3847,6 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         }
         (Ty::Struct(dn, da), Ty::Struct(an, aa))
         | (Ty::Enum(dn, da), Ty::Enum(an, aa))
-        | (Ty::NewType(dn, da), Ty::NewType(an, aa))
         | (Ty::Protocol(dn, da), Ty::Protocol(an, aa))
             if dn == an && da.len() == aa.len() =>
         {
@@ -3943,11 +3903,7 @@ fn ty_collect_params(
             ty_collect_params(a, wanted, out);
             ty_collect_params(b, wanted, out);
         }
-        Ty::Tuple(parts)
-        | Ty::Struct(_, parts)
-        | Ty::Enum(_, parts)
-        | Ty::NewType(_, parts)
-        | Ty::Protocol(_, parts) => {
+        Ty::Tuple(parts) | Ty::Struct(_, parts) | Ty::Enum(_, parts) | Ty::Protocol(_, parts) => {
             for p in parts {
                 ty_collect_params(p, wanted, out);
             }

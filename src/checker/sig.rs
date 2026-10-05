@@ -214,7 +214,7 @@ impl Checker {
     /// providers: owner `f` for a free fn, `S.m` for a method of the host `current_self_ty`.
     fn decl_param_slots(&self, decl: &FnDecl, file: u32) -> Vec<crate::desugar::SlotSpec> {
         let (owner, bare, host_tps) = match &self.current_self_ty {
-            Some(Ty::Struct(k, a) | Ty::Enum(k, a) | Ty::NewType(k, a)) => {
+            Some(Ty::Struct(k, a) | Ty::Enum(k, a)) => {
                 let bare = k.rsplit("::").next().unwrap_or(k.as_str()).to_string();
                 let tps: Vec<String> = a
                     .iter()
@@ -848,7 +848,7 @@ impl Checker {
         // is infinite recursion). Every other body inherits the flag, like `current_self_ty`.
         let saved_raw = if self_ty.is_none()
             && self.local_fn_names.contains(&decl.name)
-            && (self.struct_names.contains(&decl.name) || self.newtype_names.contains(&decl.name))
+            && self.struct_names.contains(&decl.name)
         {
             self.raw_ctor_owner.replace(self.bare_key(&decl.name))
         } else {
@@ -1049,9 +1049,6 @@ impl Checker {
                 n1.clone(),
                 Self::join_slots(a1, a2).ok_or_else(conflict)?,
             )),
-            (NewType(n1, a1), NewType(n2, a2)) if n1 == n2 && a1.len() == a2.len() => Ok(
-                Ty::NewType(n1.clone(), Self::join_slots(a1, a2).ok_or_else(conflict)?),
-            ),
             _ => Err(Box::new(conflict())),
         }
     }
@@ -1211,9 +1208,6 @@ impl Checker {
             }
             Ty::Enum(n, a) => {
                 Ty::Enum(n.clone(), a.iter().map(|x| self.fill_ret(x, bad)).collect())
-            }
-            Ty::NewType(n, a) => {
-                Ty::NewType(n.clone(), a.iter().map(|x| self.fill_ret(x, bad)).collect())
             }
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|x| self.fill_ret(x, bad)).collect()),
             // A parameterized protocol existential (`Container[int]`) carries inner `Ty` args, so a
@@ -1742,7 +1736,7 @@ impl Checker {
             Ty::Map(k, v) | Ty::Result(k, v) => self
                 .first_static_ctor_protocol(k)
                 .or_else(|| self.first_static_ctor_protocol(v)),
-            Ty::Tuple(ts) | Ty::Struct(_, ts) | Ty::Enum(_, ts) | Ty::NewType(_, ts) => {
+            Ty::Tuple(ts) | Ty::Struct(_, ts) | Ty::Enum(_, ts) => {
                 ts.iter().find_map(|t| self.first_static_ctor_protocol(t))
             }
             Ty::Func { params, ret, .. } => params
@@ -2096,21 +2090,6 @@ impl Checker {
                         }
                         Ty::Enum(key, Vec::new())
                     }
-                    _ if self.newtype_names.contains(n) => {
-                        let key = self.bare_key(n);
-                        // A generic newtype written without type arguments is missing them.
-                        let nparams = self
-                            .newtype_type_params
-                            .get(&key)
-                            .map_or(0, |tps| tps.len());
-                        if nparams > 0 {
-                            self.error(
-                                span,
-                                format!("type '{n}' expects {nparams} type argument(s), got 0"),
-                            );
-                        }
-                        Ty::NewType(key, Vec::new())
-                    }
                     // A protocol name used as a value type (existential), e.g. `Error`. BUT a protocol
                     // with a STATIC method requirement (`Convert`-style static ctor) is witnessable only
                     // by a static method — a VALUE can't invoke it — so it is BOUND-ONLY, rejected here.
@@ -2347,15 +2326,6 @@ impl Checker {
                             Ty::Protocol(self.protocol_key(n), resolved)
                         }
                     }
-                    // A user-defined generic newtype instantiated with type arguments: `Stack[int]`.
-                    _ if self.newtype_names.contains(n) => {
-                        let key = self.bare_key(n);
-                        let resolved: Vec<Ty> =
-                            args.iter().map(|a| self.resolve_type(a, span)).collect();
-                        let tps = self.newtype_type_params.get(&key).cloned();
-                        self.check_type_arity_and_bounds(n, tps, &resolved, span);
-                        Ty::NewType(key, resolved)
-                    }
                     _ if self.bare_type_head(n).is_some_and(|th| th.pinned.is_some()) => {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
@@ -2371,7 +2341,6 @@ impl Checker {
                                 match th.kind {
                                     TypeHeadKind::Struct => Ty::Struct(th.key, targs),
                                     TypeHeadKind::Enum => Ty::Enum(th.key, targs),
-                                    TypeHeadKind::Newtype => Ty::NewType(th.key, targs),
                                     TypeHeadKind::Protocol => Ty::Unknown,
                                 }
                             }
@@ -2455,18 +2424,6 @@ impl Checker {
                         );
                     }
                     Ty::Enum(self.type_key(&mid, name), resolved)
-                } else if let Some(ntdef) = sig.newtype_defs.get(name) {
-                    if ntdef.type_params.len() != resolved.len() {
-                        self.error(
-                            span,
-                            format!(
-                                "type '{module}.{name}' expects {} type argument(s), got {}",
-                                ntdef.type_params.len(),
-                                resolved.len()
-                            ),
-                        );
-                    }
-                    Ty::NewType(self.type_key(&mid, name), resolved)
                 } else if let Some(asig) = sig.type_aliases.get(name) {
                     // Pre-resolved in the exporting module by the read-only resolver (no gate) — re-gate
                     // a static-ctor protocol out of value position (`import a; c: a.Foo`).
@@ -3820,8 +3777,7 @@ impl Checker {
                 .structs
                 .get(k)
                 .and_then(|s| s.methods.get(name))
-                .or_else(|| self.enum_methods.get(k).and_then(|ms| ms.get(name)))
-                .or_else(|| self.newtype_defs.get(k).and_then(|(_, ms)| ms.get(name))),
+                .or_else(|| self.enum_methods.get(k).and_then(|ms| ms.get(name))),
         };
         sig.map(|s| s.witness_params.clone()).unwrap_or_default()
     }
@@ -5007,7 +4963,7 @@ impl Checker {
         // TICKET-029 — same raw-ctor escape as `infer_fn_ret`, see there.
         let saved_raw = if self_ty.is_none()
             && self.local_fn_names.contains(&decl.name)
-            && (self.struct_names.contains(&decl.name) || self.newtype_names.contains(&decl.name))
+            && self.struct_names.contains(&decl.name)
         {
             self.raw_ctor_owner.replace(self.bare_key(&decl.name))
         } else {
@@ -5077,9 +5033,7 @@ impl Checker {
         let witness_fn_name = match &self_ty {
             _ if saved_in_fn => None,
             None => Some(decl.name.clone()),
-            Some(Ty::Struct(k, _) | Ty::Enum(k, _) | Ty::NewType(k, _)) => {
-                Some(format!("{k}.{}", decl.name))
-            }
+            Some(Ty::Struct(k, _) | Ty::Enum(k, _)) => Some(format!("{k}.{}", decl.name)),
             Some(_) => None,
         };
         let wparams = match &witness_fn_name {
@@ -5179,7 +5133,7 @@ impl Checker {
                 // the single-module checker test helpers key types by their BARE name, so only the
                 // CLI (and any multi-module program) could show it.
                 let owner = match &self_ty {
-                    Some(Ty::Struct(k, _) | Ty::Enum(k, _) | Ty::NewType(k, _)) => {
+                    Some(Ty::Struct(k, _) | Ty::Enum(k, _)) => {
                         let bare = k.rsplit("::").next().unwrap_or(k.as_str());
                         format!("{bare}.{}", decl.name)
                     }
@@ -6159,10 +6113,9 @@ impl Checker {
         // no constructor; `infer_call` skips it the same way, so its own diagnostic stays single.
         if let ExprKind::Ident(mname) = &obj.kind
             && self.qualified_builtin_ty(name, &[]).is_none()
-            && self.qualified_type_head(mname, name).is_some_and(|th| {
-                th.pinned.is_none()
-                    && matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Newtype)
-            })
+            && self
+                .qualified_type_head(mname, name)
+                .is_some_and(|th| th.pinned.is_none() && matches!(th.kind, TypeHeadKind::Struct))
         {
             return true;
         }
@@ -6284,7 +6237,6 @@ impl Checker {
         let methods = match ty {
             Ty::Struct(name, _) => self.structs.get(name).map(|info| &info.methods),
             Ty::Enum(name, _) => self.enum_methods_of(name),
-            Ty::NewType(name, _) => self.newtype_methods_of(name),
             _ => None,
         };
         methods

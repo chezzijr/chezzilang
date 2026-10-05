@@ -66,7 +66,6 @@ pub(super) enum HeadBinding {
 pub(super) enum TypeHeadKind {
     Struct,
     Enum,
-    Newtype,
     Protocol,
 }
 
@@ -117,9 +116,6 @@ impl Checker {
             variant_owners: HashMap::new(),
             struct_names: std::collections::HashSet::new(),
             enum_names: std::collections::HashSet::new(),
-            newtype_names: std::collections::HashSet::new(),
-            newtype_defs: HashMap::new(),
-            newtype_type_params: HashMap::new(),
             aliases: HashMap::new(),
             alias_resolving: Vec::new(),
             ffi_alias_ok: std::collections::HashSet::new(),
@@ -269,9 +265,6 @@ impl Checker {
         let known = match ty {
             Ty::Struct(k, _) => self.struct_shape(k).is_some(),
             Ty::Enum(k, _) => self.enums.contains_key(k) || self.owning_enum_def(k).is_some(),
-            Ty::NewType(k, _) => {
-                self.newtype_defs.contains_key(k) || self.owning_newtype_def(k).is_some()
-            }
             _ => false,
         };
         known.then(|| ty.clone())
@@ -325,16 +318,6 @@ impl Checker {
                     }
                 }
             }
-            Ty::NewType(key, _) if !self.newtype_defs.contains_key(key) => {
-                if let Some(ntdef) = self.owning_newtype_def(key).cloned() {
-                    self.newtype_defs.insert(
-                        key.clone(),
-                        (ntdef.underlying.clone(), ntdef.methods.clone()),
-                    );
-                    self.newtype_type_params
-                        .insert(key.clone(), ntdef.type_params.clone());
-                }
-            }
             _ => {}
         }
     }
@@ -357,14 +340,6 @@ impl Checker {
         }
     }
 
-    /// An alias whose body is a newtype instantiation: `(identity key, pinned type args)`.
-    pub(super) fn alias_newtype_head(&self, name: &str) -> Option<(String, Vec<Ty>)> {
-        match self.alias_body_ty(name)? {
-            Ty::NewType(k, targs) => Some((k, targs)),
-            _ => None,
-        }
-    }
-
     /// Bind a from-imported struct name into every namespace a colliding fn import must ALSO reach
     /// (TICKET-029) — a colliding from-import binds both, so this is called from both the struct
     /// branch and the fn branch of the `Import::From` loop. Registers the layout, makes the name
@@ -378,22 +353,6 @@ impl Checker {
         if info.origin == StructOrigin::Builtin {
             self.imported_builtin_types.insert(bind.to_string());
         }
-    }
-
-    /// Bind a from-imported newtype name into every namespace a colliding fn import must ALSO reach
-    /// (TICKET-055, the newtype twin of [`Checker::bind_imported_struct_name`]) — a colliding
-    /// from-import binds both, so this is called from both the newtype branch and the fn branch of
-    /// the `Import::From` loop. Registers the underlying type + methods, and makes the name
-    /// bare-visible as a TYPE (`newtype_names`/`bare_types`).
-    fn bind_imported_newtype_name(&mut self, bind: &str, key: &str, ntdef: &NewTypeSigInfo) {
-        self.newtype_defs.insert(
-            key.to_string(),
-            (ntdef.underlying.clone(), ntdef.methods.clone()),
-        );
-        self.newtype_type_params
-            .insert(key.to_string(), ntdef.type_params.clone());
-        self.newtype_names.insert(bind.to_string());
-        self.bare_types.insert(bind.to_string(), key.to_string());
     }
 
     /// The module-scoped runtime key for a type `name` declared in module `mid` (bare unless a genuine
@@ -554,16 +513,6 @@ impl Checker {
         names
     }
 
-    /// A newtype's method names, sorted (same `HashMap` ordering reason as `method_names`).
-    pub(super) fn newtype_method_names(&self, key: &str) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .newtype_methods_of(key)
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
-        names.sort();
-        names
-    }
-
     /// An enum's method names, sorted (same `HashMap` ordering reason as `method_names`).
     pub(super) fn enum_method_names(&self, key: &str) -> Vec<String> {
         let mut names: Vec<String> = self
@@ -697,30 +646,6 @@ impl Checker {
         self.enum_type_params
             .get(key)
             .or_else(|| self.owning_enum_def(key).map(|e| &e.type_params))
-    }
-
-    /// A newtype's shape looked up by identity key in the owning module's `ModuleSig` (miss-only).
-    pub(super) fn owning_newtype_def(&self, key: &str) -> Option<&NewTypeSigInfo> {
-        self.module_sigs.iter().find_map(|(mid, sig)| {
-            sig.newtype_defs
-                .iter()
-                .find_map(|(name, info)| (self.type_key(mid, name) == key).then_some(info))
-        })
-    }
-
-    /// A newtype's method table by identity key: local table first, else the owning `ModuleSig`.
-    pub(super) fn newtype_methods_of(&self, key: &str) -> Option<&HashMap<String, FnSig>> {
-        self.newtype_defs
-            .get(key)
-            .map(|(_, ms)| ms)
-            .or_else(|| self.owning_newtype_def(key).map(|nt| &nt.methods))
-    }
-
-    /// A newtype's type params by identity key: local table first, else the owning `ModuleSig`.
-    pub(super) fn newtype_type_params_of(&self, key: &str) -> Option<&Vec<TyParam>> {
-        self.newtype_type_params
-            .get(key)
-            .or_else(|| self.owning_newtype_def(key).map(|nt| &nt.type_params))
     }
 
     /// Register the synthetic struct shapes that native std modules return (M9): `Match`
@@ -1591,9 +1516,6 @@ impl Checker {
         self.variant_owners.clear();
         self.struct_names.clear();
         self.enum_names.clear();
-        self.newtype_names.clear();
-        self.newtype_defs.clear();
-        self.newtype_type_params.clear();
         self.aliases.clear();
         self.bare_types.clear();
         self.seed_stdlib_structs();
@@ -1921,19 +1843,6 @@ impl Checker {
                 "enum",
                 path,
             );
-        } else if let Some(ntdef) = sig.newtype_defs.get(member).cloned() {
-            // A user newtype imported by name: inject its underlying + methods under
-            // the declaring module's runtime key; expose it bare under the bind name.
-            let key = self.type_key(&imp.target, member);
-            self.bind_imported_newtype_name(bind, &key, &ntdef);
-            self.record_imported_type_hover(
-                bind,
-                *name_span,
-                &Ty::NewType(key, vec![]),
-                ntdef.doc.as_deref(),
-                "newtype",
-                path,
-            );
         } else if let Some(asig) = sig.type_aliases.get(member) {
             // A user type alias imported by name. An unlicensed alias embedding an
             // un-imported FFI width cannot be laundered — reject it here, mirroring the
@@ -2123,22 +2032,6 @@ impl Checker {
                                     .or_default()
                                     .push(ename.clone());
                             }
-                        }
-                    }
-                    for (ntname, ntdef) in &sig.newtype_defs {
-                        // Register the newtype's underlying + methods under the declaring module's
-                        // runtime key (so a value whose `Ty::NewType(key)` matches resolves its
-                        // methods/construct/cast). A std module also exposes it bare.
-                        let key = self.type_key(&imp.target, ntname);
-                        self.newtype_defs.insert(
-                            key.clone(),
-                            (ntdef.underlying.clone(), ntdef.methods.clone()),
-                        );
-                        self.newtype_type_params
-                            .insert(key.clone(), ntdef.type_params.clone());
-                        if is_std {
-                            self.newtype_names.insert(ntname.clone());
-                            self.bare_types.entry(ntname.clone()).or_insert(key);
                         }
                     }
                     // A `module.Alias` needs its target's shape too — the target may live in a
@@ -2702,8 +2595,6 @@ impl Checker {
             TypeHeadKind::Struct
         } else if self.enum_names.contains(name) {
             TypeHeadKind::Enum
-        } else if self.newtype_names.contains(name) {
-            TypeHeadKind::Newtype
         } else if self.protocols.contains_key(&self.protocol_key(name)) {
             TypeHeadKind::Protocol
         } else {
@@ -2736,8 +2627,6 @@ impl Checker {
             TypeHeadKind::Struct
         } else if sig.enum_defs.contains_key(name) {
             TypeHeadKind::Enum
-        } else if sig.newtype_defs.contains_key(name) {
-            TypeHeadKind::Newtype
         } else if sig.protocol_defs.contains_key(name) {
             TypeHeadKind::Protocol
         } else {
@@ -3648,13 +3537,13 @@ impl Checker {
                     // register, the enum silently shadowed, and — sharing a `Name[args]` Display —
                     // produce nonsense like "cannot assign Foo[int] to … Foo[int]"). Same-kind dups
                     // are caught later in the resolve pass.
-                    if self.enum_names.contains(name) || self.newtype_names.contains(name) {
+                    if self.enum_names.contains(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
                     self.struct_names.insert(name.clone());
                 }
                 StmtKind::Enum { name, .. } => {
-                    if self.struct_names.contains(name) || self.newtype_names.contains(name) {
+                    if self.struct_names.contains(name) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
                     self.enum_names.insert(name.clone());
@@ -3681,7 +3570,6 @@ impl Checker {
                     } else if self.aliases.contains_key(name)
                         || self.struct_names.contains(name)
                         || self.enum_names.contains(name)
-                        || self.newtype_names.contains(name)
                     {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     } else {
@@ -4386,14 +4274,10 @@ impl Checker {
                         .structs
                         .get_mut(&key)
                         .and_then(|s| s.methods.get_mut(&m.name)),
-                    StmtKind::Enum { .. } => self
+                    _ => self
                         .enum_methods
                         .get_mut(&key)
                         .and_then(|ms| ms.get_mut(&m.name)),
-                    _ => self
-                        .newtype_defs
-                        .get_mut(&key)
-                        .and_then(|(_, ms)| ms.get_mut(&m.name)),
                 };
                 if let Some(sig) = slot {
                     sig.witness_params = w;
@@ -4430,7 +4314,6 @@ impl Checker {
             // `is_reserved_name` also means a reserved-callable name is reported ONCE, by the in-loop
             // guard above.
             if self.struct_names.contains(name)
-                || self.newtype_names.contains(name)
                 || self.variant_owners.contains_key(name)
                 || crate::checker::is_builtin_variant(name)
             {
@@ -4749,7 +4632,6 @@ fn alias_type_head(name: &str, spelled: String, body: Ty) -> Option<TypeHead> {
     let (kind, key, args) = match body {
         Ty::Struct(k, a) => (TypeHeadKind::Struct, k, a),
         Ty::Enum(k, a) => (TypeHeadKind::Enum, k, a),
-        Ty::NewType(k, a) => (TypeHeadKind::Newtype, k, a),
         _ => return None,
     };
     Some(TypeHead {
