@@ -1,0 +1,28 @@
+# TICKET-217: `float32` (C `float`) and C variadic externs, judged against a C reference program
+# (`cc ref.c -lm`): `sqrtf(2)=1.4142135381698608 fabsf(-2.5)=2.5`, and
+# `snprintf(buf, 64, "%s-%ld-%.2f", "x", 42L, 3.14159)` returns 9 and writes `x-42-3.14`.
+import std.ffi
+import float32, int32 from std.ffi
+
+extern "libm":
+    fn sqrtf(x: float32) -> float32
+    fn fabsf(x: float32) -> float32
+
+extern "libc":
+    fn snprintf(buf: ptr, n: int, fmt: str, ...) -> int32
+
+test fn float32_return_is_the_c_float_value():
+    assert sqrtf(2.0) == 1.4142135381698608
+    assert fabsf(-2.5) == 2.5
+
+test fn snprintf_formats_mixed_varargs():
+    buf := ffi.alloc(64)
+    defer ffi.free(buf)
+    assert snprintf(buf, 64, "%s-%ld-%.2f", "x", 42, 3.14159) == 9
+    assert ffi.load_str(buf) == "x-42-3.14"
+
+test fn a_variadic_call_with_only_the_fixed_args():
+    buf := ffi.alloc(16)
+    defer ffi.free(buf)
+    assert snprintf(buf, 16, "plain") == 5
+    assert ffi.load_str(buf) == "plain"

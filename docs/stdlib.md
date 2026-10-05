@@ -1222,8 +1222,15 @@ only run on the very thread they would block, while a `connect` handshake is com
 ### `std.ffi`
 C-ABI vocabulary for `extern "lib":` blocks (see the FFI section of `syntax.md`).
 `null() -> ptr` · `is_null(p: ptr) -> bool`. Also exports the marshalling **type names**: the opaque
-pointer handle `ptr` plus the eight fixed-width integers `int8`, `int16`, `int32`, `int64`, `uint8`,
-`uint16`, `uint32`, `uint64`. None of these are global builtins — a module that uses `ptr` or a width
+pointer handle `ptr` plus nine width names: the eight fixed-width integers `int8`, `int16`, `int32`,
+`int64`, `uint8`, `uint16`, `uint32`, `uint64` (each resolves to `int`), and `float32`, a C `float`
+(it resolves to `float`; a param rounds to the nearest C `float`, a return widens exactly):
+
+```chezzi
+import float32 from std.ffi
+```
+
+None of these are global builtins — a module that uses `ptr` or a width
 type (in an annotation **or an `extern` signature**) must import it from `std.ffi`. The two spellings
 are **not interchangeable for the width names**: whole-module `import std.ffi` licenses the bare `ptr`
 and the qualified `ffi.int32` form, but a bare `int32` needs the per-name `import int32 from std.ffi`

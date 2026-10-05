@@ -28,8 +28,14 @@
 //!   `None`, non-null → `Some(str)` (borrowed, not freed). The opt-in escape from the non-null `str`
 //!   faulting-on-NULL rule. Composes: `owned_str?` ([`CType::OptOwnedStr`]) is nullable + owned.
 //!
-//! Structs by value, callbacks, varargs, the rich Rust `Arc<dyn Any>` userdata handle, and a custom
-//! user-named deallocator are deferred (documented limits).
+//! Plus (TICKET-217) `float32` ([`CType::Float32`], C `float`: a param rounds the f64 to nearest
+//! f32, a return widens exactly), structs by value nested to any depth ([`CType::Struct`]; one
+//! recursive [`write_field`]/[`read_field`] at libffi offsets), and C varargs (a `c_variadic` [`Cffi`]
+//! reads each surplus arg through `Host::arg_c_value`, types it with [`vararg_ctype_of`] — C's default
+//! argument promotions — and calls through `ffi_prep_cif_var`).
+//!
+//! `str` struct fields, stored/cross-thread callbacks, the rich Rust `Arc<dyn Any>` userdata handle,
+//! and a custom user-named deallocator are deferred (documented limits).
 //!
 //! ## Send/Sync (for `--parallel`)
 //! The VM stores `Obj::Cffi(Arc<Cffi>)`, and the M:N engine shares the parent address space across

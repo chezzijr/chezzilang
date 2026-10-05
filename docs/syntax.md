@@ -4691,7 +4691,9 @@ print(strlen("hello")) # 5
 
 **Marshalling (v1 — scalars + fixed-width ints + opaque `ptr`):** `int` ↔ C `long` (for a fixed-width
 C `int32_t`/`uint32_t`/… use the dedicated `int8`..`uint64` names below — they bind the exact ABI width),
-`float` ↔ C `double`,
+`float` ↔ C `double`, `float32` ↔ C `float` (imported from `std.ffi`; the program sees a plain
+`float` — a param rounds to the nearest C `float`, `16777217.0` → `16777216.0`, `1e39` → `inf`, and a
+return widens exactly: `sqrtf(2.0)` is `1.4142135381698608`, like ctypes `c_float` and Go `float32(x)`),
 `bool` ↔ C `_Bool` (1 byte; a C function using the pre-C99 int-returning predicate idiom — e.g.
 `isdigit`, which returns an *arbitrary* nonzero `int` for true — must be bound `-> int` and tested
 `!= 0`, **not** `bool`), `str` → null-terminated `const char*` (a `char*` return is copied into a Chezzi
@@ -4700,9 +4702,9 @@ C `int32_t`/`uint32_t`/… use the dedicated `int8`..`uint64` names below — th
 C `double` param either (rule D3, §3): `cos(2)` is a type error naming `write 1.0`; write `cos(2.0)`.
 A non-numeric arg like a `str`/`bool` is rejected too. A no-return signature (`fn srand(seed: int)`) — or an explicit
 `-> nil` — maps to C `void`; `nil` is a **return-only** type (it is rejected as a parameter). A
-**flat-scalar `struct`** marshals **by value** as a C struct (see below). The checker rejects any
-other non-marshallable param/return (list/map/set/tuple/enum/generic struct/struct-with-non-scalar-
-field/…) with a *not C-marshallable* error. Calls run inline, so a slow C call pins its worker.
+**`struct`** of those (nested structs included) marshals **by value** as a C struct (see below). The
+checker rejects any other non-marshallable param/return (list/map/set/tuple/enum/generic
+struct/struct-with-a-`str`-field/…) with a *not C-marshallable* error. Calls run inline, so a slow C call pins its worker.
 
 **Structs by value.** Name a Chezzi `struct` as an extern param and/or return type to pass/return a C
 struct **by value** (not by pointer). The struct's **field order + types define the C layout** — libffi
@@ -4723,9 +4725,29 @@ print(r.quot)   # 3
 print(r.rem)    # 2
 ```
 
-**v1 limit — flat scalar fields only.** Every field must itself be an already-marshallable **scalar**
-(`int`/`float`/`bool`/`ptr`/the `int8`..`uint64` widths). A struct with a **`str` field** or a **nested
-struct** field is rejected with an error naming the struct *and* the offending field; **generic
+**Fields.** Every field is a **C scalar** (`int`/`float`/`bool`/`ptr`/the `int8`..`uint64` widths/
+`float32`) or another C-marshallable **struct**, nested to any depth — raylib's `Camera2D {Vector2
+offset, Vector2 target, float rotation, float zoom}` binds directly:
+
+```chezzi
+import float32 from std.ffi
+
+struct Vector2:
+    x: float32
+    y: float32
+
+struct Camera2D:
+    offset: Vector2
+    target: Vector2
+    rotation: float32
+    zoom: float32
+```
+
+A nested field sits at its parent's offset plus its own, both from libffi (never hand-rolled padding).
+A **recursive** struct (`struct Node: next: Node`, or `A`/`B` naming each other) has no by-value C
+layout and is rejected (*is recursively defined and cannot be C-marshallable*). A struct with a **`str`
+field**, at any depth, is rejected with an error naming the struct *and* the offending field (whether C
+may hold a `char*` into Chezzi memory is an ownership question, not yet designed); **generic
 structs** (`Pair[int]`) have no fixed C layout and are rejected. A **zero-field** struct (`struct Empty:
 pass`) is rejected too (*struct 'Empty' has no fields and cannot be C-marshallable*) — C has no empty
 struct and libffi cannot build a call interface for one. (A transparent `type P = Point` alias
@@ -4735,8 +4757,39 @@ named at the extern boundary either by **named import** (`import DivT from core.
 or by the **module-qualified spelling** (`import core.cdefs`, then `cdefs.DivT` directly in the `extern`
 fn) — both lower to the same C type. A **`bool` field** marshals as a C `_Bool` (1 byte) — it matches a C struct field
 declared `_Bool` (or `char`), **not** a 4-byte `int`; for an *int*-width boolean field declared `int` in
-C, use `int8`/`uint8` (or `int32`) and test `!= 0`. Nested structs-by-value and string fields are
-deferred to a later version.
+C, use `int8`/`uint8` (or `int32`) and test `!= 0`. String fields stay unsupported.
+
+**C variadic functions (`...`).** A bare `...` as the **last** extern param declares a C variadic
+function; each call's extra args are C varargs, typed by the checker from their static types:
+
+```chezzi
+import std.ffi
+
+extern "libc":
+    fn snprintf(buf: ptr, n: int, fmt: str, ...) -> int
+
+buf := ffi.alloc(64)
+defer ffi.free(buf)
+print(snprintf(buf, 64, "%s-%ld-%.2f", "x", 42, 3.14159))   # 9
+print(ffi.load_str(buf))                                    # x-42-3.14
+```
+
+Each vararg passes after C's default argument promotions:
+
+| Chezzi arg | C vararg | `printf` spec |
+|---|---|---|
+| `int` | `long` | `%ld` (not `%d`) |
+| `float` (incl. a `float32` result) | `double` | `%f` / `%g` |
+| `bool` | `int` (0/1) | `%d` |
+| `str` | `const char*` | `%s` |
+| `ptr` | `void*` | `%p` |
+
+A struct, closure, `str?`, list or any other value is rejected (*cannot be passed to a C variadic
+parameter*); too few fixed args is *expects at least N argument(s)*. The bare `...` is legal only in an
+`extern` fn, and only last; it is distinct from Chezzi's `...xs: T`, which an extern fn still rejects.
+A C variadic extern read as a function value (`f := printf`) has a fixed arity — its declared params.
+Calls go through libffi's `ffi_prep_cif_var`, so `double` varargs are ABI-correct (a fixed-arity
+signature leaves `%al` unset on x86-64).
 
 **Sync scalar callbacks (`fn(...)` extern params).** Pass a Chezzi closure to C as a C function
 pointer C calls *back* synchronously, during the extern call. Declare the param with the **existing**
@@ -4856,9 +4909,8 @@ dead pipe when its 4 KiB buffer first reaches `write(2)`, not on the call that f
 *cross-thread* callbacks a C library keeps and calls later or from its own thread — these **abort**
 loudly today, see above; harder than in Python because `--parallel` has no GIL to serialize the
 re-entry, plus they need a GC-rooting registry)
-and **pointer-deref builtins** (to deref a `void*` callback arg → unlocks `qsort`/`bsearch`); and
-**varargs** (#5 — rare; `printf`-family + a few syscalls, most of which you bind with a concrete
-*fixed-arity* signature today, caveat: float varargs / non-x86-64 aren't ABI-portable that way). `bool`
+and **pointer-deref builtins** (to deref a `void*` callback arg → unlocks `qsort`/`bsearch`). C
+**varargs** (#5) **shipped** — see *C variadic functions* above. `bool`
 now **is** C `_Bool` (1 byte) — no separate `bool8` type; the classic int-returning predicates
 (`isdigit`, …) bind `-> int` and test `!= 0`.
 
@@ -4891,8 +4943,9 @@ A `ptr` prints as `<ptr null>` / `<ptr>` — never the raw address (it is non-de
 runs/engines, so printing it would be nondeterministic). A `ptr` is **sendable** (a plain
 address) — it crosses a `spawn`/channel airlock by value.
 
-`std.ffi` exports both **value members** — `null()` / `is_null(p)` (above) — and **eight fixed-width
-integer TYPE names** — `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64`. The TYPE names
+`std.ffi` exports both **value members** — `null()` / `is_null(p)` (above) — and **nine width TYPE
+names** — the integers `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` and the C
+`float` width `float32` (which the program sees as `float`). The TYPE names
 are Chezzi's first **type imports**: like the value members they are brought in per-name with
 `import int32, uint32 from std.ffi`, and a module that does not import a width name cannot use it (see
 *Fixed-width integers* below). The opaque `ptr` type is imported the same way — whole-module
@@ -5050,10 +5103,11 @@ whose module you never imported (`Match`) are not callable, so nothing shadows t
   NULL base pointer is guarded (recoverable error). See `stdlib.md §std.ffi`.
 
 **Deferred (v1 limits):** *stored / cross-thread* callbacks (sync scalar callbacks **shipped** — see
-above; a stored one **aborts** with a named message on SIGABRT rather than segfaulting), varargs, a **GC-tracked auto-freed owned-buffer type** + bulk-copy helpers + `realloc` (the
+above; a stored one **aborts** with a named message on SIGABRT rather than segfaulting), a **GC-tracked auto-freed owned-buffer type** + bulk-copy helpers + `realloc` (the
 manual `ffi.alloc`/`alloc_zeroed`/`free` layer **shipped** — see above), the rich Rust `Box<dyn Any>`
 userdata handle (for compiled-in Rust libraries), a **custom user-named deallocator** (only libc `free`
-backs `owned_str`), and — within structs-by-value — **nested structs** and **`str`/`owned_str` fields**.
+backs `owned_str`), and — within structs-by-value — **`str`/`owned_str` fields** (nested structs and
+C varargs **shipped**, TICKET-217).
 (Opaque C `void*` handles — `ptr` — **shipped**, with `load_*`/`store_*` memory deref + the
 `ffi.alloc`/`alloc_zeroed`/`free` C-buffer layer, so `qsort`/`bsearch` of a Chezzi list now fully works;
 nullable `str?`

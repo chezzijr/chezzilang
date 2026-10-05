@@ -173,9 +173,9 @@ marshals a Chezzi closure into a libffi trampoline C calls *back* synchronously 
 (scalars only; faults are caught + re-raised — stronger than ctypes). **Pointer-deref builtins**
 (`std.ffi` `load_*`/`store_*`) **and the C-buffer alloc layer** (`ffi.alloc`/`alloc_zeroed`/`free`,
 libc-backed, manually freed) **have also shipped** — so `qsort`/`bsearch` of a Chezzi list now fully
-works (alloc + `store_*` + a callback comparator + `load_*`). Nested structs-by-value, `str`
-struct fields, **stored/cross-thread callbacks** (the rest of #4) and **varargs** (#5) — with design
-notes + the callback feasibility ladder + a varargs fixed-arity workaround in
+works (alloc + `store_*` + a callback comparator + `load_*`). `float32`, nested structs-by-value
+and C **varargs** (#5) **have shipped** (TICKET-217). `str` struct fields and **stored/cross-thread
+callbacks** (the rest of #4) — with design notes + the callback feasibility ladder in
 [`docs/ffi-and-packaging.md §1b`](ffi-and-packaging.md) — the rich Rust `Box<dyn Any>` userdata handle,
 and a custom user-named deallocator (only libc `free` backs `owned_str`) are still deferred. See
 the FFI subsection below + [`docs/syntax.md`](syntax.md).
@@ -794,12 +794,16 @@ struct Meters:
 >   struct return uses the raw `ffi_call` with an own rvalue buffer sized `max(struct_size,
 >   sizeof(ffi_arg))` (the register-width floor the narrow-int-return fix established), reading each field
 >   at its libffi offset into a `NativeRet::Struct` the VM already lowers. See `examples/ffi_struct.chz`.
->   **v1 limits:** nested structs, `str`/`owned_str` struct fields, and generic structs are rejected (a
->   struct with a non-scalar field errors naming the struct + field); **sync scalar callbacks shipped**
+>   **Nested structs shipped** (TICKET-217): a field may be another C-marshallable struct, to any
+>   depth; `write_field`/`read_field` recurse at `parent offset + inner offset`, all from libffi.
+>   **v1 limits:** `str`/`owned_str` struct fields, recursive structs and generic structs are rejected
+>   (a struct with a `str` field errors naming the struct + field); **sync scalar callbacks shipped**
 >   (a `fn(scalars) -> scalar` extern param → a libffi closure trampoline C calls back synchronously,
 >   scalars only, fault caught + re-raised; **pointer-deref builtins now shipped** — see below —
->   stored/cross-thread callbacks deferred), varargs, the rich Rust `Box<dyn Any>` userdata handle, and a custom user-named
->   deallocator are deferred. **Fixed-width integers shipped:** beyond bare `int` (↔ C `long`), the marshalling type
+>   stored/cross-thread callbacks deferred), the rich Rust `Box<dyn Any>` userdata handle, and a custom
+>   user-named deallocator are deferred. **C varargs shipped** (TICKET-217): a bare trailing `...` in an
+>   extern fn, each vararg promoted by `CType::vararg_promoted` and called through `ffi_prep_cif_var`.
+>   **`float32` shipped** (TICKET-217): a `std.ffi` width name for C `float`, seen as `float`. **Fixed-width integers shipped:** beyond bare `int` (↔ C `long`), the marshalling type
 >   names `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` bind C `int32_t`/`uint32_t`/…
 >   (bidirectional, truncate-on-param / sign-or-zero-extend-on-return; `examples/ffi_int.chz`). They are
 >   **imported per-name from `std.ffi`** (Chezzi's first type imports), not global builtins.
@@ -894,11 +898,13 @@ struct Meters:
 >     *as a value* (no `FILE*` vs `sqlite3*` distinction, cannot be forged from an int), but its memory
 >     is **no longer opaque**: `std.ffi` `load_*`/`store_*` read/write the bytes behind it (unsafe — a
 >     bad pointer segfaults; only NULL is guarded). See `stdlib.md §std.ffi`.
->   - **Flat-scalar structs only (FFI-`struct`):** a struct passed/returned by value must have **only
->     scalar fields** (`int`/`float`/`bool`/`ptr`/`int8`..`uint64`) in v1. A **nested struct** field or a
->     **`str`/`owned_str`** field is rejected at the checker with an error naming the struct + offending
->     field; a **generic struct** (`Pair[int]`) has no fixed C layout and is rejected. A transparent
->     `type P = Point` alias to a flat struct is accepted identically to the bare struct. The struct's
+>   - **Struct fields (FFI-`struct`):** a struct passed/returned by value has **scalar fields**
+>     (`int`/`float`/`bool`/`ptr`/`int8`..`uint64`/`float32`) or **nested C-marshallable structs**, to
+>     any depth (TICKET-217; a nested field sits at its parent's libffi offset plus its own). A
+>     **`str`/`owned_str`** field (at any depth) is rejected at the checker with an error naming the
+>     struct + offending field; a **recursive** struct has no by-value layout and is rejected; a
+>     **generic struct** (`Pair[int]`) has no fixed C layout and is rejected. A transparent
+>     `type P = Point` alias to a struct is accepted identically to the bare struct. The struct's
 >     field order + types define the C layout (libffi computes size/alignment/offsets); valid as both a
 >     param and a return. The struct may be declared **before or after** the `extern` block (forward
 >     reference is fine). **`bool` field:** marshals as a C `_Bool` (1 byte) — it matches a C struct
@@ -909,13 +915,12 @@ struct Meters:
 > - **Still deferred (Level-3):** the rich **Rust `Box<dyn Any>` userdata handle** (for compiled-in
 >   Rust libraries like Burn — distinct from the C `void*` `ptr` above, which shipped), a **custom
 >   user-named deallocator** (only libc `free` backs `owned_str`), and the deferred FFI features above
->   (nested structs-by-value /
->   `str` struct fields / **the rest of callbacks #4** — stored/cross-thread callbacks; **sync scalar
+>   (`str` struct fields / **the rest of callbacks #4** — stored/cross-thread callbacks; **sync scalar
 >   callbacks, pointer-deref `load_*`/`store_*` builtins, AND the C-buffer alloc layer
 >   (`ffi.alloc`/`alloc_zeroed`/`free`) have shipped** (so `qsort`/`bsearch` of a Chezzi list works; a
->   GC-tracked auto-freed owned-buffer type + bulk-copy helpers + `realloc` remain deferred) /
->   **varargs #5**, with design
->   notes + the callback feasibility ladder + workaround in `docs/ffi-and-packaging.md §1b`). See
+>   GC-tracked auto-freed owned-buffer type + bulk-copy helpers + `realloc` remain deferred), with
+>   design notes + the callback feasibility ladder in `docs/ffi-and-packaging.md §1b`. Nested
+>   structs-by-value, `float32` and C **varargs #5** have shipped (TICKET-217). See
 >   `docs/ffi-and-packaging.md`. (`std.os.exit` with a real exit-code channel through the run drivers
 >   has since **shipped** — see `examples/exit.chz`.)
 
@@ -1121,9 +1126,9 @@ tests/          # Rust unit + golden tests
 > **plus pointer-deref `load_*`/`store_*` builtins** reading/writing the memory behind a `ptr`,
 > **plus the C-buffer alloc layer** `ffi.alloc`/`alloc_zeroed`/`free` — libc-backed, manually-freed raw
 > buffers, so `qsort`/`bsearch` of a Chezzi list now fully works) — see
-> the *Standard library* note above. The remaining Level-3 surface (nested structs-by-value, `str`
+> the *Standard library* note above. The remaining Level-3 surface (`str`
 > struct fields, stored/cross-thread callbacks, a GC-tracked auto-freed owned-buffer type + bulk-copy
-> helpers + `realloc`, varargs,
+> helpers + `realloc`,
 > a custom user-named deallocator, and the rich Rust `Box<dyn Any>` userdata handle) is still a future idea.
 
 ## Verification

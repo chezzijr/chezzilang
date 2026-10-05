@@ -205,28 +205,27 @@ Recorded so a revisit starts from a plan, not a blank page:
    Note: our level-1 catch+re-raise fault rule already exceeds `ctypes`' swallow-to-stderr-and-return-0,
    and carries forward to levels 2–3 unchanged.
 
-### #5 Variadic functions
+### #5 Variadic functions — LANDED (TICKET-217)
 **What:** C functions taking a variable arg count (`printf`/`scanf` family; the variadic forms of
 `open`/`fcntl`/`ioctl`/`execl`).
 
-**Why it's low priority:** the genuinely-variadic-required surface is tiny — `printf`/`scanf` (Chezzi
-has its own formatting + `print`, so you'd rarely call C's), and most "variadic" syscall wrappers have
-fixed-arity-per-call-site or array siblings (`execv`, `vprintf`). Chezzi now **has** a variadic
-*parameter* surface (`fn f(...xs: T)`), but it collapses to a `List[T]` — it deliberately does **not**
-feed the C vararg ABI, which needs concrete per-arg C types (an `int` vs a `double` picks a different
-register class), not a homogeneous Chezzi list of one element type. Nor is there call-site spread
-(`f(*args)`). So true varargs FFI still needs new machinery, not just this parameter feature.
-
-**Workaround that needs nothing new:** declare a **concrete fixed-arity** extern signature for the exact
-call form you need (`open` 2-arg vs a separate 3-arg binding). *Caveat:* on x86-64 SysV, calling a
-variadic C fn through a *non*-variadic libffi CIF is technically ABI-incomplete (variadic calls set
-`%al` = SSE-register count; libffi has `ffi_prep_cif_var`). Works in practice for **integer/pointer**
-varargs; can break for **float** varargs or non-x86-64 ABIs.
-
-**Two forks when revisited:** (a) a Chezzi-level variadic/spread call surface (a language feature, broad
-blast radius) feeding `ffi_prep_cif_var`; or (b) an FFI-only typed-arg-list escape hatch —
-`printf(fmt, ffi.args([ffi.int(3), ffi.str("x")]))` — that sidesteps the language gap with an explicit
-per-arg-type list. (b) is the lower-risk, FFI-contained option.
+**Design (shipped):** a bare `...` as the **last** extern param (`fn printf(fmt: str, ...) -> int`),
+legal only in an `extern` fn and distinct from Chezzi's `...xs: T` (which collapses to a homogeneous
+`List[T]` and cannot feed the C vararg ABI — each C vararg has its own type and register class).
+- **Typing:** the checker types each surplus arg from its static type. Only C scalars pass: `int` →
+  C `long` (`%ld`), `float` → `double`, `bool` → `int` (0/1), `str` → `const char*`, `ptr` → `void*`.
+  A struct, closure, `str?`, list or other value is a check error (*cannot be passed to a C variadic
+  parameter*); too few fixed args is *expects at least N argument(s)*.
+- **One promotion table:** `CType::vararg_promoted` owns C's default argument promotions (`float` →
+  `double`; `_Bool` and every integer narrower than `int` → `int`). The checker (`c_vararg_ctype`, over
+  the static `Ty`) and the runtime (`vararg_ctype_of`, over the `NativeRet`) both end in it, so no
+  checker-to-compiler side table is needed.
+- **ABI:** every call builds its CIF with `ffi_prep_cif_var` (fixed count = declared params), re-prepping
+  the `middle::Cif` in place, so `%al` is set on x86-64 and `double` varargs are correct. No per-call-site
+  CIF cache: measured `prep_cif` 72.7 ns/op and `prep_cif_var` 61.3 ns/op against a 337.7 ns `snprintf`
+  call, and every CIF here is already rebuilt per call (`Cif` is `!Send`).
+- A vararg `str`/`ptr` counts toward the TICKET-060 `str`-buffer retention (`out_param_risk`).
+- A C variadic extern read as a function value (`f := printf`) has a fixed arity: its declared params.
 
 ### `bool` ↔ C `_Bool` — RESOLVED (`bool` means bool)
 **Decision (shipped):** Chezzi `bool` marshals as C `_Bool` (1 byte, 0/1) — params, returns, **and**
@@ -373,7 +372,7 @@ A registry serving native packages needs one of:
 |---|---|---|
 | **A. Recompile-the-world** (Zig-like) | native pkg = vendored Rust crate + glue; `chezzi build` links a **project-specific binary** | ABI-safe, simple; every native dep = a Rust rebuild; needs the Rust toolchain on the user machine |
 | **B. Dynamic plugins** (CPython C-ext model) | pkg ships a prebuilt `cdylib` (`.so`); `chezzi` `dlopen`s it at module-init | no user rebuild — but needs a **frozen `repr(C)` ABI** for the seam |
-| **C. C-ABI wrapper** (`extern "lib":`) | pkg = manifest → a system `.so` + Chezzi wrapper source | already largely built; scalars, handles, flat structs by value, **sync scalar callbacks**, **pointer-deref `load_*`/`store_*` builtins**, and the **C-buffer alloc layer** (`ffi.alloc`/`alloc_zeroed`/`free` — `qsort`/`bsearch` of a Chezzi list now fully works) today (stored/cross-thread callbacks + variadics deferred — a stored callback aborts with a named message, see §1b item 4) |
+| **C. C-ABI wrapper** (`extern "lib":`) | pkg = manifest → a system `.so` + Chezzi wrapper source | already largely built; scalars, `float32`, handles, structs by value (nested), C varargs, **sync scalar callbacks**, **pointer-deref `load_*`/`store_*` builtins**, and the **C-buffer alloc layer** (`ffi.alloc`/`alloc_zeroed`/`free` — `qsort`/`bsearch` of a Chezzi list now fully works) today (stored/cross-thread callbacks deferred — a stored callback aborts with a named message, see §1b item 4) |
 
 ### 6.3 The gotcha that decides it: Rust has no stable ABI
 Model B's blocker: the `Host`/`NativeRet`/`Arc<dyn Any>` seam is a **Rust** ABI — `String`, `Vec`,
