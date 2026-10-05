@@ -2812,11 +2812,10 @@ impl Parser {
                     // all qualify). SPECULATIVE: `try_parse_type_arg_call` only commits when it sees the
                     // exact `[types](` shape, restoring pos+depth otherwise, so a genuine subscript that
                     // is NOT a type-then-call (`obj.items[0]`, `m.data[k]`, the numeric `arr[0].h[0](x)`)
-                    // backtracks and keeps its plain index (then-call) meaning. The trade-off the broaden
-                    // makes UNIFORM across all receivers: `recv.name[X](args)` where `X` parses as a type
-                    // ALWAYS parses as a method turbofish; index-then-call of a fn-VALUED field therefore
-                    // needs parens — `(recv.name[k])(args)` — on ANY receiver (the bare-ident receiver
-                    // already required this; non-bare receivers now match it).
+                    // backtracks and keeps its plain index (then-call) meaning. A one-arg bracket keeps
+                    // its expression reading too (`bracket`), and the checker chooses (TICKET-210): a
+                    // head that denotes data (`fs[k](10)`, `h.fs[k](10)`) indexes then calls, with no
+                    // parens. The parser reads no scope (DEC-204).
                     let type_call = if headed {
                         self.try_parse_type_arg_call(&e, span)?
                     } else {

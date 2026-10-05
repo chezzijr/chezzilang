@@ -1405,7 +1405,12 @@ fn getf() -> fn(int) -> int:
 **Path values (Rust's rule, TICKET-204).** A type path is a value when it names something callable:
 a payload variant (a constructor fn), a static method, and an instance method named through its type
 (the receiver is the first argument, keyword `self`), at any type-argument arity, bare, imported or
-module-qualified. An alias head pins its own type arguments.
+module-qualified. An alias head pins its own type arguments; one that fixes them takes no more
+(`type BI = Bx[int]`: `BI[str].make`, `x: BI[str]` → *already fixes its type arguments*). A call
+through a path is the path's value applied (`P.get(p)`, `(Bx[int].get)(b)`), and a caller's type
+parameter pins a generic fn value like a concrete type: inside `fn o[U]`, `h: fn(U) -> U = ident`,
+`ap(Bx.get, b)`, `Some(ident)` at `Option[fn(U) -> U]` and a default `f: fn(U) -> U = ident` all
+accept, whatever `ident`'s own parameter is spelled (TICKET-210).
 
 ```chezzi
 f := R1[int].L                       # fn(int) -> R1[int]
@@ -1839,9 +1844,11 @@ it in a closure: `f := fn(): p.dist()`. (A struct **field** that is *fn-typed* �
 A method's **first parameter** decides its call shape. If it is named `self`, the method is an
 **instance method**, called `value.method(args)` (unchanged). If the first parameter is **not** `self`
 — or the method takes **no parameters** — it is a **static (associated) method**, called
-`Type.method(args)` on the type name itself (the Rust `fn new` ergonomic). The two are different call
-shapes: an instance method is **not** callable as `Type.method`, and a static method is **not**
-callable as `value.method` (each errors clearly, pointing at the other form).
+`Type.method(args)` on the type name itself (the Rust `fn new` ergonomic). An instance method is also
+callable through its type, receiver first — `P.get(p)`, `Bx[int].put[str](b, "s")`, `E.tag(e)`, as
+Rust's `Type::method(&v)` (TICKET-210); a call with no receiver is an arity error (`'get' expects …`).
+A reserved native handle's method is not (`io.Reader.close()` → *call it on a value*). A static method
+is **not** callable as `value.method` (it errors clearly, pointing at the other form).
 
 Static methods are **additive** — the positional all-fields constructor `Name(...)` still works. They
 unlock **named / alternative** constructors and **validating** constructors (returning `Result` /
@@ -2049,9 +2056,12 @@ constructor `Item(99)`, a nullary variant `Item.Red`, and a same-named *function
 one namespace, so this is Go's rule (`func fv[foo any](x foo) int { return foo() }` → *missing
 argument in conversion to foo*; `Item{}` under `[Item any]` → *invalid composite literal type Item*).
 `fn f[Item: Tagged](x: Item) -> int: return Item.tag()` beside a `struct Item` therefore dispatches on
-the *argument's* type. Only the static call can be lowered; every other position rejects, because a
-type parameter is erased — it has no constructor, takes no type arguments and has no members but a
-bound's static method. A real local binding still wins over the parameter. Rename the type parameter
+the *argument's* type. A type parameter is erased — it has no constructor and takes no type
+arguments. Through one you reach the methods its bounds declare: an instance method as a value or a
+call, `g := T.get` / `T.get(v)` / `ap(T.get, v)` (Rust's `T::get(&v)`, dispatched on the receiver's
+runtime type, so it needs no witness and works in a method of `struct Bx[T: Getter]` too), and a
+static method only as a call, `T.mk()` (TICKET-210). A real local binding still wins over the
+parameter. Rename the type parameter
 if you meant the outer declaration.
 
 Static methods still do **not** participate in *instance*-method protocol satisfaction: a protocol
@@ -2069,11 +2079,14 @@ xs[0].cast[str]("a")         # index receiver
 W(1).cast[Map[str, int]](m)  # nested-generic type arg, non-bare receiver
 ```
 
-The trade-off: index-then-call of a **fn-valued** field needs **parens** on any receiver —
-`(recv.name[k])(args)` — because `recv.name[k](args)` reads `k` as a type and parses as a turbofish.
-This is uniform with the bare-ident receiver, which already required parens. A **numeric** index
-(`arr[0].handlers[0](20)`) still parses as index-then-call (an int is not a type), and a plain
-subscript with no following call (`obj.items[0]`, `m.data[k]`) is always an ordinary index.
+The parser keeps both readings of a one-arg `head[k](args)` and the checker chooses (TICKET-210),
+as Go and CPython do: a head that denotes **data** re-reads the bracket as index-then-call — a local
+or global name (`fs[k](10)`), a struct field with no method of that name (`h.fs[k](10)`,
+`hs[0].fs[k](10)`), a module global that is not a fn (`lib.fs[k](10)`). A fn-like path or a method
+keeps the turbofish reading (`idt[int](3)`, `W(1).cast[str]("a")`). Parens are no longer needed. A
+fn-typed field is data, so `h.f[int](3)` reports *cannot index into* (Go's `cannot index h.f`). A
+**numeric** index (`arr[0].handlers[0](20)`) always parses as index-then-call, and a plain subscript
+with no following call (`obj.items[0]`, `m.data[k]`) is always an ordinary index.
 
 ## 7b. Generics & protocols  (M7)
 

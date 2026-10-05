@@ -745,10 +745,10 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 > form `Box[int].make[str](x)` rides the same path (the receiver `Box[int]` is itself a postfix) and
 > the checker threads both the enclosing type args and the method args. The combined form supports a
 > multi-arg method turbofish (`mk().pair[int, str](..)`) and nested-generic type args
-> (`W(1).cast[Map[str, int]](m)`). **Authorized trade-off:** index-then-call of a fn-**valued** field
-> now needs parens on any receiver — `(recv.name[k])(args)` (the bare-ident receiver already required
-> this); the numeric form `arr[0].handlers[0](20)` still parses as index-then-call (an int is not a
-> type). A method turbofish on a generic **variant** ctor (`Box[int].Has[str](5)`) is an error.
+> (`W(1).cast[Map[str, int]](m)`). Since TICKET-210 the parser keeps a one-arg bracket's expression
+> reading too, and the checker chooses: a head that denotes data (a local or global, a struct field
+> with no method of that name, a non-fn module global) indexes then calls, so `h.fs[k](10)` needs no
+> parens (Go, CPython); the numeric form `arr[0].handlers[0](20)` always parses as index-then-call. A method turbofish on a generic **variant** ctor (`Box[int].Has[str](5)`) is an error.
 > Runtime is type-erased (dispatch to the existing `CallStatic` / method paths), pinned by the golden
 > `examples/turbofish_member_args.chz`. Still out of scope: static
 > methods on `newtype`. (Associated protocol requirements (`T.zero()`) were out of scope here too;
