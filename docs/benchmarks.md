@@ -11,6 +11,48 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-216 — newtype removal, base vs branch (2026-10-06)
+
+Base `c342aa98`, branch `ticket/216` (newtype removed). Both `cargo build --release --bin chezzi` in
+separate target dirs. Every `benches/chz/*.chz` run base then branch alternately, five runs per side,
+wall time from `date +%s%N`. `uptime` before: `load average: 1.81, 2.82, 2.56`; after:
+`load average: 1.62, 2.25, 2.38`.
+
+| bench | base median ms | base spread ms (max − min) | branch median ms |
+|---|---|---|---|
+| `closure` | 2364 | 44 | 2431 |
+| `empty` | 8 | 2 | 7 |
+| `enum` | 3727 | 140 | 3743 |
+| `fib` | 511 | 43 | 518 |
+| `hof` | 677 | 42 | 691 |
+| `hof_nursery` | 689 | 36 | 699 |
+| `list` | 688 | 48 | 721 |
+| `loop` | 1710 | 94 | 1716 |
+| `many_list` | 621 | 53 | 627 |
+| `many_map` | 474 | 79 | 450 |
+| `many_struct` | 771 | 104 | 740 |
+| `map` | 243 | 40 | 248 |
+| `map_str` | 350 | 30 | 359 |
+| `poly_method` | 2467 | 52 | 2546 |
+| `primes` | 1155 | 69 | 1143 |
+| `str` | 256 | 13 | 278 |
+| `struct` | 797 | 78 | 858 |
+| `unique` | 125 | 39 | 126 |
+
+Three branch medians exceeded base's maximum at n=5 (`closure`, `poly_method`, `str`). Re-run
+interleaved at ten runs per side (`uptime` before `1.53, 2.21, 2.36`, after `1.49, 2.00, 2.27`):
+
+| bench | base median ms | base min–max | branch median ms | branch min–max |
+|---|---|---|---|---|
+| `closure` | 2387.5 | 2332–2455 | 2398 | 2336–2507 |
+| `poly_method` | 2453.5 | 2408–2628 | 2557.5 | 2538–2609 |
+| `str` | 257.5 | 246–289 | 258 | 243–290 |
+
+Verdict: at n=10 every branch median is inside base's range, so no bench regressed past base's
+spread. `poly_method` still sits about 4% above base's median (branch min 2538 ms is above base's
+median 2453.5 ms). The removed arms are on object paths (`binary`'s same-newtype check, `compare`'s
+unwrap), so this is likely code layout. It is a lean, not a measured cause.
+
 ## TICKET-215 — path value read, base vs branch (2026-10-05)
 
 `target/path_read_bench.chz`: a top-level `while` loop reading `P.mk` and `E.A` 1,000,000 times each.
