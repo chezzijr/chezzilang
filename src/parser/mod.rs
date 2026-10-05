@@ -2651,6 +2651,7 @@ impl Parser {
                         args,
                         named,
                         type_args,
+                        bracket,
                     } => {
                         if !named.is_empty() {
                             return Err(self.err(
@@ -2668,6 +2669,7 @@ impl Parser {
                                 args: new_args,
                                 named,
                                 type_args,
+                                bracket,
                             },
                             span,
                         }
@@ -2753,6 +2755,7 @@ impl Parser {
                             args,
                             named,
                             type_args: Vec::new(),
+                            bracket: None,
                         },
                         span,
                     }
@@ -3061,6 +3064,10 @@ impl Parser {
             self.fold_depth = save_fold;
             return Ok(None);
         }
+        // A one-arg bracket on a bare-name or member head keeps its expression reading too: the
+        // checker, which knows the scope, chooses index-then-call when the head denotes data
+        // (`fs[k](10)`). The parser reads no scope (DEC-204).
+        let bracket = self.bracket_expression(callee, &type_args, save, save_depth, save_fold);
         self.advance(); // '(' — committed to a type-argument call now.
         let (args, named) = self.parse_call_args()?;
         Ok(Some(Expr {
@@ -3070,9 +3077,45 @@ impl Parser {
                 args,
                 named,
                 type_args,
+                bracket,
             },
             span,
         }))
+    }
+
+    /// The expression reading of the bracket `[X]` that `try_parse_type_arg_call` just read as one
+    /// type, from `save` (the `[`) to the `(` at the current position. `Some` only for an `Ident`
+    /// head or a non-tuple-index `Field` head, and only when `X` parses as an expression that ends
+    /// at the `]`. Leaves the position at the `(`, with `depth` and `fold_depth` restored.
+    fn bracket_expression(
+        &mut self,
+        callee: &Expr,
+        type_args: &[Type],
+        save: usize,
+        save_depth: usize,
+        save_fold: usize,
+    ) -> Option<Box<Expr>> {
+        let headed = match &callee.kind {
+            ExprKind::Ident(_) => true,
+            ExprKind::Field { name, .. } => !crate::ast::is_tuple_index(name),
+            _ => false,
+        };
+        if !headed || type_args.len() != 1 {
+            return None;
+        }
+        let end = self.pos;
+        self.pos = save + 1;
+        self.depth = save_depth;
+        self.fold_depth = save_fold;
+        let parsed = self.parse_expr();
+        let fits = self.pos + 1 == end;
+        self.pos = end;
+        self.depth = save_depth;
+        self.fold_depth = save_fold;
+        match parsed {
+            Ok(e) if fits => Some(Box::new(e)),
+            _ => None,
+        }
     }
 
     fn parse_primary(&mut self) -> PResult<Expr> {

@@ -296,10 +296,12 @@ impl Scan {
                 callee,
                 args,
                 named,
+                bracket,
                 ..
             } => {
                 self.expr(callee);
                 args.iter().for_each(|a| self.expr(a));
+                bracket.iter().for_each(|b| self.expr(b));
                 named.iter().for_each(|(_, v)| self.expr(v));
             }
             ExprKind::Field { obj, .. } => self.expr(obj),

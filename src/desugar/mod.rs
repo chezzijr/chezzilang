@@ -826,9 +826,13 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
             args,
             named,
             type_args,
+            bracket,
         } => {
             walk_idents_and_types(callee, f, tf);
             args.iter().for_each(|a| walk_idents_and_types(a, f, tf));
+            if let Some(b) = bracket {
+                walk_idents_and_types(b, f, tf);
+            }
             named
                 .iter()
                 .for_each(|(_, a)| walk_idents_and_types(a, f, tf));
@@ -1452,11 +1456,15 @@ impl Walker<'_> {
                 callee,
                 args,
                 named,
+                bracket,
                 ..
             } => {
                 self.walk_expr(callee)?;
                 for a in args.iter_mut() {
                     self.walk_expr(a)?;
+                }
+                if let Some(b) = bracket {
+                    self.walk_expr(b)?;
                 }
                 for (_, v) in named.iter_mut() {
                     self.walk_expr(v)?;
@@ -1641,6 +1649,7 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                         args,
                         named,
                         type_args,
+                        bracket: None,
                     },
                     span,
                 },
@@ -1652,6 +1661,7 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                     args: vec![access],
                     named: vec![],
                     type_args: vec![],
+                    bracket: None,
                 },
                 span,
             };
@@ -1781,6 +1791,7 @@ pub fn lower_carrier_try(expr: &mut Expr) {
             args,
             named,
             type_args,
+            bracket: None,
         },
     };
 }

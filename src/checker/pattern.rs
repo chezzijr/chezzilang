@@ -1734,6 +1734,7 @@ impl Checker {
                 args,
                 named,
                 type_args,
+                ..
             } => self.infer_call(callee, args, named, type_args, expr.span, expr.id),
             ExprKind::Field {
                 obj,
@@ -5147,9 +5148,14 @@ impl Checker {
                 self.scan_expr_for_pin(name, start, match_pin, member_pin);
                 self.scan_expr_for_pin(name, end, match_pin, member_pin);
             }
-            ExprKind::Call { callee, args, .. } => {
+            ExprKind::Call {
+                callee,
+                args,
+                bracket,
+                ..
+            } => {
                 self.scan_expr_for_pin(name, callee, match_pin, member_pin);
-                for a in args {
+                for a in args.iter().chain(bracket.as_deref()) {
                     self.scan_expr_for_pin(name, a, match_pin, member_pin);
                 }
             }

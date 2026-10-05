@@ -1045,6 +1045,7 @@ impl Checker {
                         args: Vec::new(),
                         named: Vec::new(),
                         type_args: Vec::new(),
+                        bracket: None,
                     },
                     span,
                 },

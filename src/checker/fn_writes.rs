@@ -265,8 +265,12 @@ impl UseWalk<'_> {
                 callee,
                 args,
                 named,
+                bracket,
                 ..
             } => {
+                if let Some(b) = bracket {
+                    self.value(b);
+                }
                 let target = match &callee.kind {
                     ExprKind::Ident(f) if !self.bound.contains(f) => Some(ArgCallee::Fn(f.clone())),
                     ExprKind::Field { obj, name, .. } => match &obj.kind {
@@ -641,6 +645,7 @@ impl Scan {
                 callee,
                 args,
                 named,
+                bracket,
                 ..
             } => {
                 match &callee.kind {
@@ -674,6 +679,9 @@ impl Scan {
                 }
                 for arg in args {
                     self.expr(arg);
+                }
+                if let Some(b) = bracket {
+                    self.expr(b);
                 }
                 for (_, arg) in named {
                     self.expr(arg);

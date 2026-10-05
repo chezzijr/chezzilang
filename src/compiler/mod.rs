@@ -5394,6 +5394,7 @@ fn method_call_stmt(obj: Expr, method: &str, args: Vec<Expr>, span: Span) -> Stm
                 args,
                 named: Vec::new(),
                 type_args: Vec::new(),
+                bracket: None,
             },
             span,
         }),
@@ -5885,10 +5886,12 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
             callee,
             args,
             named,
+            bracket,
             ..
         } => {
             find_boundary_free_expr(callee, out);
             args.iter().for_each(|a| find_boundary_free_expr(a, out));
+            bracket.iter().for_each(|b| find_boundary_free_expr(b, out));
             named
                 .iter()
                 .for_each(|(_, v)| find_boundary_free_expr(v, out));
@@ -6142,6 +6145,7 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
             args,
             named,
             type_args,
+            ..
         } => match &callee.kind {
             ExprKind::Ident(n) if type_args.is_empty() && !bound.contains(n) => {
                 heads.push(n.clone());
@@ -6400,10 +6404,14 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             args,
             named,
             type_args,
+            bracket,
         } => {
             record_call_site(callee, args, named, type_args, bound, out);
             free_names_expr(callee, bound, out);
             args.iter().for_each(|a| free_names_expr(a, bound, out));
+            if let Some(b) = bracket {
+                free_names_expr(b, bound, out);
+            }
             named
                 .iter()
                 .for_each(|(_, v)| free_names_expr(v, bound, out));
@@ -6551,10 +6559,14 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
             callee,
             args,
             named,
+            bracket,
             ..
         } => {
             collect_frame_binds_expr(callee, out);
             args.iter().for_each(|a| collect_frame_binds_expr(a, out));
+            bracket
+                .iter()
+                .for_each(|b| collect_frame_binds_expr(b, out));
             named
                 .iter()
                 .for_each(|(_, v)| collect_frame_binds_expr(v, out));
@@ -6681,10 +6693,12 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
             callee,
             args,
             named,
+            bracket,
             ..
         } => {
             expr_has_bare_spawn(callee)
                 || args.iter().any(expr_has_bare_spawn)
+                || bracket.as_deref().is_some_and(expr_has_bare_spawn)
                 || named.iter().any(|(_, v)| expr_has_bare_spawn(v))
         }
         ExprKind::Field { obj, .. } => expr_has_bare_spawn(obj),

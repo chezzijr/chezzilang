@@ -1006,6 +1006,10 @@ pub enum ExprKind {
         /// ever see `named` empty — they read `args` and ignore this field.
         named: Vec<(String, Expr)>,
         type_args: Vec<Type>,
+        /// The expression reading of a one-arg `head[X](args)` on a bare-name or member callee,
+        /// kept so the checker can choose index-then-call (`Resolution::IndexCall`) when the head
+        /// denotes data. `None` everywhere else. Every walker that visits `args` visits this too.
+        bracket: Option<Box<Expr>>,
     },
     /// `obj.name`
     Field {
@@ -1302,10 +1306,12 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             callee,
             args,
             named,
+            bracket,
             ..
         } => {
             go(callee);
             args.iter().for_each(&mut go);
+            bracket.iter().for_each(|b| go(b));
             named.iter().for_each(|(_, v)| expr_recover_blocks(v, out));
         }
         ExprKind::Field { obj, .. } | ExprKind::Try(obj) => go(obj),
@@ -1757,11 +1763,15 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
             callee,
             args,
             named,
+            bracket,
             ..
         } => {
             go(callee, f);
             for a in args {
                 go(a, f);
+            }
+            if let Some(b) = bracket {
+                go(b, f);
             }
             for (_, a) in named {
                 go(a, f);

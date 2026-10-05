@@ -189,6 +189,7 @@ impl Scan {
                 callee,
                 args,
                 named,
+                bracket,
                 ..
             } => {
                 if let ExprKind::Field { obj, name, .. } = &callee.kind
@@ -198,6 +199,7 @@ impl Scan {
                 }
                 self.expr(callee);
                 args.iter().for_each(|arg| self.expr(arg));
+                bracket.iter().for_each(|b| self.expr(b));
                 named.iter().for_each(|(_, value)| self.expr(value));
             }
             ExprKind::Field { obj, .. } => self.expr(obj),

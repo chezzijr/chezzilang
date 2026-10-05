@@ -788,11 +788,13 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
         // name `function`; a `Field` callee (`obj.method(...)`) colors the METHOD name `function`
         // (handled BEFORE the generic field-access `property` rule, so it never mis-colors). Other
         // callee shapes (an index, a parenthesized expr) recurse normally.
+        // `bracket` spans the same text as `type_args`, which color it.
         ExprKind::Call {
             callee,
             args,
             named,
             type_args,
+            bracket: _,
         } => {
             match &callee.kind {
                 ExprKind::Ident(_) => overlay_mark(map, callee.span, FUNCTION),
