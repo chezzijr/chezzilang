@@ -309,8 +309,8 @@ struct Compiler {
     /// means "ordinary by-name call", which is the pre-W7-53 lowering. See
     /// [`crate::checker::ProtoEqTable`].
     proto_eq_calls: crate::checker::ProtoEqTable,
-    /// Which `.sum()` sites need a `T(0)` newtype SEED pushed as a hidden argument. The backend is
-    /// type-blind — an empty `List[Cents]` carries no element to read a `type_key` off — so this is
+    /// Which `.sum()` sites need a `0.0` SEED pushed as a hidden argument. The backend is
+    /// type-blind — an empty `List[float]` carries no element to read a kind off — so this is
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
     /// pre-fix lowering. See [`crate::checker::SumSeedTable`].
     sum_seeds: crate::checker::SumSeedTable,
@@ -1979,11 +1979,11 @@ impl Compiler {
                 } = &callee.kind
                     && !crate::ast::is_tuple_index(name)
                 {
-                    // Same hidden `Cents(0)` seed the eager `Op::CallMethod` emit pushes: a spawned
+                    // Same hidden `0.0` seed the eager `Op::CallMethod` emit pushes: a spawned
                     // member call runs through the identical `Vm::do_method_call`, so a missing seed
-                    // is a check-clean / run-faulting `List[Cents].sum()`. The seed is a plain
-                    // newtype-wrapped scalar, so it crosses `do_spawn`'s `deep_clone_all` airlock
-                    // exactly like any other spawned argument.
+                    // changes an empty `List[float].sum()`'s answer. The seed is a plain scalar, so
+                    // it crosses `do_spawn`'s `deep_clone_all` airlock exactly like any other
+                    // spawned argument.
                     if let Some(seed) = self.sum_seed(name, args, *name_span) {
                         self.compile_expr(fc, obj)?;
                         self.emit_sum_seed(fc, &seed, call.span);
@@ -4072,10 +4072,10 @@ impl Compiler {
         } = &callee.kind
             && !crate::ast::is_tuple_index(name)
         {
-            // `defer xs.sum()` over a scalar-numeric-newtype list needs the same hidden `Cents(0)`
-            // seed the eager `Op::CallMethod` emit pushes — `Op::DeferMethod` lands in the very same
-            // `Vm::do_method_call`, so without it the fold sees a `NewType` element and faults at
-            // RUN time on a program that CHECKED clean. Method dispatch has exactly three opcodes
+            // `defer xs.sum()` over a `List[float]` needs the same hidden `0.0` seed the eager
+            // `Op::CallMethod` emit pushes — `Op::DeferMethod` lands in the very same
+            // `Vm::do_method_call`, so without it an empty list sums to `0`, not `0.0`. Method
+            // dispatch has exactly three opcodes
             // (`CallMethod`/`DeferMethod`/`SpawnMethod`); all three consult the seed.
             if let Some(seed) = self.sum_seed(name, args, *name_span) {
                 self.compile_expr(fc, obj)?;
@@ -4467,7 +4467,7 @@ impl Compiler {
     /// witness arguments? The [`nested_body_needs_witness`] lookup.
     ///
     /// A FIELD-HEADED call always answers yes. What the head `X` in `X.name(…)` denotes — an imported
-    /// module, a struct/enum/newtype TYPE, a receiver value, or a module name shadowed by an enclosing
+    /// module, a struct/enum TYPE, a receiver value, or a module name shadowed by an enclosing
     /// binding — is a question about the enclosing scopes and the type namespace that this syntactic
     /// walk does not carry, and two rounds of guessing at it each shipped a check-ok/run-fault (a
     /// shadowing param, then a type named like an imported module). Answering yes for every head
@@ -4888,11 +4888,10 @@ impl Compiler {
                 );
                 return Ok(());
             }
-            // `xs.sum()` over a scalar-numeric-newtype list (`List[Cents]`): push a `Cents(0)` SEED as
-            // `sum`'s one hidden argument, so the runtime folds through the same-newtype `+` path
-            // (unwrap → native checked op → rewrap) and answers `Cents`. The seed IS the answer for an
-            // EMPTY list, which is why it must come from here: the backend is type-blind and an empty
-            // list carries no element to read a `type_key` off. The checker decided it; a miss falls
+            // `xs.sum()` over a `List[float]`: push a `0.0` SEED as `sum`'s one hidden argument. The
+            // seed IS the answer for an EMPTY list, which is why it must come from here: the backend
+            // is type-blind and an empty list carries no element to read a kind off. The checker
+            // decided it; a miss falls
             // through to the plain numeric lowering below.
             if let Some(seed) = self.sum_seed(name, args, *name_span) {
                 self.compile_expr(fc, obj)?;

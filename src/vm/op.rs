@@ -365,7 +365,7 @@ pub enum Op {
     /// `providers` exists because the caller's module is compiled BEFORE the definer's, so the
     /// definer's `ProtoId` does not exist yet at emit time.
     MakeFuncIn(u32),
-    /// Build a `Func` over a struct, enum or newtype method named through its type (`Bx[int].make`,
+    /// Build a `Func` over a struct or enum method named through its type (`Bx[int].make`,
     /// `Pt.getx`, TICKET-204), resolving its proto and home module at run time exactly as
     /// `CallStatic` does (`Vm::type_method_proto`). An instance method's receiver is the fn's first
     /// argument.

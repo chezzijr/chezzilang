@@ -1856,7 +1856,7 @@ impl Checker {
         }
     }
 
-    /// Editor hover for a `from M import T` user type (struct/enum/newtype). Computes the effective
+    /// Editor hover for a `from M import T` user type (struct/enum). Computes the effective
     /// doc — the type's own decl docstring carried across the module boundary, else a `kind (from
     /// module)` fallback — then (1) seeds `name_docs[bind]` so a later bare (`x: T`) / generic-head
     /// (`x: T[..]`) annotation use surfaces the same doc (those arms read `name_docs`), and (2) records
@@ -2634,7 +2634,7 @@ impl Checker {
         }
     }
 
-    /// How many type params the struct, enum or newtype keyed `key` declares.
+    /// How many type params the struct or enum keyed `key` declares.
     pub(super) fn type_param_count(&self, key: &str) -> usize {
         self.type_params_of(key).map_or(0, |tps| tps.len())
     }
@@ -3181,7 +3181,7 @@ impl Checker {
             self.record_resolution(id, r, span);
             return Ty::option(Ty::Unknown);
         }
-        // A type name read as a value (`f := Box`, `f := Meters`, TICKET-204).
+        // A type name read as a value (`f := Box`, TICKET-204).
         if let Some(th) = self.bare_type_head(name) {
             self.type_not_value(&th, span);
             return Ty::Unknown;
@@ -3574,7 +3574,7 @@ impl Checker {
         let t = self.infer_value(inner);
         match op {
             UnaryOp::Neg => {
-                // int/float negate natively; a struct/newtype/type-param negates via the `Neg`
+                // int/float negate natively; a struct/type-param negates via the `Neg`
                 // protocol (method `neg(self) -> Self`) — the unary mirror of how `+` consults `Add`.
                 if t.is_numeric() || t.is_unknown() || self.satisfies(&t, "Neg").is_ok() {
                     t
@@ -3712,8 +3712,7 @@ impl Checker {
                 }
             }
             // `/`/`%` overload via the `Div`/`Mod` protocols on same-typed structs/enums/type-params,
-            // exactly like `-`/`*` use `Sub`/`Mul` (M22). `op_overload_result` also covers the same
-            // SCALAR numeric newtype auto-flow (`Meters / Meters`), so no hand-rolled newtype branch.
+            // exactly like `-`/`*` use `Sub`/`Mul` (M22).
             Div | Mod => {
                 let proto = if op == Div { "Div" } else { "Mod" };
                 if l.is_numeric() && r.is_numeric() {

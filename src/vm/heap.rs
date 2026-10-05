@@ -914,8 +914,7 @@ impl Heap {
             Obj::Set(s) => s.entries.iter().for_each(|(_, e)| push(e)),
             Obj::Struct { fields, .. } => fields.iter().for_each(&mut push),
             Obj::Enum { payload, .. } => payload.iter().for_each(&mut push),
-            // The wrapped inner value may be a heap object — trace it (like a 1-field struct).
-            // A boxed local's cell: the inner value may be a heap object — trace it (like `NewType`).
+            // A boxed local's cell: the inner value may be a heap object — trace it.
             Obj::Cell(v) => push(v),
             Obj::Func { home, .. } => out.push(*home),
             Obj::Closure { captured, home, .. } => {

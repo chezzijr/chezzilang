@@ -1548,7 +1548,7 @@ pub fn collect_gcrefs_structural(
         WireValue::Enum { payload, .. } => payload
             .iter()
             .for_each(|x| collect_gcrefs_structural(x, out, seen, pending)),
-        // A cell queued in a channel/executor roots its inner value's handles (like `NewType`).
+        // A cell queued in a channel/executor roots its inner value's handles.
         WireValue::Cell { inner, .. } => collect_gcrefs_structural(inner, out, seen, pending),
         // A cursor queued in a channel/executor roots its snapshot items' handles (like `List`).
         WireValue::Iter { items, .. } => items

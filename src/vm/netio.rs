@@ -3629,7 +3629,7 @@ impl Vm {
             "contains" => {
                 self.arity_err("contains", args, 1, span)?;
                 let needle = args[0];
-                // Root the receiver `h` AND `needle` across the hash: for a struct/enum/newtype
+                // Root the receiver `h` AND `needle` across the hash: for a struct/enum
                 // element `hash_value` dispatches the user `hash` (re-enters the VM, may GC), and
                 // `h`/`needle` are off the operand stack (popped at dispatch) so they'd be collectable
                 // mid-hash → the following `rwshared_core(h)` would hit a freed slot. Mirrors the
@@ -3658,7 +3658,7 @@ impl Vm {
             "has" => {
                 self.arity_err("has", args, 1, span)?;
                 let key = args[0];
-                // Root receiver `h` AND `key` across the hash — a struct/enum/newtype key's `hash`
+                // Root receiver `h` AND `key` across the hash — a struct/enum key's `hash`
                 // re-enters the VM and may GC; both are off the operand stack here. Mirrors the
                 // non-RwShared Map path (arith.rs:921).
                 let qh = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
@@ -3679,7 +3679,7 @@ impl Vm {
             "get_key" => {
                 self.arity_err("get_key", args, 1, span)?;
                 let key = args[0];
-                // Root receiver `h` AND `key` across the hash — a struct/enum/newtype key's `hash`
+                // Root receiver `h` AND `key` across the hash — a struct/enum key's `hash`
                 // re-enters the VM and may GC; both are off the operand stack here. Mirrors the
                 // non-RwShared Map path (arith.rs:921).
                 let qh = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;

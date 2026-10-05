@@ -1108,7 +1108,7 @@ impl Checker {
         }
     }
 
-    /// The call-binding slots of `method` on a struct, newtype or enum receiver.
+    /// The call-binding slots of `method` on a struct or enum receiver.
     fn method_slots(&self, recv: &Ty, method: &str) -> Option<Vec<crate::desugar::SlotSpec>> {
         match recv {
             Ty::Struct(k, _) => self.struct_shape(k)?.methods.get(method)?.slots.clone(),
@@ -1417,7 +1417,7 @@ impl Checker {
         // Generic: ONE by-name substitution map over BOTH the enclosing type's params and the
         // method's own `[U]` params. Seed each from its respective turbofish, then infer the rest by
         // unifying the declared param types (which may carry either set of `Ty::Param`s) against the
-        // argument types — exactly like the struct/newtype ctor + a generic free fn.
+        // argument types — exactly like the struct ctor + a generic free fn.
         let arg_tys = self.infer_generic_arg_tys(args, &sig.params, &[]);
         if arg_tys.len() != sig.params.len() {
             self.check_arity(method, sig.params.len(), args, span);
@@ -1623,7 +1623,7 @@ impl Checker {
         )
     }
 
-    /// `module.Alias(args)` through an exported alias whose `target` is a struct or newtype
+    /// `module.Alias(args)` through an exported alias whose `target` is a struct
     /// (TICKET-172): the target's constructor, with the alias body's pinned type arguments. An alias
     /// that pins its arguments takes no more, exactly like the bare alias constructor.
     pub(super) fn infer_alias_ctor_call(
@@ -1747,17 +1747,11 @@ impl Checker {
         Ty::Struct(key.to_string(), targs_out)
     }
 
-    /// For a numeric/scalar cast builtin (`int`/`float`/`bool`), if the single arg is a NEWTYPE,
-    /// require its underlying to be exactly the cast target — `int(uid)` unwraps a `newtype X=int`
-    /// but `int(meters)` (underlying float) is rejected. A generic newtype's underlying is
-    /// substituted with its instantiated type args first (concrete for a scalar newtype — trivial).
-    /// A non-newtype arg is left to the normal permissive cast. (`str` is handled separately — it is
-    /// dual cast+display, never rejected.)
     /// Reject a scalar cast (`int`/`float`/`bool`) applied to an arg OUTSIDE the scalar-cast domain
     /// at check time. The domain is `int`/`float`/`bool`/`str` (`spec.md`); `List`/`Map`/`Set`/tuple/
     /// struct/enum/function are all outside it and always fault at runtime — `Vm::builtin_int` /
     /// `builtin_float` / `builtin_bool` (`src/vm/stmt.rs:1695`, `:1735`, `:1772`) handle only inline
-    /// scalars, `Obj::Str` and `Obj::NewType`, then fall through to the error
+    /// scalars and `Obj::Str`, then fall through to the error
     /// (`{cast}() cannot convert List`). Catching it here turns a check-OK-then-run-fault into a
     /// clean compile error (the value a statically-typed language adds over Python's runtime `TypeError`).
     /// Also covers `Ty::Option`/`Ty::Result` (both `Obj::Enum` at runtime, so both report `enum`),
@@ -1983,7 +1977,7 @@ impl Checker {
             return Some(self.infer_variant_call(&v, name, args, targs, name_span, span, hint));
         }
         // CONSTRUCTOR position, and the same shadowing rule: `Item(99)` inside `fn f[Item: Tagged]`
-        // is the PARAMETER, so the struct/enum/newtype ctor arms below must never see the name.
+        // is the PARAMETER, so the struct/enum ctor arms below must never see the name.
         // A type parameter is erased at runtime and has no constructor; rustc rejects the shape too
         // (E0308 `expected type parameter Item, found struct Item` on `let _y: Item = Item(99)`).
         if self.shadowing_type_param(name) {
@@ -2080,9 +2074,8 @@ impl Checker {
             "bool" => {
                 self.record_resolution(id, Resolution::Builtin("bool".into()), name_span);
                 self.check_arity("bool", 1, args, span);
-                // `bool(x)` is a total truthiness cast over the scalars (int/float/bool/str, +
-                // newtype-unwrap) — like `str`, it accepts any SCALAR (every scalar underlying is a
-                // valid truthiness input), so no newtype-mismatch check here. But an AGGREGATE arg
+                // `bool(x)` is a total truthiness cast over the scalars (int/float/bool/str) —
+                // like `str`, it accepts any SCALAR. But an AGGREGATE arg
                 // is outside the domain and faults at runtime — reject it at check.
                 if let Some(a) = args.first() {
                     let aty = self.infer_value(a);
@@ -2094,9 +2087,7 @@ impl Checker {
             "str" => {
                 self.record_resolution(id, Resolution::Builtin("str".into()), name_span);
                 self.check_arity("str", 1, args, span);
-                // `str` is dual: for `newtype N = str` it UNWRAPS the inner str; for any other
-                // underlying it is the normal Stringable display cast (accepts anything). So no
-                // newtype-mismatch check here — `str(meters)` is a legal display, not an error.
+                // `str` is the Stringable display cast (accepts anything).
                 self.infer_all(args);
                 Some(Ty::Str)
             }
@@ -2742,7 +2733,7 @@ impl Checker {
     }
 
     /// Does the method `method` on receiver type `recv_ty` declare its OWN `[U]` type params? Only a
-    /// user struct/enum/newtype method can; a builtin (`str`/`list`/…) member never does. Used to gate
+    /// user struct/enum method can; a builtin (`str`/`list`/…) member never does. Used to gate
     /// the member-level turbofish (`obj.method[A](x)`): a turbofish on anything else is an arity error.
     /// `None` when the receiver is a module with no member (and no type) `method`: a miss, which the
     /// module arm reports as one before any turbofish arity.
@@ -3471,9 +3462,6 @@ impl Checker {
             }
             // Enum methods (name-resolved exactly like struct methods). Substitute the enum's type
             // arguments into the method signature, so `Box[int].get()` returns `int`, not `T`.
-            // A newtype dispatches its own (non-generic) methods by name, like an enum. The
-            // underlying's methods are NOT inherited (an aggregate underlying's `.push`/index/iter
-            // never resolve here — that is the v1 distinct-type contract).
             Ty::Enum(ename, targs) => {
                 let resolved = self.enum_methods_of(ename).and_then(|ms| {
                     ms.get(method).map(|sig| {
@@ -3600,14 +3588,9 @@ impl Checker {
                 // `add` still reports the numeric diagnostic, NOT check-ok/run-error). The
                 // `where T: Add` in the decl is documentation of the necessary-but-insufficient bound.
                 //
-                // A SCALAR NUMERIC NEWTYPE (`newtype Cents = int`) is the one non-scalar that DOES
-                // have the monoid: its `+` is the underlying's native op (unwrap→add→rewrap) and its
-                // zero is `Cents(0)`, which the backend cannot mint on its own (it is type-blind, and
-                // an EMPTY list carries no element to read a `type_key` off). So the checker records
-                // the seed here and `sum` returns the NEWTYPE — Go's `type Cents int` sums to
-                // `main.Cents`, and it keeps the family consistent with `.sort()`/`.min()`/`.max()`,
-                // which already unwrap numeric newtypes. BOTH verdicts are recorded, so an aliased
-                // key is a hard error instead of one site's seed reaching another.
+                // A `List[float]` records a `0.0` seed here: an EMPTY list carries no element to
+                // read a kind off, and the backend is type-blind. BOTH verdicts are recorded, so an
+                // aliased key is a hard error instead of one site's seed reaching another.
                 let elem = (**elem).clone();
                 if method == "sum" {
                     let seed = self.sum_seed(&elem);
@@ -4900,7 +4883,7 @@ impl Checker {
     /// so inside `struct Stack[T]` the receiver is `Stack[T]` and `self.items` is `list[T]`.
     pub(super) fn struct_self_ty(&self, name: &str) -> Ty {
         // Key by the struct's runtime key (bare unless a cross-module clash disambiguated it), exactly
-        // like `enum_self_ty`/`newtype_self_ty`. In the multi-module (`build_graph`) path the layout is
+        // like `enum_self_ty`. In the multi-module (`build_graph`) path the layout is
         // stored under `<module-key>::Name`, so a bare-`name` lookup here would miss — leaving `self`'s
         // type wrong during both return inference and pass-2 body checking.
         let key = self.bare_key(name);
@@ -4941,7 +4924,7 @@ impl Checker {
     /// prebuilt protocol (`fn id[Comparable]`) is a protocol-name shadow, not a builtin-TYPE shadow,
     /// and is kept legal by design (guarded by `protocol_bound_and_typeparam_named_protocol_still_ok`,
     /// commit b2aa8ac). A param BOUND `[T: Comparable]` is likewise untouched (the bound is a separate
-    /// `Bound` list, not the param name). Called once per decl at the hoist sites (struct/enum/newtype/
+    /// `Bound` list, not the param name). Called once per decl at the hoist sites (struct/enum/
     /// fn_sig/protocol), NOT inside `enter_type_params` (which is re-entered during body checking and
     /// would double-report).
     pub(super) fn reject_reserved_type_params(&mut self, tps: &[TypeParam]) {

@@ -1846,8 +1846,6 @@ impl Vm {
                 let display = crate::compiler::bare_display(&enum_key);
                 Err(self.err(format!("type {display} has no method '{method}'"), span))
             }
-            // Newtype method dispatch (name-resolved, like enums). Resolves `newtype_methods[key]
-            // [method]` off the wrapper's `type_key`. The underlying's methods are NOT inherited.
             // W6-3 — a BOXED scalar (`Obj::BigInt`, and any other Obj-tagged scalar) is Obj-tagged, so
             // it never reaches the inline-scalar miss above and lands here instead: it must answer the
             // same intrinsic arith/`Hashable`/`Comparable` methods its inline twin does.
@@ -1864,7 +1862,7 @@ impl Vm {
         }
     }
 
-    /// The proto of method `method` on the struct, enum or newtype `type_key`, and the index of
+    /// The proto of method `method` on the struct or enum `type_key`, and the index of
     /// the type's declaring module (its home). The one lookup `CallStatic` and `MakeMethodFunc`
     /// share (TICKET-204).
     pub(super) fn type_method_proto(
@@ -2717,7 +2715,7 @@ impl Vm {
     }
 
     /// Insert-or-overwrite `(hk, key, val)` into the heap map at `h` (last write wins). Used by
-    /// `map.update`. On INSERT it snapshots a struct/enum/newtype key (Go value-key model) so the
+    /// `map.update`. On INSERT it snapshots a struct/enum key (Go value-key model) so the
     /// target map does NOT alias the source map's stored key object — otherwise mutating one map's
     /// key (e.g. via `keys()`) would silently corrupt the other. `snapshot_key` is pure alloc (no
     /// GC), so `h` stays valid across it.
@@ -2766,7 +2764,7 @@ impl Vm {
 
     /// W6-3 — dispatch an **intrinsic** protocol method: one the checker grants a BUILT-IN with no
     /// user method behind it (`src/checker/proto.rs::satisfies_args_d`'s `grant_intrinsic` early-outs
-    /// — `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` + `Comparable` on int/float/numeric-newtype, `Hashable`
+    /// — `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` + `Comparable` on int/float, `Hashable`
     /// on int/str/bytes/bool/zero-field-struct, `Index`/`IndexSet`/`Slice` on list/map/str/bytes/
     /// bytearray). An erased `[T: Add]` body may write `a.add(b)`, so the VM must answer it.
     ///
@@ -2779,20 +2777,13 @@ impl Vm {
     ///
     /// Returns `Ok(None)` when `(method, argc)` is not an intrinsic pair, so the caller re-raises its
     /// original `has no method` error unchanged. Called ONLY from a method-resolution MISS, so a
-    /// struct/enum/newtype that DEFINES `add`/`hash`/`index`/… always gets ITS method (it resolves
+    /// struct/enum that DEFINES `add`/`hash`/`index`/… always gets ITS method (it resolves
     /// first) and this costs nothing on any successful dispatch.
     ///
     /// `compare` on a NaN operand is the one arm that delegates somewhere ELSE than the operator: it
     /// answers the total order `sort()`/`.min()`/`.max()` use (via [`Vm::order_key`]) rather than
     /// faulting, so `compare`/`sort`/`min`/`max` share ONE order while `<`/`<=`/`>`/`>=` stay IEEE
     /// (false for every NaN comparison). See the arm below.
-    ///
-    /// **One documented limit on the "≡ the operator form" claim** (`docs/gaps.md`):
-    /// * a numeric `newtype` that DEFINES `add`/`sub`/`mul`/`div`/`mod`/`compare` — being miss-only,
-    ///   the method form correctly dispatches the USER method while `+`/`<` still auto-flow to the
-    ///   underlying's native op, so for THAT receiver the two spellings differ (W6-3d). Never
-    ///   shadowing a user method wins over the equivalence; the divergence pre-dates this function and
-    ///   its real fix is a checker/grant decision.
     ///
     /// There is currently NO unpairable grant — `INTRINSIC_UNPAIRED` in `src/checker/proto.rs` is empty
     /// (W6-3b narrowed `Iterator` so a raw collection no longer claims `next`).
@@ -2804,17 +2795,16 @@ impl Vm {
         span: Span,
     ) -> Result<Option<Value>, RuntimeError> {
         // W8-22 — `line()`/`col()`/`file()` through the `Error` existential, for every receiver
-        // that is NOT a `str` (a struct/enum/newtype error whose only requirement is `message()`).
-        // This hook is miss-only and already runs from the struct arm, the enum arm, the newtype
-        // arm and the catch-all, so a user error type that DEFINES its own `line()` still gets that
+        // that is NOT a `str` (a struct/enum error whose only requirement is `message()`).
+        // This hook is miss-only and already runs from the struct arm, the enum arm
+        // and the catch-all, so a user error type that DEFINES its own `line()` still gets that
         // method instead of this blanket answer. A non-`str` `Error` never carries a stamped span
         // (only the three `recover:` boundaries stamp one, and only on the `Obj::Str` payload they
         // allocate), so the honest answer here is always `None`.
         if args.is_empty() && matches!(method, "line" | "col" | "file") {
             return Ok(Some(self.alloc_enum("Option", "None", Vec::new())));
         }
-        // `Add`/`Sub`/`Mul`/`Div`/`Mod` → the binary-arith primitive (which itself routes a
-        // same-newtype pair through `newtype_arith`, so the numeric-newtype grant lands here too).
+        // `Add`/`Sub`/`Mul`/`Div`/`Mod` → the binary-arith primitive.
         let bin = match method {
             "add" => Some(Op::Add),
             "sub" => Some(Op::Sub),
@@ -2845,15 +2835,12 @@ impl Vm {
                 self.pop();
                 Ok(Some(n))
             }
-            // `Comparable` — needed for the numeric-NEWTYPE grant AND for a NaN operand on a scalar
-            // (the pre-dispatch scalar arm only answers when `compare` returns `Some`). `compare`
-            // unwraps a newtype to the UNDERLYING's native ordering, which is exactly what `<` uses
-            // (`compare_op`'s same-newtype fast path).
+            // `Comparable` — needed for a NaN operand on a scalar (the pre-dispatch scalar arm only
+            // answers when `compare` returns `Some`).
             //
             // NaN is TOTAL here, and by the SAME order the rest of the language sorts by: route the
             // pair through [`Vm::order_key`] — the one ordering site behind `sort()` / `sort_by_key` /
-            // `.min()` / `.max()` (`float_order`, NaN deterministically at one end, numeric-newtype
-            // layers unwrapped first). So there is exactly ONE total order shared by
+            // `.min()` / `.max()` (`float_order`, NaN deterministically at one end). So there is exactly ONE total order shared by
             // `compare`/`sort`/`min`/`max`, and exactly ONE documented divergence left: that total
             // order (the method) vs IEEE (the operators — `ordered_bool` answers `false` for every NaN
             // comparison, IEEE-754/Python/Rust parity, arith.rs; untouched by design). Not two
@@ -2884,8 +2871,7 @@ impl Vm {
                 None => Ok(None),
             },
             // `Eq` (M23) → the SAME structural equality `==` uses, so `x.eq(y)` can never disagree
-            // with `x == y`. Serves the four scalar grants and the numeric-newtype grant (whose `==`
-            // unwraps to the underlying, which is what the worker below does). Miss-only like the rest, so
+            // with `x == y`. Serves the four scalar grants. Miss-only like the rest, so
             // a user type's own `eq` method is dispatched before this ever runs.
             // (`values_equal_guarded` is the operator's OWN worker — not the fault-swallowing
             // `values_equal` test wrapper — so a cyclic operand raises the same recoverable
@@ -3664,7 +3650,7 @@ impl Vm {
                                 out = seen.entries.iter().map(|&(_, v)| v).collect();
                             } else {
                                 // Remove ALL duplicates, first-occurrence order (Python `dict.fromkeys`).
-                                // Fallback for any non-flat element (container, Struct/Enum/NewType,
+                                // Fallback for any non-flat element (container, Struct/Enum,
                                 // ByteArray) — same O(n^2) scan as before the hash-index fast path above.
                                 for &v in &items {
                                     if vm.seq_slot(&out, v, span)?.is_none() {
@@ -3775,7 +3761,7 @@ impl Vm {
                     Ok(Value::obj(self.heap.alloc(Obj::List(out))))
                 }
                 "copy" => {
-                    // TICKET-160 — shallow in the VALUES (Python dict.copy()); each struct/enum/newtype KEY is
+                    // TICKET-160 — shallow in the VALUES (Python dict.copy()); each struct/enum KEY is
                     // snapshotted exactly as merge() does (Go value-key model), so a key reached through the
                     // copy never aliases the original's. snapshot_key is pure alloc: no rooting.
                     self.arity_err("copy", args, 0, span)?;
@@ -3820,7 +3806,7 @@ impl Vm {
                         }
                     };
                     if method == "merge" {
-                        // Build the result fresh, snapshotting EVERY struct/enum/newtype key (Go
+                        // Build the result fresh, snapshotting EVERY struct/enum key (Go
                         // value-key model) so the new map aliases neither the receiver's nor the
                         // argument's stored keys — `m.clone()` would carry the receiver's key handles
                         // by reference. The receiver's own keys are already unique, so they need no
@@ -3891,7 +3877,7 @@ impl Vm {
                     let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
                     let present = self.set_probe(h, hx, x, span)?.is_some();
                     if !present {
-                        // Snapshot a struct/enum/newtype element on insert (Go value-key model) so a
+                        // Snapshot a struct/enum element on insert (Go value-key model) so a
                         // later mutation of the caller's live value can't corrupt the set. Pure alloc
                         // (no GC), so no rooting needed before the immediately-following push.
                         let x = self.snapshot_key(x);
@@ -3969,7 +3955,7 @@ impl Vm {
                     Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
                 }
                 "copy" => {
-                    // TICKET-160 — insertion order kept; each struct/enum/newtype element snapshotted as Set.add does.
+                    // TICKET-160 — insertion order kept; each struct/enum element snapshotted as Set.add does.
                     self.arity_err("copy", args, 0, span)?;
                     let mine = s.entries.clone();
                     let mut out = SetData::default();

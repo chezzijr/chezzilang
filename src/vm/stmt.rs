@@ -983,7 +983,7 @@ impl Vm {
         if matches!(self.heap.get(h), Obj::Map(_)) {
             let hk = self.hash_key_rooted(key, &[obj, key, val], span)?;
             let pos = self.with_roots(&[val], |vm| vm.map_probe(h, hk, key, span))?;
-            // On INSERT only, snapshot a struct/enum/newtype key so a later mutation of the
+            // On INSERT only, snapshot a struct/enum key so a later mutation of the
             // caller's live value can't corrupt the map (Go value-key model). An UPDATE reuses the
             // stored key and pays no clone. `snapshot_key` is pure alloc (no GC), so no rooting.
             match pos {
@@ -994,7 +994,7 @@ impl Vm {
                     m.entries[i].2 = val;
                 }
                 None => {
-                    // Snapshot a struct/enum/newtype key on INSERT only (Go value-key model); pure
+                    // Snapshot a struct/enum key on INSERT only (Go value-key model); pure
                     // alloc (no GC), so `h`/`val` stay valid across it and no rooting is needed.
                     let key = self.snapshot_key(key);
                     let Obj::Map(m) = self.heap.get_mut(h) else {
@@ -1529,7 +1529,7 @@ impl Vm {
             }
         };
         // Root the source elements (as a fresh PRIVATE heap list) so they survive a struct
-        // element's re-entrant hash() GC. Phase 0 snapshots each struct/enum/newtype element IN
+        // element's re-entrant hash() GC. Phase 0 snapshots each struct/enum element IN
         // PLACE in that rooted list (Go value-key model — a later mutation of the caller's original
         // can't corrupt the set); the list is ours, so overwriting is safe, and rooting the
         // snapshots there keeps them alive across the phase-1 re-entrant hashes. Then hash (phase 1)
@@ -1652,7 +1652,7 @@ impl Vm {
                         ));
                     }
                 };
-                // Snapshot a struct/enum/newtype KEY on insert (Go value-key model); root it on the
+                // Snapshot a struct/enum KEY on insert (Go value-key model); root it on the
                 // operand stack for the rest of the build (the later `hash_key_rooted` re-enters the
                 // VM → GC). Values stay by-reference (rooted via src_obj). The snapshot is `==` the
                 // original, so its hash is unchanged.
@@ -2855,8 +2855,6 @@ impl Vm {
                     out.push(')');
                 }
             }
-            // A newtype honors a `str(self) -> str` override (Stringable) exactly like enum/struct;
-            // else it renders `Name(inner)` (its raw `Display`).
             Obj::Func { proto, .. } => {
                 let _ = write!(out, "<fn {}>", self.program.protos[proto].name);
             }

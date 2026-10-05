@@ -1,5 +1,5 @@
 // checker::setup — split out of checker/mod.rs. `super::*` == the `checker` module.
-// Checker construction; stdlib/struct/enum/newtype seeding; signature harvesting.
+// Checker construction; stdlib/struct/enum seeding; signature harvesting.
 
 use super::*;
 
@@ -240,7 +240,7 @@ impl Checker {
     }
 
     /// Resolve a type alias `name` — LOCAL (`self.aliases`) or named-IMPORTED (`imported_alias_tys`)
-    /// — read-only, to its nominal (struct/enum/newtype) target with the body's pinned type
+    /// — read-only, to its nominal (struct/enum) target with the body's pinned type
     /// arguments. A local body resolves through `resolve_ty_ro`, so a chain, a named import or a
     /// `module.Type` body (TICKET-172) all resolve the way an annotation does. The compiler's
     /// `assign_type_keys` re-points the same spellings to the same canonical key, so everything
@@ -258,7 +258,7 @@ impl Checker {
         self.nominal_alias_target(&self.resolve_ty_ro(body))
     }
 
-    /// `ty` when it names a struct/enum/newtype whose shape this module can reach (local table or
+    /// `ty` when it names a struct/enum whose shape this module can reach (local table or
     /// the owning module's sig), else `None` — a scalar, protocol or builtin alias body is a type
     /// spelling, never a constructor head.
     fn nominal_alias_target(&self, ty: &Ty) -> Option<Ty> {
@@ -460,9 +460,9 @@ impl Checker {
     // --- member-resolution fallback by the value's OWN module-scoped identity key ---
     //
     // User types are MODULE-SCOPED: their per-module shape tables (`self.structs` / `self.enums` +
-    // `enum_methods`/`enum_type_params` / `newtype_defs`+`newtype_type_params`) are populated ONLY
+    // `enum_methods`/`enum_type_params`) are populated ONLY
     // when the WHOLE module OR the type NAME is imported. A named FUNCTION import injects nothing, so a
-    // factory result's value — correctly typed `Ty::Struct`/`Enum`/`NewType` carrying its owning
+    // factory result's value — correctly typed `Ty::Struct`/`Enum` carrying its owning
     // module's IDENTITY KEY (`type_key(mid, name)`) — misses the local table and its fields/methods
     // wrongly fail to resolve (gap #4). These helpers add a LAZY, MISS-ONLY fallback: on a local-table
     // miss, resolve the shape from the OWNING module's `ModuleSig` by scanning `module_sigs` for the
@@ -1461,7 +1461,7 @@ impl Checker {
     /// Report each name that repeats within `items` as a "`<kind>` '`<name>`' is already defined"
     /// error at its decl-site span. Fires once per REPEAT occurrence (the 2nd, 3rd, … copy), so the
     /// first occurrence stays the surviving definition (mirrors the dup-variant precedent). Shared by
-    /// the struct/enum/newtype method-hoist arms and the struct field-hoist arm so the seen-set loop
+    /// the struct/enum method-hoist arms and the struct field-hoist arm so the seen-set loop
     /// is written once, not inlined four times.
     pub(super) fn report_dup_names<'a>(
         &mut self,
@@ -1656,7 +1656,7 @@ impl Checker {
     }
 
     /// TICKET-187 — bind the TYPE a from-import names (`import Q from lib`), whatever the value
-    /// branch bound for the same member: a struct, enum, newtype, alias, protocol or `std` type
+    /// branch bound for the same member: a struct, enum, alias, protocol or `std` type
     /// name. The one type binder for a from-import; a fn twin never needs its own clause.
     #[allow(clippy::too_many_arguments, clippy::ptr_arg)] // the branch body, moved verbatim
     fn bind_imported_type(
@@ -2184,7 +2184,7 @@ impl Checker {
                         );
                     }
                     // TICKET-187: the value namespace and the type namespace bind independently, so
-                    // a fn twin of a struct, newtype, alias, enum or protocol leaves the type usable.
+                    // a fn twin of a struct, alias, enum or protocol leaves the type usable.
                     if sig.types.contains(member) {
                         self.bind_imported_type(bind, member, alias, &sig, imp, path, name_span);
                     }
@@ -3600,7 +3600,7 @@ impl Checker {
     }
 
     /// Collect doc-comments for the module's top-level NON-fn declarations (struct/enum/protocol/
-    /// newtype/type-alias names + top-level `let` bindings) into `name_docs`, keyed by simple name.
+    /// type-alias names + top-level `let` bindings) into `name_docs`, keyed by simple name.
     /// Free fns and methods carry their doc on `FnSig::doc` instead (handled in `fn_sig`). Purely for
     /// LSP hover — never consulted by checking/codegen, so it is behavior-neutral.
     pub(super) fn collect_docs(&mut self, stmts: &[Stmt]) {
@@ -3776,7 +3776,7 @@ impl Checker {
                     // module-exported type — NOT reserved (a bare unimported `struct Match` is legal;
                     // the name isn't in the set without the import event). Importing it, then declaring
                     // a same-named `struct`, is an ordinary import-name collision — the same "already
-                    // defined" error the enum/newtype/typealias siblings emit (they collide via
+                    // defined" error the enum/typealias siblings emit (they collide via
                     // `struct_names`). It stays a hard reject (declaring it would overwrite the native
                     // seed yet the runtime still constructs/returns the native shape → runtime field
                     // trap); only the message is corrected from "reserved" to "already defined".
@@ -4302,10 +4302,7 @@ impl Checker {
             // over-reject an extern whose owning std module was never imported). Same predicate the
             // nested-fn collision guard uses. Plus enum *variant* names (`variant_owners`), the four
             // BUILTIN `Result`/`Option` variant ctors (absent from `variant_owners` — their identity
-            // lives in `resolve_type`), and `newtype_names` — a newtype registers a bare-visible
-            // one-arg ctor too (`newtype Meters = int` makes `Meters(5)` callable), so it shadows an
-            // extern identically: `newtype abs = int` + `extern fn abs(x: int) -> int` used to check
-            // OK and then call the CTOR, printing `abs(-7)` instead of `7`. ENUMERATE the whole
+            // lives in `resolve_type`). ENUMERATE the whole
             // bare-visible ctor set here — a predicate that covers only SOME of its sources is the
             // very partial-coverage class this sweep exists to close.
             // NOT a collision: an enum/`Result`/`Option` *type* name (not callable in either engine,

@@ -36,7 +36,7 @@ impl Checker {
     /// each declared bound is validated against the known protocols.
     pub(super) fn fn_sig(&mut self, decl: &FnDecl, span: Span) -> FnSig {
         // A free fn's or method's own type param `[U]` may not be named after a reserved builtin type
-        // (`fn id[int]`). This is the SOLE funnel for free fns AND struct/enum/newtype methods (it is
+        // (`fn id[int]`). This is the SOLE funnel for free fns AND struct/enum methods (it is
         // hoist-only, so it fires once per decl — a method's `[U]` is checked here while the struct's
         // `[T]` is checked at the struct hoist, no overlap).
         self.reject_reserved_type_params(&decl.type_params);
@@ -57,11 +57,11 @@ impl Checker {
         // Fold any `where T: Bound` clauses into the matching declared type parameter's bounds, so the
         // existing generic-call bound-enforcement path (`infer_generic_call` → `enforce_bounds`) handles
         // them with zero new machinery. A where entry naming the method's OWN `[U]` merges as above.
-        // A where entry naming the ENCLOSING struct/enum/newtype's own type param (in `self.type_params`,
+        // A where entry naming the ENCLOSING struct/enum's own type param (in `self.type_params`,
         // not `decl.type_params`) is a CONDITIONAL METHOD: it constrains the RECEIVER's concrete type
         // arg, callable only when that arg satisfies the bound (mirrors native `List[T].sort`'s
         // `where T: Comparable`). Recorded on `receiver_bounds` → carried on the returned `FnSig`'s
-        // `where_bounds`, enforced at the method-call dispatch arms (struct/enum/newtype) against the
+        // `where_bounds`, enforced at the method-call dispatch arms (struct/enum) against the
         // receiver's substitution — exactly like the native `Ty::List` arm. A where entry naming NEITHER
         // an own param NOR a receiver param is still an error (e.g. a free fn's `where Q:`).
         let mut merged = decl.type_params.clone();
@@ -196,7 +196,7 @@ impl Checker {
             type_params,
             // A method's OWN `[U]` where-bounds are merged into `type_params` above (enforced via the
             // ordinary generic-call path). `where_bounds` carries only CONDITIONAL-METHOD receiver
-            // bounds — a `where` naming the enclosing type's param — enforced at the struct/enum/newtype
+            // bounds — a `where` naming the enclosing type's param — enforced at the struct/enum
             // method-call dispatch arms against the receiver's concrete type arg (mirrors native sigs,
             // e.g. `List[T].sort`'s `where T: Comparable`). Empty for a free fn or a plain method.
             where_bounds,
@@ -1003,8 +1003,8 @@ impl Checker {
     ///    branch carries no information — it must not drag a concrete sibling to a conflict).
     /// 3. `{int, float}` → `float` (the ONE numeric widen — BARE SCALARS ONLY; it does NOT recurse
     ///    into type-arg slots, per `docs/spec.md` `float! = Ok(3)` already being a type error).
-    /// 4. same type-constructor (Result/Option/List/Set/Map, or a same-name-same-arity Struct/Enum/
-    ///    NewType) → MERGE SLOT-WISE via [`Self::join_slot`].
+    /// 4. same type-constructor (Result/Option/List/Set/Map, or a same-name-same-arity Struct/Enum)
+    ///    → MERGE SLOT-WISE via [`Self::join_slot`].
     /// 5. otherwise (incl. Nil-vs-value, two distinct structs) → CONFLICT. There is deliberately NO
     ///    common-supertype / protocol / `Any` search: a protocol return must be spelled explicitly.
     fn join_ret(&self, a: &Ty, b: &Ty) -> Result<Ty, Box<(Ty, Ty)>> {
@@ -1144,7 +1144,7 @@ impl Checker {
     /// `Error` protocol when it is `Unknown` or its payload satisfies `Error` (matching the `T!` /
     /// `Result[T]` shorthand — a concrete non-`Error` payload is preserved; a deliberate concrete E
     /// needs an explicit annotation) and REJECT any OTHER residual `Unknown` (top-level, a `Result`
-    /// T-slot, an `Option` T-slot, a List/Set/Map element/key/value, or a Struct/Enum/NewType
+    /// T-slot, an `Option` T-slot, a List/Set/Map element/key/value, or a Struct/Enum
     /// type-arg) with `cannot infer return type of '<name>'`. A `Ty::Param`
     /// (generic fns / the proto.rs HOF loop-back) is LEFT UNTOUCHED — not this pass's concern. When
     /// `suppress` is set (the body already emitted a real error) the residual-`Unknown` diagnostic is
@@ -1639,8 +1639,8 @@ impl Checker {
     /// M24 — does the call-argument constructor head `head` name a NON-GENERIC struct visible here?
     /// Then `head(…)`'s type is fixed by the declaration alone and cannot mention any type parameter.
     /// Anything else is `false` (charge): one of `decl`'s own type params, a plain function whose
-    /// return type this syntactic walk cannot see, a generic struct (its args could be `T`), a
-    /// newtype, or a name this module does not know. A USER enum's variant never reaches here — bare
+    /// return type this syntactic walk cannot see, a generic struct (its args could be `T`), or a
+    /// name this module does not know. A USER enum's variant never reaches here — bare
     /// it is a checker error (`Sq(2)` → "'Sq' is a variant of enum 'Shape'; write it qualified as
     /// 'Shape.Sq'"), and qualified its callee is a field, not an ident head. The BUILTIN variants DO
     /// reach here: `Ok(1)` / `Err(e)` / `Some(x)` are accepted bare, and each is an ident-headed call,
@@ -1764,7 +1764,7 @@ impl Checker {
         }
     }
 
-    /// Arity + protocol-bound check shared by the generic struct/enum/newtype arms of
+    /// Arity + protocol-bound check shared by the generic struct/enum arms of
     /// [`resolve_type`]. `tps` is the declared type-param list (`None` if the name isn't found, e.g.
     /// a non-generic type used with args). Errors are emitted, not returned. The protocol arm is NOT
     /// routed here — it has no bounds loop, a different arity message, and a static-method reject.
@@ -1844,7 +1844,7 @@ impl Checker {
                     // (int/float/bool/str/…) so those keep resolving to their scalar even when used as a
                     // type-param name (`fn id[int](x: int)` → x is `int`), preserving existing behavior.
                     _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
-                    // `Self` inside a struct/enum/newtype method's signature or body → the concrete
+                    // `Self` inside a struct/enum method's signature or body → the concrete
                     // ENCLOSING type (`fn dup(self) -> Self` in `struct P` ⇒ `Ty::Struct("P", …)`).
                     // Placed AFTER the type-param arm above so a PROTOCOL method's `Self` (which is in
                     // `type_params` as `Ty::Param("Self")`, with `current_self_ty` left `None`) keeps
@@ -1933,7 +1933,7 @@ impl Checker {
                     // above these names are NOT global builtins and STAY reserved; but they are generic,
                     // so a bare write is either unlicensed (→ same import hint the `Shared[T]` arm below
                     // emits) or licensed-but-missing-its-type-arg (→ the same missing-type-arg message a
-                    // bare user-generic struct/enum/newtype gets). Placed before the catch-all so it
+                    // bare user-generic struct/enum gets). Placed before the catch-all so it
                     // can't fall through to a hint-less "unknown type". (An in-scope type param of the
                     // same name, e.g. `fn f[Shared]`, was already resolved by the hoisted `type_params`
                     // arm above this match, so no per-arm guard is needed here.)
@@ -2355,7 +2355,7 @@ impl Checker {
                 // token's OWN span (`List`/`Heap` in `List[int]`/`Heap[int]`) — the gap the bare
                 // `Type::Named` arm already covers for non-generic heads. A builtin/stdlib head
                 // (`List`/`Map`/`Set`/`Channel`/…) carries its `builtin_type_doc` usage+methods
-                // blurb; a user head (an imported generic struct/enum/newtype like `Heap`) falls back
+                // blurb; a user head (an imported generic struct/enum like `Heap`) falls back
                 // to its `name_docs` docstring (the import-line binding seeds that entry). Probe-gated
                 // so off-probe checks pay nothing; gated `!generic_arg_prepass` so the generic-arg
                 // unification prepass can't first-hit-wins latch an incomplete type.
@@ -2395,7 +2395,7 @@ impl Checker {
                 // harvested METHOD table — but it is NOT a nominal struct: it must resolve to the opaque
                 // reserved `Ty::Shared`/etc via the `sig.types` → `qualified_builtin_ty` branch below,
                 // NOT `Ty::Struct(...)`. Skip the struct_defs arm for these so `concurrency.Shared[int]`
-                // (a qualified annotation / `type` alias / `newtype` body) keeps its reserved `Ty`
+                // (a qualified annotation / `type` alias body) keeps its reserved `Ty`
                 // (matching the bare-after-import path); otherwise it would mint a divergent
                 // `Ty::Struct("Shared", …)` that fails to unify with a `Shared(v)` ctor's `Ty::shared`.
                 if let Some(info) = sig.struct_defs.get(name)
@@ -2459,7 +2459,7 @@ impl Checker {
                     // An opaque/native builtin TYPE reached by qualified path (`concurrency.Shared[int]`,
                     // `net.Socket`, `ffi.int32`/`ffi.ptr`). These names live ONLY in their owning std
                     // module's `sig.types` (reserved — no user module can export them), so this branch
-                    // fires solely for native builtins; user struct/enum/newtype/alias names were already
+                    // fires solely for native builtins; user struct/enum/alias names were already
                     // consumed by the def-map arms above. The arm required the module be imported (the
                     // `imported_modules.get` above), so the import gate is unchanged: a non-imported
                     // module still hit the `unknown module` error before reaching here. ADDITIVE — the
@@ -3843,10 +3843,6 @@ impl Checker {
     /// "wrote a method that happens to be called eq". The backend's `binds_eq_hook` is the syntactic
     /// twin of the *same* split, so checker and compiler agree by construction.
     ///
-    /// Newtypes are deliberately NOT covered: their `==` never dispatches to a user `eq` at all (it
-    /// auto-flows to the underlying's native equality), and the numeric case already has its own
-    /// decl-site rejection.
-    ///
     /// Is an `eq` method's second parameter the hook's `Self` operand, or the ordinary-method escape
     /// hatch (a type PARAMETER)? The single source of truth for that split, so it never grows a
     /// second, divergent notion of "is this the hook": [`Self::validate_eq_shape`] below calls it to
@@ -4576,14 +4572,13 @@ impl Checker {
                     (AssignOp::MinusEq, Ty::Set(a), Ty::Set(b)) => compatible(a, b),
                     _ => false,
                 };
-                // A struct/enum/newtype whose matching operator overload makes the binary `a OP b`
+                // A struct/enum whose matching operator overload makes the binary `a OP b`
                 // type-check must accept `a OP= b` too — `x OP= v` is defined as `x = x OP v`, and the
                 // runtime already lowers both through the same `Op::Add`/`Sub`/… opcodes. Reuse the
                 // SAME `op_overload_result` the binary-operator checker (`infer_binary`) consults, then
                 // require the result be assignable back to the target (mirrors `a = a OP b` failing if
                 // the result type can't flow into `a`). `op_overload_result` returns `Some` only for
-                // same-typed operands satisfying the operator protocol (or same numeric-newtype
-                // auto-flow), so a no-overload struct / `V += int` / `Box[int] += Box[str]` stay
+                // same-typed operands satisfying the operator protocol, so a no-overload struct / `V += int` / `Box[int] += Box[str]` stay
                 // rejected — no blanket compound-assign acceptance.
                 let proto = match op {
                     AssignOp::PlusEq => "Add",
@@ -5028,7 +5023,7 @@ impl Checker {
         // pre-replace `in_fn_body`) being true means this is a NESTED fn, which the compiler lowers
         // as a closure that DECLARES no witness param — it INHERITS the enclosing scope through the
         // capture entries instead (Task 4), so its scope is left untouched below. A body whose
-        // receiver is neither struct, enum nor newtype declares none and inherits none (nothing
+        // receiver is neither struct nor enum declares none and inherits none (nothing
         // there declares a proto the witness could ride on).
         let witness_fn_name = match &self_ty {
             _ if saved_in_fn => None,
@@ -5075,7 +5070,7 @@ impl Checker {
         // Editor hover: record the function's OWN signature at its decl-site name token (no-op
         // off-probe; behavior-neutral — `name_span` is runtime-inert). Covers free fns AND methods,
         // both routed through here. For a method, `record_method_decl_hover` (called from the
-        // struct/enum/newtype arm BEFORE this) already latched the receiver-stripped sig first
+        // struct/enum arm BEFORE this) already latched the receiver-stripped sig first
         // (first-hit-wins in `hover_record_at`), so this is a harmless no-op there; for a free fn
         // there is no prior record, so this produces the previously-missing fn-name hover.
         if self.hover_probe.is_some() {
@@ -6090,7 +6085,7 @@ impl Checker {
     ///
     /// The spellings mirror `infer_call`'s constructor arms — ALL of them, so one concept gets one
     /// verdict: bare `Enum.Variant` and its two turbofish carriers, qualified `module.Enum.Variant`
-    /// (turbofished too), the qualified struct/newtype constructor `module.Point(…)`, and the
+    /// (turbofished too), the qualified struct constructor `module.Point(…)`, and the
     /// qualified NATIVE constructor `concurrency.Shared(…)` / `time.timer(…)`.
     pub(super) fn dotted_ctor_target(&self, callee: &Expr) -> bool {
         let ExprKind::Field { obj, name, .. } = &callee.kind else {
@@ -6108,7 +6103,7 @@ impl Checker {
         {
             return true;
         }
-        // `module.Point(…)` / `module.Meters(…)` — the head is the MODULE and the member the type.
+        // `module.Point(…)` — the head is the MODULE and the member the type.
         // A reserved native handle (`net.Socket`) has a `struct_defs` entry for its method table but
         // no constructor; `infer_call` skips it the same way, so its own diagnostic stays single.
         if let ExprKind::Ident(mname) = &obj.kind
@@ -6232,7 +6227,7 @@ impl Checker {
 
     /// TICKET-197 — why an operator or hook on `ty` failed, when the reason is a misnamed
     /// parameter: ` (method 'add' parameter 1 is named 'o', but Add declares 'other')` for a
-    /// struct, enum or newtype whose `method` misnames a parameter of `protocol`, else empty.
+    /// struct or enum whose `method` misnames a parameter of `protocol`, else empty.
     pub(super) fn hook_name_note(&self, ty: &Ty, protocol: &str, method: &str) -> String {
         let methods = match ty {
             Ty::Struct(name, _) => self.structs.get(name).map(|info| &info.methods),

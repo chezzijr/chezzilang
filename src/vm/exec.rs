@@ -2544,7 +2544,7 @@ impl Vm {
                 for j in 0..count {
                     let k = self.stack[at + 2 * j];
                     hashes.push(self.hash_value(k, span)?);
-                    // Snapshot a struct/enum/newtype key (Go value-key model) and overwrite its
+                    // Snapshot a struct/enum key (Go value-key model) and overwrite its
                     // still-rooted stack slot, so phase 2 stores the snapshot (a later mutation of
                     // the caller's original can't corrupt the map). Landing it in the rooted slot
                     // keeps it alive across the NEXT element's re-entrant `hash_value` GC; values
@@ -2573,7 +2573,7 @@ impl Vm {
                 let mut hashes = Vec::with_capacity(count);
                 for j in 0..count {
                     hashes.push(self.hash_value(self.stack[at + j], span)?);
-                    // Snapshot a struct/enum/newtype element (Go value-key model) into its still-
+                    // Snapshot a struct/enum element (Go value-key model) into its still-
                     // rooted stack slot, so phase 2 stores the snapshot.
                     let snap = self.snapshot_key(self.stack[at + j]);
                     self.stack[at + j] = snap;
@@ -2595,8 +2595,7 @@ impl Vm {
             Op::NewStruct(name, argc) => self.new_struct(name, *argc, span)?,
             // ----- cells (uniform by-reference capture, Task A — unwired) -----
             Op::NewCell => {
-                // `v` moves straight into the `Obj` (no rooting window — alloc never GCs mid-op,
-                // same profile as `Op::NewType`).
+                // `v` moves straight into the `Obj` (no rooting window — alloc never GCs mid-op).
                 let v = self.pop();
                 let h = self.heap.alloc(Obj::Cell(v));
                 self.push(Value::obj(h));

@@ -192,7 +192,7 @@ impl<E> std::ops::Deref for WireTable<E> {
 
 /// A `Send`-able serialization of a sendable [`Value`](super::value::Value).
 ///
-/// Data arms (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`) own their contents
+/// Data arms (`List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`Iter`) own their contents
 /// recursively; `Str` crosses **by value** (owned bytes — [`WireValue::Str`]). Callables cross **by
 /// value** too — a closure as [`WireValue::Closure`] (proto + wired captures + home index), a bare fn as
 /// [`WireValue::Func`], a native fn as [`WireValue::Native`] (name + fn ptr), an FFI fn as
@@ -295,7 +295,7 @@ pub enum WireValue {
         inner: Box<WireValue>,
     },
     /// A BACK-REFERENCE to an already-serialized identity-preserved node (`Cell`/`Closure` OR any
-    /// container arm — `List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`NewType`/`Iter`) — the encoding that
+    /// container arm — `List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/`Iter`) — the encoding that
     /// lets ANY value cycle cross the airlock: a recursive local `fn`'s letrec self-cell, a
     /// mutually-recursive closure pair, a self-referential struct/list/map, or a mixed struct+closure
     /// cycle. Serialize assigns each such node an `id` on first visit and, on a REVISIT of a node still

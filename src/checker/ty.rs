@@ -558,7 +558,7 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         // A protocol existential: identity matches; `str` conforms to `Error` intrinsically.
         // Struct conformance needs the registry — handled by `Checker::assignable`, not here.
         // STRICT INVARIANCE: same protocol name AND same arg arity AND arg-wise compatible (mirrors
-        // the `Struct`/`Enum`/`NewType` arms), so bare `Container` (0 args) and `Container[int]`
+        // the `Struct`/`Enum` arms), so bare `Container` (0 args) and `Container[int]`
         // (1 arg) are distinct, and `Container[str]` ≠ `Container[int]`.
         (Protocol(a, aa), Protocol(b, ba)) => {
             a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
@@ -569,9 +569,6 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
         (Struct(a, aa), Struct(b, ba)) | (Enum(a, aa), Enum(b, ba)) => {
             a == b && aa.len() == ba.len() && aa.iter().zip(ba).all(|(x, y)| compatible(x, y))
         }
-        // A newtype is nominal: compatible ONLY with the same newtype (same key AND type args). It is
-        // deliberately NOT compatible with its underlying scalar — that is the entire point of the
-        // distinct type. Crossing the boundary needs an explicit construct or cast-unwrap.
         (AtomicInt, AtomicInt)
         | (Executor, Executor)
         | (Socket, Socket)
@@ -728,7 +725,7 @@ impl Ty {
         })
     }
 
-    /// Every nominal (struct/enum/newtype/protocol) identity key inside `self`, at any depth.
+    /// Every nominal (struct/enum/protocol) identity key inside `self`, at any depth.
     fn collect_nominal_keys(&self, out: &mut std::collections::BTreeSet<String>) {
         match self {
             Ty::List(t)
@@ -820,7 +817,6 @@ impl Ty {
             // `n` is the qualified IDENTITY key (`<module-key>::Name`, TICKET-027); user-facing
             // diagnostics render the BARE display name (matching runtime display) unless `names`
             // qualifies it because a different type with the same bare name is in the same message.
-            // A newtype renders like struct/enum, plus its type args when generic (`Stack[int]`).
             Ty::Protocol(n, args) | Ty::Struct(n, args) | Ty::Enum(n, args) => {
                 Self::fmt_nominal(f, n, args, names)
             }
@@ -1036,7 +1032,7 @@ pub enum Resolution {
     Variant { enum_key: String, variant: String },
     /// A static method of a struct or enum, by the type's runtime key (`Op::CallStatic`).
     Static { type_key: String, method: String },
-    /// A struct, enum or newtype method read as a VALUE through its type path (`Bx[int].make`,
+    /// A struct or enum method read as a VALUE through its type path (`Bx[int].make`,
     /// `Pt.getx`); `Op::MakeMethodFunc`. An instance method takes its receiver as the first
     /// argument.
     MethodFn { type_key: String, method: String },

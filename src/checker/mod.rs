@@ -591,7 +591,7 @@ pub(crate) const RESERVED_PROTOCOLS: &[&str] = &[
 
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (the
 /// [`RESERVED_PROTOCOLS`] membership test). Every caller is a per-DECLARATION hoist/setup check
-/// (`hoist_protocol`, the `struct`/`enum`/`newtype`/`type` reserved-name arms), so the linear scan is
+/// (`hoist_protocol`, the `struct`/`enum`/`type` reserved-name arms), so the linear scan is
 /// off any hot path — it sits beside an identical `native::ffi::TYPE_NAMES.contains(..)` scan.
 fn is_reserved_protocol(name: &str) -> bool {
     RESERVED_PROTOCOLS.contains(&name)
@@ -2227,7 +2227,7 @@ struct Checker {
     ffi_alias_ok: std::collections::HashSet<String>,
     /// Declared return type of the function body currently being checked (`Nil` at top level).
     current_ret: Ty,
-    /// `Some(T)` while resolving a struct/enum/newtype method's SIGNATURE or BODY — the concrete
+    /// `Some(T)` while resolving a struct/enum method's SIGNATURE or BODY — the concrete
     /// enclosing type `Self` names (e.g. `fn dup(self) -> Self` inside `struct P`). `None` at top
     /// level, inside a free fn, or a nested fn/closure (reset like `current_ret`), so `Self` outside
     /// a method stays `unknown type 'Self'`. A PROTOCOL method keeps `None` here: its `Self` is
@@ -2290,8 +2290,8 @@ struct Checker {
     body_facts_pass: bool,
     /// TICKET-201 — the struct-body binders a default of the type being checked could name:
     /// `(name, binder span, owner type name)` for each field that carries a default and each
-    /// method. Read by [`Checker::check_default_scope`]. Set and restored by the struct, enum and
-    /// newtype arms around their field defaults and method bodies.
+    /// method. Read by [`Checker::check_default_scope`]. Set and restored by the struct and enum
+    /// arms around their field defaults and method bodies.
     default_binders: Vec<(String, Span, String)>,
     /// W8-21 — true while checking (or inferring the return of) a fn/closure body whose return type
     /// is DECLARED (a `fn`'s `decl.ret.is_some()`, always true for a closure with an explicit `->`).
@@ -2484,7 +2484,7 @@ struct Checker {
     /// witness would have to live in the instance, which is a different mechanism.
     witness_scope: Vec<String>,
     /// M24-2 — every METHOD NAME in the program that some declaration takes a hidden witness for (a
-    /// method of a struct / enum / newtype declaring a type param with a static-carrying bound).
+    /// method of a struct / enum declaring a type param with a static-carrying bound).
     /// Graph-wide and never cleared per module — modules are checked deps-first, so an imported
     /// type's methods are already in here when an importer hoists.
     ///
@@ -2604,7 +2604,7 @@ struct Checker {
     /// read is not yet the final word on the type.
     ///
     /// SET AT THOSE TWO CALL SITES, never inside `infer_generic_arg_tys`. The helper's other five
-    /// callers (struct / qualified-struct / enum-variant / newtype ctor) pin nothing afterwards, so
+    /// callers (struct / qualified-struct / enum-variant ctor) pin nothing afterwards, so
     /// there the read IS final and the wall must fire. *Setting* it in the shared helper silenced all
     /// seven and let `Bx(ident)` through to the very "argument 1 of 'f': expected T, found int" this
     /// rule exists to replace.
@@ -2762,7 +2762,7 @@ struct Checker {
     /// covering symbol's type is kept.
     hover_result: Option<(Ty, HoverKind, Option<String>)>,
     /// EDITOR HOVER: doc-comment for the entry module's non-fn type decls (struct/enum/protocol/
-    /// newtype/alias) + top-level lets, keyed by simple name. Populated per module from the AST in
+    /// alias) + top-level lets, keyed by simple name. Populated per module from the AST in
     /// `collect_docs`; consulted by the hover Ident/type-name sites. Keyed by simple name is safe
     /// because hover only fires in the entry module (gated by `current_module_id == hover_entry`),
     /// where this table holds exactly that module's decls (mirrors how `functions` is entry-scoped).

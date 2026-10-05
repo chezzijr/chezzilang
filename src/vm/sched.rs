@@ -7,7 +7,7 @@ use super::*;
 
 /// Identity-preservation state threaded through [`Vm::to_wire_depth`] — every identity-preserved node
 /// kind (`Obj::Cell`/`Obj::Closure` AND the container arms `List`/`Tuple`/`Map`/`Set`/`Struct`/`Enum`/
-/// `NewType`/`Iter`) records its GcRef here so ANY value cycle round-trips: a recursive local `fn`'s
+/// `Iter`) records its GcRef here so ANY value cycle round-trips: a recursive local `fn`'s
 /// letrec self-cell, a mutually-recursive closure pair, a self-referential struct/list/map, or a mixed
 /// struct+closure cycle. `path` maps each such GcRef **currently on the serialize DFS stack** to the
 /// `id` assigned on its first visit; `next_id` is the monotonic id counter. On a REVISIT of a node still
@@ -3909,8 +3909,6 @@ impl Vm {
                         }
                     }
                 }
-                // A newtype crosses by value (deep copy), like a 1-field struct: carry its key + the
-                // wired inner. Sendable iff its inner is (the checker's `sendable_rec` agrees).
                 // A frame-holding generator crosses the airlock BY VALUE as a DEEP COPY: its `proto`
                 // (shared via `Arc<Program>`), `home` index, backing closure, and lifecycle state, with
                 // every parked slot wired recursively so a non-sendable slot rejects AT SERIALIZE TIME.
@@ -5605,7 +5603,7 @@ impl Vm {
     /// `Writer`/`Reader` — the sharing escape hatch, so no snapshot can be stale about them), or an
     /// import-alias `Module` whose own globals the same walk covers.
     ///
-    /// Everything else — `List`/`Map`/`Set`/`Tuple`/`Struct`/`Enum`/`NewType`/`Cell`/`Closure`/
+    /// Everything else — `List`/`Map`/`Set`/`Tuple`/`Struct`/`Enum`/`Cell`/`Closure`/
     /// `Generator`/`Iter`/`ByteArray`/an inline `Module` — is mutated IN PLACE (`q.push(1)`, `m[k] = v`,
     /// `p.x = 1`, a captured cell) with no slot write to invalidate on, so a snapshot holding one is
     /// never cached: the nursery rebuilds. A WHITELIST on purpose — a new `Obj` variant defaults to

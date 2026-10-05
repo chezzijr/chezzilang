@@ -265,7 +265,7 @@ impl Drop for EqObligation {
 ///
 /// **Keyed on the receiver KIND, not just the protocol** — that is the axis W6-3 actually failed on:
 /// `compare`/`str` *were* paired, but their `Vm::do_method_call` interceptions were type-gated
-/// narrower than the checker's grant set, so numeric newtypes and boxed scalars fell through. A
+/// narrower than the checker's grant set, so boxed scalars fell through. A
 /// protocol-keyed table cannot express, and so cannot enforce, that obligation. The kind string is
 /// [`Checker::intrinsic_recv_kind`]'s classification of the granted `Ty` (`"?"` for an unclassified
 /// one, which matches no row and therefore trips the assert).
@@ -297,7 +297,7 @@ impl Drop for EqObligation {
 /// names), and the method behind that grant is a REAL native method with a runtime arm already, not
 /// a promise this ratchet needs to police.
 pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
-    // Comparable — int/float/str scalars + a numeric newtype (its `<` unwraps to the underlying).
+    // Comparable — int/float/str scalars.
     ("Comparable", "compare", "int"),
     ("Comparable", "compare", "float"),
     ("Comparable", "compare", "str"),
@@ -307,8 +307,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Comparable", "compare", "option"),
     // Eq — D1: EVERY receiver kind whose `==` this table can key a row on except `nil` (not
     // spellable as a value). Most rows are the structural derive (`Vm::values_equal`): the four
-    // scalars are all here because `==` is defined on `bool` too, unlike `Comparable`; a newtype's
-    // `==` unwraps to the underlying's native equality, exactly as its `<` unwraps to the ordering;
+    // scalars are all here because `==` is defined on `bool` too, unlike `Comparable`;
     // `option`/`result` land on `Obj::Enum` at runtime, same as `enum`. `func` is the one exception —
     // a function value's `==` is IDENTITY (two loads of the same top-level `fn`/nested `fn` def are
     // equal, two calls to a factory are not — W7-54), not a structural walk, but it is still the same
@@ -392,8 +391,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Slice", "slice", "str"),
     ("Slice", "slice", "bytes"),
     ("Slice", "slice", "bytearray"),
-    // The operator protocols — int/float natively, plus a numeric newtype's unwrap→op→rewrap
-    // auto-flow (`Neg` has no newtype path, so it is int/float only).
+    // The operator protocols — int/float natively.
     ("Add", "add", "int"),
     ("Add", "add", "float"),
     ("Sub", "sub", "int"),
@@ -570,7 +568,7 @@ impl Checker {
             return;
         }
         // A protocol may not shadow a reserved builtin TYPE name either (`protocol List` / `protocol
-        // int`). Sibling struct/enum/newtype/type-alias decl guards all reject `is_reserved_type`;
+        // int`). Sibling struct/enum/type-alias decl guards all reject `is_reserved_type`;
         // protocol was the sole decl path that omitted it. Ordered AFTER the reserved-protocol arm so
         // `Iterator` (both a reserved protocol AND type) is caught once, above, keeping its protocol
         // wording. The stdlib carve-out mirrors the reserved-protocol arm (no native protocol is named
@@ -586,7 +584,7 @@ impl Checker {
             self.error(span, format!("protocol '{name}' is already defined"));
         }
         // A protocol's own type param may not be named after a reserved builtin type (`protocol
-        // P[int]`) — same rule as struct/enum/newtype/fn params.
+        // P[int]`) — same rule as struct/enum/fn params.
         self.reject_reserved_type_params(type_params);
         let mut saved = self.type_params.clone();
         std::mem::swap(&mut self.type_params, &mut saved); // start clean, with only Self visible
@@ -958,7 +956,7 @@ impl Checker {
     /// only in capitalization, so the comparison is on the bare reason, never the message.
     ///
     /// **Two obligations, not one (W7-45).** `Hashable` — the scalars `int`/`str`/`bool`
-    /// intrinsically, a tuple whose every element is `Hashable` (TICKET-161), or a struct/enum/newtype
+    /// intrinsically, a tuple whose every element is `Hashable` (TICKET-161), or a struct/enum
     /// defining `hash(self) -> int`; `float` is refused
     /// (NaN/equality footgun). AND `Eq`: a probe compares candidates with `values_equal` on a hash
     /// COLLISION, so a key whose `eq` carries `where` bounds this instantiation does not satisfy
@@ -1009,7 +1007,7 @@ impl Checker {
     pub(super) fn key_ty_reject(&self, t: &Ty) -> Option<String> {
         if self.satisfies(t, "Hashable").is_err() {
             let mut msg = format!(
-                "must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum/newtype defining hash(self) -> int), found {t}"
+                "must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found {t}"
             );
             if let Some(bad) = self.unhashable_tuple_elem(t) {
                 msg.push_str(&format!(": element {bad} is not Hashable"));
@@ -1699,8 +1697,8 @@ impl Checker {
             Ty::Protocol(self.type_key(mid, name), args.to_vec())
         } else if sig.types.contains(name) {
             // Mirror `resolve_type`'s qualified builtin branch on the READ-ONLY export path (so an
-            // EXPORTED `type S = concurrency.Shared[int]` / `newtype MyS[T] = concurrency.Shared[T]`
-            // resolved via `resolve_ty_ro_d` carries the right builtin `Ty`). Permissive: no errors,
+            // EXPORTED `type S = concurrency.Shared[int]` resolved
+            //  via `resolve_ty_ro_d` carries the right builtin `Ty`). Permissive: no errors,
             // and a non-type `sig.types` name (`timer`) returns `Ty::Unknown`.
             self.qualified_builtin_ty(name, args).unwrap_or(Ty::Unknown)
         } else {
@@ -2164,8 +2162,8 @@ impl Checker {
         // all four stringify (int/float/bool/str), so a `[T: Stringable]` generic accepts them (the
         // erased body's `v.str()` is dispatched by the scalar `str` branch in `Vm::do_method_call`).
         // Note the membership is all FOUR scalars — unlike Comparable (no Bool) / Hashable (no Float).
-        // Structs/enums/newtypes still fall through to the structural `satisfies_methods` below (a type
-        // WITHOUT a `str(self) -> str` method stays correctly rejected; newtypes stay opt-in).
+        // Structs/enums still fall through to the structural `satisfies_methods` below (a type
+        // WITHOUT a `str(self) -> str` method stays correctly rejected).
         if protocol == "Stringable" && matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) {
             return self.grant_intrinsic(protocol, ty);
         }
@@ -2404,11 +2402,6 @@ impl Checker {
                 self.satisfies_methods(ty, protocol, args, pinfo, methods)
                     .map(|()| Grant::no_intrinsic_method())
             }
-            // A newtype satisfies a protocol structurally via its OWN methods (like struct/enum).
-            // PLUS, when its underlying is numeric, it intrinsically satisfies the operator protocols
-            // (`Add`/`Sub`/`Mul`/`Div`/`Mod`/`Comparable`) — its same-type `+`/`<` use the native op
-            // (unwrap→op→rewrap), so a `newtype Meters = float` flows into a `[T: Add]` generic with
-            // no user `add` method. Hashable/Stringable stay strictly opt-in (the user's own method).
             _ => Err(format!("type {ty} does not satisfy {protocol_display}")),
         }
     }
@@ -2456,7 +2449,7 @@ impl Checker {
             .zip(args.iter().cloned())
             .collect();
         // The RECEIVING type's own param→arg substitution (e.g. `T→int` from `Box[int]`). The user's
-        // stored methods carry the struct/enum/newtype's type params UNsubstituted (a method on
+        // stored methods carry the struct/enum's type params UNsubstituted (a method on
         // `Box[T]` is stored as `add(self, o: Box[T]) -> Box[T]`), so for a generic instantiation we
         // must bind those params to the instantiation's args before comparing against the (Self-bound)
         // protocol signature — otherwise `compatible(Box[int], Box[T])` fails and a perfectly good
@@ -2672,8 +2665,8 @@ impl Checker {
     }
 
     /// Shared body of [`Self::ordering_allowed`]: do `l` and `r` name the
-    /// SAME type param / struct / enum / newtype, such that the comparison operator dispatches to
-    /// `protocol`'s `method` (or, for a numeric newtype, to the underlying's native op)?
+    /// SAME type param / struct / enum, such that the comparison operator dispatches to
+    /// `protocol`'s `method`?
     ///
     /// Still protocol/method parameterized (the `op_overload_result` precedent) even with one caller:
     /// `==`'s twin predicate was deleted in M23 Task 3 because the `Eq` overload is decided at RUNTIME
@@ -2692,9 +2685,6 @@ impl Checker {
             (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..)) if compatible(l, r) => {
                 self.satisfies(l, protocol).is_ok()
             }
-            // Same SCALAR newtype with a numeric underlying: `Meters < Meters` uses the underlying's
-            // native ordering (returns bool). A user `compare` method also enables it via satisfies()
-            // (the only path for a generic newtype — methods-only, no native ordering auto-flow).
             // TICKET-146: a tuple / `List` / `Option` pair orders lexicographically when every
             // element type is Comparable; `compatible` keeps `(int, int) < (int, str)` out.
             (Ty::Tuple(_), Ty::Tuple(_))
@@ -2811,7 +2801,7 @@ impl Checker {
         sig.params.len() == 2 && Self::eq_operand_is_hook(&sig.params[1])
     }
 
-    /// The methods a struct/enum/newtype DECLARES (`None` for anything else) — for diagnostics that
+    /// The methods a struct/enum DECLARES (`None` for anything else) — for diagnostics that
     /// need to ask "did the user write this method at all?", which conformance alone can't answer.
     fn declared_methods(&self, ty: &Ty) -> Option<&HashMap<String, FnSig>> {
         match ty {
@@ -2944,8 +2934,7 @@ impl Checker {
                 let ok = payloads.iter().all(|pty| self.sendable_rec(pty, stack));
                 stack.pop();
                 ok
-            } // A newtype is sendable iff its underlying type is (it crosses by deep-copy of the inner
-              // value, like a 1-field struct). Cycle-guarded by the newtype key.
+            }
         }
     }
 
@@ -2973,10 +2962,7 @@ impl Checker {
     /// escape hatch and stays unrestricted.
     ///
     /// M23 Task 3 made the claim literally true for the struct/enum arms: `P == P` now DOES route
-    /// through the user `eq` while `cas` stays structural. A non-numeric newtype's `==` is still
-    /// structural (it does not satisfy `Eq` — see `satisfies`), so for THAT arm the disagreement is
-    /// between `cas` and the `p.eq(q)` METHOD spelling, not the operator — which is why the message
-    /// says "the payload's own equality" rather than naming `==`: one wording, true on all three arms.
+    /// through the user `eq` while `cas` stays structural.
     ///
     /// Keyed on every type the payload REACHES, not just its own: structural equality recurses into
     /// elements, entries, tuple slots, struct fields and enum payloads, so `Atomic[List[P]]`,
@@ -3016,7 +3002,7 @@ impl Checker {
     ///
     /// Reachability here means exactly what `Vm::values_equal_guarded` recurses through: list/set
     /// elements, map keys AND values, `Option`/`Result` payloads, tuple slots, struct fields, enum
-    /// variant payloads, and a newtype's underlying. NOT through a `Channel`/`Shared`/`Atomic`
+    /// variant payloads. NOT through a `Channel`/`Shared`/`Atomic`
     /// handle (comparing two handles compares the handles, never their contents) and not into a
     /// `Func`. `Protocol`/`Param`/`Unknown` are permissive holes by construction — the concrete
     /// witness is unknown here — which is why the RUNTIME `cas` also refuses to dispatch the hook
@@ -3598,7 +3584,7 @@ impl Checker {
         format!("{shown} {EQ_BUDGET_MARKER} to prove its equality reaches no unmet `where` bound")
     }
 
-    /// A struct/enum/newtype's own type params bound to the args of THIS instantiation
+    /// A struct/enum's own type params bound to the args of THIS instantiation
     /// (`Box[T]` + `Box[int]` → `{T -> int}`); empty for every other `Ty`. Each arm resolves through
     /// the miss-only owning-module helpers (gap #4), so a named-fn-imported generic instantiation
     /// binds its params identically to a whole-module import.
@@ -3972,7 +3958,7 @@ impl Checker {
     }
 
     /// The structural method table a NOMINAL user type witnesses a protocol with — the same three
-    /// tables `satisfies_args_d`'s struct/enum/newtype arms feed to `satisfies_methods`, including
+    /// tables `satisfies_args_d`'s struct/enum arms feed to `satisfies_methods`, including
     /// their miss-only identity-key fallbacks (gap #4). A builtin/native or existential witness
     /// returns `None`: those satisfy through `satisfies_native` / `protocol_method_sig`, whose
     /// signatures are not the user method table this recovery unifies against.
@@ -5050,7 +5036,7 @@ impl Checker {
         // (`try_pin_generic_fn_value_arg` below; the other is `infer_generic_call`), so a same-module
         // generic fn read here is NOT the final word on its type and `infer_ident`'s "not determined
         // here" wall must stay silent for it. Set at THIS call site: the ctor `infer_generic_arg_tys`
-        // callers (struct/qualified/enum/newtype) pin nothing afterwards, so there the read IS final
+        // callers (struct/qualified/enum) pin nothing afterwards, so there the read IS final
         // and the wall must fire — setting the flag inside the shared helper silenced it at all seven,
         // which let `Bx(ident)` through to the very "argument 1 of 'f': expected T, found int" this
         // rule exists to replace. (The helper does SCOPE what is set here to the immediate bare-ident

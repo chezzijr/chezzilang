@@ -799,9 +799,7 @@ impl Vm {
                     })?;
                 Ok((proto, self.module_objs[self.enum_home_module(&key)]))
             }
-            // A newtype's overload/hook methods (`hash`/`str`/user methods) resolve via
-            // `newtype_methods`, mirroring the enum path.
-            _ => unreachable!("overload receiver is a struct, enum, or newtype"),
+            _ => unreachable!("overload receiver is a struct or enum"),
         }
     }
 
@@ -1278,10 +1276,8 @@ impl Vm {
         }
     }
 
-    /// Dispatch the user `hash(self) -> int` of a struct / enum / newtype key. An enum resolves
-    /// through the shared enum-aware resolver, mirroring the struct path; a newtype's `hash` is
-    /// opt-in (the checker rejects a newtype with no `hash` as a key, even over an
-    /// intrinsically-hashable underlying). All three re-enter the VM — may allocate / trigger GC.
+    /// Dispatch the user `hash(self) -> int` of a struct / enum key. An enum resolves
+    /// through the shared enum-aware resolver, mirroring the struct path. Both re-enter the VM — may allocate / trigger GC.
     fn hash_user(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         let Some(h) = v.as_obj() else { unreachable!() };
         match self.heap.get(h) {
@@ -1332,7 +1328,7 @@ impl Vm {
     }
 
     /// Whether `v` is a flat scalar hash key: inline `Int`/`Bool`/`Nil`, a Float-tagged box, or
-    /// `Obj::Str`/`Obj::Bytes`/`Obj::BigInt`. `Struct`/`Enum`/`NewType` are excluded because their
+    /// `Obj::Str`/`Obj::Bytes`/`Obj::BigInt`. `Struct`/`Enum` are excluded because their
     /// `hash`/`eq` re-enter the VM and `unique()` requires no `hash` at all; `ByteArray` is excluded
     /// because `bytes == bytearray` is content-equal; containers are excluded because `hash_value`
     /// faults on them.
@@ -1416,10 +1412,10 @@ impl Vm {
         self.with_roots(roots, |vm| vm.hash_value(key, span))
     }
 
-    /// Snapshot (deep-copy) a struct/enum/newtype key/element on the STORE path (Go value-key
+    /// Snapshot (deep-copy) a struct/enum key/element on the STORE path (Go value-key
     /// model): after the key is stored, mutating the caller's original value can no longer reach the
     /// stored key, so the collection can't be silently corrupted. Only the three heap-aggregate arms
-    /// `hash_value` dispatches (`Struct`/`Enum`/`NewType`) are copied — scalars and every immutable /
+    /// `hash_value` dispatches (`Struct`/`Enum`) are copied — scalars and every immutable /
     /// by-reference object pass through UNCHANGED (zero-clone hot path). Infallible + pure-alloc (no
     /// VM re-entry ⇒ no GC fires mid-copy), so it needs no rooting; a caller that then re-enters the
     /// VM (e.g. `hash_value` on a *later* element) must root the returned snapshot itself.
@@ -1466,7 +1462,7 @@ impl Vm {
     /// snapshot's tail is aliased ([`Vm::snapshot_value`] caps there) so a held-key lookup trips the
     /// same depth guard in `values_equal` and silently misses — whereas a by-reference key resolves
     /// instantly on the `ha == hb` identity short-circuit. Read-only, allocates only two small work
-    /// sets; runs on the cold struct/enum/newtype key-insert path. `on_path` holds the DFS recursion
+    /// sets; runs on the cold struct/enum key-insert path. `on_path` holds the DFS recursion
     /// stack (a back-edge into it = cycle); `done` memoizes fully-cleared nodes so a shared (DAG)
     /// sub-value isn't re-walked (no exponential blow-up on a diamond).
     fn store_key_by_reference(&self, v: Value) -> bool {
@@ -1532,7 +1528,7 @@ impl Vm {
     }
 
     /// Recursive worker for [`Vm::snapshot_key`]. Deep-copies only the MUTABLE, structurally-`==`
-    /// aggregate arms (`Struct`/`Enum`/`NewType`/`List`/`Tuple`/`Map`/`Set`/`ByteArray`) and returns
+    /// aggregate arms (`Struct`/`Enum`/`List`/`Tuple`/`Map`/`Set`/`ByteArray`) and returns
     /// every other value (scalars, immutable `Str`/`Bytes`/`Ptr`/`Builtin`, and all identity-compared
     /// by-reference objects: `Closure`/`Func`/`Channel`/`Shared`/…/`Generator`/`Iter`/`Cell`) BY
     /// REFERENCE — keeping those handles is what preserves `values_equal` (identity-only for them) and
