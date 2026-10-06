@@ -37515,3 +37515,12 @@ fn extern_c_variadic_requires_the_fixed_args() {
         "'printf' expects at least 1 argument(s), got 0",
     );
 }
+
+/// TICKET-218: a constant outside a C width's range is a compile error where the width is expected.
+#[test]
+fn ffi_width_constant_out_of_range_rejected() {
+    rejects_entry(
+        "import int8 from std.ffi\nx: int8 = 1000\nprint(x)\n",
+        "does not fit int8 (-128..127)",
+    );
+}
