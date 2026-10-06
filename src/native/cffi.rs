@@ -219,7 +219,7 @@ impl CType {
     }
 }
 
-/// The C type a `std.ffi` width name (`native::ffi::TYPE_NAMES`) marshals as -- the one owner of
+/// The C type a `std.ffi` width name (a `native type` decl of `std/ffi.chz`) marshals as -- the one owner of
 /// that map. `None` for any other name.
 pub fn width_ctype(name: &str) -> Option<CType> {
     Some(match name {

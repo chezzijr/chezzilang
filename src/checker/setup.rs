@@ -869,7 +869,7 @@ impl Checker {
         // rejects a bare unimported `ptr`). See the `native_module_sig("std.ffi")` type-license tail.
         let mut ffi_type_transient: Vec<String> = Vec::new();
         for tn in &sig.types {
-            if (tn == "ptr" || crate::native::ffi::TYPE_NAMES.contains(&tn.as_str()))
+            if crate::native::ffi::is_declared_type(tn)
                 && self.imported_ffi_types.insert(tn.clone())
             {
                 ffi_type_transient.push(tn.clone());
@@ -1734,7 +1734,7 @@ impl Checker {
                 self.imported_concurrency.insert(member.clone());
                 self.record_native_type_import_hover(member, *name_span, path);
             }
-        } else if crate::native::ffi::TYPE_NAMES.contains(&member.as_str()) || member == "ptr" {
+        } else if crate::native::ffi::is_declared_type(member) {
             // An FFI marshalling type CANNOT be RENAMED on import: the backends'
             // `ctype_of` keys off the literal surface name (`int32`/`ptr`), so an alias
             // would resolve to a type the marshaller can't lower. Reject `import int32
@@ -2045,7 +2045,11 @@ impl Checker {
                 // width types int8..uint64, which stay per-name-only). Keyed on the EXACT path, NOT
                 // `is_std`, so `import std.ref`/`std.iter`/… do NOT license `ptr`.
                 if path.as_slice() == ["std".to_string(), "ffi".to_string()] {
-                    self.imported_ffi_types.insert("ptr".to_string());
+                    for d in crate::native::ffi::declared_types() {
+                        if crate::native::ffi::is_opaque_type(&d.name) {
+                            self.imported_ffi_types.insert(d.name.clone());
+                        }
+                    }
                 }
                 // A whole-module `import std.concurrency` licenses ALL FOUR runtime concurrency ctor/
                 // TYPE names (the ergonomic default). Keyed on the EXACT len-2 path, so the real file
@@ -3564,7 +3568,7 @@ impl Checker {
                         "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil"
                     ) || is_reserved_type(name)
                         || is_reserved_protocol(name)
-                        || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
+                        || crate::native::ffi::is_width(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     } else if self.aliases.contains_key(name)
@@ -3641,7 +3645,7 @@ impl Checker {
     pub(super) fn collect_width_names(ty: &Type, out: &mut Vec<String>) {
         match ty {
             Type::Named { name: n, .. } => {
-                if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) {
+                if crate::native::ffi::is_width(n) {
                     out.push(n.clone());
                 }
             }
@@ -3767,7 +3771,7 @@ impl Checker {
                     // `reserved (builtin)` violation.
                     if is_reserved_type(name)
                         || is_reserved_protocol(name)
-                        || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
+                        || crate::native::ffi::is_width(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
@@ -3894,7 +3898,7 @@ impl Checker {
                 } => {
                     if is_reserved_type(name)
                         || is_reserved_protocol(name)
-                        || crate::native::ffi::TYPE_NAMES.contains(&name.as_str())
+                        || crate::native::ffi::is_width(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }

@@ -12,17 +12,28 @@
 # front-end reads ONLY the signature. FFI is layout-dependent UB, so the sigs here are the checker's only
 # guard: a wrong param/ret would pass the type-checker but marshal wrong bytes at runtime.
 #
-# NOTE — the TYPE-license names std.ffi ALSO exports are DELIBERATELY NOT declared here. The opaque `ptr`
-# handle type and the eight fixed-width C-ABI integer names (int8..uint64) carry NO runtime value — they
-# license `import ptr from std.ffi` / `import int32 from std.ffi` and resolve (via `resolve_type`) to
-# `Ty::Ptr`/`Ty::Int` only in a module that imported them. There is no `.chz` syntax for a bare
-# type-license name aliasing a builtin scalar, so they stay in the minimal `native_module_sig("std.ffi")`
-# arm (`sig.types.insert`), mirroring std.net's `Socket`/`Listener` and std.time's `timer`.
+# The TYPE names std.ffi exports are declared here too, as `native type`: this file is the one list of
+# everything `import … from std.ffi` accepts. `native type ptr` is the opaque handle (a whole-module
+# `import std.ffi` licenses it); `native type int8 = int` … `float32 = float` are the fixed-width C types,
+# each licensed per name (`import int32 from std.ffi`). A width carries NO runtime value of its own: the
+# program sees the scalar after `=`, and the C type each name marshals as lives in `cffi::width_ctype`.
 #
 # `extern "libc":` / `extern "libm":` name two LOGICAL library aliases the loader (`Cffi::new`,
 # `src/native/cffi.rs`) resolves to a real shared library per platform; every other `extern` string
 # still goes to `dlopen` verbatim. This module declares no callable for that resolution — it lives
 # entirely in the loader, not in std.ffi.
+
+# --- the exported types ---
+native type ptr                 # opaque C pointer handle; no Chezzi underlying value
+native type int8 = int          # C int8_t; Chezzi sees int
+native type int16 = int         # C int16_t; Chezzi sees int
+native type int32 = int         # C int32_t; Chezzi sees int
+native type int64 = int         # C int64_t; Chezzi sees int
+native type uint8 = int         # C uint8_t; Chezzi sees int
+native type uint16 = int        # C uint16_t; Chezzi sees int
+native type uint32 = int        # C uint32_t; Chezzi sees int
+native type uint64 = int        # C uint64_t; Chezzi sees int
+native type float32 = float     # C float; Chezzi sees float
 
 # --- the NULL sentinel + its test ---
 native fn null() -> ptr

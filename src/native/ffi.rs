@@ -773,25 +773,117 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("free", free, Kind::Inline),
 ];
 
-/// The fixed-width C-ABI *type* names that `std.ffi` exports (Chezzi's first type imports). Each
-/// integer width maps 1:1 to a C `int{N}_t`/`uint{N}_t` and `float32` to a C `float`; the checker
-/// recognizes one (resolving to a plain `Ty::Int`, or `Ty::Float` for `float32`) ONLY in a module that imports it per-name (`import int32, uint32 from std.ffi`), exactly
-/// like the callable `MEMBERS` above. The width/signedness is a runtime-only marshalling distinction
-/// the backends recover via `ctype_of` — these names are NOT bound as callable values. This list is
-/// the single declaring authority; the checker reads it (see `native_module_sig` + `resolve_type`).
-pub const TYPE_NAMES: &[&str] = &[
-    "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32",
-];
+/// The Chezzi scalar a declared C width reads as (`native type int8 = int` / `float32 = float`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WidthScalar {
+    Int,
+    Float,
+}
 
-/// Whether a [`TYPE_NAMES`] member is a C floating width (`float32`, a C `float`), so the program
-/// sees it as `float` rather than `int`. Every other width is an integer.
+/// One `native type` decl of `std/ffi.chz` (TICKET-218). `scalar: None` is an opaque handle (`ptr`);
+/// `Some(..)` is a fixed-width C type whose C side lives in `cffi::width_ctype`. The checker
+/// recognizes a width ONLY in a module that imports it per-name (`import int32 from std.ffi`); these
+/// names are NOT bound as callable values.
+#[derive(Debug, Clone)]
+pub struct DeclaredType {
+    pub name: String,
+    pub scalar: Option<WidthScalar>,
+}
+
+/// The type names `std.ffi` exports, in file order, derived from the `native type` decls of the
+/// embedded `std/ffi.chz` — the one declaring authority (no Rust name list). Its readers run whether
+/// or not the program imports `std.ffi` (decl guards, `resolve_type`, the VM), so the list is built
+/// from the file once, not from a harvest. A declared width with no `cffi::width_ctype` row is a bug
+/// and panics at first use.
+pub fn declared_types() -> &'static [DeclaredType] {
+    static TYPES: std::sync::OnceLock<Vec<DeclaredType>> = std::sync::OnceLock::new();
+    TYPES.get_or_init(|| {
+        let src = crate::resolver::std_embed::lookup("ffi.chz").expect("std/ffi.chz is embedded");
+        let tokens = crate::lexer::tokenize(src).expect("std/ffi.chz lexes");
+        let module = crate::parser::parse(tokens).expect("std/ffi.chz parses");
+        let mut out = Vec::new();
+        for s in &module.stmts {
+            let crate::ast::StmtKind::NativeType {
+                name, underlying, ..
+            } = &s.kind
+            else {
+                continue;
+            };
+            let scalar = match underlying {
+                None => None,
+                Some(crate::ast::Type::Named { name: u, .. }) if u == "int" => {
+                    Some(WidthScalar::Int)
+                }
+                Some(crate::ast::Type::Named { name: u, .. }) if u == "float" => {
+                    Some(WidthScalar::Float)
+                }
+                Some(t) => panic!("std/ffi.chz: native type {name} = {t:?} is not int or float"),
+            };
+            if let Some(sc) = scalar {
+                let ct = super::cffi::width_ctype(name).unwrap_or_else(|| {
+                    panic!("std/ffi.chz declares native type {name} with no cffi::width_ctype row")
+                });
+                assert_eq!(
+                    matches!(ct, super::cffi::CType::Float32),
+                    sc == WidthScalar::Float,
+                    "std/ffi.chz: native type {name}'s scalar disagrees with cffi::width_ctype"
+                );
+            }
+            out.push(DeclaredType {
+                name: name.clone(),
+                scalar,
+            });
+        }
+        out
+    })
+}
+
+fn declared(name: &str) -> Option<&'static DeclaredType> {
+    declared_types().iter().find(|d| d.name == name)
+}
+
+/// Whether `name` is a C width `std.ffi` declares (`native type NAME = int|float`).
+pub fn is_width(name: &str) -> bool {
+    declared(name).is_some_and(|d| d.scalar.is_some())
+}
+
+/// Whether `name` is an opaque handle type `std.ffi` declares (`native type NAME`, i.e. `ptr`).
+pub fn is_opaque_type(name: &str) -> bool {
+    declared(name).is_some_and(|d| d.scalar.is_none())
+}
+
+/// Whether `name` is any type `std.ffi` declares (`ptr` included).
+pub fn is_declared_type(name: &str) -> bool {
+    declared(name).is_some()
+}
+
+/// Whether a declared width is a C floating width (`float32`, a C `float`), so the program sees it
+/// as `float` rather than `int`. Read from the decl's `= float`.
 pub fn width_is_float(name: &str) -> bool {
-    name == "float32"
+    declared(name).is_some_and(|d| d.scalar == Some(WidthScalar::Float))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TICKET-218 — the type exports come from `std/ffi.chz`'s `native type` decls: `ptr` is the one
+    /// opaque handle, every width has a scalar, and `float32` is the one float width.
+    #[test]
+    fn declared_types_come_from_the_file() {
+        let names: Vec<&str> = declared_types().iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "ptr", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+                "float32"
+            ]
+        );
+        assert!(is_opaque_type("ptr") && !is_width("ptr") && is_declared_type("ptr"));
+        assert!(is_width("uint16") && !is_opaque_type("uint16") && !width_is_float("uint16"));
+        assert!(is_width("float32") && width_is_float("float32"));
+        assert!(!is_declared_type("int128") && !is_width("int") && !is_opaque_type("Socket"));
+    }
 
     /// A standalone `Host` serving a single `ptr` arg, for testing `is_null` in isolation.
     #[derive(Default)]

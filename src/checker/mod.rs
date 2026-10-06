@@ -180,7 +180,7 @@ fn module_label(import: &Import) -> String {
 /// CONTAINER (`List`/`Set`/`Map`/`Channel`/`range`), and HANDLE (`Socket`/`Listener`/`ptr`/
 /// `owned_str`) type names are all reserved at declaration too — `struct X` is rejected with the same
 /// `type 'X' is reserved (builtin)` error `struct Result` already gives. (The fixed-width FFI integer
-/// names like `int32` are reserved via `native::ffi::TYPE_NAMES` at the decl guards, not listed here.)
+/// names like `int32` are reserved via `native::ffi::is_width` at the decl guards, not listed here.)
 fn is_reserved_type(name: &str) -> bool {
     name == "Result"
         || name == "Option"
@@ -221,7 +221,7 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "Writer"
         // R2b — the std.io `Reader` read-only file handle (the read twin of `Writer`). Same dual gate.
         || name == "Reader"
-        || name == "ptr"
+        || crate::native::ffi::is_opaque_type(name)
         || name == "owned_str"
         // The four runtime concurrency ctor/TYPE names stay RESERVED — a user `struct Shared` /
         // `struct Executor` is rejected at declaration (a clean `reserved` error), NOT silently
@@ -594,7 +594,7 @@ pub(crate) const RESERVED_PROTOCOLS: &[&str] = &[
 /// Prebuilt protocols a user program may use as bounds but must not redeclare (the
 /// [`RESERVED_PROTOCOLS`] membership test). Every caller is a per-DECLARATION hoist/setup check
 /// (`hoist_protocol`, the `struct`/`enum`/`type` reserved-name arms), so the linear scan is
-/// off any hot path — it sits beside an identical `native::ffi::TYPE_NAMES.contains(..)` scan.
+/// off any hot path — it sits beside an identical `native::ffi::is_width(..)` scan.
 fn is_reserved_protocol(name: &str) -> bool {
     RESERVED_PROTOCOLS.contains(&name)
 }
@@ -1964,8 +1964,8 @@ fn native_module_sig(name: &str) -> ModuleSig {
             // `sig.types` so `import int32 from std.ffi` validates; the checker's `bind_import` records
             // the import into `imported_ffi_types` and `resolve_type` then resolves the name to `Ty::Int`
             // only in modules that imported it.
-            for tn in crate::native::ffi::TYPE_NAMES {
-                sig.types.insert((*tn).to_string());
+            for d in crate::native::ffi::declared_types() {
+                sig.types.insert(d.name.clone());
             }
             // The opaque `ptr` handle type is ALSO exported by `std.ffi` (kept out of `TYPE_NAMES`,
             // which routes a name through the ungated C-marshalling path `resolve_ctype_d`). Listing

@@ -1583,9 +1583,7 @@ impl Checker {
                 // An FFI width name resolves to plain `int` (`float` for `float32`); the width is a
                 // marshalling detail. So an exported alias body `type Len = int32` captures
                 // `Ty::Int`, and `type Real = float32` captures `Ty::Float`.
-                _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
-                    super::sig::ffi_width_ty(n)
-                }
+                _ if crate::native::ffi::is_width(n) => super::sig::ffi_width_ty(n),
                 // A bare alias name resolves to its (recursively-resolved) body.
                 _ if self.aliases.contains_key(n) => {
                     let body = self.aliases[n].clone();
@@ -1738,9 +1736,7 @@ impl Checker {
                 "str" => Some(CType::Str),
                 "ptr" => Some(CType::Ptr),
                 "owned_str" => Some(CType::OwnedStr),
-                _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
-                    crate::native::cffi::width_ctype(n)
-                }
+                _ if crate::native::ffi::is_width(n) => crate::native::cffi::width_ctype(n),
                 // A LOCAL transparent alias: recurse on its body in THIS module's scope.
                 _ if self.aliases.contains_key(n) => {
                     let body = self.aliases[n].clone();

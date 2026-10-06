@@ -4966,7 +4966,7 @@ impl Checker {
     /// builtin and acts as a real generic. Mirror the decl-NAME guards (`struct int` →
     /// `reserved (builtin)`) so the param form errors identically. Predicate = `is_reserved_type` +
     /// the fixed-width FFI integer names (`int32`/`int64`/…, reserved TYPE names via
-    /// `native::ffi::TYPE_NAMES`). Deliberately NOT `is_reserved_protocol`: a param named after a
+    /// `native::ffi::is_width`). Deliberately NOT `is_reserved_protocol`: a param named after a
     /// prebuilt protocol (`fn id[Comparable]`) is a protocol-name shadow, not a builtin-TYPE shadow,
     /// and is kept legal by design (guarded by `protocol_bound_and_typeparam_named_protocol_still_ok`,
     /// commit b2aa8ac). A param BOUND `[T: Comparable]` is likewise untouched (the bound is a separate
@@ -4975,9 +4975,7 @@ impl Checker {
     /// would double-report).
     pub(super) fn reject_reserved_type_params(&mut self, tps: &[TypeParam]) {
         for tp in tps {
-            if is_reserved_type(&tp.name)
-                || crate::native::ffi::TYPE_NAMES.contains(&tp.name.as_str())
-            {
+            if is_reserved_type(&tp.name) || crate::native::ffi::is_width(&tp.name) {
                 self.error(
                     tp.name_span,
                     format!("type '{}' is reserved (builtin)", tp.name),

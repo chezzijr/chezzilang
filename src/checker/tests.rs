@@ -14974,9 +14974,12 @@ fn enc_crypto_uuid_time_sig_from_file_not_native_module_sig() {
         ffi.types.contains("ptr"),
         "std.ffi must keep `ptr` in its type-license set (opaque C-ABI handle, no runtime value)"
     );
-    for tn in crate::native::ffi::TYPE_NAMES {
+    for tn in crate::native::ffi::declared_types()
+        .iter()
+        .map(|d| d.name.as_str())
+    {
         assert!(
-            ffi.types.contains(*tn),
+            ffi.types.contains(tn),
             "std.ffi must keep the fixed-width C-ABI type name `{tn}` in its type-license set"
         );
     }
@@ -15258,9 +15261,12 @@ fn ffi_fn_sigs_exact() {
         sig.types.contains("ptr"),
         "std.ffi must keep `ptr` licensed"
     );
-    for tn in crate::native::ffi::TYPE_NAMES {
+    for tn in crate::native::ffi::declared_types()
+        .iter()
+        .map(|d| d.name.as_str())
+    {
         assert!(
-            sig.types.contains(*tn),
+            sig.types.contains(tn),
             "std.ffi must keep the fixed-width type name `{tn}` licensed"
         );
     }
@@ -18382,7 +18388,7 @@ fn reserved_builtin_type_names_rejected_as_type_params() {
         ),
         // protocol type param
         ("protocol P[int]:\n    fn f(self)\n", "int"),
-        // FFI fixed-width name (reserved via native::ffi::TYPE_NAMES)
+        // FFI fixed-width name (reserved via native::ffi::is_width)
         ("struct Box[int32]:\n    v: int\n", "int32"),
     ] {
         entry_rejects(src, "reserved (builtin)");
@@ -18567,7 +18573,7 @@ fn reserved_builtin_type_names_rejected_at_decl() {
             "enum {name} must be rejected as reserved, got: {errs:?}"
         );
     }
-    // An FFI fixed-width type name (`int32`) is reserved too (via TYPE_NAMES) — `struct int32` / `enum
+    // An FFI fixed-width type name (`int32`) is reserved too (via native::ffi::is_width) — `struct int32` / `enum
     // int32` must be rejected, matching the TypeAlias guard.
     for src in [
         "struct int32:\n    x: int\nfn main():\n    print(1)\nmain()\n",

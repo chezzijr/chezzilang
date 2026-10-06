@@ -1344,7 +1344,7 @@ impl Checker {
             "Writer" => Some(Ty::Writer),
             "Reader" => Some(Ty::Reader),
             "ptr" => Some(Ty::Ptr),
-            _ if crate::native::ffi::TYPE_NAMES.contains(&name) => Some(ffi_width_ty(name)),
+            _ if crate::native::ffi::is_width(name) => Some(ffi_width_ty(name)),
             _ => None,
         }
     }
@@ -2039,7 +2039,7 @@ impl Checker {
                     // width name resolves only in a module that imported it per-name from `std.ffi`
                     // (`import int32 from std.ffi` → `imported_ffi_types`). Otherwise it's an unknown type
                     // with an FFI-specific hint (matches the qualified-variant "write it qualified" style).
-                    _ if crate::native::ffi::TYPE_NAMES.contains(&n.as_str()) => {
+                    _ if crate::native::ffi::is_width(n) => {
                         // Accept the width name if THIS module imported it, OR if we reached it by
                         // expanding a LICENSED transparent alias body — one whose defining module
                         // imported the width (`ffi_alias_ok`). A `type Len = int32` is a deliberate
@@ -6150,7 +6150,7 @@ impl Checker {
     }
 }
 
-/// The Chezzi type of a `std.ffi` width name (a `native::ffi::TYPE_NAMES` member): `float` for
+/// The Chezzi type of a `std.ffi` width name (a `native type NAME = int|float` decl of `std/ffi.chz`): `float` for
 /// `float32`, `int` for every integer width. The one owner of that fact -- the qualified, bare and
 /// alias-export resolvers all call it, so an alias's `Ty` agrees with its `CType`.
 pub(super) fn ffi_width_ty(name: &str) -> Ty {

@@ -1117,8 +1117,7 @@ impl Vm {
                     // (the module has no such global by design); any other missing member is a genuine
                     // error.
                     if self.module_name(target_obj) == "std.ffi"
-                        && (crate::native::ffi::TYPE_NAMES.contains(&member.as_str())
-                            || member == "ptr")
+                        && crate::native::ffi::is_declared_type(member)
                     {
                         continue;
                     }
