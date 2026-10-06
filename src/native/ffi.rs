@@ -771,7 +771,43 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("alloc", alloc, Kind::Inline),
     ("alloc_zeroed", alloc_zeroed, Kind::Inline),
     ("free", free, Kind::Inline),
+    // --- explicit wrap helpers (TICKET-218): Go's `int8(v)`, a C cast ---
+    ("cast_int8", cast_int8, Kind::Inline),
+    ("cast_int16", cast_int16, Kind::Inline),
+    ("cast_int32", cast_int32, Kind::Inline),
+    ("cast_int64", cast_int64, Kind::Inline),
+    ("cast_uint8", cast_uint8, Kind::Inline),
+    ("cast_uint16", cast_uint16, Kind::Inline),
+    ("cast_uint32", cast_uint32, Kind::Inline),
+    ("cast_uint64", cast_uint64, Kind::Inline),
+    ("cast_float32", cast_float32, Kind::Inline),
 ];
+
+/// Define `cast_<w>(v: int) -> int`, which wraps `v` to the C width `$ct` (`CType::wrap_int`).
+macro_rules! cast_fn {
+    ($name:ident, $lit:literal, $ct:expr) => {
+        fn $name(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+            expect_args(h, $lit, 1)?;
+            Ok(NativeRet::Int($ct.wrap_int(h.arg_int(0)?)))
+        }
+    };
+}
+cast_fn!(cast_int8, "cast_int8", super::cffi::CType::Int8);
+cast_fn!(cast_int16, "cast_int16", super::cffi::CType::Int16);
+cast_fn!(cast_int32, "cast_int32", super::cffi::CType::Int32);
+cast_fn!(cast_int64, "cast_int64", super::cffi::CType::Int64);
+cast_fn!(cast_uint8, "cast_uint8", super::cffi::CType::UInt8);
+cast_fn!(cast_uint16, "cast_uint16", super::cffi::CType::UInt16);
+cast_fn!(cast_uint32, "cast_uint32", super::cffi::CType::UInt32);
+cast_fn!(cast_uint64, "cast_uint64", super::cffi::CType::UInt64);
+
+/// `cast_float32(v: float) -> float`: round `v` to the nearest C `float` (`CType::wrap_f64`).
+fn cast_float32(h: &mut dyn Host) -> Result<NativeRet, HostError> {
+    expect_args(h, "cast_float32", 1)?;
+    Ok(NativeRet::Float(
+        super::cffi::CType::Float32.wrap_f64(h.arg_float(0)?),
+    ))
+}
 
 /// The Chezzi scalar a declared C width reads as (`native type int8 = int` / `float32 = float`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1293,9 +1329,9 @@ mod tests {
     #[test]
     fn members_registers_every_builtin() {
         let names: std::collections::HashSet<&str> = MEMBERS.iter().map(|(n, _, _)| *n).collect();
-        // null/is_null + 14 loads × 2 forms + 13 stores × 2 forms + alloc/alloc_zeroed/free
-        // = 2 + 28 + 26 + 3 = 59.
-        assert_eq!(MEMBERS.len(), 59, "expected exactly 59 std.ffi members");
+        // null/is_null + 14 loads × 2 forms + 13 stores × 2 forms + alloc/alloc_zeroed/free + 9 casts
+        // = 2 + 28 + 26 + 3 + 9 = 68.
+        assert_eq!(MEMBERS.len(), 68, "expected exactly 68 std.ffi members");
         for n in [
             "load_int",
             "load_int_at",
@@ -1392,7 +1428,7 @@ mod tests {
     #[test]
     fn members_registers_alloc_layer() {
         let names: std::collections::HashSet<&str> = MEMBERS.iter().map(|(n, _, _)| *n).collect();
-        assert_eq!(MEMBERS.len(), 59, "expected exactly 59 std.ffi members");
+        assert_eq!(MEMBERS.len(), 68, "expected exactly 68 std.ffi members");
         for n in ["alloc", "alloc_zeroed", "free"] {
             assert!(names.contains(n), "MEMBERS missing {n}");
         }

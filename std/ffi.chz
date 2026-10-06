@@ -112,3 +112,35 @@ native fn store_ptr_at(p: ptr, off: int, v: ptr) -> nil
 native fn alloc(nbytes: int) -> ptr
 native fn alloc_zeroed(nbytes: int) -> ptr
 native fn free(p: ptr) -> nil
+
+# --- explicit wrap: Go's `int8(v)` / Rust's `v as i8`. A value passed to C must fit its width (a
+#     constant outside it is a compile error, a runtime value faults at the C boundary); `cast_<w>`
+#     wraps it first, like a C cast. `cast_int64`/`cast_uint64` return `v` unchanged (an int holds
+#     their bits); `cast_float32` rounds to the nearest C float (`inf` when out of range).
+native fn cast_int8(v: int) -> int
+native fn cast_int16(v: int) -> int
+native fn cast_int32(v: int) -> int
+native fn cast_int64(v: int) -> int
+native fn cast_uint8(v: int) -> int
+native fn cast_uint16(v: int) -> int
+native fn cast_uint32(v: int) -> int
+native fn cast_uint64(v: int) -> int
+native fn cast_float32(v: float) -> float
+
+# --- range constants, like C's <stdint.h>/<float.h>. The C-boundary check reads each width's range
+#     from Rust's primitive bounds (`cffi::CType::int_range`); these literals are the user-facing copy
+#     and the runtime grid (`tests/ffi_width_range_grid.rs`) pins each one against it.
+INT8_MIN: const int = -128
+INT8_MAX: const int = 127
+INT16_MIN: const int = -32768
+INT16_MAX: const int = 32767
+INT32_MIN: const int = -2147483648
+INT32_MAX: const int = 2147483647
+INT64_MIN: const int = -9223372036854775808
+INT64_MAX: const int = 9223372036854775807
+UINT8_MAX: const int = 255
+UINT16_MAX: const int = 65535
+UINT32_MAX: const int = 4294967295
+# C's UINT64_MAX as its i64 bit pattern: a uint64 read back from C above INT64_MAX arrives negative.
+UINT64_MAX: const int = -1
+FLT_MAX: const float = 3.4028234663852886e38

@@ -1,0 +1,50 @@
+# tests/chz/stdlib/ffi_cast_test.chz — std.ffi's explicit wrap helpers and range constants
+# (TICKET-218), plus std.math's file-declared constants.
+#
+# `ffi.cast_<w>(v)` is Go's `int8(v)` / Rust's `v as i8`: it wraps like a C cast. References, run
+# 2026-10-06: Go `int8(300)` = 44, `uint8(-1)` = 255, `int16(40000)` = -25536,
+# `uint32(-1)` = 4294967295, `float32(1e39)` = +Inf.
+# Run: `cargo run --bin chezzi -- test tests/chz/stdlib/ffi_cast_test.chz`.
+
+import std.ffi
+import std.math
+
+test fn cast_wraps_like_a_c_cast():
+    assert ffi.cast_int8(300) == 44
+    assert ffi.cast_int8(-129) == 127
+    assert ffi.cast_uint8(-1) == 255
+    assert ffi.cast_int16(40000) == -25536
+    assert ffi.cast_uint16(65536) == 0
+    assert ffi.cast_int32(2147483648) == -2147483648
+    assert ffi.cast_uint32(-1) == 4294967295
+    assert ffi.cast_int64(5) == 5
+    assert ffi.cast_uint64(-1) == -1
+
+test fn cast_keeps_an_in_range_value():
+    assert ffi.cast_int8(-128) == -128
+    assert ffi.cast_uint8(255) == 255
+    assert ffi.cast_float32(1.5) == 1.5
+
+test fn cast_float32_rounds_to_c_float():
+    assert ffi.cast_float32(1e39) == math.inf
+    assert ffi.cast_float32(0.1) != 0.1, "0.1 is not exact in f32"
+
+test fn range_constants():
+    assert ffi.INT8_MIN == -128
+    assert ffi.INT8_MAX == 127
+    assert ffi.INT16_MIN == -32768
+    assert ffi.INT16_MAX == 32767
+    assert ffi.INT32_MIN == -2147483648
+    assert ffi.INT32_MAX == 2147483647
+    assert ffi.INT64_MIN == -9223372036854775807 - 1
+    assert ffi.INT64_MAX == 9223372036854775807
+    assert ffi.UINT8_MAX == 255
+    assert ffi.UINT16_MAX == 65535
+    assert ffi.UINT32_MAX == 4294967295
+    assert ffi.UINT64_MAX == -1, "C's UINT64_MAX as its i64 bit pattern"
+    assert ffi.FLT_MAX == 3.4028234663852886e38
+
+test fn math_constants_from_the_file():
+    assert math.pi == 3.141592653589793
+    assert math.e == 2.718281828459045
+    assert math.is_nan(math.nan)

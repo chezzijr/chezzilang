@@ -15091,7 +15091,7 @@ fn executor_submit_accepts_any_return_rejects_arity() {
     );
 }
 
-/// EXACT SIGS (phase 4c) — the 59 harvested std.ffi fn sigs must byte-match what the deleted
+/// EXACT SIGS (phase 4c) — the 68 harvested std.ffi fn sigs must byte-match what the deleted
 /// `native_module_sig("std.ffi")` arm used to hand-build (the load_*/store_* for-loops, expanded here).
 /// Also asserts the type-license tail (`ptr` + the 8 fixed-width names) survives in `sig.types`.
 #[test]
@@ -15142,12 +15142,18 @@ fn ffi_fn_sigs_exact() {
     expected.push(("alloc".to_string(), vec![Ty::Int], Ty::Ptr));
     expected.push(("alloc_zeroed".to_string(), vec![Ty::Int], Ty::Ptr));
     expected.push(("free".to_string(), vec![Ty::Ptr], Ty::Nil));
+    for w in [
+        "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+    ] {
+        expected.push((format!("cast_{w}"), vec![Ty::Int], Ty::Int));
+    }
+    expected.push(("cast_float32".to_string(), vec![Ty::Float], Ty::Float));
 
-    assert_eq!(expected.len(), 59, "expected exactly 59 std.ffi fns");
+    assert_eq!(expected.len(), 68, "expected exactly 68 std.ffi fns");
     assert_eq!(
         sig.fns().count(),
-        59,
-        "std.ffi must harvest exactly 59 native fns from std/ffi.chz"
+        68,
+        "std.ffi must harvest exactly 68 native fns from std/ffi.chz"
     );
     for (name, params, ret) in &expected {
         let fs = sig
@@ -15174,8 +15180,8 @@ fn ffi_fn_sigs_exact() {
     // The runtime member table cross-checks the harvested surface 1:1.
     assert_eq!(
         crate::native::native_members("std.ffi").len(),
-        59,
-        "std.ffi runtime MEMBERS must stay 59 (dispatch untouched)"
+        68,
+        "std.ffi runtime MEMBERS must match the 68 harvested fns"
     );
 }
 
