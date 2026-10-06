@@ -857,22 +857,20 @@ impl Checker {
                 }
             }
         }
-        // Transiently license the import-gated C-ABI TYPE names that std.ffi's `native fn` sigs
-        // reference (phase 4c). `native fn null() -> ptr` resolves its `ptr` return via `resolve_type`,
-        // whose `ptr` (and fixed-width `int8..uint64`) arms require the name to be in
-        // `self.imported_ffi_types`. This harvest runs WITHOUT `begin_module`, so that set is empty/stale
-        // and the resolve would spuriously error `unknown type 'ptr'`. Insert every `sig.types` name
-        // that is `ptr` or a fixed-width FFI name (the only names carrying such an alias — driven off the
-        // sig, so module-agnostic: no non-ffi module's sig carries them), tracking the NEWLY-inserted
-        // ones, and remove exactly those after PASS 2. The direct analog of the `struct_names` transient
-        // above — a pure sig computation that leaves no residue (so a later unrelated module still
-        // rejects a bare unimported `ptr`). See the `native_module_sig("std.ffi")` type-license tail.
+        // PASS 1a — `native type` exports (TICKET-218; std.ffi's `ptr` and C widths). Each declared
+        // name joins `sig.types` (so `import int32 from std.ffi` validates) and is licensed
+        // TRANSIENTLY: the file's own `native fn null() -> ptr` resolves `ptr` via `resolve_type`,
+        // whose `ptr`/width arms require the name in `self.imported_ffi_types`, and this harvest runs
+        // WITHOUT `begin_module`. Only the NEWLY-inserted names are removed after PASS 2, the analog
+        // of the `struct_names` transient above, so a later module still rejects a bare unimported
+        // `ptr`.
         let mut ffi_type_transient: Vec<String> = Vec::new();
-        for tn in &sig.types {
-            if crate::native::ffi::is_declared_type(tn)
-                && self.imported_ffi_types.insert(tn.clone())
-            {
-                ffi_type_transient.push(tn.clone());
+        for s in &ast.stmts {
+            if let StmtKind::NativeType { name, .. } = &s.kind {
+                sig.types.insert(name.clone());
+                if self.imported_ffi_types.insert(name.clone()) {
+                    ffi_type_transient.push(name.clone());
+                }
             }
         }
         // PASS 1b — native METHODS (phase 4c; self added 4c-followup). A `native fn` inside a `native
@@ -928,10 +926,11 @@ impl Checker {
                 let fsig = self.harvest_native_fn_sig(decl, false);
                 // `timer` is an opcode-backed BARE-callable builtin (lowers to `Op::NewTimer`, no runtime
                 // value): keep it OUT of `sig.members` (else the From-import arm binds it as a normal
-                // callable, breaking bare-callability). Stash its sig for the bare `timer(...)` expr arm;
-                // the license stays in the `native_module_sig` `sig.types` insert. `timer` is a reserved
-                // name declared in exactly one `.chz`, so this name match is unambiguous and self-scoping.
+                // callable, breaking bare-callability). Stash its sig for the bare `timer(...)` expr arm
+                // and license the import through `sig.types`. `timer` is a reserved name declared in
+                // exactly one `.chz`, so this name match is unambiguous and self-scoping.
                 if decl.name == "timer" {
+                    sig.types.insert("timer".to_string());
                     self.time_timer_sig = Some(fsig);
                 } else {
                     sig.insert_fn(decl.name.clone(), fsig);

@@ -13961,48 +13961,11 @@ fn every_native_container_method_is_classified_by_its_return_type() {
     assert_eq!(keeps, want, "{total} methods");
 }
 
-/// PROVENANCE — the `"std.regex" =>` arm is DELETED from `native_module_sig`; the whole regex signature
-/// (Match type + the 5 fns) now comes from parsing `std/regex.chz`. So `native_module_sig("std.regex")`
-/// exports NOTHING (empty functions, no Match), while a full graph check that `import std.regex` still
-/// resolves both the fns and `Match`. The sibling native modules (Response/ProcResult) stay hand-built.
+/// PROVENANCE — the whole regex signature (Match type + the 5 fns) comes from parsing
+/// `std/regex.chz` (no Rust-side sig exists): a full graph check that `import std.regex` resolves both
+/// the fns and `Match`.
 #[test]
 fn regex_sig_from_file_not_native_module_sig() {
-    let sig = native_module_sig("std.regex");
-    assert!(
-        sig.fns().next().is_none(),
-        "regex fns must no longer be hand-built in native_module_sig (harvested from std/regex.chz)"
-    );
-    assert!(
-        !sig.struct_defs.contains_key("Match"),
-        "Match must no longer be hand-built in native_module_sig (harvested from std/regex.chz)"
-    );
-    assert!(
-        !sig.types.contains("Match"),
-        "Match must not be in native_module_sig's `types` (harvested from std/regex.chz)"
-    );
-    // Phase 4f — the sibling native modules std.request/std.process are ALSO file-backed now: their
-    // `native_module_sig` arms (fns) AND `export_struct` arms (Response/ProcResult) are RETIRED, so
-    // `native_module_sig` exports NOTHING for them (the whole sig comes from the parsed .chz).
-    let req = native_module_sig("std.request");
-    assert!(
-        req.fns().next().is_none(),
-        "std.request fns must be harvested from std/request.chz, not native_module_sig"
-    );
-    assert!(
-        !req.struct_defs.contains_key("Response"),
-        "Response must be harvested from std/request.chz, not native_module_sig"
-    );
-    assert!(!req.types.contains("Response"));
-    let proc = native_module_sig("std.process");
-    assert!(
-        proc.fns().next().is_none(),
-        "std.process fns must be harvested from std/process.chz, not native_module_sig"
-    );
-    assert!(
-        !proc.struct_defs.contains_key("ProcResult"),
-        "ProcResult must be harvested from std/process.chz, not native_module_sig"
-    );
-    assert!(!proc.types.contains("ProcResult"));
     // A full graph check that imports std.regex still resolves regex.Match + typed fields.
     entry_ok(
         "import std.regex\nfn main():\n    m: Match = regex.Match(\"x\", 0, 1, [])\n    t: str = m.text\n    s: int = m.start\n    g: List[str] = m.groups\n    print(t + str(s) + \",\".join(g))\n",
@@ -14363,32 +14326,6 @@ fn response_chz_matches_handbuilt_layouts() {
 
 // ===== phase 4d: std.math/io/os/rand/fs are FILE-BACKED (native fn decls in std/<M>.chz) =====
 
-/// PROVENANCE — the `"std.math"` / `"std.io"` / `"std.os"` / `"std.rand"` / `"std.fs"` arms are DELETED
-/// from `native_module_sig`; each module's whole function signature now comes from parsing its real
-/// `std/<M>.chz`. So `native_module_sig("std.<M>")` exports NO functions/values, while a full graph
-/// check that `import std.<M>` still resolves every fn (and math's pi/e values). A sibling native
-/// module that stays hand-built (std.encoding) is unaffected.
-#[test]
-fn math_io_os_rand_fs_sig_from_file_not_native_module_sig() {
-    for m in ["std.math", "std.io", "std.os", "std.rand", "std.fs"] {
-        let sig = native_module_sig(m);
-        assert!(
-            sig.fns().next().is_none(),
-            "{m} fns must no longer be hand-built in native_module_sig (harvested from std/<M>.chz)"
-        );
-        assert!(
-            sig.members.values().all(|m| m.certain_fn.is_some()),
-            "{m} values must no longer be hand-built in native_module_sig"
-        );
-    }
-    // native_module_sig is still the home for the residual type-license modules — std.ffi keeps its
-    // opaque `ptr` handle + fixed-width C-ABI integer names there (no runtime value, no .chz syntax for
-    // a bare type-license alias). std.concurrency is FILE-BACKED now (phase 4c-concurrency): its arm is
-    // DELETED entirely, so `native_module_sig("std.concurrency").types` is EMPTY.
-    assert!(!native_module_sig("std.ffi").types.is_empty());
-    assert!(native_module_sig("std.concurrency").types.is_empty());
-}
-
 /// The effective (graph-built) sigs for a representative fn of each migrated module must EXACTLY equal
 /// what the deleted arm used to hand-build — byte-identical provenance move from arm → parsed .chz.
 #[test]
@@ -14626,15 +14563,9 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
 
 /// Phase 4c-net — std.net is FILE-BACKED: its `Socket`/`Listener` native structs carry a harvested
 /// METHOD table (the new native-method-binding capability) and its `connect`/`listen` free fns come
-/// from `std/net.chz`, NOT the retired hand-built `native_module_sig` arm.
+/// from `std/net.chz` (no Rust-side sig).
 #[test]
 fn net_sig_from_file_not_native_module_sig() {
-    // The hand-built arm is retired — `native_module_sig("std.net")` exports NOTHING now.
-    let raw = native_module_sig("std.net");
-    assert!(
-        raw.fns().next().is_none() && raw.types.is_empty(),
-        "std.net must no longer be hand-built in native_module_sig (harvested from std/net.chz)"
-    );
     // The graph-built sig carries the free fns + both native types WITH their method tables.
     let sig = native_module_sig_via_graph("net");
     let connect = sig.certain_fn("connect").expect("net.connect");
@@ -14938,49 +14869,28 @@ fn regex_harvest_immune_to_sibling_generic_match() {
 
 // ===== Phase 4e — std.encoding / std.crypto / std.uuid / std.time file-backed native modules =====
 
-/// PROVENANCE (phase 4e) — the encoding/crypto/uuid arms are DELETED from `native_module_sig`, and the
-/// time arm keeps ONLY the `timer` opcode-license (no `func()` calls). Their function sigs now come from
-/// parsing `std/<module>.chz` (harvested via `harvest_native_module`). So `native_module_sig` exports NO
-/// functions for these four, while `native_module_sig("std.time").types` still licenses `timer`.
+/// PROVENANCE (TICKET-218) — no native module has a Rust-side sig: std.time's `timer` license comes
+/// from the harvest's `timer` branch, and std.ffi's type exports from `std/ffi.chz`'s `native type`
+/// decls.
 #[test]
 fn enc_crypto_uuid_time_sig_from_file_not_native_module_sig() {
-    for m in ["std.encoding", "std.crypto", "std.uuid", "std.time"] {
-        assert!(
-            native_module_sig(m).fns().next().is_none(),
-            "{m} fns must no longer be hand-built in native_module_sig (harvested from std/*.chz)"
-        );
-    }
-    // std.time keeps its opcode-license for `timer` (NOT a native fn — no runtime value).
-    let time = native_module_sig("std.time");
+    let time = native_module_sig_via_graph("time");
     assert!(
         time.types.contains("timer"),
         "std.time must keep `timer` in its type-license set (opcode-backed builtin)"
     );
-    // std.net + std.concurrency are FILE-BACKED now (phase 4c): their arms are retired entirely
-    // (asserted in net_sig_from_file_not_native_module_sig / concurrency_sig_from_file_not_native_module_sig).
-    // std.ffi keeps a residual type-license arm — native_module_sig is still its home.
-    assert!(!native_module_sig("std.ffi").types.is_empty());
-    // std.ffi is FILE-BACKED now (phase 4c-ffi): its 59 fns are harvested from std/ffi.chz, so
-    // `native_module_sig("std.ffi")` exports NO functions. Its arm is REDUCED to only the type-license
-    // tail — the opaque `ptr` handle type + the eight fixed-width C-ABI integer names (int8..uint64) —
-    // which have no runtime value and cannot be spelled as a `native fn` decl (there is no .chz syntax
-    // for a bare type-license name aliasing Ty::Int/Ty::Ptr).
-    let ffi = native_module_sig("std.ffi");
     assert!(
-        ffi.fns().next().is_none(),
-        "std.ffi fns must be harvested from std/ffi.chz, not native_module_sig"
+        time.certain_fn("timer").is_none(),
+        "timer is not a module member"
     );
-    assert!(
-        ffi.types.contains("ptr"),
-        "std.ffi must keep `ptr` in its type-license set (opaque C-ABI handle, no runtime value)"
-    );
+    let ffi = native_module_sig_via_graph("ffi");
     for tn in crate::native::ffi::declared_types()
         .iter()
         .map(|d| d.name.as_str())
     {
         assert!(
             ffi.types.contains(tn),
-            "std.ffi must keep the fixed-width C-ABI type name `{tn}` in its type-license set"
+            "std.ffi must license its declared type `{tn}`"
         );
     }
 }
@@ -15029,24 +14939,11 @@ fn enc_fn_sigs_exact() {
 
 // ===== phase 4c-concurrency: std.concurrency is FILE-BACKED (native struct decls in std/concurrency.chz)
 
-/// PROVENANCE — the `"std.concurrency"` arm is DELETED from `native_module_sig`; the whole signature
-/// (the four `Shared`/`RwShared`/`Atomic`/`Executor` native structs WITH their harvested method tables)
-/// now comes from parsing `std/concurrency.chz`. So `native_module_sig("std.concurrency")` exports
-/// NOTHING (empty types + struct_defs), while a full graph check that `import std.concurrency` resolves
-/// all four types and their methods. This was the LAST virtual native module — after it,
-/// `native_module_sig` retains only the ffi (ptr/width) + time (timer) type-license tails.
+/// PROVENANCE — the whole std.concurrency signature (the four `Shared`/`RwShared`/`Atomic`/`Executor`
+/// native structs WITH their harvested method tables) comes from parsing `std/concurrency.chz`: a full
+/// graph check that `import std.concurrency` resolves all four types and their methods.
 #[test]
 fn concurrency_sig_from_file_not_native_module_sig() {
-    let raw = native_module_sig("std.concurrency");
-    assert!(
-        raw.types.is_empty(),
-        "std.concurrency type names must no longer be hand-built in native_module_sig (harvested from std/concurrency.chz), got: {:?}",
-        raw.types
-    );
-    assert!(
-        raw.struct_defs.is_empty(),
-        "std.concurrency struct_defs must no longer be hand-built in native_module_sig"
-    );
     // A full graph check harvests the four native structs with their method tables.
     let sig = native_module_sig_via_graph("concurrency");
     let expected: &[(&str, &[&str])] = &[
@@ -24588,6 +24485,23 @@ fn native_enum_in_user_file_rejected() {
     );
 }
 
+/// TICKET-218 — `std/ffi.chz`'s `native type` decls are the whole type import surface of `std.ffi`:
+/// every declared name imports, an undeclared width does not, and `ptr` stays opaque.
+#[test]
+fn ffi_declared_types_are_the_import_surface() {
+    let names: Vec<&str> = crate::native::ffi::declared_types()
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert!(names.contains(&"uint16"), "declared: {names:?}");
+    for n in names {
+        let errs = check_entry(&format!("import {n} from std.ffi\n"));
+        assert!(errs.is_empty(), "import {n} from std.ffi: {errs:?}");
+    }
+    rejects_entry("import int128 from std.ffi\n", "int128");
+    rejects_entry("import ptr from std.ffi\np: ptr = 5\n", "ptr");
+}
+
 /// TICKET-218 — a `native type` decl is STD-ONLY like `native struct`/`native enum`.
 #[test]
 fn native_type_is_std_only() {
@@ -25169,7 +25083,7 @@ fn module_fn_docs_all_resolve() {
     for (module, docs) in MODULE_FN_DOCS {
         // Build the EFFECTIVE sig via the graph: math/io/os are file-backed (phase 4d), so their fns
         // are harvested from `std/<M>.chz` and the docs are re-attached by `attach_native_module_metadata`
-        // — `native_module_sig(module)` alone would be empty for them.
+        // — the graph is the only place their sig exists.
         let bare = module.strip_prefix("std.").unwrap_or(module);
         let sig = native_module_sig_via_graph(bare);
         for (fname, doc) in *docs {

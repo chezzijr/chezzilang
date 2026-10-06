@@ -639,6 +639,13 @@ impl Compiler {
                     self.module_types[idx].insert(sname.to_string());
                     self.program.type_names.insert(sname.to_string());
                 }
+                // TICKET-218 — a `native type` export (std.ffi's `ptr`/`int8`..) carries no runtime
+                // value; register its name so `Vm::bind_import` skips it like any known type name.
+                for s in &lm.ast.stmts {
+                    if let StmtKind::NativeType { name, .. } = &s.kind {
+                        self.program.type_names.insert(name.clone());
+                    }
+                }
                 continue;
             }
             // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (no qualified

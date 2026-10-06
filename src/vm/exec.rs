@@ -1111,16 +1111,6 @@ impl Vm {
             }
             Import::From { names, .. } => {
                 for (member, alias) in names {
-                    // `std.ffi`'s exported FFI marshalling TYPE names — the fixed-width integers
-                    // (`import int32 from std.ffi`) and the opaque `ptr` handle — carry NO runtime
-                    // value: they are compile-time type imports the checker resolves. Skip them here
-                    // (the module has no such global by design); any other missing member is a genuine
-                    // error.
-                    if self.module_name(target_obj) == "std.ffi"
-                        && crate::native::ffi::is_declared_type(member)
-                    {
-                        continue;
-                    }
                     // `std.concurrency`'s four exported ctor/TYPE names (`Shared`/`RwShared`/`Atomic`/
                     // `Executor`) likewise carry NO runtime value: they are checker-resolved type
                     // imports, and the ctor is resolved by the compiler's name→opcode dispatch (not a

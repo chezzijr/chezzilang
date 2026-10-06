@@ -1620,14 +1620,11 @@ impl Checker {
                 // other file-backed modules resolve their non-reserved types via the transient
                 // `struct_names` arm regardless of this flag.
                 c.current_module_is_stdlib = true;
-                let mut sig = native_module_sig(name);
-                // FILE-BACKED native modules (std.regex 4b; std.encoding/crypto/uuid/time 4e;
-                // std.process/std.request 4f; std.math/io/os/rand/fs 4d) harvest their whole callable
-                // SIGNATURE from the real `std/<M>.chz` AST the resolver loaded — NOT hand-built in
-                // `native_module_sig`. For most the arm is fully deleted (returns empty). std.time keeps
-                // a MINIMAL arm carrying only the `timer` opcode-license in `sig.types` (harvest then
-                // fills its 4 real fns on top). Same predicate as the resolver's `visit_native_file`
-                // gate — lockstep by construction.
+                // FILE-BACKED native modules harvest their whole SIGNATURE (fns, native structs,
+                // `native type` exports, std.time's `timer` license) from the real `std/<M>.chz` AST
+                // the resolver loaded; no Rust-side sig exists. Same predicate as the resolver's
+                // `visit_native_file` gate — lockstep by construction.
+                let mut sig = ModuleSig::default();
                 // W7-8 — a native `.chz` may `import` a sibling std module and NAME ITS TYPES in the
                 // harvested SIGNATURES (`std.fs`'s `list_dir(p: PathLike) -> Result[List[path.Path]]`).
                 // The harvest RESOLVES those types, so the imports must be bound BEFORE it — the
@@ -1896,94 +1893,8 @@ impl Checker {
     }
 }
 
-/// The static type signatures of a native std module's members (M6c). This is the **third**
-/// lockstep table: it must agree with the runtime members in `src/native/<module>.rs` and the
-/// runtime value lowering. `std.math` params are `float` (the language has no implicit int→float,
-/// so callers pass floats); `pi`/`e` are float constants.
-fn native_module_sig(name: &str) -> ModuleSig {
-    // Only the residual opcode/type-license modules still have a hand-built arm (concurrency's ctor
-    // type names, time's `timer`, ffi's C-ABI type-license tail) — every one inserts ONLY `sig.types`,
-    // so there is no `func()`/`sig.members` helper here anymore (all callable fns are file-backed and
-    // harvested from `std/<M>.chz`). See `is_file_backed_native` + `harvest_native_module`.
-    let mut sig = ModuleSig::default();
-    match name {
-        // std.math / std.io / std.os / std.rand (phase 4d) and std.process (phase 4f) are FILE-BACKED:
-        // their whole signatures are declared in `std/<M>.chz` and harvested via `harvest_native_module`
-        // — NO hand-built arm here (this fn returns the default-empty sig for them). The checker-side
-        // metadata native decls can't express (math's `pi`/`e` values + `abs`'s numeric polymorphism +
-        // hover docs) is re-attached post-harvest by `attach_native_module_metadata`.
-        // std.net (phase 4c-net) is FILE-BACKED: its `connect`/`listen` free fns AND its `Socket`/
-        // `Listener` native structs (WITH harvested method tables — the native-method-binding
-        // capability) are declared in `std/net.chz` and harvested via `harvest_native_module` — NO
-        // hand-built arm here. The `Socket`/`Listener` TYPE names still resolve to the RESERVED
-        // `Ty::Socket`/`Ty::Listener` (opaque VM handles, import-gated via `imported_net`); the
-        // `connect`/`listen`/`read`/`write`/`accept` calls stay VM-intercepted at runtime by name.
-        // std.fs (phase 4d) and std.encoding / std.crypto / std.uuid (phase 4e) are FILE-BACKED: their
-        // whole signatures are declared in `std/<M>.chz` (bodyless `native fn`s) and harvested via
-        // `harvest_native_module` — NO hand-built arm here (this fn returns the default-empty sig for
-        // them). See the caller's `is_file_backed_native` gate.
-        // std.concurrency (phase 4c-concurrency) is FILE-BACKED: its four GENERIC native structs
-        // (`Shared[T]`/`RwShared[T]`/`Atomic[T]`/`Executor`, WITH harvested method tables — the
-        // native-method-binding capability extended to generics) are declared in `std/concurrency.chz`
-        // and harvested via `harvest_native_module` — NO hand-built arm here (this fn returns the
-        // default-empty sig for it). This was the LAST virtual native module: its arm is DELETED
-        // ENTIRELY (unlike std.net which needed no residual either — the four TYPE names come from the
-        // file, not a type-license tail). The `Shared`/`RwShared`/`Atomic`/`Executor` names still
-        // resolve to the RESERVED `Ty::Shared`/`Ty::RwShared`/`Ty::Atomic`/`Ty::Executor` (opaque VM
-        // handles, import-gated via `imported_concurrency`); the ctors stay lowered to
-        // `Op::NewShared`/etc by name, and the methods stay VM-intercepted at runtime.
-        "std.time" => {
-            // std.time is FILE-BACKED (phase 4e): its 4 callable fns (now/monotonic/sleep_ms/format) are
-            // declared in `std/time.chz` and harvested via `harvest_native_module` on top of this sig.
-            // `timer` is ALSO declared there (as `native fn timer`) — but it's an opcode-backed builtin
-            // (NOT a callable native member): it carries NO runtime value and lowers via the compiler's
-            // name→opcode dispatch. Harvest routes its sig to the `time_timer_sig` field (NOT
-            // `sig.members`, which the From-import arm would bind as a real callable). This arm keeps
-            // `timer` in `sig.types` ONLY so `import timer from std.time` validates membership and
-            // `bind_import` records it into the per-module `imported_time` set; `infer_named_call` then
-            // accepts the bare `timer(ms)` call only in a module that imported it. (Its `sig.members`
-            // entry stays absent by design — see `harvest_native_module` PASS 2.)
-            sig.types.insert("timer".to_string());
-        }
-        // std.regex is FILE-BACKED (phase 4b): its whole signature (the `native struct Match` + the 5
-        // `native fn`s) is declared in `std/regex.chz` and harvested via `harvest_native_module` — there
-        // is NO hand-built arm here (this fn returns the default-empty sig for it). See the caller.
-        // std.request is FILE-BACKED (phase 4f): its whole signature (the `native struct Response` +
-        // get/post/request — with an OPTIONAL trailing `timeout_ms` — plus put/patch/delete/head) is
-        // declared in `std/request.chz` and harvested via `harvest_native_module`. NO hand-built arm.
-        "std.ffi" => {
-            // std.ffi is FILE-BACKED (phase 4c): its 59 callable fns (`null`/`is_null`, the load_*/
-            // store_* families in base + `_at` forms, and `alloc`/`alloc_zeroed`/`free`) are declared
-            // in `std/ffi.chz` (bodyless `native fn`s) and harvested via `harvest_native_module` on top
-            // of this sig. This arm is retained ONLY for the type-license tail — the C-ABI type NAMES
-            // std.ffi exports, which carry NO runtime value and CANNOT be spelled as a `native fn` decl
-            // (there is no .chz syntax for a bare type-license name aliasing Ty::Int/Ty::Ptr). Mirrors
-            // the residual std.net/std.concurrency/std.time arms.
-            //
-            // The eight fixed-width C-ABI integer TYPE names (Chezzi's first type imports). They live in
-            // `sig.types` so `import int32 from std.ffi` validates; the checker's `bind_import` records
-            // the import into `imported_ffi_types` and `resolve_type` then resolves the name to `Ty::Int`
-            // only in modules that imported it.
-            for d in crate::native::ffi::declared_types() {
-                sig.types.insert(d.name.clone());
-            }
-            // The opaque `ptr` handle type is ALSO exported by `std.ffi` (kept out of `TYPE_NAMES`,
-            // which routes a name through the ungated C-marshalling path `resolve_ctype_d`). Listing
-            // it in `sig.types` lets `import ptr from std.ffi` validate; the checker licenses it into
-            // `imported_ffi_types` (whole-module on `import std.ffi`, per-name on the from-import).
-            // NOTE: harvesting `native fn null() -> ptr` from std/ffi.chz needs `ptr` to resolve, but
-            // harvest runs WITHOUT `begin_module` (so `imported_ffi_types` is empty) — `harvest_native_module`
-            // transiently licenses the `ptr`/TYPE_NAMES names it finds in `sig.types` for the harvest,
-            // then restores, so this insert is load-bearing for the harvest too.
-            sig.types.insert("ptr".to_string());
-        }
-        _ => {}
-    }
-    sig
-}
-
 /// Re-attach the checker-side metadata a `native fn` decl CANNOT express, on top of a native module's
-/// `ModuleSig` (whether hand-built by `native_module_sig` or harvested from a file-backed `std/M.chz`).
+/// `ModuleSig` (harvested from its file-backed `std/M.chz`).
 /// Runs in the graph loop for EVERY native module (idempotent for those it doesn't cover). Two pieces:
 ///   (a) editor hover docs (`MODULE_FN_DOCS`) — a concise one-line blurb on each authored fn's `FnSig.doc`
 ///       (excluded from `fn_sig_eq`, so purely informational; `record_method_hover` forwards it at the
