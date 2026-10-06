@@ -1126,6 +1126,22 @@ mod tests {
         assert_eq!(logged(&log), ["GET /", "GET /a", "GET /", "GET /a"]);
     }
 
+    fn see_other_r_to_a(line: &str) -> &'static [u8] {
+        if line.starts_with("POST /r ") {
+            b"HTTP/1.1 303 See Other\r\nLocation: /a\r\nContent-Length: 0\r\n\r\n"
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        }
+    }
+
+    #[test]
+    fn a_get_hop_after_a_post_303_dropped_on_a_reused_connection_is_retried_alone() {
+        let (url, log) = serve_drop_second_request(see_other_r_to_a);
+        let ret = do_request("POST", &format!("{url}r"), "x", &[], None);
+        assert!(matches!(ret, NativeRet::Ok(_)), "got {ret:?}");
+        assert_eq!(logged(&log), ["POST /r", "GET /a", "GET /a"]);
+    }
+
     fn redirect_to_root(_: &str) -> &'static [u8] {
         b"HTTP/1.1 302 Found\r\nLocation: /\r\nContent-Length: 0\r\n\r\n"
     }
