@@ -117,10 +117,12 @@ extern "{SO}":
 
 "#;
 
-/// Accept-cell programs, grouped by feature so one red feature does not mask the others.
+/// Accept-cell programs, grouped by feature so one red feature does not mask the others. `f32_overflow`
+/// wraps with `ffi.cast_float32` (C's implicit double->float conversion): passing 1e39 itself faults since
+/// TICKET-218 (`tests/ffi_width_range_grid.rs`).
 const F32_CELLS: &str = r#"print("f32_param_ret", f32_add(0.1, 0.2))
 print("f32_round_in", f32_id(16777217.0))
-print("f32_overflow", f32_id(1e39))
+print("f32_overflow", f32_id(ffi.cast_float32(1e39)))
 print("f32_param_exact", f32_widen(1.5))
 print("f32_field_param", v2_sum(Vector2(0.1, 0.2)))
 print("f32_field_ret", v2_make(0.1, 2.0).x)

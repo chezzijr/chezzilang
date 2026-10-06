@@ -99,10 +99,12 @@ pub enum CType {
     OptOwnedStr,
     /// A fixed-width C integer (surface type names `int8`..`uint64`): a BIDIRECTIONAL marshalling
     /// distinction for C functions taking/returning `int32_t`, `uint32_t`, etc. — distinct from
-    /// [`CType::Int`], which stays C `long`. To the Chezzi program each is a plain `int` (`Ty::Int`);
-    /// the width/signedness is a runtime-only marshalling concern. A PARAM truncates the Chezzi i64 to
-    /// the C width (wrapping, C-cast semantics — never an overflow trap); a RETURN sign-extends (signed)
-    /// or zero-extends (unsigned) the C value back to i64. Valid as both param and return.
+    /// [`CType::Int`], which stays C `long`. To the Chezzi program each value is a plain `int`. A
+    /// value written for C (param, struct field, `ffi.store_<w>`, callback return) must fit the width
+    /// ([`CType::check_fits`]): out of range is a recoverable fault, never a silent wrap (`ffi.cast_<w>`
+    /// wraps explicitly); uint64 accepts any int as its bit pattern. A RETURN sign-extends (signed) or
+    /// zero-extends (unsigned) the C value back to i64, so it is in range by construction (a uint64
+    /// above `i64::MAX` arrives negative). Valid as both param and return.
     Int8,
     Int16,
     Int32,
@@ -112,8 +114,9 @@ pub enum CType {
     UInt32,
     UInt64,
     /// A C `float` (surface type name `float32`, TICKET-217). To the program it is a plain `float`
-    /// (f64): a PARAM rounds to nearest f32 (`as f32`; out of range gives `inf`), a RETURN widens
-    /// exactly. Go `float32(x)` / ctypes `c_float` semantics. Valid as param, return and field.
+    /// (f64): a PARAM rounds to nearest f32 (`as f32`), a RETURN widens exactly. A finite value
+    /// outside the f32 range faults at the C boundary (TICKET-218, Python `struct.pack('f', 1e39)`);
+    /// NaN and inf pass through. Valid as param, return and field.
     Float32,
     /// A C function pointer passed as a PARAM (callbacks #4): a Chezzi closure marshalled into a
     /// libffi closure trampoline whose code address is the `void*` C receives. Params and the return
@@ -376,6 +379,8 @@ pub(crate) fn write_field(
     ct: &CType,
     v: &NativeRet,
 ) -> Result<(), HostError> {
+    // TICKET-218 — a width field written for C must fit (struct params, `ffi.store_<w>`).
+    ct.check_fits(v)?;
     let want_int = |v: &NativeRet| match v {
         NativeRet::Int(n) => Ok(*n),
         other => Err(HostError {
@@ -961,7 +966,13 @@ unsafe extern "C" fn callback_trampoline(
         // returned yet AND we are its thread, so the trampoline is firing synchronously inside that
         // same `ffi_call` while the borrow is dormant one frame up; no other alias is active.
         let host: &mut dyn Host = unsafe { &mut *host_ptr };
+        // TICKET-218 — the callback's return crosses into C: a width return must fit, or it takes
+        // the fault path below (zeroed result, first fault re-raised).
         host.invoke_callback(ctx.arg_index, &native_args)
+            .and_then(|v| match ret_ct {
+                Some(ct) => ct.check_fits(&v).map(|()| v),
+                None => Ok(v),
+            })
     }));
 
     match outcome {
@@ -1148,6 +1159,14 @@ fn variadic_cif(nfixed: usize, args: Vec<Type>, ret: Type) -> Result<Cif, HostEr
 /// returning its index there. The buffer is retained (TICKET-060) when an identical one already is,
 /// or when `out_param_risk` says a `ptr` arg may carry a pointer back into it; otherwise its pointer
 /// is filled in after every arg is read.
+/// Read extern int arg `i` for the fixed-width param `p`, faulting when it does not fit the width
+/// (`CType::check_fits`). The caller's `as` narrowing is then lossless.
+fn arg_width_int(host: &mut dyn Host, i: usize, p: &CType) -> Result<i64, HostError> {
+    let n = host.arg_int(i)?;
+    p.check_fits(&NativeRet::Int(n))?;
+    Ok(n)
+}
+
 fn marshal_str_arg(
     s: String,
     i: usize,
@@ -1458,7 +1477,9 @@ impl Cffi {
                     slots.push(Slot::Float(float_args.len() - 1));
                 }
                 CType::Float32 => {
-                    f32_args.push(host.arg_float(i)? as f32);
+                    let f = host.arg_float(i)?;
+                    p.check_fits(&NativeRet::Float(f))?;
+                    f32_args.push(f as f32);
                     slots.push(Slot::F32(f32_args.len() - 1));
                 }
                 CType::Bool => {
@@ -1485,39 +1506,40 @@ impl Cffi {
                     void_args.push(host.arg_ptr(i)? as *mut c_void);
                     slots.push(Slot::RawPtr(void_args.len() - 1));
                 }
-                // Fixed-width integers: read the Chezzi i64 and TRUNCATE to the C width via a Rust
-                // `as` cast — wrapping (C-cast) semantics, never an overflow trap (300i64 -> int8 ==
-                // 44, 255i64 -> int8 == -1). Each pushes into its own typed storage vec.
+                // Fixed-width integers: read the Chezzi i64, range-check it against the C width
+                // (`arg_width_int`, a recoverable fault: `value 300 does not fit int8 (-128..127)`),
+                // then narrow with `as` — lossless once checked; uint64 keeps the i64's bit pattern.
+                // Each pushes into its own typed storage vec.
                 CType::Int8 => {
-                    i8_args.push(host.arg_int(i)? as i8);
+                    i8_args.push(arg_width_int(host, i, p)? as i8);
                     slots.push(Slot::I8(i8_args.len() - 1));
                 }
                 CType::Int16 => {
-                    i16_args.push(host.arg_int(i)? as i16);
+                    i16_args.push(arg_width_int(host, i, p)? as i16);
                     slots.push(Slot::I16(i16_args.len() - 1));
                 }
                 CType::Int32 => {
-                    i32_args.push(host.arg_int(i)? as i32);
+                    i32_args.push(arg_width_int(host, i, p)? as i32);
                     slots.push(Slot::I32(i32_args.len() - 1));
                 }
                 CType::Int64 => {
-                    i64_args.push(host.arg_int(i)?);
+                    i64_args.push(arg_width_int(host, i, p)?);
                     slots.push(Slot::I64(i64_args.len() - 1));
                 }
                 CType::UInt8 => {
-                    u8_args.push(host.arg_int(i)? as u8);
+                    u8_args.push(arg_width_int(host, i, p)? as u8);
                     slots.push(Slot::U8(u8_args.len() - 1));
                 }
                 CType::UInt16 => {
-                    u16_args.push(host.arg_int(i)? as u16);
+                    u16_args.push(arg_width_int(host, i, p)? as u16);
                     slots.push(Slot::U16(u16_args.len() - 1));
                 }
                 CType::UInt32 => {
-                    u32_args.push(host.arg_int(i)? as u32);
+                    u32_args.push(arg_width_int(host, i, p)? as u32);
                     slots.push(Slot::U32(u32_args.len() - 1));
                 }
                 CType::UInt64 => {
-                    u64_args.push(host.arg_int(i)? as u64);
+                    u64_args.push(arg_width_int(host, i, p)? as u64);
                     slots.push(Slot::U64(u64_args.len() - 1));
                 }
                 CType::Struct { fields, .. } => {
@@ -2543,14 +2565,20 @@ mod tests {
     }
 
     #[test]
-    fn int8_param_truncates_large_value_c_cast_wraps() {
-        // A Chezzi i64 too large for the C width TRUNCATES per a C cast (wrapping), never panics.
-        // 255 (0xFF) as a signed `char` (int8) is -1; abs(-1) == 1. Declaring abs with int8 in AND
-        // out proves the param cast wraps (255 -> -1) rather than saturating/erroring.
+    fn int8_param_out_of_range_faults() {
+        // TICKET-218 — a Chezzi i64 outside the C width is a recoverable fault at the boundary,
+        // never a silent wrap (255 used to reach C as -1). `ffi.cast_int8` is the explicit wrap.
         let f = Cffi::new("libc.so.6", "abs", vec![CType::Int8], Some(CType::Int8))
             .expect("dlopen abs");
         let mut host = MockHost::default().int(255);
-        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(1)));
+        assert_eq!(
+            f.call(&mut host),
+            Err(HostError {
+                message: "value 255 does not fit int8 (-128..127)".to_string()
+            })
+        );
+        let mut host = MockHost::default().int(-128);
+        assert_eq!(f.call(&mut host), Ok(NativeRet::Int(-128)));
     }
 
     #[test]
@@ -2677,7 +2705,7 @@ mod tests {
         let fields = vec![CType::Int8, CType::Int32, CType::Float];
         let (_ty, size, _align, offsets) = struct_layout(&fields);
         let mut buf = vec![0u8; size];
-        write_field(&mut buf, offsets[0], &CType::Int8, &NativeRet::Int(255)).unwrap(); // -> -1
+        write_field(&mut buf, offsets[0], &CType::Int8, &NativeRet::Int(-1)).unwrap();
         write_field(&mut buf, offsets[1], &CType::Int32, &NativeRet::Int(-12345)).unwrap();
         write_field(&mut buf, offsets[2], &CType::Float, &NativeRet::Float(1.5)).unwrap();
         assert_eq!(

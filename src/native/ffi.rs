@@ -55,7 +55,7 @@ fn ctype_width(ct: &super::cffi::CType) -> usize {
         CType::Int => std::mem::size_of::<std::os::raw::c_long>(),
         CType::Int8 | CType::UInt8 | CType::Bool => 1,
         CType::Int16 | CType::UInt16 => 2,
-        CType::Int32 | CType::UInt32 => 4,
+        CType::Int32 | CType::UInt32 | CType::Float32 => 4,
         CType::Int64 | CType::UInt64 => 8,
         CType::Float => 8,
         CType::Ptr => std::mem::size_of::<usize>(),
@@ -468,7 +468,7 @@ fn store_value(
 ) -> Result<NativeRet, HostError> {
     use super::cffi::CType;
     Ok(match ct {
-        CType::Float => NativeRet::Float(h.arg_float(vi)?),
+        CType::Float | CType::Float32 => NativeRet::Float(h.arg_float(vi)?),
         CType::Bool => NativeRet::Bool(h.arg_bool(vi)?),
         CType::Ptr => NativeRet::Ptr(h.arg_ptr(vi)?),
         // every integer width (Int + fixed widths) reads an i64; write_field truncates to the C width.
@@ -615,19 +615,21 @@ store_fn!(
     super::cffi::CType::Ptr
 );
 
-// store_float / store_float32 are special: write_field has no f32 arm; float32 hand-writes 4 bytes.
+// store_float32 goes through `write_field` like every width store, so a finite value outside the f32
+// range faults (TICKET-218). Do not hand-write a store that casts with `as`.
+store_fn!(
+    store_float32,
+    store_float32_at,
+    "store_float32",
+    "store_float32_at",
+    super::cffi::CType::Float32
+);
+
+// store_float is special: it writes a C `double` straight through, with nothing to check.
 #[cfg(unix)]
 fn store_float_impl(addr: usize, off: usize, f: f64) -> NativeRet {
     // SAFETY: `addr` non-null + C-sourced; caller guarantees 8 writable bytes at `addr + off`.
     unsafe { ((addr + off) as *mut f64).write_unaligned(f) };
-    NativeRet::Nil
-}
-
-#[cfg(unix)]
-fn store_float32_impl(addr: usize, off: usize, f: f64) -> NativeRet {
-    // SAFETY: `addr` non-null + C-sourced; caller guarantees 4 writable bytes at `addr + off`. The f64
-    // narrows to f32 (C `float`) via `as` — the same cast a C `float` param would apply.
-    unsafe { ((addr + off) as *mut f32).write_unaligned(f as f32) };
     NativeRet::Nil
 }
 
@@ -666,44 +668,6 @@ fn store_float_at(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     {
         let _ = h;
         deref_unsupported("store_float_at")
-    }
-}
-
-/// `store_float32(p, v)` — narrow `v` to a C `float` (4 bytes) and write at `p`; returns nil.
-fn store_float32(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "store_float32", 2)?;
-    #[cfg(unix)]
-    {
-        let addr = base_addr(h, "store_float32")?;
-        let f = h.arg_float(1)?;
-        Ok(store_float32_impl(addr, 0, f))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = h;
-        deref_unsupported("store_float32")
-    }
-}
-
-/// `store_float32_at(p, off, v)` — narrow `v` to a C `float` and write at byte offset `off`; nil.
-fn store_float32_at(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "store_float32_at", 3)?;
-    #[cfg(unix)]
-    {
-        let addr = base_addr(h, "store_float32_at")?;
-        let off = h.arg_int(1)?;
-        if off < 0 {
-            return Err(HostError {
-                message: "ffi.store_float32_at: negative offset".into(),
-            });
-        }
-        let f = h.arg_float(2)?;
-        Ok(store_float32_impl(addr, off as usize, f))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = h;
-        deref_unsupported("store_float32_at")
     }
 }
 
@@ -1280,12 +1244,25 @@ mod tests {
 
     #[test]
     fn store_writes_natural_width_only() {
-        // store_int8_at(off=0, 0x1FF) must write ONLY the low byte (0xFF), leaving the next untouched.
+        // store_int8_at(off=0, -1) must write ONLY the low byte (0xFF), leaving the next untouched.
         let mut buf = [0xAAu8; 4];
         let base = buf.as_mut_ptr() as usize;
         assert_eq!(
-            store_int8_at(&mut ArgHost::default().ptr(base).int(0).int(0x1FF)),
+            store_int8_at(&mut ArgHost::default().ptr(base).int(0).int(-1)),
             Ok(NativeRet::Nil)
+        );
+        // TICKET-218 — a value outside the width faults instead of wrapping, and writes nothing.
+        assert_eq!(
+            store_int8_at(&mut ArgHost::default().ptr(base).int(0).int(0x1FF))
+                .unwrap_err()
+                .message,
+            "value 511 does not fit int8 (-128..127)"
+        );
+        assert_eq!(
+            store_float32_at(&mut ArgHost::default().ptr(base).int(0).float(1e39))
+                .unwrap_err()
+                .message,
+            "value 1e39 does not fit float32 (-3.4028234663852886e38..3.4028234663852886e38)"
         );
         // Read back through the same deref path (avoids the compiler assuming `buf` unchanged).
         assert_eq!(
