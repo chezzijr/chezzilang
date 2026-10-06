@@ -4184,6 +4184,37 @@ impl Checker {
                             .to_string(),
                     );
                 }
+                // TICKET-218 — `native type` is STD-ONLY. In a std module its underlying type is
+                // `int`/`float` (a C width) or absent (an opaque handle), and the declaring file sees
+                // its own type (the single-module `chezzi check std/ffi.chz` path; the graph path
+                // licenses it in `harvest_native_module`).
+                StmtKind::NativeType {
+                    name,
+                    underlying,
+                    span,
+                    ..
+                } => {
+                    if !self.current_module_is_stdlib {
+                        self.error(
+                            *span,
+                            "native type declarations are only allowed in standard-library modules"
+                                .to_string(),
+                        );
+                    } else {
+                        let scalar = match underlying {
+                            None => true,
+                            Some(Type::Named { name, .. }) => name == "int" || name == "float",
+                            Some(_) => false,
+                        };
+                        if !scalar {
+                            self.error(
+                                *span,
+                                "a native type's underlying type must be int or float".to_string(),
+                            );
+                        }
+                        self.imported_ffi_types.insert(name.clone());
+                    }
+                }
                 _ => {}
             }
         }

@@ -24582,6 +24582,19 @@ fn native_enum_in_user_file_rejected() {
     );
 }
 
+/// TICKET-218 — a `native type` decl is STD-ONLY like `native struct`/`native enum`.
+#[test]
+fn native_type_is_std_only() {
+    rejects(
+        "native type t = int\n",
+        "native type declarations are only allowed in standard-library modules",
+    );
+    entry_rejects(
+        "native type t\n",
+        "native type declarations are only allowed in standard-library modules",
+    );
+}
+
 /// Phase 5b BEHAVIOR-PRESERVING DRIFT GUARD: the reserved `Option`/`Result` variant SHAPE is now ALSO
 /// declared in `std/prelude.chz` as `native enum Option[T]` / `native enum Result[T, E]`, but their
 /// identity, `?` propagation, match exhaustiveness, and `Ok`/`Err`/`Some`/`None` construction stay
