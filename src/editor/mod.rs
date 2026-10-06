@@ -762,6 +762,11 @@ fn overlay_stmt(stmt: &crate::ast::Stmt, map: &mut std::collections::HashMap<(us
                 }
             }
         }
+        StmtKind::NativeType { underlying, .. } => {
+            if let Some(t) = underlying {
+                overlay_type(t, map);
+            }
+        }
         StmtKind::Assert { cond, msg } => {
             overlay_expr(cond, map);
             if let Some(m) = msg {

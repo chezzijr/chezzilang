@@ -40,7 +40,7 @@
 <module>        ::= "EOF" | <topLevelStmts> "EOF"
 <topLevelStmts> ::= <topLevelStmt> | <topLevelStmt> <topLevelStmts>
 <topLevelStmt>  ::= <item> | <stmt>
-<item>          ::= <testFnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <typeAliasDecl> | <importStmt> | <externDecl> | <nativeDecl> | <nativeStructDecl> | <nativeEnumDecl>
+<item>          ::= <testFnDecl> | <structDecl> | <enumDecl> | <protocolDecl> | <typeAliasDecl> | <importStmt> | <externDecl> | <nativeDecl> | <nativeStructDecl> | <nativeEnumDecl> | <nativeTypeDecl>
 <stmts>         ::= <stmt> | <stmt> <stmts>
 
 <stmt>         ::= <simpleStmt> | <compoundStmt>
@@ -328,6 +328,13 @@
                    | "NATIVE" "ENUM" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <nativeEnumMembers> "DEDENT"
 <nativeEnumMembers> ::= <variants> | <variants> <nativeEnumMethods>
 <nativeEnumMethods> ::= <nativeMethodDecl> | <nativeMethodDecl> <nativeEnumMethods>
+
+# A `native type` decl (TICKET-218) — a bodyless type export of a std module. PRELUDE/STD-ONLY (the
+# checker rejects it in a user module) and TOP-LEVEL-only. With no `= <type>` it is an opaque handle
+# (`std/ffi.chz`'s `ptr`); `= int` / `= float` declares a C width the program sees as that scalar
+# (`int8`..`uint64`, `float32`). The checker rejects any other underlying type.
+<nativeTypeDecl> ::= "NATIVE" "TYPE" "IDENT" "NEWLINE"
+                   | "NATIVE" "TYPE" "IDENT" "ASSIGN" <type> "NEWLINE"
 
 # An enum body is its variants, optionally followed by methods (`fn` only — unlike a struct, an enum
 # may NOT carry `test fn`: enum test suites aren't wired, so the parser rejects them).

@@ -1097,11 +1097,35 @@ impl Parser {
             self.parse_native_struct()
         } else if self.peek_at(1) == &Token::Enum {
             self.parse_native_enum()
+        } else if self.peek_at(1) == &Token::Type {
+            self.parse_native_type()
         } else {
             let k = self.parse_native(false)?;
             self.expect_stmt_end()?;
             Ok(k)
         }
+    }
+
+    /// `native type NAME` / `native type NAME = <type>` (TICKET-218): a line-terminated std-only
+    /// type export. The checker restricts the underlying type to `int`/`float`.
+    fn parse_native_type(&mut self) -> PResult<StmtKind> {
+        let span = self.cur_span();
+        self.expect(&Token::Native)?;
+        self.expect(&Token::Type)?;
+        let name_span = self.cur_span();
+        let name = self.expect_ident()?;
+        let underlying = if self.eat(&Token::Assign) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect_stmt_end()?;
+        Ok(StmtKind::NativeType {
+            name,
+            name_span,
+            underlying,
+            span,
+        })
     }
 
     /// A body-less `native fn NAME(params) -> ret` / `native ctor NAME(params) -> ret` declaration
@@ -3525,6 +3549,32 @@ mod tests {
         let (toks, comments) = lexer::tokenize_with_comments(src, 0).unwrap();
         let mut m = parse_with_docs(toks, comments).unwrap_or_else(|e| panic!("parse failed: {e}"));
         m.stmts.remove(0).kind
+    }
+
+    /// TICKET-218 -- `native type NAME` is an opaque handle, `native type NAME = T` a C width
+    /// whose Chezzi scalar is `T`; a dangling `=` is a parse error.
+    #[test]
+    fn native_type_decl_parses() {
+        let StmtKind::NativeType {
+            name, underlying, ..
+        } = only("native type ptr\n")
+        else {
+            panic!("expected StmtKind::NativeType");
+        };
+        assert_eq!(name, "ptr");
+        assert!(underlying.is_none());
+        let StmtKind::NativeType {
+            name, underlying, ..
+        } = only("native type int8 = int\n")
+        else {
+            panic!("expected StmtKind::NativeType");
+        };
+        assert_eq!(name, "int8");
+        assert!(
+            matches!(&underlying, Some(Type::Named { name, .. }) if name == "int"),
+            "got {underlying:?}"
+        );
+        parse_err("native type x =\n");
     }
 
     /// TICKET-108 / W12-17 -- a destructuring `:=` with a value-list RHS must check arity at parse

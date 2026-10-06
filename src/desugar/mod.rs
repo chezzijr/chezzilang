@@ -1268,6 +1268,7 @@ impl Walker<'_> {
             | StmtKind::Native(_)
             // A `native enum` decl carries only body-less variants/method sigs — nothing to desugar.
             | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. }
             | StmtKind::TypeAlias { .. } => {}
         }
         Ok(())

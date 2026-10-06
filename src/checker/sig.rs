@@ -3257,7 +3257,8 @@ impl Checker {
             | StmtKind::Extern { .. }
             | StmtKind::Native(_)
             | StmtKind::NativeStruct { .. }
-            | StmtKind::NativeEnum { .. } => {}
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. } => {}
             StmtKind::If {
                 branches,
                 else_block,

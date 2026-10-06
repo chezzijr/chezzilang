@@ -289,6 +289,16 @@ pub enum StmtKind {
         methods: Vec<NativeDecl>,
         span: Span,
     },
+    /// `native type NAME` / `native type NAME = int|float` (TICKET-218) — a bodyless std-only type
+    /// export. `underlying: None` is an opaque handle (`ptr`); `Some(int|float)` is a C width the
+    /// program sees as that scalar (its C type lives in `cffi::width_ctype`). The backends compile
+    /// NOTHING for it.
+    NativeType {
+        name: String,
+        name_span: Span,
+        underlying: Option<Type>,
+        span: Span,
+    },
     /// `assert <cond>` or `assert <cond>, <msg>` — fault with the assertion's source span if `cond`
     /// is false. `cond` must be `Bool`; `msg` (if present) must be `str`. If `cond` is a comparison
     /// (`<`/`<=`/`>`/`>=`/`==`/`!=`), the fault message renders both operand VALUES around the
@@ -1652,6 +1662,7 @@ fn ids_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
         | StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Pass
+        | StmtKind::NativeType { .. }
         | StmtKind::Import(_) => {}
     }
 }

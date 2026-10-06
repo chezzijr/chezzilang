@@ -322,6 +322,7 @@ fn parser_rules_match_fns() {
         ("nativeDecl", "parse_native"),
         ("nativeStructDecl", "parse_native_struct"),
         ("nativeEnumDecl", "parse_native_enum"),
+        ("nativeTypeDecl", "parse_native_type"),
         ("typeAliasDecl", "parse_type_alias"),
         ("typeParams", "parse_type_params"),
         ("whereClause", "parse_where_bounds"),
