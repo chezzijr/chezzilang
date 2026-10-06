@@ -135,6 +135,94 @@ pub enum CType {
 }
 
 impl CType {
+    /// The `std.ffi` name of a C width (`Int8` → `"int8"`), the inverse of [`width_ctype`]. `None`
+    /// for every non-width C type.
+    pub fn width_name(&self) -> Option<&'static str> {
+        WIDTHS.iter().find(|(_, c)| c == self).map(|(n, _)| *n)
+    }
+
+    /// The inclusive integer range of an integer C width, from Rust's own primitive bounds — the
+    /// one owner of every width range (TICKET-218). `None` for `Float32` and every non-width type.
+    pub fn int_range(&self) -> Option<(i128, i128)> {
+        Some(match self {
+            CType::Int8 => (i8::MIN as i128, i8::MAX as i128),
+            CType::Int16 => (i16::MIN as i128, i16::MAX as i128),
+            CType::Int32 => (i32::MIN as i128, i32::MAX as i128),
+            CType::Int64 => (i64::MIN as i128, i64::MAX as i128),
+            CType::UInt8 => (0, u8::MAX as i128),
+            CType::UInt16 => (0, u16::MAX as i128),
+            CType::UInt32 => (0, u32::MAX as i128),
+            CType::UInt64 => (0, u64::MAX as i128),
+            _ => return None,
+        })
+    }
+
+    /// Whether the Chezzi int `v` fits this integer width. A `constant` is checked against the full
+    /// range. At run time `UInt64` accepts any int as its bit pattern (owner rule, 2026-10-06: a
+    /// uint64 above `i64::MAX` is a negative Chezzi int). A non-width type accepts everything.
+    pub fn fits_int(&self, v: i64, constant: bool) -> bool {
+        if *self == CType::UInt64 && !constant {
+            return true;
+        }
+        match self.int_range() {
+            Some((lo, hi)) => (lo..=hi).contains(&(v as i128)),
+            None => true,
+        }
+    }
+
+    /// Whether the Chezzi float `v` fits this width: for `Float32` a finite value whose f32 rounding
+    /// overflows does not fit (Go's constant rule); NaN and inf pass, as C allows. Every other type
+    /// accepts everything.
+    pub fn fits_f64(&self, v: f64) -> bool {
+        *self != CType::Float32 || !(v.is_finite() && (v as f32).is_infinite())
+    }
+
+    /// The printed range of a width, e.g. `(-128..127)`; float32 prints `±f32::MAX` in `{:e}` form.
+    pub fn range_text(&self) -> String {
+        match self.int_range() {
+            Some((lo, hi)) => format!("({lo}..{hi})"),
+            None => {
+                let m = f32::MAX as f64;
+                format!("({:e}..{:e})", -m, m)
+            }
+        }
+    }
+
+    /// Wrap the Chezzi int `v` to this integer width the way a C cast does (Go `int8(v)`, Rust
+    /// `v as i8`). `Int64`/`UInt64` (and non-widths) return `v` unchanged: an i64 holds their bits.
+    pub fn wrap_int(&self, v: i64) -> i64 {
+        match self {
+            CType::Int8 => v as i8 as i64,
+            CType::Int16 => v as i16 as i64,
+            CType::Int32 => v as i32 as i64,
+            CType::UInt8 => v as u8 as i64,
+            CType::UInt16 => v as u16 as i64,
+            CType::UInt32 => v as u32 as i64,
+            _ => v,
+        }
+    }
+
+    /// Round the Chezzi float `v` to C `float` the way a C cast does (`inf` when out of range).
+    pub fn wrap_f64(&self, v: f64) -> f64 {
+        v as f32 as f64
+    }
+
+    /// The C-boundary range check: `Err` (a recoverable fault) when `v` does not fit this width.
+    /// Every Chezzi→C site calls it: extern params, `write_field`, the callback return.
+    pub fn check_fits(&self, v: &NativeRet) -> Result<(), HostError> {
+        let Some(name) = self.width_name() else {
+            return Ok(());
+        };
+        let shown = match v {
+            NativeRet::Int(n) if !self.fits_int(*n, false) => n.to_string(),
+            NativeRet::Float(f) if !self.fits_f64(*f) => format!("{f:e}"),
+            _ => return Ok(()),
+        };
+        Err(HostError {
+            message: format!("value {shown} does not fit {name} {}", self.range_text()),
+        })
+    }
+
     /// Whether this is a C scalar a callback param/return may use — `int`/`float`/`bool`/`ptr` and
     /// the fixed-width integers. NOT `str`/`owned_str`/opt/struct/nested `Callback` (those have no
     /// register-width scalar marshalling for the trampoline arg-read / result-write). Shared by the
@@ -222,19 +310,24 @@ impl CType {
 /// The C type a `std.ffi` width name (a `native type` decl of `std/ffi.chz`) marshals as -- the one owner of
 /// that map. `None` for any other name.
 pub fn width_ctype(name: &str) -> Option<CType> {
-    Some(match name {
-        "int8" => CType::Int8,
-        "int16" => CType::Int16,
-        "int32" => CType::Int32,
-        "int64" => CType::Int64,
-        "uint8" => CType::UInt8,
-        "uint16" => CType::UInt16,
-        "uint32" => CType::UInt32,
-        "uint64" => CType::UInt64,
-        "float32" => CType::Float32,
-        _ => return None,
-    })
+    WIDTHS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| c.clone())
 }
+
+/// The name ↔ C type rows of the `std.ffi` widths, read by [`width_ctype`] and [`CType::width_name`].
+const WIDTHS: [(&str, CType); 9] = [
+    ("int8", CType::Int8),
+    ("int16", CType::Int16),
+    ("int32", CType::Int32),
+    ("int64", CType::Int64),
+    ("uint8", CType::UInt8),
+    ("uint16", CType::UInt16),
+    ("uint32", CType::UInt32),
+    ("uint64", CType::UInt64),
+    ("float32", CType::Float32),
+];
 
 /// Build the libffi structure layout for a flat-scalar struct: the structure [`Type`], its total
 /// size and alignment, and each field's byte offset — all computed by libffi from the platform ABI
@@ -1953,6 +2046,57 @@ impl std::fmt::Debug for Cffi {
 mod tests {
     use super::*;
     use crate::native::{Host, HostError, NativeRet};
+
+    /// TICKET-218 — a C width's range comes from Rust's primitive bounds; uint64 accepts any int at
+    /// run time (its bit pattern) but only `0..=i64::MAX` as a constant; float32 rejects a finite
+    /// value beyond f32 and passes NaN/inf; the wrap helpers are C casts.
+    #[test]
+    fn width_ranges_come_from_rust_bounds() {
+        assert_eq!(CType::Int8.int_range(), Some((-128, 127)));
+        assert_eq!(CType::UInt64.int_range(), Some((0, u64::MAX as i128)));
+        assert_eq!(CType::Float32.int_range(), None);
+        assert!(CType::UInt64.fits_int(-1, false));
+        assert!(!CType::UInt64.fits_int(-1, true));
+        assert!(CType::UInt64.fits_int(i64::MAX, true));
+        assert!(!CType::Int8.fits_int(300, false));
+        assert!(CType::Int8.fits_int(127, true) && !CType::Int8.fits_int(128, true));
+        assert!(CType::Int8.fits_int(-128, false) && !CType::Int8.fits_int(-129, false));
+        assert!(CType::Int64.fits_int(i64::MIN, true) && CType::Int64.fits_int(i64::MAX, false));
+        assert!(CType::Float32.fits_f64(f32::MAX as f64));
+        assert!(!CType::Float32.fits_f64(1e39));
+        assert!(!CType::Float32.fits_f64(-1e39));
+        assert!(CType::Float32.fits_f64(f64::NAN));
+        assert!(CType::Float32.fits_f64(f64::INFINITY));
+        assert_eq!(CType::Int8.wrap_int(300), 44);
+        assert_eq!(CType::UInt32.wrap_int(-1), 4294967295);
+        assert_eq!(CType::UInt64.wrap_int(-1), -1);
+        assert_eq!(CType::Int16.wrap_int(40000), -25536);
+        assert!(CType::Float32.wrap_f64(1e39).is_infinite());
+        assert_eq!(CType::Int8.width_name(), Some("int8"));
+        assert_eq!(CType::Int.width_name(), None);
+        assert_eq!(CType::Int8.range_text(), "(-128..127)");
+        assert_eq!(
+            CType::Float32.range_text(),
+            "(-3.4028234663852886e38..3.4028234663852886e38)"
+        );
+        assert_eq!(
+            CType::Int8
+                .check_fits(&NativeRet::Int(300))
+                .unwrap_err()
+                .message,
+            "value 300 does not fit int8 (-128..127)"
+        );
+        assert!(CType::Int8.check_fits(&NativeRet::Int(-128)).is_ok());
+        assert_eq!(
+            CType::Float32
+                .check_fits(&NativeRet::Float(1e39))
+                .unwrap_err()
+                .message,
+            "value 1e39 does not fit float32 (-3.4028234663852886e38..3.4028234663852886e38)"
+        );
+        assert!(CType::UInt64.check_fits(&NativeRet::Int(-1)).is_ok());
+        assert!(CType::Int.check_fits(&NativeRet::Int(i64::MAX)).is_ok());
+    }
 
     /// Regression (callback SIGSEGV): `ffi_prep_closure_loc` stores a raw pointer to the callback
     /// `Cif`'s inner `ffi_cif`; libffi dereferences it when C later invokes the closure. The `Cif` is
