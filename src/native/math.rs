@@ -405,14 +405,6 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("parse_int_base", parse_int_base, Kind::Inline),
 ];
 
-/// Constant members. `(name, value)`.
-pub const CONSTS: &[(&str, f64)] = &[
-    ("pi", std::f64::consts::PI),
-    ("e", std::f64::consts::E),
-    ("inf", f64::INFINITY),
-    ("nan", f64::NAN),
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -747,15 +747,6 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)]
     }
 }
 
-/// The constant (non-callable) members of a native module, as `(name, value)`. Currently only
-/// `std.math` exposes any (`pi`, `e`).
-pub fn native_consts(module: &str) -> &'static [(&'static str, f64)] {
-    match module {
-        "std.math" => math::CONSTS,
-        _ => &[],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

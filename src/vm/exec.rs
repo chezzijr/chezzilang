@@ -1065,10 +1065,6 @@ impl Vm {
                 });
                 self.module_define(mod_obj, mname, nat);
             }
-            for (cname, cval) in crate::native::native_consts(name) {
-                let fv = self.box_float(*cval);
-                self.module_define(mod_obj, cname, fv);
-            }
         }
 
         // Bind imports (dependencies already ran, so their namespaces are populated).

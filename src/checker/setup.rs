@@ -949,6 +949,39 @@ impl Checker {
                 sig.insert_fn(decl.name.clone(), self.fn_sig(decl, decl.name_span));
             }
         }
+        // PASS 2c — module CONSTANTS (TICKET-218): a top-level `NAME: const T = value` let is a const
+        // member of type `T`. Its value is bound by running the module's toplevel, and type-checked
+        // against `T` in the graph loop's bodied branch. Any other top-level binding is rejected: a
+        // std module exports no mutable global.
+        for s in &ast.stmts {
+            if let StmtKind::Let {
+                names,
+                ty,
+                is_const,
+                ..
+            } = &s.kind
+            {
+                match (names.as_slice(), ty, is_const) {
+                    ([name], Some(t), true) => {
+                        let ty = self.resolve_type(t, s.span);
+                        sig.members.insert(
+                            name.clone(),
+                            MemberSig {
+                                ty,
+                                certain_fn: None,
+                                is_const: true,
+                                redeclared: false,
+                            },
+                        );
+                    }
+                    _ => self.error(
+                        s.span,
+                        "a standard-library module's top-level binding must be NAME: const T = value"
+                            .to_string(),
+                    ),
+                }
+            }
+        }
         // Preserve import-gating: drop the transient bare-name visibility.
         for name in transient {
             self.struct_names.remove(&name);

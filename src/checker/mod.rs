@@ -1691,7 +1691,7 @@ impl Checker {
                 // actually having a bodied decl so a pure-native module (os/fs/regex/…) pays nothing
                 // and its live-table state is left exactly as the harvest above produced it.
                 let has_bodied = lm.ast.stmts.iter().any(|s| {
-                    matches!(&s.kind, StmtKind::Fn(_))
+                    matches!(&s.kind, StmtKind::Fn(_) | StmtKind::Let { .. })
                         || matches!(&s.kind, StmtKind::NativeStruct { bodied_methods, .. } if !bodied_methods.is_empty())
                 });
                 if has_bodied {
@@ -1714,6 +1714,13 @@ impl Checker {
                         c.structs.insert(n.clone(), info.clone());
                         c.bare_types.insert(n.clone(), n.clone());
                         c.struct_names.insert(n.clone());
+                    }
+                    // TICKET-218 — module constants (`pi: const float = …`): check each value against
+                    // its declared type, before the bodies that may read it.
+                    for s in &lm.ast.stmts {
+                        if matches!(&s.kind, StmtKind::Let { .. }) {
+                            c.check_stmt(s);
+                        }
                     }
                     // Module-level bodied fns (`divmod`): free-fn sig, no `self`, decl↔sig params
                     // align by index exactly as `check_module`'s top-level-fn path.
@@ -1895,12 +1902,11 @@ impl Checker {
 
 /// Re-attach the checker-side metadata a `native fn` decl CANNOT express, on top of a native module's
 /// `ModuleSig` (harvested from its file-backed `std/M.chz`).
-/// Runs in the graph loop for EVERY native module (idempotent for those it doesn't cover). Two pieces:
-///   (a) editor hover docs (`MODULE_FN_DOCS`) — a concise one-line blurb on each authored fn's `FnSig.doc`
-///       (excluded from `fn_sig_eq`, so purely informational; `record_method_hover` forwards it at the
-///       `module.fn` hover site). Drift-guarded by `module_fn_docs_all_resolve`.
-///   (b) module CONSTANT values (`math.pi`/`e`) — read from `native::native_consts` (the runtime table,
-///       reused so there is no hardcoded pi/e here) and exposed as `float` module values.
+/// Runs in the graph loop for EVERY native module (idempotent for those it doesn't cover). It attaches
+/// editor hover docs (`MODULE_FN_DOCS`) — a concise one-line blurb on each authored fn's `FnSig.doc`
+/// (excluded from `fn_sig_eq`, so purely informational; `record_method_hover` forwards it at the
+/// `module.fn` hover site). Drift-guarded by `module_fn_docs_all_resolve`. Module constants are
+/// `NAME: const T = value` lets in the std file, harvested by `harvest_native_module`.
 /// Moved out of the (now-deleted) per-module `native_module_sig` arms so the file-backed migration
 /// (phase 4d) keeps hover/const byte-identical. The synthetic struct LAYOUTS (Match/Response/
 /// ProcResult) + request's optional-tail fns are NOT here either — they are file-backed (4b/4f) and
@@ -1916,19 +1922,6 @@ fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
                 f.doc = Some((*doc).to_string());
             }
         }
-    }
-    for (cname, _) in crate::native::native_consts(name) {
-        // A native module constant (`math.pi`/`e`/`inf`/`nan`) is immutable — mark it const so a
-        // rebind (`m.pi = x` or `import pi from m; pi = x`) reports it as const, not a mutable field.
-        sig.members.insert(
-            (*cname).to_string(),
-            MemberSig {
-                ty: Ty::Float,
-                certain_fn: None,
-                is_const: true,
-                redeclared: false,
-            },
-        );
     }
     // Phase 4c-concurrency — two method sigs a plain harvested sig CANNOT express, re-attached here.
     // Both are closure params whose expressible constraint is arity + (for `read`) the box's element

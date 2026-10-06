@@ -12,8 +12,13 @@
 #
 # The language has no implicit int→float, so params are `float` (callers pass floats). `abs`/`sign`
 # are `[T: Num]` generics (int->int, float->float); every other param is `float`. The module
-# constants `pi`/`e` (float values, `math.pi`) are NOT expressible as native decls and are re-attached
-# post-harvest (attach_native_module_metadata) via native_consts.
+# constants below (`math.pi`) are ordinary `NAME: const T = value` lets: the checker harvests each as a
+# const member, and running this module's toplevel binds its value.
+
+pi: const float = 3.141592653589793
+e: const float = 2.718281828459045
+inf: const float = float("inf")
+nan: const float = float("nan")
 
 native fn abs[T: Num](x: T) -> T
 native fn floor(x: float) -> float

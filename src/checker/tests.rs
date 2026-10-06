@@ -14340,7 +14340,7 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(pow.ret, Ty::Float);
     let is_nan = math.certain_fn("is_nan").expect("math.is_nan");
     assert_eq!(is_nan.ret, Ty::Bool);
-    // math.pi / math.e are float module VALUES (not fns) — reattached from native_consts.
+    // math.pi / math.e are float module VALUES (not fns) — const lets harvested from std/math.chz.
     assert_eq!(math.value_ty("pi"), Some(&Ty::Float));
     assert_eq!(math.value_ty("e"), Some(&Ty::Float));
     // math.abs is a [T: Num] generic (TICKET-214): one declared sig, no side-set.
@@ -14546,11 +14546,15 @@ fn math_io_os_rand_fs_runtime_tables_unchanged() {
     assert_eq!(crate::native::native_members("std.rand").len(), 4);
     // --- fs.stat/fs.walk (gaps §6): 15 original + stat + walk = 17 runtime members.
     assert_eq!(crate::native::native_members("std.fs").len(), 17);
-    let consts: Vec<&str> = crate::native::native_consts("std.math")
+    let math_sig = native_module_sig_via_graph("math");
+    let mut consts: Vec<&str> = math_sig
+        .members
         .iter()
-        .map(|(n, _)| *n)
+        .filter(|(_, m)| m.is_const)
+        .map(|(n, _)| n.as_str())
         .collect();
-    assert_eq!(consts, vec!["pi", "e", "inf", "nan"]);
+    consts.sort();
+    assert_eq!(consts, vec!["e", "inf", "nan", "pi"]);
     assert!(crate::native::is_file_backed_native("std.math"));
     assert!(crate::native::is_file_backed_native("std.regex"));
     // std.net (4c-net) + std.ffi (4c-ffi) + std.concurrency (4c-concurrency) are FILE-BACKED now —
@@ -24500,6 +24504,49 @@ fn ffi_declared_types_are_the_import_surface() {
     }
     rejects_entry("import int128 from std.ffi\n", "int128");
     rejects_entry("import ptr from std.ffi\np: ptr = 5\n", "ptr");
+}
+
+/// TICKET-218 — a native module's constants are `NAME: const T = value` lets in its std file,
+/// harvested into `ModuleSig::members` as const values (no Rust const table).
+#[test]
+fn native_module_consts_come_from_the_file() {
+    let math = native_module_sig_via_graph("math");
+    for c in ["pi", "e", "inf", "nan"] {
+        let m = math
+            .members
+            .get(c)
+            .unwrap_or_else(|| panic!("math.{c} missing"));
+        assert_eq!(m.ty, Ty::Float, "math.{c}");
+        assert!(m.is_const, "math.{c} must be const");
+        assert!(m.certain_fn.is_none(), "math.{c} is a value");
+    }
+    rejects_entry(
+        "import std.math\nmath.pi = 1.0\n",
+        "it is declared const in module 'math'",
+    );
+}
+
+/// TICKET-218 — a native std file's top-level binding must be a typed const let; a `:=` or a
+/// non-const typed let is rejected by the harvest, a const let is not.
+#[test]
+fn native_module_mutable_global_rejected() {
+    for (src, bad) in [
+        ("x := 1\n", true),
+        ("x: int = 1\n", true),
+        ("x: const int = 1\n", false),
+    ] {
+        let ast = crate::parser::parse(crate::lexer::tokenize(src).unwrap()).unwrap();
+        let mut c = Checker::new();
+        let mut sig = ModuleSig::default();
+        c.harvest_native_module(&ast, &mut sig);
+        let hit = c.errors.iter().any(|e| {
+            e.message.contains(
+                "a standard-library module's top-level binding must be NAME: const T = value",
+            )
+        });
+        assert_eq!(hit, bad, "{src:?}: {:?}", c.errors);
+        assert_eq!(sig.members.contains_key("x"), !bad, "{src:?}");
+    }
 }
 
 /// TICKET-218 — a `native type` decl is STD-ONLY like `native struct`/`native enum`.
