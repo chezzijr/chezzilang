@@ -2341,7 +2341,7 @@ impl Checker {
                     0 => {}
                     1 => match self.infer_value(&args[0]) {
                         Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
-                        Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
+                        Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
                         other => self.error(
                             args[0].span,
                             format!("bytearray() expects an int size, a bytes, a bytearray, or a List[int], got {other}"),
@@ -2359,7 +2359,7 @@ impl Checker {
                 match args.len() {
                     1 => match self.infer_value(&args[0]) {
                         Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
-                        Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
+                        Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
                         other => self.error(
                             args[0].span,
                             format!(
@@ -3724,7 +3724,7 @@ impl Checker {
                     if let Some(a) = args.first() {
                         match self.infer_value(a) {
                             Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
-                            Ty::List(elem) if matches!(*elem, Ty::Int | Ty::Unknown) => {}
+                            Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
                             other => self.error(
                                 a.span,
                                 format!("extend() expects a bytes, a bytearray, or a List[int], got {other}"),

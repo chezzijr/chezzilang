@@ -99,7 +99,7 @@ impl Checker {
             Pattern::Or(alts) => self.bind_or_alternatives(alts, ty, span),
             Pattern::Literal(lit) => {
                 let lit_ty = lit_pattern_ty(lit);
-                if !ty.is_unknown() && &lit_ty != ty {
+                if !ty.is_unknown() && &lit_ty != ty.scalar() {
                     self.error(
                         span,
                         format!("literal of type {lit_ty} cannot match a value of type {ty}"),
@@ -110,7 +110,7 @@ impl Checker {
             Pattern::Range { .. } => {
                 self.reject_empty_range(pattern, span);
                 // A range sub-pattern is int-only and always refutable.
-                if !ty.is_unknown() && ty != &Ty::Int {
+                if !ty.is_unknown() && ty.scalar() != &Ty::Int {
                     self.error(
                         span,
                         format!("range pattern cannot match a value of type {ty}"),

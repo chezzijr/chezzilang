@@ -24592,6 +24592,51 @@ fn width_ty_is_a_tag_on_its_scalar() {
     );
 }
 
+/// TICKET-218 — a width NESTED in a slot type (a payload, a tuple element, a list element) reads as
+/// its scalar too: a literal or range sub-pattern matches it, and `bytes`/`bytearray`/`extend` take a
+/// `List[<w>]` as a `List[int]`. Each program checks clean on base, where a width resolved to `int`.
+#[test]
+fn nested_width_reads_as_its_scalar() {
+    let prefix = "import std.ffi\nimport int8, uint8 from std.ffi\n";
+    for body in [
+        "enum E:\n    A(int8)\ne := E.A(1)\nmatch e:\n    E.A(1): print(1)\n    E.A(2..5): print(2)\n    E.A(_): print(3)\n",
+        "o: Option[int8] = Some(1)\nmatch o:\n    Some(1): print(1)\n    Some(2..5): print(2)\n    _: print(3)\n",
+        "r: Result[int8, str] = Ok(1)\nmatch r:\n    Ok(1): print(1)\n    Ok(_): print(2)\n    Err(e): print(e)\n",
+        "t: (int8, int) = (1, 2)\nmatch t:\n    (1, _): print(1)\n    _: print(2)\n",
+        "struct P:\n    a: int8\n    b: int\np := P(1, 2)\nmatch p:\n    P(1, b): print(b)\n    _: print(0)\n",
+        "l: List[uint8] = [1, 2]\nb := bytes(l)\n",
+        "l: List[uint8] = [1, 2]\nba := bytearray(l)\nba.extend(l)\n",
+    ] {
+        let errs = check_entry(&format!("{prefix}{body}"));
+        assert!(errs.is_empty(), "{body:?}: {errs:?}");
+    }
+    // Must still fail: a non-int literal or a non-int element is still rejected, naming the slot.
+    rejects_entry(
+        &format!(
+            "{prefix}o: Option[int8] = Some(1)\nmatch o:\n    Some(\"a\"): print(1)\n    _: print(2)\n"
+        ),
+        "literal of type str cannot match a value of type int8",
+    );
+    rejects_entry(
+        &format!(
+            "{prefix}o: Option[str] = Some(\"a\")\nmatch o:\n    Some(1..3): print(1)\n    _: print(2)\n"
+        ),
+        "range pattern cannot match a value of type str",
+    );
+    rejects_entry(
+        &format!("{prefix}l: List[str] = [\"a\"]\nb := bytes(l)\n"),
+        "bytes() expects a bytes, a bytearray, or a List[int], got List[str]",
+    );
+    rejects_entry(
+        &format!("{prefix}l: List[float] = [1.0]\nba := bytearray(l)\n"),
+        "got List[float]",
+    );
+    rejects_entry(
+        &format!("{prefix}ba := bytearray(1)\nl: List[str] = [\"a\"]\nba.extend(l)\n"),
+        "extend() expects a bytes, a bytearray, or a List[int], got List[str]",
+    );
+}
+
 /// TICKET-218 — a constant outside a C width is a compile error at every value-into-slot site, type
 /// arguments, literals and branches included; its in-range neighbours check clean. Go, run 2026-10-06:
 /// `cannot use 300 (untyped int constant) as int8 value in variable declaration (overflows)`, and the
