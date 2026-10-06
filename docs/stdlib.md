@@ -689,7 +689,7 @@ Number / integer functions (Python `math` semantics):
 
 Constants (all `const` — reassigning `math.pi`, or `import pi from std.math; pi = x`, is a type
 error naming them const): `math.pi`, `math.e`, `math.inf` (positive infinity), `math.nan` (NaN;
-`math.nan != math.nan`).
+`math.nan != math.nan`). They are `NAME: const float = value` lets in `std/math.chz`, harvested as const members.
 
 ### `std.io`
 The file seams (`read_file`/`write_file`/`read_bytes`/`write_bytes`) are
@@ -1262,7 +1262,18 @@ Stores mirror every width except `str` (a `store_str` is deferred — an unbound
 buffer is a footgun). Each returns `nil`:
 `store_int`/`store_int8`..`store_int64`/`store_uint8`..`store_uint64`/`store_float`/`store_float32`/
 `store_bool`/`store_ptr` — base form `(p, v)`, `_at` form `(p, off, v)`. Stores write at the value's
-**natural C width** (`store_int8` writes one byte only, leaving adjacent bytes untouched).
+**natural C width** (`store_int8` writes one byte only, leaving adjacent bytes untouched). A width
+store's value must fit the width (TICKET-218): a constant outside it is a compile error
+(`constant 300 does not fit int8 (-128..127)`), a runtime value a recoverable fault
+(`value 300 does not fit int8 (-128..127)`); `float32` passes NaN and inf. Wrap first with
+`ffi.cast_<w>`.
+
+**Explicit wrap and range constants.** `cast_int8(v)` … `cast_uint64(v)` wrap an `int` like a C cast
+(Go's `int8(v)`: `cast_int8(300) == 44`); `cast_float32(v)` rounds to the nearest C `float`. The
+constants `INT8_MIN`/`INT8_MAX`, `INT16_MIN`/`INT16_MAX`, `INT32_MIN`/`INT32_MAX`,
+`INT64_MIN`/`INT64_MAX`, `UINT8_MAX`, `UINT16_MAX`, `UINT32_MAX`, `UINT64_MAX` (`-1`, C's value as its
+i64 bit pattern) and `FLT_MAX` are declared in `std/ffi.chz` with the `native type` decls of every
+exported type name.
 
 > **Unsafe surface.** `load_*`/`store_*` read/write *arbitrary* memory through a C-sourced address —
 > like Python `ctypes` (`POINTER(c_int)` + `a[0]`), a bad pointer **segfaults**. Chezzi's one

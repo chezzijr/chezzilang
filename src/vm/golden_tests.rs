@@ -6907,7 +6907,7 @@ fn golden_ffi_str_chz_via_run_file() {
 
 /// C-ABI fixed-width integer marshalling golden: `atoi
 /// -> int32` (sign-extend), `htonl(uint32) -> uint32` (zero-extend, high-bit positive), `abs(int8)
-/// -> int8` (signed round-trip + param truncation per a C cast). Byte-matches `.expected`. Runs
+/// -> int8` (signed round-trip + an explicit `cast_int8` wrap). Byte-matches `.expected`. Runs
 /// wherever the `libc`/`libm` aliases resolve; otherwise prints a SKIP line naming the reason.
 // The example's `htonl` lines encode little-endian oracles, so the golden skips at runtime on a
 // big-endian host instead of `#[cfg]`-gating.

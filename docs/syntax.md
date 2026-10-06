@@ -5029,37 +5029,68 @@ and return):
 
 | name | C type | libffi type | as a parameter | as a return |
 |------|--------|-------------|----------------|-------------|
-| `int8`   | `int8_t`   | `sint8`  | truncate i64 → i8  (wrap) | sign-extend i8 → i64  |
-| `int16`  | `int16_t`  | `sint16` | truncate i64 → i16 (wrap) | sign-extend i16 → i64 |
-| `int32`  | `int32_t`  | `sint32` | truncate i64 → i32 (wrap) | sign-extend i32 → i64 |
-| `int64`  | `int64_t`  | `sint64` | i64 (no change)           | i64 (no change)       |
-| `uint8`  | `uint8_t`  | `uint8`  | truncate i64 → u8  (wrap) | zero-extend u8 → i64  |
-| `uint16` | `uint16_t` | `uint16` | truncate i64 → u16 (wrap) | zero-extend u16 → i64 |
-| `uint32` | `uint32_t` | `uint32` | truncate i64 → u32 (wrap) | zero-extend u32 → i64 |
-| `uint64` | `uint64_t` | `uint64` | truncate i64 → u64 (wrap) | reinterpret u64 → i64 |
+| `int8`   | `int8_t`   | `sint8`  | must fit -128..127          | sign-extend i8 → i64  |
+| `int16`  | `int16_t`  | `sint16` | must fit -32768..32767      | sign-extend i16 → i64 |
+| `int32`  | `int32_t`  | `sint32` | must fit i32                | sign-extend i32 → i64 |
+| `int64`  | `int64_t`  | `sint64` | any int                     | i64 (no change)       |
+| `uint8`  | `uint8_t`  | `uint8`  | must fit 0..255             | zero-extend u8 → i64  |
+| `uint16` | `uint16_t` | `uint16` | must fit 0..65535           | zero-extend u16 → i64 |
+| `uint32` | `uint32_t` | `uint32` | must fit 0..4294967295      | zero-extend u32 → i64 |
+| `uint64` | `uint64_t` | `uint64` | any int (its bit pattern)   | reinterpret u64 → i64 |
 
-A **param truncates** the Chezzi i64 to the C width with **C-cast (wrapping) semantics — never an
-overflow trap**: `255` passed to `int8` becomes `-1`, `300` becomes `44`. A **return sign-extends**
-(signed) or **zero-extends** (unsigned) the C value back to i64: `int32` returning `-1` is `-1`,
-`uint32` returning `0xFFFFFFFF` is `4294967295` (stays positive). A `type Len = int32` alias used in an
-`extern` sig behaves identically to bare `int32` — but the alias only resolves if its target `int32` is
-imported in the **same** module as the alias declaration.
+**The range rule (TICKET-218).** A value written for C — an extern param, a struct field passed to C,
+an `ffi.store_<w>` store or a callback's return — must fit its width. Go and Rust reject the same
+programs (`cannot use 300 (untyped int constant) as int8 value … (overflows)`, `literal out of range
+for i8`):
+
+- A **constant** outside the range is a **compile error** at every slot whose declared type is a width:
+  extern/fn/method params, struct fields, enum payloads, annotated locals, returns, defaults, closure
+  bodies, type arguments (`List[int8] = [300]`, `Option[int8] = Some(300)`), the branches of
+  `if`/`match` and the right side of `??`: `constant 300 does not fit int8 (-128..127)`.
+- A **runtime value** is range-checked only where it crosses into C. Out of range is a recoverable
+  fault, catchable by `recover:`: `value 300 does not fit int8 (-128..127)`. A Chezzi local of a width
+  type holds any int until then.
+- **`uint64`**: a constant must be `0..INT64_MAX`; at run time any int passes as its bit pattern, and a
+  value above `INT64_MAX` read back from C arrives negative (`UINT64_MAX` reads as `-1`).
+- **`float32`**: a finite value outside the f32 range is a compile error as a constant and a fault at run
+  time; NaN and inf pass through, as C allows.
+- A value read back from C is in range by construction; returns are not checked.
+
+**Explicit wrap — `ffi.cast_<w>(v)`.** Go's `int8(v)` / Rust's `v as i8`: `ffi.cast_int8(300) == 44`,
+`ffi.cast_uint32(-1) == 4294967295`, `ffi.cast_float32(1e39)` is `inf`. There is no silent path.
+`std.ffi` also declares the range constants `INT8_MIN`/`INT8_MAX` … `INT64_MIN`/`INT64_MAX`,
+`UINT8_MAX` … `UINT32_MAX`, `UINT64_MAX` (`-1`, the bit pattern) and `FLT_MAX`.
+
+**A width is a tag on `int`/`float`, not a distinct type.** An `int8` value is usable wherever `int` is;
+arithmetic on width values yields plain `int`/`float`; `List[int8]` and `List[int]` are interchangeable.
+Only a constant flowing into an `int8` slot is checked. Two embedded protocols that require
+`m(self, x: int8)` and `m(self, x: int)` conflict (Go: `duplicate method M`).
+
+A **return sign-extends** (signed) or **zero-extends** (unsigned) the C value back to i64: `int32`
+returning `-1` is `-1`, `uint32` returning `0xFFFFFFFF` is `4294967295` (stays positive). A
+`type Len = int32` alias used in an `extern` sig behaves identically to bare `int32` — but the alias only
+resolves if its target `int32` is imported in the **same** module as the alias declaration.
 
 ```chezzi
-import int32, uint32, int8 from std.ffi
+import int32, uint32, int8, cast_int8 from std.ffi
 extern "libc":
     fn atoi(s: str) -> int32      # parse to a C int; -1 sign-extends back to i64 -1
     fn htonl(x: uint32) -> uint32 # unsigned in+out; a high-bit result stays positive
-    fn abs(x: int8) -> int8       # signed round-trip; an out-of-range param wraps (C cast)
+    fn abs(x: int8) -> int8       # signed round-trip
 
-print(atoi("-1"))   # -1
-print(htonl(128))   # 2147483648   (0x80000000, zero-extended → positive)
-print(abs(255))     # 1            (255 → int8 → -1, then abs)
+print(atoi("-1"))             # -1
+print(htonl(128))             # 2147483648   (0x80000000, zero-extended → positive)
+print(abs(cast_int8(255)))    # 1            (255 wraps to -1, then abs); `abs(255)` is a compile error
 ```
 
-**Limits:** `uint64` values above `i64::MAX` are not representable in Chezzi's i64 `int` and wrap
-negative (the other seven widths fit i64 losslessly). No C-spelling aliases (`c_int`/`c_short`/…) yet —
-their width is platform-dependent (LP64 vs LLP64); deferred to a future task. See `examples/ffi_int.chz`.
+**Declared in `std/ffi.chz`.** Every type name `std.ffi` exports is a `native type` decl in that file
+(`native type ptr`, `native type int8 = int` … `native type float32 = float`); the C type of each width
+lives in `cffi::width_ctype`. `native type` is std-only, like `native struct`. A std file's module
+constants are ordinary `NAME: const T = value` lets (`std/math.chz`'s `pi`, `std/ffi.chz`'s
+`INT8_MAX`): the checker harvests each as a const member, and running the module binds its value.
+
+**Limits:** No C-spelling aliases (`c_int`/`c_short`/…) yet — their width is platform-dependent (LP64
+vs LLP64); deferred to a future task. See `examples/ffi_int.chz`.
 
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
@@ -5225,8 +5256,8 @@ modules and use them from a bodied fn (e.g. `import std.string`). A `test` metho
   exactly as before (`import std.regex` / `import Match from std.regex` licenses the bare `Match`;
   `regex.find(...)` qualified), the runtime + bytecode are unchanged, and it is **both-engine
   byte-identical**. It retired the earlier file-less companion-stub shortcut, and in phase 4d the
-  hand-built `native_module_sig` arms for the five pure-function modules. (Checker-side metadata a
-  `native fn` decl can't express — `math.pi`/`e`/`inf`/`nan` module values, `math.abs`/`sign`'s numeric
+  hand-built per-module Rust signatures for the five pure-function modules (no Rust-side module sig remains). (Checker-side metadata a
+  `native fn` decl can't express — `math.abs`/`sign`'s numeric
   polymorphism, and hover docs — is re-attached post-harvest.)
 
 ## 12e. `native enum` — reserved builtin-enum variant shape in Chezzi (prelude/std-only)

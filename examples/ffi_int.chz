@@ -1,11 +1,11 @@
 # Fixed-width integer C-ABI marshalling through `extern "lib":` — int8..uint64 marshalling type
 # names. They are NOT global builtins: a module that names a width type must import it per-name from
 # `std.ffi` (Chezzi's first type imports), exactly like `null`/`is_null`. To the program each is a
-# plain `int`; the width/signedness is a runtime-only marshalling distinction. Unlike `owned_str`,
-# these are BIDIRECTIONAL (param AND return). A param TRUNCATES the Chezzi i64 to the C width
-# (wrapping, C-cast); a return SIGN-extends (signed) or ZERO-extends (unsigned) the C value back to
-# i64. No overflow trap — it wraps like a cast.
-import int8, int32, uint32 from std.ffi
+# plain `int`. Unlike `owned_str`, these are BIDIRECTIONAL (param AND return). A value passed to C must
+# fit its width: a constant outside it is a compile error, a runtime value a recoverable fault, and
+# `ffi.cast_<w>` (here `cast_int8`) wraps it first like a C cast. A return SIGN-extends (signed) or
+# ZERO-extends (unsigned) the C value back to i64.
+import int8, int32, uint32, cast_int8 from std.ffi
 
 # `libc` is a LOGICAL library name the loader resolves per host (docs/syntax.md §12b).
 
@@ -35,5 +35,6 @@ print(htonl(128))               # 2147483648
 # int8 round-trip: abs(-5) == 5 (both within int8 range).
 print(abs(-5))                  # 5
 
-# int8 param TRUNCATES per a C cast: 255 (0xFF) as a signed char is -1; abs(-1) == 1. No trap.
-print(abs(255))                 # 1
+# 255 does not fit int8: `cast_int8` wraps it like a C cast (255 is 0xFF, -1 as a signed char).
+# abs(-1) == 1. Passing `abs(255)` itself is a compile error.
+print(abs(cast_int8(255)))      # 1

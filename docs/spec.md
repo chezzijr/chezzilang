@@ -843,7 +843,7 @@ struct Meters:
 >     annotation*), these are
 >     **not global**: each is a **type imported per-name from `std.ffi`** — Chezzi's first type imports — with the same
 >     `import int32, uint32 from std.ffi` form as the `null`/`is_null` value members (`std.ffi` exports
->     both callable members and these eight TYPE names; the declaring list is `native::ffi::TYPE_NAMES`,
+>     both callable members and these TYPE names; the declaring list is `std/ffi.chz`'s `native type` decls,
 >     no grammar change). A module that names a width type without importing it gets *unknown type
 >     'int32' (import it from std.ffi …)*; a bogus name (`import int99 from std.ffi`) errors like any bad
 >     import. The import is **per-module**: a struct's int32 field resolved in module A is usable from
