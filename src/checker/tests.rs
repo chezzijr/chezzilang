@@ -37750,3 +37750,10 @@ fn ffi_width_constant_out_of_range_rejected() {
         "does not fit int8 (-128..127)",
     );
 }
+
+#[test]
+fn type_arg_bracket_reads_with_the_type_grammar() {
+    ok(
+        "fn idt[T](x: T) -> T:\n    return x\nfn main():\n    g := idt[(int, str)]\n    print(g((1, \"a\")))\n",
+    );
+}
