@@ -2149,6 +2149,7 @@ impl Checker {
                         };
                         match targ_elem {
                             Some(t) => {
+                                self.check_const_fits(&Ty::list(t.clone()), &args[0]);
                                 if !t.is_unknown()
                                     && !elem.is_unknown()
                                     && !self.assignable(&t, &elem)
@@ -2208,6 +2209,7 @@ impl Checker {
                         };
                         match targ_elem {
                             Some(t) => {
+                                self.check_const_fits(&Ty::set(t.clone()), &args[0]);
                                 if !t.is_unknown()
                                     && !elem.is_unknown()
                                     && !self.assignable(&t, &elem)
@@ -2285,6 +2287,10 @@ impl Checker {
                             }
                         };
                         if let Some((tk, tv)) = &targ_kv {
+                            self.check_const_fits(
+                                &Ty::list(Ty::Tuple(vec![tk.clone(), tv.clone()])),
+                                &args[0],
+                            );
                             if !tk.is_unknown() && !k.is_unknown() && !self.assignable(tk, &k) {
                                 let note = self.protocol_note(tk, &k);
                                 let [tk_s, tv_s, k_s] = Ty::render_distinct([tk, tv, &k]);
@@ -4340,6 +4346,81 @@ impl Checker {
 
     /// Check argument count and each argument's type against a known parameter list. STRICT — an int
     /// never widens into a `float` slot (D3, TICKET-138).
+    /// TICKET-218 — reject a CONSTANT outside the C width a slot carries (`x: int8 = 1000`):
+    /// `constant 1000 does not fit int8 (-128..127)`. Called beside the `assignable` of every
+    /// value-into-slot site; a new site must call it too, or a constant there reaches C unchecked
+    /// (and faults at run time). It descends through list/set/map/tuple literals, `Some`/`Ok`/`Err`,
+    /// `if`/`match` branches and the `rhs` of `??`. Skipped while inferring a return (DEC-183) or in
+    /// the generic-arg prepass; one report per span (`const_overflow_seen`).
+    pub(super) fn check_const_fits(&mut self, slot: &Ty, value: &Expr) {
+        if self.inferring_ret || self.generic_arg_prepass {
+            return;
+        }
+        if let Some(w) = slot.width() {
+            let shown = if *w == crate::native::cffi::CType::Float32 {
+                crate::ast::const_float(value)
+                    .filter(|f| !w.fits_f64(*f))
+                    .map(|f| format!("{f:e}"))
+            } else {
+                crate::ast::const_int_scan(value, &mut self.const_scan_visits, &mut Vec::new())
+                    .filter(|k| !w.fits_int(*k, true))
+                    .map(|k| k.to_string())
+            };
+            if let Some(k) = shown
+                && self.const_overflow_seen.insert(value.span)
+            {
+                let name = w.width_name().unwrap_or("?");
+                let range = w.range_text();
+                self.error(
+                    value.span,
+                    format!("constant {k} does not fit {name} {range}"),
+                );
+            }
+        }
+        match (slot, &value.kind) {
+            (Ty::List(e) | Ty::Set(e), ExprKind::List(items, _) | ExprKind::Set(items)) => {
+                for it in items {
+                    self.check_const_fits(e, it);
+                }
+            }
+            (Ty::Map(k, v), ExprKind::Map(es)) => {
+                for (ke, ve) in es {
+                    self.check_const_fits(k, ke);
+                    self.check_const_fits(v, ve);
+                }
+            }
+            (Ty::Tuple(ts), ExprKind::Tuple(xs)) => {
+                for (t, x) in ts.iter().zip(xs) {
+                    self.check_const_fits(t, x);
+                }
+            }
+            (_, ExprKind::Call { callee, args, .. }) if args.len() == 1 => {
+                let ExprKind::Ident(n) = &callee.kind else {
+                    return;
+                };
+                match (n.as_str(), slot) {
+                    ("Some", Ty::Option(e))
+                    | ("Ok", Ty::Result(e, _))
+                    | ("Err", Ty::Result(_, e)) => {
+                        self.check_const_fits(e, &args[0]);
+                    }
+                    _ => {}
+                }
+            }
+            (_, ExprKind::IfElse { then, els, .. }) => {
+                self.check_const_fits(slot, then);
+                self.check_const_fits(slot, els);
+            }
+            (_, ExprKind::Match { arms, .. }) => {
+                for a in arms {
+                    self.check_const_fits(slot, &a.body);
+                }
+            }
+            (_, ExprKind::NullCoalesce { rhs, .. }) => self.check_const_fits(slot, rhs),
+            _ => {}
+        }
+    }
+
     pub(super) fn check_args(&mut self, name: &str, params: &[Ty], args: &[Expr], span: Span) {
         self.check_args_range(name, params, params.len(), args, span);
     }
@@ -4517,6 +4598,7 @@ impl Checker {
         } else {
             fallback.clone()
         };
+        self.check_const_fits(expected, arg);
         if !self.assignable(expected, fallback) {
             let [fallback_s, expected_s] = Ty::render_distinct([fallback, expected]);
             self.error(
@@ -4786,6 +4868,7 @@ impl Checker {
             // un-inferred / generic slot does not spuriously satisfy the requirement.
             if let Some(pt) = params.get(i) {
                 self.constrain_empty_arg(arg, pt);
+                self.check_const_fits(pt, arg);
             }
             if let Some(pt) = params.get(i)
                 && !self.assignable(pt, &at)

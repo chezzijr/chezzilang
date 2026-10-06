@@ -80,26 +80,26 @@ native fn load_str_at(p: ptr, off: int) -> str
 #     is of the matching kind; there is NO `str` store. `str` has no store counterpart.
 native fn store_int(p: ptr, v: int) -> nil
 native fn store_int_at(p: ptr, off: int, v: int) -> nil
-native fn store_int8(p: ptr, v: int) -> nil
-native fn store_int8_at(p: ptr, off: int, v: int) -> nil
-native fn store_int16(p: ptr, v: int) -> nil
-native fn store_int16_at(p: ptr, off: int, v: int) -> nil
-native fn store_int32(p: ptr, v: int) -> nil
-native fn store_int32_at(p: ptr, off: int, v: int) -> nil
-native fn store_int64(p: ptr, v: int) -> nil
-native fn store_int64_at(p: ptr, off: int, v: int) -> nil
-native fn store_uint8(p: ptr, v: int) -> nil
-native fn store_uint8_at(p: ptr, off: int, v: int) -> nil
-native fn store_uint16(p: ptr, v: int) -> nil
-native fn store_uint16_at(p: ptr, off: int, v: int) -> nil
-native fn store_uint32(p: ptr, v: int) -> nil
-native fn store_uint32_at(p: ptr, off: int, v: int) -> nil
-native fn store_uint64(p: ptr, v: int) -> nil
-native fn store_uint64_at(p: ptr, off: int, v: int) -> nil
+native fn store_int8(p: ptr, v: int8) -> nil
+native fn store_int8_at(p: ptr, off: int, v: int8) -> nil
+native fn store_int16(p: ptr, v: int16) -> nil
+native fn store_int16_at(p: ptr, off: int, v: int16) -> nil
+native fn store_int32(p: ptr, v: int32) -> nil
+native fn store_int32_at(p: ptr, off: int, v: int32) -> nil
+native fn store_int64(p: ptr, v: int64) -> nil
+native fn store_int64_at(p: ptr, off: int, v: int64) -> nil
+native fn store_uint8(p: ptr, v: uint8) -> nil
+native fn store_uint8_at(p: ptr, off: int, v: uint8) -> nil
+native fn store_uint16(p: ptr, v: uint16) -> nil
+native fn store_uint16_at(p: ptr, off: int, v: uint16) -> nil
+native fn store_uint32(p: ptr, v: uint32) -> nil
+native fn store_uint32_at(p: ptr, off: int, v: uint32) -> nil
+native fn store_uint64(p: ptr, v: uint64) -> nil
+native fn store_uint64_at(p: ptr, off: int, v: uint64) -> nil
 native fn store_float(p: ptr, v: float) -> nil
 native fn store_float_at(p: ptr, off: int, v: float) -> nil
-native fn store_float32(p: ptr, v: float) -> nil
-native fn store_float32_at(p: ptr, off: int, v: float) -> nil
+native fn store_float32(p: ptr, v: float32) -> nil
+native fn store_float32_at(p: ptr, off: int, v: float32) -> nil
 native fn store_bool(p: ptr, v: bool) -> nil
 native fn store_bool_at(p: ptr, off: int, v: bool) -> nil
 native fn store_ptr(p: ptr, v: ptr) -> nil

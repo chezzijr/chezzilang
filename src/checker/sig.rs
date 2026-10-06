@@ -2665,6 +2665,7 @@ impl Checker {
                 let name = &names[0];
                 let mut declared = match annotated {
                     Some(expected) => {
+                        self.check_const_fits(&expected, value);
                         if !self.assignable(&expected, &val_ty) {
                             let note = self.protocol_note(&expected, &val_ty);
                             let [val_s, expected_s] = Ty::render_distinct([&val_ty, &expected]);
@@ -2933,7 +2934,7 @@ impl Checker {
                     Some(t)
                 };
                 self.drop_value_escape_sites(value, sink.as_ref());
-                self.check_assign(target, *op, val_ty, span);
+                self.check_assign(target, *op, val_ty, Some(value), span);
                 // TICKET-089 — `b.get().v = 9` / `s.get()[0] = 9` write into the deep copy a box read
                 // returns, so the write is lost. Walk the target down to its innermost base.
                 let mut base = target;
@@ -3095,6 +3096,7 @@ impl Checker {
                         let actual = self.infer_arg(def, fhint.as_ref());
                         let actual = self.resolve_default_binders(&expected, actual);
                         self.decl_site_default = saved_dsd;
+                        self.check_const_fits(&expected, def);
                         if !matches!(expected, Ty::Unknown) && !self.assignable(&expected, &actual)
                         {
                             let note = self.protocol_note(&expected, &actual);
@@ -4165,7 +4167,14 @@ impl Checker {
         }
     }
 
-    pub(super) fn check_assign(&mut self, target: &Expr, op: AssignOp, val_ty: Ty, span: Span) {
+    pub(super) fn check_assign(
+        &mut self,
+        target: &Expr,
+        op: AssignOp,
+        val_ty: Ty,
+        value: Option<&Expr>,
+        span: Span,
+    ) {
         // Task 1 — an index/field-assign (`m[k]=v`, `s.field=x`) on a captured module global inside a
         // task is no longer rejected: spawning deep-copies module globals per task, so the write hits
         // the task's OWN copy. Gate
@@ -4263,7 +4272,7 @@ impl Checker {
                 // the let-binding/for-binding `Local` hover. Simple-Ident lvalue only (Index/Field
                 // targets are handled in their own arms below, where the receiver IS inferred).
                 self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
-                self.check_assign_value(&var_ty, op, &val_ty, target.span);
+                self.check_assign_value(&var_ty, op, &val_ty, value, target.span);
                 // TICKET-032 A1 — a whole-binding (re)assignment rebinds `name` to a DIFFERENT runtime
                 // object, breaking any alias pair naming it. `+=` on a `List` is the one exception
                 // (DEC-015): it extends IN PLACE and yields the SAME handle, so the pair survives.
@@ -4342,17 +4351,17 @@ impl Checker {
                         {
                             self.error(index.span, format!("map key type {why}"));
                         }
-                        self.check_assign_value(&v, op, &val_ty, target.span);
+                        self.check_assign_value(&v, op, &val_ty, value, target.span);
                     }
                     Ty::List(elem) => {
                         self.expect_int(index, "index");
-                        self.check_assign_value(&elem, op, &val_ty, target.span);
+                        self.check_assign_value(&elem, op, &val_ty, value, target.span);
                     }
                     // `ba[i] = x` — the MUTABLE sibling of bytes. Int index, int value (0–255
                     // validated at runtime). Bytes has NO arm here (immutable); bytearray adds one.
                     Ty::ByteArray => {
                         self.expect_int(index, "index");
-                        self.check_assign_value(&Ty::Int, op, &val_ty, target.span);
+                        self.check_assign_value(&Ty::Int, op, &val_ty, value, target.span);
                     }
                     Ty::Str => {
                         self.expect_int(index, "index");
@@ -4375,7 +4384,7 @@ impl Checker {
                                     format!("index must be {k_s}, found {idx_s}"),
                                 );
                             }
-                            self.check_assign_value(&v, op, &val_ty, target.span);
+                            self.check_assign_value(&v, op, &val_ty, value, target.span);
                         } else {
                             self.error(target.span, format!("cannot index-assign into {name}"));
                         }
@@ -4427,7 +4436,9 @@ impl Checker {
                             });
                             match incoherent {
                                 Some(msg) => self.error(target.span, msg),
-                                None => self.check_assign_value(&v, op, &val_ty, target.span),
+                                None => {
+                                    self.check_assign_value(&v, op, &val_ty, value, target.span)
+                                }
                             }
                         } else {
                             self.expect_int(index, "index");
@@ -4458,7 +4469,9 @@ impl Checker {
                                 .map(|(_, ty)| subst(ty, &struct_param_map(info, targs)))
                         });
                         match field_ty {
-                            Some(ty) => self.check_assign_value(&ty, op, &val_ty, target.span),
+                            Some(ty) => {
+                                self.check_assign_value(&ty, op, &val_ty, value, target.span)
+                            }
                             None => {
                                 let names = self.field_names(sname);
                                 self.error_help(
@@ -4521,7 +4534,7 @@ impl Checker {
                 }
                 let elems = elems.clone();
                 for (t, ety) in targets.iter().zip(elems) {
-                    self.check_assign(t, AssignOp::Eq, ety, span);
+                    self.check_assign(t, AssignOp::Eq, ety, None, span);
                 }
             }
             _ => self.error(
@@ -4536,9 +4549,17 @@ impl Checker {
         target_ty: &Ty,
         op: AssignOp,
         val_ty: &Ty,
+        value: Option<&Expr>,
         span: Span,
     ) {
-        // TICKET-218: a width slot takes what its scalar takes.
+        // TICKET-218: a constant outside the slot's C width is rejected, for `=` and for a compound
+        // operand (Go: `300 (untyped int constant) overflows int8`) except a shift count. Then a
+        // width slot takes what its scalar takes.
+        if let Some(v) = value
+            && !matches!(op, AssignOp::ShlEq | AssignOp::ShrEq)
+        {
+            self.check_const_fits(target_ty, v);
+        }
         let target_ty = target_ty.scalar();
         match op {
             AssignOp::Eq => {
@@ -4724,6 +4745,7 @@ impl Checker {
                         None
                     };
                     self.record_ret_coerce(e.span, mode);
+                    self.check_const_fits(&ret, e);
                     if mode.is_some() {
                     } else if !self.assignable(&ret, &ty) {
                         let note = self.protocol_note(&ret, &ty);
@@ -4845,6 +4867,9 @@ impl Checker {
         }
         // Pass 2: validate each yield against the pinned element type `T`. An `int` yielded under an
         // inferred/annotated `float` `T` is rejected (D3: no int→float slot widening).
+        if let Some(elem) = self.yield_ty.clone() {
+            self.check_const_fits(&elem, e);
+        }
         if let Some(elem) = self.yield_ty.clone()
             && !self.assignable(&elem, &ty)
         {
@@ -5189,6 +5214,7 @@ impl Checker {
                 self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;
+                self.check_const_fits(&ty, def);
                 if !matches!(ty, Ty::Unknown) && !self.assignable(&ty, &actual) {
                     let note = self.protocol_note(&ty, &actual);
                     let [ty_s, actual_s] = Ty::render_distinct([&ty, &actual]);
@@ -5252,6 +5278,7 @@ impl Checker {
                     None
                 };
                 self.record_ret_coerce(e.span, mode);
+                self.check_const_fits(&ret, e);
                 if mode.is_none() && !self.assignable(&ret, &ty) {
                     let note = self.protocol_note(&ret, &ty);
                     let [ret_s, ty_s] = Ty::render_distinct([&ret, &ty]);

@@ -15123,16 +15123,16 @@ fn ffi_fn_sigs_exact() {
     }
     for (n, v) in [
         ("store_int", Ty::Int),
-        ("store_int8", Ty::Int),
-        ("store_int16", Ty::Int),
-        ("store_int32", Ty::Int),
-        ("store_int64", Ty::Int),
-        ("store_uint8", Ty::Int),
-        ("store_uint16", Ty::Int),
-        ("store_uint32", Ty::Int),
-        ("store_uint64", Ty::Int),
+        ("store_int8", super::sig::ffi_width_ty("int8")),
+        ("store_int16", super::sig::ffi_width_ty("int16")),
+        ("store_int32", super::sig::ffi_width_ty("int32")),
+        ("store_int64", super::sig::ffi_width_ty("int64")),
+        ("store_uint8", super::sig::ffi_width_ty("uint8")),
+        ("store_uint16", super::sig::ffi_width_ty("uint16")),
+        ("store_uint32", super::sig::ffi_width_ty("uint32")),
+        ("store_uint64", super::sig::ffi_width_ty("uint64")),
         ("store_float", Ty::Float),
-        ("store_float32", Ty::Float),
+        ("store_float32", super::sig::ffi_width_ty("float32")),
         ("store_bool", Ty::Bool),
         ("store_ptr", Ty::Ptr),
     ] {
@@ -24589,6 +24589,151 @@ fn width_ty_is_a_tag_on_its_scalar() {
             "{prefix}protocol A:\n    fn m(self, x: int8) -> nil\nprotocol B:\n    fn m(self, x: int) -> nil\nprotocol C:\n    A + B\n"
         ),
         "conflicting signature",
+    );
+}
+
+/// TICKET-218 — a constant outside a C width is a compile error at every value-into-slot site, type
+/// arguments, literals and branches included; its in-range neighbours check clean. Go, run 2026-10-06:
+/// `cannot use 300 (untyped int constant) as int8 value in variable declaration (overflows)`, and the
+/// same for argument, return, array/slice, map and struct literals; Rust: `literal out of range for
+/// `i8`` for `Some(300)`, `if c { 300 } else { 1 }` and `x += 300`.
+#[test]
+fn ffi_width_constant_grid() {
+    use crate::native::cffi::{CType, width_ctype};
+    // `{w}` is the width, `{k}` the constant.
+    let sites: &[&str] = &[
+        "extern \"libc.so.6\":\n    fn idw(x: {w}) -> {w}\nidw({k})\n",
+        "fn f(x: {w}) -> nil:\n    pass\nf({k})\n",
+        "struct S:\n    n: int\n    fn m(self, x: {w}) -> nil:\n        pass\ns := S(1)\ns.m({k})\n",
+        "protocol P:\n    fn m(self, x: {w}) -> nil\nfn h(q: P) -> nil:\n    q.m({k})\n",
+        "protocol P:\n    fn m(self, x: {w}) -> nil\nfn g[T: P](t: T) -> nil:\n    t.m({k})\n",
+        "struct S:\n    f: {w}\ns := S({k})\n",
+        "enum E:\n    A({w})\ne := E.A({k})\n",
+        "enum G[T]:\n    B({w}, T)\ng := G.B({k}, 1)\n",
+        "struct S:\n    f: {w}\ns := S(0)\ns.f = {k}\n",
+        "l: List[{w}] = [0]\nl[0] = {k}\n",
+        "x: {w} = {k}\n",
+        "x: {w} = 0\nx = {k}\n",
+        "fn g(x: {w} = {k}) -> nil:\n    pass\n",
+        "struct S:\n    f: {w} = {k}\n",
+        "fn setg() -> nil:\n    G = {k}\nG: {w} = 0\n",
+        "fn r() -> {w}:\n    return {k}\n",
+        "fn r() -> {w}: {k}\n",
+        "fn gen() -> Iterator[{w}]:\n    yield {k}\n",
+        "c := fn() -> {w}: {k}\n",
+        "c := fn(x: {w}) -> int: 0\nc({k})\n",
+        "l: List[{w}] = [{k}]\n",
+        "l: List[{w}] = []\nl.push({k})\n",
+        "m: Map[str, {w}] = {\"a\": {k}}\n",
+        "t: ({w}, int) = ({k}, 1)\n",
+        "o: Option[{w}] = Some({k})\n",
+        "r: Result[{w}, str] = Ok({k})\n",
+        "struct Box[T]:\n    v: T\nb := Box[{w}]({k})\n",
+        "l := List[{w}]([{k}])\n",
+        "m := Map[str, {w}]([(\"a\", {k})])\n",
+        "c := true\nx: {w} = if c: {k} else: 0\n",
+        "c := true\nx: {w} = if c: 0 else: {k}\n",
+        "n := 1\nx: {w} = match n:\n    1: {k}\n    _: 0\n",
+        "o: Option[int] = None\nx: {w} = o ?? {k}\n",
+        "ffi.store_{w}(ffi.null(), {k})\n",
+    ];
+    // Integer-only: compound assignment and `Set` (a float is not Hashable).
+    let int_sites: &[&str] = &["x: {w} = 0\nx += {k}\n", "s := Set[{w}]([{k}])\n"];
+    let mut red: Vec<String> = Vec::new();
+    for d in crate::native::ffi::declared_types() {
+        if d.scalar.is_none() {
+            continue;
+        }
+        let w = d.name.as_str();
+        let ct = width_ctype(w).unwrap();
+        let fail = |k: &str| format!("constant {k} does not fit {w} {}", ct.range_text());
+        // (constant text, expected rejection needle or None for clean)
+        let ks: Vec<(String, Option<String>)> = match &ct {
+            CType::Float32 => vec![
+                ("3.4028234663852886e38".into(), None),
+                ("1e39".into(), Some(fail("1e39"))),
+                ("-1e39".into(), Some(fail("-1e39"))),
+            ],
+            CType::Int64 => vec![
+                ("-9223372036854775808".into(), None),
+                ("9223372036854775807".into(), None),
+            ],
+            CType::UInt64 => vec![
+                ("0".into(), None),
+                ("9223372036854775807".into(), None),
+                ("-1".into(), Some(fail("-1"))),
+            ],
+            _ => {
+                let (lo, hi) = ct.int_range().unwrap();
+                vec![
+                    (lo.to_string(), None),
+                    (hi.to_string(), None),
+                    ((lo - 1).to_string(), Some(fail(&(lo - 1).to_string()))),
+                    ((hi + 1).to_string(), Some(fail(&(hi + 1).to_string()))),
+                ]
+            }
+        };
+        let float = ct == CType::Float32;
+        let all: Vec<&&str> = sites
+            .iter()
+            .chain(int_sites.iter().filter(|_| !float))
+            .collect();
+        for site in all {
+            for (k, want) in &ks {
+                // A float site with a `0` default/branch needs a float zero.
+                let body = site.replace("{w}", w).replace("{k}", k);
+                let body = if float {
+                    body.replace("= 0\n", "= 0.0\n")
+                        .replace("else: 0\n", "else: 0.0\n")
+                        .replace("if c: 0 else", "if c: 0.0 else")
+                        .replace("_: 0\n", "_: 0.0\n")
+                        .replace("[0]\n", "[0.0]\n")
+                        .replace("S(0)\n", "S(0.0)\n")
+                        .replace("Option[int]", "Option[float]")
+                } else {
+                    body
+                };
+                let src = format!("import std.ffi\nimport {w} from std.ffi\n{body}");
+                let errs = check_entry(&src);
+                match want {
+                    None if !errs.is_empty() => {
+                        red.push(format!("{src}\n  want clean, got {errs:?}"))
+                    }
+                    Some(n) if !errs.iter().any(|e| e.message.contains(n.as_str())) => {
+                        red.push(format!("{src}\n  want {n:?}, got {errs:?}"))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // A qualified ctor across modules, and a local inferred from a width value stays a plain int.
+    let two = [
+        (
+            "main.chz",
+            "import lib\nimport int8 from std.ffi\ns := lib.S(300)\n",
+        ),
+        (
+            "lib.chz",
+            "import int8 from std.ffi\nstruct S:\n    f: int8\n",
+        ),
+    ];
+    let errs = check_files(&two);
+    if !errs.iter().any(|e| {
+        e.message
+            .contains("constant 300 does not fit int8 (-128..127)")
+    }) {
+        red.push(format!("qualified ctor: got {errs:?}"));
+    }
+    let errs = check_entry("import int8 from std.ffi\nx: int8 = 5\ny := x\ny = 1000\n");
+    if !errs.is_empty() {
+        red.push(format!("inferred local: got {errs:?}"));
+    }
+    assert!(
+        red.is_empty(),
+        "{} red cells:\n{}",
+        red.len(),
+        red.join("\n")
     );
 }
 

@@ -1384,6 +1384,19 @@ pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
     }
 }
 
+/// The value of a float constant: a `Float` literal, or a negated one (TICKET-218's float32 range
+/// check). Anything else is `None`.
+pub fn const_float(e: &Expr) -> Option<f64> {
+    match &e.kind {
+        ExprKind::Float(f) => Some(*f),
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => const_float(expr).map(|f| -f),
+        _ => None,
+    }
+}
+
 /// TICKET-142 (W14-33): evaluate an ALL-CONSTANT int expression — int literals under `+ - * / %` and
 /// unary `-` — with the VM's own int semantics (`checked_add/sub/mul/neg/div`, `%` is `wrapping_rem`,
 /// a zero divisor faults at runtime so it yields `None` here). Returns `Some(value)` when every leaf

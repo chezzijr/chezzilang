@@ -1042,7 +1042,7 @@ impl Checker {
                         // `=` assigns an existing outer lvalue — reuse the ordinary assignment checks
                         // (assignability, type match, read-only/loop-var gates).
                         WaitTarget::Assign(target) => {
-                            self.check_assign(target, AssignOp::Eq, elem, arm.span)
+                            self.check_assign(target, AssignOp::Eq, elem, None, arm.span)
                         }
                         WaitTarget::Discard => {}
                     }
@@ -5642,6 +5642,7 @@ impl Checker {
                 {
                     self.record_ret_coerce(body.span, Some(m));
                 }
+                self.check_const_fits(&declared, body);
                 if mode.is_none() && !self.assignable(&declared, &body_ty) {
                     self.error(
                         body.span,
