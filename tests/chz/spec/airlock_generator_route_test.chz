@@ -350,3 +350,21 @@ test fn written_nested_generator_binding_gets_no_stamp():
     for shape in ["reassign", "loop", "nested_fn"]:
         cell := t190_written_cell(shape)
         assert cell == "fault [1]", "{shape}: {cell}"
+
+import submit_task from std.concurrency.task
+
+fn t220_started() -> Iterator[int]:
+    return t190_started(t190_gl())
+
+# TICKET-220: an unobserved Task.get() copy of a generator with a frame-local list must run.
+test fn task_get_copy_of_frame_local_generator_runs():
+    ex := Executor()
+    t := submit_task(ex, t220_started)
+    ex.shutdown()
+    out := Channel[str](1)
+    parallel:
+        spawn:
+            match t.get():
+                Ok(g): out.send(t190_cell(g))
+                Err(e): out.send("err: {e.message()}")
+    assert out.recv() == "2"
