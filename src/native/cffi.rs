@@ -65,7 +65,7 @@ use super::{Host, HostError, NativeRet};
 /// `Type` is rebuilt per call from `fields` — exactly as the [`Cif`] is already rebuilt per call —
 /// so [`CType`] (and the `Arc<Cffi>` that stores it) stays `Send + Sync` for `--parallel`/the M:N
 /// snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CType {
     Int,
     Float,

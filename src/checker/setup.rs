@@ -4538,7 +4538,7 @@ impl Checker {
         allow_void: bool,
     ) {
         let scalar = matches!(
-            ty,
+            ty.scalar(),
             Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Ptr | Ty::Unknown
         );
         let ok = scalar
@@ -4560,8 +4560,12 @@ impl Checker {
         if let Ty::Func { params, ret, .. } = ty
             && !allow_void
         {
-            let part_ok =
-                |t: &Ty| matches!(t, Ty::Int | Ty::Float | Ty::Bool | Ty::Ptr | Ty::Unknown);
+            let part_ok = |t: &Ty| {
+                matches!(
+                    t.scalar(),
+                    Ty::Int | Ty::Float | Ty::Bool | Ty::Ptr | Ty::Unknown
+                )
+            };
             if params.iter().all(part_ok) && (part_ok(ret) || matches!(**ret, Ty::Nil)) {
                 return;
             }
@@ -4647,7 +4651,10 @@ impl Checker {
             }
             // Otherwise only true C *scalars* are valid struct fields (NOT `Str`: whether C may hold
             // a `char*` into Chezzi memory is an ownership question, out of scope).
-            let ok = matches!(fty, Ty::Int | Ty::Float | Ty::Bool | Ty::Ptr | Ty::Unknown);
+            let ok = matches!(
+                fty.scalar(),
+                Ty::Int | Ty::Float | Ty::Bool | Ty::Ptr | Ty::Unknown
+            );
             if !ok {
                 all_ok = false;
                 self.error(

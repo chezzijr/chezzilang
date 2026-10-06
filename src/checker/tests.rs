@@ -19946,7 +19946,7 @@ fn extern_owned_nullable_str_return_marshallable() {
 
 #[test]
 fn extern_fixed_width_int_param_and_return_ok() {
-    // Each fixed-width int marshalling name (int8..uint64) resolves to a plain `int` (`Ty::Int`) and
+    // Each fixed-width int marshalling name (int8..uint64) resolves to `Ty::Width` (a tag on `int`) and
     // is BIDIRECTIONAL — valid as BOTH a param and a return. abs/atoi are stand-ins; the point is the
     // type-checker accepts the name in both positions and the program sees an `int`. The width names
     // are NOT global builtins — each module that names one must `import <name> from std.ffi` first.
@@ -20331,7 +20331,7 @@ fn width_name_not_leaked_across_modules() {
 #[test]
 fn cross_module_struct_with_width_field_usable_without_import() {
     // A struct declared in module A (which imports int32) with int32 fields is usable from module B
-    // WITHOUT B importing int32 — the field types were resolved to `Ty::Int` during A's checking, so B
+    // WITHOUT B importing int32 — the field types were resolved to `Ty::Width` during A's checking, so B
     // never re-resolves the width NAME. B reads `.x` as a plain int.
     let t = TmpDir::new();
     t.write(
@@ -24553,6 +24553,43 @@ fn native_module_mutable_global_rejected() {
         assert_eq!(hit, bad, "{src:?}: {:?}", c.errors);
         assert_eq!(sig.members.contains_key("x"), !bad, "{src:?}");
     }
+}
+
+/// TICKET-218 — a C width is a tag on a SLOT type (`Ty::Width`): every value read through it is the
+/// plain scalar, so arithmetic, comparison, formatting, indexing, iteration and map keys work as on
+/// `int`/`float`. The width shows in a slot's diagnostics, and two embedded protocols that disagree
+/// on a param's width conflict (Go: `duplicate method M`).
+#[test]
+fn width_ty_is_a_tag_on_its_scalar() {
+    let prefix = "import std.ffi\nimport int8, int32, uint32, float32 from std.ffi\n";
+    for body in [
+        "x: int8 = 5\ny: int = x + 1\nb := x < y\ns := \"{x:4d}\"\nt := str(x)\n",
+        "l: List[int8] = [1, 2]\nn: int = l[0] + 1\nfor v in l:\n    n = n + v\n",
+        "m: Map[uint32, str] = {1: \"a\"}\nprint(m[1])\n",
+        "fn f(x: int8) -> int8:\n    return x\ny := f(3) + 1\n",
+        "struct P:\n    a: int8\np := P(1)\nq := p.a + 1\n",
+        "g: float32 = 1.5\nh := g + 1.0\n",
+        "struct Box[T]:\n    v: T\nbx: Box[int8] = Box(1)\nw := bx.v + 1\n",
+        "extern \"libc.so.6\":\n    fn abs(x: int32) -> int32\nprint(abs(-3) + 1)\n",
+    ] {
+        let errs = check_entry(&format!("{prefix}{body}"));
+        assert!(errs.is_empty(), "{body:?}: {errs:?}");
+    }
+    rejects_entry(
+        &format!("{prefix}x: int8 = \"a\"\n"),
+        "cannot assign str to variable of type int8",
+    );
+    // A local inferred from a width value still rejects a non-int.
+    rejects_entry(
+        &format!("{prefix}x: int8 = 5\ny := x\ny = \"s\"\n"),
+        "cannot assign str to int",
+    );
+    rejects_entry(
+        &format!(
+            "{prefix}protocol A:\n    fn m(self, x: int8) -> nil\nprotocol B:\n    fn m(self, x: int) -> nil\nprotocol C:\n    A + B\n"
+        ),
+        "conflicting signature",
+    );
 }
 
 /// TICKET-218 — a `native type` decl is STD-ONLY like `native struct`/`native enum`.

@@ -1244,6 +1244,7 @@ impl Checker {
             // any FUTURE `Ty` variant carrying an inner type fails to compile here instead of silently
             // re-opening the residual-`Unknown` leak.
             Ty::Int
+            | Ty::Width(_)
             | Ty::Float
             | Ty::Bool
             | Ty::Str
@@ -2033,8 +2034,8 @@ impl Checker {
                         self.reject_static_protocol_value(ty, span)
                     }
                     // Fixed-width C-ABI integer marshalling type names (`int8`..`uint64`) — Chezzi's first
-                    // type imports. Each resolves to a plain `int` (`Ty::Int`) — the width/signedness is a
-                    // runtime-only marshalling distinction the backends recover via `ctype_of`, and they're
+                    // type imports. Each resolves to `Ty::Width` (`ffi_width_ty`), a slot tag whose value
+                    // is a plain `int`/`float`; the backends recover the C width via `ctype_of`, and they're
                     // BIDIRECTIONAL (valid as both param and return). But they are NOT global builtins: a
                     // width name resolves only in a module that imported it per-name from `std.ffi`
                     // (`import int32 from std.ffi` → `imported_ffi_types`). Otherwise it's an unknown type
@@ -4537,6 +4538,8 @@ impl Checker {
         val_ty: &Ty,
         span: Span,
     ) {
+        // TICKET-218: a width slot takes what its scalar takes.
+        let target_ty = target_ty.scalar();
         match op {
             AssignOp::Eq => {
                 if !self.assignable(target_ty, val_ty) {
@@ -6150,15 +6153,15 @@ impl Checker {
     }
 }
 
-/// The Chezzi type of a `std.ffi` width name (a `native type NAME = int|float` decl of `std/ffi.chz`): `float` for
-/// `float32`, `int` for every integer width. The one owner of that fact -- the qualified, bare and
-/// alias-export resolvers all call it, so an alias's `Ty` agrees with its `CType`.
+/// The Chezzi type of a `std.ffi` width name (a `native type NAME = int|float` decl of
+/// `std/ffi.chz`): `Ty::Width` carrying its `cffi::width_ctype` — a slot tag whose value is `float`
+/// for `float32` and `int` for every integer width (`Ty::scalar`). The one builder of `Ty::Width`:
+/// the qualified, bare and alias-export resolvers all call it, so an alias's `Ty` agrees with its
+/// `CType`.
 pub(super) fn ffi_width_ty(name: &str) -> Ty {
-    if crate::native::ffi::width_is_float(name) {
-        Ty::Float
-    } else {
-        Ty::Int
-    }
+    Ty::Width(
+        crate::native::cffi::width_ctype(name).expect("ffi_width_ty: a declared std.ffi width"),
+    )
 }
 
 /// TICKET-201 — each method of type `owner` as a struct-body binder for

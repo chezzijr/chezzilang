@@ -117,6 +117,7 @@ pub fn from_ty<F: Clone>(
     visiting: &mut Vec<String>,
 ) -> Result<TypeDescriptor<F>, String> {
     let sub = |t: &Ty, visiting: &mut Vec<String>| from_ty(t, shape, visiting).map(Box::new);
+    let ty = ty.scalar();
     match ty {
         Ty::Unknown => Err(String::new()),
         Ty::Int => Ok(TypeDescriptor::Int),

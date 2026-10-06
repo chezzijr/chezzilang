@@ -415,6 +415,12 @@ pub enum Ty {
     /// no fields; only `==`/`!=` against another `ptr` (incl. `std.ffi.null()`) and pass/return.
     /// Untyped (one `ptr` for every handle), never auto-freed. Sendable (a plain address).
     Ptr,
+    /// A C width (`int8`..`uint64`, `float32`) on a SLOT type (TICKET-218): a binding, param,
+    /// return, field, payload or type argument declared with an imported `std.ffi` width. Built only
+    /// by `ffi_width_ty`. It is a tag on `int`/`float`, never a distinct type: `compatible` and
+    /// `assignable` ignore it, and `infer_kind` erases it, so every VALUE type is the plain scalar
+    /// ([`Ty::scalar`]). `check_const_fits` reads it to reject a constant outside the width.
+    Width(crate::native::cffi::CType),
     /// A protocol used *as a value type* (existential), e.g. the default error type `Error`, or a
     /// PARAMETERIZED protocol `Container[int]`. The `Vec<Ty>` carries the protocol's concrete type
     /// arguments (empty for a bare/non-generic existential like `Error`). A concrete type is
@@ -476,9 +482,29 @@ impl Ty {
         Ty::Struct(name.into(), Vec::new())
     }
 
+    /// The C width a slot type carries (`Ty::Width`), if any.
+    pub fn width(&self) -> Option<&crate::native::cffi::CType> {
+        match self {
+            Ty::Width(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The scalar a width slot holds (`float32` gives `float`, every other width `int`); every
+    /// other type gives itself.
+    pub fn scalar(&self) -> &Ty {
+        static INT: Ty = Ty::Int;
+        static FLOAT: Ty = Ty::Float;
+        match self {
+            Ty::Width(crate::native::cffi::CType::Float32) => &FLOAT,
+            Ty::Width(_) => &INT,
+            other => other,
+        }
+    }
+
     /// Is this a number (`int` or `float`)?
     pub fn is_numeric(&self) -> bool {
-        matches!(self, Ty::Int | Ty::Float)
+        matches!(self.scalar(), Ty::Int | Ty::Float)
     }
 
     pub fn is_unknown(&self) -> bool {
@@ -541,6 +567,9 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     use Ty::*;
     match (expected, actual) {
         (Unknown, _) | (_, Unknown) => true,
+        // A C width is a tag on its scalar (TICKET-218): compatibility ignores it, nested too.
+        (Width(_), _) => compatible(expected.scalar(), actual),
+        (_, Width(_)) => compatible(expected, actual.scalar()),
         (Int, Int)
         | (Float, Float)
         | (Bool, Bool)
@@ -814,6 +843,7 @@ impl Ty {
             Ty::Writer => write!(f, "Writer"),
             Ty::Reader => write!(f, "Reader"),
             Ty::Ptr => write!(f, "ptr"),
+            Ty::Width(c) => write!(f, "{}", c.width_name().unwrap_or("?")),
             // `n` is the qualified IDENTITY key (`<module-key>::Name`, TICKET-027); user-facing
             // diagnostics render the BARE display name (matching runtime display) unless `names`
             // qualifies it because a different type with the same bare name is in the same message.

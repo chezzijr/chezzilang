@@ -458,7 +458,7 @@ impl Checker {
     /// matches no row and therefore trips `grant_intrinsic`'s assert (classify it and add its rows
     /// rather than widening this catch-all).
     fn intrinsic_recv_kind(ty: &Ty) -> &'static str {
-        match ty {
+        match ty.scalar() {
             Ty::Int => "int",
             Ty::Float => "float",
             Ty::Bool => "bool",
@@ -503,7 +503,7 @@ impl Checker {
     /// IMPROVES the message: "type int does not satisfy Sized (missing method 'len')" instead of
     /// the bare clause.
     fn native_witness_key(ty: &Ty) -> Option<&'static str> {
-        match ty {
+        match ty.scalar() {
             Ty::List(_) => Some("List"),
             Ty::Map(..) => Some("Map"),
             Ty::Set(_) => Some("Set"),
@@ -1191,6 +1191,9 @@ impl Checker {
         use Ty::*;
         match (expected, actual) {
             (Unknown, _) | (_, Unknown) => true,
+            // A C width is a tag on its scalar (TICKET-218): assignability ignores it, nested too.
+            (Width(_), _) => self.assignable(expected.scalar(), actual),
+            (_, Width(_)) => self.assignable(expected, actual.scalar()),
             // A protocol existential slot: the actual type must satisfy the protocol WITH the carried
             // args (empty for a bare existential — reproduces the old `satisfies(a, p)`). This single
             // witness is shared by every value write-site (param/return/field/reassign) since they all
@@ -1944,6 +1947,8 @@ impl Checker {
         args: &[Ty],
         seen: &mut HashSet<String>,
     ) -> Result<Grant, String> {
+        // TICKET-218: a C width satisfies exactly what its scalar does.
+        let ty = ty.scalar();
         // TICKET-027: `protocol` may carry a module-qualified KEY (e.g. from a re-keyed stored
         // bound); every user-facing message below renders the BARE name, matching `Ty::Protocol`'s
         // own `Display`.
@@ -2758,7 +2763,7 @@ impl Checker {
     /// The seed a `List[T].sum()` needs: `Some(SumSeed::Float)` for a `List[float]`, `None` for a
     /// plain `List[int]`.
     pub(super) fn sum_seed(&self, elem: &Ty) -> Option<SumSeed> {
-        matches!(elem, Ty::Float).then_some(SumSeed::Float)
+        matches!(elem.scalar(), Ty::Float).then_some(SumSeed::Float)
     }
 
     /// Record one `.sum()` site's seed for the backend, under the same key derivation
@@ -2824,6 +2829,7 @@ impl Checker {
             // `bytearray` crosses by deep copy (a fresh independent buffer on the other side, like
             // `list`) — always sendable (its elements are always `int`).
             Ty::Int
+            | Ty::Width(_)
             | Ty::Float
             | Ty::Bool
             | Ty::Str
@@ -3262,6 +3268,7 @@ impl Checker {
         match t {
             // Genuine leaves: no `Ty` children to visit.
             Ty::Int
+            | Ty::Width(_)
             | Ty::Float
             | Ty::Bool
             | Ty::Str

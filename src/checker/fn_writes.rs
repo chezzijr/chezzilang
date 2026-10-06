@@ -92,7 +92,7 @@ pub(super) fn ret_may_hold_receiver(ret: &Ty, own: &Ty) -> bool {
     if ret == own {
         return true;
     }
-    match ret {
+    match ret.scalar() {
         Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Nil => false,
         Ty::Option(t) => ret_may_hold_receiver(t, own),
         Ty::Result(t, e) => ret_may_hold_receiver(t, own) || ret_may_hold_receiver(e, own),
@@ -1028,6 +1028,7 @@ impl Checker {
 
     /// The type rule of one kept use: its result cannot alias a root of type `t`.
     fn use_keeps_root(&self, u: &RootUse, t: &Ty) -> bool {
+        let t = t.scalar();
         match u {
             // A native method keeps its receiver only when its declared return type cannot hold it.
             RootUse::Recv(m) => native_receiver(t).is_some_and(|(key, own)| {

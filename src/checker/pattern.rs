@@ -1603,7 +1603,12 @@ impl Checker {
         self.arith_parent = is_arith;
         let ty = self.infer_kind_inner(expr);
         self.arith_parent = covered;
-        ty
+        // TICKET-218: a C width is a SLOT tag; a value read through any expression is its scalar
+        // (owner rules 1 and 3: an `int8` value is an `int`, arithmetic on it yields `int`).
+        match ty {
+            Ty::Width(_) => ty.scalar().clone(),
+            t => t,
+        }
     }
 
     fn infer_kind_inner(&mut self, expr: &Expr) -> Ty {
@@ -5722,6 +5727,7 @@ fn renders_as_text(ty: &Ty) -> bool {
         | Ty::Reader
         | Ty::Ptr => true,
         Ty::Int
+        | Ty::Width(_)
         | Ty::Float
         | Ty::Bool
         | Ty::Str
