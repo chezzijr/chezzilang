@@ -11,6 +11,34 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-225 — type variables and untyped constants, base vs branch (2026-10-07)
+
+Base `main` (`af9db901`), branch `ticket/225` at `9bdb82ea`. Both `cargo build --release --bin chezzi`
+in separate target dirs. `hyperfine` is not installed, so `benches/run.chz` reports `FAILED [..]:
+hyperfine: command not found` for every bench; these are `benches/chz/*.chz` timed with `date +%s%N`,
+five runs per side, interleaved. Run 1 (main first), `uptime` before `load average: 4.04, 3.39, 2.90`,
+after `2.90, 3.18, 2.88`:
+
+| bench | main median ms | main min–max | branch median ms | branch min–max |
+|---|---|---|---|---|
+| `fib` | 520 | 482–542 | 526 | 511–545 |
+| `poly_method` | 2479 | 2431–2500 | 2509 | 2495–2602 |
+| `closure` | 2360 | 2335–2361 | 2434 | 2364–2443 |
+| `loop` | 1729 | 1690–1749 | 1719 | 1674–1737 |
+| `primes` | 1139 | 1112–1188 | 1129 | 1108–1177 |
+| `struct` | 813 | 802–851 | 858 | 801–888 |
+| `str` | 278 | 251–292 | 248 | 238–290 |
+| `hof` | 680 | 637–708 | 677 | 660–701 |
+
+Run 2 (branch first), `uptime` before `load average: 2.82, 3.16, 2.88`, after `3.00, 3.14, 2.89`:
+`poly_method` main 2482 (2429–2515), branch 2550 (2531–2572); `closure` main 2357 (2326–2383),
+branch 2465 (2411–2485). In both runs the branch medians of `closure` and `poly_method` lie above
+main's max (by 0.4% to 3.4%); they are 1.2% to 4.6% above main's medians. The change
+does not touch the VM: it moves the peephole's int/float fold onto `ast::consteval` (compile time
+only) and adds checker work. `chezzi check benches/chz/closure.chz` takes 5–7 ms on both binaries, so
+the checker does not account for ~100 ms. The cause is not identified. TICKET-222's base run measured
+`closure` at 2372–2470 on an earlier `main`, the same band as this branch.
+
 ## TICKET-222 — one bracket node and one path resolver, base vs branch (2026-10-07)
 
 Base `cc82b74d` (`main`), branch `ticket/222` at `45310931`. Both `cargo build --release --bin chezzi`
