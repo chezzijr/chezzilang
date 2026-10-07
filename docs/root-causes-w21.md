@@ -54,6 +54,11 @@ Clean this wave:
 
 ## Family E2 — a job's life has one owner (C1, C1b, C2, CHAN3, CHAN4, CHAN1)
 
+**Status (2026-10-07):** C1, C1b, C2 and CHAN3 fixed by TICKET-219 (facts 1 and 2: one transition,
+`SchedCore::job_event`, reads the run halt before it releases a held job; the handle's sealed
+channel is the one outcome record). CHAN4 (fact 3, the verdict is a run halt) is open on its own
+ticket. CHAN1 (fact 4) is a separate ticket.
+
 **Facts:**
 1. what state a job is in, and what its outcome is;
 2. whether the run is still alive when a held job is released;

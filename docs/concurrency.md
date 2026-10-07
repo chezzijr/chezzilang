@@ -519,13 +519,19 @@ into each task by value. See `docs/stdlib.md` for signatures.
 Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. The result-returning primitive is
 `Executor.submit_result[T](f: fn() -> T) -> Channel[Result[T]]`: submit `f` and get a cap-1 channel you
 `.recv()` for its outcome (`Ok(value)` or `Err(message)`, TICKET-208; the `Task.get() -> T` raise
-described below is now `Task.get() -> Result[T]`). `std.concurrency.task` wraps that channel in a
-future-style handle over one shared state core (every copy of the handle, in any task, reads it):
+described below is now `Task.get() -> Result[T]`). That channel is **sealed** (TICKET-219): its
+outcome is written once, and every `recv` returns a copy of it and takes nothing, so `len()` stays
+`1` and every reader sees the same outcome. Do not iterate it with `for` (it never ends); to collect
+several outcomes keep a list of `submit_result` channels. Two writers can seal it, and the first
+wins: the job body seals the value of `recover: f()`, and the job transition seals
+`Err("task cancelled: shutdown_now() stopped it before it finished")` when it drops a held job or a
+job ends cut (see "Job states" below). `std.concurrency.task` wraps that channel in a future-style
+handle (every copy of the handle, in any task, reads the same channel):
 
 - `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle (builds over
-  `ex.submit_outcome(f, out, err)`). The work starts at the `submit` and is waited for by
+  `ex.submit_result(f)`). The work starts at the `submit` and is waited for by
   `shutdown()` (or the program-exit join). Read the result AFTER that call.
-- `Task.get() -> T` — block until the result lands, then return it; idempotent, and the same answer in every task (the outcome lives in one `Shared` core; the task holding the original handle gets the same object back each call, a task holding a copy gets the value as of the crossing, or a fresh snapshot when the owner had not called `get()` before it). If
+- `Task.get() -> T` — block until the result lands, then return it; idempotent, and the same answer in every task (the outcome is the sealed channel's value; the task holding the original handle gets the same object back each call, a task holding a copy gets the value as of the crossing, or a fresh copy when the owner had not called `get()` before it). If
   the job faulted, `.get()` re-raises the job's own error message (CPython's `Future.result()`
   shape, measured: `result raised: RuntimeError job failed` / `done= True`) — `shutdown()` still
   raises the job's fault too, and its error keeps the job's own origin (`e.file()`/`line()`/`col()`
@@ -534,7 +540,8 @@ future-style handle over one shared state core (every copy of the handle, in any
   `task cancelled: shutdown_now() stopped it before it finished` at once, never hangs
   (CPython: `CancelledError`), and `done()` is `true`.
 - `Task.done() -> bool` — non-blocking readiness poll; `true` once the job has finished, faulted or
-  not.
+  not. It reads `concurrency.is_settled(ch)`, so it never reads `false` after `true` (TICKET-219;
+  before, a reader racing `get()` saw `false` after `true` 618 times in one run).
 
 Canonical shape: submit all → `shutdown()` → `.get()` each. **Determinism rule:** a task's value is
 deterministic (`f()`); only its *timing* varies at runtime (the OS-thread workers race), so `.get()` is
@@ -2162,6 +2169,26 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > `shutdown_now()` never starts a held job; a RUNNING job is cut at its first cancellation point.
 > `n` jobs that each wait for a held job are a deadlock, reported at the parked job's blocking op
 > (CPython hangs there).
+>
+> **Job states (TICKET-219).** A job is held, running (or parked), or ended. One transition,
+> `SchedCore::job_event`, under the sched lock, is the only place a job is started, held, released
+> or dropped. Its events are the submit, a job's end (`finish`), a deadlock reap, and
+> `shutdown_now`. Before it releases anything it reads the run halt (`QuiesceState::run_halt`) and
+> the Executor's cancel (its own `shutdown_now` flag or its creator's):
+> 1. after an `os.exit`: drop every held job and settle no handle. No `defer` runs after an exit
+>    and no reader returns, so nothing runs or prints after it (CPython `os._exit`, Go `os.Exit`).
+> 2. after a fire-and-forget job fault, or under a cancel: drop every held job and settle each
+>    handle job it drops or cuts with `Err("task cancelled: shutdown_now() stopped it before it
+>    finished")` (CPython `shutdown(cancel_futures=True)`). A `defer` still runs after a job fault,
+>    and it may read a handle.
+> 3. else: release held jobs while fewer than `n` run.
+>
+> So no held job starts after an exit, a job fault, `shutdown_now()` or a creator cancel. A job
+> fault's cell is stored before any sched's cancel flag trips, so the halt read closes that window.
+> One shape stays accepted: a non-`defer` reader already waiting on a handle when a job fault lands
+> may take the cancel `Err` and run to its next wait or back-edge, the shape DEC-194 accepts for a
+> guard the halt freed. The deadlock verdict still reaps a parked job without settling its handle;
+> making the verdict a run halt is its own ticket (CHAN4).
 >
 > **The drain contract (TICKET-208).** A fire-and-forget job's fault ends the run at once: no
 > `recover:` catches it, and the first fault is the report. A handle job (`submit_result`,
