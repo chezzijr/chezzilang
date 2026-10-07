@@ -37764,3 +37764,263 @@ fn generic_fn_value_pinned_by_sibling_at_coalesce_join() {
         "fn inc(x: int) -> int:\n    return x + 1\nfn g[T](x: T) -> T:\n    return x\nfn main():\n    o: Option[fn(int) -> int] = Some(inc)\n    print((o ?? g)(5))\n",
     );
 }
+
+/// TICKET-225 (R5, CK5) — a generic fn value read with no pin takes type variables, and a sibling at
+/// a join pins them. Join x order (generic first / last) x sibling {`inc`, `(o ?? inc)`, `h`}. A
+/// concrete sibling pins `g`; another unpinned generic `h` pins nothing, so its cells use the result
+/// without a call and must still reject. Every set cell rejects `Hashable` first (no fn is Hashable).
+#[test]
+fn generic_value_join_grid() {
+    let prelude = "struct Bx[T]:\n    v: T\n    fn add(self, other: Bx[T]) -> Bx[T]:\n        return other\nfn g[T](x: T) -> T:\n    return x\nfn h[T](x: T) -> T:\n    return x\nfn inc(x: int) -> int:\n    return x + 1\nfn main():\n    o: Option[fn(int) -> int] = Some(inc)\n    c := true\n    d := false\n    k := 1\n";
+    // `{P}` is `(5)` in a pinning cell and empty in an `h` cell. `set` marks the Hashable cells.
+    let joins: &[(&str, &str, bool)] = &[
+        ("if", "f := if c: {A} else: {B}\n    print(f{P})\n", false),
+        (
+            "elif",
+            "f := if c: {A} elif d: {B} else: {B}\n    print(f{P})\n",
+            false,
+        ),
+        (
+            "match",
+            "f := match k:\n        1: {A}\n        _: {B}\n    print(f{P})\n",
+            false,
+        ),
+        ("list", "f := [{A}, {B}]\n    print(f[0]{P})\n", false),
+        (
+            "map",
+            "f := {\"a\": {A}, \"b\": {B}}\n    print(f[\"a\"]{P})\n",
+            false,
+        ),
+        ("==", "print({A} == {B})\n", false),
+        ("list +", "f := [{A}] + [{B}]\n    print(f[0]{P})\n", false),
+        (
+            "list +=",
+            "xs := [{A}]\n    xs += [{B}]\n    print(xs[0]{P})\n",
+            false,
+        ),
+        (
+            "recover if",
+            "r := recover:\n        if c:\n            {A}\n        else:\n            {B}\n    match r:\n        Ok(f): print(f{P})\n        Err(e): print(e.message())\n",
+            false,
+        ),
+        (
+            "recover match",
+            "r := recover:\n        match k:\n            1: {A}\n            _: {B}\n    match r:\n        Ok(f): print(f{P})\n        Err(e): print(e.message())\n",
+            false,
+        ),
+        ("in", "print({A} in [{B}])\n", false),
+        ("Bx +", "print(((Bx({A}) + Bx({B})).v){P})\n", false),
+        ("Bx ==", "print(Bx({A}) == Bx({B}))\n", false),
+        ("set", "f := {{A}, {B}}\n    print(f)\n", true),
+        ("set -", "print({{A}} - {{B}})\n", true),
+        ("set |", "print({{A}} | {{B}})\n", true),
+        ("set -=", "s := {{A}}\n    s -= {{B}}\n    print(s)\n", true),
+        ("set |=", "s := {{A}}\n    s |= {{B}}\n    print(s)\n", true),
+    ];
+    let mut red: Vec<String> = Vec::new();
+    for (join, body, set) in joins {
+        for sib in ["inc", "(o ?? inc)", "h"] {
+            for generic_first in [true, false] {
+                let (a, b) = if generic_first {
+                    ("g", sib)
+                } else {
+                    (sib, "g")
+                };
+                let p = if sib == "h" { "" } else { "(5)" };
+                let src = format!(
+                    "{prelude}    {}",
+                    body.replace("{A}", a).replace("{B}", b).replace("{P}", p)
+                );
+                let errs = check_src(&src);
+                let want = if *set {
+                    Some("Hashable")
+                } else if sib == "h" {
+                    Some("not determined here")
+                } else {
+                    None
+                };
+                let cell = format!("{join} / {sib} / generic_first={generic_first}");
+                match want {
+                    None if !errs.is_empty() => red.push(format!("{cell}: want ok, got {errs:?}")),
+                    Some(n) if !errs.iter().any(|e| e.message.contains(n)) => {
+                        red.push(format!("{cell}: want {n:?}, got {errs:?}"))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // `??` takes the generic last only: its lhs is the `Option`.
+    let errs = check_src(&format!("{prelude}    print((o ?? g)(5))\n"));
+    if !errs.is_empty() {
+        red.push(format!("??: want ok, got {errs:?}"));
+    }
+    assert!(
+        red.is_empty(),
+        "{} red cells:\n{}",
+        red.len(),
+        red.join("\n")
+    );
+}
+
+/// TICKET-225 (R5) — a let-bound generic fn value is pinned by any later use in its fn body, and is
+/// rejected at the read's span only if its frame (one fn body, or one top-level statement) closes
+/// with it unpinned.
+#[test]
+fn generic_value_later_use_grid() {
+    let prelude = "fn g[T](x: T) -> T:\n    return x\nfn inc(x: int) -> int:\n    return x + 1\nfn take(p: fn(int) -> int) -> int:\n    return p(1)\n";
+    let oks: &[&str] = &[
+        "fn main():\n    f := g\n    print(f(5))\n",
+        "fn main():\n    f := g\n    print(take(f))\n",
+        "fn main():\n    f := g\n    p: fn(int) -> int = f\n    print(p(1))\n",
+        "fn main():\n    f := g\n    print(f == inc)\n",
+        "fn mk2() -> fn(int) -> int:\n    f := g\n    return f\nfn main():\n    print(mk2()(5))\n",
+        "import std.json as json\nfn main():\n    d := json.decode\n    x: int! = d(\"1\")\n    print(x)\n",
+    ];
+    let mut red: Vec<String> = Vec::new();
+    for body in oks {
+        let errs = check_entry(&format!("{prelude}{body}"));
+        if !errs.is_empty() {
+            red.push(format!("{body}\n  want ok, got {errs:?}"));
+        }
+    }
+    // (body, line of the read `f := ...` counted from the body's first line, 1-based)
+    let rejects_at: &[(&str, u32)] = &[
+        ("fn main():\n    f := g\n", 2),
+        ("fn main():\n    f := g\n    print(f)\n", 2),
+        (
+            "fn mk[T](n: int) -> List[T]:\n    return []\nfn main():\n    f := mk\n    print(f(1))\n",
+            4,
+        ),
+        ("f := g\nprint(f(5))\n", 1),
+    ];
+    let base = prelude.lines().count() as u32;
+    for (body, line) in rejects_at {
+        let errs = check_src(&format!("{prelude}{body}"));
+        if !errs
+            .iter()
+            .any(|e| e.message.contains("not determined here") && e.span.line == base + line)
+        {
+            red.push(format!(
+                "{body}\n  want 'not determined here' at line {}, got {errs:?}",
+                base + line
+            ));
+        }
+    }
+    // A deferred read meets its bounds once pinned: the same message as the direct call.
+    let lt = "struct P:\n    x: int\nfn lt[T: Comparable](a: T, b: T) -> bool:\n    return a < b\n";
+    let direct = check_src(&format!("{lt}fn main():\n    print(lt(P(1), P(2)))\n"));
+    let Some(want) = direct.first().map(|e| e.message.clone()) else {
+        panic!("lt(P(1), P(2)) must be rejected by its bound");
+    };
+    let errs = check_src(&format!(
+        "{lt}fn main():\n    f := lt\n    print(f(P(1), P(2)))\n"
+    ));
+    if !errs.iter().any(|e| e.message == want) {
+        red.push(format!("bound: want {want:?}, got {errs:?}"));
+    }
+    assert!(
+        red.is_empty(),
+        "{} red cells:\n{}",
+        red.len(),
+        red.join("\n")
+    );
+}
+
+/// TICKET-225 (R5, W2/FF1) — an untyped constant (a literal or a folded constant expression) meets
+/// the slot it lands in, and is rejected iff its value lies outside the slot's width (Go:
+/// `cannot use 1 << 8 (untyped int constant 256) as int8 value ... (overflows)`).
+#[test]
+fn untyped_constant_width_grid() {
+    use crate::native::cffi::{CType, width_ctype};
+    // (template, int-only). `{W}` is the width, `{K}` the constant.
+    let slots: &[(&str, bool)] = &[
+        ("x: {W} = {K}\nprint(x)\n", false),
+        ("x: {W} = 0\nx = {K}\nprint(x)\n", false),
+        ("fn take(x: {W}) -> nil:\n    pass\ntake({K})\n", false),
+        ("fn r() -> {W}:\n    return {K}\nprint(r())\n", false),
+        ("struct S:\n    v: {W}\ns := S({K})\nprint(s)\n", false),
+        (
+            "struct Bx[T]:\n    v: T\nb: Bx[{W}] = Bx({K})\nprint(b)\n",
+            false,
+        ),
+        (
+            "enum E[T]:\n    A(T)\ne: E[{W}] = E.A({K})\nprint(e)\n",
+            false,
+        ),
+        (
+            "fn id[T](x: T) -> T:\n    return x\ny: {W} = id({K})\nprint(y)\n",
+            false,
+        ),
+        ("m: Map[{W}, str] = {}\nm[{K}] = \"a\"\nprint(m)\n", true),
+        ("m: Map[{W}, str] = {}\nprint(m[{K}])\n", true),
+        ("l: List[{W}] = [{K}]\nprint(l)\n", false),
+        ("o: Option[{W}] = Some({K})\nprint(o)\n", false),
+        ("c := true\nx: {W} = if c: {K} else: 0\nprint(x)\n", false),
+    ];
+    // (constant text, its folded value)
+    let int_ks: &[(&str, i64)] = &[
+        ("300", 300),
+        ("1 << 8", 256),
+        ("127 | (127 + 1)", 255),
+        ("0 - 1", -1),
+    ];
+    let float_ks: &[(&str, f64)] = &[
+        ("3e38 + 3e38", 6e38),
+        ("-3e38 * 2.0", -6e38),
+        ("1.5 + 1.5", 3.0),
+    ];
+    let mut red: Vec<String> = Vec::new();
+    let mut run = |w: &str, slot: &str, k: &str, want: Option<String>| {
+        let body = slot.replace("{W}", w).replace("{K}", k);
+        let src = format!("import std.ffi\nimport {w} from std.ffi\n{body}");
+        let errs = check_entry(&src);
+        match want {
+            None if !errs.is_empty() => red.push(format!("{src}\n  want ok, got {errs:?}")),
+            Some(n) if !errs.iter().any(|e| e.message.contains(n.as_str())) => {
+                red.push(format!("{src}\n  want {n:?}, got {errs:?}"))
+            }
+            _ => {}
+        }
+    };
+    for w in [
+        "int8", "uint8", "int16", "uint16", "int32", "uint32", "uint64",
+    ] {
+        let ct = width_ctype(w).unwrap();
+        for (slot, _) in slots {
+            for (k, v) in int_ks {
+                let want = (!ct.fits_int(*v, true))
+                    .then(|| format!("constant {v} does not fit {w} {}", ct.range_text()));
+                run(w, slot, k, want);
+            }
+        }
+    }
+    let ct = CType::Float32;
+    for (slot, int_only) in slots {
+        if *int_only {
+            continue;
+        }
+        let slot = slot
+            .replace("= 0\n", "= 0.0\n")
+            .replace("else: 0\n", "else: 0.0\n");
+        for (k, v) in float_ks {
+            let want = (!ct.fits_f64(*v))
+                .then(|| format!("constant {v:e} does not fit float32 {}", ct.range_text()));
+            run("float32", &slot, k, want);
+        }
+    }
+    // Neighbours: a non-constant int into a width slot stays accepted.
+    for body in [
+        "x: int8 = len([300])\nprint(x)\n",
+        "x: int8 = str(300).len()\nprint(x)\n",
+        "fn n(a: int) -> int8:\n    return 0\nx: int8 = n(300)\nprint(x)\n",
+    ] {
+        run("int8", body, "", None);
+    }
+    assert!(
+        red.is_empty(),
+        "{} red cells:\n{}",
+        red.len(),
+        red.join("\n")
+    );
+}
