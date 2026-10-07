@@ -20,7 +20,7 @@ struct Email:
     fn parse(s: str) -> Result[Email, str]:
         if "@" in s:
             return Ok(Email(s))
-        return Err("missing @")
+        return !"missing @"
 
 # An enum with a `from_str` static ctor returning Option — and a variant (Red) that always wins
 # over any static-method name (variant/static disjointness is enforced at declaration time).

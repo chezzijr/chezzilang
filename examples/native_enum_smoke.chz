@@ -9,7 +9,7 @@
 # A Result-returning fn (`int!` = Result[int, Error]); the Err path short-circuits its `?` caller.
 fn safe_at(xs: List[int], i: int) -> int!:
     if i < 0 or i >= xs.len():
-        return Err("index out of range")
+        return !"index out of range"
     return Ok(xs[i])
 
 # `?` on a Result: propagates the Err to THIS fn's caller unchanged, else unwraps the Ok payload.

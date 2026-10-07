@@ -50,7 +50,7 @@ print("name={u?.profile?.name ?? fallback}, age={none_user?.profile?.age ?? -1}"
 fn fetch(ok: bool) -> Result[str, str]:
     if ok:
         return Ok("payload")
-    return Err("offline")
+    return !"offline"
 
 # In a Result-returning fn, `fetch(ok)?.len()` propagates the Err, then `.len()`s the unwrapped str.
 fn size(ok: bool) -> Result[int, str]:

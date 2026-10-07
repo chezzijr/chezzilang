@@ -96,7 +96,7 @@ fn glob(pattern: PathLike) -> Result[List[path.Path]]:
 fn canonicalize(p: PathLike) -> Result[path.Path]:
     match _canonicalize(p.as_path()):
         Ok(b): return Ok(path.Path(b))
-        Err(e): return Err(e)
+        Err(e): return !e
 
 fn mkdir(p: PathLike) -> Result[nil]:
     return _mkdir(p.as_path())
@@ -133,4 +133,4 @@ fn _wrap_many(r: Result[List[bytes]]) -> Result[List[path.Path]]:
             for b in raws:
                 out.push(path.Path(b))
             return Ok(out)
-        Err(e): return Err(e)
+        Err(e): return !e

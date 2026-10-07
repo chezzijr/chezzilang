@@ -32,7 +32,7 @@ fn parse_n(val: str) -> Result[int, str]:
     fs.int_flag("n", 0, "count")
     match fs.parse(["-n", val]):
         Ok(_): return Ok(fs.get_int("n"))
-        Err(e): return Err(e.message())
+        Err(e): return !e.message()
 
 fn expect_n(val: str, want: int):
     match parse_n(val):

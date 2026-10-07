@@ -313,7 +313,7 @@ fn escape_out() -> Result[int, Error]:
         spawn:
             write_esc := d4_set_esc
             _ := recover: write_esc()
-        return Err("bail")
+        return !"bail"
     return Ok(0)
 
 test fn escape_out_of_a_nursery_tears_down():

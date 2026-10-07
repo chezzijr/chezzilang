@@ -42,13 +42,13 @@ fn sok() -> str!str:
     return Ok("hello")
 
 fn serr() -> str!str:
-    return Err("boom")
+    return !"boom"
 
 fn bok() -> Box!MyErr:
     return Ok(Box(10))
 
 fn berr() -> Box!MyErr:
-    return Err(MyErr(3))
+    return !MyErr(3)
 
 fn bok_s() -> Box!str:
     return Ok(Box(10))
@@ -184,7 +184,7 @@ test fn null_coalesce_on_option_unwraps_or_falls_back():
 fn rq(ok: bool) -> int!str:
     if ok:
         return Ok(3)
-    return Err("boom")
+    return !"boom"
 
 fn ores(v: bool) -> Option[int!str]:
     if v:
@@ -253,7 +253,7 @@ fn run_defer_spaced(log: Shared[str], good: bool):
 fn pick(good: bool) -> str!str:
     if good:
         return Ok("hello")
-    return Err("boom")
+    return !"boom"
 
 test fn result_carrier_inside_defer_matches_the_spaced_spelling():
     ok_dot := Shared("")

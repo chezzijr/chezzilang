@@ -69,7 +69,7 @@ fn tree_sum(t: Tree[int]) -> int:
 # Result/Option + the `?` operator (gated on the fixed native variant ids).
 fn safe_div(a: int, b: int) -> int!:
     if b == 0:
-        return Err("divide by zero")
+        return !"divide by zero"
     return Ok(a / b)
 
 fn chained(a: int, b: int, c: int) -> int!:

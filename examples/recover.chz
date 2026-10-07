@@ -5,7 +5,7 @@ fn risky(i: int, xs: List[int]) -> int:
 fn parse_int(s: str) -> int!:
     if s == "42":
         return Ok(42)
-    return Err("not an int: '{s}'")
+    return !"not an int: '{s}'"
 
 fn main():
     xs := [10, 20, 30]

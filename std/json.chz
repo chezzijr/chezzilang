@@ -96,7 +96,7 @@ struct Parser:
         self.skip_ws()
         c := self.peek()
         if c == "":
-            return Err(self.at("unexpected end of input"))
+            return !self.at("unexpected end of input")
         if c == "{{":
             return self.parse_object()
         if c == "[":
@@ -112,13 +112,13 @@ struct Parser:
             return self.parse_lit("null", Json.Null)
         if c == "-" or (c >= "0" and c <= "9"):
             return self.parse_number()
-        return Err(self.at("unexpected character '" + c + "'"))
+        return !self.at("unexpected character '" + c + "'")
 
     fn parse_lit(self, word: str, val: Json) -> Result[Json]:
         start := self.pos
         for expected in word:
             if self.bump() != expected:
-                return Err(self.at_pos("invalid literal, expected '" + word + "'", start))
+                return !self.at_pos("invalid literal, expected '" + word + "'", start)
         return Ok(val)
 
     fn parse_string(self) -> Result[str]:
@@ -130,7 +130,7 @@ struct Parser:
             if self.pos >= self.len:
                 # The OPENING quote: CPython's json.loads and docs/gaps.md M24-7 both point an
                 # unterminated delimiter at its opener.
-                return Err(self.at_pos("unterminated string", open_quote))
+                return !self.at_pos("unterminated string", open_quote)
             c := self.src[self.pos]
             if c == "\"":
                 if run < self.pos:
@@ -152,11 +152,11 @@ struct Parser:
                     "b": parts.push(chr(8))
                     "f": parts.push(chr(12))
                     "u": parts.push(self.parse_unicode()?)
-                    _: return Err(self.at_pos("invalid escape '\\" + e + "'", self.pos - 1))
+                    _: return !self.at_pos("invalid escape '\\" + e + "'", self.pos - 1)
                 run = self.pos
             elif ord(c) < 32:
                 # RFC-8259: raw control chars U+0000..U+001F must be `\u`-escaped, never literal.
-                return Err(self.at_pos("invalid control character in string", self.pos))
+                return !self.at_pos("invalid control character in string", self.pos)
             else:
                 self.pos += 1
 
@@ -165,14 +165,14 @@ struct Parser:
         hi := self.parse_hex4()?
         if hi >= 55296 and hi <= 56319:                 # high surrogate
             if self.bump() != "\\" or self.bump() != "u":
-                return Err(self.at("expected low surrogate"))
+                return !self.at("expected low surrogate")
             lo := self.parse_hex4()?
             if lo < 56320 or lo > 57343:
-                return Err(self.at("invalid low surrogate"))
+                return !self.at("invalid low surrogate")
             cp := 65536 + (hi - 55296) * 1024 + (lo - 56320)
             return Ok(chr(cp))
         if hi >= 56320 and hi <= 57343:
-            return Err(self.at("unexpected low surrogate"))
+            return !self.at("unexpected low surrogate")
         return Ok(chr(hi))
 
     fn parse_hex4(self) -> Result[int]:
@@ -182,7 +182,7 @@ struct Parser:
             match hex_val(c):
                 Ok(d): n = n * 16 + d
                 # `hex_val` is a free fn with no `self`, so the location wraps here instead.
-                Err(m): return Err(self.at_pos(m.message(), self.pos - 1))
+                Err(m): return !self.at_pos(m.message(), self.pos - 1)
         return Ok(n)
 
     fn parse_number(self) -> Result[Json]:
@@ -197,11 +197,11 @@ struct Parser:
             self.pos += 1
             int_digits += 1
         if int_digits == 0:
-            return Err(self.at_pos("invalid number: expected a digit", start))
+            return !self.at_pos("invalid number: expected a digit", start)
         # RFC-8259: the integer part is either a single `0` or a nonzero digit followed by more —
         # a leading `0` before another digit (`01`, `007`) is invalid.
         if zero_first and int_digits > 1:
-            return Err(self.at_pos("invalid number: leading zero", start))
+            return !self.at_pos("invalid number: leading zero", start)
         # An integer-shaped numeral stays integer-shaped until a `.`/`e`/`E` proves otherwise.
         is_int := true
         if self.peek() == ".":
@@ -213,7 +213,7 @@ struct Parser:
                 self.pos += 1
                 frac += 1
             if frac == 0:
-                return Err(self.at_pos("invalid number: digits required after '.'", dot))
+                return !self.at_pos("invalid number: digits required after '.'", dot)
         if self.peek() == "e" or self.peek() == "E":
             is_int = false
             # The e/E itself, not self.pos - 1: this branch may consume a '+'/'-' sign after it.
@@ -226,7 +226,7 @@ struct Parser:
                 self.pos += 1
                 exp += 1
             if exp == 0:
-                return Err(self.at_pos("invalid number: digits required in exponent", exp_at))
+                return !self.at_pos("invalid number: digits required in exponent", exp_at)
         raw := "".join(self.src[start : self.pos])
         if is_int:
             match raw.to_int():
@@ -242,7 +242,7 @@ struct Parser:
         # refuse to serialize. `f - f` is `0.0` for every finite `f` and NaN for a non-finite one.
         # (Underflow like `1e-400` → `0.0` is finite and stays accepted.)
         if f - f != 0.0:
-            return Err(self.at_pos("invalid number: value out of range", start))
+            return !self.at_pos("invalid number: value out of range", start)
         return Ok(Json.Num(f))
 
     fn parse_array(self) -> Result[Json]:
@@ -252,7 +252,7 @@ struct Parser:
         # where it started, not inflated by an earlier sibling's subtree.
         self.depth += 1
         if self.depth > MAX_NEST_DEPTH:
-            return Err("exceeded max depth")
+            return !"exceeded max depth"
         self.pos += 1                       # consume '['
         items := []
         self.skip_ws()
@@ -269,12 +269,12 @@ struct Parser:
                 self.depth -= 1
                 return Ok(Json.Arr(items))
             if c != ",":
-                return Err(self.at_pos("expected ',' or ']' in array", self.pos - 1))
+                return !self.at_pos("expected ',' or ']' in array", self.pos - 1)
 
     fn parse_object(self) -> Result[Json]:
         self.depth += 1
         if self.depth > MAX_NEST_DEPTH:
-            return Err("exceeded max depth")
+            return !"exceeded max depth"
         self.pos += 1                       # consume '{'
         obj := {}
         self.skip_ws()
@@ -285,11 +285,11 @@ struct Parser:
         while true:
             self.skip_ws()
             if self.peek() != "\"":
-                return Err(self.at("expected string key in object"))
+                return !self.at("expected string key in object")
             key := self.parse_string()?
             self.skip_ws()
             if self.bump() != ":":
-                return Err(self.at_pos("expected ':' after object key", self.pos - 1))
+                return !self.at_pos("expected ':' after object key", self.pos - 1)
             v := self.parse_value()?
             obj[key] = v
             self.skip_ws()
@@ -298,7 +298,7 @@ struct Parser:
                 self.depth -= 1
                 return Ok(Json.Obj(obj))
             if c != ",":
-                return Err(self.at_pos("expected ',' or '}}' in object", self.pos - 1))
+                return !self.at_pos("expected ',' or '}}' in object", self.pos - 1)
 
 fn is_digit(c: str) -> bool:
     return c >= "0" and c <= "9"
@@ -310,7 +310,7 @@ fn hex_val(c: str) -> Result[int]:
         return Ok(ord(c) - ord("a") + 10)
     if c >= "A" and c <= "F":
         return Ok(ord(c) - ord("A") + 10)
-    return Err("invalid hex digit '" + c + "'")
+    return !("invalid hex digit '" + c + "'")
 
 # Parse a JSON document into a `Json` tree. Trailing non-whitespace is an error.
 fn parse(s: str) -> Result[Json]:
@@ -318,7 +318,7 @@ fn parse(s: str) -> Result[Json]:
     v := p.parse_value()?
     p.skip_ws()
     if p.pos < p.len:
-        return Err(p.at("trailing characters after JSON value"))
+        return !p.at("trailing characters after JSON value")
     return Ok(v)
 
 # ----- serializing ---------------------------------------------------------------------------

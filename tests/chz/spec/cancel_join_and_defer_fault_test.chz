@@ -84,7 +84,7 @@ test fn a_break_out_of_a_nursery_surfaces_a_cancelled_childs_defer_fault():
 
 
 fn fails() -> int!str:
-    return Err("try failed")
+    return !"try failed"
 
 fn try_out(started: Channel[int]) -> int!str:
     parallel:

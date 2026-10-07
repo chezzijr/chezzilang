@@ -27,7 +27,7 @@ native fn _chdir(path: bytes) -> Result[nil]
 fn getcwd() -> Result[path.Path]:
     match _getcwd():
         Ok(b): return Ok(path.Path(b))
-        Err(e): return Err(e)
+        Err(e): return !e
 
 # System queries (gaps §6). getpid/platform/temp_dir are engine-agnostic process reads;
 # home_dir reads the HostConfig `HOME` (same source as `env`), so it's None when unset.

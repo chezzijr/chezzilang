@@ -202,7 +202,7 @@ fn defer_lifo():
 
 fn defer_q() -> int!:
     defer note("cleanup ran")
-    return Err("boom")        # `?` caller sees this; defer still runs
+    return !"boom"        # `?` caller sees this; defer still runs
 
 fn defers():
     print("-- defer --")

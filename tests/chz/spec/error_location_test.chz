@@ -15,7 +15,7 @@ test fn a_runtime_fault_carries_its_origin():
 
 test fn a_user_err_through_question_mark_carries_no_origin():
     fn inner() -> int!:
-        return Err("boom")
+        return !"boom"
     fn outer() -> int!:
         x := inner()?
         return Ok(x)
@@ -46,7 +46,7 @@ struct MyErr:
 
 test fn a_struct_error_with_only_message_carries_no_origin():
     fn boom() -> int!:
-        return Err(MyErr(7))
+        return !MyErr(7)
     match boom():
         Ok(_): assert false, "expected Err"
         Err(e):

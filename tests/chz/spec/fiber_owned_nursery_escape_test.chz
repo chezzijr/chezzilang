@@ -24,7 +24,7 @@ fn ret_escape(log: Shared[str]) -> int:
     return 0
 
 fn fails() -> int!str:
-    return Err("bail")
+    return !"bail"
 
 fn try_escape(log: Shared[str]) -> int!str:
     defer:

@@ -133,7 +133,7 @@ fn _to_neg_checked(x: str) -> Result[int]:
     for c in x:
         d := ord(c) - 48
         if n < -922337203685477580 or (n == -922337203685477580 and d > 8):
-            return Err("duration out of range '" + x + "'")
+            return !("duration out of range '" + x + "'")
         n = n * 10 - d
     return Ok(n)
 
@@ -150,27 +150,27 @@ fn _num_ms(numstr: str, unit_ms: int, neg: bool) -> Result[int]:
     if parts.len() == 2:
         frac = parts[1]
     elif parts.len() != 1:
-        return Err("malformed number '" + numstr + "'")
+        return !("malformed number '" + numstr + "'")
     # A bare dot, or a trailing dot ("1."), is malformed.
     if intpart == "" and frac == "":
-        return Err("malformed number '" + numstr + "'")
+        return !("malformed number '" + numstr + "'")
     if parts.len() == 2 and frac == "":
-        return Err("malformed number '" + numstr + "'")
+        return !("malformed number '" + numstr + "'")
     if intpart != "":
         if not _all_digits(intpart):
-            return Err("malformed number '" + numstr + "'")
+            return !("malformed number '" + numstr + "'")
     whole := 0
     if intpart != "":
         # Bound the VALUE (not the digit count) against i64 ms, per unit: `/` truncates toward zero,
         # so `i64_min / unit_ms` is the least `v` with `v * unit_ms >= i64_min`.
         v := _to_neg_checked(intpart)?
         if v < i64_min / unit_ms:
-            return Err("duration out of range '" + numstr + "'")
+            return !("duration out of range '" + numstr + "'")
         whole = v * unit_ms
     frac_ms := 0
     if frac != "":
         if not _all_digits(frac):
-            return Err("malformed number '" + numstr + "'")
+            return !("malformed number '" + numstr + "'")
         # Cap fractional precision at 9 digits (below 1ms floors to 0 anyway); keeps the product
         # unit_ms * frac_num (<= 3_600_000 * 1e9 = 3.6e15) inside i64.
         fd := frac
@@ -181,12 +181,12 @@ fn _num_ms(numstr: str, unit_ms: int, neg: bool) -> Result[int]:
             denom = denom * 10
         frac_ms = unit_ms * _to_uint(fd) / denom
     if whole < i64_min + frac_ms:
-        return Err("duration out of range '" + numstr + "'")
+        return !("duration out of range '" + numstr + "'")
     mag := whole - frac_ms
     if neg:
         return Ok(mag)
     if mag == i64_min:
-        return Err("duration out of range '" + numstr + "'")
+        return !("duration out of range '" + numstr + "'")
     return Ok(-mag)
 
 # Parse a Go-style duration string -> Duration. Accepts an optional leading '+'/'-', one or more
@@ -194,7 +194,7 @@ fn _num_ms(numstr: str, unit_ms: int, neg: bool) -> Result[int]:
 # and a bare "0". Sub-ms units (us/ns/µs) and anything malformed are a clean Err.
 fn parse(input: str) -> Result[Duration]:
     if input.len() == 0:
-        return Err("empty duration string")
+        return !"empty duration string"
     cs := input.chars()      # O(n) index; never re-slice per char (the pure-Chezzi O(n^2) trap)
     n := cs.len()
     i := 0
@@ -203,7 +203,7 @@ fn parse(input: str) -> Result[Duration]:
         neg = cs[0] == "-"
         i = 1
     if i >= n:
-        return Err("no digits in duration '" + input + "'")
+        return !("no digits in duration '" + input + "'")
     # Go accepts a lone "0" (no unit).
     if input[i:] == "0":
         return Ok(Duration(0))
@@ -219,9 +219,9 @@ fn parse(input: str) -> Result[Duration]:
                 dots = dots + 1
             i = i + 1
         if i == start:
-            return Err("expected a number in '" + input + "'")
+            return !("expected a number in '" + input + "'")
         if dots > 1:
-            return Err("malformed number in '" + input + "'")
+            return !("malformed number in '" + input + "'")
         numstr := input[start:i]
         # 2. unit: lowercase ASCII letters (µ in µs is not a-z, so us/µs/ns all fall through to Err)
         ustart := i
@@ -238,18 +238,18 @@ fn parse(input: str) -> Result[Duration]:
         elif unit == "h":
             unit_ms = 3600000
         elif unit == "":
-            return Err("missing unit in '" + input + "'")
+            return !("missing unit in '" + input + "'")
         else:
-            return Err("unknown unit '" + unit + "' in '" + input + "'")
+            return !("unknown unit '" + unit + "' in '" + input + "'")
         # `part` carries the SIGN (`_num_ms` applies it), and `total` shares that sign across every
         # group in this call, so the two bounds below can never overflow themselves.
         part := _num_ms(numstr, unit_ms, neg)?
         if neg:
             if part < i64_min - total:
-                return Err("duration out of range '" + input + "'")
+                return !("duration out of range '" + input + "'")
         else:
             if part > i64_max - total:
-                return Err("duration out of range '" + input + "'")
+                return !("duration out of range '" + input + "'")
         total = total + part
     return Ok(Duration(total))
 

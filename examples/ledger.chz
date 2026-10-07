@@ -22,16 +22,16 @@ fn apply(accounts: Map[str, Account], t: Txn) -> str!:
     match t:
         Txn.Deposit(who, amt):
             match accounts.get(who):
-                None: return Err("no account '{who}'")
+                None: return !"no account '{who}'"
                 Some(acc):
                     acc.balance += amt
                     return Ok("{who} +{amt} -> {acc.balance}")
         Txn.Withdraw(who, amt):
             match accounts.get(who):
-                None: return Err("no account '{who}'")
+                None: return !"no account '{who}'"
                 Some(acc):
                     if amt > acc.balance:
-                        return Err("{who} overdraft: have {acc.balance}, need {amt}")
+                        return !"{who} overdraft: have {acc.balance}, need {amt}"
                     acc.balance -= amt
                     return Ok("{who} -{amt} -> {acc.balance}")
 

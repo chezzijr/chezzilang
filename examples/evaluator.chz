@@ -57,7 +57,7 @@ fn tokenize(src: str) -> List[Tok]!:
                 i += 1
             toks.push(Tok.Num(val))
         else:
-            return Err("bad character '{c}' at {i}")
+            return !"bad character '{c}' at {i}"
     return Ok(toks)
 
 # ---- AST ---------------------------------------------------------------------------------------
@@ -123,7 +123,7 @@ struct Parser:
 
     fn parse_factor(self) -> Ast!:
         match self.peek():
-            None: return Err("expected a number or '('")
+            None: return !"expected a number or '('"
             Some(t):
                 match t:
                     Tok.Num(v):
@@ -133,14 +133,14 @@ struct Parser:
                         self.advance()
                         inner := self.parse_expr()?
                         match self.peek():
-                            None: return Err("expected ')'")
+                            None: return !"expected ')'"
                             Some(rt):
                                 match rt:
                                     Tok.RParen:
                                         self.advance()
                                         return Ok(inner)
-                                    _: return Err("expected ')'")
-                    _: return Err("expected a number or '('")
+                                    _: return !"expected ')'"
+                    _: return !"expected a number or '('"
 
 # ---- evaluator ---------------------------------------------------------------------------------
 
@@ -157,9 +157,9 @@ fn eval(node: Ast) -> int!:
                 "*": return Ok(a * b)
                 "/":
                     if b == 0:
-                        return Err("division by zero")
+                        return !"division by zero"
                     return Ok(a / b)
-                _: return Err("unknown operator '{op}'")
+                _: return !"unknown operator '{op}'"
 
 # ---- driver ------------------------------------------------------------------------------------
 
@@ -168,7 +168,7 @@ fn calc(input: str) -> int!:
     p := Parser(toks, 0)
     ast := p.parse_expr()?
     match p.peek():
-        Some(_): return Err("trailing input")
+        Some(_): return !"trailing input"
         None:    return eval(ast)
 
 fn main():

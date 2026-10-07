@@ -29,7 +29,7 @@ fn write_then_read_line(p: str) -> Result[str]:
     line := ""
     match r.read_line():          # Option[str], newline stripped
         Some(l): line = l
-        None: return Err("unexpected EOF on a non-empty file")
+        None: return !"unexpected EOF on a non-empty file"
     r.close()?
     return Ok(line)
 

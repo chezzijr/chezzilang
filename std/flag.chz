@@ -83,26 +83,26 @@ fn _parse_go_int(s: str) -> Result[int, str]:
         for c in scan:
             if c == "_":
                 if saw != "0":
-                    return Err(bad)
+                    return !bad
                 saw = "_"
             elif "0123456789abcdefABCDEF".contains(c) and (base == 16 or "0123456789".contains(c)):
                 saw = "0"
             else:
                 saw = "!"
         if saw == "_":
-            return Err(bad)
+            return !bad
     clean := digits.replace("_", "")
     if clean == "":
         if body.starts_with("0") and not prefixed:
             return Ok(0)
-        return Err(bad)
+        return !bad
     valid := "0123456789abcdef"[0 : base]
     for c in clean.lower():
         if not valid.contains(c):
-            return Err(bad)
+            return !bad
     match math.parse_int_base(sign + clean, base):
         Ok(v): return Ok(v)
-        Err(_): return Err("'" + s + "' overflows i64 (range -9223372036854775808..=9223372036854775807)")
+        Err(_): return !("'" + s + "' overflows i64 (range -9223372036854775808..=9223372036854775807)")
 
 struct FlagSet:
     names: List[str]        # registration order → deterministic usage()
@@ -165,7 +165,7 @@ struct FlagSet:
                 if body.starts_with("-"):
                     body = body[1 : body.len()]
                 if body == "" or body.starts_with("-") or body.starts_with("="):
-                    return Err("bad flag syntax: " + tok)
+                    return !("bad flag syntax: " + tok)
                 name := body
                 inline := ""
                 has_inline := false
@@ -182,8 +182,8 @@ struct FlagSet:
                         # matching Go. Returns an Err (ContinueOnError analog of Go's ErrHelp) — it
                         # never prints or exits, leaving that choice to the caller.
                         if name == "help" or name == "h":
-                            return Err("flag: help requested\n" + self.usage())
-                        return Err("unknown flag --" + name)
+                            return !("flag: help requested\n" + self.usage())
+                        return !("unknown flag --" + name)
                 if kind == "bool":
                     if has_inline:
                         # Go strconv.ParseBool accepted set (matches Go flag.Bool).
@@ -192,7 +192,7 @@ struct FlagSet:
                         elif ["0", "f", "F", "FALSE", "false", "False"].contains(inline):
                             self.bools[name] = false
                         else:
-                            return Err("flag --" + name + ": invalid bool '" + inline + "'")
+                            return !("flag --" + name + ": invalid bool '" + inline + "'")
                     else:
                         self.bools[name] = true
                     i += 1
@@ -204,13 +204,13 @@ struct FlagSet:
                     i += 1
                 else:
                     if i + 1 >= n:
-                        return Err("flag --" + name + ": missing value")
+                        return !("flag --" + name + ": missing value")
                     val = args[i + 1]
                     i += 2
                 if kind == "int":
                     match _parse_go_int(val):
                         Ok(iv): self.ints[name] = iv
-                        Err(m): return Err("flag --" + name + ": " + m)
+                        Err(m): return !("flag --" + name + ": " + m)
                 else:
                     self.strs[name] = val
                 continue

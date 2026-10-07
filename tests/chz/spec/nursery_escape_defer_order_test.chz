@@ -46,7 +46,7 @@ fn noop():
 
 
 fn fails() -> int!str:
-    return Err("bail")
+    return !"bail"
 
 
 fn ret_order(log: Shared[str]) -> int:

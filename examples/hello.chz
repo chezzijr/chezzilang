@@ -22,7 +22,7 @@ fn area(s: Shape) -> float:
 
 fn safe_div(a: int, b: int) -> Result[int]:
     if b == 0:
-        return Err("divide by zero")
+        return !"divide by zero"
     return Ok(a / b)
 
 fn main() -> int!:

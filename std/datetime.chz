@@ -247,7 +247,7 @@ fn to_uint(x: str) -> int:
 # Exactly-2-ASCII-digit field -> int, else Err (guards every fixed-width ISO field before conversion).
 fn field2(x: str) -> Result[int]:
     if x.len() != 2 or not all_digits(x):
-        return Err("invalid 2-digit field '" + x + "'")
+        return !("invalid 2-digit field '" + x + "'")
     return Ok(to_uint(x))
 
 fn parse_iso8601(input: str) -> Result[DateTime]:
@@ -263,7 +263,7 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
         time_part = dt_parts[1]
         has_time = true
     elif dt_parts.len() != 1:
-        return Err("malformed date/time separator in '" + input + "'")
+        return !("malformed date/time separator in '" + input + "'")
 
     # 2. date: optional leading '-' (proleptic negative year, as pad_year emits), then YYYY-MM-DD
     neg := false
@@ -277,20 +277,20 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
         if dc.len() == 1 and dp.len() == 8 and all_digits(dp):
             dc = [dp[0:4], dp[4:6], dp[6:8]]
         else:
-            return Err("date must be YYYY-MM-DD or YYYYMMDD, got '" + date_part + "'")
+            return !("date must be YYYY-MM-DD or YYYYMMDD, got '" + date_part + "'")
     if not all_digits(dc[0]):
-        return Err("invalid year '" + dc[0] + "'")
+        return !("invalid year '" + dc[0] + "'")
     # Enforce the year's WIDTH like every other field (month/day/… go through `field2`'s exact-2).
     # The lower bound MIRRORS the emitter: `pad_year` writes >=4 digits ("0999", "-0044"), and more
     # for an extended year — so >=4 (not ==4, which would break the round-trip on what this module
     # itself emits). Without it "24-01-01" silently parsed as year 24.
     if dc[0].len() < 4:
-        return Err("year must be 4+ digits, got '" + dc[0] + "'")
+        return !("year must be 4+ digits, got '" + dc[0] + "'")
     # Bound the year before conversion: an oversized all-digit year would overflow i64 in `to_uint`
     # or downstream `to_epoch` (days * 86400) — a fault, not the clean Err the contract requires.
     # <=9 digits (max 999_999_999) can never overflow to_epoch; every realistic/padded year fits.
     if dc[0].len() > 9:
-        return Err("year out of range '" + dc[0] + "'")
+        return !("year out of range '" + dc[0] + "'")
     y := to_uint(dc[0])
     if neg:
         y = -y
@@ -324,22 +324,22 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
                     if oc.len() == 1 and otxt.len() == 4 and all_digits(otxt):
                         oc = [otxt[0:2], otxt[2:4]]
                     else:
-                        return Err("offset must be +HH:MM / +HHMM (or the '-' forms)")
+                        return !"offset must be +HH:MM / +HHMM (or the '-' forms)"
                 oh := field2(oc[0])?
                 om := field2(oc[1])?
                 if oh > 23 or om > 59:
-                    return Err("offset field out of range")
+                    return !"offset field out of range"
                 off = sign * (oh * 3600 + om * 60)
         # 3b. peel fractional seconds into `milli`: first 3 digits, right-padded, the rest truncated.
         #     Never to_uint the whole fraction — a long one would overflow i64 (a fault, not an Err).
         fc := tp.split(".")
         if fc.len() == 2:
             if not all_digits(fc[1]):
-                return Err("invalid fractional seconds")
+                return !"invalid fractional seconds"
             milli = to_uint((fc[1] + "00")[0:3])
             tp = fc[0]
         elif fc.len() != 1:
-            return Err("malformed fractional seconds")
+            return !"malformed fractional seconds"
         # 3c. HH:MM:SS, HH:MM (minute precision), HHMMSS or HHMM (compact forms)
         tc := tp.split(":")
         if tc.len() == 1:
@@ -348,11 +348,11 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
             elif tp.len() == 4 and all_digits(tp):
                 tc = [tp[0:2], tp[2:4], "00"]
             else:
-                return Err("time must be HH:MM[:SS] or HHMM[SS], got '" + time_part + "'")
+                return !("time must be HH:MM[:SS] or HHMM[SS], got '" + time_part + "'")
         elif tc.len() == 2:
             tc = [tc[0], tc[1], "00"]
         elif tc.len() != 3:
-            return Err("time must be HH:MM[:SS] or HHMM[SS], got '" + time_part + "'")
+            return !("time must be HH:MM[:SS] or HHMM[SS], got '" + time_part + "'")
         hh = field2(tc[0])?
         mm = field2(tc[1])?
         ss = field2(tc[2])?
@@ -360,15 +360,15 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
     # 4. range-validate BEFORE any civil math (days_from_civil computes garbage for month 13 / day 32).
     #    field2/to_uint are non-negative, so only upper bounds (+ the m<1 / d<1 zero cases) need checks.
     if m < 1 or m > 12:
-        return Err("month out of range: " + str(m))
+        return !("month out of range: " + str(m))
     if d < 1 or d > days_in_month(y, m):
-        return Err("day out of range: " + str(d))
+        return !("day out of range: " + str(d))
     if hh > 23:
-        return Err("hour out of range: " + str(hh))
+        return !("hour out of range: " + str(hh))
     if mm > 59:
-        return Err("minute out of range: " + str(mm))
+        return !("minute out of range: " + str(mm))
     if ss > 59:
-        return Err("second out of range: " + str(ss))
+        return !("second out of range: " + str(ss))
 
     # 5. reuse to_epoch/from_epoch: normalizes any non-Z offset to UTC + fills the contractual weekday.
     epoch := to_epoch(DateTime(y, m, d, hh, mm, ss, 0)) - off

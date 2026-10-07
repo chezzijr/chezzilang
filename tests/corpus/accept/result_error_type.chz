@@ -4,8 +4,8 @@ struct DbErr:
     fn message(self) -> str:
         return "db {self.code}"
 fn q() -> int!DbErr:
-    return Err(DbErr(1))
+    return !DbErr(1)
 fn p() -> int!:
-    return Err("oops")
+    return !"oops"
 fn r() -> Result[int, str]:
     return Ok(1)
