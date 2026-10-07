@@ -1001,8 +1001,14 @@ mod tests {
         assert_eq!(field(&ret, "body"), &NativeRet::Str("done".into()));
     }
 
-    /// Reads one request (head, then a `content-length` body); returns its request line, `None` on EOF.
+    /// Reads one request; returns its request line, `None` on EOF.
     fn read_request(s: &mut std::net::TcpStream) -> Option<String> {
+        let (head, _) = read_request_head_body(s)?;
+        Some(head.lines().next().unwrap_or("").to_string())
+    }
+
+    /// Reads one request (head, then a `content-length` body); returns its head and body, `None` on EOF.
+    fn read_request_head_body(s: &mut std::net::TcpStream) -> Option<(String, String)> {
         let mut data = Vec::new();
         let mut byte = [0u8; 1];
         while !data.ends_with(b"\r\n\r\n") {
@@ -1022,7 +1028,7 @@ mod tests {
             .unwrap_or(0);
         let mut body = vec![0u8; len];
         s.read_exact(&mut body).ok()?;
-        Some(head.lines().next().unwrap_or("").to_string())
+        Some((head, String::from_utf8_lossy(&body).into_owned()))
     }
 
     /// Per connection: answer request 1, keep the socket open, then read request 2 and drop the socket
@@ -1191,5 +1197,358 @@ mod tests {
             NativeRet::Err(m) => assert!(m.contains("too many redirects"), "message: {m}"),
             other => panic!("expected Err, got {other:?}"),
         }
+    }
+
+    /// Per connection, keep-alive: log `METHOD /path[ body]` for each request, and drop the request to
+    /// `drop_path` once, unanswered, when it is a connection's second or later request. `/r` answers
+    /// `status` with `Location: /a` (`200` when `status` is 0); every other path answers `200`. Every
+    /// response has `Content-Length: 0`, so each connection goes back to the pool.
+    fn serve_redirect_grid(
+        status: u16,
+        drop_path: &'static str,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let lg = Arc::clone(&log);
+        thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                let (lg, dropped) = (Arc::clone(&lg), Arc::clone(&dropped));
+                thread::spawn(move || {
+                    for n in 0.. {
+                        let Some((head, body)) = read_request_head_body(&mut stream) else {
+                            return;
+                        };
+                        let line: Vec<&str> = head.split(' ').take(2).collect();
+                        let mut entry = line.join(" ");
+                        if !body.is_empty() {
+                            entry = format!("{entry} {body}");
+                        }
+                        lg.lock().unwrap().push(entry);
+                        if line[1] == drop_path && n >= 1 && !dropped.swap(true, Ordering::SeqCst) {
+                            return;
+                        }
+                        let resp = if line[1] == "/r" && status != 0 {
+                            format!(
+                                "HTTP/1.1 {status} X\r\nLocation: /a\r\nContent-Length: 0\r\n\r\n"
+                            )
+                        } else {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_string()
+                        };
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}/"), log)
+    }
+
+    #[test]
+    fn a_dropped_redirect_hop_is_retried_iff_go_would_retry_that_hop() {
+        // (original method, redirect status (0 = none), dropped hop, ok, request log). Measured with
+        // Go 1.27.0 `net/http` against this fixture rebuilt in Go (TICKET-221). "first" drops the
+        // request to `/r`, "redirected" the hop to `/a`; `POST+key` carries `Idempotency-Key`.
+        let cases: &[(&str, u16, &str, bool, &str)] = &[
+            ("GET", 0, "first", true, "GET /r, GET /r"),
+            ("GET", 301, "first", true, "GET /r, GET /r, GET /a"),
+            ("GET", 301, "redirected", true, "GET /r, GET /a, GET /a"),
+            ("GET", 302, "first", true, "GET /r, GET /r, GET /a"),
+            ("GET", 302, "redirected", true, "GET /r, GET /a, GET /a"),
+            ("GET", 303, "first", true, "GET /r, GET /r, GET /a"),
+            ("GET", 303, "redirected", true, "GET /r, GET /a, GET /a"),
+            ("GET", 307, "first", true, "GET /r, GET /r, GET /a"),
+            ("GET", 307, "redirected", true, "GET /r, GET /a, GET /a"),
+            ("GET", 308, "first", true, "GET /r, GET /r, GET /a"),
+            ("GET", 308, "redirected", true, "GET /r, GET /a, GET /a"),
+            ("HEAD", 0, "first", true, "HEAD /r, HEAD /r"),
+            ("HEAD", 301, "first", true, "HEAD /r, HEAD /r, HEAD /a"),
+            ("HEAD", 301, "redirected", true, "HEAD /r, HEAD /a, HEAD /a"),
+            ("HEAD", 302, "first", true, "HEAD /r, HEAD /r, HEAD /a"),
+            ("HEAD", 302, "redirected", true, "HEAD /r, HEAD /a, HEAD /a"),
+            ("HEAD", 303, "first", true, "HEAD /r, HEAD /r, HEAD /a"),
+            ("HEAD", 303, "redirected", true, "HEAD /r, HEAD /a, HEAD /a"),
+            ("HEAD", 307, "first", true, "HEAD /r, HEAD /r, HEAD /a"),
+            ("HEAD", 307, "redirected", true, "HEAD /r, HEAD /a, HEAD /a"),
+            ("HEAD", 308, "first", true, "HEAD /r, HEAD /r, HEAD /a"),
+            ("HEAD", 308, "redirected", true, "HEAD /r, HEAD /a, HEAD /a"),
+            ("POST", 0, "first", false, "POST /r x"),
+            ("POST", 301, "first", false, "POST /r x"),
+            ("POST", 301, "redirected", true, "POST /r x, GET /a, GET /a"),
+            ("POST", 302, "first", false, "POST /r x"),
+            ("POST", 302, "redirected", true, "POST /r x, GET /a, GET /a"),
+            ("POST", 303, "first", false, "POST /r x"),
+            ("POST", 303, "redirected", true, "POST /r x, GET /a, GET /a"),
+            ("POST", 307, "first", false, "POST /r x"),
+            ("POST", 307, "redirected", false, "POST /r x, POST /a x"),
+            ("POST", 308, "first", false, "POST /r x"),
+            ("POST", 308, "redirected", false, "POST /r x, POST /a x"),
+            ("PUT", 0, "first", false, "PUT /r x"),
+            ("PUT", 301, "first", false, "PUT /r x"),
+            ("PUT", 301, "redirected", true, "PUT /r x, GET /a, GET /a"),
+            ("PUT", 302, "first", false, "PUT /r x"),
+            ("PUT", 302, "redirected", true, "PUT /r x, GET /a, GET /a"),
+            ("PUT", 303, "first", false, "PUT /r x"),
+            ("PUT", 303, "redirected", true, "PUT /r x, GET /a, GET /a"),
+            ("PUT", 307, "first", false, "PUT /r x"),
+            ("PUT", 307, "redirected", false, "PUT /r x, PUT /a x"),
+            ("PUT", 308, "first", false, "PUT /r x"),
+            ("PUT", 308, "redirected", false, "PUT /r x, PUT /a x"),
+            ("DELETE", 0, "first", false, "DELETE /r"),
+            ("DELETE", 301, "first", false, "DELETE /r"),
+            (
+                "DELETE",
+                301,
+                "redirected",
+                true,
+                "DELETE /r, GET /a, GET /a",
+            ),
+            ("DELETE", 302, "first", false, "DELETE /r"),
+            (
+                "DELETE",
+                302,
+                "redirected",
+                true,
+                "DELETE /r, GET /a, GET /a",
+            ),
+            ("DELETE", 303, "first", false, "DELETE /r"),
+            (
+                "DELETE",
+                303,
+                "redirected",
+                true,
+                "DELETE /r, GET /a, GET /a",
+            ),
+            ("DELETE", 307, "first", false, "DELETE /r"),
+            ("DELETE", 307, "redirected", false, "DELETE /r, DELETE /a"),
+            ("DELETE", 308, "first", false, "DELETE /r"),
+            ("DELETE", 308, "redirected", false, "DELETE /r, DELETE /a"),
+            ("POST+key", 0, "first", true, "POST /r x, POST /r x"),
+            (
+                "POST+key",
+                301,
+                "first",
+                true,
+                "POST /r x, POST /r x, GET /a",
+            ),
+            (
+                "POST+key",
+                301,
+                "redirected",
+                true,
+                "POST /r x, GET /a, GET /a",
+            ),
+            (
+                "POST+key",
+                302,
+                "first",
+                true,
+                "POST /r x, POST /r x, GET /a",
+            ),
+            (
+                "POST+key",
+                302,
+                "redirected",
+                true,
+                "POST /r x, GET /a, GET /a",
+            ),
+            (
+                "POST+key",
+                303,
+                "first",
+                true,
+                "POST /r x, POST /r x, GET /a",
+            ),
+            (
+                "POST+key",
+                303,
+                "redirected",
+                true,
+                "POST /r x, GET /a, GET /a",
+            ),
+            (
+                "POST+key",
+                307,
+                "first",
+                true,
+                "POST /r x, POST /r x, POST /a x",
+            ),
+            (
+                "POST+key",
+                307,
+                "redirected",
+                true,
+                "POST /r x, POST /a x, POST /a x",
+            ),
+            (
+                "POST+key",
+                308,
+                "first",
+                true,
+                "POST /r x, POST /r x, POST /a x",
+            ),
+            (
+                "POST+key",
+                308,
+                "redirected",
+                true,
+                "POST /r x, POST /a x, POST /a x",
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for &(m, status, drop, ok, want) in cases {
+            let (url, log) = serve_redirect_grid(status, if drop == "first" { "/r" } else { "/a" });
+            if drop == "first" {
+                // Setup: one request opens the pooled connection the dropped `/r` then reuses.
+                let _ = do_get(&format!("{url}setup"), None);
+            }
+            let (method, headers) = match m {
+                "POST+key" => (
+                    "POST",
+                    vec![("Idempotency-Key".to_string(), "k".to_string())],
+                ),
+                _ => (m, vec![]),
+            };
+            let body = if matches!(method, "POST" | "PUT") {
+                "x"
+            } else {
+                ""
+            };
+            let ret = do_request(method, &format!("{url}r"), body, &headers, None);
+            let mut sent = log.lock().unwrap().clone();
+            if drop == "first" {
+                sent.remove(0);
+            }
+            let got = (!matches!(ret, NativeRet::Err(_)), sent.join(", "));
+            if got != (ok, want.to_string()) {
+                wrong.push(format!(
+                    "{m} {status} drop={drop}: got {got:?}, want ({ok}, {want:?})"
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} of {} cells wrong: {}",
+            wrong.len(),
+            cases.len(),
+            wrong.join("; ")
+        );
+    }
+
+    /// Serve `ln`, one request per connection: log `METHOD /path[ body]` and the request's
+    /// `authorization`, `content-type`, `cookie`, `referer` and `x-custom` headers as sorted
+    /// `name=value`, then answer the `(path, status, location)` route for the path, or `200`.
+    fn serve_header_log(
+        ln: TcpListener,
+        routes: Vec<(&'static str, u16, String)>,
+        log: Arc<Mutex<Vec<String>>>,
+    ) {
+        thread::spawn(move || {
+            while let Ok((mut s, _)) = ln.accept() {
+                let Some((head, body)) = read_request_head_body(&mut s) else {
+                    continue;
+                };
+                let mut lines = head.lines();
+                let line: Vec<&str> = lines.next().unwrap_or("").split(' ').take(2).collect();
+                let mut entry = line.join(" ");
+                if !body.is_empty() {
+                    entry = format!("{entry} {body}");
+                }
+                let mut hs: Vec<String> = lines
+                    .filter_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        let k = k.trim().to_ascii_lowercase();
+                        [
+                            "authorization",
+                            "content-type",
+                            "cookie",
+                            "referer",
+                            "x-custom",
+                        ]
+                        .contains(&k.as_str())
+                        .then(|| format!("{k}={}", v.trim()))
+                    })
+                    .collect();
+                hs.sort();
+                for h in hs {
+                    entry = format!("{entry} {h}");
+                }
+                log.lock().unwrap().push(entry);
+                let resp = match routes.iter().find(|(p, _, _)| Some(p) == line.get(1)) {
+                    Some((_, status, loc)) => format!(
+                        "HTTP/1.1 {status} X\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    None => "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string(),
+                };
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+    }
+
+    #[cfg(target_os = "linux")] // 127.0.0.2 is a second loopback host on Linux only.
+    #[test]
+    fn redirect_hops_carry_gos_headers_and_drop_credentials_after_a_host_change() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let la = TcpListener::bind("127.0.0.1:0").unwrap();
+        let lb = TcpListener::bind("127.0.0.1:0").unwrap();
+        let lc = TcpListener::bind("127.0.0.2:0").unwrap();
+        let [a, b, c] = [&la, &lb, &lc].map(|l| format!("http://{}", l.local_addr().unwrap()));
+        serve_header_log(la, vec![("/r", 307, format!("{b}/s"))], Arc::clone(&log));
+        serve_header_log(lb, vec![("/s", 303, format!("{c}/t"))], Arc::clone(&log));
+        serve_header_log(lc, vec![("/t", 302, format!("{a}/u"))], Arc::clone(&log));
+        let headers: Vec<(String, String)> = [
+            ("Authorization", "Bearer t"),
+            ("Cookie", "c=1"),
+            ("Content-Type", "text/plain"),
+            ("X-Custom", "v"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let ret = do_request("POST", &format!("{a}/r"), "x", &headers, None);
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(200));
+        // Measured with Go 1.27.0 `net/http` on the same chain (TICKET-221): a 307 keeps the method,
+        // body and every header; a 303 drops the body and `content-type`; leaving the first host's
+        // domain drops `authorization` and `cookie` for every later hop; each hop's `referer` is the
+        // previous hop's URL.
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "POST /r x authorization=Bearer t content-type=text/plain cookie=c=1 x-custom=v"
+                    .to_string(),
+                format!(
+                    "POST /s x authorization=Bearer t content-type=text/plain cookie=c=1 referer={a}/r x-custom=v"
+                ),
+                format!("GET /t referer={b}/s x-custom=v"),
+                format!("GET /u referer={c}/t x-custom=v"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ten_redirects_are_followed_and_an_eleventh_is_too_many_redirects() {
+        let (url, handle) = serve_redirect_chain(10);
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        assert_eq!(field(&ret, "body"), &NativeRet::Str("done".into()));
+        let (url, handle) = serve_redirect_chain(11);
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        match ret {
+            NativeRet::Err(m) => assert!(m.contains("too many redirects"), "message: {m}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_redirect_status_without_a_location_is_the_response_like_go() {
+        let (url, handle) =
+            serve_raw(b"HTTP/1.1 302 Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno");
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        assert_eq!(field(&ret, "status"), &NativeRet::Int(302));
+        assert_eq!(field(&ret, "body"), &NativeRet::Str("no".into()));
     }
 }
