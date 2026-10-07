@@ -1050,11 +1050,6 @@ impl Checker {
                     };
                     match target {
                         WaitTarget::Bind(name) => self.declare(name, elem),
-                        // `=` assigns an existing outer lvalue — reuse the ordinary assignment checks
-                        // (assignability, type match, read-only/loop-var gates).
-                        WaitTarget::Assign(target) => {
-                            self.check_assign(target, AssignOp::Eq, elem, None, arm.span)
-                        }
                         WaitTarget::Discard => {}
                     }
                 }

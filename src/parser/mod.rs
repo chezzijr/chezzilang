@@ -2167,6 +2167,10 @@ impl Parser {
             // A `:=`/`=` after the lhs ⇒ a RECV arm (`x := ch.recv():` / `y = ch.recv():`). No such
             // operator ⇒ the lhs is a bare SEND-arm candidate (`ch.send(v):`); the parser stays lenient
             // (any bare expr is accepted) and the CHECKER validates it is exactly `chan.send(value)`.
+            // TICKET-227: `lhs = ch.recv():` is a bind to a fresh `$waitN` plus the ordinary
+            // assignment `lhs = $waitN` as the arm's first statement, so the assigned value has a
+            // node (it can wrap into a carrier target like any assignment).
+            let mut assign_first: Option<Stmt> = None;
             let kind = if self.eat(&Token::Walrus) {
                 let target = match lhs.kind {
                     ExprKind::Ident(n) if n == "_" => WaitTarget::Discard,
@@ -2191,7 +2195,22 @@ impl Parser {
                         | ExprKind::Field { .. }
                         | ExprKind::Index { index: Some(_), .. }
                 ) {
-                    WaitTarget::Assign(lhs)
+                    let id = crate::ast::NodeId::fresh();
+                    let tmp = format!("$wait{}", id.0);
+                    let value = Expr {
+                        id: crate::ast::NodeId::fresh(),
+                        kind: ExprKind::Ident(tmp.clone()),
+                        span: lhs_span,
+                    };
+                    assign_first = Some(Stmt {
+                        kind: StmtKind::Assign {
+                            target: lhs,
+                            op: AssignOp::Eq,
+                            value,
+                        },
+                        span: arm_span,
+                    });
+                    WaitTarget::Bind(tmp)
                 } else {
                     return Err(ParseError {
                         message: "invalid wait-arm assignment target".to_string(),
@@ -2206,7 +2225,10 @@ impl Parser {
                 // Bare expr, no `:=`/`=` — a send arm. Validated by the checker (`chan.send(value)`).
                 WaitArmKind::Send { call: lhs }
             };
-            let body = self.parse_block()?;
+            let mut body = self.parse_block()?;
+            if let Some(stmt) = assign_first {
+                body.insert(0, stmt);
+            }
             arms.push(WaitArm {
                 kind,
                 body,
@@ -4799,8 +4821,10 @@ mod tests {
                 let (t0, c0) = recv(&arms[0]);
                 assert!(matches!(t0, WaitTarget::Bind(ref n) if n == "v"));
                 assert!(matches!(&c0.kind, ExprKind::Ident(n) if n == "orders"));
+                // `result = ...` binds a fresh `$waitN`, then assigns it as the body's first statement.
                 let (t1, _) = recv(&arms[1]);
-                assert!(matches!(t1, WaitTarget::Assign(_)));
+                assert!(matches!(t1, WaitTarget::Bind(ref n) if n.starts_with("$wait")));
+                assert!(matches!(&arms[1].body[0].kind, StmtKind::Assign { .. }));
                 let (t2, c2) = recv(&arms[2]);
                 assert!(matches!(t2, WaitTarget::Discard));
                 // a timer arm's channel expr is the `timer(500)` call, evaluated once.

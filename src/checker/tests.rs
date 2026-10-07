@@ -38102,3 +38102,10 @@ fn multi_target_assignment_wraps_each_element() {
         "cannot assign int to",
     );
 }
+
+#[test]
+fn wait_recv_assign_wraps_into_an_optional_target() {
+    ok(
+        "fn main():\n    ch := Channel[int](1)\n    ch.send(5)\n    x: int? = None\n    wait:\n        x = ch.recv():\n            print(x)\n",
+    );
+}

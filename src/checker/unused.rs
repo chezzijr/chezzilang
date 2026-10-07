@@ -213,7 +213,6 @@ impl Scan {
                                 s.expr(chan);
                                 match target {
                                     WaitTarget::Bind(n) => s.bind(n, arm.span, false),
-                                    WaitTarget::Assign(e) => s.expr(e),
                                     WaitTarget::Discard => {}
                                 }
                             }

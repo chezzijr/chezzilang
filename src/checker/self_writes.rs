@@ -1,9 +1,7 @@
 //! D4 rule 2: syntactic summaries of writes rooted at a method's `self` parameter.
 
 use super::ChainLink;
-use crate::ast::{
-    DeferTarget, Expr, ExprKind, SpawnTarget, Stmt, StmtKind, WaitArmKind, WaitTarget,
-};
+use crate::ast::{DeferTarget, Expr, ExprKind, SpawnTarget, Stmt, StmtKind, WaitArmKind};
 use crate::compiler::{chunk_exprs, interp_exprs};
 
 #[derive(Clone, Debug)]
@@ -102,17 +100,7 @@ impl Scan {
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
                     match &arm.kind {
-                        WaitArmKind::Recv { target, chan } => {
-                            self.expr(chan);
-                            if let WaitTarget::Assign(expr) = target {
-                                if let Some(links) = self_chain(expr)
-                                    && !links.is_empty()
-                                {
-                                    self.ops.push(SelfOp::Store(links));
-                                }
-                                self.expr(expr);
-                            }
-                        }
+                        WaitArmKind::Recv { chan, .. } => self.expr(chan),
                         WaitArmKind::Send { call } => self.expr(call),
                     }
                     self.block(&arm.body);

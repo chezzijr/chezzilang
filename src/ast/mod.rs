@@ -436,13 +436,12 @@ pub enum WaitArmKind {
     Send { call: Expr },
 }
 
-/// Where a `wait` arm delivers the received value: a fresh arm-scoped binding (`v :=`), an existing
-/// outer lvalue (`result =`), or discarded (`_`). Mirrors the `:=`/`=`/`_` split of ordinary `let`/
-/// assignment; arm bodies are plain lexical sub-scopes (not closures), so `=` mutation is normal.
+/// Where a `wait` arm delivers the received value: a fresh arm-scoped binding (`v :=`) or discarded
+/// (`_`). An outer lvalue (`result = ch.recv():`) parses to a bind of a fresh `$waitN` plus the
+/// ordinary assignment `result = $waitN` as the arm body's first statement (TICKET-227).
 #[derive(Debug, Clone, PartialEq)]
 pub enum WaitTarget {
     Bind(String),
-    Assign(Expr),
     Discard,
 }
 
@@ -1545,12 +1544,7 @@ fn ids_in_stmt(s: &mut Stmt, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
         StmtKind::Wait { arms, else_block } => {
             for a in arms {
                 match &mut a.kind {
-                    WaitArmKind::Recv { target, chan } => {
-                        if let WaitTarget::Assign(t) = target {
-                            ids_in_expr(t, f);
-                        }
-                        ids_in_expr(chan, f);
-                    }
+                    WaitArmKind::Recv { chan, .. } => ids_in_expr(chan, f),
                     WaitArmKind::Send { call } => ids_in_expr(call, f),
                 }
                 ids_in_block(&mut a.body, f);

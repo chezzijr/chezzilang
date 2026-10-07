@@ -1836,9 +1836,6 @@ impl Compiler {
                         fc.emit_decl_named(name.clone(), arm.span);
                     }
                     WaitTarget::Discard => fc.emit(Op::Pop, arm.span),
-                    WaitTarget::Assign(target) => {
-                        self.emit_assign_value_first(fc, target, arm.span)?
-                    }
                 },
                 // A send arm binds nothing — `take_wait_send_arm` pushes no value, so no prologue.
                 WaitArmKind::Send { .. } => {}
@@ -5818,7 +5815,6 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
                                 WaitTarget::Bind(n) => {
                                     out.insert(n.clone());
                                 }
-                                WaitTarget::Assign(e) => collect_frame_binds_expr(e, out),
                                 WaitTarget::Discard => {}
                             }
                         }
@@ -5909,12 +5905,7 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
             StmtKind::Wait { arms, else_block } => {
                 for arm in arms {
                     match &arm.kind {
-                        WaitArmKind::Recv { target, chan } => {
-                            find_boundary_free_expr(chan, out);
-                            if let WaitTarget::Assign(e) = target {
-                                find_boundary_free_expr(e, out);
-                            }
-                        }
+                        WaitArmKind::Recv { chan, .. } => find_boundary_free_expr(chan, out),
                         WaitArmKind::Send { call } => find_boundary_free_expr(call, out),
                     }
                     find_boundary_free_block(&arm.body, out);
@@ -6477,7 +6468,6 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
                                 WaitTarget::Bind(n) => {
                                     b2.insert(n.clone());
                                 }
-                                WaitTarget::Assign(e) => free_names_expr(e, &b, out),
                                 WaitTarget::Discard => {}
                             }
                         }
@@ -6934,10 +6924,7 @@ fn stmt_has_bare_spawn(s: &Stmt) -> bool {
         StmtKind::Wait { arms, else_block } => {
             arms.iter().any(|a| {
                 let header = match &a.kind {
-                    WaitArmKind::Recv { target, chan } => {
-                        expr_has_bare_spawn(chan)
-                            || matches!(target, WaitTarget::Assign(t) if expr_has_bare_spawn(t))
-                    }
+                    WaitArmKind::Recv { chan, .. } => expr_has_bare_spawn(chan),
                     WaitArmKind::Send { call } => expr_has_bare_spawn(call),
                 };
                 header || block_has_bare_spawn(&a.body)

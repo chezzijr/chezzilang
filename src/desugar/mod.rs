@@ -1180,7 +1180,6 @@ impl Walker<'_> {
                         WaitArmKind::Recv { target, chan } => {
                             self.walk_expr(chan)?;
                             match target {
-                                WaitTarget::Assign(e) => self.walk_expr(e)?,
                                 WaitTarget::Bind(name) => self.bind(name),
                                 WaitTarget::Discard => {}
                             }
