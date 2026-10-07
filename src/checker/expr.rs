@@ -2047,7 +2047,7 @@ impl Checker {
                 // NOT a global builtin: requires `import std.concurrency` (the arg is still inferred on
                 // the unlicensed path so a nested error surfaces; the name STAYS reserved). Same for
                 // RwShared/Atomic/Executor below.
-                let inferred = self.one_arg("Shared", args, span);
+                let inferred = self.one_arg_hinted("Shared", args, span, single_targ(targs));
                 let elem = self.concurrency_turbofish_elem("Shared", targs, inferred, span);
                 if self.concurrency_licensed("Shared") {
                     Some(Ty::shared(elem))
@@ -2064,7 +2064,7 @@ impl Checker {
                 // `RwShared(v)` — a fresh cross-task read-write box initialised with `v`. The element
                 // type is inferred from the value (value-first, like `Shared`); an OPTIONAL `[T]`
                 // turbofish pins it and is checked against the value's type.
-                let inferred = self.one_arg("RwShared", args, span);
+                let inferred = self.one_arg_hinted("RwShared", args, span, single_targ(targs));
                 let elem = self.concurrency_turbofish_elem("RwShared", targs, inferred, span);
                 if self.concurrency_licensed("RwShared") {
                     Some(Ty::rwshared(elem))
@@ -2081,7 +2081,7 @@ impl Checker {
                 // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
                 // `Shared`; an OPTIONAL `[T]` turbofish pins the element type and is checked against
                 // the value's type.
-                let inferred = self.one_arg("Atomic", args, span);
+                let inferred = self.one_arg_hinted("Atomic", args, span, single_targ(targs));
                 let elem = self.concurrency_turbofish_elem("Atomic", targs, inferred, span);
                 if self.concurrency_licensed("Atomic") {
                     // INSIDE the licensing branch: an unavailable type must not first get advice
@@ -2171,7 +2171,7 @@ impl Checker {
                         Ty::Result(t, _) => Some((**t).clone()),
                         _ => None,
                     });
-                    self.one_arg_hinted(name, args, span, h.as_ref())
+                    self.one_arg_seeded(name, args, span, h.as_ref())
                 },
                 Ty::Unknown,
             )),
@@ -2180,7 +2180,7 @@ impl Checker {
                     Ty::Option(t) => Some((**t).clone()),
                     _ => None,
                 });
-                self.one_arg_hinted(name, args, span, h.as_ref())
+                self.one_arg_seeded(name, args, span, h.as_ref())
             })),
             // `Err(x)`: error type known (`typeof x`), success type open.
             "Err" => Some(Ty::result_e(Ty::Unknown, {
@@ -2188,7 +2188,7 @@ impl Checker {
                     Ty::Result(_, e) => Some((**e).clone()),
                     _ => None,
                 });
-                self.one_arg_hinted(name, args, span, h.as_ref())
+                self.one_arg_seeded(name, args, span, h.as_ref())
             })),
             _ => None,
         }
@@ -3931,17 +3931,33 @@ impl Checker {
 
     // ===== small helpers =====
 
-    pub(super) fn one_arg(&mut self, name: &str, args: &[Expr], span: Span) -> Ty {
+    /// TICKET-124 (W13-13): infer the single argument, reaching an expected type that is
+    /// concrete up to in-scope type params (`ty_concrete_but` + `rigid_param`) into it, so `Some([A()])` under an
+    /// `Option[List[Named]]` hint infers the list literal's elements as `Named`, not `A`.
+    /// TICKET-227: here `h` is the argument's slot type (a `Shared[T]`/`RwShared[T]`/`Atomic[T]`
+    /// turbofish), so a plain value wraps into a carrier `T`. See [`Self::one_arg_seeded`].
+    pub(super) fn one_arg_hinted(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+        h: Option<&Ty>,
+    ) -> Ty {
         self.check_arity(name, 1, args, span);
-        args.first()
-            .map(|a| self.infer_value(a))
-            .unwrap_or(Ty::Unknown)
+        let Some(a) = args.first() else {
+            return Ty::Unknown;
+        };
+        match h {
+            Some(t) if ty_concrete_but(t, &|n| self.rigid_param(n, &[])) => {
+                self.infer_arg(a, Some(t))
+            }
+            _ => self.infer_value(a),
+        }
     }
 
-    /// TICKET-124 (W13-13): like [`Checker::one_arg`], but reaches an expected type that is
-    /// concrete up to in-scope type params (`ty_concrete_but` + `rigid_param`) into the single argument (`Some`/`Ok`/`Err`'s payload), so `Some([A()])` under an
-    /// `Option[List[Named]]` hint infers the list literal's elements as `Named`, not `A`.
-    pub(super) fn one_arg_hinted(
+    /// [`Self::one_arg_hinted`] with `h` as a seed only: the `Some`/`Ok`/`Err` payload, which never
+    /// wraps (`x: Option[Option[int]] = Some(5)` keeps rejecting).
+    pub(super) fn one_arg_seeded(
         &mut self,
         name: &str,
         args: &[Expr],
@@ -4025,17 +4041,14 @@ impl Checker {
         }
     }
 
-    /// TICKET-225: the iterable of a type-applied conversion (`List[int8]([300])`). A list literal
-    /// infers under `List[elem]` when `elem` (or a part of a `(K, V)` element) is a C width, so each
-    /// constant element meets the width it lands in. Anything else infers bottom-up, and the
-    /// conversion's own element check reports a mismatch.
+    /// TICKET-225 / TICKET-227: the iterable of a type-applied conversion (`List[int8]([300])`,
+    /// `List[int?]([5])`). The turbofish element is the expected type of each element of a list
+    /// literal argument: a constant meets its C width, a plain value wraps into a carrier element
+    /// (`Map[K, V]` elements are `(K, V)` tuples, split per part). Anything else infers bottom-up,
+    /// and the conversion's own element check reports a mismatch.
     fn infer_conv_arg(&mut self, arg: &Expr, elem: Option<Ty>) -> Ty {
-        let widths = |e: &Ty| match e {
-            Ty::Tuple(ps) => ps.iter().any(|p| p.width().is_some()),
-            e => e.width().is_some(),
-        };
         match elem {
-            Some(e) if matches!(arg.kind, ExprKind::List(..)) && widths(&e) => {
+            Some(e) if matches!(arg.kind, ExprKind::List(..)) && ty_fully_concrete(&e) => {
                 self.infer_arg(arg, Some(&Ty::list(e)))
             }
             _ => self.infer_value(arg),
@@ -4791,6 +4804,14 @@ fn type_apply_param_head(obj: &Expr) -> Option<String> {
             ExprKind::Ident(n) => Some(n.clone()),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// The one type argument of a `Shared[T](..)`-style turbofish, if exactly one was written.
+fn single_targ(targs: &[Ty]) -> Option<&Ty> {
+    match targs {
+        [t] => Some(t),
         _ => None,
     }
 }

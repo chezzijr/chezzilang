@@ -38093,3 +38093,12 @@ fn none_is_the_void_type_name() {
         "cannot be used as a value",
     );
 }
+
+#[test]
+fn multi_target_assignment_wraps_each_element() {
+    ok("x: int? = None\ny := 0\nx, y = 5, 0\n");
+    rejects(
+        "fn g() -> (int, int):\n    return (5, 0)\nx: int? = None\ny := 0\nx, y = g()\n",
+        "cannot assign int to",
+    );
+}

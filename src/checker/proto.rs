@@ -1510,6 +1510,17 @@ impl Checker {
     /// protocol — a witness that satisfies but is not sendable still reaches the error path via
     /// `assignable`'s `sendable` check, and claiming a missing method there would be false.
     pub(super) fn protocol_note(&self, expected: &Ty, actual: &Ty) -> String {
+        // A tuple misfits through its first misfitting element (a `Map[K, V]([(k, v)])` element).
+        if let (Ty::Tuple(es), Ty::Tuple(xs)) = (expected, actual)
+            && es.len() == xs.len()
+        {
+            return es
+                .iter()
+                .zip(xs)
+                .map(|(e, x)| self.protocol_note(e, x))
+                .find(|n| !n.is_empty())
+                .unwrap_or_default();
+        }
         let Ty::Protocol(p, pargs) = expected else {
             return String::new();
         };

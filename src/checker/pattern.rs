@@ -3364,10 +3364,11 @@ impl Checker {
             for (t, item) in tys.iter().zip(items) {
                 if !t.is_unknown() && !self.assignable(e, t) {
                     let [e_s, t_s] = Ty::render_distinct([e, t]);
+                    let note = self.protocol_note(e, t);
                     self.error(
                         item.span,
                         format!(
-                            "list element: expected {e_s}, found {t_s}{}",
+                            "list element: expected {e_s}, found {t_s}{note}{}",
                             float_fix_note(e, t)
                         ),
                     );
@@ -3556,7 +3557,9 @@ impl Checker {
         // [3]] for y in xs]` false-rejects (the iterand then types as `List[int]` against a
         // `List[List[int]]` value). Measured on a scratch implementation of this fix: with the take,
         // that program is `ok: no type errors`.
-        let _outer_hint = self.expected_hint.take();
+        // TICKET-227: after every clause, the hint's ELEMENT payload (never the whole type,
+        // DEC-032) is the element expression's slot, so a plain element wraps into a carrier.
+        let outer_hint = self.expected_hint.take().filter(ty_fully_concrete);
         self.push_scope();
         for clause in clauses {
             // `for_bindings` infers the iter IN the current scope, so later clauses see earlier
@@ -3587,10 +3590,21 @@ impl Checker {
                 self.expect_bool(g, "comprehension guard");
             }
         }
+        let elem_in = |s: &mut Self, e: &Expr, slot: Option<&Ty>| match slot {
+            Some(t) => s.infer_value_in(e, t),
+            None => s.infer_value(e),
+        };
+        let (key_slot, elem_slot) = match (&kind, &outer_hint) {
+            (CompKind::List, Some(Ty::List(e))) | (CompKind::Set, Some(Ty::Set(e))) => {
+                (None, Some((**e).clone()))
+            }
+            (CompKind::Map, Some(Ty::Map(k, v))) => (Some((**k).clone()), Some((**v).clone())),
+            _ => (None, None),
+        };
         let result = match kind {
-            CompKind::List => Ty::list(self.infer_value(elem)),
+            CompKind::List => Ty::list(elem_in(self, elem, elem_slot.as_ref())),
             CompKind::Set => {
-                let et = self.infer_value(elem);
+                let et = elem_in(self, elem, elem_slot.as_ref());
                 if !et.is_unknown()
                     && let Some(why) = self.key_ty_reject(&et)
                     && self.pending_key_reject.as_deref() != Some(why.as_str())
@@ -3601,8 +3615,8 @@ impl Checker {
             }
             CompKind::Map => {
                 let key = key.expect("a map comprehension always carries a key expression");
-                let kt = self.infer_value(key);
-                let vt = self.infer_value(elem);
+                let kt = elem_in(self, key, key_slot.as_ref());
+                let vt = elem_in(self, elem, elem_slot.as_ref());
                 if !kt.is_unknown()
                     && let Some(why) = self.key_ty_reject(&kt)
                     && self.pending_key_reject.as_deref() != Some(why.as_str())
@@ -5674,7 +5688,16 @@ impl Checker {
                 ty
             })
             .collect();
-        let slot = ret.is_some().then(|| self.current_ret.clone());
+        // TICKET-227: the body's slot is the declared return, else a concrete return of the
+        // `fn`-typed slot this closure lands in.
+        let slot = if ret.is_some() {
+            Some(self.current_ret.clone())
+        } else {
+            match expected {
+                Some(Ty::Func { ret: er, .. }) if ty_fully_concrete(er) => Some((**er).clone()),
+                _ => None,
+            }
+        };
         let body_ty = self.infer_in_slot(body, slot);
         self.last_closure_writes = self
             .closure_write_frames

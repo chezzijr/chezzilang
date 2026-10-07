@@ -2858,24 +2858,22 @@ impl Checker {
                 } else if *op == AssignOp::Eq
                     && matches!(
                         target.kind,
-                        ExprKind::Ident(_) | ExprKind::Index { .. } | ExprKind::Field { .. }
-                    )
-                    && (matches!(
-                        value.kind,
-                        ExprKind::Call { .. }
-                            | ExprKind::List(..)
-                            | ExprKind::Map(_)
-                            | ExprKind::Set(_)
+                        ExprKind::Ident(_)
+                            | ExprKind::Index { .. }
+                            | ExprKind::Field { .. }
                             | ExprKind::Tuple(_)
-                    ) || self.generic_fn_value_sig(value).is_some())
+                    )
                 {
                     // TICKET-124 (W13-14): the hint that seeds a FRESH literal/call value used to
                     // exist only at DECLARATION (an annotated `let`, a call argument, a return) —
                     // reassignment, index-assign and field-assign have a statically known target
                     // type too. Probe it speculatively (mark/rollback, same idiom as the closure
                     // branch above) so an lvalue read never double-diagnoses.
+                    // TICKET-227: the target type is the value's slot, for every value kind, so a
+                    // plain value wraps into a carrier target; a tuple literal splits per element
+                    // (`x, y = 5, 0`). Only `=` reaches here: `+=` never wraps (DEC-107).
                     let mark = self.diag_mark();
-                    let target_ty = self.infer(target);
+                    let target_ty = self.assign_slot_ty(target);
                     self.diag_rollback(mark);
                     if ty_concrete_but(&target_ty, &|n| self.rigid_param(n, &[])) {
                         self.infer_arg(value, Some(&target_ty))
@@ -5572,6 +5570,26 @@ impl Checker {
             return None;
         }
         Some(subst(&sig.params[1], &map))
+    }
+
+    /// TICKET-227 — the type a plain `=` writes into `target`: its read type, except a struct
+    /// `obj[k]` target, whose write slot is `set_index`'s value ([`Self::index_set_kv`]; a plain `=`
+    /// never reads through `index`). A tuple target is per element. A probe: the caller rolls back
+    /// its diagnostics.
+    fn assign_slot_ty(&mut self, target: &Expr) -> Ty {
+        match &target.kind {
+            ExprKind::Tuple(items) => {
+                Ty::Tuple(items.iter().map(|t| self.assign_slot_ty(t)).collect())
+            }
+            ExprKind::Index { obj, .. } => {
+                let obj_ty = self.infer(obj);
+                match self.index_set_kv(&obj_ty) {
+                    Some((_, v)) => v,
+                    None => self.infer(target),
+                }
+            }
+            _ => self.infer(target),
+        }
     }
 
     /// The `(key, value)` types of a mutable `obj[k] = v` — the `IndexSet` protocol's args. Built-in
