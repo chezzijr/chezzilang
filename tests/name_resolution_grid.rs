@@ -381,6 +381,14 @@ fn same_module_fn_cells() -> Vec<Cell> {
             format!("{p}fn P(n: int) -> P:\n    return P(n)\nprint(P(4))\n"),
             Expect::Prints("P(x=4)".into()),
         ),
+        // Inside its own body the CALL `P(..)` is the raw ctor, but a VALUE read of `P` is the fn.
+        one(
+            "toplevel_fn/struct/value_read_in_own_body",
+            format!(
+                "{p}fn P(x: int) -> P:\n    if x > 100:\n        return P(x=x)\n    f := P\n    return f(x + 100)\nprint(P(4))\n"
+            ),
+            Expect::Prints("P(x=104)".into()),
+        ),
         // K2: the recursive call inside `fn Q` is the fn, not the alias ctor.
         one(
             "toplevel_fn/alias/k2_recursive_call",

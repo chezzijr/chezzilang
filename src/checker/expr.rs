@@ -118,7 +118,7 @@ impl Checker {
             && name == "print"
             && self.names_builtin_fn(name)
         {
-            self.resolve_path(callee);
+            self.resolve_callee(callee);
             self.consume_named();
             let mut seen: Vec<&str> = Vec::new();
             for (k, _) in named {
@@ -163,7 +163,7 @@ impl Checker {
             && n.starts_with(crate::desugar::PROVIDER_PREFIX)
             && (callee.id.0 == crate::ast::NodeId::SYNTH.0 || !self.functions.contains_key(n))
         {
-            self.resolve_path(callee);
+            self.resolve_callee(callee);
             return expected.cloned().unwrap_or(Ty::Unknown);
         }
         // `head[k](args)` with a head that denotes data: index, then call the element (Go,
@@ -230,7 +230,7 @@ impl Checker {
                 && !sig.member(name).is_some_and(MemberSig::holds_fn)
             {
                 let key = self.type_key(&mid, name);
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
                 return self
                     .infer_qualified_struct_call(info, name, &key, args, &targs, span, expected);
             }
@@ -242,7 +242,7 @@ impl Checker {
                 && !self.module_declares_fn(mname, name)
             {
                 if let Ty::Struct(..) = &target {
-                    self.resolve_path(callee);
+                    self.resolve_callee(callee);
                 }
                 let spelled = format!("{mname}.{name}");
                 return self.infer_alias_ctor_call(&target, &spelled, args, &targs, span, expected);
@@ -281,7 +281,7 @@ impl Checker {
                         return Ty::Unknown;
                     }
                     let vi = vinfo;
-                    self.resolve_path(callee);
+                    self.resolve_callee(callee);
                     return self
                         .infer_variant_call(&vi, name, args, &targs, *name_span, span, expected);
                 }
@@ -293,7 +293,7 @@ impl Checker {
                 // `infer_static_call` writes quotes it back, and the witness pin advice
                 // (`WitnessCallee::Dotted`) has to name a form that actually compiles: bare
                 // `Enum.method[T](...)` here answers "unknown type 'Enum'".
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
                 return self.infer_static_call(
                     &th,
                     &spelled,
@@ -328,7 +328,7 @@ impl Checker {
                 let spelled = th.spelled.clone();
                 // …and the same for a qualified STRUCT static (`lib.Holder.build()`): the advice
                 // must carry `lib.`, which is the prefix the user reached it by (an alias included).
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
                 return self.infer_static_call(
                     &th,
                     &spelled,
@@ -357,7 +357,7 @@ impl Checker {
                     },
                 ) = self.qualified_type_head(mname, aname)
             {
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
                 return self.infer_alias_member_call(
                     &th,
                     &th.spelled,
@@ -388,7 +388,7 @@ impl Checker {
                     let callee_ty = self.infer(callee);
                     return self.apply_value_call(callee, callee_ty, args, named, span);
                 }
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
                 return self.infer_witness_static_call(tname, name, args, span);
             }
             // …and the same head under a TYPE-LEVEL turbofish (`Item[int].tag()`, in either carrier)
@@ -419,7 +419,7 @@ impl Checker {
                     },
                 ) = self.bare_type_head(aname)
             {
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
                 return self.infer_alias_member_call(
                     &th, aname, name, args, &targs, *name_span, span, expected,
                 );
@@ -448,7 +448,7 @@ impl Checker {
                         None,
                     );
                 }
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
                 if self
                     .variants
                     .contains_key(&(ekey.clone(), name.to_string()))
@@ -509,7 +509,7 @@ impl Checker {
                 ) = self.bare_type_head(tname)
             {
                 let key = th.key.clone();
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
                 // Editor hover (probe-gated no-op): record the receiver `Foo` of `Foo.default()` as
                 // its struct type.
                 if self.hover_probe.is_some() {
@@ -546,7 +546,7 @@ impl Checker {
             // no variant matches the member name, fall to the static-method path.
             if let Some((th, type_exprs)) = self.type_apply_head(obj) {
                 let (tname, key) = (th.name.clone(), th.key.clone());
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
                 let written: Vec<Ty> = type_exprs
                     .iter()
                     .map(|t| self.resolve_type(t, span))
@@ -599,7 +599,7 @@ impl Checker {
                 && sig.types.contains(name)
             {
                 if Self::qualified_native_ctor(name) {
-                    self.resolve_path(callee);
+                    self.resolve_callee(callee);
                     return self
                         .infer_named_call(
                             name, args, &targs, *name_span, span, None, expected, None,
@@ -622,7 +622,7 @@ impl Checker {
                     return Ty::Unknown;
                 }
             }
-            self.resolve_path(callee);
+            self.resolve_callee(callee);
             return self.infer_method_call(obj, name, *name_span, args, &targs, span, expected);
         }
         if let ExprKind::Ident(name) = &callee.kind {
@@ -635,7 +635,7 @@ impl Checker {
                 HeadBinding::Local | HeadBinding::Global | HeadBinding::Module
             ) {
                 // The same answer `infer_ident` records when the value call infers the callee.
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
             } else {
                 // A DIRECT call of a from-imported fn (`h()`) above its own `import` is the same
                 // use-before-import as the bare read (`g := h`), but a direct callee never reaches
@@ -690,7 +690,7 @@ impl Checker {
                 }
                 // Not a builtin, ctor or module-level fn: a value call through a module-level binding
                 // outside the scope stack (an imported value).
-                self.resolve_path(callee);
+                self.resolve_callee(callee);
             }
         }
         // A value-call (closure / arbitrary expr) cannot take explicit type arguments.
@@ -1857,12 +1857,12 @@ impl Checker {
         if matches!(name, "Ok" | "Some" | "Err")
             && let Some(c) = callee
         {
-            self.resolve_path(c);
+            self.resolve_callee(c);
         }
         match name {
             "print" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 for a in args {
                     self.infer_value(a);
@@ -1876,7 +1876,7 @@ impl Checker {
             // `flow::stmt` (via `call_diverges` on this Resolution) treats it as a divergence.
             "panic" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 self.check_arity("panic", 1, args, span);
                 if let Some(a) = args.first() {
@@ -1889,7 +1889,7 @@ impl Checker {
             }
             "range" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 for a in args {
                     self.expect_int_val(a);
@@ -1904,7 +1904,7 @@ impl Checker {
             }
             "int" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 self.check_arity("int", 1, args, span);
                 if let Some(a) = args.first() {
@@ -1916,7 +1916,7 @@ impl Checker {
             }
             "float" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 self.check_arity("float", 1, args, span);
                 if let Some(a) = args.first() {
@@ -1928,7 +1928,7 @@ impl Checker {
             }
             "bool" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 self.check_arity("bool", 1, args, span);
                 // `bool(x)` is a total truthiness cast over the scalars (int/float/bool/str) —
@@ -1943,7 +1943,7 @@ impl Checker {
             }
             "str" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 self.check_arity("str", 1, args, span);
                 // `str` is the Stringable display cast (accepts anything).
@@ -1952,7 +1952,7 @@ impl Checker {
             }
             "ord" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 self.check_arity("ord", 1, args, span);
                 if let Some(a) = args.first() {
@@ -1965,7 +1965,7 @@ impl Checker {
             }
             "chr" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 self.check_arity("chr", 1, args, span);
                 if let Some(a) = args.first() {
@@ -1983,7 +1983,7 @@ impl Checker {
             // is REQUIRED: an empty list is the `[]` literal (zero args can't infer T).
             "List" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `List[T]()` — explicit element type (turbofish), bare `List()` — empty list whose
                 // element type is refined from the expected type / first use (mirrors `Set()`), and
@@ -2044,7 +2044,7 @@ impl Checker {
             }
             "Set" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `Set()`/`Set[T]()` → empty set (element from the turbofish, else inferred from
                 // later use, like `{}` for maps); `Set(it)` → a set from ANY iterable VALUE
@@ -2113,7 +2113,7 @@ impl Checker {
             // literal. (Free-call `map(it)` is a distinct namespace from the `xs.map(f)` list HOF.)
             "Map" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `Map[K, V]()` → typed empty map (turbofish); bare `Map()` → empty map refined from
                 // the expected type / first use (mirrors the `{}` literal and `Set()`); `Map(it)` →
@@ -2206,7 +2206,7 @@ impl Checker {
             // and `bytearray(ba)` (copy). Always infers `bytearray`.
             "bytearray" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 match args.len() {
                     0 => {}
@@ -2227,7 +2227,7 @@ impl Checker {
             // `bytes(b)` copies a `bytes`, `bytes([ints])` builds from a `list[int]`. Infers `bytes`.
             "bytes" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 match args.len() {
                     1 => match self.infer_value(&args[0]) {
@@ -2249,7 +2249,7 @@ impl Checker {
             }
             "Channel" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `Channel[T]()` — an unbounded mailbox; `Channel[T](cap)` — a bounded FIFO whose
                 // `send` blocks when `cap` messages are queued. The element type comes from the explicit
@@ -2285,7 +2285,7 @@ impl Checker {
             }
             "Shared" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `Shared(v)` — a fresh cross-task box initialised with `v`. The element type is
                 // inferred from the value (value-first, unlike `Channel[T]()`); an OPTIONAL `[T]`
@@ -2308,7 +2308,7 @@ impl Checker {
             }
             "RwShared" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `RwShared(v)` — a fresh cross-task read-write box initialised with `v`. The element
                 // type is inferred from the value (value-first, like `Shared`); an OPTIONAL `[T]`
@@ -2328,7 +2328,7 @@ impl Checker {
             }
             "Atomic" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
                 // `Shared`; an OPTIONAL `[T]` turbofish pins the element type and is checked against
@@ -2351,7 +2351,7 @@ impl Checker {
             }
             "timer" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `timer(ms)` — a one-shot timeout channel: a `Channel[bool]` that delivers `true`
                 // once, `ms` milliseconds after creation. The composable timeout primitive (recv it in
@@ -2381,7 +2381,7 @@ impl Checker {
             }
             "Executor" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
                 // Non-generic; zero arguments, or one `int` cap on the jobs running at once; a `[T]` type arg is rejected upstream. NOT a global
@@ -2400,7 +2400,7 @@ impl Checker {
             }
             "AtomicInt" => {
                 if let Some(c) = callee {
-                    self.resolve_path(c);
+                    self.resolve_callee(c);
                 }
                 // `AtomicInt(v)` — a fresh lock-free int atomic. Monomorphic (no `[T]`); the single arg
                 // must be an int. NOT a global builtin: requires `import std.concurrency` (the name
@@ -2473,7 +2473,7 @@ impl Checker {
                     })
                 {
                     if let Some(c) = callee {
-                        self.resolve_path(c);
+                        self.resolve_callee(c);
                     }
                     let Some(targs) = self.written_head_args(
                         name,
@@ -2565,7 +2565,7 @@ impl Checker {
                     let r = self.fn_resolution(name);
                     let diverges = self.resolution_diverges(&r);
                     if let Some(c) = callee {
-                        self.resolve_path(c);
+                        self.resolve_callee(c);
                     }
                     // W7-42r: this call site's arity/defaults/arg types are now fixed against the
                     // fn's signature, so a later module-scope `name := …` retypes the ONE slot it

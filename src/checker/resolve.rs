@@ -5,7 +5,8 @@
 //! kind whatever position reads it: a module fn is `Fn`, a type method `MethodFn`, a payload
 //! variant `VariantFn`; the compiler derives the opcode from the position.
 //!
-//! [`Checker::commit_resolution`] is private here and has exactly four callers: `resolve_path`,
+//! [`Checker::commit_resolution`] is private here and has exactly four callers: `resolve` (behind
+//! `resolve_path` and `resolve_callee`),
 //! `record_pattern_head`, `record_index_call` and `record_decode`. A new path form adds a rule to
 //! `classify_path`; never add a `commit_resolution` call elsewhere or a `record_*` helper outside
 //! this file.
@@ -78,21 +79,31 @@ impl Checker {
     /// classifies afresh and writes only `callee_diverges` (DEC-180, DEC-025). `None` when `e` is
     /// no path this table classifies; nothing is written then.
     pub(super) fn resolve_path(&mut self, e: &Expr) -> Option<Resolution> {
+        self.resolve(e, false)
+    }
+
+    /// [`Self::resolve_path`] for a call's callee. The callee position differs in one rule only:
+    /// a struct's raw constructor inside its same-named fn (DEC-029/055/172).
+    pub(super) fn resolve_callee(&mut self, e: &Expr) -> Option<Resolution> {
+        self.resolve(e, true)
+    }
+
+    fn resolve(&mut self, e: &Expr, callee: bool) -> Option<Resolution> {
         if self.records_node(e.id)
             && let Some(r) = self.resolutions.get(&(self.graph_module_idx, e.id.0))
         {
             return Some(r.clone());
         }
-        let r = self.classify_path(e)?;
+        let r = self.classify_path(e, callee)?;
         self.commit_resolution(e.id, r.clone(), e.span);
         Some(r)
     }
 
     /// THE rule table: what the path `e` names. Only an `Ident` or a non-tuple `Field` is a path;
     /// a bracket node is never classified, its head is. Every input is an existing `&self` decider.
-    pub(super) fn classify_path(&self, e: &Expr) -> Option<Resolution> {
+    pub(super) fn classify_path(&self, e: &Expr, callee: bool) -> Option<Resolution> {
         match &e.kind {
-            ExprKind::Ident(n) => self.classify_ident(e, n),
+            ExprKind::Ident(n) => self.classify_ident(e, n, callee),
             ExprKind::Field { obj, name, .. } if !crate::ast::is_tuple_index(name) => {
                 self.classify_field(obj, name)
             }
@@ -100,7 +111,7 @@ impl Checker {
         }
     }
 
-    fn classify_ident(&self, e: &Expr, n: &str) -> Option<Resolution> {
+    fn classify_ident(&self, e: &Expr, n: &str, callee: bool) -> Option<Resolution> {
         // A default provider `desugar` synthesized (`$def$…`), unspellable by a user.
         if n.starts_with(crate::desugar::PROVIDER_PREFIX)
             && (e.id.0 == crate::ast::NodeId::SYNTH.0 || !self.functions.contains_key(n))
@@ -117,9 +128,11 @@ impl Checker {
         ) {
             return Some(self.value_head_resolution(n));
         }
-        // A struct's own raw constructor inside its same-named fn (DEC-029/055/172).
+        // A struct's own raw constructor inside its same-named fn (DEC-029/055/172). Only the
+        // callee: a value read there is the fn, which is what `infer_ident` types it as.
         let ctor = self.struct_ctor_key(n);
-        if let Some(key) = &ctor
+        if callee
+            && let Some(key) = &ctor
             && self.raw_ctor_owner.as_deref() == Some(key.as_str())
         {
             return Some(Resolution::StructCtor(key.clone()));
