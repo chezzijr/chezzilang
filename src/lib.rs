@@ -13,6 +13,34 @@
 // The front-end modules are `pub` so every item the binaries reach across the crate boundary is
 // visible, and so the modules' own dead-code analysis stays whole-crate. `editor` is the tooling layer
 // consumed by `chezzi-lsp`; the rest are the compiler/VM pipeline driven by the `chezzi` CLI.
+/// `println!` / `eprintln!` / `print!` for the CLI's own messages (diagnostics, `ok: no type errors`,
+/// usage). A closed pipe (`chezzi check f.chz 2>&1 | head -1`) drops the write instead of panicking
+/// (rc=101); the command keeps its own exit code, as `go vet` does. A program's own output does not
+/// come here: it goes through the VM's `emit_out` / `stream_halt` path.
+#[macro_export]
+macro_rules! outln {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($t)*);
+    }};
+}
+/// See [`outln!`]; stderr.
+#[macro_export]
+macro_rules! errln {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($t)*);
+    }};
+}
+/// See [`outln!`]; no trailing newline.
+#[macro_export]
+macro_rules! out {
+    ($($t:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($t)*);
+    }};
+}
+
 pub mod ast;
 pub mod checker;
 pub mod compiler;

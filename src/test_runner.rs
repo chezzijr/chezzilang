@@ -716,7 +716,7 @@ fn run_file(
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         if seen_warnings.insert(format!("{module}|{w}")) {
-            eprintln!("{}", w.render(graph_path(&graph, w.span.file)));
+            crate::errln!("{}", w.render(graph_path(&graph, w.span.file)));
         }
     }
     if let Err(errs) = res {

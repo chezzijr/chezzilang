@@ -86,11 +86,11 @@ fn main() -> ExitCode {
 
     match cmd {
         "help" | "-h" | "--help" => {
-            print!("{USAGE}");
+            chezzi::out!("{USAGE}");
             ExitCode::SUCCESS
         }
         "version" | "-V" | "--version" => {
-            println!("chezzi {}", env!("CARGO_PKG_VERSION"));
+            chezzi::outln!("chezzi {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         "tokens" => cmd_tokens(args.get(1)),
@@ -101,14 +101,14 @@ fn main() -> ExitCode {
         "init" => cmd_init(&args[1..]),
         "docs" => cmd_docs(&args[1..]),
         other => {
-            eprintln!("chezzi: unknown command '{other}'");
+            chezzi::errln!("chezzi: unknown command '{other}'");
             if let Some(help) =
                 checker::suggest::did_you_mean(other, &COMMAND_NAMES.map(str::to_string))
             {
-                eprintln!("help: {help}");
+                chezzi::errln!("help: {help}");
             }
-            eprintln!();
-            print!("{USAGE}");
+            chezzi::errln!();
+            chezzi::out!("{USAGE}");
             ExitCode::FAILURE
         }
     }
@@ -120,7 +120,7 @@ fn main() -> ExitCode {
 /// lexer's `todo!()`s, running this will panic at the `todo!` — that's expected.
 fn cmd_tokens(path: Option<&String>) -> ExitCode {
     let Some(path) = path else {
-        eprintln!("chezzi tokens: missing file argument\nusage: chezzi tokens <file.chz>");
+        chezzi::errln!("chezzi tokens: missing file argument\nusage: chezzi tokens <file.chz>");
         return ExitCode::FAILURE;
     };
 
@@ -135,18 +135,18 @@ fn cmd_tokens(path: Option<&String>) -> ExitCode {
             let mut lock = stdout.lock();
             for tok in &tokens {
                 if let Err(e) = writeln!(lock, "{:?}", tok.kind) {
-                    eprintln!("{}", stdout_write_error("tokens", &e));
+                    chezzi::errln!("{}", stdout_write_error("tokens", &e));
                     return ExitCode::FAILURE;
                 }
             }
             if let Err(e) = lock.flush() {
-                eprintln!("{}", stdout_write_error("tokens", &e));
+                chezzi::errln!("{}", stdout_write_error("tokens", &e));
                 return ExitCode::FAILURE;
             }
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("{e}");
+            chezzi::errln!("{e}");
             ExitCode::FAILURE
         }
     }
@@ -156,7 +156,7 @@ fn cmd_tokens(path: Option<&String>) -> ExitCode {
 /// `ast::AST_DUMP_MAX_PRETTY_DEPTH` (W12-21). (M2)
 fn cmd_ast(path: Option<&String>) -> ExitCode {
     let Some(path) = path else {
-        eprintln!("chezzi ast: missing file argument\nusage: chezzi ast <file.chz>");
+        chezzi::errln!("chezzi ast: missing file argument\nusage: chezzi ast <file.chz>");
         return ExitCode::FAILURE;
     };
 
@@ -189,7 +189,7 @@ fn cmd_ast(path: Option<&String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("{e}");
+            chezzi::errln!("{e}");
             ExitCode::FAILURE
         }
     }
@@ -206,7 +206,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
     // A zero-byte entry is an ERROR, not an empty program — see `## Decisions` in TICKET-001: this is
     // a deliberate divergence from CPython, confined to this CLI layer (never `resolver`/`vm`).
     if source.is_empty() {
-        eprintln!("chezzi check: '{path}' is empty - there is no program to check");
+        chezzi::errln!("chezzi check: '{path}' is empty - there is no program to check");
         return ExitCode::FAILURE;
     }
 
@@ -228,9 +228,9 @@ fn cmd_check(args: &[String]) -> ExitCode {
             // Warnings are not errors: the verdict and the exit code are unchanged. In JSON mode
             // they ARE the array (`[]` when there are none), so a machine consumer sees them.
             if json {
-                println!("{}", diags_json(&warns, &files));
+                chezzi::outln!("{}", diags_json(&warns, &files));
             } else {
-                println!("ok: no type errors");
+                chezzi::outln!("ok: no type errors");
             }
             ExitCode::SUCCESS
         }
@@ -296,7 +296,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
                 match v.parse::<usize>() {
                     Ok(n) => threads_flag = Some(n),
                     Err(_) => {
-                        eprintln!(
+                        chezzi::errln!(
                             "chezzi run: --threads expects a non-negative integer (0 = all cores), got '{v}'"
                         );
                         return ExitCode::FAILURE;
@@ -304,7 +304,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
                 }
             }
             other if other.starts_with("--") => {
-                eprintln!("chezzi run: unknown flag '{other}'");
+                chezzi::errln!("chezzi run: unknown flag '{other}'");
                 return ExitCode::FAILURE;
             }
             other => path = Some(other.to_string()),
@@ -329,7 +329,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
             None => match resolve_entrypoint() {
                 Ok((p, f, root)) => (p, f, Some(root)),
                 Err(msg) => {
-                    eprintln!("{msg}");
+                    chezzi::errln!("{msg}");
                     return ExitCode::FAILURE;
                 }
             },
@@ -350,7 +350,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     // A zero-byte entry is an ERROR, not an empty program — see `## Decisions` in TICKET-001: this is
     // a deliberate divergence from CPython, confined to this CLI layer (never `resolver`/`vm`).
     if source.is_empty() {
-        eprintln!("chezzi run: '{path}' is empty - there is no program to run");
+        chezzi::errln!("chezzi run: '{path}' is empty - there is no program to run");
         return ExitCode::FAILURE;
     }
 
@@ -376,7 +376,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     match outcome {
         CheckOutcome::Ok => {
             if json {
-                println!("{}", diags_json(&warns, &files));
+                chezzi::outln!("{}", diags_json(&warns, &files));
             }
         }
         CheckOutcome::Errors(errs) => {
@@ -423,13 +423,13 @@ fn cmd_run(args: &[String]) -> ExitCode {
     vm::flush_stream();
     // The exit status is decided HERE — the writer threads only record (`vm::stream`).
     if let Some(msg) = &errored {
-        eprintln!("{msg}");
+        chezzi::errln!("{msg}");
     }
     // A stdout write that failed for anything but a closed reader (`> /dev/full`, a closed fd): the
     // output is truncated, so the run must not report success. A closed READER (`| head -1`) is a
     // clean end — the VM halted itself at its next `print` and its own status stands.
     if let Some(e) = vm::stream_error() {
-        eprintln!("chezzi run: cannot write stdout: {e}");
+        chezzi::errln!("chezzi run: cannot write stdout: {e}");
         return ExitCode::FAILURE;
     }
     // A last `print` into a just-closed pipe drops bytes but has NO next print site to fault at, so
@@ -443,7 +443,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
         && exit_code.is_none()
         && let Some(why) = vm::out_dead_reason()
     {
-        eprintln!("chezzi run: {why}");
+        chezzi::errln!("chezzi run: {why}");
         return ExitCode::FAILURE;
     }
     // `std.os.exit(code)` takes precedence: a clean halt with the requested status.
@@ -481,7 +481,7 @@ fn apply_env_worker_count(cmd: &str) {
     match resolve_threads_env(std::env::var("CHEZZI_THREADS").ok().as_deref()) {
         Ok(Some(n)) => vm::set_worker_count(n),
         Ok(None) => {}
-        Err(bad) => eprintln!(
+        Err(bad) => chezzi::errln!(
             "chezzi {cmd}: ignoring invalid CHEZZI_THREADS='{bad}' (expected a non-negative integer; 0 = all cores)"
         ),
     }
@@ -493,7 +493,7 @@ fn apply_env_sched_seed(cmd: &str) {
     match vm::sched_seed::parse(std::env::var("CHEZZI_SCHED_SEED").ok().as_deref()) {
         Ok(Some(s)) => vm::sched_seed::init(s),
         Ok(None) => {}
-        Err(bad) => eprintln!(
+        Err(bad) => chezzi::errln!(
             "chezzi {cmd}: ignoring invalid CHEZZI_SCHED_SEED='{bad}' (expected an unsigned 64-bit integer)"
         ),
     }
@@ -506,7 +506,7 @@ fn report_sched_seed(code: ExitCode) -> ExitCode {
         && let Some(s) = vm::sched_seed::seed()
     {
         let n = vm::worker_count();
-        eprintln!(
+        chezzi::errln!(
             "chezzi: scheduler seed {s} at {n} worker(s); replay with CHEZZI_SCHED_SEED={s} CHEZZI_THREADS={n}"
         );
     }
@@ -575,7 +575,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
             "-v" | "--verbose" => saw_verbose = true,
             "-k" | "--filter" => {
                 let Some(pat) = args.get(i + 1) else {
-                    eprintln!("chezzi test: {arg} expects a substring argument");
+                    chezzi::errln!("chezzi test: {arg} expects a substring argument");
                     return ExitCode::FAILURE;
                 };
                 opts.filter = Some(pat.clone());
@@ -584,7 +584,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
             other if other.starts_with("--color=") => match &other["--color=".len()..] {
                 m @ ("auto" | "always" | "never") => color_mode = m,
                 bad => {
-                    eprintln!("chezzi test: --color expects auto|always|never, got '{bad}'");
+                    chezzi::errln!("chezzi test: --color expects auto|always|never, got '{bad}'");
                     return ExitCode::FAILURE;
                 }
             },
@@ -593,7 +593,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
                 match raw.parse::<usize>() {
                     Ok(n) => opts.max_heap = n,
                     Err(_) => {
-                        eprintln!(
+                        chezzi::errln!(
                             "chezzi test: --max-heap expects a byte count (a non-negative integer), got '{raw}'"
                         );
                         return ExitCode::FAILURE;
@@ -605,7 +605,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
                 match raw.parse::<u64>() {
                     Ok(n) => opts.timeout_ms = n,
                     Err(_) => {
-                        eprintln!(
+                        chezzi::errln!(
                             "chezzi test: --timeout expects a millisecond count (a non-negative integer), got '{raw}'"
                         );
                         return ExitCode::FAILURE;
@@ -613,7 +613,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
                 }
             }
             other if other.starts_with("--") => {
-                eprintln!("chezzi test: unknown flag '{other}'");
+                chezzi::errln!("chezzi test: unknown flag '{other}'");
                 return ExitCode::FAILURE;
             }
             other if path.is_none() => {
@@ -623,14 +623,14 @@ fn cmd_test(args: &[String]) -> ExitCode {
                 path = Some(other.to_string())
             }
             _ => {
-                eprintln!("chezzi test: unexpected extra argument");
+                chezzi::errln!("chezzi test: unexpected extra argument");
                 return ExitCode::FAILURE;
             }
         }
         i += 1;
     }
     if saw_quiet && saw_verbose {
-        eprintln!("chezzi test: -q and -v are mutually exclusive");
+        chezzi::errln!("chezzi test: -q and -v are mutually exclusive");
         return ExitCode::FAILURE;
     }
     opts.verbosity = if saw_quiet {
@@ -668,7 +668,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
     // reader as a clean pass. Matches `chezzi run`'s own broken-pipe handling (see `out_dead_reason`
     // above): a truncated report is a failure, full stop.
     if let Err(e) = std::io::Write::write_all(&mut std::io::stdout(), &report.bytes) {
-        eprintln!("{}", stdout_write_error("test", &e));
+        chezzi::errln!("{}", stdout_write_error("test", &e));
         return ExitCode::FAILURE;
     }
     // fd 2 is diagnostic-only: a failed write here does not change the verdict, unlike the fd 1
@@ -691,12 +691,12 @@ fn cmd_init(args: &[String]) -> ExitCode {
     for arg in args {
         match arg.as_str() {
             other if other.starts_with("--") => {
-                eprintln!("chezzi init: unknown flag '{other}'");
+                chezzi::errln!("chezzi init: unknown flag '{other}'");
                 return ExitCode::FAILURE;
             }
             other if dir.is_none() => dir = Some(other.to_string()),
             _ => {
-                eprintln!("chezzi init: unexpected extra argument");
+                chezzi::errln!("chezzi init: unexpected extra argument");
                 return ExitCode::FAILURE;
             }
         }
@@ -705,31 +705,31 @@ fn cmd_init(args: &[String]) -> ExitCode {
     let path = std::path::Path::new(&dir);
     match scaffold_project(path) {
         Ok(report) => {
-            println!("chezzi: scaffolded a new project in {}", path.display());
-            println!(
+            chezzi::outln!("chezzi: scaffolded a new project in {}", path.display());
+            chezzi::outln!(
                 "  chezzi.toml          project manifest (entrypoint = \"src.main:main\" — drives bare `chezzi run`)"
             );
             match report.main {
-                Scaffolded::Created => println!(
+                Scaffolded::Created => chezzi::outln!(
                     "  src/main.chz         entry script  — run with: chezzi run (from {dir}). NOTE `chezzi run {dir}/src/main.chz` runs the file's TOP LEVEL only, so it will NOT call main()",
                 ),
-                Scaffolded::Kept => println!(
+                Scaffolded::Kept => chezzi::outln!(
                     "  src/main.chz         kept — a file was already here, left untouched (init never overwrites)"
                 ),
             }
             match report.main_test {
-                Scaffolded::Created => println!(
+                Scaffolded::Created => chezzi::outln!(
                     "  src/main_test.chz    example test   — run with: chezzi test {}",
                     dir
                 ),
-                Scaffolded::Kept => println!(
+                Scaffolded::Kept => chezzi::outln!(
                     "  src/main_test.chz    kept — a file was already here, left untouched (init never overwrites)"
                 ),
             }
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("chezzi init: {e}");
+            chezzi::errln!("chezzi init: {e}");
             ExitCode::FAILURE
         }
     }
@@ -942,12 +942,12 @@ fn cmd_docs(args: &[String]) -> ExitCode {
             // prefix) is the expected case for a bulk dump, not an error — exit clean, don't panic.
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("chezzi docs: cannot write output: {e}");
+                chezzi::errln!("chezzi docs: cannot write output: {e}");
                 ExitCode::FAILURE
             }
         },
         Err(msg) => {
-            eprintln!("{msg}");
+            chezzi::errln!("{msg}");
             ExitCode::FAILURE
         }
     }
@@ -1125,7 +1125,7 @@ fn parse_file_and_flags(cmd: &str, args: &[String]) -> Option<(String, bool)> {
         match arg.as_str() {
             "--errors=json" => json = true,
             other if other.starts_with("--") => {
-                eprintln!("chezzi {cmd}: unknown flag '{other}'");
+                chezzi::errln!("chezzi {cmd}: unknown flag '{other}'");
                 return None;
             }
             other => {
@@ -1138,7 +1138,7 @@ fn parse_file_and_flags(cmd: &str, args: &[String]) -> Option<(String, bool)> {
     match path {
         Some(p) => Some((p, json)),
         None => {
-            eprintln!(
+            chezzi::errln!(
                 "chezzi {cmd}: missing file argument\nusage: chezzi {cmd} <file.chz> [--errors=json]"
             );
             None
@@ -1158,7 +1158,7 @@ fn parse_file_and_flags(cmd: &str, args: &[String]) -> Option<(String, bool)> {
 /// threaded through the resolver and module graph, its own milestone (docs/gaps.md W7-6).
 fn reject_lossy_path(path: &str) -> bool {
     if path.contains('\u{FFFD}') {
-        eprintln!(
+        chezzi::errln!(
             "chezzi: cannot use '{path}' as a path — it contains U+FFFD, which is how a non-UTF-8 \
              argument decodes, so it may not name the file you meant"
         );
@@ -1174,7 +1174,7 @@ fn read_source(path: &str) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(s) => Some(s),
         Err(e) => {
-            eprintln!("chezzi: cannot read '{path}': {e}");
+            chezzi::errln!("chezzi: cannot read '{path}': {e}");
             None
         }
     }
@@ -1318,7 +1318,7 @@ fn report_check_warnings(
 ) {
     let mut cache = seed_cache(entry);
     for w in warns {
-        eprintln!("{}", render_diag(w, files, &mut cache));
+        chezzi::errln!("{}", render_diag(w, files, &mut cache));
     }
 }
 
@@ -1352,13 +1352,13 @@ fn report_check_errors(
 ) {
     if json {
         let all: Vec<checker::CheckError> = warns.iter().chain(errs).cloned().collect();
-        println!("{}", diags_json(&all, files));
+        chezzi::outln!("{}", diags_json(&all, files));
     } else {
         let mut cache = seed_cache(entry);
         for e in errs {
-            eprintln!("{}", render_diag(e, files, &mut cache));
+            chezzi::errln!("{}", render_diag(e, files, &mut cache));
         }
-        eprintln!(
+        chezzi::errln!(
             "chezzi: {} type error{}",
             errs.len(),
             if errs.len() == 1 { "" } else { "s" }
@@ -1383,7 +1383,7 @@ fn report_fatal(
     if json {
         // Same renderer as a type error, so `severity` is present on EVERY object a consumer can
         // receive — a schema that carries the key only sometimes is worse than one that never does.
-        println!(
+        chezzi::outln!(
             "{}",
             diags_json(
                 &[checker::CheckError::error(message.to_string(), span)],
@@ -1404,7 +1404,7 @@ fn report_fatal(
                 out.push_str(&snippet);
             }
         }
-        eprintln!("{out}");
+        chezzi::errln!("{out}");
     }
 }
 

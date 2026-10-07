@@ -169,3 +169,35 @@ fn help_note_documents_the_double_dash_terminator() {
          (it currently only describes the file-argument form), got NOTE block:\n{note}"
     );
 }
+
+/// `check` / `run` print their diagnostics through `errln!`, so a reader that closes the pipe after the
+/// first line (`chezzi check bad.chz 2>&1 | head -1`) leaves the command's own exit code (1), not a Rust
+/// panic (rc=101). Same for `check`'s `ok: no type errors` on a closed stdout (exit 0).
+#[test]
+fn check_and_run_diagnostics_on_a_closed_pipe_keep_their_exit_code() {
+    let dir = std::env::temp_dir().join(format!("chezzi-closed-pipe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad = dir.join("bad.chz");
+    let mut prog = String::new();
+    for i in 0..40 {
+        prog.push_str(&format!("x{i}: int = \"s\"\n"));
+    }
+    std::fs::write(&bad, prog).unwrap();
+    let ok = dir.join("ok.chz");
+    std::fs::write(&ok, "print(1)\n").unwrap();
+    for (cmd, file, want) in [("check", &bad, 1), ("run", &bad, 1), ("check", &ok, 0)] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .arg(cmd)
+            .arg(file)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn chezzi");
+        // Close both pipes before the child writes: every write then fails with EPIPE.
+        drop(child.stdout.take());
+        drop(child.stderr.take());
+        let status = child.wait().expect("wait chezzi");
+        assert_eq!(status.code(), Some(want), "chezzi {cmd} {}", file.display());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

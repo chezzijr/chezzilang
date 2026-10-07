@@ -253,7 +253,7 @@ as a head.
   redirects itself, or to learn the failed hop's method.
 - **CK6:** diagnostics are printed with `eprintln!`, which panics on a closed stderr. There are 89 sites in
   `src/`. Stdout already goes through `emit_out`/`stream_halt`. **Single source:** one diagnostics writer
-  that ends quietly on EPIPE, used by every site.
+  that ends quietly on EPIPE, used by every site. **Fixed in place 2026-10-07:** `chezzi::outln!`/`errln!`/`out!` (`src/lib.rs`) for every CLI message in `src/main.rs` and `test_runner`'s warning line.
 
 ## Owner decisions needed
 
