@@ -1,0 +1,27 @@
+fn burn(n: int) -> int:
+    x := 0
+    i := 0
+    while i < n:
+        x = x + i * i - i
+        i += 1
+    return x
+
+fn fan_open() -> int:
+    ch := Channel[int](0)
+    got := 0
+    parallel:
+        spawn:
+            parallel:
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+                spawn: burn(1500000)
+            ch.send(1)
+        got = ch.recv()
+    return got
+
+print(fan_open())
