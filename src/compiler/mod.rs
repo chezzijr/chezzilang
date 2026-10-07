@@ -91,7 +91,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc, wr) =
         crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.fall_off = nf;
@@ -105,6 +105,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.gen_crossings = gc;
     c.resolutions = rs;
     c.ret_coerce = rc;
+    c.wraps = wr;
     // Pass 0: collision pre-pass — assign runtime keys for module-scoped user types. A type name
     // declared in exactly one module keeps its BARE name (the common case → unchanged Display/print
     // output); a name declared in ≥2 modules that are BOTH in the program is disambiguated (the
@@ -174,7 +175,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc, wr) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.fall_off = nf;
@@ -188,6 +189,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.gen_crossings = gc;
     c.resolutions = rs;
     c.ret_coerce = rc;
+    c.wraps = wr;
     let toplevel = c.compile_module(0, module, &[], true, None)?;
     let global_slots = std::mem::take(&mut c.global_slots);
     let let_lines = std::mem::take(&mut c.global_let_lines);
@@ -346,6 +348,9 @@ struct Compiler {
     /// whether the returned expression is already a carrier. A MISS means `NoWrap` — the pre-fix
     /// lowering. See [`crate::checker::RetCoerceTable`].
     ret_coerce: crate::checker::RetCoerceTable,
+    /// TICKET-227 -- the checker's implicit wraps, keyed by (module idx, NodeId). Applied only by
+    /// [`Self::compile_expr`].
+    wraps: crate::checker::WrapTable,
     /// TICKET-161 (DEC-113) — the N-name `for` loops the checker says destructure (iterand statically
     /// `Ty::Param`/`Ty::Protocol`), consumed verbatim; a MISS keeps the runtime `IsMap` test. See
     /// [`crate::checker::ForBindTable`].
@@ -617,6 +622,7 @@ impl Compiler {
             resolutions: crate::checker::ResolutionTable::new(),
             fall_off: crate::checker::FallOffTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
+            wraps: crate::checker::WrapTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             next_opt_tmp: 0,
             witness_locals: Vec::new(),
@@ -1273,7 +1279,6 @@ impl Compiler {
             ] = decl.body.as_slice()
         {
             self.compile_expr(&mut fc, e)?;
-            self.emit_ret_coerce(&mut fc, e.span)?;
             fc.emit(Op::Return, e.span);
             return Ok(self.finish(fc));
         }
@@ -1663,10 +1668,7 @@ impl Compiler {
             | StmtKind::Import(_) => Ok(()),
             StmtKind::Return(value) => {
                 match value {
-                    Some(e) => {
-                        self.compile_expr(fc, e)?;
-                        self.emit_ret_coerce(fc, e.span)?;
-                    }
+                    Some(e) => self.compile_expr(fc, e)?,
                     None => {
                         fc.emit(Op::Nil, stmt.span);
                         self.emit_ret_coerce(fc, stmt.span)?;
@@ -3391,7 +3393,34 @@ impl Compiler {
         n
     }
 
+    /// Compile one value-producing expression, then apply the checker's implicit wrap for its node
+    /// (TICKET-227). The ONLY code that applies a [`crate::checker::WrapTable`] entry.
     fn compile_expr(&mut self, fc: &mut FnComp, expr: &Expr) -> Result<(), CompileError> {
+        self.compile_expr_node(fc, expr)?;
+        if expr.id.0 != crate::ast::NodeId::SYNTH.0 {
+            self.emit_wrap_at(fc, expr.id, expr.span)?;
+        }
+        Ok(())
+    }
+
+    /// Wrap the stack top in `Some`/`Ok` when the checker recorded a wrap for node `id`.
+    fn emit_wrap_at(
+        &mut self,
+        fc: &mut FnComp,
+        id: crate::ast::NodeId,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        let name = match self.wraps.get(&(self.current_module_idx, id.0)) {
+            None => return Ok(()),
+            Some(crate::checker::Wrap::Some) => "Some",
+            Some(crate::checker::Wrap::Ok) => "Ok",
+        };
+        self.emit_builtin_variant(fc, name, span)
+    }
+
+    /// The dispatch over `ExprKind`; call [`Self::compile_expr`] instead, except to re-enter a
+    /// node whose wrap `compile_expr` already applies (a `??`/`?.` lowering keeps its NodeId).
+    fn compile_expr_node(&mut self, fc: &mut FnComp, expr: &Expr) -> Result<(), CompileError> {
         match &expr.kind {
             ExprKind::Int(n) => fc.emit(Op::ConstInt(*n), expr.span),
             ExprKind::Float(x) => fc.emit(Op::ConstFloat(*x), expr.span),
@@ -3702,7 +3731,7 @@ impl Compiler {
                         });
                     }
                 }
-                self.compile_expr(fc, &c)?;
+                self.compile_expr_node(fc, &c)?;
             }
             ExprKind::OptChain { name_span, .. } => {
                 let key = crate::checker::carrier_key(
@@ -3741,7 +3770,7 @@ impl Compiler {
                         });
                     }
                 }
-                self.compile_expr(fc, &c)?;
+                self.compile_expr_node(fc, &c)?;
             }
             ExprKind::Closure { params, body, .. } => {
                 self.compile_closure(fc, params, body, expr.span)?
@@ -3749,9 +3778,7 @@ impl Compiler {
             ExprKind::Match { scrutinee, arms } => {
                 self.compile_match_expr(fc, scrutinee, arms, expr.span)?
             }
-            ExprKind::IfElse { cond, then, els } => {
-                self.compile_if_expr(fc, cond, then, els, expr.span)?
-            }
+            ExprKind::IfElse { cond, then, els } => self.compile_if_expr(fc, cond, then, els)?,
             ExprKind::Recover(block) => self.compile_recover(fc, block, expr.span)?,
         }
         Ok(())
@@ -3956,15 +3983,9 @@ impl Compiler {
         arms: &[MatchExprArm],
         span: Span,
     ) -> Result<(), CompileError> {
+        // Leaves the arm's value on the stack; `compile_expr` applies the arm's own wrap.
         let widen = |s: &mut Self, fc: &mut FnComp, body: &Expr| -> Result<(), CompileError> {
-            s.compile_expr(fc, body)?; // leaves the arm's value on the stack
-            // TICKET-107 (W12-13): a branch whose span equals the match expression's OWN span is a
-            // synthesized `??`/`?.` desugar sharing that span — never re-look-it-up here, or a bare
-            // value at that span wraps twice.
-            if body.span != span {
-                s.emit_ret_coerce(fc, body.span)?;
-            }
-            Ok(())
+            s.compile_expr(fc, body)
         };
         if self.arms_are_literal(arms.iter().map(|a| &a.pattern)) {
             return self.compile_match_lit(fc, scrutinee, arms, span, widen);
@@ -3980,48 +4001,26 @@ impl Compiler {
         cond: &Expr,
         then: &Expr,
         els: &Expr,
-        own: Span,
     ) -> Result<(), CompileError> {
-        self.compile_if_expr_chain(fc, cond, then, els, own)
+        self.compile_if_expr_chain(fc, cond, then, els)
     }
 
-    /// Chain-aware body of `compile_if_expr`: an `elif` is a nested `IfElse` in `els`, compiled by a
-    /// DIRECT recursive call. Mirrors the checker's `infer_if_else_chain`.
+    /// Body of `compile_if_expr`. Every branch, an `elif` tail included, compiles through
+    /// `compile_expr`, the one place a wrap is applied (TICKET-227).
     fn compile_if_expr_chain(
         &mut self,
         fc: &mut FnComp,
         cond: &Expr,
         then: &Expr,
         els: &Expr,
-        own: Span,
     ) -> Result<(), CompileError> {
         self.compile_expr(fc, cond)?;
         fc.emit(Op::AsBool, cond.span);
         let skip = fc.emit_jump(Op::JumpIfFalse(0), cond.span);
         self.compile_expr(fc, then)?;
-        // TICKET-107 (W12-13): a branch whose span equals the if-expression's OWN span is a
-        // synthesized `??`/`?.` desugar sharing that span — never re-look-it-up here, or a bare
-        // value at that span wraps twice.
-        if then.span != own {
-            self.emit_ret_coerce(fc, then.span)?;
-        }
         let end = fc.emit_jump(Op::Jump(0), cond.span);
         fc.patch_jump(skip);
-        // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY; any other `els` is the final
-        // leaf.
-        if let ExprKind::IfElse {
-            cond: c2,
-            then: t2,
-            els: e2,
-        } = &els.kind
-        {
-            self.compile_if_expr_chain(fc, c2, t2, e2, els.span)?;
-        } else {
-            self.compile_expr(fc, els)?;
-        }
-        if els.span != own {
-            self.emit_ret_coerce(fc, els.span)?;
-        }
+        self.compile_expr(fc, els)?;
         fc.patch_jump(end);
         Ok(())
     }
@@ -4261,8 +4260,7 @@ impl Compiler {
         );
         let name = match self.ret_coerce.get(&key) {
             None | Some(crate::checker::RetCoerce::NoWrap) => return Ok(()),
-            Some(crate::checker::RetCoerce::WrapSome) => "Some",
-            Some(crate::checker::RetCoerce::WrapOk | crate::checker::RetCoerce::WrapOkNil) => "Ok",
+            Some(crate::checker::RetCoerce::WrapOkNil) => "Ok",
         };
         self.emit_builtin_variant(fc, name, span)
     }
@@ -5454,7 +5452,6 @@ impl Compiler {
         if implicit {
             child.nursery_scopes -= 1;
         }
-        self.emit_ret_coerce(&mut child, body.span)?;
         child.emit(Op::Return, span);
         let pid = self.finish(child);
 

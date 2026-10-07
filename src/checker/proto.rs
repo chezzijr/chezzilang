@@ -1395,15 +1395,15 @@ impl Checker {
         }
     }
 
-    /// W8-21 — which implicit success-coercion (if any) a bare value of type `ty` gets at a declared
-    /// return sink of type `ret`. `None` means "no coercion" — the caller keeps its existing
-    /// `assignable` diagnostic unchanged.
+    /// W8-21 / TICKET-227 (D3) — which implicit wrap (if any) a plain value of type `ty` gets at a
+    /// typed slot of type `ret`. `None` means "no wrap" — the slot keeps its existing `assignable`
+    /// diagnostic unchanged. Called only by [`Self::meet_slot`].
     ///
-    /// Order matters: `assignable` first (rule a — an already-legal return is never coerced), then
+    /// Order matters: `assignable` first (rule a — an already-legal value is never wrapped), then
     /// "already a carrier" (never re-wrap `Option[Option[T]]`/`Result[Option[T],E]`), then
-    /// `ty_fully_concrete(ret)` (rule c — a generic sink `T?` declines). The wrap arms use plain
+    /// `ty_fully_concrete(ret)` (rule c — a generic slot `T?` declines). The wrap arms use plain
     /// `assignable` (rule b — no chaining onto int→float: `float?: return 1` must keep erroring).
-    pub(super) fn ret_coerce_mode(&self, ret: &Ty, ty: &Ty) -> Option<crate::checker::RetCoerce> {
+    pub(super) fn wrap_mode(&self, ret: &Ty, ty: &Ty) -> Option<crate::checker::Wrap> {
         if self.assignable(ret, ty) {
             return None;
         }
@@ -1414,12 +1414,32 @@ impl Checker {
             return None;
         }
         match ret {
-            Ty::Option(inner) if self.assignable(inner, ty) => {
-                Some(crate::checker::RetCoerce::WrapSome)
-            }
-            Ty::Result(t, _) if self.assignable(t, ty) => Some(crate::checker::RetCoerce::WrapOk),
+            Ty::Option(inner) if self.assignable(inner, ty) => Some(crate::checker::Wrap::Some),
+            Ty::Result(t, _) if self.assignable(t, ty) => Some(crate::checker::Wrap::Ok),
             _ => None,
         }
+    }
+
+    /// TICKET-227 — record one implicit wrap of the value node `node` into
+    /// [`crate::checker::WrapTable`]. Nothing for a synthesized node, the generic-arg prepass or
+    /// the return-inference walk (the main walk records).
+    pub(super) fn record_wrap(
+        &mut self,
+        node: crate::ast::NodeId,
+        w: crate::checker::Wrap,
+        span: Span,
+    ) {
+        if !self.records_node(node) {
+            return;
+        }
+        crate::checker::record_call_table_entry(
+            &mut self.wraps,
+            &mut self.table_conflicts,
+            (self.graph_module_idx, node.0),
+            w,
+            "implicit wrap",
+            span,
+        );
     }
 
     /// W8-21 — the bare-`return`-at-`Result[nil, E]` case: DEC-017's zero-arg `Ok()`. `None` for every

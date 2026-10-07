@@ -3954,7 +3954,7 @@ impl Checker {
         };
         match h {
             Some(t) if ty_concrete_but(t, &|n| self.rigid_param(n, &[])) => {
-                self.infer_arg(a, Some(t))
+                self.infer_arg_seeded(a, t)
             }
             _ => self.infer_value(a),
         }
@@ -4058,13 +4058,27 @@ impl Checker {
         // ctor / generic fn-call passed directly as a call argument pre-seeds its type params —
         // `take(Heap([], fn(x, y): x < y))` with `fn take(h: Heap[int])` pins `T=int`. `infer_call`
         // consumes the hint; pair set+clear so a non-call arg never leaks it into a sibling arg.
+        // TICKET-227: the arg owns its slot, so a plain `T` wraps into a `T?`/`T!E` parameter.
         if let Some(e) = expected {
-            self.expected_hint = Some(e.clone());
-            let t = self.infer_value(arg);
-            self.expected_hint = None;
-            return t;
+            return self.infer_value_in(arg, e);
         }
         self.infer_value(arg)
+    }
+
+    /// [`Self::infer_arg`] with `hint` as a SEED only: it guides inference (a generic ctor pins its
+    /// type params from it) but never wraps the arg. For a hint that is not the arg's own slot type
+    /// (the `Some`/`Ok`/`Err` payload, the TICKET-124 ctor hint into a bare `T` slot).
+    pub(super) fn infer_arg_seeded(&mut self, arg: &Expr, hint: &Ty) -> Ty {
+        if let ExprKind::Closure { params, ret, body } = &arg.kind {
+            if matches!(hint, Ty::Func { .. }) {
+                return self.infer_closure(params, ret.as_ref(), body, Some(hint));
+            }
+            return self.infer_value(arg);
+        }
+        self.install_hint(arg, hint.clone(), false);
+        let t = self.infer_value(arg);
+        self.expected_hint = None;
+        t
     }
 
     /// First-pass bottom-up inference of a generic ctor/call's args (the pass that drives unification).
@@ -4103,8 +4117,8 @@ impl Checker {
                     // TICKET-124 (W13-13): the declared slot is a bare/under-determined type
                     // param, but the CTOR's own expected-type hint pinned this argument's type
                     // concretely — reach the hint into the nested argument instead of stopping at
-                    // the outermost ctor.
-                    self.infer_arg(a, Some(h))
+                    // the outermost ctor. A seed only: DEC-025 declines a type-param slot.
+                    self.infer_arg_seeded(a, h)
                 } else {
                     self.infer_value(a)
                 }

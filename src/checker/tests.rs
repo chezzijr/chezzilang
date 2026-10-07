@@ -1774,23 +1774,26 @@ fn success_coercion_keeps_explicit_carriers() {
 /// W8-21 exclusion — the coercion fires ONLY at return sinks, never at a `let`, an argument, or a
 /// struct field default.
 #[test]
-fn success_coercion_is_return_sinks_only() {
-    rejects("x: int? = 1\nprint(x)\n", "cannot assign");
-    rejects("fn t(x: int?) -> int:\n    return 0\nt(1)\n", "argument 1");
+fn success_coercion_wraps_at_every_typed_slot() {
+    ok("x: int? = 1\nprint(x)\n");
+    ok("fn t(x: int?) -> int:\n    return 0\nt(1)\n");
+    ok("struct S:\n    n: int? = 1\nfn main():\n    pass\n");
+    ok("fn f(x: int? = 1) -> int:\n    return 0\n");
     rejects(
-        "struct S:\n    n: int? = 1\nfn main():\n    pass\n",
-        "default value for field",
-    );
-}
-
-/// W8-21 exclusion — a synthesized default-argument provider is structurally a return sink but must
-/// stay excluded (its decl-site default keeps its own diagnostic, unaffected).
-#[test]
-fn success_coercion_declines_in_a_default_provider() {
-    rejects(
-        "fn g() -> int:\n    return 5\nfn f(x: int? = g()) -> int:\n    return 0\nf()\n",
+        "fn f(x: float? = 1) -> int:\n    return 0\n",
         "default value for parameter",
     );
+    // Operands never own the slot: the sum wraps once, the operands never.
+    ok("fn main():\n    x: int? = 1 + 2\n    print(x)\n");
+    // A carrier payload is a seed only.
+    rejects("x: Option[Option[int]] = Some(5)\n", "cannot assign");
+}
+
+/// TICKET-227 (DEC-025 superseded) — a default provider is a typed slot like any other: both halves
+/// of a default wrap together.
+#[test]
+fn success_coercion_wraps_in_a_default_provider() {
+    ok("fn g() -> int:\n    return 5\nfn f(x: int? = g()) -> int:\n    return 0\nf()\n");
 }
 
 /// W8-21 exclusion — the coercion never decides an un-annotated return-type inference: two branches
@@ -9053,11 +9056,8 @@ fn optional_shorthand_accepts_some_and_none() {
 }
 
 #[test]
-fn optional_shorthand_rejects_bare_value() {
-    rejects(
-        "x: int? = 5\n",
-        "cannot assign int to variable of type Option[int]",
-    );
+fn optional_shorthand_wraps_a_bare_value() {
+    ok("x: int? = 5\n");
 }
 
 // ===== 9d. expression-valued match / if (Part 3) =====
@@ -33308,14 +33308,13 @@ fn ticket_107_elif_chain_success_coerces_at_option_sink() {
 }
 
 #[test]
-fn ticket_107_mixed_branch_coercion_stays_declined_off_a_return_sink() {
+fn ticket_107_mixed_branch_coercion_wraps_at_every_typed_slot() {
+    ok("fn main():\n    x: int? = if true: 1 else: None\n");
+    ok("fn t(x: int?) -> int:\n    return 0\n\nfn main():\n    print(t(if true: 1 else: None))\n");
+    // An inferred return is not a slot.
     rejects(
-        "fn main():\n    x: int? = if true: 1 else: None\n",
-        "branches have incompatible types: int and Option[?]",
-    );
-    rejects(
-        "fn t(x: int?) -> int:\n    return 0\n\nfn main():\n    print(t(if true: 1 else: None))\n",
-        "branches have incompatible types: int and Option[?]",
+        "fn f(c: bool):\n    if c:\n        return Some(2)\n    return if c: 1 else: None\n",
+        "branches have incompatible types",
     );
     rejects(
         "fn f(c: bool) -> float?:\n    return if c: 1 else: None\n",
@@ -33599,6 +33598,7 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
             sorted_debug(&off.5),
             "{name}: ret_coerce"
         );
+        assert_eq!(sorted_debug(&on.12), sorted_debug(&off.12), "{name}: wraps");
         assert_eq!(on.6, off.6, "{name}: table_conflicts");
         assert_eq!(
             sorted_debug(&on.8),

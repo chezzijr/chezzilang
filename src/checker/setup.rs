@@ -20,6 +20,8 @@ pub(super) struct DiagMark {
     /// recording happens on the real (non-speculative) `check_stmt` walk, once every callee sig is
     /// settled.
     ret_coerce: crate::checker::RetCoerceTable,
+    /// TICKET-227 -- the implicit wraps; decided state, same reason as `ret_coerce`.
+    wraps: crate::checker::WrapTable,
     /// TICKET-161 — same reason as `ret_coerce`: decided state, not a diagnostic.
     for_binds: crate::checker::ForBindTable,
     /// TICKET-142 (W14-33) — the constant-overflow dedupe set is speculative state too: a
@@ -128,7 +130,8 @@ impl Checker {
             generic_arg_prepass: false,
             tyvars: std::cell::RefCell::new(tyvar::TyVars::default()),
             expected_hint: None,
-            ret_coerce_sink: None,
+            hint_owner: None,
+            hint_owned: false,
             arith_parent: false,
             const_scan_visits: 0,
             const_overflow_seen: std::collections::HashSet::new(),
@@ -170,6 +173,7 @@ impl Checker {
             gen_crossings: crate::checker::GenCrossings::default(),
             gen_frame: None,
             ret_coerce: crate::checker::RetCoerceTable::new(),
+            wraps: crate::checker::WrapTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             table_conflicts: Vec::new(),
             resolutions: HashMap::new(),
@@ -1446,6 +1450,7 @@ impl Checker {
             errors: self.errors.len(),
             warnings: self.warnings.len(),
             ret_coerce: self.ret_coerce.clone(),
+            wraps: self.wraps.clone(),
             for_binds: self.for_binds.clone(),
             const_overflow_seen: self.const_overflow_seen.clone(),
             fn_reads: self.fn_reads.clone(),
@@ -1469,6 +1474,7 @@ impl Checker {
         self.errors.truncate(m.errors);
         self.warnings.truncate(m.warnings);
         self.ret_coerce = m.ret_coerce;
+        self.wraps = m.wraps;
         self.for_binds = m.for_binds;
         self.const_overflow_seen = m.const_overflow_seen;
         self.fn_reads = m.fn_reads;

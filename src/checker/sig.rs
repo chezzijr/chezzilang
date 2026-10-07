@@ -584,12 +584,8 @@ impl Checker {
             // Heap([], fn(x, y): x < y)` pins `T=int`, which then pins the comparator's
             // params. `infer_call` clears the hint, but pair the set with an immediate clear
             // so a non-call value never leaks it into the next statement.
-            Some(expected) => {
-                self.expected_hint = Some(expected.clone());
-                let vt = self.infer_value(value);
-                self.expected_hint = None;
-                vt
-            }
+            // TICKET-227: the value owns the annotation as its slot (it may wrap).
+            Some(expected) => self.infer_arg(value, Some(expected)),
             None => self.infer_value(value),
         };
         (annotated, val_ty)
@@ -4727,59 +4723,45 @@ impl Checker {
                     // `fn mk() -> Heap[int]: return Heap([], fn(x, y): x < y)` pins `T=int`. `unify`
                     // no-ops on a `Nil` (void) ret, so setting it unconditionally is safe; pair with
                     // an immediate clear so a non-call return value never leaks the hint.
-                    self.expected_hint = Some(ret.clone());
-                    // TICKET-107 (W12-13) — a mixed if/match-expression return value may success-
-                    // coerce its bare branches at this same sink; same `ret_declared` /
-                    // `in_default_provider` gate as the whole-value coercion just below.
-                    self.ret_coerce_sink =
-                        (self.ret_declared && !self.in_default_provider).then(|| ret.clone());
+                    // TICKET-227: a DECLARED return is a typed slot, so the value owns it and may
+                    // wrap (`Some(v)`/`Ok(v)`); an inferred return is a seed only. A default
+                    // provider's return is a slot like any other (its decl-site half wraps too).
+                    self.install_hint(e, ret.clone(), self.ret_declared);
                     let t = self.infer(e);
-                    self.ret_coerce_sink = None;
                     self.expected_hint = None;
+                    self.hint_owner = None;
                     t
                 };
                 if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
-                } else {
-                    // W8-21 — a bare success value at a declared `T?`/`T!E` sink coerces to
-                    // `Some(v)`/`Ok(v)`. Gated on `ret_declared` (an inferred sink has nothing to
-                    // coerce into) and `!in_default_provider` (a synthesized default provider is
-                    // structurally a return sink but must stay excluded — see `## Decisions`).
-                    let mode = if self.ret_declared && !self.in_default_provider {
-                        self.ret_coerce_mode(&ret, &ty)
-                    } else {
-                        None
-                    };
-                    self.record_ret_coerce(e.span, mode);
-                    if mode.is_some() {
-                    } else if !self.assignable(&ret, &ty) {
-                        let note = self.protocol_note(&ret, &ty);
-                        let [ret_s, ty_s] = Ty::render_distinct([&ret, &ty]);
-                        self.error(
-                            e.span,
-                            format!(
-                                "expected return type {ret_s}, found {ty_s}{note}{}",
-                                float_fix_note(&ret, &ty)
-                            ),
-                        );
-                    } else if let ExprKind::Ident(name) = &e.kind
-                        && !contains_unknown_in_slot(&ret)
-                    {
-                        // PART A: returning a bare empty-collection binding into a CONCRETE collection
-                        // return type constrains its element type (the typed-return false-positive
-                        // guard, one binding away from the direct-literal `return []`). Drop its
-                        // pending annotation requirement AND pin from the return type — dropping
-                        // alone was measured check-clean at rc=0: `zs := []` /
-                        // `fn give() -> List[str]: return zs` / `s := give()` / `s.push("a")` /
-                        // `zs.push(1)` printed `['a', 1]`.
-                        self.drop_empty_site(name, Some(&ret));
-                    }
+                } else if !self.assignable(&ret, &ty) {
+                    let note = self.protocol_note(&ret, &ty);
+                    let [ret_s, ty_s] = Ty::render_distinct([&ret, &ty]);
+                    self.error(
+                        e.span,
+                        format!(
+                            "expected return type {ret_s}, found {ty_s}{note}{}",
+                            float_fix_note(&ret, &ty)
+                        ),
+                    );
+                } else if let ExprKind::Ident(name) = &e.kind
+                    && !contains_unknown_in_slot(&ret)
+                {
+                    // PART A: returning a bare empty-collection binding into a CONCRETE collection
+                    // return type constrains its element type (the typed-return false-positive
+                    // guard, one binding away from the direct-literal `return []`). Drop its
+                    // pending annotation requirement AND pin from the return type — dropping
+                    // alone was measured check-clean at rc=0: `zs := []` /
+                    // `fn give() -> List[str]: return zs` / `s := give()` / `s.push("a")` /
+                    // `zs.push(1)` printed `['a', 1]`.
+                    self.drop_empty_site(name, Some(&ret));
                 }
             }
             None => {
                 // W8-21 — a bare `return` at a `Result[nil, E]` sink coerces to DEC-017's zero-arg
-                // `Ok()`. See `ret_coerce_bare`.
-                let mode = if self.ret_declared && !self.in_default_provider {
+                // `Ok()`. See `ret_coerce_bare`. A bare `return` has no value node, so this is
+                // the one span-keyed wrap left.
+                let mode = if self.ret_declared {
                     self.ret_coerce_bare(&ret)
                 } else {
                     None
@@ -4857,7 +4839,7 @@ impl Checker {
     /// `Iterator[T]`); the operand must be assignable to the element type `T`.
     pub(super) fn check_yield(&mut self, e: &Expr, span: Span) {
         let slot = self.yield_ty.clone().filter(|_| !self.inferring_ret);
-        let ty = self.infer_const_in(e, slot);
+        let ty = self.infer_in_slot(e, slot);
         // `in_generator` (not `yield_ty.is_some()`) is the in-bounds signal: during return-type
         // inference the element type is not yet pinned (`yield_ty` is `None`) but a `yield` is still
         // legal and its type must be COLLECTED to seed the inferred `Iterator[T]`.
@@ -5262,11 +5244,8 @@ impl Checker {
             ] = decl.body.as_slice()
         {
             let ret = sig.ret.clone();
-            // TICKET-107 (W12-13) — same gate as the coercion mode computed below.
-            self.ret_coerce_sink =
-                (decl.ret.is_some() && !self.in_default_provider).then(|| ret.clone());
-            let ty = self.infer_const_in(e, decl.ret.is_some().then(|| ret.clone()));
-            self.ret_coerce_sink = None;
+            // TICKET-227: a declared inline body is a typed slot; its value may wrap.
+            let ty = self.infer_in_slot(e, decl.ret.is_some().then(|| ret.clone()));
             if ret == Ty::Nil {
                 // A NON-nil expr against `-> nil` is a void fn that actually returns a value —
                 // reject it, mirroring the multiline `return <expr>` path. A nil-typed inline expr
@@ -5275,15 +5254,9 @@ impl Checker {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 }
             } else {
-                // W8-21 — same coercion as `check_return`'s value arm; an inline-expr body implicitly
-                // returns its single expression.
-                let mode = if decl.ret.is_some() && !self.in_default_provider {
-                    self.ret_coerce_mode(&ret, &ty)
-                } else {
-                    None
-                };
-                self.record_ret_coerce(e.span, mode);
-                if mode.is_none() && !self.assignable(&ret, &ty) {
+                // An inline-expr body implicitly returns its single expression; a wrapped value
+                // already has the slot's type.
+                if !self.assignable(&ret, &ty) {
                     let note = self.protocol_note(&ret, &ty);
                     let [ret_s, ty_s] = Ty::render_distinct([&ret, &ty]);
                     self.error(

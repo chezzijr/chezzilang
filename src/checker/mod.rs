@@ -23,7 +23,7 @@ pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, Crossing,
     CrossingTable, FallOff, FallOffTable, FnLabels, ForBind, ForBindTable, GenCrossings,
     ProtoEqTable, Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable,
-    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
+    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -1238,44 +1238,13 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
 /// Runs on [`crate::on_frontend_stack_scoped`]'s dedicated stack — same reason as
 /// [`resolve_extern_signatures`]: this is the other checker pass `compiler::compile_graph` runs from
 /// inside the VM's 384 MiB thread (W7-55 Important-3 follow-up).
-pub fn resolve_call_tables(
-    graph: &ModuleGraph,
-) -> (
-    CallPlanTable,
-    WitnessTable,
-    CarrierTable,
-    ProtoEqTable,
-    SumSeedTable,
-    RetCoerceTable,
-    TableConflicts,
-    ForBindTable,
-    CrossingTable,
-    ResolutionTable,
-    FallOffTable,
-    GenCrossings,
-) {
+pub fn resolve_call_tables(graph: &ModuleGraph) -> CallTables {
     resolve_call_tables_with(graph, true)
 }
 
 /// [`resolve_call_tables`] with the nested-fn return memo (`Checker::ret_memo`) switchable, so a test
 /// can run the SAME graph both ways. Production always passes `true`.
-fn resolve_call_tables_with(
-    graph: &ModuleGraph,
-    memo_enabled: bool,
-) -> (
-    CallPlanTable,
-    WitnessTable,
-    CarrierTable,
-    ProtoEqTable,
-    SumSeedTable,
-    RetCoerceTable,
-    TableConflicts,
-    ForBindTable,
-    CrossingTable,
-    ResolutionTable,
-    FallOffTable,
-    GenCrossings,
-) {
+fn resolve_call_tables_with(graph: &ModuleGraph, memo_enabled: bool) -> CallTables {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
         c.memo_enabled = memo_enabled;
@@ -1294,9 +1263,27 @@ fn resolve_call_tables_with(
             std::mem::take(&mut c.resolutions),
             std::mem::take(&mut c.fall_off),
             std::mem::take(&mut c.gen_crossings),
+            std::mem::take(&mut c.wraps),
         )
     })
 }
+
+/// Every checker-to-compiler side table [`resolve_call_tables`] returns, in this order.
+pub type CallTables = (
+    CallPlanTable,
+    WitnessTable,
+    CarrierTable,
+    ProtoEqTable,
+    SumSeedTable,
+    RetCoerceTable,
+    TableConflicts,
+    ForBindTable,
+    CrossingTable,
+    ResolutionTable,
+    FallOffTable,
+    GenCrossings,
+    WrapTable,
+);
 
 /// W7-49 — side-table keys asked to hold two different decisions, as `(span, message)`. Empty for
 /// every well-formed program; a non-empty one is a hard compile error, never a warning.
@@ -1308,44 +1295,14 @@ pub type TableConflicts = Vec<(Span, String)>;
 /// [`resolve_extern_signatures_standalone`]. Test-only (the standalone compile/run paths are
 /// `#[cfg(test)]`; production always goes through `build_graph`).
 #[cfg(test)]
-pub fn resolve_call_tables_standalone(
-    stmts: &[Stmt],
-) -> (
-    CallPlanTable,
-    WitnessTable,
-    CarrierTable,
-    ProtoEqTable,
-    SumSeedTable,
-    RetCoerceTable,
-    TableConflicts,
-    ForBindTable,
-    CrossingTable,
-    ResolutionTable,
-    FallOffTable,
-    GenCrossings,
-) {
+pub fn resolve_call_tables_standalone(stmts: &[Stmt]) -> CallTables {
     resolve_call_tables_with(&standalone_graph(stmts), true)
 }
 
 /// [`resolve_call_tables_standalone`] with the nested-fn return memo off — the twin
 /// `the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables` compares against.
 #[cfg(test)]
-pub fn resolve_call_tables_standalone_no_memo(
-    stmts: &[Stmt],
-) -> (
-    CallPlanTable,
-    WitnessTable,
-    CarrierTable,
-    ProtoEqTable,
-    SumSeedTable,
-    RetCoerceTable,
-    TableConflicts,
-    ForBindTable,
-    CrossingTable,
-    ResolutionTable,
-    FallOffTable,
-    GenCrossings,
-) {
+pub fn resolve_call_tables_standalone_no_memo(stmts: &[Stmt]) -> CallTables {
     resolve_call_tables_with(&standalone_graph(stmts), false)
 }
 
@@ -2351,6 +2308,9 @@ struct Checker {
     /// compiler (which cannot re-derive it: the decision is whether the returned expression is
     /// already a carrier). See [`RetCoerceTable`].
     ret_coerce: RetCoerceTable,
+    /// TICKET-227 -- the implicit wraps at typed slots; see [`WrapTable`]. Written only by
+    /// `record_wrap`.
+    wraps: WrapTable,
     /// TICKET-161 (DEC-113) — the N-name `for` loops whose iterand is statically `Ty::Param` or
     /// `Ty::Protocol` and so destructure each element, keyed by [`ret_coerce_key`] on the iterand's
     /// span and consumed verbatim by the compiler. See [`ForBindTable`].
@@ -2521,11 +2481,12 @@ struct Checker {
     /// `Heap([], fn(x, y): x < y)` deadlock: the annotation pins `T`, which then pins the closure
     /// params. Mirrors the existing closure-vs-fn-annotation checking-mode (`infer_arg`).
     expected_hint: Option<Ty>,
-    /// TICKET-107 (W12-13): the declared `T?`/`T!E` return type when the expression about to be
-    /// inferred sits DIRECTLY at a W8-21 success-coercion sink. `take()`n at the top of `infer_kind`,
-    /// like other one-shot hints, so only an if/match expression at that exact position (and, through
-    /// it, its own branches) ever sees it.
-    ret_coerce_sink: Option<Ty>,
+    /// TICKET-227 -- the node `expected_hint` was installed FOR (its slot's value). Only `infer` of
+    /// that node may wrap it into the hint's carrier; every other reader treats the hint as a seed.
+    hint_owner: Option<crate::ast::NodeId>,
+    /// TICKET-227 -- set by `infer` for one `infer_kind_inner` call: the node being inferred owns its
+    /// hint. An if/match that owns its hint makes each branch value own it.
+    hint_owned: bool,
     /// TICKET-142 (W14-33): true while the checker is inferring the CHILD of a `Binary`/`Unary`
     /// node, so `infer_kind` starts its constant-overflow scan only at the root of a maximal
     /// arithmetic tree (one linear scan per tree, never one per node). Set/restored by the

@@ -131,30 +131,33 @@ pub type CarrierTable = HashMap<CarrierKey, CarrierMode>;
 /// fix, never mis-apply it.
 pub type ProtoEqTable = HashMap<CarrierKey, bool>;
 
-/// W8-21 — which implicit success-coercion, if any, a declared `T?`/`T!E` return sink applies to a
-/// bare success value, keyed exactly like [`CarrierKey`]. This is the checker-to-backend contract:
-/// the compiler is TYPE-BLIND (it sees `decl.ret`'s syntactic annotation but not whether the returned
-/// expression is already a carrier), so it cannot re-derive this decision and must consume it
-/// verbatim.
+/// W8-21 — the bare-`return` success at a declared `Result[nil, E]` sink, keyed exactly like
+/// [`CarrierKey`] on the `return` statement's span (a bare `return` has no value node; every valued
+/// wrap is a [`Wrap`] keyed by NodeId). The compiler is TYPE-BLIND, so it consumes this verbatim.
 ///
-/// `NoWrap` and a lookup MISS are deliberately IDENTICAL — both mean "lower exactly as before the
-/// fix" — so a missing entry can only ever under-apply the coercion, never mis-apply it. BOTH
-/// verdicts are recorded at the three fn-body sinks (never just the wrap one) so
-/// [`crate::checker::record_call_table_entry`] can turn an aliased key into a hard error instead of
-/// silently applying one site's verdict to another; the closure sink records ONLY a wrap verdict,
-/// because a closure body can be inferred more than once for the same span.
-///
-/// `WrapOkNil` is the bare-`return`-at-`Result[nil, E]` case: its caller must emit `Op::Nil` before
-/// the wrap, exactly like a written `Ok()` (DEC-017).
+/// `NoWrap` and a lookup MISS are deliberately IDENTICAL. `WrapOkNil`: the caller emits `Op::Nil`
+/// before the wrap, exactly like a written `Ok()` (DEC-017).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RetCoerce {
     NoWrap,
-    WrapSome,
-    WrapOk,
     WrapOkNil,
 }
 
 pub type RetCoerceTable = HashMap<CarrierKey, RetCoerce>;
+
+/// TICKET-227 (D3) -- the implicit wrap a value node gets at a typed slot: a plain `T` flowing into
+/// a `T?` slot becomes `Some(v)`, into a `T!E` slot `Ok(v)`. Decided ONLY by `Checker::infer`, for
+/// the node that owns its expected-type hint (`meet_slot`), and applied ONLY by the compiler's
+/// `compile_expr`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Wrap {
+    Some,
+    Ok,
+}
+
+/// Every [`Wrap`] the checker decided, keyed by graph module index and the value's `NodeId`. A miss
+/// means "no wrap".
+pub type WrapTable = HashMap<(usize, u32), Wrap>;
 
 /// TICKET-161 (DEC-113) — how an N-name `for` binds its iterand when the choice is STATIC. An N-name
 /// `for` over a runtime `Map` binds (key, value); over anything else it destructures each element.

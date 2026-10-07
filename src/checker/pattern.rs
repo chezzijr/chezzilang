@@ -1181,8 +1181,7 @@ impl Checker {
         &mut self,
         scrutinee: &Expr,
         arms: &[crate::ast::MatchExprArm],
-        sink: Option<Ty>,
-        own: Span,
+        owned: bool,
     ) -> Ty {
         // Capture + clear the expected-type hint before the scrutinee/guards (the hint is for the
         // arm BODIES, the tail values). It is re-installed before each arm body below — every arm
@@ -1216,31 +1215,26 @@ impl Checker {
             has_wildcard |= irref && arm.guard.is_none();
             has_wildcard |= Self::bool_domain_closed(&kind, &covered);
             has_wildcard |= self.exh_add(&mut exh, &arm.pattern, arm.guard.is_some());
-            self.expected_hint = hint.clone();
-            self.ret_coerce_sink = sink.clone();
+            match &hint {
+                Some(h) => self.install_hint(&arm.body, h.clone(), owned),
+                None => self.expected_hint = None,
+            }
             let t = self.infer(&arm.body);
             self.pop_scope();
             arm_tys.push((arm.body.span, t));
         }
         self.expected_hint = None;
-        let coerced = sink
-            .as_ref()
-            .and_then(|h| self.coerce_branches_at_sink(h, own, &arm_tys));
-        let result = if coerced.is_some() {
-            coerced.clone()
-        } else {
-            let mut acc = None;
-            for (sp, t) in arm_tys {
-                acc = Some(self.unify_branch(acc, t, sp, hint.as_ref()));
-            }
-            acc
-        };
+        self.hint_owner = None;
+        let mut result = None;
+        for (sp, t) in arm_tys {
+            result = Some(self.unify_branch(result, t, sp, hint.as_ref()));
+        }
         let help = self.exh_help(&exh);
         if !arm_pattern_error {
             self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
         }
         let res = result.unwrap_or(Ty::Unknown);
-        if had_hint || coerced.is_some() {
+        if had_hint {
             res
         } else {
             self.default_expr_result_e(res)
@@ -1253,22 +1247,14 @@ impl Checker {
         cond: &Expr,
         then: &Expr,
         els: &Expr,
-        sink: Option<Ty>,
-        own: Span,
+        owned: bool,
     ) -> Ty {
-        self.infer_if_else_chain(cond, then, els, sink, own)
+        self.infer_if_else_chain(cond, then, els, owned)
     }
 
     /// Chain-aware body of `infer_if_else`: an `elif` desugars to a nested `IfElse` in `els`, and the
     /// nested `els` sub-chain is inferred by a DIRECT recursive call here (not generic `infer`).
-    fn infer_if_else_chain(
-        &mut self,
-        cond: &Expr,
-        then: &Expr,
-        els: &Expr,
-        sink: Option<Ty>,
-        own: Span,
-    ) -> Ty {
+    fn infer_if_else_chain(&mut self, cond: &Expr, then: &Expr, els: &Expr, owned: bool) -> Ty {
         // Capture + clear the expected-type hint before the condition: the hint is for the branch
         // VALUES (tail position), not the bool condition. Re-install it for EACH branch — both are
         // equally the tail value, and `infer_call` drains the single slot via `take()`, so without
@@ -1279,33 +1265,32 @@ impl Checker {
         self.expect_bool(cond, "if condition");
         // No refine-on-first-use barrier here: a pin made in a branch VALUE persists, exactly like
         // statement position. See the note above `Checker::is_unrefined_empty_coll`.
-        self.expected_hint = hint.clone();
-        self.ret_coerce_sink = sink.clone();
+        // Each branch value owns the hint when this if owns it (TICKET-227): it wraps on its own.
+        match &hint {
+            Some(h) => self.install_hint(then, h.clone(), owned),
+            None => self.expected_hint = None,
+        }
         let t_then = self.infer(then);
-        self.expected_hint = hint.clone();
-        // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY; any other `els` is the final
-        // leaf, inferred normally.
+        match &hint {
+            Some(h) => self.install_hint(els, h.clone(), owned),
+            None => self.expected_hint = None,
+        }
+        // A nested-`IfElse` `els` is the `elif` tail — recurse DIRECTLY (it owns the hint exactly
+        // when this chain does); any other `els` is the final leaf, inferred normally.
         let t_els = if let ExprKind::IfElse {
             cond: c2,
             then: t2,
             els: e2,
         } = &els.kind
         {
-            self.infer_if_else_chain(c2, t2, e2, sink.clone(), els.span)
+            // The `elif` node itself never wraps: its own branches did.
+            self.hint_owner = None;
+            self.infer_if_else_chain(c2, t2, e2, owned)
         } else {
-            self.ret_coerce_sink = sink.clone();
             self.infer(els)
         };
         self.expected_hint = None;
-        if let Some(h) = &sink
-            && let Some(ty) = self.coerce_branches_at_sink(
-                h,
-                own,
-                &[(then.span, t_then.clone()), (els.span, t_els.clone())],
-            )
-        {
-            return ty;
-        }
+        self.hint_owner = None;
         let acc = self.unify_branch(None, t_then, then.span, hint.as_ref());
         let res = self.unify_branch(Some(acc), t_els, els.span, hint.as_ref());
         if had_hint {
@@ -1385,50 +1370,6 @@ impl Checker {
                 }
             }
         }
-    }
-
-    /// TICKET-107 (W12-13) — mixed-branch success-coercion at a `T?`/`T!E` return `sink`. Fires only
-    /// when the branches MIX: at least one is a bare coercible value (`ret_coerce_mode` returns
-    /// `Some`) and every other branch is already assignable to `sink`. All-bare branches (every mode
-    /// `Some`) and all-already-typed branches (every mode `None`) both decline here and keep the old
-    /// `unify_branch` fold — an all-bare match is wrapped whole at the return site (DEC-025), and an
-    /// incompatible all-typed fold stays rejected. A branch whose own span equals the if/match node's
-    /// `own` span is EXCLUDED on both sides (never coerced, never recorded): the `??`/`?.` desugar
-    /// gives a synthesized arm body the whole node's span, so without this a bare branch there would
-    /// be wrapped twice (`return if c: (o ?? 0) else: None` → `Some(Some(5))`). Records only WRAP
-    /// verdicts, and none under `generic_arg_prepass` (a closure body infers more than once, DEC-025).
-    fn coerce_branches_at_sink(
-        &mut self,
-        sink: &Ty,
-        own: Span,
-        branches: &[(Span, Ty)],
-    ) -> Option<Ty> {
-        if !ty_fully_concrete(sink) {
-            return None;
-        }
-        let modes: Vec<Option<crate::checker::RetCoerce>> = branches
-            .iter()
-            .map(|(_, t)| self.ret_coerce_mode(sink, t))
-            .collect();
-        if modes.iter().all(Option::is_none) || modes.iter().all(Option::is_some) {
-            return None;
-        }
-        for ((span, t), mode) in branches.iter().zip(modes.iter()) {
-            match mode {
-                Some(_) if *span == own => return None,
-                Some(_) => {}
-                None if !self.assignable(sink, t) => return None,
-                None => {}
-            }
-        }
-        if !self.generic_arg_prepass {
-            for ((span, _), mode) in branches.iter().zip(modes) {
-                if let Some(m) = mode {
-                    self.record_ret_coerce(*span, Some(m));
-                }
-            }
-        }
-        Some(sink.clone())
     }
 
     // ===== expression inference =====
@@ -1574,6 +1515,24 @@ impl Checker {
         ty
     }
 
+    /// TICKET-227 — install `hint` as the expected type of `e`. With `slot`, `e` OWNS it: only
+    /// `infer` of `e` may wrap `e` into the hint's carrier. Without, the hint is a seed (it guides
+    /// inference and never wraps). A synthesized node never owns a hint.
+    pub(super) fn install_hint(&mut self, e: &Expr, hint: Ty, slot: bool) {
+        self.expected_hint = Some(hint);
+        self.hint_owner = (slot && e.id.0 != crate::ast::NodeId::SYNTH.0).then_some(e.id);
+    }
+
+    /// TICKET-227 — infer `e` in value position as the value of a typed slot `slot`: `e` owns the
+    /// slot's type and wraps into it where [`Self::meet_slot`] says so.
+    pub(super) fn infer_value_in(&mut self, e: &Expr, slot: &Ty) -> Ty {
+        self.install_hint(e, slot.clone(), true);
+        let t = self.infer_value(e);
+        self.expected_hint = None;
+        self.hint_owner = None;
+        t
+    }
+
     pub(super) fn infer(&mut self, expr: &Expr) -> Ty {
         // TICKET-225: a var bound since a type was stored reads as its binding.
         if self.tyvars.borrow().any()
@@ -1581,6 +1540,14 @@ impl Checker {
         {
             self.expected_hint = Some(self.zonk(h));
         }
+        // TICKET-227: the slot this node owns, if the hint was installed FOR it. Taken here, so
+        // no child ever sees the owner.
+        let owner = self.hint_owner.take();
+        let slot = match owner {
+            Some(o) if o.0 == expr.id.0 => self.expected_hint.clone(),
+            _ => None,
+        };
+        self.hint_owned = slot.is_some();
         let ty = self.infer_kind(expr);
         let ty = if self.tyvars.borrow().any() {
             self.zonk(&ty)
@@ -1593,7 +1560,24 @@ impl Checker {
         if self.hover_probe.is_some() {
             self.hover_record_expr(expr, &ty);
         }
-        ty
+        match &slot {
+            Some(s) => self.meet_slot(s, expr, ty),
+            None => ty,
+        }
+    }
+
+    /// TICKET-227 (D3) — THE one place an implicit wrap is decided: the value `value` of type `ty`
+    /// meets the typed slot `slot` it owns. A plain `T` at a `T?`/`T!E` slot records a wrap and
+    /// takes the slot's type; anything else keeps its own type, and the slot's `assignable` compare
+    /// reports a misfit. Called only by [`Self::infer`].
+    fn meet_slot(&mut self, slot: &Ty, value: &Expr, ty: Ty) -> Ty {
+        match self.wrap_mode(slot, &ty) {
+            Some(w) => {
+                self.record_wrap(value.id, w, value.span);
+                slot.clone()
+            }
+            None => ty,
+        }
     }
 
     /// TICKET-142 (W14-33): the dispatch every expression inference passes through. Wraps
@@ -1602,7 +1586,7 @@ impl Checker {
     /// each overflow once. A child of a `Binary`/`Unary` sees `arith_parent` and skips (its parent's
     /// scan already entered it); a child of any other node (a call argument under a `+`) starts its
     /// own tree. Each node is scanned at most once, so the check is linear even on a
-    /// `MAX_AST_DEPTH` chain. Must not touch `ret_coerce_sink` (the inner fn takes it first).
+    /// `MAX_AST_DEPTH` chain. Must not touch `hint_owned` (the inner fn takes it first).
     /// A walk with `inferring_ret` set rolls back its diagnostics and `const_overflow_seen`, so it
     /// skips the scan and the real walk reports each overflow once (TICKET-183).
     pub(super) fn infer_kind(&mut self, expr: &Expr) -> Ty {
@@ -1679,22 +1663,24 @@ impl Checker {
         }
     }
 
-    /// TICKET-225: infer a constant `e` under `slot` as its expected type, so it meets the slot's
-    /// width; any other `e` infers with no hint. For value sites that thread no hint of their own.
-    pub(super) fn infer_const_in(&mut self, e: &Expr, slot: Option<Ty>) -> Ty {
-        if is_const_expr(e)
-            && let Some(s) = slot
-        {
-            self.expected_hint = Some(s);
-            let t = self.infer(e);
-            self.expected_hint = None;
-            return t;
+    /// TICKET-225 / TICKET-227: infer `e` as the value of the typed slot `slot` (a constant meets
+    /// the slot's width; a plain value wraps into a carrier slot); `None` infers with no hint. For
+    /// value sites with a statement-tail slot (yield, inline body, closure body).
+    pub(super) fn infer_in_slot(&mut self, e: &Expr, slot: Option<Ty>) -> Ty {
+        match slot {
+            Some(s) => {
+                self.install_hint(e, s, true);
+                let t = self.infer(e);
+                self.expected_hint = None;
+                self.hint_owner = None;
+                t
+            }
+            None => self.infer(e),
         }
-        self.infer(e)
     }
 
     fn infer_kind_inner(&mut self, expr: &Expr) -> Ty {
-        let ret_sink = self.ret_coerce_sink.take();
+        let owned = std::mem::take(&mut self.hint_owned);
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
@@ -1836,12 +1822,8 @@ impl Checker {
                 // #2/#3) and the ambiguity check happen inside `infer_closure`.
                 self.infer_closure(params, ret.as_ref(), body, None)
             }
-            ExprKind::Match { scrutinee, arms } => {
-                self.infer_match(scrutinee, arms, ret_sink, expr.span)
-            }
-            ExprKind::IfElse { cond, then, els } => {
-                self.infer_if_else(cond, then, els, ret_sink, expr.span)
-            }
+            ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms, owned),
+            ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els, owned),
             ExprKind::Recover(block) => self.infer_recover(block),
         }
     }
@@ -3360,12 +3342,7 @@ impl Checker {
         let tys: Vec<Ty> = items
             .iter()
             .map(|it| match &elem_expected {
-                Some(e) => {
-                    self.expected_hint = Some(e.clone());
-                    let t = self.infer_value(it);
-                    self.expected_hint = None;
-                    t
-                }
+                Some(e) => self.infer_value_in(it, e),
                 None => self.infer_value(it),
             })
             .collect();
@@ -3429,12 +3406,7 @@ impl Checker {
         let mut elem = Ty::Unknown;
         for e in elems {
             let et = match &elem_expected {
-                Some(x) => {
-                    self.expected_hint = Some(x.clone());
-                    let t = self.infer_value(e);
-                    self.expected_hint = None;
-                    t
-                }
+                Some(x) => self.infer_value_in(e, x),
                 None => self.infer_value(e),
             };
             if !et.is_unknown()
@@ -3482,11 +3454,16 @@ impl Checker {
         let mut key_tys: Vec<Ty> = Vec::with_capacity(entries.len());
         let mut val_tys: Vec<Ty> = Vec::with_capacity(entries.len());
         for (k, v) in entries {
-            self.expected_hint = key_expected.clone();
-            key_tys.push(self.infer_value(k));
-            self.expected_hint = val_expected.clone();
-            val_tys.push(self.infer_value(v));
-            self.expected_hint = None;
+            let kt = match &key_expected {
+                Some(x) => self.infer_value_in(k, x),
+                None => self.infer_value(k),
+            };
+            key_tys.push(kt);
+            let vt = match &val_expected {
+                Some(x) => self.infer_value_in(v, x),
+                None => self.infer_value(v),
+            };
+            val_tys.push(vt);
         }
 
         // TICKET-032 A2 — CLOSED, the `infer_list` twin: an expected key/value type is reported per
@@ -5697,10 +5674,8 @@ impl Checker {
                 ty
             })
             .collect();
-        self.ret_coerce_sink = ret.is_some().then(|| self.current_ret.clone());
         let slot = ret.is_some().then(|| self.current_ret.clone());
-        let body_ty = self.infer_const_in(body, slot);
-        self.ret_coerce_sink = None;
+        let body_ty = self.infer_in_slot(body, slot);
         self.last_closure_writes = self
             .closure_write_frames
             .pop()
@@ -5727,18 +5702,9 @@ impl Checker {
         let ret_ty = match ret {
             Some(t) => {
                 let declared = self.resolve_type(t, body.span);
-                // W8-21 — same coercion as a `fn`'s declared return sink. Records ONLY a wrap
-                // verdict, and only outside the generic-arg unification prepass: a closure body can
-                // be inferred more than once for the same span (this prepass, and the HOF loop-back),
-                // and a second, different verdict for one span would turn a valid program into a hard
-                // `internal:` error via `record_call_table_entry`.
-                let mode = self.ret_coerce_mode(&declared, &body_ty);
-                if let Some(m) = mode
-                    && !self.generic_arg_prepass
-                {
-                    self.record_ret_coerce(body.span, Some(m));
-                }
-                if mode.is_none() && !self.assignable(&declared, &body_ty) {
+                // The body owned the declared return as its slot, so a wrapped body already has
+                // the declared type (TICKET-227).
+                if !self.assignable(&declared, &body_ty) {
                     self.error(
                         body.span,
                         format!(

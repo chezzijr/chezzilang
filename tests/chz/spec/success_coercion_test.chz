@@ -83,3 +83,16 @@ test fn closure_if_expr_mixed_branches_coerce_the_bare_ones():
     g := fn(n: int) -> int?: if n > 0: n else: None
     assert str(g(3)) == "Some(3)"
     assert str(g(-3)) == "None"
+
+fn elif_tail_mixed(n: int) -> int?:
+    return if n > 0: Some(n) elif n == 0: 0 else: 0 - n
+
+fn else_nested_mixed(n: int) -> int!:
+    return if n > 0: Ok(n) else: (if n == 0: 0 else: 0 - n)
+
+test fn an_all_bare_elif_tail_coerces_as_one_branch():
+    assert str(elif_tail_mixed(2)) == "Some(2)"
+    assert str(elif_tail_mixed(0)) == "Some(0)"
+    assert str(elif_tail_mixed(-3)) == "Some(3)"
+    assert str(else_nested_mixed(0)) == "Ok(0)"
+    assert str(else_nested_mixed(-3)) == "Ok(3)"
