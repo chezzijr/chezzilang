@@ -1,0 +1,41 @@
+# TICKET-225 (R5) — a generic fn value read with no pin takes type variables, and a later use in its
+# fn body pins them: a sibling at a join, a call, a `+=`. An untyped constant meets the slot it lands
+# in. Rust reference (rustc 1.97): `let k = g; k(5)` and `o.unwrap_or(g)(5)` compile and give 5 and 6.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+fn inc(x: int) -> int:
+    return x + 1
+
+fn g[T](x: T) -> T:
+    return x
+
+fn id[T](x: T) -> T:
+    return x
+
+test fn coalesce_join_pins_from_the_option():
+    o: Option[fn(int) -> int] = Some(inc)
+    assert (o ?? g)(5) == 6
+
+test fn if_join_pins_in_either_order():
+    c := true
+    assert (if c: inc else: g)(5) == 6
+    assert (if c: g else: inc)(5) == 5
+
+test fn list_and_map_joins_pin_the_generic_element():
+    assert [inc, g][1](5) == 5
+    assert ([inc] + [g])[1](5) == 5
+    xs := [inc]
+    xs += [g]
+    assert xs[1](5) == 5
+    assert {"a": inc, "b": g}["b"](5) == 5
+
+test fn a_later_call_pins_a_let_bound_read():
+    f := g
+    assert f(5) == 5
+
+test fn equality_join_pins_and_compares_identity():
+    assert (inc == g) == false
+
+test fn a_constant_argument_meets_the_expected_type():
+    y: int = id(300)
+    assert y == 300
