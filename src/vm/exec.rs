@@ -1695,10 +1695,9 @@ impl Vm {
             }
             _ => rte,
         };
-        // A deferred `std.os.exit` turns the unwind into a hard halt.
-        if self.pending_exit.is_some() {
-            return Err(rte);
-        }
+        // A deferred `std.os.exit`, or a cleanup that met the latched verdict, turns the unwind
+        // into a hard halt.
+        let rte = self.cleanup_met_halt(base_level, rte)?;
         match self.handlers.last().copied() {
             Some(h) if !fatal && h.frame_len > base_level => {
                 self.handlers.pop();
@@ -1747,9 +1746,7 @@ impl Vm {
                 // cancels its tasks IDENTICALLY to an uncaught `?`.
                 // TICKET-147 — the caught fault is the root cause; a child's fault is dropped.
                 let _ = self.drain_escaped_nursery(h.nursery_len);
-                if self.pending_exit.is_some() {
-                    return Err(rte);
-                }
+                let rte = self.cleanup_met_halt(base_level, rte)?;
                 // Convert the fault message (a `str`, i.e. an `Error`) into `Err(msg)`; the
                 // boundary's `done` label receives a ready `Result`.
                 let sp = rte.span;
@@ -2026,6 +2023,20 @@ impl Vm {
         self.cut = Some(Cut::RunFault);
         self.fault_trace = Some(trace);
         self.fault_trace_depth = usize::MAX;
+    }
+
+    /// TICKET-223 — `on_step_fault`'s read of `Vm::cleanup_halt`: on a verdict it also drops the
+    /// frames left above `base_level` without their `defer`s (DEC-152).
+    fn cleanup_met_halt(
+        &mut self,
+        base_level: usize,
+        rte: RuntimeError,
+    ) -> Result<RuntimeError, RuntimeError> {
+        self.cleanup_halt(rte).inspect_err(|e| {
+            if e.is_deadlock {
+                self.unwind_no_defer(base_level);
+            }
+        })
     }
 
     /// TICKET-195 — is this party unwinding a cancel ([`Cut::Cancelled`])?

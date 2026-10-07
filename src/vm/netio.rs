@@ -2408,13 +2408,11 @@ impl Vm {
     /// (TICKET-223). A CPU-side or in-place checkpoint reads this (behind the lock-free
     /// `run_halt_hint`); it never reads the exit, job-fault or deadlock cell by itself. An exit and
     /// a deadlock are due inside a `defer` too (TICKET-213, TICKET-152); a job fault waits for the
-    /// `defer` to end.
+    /// `defer` to end. Which kinds cut a `defer` is `RunHalt::cuts_cleanup`; a latched verdict is
+    /// due inside a `defer` even while a job fault waits.
     pub(super) fn run_halt_due(&self) -> bool {
-        match self.quiesce.run_halt() {
-            RunHalt::Exit | RunHalt::Deadlock => true,
-            RunHalt::Fault => self.deferring == 0,
-            RunHalt::Running => false,
-        }
+        let halt = self.quiesce.run_halt();
+        halt.cuts_cleanup() || (halt == RunHalt::Fault && self.deferring == 0)
     }
 
     /// The halts of a party that comes back from a wait it could not poll (a nursery join, an

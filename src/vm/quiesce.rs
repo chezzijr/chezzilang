@@ -375,6 +375,13 @@ impl RunHalt {
     pub(super) fn settles(self) -> bool {
         !matches!(self, RunHalt::Exit | RunHalt::Deadlock)
     }
+
+    /// THE answer to which halts cut a `defer`: an exit (TICKET-213) and a latched verdict
+    /// (TICKET-152) stop a running `defer` and every queued one; a job fault waits for the cleanup.
+    /// `Vm::run_halt_due` and `Vm::next_deferred` read it.
+    pub(super) fn cuts_cleanup(self) -> bool {
+        matches!(self, RunHalt::Exit | RunHalt::Deadlock)
+    }
 }
 
 impl QuiesceState {
@@ -436,12 +443,12 @@ impl QuiesceState {
 
     /// TICKET-219 — the run halt's kind, the one source `Vm::run_halt_due` and
     /// `SchedCore::job_event` read. An exit outranks a job fault: `os.exit` runs no `defer`.
-    /// A job fault outranks a deadlock verdict (TICKET-223).
+    /// A latched verdict outranks a job fault, because a verdict cuts a `defer` and a job fault does
+    /// not (TICKET-223). The report order is separate: `run_exit_err` and `rank_end` still put a
+    /// job fault first (DEC-200).
     pub(super) fn run_halt(&self) -> RunHalt {
         if self.pending().is_some() {
             RunHalt::Exit
-        } else if self.has_job_fault() {
-            RunHalt::Fault
         } else if self
             .deadlock
             .lock()
@@ -449,6 +456,8 @@ impl QuiesceState {
             .decided
         {
             RunHalt::Deadlock
+        } else if self.has_job_fault() {
+            RunHalt::Fault
         } else {
             RunHalt::Running
         }
@@ -546,7 +555,9 @@ impl QuiesceState {
 
     /// TICKET-223 — the ONE place a judge acts on the verdict. The first judge that sees it latches
     /// it, with the report taken from the first registered party that has a site, and publishes it
-    /// as a run halt; every later call answers `true`. The latch is taken under the party lock, so
+    /// as a run halt; a later call answers `true` once latched. A verdict that names no party site
+    /// (main at a join) latches nothing: its report is the victims' slots (DEC-208), and the run
+    /// may go on (DEC-147). The latch is taken under the party lock, so
     /// it is set before any judge cuts a victim. [`Self::quiesced`] stays the pure predicate.
     ///
     /// Lock order: `parties` (P), then the verdict's own walk, then the `deadlock` cell alone. The
@@ -566,9 +577,11 @@ impl QuiesceState {
             return false;
         }
         let mut cell = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
-        cell.decided = true;
+        cell.decided = site.is_some();
         cell.report = site;
-        self.run_halt_hint.store(true, Ordering::Release);
+        if site.is_some() {
+            self.run_halt_hint.store(true, Ordering::Release);
+        }
         true
     }
 
@@ -711,5 +724,34 @@ mod tests {
         assert!(q.take_deadlock_report().is_some());
         q.clear_exit();
         assert_eq!(q.run_halt(), RunHalt::Running);
+    }
+
+    /// TICKET-223 — a verdict that names no party site (main at a join) is answered but not
+    /// latched: its report is the victims' slots (DEC-208), and a later call re-evaluates it.
+    #[test]
+    fn decide_without_a_party_site_latches_nothing() {
+        let q = Arc::new(QuiesceState::default());
+        let g = q.block(PartyWait::Send(Pending::new()), WakeSet::default());
+        assert!(q.decide(Judge::Sched));
+        assert_eq!(q.run_halt(), RunHalt::Running);
+        drop(g);
+        assert!(!q.decide(Judge::Sched));
+    }
+
+    /// TICKET-223 — a latched verdict outranks a waiting job fault (it cuts a `defer`, a job fault
+    /// does not); an exit still outranks both.
+    #[test]
+    fn run_halt_ranks_a_verdict_above_a_job_fault() {
+        let q = Arc::new(QuiesceState::default());
+        let _g = q.block_shared(
+            Arc::new(PartyWait::Send(Pending::new())),
+            WakeSet::default(),
+            Some(("x", crate::ast::Span::default())),
+        );
+        assert!(q.decide(Judge::Party));
+        q.request_job_fault(super::super::RuntimeError::default(), Vec::new());
+        assert_eq!(q.run_halt(), RunHalt::Deadlock);
+        q.request_exit(17);
+        assert_eq!(q.run_halt(), RunHalt::Exit);
     }
 }

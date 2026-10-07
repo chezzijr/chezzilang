@@ -37,7 +37,8 @@ impl Vm {
         self.drain_frame_to(0)
     }
 
-    /// THE one pop and the one read of the exit rule, asked before EACH pop: `Ok(None)` when no
+    /// THE one pop and the one read of the halts that cut a `defer` (`RunHalt::cuts_cleanup`: an
+    /// exit or the latched verdict), asked before EACH pop: `Ok(None)` when no
     /// `defer` is left or this party is already exiting; `Err` when another party's exit is
     /// published with a `defer` still pending. The exit is delivered here, so no `recover:` catches
     /// the unwind and no caller runs on.
@@ -54,12 +55,27 @@ impl Vm {
         if self.frames[fi].deferred.len() <= marker || self.pending_exit.is_some() {
             return Ok(None);
         }
-        if self.quiesce.pending().is_some()
+        if self.quiesce.run_halt().cuts_cleanup()
             && let Some(e) = self.run_exit_err(Span::RUNTIME)
         {
             return Err(e);
         }
         Ok(self.frames[fi].deferred.pop())
+    }
+
+    /// TICKET-223 — THE post-drain read of "a hard halt cut this cleanup": this party is exiting
+    /// (`next_deferred` delivered the exit), or the deadlock verdict is latched. `Err` carries
+    /// `rte`, stamped fatal for a verdict (DEC-135), so no `recover:` catches it; `next_deferred`
+    /// already stops the remaining `defer`s (DEC-152). `rte` keeps its message, so a delivered
+    /// cause still outranks its stuck cleanup in the report (DEC-147).
+    pub(super) fn cleanup_halt(&self, rte: RuntimeError) -> Result<RuntimeError, RuntimeError> {
+        if self.pending_exit.is_some() {
+            return Err(rte);
+        }
+        if self.quiesce.run_halt() == RunHalt::Deadlock {
+            return Err(rte.deadlock());
+        }
+        Ok(rte)
     }
 
     /// Run frame `fi`'s pending `defer`s down to `marker`, LIFO, each popped by
@@ -294,10 +310,8 @@ impl Vm {
                     } else {
                         None
                     };
-                    if self.pending_exit.is_some()
-                        && let Some(e) = body_defer_err.take()
-                    {
-                        return Err(e);
+                    if let Some(e) = body_defer_err.take() {
+                        body_defer_err = Some(self.cleanup_halt(e)?);
                     }
                     // TICKET-147 — the propagated `Err` is the recover's value; a body defer fault
                     // supersedes it, and an aborted nursery's child fault fills that gap.
@@ -307,8 +321,8 @@ impl Vm {
                     // supersedes the propagated value (becomes the recover's `Err`); a recover-block
                     // defer fault in turn supersedes a body defer fault (it unwinds later).
                     match self.drain_frame_to(h.defer_len) {
-                        Some(e) if self.pending_exit.is_some() => return Err(e),
                         Some(e) => {
+                            let e = self.cleanup_halt(e)?;
                             let sp = e.span;
                             let msg = self.alloc_str(e.message);
                             self.stamp_err_span(msg, sp);

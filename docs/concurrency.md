@@ -487,7 +487,12 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   wait's site: main locking a `Shared` guard that a stuck job holds reports
   `update guard wait: deadlock — …` at its own `update`, as Go reports
   `goroutine 1 [sync.Mutex.Lock]`. Main at a join (`shutdown()`, the end of a `parallel:` block)
-  reports the victims' sites.
+  reports the victims' sites. A cleanup that meets the verdict is fatal too: no further `defer`
+  runs, no `recover:` catches the unwind it ran in (a `?` inside `recover:` included), and the cause
+  it was cleaning up after keeps the report (Go prints `fatal error: all goroutines are asleep -
+  deadlock!` and nothing after). A latched verdict is due inside a `defer` even while a job fault
+  waits; the job fault stays the report. A verdict that names only a join party latches nothing: its
+  report is the victims' slots.
 
   A deadlock message raised inside
   a native callback that cannot park at all is an ordinary recoverable fault and still runs

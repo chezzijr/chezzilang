@@ -7,6 +7,8 @@
 //! controls for `child`, `join` and `cancel`, and `join` vs `child` is "delivered at the join vs
 //! delivered mid-wait". Judged against the ancestors: Go reports a child's `panic: boom` whatever
 //! its owner's `defer` does, and CPython lets an outside `ThreadPoolExecutor`'s job finish.
+//! A stuck cleanup on a cut owner meets the deadlock verdict and ends the run, as Go's does; one in
+//! a cancelled sibling stays swallowed (TICKET-223).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -373,6 +375,10 @@ enum Expect {
     Deadlock,
     /// C1: the outside Executor's job finished
     ShutdownSurvives,
+    /// C1, a `child` cause with a stuck cleanup on the owner: the cleanup meets the deadlock
+    /// verdict, which is fatal (Go: `all goroutines are asleep`); the cause `boom` is the one report
+    /// (DEC-147) and no `recover:` catches it (TICKET-223)
+    ShutdownStuckFatal,
     /// test mode: the cell timed out
     TimedOut,
     /// `shutdown` × `timeout`: timed out, and the job's second call never ran
@@ -417,6 +423,13 @@ fn ok(e: Expect, g: &Got) -> bool {
         Expect::Deadlock => g.code != 0 && err.contains("deadlock"),
         Expect::ShutdownSurvives => {
             g.code == 0 && out.contains("Err('boom')") && out.contains("job done? Some(1)")
+        }
+        Expect::ShutdownStuckFatal => {
+            g.code != 0
+                && err.contains("boom")
+                && !err.contains("deadlock")
+                && !out.contains("Err('boom')")
+                && !out.contains("job done?")
         }
         Expect::TimedOut => out.contains("TIMED-OUT cell") && out.contains("1 timed out"),
         Expect::TimedOutStopped => {
@@ -489,7 +502,11 @@ fn cells() -> Vec<Cell> {
                 src: Box::new(move |_| shutdown_src(cause, c)),
                 test_mode: false,
                 runs,
-                expect: Expect::ShutdownSurvives,
+                expect: if cause == K::Child && c == C::Stuck {
+                    Expect::ShutdownStuckFatal
+                } else {
+                    Expect::ShutdownSurvives
+                },
             });
         }
     }
