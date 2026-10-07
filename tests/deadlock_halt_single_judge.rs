@@ -55,6 +55,9 @@ struct Row {
     src: &'static str,
     site: &'static str,
     after_ok: bool,
+    /// Run under `chezzi test`: the report is one `ERROR` row on stdout, and the per-test reap and
+    /// the end-of-file reap drain the executors after the verdict.
+    test_mode: bool,
 }
 
 const ROWS: &[Row] = &[
@@ -75,6 +78,7 @@ main()
 "#,
         site: "9:5",
         after_ok: false,
+        test_mode: false,
     },
     Row {
         name: "ex_send",
@@ -94,6 +98,7 @@ main()
 "#,
         site: "9:5",
         after_ok: false,
+        test_mode: false,
     },
     Row {
         name: "ex_rw",
@@ -112,6 +117,7 @@ main()
 "#,
         site: "6:11",
         after_ok: true,
+        test_mode: false,
     },
     Row {
         name: "ex_chan",
@@ -128,6 +134,7 @@ main()
 "#,
         site: "6:27",
         after_ok: false,
+        test_mode: false,
     },
     Row {
         name: "ex_cycle",
@@ -146,6 +153,7 @@ main()
 "#,
         site: "7:28",
         after_ok: false,
+        test_mode: false,
     },
     Row {
         name: "ex_nested",
@@ -166,6 +174,7 @@ main()
 "#,
         site: "9:11",
         after_ok: false,
+        test_mode: false,
     },
     Row {
         name: "sp_guard",
@@ -183,6 +192,7 @@ main()
 "#,
         site: "6:5",
         after_ok: false,
+        test_mode: false,
     },
     Row {
         name: "sp_rw",
@@ -200,6 +210,7 @@ main()
 "#,
         site: "6:5",
         after_ok: true,
+        test_mode: false,
     },
     Row {
         name: "sp_chan",
@@ -214,6 +225,7 @@ main()
 "#,
         site: "4:5",
         after_ok: false,
+        test_mode: false,
     },
     Row {
         name: "sp_cycle",
@@ -230,6 +242,33 @@ main()
 "#,
         site: "5:5",
         after_ok: false,
+        test_mode: false,
+    },
+    // ex_guard under `chezzi test`, with a later test that reaps its own executor. The reaps after
+    // the verdict must wait for the victims: a reap that leaves early leaves the deadlocked job to
+    // the end-of-file reap, which reports it as a second `ERROR (executor job)` row.
+    Row {
+        name: "ex_guard_test",
+        src: r#"import std.concurrency
+import std.time
+
+test fn a_deadlocks():
+    s := Shared(0)
+    c := Channel[int](0)
+    ex := Executor()
+    ex.submit(fn(): s.update(fn(x: int) -> int: x + c.recv()))
+    time.sleep_ms(50)
+    s.update(fn(x: int) -> int: x + 1)
+    print("AFTER")
+
+test fn b_runs():
+    ex := Executor()
+    ex.submit(fn(): print("B"))
+    ex.shutdown()
+"#,
+        site: "10:5",
+        after_ok: false,
+        test_mode: true,
     },
 ];
 
@@ -244,7 +283,7 @@ fn run_cell(
     use std::time::{Duration, Instant};
     let cell = format!("{} T={t} seed={seed} pin={pin:?}", row.name);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
-    cmd.arg("run")
+    cmd.arg(if row.test_mode { "test" } else { "run" })
         .arg(path)
         .env("CHEZZI_THREADS", t)
         .env("CHEZZI_SCHED_SEED", seed.to_string())
@@ -286,9 +325,17 @@ fn run_cell(
         return Some(format!("{cell}: hung past 20 s; stdout {stdout:?}"));
     };
     let site = format!("{}.chz:{}", row.name, row.site);
-    let reports = stderr.matches("runtime error (").count();
+    // `chezzi test` reports each errored test as one `ERROR` row on stdout.
+    let (report, reports) = if row.test_mode {
+        (
+            &stdout,
+            stdout.lines().filter(|l| l.starts_with("ERROR ")).count(),
+        )
+    } else {
+        (&stderr, stderr.matches("runtime error (").count())
+    };
     if status.code() != Some(1)
-        || !stderr.contains(&site)
+        || !report.contains(&site)
         || reports != 1
         || (!row.after_ok && stdout.contains("AFTER"))
     {
