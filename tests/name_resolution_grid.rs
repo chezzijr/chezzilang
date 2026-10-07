@@ -389,6 +389,19 @@ fn same_module_fn_cells() -> Vec<Cell> {
             ),
             Expect::Prints("P(x=104)".into()),
         ),
+        // A variant lives under its enum, so a top-level `fn` may share its name; the bare call
+        // is the fn, as the bare read is (Rust: `fn Circle` beside `Shape::Circle` prints `1`).
+        one(
+            "toplevel_fn/variant_name/call",
+            "enum Shape:\n    Circle(int)\nfn Circle() -> int:\n    return 1\nprint(Circle(), Shape.Circle(2))\n".into(),
+            Expect::Prints("1 Circle(2)".into()),
+        ),
+        // `None` is a value, not a constructor (Rust E0618 `expected function, found Option<_>`).
+        one(
+            "builtin/none/called",
+            "x := None(1)\n".into(),
+            Expect::Rejects("is not callable"),
+        ),
         // K2: the recursive call inside `fn Q` is the fn, not the alias ctor.
         one(
             "toplevel_fn/alias/k2_recursive_call",
