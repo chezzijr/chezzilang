@@ -1145,8 +1145,10 @@ pub struct CompClause {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOp {
-    Neg, // -x
-    Not, // not x
+    Neg,    // -x
+    Not,    // not x
+    ErrVal, // !x -- an error value of the expected `T!E` (TICKET-227)
+    Wrap,   // ?x -- a present/success value of the expected `T?` / `T!E` (TICKET-227)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

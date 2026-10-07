@@ -3441,6 +3441,10 @@ impl Compiler {
                         fc.emit(Op::AsBool, inner.span);
                         fc.emit(Op::Not, expr.span);
                     }
+                    // `!e` is `Err(e)`; `?x` compiles its operand, and the checker's wrap
+                    // record on this node (applied by `compile_expr`) builds the carrier.
+                    UnaryOp::ErrVal => self.emit_builtin_variant(fc, "Err", expr.span)?,
+                    UnaryOp::Wrap => {}
                 }
             }
             ExprKind::Binary {
@@ -4255,12 +4259,22 @@ impl Compiler {
             Some(crate::checker::RetCoerce::WrapSome) => "Some",
             Some(crate::checker::RetCoerce::WrapOk | crate::checker::RetCoerce::WrapOkNil) => "Ok",
         };
+        self.emit_builtin_variant(fc, name, span)
+    }
+
+    /// Build the builtin carrier variant `name` (`Some`/`Ok`/`Err`) around the stack top.
+    fn emit_builtin_variant(
+        &mut self,
+        fc: &mut FnComp,
+        name: &str,
+        span: Span,
+    ) -> Result<(), CompileError> {
         let variant_id = Self::builtin_variant_pair(name)
             .and_then(|k| self.program.variants.get(&k))
             .map(|def| def.variant_id)
             .ok_or_else(|| CompileError {
                 message: format!(
-                    "internal: no '{name}' variant registered for a return-site success-coercion \
+                    "internal: no '{name}' variant registered for a carrier value \
                      -- the type-checker and the backend disagree"
                 ),
                 span,

@@ -34455,14 +34455,8 @@ fn inline_nested_if_statement_block_is_still_rejected() {
 }
 
 #[test]
-fn double_question_type_suffix_names_the_nested_optional_form() {
-    let tokens =
-        lexer::tokenize("fn main():\n    y: int?? = Some(None)\n").expect("lex should succeed");
-    let err = parser::parse(tokens).err().expect("`int??` must not parse");
-    assert!(
-        err.message.contains("'??' is not a type suffix"),
-        "wrong message: {err:?}"
-    );
+fn double_question_type_suffix_is_a_nested_optional() {
+    ok("fn main():\n    y: int?? = Some(None)\n    print(y)\n");
 }
 
 #[test]
@@ -38054,4 +38048,32 @@ fn untyped_constant_width_grid() {
 #[test]
 fn prefix_bang_builds_an_error_value() {
     ok("fn f() -> int!str:\n    return !\"disk\"\nfn main():\n    pass\n");
+}
+
+#[test]
+fn prefix_bang_operand_must_satisfy_error() {
+    rejects(
+        "fn f() -> int!:\n    return !5\n",
+        "int does not satisfy Error",
+    );
+}
+
+#[test]
+fn prefix_bang_applies_to_the_whole_postfix_operand() {
+    use crate::ast::{ExprKind, StmtKind, UnaryOp};
+    let m = parser::parse(lexer::tokenize("x := !a.b(c)\n").expect("lex")).expect("parse");
+    let StmtKind::Let { value, .. } = &m.stmts[0].kind else {
+        panic!("expected a let: {:?}", m.stmts[0]);
+    };
+    let ExprKind::Unary {
+        op: UnaryOp::ErrVal,
+        expr,
+    } = &value.kind
+    else {
+        panic!("expected a prefix '!': {value:?}");
+    };
+    assert!(
+        matches!(expr.kind, ExprKind::Call { .. }),
+        "operand must be the whole call: {expr:?}"
+    );
 }

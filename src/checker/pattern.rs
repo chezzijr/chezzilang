@@ -1763,7 +1763,7 @@ impl Checker {
                 elem,
                 clauses,
             } => self.infer_comprehension(*kind, key.as_deref(), elem, clauses),
-            ExprKind::Unary { op, expr: inner } => self.infer_unary(*op, inner),
+            ExprKind::Unary { op, expr: inner } => self.infer_unary(expr, *op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
             ExprKind::Compare { operands, ops } => self.infer_compare_chain(operands, ops),
             ExprKind::Slice {
@@ -3639,7 +3639,17 @@ impl Checker {
         result
     }
 
-    pub(super) fn infer_unary(&mut self, op: UnaryOp, inner: &Expr) -> Ty {
+    pub(super) fn infer_unary(&mut self, node: &Expr, op: UnaryOp, inner: &Expr) -> Ty {
+        match op {
+            UnaryOp::ErrVal => return self.infer_err_val(node, inner),
+            UnaryOp::Wrap => {
+                self.expected_hint = None;
+                self.infer_value(inner);
+                self.error(node.span, "internal: '?x' is not wired yet".to_string());
+                return Ty::Unknown;
+            }
+            UnaryOp::Neg | UnaryOp::Not => {}
+        }
         let t = self.infer_value(inner);
         match op {
             UnaryOp::Neg => {
@@ -3658,6 +3668,35 @@ impl Checker {
                 }
                 Ty::Bool
             }
+            UnaryOp::ErrVal | UnaryOp::Wrap => unreachable!("handled above"),
+        }
+    }
+
+    /// TICKET-227 (D2): prefix `!e` builds an error value. Under an expected `T!E` the operand is
+    /// inferred with `E` as a seed hint and must fit `E`; the value is that `T!E`. The operand must
+    /// satisfy the `Error` protocol.
+    fn infer_err_val(&mut self, _node: &Expr, inner: &Expr) -> Ty {
+        let hint = self.expected_hint.take();
+        let t = match &hint {
+            Some(Ty::Result(_, e)) => {
+                self.expected_hint = Some((**e).clone());
+                let t = self.infer_value(inner);
+                self.expected_hint = None;
+                t
+            }
+            _ => self.infer_value(inner),
+        };
+        if !t.is_unknown() && !self.assignable(&Ty::error_proto(), &t) {
+            self.error(inner.span, format!("{t} does not satisfy Error"));
+        }
+        match hint {
+            Some(Ty::Result(ok, e)) => {
+                if !t.is_unknown() && !self.assignable(&e, &t) {
+                    self.error(inner.span, format!("error value: expected {e}, found {t}"));
+                }
+                Ty::Result(ok, e)
+            }
+            _ => Ty::Result(Box::new(Ty::Unknown), Box::new(t)),
         }
     }
 

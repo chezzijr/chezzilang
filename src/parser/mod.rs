@@ -2522,12 +2522,11 @@ impl Parser {
                 } else {
                     ty = Type::Generic("Result".to_string(), vec![ty], Span::default());
                 }
-            } else if self.check(&Token::QuestionQuestion) {
-                // Adjacent `??` lexes as ONE coalesce token, so `int??` used to fall through to a
-                // caller's `expected '='`. Speculative callers swallow this error and backtrack.
-                return Err(self.err(
-                    "'??' is not a type suffix: write a nested optional as Option[T?]".to_string(),
-                ));
+            } else if self.eat(&Token::QuestionQuestion) {
+                // Adjacent `??` lexes as ONE token: `int??` is `Option[Option[int]]`.
+                chain += 2;
+                ty = Type::Generic("Option".to_string(), vec![ty], Span::default());
+                ty = Type::Generic("Option".to_string(), vec![ty], Span::default());
             } else {
                 break;
             }
@@ -2697,15 +2696,33 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// Prefix unary operators (`not`, `-`), then a postfix chain.
+    /// Prefix unary operators (`-`, `!` error value, `?` present/success value; `??` is two
+    /// nested `?`), then a postfix chain. `not` is parsed one level up.
     fn parse_unary(&mut self) -> PResult<Expr> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             return Err(self.err("expression nested too deeply".to_string()));
         }
         let span = self.cur_span();
+        if self.check(&Token::QuestionQuestion) {
+            // Adjacent `??` lexes as ONE token: prefix `??x` is `?(?x)`, two nodes.
+            self.advance();
+            let inner = self.parse_unary();
+            self.depth -= 1;
+            let wrap = |e: Expr| Expr {
+                id: crate::ast::NodeId::fresh(),
+                kind: ExprKind::Unary {
+                    op: UnaryOp::Wrap,
+                    expr: Box::new(e),
+                },
+                span,
+            };
+            return inner.map(|e| wrap(wrap(e)));
+        }
         let op = match self.peek() {
             Token::Minus => Some(UnaryOp::Neg),
+            Token::Bang => Some(UnaryOp::ErrVal),
+            Token::Question => Some(UnaryOp::Wrap),
             _ => None,
         };
         let result = if let Some(op) = op {
@@ -6593,11 +6610,11 @@ mod tests {
         parse_err("x := match s:\n    A:\n        1\n    B: 2\n");
     }
 
-    /// Bare `!` is a token now (for the `T!` type shorthand) but has no meaning in expression
-    /// position — it must still be a parse error, not silently consumed.
+    /// Prefix `!e` is an error value (TICKET-227); an infix `!` has no meaning and must stay a
+    /// parse error, not silently consumed.
     #[test]
-    fn bang_in_expression_rejected() {
-        assert!(parse_err("x := !y\n").message.contains("unexpected '!'"));
+    fn bang_is_prefix_only_in_expressions() {
+        parse_ok("x := !y\n");
         assert!(parse_err("z := 1 ! 2\n").message.contains("'!'"));
     }
 
