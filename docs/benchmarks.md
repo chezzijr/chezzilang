@@ -11,6 +11,50 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-222 — one bracket node and one path resolver, base vs branch (2026-10-07)
+
+Base `cc82b74d` (`main`), branch `ticket/222` at `45310931`. Both `cargo build --release --bin chezzi`
+in separate target dirs. Every `benches/chz/*.chz` run base then branch alternately, five runs per
+side, wall time from `date +%s%N`. `uptime` before: `load average: 3.80, 2.70, 2.08`; after:
+`load average: 2.53, 2.53, 2.12`.
+
+| bench | base median ms | base min–max | branch median ms | branch min–max |
+|---|---|---|---|---|
+| `closure` | 2393 | 2372–2470 | 2410 | 2379–2504 |
+| `empty` | 8 | 8–10 | 8 | 8–10 |
+| `enum` | 3712 | 3683–3792 | 3678 | 3670–3735 |
+| `fib` | 509 | 491–522 | 524 | 483–534 |
+| `hof` | 654 | 628–677 | 648 | 643–684 |
+| `hof_nursery` | 669 | 655–681 | 650 | 639–656 |
+| `list` | 685 | 675–707 | 708 | 679–730 |
+| `loop` | 1731 | 1701–1796 | 1695 | 1686–1800 |
+| `many_list` | 641 | 623–660 | 645 | 621–690 |
+| `many_map` | 454 | 434–488 | 474 | 441–497 |
+| `many_struct` | 767 | 761–786 | 736 | 725–766 |
+| `map` | 262 | 247–279 | 264 | 233–275 |
+| `map_str` | 354 | 338–388 | 354 | 346–405 |
+| `poly_method` | 2464 | 2421–2472 | 2503 | 2455–2506 |
+| `primes` | 1134 | 1117–1140 | 1133 | 1110–1155 |
+| `str` | 279 | 256–290 | 273 | 248–292 |
+| `struct` | 840 | 832–845 | 807 | 795–851 |
+| `unique` | 133 | 128–174 | 150 | 124–155 |
+
+Eight branch medians fell outside base's range at n=5: five below it (`enum`, `hof_nursery`, `loop`,
+`many_struct`, `struct`) and three above it (`fib`, `list`, `poly_method`). The three above were
+re-run interleaved at ten runs per side (`uptime` before `2.59, 2.55, 2.13`, after `2.65, 2.59, 2.18`):
+
+| bench | base median ms | base min–max | branch median ms | branch min–max |
+|---|---|---|---|---|
+| `fib` | 511.5 | 484–545 | 521.5 | 487–546 |
+| `list` | 713.5 | 667–760 | 700.5 | 668–752 |
+| `poly_method` | 2464.5 | 2446–2499 | 2524.5 | 2489–2557 |
+
+Verdict: at n=10 `fib` and `list` sit inside base's range. `poly_method` does not: its branch median
+is 2.4% above base's and above base's maximum. The ticket changes no file under `src/vm`; the
+compiler diff deletes the Index-over-Field call arm and renames resolution kinds, and `s.area()` is
+an instance member call that neither touches. The cause is not measured. TICKET-216 saw the same
+`poly_method` lean (about 4%) with no change on its path, so code layout is the likely cause.
+
 ## TICKET-216 — newtype removal, base vs branch (2026-10-06)
 
 Base `c342aa98`, branch `ticket/216` (newtype removed). Both `cargo build --release --bin chezzi` in

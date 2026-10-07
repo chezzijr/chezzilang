@@ -31,7 +31,13 @@ surface follows **Zig** (`?T`, `E!T`, `orelse`, `catch`).
 (`f`, `lib.f`, `a.b.f`, `T.m`, `Bx[int].make`, `E.A`) gets exactly one resolution (item + kind)
 from `resolve_path` (rule table `classify_path`, `src/checker/resolve.rs`), memoised per node.
 **Done (TICKET-222, 2026-10-07):** one kind per path in every position (a module fn is `Fn`, a type
-method `MethodFn`, a payload variant `VariantFn`; `Resolution::Static` is deleted). The call side, the value side and the compiler only read it
+method `MethodFn`, a payload variant `VariantFn`; `Resolution::Static` is deleted). The call side
+(`infer_call_dispatch`), the value side (`infer_ident`, `infer_field`, the type-applied fn value)
+and the compiler only read it: each binds `resolve_path`'s answer and takes its branch from a
+`match` on it. What stays beside the match is reject-only: a miss's message, the type-parameter
+shadow, a type-only native name. One rule reads the position (`PathPos`): inside `fn P` of a
+module declaring `struct P`, the callee `P(..)` is the raw constructor and a value read of `P` is
+the fn, as Rust's struct expression `P { x }` and value `P` split by namespace
 (owner decision 2026-10-07; a separate pre-pass would need a second scope model, and Rust itself
 resolves type-relative paths like `Vec::<i32>::new` / `T::method` during type checking). Deletes: the call-side "defensive fallback"
 (`checker/expr.rs:649-718`), the per-shape call arms, and every second writer of the resolutions table.
