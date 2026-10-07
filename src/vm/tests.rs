@@ -2650,6 +2650,11 @@ print(nested < flat * 1.6 + 0.05)
 /// nested in an Executor job} x outer body {open, closed} x T {2, 4, 8} must reach exactly T runner
 /// threads. A cell may stay below T only when the `NestedDrainerSlot` budget refused a start (another
 /// test holds slots), and never exceed T.
+///
+/// TICKET-230 — every shape, plus two Executors, an Executor beside a `parallel:`, an Executor
+/// beside a busy main and a body that blocks once then burns (W15-9), at T {1, 2, 4, 8}: the run's
+/// peak runner permit holders is at least 1 (main holds one from `Vm::run`) and at most T. The
+/// thread assertion above stays on the first 8 shapes at T >= 2.
 #[test]
 fn runner_threads_reach_the_worker_count_in_every_nesting_shape() {
     struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
@@ -2686,7 +2691,7 @@ fn fan2_send(done: Channel[int]):
     fan2()
     done.send(1)
 ";
-    let shapes: [(&str, &str); 8] = [
+    let shapes: [(&str, &str); 12] = [
         (
             "flat_closed",
             "
@@ -2756,19 +2761,71 @@ done.recv()
 ex.shutdown()
 ",
         ),
+        (
+            "two_executors",
+            "
+a := Executor()
+b := Executor()
+for _ in 0..4:
+    a.submit(fn(): burn())
+    b.submit(fn(): burn())
+a.shutdown()
+b.shutdown()
+",
+        ),
+        (
+            "exec_and_parallel",
+            "
+ex := Executor()
+for _ in 0..4:
+    ex.submit(fn(): burn())
+parallel:
+    for _ in 0..4:
+        spawn burn()
+ex.shutdown()
+",
+        ),
+        (
+            "exec_busy_main",
+            "
+ex := Executor()
+for _ in 0..4:
+    ex.submit(fn(): burn())
+for _ in 0..4:
+    burn()
+ex.shutdown()
+",
+        ),
+        (
+            "blocked_body",
+            "
+done := Channel[int](1)
+parallel:
+    spawn burn_send(done)
+    for _ in 0..3:
+        spawn burn()
+    done.recv()
+    burn()
+",
+        ),
     ];
     let mut failures = Vec::new();
-    for t in [2usize, 4, 8] {
-        for (shape, body) in shapes {
+    for t in [1usize, 2, 4, 8] {
+        for (i, (shape, body)) in shapes.iter().enumerate() {
             crate::vm::set_worker_count(t);
             let entry = write_temp_chz(&format!("w1_grid_{shape}_{t}"), &format!("{header}{body}"));
-            let ((_out, _err, res, _code), peak, denials, _spawns) =
+            let ((_out, _err, res, _code), peak, denials, _spawns, permits) =
                 crate::vm::run_file_counting_runners(&entry);
             let _ = std::fs::remove_file(&entry);
             assert!(res.is_ok(), "{shape} T={t} faulted: {res:?}");
-            if !(peak <= t && (peak == t || denials > 0)) {
+            if i < 8 && t >= 2 && !(peak <= t && (peak == t || denials > 0)) {
                 failures.push(format!(
                     "{shape} T={t}: peak runner threads {peak}, slot denials {denials}"
+                ));
+            }
+            if !(1 <= permits && permits <= t) {
+                failures.push(format!(
+                    "{shape} T={t}: peak runner permit holders {permits}"
                 ));
             }
         }
@@ -2797,7 +2854,7 @@ fn nursery_rounds_reuse_their_runner_threads() {
         "w1_reuse_rounds",
         "import std.concurrency\nfn hold(gate: Channel[int]):\n    gate.recv()\nr := 0\nwhile r < 200:\n    gate := Channel[int](8)\n    parallel:\n        for _ in 0..8:\n            spawn hold(gate)\n        for _ in 0..8:\n            gate.send(1)\n    r += 1\n",
     );
-    let ((_out, _err, res, _code), _peak, denials, spawns) =
+    let ((_out, _err, res, _code), _peak, denials, spawns, _permits) =
         crate::vm::run_file_counting_runners(&entry);
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "{res:?}");
