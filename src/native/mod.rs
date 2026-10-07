@@ -440,6 +440,23 @@ pub trait Host {
             message: "this host does not support airlock-copy queries".into(),
         })
     }
+    /// TICKET-219 — seal the channel `args[ch]` with `args[v]` (`std.concurrency._settle`) and wake
+    /// its receivers when this seal was the first. The default errors, as
+    /// [`Host::arg_is_task_copy`]'s does.
+    fn arg_settle_channel(&mut self, ch: usize, v: usize) -> Result<(), HostError> {
+        let _ = (ch, v);
+        Err(HostError {
+            message: "this host does not support channel settles".into(),
+        })
+    }
+    /// TICKET-219 — whether the channel `args[i]` is sealed (`std.concurrency.is_settled`). The
+    /// default errors, as [`Host::arg_is_task_copy`]'s does.
+    fn arg_channel_settled(&self, i: usize) -> Result<bool, HostError> {
+        let _ = i;
+        Err(HostError {
+            message: "this host does not support channel settles".into(),
+        })
+    }
     /// R1 — `args[i]` as raw bytes, copied out at the boundary (no heap aliasing). A `bytes` only:
     /// every seam param is typed `bytes`, and a `bytearray` is NOT assignable to a `bytes` sink
     /// (commit 7b29552 — a mutable buffer aliased as immutable `bytes` is the hole that rule closes);
@@ -1043,13 +1060,15 @@ mod tests {
             native_name(&["std".into(), "concurrency".into()]),
             Some("std.concurrency")
         );
-        // ...and its two callable members are is_task_copy (TICKET-191) and mark_task_copy
-        // (TICKET-213).
+        // ...and its callable members are is_task_copy (TICKET-191), mark_task_copy (TICKET-213),
+        // and the handle-channel pair _settle / is_settled (TICKET-219).
         assert_eq!(
             kinds("std.concurrency"),
             [
                 ("is_task_copy", Kind::Inline),
-                ("mark_task_copy", Kind::Inline)
+                ("mark_task_copy", Kind::Inline),
+                ("_settle", Kind::Inline),
+                ("is_settled", Kind::Inline)
             ]
         );
         // The len-3 `std.concurrency.collection` is the REAL file — NOT native (no collision).

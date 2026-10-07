@@ -2,6 +2,7 @@
 // Channels, Shared/RwShared/Atomic, sockets/listeners, netpoller parks.
 
 use super::core::{Pending, PendingOp, SendOutcome, Settled};
+use super::quiesce::RunHalt;
 use super::*;
 
 /// §2c1 — the RAII pair [`Vm::block_party_guard`] hands back: the process-wide blocked-party
@@ -1608,6 +1609,23 @@ impl Vm {
         }
     }
 
+    /// The wake fan-out of a `close()`, a `trip()` and a seal (TICKET-219): wake EVERY receiver of
+    /// channel `h`, parked or demoted, so each re-runs and observes the new state. Same routing as
+    /// `send_commit`: an inline outermost-`parallel:` builder VM (`self.mn == None`) wakes
+    /// enlisted, parked receivers via the held `mn_enlist_sched`, not just the local condvar
+    /// (cross-nursery flat scheduler #2).
+    pub(super) fn wake_receivers_all(&mut self, h: GcRef, core: &Arc<ChannelCore>) {
+        if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
+            let key = self.channel_core_ptr(h);
+            sched.close_wake(key, core);
+        } else {
+            // Wake any demoted OS thread blocked on this core's condvar (in-callback recv).
+            core.wake_all();
+            // Cooperative engine: re-add every sibling fiber parked on this channel's `recv`.
+            self.wake_on_send(h);
+        }
+    }
+
     /// `Channel[T]` methods (C2/C4): `send` (move-on-send, deep-copied in), `recv` (FIFO; empty =
     /// deadlock fault under the sequential executor), `len`.
     pub(super) fn channel_method(
@@ -1705,18 +1723,7 @@ impl Vm {
                 // the woken sender settles `Closed` and faults `send on a closed channel`). A value
                 // already committed to a receiver's slot stays delivered.
                 core.q.lock().unwrap().close();
-                // Same routing as `send_commit`: an inline outermost-`parallel:` builder VM
-                // (`self.mn == None`) closing a channel must wake enlisted, parked receivers via the
-                // held `mn_enlist_sched`, not just the local condvar. (Cross-nursery flat scheduler #2.)
-                if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
-                    let key = self.channel_core_ptr(h);
-                    sched.close_wake(key, &core);
-                } else {
-                    // Wake any demoted OS thread blocked on this core's condvar (in-callback recv).
-                    core.wake_all();
-                    // Cooperative engine: re-add every sibling fiber parked on this channel's `recv`.
-                    self.wake_on_send(h);
-                }
+                self.wake_receivers_all(h, &core);
                 Ok(Value::nil())
             }
             // `trip()` flips the manual level-trigger latch (the primitive behind `std.cancel`'s
@@ -1741,13 +1748,7 @@ impl Vm {
                     let _g = core.q.lock().unwrap_or_else(|e| e.into_inner());
                     core.done_latch.store(true, Ordering::Relaxed);
                 }
-                if let Some(sched) = self.mn.clone().or_else(|| self.mn_enlist_sched.clone()) {
-                    let key = self.channel_core_ptr(h);
-                    sched.close_wake(key, &core);
-                } else {
-                    core.wake_all();
-                    self.wake_on_send(h);
-                }
+                self.wake_receivers_all(h, &core);
                 Ok(Value::nil())
             }
             "len" => {
@@ -2387,7 +2388,11 @@ impl Vm {
     /// or the job-fault cell by itself. An exit is due inside a `defer` too (TICKET-213); a job
     /// fault waits for the `defer` to end.
     pub(super) fn run_halt_due(&self) -> bool {
-        self.quiesce.pending().is_some() || (self.deferring == 0 && self.quiesce.has_job_fault())
+        match self.quiesce.run_halt() {
+            RunHalt::Exit => true,
+            RunHalt::Fault => self.deferring == 0,
+            RunHalt::Running => false,
+        }
     }
 
     /// The halts of a party that comes back from a wait it could not poll (a nursery join, an
@@ -4098,76 +4103,26 @@ impl Vm {
         match method {
             "submit" => {
                 self.arity_err("submit", args, 1, span)?;
-                let core = self.executor_core(h);
-                // Cheap early reject so a shut executor costs no wiring work. Re-checked below under
-                // the lock — this one is advisory, the one that decides is the atomic one.
-                if core.inner.lock().unwrap().shut {
-                    return Err(self.err(
-                        "submit on a shut-down Executor (it no longer accepts work)".to_string(),
-                        span,
-                    ));
-                }
-                // W7-39 follow-up — the inherited chain (`creator_cancel`, captured at
-                // `Op::NewExecutor`) is STICKY: nothing ever resets it, matching Go's derived context
-                // (a cancelled parent stays cancelled). So once the creating job's executor has been
-                // `shutdown_now`-ed, every job this core dispatches starts already-cancelled and dies
-                // at its first checkpoint. Silently: the handle crosses the airlock by `Arc`, so the
-                // submitter may be `main` holding the only reference, and its own GRACEFUL
-                // `shutdown()` — which promises to wait for its work — returned having run nothing.
-                // Keep the stickiness, drop the silence: this is a `submit` the executor cannot
-                // honour, exactly like a `submit` after `shutdown()`, so it faults the same way.
-                //
-                // Read-only after construction (no lock), and EMPTY for an executor created by `main`
-                // or by a `parallel:`/`spawn` fiber — those are untouched. The core's OWN `cancel` is
-                // deliberately NOT checked here: `shutdown_now` sets `shut` first, so the check above
-                // already owns that case and adding it would double-report.
-                if core
-                    .creator_cancel
-                    .iter()
-                    .any(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-                {
-                    return Err(self.err(
-                        "submit on an Executor whose creating job was cancelled (it no longer \
-                         accepts work)"
-                            .to_string(),
-                        span,
-                    ));
-                }
-                // TICKET-208 — a job IS a spawned task. `spawn_into` is the one function behind
-                // `spawn` and `submit`: it pins the globals view as of this submit, crosses the
-                // closure by value, and starts a fiber on the Executor's detached sched, built on
-                // first use. No `ExecutorCore` lock is held across it: a job that captures its own
-                // Executor puts an `Obj::Executor` over THIS core into the worker heap, and the heap
-                // walk locks the core. A submit racing a `shutdown()` is rejected by the slot
-                // reservation itself (the join closes scope 0 under the sched's core lock), so a job
-                // is either rejected or counted by that join.
-                if !args[0].as_obj().is_some_and(|c| {
-                    matches!(self.heap.get(c), Obj::Func { .. } | Obj::Closure { .. })
-                }) {
-                    return Err(self.err("submit requires a function or closure".to_string(), span));
-                }
-                let sched = {
-                    let mut g = core.scope.lock().unwrap_or_else(|e| e.into_inner());
-                    if g.is_none() {
-                        *g = self.new_detached_sched(
-                            core.created_at,
-                            core.creator_cancel.clone(),
-                            Some(&core),
+                self.executor_submit(h, args[0], None, span)?;
+                Ok(Value::nil())
+            }
+            // TICKET-219 — a std internal: `submit_result` submits its job with the fresh cap-1
+            // channel it created, which the job transition seals with the cancel value when it
+            // drops or cuts the job.
+            "_submit_settled" => {
+                self.arity_err("_submit_settled", args, 2, span)?;
+                let ch = match args[1].as_obj().map(|c| self.heap.get(c)) {
+                    Some(Obj::Channel(core)) => Arc::clone(core),
+                    _ => {
+                        return Err(
+                            self.err("_submit_settled requires a Channel".to_string(), span)
                         );
                     }
-                    g.as_ref().map(|s| Arc::clone(&s.sched))
                 };
-                let Some(sched) = sched else {
-                    return Err(self.err(super::EXEC_NO_RUNNER_MSG.to_string(), span));
-                };
-                self.spawn_into(
-                    crate::vm::sched::SpawnTarget::Scope { sched },
-                    None,
-                    args[0],
-                    Vec::new(),
-                    0,
-                    span,
-                )?;
+                let msg = self.alloc_str(super::EXEC_CANCELLED_MSG.to_string());
+                let err = self.alloc_enum("Result", "Err", vec![msg]);
+                let cancel = self.to_wire(err)?;
+                self.executor_submit(h, args[0], Some(JobSettle { ch, cancel }), span)?;
                 Ok(Value::nil())
             }
             "shutdown" => {
@@ -4197,7 +4152,7 @@ impl Vm {
                 // `shutdown(cancel_futures=True)`).
                 crate::vm::trip_cancel_flag(&core.cancel);
                 if let Some(sched) = core.sched() {
-                    sched.lock().drop_held_jobs();
+                    sched.drop_held();
                     sched.drain_family(0);
                 }
                 // TICKET-118 (W13-8) — a cancel is a wake source too.
@@ -4212,6 +4167,88 @@ impl Vm {
             }
             _ => Err(self.err(format!("type Executor has no method '{method}'"), span)),
         }
+    }
+
+    /// `Executor.submit(f)`: start `f` as a job on the Executor's detached sched. `settle` is a
+    /// handle job's [`JobSettle`] (TICKET-219, `_submit_settled`); `None` for a bare `submit`.
+    pub(super) fn executor_submit(
+        &mut self,
+        h: GcRef,
+        f: Value,
+        settle: Option<JobSettle>,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let core = self.executor_core(h);
+        // Cheap early reject so a shut executor costs no wiring work. Re-checked below under
+        // the lock — this one is advisory, the one that decides is the atomic one.
+        if core.inner.lock().unwrap().shut {
+            return Err(self.err(
+                "submit on a shut-down Executor (it no longer accepts work)".to_string(),
+                span,
+            ));
+        }
+        // W7-39 follow-up — the inherited chain (`creator_cancel`, captured at
+        // `Op::NewExecutor`) is STICKY: nothing ever resets it, matching Go's derived context
+        // (a cancelled parent stays cancelled). So once the creating job's executor has been
+        // `shutdown_now`-ed, every job this core dispatches starts already-cancelled and dies
+        // at its first checkpoint. Silently: the handle crosses the airlock by `Arc`, so the
+        // submitter may be `main` holding the only reference, and its own GRACEFUL
+        // `shutdown()` — which promises to wait for its work — returned having run nothing.
+        // Keep the stickiness, drop the silence: this is a `submit` the executor cannot
+        // honour, exactly like a `submit` after `shutdown()`, so it faults the same way.
+        //
+        // Read-only after construction (no lock), and EMPTY for an executor created by `main`
+        // or by a `parallel:`/`spawn` fiber — those are untouched. The core's OWN `cancel` is
+        // deliberately NOT checked here: `shutdown_now` sets `shut` first, so the check above
+        // already owns that case and adding it would double-report.
+        if core
+            .creator_cancel
+            .iter()
+            .any(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            return Err(self.err(
+                "submit on an Executor whose creating job was cancelled (it no longer \
+                 accepts work)"
+                    .to_string(),
+                span,
+            ));
+        }
+        // TICKET-208 — a job IS a spawned task. `spawn_into` is the one function behind
+        // `spawn` and `submit`: it pins the globals view as of this submit, crosses the
+        // closure by value, and starts a fiber on the Executor's detached sched, built on
+        // first use. No `ExecutorCore` lock is held across it: a job that captures its own
+        // Executor puts an `Obj::Executor` over THIS core into the worker heap, and the heap
+        // walk locks the core. A submit racing a `shutdown()` is rejected by the slot
+        // reservation itself (the join closes scope 0 under the sched's core lock), so a job
+        // is either rejected or counted by that join.
+        if !f
+            .as_obj()
+            .is_some_and(|c| matches!(self.heap.get(c), Obj::Func { .. } | Obj::Closure { .. }))
+        {
+            return Err(self.err("submit requires a function or closure".to_string(), span));
+        }
+        let sched = {
+            let mut g = core.scope.lock().unwrap_or_else(|e| e.into_inner());
+            if g.is_none() {
+                *g = self.new_detached_sched(
+                    core.created_at,
+                    core.creator_cancel.clone(),
+                    Some(&core),
+                );
+            }
+            g.as_ref().map(|s| Arc::clone(&s.sched))
+        };
+        let Some(sched) = sched else {
+            return Err(self.err(super::EXEC_NO_RUNNER_MSG.to_string(), span));
+        };
+        self.spawn_into(
+            crate::vm::sched::SpawnTarget::Scope { sched, settle },
+            None,
+            f,
+            Vec::new(),
+            0,
+            span,
+        )
     }
 
     /// C5 / A2 — at a clean program end, gracefully

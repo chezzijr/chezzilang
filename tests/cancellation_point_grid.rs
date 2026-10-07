@@ -498,21 +498,6 @@ const SUBMIT_RESULT_ROUND: &str = "fn round() -> bool:
     return ok
 ";
 
-const SUBMIT_OUTCOME_ROUND: &str = "fn round() -> bool:
-    gate := Channel[int](0)
-    ex := Executor()
-    out := Channel[Result[int]](1)
-    ex.submit_outcome(fn() -> int: gate.recv(), out)
-    gate.send(7)
-    ex.shutdown_now()
-    ok := false
-    match out.try_recv():
-        Some(Ok(x)): ok = x == 7
-        Some(Err(_)): pass
-        None: pass
-    return ok
-";
-
 const BLANK: Cell = Cell {
     name: String::new(),
     halt: Halt::ShutdownNow,
@@ -576,11 +561,6 @@ fn cells() -> Vec<Cell> {
     v.push(Cell {
         name: "submit_result ready ShutdownNow".into(),
         round: Some(SUBMIT_RESULT_ROUND),
-        ..BLANK
-    });
-    v.push(Cell {
-        name: "submit_outcome ready ShutdownNow".into(),
-        round: Some(SUBMIT_OUTCOME_ROUND),
         ..BLANK
     });
     v

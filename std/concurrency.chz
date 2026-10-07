@@ -88,18 +88,20 @@ native struct Executor:
     native fn submit(self, f) -> nil
     native fn shutdown(self) -> nil
     native fn shutdown_now(self) -> nil
+    # A std internal (TICKET-219): submit `f` as a handle job whose result channel is `out`. The
+    # job transition seals `out` with the cancel `Err` when it drops or cuts the job. Its only
+    # caller is `submit_result`, with the fresh cap-1 channel it created.
+    native fn _submit_settled(self, f: fn() -> nil, out) -> nil
     # A BODIED generic method (the first on a native struct): submit `f` and hand back a cap-1
-    # `Channel[Result[T]]` that carries its outcome. The primitive `submit_task`/`Task[T]` wraps.
+    # `Channel[Result[T]]` that carries its outcome: `Ok(value)`, or `Err(message)` for exactly
+    # what `recover:` catches. The job itself never faults, so `shutdown()` raises nothing for it
+    # and its siblings keep running (CPython `Future.result()`). The channel is SEALED once: every
+    # `recv` returns the same outcome and takes nothing, so do not iterate it with `for`. The
+    # primitive `submit_task`/`Task[T]` wraps.
     fn submit_result[T](self, f: fn() -> T) -> Channel[Result[T]]:
         ch := Channel[Result[T]](1)
-        self.submit_outcome(f, ch)
+        self._submit_settled(fn(): run_outcome(f, ch), ch)
         return ch
-
-    # A handle job's outcome is one `Result[T]` sent into `out`: `Ok(value)`, or `Err(message)`
-    # for exactly what `recover:` catches. The job itself never faults, so `shutdown()` raises
-    # nothing for it and its siblings keep running (CPython `Future.result()`).
-    fn submit_outcome[T](self, f: fn() -> T, out: Channel[Result[T]]):
-        self.submit(fn(): run_outcome(f, out))
 
 # Chezzi closures are single-expression only, so a multi-statement job body must be a named
 # top-level fn the lambda calls.
@@ -107,22 +109,20 @@ native struct Executor:
 # `recover:` decides what becomes an `Err`; there is no second list. What it cannot catch
 # (`os.exit`, `--timeout`, `--max-heap`, a deadlock verdict) ends the run with its own report.
 #
-# A `shutdown_now()` cancel is not a fault `recover:` catches, so the `defer:` settles a cancelled
-# job instead: an `Err` with the cancel message, so `Task.done()` is true and `get()`/`recv()`
-# return at once (TICKET-148, W14-13; CPython's `result()` raises `CancelledError`). `settled`
-# marks a job the body already settled, and the body sends it LAST. A send into a channel with
-# room never waits, so it is not a cancellation point (docs/concurrency.md "Cancellation is
-# delivered at CHECKPOINTS"): a job that returned always delivers its outcome and never also
-# reports cancelled (TICKET-194). A cancel lands only at an `out.send(r)` that waits, where
-# `settled` is still empty.
+# A handle job's outcome is written ONCE into its channel by a seal (TICKET-219); the first writer
+# wins under the channel's lock. Two writers exist:
+# 1. this body, for the value of `recover: f()`;
+# 2. the job transition (`SchedCore::job_event`), for the cancel `Err` when it drops a held job
+#    or a job ends cut: by `shutdown_now()`, a creator cancel, or a fire-and-forget job fault,
+#    after which every `defer` still runs and may read the handle (CPython
+#    `shutdown(cancel_futures=True)`). An `os.exit` settles nothing: it runs no `defer`, and no
+#    reader runs after it.
+# A slot never carries a job's return value, so the body is the value's writer. `_submit_settled`
+# and `_settle` are std internals; the only channel they seal is the fresh cap-1 one
+# `submit_result` creates.
 fn run_outcome[T](f: fn() -> T, out: Channel[Result[T]]):
-    settled := Channel[bool](1)
-    defer:
-        if settled.len() == 0:
-            out.try_send(Err("task cancelled: shutdown_now() stopped it before it finished"))
     r := recover: f()
-    out.send(r)
-    settled.send(true)
+    _settle(out, r)
 
 # True when `v` is an airlock copy in the calling task: a write to it would fault `this value is
 # this task's copy`. Reads the same predicate as that write check (`Heap::is_copied`), so std code
@@ -135,3 +135,11 @@ native fn is_task_copy(v) -> bool
 # module's globals unmarked. Not for a general read path: a plain `Shared.get()` or `ch.recv()` is
 # a handoff, and the receiver owns it.
 native fn mark_task_copy(v) -> nil
+
+# A std internal (TICKET-219): seal the handle channel `ch` with the outcome `v`. The first seal
+# wins; a later one changes nothing. Called only by `run_outcome`.
+native fn _settle(ch, v) -> nil
+
+# True once the handle channel `ch` holds its outcome. Never blocks, and never reads false after
+# true: a sealed channel stays sealed. `Task.done()` reads it.
+native fn is_settled(ch) -> bool

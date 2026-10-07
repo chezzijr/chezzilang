@@ -446,6 +446,8 @@ pub struct ChanState {
     /// only when all three queues empty, so it is conservative (over-walk = safe) and self-healing.
     dirty: bool,
     pub closed: bool,
+    /// TICKET-219 — set by [`seal`](Self::seal): the last buffered value is the handle's outcome.
+    sealed: bool,
 }
 
 impl ChanState {
@@ -471,6 +473,25 @@ impl ChanState {
     pub fn push(&mut self, sum: (usize, bool), w: WireValue) {
         self.add(sum);
         self.queue.push_back((sum.0, w));
+    }
+
+    /// TICKET-219 — write a handle job's one outcome: buffer `w` as the last value and close the
+    /// channel. The first writer wins under `core.q`: a second seal returns `false` and changes
+    /// nothing. Every receive of a sealed channel copies `w` and takes nothing
+    /// ([`pop_for`](Self::pop_for)), so `len()` stays 1 and every reader sees the same outcome.
+    pub fn seal(&mut self, sum: (usize, bool), w: WireValue) -> bool {
+        if self.sealed {
+            return false;
+        }
+        self.add(sum);
+        self.queue.push_back((sum.0, w));
+        self.sealed = true;
+        self.closed = true;
+        true
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        self.sealed
     }
 
     /// Publish a blocked sender's value as `p`'s offer on `arm`.
@@ -559,6 +580,9 @@ impl ChanState {
     /// place — Go's recv refill), else the first live offer that is not `me`'s. Each offer taken
     /// is committed by CAS; dead offers are dropped on the way.
     pub fn pop_for(&mut self, me: Option<&Arc<Pending>>) -> Option<WireValue> {
+        if self.sealed {
+            return self.queue.back().map(|(_, w)| w.clone());
+        }
         if let Some((b, w)) = self.queue.pop_front() {
             self.bytes = self.bytes.saturating_sub(b);
             if let Some((sum, ow)) = self.take_offer(me) {
@@ -2096,6 +2120,25 @@ pub fn value_core_bytes_structural(
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
+
+    /// TICKET-219 — a sealed channel is a handle's one outcome record: every receive copies the
+    /// value and takes nothing, `len()` stays 1, the first seal wins, and a `send` faults closed.
+    #[test]
+    fn sealed_channel_receive_copies_and_refuses_a_second_seal() {
+        let mut q = ChanState::default();
+        assert!(q.seal((8, false), WireValue::Int(7)));
+        assert!(q.is_sealed());
+        assert!(matches!(q.pop(), Some(WireValue::Int(7))));
+        assert!(matches!(q.pop(), Some(WireValue::Int(7))));
+        assert_eq!(q.len(), 1);
+        assert!(q.recv_ready_for(None));
+        assert!(!q.seal((8, false), WireValue::Int(9)));
+        assert!(matches!(q.pop(), Some(WireValue::Int(7))));
+        assert!(matches!(
+            q.send(Some(1), (8, false), WireValue::Int(1), None),
+            SendOutcome::Closed
+        ));
+    }
 
     /// TICKET-192 — `adjust` keeps UNKNOWN, moves bytes by the delta (saturating), turns CLEAN into
     /// DIRTY on a dirty piece, and never turns DIRTY into CLEAN.

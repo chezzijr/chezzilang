@@ -36268,13 +36268,26 @@ struct K:\n    n: int\n\n    fn w(xs: List[int], out: Channel[int]):\n        xs
         wrong.len(),
         wrong.join("\n")
     );
-    // Executor has no `map` (`std/concurrency.chz` declares submit/submit_result/submit_outcome).
+    // Executor has no `map` (`std/concurrency.chz` declares submit/submit_result).
     files_reject(
         &[(
             "main.chz",
             "import std.concurrency\nfn main():\n    ex := Executor()\n    print(ex.map(fn(x: int) -> int: x, [1]))\nmain()\n",
         )],
         "has no method 'map'",
+    );
+}
+
+/// TICKET-219: `submit_outcome(f, out)` is deleted. It sealed a caller's channel, which may be
+/// full, unbuffered, or fanned in from several jobs; `submit_result` returns std's own channel.
+#[test]
+fn executor_has_no_submit_outcome() {
+    files_reject(
+        &[(
+            "main.chz",
+            "import std.concurrency\nfn main():\n    ex := Executor()\n    out := Channel[Result[int]](1)\n    ex.submit_outcome(fn() -> int: 7, out)\nmain()\n",
+        )],
+        "has no method 'submit_outcome'",
     );
 }
 

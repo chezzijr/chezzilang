@@ -1,5 +1,6 @@
 # std.concurrency.task — result handles for `Executor`-submitted work. Pure Chezzi over existing
-# primitives (a cap-1 bounded `Channel[Result[T]]` outcome slot and one `Shared` state core) plus one airlock query (`concurrency.is_task_copy`).
+# primitives (the sealed cap-1 `Channel[Result[T]]` `submit_result` returns) plus two natives: the
+# airlock query `concurrency.is_task_copy` and the seal query `concurrency.is_settled`.
 #
 # WHY: `Executor.submit(f)` is fire-and-forget — it returns nothing, so the only way to get a value
 # back is to hand-plumb a result `Channel` and `recv` it yourself. `submit_task` bakes that in: it
@@ -11,80 +12,60 @@
 # NO `join_next()`/select-on-completion API: completion order is nondeterministic and would break
 # parity. Await your tasks in the order you submitted them (or any fixed order) and both engines agree.
 #
-# MODEL: `submit_task` builds ONE `Shared[TaskState[T]]` core. The job's outcome is one
-# `Result[T]`: `Ok(value)`, or `Err(message)` for exactly what `recover:` catches. Every copy of
-# the handle (the parent's, a spawned task's, an Executor job's) points at that core, so `done()`
-# and `get()` give the same answer in every task: one future, many readers (CPython `Future`, Go
-# channel + `sync.Once`). A handle job never faults by itself: `shutdown()` raises nothing for it.
-# Like a bare `Executor.submit`, the work STARTS at the submit and is waited for by `shutdown()` (or
-# the program-exit join). The canonical shape is: submit every task, `shutdown()`, then `.get()` each.
+# MODEL (TICKET-219): the handle's channel is the one record of the outcome. It is written once by a
+# seal: the job body seals the value of `recover: f()`, or the job transition seals the cancel `Err`
+# when it drops or cuts the job. A sealed channel's receive copies the outcome and takes nothing, so
+# `get()` is `ch.recv()` and every copy of the handle (the parent's, a spawned task's, an Executor
+# job's) and every second waiter reads the same outcome: one future, many readers (CPython `Future`).
+# `done()` reads `concurrency.is_settled(ch)`, which never blocks and never reads false after true. A
+# native cannot wait, so the wait stays the channel receive. A handle job never faults by itself:
+# `shutdown()` raises nothing for it. Like a bare `Executor.submit`, the work STARTS at the submit and
+# is waited for by `shutdown()` (or the program-exit join). The canonical shape is: submit every
+# task, `shutdown()`, then `.get()` each.
 #
 # IDENTITY: the task that holds the original handle caches the value in `cached`, so its repeated
 # `get()` returns the SAME object (CPython `fut.result() is fut.result()`). A copy of the handle (a
 # spawned task's, an Executor job's) carries `cached` as it was at the crossing, so its `get()`
 # returns the value as of the crossing, as every other captured value does (owner decision
 # 2026-10-02, TICKET-203); a write to it there faults (D4), as for any captured value. A copy whose
-# owner had not called `get()` reads a fresh snapshot from the core, marked as the task's copy
+# owner had not called `get()` reads a fresh copy from the channel, marked as the task's copy
 # (`concurrency.mark_task_copy`, TICKET-213), so a write to it faults too. `concurrency.is_task_copy(self)`
 # picks between the mark and the `cached` write; it reads the same predicate as the D4 write check, so
 # `get()` never attempts a write that would fault.
 
 import std.concurrency
 
-# A task's outcome. Shared by every copy of its handle through `Task.core`.
-enum TaskState[T]:
-    Pending
-    Done(Result[T])
-
-# A future handle. `core` is the one record of the outcome; `ch` is the channel `run_outcome`
-# settles; `cached` holds the owner's outcome object; a copy carries it as of the crossing.
-# Never block inside `core.update`: a guard held across `ch.recv()` turns a deadlock fault into a hang.
+# A future handle. `ch` is the sealed channel that holds the outcome; `cached` holds the owner's
+# outcome object; a copy carries it as of the crossing.
 struct Task[T]:
     ch: Channel[Result[T]]
-    core: Shared[TaskState[T]]
     cached: Option[Result[T]]
 
     # Block until the outcome is available, then return it: `Ok(value)`, or `Err(message)` when
     # the job faulted or `shutdown_now()` cancelled it (CPython `Future.result()`; a `Result` in
     # place of a raise). Idempotent. `cached` answers first in every task: the owner's alias, or in
     # a copy that alias as it was at the crossing. Only the owner fills it, so a copy whose owner had
-    # not called `get()` before the crossing reads a fresh snapshot from the core on each call,
+    # not called `get()` before the crossing reads a fresh copy from the channel on each call,
     # marked as the task's copy.
     fn get(self) -> Result[T]:
         match self.cached:
             Some(r): return r
             None: pass
-        r := _outcome(self)
+        r := self.ch.recv()
         if concurrency.is_task_copy(self):
             concurrency.mark_task_copy(r)
         else:
             self.cached = Some(r)
         return r
 
-    # True once the job has finished, faulted or cancelled. Never blocks.
+    # True once the job has finished, faulted or cancelled. Never blocks, and never reads false
+    # after true.
     fn done(self) -> bool:
-        match self.core.get():
-            TaskState.Pending: return self.ch.len() > 0
-            _: return true
-
-# Read `t`'s outcome from the core, waiting on `ch` while it is `Pending`. Returns a fresh snapshot
-# of the outcome. Writes nothing to `t` itself.
-fn _outcome[T](t: Task[T]) -> Result[T]:
-    match t.core.get():
-        TaskState.Done(r): return r
-        TaskState.Pending: pass
-    r := t.ch.recv()
-    # Put the outcome back so the next waiter's `recv` wakes too, and record it for every copy.
-    t.ch.try_send(r)
-    t.core.set(TaskState.Done(r))
-    return r
+        return concurrency.is_settled(self.ch)
 
 # Submit `f` to `ex` for detached execution and return a `Task[T]` handle for its outcome. The work
 # starts at the submit and is waited for by `shutdown()` (or exit); `task.get()` then yields
 # `Ok(f())`, or `Err(message)` for the job's fault. Await the handles in a fixed (e.g. submission)
 # order to keep the output deterministic.
 fn submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]:
-    ch := Channel[Result[T]](1)
-    core := Shared(TaskState[T].Pending)
-    ex.submit_outcome(f, ch)
-    return Task(ch=ch, core=core, cached=None)
+    return Task(ch=ex.submit_result(f), cached=None)

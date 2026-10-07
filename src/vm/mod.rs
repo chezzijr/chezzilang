@@ -27,6 +27,7 @@ use core::{
 };
 use heap::{Fields, Heap, Identity, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
+use quiesce::RunHalt;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -2045,6 +2046,10 @@ const DEADLOCK_MSG: &str = "deadlock: every task in this parallel: block is bloc
 const EXEC_NO_RUNNER_MSG: &str =
     "Executor.submit could not start a runner thread (OS thread limit reached)";
 
+/// TICKET-219 — the `Err` a dropped or cut handle job's channel is sealed with (CPython
+/// `shutdown(cancel_futures=True)`).
+const EXEC_CANCELLED_MSG: &str = "task cancelled: shutdown_now() stopped it before it finished";
+
 /// D2b — the M:N scheduler shared by every worker enlisted on one `parallel:` nursery (the joining
 /// thread + the pool shells it farms). It replaces the legacy `--parallel` "one OS thread per task,
 /// block the thread on `recv`" model with **lightweight fibers parked on `recv`** multiplexed over a
@@ -2608,6 +2613,37 @@ impl std::ops::IndexMut<usize> for ScopeTable {
     }
 }
 
+/// TICKET-219 — what settles a handle job that [`SchedCore::job_event`] drops or cuts: the fresh
+/// cap-1 result channel `submit_result` created, and the cancel value. Registered at the submit.
+pub(super) struct JobSettle {
+    pub(super) ch: Arc<ChannelCore>,
+    pub(super) cancel: WireValue,
+}
+
+/// TICKET-219 — an event in an Executor job's life, the input of [`SchedCore::job_event`].
+enum JobEvent {
+    /// A submitted job, its slot reserved.
+    Submit(Box<Fiber>),
+    /// A job's slot was filled at `finish`; `done` is true for a `TaskOutcome::Done`.
+    Ended {
+        task_index: usize,
+        scope_id: usize,
+        done: bool,
+    },
+    /// A parked job was reaped by the deadlock verdict.
+    Reaped { task_index: usize, scope_id: usize },
+    /// `shutdown_now` drops the held jobs.
+    DropHeld,
+}
+
+/// TICKET-219 — what the caller of [`SchedCore::job_event`] does next: enqueue `start` under the
+/// sched lock, then seal `settle` after it drops the lock ([`MnSched::seal_settles`]).
+#[derive(Default)]
+struct JobStep {
+    start: Vec<Fiber>,
+    settle: Vec<JobSettle>,
+}
+
 struct SchedCore {
     /// The global overflow / seed queue. Seed + every coordinator-path requeue (deadlock flag,
     /// cancel drain) land here; per-worker requeues go to a worker's `locals[wid]` (D4c). Drained by
@@ -2686,11 +2722,15 @@ struct SchedCore {
     exec_tail: usize,
     /// `Executor(n)`'s cap on the jobs running at once; zero means no cap.
     exec_limit: usize,
-    /// Job slots admitted and not yet filled. Decremented by [`SchedCore::job_ended`] alone.
+    /// Job slots admitted and not yet filled. Written by [`SchedCore::job_event`] alone, except
+    /// the no-runner pre-count in `spawn_into`, which starts nothing.
     exec_active: usize,
-    /// Jobs submitted over the cap, slot reserved, not yet started. A held job leaves at
-    /// [`MnSched::finish`] (released) or [`SchedCore::drop_held_jobs`] (never starts).
+    /// Jobs submitted over the cap, slot reserved, not yet started. Read and written by
+    /// [`SchedCore::job_event`] alone.
     exec_held: std::collections::VecDeque<Fiber>,
+    /// TICKET-219 — task index of a handle job to what settles its handle when the job is dropped
+    /// or cut. Read and written by [`SchedCore::job_event`] alone (inserted at the reserve).
+    job_settle: fxhash::FxHashMap<usize, JobSettle>,
     /// A deadlocked fiber of this sched is reported at its own blocking op. True for a detached
     /// sched (an `Executor`) alone: a nursery sched reports at the nursery.
     leaf_site: bool,
@@ -3007,6 +3047,7 @@ impl MnSched {
                 exec_limit: 0,
                 exec_active: 0,
                 exec_held: std::collections::VecDeque::new(),
+                job_settle: Default::default(),
                 leaf_site: false,
                 slot_charge: Default::default(),
                 unfinished_bytes: 0,
@@ -3346,18 +3387,45 @@ impl MnSched {
         self.runnable.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// [`MnSched::enqueue_locked`] under its own lock hold, for `Executor.submit`, which starts its
-    /// runners between the reserve and the enqueue.
-    /// Under `Executor(n)` a job over the cap is held instead, and starts when a running one ends.
-    fn admit_or_hold(&self, fiber: Fiber) {
+    /// TICKET-219 — a submitted job, for `Executor.submit`, which starts its runners between the
+    /// reserve and this call: [`SchedCore::job_event`] starts it, holds it over the cap, or drops it
+    /// under a run halt or a cancel.
+    fn submit_job(&self, fiber: Fiber) {
         let mut c = self.lock();
-        if c.exec_limit == 0 || c.exec_active < c.exec_limit {
-            c.exec_active += 1;
-            self.enqueue_locked(&mut c, fiber);
-            drop(c);
+        let step = c.job_event(JobEvent::Submit(Box::new(fiber)), self.quiesce.run_halt());
+        let started = !step.start.is_empty();
+        for f in step.start {
+            self.enqueue_locked(&mut c, f);
+        }
+        drop(c);
+        if started || !step.settle.is_empty() {
             self.notify_waiters();
-        } else {
-            c.exec_held.push_back(fiber);
+        }
+        self.seal_settles(step.settle);
+    }
+
+    /// TICKET-219 — `shutdown_now` drops the held jobs ([`JobEvent::DropHeld`]).
+    fn drop_held(&self) {
+        let mut c = self.lock();
+        let step = c.job_event(JobEvent::DropHeld, self.quiesce.run_halt());
+        drop(c);
+        self.seal_settles(step.settle);
+    }
+
+    /// TICKET-219 — seal each dropped or cut handle job's channel with its cancel value, with no
+    /// sched lock held: [`MnSched::close_wake`] takes it. The first writer wins: a job body that
+    /// already sealed its value keeps it, and nothing is woken.
+    fn seal_settles(&self, settle: Vec<JobSettle>) {
+        for s in settle {
+            let sum = crate::vm::core::wire_summary(&s.cancel);
+            let sealed =
+                s.ch.q
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .seal(sum, s.cancel);
+            if sealed {
+                self.close_wake(Arc::as_ptr(&s.ch) as usize, &s.ch);
+            }
         }
     }
 
@@ -3413,16 +3481,21 @@ impl MnSched {
     /// [`MnSched::reserve_slot`] on the Executor's own tail scope, for `Executor.submit` alone: its
     /// submitters are many parties, so the sched keeps the tail. A `spawn` in a job's nursery
     /// reserves on that nursery's scope instead, so a nursery child is never a job.
+    /// `settle` is a handle job's [`JobSettle`] (TICKET-219), registered under its task index.
     fn reserve_job_slot(
         &self,
         c: &mut SchedCore,
         fiber: &mut Fiber,
         charge: usize,
+        settle: Option<JobSettle>,
     ) -> Option<usize> {
         let tail = c.exec_tail;
         let opened = self.reserve_slot(c, fiber, tail, charge);
         if let Some(id) = opened {
             c.exec_tail = id;
+        }
+        if let Some(s) = settle {
+            c.job_settle.insert(fiber.task_index, s);
         }
         opened
     }
@@ -4964,19 +5037,26 @@ impl MnSched {
             outcome,
             TaskOutcome::Fault { .. } | TaskOutcome::Exit { .. }
         );
+        let done = matches!(outcome, TaskOutcome::Done(_));
         c.slots[task_index] = Some(outcome);
         c.scopes[scope_id].done += 1;
-        if c.job_ended(scope_id) {
-            // The loop condition, not a bare pop, keeps the cap: the no-runner path of
-            // `spawn_into` admits a slot without testing the cap, and its `finish` must start
-            // nothing while `exec_active` is still at the cap.
-            while c.exec_active < c.exec_limit {
-                let Some(f) = c.exec_held.pop_front() else {
-                    break;
-                };
-                c.exec_active += 1;
-                self.enqueue_locked(&mut c, f);
-            }
+        // TICKET-219 — only an Executor's sched (`leaf_site`) holds jobs, so a nursery's finish
+        // reads no halt cell.
+        let halt = if c.leaf_site {
+            self.quiesce.run_halt()
+        } else {
+            RunHalt::Running
+        };
+        let step = c.job_event(
+            JobEvent::Ended {
+                task_index,
+                scope_id,
+                done,
+            },
+            halt,
+        );
+        for f in step.start {
+            self.enqueue_locked(&mut c, f);
         }
         // TICKET-103 — a join-parked owner of the family this task completed resumes. Its own slot
         // is still `None`, so the `terminate` latch below cannot fire while one is requeued.
@@ -4989,6 +5069,8 @@ impl MnSched {
             c.terminate = true;
         }
         self.notify_waiters();
+        drop(c);
+        self.seal_settles(step.settle);
         aborts
     }
 
@@ -5807,9 +5889,13 @@ impl SchedCore {
             stderr: f.ctx.stderr,
         });
         self.scopes[sid].done += 1;
-        if self.job_ended(sid) {
-            self.drop_held_jobs();
-        }
+        self.job_event(
+            JobEvent::Reaped {
+                task_index: ti,
+                scope_id: sid,
+            },
+            RunHalt::Running,
+        );
     }
 
     /// Whether `scope_id` is one of the Executor's own scopes, so its fiber is a job and not a
@@ -5818,31 +5904,113 @@ impl SchedCore {
         self.leaf_site && self.scope_family(0).contains(&scope_id)
     }
 
-    /// A started job's slot was just filled: the one decrement of `exec_active`, called at both
-    /// slot-fill sites. False for a fiber that is not a job.
-    fn job_ended(&mut self, scope_id: usize) -> bool {
-        if !self.is_job_scope(scope_id) {
-            return false;
+    /// TICKET-219 — THE job-state transition: the only reader and writer of `exec_held`,
+    /// `exec_active` (except the no-runner pre-count in `spawn_into`) and `job_settle`. `halt` is
+    /// [`quiesce::QuiesceState::run_halt`], read by the caller under this lock; `cancelled` is
+    /// scope 0's own flag (`shutdown_now`) or an ancestor's (creator cancel). The rule, read before
+    /// anything is released:
+    /// 1. `halt` is `Exit`: drop every held job, settle nothing. `os.exit` runs no `defer`, and a
+    ///    sealed value is a ready receive (DEC-194), so a seal would let a reader print after it.
+    /// 2. else `halt` is `Fault`, or `cancelled`: drop every held job and settle each with its
+    ///    cancel value. A `defer` still runs whole after a job fault, and it may read the handle.
+    /// 3. else: release held jobs while `exec_active < exec_limit`.
+    ///
+    /// A fault's cell is stored before any sched's flag trips, so the halt read closes that window.
+    fn job_event(&mut self, ev: JobEvent, halt: RunHalt) -> JobStep {
+        let mut step = JobStep::default();
+        match ev {
+            JobEvent::Submit(fiber) => {
+                let fiber = *fiber;
+                if halt != RunHalt::Running || self.job_cancelled() {
+                    self.drop_job(fiber, halt != RunHalt::Exit, &mut step);
+                } else if self.exec_limit == 0 || self.exec_active < self.exec_limit {
+                    self.exec_active += 1;
+                    step.start.push(fiber);
+                } else {
+                    self.exec_held.push_back(fiber);
+                }
+                return step;
+            }
+            JobEvent::Ended {
+                task_index,
+                scope_id,
+                done,
+            } => {
+                if !self.is_job_scope(scope_id) {
+                    return step;
+                }
+                self.exec_active -= 1;
+                if let Some(s) = self.job_settle.remove(&task_index)
+                    && !done
+                    && halt != RunHalt::Exit
+                {
+                    step.settle.push(s);
+                }
+            }
+            JobEvent::Reaped {
+                task_index,
+                scope_id,
+            } => {
+                // `flag_deadlock` sets `terminate`, so a released job would never run and its
+                // `None` slot would hang the join; the parked job's `Deadlocked` is the report.
+                if self.is_job_scope(scope_id) {
+                    self.exec_active -= 1;
+                    self.job_settle.remove(&task_index);
+                    self.drop_held(false, &mut step);
+                }
+                return step;
+            }
+            JobEvent::DropHeld => {
+                self.drop_held(halt != RunHalt::Exit, &mut step);
+                return step;
+            }
         }
-        self.exec_active -= 1;
-        true
+        if self.exec_held.is_empty() {
+            return step;
+        }
+        if halt != RunHalt::Running || self.job_cancelled() {
+            self.drop_held(halt != RunHalt::Exit, &mut step);
+            return step;
+        }
+        // The loop condition, not a bare pop, keeps the cap: the no-runner path of `spawn_into`
+        // admits a slot without testing the cap, and its `finish` must start nothing while
+        // `exec_active` is still at the cap.
+        while self.exec_active < self.exec_limit {
+            let Some(f) = self.exec_held.pop_front() else {
+                break;
+            };
+            self.exec_active += 1;
+            step.start.push(f);
+        }
+        step
     }
 
-    /// The ONE drop of the held jobs. A deadlock reap of a job drops every held job:
-    /// `flag_deadlock` sets `terminate`, so a released job would never run and its `None` slot
-    /// would hang the join; a held job never started, so its slot is `Cancelled` and the parked
-    /// job's `Deadlocked` is the report. `shutdown_now` drops them too: a held job never started,
-    /// so it never starts.
-    fn drop_held_jobs(&mut self) {
-        for h in std::mem::take(&mut self.exec_held) {
-            if let Some(charge) = self.slot_charge.remove(&h.task_index) {
-                self.unfinished_bytes -= charge;
-            }
-            self.slots[h.task_index] = Some(TaskOutcome::Cancelled {
-                out: Vec::new(),
-                stderr: Vec::new(),
-            });
-            self.scopes[h.scope_id].done += 1;
+    /// Scope 0's own cancel flag (`shutdown_now`) or an ancestor's (creator cancel) is tripped.
+    fn job_cancelled(&self) -> bool {
+        self.scopes.get(0).is_some() && self.scope_cancel_tripped(0)
+    }
+
+    fn drop_held(&mut self, settle: bool, step: &mut JobStep) {
+        for f in std::mem::take(&mut self.exec_held) {
+            self.drop_job(f, settle, step);
+        }
+    }
+
+    /// A job that never starts: its slot is `Cancelled`, its charge returns (DEC-205), and its
+    /// handle settles with the cancel value when `settle` is set.
+    fn drop_job(&mut self, f: Fiber, settle: bool, step: &mut JobStep) {
+        if let Some(charge) = self.slot_charge.remove(&f.task_index) {
+            self.unfinished_bytes -= charge;
+        }
+        self.slots[f.task_index] = Some(TaskOutcome::Cancelled {
+            out: Vec::new(),
+            stderr: Vec::new(),
+        });
+        self.scopes[f.scope_id].done += 1;
+        if let Some(s) = self.job_settle.remove(&f.task_index)
+            && settle
+        {
+            step.settle.push(s);
         }
     }
 
@@ -6556,6 +6724,23 @@ struct VmHost<'a> {
     args: Vec<Value>,
 }
 
+impl VmHost<'_> {
+    /// `args[i]` as a channel handle (TICKET-219, `std.concurrency._settle` / `is_settled`).
+    fn arg_channel(&self, i: usize) -> Result<GcRef, crate::native::HostError> {
+        let Some(v) = self.args.get(i).copied() else {
+            return Err(crate::native::HostError::missing_arg(i));
+        };
+        match v.as_obj() {
+            Some(h) if matches!(self.vm.heap.get(h), Obj::Channel(_)) => Ok(h),
+            _ => Err(crate::native::HostError::arg_type(
+                i,
+                "Channel",
+                self.vm.type_name(v),
+            )),
+        }
+    }
+}
+
 impl crate::native::Host for VmHost<'_> {
     fn arg_count(&self) -> usize {
         self.args.len()
@@ -6738,6 +6923,33 @@ impl crate::native::Host for VmHost<'_> {
             Some(v) => Ok(v.as_obj().is_some_and(|h| self.vm.heap.is_copied(h))),
             None => Err(crate::native::HostError::missing_arg(i)),
         }
+    }
+    fn arg_settle_channel(&mut self, ch: usize, v: usize) -> Result<(), crate::native::HostError> {
+        let h = self.arg_channel(ch)?;
+        let Some(val) = self.args.get(v).copied() else {
+            return Err(crate::native::HostError::missing_arg(v));
+        };
+        let core = self.vm.channel_core(h);
+        let w = self
+            .vm
+            .to_wire_crossable(val, Span::default())
+            .map_err(|e| crate::native::HostError { message: e.message })?;
+        let sum = crate::vm::core::wire_summary(&w);
+        let sealed = core
+            .q
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .seal(sum, w);
+        if sealed {
+            self.vm.wake_receivers_all(h, &core);
+        }
+        Ok(())
+    }
+    fn arg_channel_settled(&self, i: usize) -> Result<bool, crate::native::HostError> {
+        let h = self.arg_channel(i)?;
+        let core = self.vm.channel_core(h);
+        let sealed = core.q.lock().unwrap_or_else(|e| e.into_inner()).is_sealed();
+        Ok(sealed)
     }
     fn arg_mark_task_copy(&mut self, i: usize) -> Result<(), crate::native::HostError> {
         let Some(v) = self.args.get(i).copied() else {

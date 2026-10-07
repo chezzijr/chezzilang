@@ -305,6 +305,16 @@ pub(super) struct QuiesceState {
     pub(super) runner_spawns: std::sync::atomic::AtomicUsize,
 }
 
+/// TICKET-219 — the kind of run-wide halt in force ([`QuiesceState::run_halt`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum RunHalt {
+    Running,
+    /// A fire-and-forget job fault: every `defer` still runs whole.
+    Fault,
+    /// An `os.exit`: no `defer` runs in any party.
+    Exit,
+}
+
 impl QuiesceState {
     /// Publish an `os.exit`. First writer wins, exactly like Go: whichever `os.Exit` runs first sets
     /// the status, and a later one cannot rewrite it.
@@ -359,6 +369,18 @@ impl QuiesceState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// TICKET-219 — the run halt's kind, the one source `Vm::run_halt_due` and
+    /// `SchedCore::job_event` read. An exit outranks a job fault: `os.exit` runs no `defer`.
+    pub(super) fn run_halt(&self) -> RunHalt {
+        if self.pending().is_some() {
+            RunHalt::Exit
+        } else if self.has_job_fault() {
+            RunHalt::Fault
+        } else {
+            RunHalt::Running
+        }
     }
 
     pub(super) fn has_job_fault(&self) -> bool {
@@ -525,5 +547,22 @@ impl Drop for PartyGuard {
         if let Some(i) = g.iter().position(|p| Arc::ptr_eq(&p.wait, &self.wait)) {
             g.swap_remove(i);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TICKET-219 — the halt kind: `Running` with no cell, `Fault` with a job fault, and `Exit`
+    /// whenever an exit is pending, even beside a job fault (an exit settles nothing).
+    #[test]
+    fn run_halt_reads_exit_before_job_fault() {
+        let q = QuiesceState::default();
+        assert_eq!(q.run_halt(), RunHalt::Running);
+        q.request_job_fault(super::super::RuntimeError::default(), Vec::new());
+        assert_eq!(q.run_halt(), RunHalt::Fault);
+        q.request_exit(17);
+        assert_eq!(q.run_halt(), RunHalt::Exit);
     }
 }

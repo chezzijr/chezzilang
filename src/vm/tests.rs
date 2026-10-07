@@ -21990,8 +21990,7 @@ for _ in 0..20:
     fn job() -> int:
         v := gate.recv()
         return v
-    out := Channel[Result[int]](1)
-    ex.submit_outcome(job, out)
+    out := ex.submit_result(job)
     gate.send(7)
     ex.shutdown_now()
     match out.try_recv():

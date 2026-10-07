@@ -198,7 +198,11 @@ pub(super) enum SpawnTarget {
     /// The innermost open `parallel:` of the calling party (`spawn`).
     Nursery,
     /// The own tail scope of `sched`, with no nursery open on the caller (`Executor.submit`).
-    Scope { sched: Arc<MnSched> },
+    /// `settle` is a handle job's [`JobSettle`] (TICKET-219, `_submit_settled`).
+    Scope {
+        sched: Arc<MnSched>,
+        settle: Option<JobSettle>,
+    },
 }
 
 impl Vm {
@@ -297,7 +301,7 @@ impl Vm {
         };
         match target {
             SpawnTarget::Nursery => self.register_task(task, span, pin, cell_ids, fresh),
-            SpawnTarget::Scope { sched } => {
+            SpawnTarget::Scope { sched, settle } => {
                 let rw = self.prepare_worker(task, pin?, &cell_ids, fresh)?;
                 // W7-26r — the worker heap this start just built is owned by the starter until the
                 // task FINISHES (DEC-205). `own_bytes`, never `live_bytes`: the full walk counts
@@ -321,7 +325,7 @@ impl Vm {
                             span,
                         ));
                     }
-                    sched.reserve_job_slot(&mut c, &mut fiber, charge);
+                    sched.reserve_job_slot(&mut c, &mut fiber, charge, settle);
                     sched.claim_runners(&mut c)
                 };
                 // At one worker the starter and the runner share the one runner slot (DEC-205): a
@@ -349,7 +353,7 @@ impl Vm {
                     );
                     return Err(self.err(super::EXEC_NO_RUNNER_MSG.to_string(), span));
                 }
-                sched.admit_or_hold(fiber);
+                sched.submit_job(fiber);
                 // W7-26, the sampling half — charge what this Executor retains, and the task just
                 // started, against this heap's GC pacing counter, so a live cap gets sampled.
                 if self.heap.mem_cap() != 0 {
