@@ -7,6 +7,8 @@
 
 pub use crate::lexer::{Span, StrLit};
 
+pub mod consteval;
+
 /// A whole parsed source file: a flat sequence of top-level statements.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
@@ -1338,73 +1340,6 @@ pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
             WaitArmKind::Send { call } => expr_recover_blocks(call, out),
         }),
         _ => {}
-    }
-}
-
-/// The value of a float constant: a `Float` literal, or a negated one (TICKET-218's float32 range
-/// check). Anything else is `None`.
-pub fn const_float(e: &Expr) -> Option<f64> {
-    match &e.kind {
-        ExprKind::Float(f) => Some(*f),
-        ExprKind::Unary {
-            op: UnaryOp::Neg,
-            expr,
-        } => const_float(expr).map(|f| -f),
-        _ => None,
-    }
-}
-
-/// TICKET-142 (W14-33): evaluate an ALL-CONSTANT int expression — int literals under `+ - * / %` and
-/// unary `-` — with the VM's own int semantics (`checked_add/sub/mul/neg/div`, `%` is `wrapping_rem`,
-/// a zero divisor faults at runtime so it yields `None` here). Returns `Some(value)` when every leaf
-/// is an int literal and nothing overflowed. Each overflow pushes `(span, op)` onto `out` and yields
-/// `None`, so an enclosing node does not report the same overflow again. Every other node kind
-/// (`Float`, `Ident`, `Call`, `Compare`, …) yields `None` WITHOUT descending: the caller starts one
-/// scan per maximal arithmetic tree, and a call argument under a `+` is that argument's own tree.
-/// `visits` counts nodes entered, so a test can pin that the scan is linear.
-pub fn const_int_scan(
-    e: &Expr,
-    visits: &mut usize,
-    out: &mut Vec<(Span, &'static str)>,
-) -> Option<i64> {
-    *visits += 1;
-    match &e.kind {
-        ExprKind::Int(n) => Some(*n),
-        ExprKind::Unary { op, expr } => {
-            let v = const_int_scan(expr, visits, out);
-            match (op, v) {
-                (UnaryOp::Neg, Some(v)) => {
-                    let r = v.checked_neg();
-                    if r.is_none() {
-                        out.push((e.span, "negation"));
-                    }
-                    r
-                }
-                _ => None,
-            }
-        }
-        ExprKind::Binary { op, lhs, rhs } => {
-            let l = const_int_scan(lhs, visits, out);
-            let r = const_int_scan(rhs, visits, out);
-            let (Some(a), Some(b)) = (l, r) else {
-                return None;
-            };
-            let (res, name) = match op {
-                BinaryOp::Add => (a.checked_add(b), "Add"),
-                BinaryOp::Sub => (a.checked_sub(b), "Sub"),
-                BinaryOp::Mul => (a.checked_mul(b), "Mul"),
-                // Division by a constant zero stays a runtime fault (`division by zero`).
-                BinaryOp::Div | BinaryOp::Mod if b == 0 => return None,
-                BinaryOp::Div => (a.checked_div(b), "Div"),
-                BinaryOp::Mod => return Some(a.wrapping_rem(b)),
-                _ => return None,
-            };
-            if res.is_none() {
-                out.push((e.span, name));
-            }
-            res
-        }
-        _ => None,
     }
 }
 

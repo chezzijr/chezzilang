@@ -2550,7 +2550,7 @@ struct Checker {
     /// arithmetic tree (one linear scan per tree, never one per node). Set/restored by the
     /// `infer_kind` wrapper.
     arith_parent: bool,
-    /// TICKET-142 (W14-33): total nodes entered by every `const_int_scan`; pinned by a test so the
+    /// TICKET-142 (W14-33): total nodes entered by every `consteval::eval`; pinned by a test so the
     /// scan stays linear on a `MAX_AST_DEPTH` chain.
     pub(super) const_scan_visits: usize,
     /// TICKET-142 (W14-33): spans whose constant-overflow error is already reported, so a

@@ -3982,14 +3982,12 @@ impl Checker {
             return;
         }
         if let Some(w) = slot.width() {
-            let shown = if *w == crate::native::cffi::CType::Float32 {
-                crate::ast::const_float(value)
-                    .filter(|f| !w.fits_f64(*f))
-                    .map(|f| format!("{f:e}"))
-            } else {
-                crate::ast::const_int_scan(value, &mut self.const_scan_visits, &mut Vec::new())
-                    .filter(|k| !w.fits_int(*k, true))
-                    .map(|k| k.to_string())
+            use crate::ast::consteval::{Const, Fold, eval};
+            let float = *w == crate::native::cffi::CType::Float32;
+            let shown = match eval(value, &mut self.const_scan_visits) {
+                Fold::Value(Const::Float(f)) if float && !w.fits_f64(f) => Some(format!("{f:e}")),
+                Fold::Value(Const::Int(k)) if !float && !w.fits_int(k, true) => Some(k.to_string()),
+                _ => None,
             };
             if let Some(k) = shown
                 && self.const_overflow_seen.insert(value.span)

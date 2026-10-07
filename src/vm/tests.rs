@@ -17966,8 +17966,13 @@ fn golden_edge_cases_chz_matches_expected_and_interp() {
 /// and the VM stays in lock-step with the interpreter.
 #[test]
 fn shift_left_overflow_is_recoverable_fault() {
-    // overflow → recoverable fault with the shared arith-overflow message,
-    for src in ["print(1 << 63)", "print(3 << 62)", "print(2 << 62)"] {
+    // overflow → recoverable fault with the shared arith-overflow message (a bound left operand: a
+    // constant `1 << 63` is a compile error since TICKET-225),
+    for src in [
+        "a := 1\nprint(a << 63)",
+        "a := 3\nprint(a << 62)",
+        "a := 2\nprint(a << 62)",
+    ] {
         let vm = run_capture(src).expect_err("vm: shift overflow should fault");
         assert_eq!(vm.message, "integer overflow in Shl");
         let it = run_capture(src).expect_err("interp: shift overflow");

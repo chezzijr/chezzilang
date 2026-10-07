@@ -15,7 +15,8 @@
 //! folding replicates `Vm::arith`'s checked semantics (overflow / divide-by-zero are *not* folded
 //! — they are left for the runtime to raise the same error).
 
-use crate::ast::Span;
+use crate::ast::consteval;
+use crate::ast::{BinaryOp, Span};
 use crate::vm::op::{BinKind, Op};
 
 /// Map a binary-operator op to its `BinKind`, or `None` if it isn't a fusable binop. `Eq`/`NotEq`
@@ -81,23 +82,20 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
     let m = out.len();
     // ----- binary: [Const, Const, <arith>] -----
     if m >= 3 {
-        let arith = matches!(out[m - 1], Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod);
-        if arith {
+        let op = match out[m - 1] {
+            Op::Add => Some(BinaryOp::Add),
+            Op::Sub => Some(BinaryOp::Sub),
+            Op::Mul => Some(BinaryOp::Mul),
+            Op::Div => Some(BinaryOp::Div),
+            Op::Mod => Some(BinaryOp::Mod),
+            _ => None,
+        };
+        if let Some(op) = op {
+            // The arithmetic is `ast::consteval`'s (TICKET-225), the one evaluator the checker
+            // reads too. An overflow or a zero divisor does NOT fold: the runtime raises its error.
             match (&out[m - 3], &out[m - 2]) {
                 (Op::ConstInt(a), Op::ConstInt(b)) => {
-                    let (a, b) = (*a, *b);
-                    let r = match &out[m - 1] {
-                        Op::Add => a.checked_add(b),
-                        Op::Sub => a.checked_sub(b),
-                        Op::Mul => a.checked_mul(b),
-                        Op::Div if b == 0 => None,
-                        Op::Mod if b == 0 => None,
-                        Op::Div => a.checked_div(b),
-                        Op::Mod => a.checked_rem(b),
-                        _ => unreachable!(),
-                    };
-                    // `None` ⇒ overflow or div/mod-by-zero: do NOT fold (leave the runtime error).
-                    if let Some(v) = r {
+                    if let Some(Ok(v)) = consteval::int_binop(op, *a, *b) {
                         return Some(Fold {
                             op: Op::ConstInt(v),
                             window: 3,
@@ -105,22 +103,7 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
                     }
                 }
                 (Op::ConstFloat(a), Op::ConstFloat(b)) => {
-                    let (a, b) = (*a, *b);
-                    // Float Div/Mod by zero is total IEEE-754 (inf/-inf/NaN) at runtime — it no
-                    // longer faults. We still bail rather than const-fold a zero divisor: not folding
-                    // is always correct, and folding inf/NaN at compile time risks drifting from the
-                    // runtime arith path.
-                    let r = match &out[m - 1] {
-                        Op::Add => Some(a + b),
-                        Op::Sub => Some(a - b),
-                        Op::Mul => Some(a * b),
-                        Op::Div if b == 0.0 => None,
-                        Op::Mod if b == 0.0 => None,
-                        Op::Div => Some(a / b),
-                        Op::Mod => Some(a % b),
-                        _ => unreachable!(),
-                    };
-                    if let Some(v) = r {
+                    if let Some(v) = consteval::float_binop(op, *a, *b) {
                         return Some(Fold {
                             op: Op::ConstFloat(v),
                             window: 3,
@@ -306,6 +289,19 @@ mod tests {
         let (out, out_lines) = optimize(code, lines);
         assert_eq!(out_lines.len(), out.len(), "code/lines must stay parallel");
         out
+    }
+
+    /// TICKET-225 — the fold is `ast::consteval`'s: `i64::MIN % -1` is `0` as on the VM
+    /// (`wrapping_rem`), and a zero divisor stays a runtime fault.
+    #[test]
+    fn peephole_folds_through_consteval() {
+        let out = opt(vec![Op::ConstInt(i64::MIN), Op::ConstInt(-1), Op::Mod]);
+        assert!(
+            matches!(out[..], [Op::ConstInt(0)]),
+            "expected a fold to 0, got {out:?}"
+        );
+        let out = opt(vec![Op::ConstInt(1), Op::ConstInt(0), Op::Div]);
+        assert_eq!(out.len(), 3, "a zero divisor must not fold, got {out:?}");
     }
 
     #[test]

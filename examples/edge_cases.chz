@@ -30,7 +30,8 @@ fn f_shift_hi() -> int:
 fn f_shift_neg() -> int:
     return 1 << (0 - 1)
 fn f_shift_ovf63() -> int:
-    return 1 << 63
+    n := 1
+    return n << 63
 
 fn faults():
     print("-- faults --")
