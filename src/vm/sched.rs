@@ -328,11 +328,9 @@ impl Vm {
                     sched.reserve_job_slot(&mut c, &mut fiber, charge, settle);
                     sched.claim_runners(&mut c)
                 };
-                // At one worker the starter and the runner share the one runner slot (DEC-205): a
-                // thread still on its implicit slot turns it into a permit, so its waits and its
-                // slice ends hand it to the runner.
-                if self.mn.is_none() && worker_count() == 1 && !wids.is_empty() {
-                    width::convert();
+                // TICKET-230 — once another runner exists, main hands its permit over at slice
+                // ends, at every worker count (one runner budget of N, main included).
+                if self.mn.is_none() && !wids.is_empty() {
                     self.slice_in_place = true;
                 }
                 let runner = self.start_runners(&sched, wids);
@@ -1245,11 +1243,9 @@ impl Vm {
             c.runner_wids[1] = true;
         }
         let shell = self.spawn_shell(&sched, &cancel);
-        let gate_body = self.mn.is_none() && worker_count() == 1;
-        let born_gated = gate_body || width::gated();
-        let drainer = spawn_worker_thread(shell, &sched, "chezzi-eager", 1, 0, born_gated).ok()?; // no drainer ⇒ no worker during the body ⇒ fall back to lazy (see the doc above)
-        if gate_body {
-            width::convert();
+        let drainer = spawn_worker_thread(shell, &sched, "chezzi-eager", 1, 0).ok()?; // no drainer ⇒ no worker during the body ⇒ fall back to lazy (see the doc above)
+        // TICKET-230 — the body shares the runner budget with its drainer at every worker count.
+        if self.mn.is_none() {
             self.slice_in_place = true;
         }
         // §2c1 — an eager nursery publishes itself so the process-wide verdict counts its undone
@@ -1442,14 +1438,11 @@ impl Vm {
         if let Some(core) = sched.detached.as_ref().and_then(|w| w.upgrade()) {
             core.runner_starts.fetch_add(wids.len(), Ordering::Relaxed);
         }
-        let born_gated = (exec && worker_count() == 1) || width::gated();
         let mut runner = true;
         for wid in wids {
             if exec {
                 let shell = self.spawn_shell(sched, &cancel);
-                if spawn_worker_thread(shell, sched, "chezzi-exec", wid, SENTINEL_SCOPE, born_gated)
-                    .is_err()
-                {
+                if spawn_worker_thread(shell, sched, "chezzi-exec", wid, SENTINEL_SCOPE).is_err() {
                     runner = sched.unclaim_runner(wid);
                 }
                 continue;
@@ -1471,7 +1464,7 @@ impl Vm {
                 wid,
                 slot,
             };
-            if super::runner_cache::start(lease, born_gated).is_err() {
+            if super::runner_cache::start(lease).is_err() {
                 sched.helper_done();
                 runner = sched.unclaim_runner(wid);
             }
@@ -2287,15 +2280,13 @@ impl Vm {
     /// guard lives, so the waker (`ChannelCore::wake_all`) queues it for the permit in the waker's
     /// own order. Called while the permit is held: the list order is the order the waits began.
     pub(super) fn gated_register(&self, cores: &[&Arc<ChannelCore>]) -> GatedReg {
-        let me = width::gated().then(width::my_slot);
-        if let Some(me) = &me {
-            for (i, c) in cores.iter().enumerate() {
-                let sleeps_on = (i > 0).then(|| Arc::clone(cores[0]));
-                c.gated
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((Arc::clone(me), sleeps_on));
-            }
+        let me = width::my_slot();
+        for (i, c) in cores.iter().enumerate() {
+            let sleeps_on = (i > 0).then(|| Arc::clone(cores[0]));
+            c.gated
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((Arc::clone(&me), sleeps_on));
         }
         GatedReg {
             cores: cores.iter().map(|c| Arc::clone(c)).collect(),
@@ -2318,10 +2309,9 @@ impl Vm {
     }
 
     /// TICKET-205 — a pool thread about to keep its slot past a slice end makes room for a queued
-    /// job: it turns its slot into a permit and starts one gated pool thread for the queue.
+    /// job: it starts one pool thread for the queue (gated like every runner, TICKET-230).
     pub(super) fn offer_pool_slot(&self) {
         if crate::vm::pool::job_waits_for_my_slot() {
-            width::convert();
             crate::vm::pool::yield_slot(None);
         }
     }
@@ -2389,8 +2379,6 @@ impl Vm {
         if !fiber_waits && !job_waits && width::RUNNERS.waiting() == 0 {
             return;
         }
-        // Convert this thread's implicit slot into an explicit permit (`free` stays 0).
-        width::convert();
         if let Some(sched) = self.mn.clone()
             && !self.demoted
         {
@@ -2476,15 +2464,7 @@ impl Vm {
         // (across all scopes) until global terminate; the demoted owner returns on its own (its
         // fiber settles → `self.demoted` exits its loop), so the replacement must not stop early on
         // any single scope.
-        spawn_worker_thread(
-            shell,
-            sched,
-            "chezzi-mn-repl",
-            wid,
-            SENTINEL_SCOPE,
-            width::gated(),
-        )
-        .is_ok()
+        spawn_worker_thread(shell, sched, "chezzi-mn-repl", wid, SENTINEL_SCOPE).is_ok()
     }
 
     /// D2b — a worker shell's lifetime: pull a runnable fiber, run it to its next park/finish, settle,
@@ -2494,7 +2474,19 @@ impl Vm {
     /// FARMED helper / drainer (which never self-stops, only on global terminate). The fiber it runs may
     /// belong to ANY scope (the queue is global): `finish`/`cancel_drain` use the FIBER's `scope_id`,
     /// while `take_runnable`'s stop check uses `owner_scope`.
+    ///
+    /// TICKET-230 — the loop releases the permit before it returns, so a caller that held one (main
+    /// as joiner, a fiber's inline nested-nursery owner) takes it back here before its own Chezzi
+    /// code runs again.
     pub(super) fn mn_worker_loop(&mut self, sched: &Arc<MnSched>, wid: usize, owner_scope: usize) {
+        let held = width::holds();
+        self.mn_worker_loop_inner(sched, wid, owner_scope);
+        if held {
+            width::acquire();
+        }
+    }
+
+    fn mn_worker_loop_inner(&mut self, sched: &Arc<MnSched>, wid: usize, owner_scope: usize) {
         #[cfg(test)]
         let _runner = RunnerCount::enter(&sched.quiesce);
         self.wid = wid; // D5 owe #3 (Path C) — `demote_recv_block` reuses this for the replacement worker
@@ -2502,9 +2494,7 @@ impl Vm {
         struct OwnTurn;
         impl Drop for OwnTurn {
             fn drop(&mut self) {
-                if width::gated() {
-                    width::cancel(&width::my_slot());
-                }
+                width::cancel(&width::my_slot());
             }
         }
         let _turn = OwnTurn;
@@ -2529,10 +2519,9 @@ impl Vm {
             let span = fiber.span;
             let disp = self.run_one_fiber(&mut fiber, span, slice);
             self.offer_pool_slot();
-            // TICKET-206 — a gated worker queues its own next turn while it still holds the permit,
-            // so its place does not depend on how long the bookkeeping below takes.
-            if width::gated()
-                && width::holds()
+            // TICKET-206 — a worker queues its own next turn while it still holds the permit, so
+            // its place does not depend on how long the bookkeeping below takes.
+            if width::holds()
                 && (sched.runnable.load(Ordering::Relaxed) > 0 || matches!(disp, Disp::Yield))
             {
                 width::reserve(&width::my_slot());
@@ -6395,59 +6384,54 @@ fn join_helpers(sched: &Arc<MnSched>) {
     sched.wait_helpers();
 }
 
-/// TICKET-073 — the one process-wide budget of EXTRA eager runner threads a NESTED eager nursery may
+/// TICKET-073 — the one process-wide cap on EXTRA eager runner THREADS a NESTED eager nursery may
 /// spend: a per-nursery `chezzi-eager` drainer (`activate_eager_nursery`) and the runner leases
 /// `Vm::start_runners` hands to `runner_cache` both draw from it. A lease holds its share until its
 /// raw `chezzi-eager-helper` thread parks, and the cache starts a thread only when no parked thread
-/// is unpromised, so the budget also bounds the cached runner threads, parked or running. Sized
+/// is unpromised, so the cap also bounds the cached runner threads, parked or running. Sized
 /// `worker_count().max(2)` so the bound stays linear in `--threads` and independent of nesting depth
 /// and fan-out (see `src/vm/pool.rs`).
+///
+/// TICKET-230 — this caps drainer and helper THREADS only. How many threads RUN Chezzi code at once
+/// (the CPU width, main included) is `width::RUNNERS`, alone.
 static NESTED_EAGER_DRAINERS: AtomicUsize = AtomicUsize::new(0);
 
-/// A held share of [`NESTED_EAGER_DRAINERS`]. Released by `Drop`, never by hand: an `EagerScope`
-/// moves across `Vm::swap_ctx` and is consumed by `join_eager_nursery` OR `abort_eager_nursery`, and a
-/// hand-written release in only those two consumers would leak a slot on every other drop path.
 /// TICKET-205 — THE spawn of a raw worker thread of `sched` (the drainer, an eager helper, the
-/// replacement of a demoted worker). A thread started by a gated thread is gated from birth, and
-/// its SPAWNER lists its slot with the sched, so a wake queues it for the runner permit in the
-/// waker's order instead of on the child's own start time. A refused thread withdraws the slot.
+/// replacement of a demoted worker).
 fn spawn_worker_thread(
     mut shell: Vm,
     sched: &Arc<MnSched>,
     name: &str,
     wid: usize,
     owner_scope: usize,
-    born_gated: bool,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let s = Arc::clone(sched);
-    spawn_runner_thread(sched, name, born_gated, move || {
+    spawn_runner_thread(sched, name, move || {
         shell.mn_worker_loop(&s, wid, owner_scope)
     })
 }
 
 /// TICKET-211 — THE birth of a runner OS thread, shared by [`spawn_worker_thread`] and
-/// `runner_cache::start`: width registration (born gated, adopted slot), the VM stack size, the
-/// thread name and the `catch_unwind` around `body`. A refused thread withdraws the slot.
+/// `runner_cache::start`: width registration (adopted slot), the VM stack size, the thread name and
+/// the `catch_unwind` around `body`. Every runner is gated from birth (TICKET-230), and its SPAWNER
+/// lists its slot with the sched, so a wake queues it for the runner permit in the waker's order
+/// instead of on the child's own start time. A refused thread withdraws the slot.
 pub(super) fn spawn_runner_thread(
     sched: &Arc<MnSched>,
     name: &str,
-    born_gated: bool,
     body: impl FnOnce() + Send + 'static,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let child_slot = width::new_slot();
-    if born_gated {
-        sched.idle_register_child(&child_slot);
-    }
+    sched.idle_register_child(&child_slot);
     let adopted = Arc::clone(&child_slot);
     let r = std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .name(name.into())
         .spawn(move || {
-            width::born_gated(born_gated);
             width::adopt(adopted);
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
         });
-    if r.is_err() && born_gated {
+    if r.is_err() {
         sched.idle_forget(&child_slot);
     }
     r
@@ -6461,18 +6445,24 @@ thread_local! {
 
 /// TICKET-211 — counts one runner thread for the span of its outermost `mn_worker_loop`. A loop
 /// nested on a thread that already runs one (a fiber's inline join) is inert. Test-only.
+/// TICKET-230 — the outermost loop also points this thread's permits at the run's
+/// `QuiesceState::width_probe`, restoring the previous probe on drop.
 #[cfg(test)]
-struct RunnerCount(Option<Arc<crate::vm::quiesce::QuiesceState>>);
+struct RunnerCount(
+    Option<Arc<crate::vm::quiesce::QuiesceState>>,
+    Option<Arc<width::WidthProbe>>,
+);
 
 #[cfg(test)]
 impl RunnerCount {
     fn enter(q: &Arc<crate::vm::quiesce::QuiesceState>) -> Self {
         if IN_RUNNER.with(|f| f.replace(true)) {
-            return RunnerCount(None);
+            return RunnerCount(None, None);
         }
         let now = q.runner_threads.fetch_add(1, Ordering::SeqCst) + 1;
         q.peak_runner_threads.fetch_max(now, Ordering::SeqCst);
-        RunnerCount(Some(Arc::clone(q)))
+        let prev = width::set_probe(Some(Arc::clone(&q.width_probe)));
+        RunnerCount(Some(Arc::clone(q)), prev)
     }
 }
 
@@ -6482,6 +6472,7 @@ impl Drop for RunnerCount {
         if let Some(q) = self.0.take() {
             q.runner_threads.fetch_sub(1, Ordering::SeqCst);
             IN_RUNNER.with(|f| f.set(false));
+            width::set_probe(self.1.take());
         }
     }
 }
@@ -6489,22 +6480,24 @@ impl Drop for RunnerCount {
 /// TICKET-205 — see [`Vm::gated_register`].
 pub(super) struct GatedReg {
     cores: Vec<Arc<ChannelCore>>,
-    me: Option<Arc<width::Slot>>,
+    me: Arc<width::Slot>,
 }
 impl Drop for GatedReg {
     fn drop(&mut self) {
-        if let Some(me) = &self.me {
-            for c in &self.cores {
-                c.gated
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retain(|(s, _)| !Arc::ptr_eq(s, me));
-            }
-            width::cancel(me);
+        for c in &self.cores {
+            c.gated
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|(s, _)| !Arc::ptr_eq(s, &self.me));
         }
+        width::cancel(&self.me);
     }
 }
 
+/// A held share of [`NESTED_EAGER_DRAINERS`]: one drainer or helper THREAD (TICKET-230: never a
+/// runner permit). Released by `Drop`, never by hand: an `EagerScope` moves across `Vm::swap_ctx`
+/// and is consumed by `join_eager_nursery` OR `abort_eager_nursery`, and a hand-written release in
+/// only those two consumers would leak a slot on every other drop path.
 pub(super) struct NestedDrainerSlot;
 
 impl NestedDrainerSlot {

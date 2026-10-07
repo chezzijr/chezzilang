@@ -1,70 +1,56 @@
 //! TICKET-205 (was TICKET-141, W14-14) — the ONE process-wide FIFO runner gate, [`RUNNERS`].
 //!
-//! A party that cannot leave its OS thread at a slice end — a CPU loop inside a native re-entry
-//! callback (its caller's loop state lives on the host stack), an `Executor` job, a gated nursery
-//! body — cannot be parked, so the THREAD hands its runner slot over and takes one back in arrival
-//! order. That keeps `--threads=N` at N runners (Go's `GOMAXPROCS=1`, DEC-059).
+//! TICKET-230 — the gate is the single owner of CPU width: `--threads=N` caps the threads that run
+//! Chezzi code at N process-wide, main included (Go's `GOMAXPROCS`, DEC-059). A party that cannot
+//! leave its OS thread at a slice end — a CPU loop inside a native re-entry callback, an `Executor`
+//! job, a nursery body — cannot be parked, so the THREAD hands its permit over and takes one back in
+//! arrival order.
 //!
-//! The gate state is per OS thread, not per `Vm`: `GATED` (permanent once set), `HOLDS` (returns
-//! the permit when the thread exits) and `SLOT` (the queue ticket a WAKER reserved for the thread).
+//! The gate state is per OS thread, not per `Vm`: `HOLDS` (returns the permit when the thread
+//! exits) and `SLOT` (the queue ticket a WAKER reserved for the thread).
 //!
 //! INVARIANTS:
-//! - A gated thread runs Chezzi code, picks a fiber and draws from the seeded RNG only while it
-//!   holds a permit, and releases it around every wait in place (a demote, a guard wait, an inline
-//!   nursery join, an idle sleep, ...). A gated waiter holds a fiber it already dequeued that no
-//!   other worker can steal, so a permit holder waiting in place for that fiber would hang both.
+//! - Every thread that runs Chezzi code is gated from birth. It runs Chezzi code, picks a fiber and
+//!   draws from the seeded RNG only while it holds a permit, and releases it around every wait in
+//!   place (a demote, a guard wait, an inline nursery join, an idle sleep, ...). A waiter holds a
+//!   fiber it already dequeued that no other worker can steal, so a permit holder waiting in place
+//!   for that fiber would hang both.
+//! - The gate's capacity is `worker_count()`, read at every acquire. There is no other width budget.
 //! - The waker queues the woken thread ([`reserve`]), so wake order is the waker's order and not
 //!   the order the OS runs the woken threads in.
 //! - A reserved ticket lives only while its thread is listed as a waiter. Whoever unlists the
 //!   slot withdraws the ticket ([`cancel`]): a ticket nobody takes sits at the queue head and hangs
-//!   every gated thread of the process.
+//!   every thread of the process.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
-/// TICKET-205 — the ONE runner gate of the process. Every thread that cannot leave its OS thread
-/// (a native callback, an Executor job, a gated nursery body) hands its runner slot over here.
-pub(super) static RUNNERS: WidthGate = WidthGate::new();
+/// TICKET-205 / TICKET-230 — the ONE runner gate of the process: `worker_count()` permits.
+pub(super) static RUNNERS: WidthGate = WidthGate::new(super::worker_count);
 
 thread_local! {
-    /// This OS thread runs Chezzi code only while it holds a permit of [`RUNNERS`].
-    static GATED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static HOLDS: HoldGuard = const { HoldGuard(std::cell::Cell::new(false)) };
 }
 
-/// Returns the permit when a gated thread exits while holding one.
+/// Returns the permit when a thread exits while holding one.
 struct HoldGuard(std::cell::Cell<bool>);
 impl Drop for HoldGuard {
     fn drop(&mut self) {
         if self.0.get() {
+            probe_leave();
             RUNNERS.release();
         }
     }
 }
 
-pub(super) fn gated() -> bool {
-    GATED.with(|g| g.get())
-}
 pub(super) fn holds() -> bool {
     HOLDS.with(|h| h.0.get())
-}
-/// Turn this thread's implicit runner slot into an explicit permit that it holds. Permanent.
-pub(super) fn convert() {
-    if !gated() {
-        GATED.with(|g| g.set(true));
-        HOLDS.with(|h| h.0.set(true));
-    }
-}
-/// A thread spawned to take over a gated thread's slot starts gated, with no permit.
-pub(super) fn born_gated(on: bool) {
-    if on {
-        GATED.with(|g| g.set(true));
-    }
 }
 pub(super) fn release() {
     if holds() {
         HOLDS.with(|h| h.0.set(false));
+        probe_leave();
         RUNNERS.release();
     }
 }
@@ -76,11 +62,74 @@ pub(super) fn released<R>(wait: impl FnOnce() -> R) -> R {
     r
 }
 pub(super) fn acquire() {
-    if gated() && !holds() {
+    if !holds() {
         with_slot(|s| RUNNERS.acquire_slot(s));
         HOLDS.with(|h| h.0.set(true));
+        probe_enter();
     }
 }
+
+/// TICKET-230 — the permit a run's main thread takes in `Vm::run`. Its drop returns the permit
+/// only if this guard took it: a thread that already held one keeps it.
+pub(super) struct RunPermit(bool);
+impl RunPermit {
+    pub(super) fn take() -> Self {
+        let fresh = !holds();
+        acquire();
+        RunPermit(fresh)
+    }
+}
+impl Drop for RunPermit {
+    fn drop(&mut self) {
+        if self.0 {
+            release();
+        }
+    }
+}
+
+/// TICKET-230 — test-only count of one run's permit holders: `now` at this moment, `peak` the most
+/// at once. Per run, so concurrently running lib tests do not pollute each other's counts.
+#[cfg(test)]
+#[derive(Default, Debug)]
+pub(super) struct WidthProbe {
+    pub(super) now: AtomicUsize,
+    pub(super) peak: AtomicUsize,
+}
+#[cfg(test)]
+thread_local! {
+    /// The probe of the run this thread works for; the next acquire counts in it.
+    static PROBE: std::cell::RefCell<Option<std::sync::Arc<WidthProbe>>> =
+        const { std::cell::RefCell::new(None) };
+    /// The probe the held permit was counted in; the release uncounts it there.
+    static HELD_PROBE: std::cell::RefCell<Option<std::sync::Arc<WidthProbe>>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// Point this thread's next permit at `p`. Returns the previous probe.
+#[cfg(test)]
+pub(super) fn set_probe(
+    p: Option<std::sync::Arc<WidthProbe>>,
+) -> Option<std::sync::Arc<WidthProbe>> {
+    PROBE.with(|c| c.replace(p))
+}
+#[cfg(test)]
+fn probe_enter() {
+    let p = PROBE.try_with(|c| c.borrow().clone()).ok().flatten();
+    if let Some(p) = p {
+        let now = p.now.fetch_add(1, Ordering::SeqCst) + 1;
+        p.peak.fetch_max(now, Ordering::SeqCst);
+        let _ = HELD_PROBE.try_with(|c| *c.borrow_mut() = Some(p));
+    }
+}
+#[cfg(test)]
+fn probe_leave() {
+    if let Ok(Some(p)) = HELD_PROBE.try_with(|c| c.borrow_mut().take()) {
+        p.now.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+#[cfg(not(test))]
+fn probe_enter() {}
+#[cfg(not(test))]
+fn probe_leave() {}
 
 /// One per OS thread: the queue ticket a WAKER reserved for it (`0` = none, else ticket + 1).
 /// Written only under the gate lock.
@@ -114,7 +163,7 @@ fn with_slot<R>(f: impl FnOnce(&std::sync::Arc<Slot>) -> R) -> R {
 pub(super) fn my_slot() -> std::sync::Arc<Slot> {
     with_slot(std::sync::Arc::clone)
 }
-/// A slot made by the thread that SPAWNS a gated thread, so it can queue the child for the permit
+/// A slot made by the thread that SPAWNS a runner thread, so it can queue the child for the permit
 /// before the child first runs. The child takes it with [`adopt`].
 pub(super) fn new_slot() -> std::sync::Arc<Slot> {
     std::sync::Arc::new(Slot::new())
@@ -141,22 +190,25 @@ pub(super) fn reserve(slot: &Slot) {
 }
 
 struct GateSt {
-    free: usize,
+    held: usize,
     queue: VecDeque<u64>,
     next_ticket: u64,
 }
 
 pub(super) struct WidthGate {
+    /// The capacity, read at every acquire: a changed worker count needs no resize.
+    cap: fn() -> usize,
     st: Mutex<GateSt>,
     cv: Condvar,
     waiting: AtomicUsize,
 }
 
 impl WidthGate {
-    pub(super) const fn new() -> Self {
+    pub(super) const fn new(cap: fn() -> usize) -> Self {
         WidthGate {
+            cap,
             st: Mutex::new(GateSt {
-                free: 0,
+                held: 0,
                 queue: VecDeque::new(),
                 next_ticket: 0,
             }),
@@ -173,7 +225,8 @@ impl WidthGate {
     /// preemption).
     pub(super) fn release(&self) {
         let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        st.free += 1;
+        debug_assert!(st.held > 0, "TICKET-230: release without a held permit");
+        st.held -= 1;
         let wake = !st.queue.is_empty();
         drop(st);
         if wake {
@@ -226,14 +279,14 @@ impl WidthGate {
             }
             t => t - 1,
         };
-        while !(st.free > 0 && st.queue.front() == Some(&me)) {
+        while !(st.held < (self.cap)() && st.queue.front() == Some(&me)) {
             st = self.cv.wait(st).unwrap_or_else(|e| e.into_inner());
         }
         st.queue.pop_front();
         slot.ticket.store(0, Ordering::Relaxed);
-        st.free -= 1;
+        st.held += 1;
         self.waiting.fetch_sub(1, Ordering::Relaxed);
-        let more = st.free > 0 && !st.queue.is_empty();
+        let more = st.held < (self.cap)() && !st.queue.is_empty();
         drop(st);
         if more {
             self.cv.notify_all();
@@ -253,18 +306,22 @@ mod tests {
     }
 
     #[test]
-    fn release_then_acquire_does_not_block() {
-        let g = WidthGate::new();
-        g.release();
+    fn acquire_on_a_free_gate_does_not_block() {
+        let g = WidthGate::new(|| 1);
         g.acquire();
         assert_eq!(g.waiting(), 0);
+        g.release();
     }
 
     #[test]
     fn acquire_blocks_until_a_release() {
-        let g = Arc::new(WidthGate::new());
+        let g = Arc::new(WidthGate::new(|| 1));
+        g.acquire();
         let g2 = Arc::clone(&g);
-        let h = std::thread::spawn(move || g2.acquire());
+        let h = std::thread::spawn(move || {
+            g2.acquire();
+            g2.release();
+        });
         spin_until_waiting(&g, 1);
         g.release();
         h.join().expect("acquirer panicked");
@@ -273,7 +330,8 @@ mod tests {
 
     #[test]
     fn waiters_are_served_in_arrival_order() {
-        let g = Arc::new(WidthGate::new());
+        let g = Arc::new(WidthGate::new(|| 1));
+        g.acquire();
         let (tx, rx) = mpsc::channel();
         let mut hs = Vec::new();
         for id in 0..2 {
@@ -282,6 +340,7 @@ mod tests {
             hs.push(std::thread::spawn(move || {
                 g2.acquire();
                 tx2.send(id).unwrap();
+                g2.release();
             }));
             spin_until_waiting(&g, id + 1);
         }
@@ -291,7 +350,6 @@ mod tests {
             0,
             "the first arrival must be served first"
         );
-        g.release();
         assert_eq!(rx.recv().unwrap(), 1);
         for h in hs {
             h.join().expect("acquirer panicked");
@@ -304,7 +362,8 @@ mod tests {
     fn a_reserved_ticket_keeps_its_place_ahead_of_a_later_acquirer() {
         const A: usize = 0;
         const B: usize = 1;
-        let g = Arc::new(WidthGate::new());
+        let g = Arc::new(WidthGate::new(|| 1));
+        g.acquire();
         let slot_a = Arc::new(Slot::new());
         g.reserve(&slot_a);
         let (tx, rx) = mpsc::channel();
@@ -312,24 +371,53 @@ mod tests {
         let hb = std::thread::spawn(move || {
             g2.acquire_slot(&Slot::new());
             tx2.send(B).unwrap();
+            g2.release();
         });
         spin_until_waiting(&g, 2);
         let (g2, slot2) = (Arc::clone(&g), Arc::clone(&slot_a));
         let ha = std::thread::spawn(move || {
             g2.acquire_slot(&slot2);
             tx.send(A).unwrap();
+            g2.release();
         });
-        // One permit at a time: two at once would let both acquire and race their sends.
+        // One permit: each holder releases after its own send, so the sends cannot race.
         g.release();
         assert_eq!(
             rx.recv().unwrap(),
             A,
             "the reserved ticket must be served before the later arrival"
         );
-        g.release();
         assert_eq!(rx.recv().unwrap(), B);
         ha.join().expect("acquirer A panicked");
         hb.join().expect("acquirer B panicked");
+        assert_eq!(g.waiting(), 0);
+    }
+
+    /// TICKET-230: the gate grants `cap` permits at once, and a third holder waits for a release.
+    #[test]
+    fn a_gate_grants_up_to_its_cap_and_no_more() {
+        let g = Arc::new(WidthGate::new(|| 2));
+        g.acquire();
+        g.acquire();
+        assert_eq!(g.waiting(), 0);
+        let (tx, rx) = mpsc::channel();
+        let g2 = Arc::clone(&g);
+        let h = std::thread::spawn(move || {
+            g2.acquire();
+            tx.send(()).unwrap();
+            g2.release();
+        });
+        spin_until_waiting(&g, 1);
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "a third acquire must wait while two permits are held"
+        );
+        g.release();
+        rx.recv()
+            .expect("the third acquire must proceed after a release");
+        h.join().expect("acquirer panicked");
+        g.release();
         assert_eq!(g.waiting(), 0);
     }
 }

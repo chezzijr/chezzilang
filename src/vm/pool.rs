@@ -14,6 +14,10 @@
 //! a depth-11 tree of 2048 sleeping leaves nested in a spawned task peaks at 6 live threads at
 //! `CHEZZI_THREADS=2`, against 2050 before the budget existed.
 //!
+//! TICKET-230 — the pool bounds THREADS, not width. A pool thread is gated like every runner: it
+//! runs Chezzi code only while it holds a permit of `width::RUNNERS`, which caps the runners of the
+//! whole process at `worker_count()`, main included.
+//!
 //! Each pool thread is spawned with the same 256 MiB stack as the main VM thread
 //! ([`super::VM_STACK_BYTES`]) — a worker `Vm` recurses as deeply as the parent can. Idle threads
 //! block on the queue condvar; the process exiting reaps them (they are never joined).
@@ -65,25 +69,19 @@ fn pool() -> &'static Pool {
         let n = super::worker_count();
         let queue: Queue = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         for _ in 0..n {
-            assert!(
-                spawn_worker(&queue, false),
-                "failed to spawn chezzi pool thread"
-            );
+            assert!(spawn_worker(&queue), "failed to spawn chezzi pool thread");
         }
         Pool { queue }
     })
 }
 
 /// Spawn one pool worker thread over `queue`. `false` iff the OS refused the thread.
-fn spawn_worker(queue: &Queue, gated: bool) -> bool {
+fn spawn_worker(queue: &Queue) -> bool {
     let q = Arc::clone(queue);
     thread::Builder::new()
         .stack_size(super::VM_STACK_BYTES)
         .name("chezzi-pool".into())
-        .spawn(move || {
-            super::width::born_gated(gated);
-            worker_loop(&q)
-        })
+        .spawn(move || worker_loop(&q))
         .is_ok()
 }
 
@@ -149,7 +147,7 @@ pub(super) fn yield_slot(budget: Option<Duration>) -> bool {
     if !should_yield_slot(first_seen, now, budget) {
         return false;
     }
-    if spawn_worker(&pool().queue, super::width::gated()) {
+    if spawn_worker(&pool().queue) {
         SLOT.with(|c| c.set(Slot::Yielded));
         true
     } else {

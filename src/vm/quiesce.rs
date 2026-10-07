@@ -356,6 +356,10 @@ pub(super) struct QuiesceState {
     /// TICKET-211 — OS threads started for this run's non-Executor runner leases. Test-only.
     #[cfg(test)]
     pub(super) runner_spawns: std::sync::atomic::AtomicUsize,
+    /// TICKET-230 — this run's runner permit holders, now and at peak (`width::WidthProbe`).
+    /// Test-only.
+    #[cfg(test)]
+    pub(super) width_probe: Arc<super::width::WidthProbe>,
 }
 
 /// TICKET-219 — the kind of run-wide halt in force ([`QuiesceState::run_halt`]).

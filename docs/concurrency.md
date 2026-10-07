@@ -318,8 +318,10 @@ How a `parallel:` block runs on the M:N engine (`chezzi run` — the default):
    `inject_or_extend` (every spawn), at `Executor.submit`, and when a body blocks. It claims runners
    while fewer than `worker_count()` run and fewer fiber runners run than tasks are undone; the
    body's own thread counts toward `worker_count()` but not toward fiber runners, so `--threads=1`
-   stays one runner. `Vm::start_runners` starts what it claimed. A non-Executor runner is a RAW
-   `chezzi-eager-helper` thread from the `NestedDrainerSlot` budget — never the bounded pool,
+   stays one runner. `Vm::start_runners` starts what it claimed. The claim is demand only: how many
+   runners run at once process-wide is the one `width::RUNNERS` budget of N, main included
+   (TICKET-230, see "One runner budget" below). A non-Executor runner is a RAW
+   `chezzi-eager-helper` thread from the `NestedDrainerSlot` thread cap — never the bounded pool,
    because a body may be waiting on an `Executor` job queued behind a pool helper that runs to
    global terminate (DEC-103, DEC-159). Runner threads are reused: one that finishes a nursery parks
    in `src/vm/runner_cache.rs` for up to one second and serves the next nursery's runner, so 20 000
@@ -1412,10 +1414,22 @@ other job, of its own executor or another, until the loop ended (`os.exit` from 
 job landed after 23 s; Go at `GOMAXPROCS=1` exits at ~100 ms). The rules, one mechanism for every
 kind of party:
 
-- **One gate per process, `width::RUNNERS`.** Its state is per OS thread, not per `Vm` or per
-  scheduler. A party that cannot leave its thread at a slice end (a native callback, an `Executor`
-  job, a gated `--threads=1` nursery body) hands its runner slot over through
-  `Vm::slice_end_in_place`. A fiber that can leave its thread yields as before.
+- **One runner budget of N per process, main included: `width::RUNNERS` (TICKET-230).**
+  `--threads=N` caps the threads that run Chezzi code at once at N process-wide, like Go's
+  `GOMAXPROCS`, at every N. The gate holds `worker_count()` permits, read at every acquire, and it
+  is the only width budget. Every thread that runs Chezzi code holds a permit while it runs: main
+  takes one in `Vm::run` (`width::RunPermit`), and drainers, helpers, pool threads, demote
+  replacements and `Executor` runners take one in `take_runnable_inner` before they pick. Before
+  TICKET-230 the gate counted runners only at `--threads=1`, so each `Executor` and each sched got
+  its own N: two Executors with 4 CPU jobs each used 4.01 cores at `--threads=2`, now 1.98.
+  `claim_runners` stays per-sched DEMAND (how many runners a sched wants), not width. Thread counts
+  have separate caps: `NestedDrainerSlot` caps drainer and helper THREADS at `worker_count().max(2)`,
+  the pool keeps `worker_count()` threads plus one replacement per blocked job, and `Executor`
+  runners stay outside the thread cap (a denied start would cancel the job). The gate's state is
+  per OS thread, not per `Vm` or per scheduler. A party that cannot leave its thread at a slice end
+  (a native callback, an `Executor` job, a nursery body on main) hands its permit over through
+  `Vm::slice_end_in_place`; main does so only once it has started another runner, so a
+  single-threaded program pays nothing per op. A fiber that can leave its thread yields as before.
 - **A job hands its slot over only when a job waits and no pool thread is idle**
   (`pool::job_waits_for_my_slot`). K CPU jobs at `--threads=1` then run on up to K pool threads that
   share one permit: threads grow with the parties that cannot leave their thread, runners do not.
@@ -1424,8 +1438,8 @@ kind of party:
 - **The waker queues the woken thread.** `ChannelCore::wake_all` reserves a FIFO ticket for each
   gated in-place channel waiter (listed once per wait by `Vm::gated_register`), and
   `MnSched::notify_waiters` does the same for each gated idle worker, before it notifies. Wake order
-  is the waker's order, not the order the OS runs the woken threads in. A thread spawned by a gated
-  thread starts gated and its spawner lists its slot (`spawn_worker_thread`).
+  is the waker's order, not the order the OS runs the woken threads in. Every runner thread is gated
+  from birth and its spawner lists its slot (`spawn_runner_thread`).
 - **A gated worker queues its own next turn.** `Vm::mn_worker_loop` reserves its ticket before it
   releases the permit after a slice, when a fiber is runnable or its fiber yielded; the `OwnTurn`
   guard withdraws a turn the loop exits without taking. A callback thread does the same in
@@ -1437,9 +1451,11 @@ kind of party:
   a seeded-only gate, queue or park path. A direct guard hand-off (the releaser gives the guard to
   the first queued waiter) is ruled out: every contended update then costs one thread switch
   (`tests/shared_update_contention.rs` one-box source at T=1: 225 ms against 29 ms).
-- **A gated idle worker never sleeps untimed**: a ticket can land just before its sleep, and a ticket
-  nobody takes blocks every gated thread. Its sleep is bounded by one `DEMOTE_POLL_BACKOFF` tick. An
-  ungated idle worker still sleeps untimed on `idle_cv`.
+- **An idle worker never sleeps untimed**: a ticket can land just before its sleep, and a ticket
+  nobody takes blocks every gated thread. Its sleep is bounded by one `DEMOTE_POLL_BACKOFF` tick.
+  Since TICKET-230 every worker is gated, so no idle worker sleeps untimed.
+- **A runner thread parks in `runner_cache` holding no permit and no ticket**, so gated threads are
+  reused across nurseries like ungated ones were (TICKET-230).
 - **Cost.** A hand-over has no CPU cost of its own, but a serialized `--threads=1` run of two CPU
   jobs costs more wall time than one sequential run when the kernel's `schedutil` governor ramps
   each thread separately: 0.90 s serial, 1.52 s with hand-overs, 0.91 s pinned to one core with
@@ -1474,11 +1490,10 @@ inside a callback, so a runnable sibling runs while stdin is withheld, as under 
 > drainer — the two ran at once (196% measured), even though W8-8 had already made every OTHER T=1
 > shape correctly serial. The body and the drainer now share one width permit (`src/vm/width.rs`,
 > TICKET-141), so `--threads=1` runs at most one CPU runner including the main-thread body: fixed
-> measured 96% on the same shape, matching Go `GOMAXPROCS=1`'s 100%. This does NOT close the contract
-> everywhere: `docs/gaps.md` **W15-9** stays open for a body that blocks once then burns at T>=2 (n+1
-> runners, a separate cause — runners claimed while the body was blocked serve to `terminate`, so
-> they outlive the unblock; since TICKET-211 they come from the one claim at the spawn and the body
-> block, and are reused across nurseries through `runner_cache`). Since TICKET-205
+> measured 96% on the same shape, matching Go `GOMAXPROCS=1`'s 100%. `docs/gaps.md` **W15-9** (a
+> body that blocks once then burns ran n+1 runners at T>=2) is closed by TICKET-230: the body's
+> thread and every runner now hold one permit of the same N-wide gate at every worker count, so the
+> runners that outlive the unblock wait for a permit instead of adding a core. Since TICKET-205
 > the gate is one per process and an `Executor` job is a party of it too (see above); the body has no
 > gate of its own. Full tables: `docs/benchmarks.md` §TICKET-168.
 

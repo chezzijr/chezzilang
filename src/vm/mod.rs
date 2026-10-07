@@ -1442,6 +1442,9 @@ pub struct Vm {
     /// TICKET-205 — this `Vm` cannot leave its OS thread at a slice end (an Executor job, a gated
     /// nursery body), so it counts reductions and hands its runner slot over in place.
     slice_in_place: bool,
+    /// TICKET-230 — the run's main thread holds one runner permit from `Vm::run` until the root
+    /// `Vm` drops.
+    run_permit: Option<width::RunPermit>,
 }
 
 /// D3 — a fiber's reduction budget per schedule-in: how many ops it dispatches before yielding its
@@ -3135,7 +3138,7 @@ impl MnSched {
         if c.pool_joiner != Some(me) || !crate::vm::pool::may_yield_slot() {
             return JoinerStep::Untimed;
         }
-        if width::gated() && crate::vm::pool::job_waits_for_my_slot() {
+        if crate::vm::pool::job_waits_for_my_slot() {
             return JoinerStep::Yield;
         }
         if c.running != 0 || self.runnable.load(Ordering::Relaxed) != 0 {
@@ -3282,11 +3285,8 @@ impl MnSched {
     /// too. Every site that used to broadcast `cv` alone for a wake reachable by an idle worker now
     /// calls this instead, so narrowing the idle sleep to its own condvar never strands a sleeper
     /// that the old broadcast would have reached.
-    /// TICKET-205 — list a gated worker's slot as idle (once).
+    /// TICKET-205 — list a worker's slot as idle (once).
     pub(super) fn idle_register(&self, slot: &Arc<width::Slot>) {
-        if !width::gated() && Arc::ptr_eq(slot, &width::my_slot()) {
-            return;
-        }
         let mut g = self.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
         if !g.iter().any(|s| Arc::ptr_eq(s, slot)) {
             g.push(Arc::clone(slot));
@@ -3867,15 +3867,13 @@ impl MnSched {
         struct IdleReg<'a>(&'a MnSched);
         impl Drop for IdleReg<'_> {
             fn drop(&mut self) {
-                if width::gated() {
-                    let me = width::my_slot();
-                    self.0
-                        .gated_idle
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .retain(|s| !Arc::ptr_eq(s, &me));
-                    width::cancel(&me);
-                }
+                let me = width::my_slot();
+                self.0
+                    .gated_idle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|s| !Arc::ptr_eq(s, &me));
+                width::cancel(&me);
             }
         }
         let _idle = IdleReg(self);
@@ -3888,14 +3886,10 @@ impl MnSched {
             //    TICKET-128 (W13-25) — this pulled fiber runs AHEAD of this worker's own `runnext`
             //    and may block its thread in a `Kind::Inline` native, so if `runnext` is occupied an
             //    idle worker is recruited to steal it (nobody else is left to run it otherwise).
-            if width::gated()
-                && !width::holds()
-                && (self.runnable.load(Ordering::Relaxed) > 0 || width::reserved())
-            {
+            if !width::holds() && (self.runnable.load(Ordering::Relaxed) > 0 || width::reserved()) {
                 width::acquire();
             }
-            let may_pick =
-                !width::gated() || (width::holds() && self.runnable.load(Ordering::Relaxed) > 0);
+            let may_pick = width::holds() && self.runnable.load(Ordering::Relaxed) > 0;
             let global_first = may_pick
                 && if sched_seed::on() {
                     self.rng.below(8) == 0
@@ -4215,11 +4209,16 @@ impl MnSched {
                     .wait_timeout(c, DEMOTE_POLL_BACKOFF)
                     .unwrap_or_else(|e| e.into_inner());
                 drop(guard);
-            } else if width::gated() {
+            } else {
+                // TICKET-128 (W13-25) — a worker with NOTHING runnable sleeps on `idle_cv`, not `cv`,
+                // so a rendezvous handoff can recruit exactly this one sleeper (`recruit`) instead of
+                // broadcasting to every parked worker. `notify_waiters` still reaches this wait; only
+                // a bare `cv.notify_all()`/`notify_one()` would miss it.
                 // TICKET-205 — a waker reserves this thread's permit ticket WITHOUT `c`, so a ticket
                 // can land between the checks above and this wait, and the waker's `idle_sleepers`
-                // read can miss it. A gated sleeper therefore never sleeps untimed: asleep with a
-                // ticket at the head of the queue it would block every other gated thread.
+                // read can miss it. A sleeper therefore never sleeps untimed: asleep with a ticket at
+                // the head of the queue it would block every other thread (TICKET-230: every worker
+                // is gated, so no idle worker sleeps untimed).
                 if !width::reserved() {
                     self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
                     let (guard, _) = self
@@ -4229,15 +4228,6 @@ impl MnSched {
                     self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
                     drop(guard);
                 }
-            } else {
-                // TICKET-128 (W13-25) — a worker with NOTHING runnable sleeps on `idle_cv`, not `cv`,
-                // so a rendezvous handoff can recruit exactly this one sleeper (`recruit`) instead of
-                // broadcasting to every parked worker. `notify_waiters` still reaches this wait; only
-                // a bare `cv.notify_all()`/`notify_one()` would miss it.
-                self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
-                let guard = self.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
-                self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
-                drop(guard);
             }
             judged = false; // W7-58 — see above.
         }
@@ -7286,11 +7276,11 @@ thread_local! {
     /// nursery join (`sched::run_mn_nursery_outermost` / `sched::join_eager_nursery`) on the VM's own
     /// thread, then read here by [`run_capture_counting_picks`].
     pub(crate) static RUN_PICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// TICKET-211 — `(peak runner threads, runner slot denials, runner thread spawns)` of the
-    /// current test's own run, set by `run_file_inner` from the run's `QuiesceState`; read by
-    /// [`run_file_counting_runners`].
-    pub(crate) static RUN_PEAK_RUNNERS: std::cell::Cell<(usize, usize, usize)> =
-        const { std::cell::Cell::new((0, 0, 0)) };
+    /// TICKET-211 — `(peak runner threads, runner slot denials, runner thread spawns, peak runner
+    /// permit holders)` of the current test's own run, set by `run_file_inner` from the run's
+    /// `QuiesceState`; read by [`run_file_counting_runners`]. The fourth is TICKET-230's.
+    pub(crate) static RUN_PEAK_RUNNERS: std::cell::Cell<(usize, usize, usize, usize)> =
+        const { std::cell::Cell::new((0, 0, 0, 0)) };
 }
 
 /// [`run_capture`], plus the number of scheduler picks the run made (TICKET-164). Runs on its own
@@ -7311,15 +7301,18 @@ pub fn run_capture_counting_picks(src: &str) -> (Result<String, RuntimeError>, u
 }
 
 /// Run the file at `entry` and return its output, the run's peak runner-thread count, its runner
-/// slot denials and the OS threads it started for non-Executor runners (TICKET-211). Runs on its
-/// own thread, since [`RUN_PEAK_RUNNERS`] is thread-local to the VM's own thread.
+/// slot denials, the OS threads it started for non-Executor runners (TICKET-211) and its peak
+/// runner permit holders (TICKET-230). Runs on its own thread, since [`RUN_PEAK_RUNNERS`] is
+/// thread-local to the VM's own thread.
 #[cfg(test)]
-pub fn run_file_counting_runners(entry: &std::path::Path) -> (RunOutput, usize, usize, usize) {
+pub fn run_file_counting_runners(
+    entry: &std::path::Path,
+) -> (RunOutput, usize, usize, usize, usize) {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
-            RUN_PEAK_RUNNERS.with(|p| p.set((0, 0, 0)));
+            RUN_PEAK_RUNNERS.with(|p| p.set((0, 0, 0, 0)));
             let out = to_str_output(run_file_inner(
                 &entry,
                 crate::native::HostConfig::default(),
@@ -7328,8 +7321,8 @@ pub fn run_file_counting_runners(entry: &std::path::Path) -> (RunOutput, usize, 
                 false,
                 None,
             ));
-            let (peak, denials, spawns) = RUN_PEAK_RUNNERS.with(|p| p.get());
-            (out, peak, denials, spawns)
+            let (peak, denials, spawns, permits) = RUN_PEAK_RUNNERS.with(|p| p.get());
+            (out, peak, denials, spawns, permits)
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -7760,6 +7753,7 @@ fn run_file_inner(
             vm.quiesce.peak_runner_threads.load(Ordering::SeqCst),
             vm.quiesce.runner_slot_denials.load(Ordering::SeqCst),
             vm.quiesce.runner_spawns.load(Ordering::SeqCst),
+            vm.quiesce.width_probe.peak.load(Ordering::SeqCst),
         ))
     });
     // Memory probe (8B-`Value` gate): report the peak live-bytes high-water mark to real stderr,

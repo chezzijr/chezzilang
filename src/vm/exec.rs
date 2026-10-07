@@ -169,6 +169,7 @@ impl Vm {
             wid: 0,         // D5 owe #3 (Path C) — set in mn_worker_loop
             demoted: false, // D5 owe #3 (Path C)
             slice_in_place: false,
+            run_permit: None,
             cancel: None,
             cancel_outer: Vec::new(),
             cut: None,
@@ -723,6 +724,13 @@ impl Vm {
 
     /// Run every module in dependency order, then the entry's `main()`.
     pub(super) fn run(&mut self) -> Result<(), RuntimeError> {
+        // TICKET-230 — the run's main thread is one of the N runners. The guard keeps a second
+        // `run()` on this `Vm` from dropping the first permit and running with none.
+        #[cfg(test)]
+        width::set_probe(Some(Arc::clone(&self.quiesce.width_probe)));
+        if self.run_permit.is_none() {
+            self.run_permit = Some(width::RunPermit::take());
+        }
         for idx in 0..self.program.modules.len() {
             self.run_module(idx)?;
         }
@@ -1426,6 +1434,10 @@ impl Vm {
             // voluntary park).
             if self.mn.is_some() || self.slice_in_place {
                 if self.reds == 0 {
+                    debug_assert!(
+                        width::holds(),
+                        "TICKET-230: a Chezzi slice ran without a runner permit"
+                    );
                     if self.mn.is_some() && self.native_reentry == 0 {
                         self.yield_now = true;
                         return Ok(());

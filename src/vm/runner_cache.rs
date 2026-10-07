@@ -8,8 +8,8 @@
 //!
 //! INVARIANTS:
 //! 1. Under the lock `idle >= leases.len()`, so a queued lease always has a parked thread to take it.
-//! 2. Only an ungated thread parks, because width state is per OS thread and permanent
-//!    (`src/vm/width.rs`); a born-gated lease always gets a fresh thread.
+//! 2. Every thread is gated (TICKET-230). A parked thread holds no permit and no reserved ticket:
+//!    `mn_worker_loop` released the one and its `OwnTurn` withdrew the other.
 //! 3. `idle += 1`, the slot drop and `helper_done` happen in that order under the cache lock, so a
 //!    nursery whose join returns finds its helpers already parked.
 //! 4. A lease holds its `NestedDrainerSlot` from `start_runners` until it parks, and a thread is
@@ -47,9 +47,9 @@ static WAKE: Condvar = Condvar::new();
 const RUNNER_LINGER: Duration = Duration::from_secs(1);
 
 /// Run `lease` on a parked thread if one is free, else on a new thread.
-pub(super) fn start(lease: Lease, born_gated: bool) -> std::io::Result<()> {
+pub(super) fn start(lease: Lease) -> std::io::Result<()> {
     let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if !born_gated && c.idle > c.leases.len() {
+    if c.idle > c.leases.len() {
         c.leases.push_back(lease);
         WAKE.notify_one();
         return Ok(());
@@ -62,10 +62,7 @@ pub(super) fn start(lease: Lease, born_gated: bool) -> std::io::Result<()> {
         .runner_spawns
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let sched = Arc::clone(&lease.sched);
-    spawn_runner_thread(&sched, "chezzi-eager-helper", born_gated, move || {
-        serve(lease)
-    })
-    .map(drop)
+    spawn_runner_thread(&sched, "chezzi-eager-helper", move || serve(lease)).map(drop)
 }
 
 /// A runner thread's life: serve one lease, park, take the next one or leave after
@@ -85,8 +82,12 @@ fn serve(first: Lease) {
         .is_ok();
         drop(shell);
         let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        let park = ok && !width::gated();
+        let park = ok;
         if park {
+            debug_assert!(
+                !width::holds(),
+                "TICKET-230: a parked runner holds a permit"
+            );
             c.idle += 1;
         }
         drop(slot);
