@@ -616,3 +616,72 @@ fn path_call_grid() {
     param_cells(&mut cells);
     run_grid("path-call", &cells);
 }
+
+const GLIB: &str = "fn g[T](x: T) -> T:
+    return x
+fn f(x: int) -> int:
+    return x
+struct Bx[T]:
+    v: T
+    fn make(v: T) -> Bx[T]:
+        return Bx(v=v)
+    fn get(self) -> T:
+        return self.v
+enum E[T]:
+    A(T)
+    N
+";
+
+/// TICKET-222: a parenthesised path callee is the path value applied, for every head, with and
+/// without type arguments (Rust `(i64::abs)(-6)`, `(g::<i64>)(6)` print `6 6`).
+#[test]
+fn parenthesised_turbofish_call_grid() {
+    let pre = "import std.json
+import std.math
+import lib
+import lib as L
+import a.b
+import Bx, E from lib
+fn idt[T](x: T) -> T:
+    return x
+fn top(x: int) -> int:
+    return x
+type BX = Bx[int]
+";
+    // (head, path, argument, show of the result, printed)
+    let heads = [
+        ("local", "idt[int]", "6", "{}", "6"),
+        ("mod", "lib.g[int]", "6", "{}", "6"),
+        ("alias_mod", "L.g[int]", "6", "{}", "6"),
+        ("full", "a.b.g[int]", "7", "{}", "7"),
+        ("json", "json.decode[int]", "'3'", "{}", "Ok(3)"),
+        ("abs", "math.abs[int]", "-6", "{}", "6"),
+        ("make", "Bx[int].make", "6", "{}.v", "6"),
+        ("get", "Bx[int].get", "Bx[int](v=6)", "{}", "6"),
+        ("variant", "E[int].A", "6", "{}", "A(6)"),
+        ("alias", "BX.make", "6", "{}.v", "6"),
+        ("plain", "top", "6", "{}", "6"),
+        ("plain_mod", "lib.f", "5", "{}", "5"),
+        ("plain_static", "lib.Bx[int].make", "6", "{}.v", "6"),
+    ];
+    let mut cells = Vec::new();
+    for (h, path, arg, show, want) in heads {
+        let rows = [
+            ("paren_call", format!("r := ({path})({arg})")),
+            ("paren_let", format!("v := ({path})\nr := v({arg})")),
+        ];
+        for (p, body) in rows {
+            let r = show.replace("{}", "r");
+            cells.push(Cell {
+                name: format!("paren/{h}/{p}"),
+                files: vec![
+                    ("lib.chz".to_string(), GLIB.to_string()),
+                    ("a/b.chz".to_string(), GLIB.to_string()),
+                    ("main.chz".to_string(), format!("{pre}{body}\nprint({r})\n")),
+                ],
+                expect: prints(want),
+            });
+        }
+    }
+    run_grid("paren-turbofish-call", &cells);
+}
