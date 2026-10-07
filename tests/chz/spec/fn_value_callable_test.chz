@@ -1,0 +1,18 @@
+# TICKET-226: a function value is (item, type args). `json.decode[int]` read twice is one value, and a
+# native fn value is a callable for `spawn`.
+import std.json
+import std.math
+
+test fn decode_value_has_one_identity():
+    assert json.decode[int] == json.decode[int]
+
+test fn native_fn_value_spawns():
+    g := math.sqrt
+    r := recover:
+        parallel:
+            spawn g(9.0)
+    match r:
+        Ok(_):
+            assert true
+        Err(e):
+            assert false, e.message()
