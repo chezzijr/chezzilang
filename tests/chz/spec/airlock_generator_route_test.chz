@@ -2,6 +2,8 @@
 # frame crosses every route the same way. CPython runs the same generator in a pool thread.
 import std.concurrency
 import std.time as time
+import submit_task from std.concurrency.task
+import memoize1 from std.memoize
 
 # A handle carries a `Result`; these tests read a job that did not fault.
 fn must[T](r: Result[T]) -> T:
@@ -158,6 +160,19 @@ fn t190_route(route: str, g: Iterator[int]) -> str:
         r := must(ex.submit_result(fn() -> str: t190_cell(g)).recv())
         ex.shutdown()
         return r
+    elif route == "task_get":
+        ex := Executor()
+        t := submit_task(ex, fn() -> Iterator[int]: g)
+        ex.shutdown()
+        parallel:
+            spawn:
+                match t.get():
+                    Ok(x): out.send(t190_cell(x))
+                    Err(e): out.send("err: {e.message()}")
+    elif route == "memoize":
+        m := memoize1(fn(k: int) -> Iterator[int]: g)
+        parallel:
+            spawn: out.send(t190_cell(m(0)))
     elif route == "channel":
         ch := Channel[Iterator[int]](1)
         ch.send(g)
@@ -193,7 +208,7 @@ fn t190_snapshot_row(named: List[List[int]], sink: List[List[int]]) -> str:
 test fn generator_route_grid():
     marking := "3,fault,2,fault,3,fault,2,fault,3,2,3,2,fault,0"
     handoff := "3,3,2,2,3,3,2,2,3,2,3,2,1,0"
-    routes := ["spawn_fn", "spawn_block", "spawn_value", "submit", "submit_result", "channel", "shared", "rwshared", "atomic"]
+    routes := ["spawn_fn", "spawn_block", "spawn_value", "submit", "submit_result", "channel", "shared", "rwshared", "atomic", "task_get", "memoize"]
     for route in routes:
         named: List[List[int]] = [[], [], [], []]
         sink: List[List[int]] = []
@@ -351,8 +366,6 @@ test fn written_nested_generator_binding_gets_no_stamp():
         cell := t190_written_cell(shape)
         assert cell == "fault [1]", "{shape}: {cell}"
 
-import submit_task from std.concurrency.task
-
 fn t220_started() -> Iterator[int]:
     return t190_started(t190_gl())
 
@@ -368,3 +381,15 @@ test fn task_get_copy_of_frame_local_generator_runs():
                 Ok(g): out.send(t190_cell(g))
                 Err(e): out.send("err: {e.message()}")
     assert out.recv() == "2"
+
+# TICKET-220: a copy's memoize1 cache HIT (a key another task filled) runs the frame-local
+# generator too. The first spawn fills key 0; the second reads it back from the shared cache.
+test fn memoize_copy_hit_of_frame_local_generator_runs():
+    m := memoize1(fn(k: int) -> Iterator[int]: t220_started())
+    got: List[str] = []
+    for _ in range(2):
+        out := Channel[str](1)
+        parallel:
+            spawn: out.send(t190_cell(m(0)))
+        got.push(out.recv())
+    assert ",".join(got) == "2,2"

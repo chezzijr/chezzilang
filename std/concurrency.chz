@@ -129,13 +129,6 @@ fn run_outcome[T](f: fn() -> T, out: Channel[Result[T]]):
 # can pick write-or-share without attempting the write. A scalar is never a copy (TICKET-191).
 native fn is_task_copy(v) -> bool
 
-# Marks `v` and everything it reaches as this task's copy; called by std code on a value a task
-# copy read from a shared core (`Task.get`, a `memoize1` wrapper), so a write to it faults instead
-# of vanishing (TICKET-213). The mark stops at a module, so a function inside `v` leaves the
-# module's globals unmarked. Not for a general read path: a plain `Shared.get()` or `ch.recv()` is
-# a handoff, and the receiver owns it.
-native fn mark_task_copy(v) -> nil
-
 # Returns `v` rebuilt as this task's copy (`Route::CopyRead`): the rebuild every crossing runs, so
 # a write to it faults instead of vanishing, a function inside it leaves its module's globals
 # unmarked, and a generator's private frame slots stay writable (TICKET-190). For std code reading

@@ -431,15 +431,6 @@ pub trait Host {
             message: "this host does not support airlock-copy queries".into(),
         })
     }
-    /// Mark `args[i]` and everything it reaches as this task's copy, so a write to it faults (D4).
-    /// A non-heap value is left alone. Used by `std.concurrency.mark_task_copy`. The default errors,
-    /// as [`Host::arg_is_task_copy`]'s does.
-    fn arg_mark_task_copy(&mut self, i: usize) -> Result<(), HostError> {
-        let _ = i;
-        Err(HostError {
-            message: "this host does not support airlock-copy queries".into(),
-        })
-    }
     /// TICKET-219 — seal the channel `args[ch]` with `args[v]` (`std.concurrency._settle`) and wake
     /// its receivers when this seal was the first. The default errors, as
     /// [`Host::arg_is_task_copy`]'s does.
@@ -698,8 +689,8 @@ pub fn native_name(path: &[String]) -> Option<&'static str> {
             "encoding" => Some("std.encoding"),
             "crypto" => Some("std.crypto"),
             "uuid" => Some("std.uuid"),
-            // `std.concurrency` is a FILE-BACKED native module (phase 4c-concurrency): its two
-            // callable members are `is_task_copy` (TICKET-191) and `mark_task_copy` (TICKET-213); otherwise it declares the four runtime concurrency TYPE/ctor names
+            // `std.concurrency` is a FILE-BACKED native module (phase 4c-concurrency): its
+            // callable members are `is_task_copy` (TICKET-191), `_settle` / `is_settled` (TICKET-219) and `task_copy_of` (TICKET-220); otherwise it declares the four runtime concurrency TYPE/ctor names
             // (`Shared`/`RwShared`/`Atomic`/`Executor`) as `native struct`s in `std/concurrency.chz`,
             // harvested for their sigs + method tables (the ctors still lower via the compiler's
             // name→opcode dispatch, not a bound module member). Only the len-2 path is the native module
@@ -769,7 +760,7 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)]
         "std.encoding" => encoding::MEMBERS,
         "std.crypto" => crypto::MEMBERS,
         "std.uuid" => uuid::MEMBERS,
-        // Two callable members, is_task_copy (TICKET-191) and mark_task_copy (TICKET-213); the four concurrency TYPE names have no
+        // Callable members is_task_copy (TICKET-191), _settle / is_settled (TICKET-219) and task_copy_of (TICKET-220); the four concurrency TYPE names have no
         // runtime value -- they lower via the compiler name→opcode path.
         "std.concurrency" => concurrency::MEMBERS,
         _ => &[],
@@ -1072,13 +1063,12 @@ mod tests {
             native_name(&["std".into(), "concurrency".into()]),
             Some("std.concurrency")
         );
-        // ...and its callable members are is_task_copy (TICKET-191), mark_task_copy (TICKET-213),
-        // the handle-channel pair _settle / is_settled (TICKET-219), and task_copy_of (TICKET-220).
+        // ...and its callable members are is_task_copy (TICKET-191), the handle-channel pair
+        // _settle / is_settled (TICKET-219), and task_copy_of (TICKET-220).
         assert_eq!(
             kinds("std.concurrency"),
             [
                 ("is_task_copy", Kind::Inline),
-                ("mark_task_copy", Kind::Inline),
                 ("_settle", Kind::Inline),
                 ("is_settled", Kind::Inline),
                 ("task_copy_of", Kind::InterceptAirlock)

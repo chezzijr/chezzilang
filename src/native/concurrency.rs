@@ -1,4 +1,4 @@
-//! `std.concurrency`'s callable members (TICKET-191, TICKET-213, TICKET-219). The module's types (`Shared`, `Executor`, ...)
+//! `std.concurrency`'s callable members (TICKET-191, TICKET-219, TICKET-220). The module's types (`Shared`, `Executor`, ...)
 //! lower through the compiler's name->opcode dispatch and have no entry here.
 //!
 //! `is_task_copy(v)` reads the airlock's own predicate, `Heap::is_copied`, the one D4's write check
@@ -14,12 +14,6 @@ use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args};
 fn is_task_copy(h: &mut dyn Host) -> Result<NativeRet, HostError> {
     expect_args(h, "is_task_copy", 1)?;
     Ok(NativeRet::Bool(h.arg_is_task_copy(0)?))
-}
-
-fn mark_task_copy(h: &mut dyn Host) -> Result<NativeRet, HostError> {
-    expect_args(h, "mark_task_copy", 1)?;
-    h.arg_mark_task_copy(0)?;
-    Ok(NativeRet::Nil)
 }
 
 /// TICKET-219 — a std internal: seal `submit_result`'s fresh cap-1 channel `args[0]` with the job's
@@ -48,7 +42,6 @@ fn intercepted(_h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
     ("is_task_copy", is_task_copy, Kind::Inline),
-    ("mark_task_copy", mark_task_copy, Kind::Inline),
     ("_settle", settle, Kind::Inline),
     ("is_settled", is_settled, Kind::Inline),
     ("task_copy_of", intercepted, Kind::InterceptAirlock),

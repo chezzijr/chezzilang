@@ -6951,25 +6951,6 @@ impl crate::native::Host for VmHost<'_> {
         let sealed = core.q.lock().unwrap_or_else(|e| e.into_inner()).is_sealed();
         Ok(sealed)
     }
-    fn arg_mark_task_copy(&mut self, i: usize) -> Result<(), crate::native::HostError> {
-        let Some(v) = self.args.get(i).copied() else {
-            return Err(crate::native::HostError::missing_arg(i));
-        };
-        if !crossing::marks(crossing::Route::CopyRead, false) {
-            return Ok(());
-        }
-        let mut work: Vec<GcRef> = v.as_obj().into_iter().collect();
-        while let Some(h) = work.pop() {
-            // A function value's `home` is this heap's live module (`Heap::children`). The walk
-            // stops there: a module's globals belong to whoever runs this heap, not to the copy.
-            if self.vm.heap.is_copied(h) || matches!(self.vm.heap.get(h), Obj::Module(_)) {
-                continue;
-            }
-            self.vm.heap.set_copied(h);
-            work.extend(self.vm.heap.children(h));
-        }
-        Ok(())
-    }
     fn arg_str_list(&mut self, i: usize) -> Result<Vec<String>, crate::native::HostError> {
         let Some(av) = self.args.get(i).copied() else {
             return Err(crate::native::HostError::missing_arg(i));

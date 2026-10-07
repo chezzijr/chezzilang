@@ -45,15 +45,13 @@ fn _memo_get[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], own: Map[K, V], f
 fn _memo_copy_read[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
     match shared.get_key(k):
         Some(x):
-            concurrency.mark_task_copy(x)
-            return x
+            return concurrency.task_copy_of(x)
         None:
             pass
     v := _memo_fill(shared, f, k)
     match shared.get_key(k):
         Some(x):
-            concurrency.mark_task_copy(x)
-            return x
+            return concurrency.task_copy_of(x)
         None:
             return v
 

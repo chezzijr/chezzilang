@@ -53,9 +53,8 @@ struct Task[T]:
             None: pass
         r := self.ch.recv()
         if concurrency.is_task_copy(self):
-            concurrency.mark_task_copy(r)
-        else:
-            self.cached = Some(r)
+            return concurrency.task_copy_of(r)
+        self.cached = Some(r)
         return r
 
     # True once the job has finished, faulted or cancelled. Never blocks, and never reads false
