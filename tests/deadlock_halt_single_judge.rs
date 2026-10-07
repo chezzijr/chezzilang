@@ -21,29 +21,56 @@ fn main():
 main()
 "#;
 
+/// Streams x runs per stream for the repro. The race lives at `CHEZZI_THREADS=1`; the T=2/0 and
+/// seeded cells are the grid's job. Measured on base `a753681e`, DEBUG binary (what this target
+/// runs), load 2.3-3.3: serial batches of 300 gave 2, 1 and 5 bad runs; four concurrent streams of
+/// 300 gave 3, 5, 2 and 3; this test at 4 x 600 gave 18, 14 and 20 of 2400 in three sessions. That
+/// is 52 of 7200, 0.72% (the release binary is 12-17%). At 0.72%, 3000 runs all pass on base with
+/// probability 4e-10; at 0.54%, the low end of that sample's 95% interval, 9e-8. Four streams keep
+/// the wall time near 75 s and did not lower the rate.
+const STREAMS: usize = 4;
+const RUNS_PER_STREAM: usize = 750;
+
 #[test]
 fn deadlock_on_a_held_guard_ends_the_run_at_the_first_party_site() {
     let dir = std::env::temp_dir().join(format!("chz-ticket223-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create fixture dir");
     let path = dir.join("G.chz");
     std::fs::write(&path, SRC).expect("write fixture");
+    let runs = STREAMS * RUNS_PER_STREAM;
     let mut bad = Vec::new();
-    for run in 0..500 {
-        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-            .arg("run")
-            .arg(&path)
-            .env("CHEZZI_THREADS", "1")
-            .output()
-            .expect("run chezzi");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stdout.contains("main: past the guard") || !stderr.contains("G.chz:9:5") {
-            bad.push(format!("run {run}: stdout {stdout:?}"));
+    std::thread::scope(|s| {
+        let streams: Vec<_> = (0..STREAMS)
+            .map(|k| {
+                let path = &path;
+                s.spawn(move || {
+                    let mut bad = Vec::new();
+                    for i in 0..RUNS_PER_STREAM {
+                        let run = k * RUNS_PER_STREAM + i;
+                        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+                            .arg("run")
+                            .arg(path)
+                            .env("CHEZZI_THREADS", "1")
+                            .output()
+                            .expect("run chezzi");
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        if stdout.contains("main: past the guard") || !stderr.contains("G.chz:9:5")
+                        {
+                            bad.push(format!("run {run}: stdout {stdout:?}"));
+                        }
+                    }
+                    bad
+                })
+            })
+            .collect();
+        for h in streams {
+            bad.extend(h.join().expect("repro stream panicked"));
         }
-    }
+    });
     assert!(
         bad.is_empty(),
-        "deadlock verdict did not end the run at main's site in {} of 500 runs; first: {}",
+        "deadlock verdict did not end the run at main's site in {} of {runs} runs; first: {}",
         bad.len(),
         bad[0]
     );
