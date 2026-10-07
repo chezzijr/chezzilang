@@ -174,7 +174,7 @@ impl Checker {
             table_conflicts: Vec::new(),
             resolutions: HashMap::new(),
             callee_diverges: HashMap::new(),
-            no_fall_off: NoFallOffTable::new(),
+            fall_off: FallOffTable::new(),
             module_idx_of: HashMap::new(),
             fn_homes: HashMap::new(),
             next_opt_tmp: 0,

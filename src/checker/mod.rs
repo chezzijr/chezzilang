@@ -21,9 +21,9 @@ use std::fmt;
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, Crossing,
-    CrossingTable, FnLabels, ForBind, ForBindTable, GenCrossings, NoFallOffTable, ProtoEqTable,
-    Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
-    WitnessKey, WitnessSrc, WitnessTable,
+    CrossingTable, FallOff, FallOffTable, FnLabels, ForBind, ForBindTable, GenCrossings,
+    ProtoEqTable, Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable,
+    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -1251,7 +1251,7 @@ pub fn resolve_call_tables(
     ForBindTable,
     CrossingTable,
     ResolutionTable,
-    NoFallOffTable,
+    FallOffTable,
     GenCrossings,
 ) {
     resolve_call_tables_with(graph, true)
@@ -1273,7 +1273,7 @@ fn resolve_call_tables_with(
     ForBindTable,
     CrossingTable,
     ResolutionTable,
-    NoFallOffTable,
+    FallOffTable,
     GenCrossings,
 ) {
     crate::on_frontend_stack_scoped(move || {
@@ -1292,7 +1292,7 @@ fn resolve_call_tables_with(
             std::mem::take(&mut c.for_binds),
             std::mem::take(&mut c.crossings),
             std::mem::take(&mut c.resolutions),
-            std::mem::take(&mut c.no_fall_off),
+            std::mem::take(&mut c.fall_off),
             std::mem::take(&mut c.gen_crossings),
         )
     })
@@ -1321,7 +1321,7 @@ pub fn resolve_call_tables_standalone(
     ForBindTable,
     CrossingTable,
     ResolutionTable,
-    NoFallOffTable,
+    FallOffTable,
     GenCrossings,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), true)
@@ -1343,7 +1343,7 @@ pub fn resolve_call_tables_standalone_no_memo(
     ForBindTable,
     CrossingTable,
     ResolutionTable,
-    NoFallOffTable,
+    FallOffTable,
     GenCrossings,
 ) {
     resolve_call_tables_with(&standalone_graph(stmts), false)
@@ -2368,8 +2368,8 @@ struct Checker {
     /// `resolve_path` in EVERY walk and overwritten, because inference passes read it; the
     /// Resolution table itself stays main-pass-only (DEC-180).
     callee_diverges: HashMap<(usize, u32), bool>,
-    /// TICKET-184 — fns proved unable to fall off their end; see [`NoFallOffTable`].
-    no_fall_off: NoFallOffTable,
+    /// TICKET-184 — fns proved unable to fall off their end; see [`FallOffTable`].
+    fall_off: FallOffTable,
     /// Graph index of every module, so a from-imported fn's [`Resolution::Fn`] names its home.
     module_idx_of: HashMap<crate::resolver::ModuleId, usize>,
     /// The current module's from-imported fns: bound name -> (declaring module, declared name).

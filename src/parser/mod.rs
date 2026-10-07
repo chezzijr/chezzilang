@@ -2489,7 +2489,13 @@ impl Parser {
             Type::Generic(name, args, name_span)
         } else {
             Type::Named {
-                name,
+                // TICKET-227: `None` names the void type. The parser owns this one alias until
+                // TICKET-231 makes `None` canonical.
+                name: if name == "None" {
+                    "nil".to_string()
+                } else {
+                    name
+                },
                 span: name_span,
             }
         };

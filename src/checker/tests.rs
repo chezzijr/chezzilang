@@ -38077,3 +38077,19 @@ fn prefix_bang_applies_to_the_whole_postfix_operand() {
         "operand must be the whole call: {expr:?}"
     );
 }
+
+#[test]
+fn none_is_the_void_type_name() {
+    ok("fn log(m: str) -> None:\n    print(m)\nlog(\"hi\")\n");
+    rejects(
+        "fn log(m: str) -> None:\n    print(m)\nx := log(\"hi\")\n",
+        "cannot be used as a value",
+    );
+    ok(
+        "fn save(p: str) -> None!str:\n    if p == \"\":\n        return Err(\"empty\")\n    print(p)\n",
+    );
+    rejects(
+        "fn save() -> None!str:\n    return\nx := save()?\n",
+        "cannot be used as a value",
+    );
+}

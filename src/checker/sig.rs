@@ -5313,19 +5313,30 @@ impl Checker {
             && decl.ret.is_some()
             && sig.ret != Ty::Nil;
         let falls_through = self.block_flow(&decl.body).falls_through;
+        // TICKET-227: a `None!E` fn's end is a success, `Ok(nil)`, like a bare `return`.
+        let ok_nil =
+            matches!(&sig.ret, Ty::Result(t, _) if **t == Ty::Nil) && ty_fully_concrete(&sig.ret);
         // TICKET-184: a proved-unreachable end is recorded, so the compiler traps there instead of
         // returning a silent `nil`. Main pass only; a decl with a default span has no key.
+        let fall_off = if !falls_through {
+            Some(FallOff::Trap)
+        } else if ok_nil {
+            Some(FallOff::OkNil)
+        } else {
+            None
+        };
         if must_return
-            && !falls_through
+            && let Some(f) = fall_off
             && !self.generic_arg_prepass
             && !self.resolving_returns
             && decl.name_span != Span::default()
         {
-            self.no_fall_off
-                .insert((self.graph_module_idx, decl.name_span));
+            self.fall_off
+                .insert((self.graph_module_idx, decl.name_span), f);
         }
         if must_return
             && falls_through
+            && !ok_nil
             && let Some(span) = decl.body.first().map(|s| s.span)
         {
             let ret = &sig.ret;

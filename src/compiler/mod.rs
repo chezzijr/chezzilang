@@ -94,7 +94,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc) =
         crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
-    c.no_fall_off = nf;
+    c.fall_off = nf;
     c.for_binds = fb;
     c.call_plans = kw;
     c.witnesses = wt;
@@ -177,7 +177,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
-    c.no_fall_off = nf;
+    c.fall_off = nf;
     c.for_binds = fb;
     c.call_plans = kw;
     c.witnesses = wt;
@@ -340,7 +340,7 @@ struct Compiler {
     /// it. Read through [`Compiler::resolution`].
     resolutions: crate::checker::ResolutionTable,
     /// TICKET-184 — fns the checker proved cannot fall off their end; their fall-off traps.
-    no_fall_off: crate::checker::NoFallOffTable,
+    fall_off: crate::checker::FallOffTable,
     /// W8-21 — which implicit success-coercion (if any) each declared `T?`/`T!E` return sink applies
     /// to its bare success value, consumed verbatim: the backend is type-blind and cannot re-derive
     /// whether the returned expression is already a carrier. A MISS means `NoWrap` — the pre-fix
@@ -615,7 +615,7 @@ impl Compiler {
             crossings: crate::checker::CrossingTable::new(),
             gen_crossings: crate::checker::GenCrossings::default(),
             resolutions: crate::checker::ResolutionTable::new(),
-            no_fall_off: crate::checker::NoFallOffTable::new(),
+            fall_off: crate::checker::FallOffTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             for_binds: crate::checker::ForBindTable::new(),
             next_opt_tmp: 0,
@@ -1297,10 +1297,11 @@ impl Compiler {
         }
         // TICKET-184: the checker proved this end unreachable, so reaching it means the proof is
         // wrong — trap loudly instead of returning a silent `nil`. Fix `checker/flow.rs`, never this.
-        if self
-            .no_fall_off
-            .contains(&(self.current_module_idx, decl.name_span))
-        {
+        let fall_off = self
+            .fall_off
+            .get(&(self.current_module_idx, decl.name_span))
+            .copied();
+        if fall_off == Some(crate::checker::FallOff::Trap) {
             fc.emit(
                 Op::ConstStr(format!(
                     "internal: function '{}' fell off the end, but the type-checker proved every path returns",
@@ -1310,8 +1311,12 @@ impl Compiler {
             );
             fc.emit(Op::CallBuiltin("panic".to_string(), 1), Span::RUNTIME);
         }
-        // Fall off the end → return Nil (do_return joins the implicit nursery).
+        // Fall off the end → return Nil (do_return joins the implicit nursery); a `None!E` fn
+        // returns `Ok(nil)` (TICKET-227).
         fc.emit(Op::Nil, Span::RUNTIME);
+        if fall_off == Some(crate::checker::FallOff::OkNil) {
+            self.emit_builtin_variant(&mut fc, "Ok", Span::RUNTIME)?;
+        }
         fc.emit(Op::Return, Span::RUNTIME);
         Ok(self.finish(fc))
     }
