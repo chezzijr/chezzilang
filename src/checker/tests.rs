@@ -38109,3 +38109,39 @@ fn wait_recv_assign_wraps_into_an_optional_target() {
         "fn main():\n    ch := Channel[int](1)\n    ch.send(5)\n    x: int? = None\n    wait:\n        x = ch.recv():\n            print(x)\n",
     );
 }
+
+#[test]
+fn question_prefix_without_expected_type_defaults_to_optional() {
+    ok("fn main():\n    y := ?5\n    z: int? = y\n");
+}
+
+#[test]
+fn question_prefix_is_pinned_by_a_later_result_slot() {
+    ok("fn take(r: int!str):\n    pass\nfn main():\n    z := ?5\n    take(z)\n");
+}
+
+#[test]
+fn question_prefix_builds_the_expected_carrier() {
+    ok("fn main():\n    x: int? = ?5\n    y: int!str = ?5\n    z: int?? = ?None\n");
+    rejects(
+        "fn main():\n    x: int? = ?\"s\"\n",
+        "'?' value: expected int, found str",
+    );
+}
+
+#[test]
+fn bang_prefix_is_pinned_by_a_later_return() {
+    ok("fn f() -> int!:\n    e := !\"disk\"\n    return e\n");
+}
+
+#[test]
+fn bang_prefix_without_a_pinning_use_is_rejected() {
+    rejects(
+        "fn main():\n    w := !\"disk\"\n    print(w)\n",
+        "cannot infer the success type",
+    );
+    rejects(
+        "w := !\"disk\"\nprint(w)\n",
+        "cannot infer the success type",
+    );
+}

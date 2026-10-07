@@ -17,6 +17,26 @@ pub(super) struct TyVars {
     bounds: Vec<DeferredBound>,
     /// Read node -> its `pending` index: one read keeps one set of vars across re-walks.
     reads: HashMap<u32, usize>,
+    /// TICKET-227: every `?x` / `!e` built with no expected carrier, judged when its frame closes.
+    carriers: Vec<PendingCarrier>,
+    /// `?x` / `!e` node -> its `carriers` index: a re-walk of the node reuses its var.
+    carrier_reads: HashMap<u32, usize>,
+}
+
+/// TICKET-227: a `?x` / `!e` value whose carrier no expected type gave; a later use in its frame
+/// pins `var`.
+pub(super) struct PendingCarrier {
+    node: crate::ast::NodeId,
+    span: Span,
+    var: u32,
+    kind: CarrierKind,
+}
+
+pub(super) enum CarrierKind {
+    /// `?x` with operand type `t`: `var` is the whole value's type.
+    Present(Ty),
+    /// `!e`: `var` is the success type of the error value's `Result`.
+    Error,
 }
 
 /// A generic fn value read that nothing pinned at the read.
@@ -47,6 +67,7 @@ pub(super) struct TyVarMark {
     log: usize,
     pending: usize,
     bounds: usize,
+    carriers: usize,
 }
 
 impl TyVars {
@@ -75,6 +96,7 @@ impl TyVars {
             log: self.log.len(),
             pending: self.pending.len(),
             bounds: self.bounds.len(),
+            carriers: self.carriers.len(),
         }
     }
 
@@ -84,6 +106,8 @@ impl TyVars {
         self.pending.truncate(m.pending);
         self.bounds.truncate(m.bounds);
         self.reads.retain(|_, i| *i < m.pending);
+        self.carriers.truncate(m.carriers);
+        self.carrier_reads.retain(|_, i| *i < m.carriers);
         for id in self.log.drain(m.log..) {
             if (id as usize) < m.slots {
                 self.slots[id as usize] = None;
@@ -115,6 +139,10 @@ impl TyVars {
         if has_var(&z) { Ty::Unknown } else { z }
     }
 }
+
+/// TICKET-227 — an error value `!e` whose success type nothing pins.
+pub(super) const CANNOT_INFER_SUCCESS: &str =
+    "cannot infer the success type; annotate the binding, e.g. w: int! = !e";
 
 /// Whether `t` mentions a `Ty::Var` anywhere.
 pub(super) fn has_var(t: &Ty) -> bool {
@@ -328,15 +356,40 @@ impl Checker {
         self.tyvars.borrow_mut().bounds.push(b);
     }
 
+    /// TICKET-227 — a `?x` / `!e` with no expected carrier in a fn body: a fresh var (the same one
+    /// on a re-walk of `node`), judged at the frame close.
+    pub(super) fn defer_carrier(&mut self, node: &Expr, kind: CarrierKind) -> u32 {
+        let mut s = self.tyvars.borrow_mut();
+        if let Some(&i) = s.carrier_reads.get(&node.id.0) {
+            s.carriers[i].kind = kind;
+            return s.carriers[i].var;
+        }
+        let var = s.fresh();
+        s.carriers.push(PendingCarrier {
+            node: node.id,
+            span: node.span,
+            var,
+            kind,
+        });
+        let i = s.carriers.len() - 1;
+        if node.id.0 != crate::ast::NodeId::SYNTH.0 {
+            s.carrier_reads.insert(node.id.0, i);
+        }
+        var
+    }
+
     /// The frame verdict, over every read and bound recorded since `start`. A read whose vars are
     /// all bound meets its bounds (and a decode read writes its record, DEC-214). A read with a var
     /// still unbound is rejected with today's instantiate hint, and the var is bound to `Unknown`.
     /// A var bound to `Unknown` (the empty-collection sentinel) accepts silently, except for a
     /// decode read, whose value is compiled per `T`.
     pub(super) fn close_tyvar_frame(&mut self, start: TyVarMark) {
-        let (pending, bounds) = {
+        let (pending, bounds, carriers) = {
             let mut s = self.tyvars.borrow_mut();
-            if s.pending.len() <= start.pending && s.bounds.len() <= start.bounds {
+            if s.pending.len() <= start.pending
+                && s.bounds.len() <= start.bounds
+                && s.carriers.len() <= start.carriers
+            {
                 return;
             }
             let p: Vec<Pending> = {
@@ -350,7 +403,13 @@ impl Checker {
             }
             .collect();
             s.reads.retain(|_, i| *i < start.pending);
-            (p, b)
+            let c: Vec<PendingCarrier> = {
+                let n = start.carriers.min(s.carriers.len());
+                s.carriers.drain(n..)
+            }
+            .collect();
+            s.carrier_reads.retain(|_, i| *i < start.carriers);
+            (p, b, c)
         };
         for p in pending {
             let map: HashMap<String, Ty> = p
@@ -388,6 +447,40 @@ impl Checker {
                 .collect();
             if !map.values().any(has_var) {
                 self.enforce_bounds(&b.params, &b.owner, &map, b.span);
+            }
+        }
+        for c in carriers {
+            self.judge_carrier(c);
+        }
+    }
+
+    /// TICKET-227 — the frame verdict on one `?x` / `!e`. An unpinned `?x` is optional; a `?x`
+    /// pinned to `T?` / `T!E` wraps as `Some` / `Ok`. An unpinned `!e` is an error.
+    fn judge_carrier(&mut self, c: PendingCarrier) {
+        let z = self.zonk(&Ty::Var(c.var));
+        match c.kind {
+            CarrierKind::Present(t) => match &z {
+                Ty::Var(v) => {
+                    self.tyvars.borrow_mut().bind(*v, Ty::Option(Box::new(t)));
+                    self.record_wrap(c.node, crate::checker::Wrap::Some, c.span);
+                }
+                Ty::Option(p) if self.assignable(p, &t) => {
+                    self.record_wrap(c.node, crate::checker::Wrap::Some, c.span);
+                }
+                Ty::Result(p, _) if self.assignable(p, &t) => {
+                    self.record_wrap(c.node, crate::checker::Wrap::Ok, c.span);
+                }
+                z if z.is_unknown() => {}
+                z => self.error(
+                    c.span,
+                    format!("'?' builds an optional or success value, found {z}"),
+                ),
+            },
+            CarrierKind::Error => {
+                if let Ty::Var(v) = z {
+                    self.error(c.span, CANNOT_INFER_SUCCESS.to_string());
+                    self.tyvars.borrow_mut().bind(v, Ty::Unknown);
+                }
             }
         }
     }

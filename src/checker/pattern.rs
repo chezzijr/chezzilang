@@ -3628,12 +3628,7 @@ impl Checker {
     pub(super) fn infer_unary(&mut self, node: &Expr, op: UnaryOp, inner: &Expr) -> Ty {
         match op {
             UnaryOp::ErrVal => return self.infer_err_val(node, inner),
-            UnaryOp::Wrap => {
-                self.expected_hint = None;
-                self.infer_value(inner);
-                self.error(node.span, "internal: '?x' is not wired yet".to_string());
-                return Ty::Unknown;
-            }
+            UnaryOp::Wrap => return self.infer_wrap_val(node, inner),
             UnaryOp::Neg | UnaryOp::Not => {}
         }
         let t = self.infer_value(inner);
@@ -3661,7 +3656,7 @@ impl Checker {
     /// TICKET-227 (D2): prefix `!e` builds an error value. Under an expected `T!E` the operand is
     /// inferred with `E` as a seed hint and must fit `E`; the value is that `T!E`. The operand must
     /// satisfy the `Error` protocol.
-    fn infer_err_val(&mut self, _node: &Expr, inner: &Expr) -> Ty {
+    fn infer_err_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
         let hint = self.expected_hint.take();
         let t = match &hint {
             Some(Ty::Result(_, e)) => {
@@ -3682,8 +3677,48 @@ impl Checker {
                 }
                 Ty::Result(ok, e)
             }
+            // No expected carrier: a fn body pins the success type by a later use in its frame
+            // (R5); top level decides at once; the return-inference walk leaves it open.
+            None | Some(Ty::Var(_)) if self.in_fn_body && !self.resolving_returns => {
+                let v = self.defer_carrier(node, super::tyvar::CarrierKind::Error);
+                Ty::Result(Box::new(Ty::Var(v)), Box::new(t))
+            }
+            None | Some(Ty::Var(_)) if !self.resolving_returns => {
+                self.error(node.span, super::tyvar::CANNOT_INFER_SUCCESS.to_string());
+                Ty::Result(Box::new(Ty::Unknown), Box::new(t))
+            }
             _ => Ty::Result(Box::new(Ty::Unknown), Box::new(t)),
         }
+    }
+
+    /// TICKET-227 (D3) — prefix `?x` builds a present/success value, its carrier taken from the
+    /// expected type: `T?` -> `Some(x)`, `T!E` -> `Ok(x)`. The operand owns `T` as its slot (so
+    /// `?5` at `int??` is `Some(Some(5))`). With no expected carrier the value takes a frame type
+    /// variable in a fn body (an unpinned one defaults to `T?`); elsewhere it is `T?` at once.
+    fn infer_wrap_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
+        let hint = self.expected_hint.take();
+        let (payload, w) = match &hint {
+            Some(Ty::Option(p)) => ((**p).clone(), crate::checker::Wrap::Some),
+            Some(Ty::Result(p, _)) => ((**p).clone(), crate::checker::Wrap::Ok),
+            _ => {
+                let t = self.infer_value(inner);
+                if self.in_fn_body && !self.resolving_returns {
+                    let v = self.defer_carrier(node, super::tyvar::CarrierKind::Present(t));
+                    return Ty::Var(v);
+                }
+                self.record_wrap(node.id, crate::checker::Wrap::Some, node.span);
+                return Ty::Option(Box::new(t));
+            }
+        };
+        let t = self.infer_value_in(inner, &payload);
+        if !t.is_unknown() && !self.assignable(&payload, &t) {
+            self.error(
+                inner.span,
+                format!("'?' value: expected {payload}, found {t}"),
+            );
+        }
+        self.record_wrap(node.id, w, node.span);
+        hint.unwrap_or(Ty::Unknown)
     }
 
     pub(super) fn infer_binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Ty {
