@@ -36,10 +36,13 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 **Core:** `int float bool str`, `List[T]`, `Map[K,V]`, `Set[T]`, `tuple`, `fn`, `struct`, `enum`,
 `if/else`, `for/while`, `Result[T, E]` & `Option[T]` + `?`, closures (`fn(x): x*2`), built-in generics
 (`List`/`Map`/`Set`/`Result`). `Result[T, E]` is two-param: `T!` = `Result[T, Error]`, `T!E` =
-`Result[T, E]`, `T?` = `Option[T]` (E defaults to the built-in `Error` protocol). A bare success value
-returned at a declared `T?`/`T!E` sink implicitly coerces to `Some(v)`/`Ok(v)` (`docs/syntax.md`
-"Success-coercion"); `None`/`Some`/`Ok`/`Err` stay explicit and a value already a carrier is never
-re-wrapped.
+`Result[T, E]`, `T?` = `Option[T]`, `T??` = `Option[Option[T]]` (E defaults to the built-in `Error`
+protocol); `None` as a type means "returns nothing" and `None!E` = `Result[nil, E]`, whose bare `return`
+or fall-off is `Ok()`. A plain success value at ANY typed slot (binding, assignment, argument, field,
+element, return, yield, default) implicitly wraps to `Some(v)`/`Ok(v)` (`docs/syntax.md` §9); prefix
+`!e` builds an error value (`return !e`; `e` must satisfy `Error`) and prefix `?x` a present/success
+value of the expected carrier. A value already a carrier is never re-wrapped, there is no int→float
+step, and a slot mentioning an unpinned type parameter does not wrap.
 
 **Included:**
 - **Pattern matching** — `match` on enums (also int/str/bool + tuple + **struct** scrutinees),
@@ -311,7 +314,7 @@ fn area(s: Shape) -> float:
 
 fn safe_div(a: int, b: int) -> Result[int]:
     if b == 0:
-        return Err("divide by zero")
+        return !"divide by zero"
     return Ok(a / b)
 
 fn main() -> int!:                     # must return Result/Option to use `?` — no `fn main` exception
@@ -577,7 +580,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   **conflicts**; write `2.0` in both. `return Ok(1)` / `return Ok(2.0)` likewise conflict (no
   widening inside a merged type-arg slot — the `float! = Ok(3)` error above). The `Result` **error
   slot** defaults to the built-in `Error` protocol when it is un-pinned or its payload **satisfies
-  `Error`** (`return Err("a")` + `return Ok("h")` infers `Result[str, Error]`, not `Result[str, str]`,
+  `Error`** (`return !"a"` + `return Ok("h")` infers `Result[str, Error]`, not `Result[str, str]`,
   because `str` satisfies `Error`; two distinct **sendable** `Error`-satisfying payloads across branches
   unify to `Error` rather than conflicting). A concrete payload that does **not** satisfy `Error` — **or
   satisfies it but is not sendable** — is preserved (not laundered into the `Error` existential); a

@@ -660,15 +660,17 @@ and `T!` for `Result[T, Error]` (E defaults to the built-in `Error` protocol). E
 `List[int]?`, `int!` (= `Result[int, Error]`), `int!DbErr` (= `Result[int, DbErr]`). Pure spelling —
 `Some`/`None`/`Ok`/`Err`, `match`, and `?` behave exactly as on the long forms.
 
-**Success-coercion.** At a declared `T?`/`T!E` return sink (a `fn`'s or closure's own `-> T?`/`-> T!E`,
-including its inline-expr body), a bare success value implicitly coerces: `T -> T?` gives `Some(v)`,
-`T -> T!E` gives `Ok(v)` — and a bare `return` at a `Result[nil, E]` sink gives `Ok()`. `None`, `Some`,
-`Ok` and every `Err` stay explicit; a value that is ALREADY an `Option`/`Result` is never re-wrapped
-(`Option[Option[int]]: return Some(1)` still needs `Some(Some(1))`); the coercion never chains onto the
-int→float rule (`float?: return 1` is still an error, D3); and it declines at a sink mentioning a
-type parameter, and inside a synthesized default-argument provider. A `return`ed or inline-expr-bodied
-**if/match expression** at the same sink success-coerces per BARE branch (see §8): `return if c: n else:
-None` wraps only the bare `n`, leaving the already-wrapped `None` alone.
+**Success-coercion (implicit wrap, TICKET-227).** At EVERY typed slot — a typed binding, an
+assignment target, an argument, a field, a collection or tuple element, a conversion or box ctor
+element, a comprehension element, `return`, `yield`, an inline or closure body, a parameter or field
+default — a plain success value implicitly wraps: `T -> T?` gives `Some(v)`, `T -> T!E` gives `Ok(v)` —
+and a bare `return` (or falling off the end) at a `Result[nil, E]` (`None!E`) fn gives `Ok()`. `None`
+and error values (`!e`, `Err(e)`) stay explicit; a value that is ALREADY an `Option`/`Result` is never
+re-wrapped (`Option[Option[int]]: return Some(1)` still needs `Some(Some(1))`); the wrap never chains
+onto the int→float rule (`float?: return 1` is still an error, D3); and it declines at a slot
+mentioning a type parameter. An operator operand is not a slot, nor is the return of a fn with no `->`.
+Each branch of an **if/match expression** at a slot wraps on its own (see §8): `x: int? = if c: n else:
+None` wraps only the bare `n`, leaving the already-wrapped `None` alone. Full table: §9.
 
 **No `int`→`float` widening at any slot (rule D3, TICKET-138).** An `int`-typed expression — a literal
 or not — is **never** accepted where a `float` is expected: not at a typed binding, a reassignment /
@@ -1015,8 +1017,8 @@ types → that type; (2) mixed `{int, float}` branches **conflict** — no `int`
 `Set`, or the same generic struct/enum) with differing type-args → **merge slot-wise** (each slot: one
 side `?`/un-inferred fills from the other; two concrete slots must be **equal**, no widening inside
 payloads — `Result[int]` and `Result[float]` **conflict**). The `Result` **error slot** is special:
-two *different* `Err` payload types that **both satisfy the `Error` protocol** (`return Err("s")` vs
-`return Err(myErr)`) do **not** conflict — they unify to the built-in `Error` protocol (see below); a
+two *different* `Err` payload types that **both satisfy the `Error` protocol** (`return !"s"` vs
+`return !myErr`) do **not** conflict — they unify to the built-in `Error` protocol (see below); a
 payload that does **not** satisfy `Error` keeps the strict equal-or-conflict rule. (4) otherwise → a
 **conflict** error
 `cannot infer return type: conflicting branches (X vs Y); add a -> annotation`. There is **no
@@ -1024,7 +1026,7 @@ common-supertype / protocol / `Any` search** for the T-slot: two distinct concre
 structs that both have a `speak()` method) *conflict* — a protocol return must be spelled explicitly
 (`-> Shape`).
 
-So `fn res(): if …: return Err("a")` then `return Ok("h")` infers `Result[str, Error]` (the `Ok`
+So `fn res(): if …: return !"a"` then `return Ok("h")` infers `Result[str, Error]` (the `Ok`
 branch pins `T=str`; the error slot defaults to `Error` because the `Err` payload `str` **satisfies**
 `Error`). A concrete error type is honored as-is only when written explicitly (`-> Result[str, str]` /
 `-> int!DbErr`). Slots that stay un-inferable after the merge are resolved at a **finalize** step: the
@@ -1033,7 +1035,7 @@ branch pins `T=str`; the error slot defaults to `Error` because the `Err` payloa
 shorthand); a concrete payload that does **not** satisfy `Error` (e.g. a struct without `message`) is
 **preserved** so a bogus `.message()` on it is still rejected. **Any other**
 residual un-inferable slot — a `Result`/`Option` value slot, a `List`/`Map`/`Set` element — is an error
-`cannot infer return type of '<name>'; add a -> annotation`. Hence `fn err(): return Err("x")`,
+`cannot infer return type of '<name>'; add a -> annotation`. Hence `fn err(): return !"x"`,
 `fn none(): return None`, and `fn f(): return []` are each rejected (the value type is un-inferable, the
 return-position analogue of the empty-collection diagnostic) — annotate them (`-> str!`, `-> int?`,
 `-> List[int]`).
@@ -1876,7 +1878,7 @@ struct Email:
     fn parse(s: str) -> Result[Email, str]:   # validating ctor
         if "@" in s:
             return Ok(Email(s))
-        return Err("missing @")
+        return !"missing @"
 
 r := Rect.square(5)        # Type.method(args) — static call
 print(r.area())            # 25
@@ -3414,9 +3416,9 @@ position — an annotated binding, a call argument, a declared return — take t
 (`x: Sh = if true: Sq(2) else: Tr(9)`, where `Sh` is a protocol both `Sq` and `Tr` satisfy). With NO
 expected type the branches must still agree, so `x := if true: Sq(2) else: Tr(9)` stays `branches have
 incompatible types: Sq and Tr`. The expected type is matched with plain assignability, so it never
-licenses an int-to-float widen — `x: float = if c: 1 else: 2` is an error (write `1.0`). At a declared
-`T?`/`T!E` **return sink** the branches may also MIX bare success values with already-wrapped ones
-(`return if n > 0: n else: None`); each bare branch is success-coerced (`Some(n)`), the others are
+licenses an int-to-float widen — `x: float = if c: 1 else: 2` is an error (write `1.0`). At a typed
+`T?`/`T!E` **slot** the branches may also MIX bare success values with already-wrapped ones
+(`x: int? = if n > 0: n else: None`); each bare branch wraps on its own (`Some(n)`), the others are
 left alone, and the same declines named under **Success-coercion** below apply (a generic slot, a
 declared `Option[Option[int]]`). This is a
 property of the if/match EXPRESSION and is distinct from multi-`return` inference (which still conflicts
@@ -3437,7 +3439,7 @@ Errors are **values**, not exceptions. No hidden control flow.
 ```chezzi
 fn safe_div(a: int, b: int) -> int!:        # int! == Result[int, Error]
     if b == 0:
-        return Err("divide by zero")        # a str IS an Error (see below)
+        return !"divide by zero"             # a str IS an Error (see below)
     return Ok(a / b)
 
 fn calc() -> Result[int]:
@@ -3445,6 +3447,55 @@ fn calc() -> Result[int]:
     y := safe_div(x, 0)?      # if Err, calc() returns that Err immediately
     return Ok(x + y)
 ```
+
+**Types and values (TICKET-227).** The carriers have short spellings, and a plain value wraps into
+the carrier its slot expects:
+
+| type | means | values |
+|---|---|---|
+| `T?` | `T` or absent (`Option[T]`) | a plain `T`, `None`, `?x` |
+| `T!E` / `T!` | `T` or an error `E` (`Result[T, E]`; `T!` = `T!Error`) | a plain `T`, `!e`, `?x` |
+| `None` | returns nothing (an annotation only: `fn log(m: str) -> None`) | — |
+| `None!E` | nothing, or an error (`Result[nil, E]`) | `!e`; a bare `return` or falling off the end is success |
+| `T??` | nested optional (`Option[Option[T]]`) | `None` is the OUTER absent, `?None` the inner one |
+
+```chezzi
+fn save(path: str) -> None!str:
+    if path == "":
+        return !"empty path"     # prefix `!` builds an error value; there is no `fail` keyword
+    write(path)                  # falling off the end returns Ok(nil)
+
+fn find(xs: List[int], k: int) -> int?:
+    for x in xs:
+        if x == k:
+            return x             # wraps: Some(x)
+    return None
+
+x: int? = 5                      # Some(5)
+rs: List[int!str] = [1, !"disk", 3]   # [Ok(1), Err('disk'), Ok(3)]
+```
+
+- **`!e` builds an error value.** Its operand must satisfy the `Error` protocol (`!5` is the error
+  `int does not satisfy Error`); the prefix applies to the whole postfix operand (`!wrap(e)`).
+  `return !e` returns an error. `!e` is an ordinary expression: it works at any typed slot.
+- **Implicit wrap at every typed slot.** Wherever the expected type is known — a typed binding, an
+  assignment target (`x = 5`, `s.f = 5`, `xs[i] = 5`, `x, y = 5, 0`), a call or method argument, a
+  struct field or variant payload, a list/map/tuple element, a `List[T](...)` / `Map[K, V](...)` /
+  `Shared[T](...)` element, a comprehension element, `return`, `yield`, an inline or closure body, a
+  parameter or field default — a plain `T` becomes `Some(v)` at `T?` and `Ok(v)` at `T!E`. Each
+  branch of an `if`/`match` value at such a slot wraps on its own (`x: int? = if c: 5 else: None`).
+  Three rules: a carrier is never re-wrapped (`x: int?? = Some(5)` stays an error); there is no
+  int→float step (`fn f() -> float?: return 1` is an error); a slot that mentions an unpinned type
+  parameter (`-> T?`) does not wrap. An operator operand is not a slot (`x: int? = 1 + 2` wraps the
+  sum, `Some(3)`), and neither is the return of a fn with no `->` annotation.
+- **`?x` builds a present/success value**, its carrier taken from the expected type: `?5` is
+  `Some(5)` at `int?` and `Ok(5)` at `int!E`; `x: int?? = ?None` is `Some(None)`.
+- **No expected type.** Inside a fn, a later use pins the carrier: `y := ?5` alone is `int?`;
+  `z := ?5` then `take(z)` with `take(r: int!str)` makes it `Ok(5)`. `w := !"disk"` needs its success
+  type pinned the same way (`return w` in an `int!` fn); unpinned it is the error `cannot infer the
+  success type; annotate the binding, e.g. w: int! = !e`. At top level `?5` is `int?` at once and
+  `!e` must be annotated.
+- **Set elements and map keys** never wrap in effect: no carrier is `Hashable`.
 
 **`Result[nil, E]`'s success value.** There is no `nil` expression — `nil` only means "returns no
 value" — so a `Result` with no payload is constructed with zero-arg `Ok()`, not `Ok(nil)`:
@@ -3472,7 +3523,7 @@ struct DbErr:
         return "db error {self.code}"
 
 fn query() -> Row!DbErr:        # Result[Row, DbErr]
-    return Err(DbErr(503))
+    return !DbErr(503)
 
 match query():
     Ok(row): use(row)
@@ -3551,7 +3602,7 @@ trace, and that is exactly where `chezzi check` **warns**, following Rust (which
 `#[must_use]` and warns on the drop):
 
 ```chezzi
-fn g() -> Result[int, Error]: return Err("E")
+fn g() -> Result[int, Error]: return !"E"
 g()                    # warning … the Result returned by 'g' is discarded, and rc stays 0
 fn f():
     g()                # warning … the Result returned by 'g' is discarded, and rc stays 0
@@ -3598,7 +3649,7 @@ warn: their bodies are ordinary statements, not the fire-and-forget call.)
 *statement's own type*, so a generic that swallows its argument is invisible to it:
 
 ```chezzi
-fn g() -> Result[int, Error]: return Err("E")
+fn g() -> Result[int, Error]: return !"E"
 fn drop_it[T](x: T):
     x                  # type is `T`, not a carrier — NO warning
 drop_it(g())           # prints "after", rc=0; the Err is gone
@@ -3656,7 +3707,7 @@ everyday error handling — `Result`/`?` remain the tool for expected failures.
 
 **`panic(msg: str)` — raise a panic yourself.** The faults above (OOB, divide-by-zero, overflow) are
 raised by the runtime; `panic(msg)` raises the *same* recoverable fault from your own code. It
-**unwinds** — it does not return a value (it is **not** sugar for `return Err(...)`, which already
+**unwinds** — it does not return a value (it is **not** sugar for `return !e`, which already
 exists for *expected* errors). The nearest enclosing `recover:` catches it as `Err(e)` with
 `e.message() == msg`; uncaught, it terminates the program with that message and a non-zero exit code,
 exactly like an integer overflow. `defer`s run as it unwinds, like any panic — and if one of those
@@ -5382,7 +5433,7 @@ struct Point:
 
 fn safe_div(a: int, b: int) -> Result[int]:
     if b == 0:
-        return Err("divide by zero")
+        return !"divide by zero"
     return Ok(a / b)
 
 fn main():

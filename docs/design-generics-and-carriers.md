@@ -323,6 +323,7 @@ They exist only inside the compiler (R3). Every spelling has a replacement:
    - D4 `else` guard;
    - D5 `?v` / `!e` patterns, bare-constant reject;
    - D6 remove the long names (last: after every corpus use is migrated).
+   - Status: D2 and D3 shipped (TICKET-227).
 5. Docs: rewrite the error-handling chapter of `docs/syntax.md` around the Part 2 table; `docs/spec.md`
    and `docs/grammar.bnf`; a migration note listing every old spelling and its new one.
 
