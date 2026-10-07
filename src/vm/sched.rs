@@ -2519,15 +2519,23 @@ impl Vm {
             let span = fiber.span;
             let disp = self.run_one_fiber(&mut fiber, span, slice);
             self.offer_pool_slot();
-            // TICKET-206 — a worker queues its own next turn while it still holds the permit, so
-            // its place does not depend on how long the bookkeeping below takes.
-            if width::holds()
-                && (sched.runnable.load(Ordering::Relaxed) > 0 || matches!(disp, Disp::Yield))
-            {
-                width::reserve(&width::my_slot());
+            // TICKET-230 — a worker keeps its permit across fibers while no thread queues for one.
+            // Releasing and re-taking it per fiber was a gate round trip per park (measured: the
+            // head-of-line wait made `send_one_channel` T=0 29.2x base). When a thread queues, the
+            // worker hands the permit over at this fiber boundary.
+            if width::RUNNERS.waiting() > 0 {
+                // TICKET-206 — a worker queues its own next turn while it still holds the permit,
+                // so its place does not depend on how long the bookkeeping below takes. The reserve
+                // stays above the release (DEC-206).
+                if width::holds()
+                    && (sched.runnable.load(Ordering::Relaxed) > 0 || matches!(disp, Disp::Yield))
+                {
+                    width::reserve(&width::my_slot());
+                }
+                // Also runs on the panic path: `run_one_fiber` catches the panic and returns
+                // `Disp::Finish`.
+                self.width_release();
             }
-            // Also runs on the panic path: `run_one_fiber` catches the panic and returns `Disp::Finish`.
-            self.width_release();
             match disp {
                 Disp::Park(key, core) => sched.park(key, core, fiber),
                 // Bounded backpressure — the send-side park (gap re-check = space, not a message).

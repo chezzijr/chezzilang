@@ -1435,15 +1435,31 @@ kind of party:
   share one permit: threads grow with the parties that cannot leave their thread, runners do not.
 - **A gated thread picks a fiber, and draws from the seeded RNG, only while it holds the permit.**
   `take_runnable_inner` takes the permit before the pick and releases it before every wait.
-- **The waker queues the woken thread.** `ChannelCore::wake_all` reserves a FIFO ticket for each
-  gated in-place channel waiter (listed once per wait by `Vm::gated_register`), and
-  `MnSched::notify_waiters` does the same for each gated idle worker, before it notifies. Wake order
-  is the waker's order, not the order the OS runs the woken threads in. Every runner thread is gated
-  from birth and its spawner lists its slot (`spawn_runner_thread`).
-- **A gated worker queues its own next turn.** `Vm::mn_worker_loop` reserves its ticket before it
-  releases the permit after a slice, when a fiber is runnable or its fiber yielded; the `OwnTurn`
-  guard withdraws a turn the loop exits without taking. A callback thread does the same in
-  `Vm::slice_end_in_place`, where the acquire that follows always takes the ticket.
+  An idle unseeded worker also takes a FREE permit (`width::try_acquire`) to look for work, and
+  picks whenever it holds one (TICKET-230): gating the pick on a relaxed `runnable > 0` read made
+  idle workers skip work they could take (`send_one_channel` T=0 1.37 s vs base 0.76 s). Seeded
+  mode keeps `holds() && runnable > 0` and takes no free permit, because `try_steal` and the
+  global-first coin draw from the seeded RNG.
+- **The gate grants by queue position, not by queue head (TICKET-230).** A ticket at queue position
+  i is granted while `held + i < cap` (`WidthGate::acquire_slot`). A head-only grant made every
+  thread wait behind a ticket reserved for a thread the OS had not run yet: `send_one_channel` T=0
+  ran 29.2x base, with every gate wait taken while permits were free. At cap 1 the two rules agree.
+  The free-permit path is lock-free: `held` is an atomic, and `release` locks only when a thread
+  queues.
+- **The waker queues the woken thread only when the budget is full.** `ChannelCore::wake_all`
+  reserves a FIFO ticket for each gated in-place channel waiter (listed once per wait by
+  `Vm::gated_register`), and `MnSched::notify_waiters` does the same for each gated idle worker,
+  before it notifies, but only when no permit is free beyond the queued tickets (`width::full`,
+  TICKET-230). Then wake order is the waker's order, not the order the OS runs the woken threads
+  in; with a free permit the woken thread takes it itself. At cap 1 a waker that holds the permit
+  always queues, so T=1 order is unchanged. Every runner thread is gated from birth and its spawner
+  lists its slot (`spawn_runner_thread`).
+- **A worker keeps its permit across fibers while no thread queues (TICKET-230).**
+  `Vm::mn_worker_loop` returns its permit at a fiber boundary only when `RUNNERS.waiting() > 0`.
+  Then it queues its own next turn first, while it still holds the permit, when a fiber is runnable
+  or its fiber yielded (DEC-206); the `OwnTurn` guard withdraws a turn the loop exits without
+  taking. A callback thread does the same in `Vm::slice_end_in_place`, where the acquire that
+  follows always takes the ticket.
 - **Seeded replay is exact only where that is free (owner decision 2026-10-05).** The seed is a
   fuzzer first. A nursery join in place, a `Shared` guard wait, an `Executor` join and job start,
   and a `recv` or `wait:` inside a native callback replay at a measured rate (`docs/gaps.md`

@@ -3337,7 +3337,11 @@ impl MnSched {
     }
 
     fn notify_waiters(&self) {
-        if self.runnable.load(Ordering::Relaxed) > 0 {
+        // TICKET-230 — the waker queues gated idle workers only when no permit is free beyond the
+        // queued tickets ([`width::full`]): with a free permit the woken worker takes it itself,
+        // and a reserved ticket would make it wait behind a thread the OS has not run yet
+        // (head-of-line wait). The `gated_idle` walk is skipped with it.
+        if self.runnable.load(Ordering::Relaxed) > 0 && width::full() {
             for s in self
                 .gated_idle
                 .lock()
@@ -3910,10 +3914,18 @@ impl MnSched {
             //    TICKET-128 (W13-25) — this pulled fiber runs AHEAD of this worker's own `runnext`
             //    and may block its thread in a `Kind::Inline` native, so if `runnext` is occupied an
             //    idle worker is recruited to steal it (nobody else is left to run it otherwise).
+            // TICKET-230 — an idle unseeded worker takes a FREE permit to look for work, and picks
+            // whenever it holds one: an idle worker whose relaxed `runnable` read was 0 skipped work
+            // it could take (`send_one_channel` T=0 1.37 s vs base 0.76 s). Seeded mode keeps the
+            // old pick rule: an idle holder must not draw from the seeded RNG (`try_steal`, the
+            // global-first coin) with nothing runnable (DEC-205, DEC-209).
             if !width::holds() && (self.runnable.load(Ordering::Relaxed) > 0 || width::reserved()) {
                 width::acquire();
+            } else if !sched_seed::on() {
+                width::try_acquire();
             }
-            let may_pick = width::holds() && self.runnable.load(Ordering::Relaxed) > 0;
+            let may_pick =
+                width::holds() && (self.runnable.load(Ordering::Relaxed) > 0 || !sched_seed::on());
             let global_first = may_pick
                 && if sched_seed::on() {
                     self.rng.below(8) == 0

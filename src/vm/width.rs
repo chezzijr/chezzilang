@@ -55,6 +55,22 @@ pub(super) fn release() {
         RUNNERS.release();
     }
 }
+/// TICKET-230 — take a FREE permit without waiting: `false` when none is free beyond the queued
+/// tickets, or when a waker already queued this thread (its ticket keeps its place).
+pub(super) fn try_acquire() -> bool {
+    if holds() {
+        return true;
+    }
+    let free = with_slot(|s| {
+        s.ticket.load(Ordering::Relaxed) == 0
+            && RUNNERS.try_take(RUNNERS.waiting.load(Ordering::SeqCst))
+    });
+    if free {
+        HOLDS.with(|h| h.0.set(true));
+        probe_enter();
+    }
+    free
+}
 /// One in-place wait with the permit released.
 pub(super) fn released<R>(wait: impl FnOnce() -> R) -> R {
     release();
@@ -184,6 +200,10 @@ pub(super) fn cancel(slot: &Slot) {
 /// Has a waker queued this thread for the permit?
 pub(super) fn reserved() -> bool {
     with_slot(|s| s.ticket.load(Ordering::Relaxed) != 0)
+}
+/// TICKET-230 — no permit is free beyond the queued tickets.
+pub(super) fn full() -> bool {
+    RUNNERS.held.load(Ordering::SeqCst) + RUNNERS.waiting.load(Ordering::SeqCst) >= (RUNNERS.cap)()
 }
 /// The waker queues the woken thread for the permit, in the waker's own order, when the gate is
 /// [`full`].
