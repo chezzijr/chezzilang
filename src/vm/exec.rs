@@ -997,18 +997,24 @@ impl Vm {
         // The ONLY taker of the job-fault cell, and it reports what it takes — for an `Ok` run
         // too: a job can fault while a passing run reads no halt.
         let job = self.quiesce.take_job_fault();
+        // TICKET-223 — the ONLY taker of the deadlock report too, so a drain after the verdict finds
+        // no report and its join waits for the victims (the verdict itself stays latched).
+        let dl = self.quiesce.take_deadlock_report();
         if self.pending_exit.is_some() {
             return r;
         }
-        let Some((je, trace)) = job else {
-            return r;
-        };
-        self.adopt_child_fault(None, trace);
-        Err(if matches!(&r, Err(e) if e.is_deadlock) {
-            je.deadlock()
-        } else {
-            je
-        })
+        if let Some((je, trace)) = job {
+            self.adopt_child_fault(None, trace);
+            return Err(if matches!(&r, Err(e) if e.is_deadlock) {
+                je.deadlock()
+            } else {
+                je
+            });
+        }
+        match (r, dl) {
+            (Ok(()), Some((msg, site))) => Err(self.err(msg.to_string(), site).deadlock()),
+            (r, _) => r,
+        }
     }
 
     /// The per-test A2 join: drain (join) only the executors created SINCE `mark`, i.e. by the test

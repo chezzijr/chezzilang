@@ -26,11 +26,10 @@
 //!
 //! # Counted parties, and why the count is sound
 //!
-//! `live = 1 (the main thread) + Σ ExecutorCore::outstanding` over the run's [`ExecRegistry`].
-//! `outstanding` is bumped at `reserve()` — at `submit`, BEFORE the job is dispatched — and dropped at
-//! `finish()`, so a job still queued behind a saturated pool already counts as live. No new counter is
-//! introduced, deliberately: an UNDER-count of `live` is the one error direction that produces a false
-//! deadlock, and `outstanding` is maintained by the code that owns job lifetime.
+//! `live = 1 (the main thread) + live_eager_bodies()`: one per registered sched that still holds an
+//! undone task that can move. Since TICKET-208 a job is a fiber of its Executor's detached sched,
+//! so a job that can still send counts through its sched, never as a party of its own. An
+//! UNDER-count of `live` is the one error direction that produces a false deadlock.
 //!
 //! **The load-bearing invariant.** A thread that is not a counted party — an `MnSched` worker, a
 //! netpoller callback, a timer callback, a blocking-pool thread — only ever runs user code while some
@@ -60,6 +59,7 @@ use std::sync::{Arc, Mutex};
 
 use super::block::{Halt, WakeSet};
 use super::core::{ChannelCore, Pending};
+use crate::ast::Span;
 
 /// What one registered party is waiting for — and, through [`PartyWait::satisfiable`], whether that
 /// wait could already be over.
@@ -227,6 +227,55 @@ impl PartyWait {
 struct Party {
     wait: Arc<PartyWait>,
     wake: WakeSet,
+    /// TICKET-223 — the deadlock report this party gives when the verdict names it: its own text
+    /// and blocking site. `None` for a Join or Nursery party, whose report is the victims' slots
+    /// (DEC-208).
+    site: Option<(&'static str, Span)>,
+}
+
+/// TICKET-223 — the latched deadlock verdict ([`QuiesceState::decide`]).
+#[derive(Default)]
+struct DeadlockCell {
+    decided: bool,
+    report: Option<(&'static str, Span)>,
+}
+
+/// TICKET-223 — which judge asks [`QuiesceState::decide`]: a party at its own poll, or a sched
+/// worker with nothing runnable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Judge {
+    Party,
+    Sched,
+}
+
+/// TICKET-223 — names the judge allowed to decide first (`party` or `sched`), so a test can force
+/// either order. Compiled only under `debug_assertions`: the release binary reads no test env.
+#[cfg(debug_assertions)]
+pub(crate) const VERDICT_JUDGE_ENV: &str = "CHEZZI_TEST_VERDICT_JUDGE";
+
+/// TICKET-223 — `true` when [`VERDICT_JUDGE_ENV`] pins the OTHER judge, so `judge` must not decide
+/// first. A `party` pin holds back the sched judge only while a party with a site is registered:
+/// otherwise no party judge would ever decide. Always `false` in a release build.
+fn pinned_away(judge: Judge, has_site: bool) -> bool {
+    #[cfg(debug_assertions)]
+    {
+        static PIN: std::sync::OnceLock<Option<Judge>> = std::sync::OnceLock::new();
+        let pin = *PIN.get_or_init(|| match std::env::var(VERDICT_JUDGE_ENV).as_deref() {
+            Ok("party") => Some(Judge::Party),
+            Ok("sched") => Some(Judge::Sched),
+            _ => None,
+        });
+        match (pin, judge) {
+            (Some(Judge::Sched), Judge::Party) => true,
+            (Some(Judge::Party), Judge::Sched) => has_site,
+            _ => false,
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (judge, has_site);
+        false
+    }
 }
 
 /// The run's registry of blocked parties. One per `Vm::new`, shared by `Arc` with every worker.
@@ -290,6 +339,10 @@ pub(super) struct QuiesceState {
     /// TICKET-208 — the fault of a fire-and-forget `Executor` job: the second cause of a run-wide
     /// halt, beside `exit`. Read through the one funnel `Vm::run_exit_err`, taken by `Vm::rank_end`.
     job_fault: Mutex<Option<(super::RuntimeError, Vec<super::TraceFrame>)>>,
+    /// TICKET-223 — the deadlock verdict, the third cause of a run-wide halt. Latched once by
+    /// [`Self::decide`] under the party lock; read through `Vm::run_exit_err`; its report is taken
+    /// by `Vm::rank_end`. Reset only by [`Self::clear_exit`].
+    deadlock: Mutex<DeadlockCell>,
     /// TICKET-211 — runner threads of this run inside `Vm::mn_worker_loop` right now, one per OS
     /// thread however deep its loops nest (`sched::RunnerCount`). Test-only.
     #[cfg(test)]
@@ -313,6 +366,15 @@ pub(super) enum RunHalt {
     Fault,
     /// An `os.exit`: no `defer` runs in any party.
     Exit,
+    /// TICKET-223 — a latched deadlock verdict: no `defer` runs (TICKET-152), no handle settles.
+    Deadlock,
+}
+
+impl RunHalt {
+    /// Whether this halt settles the held job handles. An exit and a deadlock settle nothing.
+    pub(super) fn settles(self) -> bool {
+        !matches!(self, RunHalt::Exit | RunHalt::Deadlock)
+    }
 }
 
 impl QuiesceState {
@@ -346,6 +408,7 @@ impl QuiesceState {
     /// atomic is cleared with it to keep the mirror honest and to save the confirming lock.
     pub(super) fn clear_exit(&self) {
         *self.exit.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.deadlock.lock().unwrap_or_else(|e| e.into_inner()) = DeadlockCell::default();
         // The hint covers a pending job fault too, and this reset never clears that.
         self.run_halt_hint
             .store(self.has_job_fault(), Ordering::Release);
@@ -373,11 +436,19 @@ impl QuiesceState {
 
     /// TICKET-219 — the run halt's kind, the one source `Vm::run_halt_due` and
     /// `SchedCore::job_event` read. An exit outranks a job fault: `os.exit` runs no `defer`.
+    /// A job fault outranks a deadlock verdict (TICKET-223).
     pub(super) fn run_halt(&self) -> RunHalt {
         if self.pending().is_some() {
             RunHalt::Exit
         } else if self.has_job_fault() {
             RunHalt::Fault
+        } else if self
+            .deadlock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .decided
+        {
+            RunHalt::Deadlock
         } else {
             RunHalt::Running
         }
@@ -399,18 +470,35 @@ impl QuiesceState {
             .take()
     }
 
-    /// Register a blocked party for as long as the returned guard lives.
+    /// TICKET-223 — the latched report's text and site, while a verdict is decided.
+    pub(super) fn deadlock_report(&self) -> Option<(&'static str, Span)> {
+        let g = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
+        if g.decided { g.report } else { None }
+    }
+
+    /// TICKET-223 — take the latched report; the verdict stays decided. ONE caller, `Vm::rank_end`.
+    pub(super) fn take_deadlock_report(&self) -> Option<(&'static str, Span)> {
+        self.deadlock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .report
+            .take()
+    }
+
+    /// Register a blocked party for as long as the returned guard lives. It has no deadlock site.
     pub(super) fn block(self: &Arc<Self>, wait: PartyWait, wake: WakeSet) -> PartyGuard {
-        self.block_shared(Arc::new(wait), wake)
+        self.block_shared(Arc::new(wait), wake, None)
     }
 
     /// §2c1 — [`Self::block`] over an `Arc` the caller already holds, so ONE `PartyWait` can be both
     /// the registered party AND the sched-side `SchedCore::waiters` entry. Two separately-built
     /// waits for the same block could disagree about what the thread waits for; one cannot.
+    /// `site` is the party's deadlock report (TICKET-223).
     pub(super) fn block_shared(
         self: &Arc<Self>,
         wait: Arc<PartyWait>,
         wake: WakeSet,
+        site: Option<(&'static str, Span)>,
     ) -> PartyGuard {
         self.parties
             .lock()
@@ -418,6 +506,7 @@ impl QuiesceState {
             .push(Party {
                 wait: Arc::clone(&wait),
                 wake,
+                site,
             });
         PartyGuard {
             state: Arc::clone(self),
@@ -447,13 +536,51 @@ impl QuiesceState {
     /// cycle. `parties` is globally exclusive, so at most one thread is ever inside this function and
     /// it takes each `SchedCore` singly — there is no A→A' edge either. (Same rule the deleted
     /// `eager_join_deadlocked` documented; it is tightened here, not relaxed.)
+    ///
+    /// TICKET-223 — test-only: both production judges call [`Self::decide`], which evaluates the
+    /// same predicate under the same lock discipline and latches it.
+    #[cfg(test)]
     pub(super) fn quiesced(&self) -> bool {
         self.verdict()
     }
 
+    /// TICKET-223 — the ONE place a judge acts on the verdict. The first judge that sees it latches
+    /// it, with the report taken from the first registered party that has a site, and publishes it
+    /// as a run halt; every later call answers `true`. The latch is taken under the party lock, so
+    /// it is set before any judge cuts a victim. [`Self::quiesced`] stays the pure predicate.
+    ///
+    /// Lock order: `parties` (P), then the verdict's own walk, then the `deadlock` cell alone. The
+    /// cell is never held across the walk, because `run_halt` reads it under a `SchedCore` lock.
+    pub(super) fn decide(&self, judge: Judge) -> bool {
+        let parties = self.parties.lock().unwrap_or_else(|e| e.into_inner());
+        if self
+            .deadlock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .decided
+        {
+            return true;
+        }
+        let site = parties.iter().find_map(|p| p.site);
+        if !self.verdict_on(&parties) || pinned_away(judge, site.is_some()) {
+            return false;
+        }
+        let mut cell = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
+        cell.decided = true;
+        cell.report = site;
+        self.run_halt_hint.store(true, Ordering::Release);
+        true
+    }
+
     /// One evaluation under ONE hold of the party lock (see [`Self::quiesced`]).
+    #[cfg(test)]
     fn verdict(&self) -> bool {
         let parties = self.parties.lock().unwrap_or_else(|e| e.into_inner());
+        self.verdict_on(&parties)
+    }
+
+    /// The verdict over `parties`, which the caller holds locked.
+    fn verdict_on(&self, parties: &[Party]) -> bool {
         // `1 +` is the main thread, which is a party for the whole run. Plus one per registered
         // sched (an eager nursery, nested ones since TICKET-112, or an `Executor`'s detached
         // sched since TICKET-208) that still holds an undone task that can move: those fibers are
@@ -564,5 +691,25 @@ mod tests {
         assert_eq!(q.run_halt(), RunHalt::Fault);
         q.request_exit(17);
         assert_eq!(q.run_halt(), RunHalt::Exit);
+    }
+
+    /// TICKET-223 — the first judge latches the verdict with the registered party's site; a later
+    /// judge reads the latch even after the pure predicate has gone false, and `clear_exit` resets it.
+    #[test]
+    fn decide_latches_once_and_reports_the_party_site() {
+        let q = Arc::new(QuiesceState::default());
+        let g = q.block_shared(
+            Arc::new(PartyWait::Send(Pending::new())),
+            WakeSet::default(),
+            Some(("x", crate::ast::Span::default())),
+        );
+        assert!(q.decide(Judge::Sched));
+        drop(g);
+        assert!(!q.quiesced());
+        assert!(q.decide(Judge::Party));
+        assert_eq!(q.run_halt(), RunHalt::Deadlock);
+        assert!(q.take_deadlock_report().is_some());
+        q.clear_exit();
+        assert_eq!(q.run_halt(), RunHalt::Running);
     }
 }

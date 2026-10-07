@@ -4085,7 +4085,9 @@ impl MnSched {
                     continue;
                 }
                 drop(c);
-                let verdict = self.quiesce.quiesced();
+                // TICKET-223 — through the one latch the party judge shares: the verdict is a run
+                // halt BEFORE any victim below is flagged, so a party never runs past it.
+                let verdict = self.quiesce.decide(crate::vm::quiesce::Judge::Sched);
                 c = self.lock();
                 if verdict && self.is_deadlocked_ignoring_jobs(&c) {
                     // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict
@@ -5909,8 +5911,9 @@ impl SchedCore {
     /// [`quiesce::QuiesceState::run_halt`], read by the caller under this lock; `cancelled` is
     /// scope 0's own flag (`shutdown_now`) or an ancestor's (creator cancel). The rule, read before
     /// anything is released:
-    /// 1. `halt` is `Exit`: drop every held job, settle nothing. `os.exit` runs no `defer`, and a
-    ///    sealed value is a ready receive (DEC-194), so a seal would let a reader print after it.
+    /// 1. `halt` is `Exit` or `Deadlock`: drop every held job, settle nothing; neither runs a
+    ///    `defer`. A sealed value is a ready receive (DEC-194), so a seal would let a reader print
+    ///    after it ([`RunHalt::settles`], TICKET-223).
     /// 2. else `halt` is `Fault`, or `cancelled`: drop every held job and settle each with its
     ///    cancel value. A `defer` still runs whole after a job fault, and it may read the handle.
     /// 3. else: release held jobs while `exec_active < exec_limit`.
@@ -5922,7 +5925,7 @@ impl SchedCore {
             JobEvent::Submit(fiber) => {
                 let fiber = *fiber;
                 if halt != RunHalt::Running || self.job_cancelled() {
-                    self.drop_job(fiber, halt != RunHalt::Exit, &mut step);
+                    self.drop_job(fiber, halt.settles(), &mut step);
                 } else if self.exec_limit == 0 || self.exec_active < self.exec_limit {
                     self.exec_active += 1;
                     step.start.push(fiber);
@@ -5942,7 +5945,7 @@ impl SchedCore {
                 self.exec_active -= 1;
                 if let Some(s) = self.job_settle.remove(&task_index)
                     && !done
-                    && halt != RunHalt::Exit
+                    && halt.settles()
                 {
                     step.settle.push(s);
                 }
@@ -5961,7 +5964,7 @@ impl SchedCore {
                 return step;
             }
             JobEvent::DropHeld => {
-                self.drop_held(halt != RunHalt::Exit, &mut step);
+                self.drop_held(halt.settles(), &mut step);
                 return step;
             }
         }
@@ -5969,7 +5972,7 @@ impl SchedCore {
             return step;
         }
         if halt != RunHalt::Running || self.job_cancelled() {
-            self.drop_held(halt != RunHalt::Exit, &mut step);
+            self.drop_held(halt.settles(), &mut step);
             return step;
         }
         // The loop condition, not a bare pop, keeps the cap: the no-runner path of `spawn_into`

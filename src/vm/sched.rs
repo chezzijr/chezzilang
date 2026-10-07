@@ -2562,7 +2562,10 @@ impl Vm {
                     // run (Go: a goroutine panic). Published BEFORE `finish` records the outcome, so
                     // no join sees the job finished while the cell is empty; in `request_exit`'s
                     // order: the cell, every sched halted, then the hint. A deadlock verdict and a
-                    // `--timeout` cut are the run's own causes, never a job fault.
+                    // `--timeout` cut are the run's own causes, never a job fault. A deadlock verdict
+                    // is its own run halt: `QuiesceState::decide` latches it before any victim is
+                    // recorded, so a job's deadlock outcome is that verdict's victim record, never
+                    // a second halt (TICKET-223).
                     if sched.is_job_scope(scope_id)
                         && let TaskOutcome::Fault { err, trace, .. } = &outcome
                         && !err.is_deadlock
@@ -5317,7 +5320,7 @@ impl Vm {
         } else {
             None
         };
-        let party = self.block_party_guard(PartyWait::Join(Arc::clone(&sched), slack));
+        let party = self.block_party_guard(PartyWait::Join(Arc::clone(&sched), slack), None);
         let leave = loop {
             if sched.lock().undone_tasks() <= slack {
                 break None;

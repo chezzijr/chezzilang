@@ -112,6 +112,11 @@ const EMPTY_WAIT_DEADLOCK: &str = "wait on channels that are all empty: deadlock
     can send. (Make sure a task that sends to one of these channels is spawned with `spawn:` and is \
     still running.)";
 
+/// TICKET-223 — the report of a party blocked on a `Shared`/`RwShared` guard when the deadlock
+/// verdict names it. Replaces the "parallel: block" text the guard wait used to borrow.
+const GUARD_DEADLOCK: &str = "update guard wait: deadlock — the task holding this Shared/RwShared \
+    guard is blocked and no runnable task can release it";
+
 /// Test-only instrumentation: how many waits [`Vm::block_wait_tick`] has performed, process-wide.
 /// A COVERAGE floor for [`BLOCK_WAITS_SLEPT_WHILE_READY`] — "this program really did block on a
 /// channel" — never a measurement: libtest runs the whole lib suite in ONE process, so a concurrent
@@ -366,7 +371,10 @@ impl Vm {
         // sibling thread; hold no width permit while the guard is busy. TICKET-193 — take the
         // permit back BEFORE the guard (the loop below).
         self.width_release();
-        let _party = self.block_party_guard(quiesce::PartyWait::Guard(key, self.guard_token));
+        let _party = self.block_party_guard(
+            quiesce::PartyWait::Guard(key, self.guard_token),
+            Some((GUARD_DEADLOCK, span)),
+        );
         let out = loop {
             // TICKET-193 — permit BEFORE guard. Wait for the guard to come free holding no permit,
             // take the permit, then take the guard without waiting. Taking the guard first parks
@@ -378,7 +386,7 @@ impl Vm {
                 Err(e) => break Err(e),
                 Ok(Ok(None)) => {}
             }
-            if let Err(e) = self.block_halt_check(super::DEADLOCK_MSG, span) {
+            if let Err(e) = self.block_halt_check(span) {
                 break Err(e);
             }
             if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
@@ -1860,8 +1868,9 @@ impl Vm {
         let p = Arc::clone(&op.p);
         let mut r = Ok(());
         while p.is_queued() {
-            let party = self.block_party_guard(quiesce::PartyWait::Send(Arc::clone(&p)));
-            r = self.block_wait_tick(core, msg, span, |_| !p.is_queued());
+            let party =
+                self.block_party_guard(quiesce::PartyWait::Send(Arc::clone(&p)), Some((msg, span)));
+            r = self.block_wait_tick(core, span, |_| !p.is_queued());
             drop(party);
             if r.is_err() {
                 break;
@@ -2193,23 +2202,19 @@ impl Vm {
     fn block_wait_tick(
         &mut self,
         core: &Arc<ChannelCore>,
-        deadlock_msg: &str,
         span: Span,
         ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
     ) -> Result<(), RuntimeError> {
-        self.wait_released_on(&[core], |vm| {
-            vm.block_wait_tick_in_place(core, deadlock_msg, span, ready)
-        })
+        self.wait_released_on(&[core], |vm| vm.block_wait_tick_in_place(core, span, ready))
     }
 
     fn block_wait_tick_in_place(
         &mut self,
         core: &Arc<ChannelCore>,
-        deadlock_msg: &str,
         span: Span,
         mut ready: impl FnMut(&mut crate::vm::core::ChanState) -> bool,
     ) -> Result<(), RuntimeError> {
-        self.block_halt_check(deadlock_msg, span)?;
+        self.block_halt_check(span)?;
         let q = core.q.lock().unwrap_or_else(|e| e.into_inner());
         #[cfg_attr(not(test), allow(unused_mut))]
         let (mut guard, waited) = core
@@ -2263,7 +2268,14 @@ impl Vm {
     /// vetoing the deadlock predicate (see [`super::JoinScope::body_blocked`]). This is the one funnel
     /// every counted-party block goes through, which is why the mark lives here rather than at each
     /// blocking site. Unmarked on drop, in `BlockGuard`'s `Drop`.
-    pub(super) fn block_party_guard(&self, wait: quiesce::PartyWait) -> BlockGuard {
+    ///
+    /// TICKET-223 — `site` is the deadlock report this wait gives when the verdict names it: the
+    /// one place a wait names its deadlock text. `None` for a join, whose report is the victims'.
+    pub(super) fn block_party_guard(
+        &self,
+        wait: quiesce::PartyWait,
+        site: Option<(&'static str, Span)>,
+    ) -> BlockGuard {
         // The wait is published WITH the `body_blocked` mark, in one `SchedCore` acquisition per
         // sched (`set_body_wait`) — see its doc for the race that two acquisitions leave open. The
         // party (P) is taken after, with no `SchedCore` held, so the documented P → A order holds.
@@ -2274,7 +2286,7 @@ impl Vm {
         g._party = self
             .block_ctx()
             .judged()
-            .then(|| self.quiesce.block_shared(wait, self.wake_set()));
+            .then(|| self.quiesce.block_shared(wait, self.wake_set(), site));
         g
     }
 
@@ -2356,6 +2368,9 @@ impl Vm {
     /// `reduce_task_slots` already produces for a joined child's exit (`sched.rs`): `pending_exit` set
     /// plus the `"exit"` sentinel `Err`, which unwinds past every `recover:` to the driver.
     ///
+    /// The one funnel for all three causes of a run halt, in this order: an exit, a job fault
+    /// (TICKET-208), then the deadlock verdict that `QuiesceState::decide` latched (TICKET-223).
+    ///
     /// Deliberately does NOT set `Cut::Cancelled` — that would SWALLOW the outcome (`run_outcome`),
     /// which is the opposite of what an exit needs.
     ///
@@ -2377,19 +2392,26 @@ impl Vm {
         }
         // TICKET-208 — a fire-and-forget `Executor` job faulted: the run ends with THAT fault, and
         // no `recover:` of this party catches it (`Cut::RunFault`).
-        let (err, trace) = self.quiesce.job_fault()?;
-        self.adopt_run_fault(trace);
-        Some(err)
+        if let Some((err, trace)) = self.quiesce.job_fault() {
+            self.adopt_run_fault(trace);
+            return Some(err);
+        }
+        // TICKET-223 — the latched deadlock verdict: every party ends with the report of the
+        // first party site the verdict named. `None` while main is at a join: the report there is
+        // the victims' slots (DEC-208), and the join must stay until they are recorded.
+        let (msg, site) = self.quiesce.deadlock_report()?;
+        Some(self.err(msg.to_string(), site).deadlock())
     }
 
     /// TICKET-208 — THE predicate "a run-wide halt is pending for this party": an `os.exit` from
-    /// another party, or a fire-and-forget `Executor` job's fault. A CPU-side or in-place
-    /// checkpoint reads this (behind the lock-free `run_halt_hint`); it never reads the exit cell
-    /// or the job-fault cell by itself. An exit is due inside a `defer` too (TICKET-213); a job
-    /// fault waits for the `defer` to end.
+    /// another party, a fire-and-forget `Executor` job's fault, or a latched deadlock verdict
+    /// (TICKET-223). A CPU-side or in-place checkpoint reads this (behind the lock-free
+    /// `run_halt_hint`); it never reads the exit, job-fault or deadlock cell by itself. An exit and
+    /// a deadlock are due inside a `defer` too (TICKET-213, TICKET-152); a job fault waits for the
+    /// `defer` to end.
     pub(super) fn run_halt_due(&self) -> bool {
         match self.quiesce.run_halt() {
-            RunHalt::Exit => true,
+            RunHalt::Exit | RunHalt::Deadlock => true,
             RunHalt::Fault => self.deferring == 0,
             RunHalt::Running => false,
         }
@@ -2438,7 +2460,11 @@ impl Vm {
     /// multi-channel `wait:` path — which polls N arms instead of waiting on one condvar, and so
     /// cannot share the tick — honours exactly the same three, rather than being the one blocking op a
     /// `--timeout` cannot reach.
-    fn block_halt_check(&mut self, deadlock_msg: &str, span: Span) -> Result<(), RuntimeError> {
+    ///
+    /// TICKET-223 — it has no deadlock text of its own: a positive verdict is latched by
+    /// `QuiesceState::decide` and delivered by [`Vm::run_exit_err`] as one of its three causes (an
+    /// exit, a job fault, the verdict), with the report of the party site the latch recorded.
+    fn block_halt_check(&mut self, span: Span) -> Result<(), RuntimeError> {
         self.block_halts(span)?;
         // TICKET-134 — test-only seam: widen the check-then-check window between the rung above and
         // the verdict below so a racing fault is deterministically reachable in a test. No-op outside
@@ -2447,12 +2473,17 @@ impl Vm {
         self.owner_fault_window_hook();
         // The process-wide deadlock verdict (`future.md` §2d step 0), checked LAST so the two real
         // halts still outrank it. Every counted party is registered as blocked and none of their wait
-        // conditions is satisfiable ⇒ nothing in this run can ever move again, so this party faults
-        // with its own site's message. No debounce: W7-12 needed two consecutive observations to rule
-        // out "a value landed a microsecond before I looked", and the satisfiability re-check
-        // ([`quiesce::PartyWait::satisfiable`]) answers that question directly instead of waiting a
-        // tick to guess at it — a value that landed IS a satisfiable wait, so the verdict declines.
-        if self.block_ctx().judged() && self.quiesce.quiesced() {
+        // conditions is satisfiable ⇒ nothing in this run can ever move again. No debounce: W7-12
+        // needed two consecutive observations to rule out "a value landed a microsecond before I
+        // looked", and the satisfiability re-check ([`quiesce::PartyWait::satisfiable`]) answers that
+        // question directly instead of waiting a tick to guess at it — a value that landed IS a
+        // satisfiable wait, so the verdict declines.
+        //
+        // TICKET-223 — this judge acts only through the one latch, `QuiesceState::decide`, which a
+        // sched worker's judge shares. The latched verdict is a run halt, so this party ends through
+        // `run_exit_err` with the report of the first registered party's site, whichever judge
+        // decided first.
+        if self.block_ctx().judged() && self.quiesce.decide(quiesce::Judge::Party) {
             // TICKET-134 — the child can record its fault and complete between the rung above and
             // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
             // child's fault-slot write, so this re-read sees the fault.
@@ -2464,7 +2495,6 @@ impl Vm {
             if let Some(e) = self.run_exit_err(span) {
                 return Err(e);
             }
-            return Err(self.err(deadlock_msg.to_string(), span).deadlock());
         }
         // TICKET-052 — an eager `Executor` job (`mn.is_none()`) about to wait another tick hands its
         // pool thread to a replacement, so the job that would unblock it can still get a thread.
@@ -2487,8 +2517,6 @@ impl Vm {
     /// declines — the safe direction (it can only delay someone else's fault, never fabricate one),
     /// and exactly what `inflight` does for the M:N side of the same sleep. A `PartyWait::Sleep` would
     /// be a false-deadlock generator: a sleeper's wait is never unsatisfiable, it always ends.
-    /// `block_halt_check`'s `deadlock_msg` is therefore unreachable from here — the argument is
-    /// inherited, not intended.
     ///
     /// **`--max-heap` reaches this loop only through the CANCEL arm, and only when the over-allocating
     /// task shares a cancel scope with the sleeper** — a nursery sibling or an `Executor` job, whose
@@ -2521,7 +2549,7 @@ impl Vm {
             if now >= deadline {
                 return Ok(());
             }
-            self.block_halt_check(EMPTY_RECV_DEADLOCK, span)?;
+            self.block_halt_check(span)?;
             std::thread::sleep(DEMOTE_POLL_BACKOFF.min(deadline - now));
         }
     }
@@ -2565,16 +2593,16 @@ impl Vm {
             // empty gate" between the pop and the return — all parties registered, none satisfiable —
             // and the run faulted 6/10. The inverse costs nothing: an unregistered party makes
             // `blocked < live`, which only DECLINES a verdict (a delayed fault, never a wrong one).
-            let party = self.block_party_guard(quiesce::PartyWait::Recv(
-                Arc::clone(core),
-                Some(Arc::clone(&p)),
-            ));
+            let party = self.block_party_guard(
+                quiesce::PartyWait::Recv(Arc::clone(core), Some(Arc::clone(&p))),
+                Some((EMPTY_RECV_DEADLOCK, span)),
+            );
             // Ready == the settle conditions the loop head consumes (a value to take, `closed`, a
             // `trip()` latch), plus this receiver's own slot being filled, so the wait cannot sleep
             // through a state the next iteration would immediately take (W7-13). All are written
             // under `core.q` (`done_latch` since W7-13r(b)), so re-checking them under the guard the
             // wait consumes closes the window.
-            let r = self.block_wait_tick(core, EMPTY_RECV_DEADLOCK, span, |g| {
+            let r = self.block_wait_tick(core, span, |g| {
                 g.recv_ready_for(Some(&p))
                     || g.closed
                     || core.done_latch.load(Ordering::Relaxed)
@@ -2903,9 +2931,11 @@ impl Vm {
             let (first, is_send0) = arms[0].clone(); // non-empty: an all-closed arm set returned above
             let arm_cores: Vec<Arc<ChannelCore>> =
                 arms.iter().map(|(c, _)| Arc::clone(c)).collect();
-            let party =
-                self.block_party_guard(quiesce::PartyWait::Wait(arms, Some(Arc::clone(&p))));
-            if let Err(e) = self.block_halt_check(EMPTY_WAIT_DEADLOCK, span) {
+            let party = self.block_party_guard(
+                quiesce::PartyWait::Wait(arms, Some(Arc::clone(&p))),
+                Some((EMPTY_WAIT_DEADLOCK, span)),
+            );
+            if let Err(e) = self.block_halt_check(span) {
                 drop(party);
                 let settled = op.settle();
                 return self
