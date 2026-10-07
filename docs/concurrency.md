@@ -479,7 +479,17 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   they stand: §6e's *One deliberate exception: a genuine deadlock does not run `defer`s* still
   applies to them. No task runs its `defer`s on a fatal deadlock — not the parked siblings, and not
   the task that reports it: the frames are dropped where they stand, as Go's `fatal error: all
-  goroutines are asleep - deadlock!` does (TICKET-152). A deadlock message raised inside
+  goroutines are asleep - deadlock!` does (TICKET-152).
+
+  **One verdict, one halt (TICKET-223).** The first judge to see the verdict (main at its own
+  wait, or an idle scheduler worker) latches it, and every party ends through the run-halt funnel
+  that `os.exit` and a job fault use, so no party runs past it. Main blocked at a wait reports that
+  wait's site: main locking a `Shared` guard that a stuck job holds reports
+  `update guard wait: deadlock — …` at its own `update`, as Go reports
+  `goroutine 1 [sync.Mutex.Lock]`. Main at a join (`shutdown()`, the end of a `parallel:` block)
+  reports the victims' sites.
+
+  A deadlock message raised inside
   a native callback that cannot park at all is an ordinary recoverable fault and still runs
   `defer`s. A `defer` that blocks forever is not that case: it is a counted party, so it reaches the verdict
   itself, and that verdict is fatal like any other.
