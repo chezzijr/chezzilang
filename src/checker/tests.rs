@@ -38024,8 +38024,24 @@ fn untyped_constant_width_grid() {
         "x: int8 = [300].len()\nprint(x)\n",
         "x: int8 = str(300).len()\nprint(x)\n",
         "fn n(a: int) -> int8:\n    return 0\nx: int8 = n(300)\nprint(x)\n",
+        // An index subscript is an `int`, not the slot's width (Go: `var x int8 = xs[200]`).
+        "xs: List[int8] = [1]\nx: int8 = xs[200]\nprint(x)\n",
+        "xs: List[int8] = [1]\nfn take(v: int8) -> nil:\n    pass\ntake(xs[200])\n",
+        "xs: List[int8] = [1]\nfn r() -> int8:\n    return xs[200]\nprint(r())\n",
+        "xs: List[int8] = [1]\nx: int8 = xs[200] + 1\nprint(x)\n",
+        "xs: List[int8] = [1]\nx: int8 = xs[0:200][0]\nprint(x)\n",
+        "s := \"abc\"\nn: int8 = s[200].len()\nprint(n)\n",
     ] {
         run("int8", body, "", None);
+    }
+    // Must still fail: a constant stored through an index, or assigned after an index read,
+    // meets the element width.
+    for body in [
+        "xs: List[int8] = [1]\nxs[0] = 300\nprint(xs)\n",
+        "xs: List[int8] = [1]\nx: int8 = xs[0]\nx = 300\nprint(x)\n",
+    ] {
+        let want = "constant 300 does not fit int8 (-128..127)".to_string();
+        run("int8", body, "", Some(want));
     }
     assert!(
         red.is_empty(),
