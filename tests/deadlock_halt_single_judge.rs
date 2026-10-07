@@ -299,6 +299,139 @@ test fn b_runs():
     },
 ];
 
+/// TICKET-223 — one row per cleanup funnel that can meet the verdict: the `on_step_fault` catch arm,
+/// its uncaught arm, a later `defer` in the same unwind, `do_try`'s recover-block and
+/// `parallel:`-body drains, and a stuck `defer` while a job fault waits. Run under pins {unset,
+/// party} only: a `sched` pin holds back the party judge, and these rows may have no idle sched
+/// left to judge.
+const CLEANUP_ROWS: &[Row] = &[
+    Row {
+        name: "cut_defer",
+        src: r#"import std.time
+fn boomer():
+    time.sleep_ms(50)
+    panic("boom")
+fn owner(stuck: Channel[int]):
+    parallel:
+        spawn boomer()
+        defer:
+            print(stuck.recv())
+        time.sleep_ms(1000)
+fn main():
+    stuck := Channel[int](0)
+    r := recover: owner(stuck)
+    print("AFTER {r}")
+main()
+"#,
+        site: "4:5",
+        after_ok: false,
+        test_mode: false,
+    },
+    Row {
+        name: "cut_uncaught",
+        src: r#"import std.time
+fn boomer():
+    time.sleep_ms(50)
+    panic("boom")
+fn owner(stuck: Channel[int]):
+    parallel:
+        spawn boomer()
+        defer:
+            print(stuck.recv())
+        time.sleep_ms(1000)
+fn main():
+    stuck := Channel[int](0)
+    owner(stuck)
+    print("AFTER")
+main()
+"#,
+        site: "4:5",
+        after_ok: false,
+        test_mode: false,
+    },
+    Row {
+        name: "cut_late",
+        src: r#"import std.time
+fn boomer():
+    time.sleep_ms(50)
+    panic("boom")
+fn owner(stuck: Channel[int]):
+    defer:
+        print("AFTER late")
+    parallel:
+        spawn boomer()
+        defer:
+            print(stuck.recv())
+        time.sleep_ms(1000)
+fn main():
+    stuck := Channel[int](0)
+    owner(stuck)
+main()
+"#,
+        site: "4:5",
+        after_ok: false,
+        test_mode: false,
+    },
+    Row {
+        name: "try_defer",
+        src: r#"fn bad() -> Result[int, str]:
+    return Err("bad")
+fn main():
+    stuck := Channel[int](0)
+    r := recover:
+        defer:
+            print(stuck.recv())
+        x := bad()?
+        x
+    print("AFTER {r}")
+main()
+"#,
+        site: "7:19",
+        after_ok: false,
+        test_mode: false,
+    },
+    Row {
+        name: "try_par",
+        src: r#"fn bad() -> Result[int, str]:
+    return Err("bad")
+fn main():
+    stuck := Channel[int](0)
+    r := recover:
+        parallel:
+            defer:
+                print(stuck.recv())
+            x := bad()?
+            print(x)
+        0
+    print("AFTER {r}")
+main()
+"#,
+        site: "8:23",
+        after_ok: false,
+        test_mode: false,
+    },
+    Row {
+        name: "job_defer",
+        src: r#"import std.concurrency
+fn work(c: Channel[int], xs: List[int]):
+    c.send(xs[5])
+fn main():
+    stuck := Channel[int](0)
+    jch := Channel[int](0)
+    ex := Executor()
+    ex.submit(fn(): work(jch, [1, 2]))
+    defer:
+        print(stuck.recv())
+    print(jch.recv())
+    print("AFTER")
+main()
+"#,
+        site: "3:12",
+        after_ok: false,
+        test_mode: false,
+    },
+];
+
 /// Run one cell; `None` when it is good, else a description of what went wrong.
 fn run_cell(
     path: &std::path::Path,
@@ -376,16 +509,23 @@ fn run_cell(
 
 /// TICKET-223 — the whole family: every shape x which judge may decide first x worker count x seed.
 /// The run always ends at the first party's site with one report, and nothing prints after the
-/// verdict except where a `RwShared.read` legally runs beside a writer (ex_rw, sp_rw).
+/// verdict except where a `RwShared.read` legally runs beside a writer (ex_rw, sp_rw); plus
+/// `CLEANUP_ROWS`, where nothing prints after the verdict and the cause keeps the report.
 #[test]
 fn deadlock_verdict_grid_ends_at_the_first_party_site() {
     let dir = std::env::temp_dir().join(format!("chz-ticket223-grid-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create fixture dir");
     let mut cells = Vec::new();
-    for row in ROWS {
+    let pins: &[Option<&str>] = &[None, Some("party"), Some("sched")];
+    let cleanup_pins: &[Option<&str>] = &[None, Some("party")];
+    let rows = ROWS
+        .iter()
+        .map(|r| (r, pins))
+        .chain(CLEANUP_ROWS.iter().map(|r| (r, cleanup_pins)));
+    for (row, pins) in rows {
         let path = dir.join(format!("{}.chz", row.name));
         std::fs::write(&path, row.src).expect("write fixture");
-        for pin in [None, Some("party"), Some("sched")] {
+        for &pin in pins {
             for t in ["1", "2", "0"] {
                 for seed in 1..=8u32 {
                     cells.push((path.clone(), row, t, seed, pin));
