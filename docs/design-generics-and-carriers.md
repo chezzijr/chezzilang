@@ -73,6 +73,13 @@ equality follows from that. Chezzi:
 - One classifier `Vm::callable(value)` read by call, spawn, `Executor.submit` and the entrypoint,
   replacing each consumer's hand-listed kinds.
 
+**Done (TICKET-226, 2026-10-07):** one compiler memo `Compiler::synth_fn_proto` keyed by `SynthFn`
+(variant ctor, `T.m`, `json.decode[T]` by target shape); the decode value is homed in std.json by
+`Op::MakeFuncIn` and reads std.json's own `parse` slot. `FnKey::Builtin` makes `Vm::fn_value` the
+allocator of every bare fn kind. `Vm::callable` (an exhaustive `match`, no `_` arm) is read by call,
+`lower_task`, `Executor.submit` and the entrypoint; a non-closure spawn callee crosses as
+`Lowered::Value`. Grid: `tests/chz/spec/fn_value_grid_test.chz`.
+
 **R5. Type variables, solved across the body.** **Status: done (TICKET-225, 2026-10-07).** A generic value read without a pin gets a type variable,
 not an immediate reject. Joins (`if`/`match`/`??`/list/map/set/`==`), call arguments and later uses pin
 it; it is rejected only if still unpinned at the end. This is the general form of today's call-argument

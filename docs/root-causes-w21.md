@@ -173,6 +173,8 @@ as a head.
 
 ## Family P3 — what kinds of fn value exist, and what every consumer handles (CK3, A4)
 
+**Status (2026-10-07):** CK3 and A4 fixed by TICKET-226 (R4: `synth_fn_proto` memo, decode homed in std.json; `Vm::callable` read by call, `lower_task`, `Executor.submit` and the entrypoint).
+
 - **CK3: no single memo for synthesized fns.**
   - `Vm::fn_value` keys `Proto | Native | Cffi` (`src/vm/mod.rs:895`).
   - The compiler memoizes variant fns (`variant_fns`) and param-method fns (`param_method_fns`).

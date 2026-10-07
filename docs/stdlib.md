@@ -501,7 +501,8 @@ cap is held and starts when a running one finishes. `Executor(0)` (or any `n < 1
 `Executor(n) needs n >= 1`. A job parked in a blocking op still counts toward the cap, so `n` jobs
 that each wait for a held job are a deadlock, reported at the parked job's blocking op ·
 `submit(task: fn() -> _) -> nil` — **starts the job immediately** (detached, fire-and-forget), like
-Python's `ThreadPoolExecutor.submit`. **A job is a spawned task** (TICKET-208): it copies its
+Python's `ThreadPoolExecutor.submit`. `task` is any zero-arg callable: a fn, method path, closure,
+std native (`time.now_ms`) or extern fn (TICKET-226). **A job is a spawned task** (TICKET-208): it copies its
 globals at the submit, inherits its creator's cancel chain and parks like any `spawn`ed task. A
 fire-and-forget job's fault ends the run; no `recover:` catches it ·
 `shutdown() -> nil` (**wait** for the submitted work; it raises no job fault: a handle job's fault

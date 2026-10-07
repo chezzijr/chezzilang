@@ -1830,6 +1830,53 @@ fn vm_calls_native_fn_value() {
     assert_eq!(vm.pop(), Value::int(42));
 }
 
+/// TICKET-226: `Vm::callable` is the one answer to "is this value callable", read by call, spawn,
+/// `Executor.submit` and the entrypoint, and it agrees with `type_name`'s "function". The extern
+/// (`Obj::Cffi`) cell is `tests/chz/spec/fn_value_grid_test.chz`'s; the exhaustive `match` in
+/// `Vm::callable` (no `_` arm) is the completeness guard for a new `Obj` kind.
+#[test]
+fn callable_classifies_every_fn_kind() {
+    use crate::native::{Host, HostError, NativeRet};
+    fn nop(_: &mut dyn Host) -> Result<NativeRet, HostError> {
+        Ok(NativeRet::Nil)
+    }
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let home = vm.heap.alloc(Obj::Str("home".into()));
+    let fns = [
+        Obj::Func { proto: 0, home },
+        Obj::Closure {
+            proto: 0,
+            captured: vec![],
+            home,
+        },
+        Obj::Native {
+            name: "n".into(),
+            func: nop,
+            kind: crate::native::Kind::Inline,
+        },
+        Obj::Builtin("ord".into()),
+    ];
+    for o in fns {
+        let v = Value::obj(vm.heap.alloc(o));
+        assert!(vm.callable(v).is_some(), "{} is callable", vm.type_name(v));
+        assert_eq!(vm.type_name(v), "function");
+    }
+    let others = [
+        Value::obj(vm.heap.alloc(Obj::Str("s".into()))),
+        Value::obj(vm.heap.alloc(Obj::Bytes(Box::new([])))),
+        Value::int(1),
+        Value::nil(),
+    ];
+    for v in others {
+        assert!(
+            vm.callable(v).is_none(),
+            "{} is not callable",
+            vm.type_name(v)
+        );
+        assert_ne!(vm.type_name(v), "function");
+    }
+}
+
 #[test]
 fn guarded_restores_native_reentry_on_panic() {
     // Regression (FFI callbacks): a Rust panic re-entered through a native FFI callback is caught
@@ -13081,7 +13128,8 @@ fn builtin_value_sendable_across_airlock_both_engines() {
 /// callee reaches `prepare_worker`'s `PendingCall::Call` arm, which only handled Closure/Func —
 /// a raw `Obj::Builtin` hit the reject `_` on the M:N engine only (`spawn: 'function' is not an
 /// isolable task`) while serial/interp dispatched it fine: a three-engine parity divergence on a
-/// checker-accepted program. Fixed by the `Lowered::Builtin` arm (cross by name, worker re-allocs).
+/// checker-accepted program. Fixed by `Lowered::Value` (TICKET-226: every non-closure callable
+/// crosses by value through `to_wire`, classified by `Vm::callable`).
 #[test]
 fn spawn_builtin_fn_value_as_call_callee_both_engines() {
     let src = "import std.concurrency\nfn main():\n    g := print\n    parallel:\n        spawn g(\"from-task\")\nmain()\n";
