@@ -34,6 +34,8 @@ pub(super) struct DiagMark {
     /// restored wholesale (never re-derived: DEC-064 first-use-wins, DEC-032 alias reverse walk).
     /// A NEW `Checker` field written during a body walk must be added here in the same commit.
     fn_reads: std::collections::HashSet<String>,
+    /// TICKET-225 — the type-variable store (DEC-157): a walk binds vars and creates them.
+    tyvars: super::tyvar::TyVarMark,
     empty_coll_sites: Vec<(usize, String, Span)>,
     empty_coll_aliases: Vec<((usize, String), (usize, String))>,
     carrier_pins: Vec<((usize, String), Ty)>,
@@ -125,6 +127,7 @@ impl Checker {
             recover_depth: 0,
             generic_arg_prepass: false,
             generic_fn_value_prepass: false,
+            tyvars: std::cell::RefCell::new(tyvar::TyVars::default()),
             expected_hint: None,
             ret_coerce_sink: None,
             arith_parent: false,
@@ -1447,6 +1450,7 @@ impl Checker {
             for_binds: self.for_binds.clone(),
             const_overflow_seen: self.const_overflow_seen.clone(),
             fn_reads: self.fn_reads.clone(),
+            tyvars: self.tyvars.borrow().mark(),
             empty_coll_sites: self.empty_coll_sites.clone(),
             empty_coll_aliases: self.empty_coll_aliases.clone(),
             carrier_pins: self.carrier_pins.clone(),
@@ -1469,6 +1473,7 @@ impl Checker {
         self.for_binds = m.for_binds;
         self.const_overflow_seen = m.const_overflow_seen;
         self.fn_reads = m.fn_reads;
+        self.tyvars.borrow_mut().rollback(m.tyvars);
         self.empty_coll_sites = m.empty_coll_sites;
         self.empty_coll_aliases = m.empty_coll_aliases;
         self.carrier_pins = m.carrier_pins;

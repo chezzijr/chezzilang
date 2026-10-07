@@ -1166,7 +1166,7 @@ impl Checker {
     /// residual `Unknown`. `Ty::Param` and all leaf types pass through unchanged.
     fn fill_ret(&self, t: &Ty, bad: &mut bool) -> Ty {
         match t {
-            Ty::Unknown => {
+            Ty::Unknown | Ty::Var(_) => {
                 *bad = true;
                 Ty::Unknown
             }
@@ -4338,7 +4338,7 @@ impl Checker {
                 match self.infer(obj) {
                     Ty::Map(k, v) => {
                         let idx_ty = self.infer_arg(index, Some(&k));
-                        if !compatible(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
+                        if !self.join_ty(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
                             let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
                             self.error(index.span, format!("map key must be {k_s}, found {idx_s}"));
                         }
@@ -4592,9 +4592,9 @@ impl Checker {
                 // `Op::Add`/`Op::Mul`/`Op::Sub` opcodes the binary form uses, so the runtime already
                 // handles these — only the checker had to be taught to accept them.
                 let coll_ok = match (op, target_ty, val_ty) {
-                    (AssignOp::PlusEq, Ty::List(a), Ty::List(b)) => compatible(a, b),
+                    (AssignOp::PlusEq, Ty::List(a), Ty::List(b)) => self.join_ty(a, b),
                     (AssignOp::StarEq, Ty::List(_), Ty::Int) => true,
-                    (AssignOp::MinusEq, Ty::Set(a), Ty::Set(b)) => compatible(a, b),
+                    (AssignOp::MinusEq, Ty::Set(a), Ty::Set(b)) => self.join_ty(a, b),
                     _ => false,
                 };
                 // A struct/enum whose matching operator overload makes the binary `a OP b`
@@ -4644,7 +4644,7 @@ impl Checker {
             | AssignOp::ShrEq => {
                 let int_ok = *target_ty == Ty::Int && *val_ty == Ty::Int;
                 let set_ok = matches!(op, AssignOp::AmpEq | AssignOp::PipeEq | AssignOp::CaretEq)
-                    && matches!((target_ty, val_ty), (Ty::Set(a), Ty::Set(b)) if compatible(a, b));
+                    && matches!((target_ty, val_ty), (Ty::Set(a), Ty::Set(b)) if self.join_ty(a, b));
                 let known = !target_ty.is_unknown() && !val_ty.is_unknown();
                 if known && !int_ok && !set_ok {
                     let sym = match op {

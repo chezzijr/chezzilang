@@ -438,6 +438,10 @@ pub enum Ty {
     Module(String),
     /// Un-inferable, or "an error was already reported here". Compatible with everything.
     Unknown,
+    /// TICKET-225 (R5) — a type variable: a hole a later use in its frame fills
+    /// (`checker::tyvar`). Only `assignable` and `Checker::join_ty` can bind one; the pure
+    /// [`compatible`] declines on it (an unbound var equals only itself). Displayed `_`.
+    Var(u32),
 }
 
 impl Ty {
@@ -567,6 +571,8 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
     use Ty::*;
     match (expected, actual) {
         (Unknown, _) | (_, Unknown) => true,
+        // A pure caller has no var store, so it declines on a var other than the same one.
+        (Var(a), Var(b)) => a == b,
         // A C width is a tag on its scalar (TICKET-218): compatibility ignores it, nested too.
         (Width(_), _) => compatible(expected.scalar(), actual),
         (_, Width(_)) => compatible(expected, actual.scalar()),
@@ -891,6 +897,7 @@ impl Ty {
                 write!(f, ")")
             }
             Ty::Unknown => write!(f, "?"),
+            Ty::Var(_) => write!(f, "_"),
         }
     }
 }

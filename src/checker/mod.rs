@@ -2529,6 +2529,9 @@ struct Checker {
     /// ctor's wall too and check-cleanly builds a `Bx[fn(T) -> T]`. Separate from
     /// `generic_arg_prepass`, which also changes closure-param binding and hover recording.
     generic_fn_value_prepass: bool,
+    /// TICKET-225 (R5) — the type-variable store (`tyvar::TyVars`). A `RefCell` because `assignable`
+    /// and `join_ty` bind vars and are `&self`. Speculative state: `DiagMark` carries its mark.
+    pub(super) tyvars: std::cell::RefCell<tyvar::TyVars>,
     /// Expected-type HINT (checking-mode) for the OUTERMOST generic ctor / generic fn-call currently
     /// being inferred — pure transport from the three annotation sites (a `let`-binding's declared
     /// type, a `return`'s declared return type, a call argument's declared parameter type) into
@@ -2775,6 +2778,7 @@ mod self_writes;
 mod setup;
 mod sig;
 pub mod suggest;
+mod tyvar;
 mod unused;
 
 /// Render a resolved type-arg list for a user-facing redirect hint (`int, str`), used by the
@@ -3220,7 +3224,7 @@ fn ty_fully_concrete(ty: &Ty) -> bool {
 fn ty_all_holes(ty: &Ty, ok: &dyn Fn(&Ty) -> bool) -> bool {
     let all = |ts: &[Ty]| ts.iter().all(|t| ty_all_holes(t, ok));
     match ty {
-        Ty::Unknown | Ty::Param(_) => ok(ty),
+        Ty::Unknown | Ty::Param(_) | Ty::Var(_) => ok(ty),
         Ty::List(x) | Ty::Option(x) | Ty::Set(x) => ty_all_holes(x, ok),
         Ty::Map(k, v) | Ty::Result(k, v) => ty_all_holes(k, ok) && ty_all_holes(v, ok),
         // A parameterized protocol existential carrying a free type-param (`Container[T]`) is NOT
@@ -3645,53 +3649,55 @@ fn name_mismatch_text(
     )
 }
 
-/// Does a struct method `actual` match a protocol method `proto` (with `Self` bound to `self_ty`)?
-fn method_matches(proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
-    if proto.params.len() != actual.params.len() {
-        return false;
+impl Checker {
+    /// Does a struct method `actual` match a protocol method `proto` (with `Self` bound to `self_ty`)?
+    fn method_matches(&self, proto: &FnSig, actual: &FnSig, self_ty: &Ty) -> bool {
+        if proto.params.len() != actual.params.len() {
+            return false;
+        }
+        // A STATIC-slot protocol requirement (`Convert`'s `convert(x: S) -> Self`, first param NOT `self`)
+        // is witnessed ONLY by a matching STATIC method — a value cannot invoke a static ctor, so an
+        // instance/`self`-slot method with the same arity (`convert(self) -> Self`) must NOT falsely satisfy
+        // it (and vice-versa). Every non-static protocol requirement keeps `is_static == false`, so this is a
+        // no-op for every existing instance-method protocol.
+        if proto.is_static != actual.is_static {
+            return false;
+        }
+        // M24 Task 5 — a method that takes hidden witness arguments can never WITNESS a protocol
+        // requirement. A protocol method has no type parameters of its own (the parser refuses them), so
+        // every dispatch through the requirement — an existential value call, `T.static()` through a
+        // bound (`Op::CallStaticDyn`) — pushes the declared arity only, and the hidden argument would be
+        // missing. Refusing satisfaction here keeps that a type error instead of a runtime arity fault.
+        if !actual.witness_params.is_empty() {
+            return false;
+        }
+        // A GENERIC method cannot witness a protocol requirement. Its signature is spelled in terms of
+        // its OWN type params, which exist in no scope the requirement can see — so comparing them here
+        // compares two independently-scoped binders by their NAME STRING (`ty.rs`'s
+        // `(Param(a), Param(b)) => a == b`), and alpha-renaming changes meaning. Measured: `protocol
+        // Sink[U]: fn put(self, v: U)` witnessed by `fn put[U](self, v: U)` from a caller
+        // `fn use_sink[U, T: Sink[U]](x: T)` is `ok: no type errors`; renaming ONLY the method's own `U`
+        // to `W` makes it *type GS does not satisfy Sink (method 'put' has the wrong signature)*.
+        // Freshening the binders instead gives the identical verdict — a fresh name never equals the
+        // requirement's param — so refusing IS the semantics, just stated honestly.
+        //
+        // Rust is the owning ancestor and refuses the same shape outright: `trait Show { fn show(&self)
+        // -> String; }` with `impl Show for G { fn show<U>(&self) -> String }` is `E0049: method 'show'
+        // has 1 type parameter but its trait declaration has 0`. `satisfies_native` has always applied
+        // this to builtins ("native method '…' is generic and cannot witness a protocol requirement");
+        // this is the same policy for user types, and `recover_bound_args_from` already skips such a
+        // method on the recovery side for the same reason.
+        if !actual.type_params.is_empty() {
+            return false;
+        }
+        let map = HashMap::from([("Self".to_string(), self_ty.clone())]);
+        proto
+            .params
+            .iter()
+            .zip(&actual.params)
+            .all(|(p, a)| self.join_ty(&subst(p, &map), a))
+            && self.join_ty(&subst(&proto.ret, &map), &actual.ret)
     }
-    // A STATIC-slot protocol requirement (`Convert`'s `convert(x: S) -> Self`, first param NOT `self`)
-    // is witnessed ONLY by a matching STATIC method — a value cannot invoke a static ctor, so an
-    // instance/`self`-slot method with the same arity (`convert(self) -> Self`) must NOT falsely satisfy
-    // it (and vice-versa). Every non-static protocol requirement keeps `is_static == false`, so this is a
-    // no-op for every existing instance-method protocol.
-    if proto.is_static != actual.is_static {
-        return false;
-    }
-    // M24 Task 5 — a method that takes hidden witness arguments can never WITNESS a protocol
-    // requirement. A protocol method has no type parameters of its own (the parser refuses them), so
-    // every dispatch through the requirement — an existential value call, `T.static()` through a
-    // bound (`Op::CallStaticDyn`) — pushes the declared arity only, and the hidden argument would be
-    // missing. Refusing satisfaction here keeps that a type error instead of a runtime arity fault.
-    if !actual.witness_params.is_empty() {
-        return false;
-    }
-    // A GENERIC method cannot witness a protocol requirement. Its signature is spelled in terms of
-    // its OWN type params, which exist in no scope the requirement can see — so comparing them here
-    // compares two independently-scoped binders by their NAME STRING (`ty.rs`'s
-    // `(Param(a), Param(b)) => a == b`), and alpha-renaming changes meaning. Measured: `protocol
-    // Sink[U]: fn put(self, v: U)` witnessed by `fn put[U](self, v: U)` from a caller
-    // `fn use_sink[U, T: Sink[U]](x: T)` is `ok: no type errors`; renaming ONLY the method's own `U`
-    // to `W` makes it *type GS does not satisfy Sink (method 'put' has the wrong signature)*.
-    // Freshening the binders instead gives the identical verdict — a fresh name never equals the
-    // requirement's param — so refusing IS the semantics, just stated honestly.
-    //
-    // Rust is the owning ancestor and refuses the same shape outright: `trait Show { fn show(&self)
-    // -> String; }` with `impl Show for G { fn show<U>(&self) -> String }` is `E0049: method 'show'
-    // has 1 type parameter but its trait declaration has 0`. `satisfies_native` has always applied
-    // this to builtins ("native method '…' is generic and cannot witness a protocol requirement");
-    // this is the same policy for user types, and `recover_bound_args_from` already skips such a
-    // method on the recovery side for the same reason.
-    if !actual.type_params.is_empty() {
-        return false;
-    }
-    let map = HashMap::from([("Self".to_string(), self_ty.clone())]);
-    proto
-        .params
-        .iter()
-        .zip(&actual.params)
-        .all(|(p, a)| compatible(&subst(p, &map), a))
-        && compatible(&subst(&proto.ret, &map), &actual.ret)
 }
 
 /// Bind type parameters in `decl` to the corresponding concrete `actual` types (first binding wins;

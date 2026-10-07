@@ -353,8 +353,8 @@ impl Checker {
             // Same key set — check per-name type compatibility (in either direction).
             for (name, lt) in first.iter() {
                 if let Some(rt) = other.get(name)
-                    && !compatible(lt, rt)
-                    && !compatible(rt, lt)
+                    && !self.join_ty(lt, rt)
+                    && !self.join_ty(rt, lt)
                 {
                     self.error(
                         span,
@@ -1365,7 +1365,7 @@ impl Checker {
         match acc {
             None => t,
             Some(prev) => {
-                if compatible(&prev, &t) {
+                if self.join_ty(&prev, &t) {
                     if prev.is_unknown() { t } else { prev }
                 } else if let Some(h) = hint
                     && ty_fully_concrete(h)
@@ -1575,7 +1575,18 @@ impl Checker {
     }
 
     pub(super) fn infer(&mut self, expr: &Expr) -> Ty {
+        // TICKET-225: a var bound since a type was stored reads as its binding.
+        if self.tyvars.borrow().any()
+            && let Some(h) = &self.expected_hint
+        {
+            self.expected_hint = Some(self.zonk(h));
+        }
         let ty = self.infer_kind(expr);
+        let ty = if self.tyvars.borrow().any() {
+            self.zonk(&ty)
+        } else {
+            ty
+        };
         // EDITOR HOVER probe: record this expr's type if its leaf/field anchor is the cursor token.
         // No-op (one `Option` check) unless a probe is armed. Children infer before parents and only
         // LEAF kinds record, so a parent expression never overwrites the smaller symbol's type.
@@ -2147,11 +2158,11 @@ impl Checker {
     /// `nil`-typed `Ok(v)` binding UNUSABLE in every value context (interpolation, list literal, call
     /// arg, arithmetic). So the heterogeneous runtime payload can never be observed — observationally
     /// identical to the pre-feature `Result[nil]` value-drop, with no checker/runtime divergence.
-    fn fold_recover_tail(acc: Option<Ty>, t: Ty) -> Option<Ty> {
+    fn fold_recover_tail(&self, acc: Option<Ty>, t: Ty) -> Option<Ty> {
         match acc {
             None => Some(t),
             Some(prev) => {
-                if compatible(&prev, &t) {
+                if self.join_ty(&prev, &t) {
                     Some(if prev.is_unknown() { t } else { prev })
                 } else {
                     None
@@ -2217,7 +2228,7 @@ impl Checker {
             };
             self.pop_scope();
             if uniform {
-                match Self::fold_recover_tail(result.take(), t) {
+                match self.fold_recover_tail(result.take(), t) {
                     Some(u) => result = Some(u),
                     None => uniform = false,
                 }
@@ -2252,7 +2263,7 @@ impl Checker {
             self.expect_bool(cond, "if condition");
             let (t, _span) = self.infer_recover_tail_block(body);
             if uniform {
-                match Self::fold_recover_tail(result.take(), t) {
+                match self.fold_recover_tail(result.take(), t) {
                     Some(u) => result = Some(u),
                     None => uniform = false,
                 }
@@ -2262,7 +2273,7 @@ impl Checker {
         if let Some(body) = else_block {
             let (t, _span) = self.infer_recover_tail_block(body);
             if uniform {
-                match Self::fold_recover_tail(result.take(), t) {
+                match self.fold_recover_tail(result.take(), t) {
                     Some(u) => result = Some(u),
                     None => uniform = false,
                 }
@@ -3388,7 +3399,7 @@ impl Checker {
         for (t, item) in tys.iter().zip(items) {
             if elem.is_unknown() {
                 elem = t.clone();
-            } else if !t.is_unknown() && !compatible(&elem, t) {
+            } else if !t.is_unknown() && !self.join_ty(&elem, t) {
                 let [elem_s, t_s] = Ty::render_distinct([&elem, t]);
                 self.error(
                     item.span,
@@ -3440,7 +3451,7 @@ impl Checker {
                 None => {
                     if elem.is_unknown() {
                         elem = et;
-                    } else if !et.is_unknown() && !compatible(&elem, &et) {
+                    } else if !et.is_unknown() && !self.join_ty(&elem, &et) {
                         let [elem_s, et_s] = Ty::render_distinct([&elem, &et]);
                         self.error(e.span, format!("set elements differ: {elem_s} vs {et_s}"));
                     }
@@ -3507,7 +3518,7 @@ impl Checker {
                 None => {
                     if key.is_unknown() {
                         key = kt.clone();
-                    } else if !kt.is_unknown() && !compatible(&key, &kt) {
+                    } else if !kt.is_unknown() && !self.join_ty(&key, &kt) {
                         let [key_s, kt_s] = Ty::render_distinct([&key, &kt]);
                         self.error(k_expr.span, format!("map keys differ: {key_s} vs {kt_s}"));
                     }
@@ -3529,7 +3540,7 @@ impl Checker {
                 None => {
                     if value.is_unknown() {
                         value = vt.clone();
-                    } else if !vt.is_unknown() && !compatible(&value, &vt) {
+                    } else if !vt.is_unknown() && !self.join_ty(&value, &vt) {
                         let [value_s, vt_s] = Ty::render_distinct([&value, &vt]);
                         self.error(
                             v_expr.span,
@@ -3688,7 +3699,7 @@ impl Checker {
                     // List concat (gap #3): `[1,2] + [3,4]` → `list[T]`, identical to `.concat`.
                     // Element types must be compatible; an empty `[]` side (Unknown elem) is
                     // joined by `merge_unknown` so `[] + [1]` infers `list[int]`.
-                    if compatible(le, re) {
+                    if self.join_ty(le, re) {
                         Ty::List(Box::new(merge_unknown(le, re)))
                     } else {
                         let [l_s, r_s] = Ty::render_distinct([&l, &r]);
@@ -3734,7 +3745,7 @@ impl Checker {
                     && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
                 {
                     // Set difference (gap #3): `a - b` → `set[T]`, identical to `.difference`.
-                    if compatible(le, re) {
+                    if self.join_ty(le, re) {
                         Ty::Set(Box::new(merge_unknown(le, re)))
                     } else {
                         let [l_s, r_s] = Ty::render_distinct([&l, &r]);
@@ -3802,7 +3813,7 @@ impl Checker {
                 {
                     // Set `|`→union, `&`→intersection, `^`→symmetric-difference → `set[T]`,
                     // identical to the `.union`/`.intersection` methods (`^` has no method form).
-                    if compatible(le, re) {
+                    if self.join_ty(le, re) {
                         Ty::Set(Box::new(merge_unknown(le, re)))
                     } else {
                         let [l_s, r_s] = Ty::render_distinct([&l, &r]);
@@ -3913,6 +3924,9 @@ impl Checker {
             // IS a same-type pair whose `eq` does not cover it, and it check-cleaned then faulted with
             // *"struct 'Tag' has no 'compare' method"*. So the bound is asked too, below.
             Eq | NotEq => {
+                // TICKET-225: an `==` join pins a generic value from its sibling (`inc == g`) before
+                // the operands are judged.
+                self.join_ty(l, r);
                 // A `where T: <scalar>` bound is an EQUALITY constraint (`scalar_bound_ty`), not
                 // structural satisfaction: such a `T` is EXACTLY that scalar, at any nesting depth.
                 // Substitute the pins away so the pair is judged concretely — without this the
@@ -4001,7 +4015,7 @@ impl Checker {
                 // `Unknown`, which `either_unknown` then silences. A guard here would DOUBLE-report.)
                 match r {
                     Ty::List(elem) | Ty::Set(elem) => {
-                        if !either_unknown && !compatible(elem, l) && !self.assignable(elem, l) {
+                        if !either_unknown && !self.join_ty(elem, l) && !self.assignable(elem, l) {
                             let [l_s, r_s] = Ty::render_distinct([l, r]);
                             self.error(lspan, format!("cannot test membership of {l_s} in {r_s}"));
                         }
@@ -4033,7 +4047,7 @@ impl Checker {
                         }
                     }
                     Ty::Map(key, _) => {
-                        if !either_unknown && !compatible(key, l) && !self.assignable(key, l) {
+                        if !either_unknown && !self.join_ty(key, l) && !self.assignable(key, l) {
                             let [l_s, r_s] = Ty::render_distinct([l, r]);
                             self.error(
                                 lspan,
@@ -4055,7 +4069,7 @@ impl Checker {
                     other => {
                         // `Contains` protocol: a struct/enum with `contains(self, item) -> bool`.
                         if let Some(item) = self.contains_item_ty(other) {
-                            if !either_unknown && !compatible(&item, l) {
+                            if !either_unknown && !self.join_ty(&item, l) {
                                 let [l_s, r_s] = Ty::render_distinct([l, r]);
                                 self.error(
                                     lspan,
@@ -4541,7 +4555,7 @@ impl Checker {
         match obj_ty {
             Ty::Map(k, v) => {
                 let idx_ty = self.infer_arg(index, Some(&k));
-                if !compatible(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
+                if !self.join_ty(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
                     let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
                     self.error(index.span, format!("map key must be {k_s}, found {idx_s}"));
                 }
@@ -5095,7 +5109,7 @@ impl Checker {
     ) -> Ty {
         let _ = self.infer(obj);
         let arg_ty = self.infer_value(arg);
-        if !compatible(&Ty::Str, &arg_ty) {
+        if !self.join_ty(&Ty::Str, &arg_ty) {
             self.error(span, format!("decode source must be str, found {arg_ty}"));
         }
         let target = self.resolve_type(ty, span);
@@ -5768,6 +5782,7 @@ fn renders_as_text(ty: &Ty) -> bool {
         | Ty::Param(_)
         | Ty::Protocol(..)
         | Ty::Module(_)
+        | Ty::Var(_)
         | Ty::Unknown => false,
     }
 }

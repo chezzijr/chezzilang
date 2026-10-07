@@ -1187,7 +1187,25 @@ impl Checker {
     /// protocol/struct registry, so it can't live in the context-free `compatible`. Recurses through
     /// compound types so a nested existential (the `E` in `Result[T, Error]`) is checked structurally.
     /// Strict assignability — NO int→float widening (the reverse `float`→`int` is always rejected).
+    ///
+    /// TICKET-225: a type variable on either side is bound by `solve` first, and the body below
+    /// compares the zonked pair; a `false` answer rolls this call's bindings back.
     pub(super) fn assignable(&self, expected: &Ty, actual: &Ty) -> bool {
+        if !self.tyvars.borrow().any()
+            || !(super::tyvar::has_var(expected) || super::tyvar::has_var(actual))
+        {
+            return self.assignable_zonked(expected, actual);
+        }
+        let m = self.tyvars.borrow().mark();
+        self.solve(expected, actual);
+        let ok = self.assignable_zonked(&self.zonk(expected), &self.zonk(actual));
+        if !ok {
+            self.tyvars.borrow_mut().rollback(m);
+        }
+        ok
+    }
+
+    fn assignable_zonked(&self, expected: &Ty, actual: &Ty) -> bool {
         use Ty::*;
         match (expected, actual) {
             (Unknown, _) | (_, Unknown) => true,
@@ -1373,7 +1391,7 @@ impl Checker {
             // Everything else (scalars, the concurrency/IO handles, `Module`) is nominal: two values
             // co-inhabit iff the types are structurally the same, which is exactly the runtime's own
             // type-tag guard ("distinct types are never equal"). Unchanged from `assignable`'s `_`.
-            _ => compatible(l, r),
+            _ => self.join_ty(l, r),
         }
     }
 
@@ -1528,7 +1546,7 @@ impl Checker {
             return false;
         }
         let args_match = pargs.len() == required.len()
-            && pargs.iter().zip(required).all(|(x, y)| compatible(x, y));
+            && pargs.iter().zip(required).all(|(x, y)| self.join_ty(x, y));
         if self.protocol_key(p) == self.protocol_key(protocol) && args_match {
             return true;
         }
@@ -2251,7 +2269,7 @@ impl Checker {
             if let Some(want) = args.first()
                 && !want.is_unknown()
                 && !elem.is_unknown()
-                && !compatible(want, &elem)
+                && !self.join_ty(want, &elem)
             {
                 return Err(format!("type {ty} does not satisfy Iterable"));
             }
@@ -2284,7 +2302,7 @@ impl Checker {
             };
             // Any args the bound supplied must match what the built-in actually provides.
             for (want, got) in args.iter().zip(&provided) {
-                if !want.is_unknown() && !got.is_unknown() && !compatible(want, got) {
+                if !want.is_unknown() && !got.is_unknown() && !self.join_ty(want, got) {
                     return Err(format!("type {ty} does not satisfy {protocol_display}"));
                 }
             }
@@ -2507,7 +2525,7 @@ impl Checker {
                 }
             });
             match actual_owned.as_ref() {
-                Some(actual) if method_matches(msig, actual, ty) => {
+                Some(actual) if self.method_matches(msig, actual, ty) => {
                     if let Some(mm) = param_name_mismatch(msig, actual) {
                         return Err(format!(
                             "type {ty} does not satisfy {protocol_display} ({})",
@@ -2633,7 +2651,7 @@ impl Checker {
         // honor → runtime type confusion). `compatible` checks name + pairwise-compatible targs; an
         // `Unknown` targ on a partially-inferred side still unifies (no false rejection there).
         let same = match (l, r) {
-            (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..)) => compatible(l, r),
+            (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..)) => self.join_ty(l, r),
             (Ty::Param(a), Ty::Param(b)) => a == b,
             // NOT `(Ty::Protocol, Ty::Protocol)`: every operator protocol's method is
             // `(self, Self) -> Self`, and two values of one protocol need not hold the same witness
@@ -2674,7 +2692,9 @@ impl Checker {
             // Same generic struct/enum REQUIRES matching type ARGS (`compatible` = name + targs), not
             // just the same name — `Box[int] < Box[str]` must not overload `compare` (same
             // heterogeneous laundering as `+`; see `op_overload_result`).
-            (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..)) if compatible(l, r) => {
+            (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..))
+                if self.join_ty(l, r) =>
+            {
                 self.satisfies(l, protocol).is_ok()
             }
             // TICKET-146: a tuple / `List` / `Option` pair orders lexicographically when every
@@ -2682,7 +2702,7 @@ impl Checker {
             (Ty::Tuple(_), Ty::Tuple(_))
             | (Ty::List(_), Ty::List(_))
             | (Ty::Option(_), Ty::Option(_))
-                if compatible(l, r) =>
+                if self.join_ty(l, r) =>
             {
                 self.satisfies(l, protocol).is_ok()
             }
@@ -2837,6 +2857,7 @@ impl Checker {
             | Ty::ByteArray
             | Ty::Nil
             | Ty::Unknown
+            | Ty::Var(_)
             | Ty::Param(_) => true,
             // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
             // its element type is *not* a constraint (the value never crosses, only the handle).
@@ -3283,6 +3304,7 @@ impl Checker {
             | Ty::Reader
             | Ty::Ptr
             | Ty::Unknown
+            | Ty::Var(_)
             | Ty::Param(_)
             | Ty::Module(_) => 1,
             // One child.
