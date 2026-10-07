@@ -1,4 +1,4 @@
-# rule: postfix, typeApply, enumDecl
+# rule: postfix, bracket, enumDecl
 # Declaration-site turbofish on a generic TYPE: type args go ON THE TYPE.
 #   Box[int].Has(5)          — single type-arg variant ctor (rides the index path)
 #   Pair[int, str].Both(...) — MULTI type-arg variant ctor (the <typeApply> head; comma disambiguates)

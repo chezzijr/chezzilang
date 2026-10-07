@@ -27,9 +27,11 @@ surface follows **Zig** (`?T`, `E!T`, `orelse`, `catch`).
 
 ### Rust's model, adopted step by step
 
-**R1. One resolution, one writer.** Every path node (`f`, `lib.f`, `a.b.f`, `T.m`, `Bx[int].make`,
-`E.A`) gets exactly one resolution (item + kind) from one decider inside the checker, `resolve_path`,
-memoised per node and written once. The call side, the value side and the compiler only read it
+**R1. One resolution, one writer.** One decider inside the checker, written once: every path node
+(`f`, `lib.f`, `a.b.f`, `T.m`, `Bx[int].make`, `E.A`) gets exactly one resolution (item + kind)
+from `resolve_path` (rule table `classify_path`, `src/checker/resolve.rs`), memoised per node.
+**Done (TICKET-222, 2026-10-07):** one kind per path in every position (a module fn is `Fn`, a type
+method `MethodFn`, a payload variant `VariantFn`; `Resolution::Static` is deleted). The call side, the value side and the compiler only read it
 (owner decision 2026-10-07; a separate pre-pass would need a second scope model, and Rust itself
 resolves type-relative paths like `Vec::<i32>::new` / `T::method` during type checking). Deletes: the call-side "defensive fallback"
 (`checker/expr.rs:649-718`), the per-shape call arms, and every second writer of the resolutions table.
@@ -40,6 +42,8 @@ does the same). The parser stops guessing: `head[X]` becomes one neutral node th
 readings, the index expression and `X` parsed by the real type grammar (`Map[str, int]`, `(int, str)`,
 `fn(int) -> int`, `lib.Bx[int]`). R1 picks: type application when the head resolves to a generic item or
 type, index when the head is a value. Deletes `ast::index_as_type` and its three direct callers.
+**Done (TICKET-222, 2026-10-07):** `ExprKind::Index { obj, index, types }`; `TypeApply` and the
+parser's comma rule are deleted.
 
 **R3. The carriers are ordinary enums inside.** The optional and error carriers are declared in the
 prelude like any user enum and get no special case in the checker or compiler: one model for patterns,

@@ -131,6 +131,10 @@ per-sched fact.
 
 The unfinished part of TICKET-210's one resolver. Three separate duplicates.
 
+**Status (2026-10-07):** S1 and CK1 fixed by TICKET-222 (R1 + R2: one bracket node read with the
+type grammar; `resolve_path` the one writer of a path's resolution, the call fallback deleted). S2
+is open (R3).
+
 - **S1, two type grammars for one bracket.**
   - The call form `[X](` parses `X` with `parse_type` (`try_parse_type_arg_call`, `src/parser/mod.rs:3043`).
   - With one argument and no `(`, the bracket is parsed as an expression (`parse_subscript`, `:2826`)

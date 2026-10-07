@@ -2074,6 +2074,25 @@ fn-typed field is data, so `h.f[int](3)` reports *cannot index into* (Go's `cann
 **numeric** index (`arr[0].handlers[0](20)`) always parses as index-then-call, and a plain subscript
 with no following call (`obj.items[0]`, `m.data[k]`) is always an ordinary index.
 
+**One bracket, both readings, the head decides (TICKET-222).** Without a call too, `head[X…]` is
+one bracket whose `X` the parser reads twice: by the real type grammar and as an expression. The
+head picks, as in Rust and Go: a generic fn or a type head takes the type arguments, any value
+indexes. So every type spelling works as a type argument in value position, and a parenthesised
+path is the path value applied (Rust's `(i64::abs)(-6)`):
+
+```chezzi
+g := idt[(int, str)]            # tuple type argument
+h := idt[fn(int) -> int]        # fn type argument
+d := json.decode[Map[str, int]] # nested generic
+print((math.abs[int])(-6))      # 6
+K := 1
+print(fs[K](10))                # a value head indexes: fs[1](10)
+```
+
+A type-only bracket on a value is rejected: `xs[fn(int) -> int]` reports *a subscript takes an
+expression, found the type 'fn(int) -> int'*, and `xs[int, str]` *a subscript takes one index,
+found 2* (Go: `more than one index`).
+
 ## 7b. Generics & protocols  (M7)
 
 A protocol must be imported to be used in another module -- `import Drawable from shapes` or the qualified `shapes.Drawable`.

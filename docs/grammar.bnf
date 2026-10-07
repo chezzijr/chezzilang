@@ -479,14 +479,14 @@
 <fnParamList> ::= <fnParam> | <fnParam> "COMMA" <fnParamList>
 <fnParam>     ::= <type> | "IDENT" "COLON" <type>
 
-# A type application with two or more type args on an IDENT or field head (TICKET-204): a
-# type-level head (`Result[int, str].Ok(5)`, `lib.Pair[int, str].Neither`) or a generic fn value
-# (`pair[str, int]`, `lib.tri[A, B, C]`). The parser commits it when `]` is NOT followed by `(` —
-# `[types](` is the explicit type-argument call below. The comma is what makes it unambiguous
-# against a plain index `arr[i]`; a single-arg `Type[int]` / `idt[int]` rides the index path and
-# the checker reinterprets it.
-<typeApply>     ::= <postfix> "LBRACKET" <typeListMulti> "RBRACKET"
-<typeListMulti> ::= <type> "COMMA" <typeList>
+# One bracket after a postfix head (TICKET-222): `head[X…]` is ONE node carrying every reading that
+# parses — the type list by the real type grammar (`Map[str, int]`, `(int, str)`, `fn(int) -> int`,
+# `lib.Bx[int]`, `int?`; only on an IDENT or non-tuple field head) and the subscript by the
+# expression grammar. The parser never chooses: the checker picks a type application when the head
+# names a generic item or a type (`idt[(int, str)]`, `Result[int, str].Ok(5)`, `Bx[int].make`),
+# else the index (`xs[i]`, `K := 1; fs[K](10)`). A type-only bracket on a value is rejected (`a
+# subscript takes an expression, found the type '…'`, or `… one index, found N`).
+<bracket> ::= <typeList> | <subscript>
 
 # ===== expressions (precedence cascade, loosest -> tightest) =====
 <expr>     ::= <pipeExpr>
@@ -551,7 +551,7 @@
 # The OLD gliding form `Enum.Variant[T](args)` (type args on the VARIANT) is REMOVED — the checker
 # emits a redirect to the type-side form. STATIC (associated) calls and the type-side turbofish reuse
 # the existing postfix shapes, reinterpreted by the checker/compiler when the head is a known
-# struct/enum TYPE name; the MULTI-arg head needs one new production (the `<typeApply>` carrier):
+# struct/enum TYPE name; the type-argument head is the one `<bracket>` production:
 #   `Type.method(args)`        — `<postfix> "DOT" "IDENT" "LPAREN" <argList>? "RPAREN"` where the
 #                                 leading IDENT is a known struct/enum and `method` is a static method
 #                                 (its first param is not `self` — the "no self ⇒ static" rule). For
@@ -568,14 +568,11 @@
 #                                 call, and the annotation position (Go's rule; Chezzi has one
 #                                 namespace). Only the static call can then be lowered; the others
 #                                 reject, because a type parameter is erased.
-#   `Type[targ].member(args)?` — SINGLE type arg: parses as `<postfix> "LBRACKET" <subscript>
-#                                 "RBRACKET" "DOT" "IDENT" ("LPAREN" <argList>? "RPAREN")?` — the
-#                                 parser cannot tell `Type[int].member` from `arr[i].field`, so it
-#                                 stays a plain index and the checker reinterprets the single index as
-#                                 one type argument (VARIANT-first, else static).
-#   `Type[T, …].member(args)?` — MULTI type arg: the disambiguating comma lets the parser commit a
-#                                 `<typeApply>` head (real parsed types); the trailing `.member` /
-#                                 `(args)` attach via the postfix loop. VARIANT-first, else static.
+#   `Type[T, …].member(args)?` — parses as `<postfix> "LBRACKET" <bracket> "RBRACKET" "DOT" "IDENT"
+#                                 ("LPAREN" <argList>? "RPAREN")?`; the bracket keeps its type
+#                                 reading (real parsed types, one or more) beside its index reading,
+#                                 and the checker reads the types because the head names a type.
+#                                 VARIANT-first, else static.
 # The method-level form `Type.method[T](...)` is a MEMBER-level turbofish and is accepted: it pins the
 # member's OWN type args (`Box.make[str]("hi")`), per the declaration-site rule — a type argument is
 # written where its parameter is declared. It composes with the type-level form
@@ -586,12 +583,11 @@
             | <postfix> "DOT" "IDENT"
             | <postfix> "DOT" "INT"                         # tuple element: `t.0` (literal index, read-only —
                                                             # NOT in <lvalue>, and `t[0]` is a type error)
-            | <postfix> "LBRACKET" <subscript> "RBRACKET"   # plain index (no colon) or a Python slice
+            # one bracket: a type application (`pair[str, int]`, `idt[fn(int) -> int]`, a type-level
+            # head), a plain index, or a Python slice; its `.member` and `(args)` attach above.
+            | <postfix> "LBRACKET" <bracket> "RBRACKET"
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
             | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
-            # a MULTI type-arg application (`<typeApply>`): a generic fn value (`pair[str, int]`)
-            # or a type-level head; its `.member` and `(args)` attach through the productions above.
-            | <typeApply>
             # member-side declaration-site turbofish — a method's OWN type args (`xs.map[str](f)`,
             # `s.first[int, str](1, "x")`). The receiver is ANY postfix expression: a bare ident, a call
             # result (`W(1).cast[str]("a")`), a field (`h.w.cast[str](x)`), or an index (`xs[0].cast[U](x)`).

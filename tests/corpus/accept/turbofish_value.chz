@@ -1,4 +1,4 @@
-# rule: postfix, typeApply, letStmt
+# rule: postfix, bracket, letStmt
 # A multi-arg type application is a value (TICKET-204): a generic fn instantiated in value
 # position, bare or module-qualified, and a qualified type-level head.
 import lib

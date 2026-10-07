@@ -1,4 +1,4 @@
-# rule: postfix, typeApply, structDecl
+# rule: postfix, bracket, structDecl
 # Declaration-site turbofish on a MEMBER (PART 2): a member declares its OWN type args, composing with
 # the type-side args. All parse via <postfix> (the member-turbofish steal / the index-over-member-access
 # combined form that the checker reinterprets).

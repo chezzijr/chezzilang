@@ -367,6 +367,7 @@ fn parser_rules_match_fns() {
         "parse_unary",
         "parse_postfix",
         "parse_subscript",
+        "parse_bracket",
         "parse_call_args",
         "parse_type_postfix",
         // `parse_type_body` is `parse_type`'s body, out-of-lined so the wrapper can own the depth +

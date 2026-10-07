@@ -1,0 +1,70 @@
+# TICKET-222: one bracket, both readings, the head decides. Every type spelling is a type argument
+# in value position, and a parenthesised path callee is the path value applied. Values are Rust's:
+# `idt::<(i64, String)>`, `idt::<fn(i64) -> i64>`, `(i64::abs)(-6)`, `(g::<i64>)(6)`.
+import std.json
+import std.math
+
+fn idt[T](x: T) -> T:
+    return x
+
+fn inc(x: int) -> int:
+    return x + 1
+
+struct Bx[T]:
+    v: T
+    fn make(v: T) -> Bx[T]:
+        return Bx(v=v)
+
+enum E[T]:
+    A(T)
+    N
+
+test fn tuple_type_argument():
+    g := idt[(int, str)]
+    assert g((1, "a")) == (1, "a")
+
+test fn fn_type_argument():
+    h := idt[fn(int) -> int]
+    assert h(inc)(2) == 3
+
+test fn optional_type_argument():
+    g := idt[int?]
+    assert g(None) == None
+
+test fn nested_generic_type_argument_on_decode():
+    d := json.decode[Map[str, int]]
+    match d(r'{"a": 1}'):
+        Ok(m):
+            assert m == {"a": 1}
+        Err(e):
+            assert false, e.message()
+
+test fn nested_generic_type_argument_on_a_type_head():
+    assert Bx[Map[str, int]].make({"a": 1}).v == {"a": 1}
+    mk := Bx[(int, int)].make
+    assert mk((1, 2)).v == (1, 2)
+
+test fn tuple_type_argument_on_a_variant():
+    a := E[(int, int)].A
+    match a((1, 2)):
+        E.A(p):
+            assert p == (1, 2)
+        E.N:
+            assert false, "N"
+
+test fn parenthesised_turbofish_callee():
+    assert (math.abs[int])(-6) == 6
+    assert (idt[int])(6) == 6
+    match (json.decode[int])("3"):
+        Ok(n):
+            assert n == 3
+        Err(e):
+            assert false, e.message()
+
+test fn a_value_head_indexes():
+    fs := [inc, idt[int]]
+    K := 1
+    assert fs[K](10) == 10
+    xs := [1, 2, 3]
+    i := 1
+    assert xs[i] == 2
