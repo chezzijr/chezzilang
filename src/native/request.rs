@@ -1691,4 +1691,20 @@ mod tests {
         assert_eq!(field(&ret, "status"), &NativeRet::Int(302));
         assert_eq!(field(&ret, "body"), &NativeRet::Str("no".into()));
     }
+
+    #[test]
+    fn a_redirect_to_an_unparsable_location_is_err_naming_the_location_like_go() {
+        let (url, handle) = serve_raw(
+            b"HTTP/1.1 302 Found\r\nLocation: http://[x/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let ret = do_get(&url, None);
+        handle.join().unwrap();
+        match ret {
+            NativeRet::Err(m) => assert!(
+                m.contains("failed to parse Location header"),
+                "message: {m}"
+            ),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
 }
