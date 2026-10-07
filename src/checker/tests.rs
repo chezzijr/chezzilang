@@ -38186,3 +38186,13 @@ fn enum_ty_and_as_enum_are_inverse_on_every_enum_shape() {
     assert!(Ty::Int.as_enum().is_none());
     assert!(Ty::list(Ty::Int).as_enum().is_none());
 }
+
+#[cfg(test)]
+mod ticket_231_none_word {
+    use super::*;
+
+    #[test]
+    fn mismatch_message_prints_option_sugar() {
+        rejects("fn main():\n    x: int? = \"a\"\n", "int?");
+    }
+}
