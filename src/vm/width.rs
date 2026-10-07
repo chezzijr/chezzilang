@@ -16,8 +16,9 @@
 //!   fiber it already dequeued that no other worker can steal, so a permit holder waiting in place
 //!   for that fiber would hang both.
 //! - The gate's capacity is `worker_count()`, read at every acquire. There is no other width budget.
-//! - The waker queues the woken thread ([`reserve`]), so wake order is the waker's order and not
-//!   the order the OS runs the woken threads in.
+//! - The waker queues the woken thread ([`reserve`]) only when no permit is free beyond the queued
+//!   tickets, so while the budget is full wake order is the waker's order and not the order the OS
+//!   runs the woken threads in. A ticket at queue position i is granted while `held + i < cap`.
 //! - A reserved ticket lives only while its thread is listed as a waiter. Whoever unlists the
 //!   slot withdraws the ticket ([`cancel`]): a ticket nobody takes sits at the queue head and hangs
 //!   every thread of the process.
@@ -184,13 +185,13 @@ pub(super) fn cancel(slot: &Slot) {
 pub(super) fn reserved() -> bool {
     with_slot(|s| s.ticket.load(Ordering::Relaxed) != 0)
 }
-/// The waker queues the woken thread for the permit, in the waker's own order.
+/// The waker queues the woken thread for the permit, in the waker's own order, when the gate is
+/// [`full`].
 pub(super) fn reserve(slot: &Slot) {
     RUNNERS.reserve(slot);
 }
 
 struct GateSt {
-    held: usize,
     queue: VecDeque<u64>,
     next_ticket: u64,
 }
@@ -198,8 +199,12 @@ struct GateSt {
 pub(super) struct WidthGate {
     /// The capacity, read at every acquire: a changed worker count needs no resize.
     cap: fn() -> usize,
+    /// TICKET-230 — permits held now: raised by CAS (never past `cap`), lowered by `release`.
+    /// Atomic so the free-permit path takes no lock.
+    held: AtomicUsize,
     st: Mutex<GateSt>,
     cv: Condvar,
+    /// Queued tickets, equal to `st.queue.len()`; written under `st`.
     waiting: AtomicUsize,
 }
 
@@ -207,8 +212,8 @@ impl WidthGate {
     pub(super) const fn new(cap: fn() -> usize) -> Self {
         WidthGate {
             cap,
+            held: AtomicUsize::new(0),
             st: Mutex::new(GateSt {
-                held: 0,
                 queue: VecDeque::new(),
                 next_ticket: 0,
             }),
@@ -221,15 +226,30 @@ impl WidthGate {
         self.waiting.load(Ordering::Relaxed)
     }
 
+    /// Take a permit if one is free beyond the first `ahead` queued tickets.
+    fn try_take(&self, ahead: usize) -> bool {
+        let cap = (self.cap)();
+        let mut h = self.held.load(Ordering::SeqCst);
+        while h + ahead < cap {
+            match self
+                .held
+                .compare_exchange_weak(h, h + 1, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return true,
+                Err(x) => h = x,
+            }
+        }
+        false
+    }
+
     /// Return a permit. Wakes waiters only when the queue is non-empty (DEC-028: no wake per
-    /// preemption).
+    /// preemption). The lock orders the wake after a waiter's last check; the free-permit path
+    /// takes no lock.
     pub(super) fn release(&self) {
-        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        debug_assert!(st.held > 0, "TICKET-230: release without a held permit");
-        st.held -= 1;
-        let wake = !st.queue.is_empty();
-        drop(st);
-        if wake {
+        let prev = self.held.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(prev > 0, "TICKET-230: release without a held permit");
+        if self.waiting.load(Ordering::SeqCst) > 0 {
+            drop(self.st.lock().unwrap_or_else(|e| e.into_inner()));
             self.cv.notify_all();
         }
     }
@@ -241,14 +261,23 @@ impl WidthGate {
         self.acquire_slot(&Slot::new());
     }
 
+    /// TICKET-230 — queues a ticket only when no permit is free beyond the queued tickets: wake
+    /// order matters only when the budget is full. At cap 1 a waker that holds the permit always
+    /// queues, so T=1 order is unchanged.
     fn reserve(&self, slot: &Slot) {
+        let cap = (self.cap)();
+        if self.held.load(Ordering::SeqCst) + self.waiting.load(Ordering::SeqCst) < cap {
+            return;
+        }
         let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        if slot.ticket.load(Ordering::Relaxed) == 0 {
+        if slot.ticket.load(Ordering::Relaxed) == 0
+            && self.held.load(Ordering::SeqCst) + st.queue.len() >= cap
+        {
             let t = st.next_ticket;
             st.next_ticket += 1;
             st.queue.push_back(t);
             slot.ticket.store(t + 1, Ordering::Relaxed);
-            self.waiting.fetch_add(1, Ordering::Relaxed);
+            self.waiting.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -260,13 +289,21 @@ impl WidthGate {
         let t = slot.ticket.swap(0, Ordering::Relaxed);
         if t != 0 {
             st.queue.retain(|q| *q != t - 1);
-            self.waiting.fetch_sub(1, Ordering::Relaxed);
+            self.waiting.fetch_sub(1, Ordering::SeqCst);
             drop(st);
             self.cv.notify_all();
         }
     }
 
+    /// TICKET-230 — a ticket at queue position i is granted while `held + i < cap`, not only at the
+    /// queue head: a head-only grant made every thread wait behind a ticket reserved for a thread
+    /// the OS had not run yet (`send_one_channel` T=0 ran 29.2x base). At cap 1 the two rules agree.
     fn acquire_slot(&self, slot: &Slot) {
+        if slot.ticket.load(Ordering::Relaxed) == 0
+            && self.try_take(self.waiting.load(Ordering::SeqCst))
+        {
+            return;
+        }
         let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
         let me = match slot.ticket.load(Ordering::Relaxed) {
             0 => {
@@ -274,19 +311,26 @@ impl WidthGate {
                 st.next_ticket += 1;
                 st.queue.push_back(t);
                 slot.ticket.store(t + 1, Ordering::Relaxed);
-                self.waiting.fetch_add(1, Ordering::Relaxed);
+                self.waiting.fetch_add(1, Ordering::SeqCst);
                 t
             }
             t => t - 1,
         };
-        while !(st.held < (self.cap)() && st.queue.front() == Some(&me)) {
+        let pos = loop {
+            let pos = st
+                .queue
+                .iter()
+                .position(|q| *q == me)
+                .expect("a waiting thread's ticket is queued");
+            if self.try_take(pos) {
+                break pos;
+            }
             st = self.cv.wait(st).unwrap_or_else(|e| e.into_inner());
-        }
-        st.queue.pop_front();
+        };
+        st.queue.remove(pos);
         slot.ticket.store(0, Ordering::Relaxed);
-        st.held += 1;
-        self.waiting.fetch_sub(1, Ordering::Relaxed);
-        let more = st.held < (self.cap)() && !st.queue.is_empty();
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        let more = !st.queue.is_empty() && self.held.load(Ordering::SeqCst) < (self.cap)();
         drop(st);
         if more {
             self.cv.notify_all();
@@ -418,6 +462,47 @@ mod tests {
             .expect("the third acquire must proceed after a release");
         h.join().expect("acquirer panicked");
         g.release();
+        assert_eq!(g.waiting(), 0);
+    }
+
+    /// TICKET-230: a waker queues the wakee only when no permit is free beyond the queued tickets.
+    #[test]
+    fn a_reserve_with_a_free_permit_queues_nothing() {
+        let g = WidthGate::new(|| 2);
+        g.reserve(&Slot::new());
+        assert_eq!(
+            g.waiting(),
+            0,
+            "a reserve must not queue a ticket while a permit is free"
+        );
+    }
+
+    /// TICKET-230: a ticket at queue position i is granted while `held + i < cap`. A head-only grant
+    /// made a thread wait behind a ticket reserved for a thread the OS had not run yet.
+    #[test]
+    fn a_ticket_behind_an_untaken_ticket_proceeds_while_permits_are_free() {
+        let g = Arc::new(WidthGate::new(|| 2));
+        g.acquire();
+        g.acquire();
+        let a = Slot::new();
+        g.reserve(&a);
+        let (tx, rx) = mpsc::channel();
+        let g2 = Arc::clone(&g);
+        let h = std::thread::spawn(move || {
+            g2.acquire();
+            tx.send(()).unwrap();
+            g2.release();
+        });
+        spin_until_waiting(&g, 2);
+        g.release();
+        g.release();
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
+            "a ticket behind an untaken ticket must proceed while permits are free"
+        );
+        assert_eq!(g.waiting(), 1, "the untaken ticket stays queued");
+        g.cancel(&a);
+        h.join().expect("acquirer panicked");
         assert_eq!(g.waiting(), 0);
     }
 }
