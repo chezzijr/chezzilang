@@ -86,7 +86,9 @@ pub enum Route {
     /// away, so the receiver owns it (DEC-179 item 6).
     Handoff,
     /// A value a task copy read through a handle whose owner aliases it: `Task.get`, a
-    /// `memoize1` wrapper (TICKET-213).
+    /// `memoize1` wrapper (TICKET-213). `std.concurrency.task_copy_of` rebuilds it through
+    /// `from_wire_memo` (`Vm::airlock_native`, TICKET-220), so it takes every marking rule a
+    /// rebuild has, the generator frame mask included.
     CopyRead,
 }
 

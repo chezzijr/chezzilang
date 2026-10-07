@@ -10,7 +10,7 @@
 # visible). A task copy of the wrapper carries that map as it was at the crossing and reads it first,
 # so it sees the value as of the crossing, like every other captured value; a write to it there faults
 # (D4). A copy never writes the alias (`concurrency.is_task_copy`); a key the owner had not cached
-# reads a snapshot from the shared cache, marked as the task's copy (TICKET-213), so a write to it
+# reads a snapshot from the shared cache, rebuilt as the task's copy (`concurrency.task_copy_of`, TICKET-213), so a write to it
 # faults too. Two tasks missing one key at the same moment may both
 # run `f`; CPython's `functools.cache` does the same.
 #
@@ -38,7 +38,8 @@ fn _memo_get[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], own: Map[K, V], f
     own[k] = v
     return v
 
-# A copy's read is a snapshot of the shared cache, marked as the task's copy; on a miss it fills the
+# A copy's read is a snapshot of the shared cache, rebuilt as the task's copy
+# (`concurrency.task_copy_of`); on a miss it fills the
 # cache once and reads it back once, because `_memo_fill` returns the caller's own object and marking
 # that would mark what the task owns; a key that never equals itself is not found by the read-back,
 # and the fill's own value is returned unmarked (no recursion: `f` runs once per call, as on base).

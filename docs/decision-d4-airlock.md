@@ -155,7 +155,7 @@ value after the join? Two routes decide it, each in one place:
 2. **A crossing generator marks only the frame slots the parent can reach (TICKET-190).** A
    generator crossing into a task stays an independent deep copy (`docs/syntax.md`). Each generator
    carries one static frame mask (`vm::crossing::Crossing::frame_mask`), and every route reads it:
-   a marking route (spawn forms, Executor jobs through their closure captures, the module snapshot)
+   a marking route (spawn forms, Executor jobs through their closure captures, the module snapshot, and a task copy's `Task.get()` / `memoize1` read, `Route::CopyRead`, TICKET-220)
    rebuilds the frame marked, then unmarks the ROOT of each private slot. A hand-off (Channel,
    Shared, RwShared, Atomic) marks nothing, so the mask changes nothing there. A local slot is
    private when every single-name `let` and assignment of it is fresh and its root never escapes

@@ -1792,8 +1792,9 @@ not universal — measured against the release binary, three shapes still lose t
    parent's own `g.next()` after the join returns its own next value (owner ruling 2026-09-28). What
    the resumed generator writes inside its frame IS decided (TICKET-179, TICKET-190): every crossing
    route reads one static frame mask per generator, so a frame-local list the parent never saw is
-   writable and a list the generator yielded, stored or passed on faults. An Executor job, a spawn
-   and the module snapshot all apply it; see `docs/decision-d4-airlock.md` rule 2.
+   writable and a list the generator yielded, stored or passed on faults. An Executor job, a spawn,
+   the module snapshot and a task copy's `Task.get()` / `memoize1` read (`Route::CopyRead`,
+   TICKET-220) all apply it; see `docs/decision-d4-airlock.md` rule 2.
 3. **A same-task round-trip is not a crossing.** A closure/value sent on a `Channel` or read back
    from a `Shared`/`RwShared` and used by the SAME task that sent it never left that task's heap, so
    the D4 layer-C mark is not set on it (`Heap::id`-gated, TICKET-169) — its write stays silent,

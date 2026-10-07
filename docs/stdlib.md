@@ -478,14 +478,14 @@ parallel:
 `spawn print(concurrency.is_task_copy(xs))` prints `false`: a spawn's call arguments run in the
 parent (Go `go f(x)`), so the query runs before the crossing.
 
-### `concurrency.mark_task_copy` — mark a value as this task's copy
-`mark_task_copy(v) -> nil` (after `import std.concurrency`). Marks `v` and everything it reaches as
-this task's copy, so a later write to it faults `this value is this task's copy` (D4). The mark
-stops at a module: a function inside `v` does not mark the globals of the module it lives in. It is for std
-code that reads a shared core on behalf of a handle its owner aliases: `Task.get()` and a
-`memoize1` wrapper call it on the snapshot a task copy reads, because a write to that snapshot would
-never reach the owner (TICKET-213). A plain `Shared.get()` or `ch.recv()` result is the receiver's
-own and is not marked. `Kind::Inline`, like `is_task_copy`.
+### `concurrency.task_copy_of` — this task's copy of a value
+`task_copy_of[T](v: T) -> T` (after `import std.concurrency`). Returns `v` rebuilt as this task's
+copy, so a later write to it faults `this value is this task's copy` (D4). It is the rebuild every
+crossing runs: a function inside `v` leaves its module's globals unmarked, and a generator's
+frame-local list the creating task never saw stays writable. It is for std code that reads a shared
+core on behalf of a handle its owner aliases: `Task.get()` and a `memoize1` wrapper (TICKET-213,
+TICKET-220). A plain `Shared.get()` or `ch.recv()` result is the receiver's own. The engine runs it
+(`Kind::InterceptAirlock`).
 
 ### `concurrency.is_settled` — has a handle channel its outcome
 `is_settled(ch) -> bool` (after `import std.concurrency`). True once the channel `ch` is sealed: a
@@ -1824,7 +1824,7 @@ result cached (`K: Hashable + Eq` — a map key needs both, `docs/gaps.md` W7-53
 Executor job reads and fills the same cache as its creator, as CPython `functools.cache` does from any
 thread. Lookups and inserts are O(1) expected. The task holding the original wrapper gets the **same
 object** on every call (CPython `f(1) is f(1)`; a mutation of the result stays visible), through a
-private alias map; a task copy of the wrapper reads that map as copied at the crossing, so it sees the value as of the crossing and its write to that value faults (D4); a key the owner had not cached gives the copy a snapshot of the shared cache's value, marked as the task's copy, so a write to it faults too (`concurrency.mark_task_copy`, TICKET-213; `.copy()` gives a writable value). Two tasks missing one key at the same moment may both run `f`,
+private alias map; a task copy of the wrapper reads that map as copied at the crossing, so it sees the value as of the crossing and its write to that value faults (D4); a key the owner had not cached gives the copy a snapshot of the shared cache's value, marked as the task's copy, so a write to it faults too (`concurrency.task_copy_of`, TICKET-213, TICKET-220; `.copy()` gives a writable value). Two tasks missing one key at the same moment may both run `f`,
 as with CPython's `functools.cache`.
 **v1 limit (not a bug):** single-argument only. A general N-arg cache would key a `Map[(A, B), V]` on
 the argument tuple: a tuple of Hashable args is a valid key (TICKET-161), so an N-arg wrapper can be

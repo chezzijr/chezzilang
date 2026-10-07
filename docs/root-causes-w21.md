@@ -224,6 +224,8 @@ as a head.
 
 ## Family A2 — one task-copy marking walk (A3)
 
+**Status: fixed (TICKET-220, 2026-10-07).** `arg_mark_task_copy` is deleted; a copy's read rebuilds through `std.concurrency.task_copy_of` under `Route::CopyRead`.
+
 - There are two walks that mark task copies:
   - the rebuild walk (`from_wire_memo` + `copy_mark`, `src/vm/sched.rs:4340`), which applies TICKET-190's
     generator frame mask in `rebuild_frame_slots` (`:4307`);

@@ -28,9 +28,9 @@
 # spawned task's, an Executor job's) carries `cached` as it was at the crossing, so its `get()`
 # returns the value as of the crossing, as every other captured value does (owner decision
 # 2026-10-02, TICKET-203); a write to it there faults (D4), as for any captured value. A copy whose
-# owner had not called `get()` reads a fresh copy from the channel, marked as the task's copy
-# (`concurrency.mark_task_copy`, TICKET-213), so a write to it faults too. `concurrency.is_task_copy(self)`
-# picks between the mark and the `cached` write; it reads the same predicate as the D4 write check, so
+# owner had not called `get()` reads a fresh copy from the channel, rebuilt as the task's copy
+# (`concurrency.task_copy_of`, TICKET-213, TICKET-220), so a write to it faults too. `concurrency.is_task_copy(self)`
+# picks between that copy and the `cached` write; it reads the same predicate as the D4 write check, so
 # `get()` never attempts a write that would fault.
 
 import std.concurrency
@@ -46,7 +46,7 @@ struct Task[T]:
     # place of a raise). Idempotent. `cached` answers first in every task: the owner's alias, or in
     # a copy that alias as it was at the crossing. Only the owner fills it, so a copy whose owner had
     # not called `get()` before the crossing reads a fresh copy from the channel on each call,
-    # marked as the task's copy.
+    # rebuilt as the task's copy (`concurrency.task_copy_of`).
     fn get(self) -> Result[T]:
         match self.cached:
             Some(r): return r
