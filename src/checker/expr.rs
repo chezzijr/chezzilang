@@ -173,7 +173,7 @@ impl Checker {
             && self.bracket_is_index(callee)
         {
             if let Some(id) = self.call_ctx.as_ref().map(|c| c.id) {
-                self.record_resolution(id, Resolution::IndexCall, span);
+                self.record_index_call(id, span);
             }
             let callee_ty = self.index_value(callee, &ix, true);
             return self.apply_value_call(callee, callee_ty, args, named, span);
@@ -645,83 +645,6 @@ impl Checker {
             let r = self.member_resolution(obj, name);
             self.record_resolution(callee.id, r, callee.span);
             return self.infer_method_call(obj, name, *name_span, args, &targs, span, expected);
-        }
-        // Combined member-side turbofish — DEFENSIVE FALLBACK. Since the parser steal was broadened to
-        // ANY `Field` receiver, the combined `Type[T].member[U](args)` now parses as a `Call{callee:
-        // Field, type_args:[U]}` and is handled by the `Field`-callee dispatch above (the `type_apply_head`
-        // branch). This `Index`-over-`Field`-callee block stays in place for the residual shapes that do
-        // NOT get stolen — e.g. a head that is a value (`arr[i].field[k](x)`, where `resolved_head` is
-        // `None` and we fall through to ordinary index-then-call). Reinterpret: the inner `Field`'s `obj`
-        // is the enclosing-type head (a type-applied `Box[int]` or a bare `Ident(Box)`), the trailing
-        // index is the single method type argument. Gate on the head being a KNOWN, NON-local struct/enum.
-        if let ExprKind::Index {
-            obj: callee_obj,
-            types,
-            ..
-        } = &callee.kind
-            && let [mt] = types.as_slice()
-            && let ExprKind::Field {
-                obj: head,
-                name,
-                name_span,
-            } = &callee_obj.kind
-        {
-            // Resolve the enclosing-type head + its type args. A bare `Ident(Box).member[U]` head has
-            // NO enclosing type args; a `Box[int].member[U]` head carries them via `type_apply_head`.
-            let resolved_head = self.type_apply_head(head).or_else(|| match &head.kind {
-                ExprKind::Ident(tn) => self
-                    .bare_type_head(tn)
-                    .filter(|th| {
-                        th.pinned.is_none()
-                            && matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Enum)
-                    })
-                    .map(|th| (th, Vec::new())),
-                _ => None,
-            });
-            if let Some((th, type_exprs)) = resolved_head {
-                let mt_ty = self.resolve_type(mt, span);
-                let (tname, key) = (th.name.clone(), th.key.clone());
-                self.record_type_member(callee_obj, &key, name);
-                let written: Vec<Ty> = type_exprs
-                    .iter()
-                    .map(|t| self.resolve_type(t, span))
-                    .collect();
-                let Some(enclosing) = self.written_head_args(
-                    &th.spelled,
-                    self.type_param_count(&th.key),
-                    th.pinned.clone(),
-                    written,
-                    span,
-                ) else {
-                    self.infer_all(args);
-                    return Ty::Unknown;
-                };
-                // VARIANT-FIRST (a same-named static is barred at decl time); a variant takes no
-                // method-level type args, so a method turbofish on a variant is an error.
-                if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
-                    self.error(
-                        span,
-                        format!("variant '{name}' of '{tname}' takes no method type arguments"),
-                    );
-                    return self.infer_variant_call(
-                        &v, name, args, &enclosing, *name_span, span, expected,
-                    );
-                }
-                return self.infer_static_call(
-                    &th,
-                    &th.name,
-                    name,
-                    args,
-                    &enclosing,
-                    &[mt_ty],
-                    *name_span,
-                    span,
-                    expected,
-                );
-            }
-            // Not a type head: a member of a module or a value, read then called.
-            let r = self.member_resolution(head, name);
-            self.record_resolution(callee_obj.id, r, callee_obj.span);
         }
         if let ExprKind::Ident(name) = &callee.kind {
             // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same
@@ -1804,34 +1727,6 @@ impl Checker {
         id.0 != crate::ast::NodeId::SYNTH.0 && !self.generic_arg_prepass && !self.resolving_returns
     }
 
-    pub(super) fn record_resolution(&mut self, id: crate::ast::NodeId, r: Resolution, span: Span) {
-        // Every walk (inference passes included) records divergence, before the main-pass guard.
-        if id.0 != crate::ast::NodeId::SYNTH.0 {
-            let d = self.resolution_diverges(&r);
-            self.callee_diverges
-                .insert((self.graph_module_idx, id.0), d);
-        }
-        if !self.records_node(id) {
-            return;
-        }
-        // One writer per NodeId: a second, different write means a second walk records.
-        if let Some(prev) = self.resolutions.get(&(self.graph_module_idx, id.0)) {
-            debug_assert!(
-                *prev == r,
-                "NodeId {} resolved twice: {prev:?} then {r:?}",
-                id.0
-            );
-        }
-        crate::checker::record_call_table_entry(
-            &mut self.resolutions,
-            &mut self.table_conflicts,
-            (self.graph_module_idx, id.0),
-            r,
-            "name resolution",
-            span,
-        );
-    }
-
     /// TICKET-184 — whether a callee resolved to `r` never returns: the `panic` builtin, or a fn of a
     /// native module that [`is_diverging_native`] names (`std.os.exit`, under any bound name). Never
     /// a name test: a user fn, method, local or parameter named `exit`/`panic` returns normally.
@@ -1863,7 +1758,7 @@ impl Checker {
         Resolution::Fn { module, name }
     }
 
-    /// Record `Resolution::Variant` for a nullary variant read `Enum.V`.
+    /// Record `Resolution::Variant` for a variant pattern head `Enum.V`.
     pub(super) fn record_variant(
         &mut self,
         id: crate::ast::NodeId,
@@ -1875,7 +1770,7 @@ impl Checker {
             enum_key: enum_key.to_string(),
             variant: variant.to_string(),
         };
-        self.record_resolution(id, r, span);
+        self.record_pattern_head(id, r, span);
     }
 
     /// What a bare value head that a scope holds names: a scope >= 1 binding, a module-level fn

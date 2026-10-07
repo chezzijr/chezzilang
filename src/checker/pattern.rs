@@ -92,7 +92,7 @@ impl Checker {
                 // token's OWN span (`bind_span`, not the arm-level `span`), exactly as the for-loop
                 // uses `var_spans`. No-op unless a probe is armed → zero overhead on normal checks.
                 self.hover_record_at(*bind_span, ty, HoverKind::Local, None);
-                self.record_resolution(*id, Resolution::PatBinding, span);
+                self.record_pattern_head(*id, Resolution::PatBinding, span);
                 self.declare(name, ty.clone());
                 true
             }
@@ -191,7 +191,7 @@ impl Checker {
                     if let Err(msg) = &ctor {
                         self.error(span, msg.clone());
                     } else {
-                        self.record_resolution(*id, Resolution::PatStruct(sname.clone()), span);
+                        self.record_pattern_head(*id, Resolution::PatStruct(sname.clone()), span);
                         if fields.len() != bindings.len() {
                             self.error(
                                 span,
@@ -469,7 +469,7 @@ impl Checker {
                             && bindings.is_empty()
                             && !is_known_variant
                         {
-                            self.record_resolution(*id, Resolution::PatBinding, span);
+                            self.record_pattern_head(*id, Resolution::PatBinding, span);
                             self.declare(name, Ty::Unknown);
                             return true;
                         }
@@ -516,7 +516,7 @@ impl Checker {
                             && !self.variant_owners.contains_key(name)
                             && !crate::checker::is_builtin_variant(name)
                         {
-                            self.record_resolution(*id, Resolution::PatBinding, span);
+                            self.record_pattern_head(*id, Resolution::PatBinding, span);
                             self.declare(name, scrut.clone());
                             return true;
                         }
@@ -686,7 +686,7 @@ impl Checker {
                             );
                             return false;
                         }
-                        self.record_resolution(*id, Resolution::PatBinding, span);
+                        self.record_pattern_head(*id, Resolution::PatBinding, span);
                         self.declare(name, ty.clone());
                         return true;
                     }
@@ -759,7 +759,7 @@ impl Checker {
                         );
                         return false;
                     }
-                    self.record_resolution(*id, Resolution::PatBinding, span);
+                    self.record_pattern_head(*id, Resolution::PatBinding, span);
                     self.declare(name, Ty::Tuple(tys.clone()));
                     return true;
                 }
@@ -811,7 +811,7 @@ impl Checker {
                                 );
                                 return false;
                             }
-                            self.record_resolution(*id, Resolution::PatBinding, span);
+                            self.record_pattern_head(*id, Resolution::PatBinding, span);
                             self.declare(name, Ty::Struct(label.clone(), targs.clone()));
                             return true;
                         }
@@ -819,7 +819,11 @@ impl Checker {
                         // field count must match (a clean checker error, never a runtime panic).
                         let is_ctor = ctor.is_ok();
                         if is_ctor {
-                            self.record_resolution(*id, Resolution::PatStruct(label.clone()), span);
+                            self.record_pattern_head(
+                                *id,
+                                Resolution::PatStruct(label.clone()),
+                                span,
+                            );
                         }
                         if let Err(msg) = &ctor {
                             self.error(span, msg.clone());
@@ -1624,7 +1628,7 @@ impl Checker {
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Pass => Ty::Nil,
-            ExprKind::Ident(name) => self.infer_ident(expr.id, name, expr.span),
+            ExprKind::Ident(name) => self.infer_ident(expr, name, expr.span),
             ExprKind::List(items, _) => {
                 // Consume any expected-type hint (a `List[E]` slot: an annotated `let`, a call
                 // arg, a return position — or the synthesized variadic list). `take()` so the
@@ -1734,7 +1738,7 @@ impl Checker {
                 obj,
                 name,
                 name_span,
-            } => self.infer_field(expr.id, obj, name, *name_span),
+            } => self.infer_field(expr, obj, name, *name_span),
             ExprKind::Index { obj, index, types } => {
                 self.infer_index(expr, obj, index.as_deref(), types)
             }
@@ -2428,7 +2432,7 @@ impl Checker {
 
     /// The `m.f` half of [`Self::path_fn`]: `m` is a whole-module import here and `f` is one of its
     /// fns.
-    fn module_fn(&self, m: &str, name: &str) -> Option<(String, FnSig)> {
+    pub(super) fn module_fn(&self, m: &str, name: &str) -> Option<(String, FnSig)> {
         if !matches!(self.head_binding(m), HeadBinding::Module) {
             return None;
         }
@@ -2488,7 +2492,7 @@ impl Checker {
     /// The type head of a member path's receiver `obj`, with its written type arguments: `Bx`,
     /// `Bx[int]`, `vlib.R2[int, str]`, or an alias `B`. An alias given type arguments (`A[int]`)
     /// is still a type path; its readers reject it through [`Self::written_head_args`].
-    fn peel_type_path(&self, obj: &Expr) -> Option<(TypeHead, Option<WrittenTypeArgs>)> {
+    pub(super) fn peel_type_path(&self, obj: &Expr) -> Option<(TypeHead, Option<WrittenTypeArgs>)> {
         let (head, args) = match crate::ast::type_application(obj) {
             Some(app) => (app.head, Some((app.args, app.args_span))),
             None => (obj, None),
@@ -2754,35 +2758,20 @@ impl Checker {
             && let ExprKind::Ident(mn) = &m.kind
             && self.json_decode_member(mn, name)
         {
-            let r = self.value_head_resolution(mn);
-            self.record_resolution(m.id, r, m.span);
+            self.resolve_path(m);
             let ty =
                 self.path_fn_value_ty(pf, Some((app.args.clone(), app.args_span)), app.head.span);
             return Some(self.record_decode_value(app.head.id, ty, app.head.span));
         }
         let head = app.head;
-        match &pf.res {
-            Some(r) => self.record_resolution(head.id, r.clone(), head.span),
-            // A fn head records `Resolution::Fn`, the one fact the compiler erases on (DEC-197).
-            None => match &head.kind {
-                ExprKind::Ident(name) => {
-                    let r = self.value_head_resolution(name);
-                    self.record_resolution(head.id, r, head.span);
-                }
-                ExprKind::Field { obj: m, name, .. } => {
-                    if let Resolution::ModuleMember { module, name } =
-                        self.member_resolution(m, name)
-                    {
-                        self.record_resolution(head.id, Resolution::Fn { module, name }, head.span);
-                    }
-                    // The compiler loads the module head as a value (`Compiler::resolution` (5)).
-                    if let ExprKind::Ident(mn) = &m.kind {
-                        let r = self.value_head_resolution(mn);
-                        self.record_resolution(m.id, r, m.span);
-                    }
-                }
-                _ => {}
-            },
+        // A fn head resolves to `Resolution::Fn`, the one fact the compiler erases on (DEC-197).
+        self.resolve_path(head);
+        // The compiler loads a module head as a value (`Compiler::resolution` (5)).
+        if pf.res.is_none()
+            && let ExprKind::Field { obj: m, .. } = &head.kind
+            && let ExprKind::Ident(_) = &m.kind
+        {
+            self.resolve_path(m);
         }
         Some(self.path_fn_value_ty(pf, Some((app.args.clone(), app.args_span)), head.span))
     }
@@ -2843,7 +2832,7 @@ impl Checker {
     /// this decides; the caller falls through to the ordinary field path.
     fn type_member_value(
         &mut self,
-        id: crate::ast::NodeId,
+        e: &Expr,
         obj: &Expr,
         name: &str,
         name_span: Span,
@@ -2865,7 +2854,7 @@ impl Checker {
         {
             // A nullary variant is a value of the enum: explicit head args resolve and arity-check,
             // an alias head pins its own, a bare head leaves them Unknown.
-            self.record_variant(id, &key, name, name_span);
+            self.resolve_path(e);
             let tps = self.enum_type_params.get(&key).cloned().unwrap_or_default();
             let written: Vec<Ty> = match &head_args {
                 Some((targs, _)) => targs
@@ -2894,8 +2883,8 @@ impl Checker {
             return Some(Ty::Enum(key, args));
         }
         if let Some(pf) = self.type_member_fn(&th, head_args, name) {
-            if let Some(r) = pf.res.clone() {
-                self.record_resolution(id, r, name_span);
+            if pf.res.is_some() {
+                self.resolve_path(e);
             }
             return Some(self.path_fn_value_ty(pf, None, name_span));
         }
@@ -3019,7 +3008,7 @@ impl Checker {
         );
     }
 
-    pub(super) fn infer_ident(&mut self, id: crate::ast::NodeId, name: &str, span: Span) -> Ty {
+    pub(super) fn infer_ident(&mut self, e: &Expr, name: &str, span: Span) -> Ty {
         // BARE-VALUE position, and the same shadowing rule (`Checker::shadowing_type_param`): a type
         // parameter shadows a same-named FUNCTION or module GLOBAL for the whole body, so `g := foo`
         // and `LIM + 1` must not quietly read the outer one while `foo()` / `LIM.m()` resolve to the
@@ -3035,8 +3024,7 @@ impl Checker {
         }
         if let Some(ty) = self.lookup(name) {
             // What the name means does not depend on whether its type is known here.
-            let r = self.value_head_resolution(name);
-            self.record_resolution(id, r, span);
+            self.resolve_path(e);
             // TICKET-183 — a body reads a module global declared below it through the type
             // `seed_module_globals` gave it. An `Unknown` in that type (an un-annotated empty
             // collection, a value of un-inferable type) is pinned by walk-order code this body cannot
@@ -3094,8 +3082,7 @@ impl Checker {
             // W7-42r: this expression's type is now fixed against the fn's signature, so a later
             // module-scope `name := …` would retype the ONE slot underneath it (see `fn_reads`).
             self.record_fn_read(name);
-            let r = self.value_head_resolution(name);
-            self.record_resolution(id, r, span);
+            self.resolve_path(e);
             // …and a FROM-IMPORTED fn read above its own `import` is the same use-before-import the
             // value arm rejects (`g := h` above `import h from lib.fns`). Leaving it accepted gave
             // two verdicts for one user-visible concept; both ancestors reject it too (CPython:
@@ -3146,14 +3133,14 @@ impl Checker {
         // design-sanctioned split (the call authority is the variadic prelude decl; the value form is
         // fixed).
         if name == "print" {
-            self.record_resolution(id, Resolution::Builtin(name.to_string()), span);
+            self.resolve_path(e);
             return Ty::BuiltinFn {
                 params: vec![Ty::Unknown],
                 ret: Box::new(Ty::Nil),
             };
         }
         if is_firstclass_builtin_fn(name) {
-            self.record_resolution(id, Resolution::Builtin(name.to_string()), span);
+            self.resolve_path(e);
             if let Some(sig) = self.builtin_sig(name) {
                 return Ty::BuiltinFn {
                     params: sig.params,
@@ -3162,11 +3149,7 @@ impl Checker {
             }
         }
         if name == "None" {
-            let r = Resolution::Variant {
-                enum_key: "Option".to_string(),
-                variant: name.to_string(),
-            };
-            self.record_resolution(id, r, span);
+            self.resolve_path(e);
             return Ty::option(Ty::Unknown);
         }
         // A type name read as a value (`f := Box`, TICKET-204).
@@ -4211,13 +4194,7 @@ impl Checker {
         })
     }
 
-    pub(super) fn infer_field(
-        &mut self,
-        id: crate::ast::NodeId,
-        obj: &Expr,
-        name: &str,
-        name_span: Span,
-    ) -> Ty {
+    pub(super) fn infer_field(&mut self, e: &Expr, obj: &Expr, name: &str, name_span: Span) -> Ty {
         // A full module path that did not resolve (TICKET-175): the receiver `obj` is the BARE first
         // segment of an imported dotted module path (`pkg`), never a bound name, and `name` is the
         // NEXT segment. Desugar already folded every full path of an un-aliased import into one
@@ -4270,8 +4247,8 @@ impl Checker {
             && self.shadowing_type_param(tname)
         {
             if let Some(pf) = self.param_member_fn(tname, name) {
-                if let Some(r) = pf.res.clone() {
-                    self.record_resolution(id, r, name_span);
+                if pf.res.is_some() {
+                    self.resolve_path(e);
                 }
                 return self.path_fn_value_ty(pf, None, name_span);
             }
@@ -4286,14 +4263,13 @@ impl Checker {
         // A type path read as a value (Rust's path-value rule, TICKET-204): `E.V`, `R1[int].L`,
         // `Bx[int].make`, `Pt.getx`, `lib.E.V`, an alias head `A.L` — every head through
         // `type_head`, every member through `type_member_fn`.
-        if let Some(t) = self.type_member_value(id, obj, name, name_span) {
+        if let Some(t) = self.type_member_value(e, obj, name, name_span) {
             return t;
         }
-        if let Some(t) = self.decode_value(id, obj, name, name_span) {
+        if let Some(t) = self.decode_value(e.id, obj, name, name_span) {
             return t;
         }
-        let r = self.member_resolution(obj, name);
-        self.record_resolution(id, r, name_span);
+        self.resolve_path(e);
         let obj_ty = self.infer(obj);
         match &obj_ty {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index as a
@@ -5080,8 +5056,7 @@ impl Checker {
         if !self.json_decode_member(m, name) {
             return None;
         }
-        let r = self.value_head_resolution(m);
-        self.record_resolution(obj.id, r, obj.span);
+        self.resolve_path(obj);
         let sig = json_decode_sig();
         let display = format!("{m}.{name}");
         let spelling = fn_spelling(&display, &sig.type_params);
@@ -5097,48 +5072,6 @@ impl Checker {
                 Ty::Unknown
             }
         })
-    }
-
-    /// Build `target`'s decode descriptor and record it on `id` as `Resolution::Decode`. `false`
-    /// when it reported why `target` is not decodable.
-    pub(super) fn record_decode(
-        &mut self,
-        id: crate::ast::NodeId,
-        target: &Ty,
-        span: Span,
-    ) -> bool {
-        // One decision for what is decodable and what the VM decodes: the descriptor built here is
-        // the diagnostic when it fails and the compiler's `Op::JsonDecode` operand when it succeeds.
-        // Each field's default is the fill `S(...)` takes for it (decodable structs are non-generic,
-        // so no type arguments), so a missing key and an omitted argument share one default.
-        let shape = |key: &str| {
-            self.structs.get(key).map(|s| {
-                s.fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (name, ty))| {
-                        let fill = s
-                            .field_slots
-                            .as_ref()
-                            .and_then(|sl| sl.get(i))
-                            .and_then(|sl| sl.default.as_ref())
-                            .and_then(|d| self.default_fill(d, 0));
-                        (name.clone(), ty.clone(), fill)
-                    })
-                    .collect()
-            })
-        };
-        match crate::json_decode::from_ty(target, &shape, &mut Vec::new()) {
-            Ok(desc) => {
-                self.record_resolution(id, Resolution::Decode(desc), span);
-                true
-            }
-            Err(msg) if msg.is_empty() => true,
-            Err(msg) => {
-                self.error(span, msg);
-                false
-            }
-        }
     }
 
     /// A free closure's param type, inferred from how its body USES the param (sources #2/#3 — only

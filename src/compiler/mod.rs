@@ -4302,22 +4302,21 @@ impl Compiler {
     /// never answers yes, so every genuine receiver shape keeps its `SpawnMethod`/`DeferMethod`
     /// lowering.
     fn receiverless_call_head(&self, callee: &Expr) -> Result<bool, CompileError> {
-        // A member-side turbofish (`Type[T].member[U](x)`) wraps the `Field` in an `Index`.
-        let inner = match &callee.kind {
-            ExprKind::Index { obj, .. } => obj,
-            _ => callee,
-        };
         // A tuple slot (`t.0`) is a value, never a name (`compile_call` skips it the same way).
-        match &inner.kind {
+        match &callee.kind {
             ExprKind::Field { name, .. } if !crate::ast::is_tuple_index(name) => {}
             _ => return Ok(false),
         }
         // A type member, a native ctor or a module member is receiverless; a value's member (a
         // local that merely SHADOWS a type or module name included) is a genuine receiver.
         Ok(matches!(
-            self.resolution(inner)?,
+            self.resolution(callee)?,
             Resolution::Static { .. }
+                | Resolution::MethodFn { .. }
                 | Resolution::Variant { .. }
+                | Resolution::VariantFn { .. }
+                | Resolution::Fn { .. }
+                | Resolution::Decode(_)
                 | Resolution::StructCtor(_)
                 | Resolution::WitnessStatic(_)
                 | Resolution::ParamMethodFn { .. }
@@ -4457,7 +4456,9 @@ impl Compiler {
             },
             ExprKind::Field { name, .. } if !crate::ast::is_tuple_index(name) => {
                 match self.resolution(callee)? {
-                    Resolution::ModuleMember { module, name } => Some((*module, name.clone())),
+                    Resolution::ModuleMember { module, name } | Resolution::Fn { module, name } => {
+                        Some((*module, name.clone()))
+                    }
                     _ => None,
                 }
             }
@@ -4885,7 +4886,7 @@ impl Compiler {
                 Resolution::Builtin(b) => {
                     return self.compile_builtin_call(fc, &b, args, named, span);
                 }
-                Resolution::Member | Resolution::ModuleMember { .. } => {}
+                Resolution::Member | Resolution::ModuleMember { .. } | Resolution::Fn { .. } => {}
                 other => {
                     return Err(CompileError {
                         message: format!("internal: a call callee resolved to {other:?}"),
@@ -4961,44 +4962,6 @@ impl Compiler {
                 span,
             );
             return Ok(());
-        }
-        // Combined member-side turbofish: `Type[T].member[U](args)` (and the bare `Type.member[U]`).
-        // The trailing method `[U]` wraps the `Field` in an `Index`, so the callee is an `Index` over
-        // a `Field`, NOT a `Field` — it lands here. The type args (both enclosing AND method) are
-        // RUNTIME-erased, so peel the index and emit the SAME `Op::NewEnum` (variant-first) /
-        // `Op::CallStatic` (generic static) bytecode as the type-side forms above. The head is the
-        // enclosing-type carrier — a type-applied `Box[int]` (`type_apply_head_name`) or a bare
-        // `Ident(Box)`. Gate on a KNOWN, NON-local struct/enum so `arr[i].field[k](x)` (head a value)
-        // stays ordinary index-then-call.
-        if let ExprKind::Index {
-            obj: callee_obj, ..
-        } = &callee.kind
-            && let ExprKind::Field {
-                name, name_span, ..
-            } = &callee_obj.kind
-        {
-            // A member-side turbofish (`Type[T].m[U](..)`, `Type.m[U](..)`, `m.f[int](..)`): the
-            // record is on the inner `Field`. Anything but a type member is a value, called below.
-            match self.resolution(callee_obj)?.clone() {
-                Resolution::Variant { enum_key, variant } => {
-                    self.compile_args(fc, args)?;
-                    self.emit_new_enum(fc, &enum_key, &variant, args.len(), span);
-                    return Ok(());
-                }
-                Resolution::Static { type_key, method } => {
-                    debug_assert_eq!(&method, name);
-                    self.emit_call_static(
-                        fc,
-                        type_key,
-                        name,
-                        (call_id, callee, args, named),
-                        *name_span,
-                        span,
-                    )?;
-                    return Ok(());
-                }
-                _ => {}
-            }
         }
         if let ExprKind::Ident(_) = &callee.kind {
             match self.resolution(callee)?.clone() {
