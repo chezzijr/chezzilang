@@ -38050,3 +38050,8 @@ fn untyped_constant_width_grid() {
         red.join("\n")
     );
 }
+
+#[test]
+fn prefix_bang_builds_an_error_value() {
+    ok("fn f() -> int!str:\n    return !\"disk\"\nfn main():\n    pass\n");
+}
