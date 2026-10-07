@@ -426,6 +426,8 @@ impl Checker {
                             _ => Ty::Unknown,
                         }
                     };
+                    // TICKET-225: a seeded global type outlives this walk.
+                    let t = self.settle(&t);
                     if self.scopes[0].get(&names[i]) != Some(&t) {
                         self.scopes[0].insert(names[i].clone(), t);
                         changed = true;
@@ -941,6 +943,11 @@ impl Checker {
         // diagnostic surfaces in pass 2, so a residual `Unknown`/conflict here is a CASCADE, not a
         // genuine un-inferable return — suppress the finalize error to avoid piling on.
         let body_had_err = self.errors.len() > mark.errors;
+        // TICKET-225: an inferred return outlives this walk, so a type variable the walk created
+        // must not reach it — a still-unbound one settles to `Unknown`.
+        let found: Vec<Ty> = found.iter().map(|t| self.settle(t)).collect();
+        let found_yields: Vec<Ty> = found_yields.iter().map(|t| self.settle(t)).collect();
+        let inline_ret = inline_ret.map(|t| self.settle(&t));
         // Discard inference-time diagnostics; pass 2 re-reports them for real. BOTH channels: a
         // warning raised inside this body would otherwise be emitted here AND again in pass 2.
         self.diag_rollback(mark);
@@ -4929,7 +4936,10 @@ impl Checker {
                 .or_insert_with(|| (Vec::new(), *sp));
         }
         let saved_provider = std::mem::replace(&mut self.current_provider, provider);
+        // TICKET-225: one fn body is one type-variable frame.
+        let frame = self.tyvar_mark();
         self.check_fn_body_inner(decl, self_ty, sig);
+        self.close_tyvar_frame(frame);
         self.current_provider = saved_provider;
     }
 

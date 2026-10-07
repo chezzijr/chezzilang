@@ -2406,6 +2406,7 @@ impl Checker {
     /// because `Ty::Param` compares by name (G1).
     pub(super) fn generic_fn_value_ty(
         &mut self,
+        node: crate::ast::NodeId,
         name: &str,
         sig: &FnSig,
         spelling: &str,
@@ -2445,23 +2446,21 @@ impl Checker {
             // position, `in call to takeBool, cannot infer T`). Chezzi used to accept it and
             // blame the eventual call ("argument 1 of 'closure': expected T, found int" — a
             // `closure` the user never wrote, naming a `T` there is no way to act on), or
-            // accept it silently when the value was never called. Reported here, where the name
-            // and its parameters are still known. `generic_fn_value_prepass` holds the wall
-            // back for the ONE pass whose bare-ident arg is re-pinned afterwards — there the
-            // read is not the final word, and the deferred end-of-call check
-            // (`report_undetermined_generic_fn_value_args`) owns the verdict instead. The
+            // accept it silently when the value was never called. The
             // witness wall above wins first — its advice differs (a turbofish does not help).
             // …gated by the hint's own parameter positions (see `fn_slot_params_concrete`):
             // a hint that is not concrete there cannot answer the question, so the rigid
             // arm's assignability diagnostic owns it. No hint at all still reports (`g := id`).
+            //
+            // TICKET-225 (R5, amends DEC-197): the read is no longer the final word. It takes one
+            // type variable per param, and any later use in its frame pins them; the frame verdict
+            // (`close_tyvar_frame`) reports a read still unpinned, with this same message.
             FnValuePin::Undetermined
-                if !self.generic_fn_value_prepass
-                    && hint.as_ref().is_none_or(|h| {
-                        fn_slot_params_concrete(h, &|n| self.rigid_param(n, &[]))
-                    }) =>
+                if hint
+                    .as_ref()
+                    .is_none_or(|h| fn_slot_params_concrete(h, &|n| self.rigid_param(n, &[]))) =>
             {
-                self.reject_undetermined_generic_fn_value(name, sig, spelling, span);
-                return Some(Ty::Unknown);
+                return Some(self.defer_generic_fn_value(node, name, sig, spelling, span, false));
             }
             // Not this rule's business (see [`FnValuePin::Skip`]) — fall through to the rigid
             // `fn(T) -> T` arm and let the existing assignability diagnostic, which is the
@@ -2761,6 +2760,7 @@ impl Checker {
     /// or, with params left free, the pin-or-reject rule of [`Self::generic_fn_value_ty`].
     pub(super) fn path_fn_value_ty(
         &mut self,
+        node: crate::ast::NodeId,
         pf: PathFn,
         own_args: Option<WrittenTypeArgs>,
         span: Span,
@@ -2817,7 +2817,7 @@ impl Checker {
         } else {
             fn_spelling(&pf.display, &sig.type_params)
         };
-        self.generic_fn_value_ty(&pf.display, &sig, &spelling, span)
+        self.generic_fn_value_ty(node, &pf.display, &sig, &spelling, span)
             .unwrap_or_else(|| fn_value_ty(&sig))
     }
 
@@ -2847,7 +2847,7 @@ impl Checker {
                 {
                     self.infer(m);
                 }
-                Some(self.path_fn_value_ty(pf, written, head.span))
+                Some(self.path_fn_value_ty(e.id, pf, written, head.span))
             }
             // TICKET-214: std.json's decode, which the table leaves unnamed — `T` is written, so
             // the value always records its descriptor (or reports a target that does not decode).
@@ -2863,7 +2863,7 @@ impl Checker {
                 }
                 self.infer(m);
                 let pf = self.path_fn(head)?;
-                let ty = self.path_fn_value_ty(pf, written, head.span);
+                let ty = self.path_fn_value_ty(e.id, pf, written, head.span);
                 Some(self.record_decode_value(head.id, ty, head.span))
             }
             _ => None,
@@ -2970,7 +2970,7 @@ impl Checker {
             }
             Some(Resolution::MethodFn { .. } | Resolution::VariantFn { .. }) => {
                 let pf = self.type_member_fn(&th, head_args, name)?;
-                Some(self.path_fn_value_ty(pf, None, name_span))
+                Some(self.path_fn_value_ty(obj.id, pf, None, name_span))
             }
             // A miss on an enum: no such variant. A struct's miss reads `obj` as a value below,
             // which reports the type.
@@ -3198,8 +3198,13 @@ impl Checker {
             // and we return the CONCRETE `fn(str) -> str` — NEVER `expected` — leaving the existing
             // assignability / arg / return check to reject it against `fn(str) -> int`.
             if !type_params.is_empty()
-                && let Some(ty) =
-                    self.generic_fn_value_ty(name, &sig, &fn_spelling(name, &type_params), span)
+                && let Some(ty) = self.generic_fn_value_ty(
+                    e.id,
+                    name,
+                    &sig,
+                    &fn_spelling(name, &type_params),
+                    span,
+                )
             {
                 return ty;
             }
@@ -4348,7 +4353,7 @@ impl Checker {
                 if let Some(Resolution::ParamMethodFn { .. }) = res
                     && let Some(pf) = self.param_member_fn(tname, name)
                 {
-                    return self.path_fn_value_ty(pf, None, name_span);
+                    return self.path_fn_value_ty(e.id, pf, None, name_span);
                 }
                 return self.type_param_shadow_error(
                     tname,
@@ -4445,6 +4450,7 @@ impl Checker {
                 if let ExprKind::Ident(m) = &obj.kind
                     && let Some((display, sig)) = self.generic_module_fn(m, name)
                     && let Some(ty) = self.generic_fn_value_ty(
+                        e.id,
                         &display,
                         &sig,
                         &fn_spelling(&display, &sig.type_params),
@@ -5147,10 +5153,9 @@ impl Checker {
 
     /// std.json's decode read as a value (TICKET-214). Its record is its descriptor, so it is
     /// written only at a FINAL verdict, and only `Pinned` records: a read whose `T` nothing pins is
-    /// rejected, because the value is compiled per `T`. A re-pinning call's immediate argument
-    /// (`generic_fn_value_prepass`) records nothing here; that call's
-    /// `report_undetermined_generic_fn_value_args` records or rejects it. `None` when `obj.name` is
-    /// not that decode.
+    /// rejected, because the value is compiled per `T`. A read nothing pins at the read defers
+    /// (TICKET-225); its frame verdict records or rejects it. `None` when `obj.name` is not that
+    /// decode.
     fn decode_value(
         &mut self,
         id: crate::ast::NodeId,
@@ -5169,12 +5174,14 @@ impl Checker {
         let sig = json_decode_sig();
         let display = format!("{m}.{name}");
         let spelling = fn_spelling(&display, &sig.type_params);
-        let ty = self.generic_fn_value_ty(&display, &sig, &spelling, name_span);
-        if self.generic_fn_value_prepass {
-            return Some(ty.unwrap_or_else(|| fn_value_ty(&sig)));
-        }
+        let ty = self.generic_fn_value_ty(id, &display, &sig, &spelling, name_span);
         Some(match ty {
             Some(Ty::Unknown) => Ty::Unknown,
+            // TICKET-225: deferred — the frame verdict records or rejects it.
+            Some(t) if super::tyvar::has_var(&t) => {
+                self.mark_decode_read(id);
+                t
+            }
             Some(t) => self.record_decode_value(id, t, name_span),
             None => {
                 self.reject_undetermined_generic_fn_value(&display, &sig, &spelling, name_span);

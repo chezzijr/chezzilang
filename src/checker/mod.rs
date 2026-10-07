@@ -2507,28 +2507,6 @@ struct Checker {
     /// (sources #2/#3) must NOT pin it here, or a body use like `x.upper()` would force `x: str` and
     /// corrupt unification (e.g. `Mapped(int_iter, fn(x): x.upper())`).
     generic_arg_prepass: bool,
-    /// True while inferring the arguments of a generic METHOD or generic FREE-FN call
-    /// ([`Checker::infer_generic_method`] / [`Checker::infer_generic_call`] — the TWO prepasses whose
-    /// bare-ident arg is re-pinned afterwards by
-    /// [`Checker::try_pin_generic_fn_value_arg`]). Such an argument gets no `expected_hint` — the slot
-    /// type isn't substituted yet — so a same-module generic fn passed there types rigid
-    /// (`fn(T) -> str` for `[1,2,3].map(conv)`) and only becomes concrete after the pin. The
-    /// "not determined here" wall in [`Checker::infer_ident`] must therefore stay silent for it: the
-    /// read is not yet the final word on the type.
-    ///
-    /// SET AT THOSE TWO CALL SITES, never inside `infer_generic_arg_tys`. The helper's other five
-    /// callers (struct / qualified-struct / enum-variant ctor) pin nothing afterwards, so
-    /// there the read IS final and the wall must fire. *Setting* it in the shared helper silenced all
-    /// seven and let `Bx(ident)` through to the very "argument 1 of 'f': expected T, found int" this
-    /// rule exists to replace.
-    ///
-    /// What the helper DOES do is SCOPE it: the licence is re-applied per argument, and only to a
-    /// bare `ExprKind::Ident` — the one shape [`Checker::generic_fn_value_sig`] can re-pin. A
-    /// non-identifier argument is a whole subtree the caller will never revisit, so it is inferred
-    /// with the licence OFF; otherwise `take2(Bx(ident), 5)` on a generic callee silences the nested
-    /// ctor's wall too and check-cleanly builds a `Bx[fn(T) -> T]`. Separate from
-    /// `generic_arg_prepass`, which also changes closure-param binding and hover recording.
-    generic_fn_value_prepass: bool,
     /// TICKET-225 (R5) — the type-variable store (`tyvar::TyVars`). A `RefCell` because `assignable`
     /// and `join_ty` bind vars and are `&self`. Speculative state: `DiagMark` carries its mark.
     pub(super) tyvars: std::cell::RefCell<tyvar::TyVars>,
@@ -3276,7 +3254,8 @@ fn fn_slot_params_concrete(t: &Ty, rigid: &dyn Fn(&str) -> bool) -> bool {
 }
 
 /// See [`fn_slot_params_concrete`] — the declared-slot half: does a PARAMETER position of `t` hold
-/// the empty-collection `Unknown` sentinel?
+/// the empty-collection `Unknown` sentinel? Asked of the UNSUBSTITUTED slot, so a live `[U]` that a
+/// recovery degraded to `?` (`Bx(0).two(ident, ident)`) does not read as the sentinel.
 fn fn_slot_params_have_unknown(t: &Ty) -> bool {
     matches!(t, Ty::Func { params, .. }
         if params.iter().any(|p| p.is_unknown() || contains_unknown_in_slot(p)))
@@ -3285,7 +3264,7 @@ fn fn_slot_params_have_unknown(t: &Ty) -> bool {
 /// THE derivation behind the uninstantiated-generic-function-value rule, asked at every position a
 /// generic fn is read as a VALUE: a binding / annotation / return (via `infer_ident`'s expected-type
 /// hint), a generic method's argument slot (the interleaved pin in `try_pin_generic_fn_value_arg`),
-/// and again at the END of that call, where `report_undetermined_generic_fn_value_args` reports the
+/// and again when the frame closes (`Checker::close_tyvar_frame`, TICKET-225), which reports the
 /// [`FnValuePin::Undetermined`] ones. `declared` is the fn's own signature (type params still free);
 /// `want` is the expected type / declared slot with everything known SO FAR substituted in.
 ///

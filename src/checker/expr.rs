@@ -4080,23 +4080,9 @@ impl Checker {
         declared: &[Ty],
         arg_hints: &[Option<Ty>],
     ) -> Vec<Ty> {
-        // The "this read is re-pinned afterwards" licence ([`Checker::generic_fn_value_prepass`],
-        // set by the two callers that DO re-pin) belongs to the IMMEDIATE bare-identifier arguments
-        // only — they are the only shape `generic_fn_value_sig` can ever re-pin. Any other
-        // argument is a whole SUBTREE whose own reads this call will never revisit, so the licence
-        // must not leak into it: without this, `take2(Bx(ident), 5)` on a generic callee silenced the
-        // nested ctor's wall too and check-cleanly built a `Bx[fn(T) -> T]` — a stored value whose
-        // type nothing determines. Scoped here, in the ONE helper every generic-argument prepass goes
-        // through, so it covers the method path's identical leak (`Holder(0).m(Bx(ident), 5)`, wrongly
-        // accepted since the licence was introduced) in the same place.
-        let repins = std::mem::take(&mut self.generic_fn_value_prepass);
-        let tys = args
-            .iter()
+        args.iter()
             .enumerate()
             .map(|(i, a)| {
-                self.generic_fn_value_prepass = repins
-                    && (matches!(a.kind, ExprKind::Ident(_))
-                        || self.generic_fn_value_sig(a).is_some());
                 if matches!(a.kind, ExprKind::Closure { .. }) {
                     let mark = self.diag_mark();
                     // Keep the closure's unannotated params `Unknown` in the unification prepass —
@@ -4123,10 +4109,7 @@ impl Checker {
                     self.infer_value(a)
                 }
             })
-            .collect();
-        // Hand the licence back exactly as it was found — the caller owns its own save/restore.
-        self.generic_fn_value_prepass = repins;
-        tys
+            .collect()
     }
 
     /// Per-argument check for a generic ctor/call/method. `expected` is the arg's SUBSTITUTED declared

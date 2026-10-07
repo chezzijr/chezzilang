@@ -126,7 +126,6 @@ impl Checker {
             yield_ty: None,
             recover_depth: 0,
             generic_arg_prepass: false,
-            generic_fn_value_prepass: false,
             tyvars: std::cell::RefCell::new(tyvar::TyVars::default()),
             expected_hint: None,
             ret_coerce_sink: None,
@@ -1617,7 +1616,11 @@ impl Checker {
         }
         self.infer_returns(stmts);
         for stmt in stmts {
+            // TICKET-225: one top-level statement is one frame (globals are seeded before any body
+            // is walked, DEC-183, so a later statement cannot pin an earlier one).
+            let frame = self.tyvar_mark();
             self.check_stmt(stmt);
+            self.close_tyvar_frame(frame);
         }
         if !self.current_module_is_stdlib {
             for (name, span) in super::unused::unused_locals(stmts) {

@@ -4184,6 +4184,19 @@ impl Checker {
         sub: &HashMap<String, Ty>,
         span: Span,
     ) {
+        // TICKET-225: a binding that still holds a type variable is judged when its frame closes.
+        if tps
+            .iter()
+            .any(|tp| sub.get(&tp.name).is_some_and(super::tyvar::has_var))
+        {
+            self.defer_bound(super::tyvar::DeferredBound {
+                params: tps.to_vec(),
+                owner: owner.to_vec(),
+                map: sub.clone(),
+                span,
+            });
+            return;
+        }
         let mut full = sub.clone();
         for tp in tps.iter().chain(owner) {
             full.entry(tp.name.clone()).or_insert(Ty::Unknown);
@@ -4670,15 +4683,7 @@ impl Checker {
         if !(sig.min_params..=sig.params.len()).contains(&args.len()) {
             self.check_arity(name, sig.params.len(), args, span);
         }
-        // A bare same-module GENERIC fn read as an ARGUMENT here is NOT the final word on its type:
-        // this call re-pins it below, exactly as `infer_generic_method` does for `[1,2,3].fold(0,
-        // pick)`. So `infer_ident`'s "not determined here" wall must stay silent for the prepass and
-        // the DEFERRED end-of-call check owns the verdict instead. Set HERE, not in the shared
-        // `infer_generic_arg_tys` — its ctor callers pin nothing afterwards, so there the read IS
-        // final. The helper scopes what is set here to the immediate bare-identifier arguments.
-        let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
         let mut arg_tys = self.infer_generic_arg_tys(args, &sig.params, &[]);
-        self.generic_fn_value_prepass = saved;
         // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
         // all, when none given) parameters are inferred from positional arguments. `unify` only
         // binds a parameter that isn't already in the map, so explicit args take precedence and a
@@ -4707,6 +4712,7 @@ impl Checker {
                 if let Some(refined) =
                     self.try_pin_generic_fn_value_arg(&args[i], &want, &free, span)
                 {
+                    self.solve(&refined, &arg_tys[i]);
                     arg_tys[i] = refined;
                 } else {
                     deferred_fn_args.push(i);
@@ -4793,7 +4799,10 @@ impl Checker {
             let want = subst(&sig.params[i], &subst_map);
             let free = unbound_params(&sig.type_params, &subst_map);
             if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, &free, span) {
+                self.solve(&refined, &arg_tys[i]);
                 arg_tys[i] = refined;
+            } else {
+                self.sentinel_slot_arg(&sig.params[i], &arg_tys[i]);
             }
             unify(&sig.params[i], &arg_tys[i].clone(), &mut subst_map);
         }
@@ -4844,12 +4853,6 @@ impl Checker {
             span,
             false,
         );
-        // …and NOW — with `subst_map` as bound as it will ever get — the deferred half of the
-        // uninstantiated-generic-fn-value rule, the verdict the silenced prepass wall handed over.
-        // The SAME reporter the method path calls, so `applyg(ident, 5)` and `[1,2,3].fold(0, pick)`
-        // get one answer from one derivation.
-        let free = unbound_params(&sig.type_params, &subst_map);
-        self.report_undetermined_generic_fn_value_args(args, &sig.params, &subst_map, &free, span);
         // PART A — the empty-collection pin, at the LAST moment the substitution can still change.
         // Neither generic path routes through `check_args_range_decl`, so a bare empty binding passed
         // into a parameter that a SIBLING argument made concrete used to pin nothing: measured
@@ -5048,19 +5051,8 @@ impl Checker {
                 format!("'{method}' expects {want} argument(s), got {}", args.len()),
             );
         }
-        // One of the TWO prepasses whose bare-ident arg is re-pinned afterwards
-        // (`try_pin_generic_fn_value_arg` below; the other is `infer_generic_call`), so a same-module
-        // generic fn read here is NOT the final word on its type and `infer_ident`'s "not determined
-        // here" wall must stay silent for it. Set at THIS call site: the ctor `infer_generic_arg_tys`
-        // callers (struct/qualified/enum) pin nothing afterwards, so there the read IS final
-        // and the wall must fire — setting the flag inside the shared helper silenced it at all seven,
-        // which let `Bx(ident)` through to the very "argument 1 of 'f': expected T, found int" this
-        // rule exists to replace. (The helper does SCOPE what is set here to the immediate bare-ident
-        // arguments, so a nested `Bx(ident)` still faces the wall.)
         let dec_args = declared.split_first().map_or(&[][..], |(_, d)| d);
-        let saved = std::mem::replace(&mut self.generic_fn_value_prepass, true);
         let mut arg_tys = self.infer_generic_arg_tys(args, dec_args, &[]);
-        self.generic_fn_value_prepass = saved;
         // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
         // the per-argument check below.
@@ -5101,6 +5093,7 @@ impl Checker {
             let want = subst(decl, &mmap);
             let free = unbound_params(mtps, &mmap);
             if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, &free, span) {
+                self.solve(&refined, &arg_tys[i]);
                 arg_tys[i] = refined;
             } else if self.generic_fn_value_sig(&args[i]).is_some() {
                 // …and when the slot can NOT pin it yet, the rigid prepass type (`fn(T) -> T`, the
@@ -5140,7 +5133,10 @@ impl Checker {
             let want = subst(&expected[i], &mmap);
             let free = unbound_params(mtps, &mmap);
             if let Some(refined) = self.try_pin_generic_fn_value_arg(&args[i], &want, &free, span) {
+                self.solve(&refined, &arg_tys[i]);
                 arg_tys[i] = refined;
+            } else {
+                self.sentinel_slot_arg(&expected[i], &arg_tys[i]);
             }
             unify(&expected[i], &arg_tys[i].clone(), &mut mmap);
         }
@@ -5225,12 +5221,6 @@ impl Checker {
         self.recover_return_only_params(
             method, expected, &arg_tys, args, params, mtps, &mut mmap, span, true,
         );
-        // …and NOW — with `mmap` as bound as it will ever get — the deferred half of the
-        // uninstantiated-generic-fn-value rule. This is the LAST possible moment, which is the whole
-        // design: `[1,2,3].fold(0, pick)` is pinned by the accumulator, argument ZERO, while `pick` is
-        // argument one.
-        let free = unbound_params(mtps, &mmap);
-        self.report_undetermined_generic_fn_value_args(args, expected, &mmap, &free, span);
         // PART A — the empty-collection pin, at the LAST moment the substitution can still change.
         // Neither generic path routes through `check_args_range_decl`, so a bare empty binding passed
         // into a parameter that a SIBLING argument made concrete used to pin nothing: measured
@@ -5303,94 +5293,6 @@ impl Checker {
         // A method value's receiver `where` bound (`Bx.total`); empty for a fn.
         self.enforce_bounds(&sig.where_bounds, &sig.type_params, &m, span);
         Some(refined)
-    }
-
-    /// The DEFERRED half of the uninstantiated-generic-fn-value rule: after EVERYTHING that could pin
-    /// a bare generic fn passed as an argument has had its chance — every sibling argument, the
-    /// receiver, the turbofish, the loop-back — re-ask [`pin_generic_fn_value`] with the FINAL
-    /// bindings and report each argument nothing determined.
-    ///
-    /// WHY AT THE END, and not per-argument: `[1,2,3].fold(0, pick)` (`pick[T](a: T, b: T) -> T`) is
-    /// pinned by the FIRST argument, the accumulator, while `pick` is the SECOND. An eager check at
-    /// the moment the argument is encountered refuses a program that runs today (`3`) and that Go
-    /// accepts. `map`'s `U` is likewise only known after the loop-back. Being deferred also makes
-    /// this idempotent with the interleaved pin above: `mmap` only grows (`unify` is
-    /// first-binding-wins), so anything that pinned there still pins here.
-    ///
-    /// `arg_decls` are the per-argument declared slot types (receiver already dropped), parallel to
-    /// `args`; `map` is the call's completed substitution.
-    fn report_undetermined_generic_fn_value_args(
-        &mut self,
-        args: &[Expr],
-        arg_decls: &[Ty],
-        map: &HashMap<String, Ty>,
-        call_free: &[String],
-        span: Span,
-    ) {
-        for (decl, arg) in arg_decls.iter().zip(args) {
-            let Some((name, sig, spelling)) = self.generic_fn_value_sig(arg) else {
-                continue;
-            };
-            // TICKET-214: std.json's decode is compiled per T, so its FINAL verdict here is the one
-            // place a re-pinned decode argument is recorded, and anything short of Pinned
-            // (Undetermined, or Skip: a bare `T` slot, a wrong arity, an Unknown-cored pin such as
-            // `[].map(json.decode)`) is rejected.
-            if let ExprKind::Field {
-                obj, name: member, ..
-            } = &arg.kind
-                && let ExprKind::Ident(m) = &obj.kind
-                && self.json_decode_member(m, member)
-            {
-                let at = if arg.span == Span::default() {
-                    span
-                } else {
-                    arg.span
-                };
-                let verdict = pin_generic_fn_value(
-                    &sig.type_params,
-                    &fn_value_ty(&sig),
-                    &subst(decl, map),
-                    &|n| self.rigid_param(n, call_free),
-                );
-                match verdict {
-                    FnValuePin::Pinned(_, refined) => {
-                        self.record_decode_value(arg.id, refined, at);
-                    }
-                    _ => self.reject_undetermined_generic_fn_value(&name, &sig, &spelling, at),
-                }
-                continue;
-            }
-            // The witness wall (`reject_witness_fn_value`) is a stricter, unconditional refusal with
-            // different advice, and it already fired at the READ — do not stack a second message on
-            // top of it.
-            if !sig.witness_params.is_empty() {
-                continue;
-            }
-            // The empty-collection carve-out, asked of the UNSUBSTITUTED slot (see
-            // `fn_slot_params_have_unknown`): `[].map(ident)`'s `fn(?) -> U` carries the receiver's
-            // sentinel and runs fine. Asking it of the SUBSTITUTED slot instead let the rule's own
-            // subject escape — `Bx(0).two(ident, ident)` on `fn two[U](f: fn(U) -> U, g: fn(U) -> U)
-            // -> List[U]` degrades `U` to `?` and then read as the sentinel, so the check went silent
-            // and printed a `List[U]` nothing determines (Go: "cannot infer U").
-            if fn_slot_params_have_unknown(decl) {
-                continue;
-            }
-            let declared = fn_value_ty(&sig);
-            if matches!(
-                pin_generic_fn_value(&sig.type_params, &declared, &subst(decl, map), &|n| {
-                    self.rigid_param(n, call_free)
-                }),
-                FnValuePin::Undetermined
-            ) {
-                // The argument's own span, not the call's: the mistake is this read.
-                let at = if arg.span == Span::default() {
-                    span
-                } else {
-                    arg.span
-                };
-                self.reject_undetermined_generic_fn_value(&name, &sig, &spelling, at);
-            }
-        }
     }
 
     /// Bug D's closure-return recovery, shared by the generic-METHOD (`infer_generic_method`) and

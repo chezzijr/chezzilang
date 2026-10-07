@@ -11,6 +11,33 @@ pub(super) struct TyVars {
     slots: Vec<Option<Ty>>,
     /// Every var bound, in order, so a rollback can unbind the ones bound after its mark.
     log: Vec<u32>,
+    /// Every deferred generic fn value read, judged when its frame closes.
+    pending: Vec<Pending>,
+    /// Bounds a call could not check yet because a type argument still held a var.
+    bounds: Vec<DeferredBound>,
+    /// Read node -> its `pending` index: one read keeps one set of vars across re-walks.
+    reads: HashMap<u32, usize>,
+}
+
+/// A generic fn value read that nothing pinned at the read.
+pub(super) struct Pending {
+    node: crate::ast::NodeId,
+    name: String,
+    sig: FnSig,
+    spelling: String,
+    span: Span,
+    /// One var per type param of `sig`.
+    vars: Vec<(String, u32)>,
+    /// A std.json decode read: its record is written at the verdict (DEC-214).
+    decode: bool,
+}
+
+/// `enforce_bounds` on a call whose bindings held a var; re-run once the vars are bound.
+pub(super) struct DeferredBound {
+    pub(super) params: Vec<TyParam>,
+    pub(super) owner: Vec<TyParam>,
+    pub(super) map: HashMap<String, Ty>,
+    pub(super) span: Span,
 }
 
 /// A point in the store a speculative walk can roll back to.
@@ -18,10 +45,11 @@ pub(super) struct TyVars {
 pub(super) struct TyVarMark {
     slots: usize,
     log: usize,
+    pending: usize,
+    bounds: usize,
 }
 
 impl TyVars {
-    #[allow(dead_code)] // TICKET-225 step 5 creates vars
     pub(super) fn fresh(&mut self) -> u32 {
         self.slots.push(None);
         (self.slots.len() - 1) as u32
@@ -45,12 +73,17 @@ impl TyVars {
         TyVarMark {
             slots: self.slots.len(),
             log: self.log.len(),
+            pending: self.pending.len(),
+            bounds: self.bounds.len(),
         }
     }
 
     /// Unbind every var bound after `m`, and retire every var created after it: it is bound to
-    /// `Unknown`, so no type left holding it dangles.
+    /// `Unknown`, so no type left holding it dangles. Reads and bounds recorded after `m` go too.
     pub(super) fn rollback(&mut self, m: TyVarMark) {
+        self.pending.truncate(m.pending);
+        self.bounds.truncate(m.bounds);
+        self.reads.retain(|_, i| *i < m.pending);
         for id in self.log.drain(m.log..) {
             if (id as usize) < m.slots {
                 self.slots[id as usize] = None;
@@ -77,7 +110,6 @@ impl TyVars {
 
     /// `t` zonked; a type still holding an unbound var becomes `Unknown` as a whole. For a type that
     /// outlives its walk (an inferred return, a seeded global type).
-    #[allow(dead_code)] // TICKET-225 step 5 settles escaping types
     pub(super) fn settle(&self, t: &Ty) -> Ty {
         let z = self.zonk(t);
         if has_var(&z) { Ty::Unknown } else { z }
@@ -207,6 +239,155 @@ impl Checker {
                         .for_each(|(x, y)| self.solve_at(x, y, false));
                     self.solve_at(r1, r2, false);
                 }
+            }
+        }
+    }
+
+    /// A generic fn value read that nothing pins at the read: one fresh var per type param, judged
+    /// when the frame closes ([`Self::close_tyvar_frame`]). A re-walk of the same read node gets the
+    /// same vars back.
+    pub(super) fn defer_generic_fn_value(
+        &mut self,
+        node: crate::ast::NodeId,
+        name: &str,
+        sig: &FnSig,
+        spelling: &str,
+        span: Span,
+        decode: bool,
+    ) -> Ty {
+        let mut s = self.tyvars.borrow_mut();
+        let cached = (node.0 != 0)
+            .then(|| s.reads.get(&node.0).copied())
+            .flatten();
+        let vars = match cached {
+            Some(i) => s.pending[i].vars.clone(),
+            None => {
+                let vars: Vec<(String, u32)> = sig
+                    .type_params
+                    .iter()
+                    .map(|tp| (tp.name.clone(), s.fresh()))
+                    .collect();
+                if node.0 != 0 {
+                    let i = s.pending.len();
+                    s.reads.insert(node.0, i);
+                }
+                s.pending.push(Pending {
+                    node,
+                    name: name.to_string(),
+                    sig: sig.clone(),
+                    spelling: spelling.to_string(),
+                    span,
+                    vars: vars.clone(),
+                    decode,
+                });
+                vars
+            }
+        };
+        let map: HashMap<String, Ty> = vars.into_iter().map(|(n, v)| (n, Ty::Var(v))).collect();
+        subst(&fn_value_ty(sig), &map)
+    }
+
+    /// A generic fn argument in a slot whose params carry the empty-collection sentinel
+    /// (`[].map(mk)`'s `fn(?) -> U`): bind its unbound vars to `Unknown`, which the verdict accepts.
+    pub(super) fn sentinel_slot_arg(&self, decl: &Ty, arg_ty: &Ty) {
+        if !fn_slot_params_have_unknown(decl) {
+            return;
+        }
+        let z = self.zonk(arg_ty);
+        let mut s = self.tyvars.borrow_mut();
+        let _ = map_ty(&z, &mut |x| {
+            if let Ty::Var(v) = x
+                && s.binding(*v).is_none()
+            {
+                s.bind(*v, Ty::Unknown);
+            }
+            None
+        });
+    }
+
+    /// The deferred read at `node` is a std.json decode: its verdict writes its record.
+    pub(super) fn mark_decode_read(&self, node: crate::ast::NodeId) {
+        let mut s = self.tyvars.borrow_mut();
+        if let Some(&i) = s.reads.get(&node.0) {
+            s.pending[i].decode = true;
+        }
+    }
+
+    /// Mark the store, for a frame or a speculative walk.
+    pub(super) fn tyvar_mark(&self) -> TyVarMark {
+        self.tyvars.borrow().mark()
+    }
+
+    /// `t` zonked, or `Unknown` if it still holds an unbound var: for a type that outlives its walk.
+    pub(super) fn settle(&self, t: &Ty) -> Ty {
+        self.tyvars.borrow().settle(t)
+    }
+
+    /// `enforce_bounds` for a call whose bindings still hold a var: deferred to the frame verdict.
+    pub(super) fn defer_bound(&self, b: DeferredBound) {
+        self.tyvars.borrow_mut().bounds.push(b);
+    }
+
+    /// The frame verdict, over every read and bound recorded since `start`. A read whose vars are
+    /// all bound meets its bounds (and a decode read writes its record, DEC-214). A read with a var
+    /// still unbound is rejected with today's instantiate hint, and the var is bound to `Unknown`.
+    /// A var bound to `Unknown` (the empty-collection sentinel) accepts silently, except for a
+    /// decode read, whose value is compiled per `T`.
+    pub(super) fn close_tyvar_frame(&mut self, start: TyVarMark) {
+        let (pending, bounds) = {
+            let mut s = self.tyvars.borrow_mut();
+            if s.pending.len() <= start.pending && s.bounds.len() <= start.bounds {
+                return;
+            }
+            let p: Vec<Pending> = {
+                let n = start.pending.min(s.pending.len());
+                s.pending.drain(n..)
+            }
+            .collect();
+            let b: Vec<DeferredBound> = {
+                let n = start.bounds.min(s.bounds.len());
+                s.bounds.drain(n..)
+            }
+            .collect();
+            s.reads.retain(|_, i| *i < start.pending);
+            (p, b)
+        };
+        for p in pending {
+            let map: HashMap<String, Ty> = p
+                .vars
+                .iter()
+                .map(|(n, v)| (n.clone(), self.zonk(&Ty::Var(*v))))
+                .collect();
+            let unbound = map.values().any(has_var);
+            let unknown = map.values().any(|t| !ty_all_holes(t, &|h| !h.is_unknown()));
+            if unbound || (p.decode && unknown) {
+                self.reject_undetermined_generic_fn_value(&p.name, &p.sig, &p.spelling, p.span);
+                let mut s = self.tyvars.borrow_mut();
+                for (_, v) in &p.vars {
+                    if s.binding(*v).is_none() {
+                        s.bind(*v, Ty::Unknown);
+                    }
+                }
+                continue;
+            }
+            if unknown {
+                continue;
+            }
+            self.enforce_bounds(&p.sig.type_params, &p.sig.type_params, &map, p.span);
+            self.enforce_bounds(&p.sig.where_bounds, &p.sig.type_params, &map, p.span);
+            if p.decode {
+                let refined = subst(&fn_value_ty(&p.sig), &map);
+                self.record_decode_value(p.node, refined, p.span);
+            }
+        }
+        for b in bounds {
+            let map: HashMap<String, Ty> = b
+                .map
+                .iter()
+                .map(|(n, t)| (n.clone(), self.zonk(t)))
+                .collect();
+            if !map.values().any(has_var) {
+                self.enforce_bounds(&b.params, &b.owner, &map, b.span);
             }
         }
     }

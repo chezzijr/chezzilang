@@ -27113,9 +27113,11 @@ fn generic_fn_value_downstream_misuse_rejected() {
 
 #[test]
 fn bare_unpinned_generic_fn_value_stays_error() {
-    // OUT OF SCOPE (scope C) — a bare generic-fn value with no expected type + no turbofish, then called.
+    // TICKET-225 (R5): a bare generic-fn value with no expected type is pinned by the later call
+    // (Rust: `let g = ident; g(5)` compiles); with no use that pins it, it stays an error.
+    ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n");
     let errs = check_src(
-        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n",
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g)\n",
     );
     assert!(
         !errs.is_empty(),
@@ -27130,9 +27132,10 @@ fn bare_unpinned_generic_fn_value_stays_error() {
 /// there is no way to act on. A read that is never called at all was accepted silently.
 #[test]
 fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
+    // TICKET-225: a later call pins the binding (Rust: `let g = ident; g(5)` compiles).
+    ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n");
     for src in [
-        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n",
-        // …never called: the binding alone is the mistake, so it must not need a use to be caught.
+        // …never called: nothing in the frame pins it, so the read is rejected when it closes.
         "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(1)\n",
     ] {
         let errs = check_src(src);
@@ -27212,7 +27215,7 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
     // A DEFAULTED parameter must not be advertised with a stricter arity than a plain fn read gives:
     // `fn rep[T](x: T, n: int = 2)` suggests `fn(<T>, int) -> str`, which must still accept `g(1)`.
     let joined = check_src(
-        "fn rep[T](x: T, n: int = 2) -> str:\n    return \"{x}{n}\"\n\nfn main():\n    g := rep\n    print(g(1))\n",
+        "fn rep[T](x: T, n: int = 2) -> str:\n    return \"{x}{n}\"\n\nfn main():\n    g := rep\n    print(1)\n",
     )
     .iter()
     .map(|e| e.message.clone())
@@ -27232,8 +27235,13 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
 /// blame-the-later-call message this rule exists to replace.
 #[test]
 fn uninstantiated_generic_fn_value_as_a_generic_ctor_arg_rejected() {
-    rejects(
+    // TICKET-225: the later call pins it (Rust: `let b = Bx { f: ident }; (b.f)(3)` compiles); a
+    // read nothing pins still rejects.
+    ok(
         "fn ident[T](x: T) -> T:\n    return x\n\nstruct Bx[T]:\n    f: T\n\nfn main():\n    b := Bx(ident)\n    print(b.f(3))\n",
+    );
+    rejects(
+        "fn ident[T](x: T) -> T:\n    return x\n\nstruct Bx[T]:\n    f: T\n\nfn main():\n    b := Bx(ident)\n    print(b)\n",
         "'ident' is generic and T is not determined here",
     );
     // …the generic FREE-FN argument spelling of the same thing.
@@ -36114,7 +36122,9 @@ fn t187_decode_on_int_receiver_rejected() {
 fn t187_generic_fn_value_same_named_param_rejected() {
     rejects_entry(
         "import std.cmp\nstruct P:\n    x: int\nfn pick[T](a: T, b: T) -> T:\n    f := cmp.max\n    return f(a, b)\nfn main():\n    print(pick(P(1), P(2)).x)\n",
-        "is generic and T is not determined here",
+        // TICKET-225: the call pins `cmp.max`'s `T` to `pick`'s rigid `T`, which fails its bound
+        // (Rust: `E0277: the trait bound T: Ord is not satisfied`).
+        "type T does not satisfy Comparable",
     );
 }
 
