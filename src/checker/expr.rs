@@ -1,6 +1,8 @@
 // checker::expr — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Expression & call inference, keyword calls, type application, indexing.
 
+use super::pattern::WrittenTypeArgs;
+use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
@@ -112,13 +114,14 @@ impl Checker {
                 format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
             );
         }
+        // What the callee names: ONE answer from the rule table (`resolve.rs`). Every arm below takes
+        // its branch from it and none re-decides what the path is.
+        let res = self.resolve_path(callee, PathPos::Callee);
         // `print(..., sep=, end=)`: its only named arguments are `sep` and `end`, typed `str`.
         if !named.is_empty()
-            && let ExprKind::Ident(name) = &callee.kind
-            && name == "print"
-            && self.names_builtin_fn(name)
+            && let Some(Resolution::Builtin(b)) = &res
+            && b == "print"
         {
-            self.resolve_callee(callee);
             self.consume_named();
             let mut seen: Vec<&str> = Vec::new();
             for (k, _) in named {
@@ -159,11 +162,7 @@ impl Checker {
         // found …"*), and protocol conformance forces the protocol's declared parameter type to
         // match the implementor's (`method_matches`). A provider name is unspellable by a user
         // (`$def$…`), so this arm can only ever see an expression `desugar` synthesized.
-        if let ExprKind::Ident(n) = &callee.kind
-            && n.starts_with(crate::desugar::PROVIDER_PREFIX)
-            && (callee.id.0 == crate::ast::NodeId::SYNTH.0 || !self.functions.contains_key(n))
-        {
-            self.resolve_callee(callee);
+        if let Some(Resolution::Provider) = res {
             return expected.cloned().unwrap_or(Ty::Unknown);
         }
         // `head[k](args)` with a head that denotes data: index, then call the element (Go,
@@ -186,7 +185,9 @@ impl Checker {
             .collect();
         // TICKET-187: `.decode[T](s)` is an ordinary member call; only `decode` on the `std.json`
         // module is JSON decode, recorded as `Resolution::Decode` on the callee for the compiler.
-        if let ExprKind::Field { obj, name, .. } = &callee.kind
+        // The rule table leaves it unnamed (its entry is the descriptor, DEC-214).
+        if res.is_none()
+            && let ExprKind::Field { obj, name, .. } = &callee.kind
             && let ExprKind::Ident(m) = &obj.kind
             && self.json_decode_member(m, name)
         {
@@ -214,483 +215,51 @@ impl Checker {
         } = &callee.kind
             && !crate::ast::is_tuple_index(name)
         {
-            // `module.Struct(args)` — qualified struct constructor. `module` is a bound module name
-            // whose sig declares struct `name`. Inject nothing: resolve the constructor through the
-            // sig's struct shape (mirrors `infer_named_call`'s struct path, with type args). A RESERVED
-            // native type (std.net's `Socket`/`Listener`) now also has a `sig.struct_defs` entry (for
-            // its harvested METHOD table), but it resolves to an opaque `Ty::Socket`/`Ty::Listener` and
-            // has NO from-nothing constructor — exclude it here so `net.Socket()` falls through to the
-            // "has no constructor" arm below (a value comes only from `connect`/`listen`/`accept`).
-            if let ExprKind::Ident(mname) = &obj.kind
-                && !self.head_is_value(mname)
-                && self.qualified_builtin_ty(name, &[]).is_none()
-                && let Some(mid) = self.imported_modules.get(mname).cloned()
-                && let Some(sig) = self.module_sigs.get(&mid).cloned()
-                && let Some(info) = sig.struct_defs.get(name)
-                && !sig.member(name).is_some_and(MemberSig::holds_fn)
-            {
-                let key = self.type_key(&mid, name);
-                self.resolve_callee(callee);
-                return self
-                    .infer_qualified_struct_call(info, name, &key, args, &targs, span, expected);
-            }
-            // `module.Alias(args)` — an EXPORTED alias of a struct reached qualified
-            // (TICKET-172). Constructs the alias's canonical target, with its pinned type arguments.
-            if let ExprKind::Ident(mname) = &obj.kind
-                && let Some(target) = self.qualified_alias_ty(mname, name)
-                && !matches!(target, Ty::Enum(..))
-                && !self.module_declares_fn(mname, name)
-            {
-                if let Ty::Struct(..) = &target {
-                    self.resolve_callee(callee);
-                }
-                let spelled = format!("{mname}.{name}");
-                return self.infer_alias_ctor_call(&target, &spelled, args, &targs, span, expected);
-            }
-            // `module.Enum.Variant(args)` — qualified payload-variant constructor.
-            if let ExprKind::Field {
-                obj: inner_obj,
-                name: ename,
-                ..
-            } = &obj.kind
-                && let ExprKind::Ident(mname) = &inner_obj.kind
-                && let Some(
-                    th @ TypeHead {
-                        kind: TypeHeadKind::Enum,
-                        pinned: None,
-                        ..
-                    },
-                ) = self.qualified_type_head(mname, ename)
-            {
-                let (key, spelled) = (th.key.clone(), th.spelled.clone());
-                // `import lib` registers every variant under `type_key(mid, ename)` with its
-                // `enum_name` already re-keyed (DEC-066).
-                if let Some(vinfo) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
-                    // The OLD gliding form `module.Enum.Variant[T](args)` (type args on the VARIANT)
-                    // is removed — explicit type args go on the TYPE: `module.Enum[T].Variant(args)`.
-                    if !targs.is_empty() {
-                        self.infer_all(args);
-                        self.error(
-                            span,
-                            format!(
-                                "put the type arguments on the type: {}.{ename}[{}].{name}(...)",
-                                mname,
-                                render_targs(&targs)
-                            ),
-                        );
-                        return Ty::Unknown;
-                    }
-                    let vi = vinfo;
-                    self.resolve_callee(callee);
-                    return self
-                        .infer_variant_call(&vi, name, args, &targs, *name_span, span, expected);
-                }
-                // Not a variant — a QUALIFIED enum STATIC method `module.Enum.method(args)`. Mirror the
-                // bare enum-static path: variant-first ran above (a variant always wins, disjointness
-                // enforced at decl), so delegate to `infer_static_call` keyed by the declaring module's
-                // runtime key. Emits "type 'Enum' has no static method 'm'" for a genuine miss.
-                // The SPELLING this callee was reached by, prefix included — every diagnostic
-                // `infer_static_call` writes quotes it back, and the witness pin advice
-                // (`WitnessCallee::Dotted`) has to name a form that actually compiles: bare
-                // `Enum.method[T](...)` here answers "unknown type 'Enum'".
-                self.resolve_callee(callee);
-                return self.infer_static_call(
-                    &th,
-                    &spelled,
-                    name,
-                    args,
-                    &[],
-                    &targs,
-                    *name_span,
-                    span,
-                    expected,
-                );
-            }
-            // `module.Struct.method(args)` — a QUALIFIED struct STATIC method. The enum arm above
-            // consumed enum names; this covers structs declared in a bound (non-local) module. Resolve
-            // the type's module-scoped key and delegate to `infer_static_call` (the SAME path the bare
-            // `Type.static_method()` form uses). Placed before the bare-type / native-ctor arms so a
-            // qualified static call no longer falls through to "module has no member 'Struct'".
-            if let ExprKind::Field {
-                obj: inner_obj,
-                name: tname,
-                ..
-            } = &obj.kind
-                && let ExprKind::Ident(mname) = &inner_obj.kind
-                && let Some(
-                    th @ TypeHead {
-                        kind: TypeHeadKind::Struct,
-                        pinned: None,
-                        ..
-                    },
-                ) = self.qualified_type_head(mname, tname)
-            {
-                let spelled = th.spelled.clone();
-                // …and the same for a qualified STRUCT static (`lib.Holder.build()`): the advice
-                // must carry `lib.`, which is the prefix the user reached it by (an alias included).
-                self.resolve_callee(callee);
-                return self.infer_static_call(
-                    &th,
-                    &spelled,
-                    name,
-                    args,
-                    &[],
-                    &targs,
-                    *name_span,
-                    span,
-                    expected,
-                );
-            }
-            // `module.Alias.Variant(args)` / `module.Alias.method(args)` — an EXPORTED alias of an
-            // enum/struct reached qualified (TICKET-172). Same dispatch as a local alias head below.
-            if let ExprKind::Field {
-                obj: inner_obj,
-                name: aname,
-                ..
-            } = &obj.kind
-                && let ExprKind::Ident(mname) = &inner_obj.kind
-                && let Some(
-                    th @ TypeHead {
-                        kind: TypeHeadKind::Enum | TypeHeadKind::Struct,
-                        pinned: Some(_),
-                        ..
-                    },
-                ) = self.qualified_type_head(mname, aname)
-            {
-                self.resolve_callee(callee);
-                return self.infer_alias_member_call(
-                    &th,
-                    &th.spelled,
-                    name,
-                    args,
-                    &targs,
-                    *name_span,
-                    span,
-                    expected,
-                );
-            }
-            // `T.member(args)` where `T` is an in-scope generic TYPE PARAMETER. M24 — this is the
-            // STATIC-WITNESS call: legal exactly when one of `T`'s bounds declares `member` as a
-            // STATIC requirement AND the enclosing fn's hidden `$w:T` witness local is reachable
-            // here. Everything else keeps the pre-M24 clear diagnostic (generics are erased, so
-            // without a witness there is no concrete type to dispatch to).
-            //
-            // FIRST among the receiver arms, because of [`Checker::shadowing_type_param`] — a type
-            // parameter shadows a same-named type in EVERY type-name position, so the struct arms
-            // below must never see the name. The compiler's witness arm sits first among ITS
-            // bare-receiver arms for the same reason: both halves must resolve the same `Item`.
-            if let ExprKind::Ident(tname) = &obj.kind
-                && self.shadowing_type_param(tname)
-            {
-                // A bound's INSTANCE method through the parameter (`T.get(v)`, Rust's
-                // `T::get(&v)`) is the path value `T.get` applied; `infer_field` records it.
-                if self.param_member_fn(tname, name).is_some() {
-                    let callee_ty = self.infer(callee);
-                    return self.apply_value_call(callee, callee_ty, args, named, span);
-                }
-                self.resolve_callee(callee);
-                return self.infer_witness_static_call(tname, name, args, span);
-            }
-            // …and the same head under a TYPE-LEVEL turbofish (`Item[int].tag()`, in either carrier)
-            // is the same `Item`: the parameter, which takes no type arguments (rustc E0109).
-            if let Some(tname) = type_apply_param_head(obj)
-                && self.shadowing_type_param(&tname)
-            {
-                self.infer_all(args);
-                return self.type_param_shadow_error(
-                    &tname,
-                    &format!(
-                        "a type parameter takes no type arguments and cannot be indexed (`{tname}[…]`)"
-                    ),
-                    span,
-                );
-            }
-            // `Alias.Variant(args)` / `Alias.method(args)` — a LOCAL `type` alias of an enum or
-            // struct dotted with a member. VARIANT-FIRST, mirroring the `type_apply_head` arm below:
-            // look up the variant on the alias's resolved identity key first, falling back to a
-            // static call. `head_targs` (the alias body's pinned type arguments) is threaded through
-            // both, so `type IS = Box[str]; IS.of(3)` still infers against `Box[str]`, not `Box[int]`.
-            if let ExprKind::Ident(aname) = &obj.kind
-                && let Some(
-                    th @ TypeHead {
-                        kind: TypeHeadKind::Enum | TypeHeadKind::Struct,
-                        pinned: Some(_),
-                        ..
-                    },
-                ) = self.bare_type_head(aname)
-            {
-                self.resolve_callee(callee);
-                return self.infer_alias_member_call(
-                    &th, aname, name, args, &targs, *name_span, span, expected,
-                );
-            }
-            // `Enum.Variant(args)` — qualified payload-variant constructor. Same gate as the nullary
-            // value form in `infer_field`: an unbound enum name dotted with one of its variants. The
-            // bare-written enum name is gated by `enum_names` (bare visibility) and resolved to its
-            // runtime key (`bare_key`) for the layout lookup.
-            if let ExprKind::Ident(ename) = &obj.kind
-                && let Some(
-                    th @ TypeHead {
-                        kind: TypeHeadKind::Enum,
-                        pinned: None,
-                        ..
-                    },
-                ) = self.bare_type_head(ename)
-            {
-                let ekey = th.key.clone();
-                // Editor hover (probe-gated no-op): record the receiver `Col` of `Col.Val(3)` /
-                // `Col.method()` as its enum type. Covers both the variant-ctor and enum-static paths.
-                if self.hover_probe.is_some() {
-                    self.hover_record_at(
-                        obj.span,
-                        &Ty::Enum(ekey.clone(), Vec::new()),
-                        HoverKind::Other,
-                        None,
-                    );
-                }
-                self.resolve_callee(callee);
-                if self
-                    .variants
-                    .contains_key(&(ekey.clone(), name.to_string()))
-                {
-                    // The OLD gliding form `Enum.Variant[T](args)` (type args on the VARIANT) is
-                    // removed — explicit type args now go on the TYPE: `Enum[T].Variant(args)`.
-                    if !targs.is_empty() {
-                        self.infer_all(args);
-                        self.error(
-                            span,
-                            format!(
-                                "put the type arguments on the type: {ename}[{}].{name}(...)",
-                                render_targs(&targs)
-                            ),
-                        );
-                        return Ty::Unknown;
-                    }
-                    if let Some(ty) = self.infer_named_call(
-                        name,
-                        args,
-                        &targs,
-                        *name_span,
-                        span,
-                        Some(&ekey),
-                        expected,
-                        None,
-                    ) {
-                        return ty;
-                    }
-                } else {
-                    // Not a variant — try a STATIC method `Enum.method(args)` (variant check ran
-                    // first, so a variant always wins; disjointness is enforced at decl time). The
-                    // member-level turbofish (`Enum.method[U](...)`) is the bare carrier of the
-                    // method's OWN `[U]` args (PART 2): pass them as `mtargs` (no enclosing turbofish).
-                    return self.infer_static_call(
-                        &th,
-                        ename,
-                        name,
-                        args,
-                        &[],
-                        &targs,
-                        *name_span,
-                        span,
-                        expected,
-                    );
-                }
-            }
-            // `Type.method(args)` — STATIC (associated) method on a bare struct/enum type name. The
-            // enum branch above already handled enums; this covers structs. The type name must be a
-            // known (unbound) struct; a static method is one whose first param is not `self`.
-            if let ExprKind::Ident(tname) = &obj.kind
-                && let Some(
-                    th @ TypeHead {
-                        kind: TypeHeadKind::Struct,
-                        pinned: None,
-                        ..
-                    },
-                ) = self.bare_type_head(tname)
-            {
-                let key = th.key.clone();
-                self.resolve_callee(callee);
-                // Editor hover (probe-gated no-op): record the receiver `Foo` of `Foo.default()` as
-                // its struct type.
-                if self.hover_probe.is_some() {
-                    self.hover_record_at(
-                        obj.span,
-                        &Ty::Struct(key.clone(), Vec::new()),
-                        HoverKind::Other,
-                        None,
-                    );
-                }
-                // The member-level turbofish (`Type.method[U](...)`) is the bare carrier of the
-                // method's OWN `[U]` args (PART 2): pass them as `mtargs` (no enclosing turbofish).
-                return self.infer_static_call(
-                    &th,
-                    tname,
-                    name,
-                    args,
-                    &[],
-                    &targs,
-                    *name_span,
-                    span,
-                    expected,
-                );
-            }
-            // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE: a VARIANT
-            // constructor (`Box[int].Has(5)`, `E[int, str].Pair(…)`) or a generic STATIC method
-            // (`Box[int].empty()`). Two carriers converge here:
-            //   • SINGLE type arg — `Field{obj: Index{Ident(Type), idx}, name}` (the `[..]` is
-            //     followed by `.` not `(`, so the turbofish-call steal never fires; the parser can't
-            //     tell `Type[int].x` from `arr[i].field`, so the checker reinterprets the index).
-            //   • MULTI type arg — `Field{obj: Index{head, types}, name}` (a type-only bracket: the
-            //     type list has no expression reading).
-            // VARIANT-FIRST (a same-named static method is barred at decl time by disjointness); if
-            // no variant matches the member name, fall to the static-method path.
-            if let Some((th, type_exprs)) = self.type_apply_head(obj) {
-                let (tname, key) = (th.name.clone(), th.key.clone());
-                self.resolve_callee(callee);
-                let written: Vec<Ty> = type_exprs
-                    .iter()
-                    .map(|t| self.resolve_type(t, span))
-                    .collect();
-                let Some(resolved) = self.written_head_args(
-                    &th.spelled,
-                    self.type_param_count(&th.key),
-                    th.pinned.clone(),
-                    written,
-                    span,
-                ) else {
-                    self.infer_all(args);
-                    return Ty::Unknown;
-                };
-                if let Some(v) = self.variants.get(&(key.clone(), name.to_string())).cloned() {
-                    // A variant ctor takes NO method-level type args. Under the broadened parser steal
-                    // the combined `Box[int].Has[str](5)` now arrives here as a Field callee carrying
-                    // `targs=[str]` (it used to ride the Index-over-Field block below, which errored);
-                    // preserve that error rather than silently dropping the targs.
-                    if !targs.is_empty() {
-                        self.error(
-                            span,
-                            format!("variant '{name}' of '{tname}' takes no method type arguments"),
-                        );
-                    }
-                    return self
-                        .infer_variant_call(&v, name, args, &resolved, *name_span, span, expected);
-                }
-                // `targs` is the member-level (method) turbofish — `Box[int].make[str](x)` arrives here
-                // as a Field callee under the broadened steal, with the enclosing `[int]` in `resolved`
-                // and the method `[str]` in `targs`. Thread `targs` as the static method's `mtargs` so
-                // the combined form composes (was `&[]`, which dropped the method turbofish).
-                return self.infer_static_call(
-                    &th, &tname, name, args, &resolved, &targs, *name_span, span, expected,
-                );
-            }
-            // `module.Ctor(args)` — a qualified native builtin CONSTRUCTOR (`concurrency.Shared(0)`,
-            // aliased `c.Shared(0)`, `time.timer(100)`). `module` is a bound (non-local) module name
-            // whose sig declares `name` in `sig.types` — and those reserved names live ONLY in the
-            // owning native module's sig, so this fires solely for native builtins. Concurrency
-            // ctors + `timer` delegate to `infer_named_call` (the SAME value-first inference + license
-            // check the bare name uses). The type-only handles (Socket/Listener) and FFI widths/ptr
-            // have NO from-nothing constructor — reject with a clear message. Placed AFTER the
-            // user-type qualified arms above and BEFORE the method-call fallthrough (so a genuine
-            // module method like `time.now()` still reaches `infer_method_call`).
-            if let ExprKind::Ident(mname) = &obj.kind
-                && !self.head_is_value(mname)
-                && let Some(mid) = self.imported_modules.get(mname).cloned()
-                && let Some(sig) = self.module_sigs.get(&mid).cloned()
-                && sig.types.contains(name)
-            {
-                if Self::qualified_native_ctor(name) {
-                    self.resolve_callee(callee);
-                    return self
-                        .infer_named_call(
-                            name, args, &targs, *name_span, span, None, expected, None,
-                        )
-                        .unwrap_or(Ty::Unknown);
-                }
-                // A type-only native name (Socket/Listener/FFI width/ptr) — no from-nothing ctor.
-                // Gated on `qualified_builtin_ty` so this fires ONLY for genuine native types; a
-                // (non-builtin) user `sig.types` name — e.g. an exported type alias used as a bogus
-                // `mod.Alias(x)` ctor — falls through to `infer_method_call` (its original error),
-                // not this native-specific message.
-                if self.qualified_builtin_ty(name, &[]).is_some() {
-                    self.infer_all(args);
-                    self.error(
-                        span,
-                        format!(
-                            "'{mname}.{name}' has no constructor — it is a type-only native type (a value is obtained from the module's functions, e.g. net.connect/net.listen for a Socket)"
-                        ),
-                    );
-                    return Ty::Unknown;
-                }
-            }
-            self.resolve_callee(callee);
-            return self.infer_method_call(obj, name, *name_span, args, &targs, span, expected);
+            return self.infer_member_path_call(
+                callee, res, obj, name, *name_span, args, named, &targs, span, expected,
+            );
         }
         if let ExprKind::Ident(name) = &callee.kind {
-            // Shadowing local (e.g. a closure bound to a variable) wins over a global of the same
-            // name; a type parameter sits between the two (DEC-108) and takes the named-call path,
-            // which reports the shadow.
-            let head = self.head_binding(name);
-            if matches!(
-                head,
-                HeadBinding::Local | HeadBinding::Global | HeadBinding::Module
-            ) {
-                // The same answer `infer_ident` records when the value call infers the callee.
-                self.resolve_callee(callee);
-            } else {
-                // A DIRECT call of a from-imported fn (`h()`) above its own `import` is the same
-                // use-before-import as the bare read (`g := h`), but a direct callee never reaches
-                // `infer_ident` — so the guard is repeated at this funnel, or the two spellings of
-                // one concept would disagree. Gated on `functions` so a from-imported TYPE's ctor
-                // call stays out (a type position, deliberately not covered) and so a same-module
-                // fn — never in `import_binds` — is untouched.
-                if self.functions.contains_key(name) {
-                    self.reject_read_above_import(name, true, callee.span);
+            match &res {
+                // A type parameter: the one bare name the rule table leaves unnamed. It is erased at
+                // runtime and has no constructor; rustc rejects the shape too (E0308 `expected type
+                // parameter Item, found struct Item` on `let _y: Item = Item(99)`).
+                None => {
+                    self.infer_all(args);
+                    return self.type_param_shadow_error(
+                        name,
+                        &format!(
+                            "a type parameter is erased at runtime, so it has no constructor; take a factory function (a `fn(...) -> {name}` parameter), or bound '{name}' by a protocol with a static requirement and call `{name}.<method>(...)`"
+                        ),
+                        span,
+                    );
                 }
-                // Editor hover (probe-gated no-op): record a DISPLAY function type at the callee
-                // token so hovering a CALL's callee yields its signature — the callee never reaches
-                // `infer()`/`hover_record_expr`, so without this it returns None. We build the display
-                // `Ty::Func` WITHOUT emitting any error and never touch normal checking results.
-                // A free fn → its declared `FnSig` (a generic fn's params/ret stay `Ty::Param(T)`, so
-                // it Displays "fn(T, T) -> T"); a struct ctor → fields-to-`Struct`; a reserved builtin
-                // (print/range/List) → its `builtin_sig` display sig. Only bare enum variants record
-                // nothing → hover stays None.
-                if self.hover_probe.is_some()
-                    && let Some(fty) = self.callee_display_ty(name)
+                Some(
+                    r
+                    @ (Resolution::Builtin(_) | Resolution::StructCtor(_) | Resolution::Fn { .. }),
+                ) => {
+                    if let Some(ty) =
+                        self.infer_item_call(callee, name, r, args, named, &targs, span, expected)
+                    {
+                        return ty;
+                    }
+                }
+                // A bare user-variant constructor (`Circle(5)`) is no longer allowed — variants are
+                // scoped under their enum and must be written qualified (`Shape.Circle(5)`). The
+                // table answers `Global` for a name no scope binds.
+                Some(Resolution::Global { .. })
+                    if self.lookup(name).is_none() && self.variant_owners.contains_key(name) =>
                 {
-                    // doc: a user-defined free fn owns its `FnSig::doc` and NOTHING else — an
-                    // undocumented user fn must NOT fall through to a builtin blurb (a user fn whose
-                    // name shadows a builtin, e.g. `fn range(...)`, would otherwise show the builtin's
-                    // usage text). Only a NON-user-fn callee (a struct/type-decl ctor via `name_docs`,
-                    // or a reserved builtin ctor via `builtin_type_doc`) consults those fallbacks.
-                    let doc = if let Some(sig) = self.functions.get(name) {
-                        sig.doc.clone()
-                    } else {
-                        self.name_docs
-                            .get(name)
-                            .cloned()
-                            .or_else(|| builtin_type_doc(name))
-                    };
-                    self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
+                    let hint = self.qualify_hint(name);
+                    self.error(span, hint);
+                    for a in args {
+                        self.infer_value(a);
+                    }
+                    return Ty::Unknown;
                 }
-                if !named.is_empty() && self.lookup(name).is_none() && super::is_reserved_name(name)
-                {
-                    self.refuse_named(name, named, span);
-                }
-                if let Some(ty) = self.infer_named_call(
-                    name,
-                    args,
-                    &targs,
-                    callee.span,
-                    span,
-                    None,
-                    expected,
-                    Some(callee),
-                ) {
-                    return ty;
-                }
-                // Not a builtin, ctor or module-level fn: a value call through a module-level binding
-                // outside the scope stack (an imported value).
-                self.resolve_callee(callee);
+                // A value the scopes hold, a module-level binding outside them, or `None`: the
+                // value call below.
+                Some(_) => {}
             }
         }
         // A value-call (closure / arbitrary expr) cannot take explicit type arguments.
@@ -704,6 +273,341 @@ impl Checker {
         // Fall back: the callee is an arbitrary expression; it must evaluate to a function.
         let callee_ty = self.infer(callee);
         self.apply_value_call(callee, callee_ty, args, named, span)
+    }
+
+    /// A call whose callee is the member path `obj.name`, dispatched on `res`, the rule table's
+    /// answer for the callee (`resolve.rs`).
+    #[allow(clippy::too_many_arguments)] // callee shape + its resolution + call shape + hint
+    fn infer_member_path_call(
+        &mut self,
+        callee: &Expr,
+        res: Option<Resolution>,
+        obj: &Expr,
+        name: &str,
+        name_span: Span,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        targs: &[Ty],
+        span: Span,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        // A type parameter under a TYPE-LEVEL turbofish (`Item[int].tag()`, in either carrier) is
+        // the parameter, which takes no type arguments (rustc E0109). A reject before any reading.
+        if let Some(tname) = type_apply_param_head(obj)
+            && self.shadowing_type_param(&tname)
+        {
+            self.infer_all(args);
+            return self.type_param_shadow_error(
+                &tname,
+                &format!(
+                    "a type parameter takes no type arguments and cannot be indexed (`{tname}[…]`)"
+                ),
+                span,
+            );
+        }
+        match res {
+            // `module.Struct(args)` / `module.Alias(args)`: a struct constructed through a
+            // whole-module import (TICKET-172 for the exported alias, with its pinned arguments).
+            Some(Resolution::StructCtor(key)) => {
+                let ExprKind::Ident(mname) = &obj.kind else {
+                    self.infer_all(args);
+                    return Ty::Unknown;
+                };
+                let spelled = format!("{mname}.{name}");
+                if let Some(target @ Ty::Struct(..)) = self.qualified_alias_ty(mname, name) {
+                    return self
+                        .infer_alias_ctor_call(&target, &spelled, args, targs, span, expected);
+                }
+                let Some(info) = self
+                    .imported_modules
+                    .get(mname)
+                    .and_then(|mid| self.module_sigs.get(mid))
+                    .and_then(|sig| sig.struct_defs.get(name))
+                    .cloned()
+                else {
+                    self.infer_all(args);
+                    return Ty::Unknown;
+                };
+                self.infer_qualified_struct_call(&info, name, &key, args, targs, span, expected)
+            }
+            // `module.Ctor(args)` — a qualified native builtin CONSTRUCTOR (`concurrency.Shared(0)`,
+            // aliased `c.Shared(0)`, `time.timer(100)`): the same inference and license check the
+            // bare name takes.
+            Some(Resolution::Builtin(b)) => {
+                if self.reject_item_targs(&b, args, targs, span) {
+                    return Ty::Unknown;
+                }
+                self.infer_builtin_call(&b, args, targs, span, expected)
+                    .unwrap_or(Ty::Unknown)
+            }
+            // `T.member(args)` where `T` is an in-scope generic TYPE PARAMETER and `member` is no
+            // instance method of its bounds. M24 — the STATIC-WITNESS call: legal exactly when one
+            // of `T`'s bounds declares `member` as a STATIC requirement AND the enclosing fn's
+            // hidden `$w:T` witness local is reachable here; a miss reports itself.
+            Some(Resolution::WitnessStatic(tname)) => {
+                self.infer_witness_static_call(&tname, name, args, span)
+            }
+            // A bound's INSTANCE method through the parameter (`T.get(v)`, Rust's
+            // `T::get(&v)`) is the path value `T.get` applied.
+            Some(Resolution::ParamMethodFn { .. }) => {
+                let callee_ty = self.infer(callee);
+                self.apply_value_call(callee, callee_ty, args, named, span)
+            }
+            // A call through a type path: a variant constructor or a method of the type.
+            Some(
+                r @ (Resolution::Variant { .. }
+                | Resolution::VariantFn { .. }
+                | Resolution::MethodFn { .. }),
+            ) => {
+                let Some((th, head_args)) = self.peel_type_path(obj) else {
+                    self.infer_all(args);
+                    return Ty::Unknown;
+                };
+                let variant = !matches!(r, Resolution::MethodFn { .. });
+                self.infer_type_member_call(
+                    obj, &th, head_args, name, variant, name_span, args, targs, span, expected,
+                )
+            }
+            // A struct or enum type path the table found no member on: the static call reports
+            // the miss ("type 'E' has no static method 'm'").
+            None => {
+                if let Some((th, head_args)) = self.peel_type_path(obj)
+                    && matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Enum)
+                {
+                    return self.infer_type_member_call(
+                        obj, &th, head_args, name, false, name_span, args, targs, span, expected,
+                    );
+                }
+                self.infer_method_call(obj, name, name_span, args, targs, span, expected)
+            }
+            Some(_) => {
+                // A type-only native name (Socket/Listener/FFI width/ptr) — no from-nothing ctor.
+                // Gated on `qualified_builtin_ty` so this fires ONLY for genuine native types; a
+                // (non-builtin) user `sig.types` name — e.g. an exported type alias used as a bogus
+                // `mod.Alias(x)` ctor — falls through to `infer_method_call` (its original error),
+                // not this native-specific message.
+                if let Some(Resolution::ModuleMember { .. }) = res
+                    && let ExprKind::Ident(mname) = &obj.kind
+                    && self
+                        .imported_modules
+                        .get(mname)
+                        .and_then(|mid| self.module_sigs.get(mid))
+                        .is_some_and(|sig| sig.types.contains(name))
+                    && self.qualified_builtin_ty(name, &[]).is_some()
+                {
+                    self.infer_all(args);
+                    self.error(
+                        span,
+                        format!(
+                            "'{mname}.{name}' has no constructor — it is a type-only native type (a value is obtained from the module's functions, e.g. net.connect/net.listen for a Socket)"
+                        ),
+                    );
+                    return Ty::Unknown;
+                }
+                self.infer_method_call(obj, name, name_span, args, targs, span, expected)
+            }
+        }
+    }
+
+    /// A call through the type path `obj.name` whose head is `th`: a variant constructor when
+    /// `variant` (the rule table answered `Variant`/`VariantFn`), else the static call, which also
+    /// reports a miss. The head's written type arguments (`Box[int].Has(5)`), an alias head's pinned
+    /// ones (`type IS = Box[str]; IS.of(3)`) and the member-level turbofish (`Box.make[U](x)`, the
+    /// method's OWN `[U]`) compose here.
+    #[allow(clippy::too_many_arguments)] // head + member + call shape + hint
+    fn infer_type_member_call(
+        &mut self,
+        obj: &Expr,
+        th: &TypeHead,
+        head_args: Option<WrittenTypeArgs>,
+        name: &str,
+        variant: bool,
+        name_span: Span,
+        args: &[Expr],
+        targs: &[Ty],
+        span: Span,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let vinfo = if variant {
+            self.variants
+                .get(&(th.key.clone(), name.to_string()))
+                .cloned()
+        } else {
+            None
+        };
+        // `Type[T…].member(args)` — declaration-site turbofish for a generic TYPE.
+        if let Some((type_exprs, _)) = head_args {
+            let written: Vec<Ty> = type_exprs
+                .iter()
+                .map(|t| self.resolve_type(t, span))
+                .collect();
+            let Some(resolved) = self.written_head_args(
+                &th.spelled,
+                self.type_param_count(&th.key),
+                th.pinned.clone(),
+                written,
+                span,
+            ) else {
+                self.infer_all(args);
+                return Ty::Unknown;
+            };
+            if let Some(v) = vinfo {
+                // A variant ctor takes NO method-level type args (`Box[int].Has[str](5)`).
+                if !targs.is_empty() {
+                    self.error(
+                        span,
+                        format!(
+                            "variant '{name}' of '{}' takes no method type arguments",
+                            th.name
+                        ),
+                    );
+                }
+                return self
+                    .infer_variant_call(&v, name, args, &resolved, name_span, span, expected);
+            }
+            return self.infer_static_call(
+                th, &th.name, name, args, &resolved, targs, name_span, span, expected,
+            );
+        }
+        // An alias head (`Tone.Val(3)`, `lib.Tone.of(3)`, TICKET-172) threads the alias body's
+        // pinned type arguments through both readings.
+        if let Some(pinned) = th.pinned.clone() {
+            if let Some(v) = vinfo {
+                if !targs.is_empty() {
+                    self.infer_all(args);
+                    self.error(
+                        span,
+                        format!(
+                            "variant '{name}' of '{}' takes no method type arguments",
+                            th.spelled
+                        ),
+                    );
+                    return Ty::Unknown;
+                }
+                return self.infer_variant_call(&v, name, args, &pinned, name_span, span, expected);
+            }
+            return self.infer_static_call(
+                th,
+                &th.spelled,
+                name,
+                args,
+                &pinned,
+                targs,
+                name_span,
+                span,
+                expected,
+            );
+        }
+        // Editor hover (probe-gated no-op): record the receiver `Col` of `Col.Val(3)` /
+        // `Foo.default()` as its type.
+        if self.hover_probe.is_some() && matches!(obj.kind, ExprKind::Ident(_)) {
+            let ty = match th.kind {
+                TypeHeadKind::Enum => Ty::Enum(th.key.clone(), Vec::new()),
+                _ => Ty::Struct(th.key.clone(), Vec::new()),
+            };
+            self.hover_record_at(obj.span, &ty, HoverKind::Other, None);
+        }
+        if let Some(v) = vinfo {
+            // The OLD gliding form `Enum.Variant[T](args)` (type args on the VARIANT) is removed —
+            // explicit type args go on the TYPE: `Enum[T].Variant(args)`.
+            if !targs.is_empty() {
+                self.infer_all(args);
+                self.error(
+                    span,
+                    format!(
+                        "put the type arguments on the type: {}[{}].{name}(...)",
+                        th.spelled,
+                        render_targs(targs)
+                    ),
+                );
+                return Ty::Unknown;
+            }
+            return self.infer_variant_call(&v, name, args, &[], name_span, span, expected);
+        }
+        // A STATIC (or receiver-first instance) method through the type. The member-level
+        // turbofish is the bare carrier of the method's OWN `[U]` args (PART 2).
+        self.infer_static_call(
+            th,
+            &th.spelled,
+            name,
+            args,
+            &[],
+            targs,
+            name_span,
+            span,
+            expected,
+        )
+    }
+
+    /// The "takes no type arguments" reject for a by-name item call (a builtin, a struct
+    /// constructor, a fn). An alias of a struct passes: the constructor decides through
+    /// `written_head_args` (TICKET-180 P2, TICKET-172). `true` when it reported.
+    fn reject_item_targs(&mut self, name: &str, args: &[Expr], targs: &[Ty], span: Span) -> bool {
+        let alias_takes_targs = matches!(self.alias_body_ty(name), Some(Ty::Struct(..)));
+        if targs.is_empty() || self.name_is_generic(name) || alias_takes_targs {
+            return false;
+        }
+        self.error(span, format!("'{name}' takes no type arguments"));
+        for a in args {
+            self.infer(a);
+        }
+        true
+    }
+
+    /// A call of the bare name `name` that the rule table answered `r` for: a builtin, a struct
+    /// constructor or a module-level fn. `None` for a first-class builtin fn with no call arm of
+    /// its own (the value call types it).
+    #[allow(clippy::too_many_arguments)] // callee + resolution + call shape + hint
+    fn infer_item_call(
+        &mut self,
+        callee: &Expr,
+        name: &str,
+        r: &Resolution,
+        args: &[Expr],
+        named: &[(String, Expr)],
+        targs: &[Ty],
+        span: Span,
+        expected: Option<&Ty>,
+    ) -> Option<Ty> {
+        // A DIRECT call of a from-imported fn (`h()`) above its own `import` is the same
+        // use-before-import as the bare read (`g := h`), but a direct callee never reaches
+        // `infer_ident` — so the guard is repeated at this funnel, or the two spellings of one
+        // concept would disagree. A same-module fn — never in `import_binds` — is untouched.
+        if let Resolution::Fn { .. } = r {
+            self.reject_read_above_import(name, true, callee.span);
+        }
+        // Editor hover (probe-gated no-op): record a DISPLAY function type at the callee token so
+        // hovering a CALL's callee yields its signature — the callee never reaches
+        // `infer()`/`hover_record_expr`. A free fn → its declared `FnSig`; a struct ctor →
+        // fields-to-`Struct`; a reserved builtin → its `builtin_sig` display sig. Emits no error.
+        if self.hover_probe.is_some()
+            && let Some(fty) = self.callee_display_ty(name)
+        {
+            // doc: a user-defined free fn owns its `FnSig::doc` and NOTHING else — an
+            // undocumented user fn must NOT fall through to a builtin blurb.
+            let doc = if let Some(sig) = self.functions.get(name) {
+                sig.doc.clone()
+            } else {
+                self.name_docs
+                    .get(name)
+                    .cloned()
+                    .or_else(|| builtin_type_doc(name))
+            };
+            self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
+        }
+        if !named.is_empty() && self.lookup(name).is_none() && super::is_reserved_name(name) {
+            self.refuse_named(name, named, span);
+        }
+        if self.reject_item_targs(name, args, targs, span) {
+            return Some(Ty::Unknown);
+        }
+        match r {
+            Resolution::Builtin(b) => self.infer_builtin_call(b, args, targs, span, expected),
+            Resolution::StructCtor(key) => {
+                Some(self.infer_struct_ctor_call(name, key, args, targs, span, expected))
+            }
+            _ => Some(self.infer_fn_call(name, args, targs, callee.span, span, expected)),
+        }
     }
 
     /// A call of an arbitrary callee expression whose type is `callee_ty`: it must evaluate to a
@@ -1219,19 +1123,6 @@ impl Checker {
         }
     }
 
-    /// Resolve a `Type[T…]` member-access head — the receiver of `Type[T…].member(args)` /
-    /// nullary `Type[T…].member` — into `(type-name, runtime-key, type-arg-exprs)` when `obj` is a
-    /// declaration-site turbofish on a KNOWN struct/enum name: both carriers, bare or qualified,
-    /// through `ast::type_application` and `type_head` (B1: a qualified head keys by
-    /// `type_key(mid, Type)`). Returns `None` when `obj` is not such a head (a real
-    /// index-then-member, a local binding, an unknown name, or a non-type index), so the caller
-    /// falls back to the ordinary method path.
-    pub(super) fn type_apply_head(&self, obj: &Expr) -> Option<(TypeHead, Vec<Type>)> {
-        let app = crate::ast::type_application(obj)?;
-        let th = self.type_head(app.head)?;
-        matches!(th.kind, TypeHeadKind::Struct | TypeHeadKind::Enum).then_some((th, app.args))
-    }
-
     /// Type-check a call through a type, `Type.method(args)`: the path value `Type.method` applied.
     /// `th` is the type head; `tname` its display name. Reads the sig from `type_member_fn`, so an
     /// instance method takes its receiver first (`P.get(p)`); rejects a refused member or an unknown
@@ -1480,44 +1371,6 @@ impl Checker {
             .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
             .collect();
         Ty::Enum(v.enum_name.clone(), targs_out)
-    }
-
-    /// `Alias.Variant(args)` / `Alias.method(args)` through an alias of an enum or struct whose
-    /// canonical key is `key` and whose body pins `head_targs`. VARIANT-FIRST, mirroring the
-    /// `type_apply_head` arm: look up the variant on the key first, falling back to a static call.
-    /// `head_targs` is threaded through both, so `type IS = Box[str]; IS.of(3)` still infers against
-    /// `Box[str]`. `spelled` is the alias as written (`Tone` / `lib.Tone`), for diagnostics.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn infer_alias_member_call(
-        &mut self,
-        th: &TypeHead,
-        spelled: &str,
-        name: &str,
-        args: &[Expr],
-        targs: &[Ty],
-        name_span: Span,
-        span: Span,
-        expected: Option<&Ty>,
-    ) -> Ty {
-        let head_targs = th.pinned.as_deref().unwrap_or(&[]);
-        if let Some(v) = self
-            .variants
-            .get(&(th.key.clone(), name.to_string()))
-            .cloned()
-        {
-            if !targs.is_empty() {
-                self.infer_all(args);
-                self.error(
-                    span,
-                    format!("variant '{name}' of '{spelled}' takes no method type arguments"),
-                );
-                return Ty::Unknown;
-            }
-            return self.infer_variant_call(&v, name, args, head_targs, name_span, span, expected);
-        }
-        self.infer_static_call(
-            th, spelled, name, args, head_targs, targs, name_span, span, expected,
-        )
     }
 
     /// `module.Alias(args)` through an exported alias whose `target` is a struct
@@ -1797,73 +1650,22 @@ impl Checker {
             .is_some_and(|sig| sig.member(name).is_some_and(MemberSig::holds_fn))
     }
 
-    #[allow(clippy::too_many_arguments)] // call shape + enum qualifier + hint + the head's NodeId
-    pub(super) fn infer_named_call(
+    /// A call of the builtin `name` (the rule table answered `Resolution::Builtin`). The
+    /// `range`/`List`/`Set`/`Map` arms are the ctor-RETURN-TYPE / generic-inference source for the
+    /// container ctors (arity/overload check, element-type inference) — NOT a flat `FnSig`, so it
+    /// stays HERE. Their `CallBuiltin` DISPATCH is table-sourced (the `Intrinsic::Ctor` PRELUDE
+    /// rows); `builtin_container_sig` supplies only the flat display/placeholder sig. See
+    /// `Intrinsic`. `None` for a first-class builtin fn with no arm here: the value call types it.
+    fn infer_builtin_call(
         &mut self,
         name: &str,
         args: &[Expr],
         targs: &[Ty],
-        name_span: Span,
         span: Span,
-        enum_qual: Option<&str>,
         hint: Option<&Ty>,
-        callee: Option<&Expr>,
     ) -> Option<Ty> {
-        // Qualified `Enum.Variant(args)`: resolve strictly within the named enum, bypassing the bare
-        // dispatch below — so a variant named like a built-in (`enum E: Ok(int)`) or a struct can't be
-        // hijacked by that branch. The caller has already verified `(enum, variant)` exists.
-        if let Some(en) = enum_qual {
-            let v = self
-                .variants
-                .get(&(en.to_string(), name.to_string()))
-                .cloned()?;
-            return Some(self.infer_variant_call(&v, name, args, targs, name_span, span, hint));
-        }
-        // CONSTRUCTOR position, and the same shadowing rule: `Item(99)` inside `fn f[Item: Tagged]`
-        // is the PARAMETER, so the struct/enum ctor arms below must never see the name.
-        // A type parameter is erased at runtime and has no constructor; rustc rejects the shape too
-        // (E0308 `expected type parameter Item, found struct Item` on `let _y: Item = Item(99)`).
-        if self.shadowing_type_param(name) {
-            self.infer_all(args);
-            return Some(self.type_param_shadow_error(
-                name,
-                &format!(
-                    "a type parameter is erased at runtime, so it has no constructor; take a factory function (a `fn(...) -> {name}` parameter), or bound '{name}' by a protocol with a static requirement and call `{name}.<method>(...)`"
-                ),
-                span,
-            ));
-        }
-        // Explicit call-site type arguments are only meaningful on a *generic* user fn / struct /
-        // enum-variant constructor. Reject them on anything else (builtins, non-generic decls)
-        // before the dispatch below, so the seeding logic only has to handle the generic paths.
-        // An alias of a struct passes through: the constructor branch below decides
-        // through `written_head_args` (an unpinned alias of a generic type takes the target's type
-        // arguments, `type BB = Box; BB[int](9)`, TICKET-180 P2; one that fixes them reports
-        // "already fixes its type arguments", TICKET-172).
-        let alias_takes_targs = matches!(self.alias_body_ty(name), Some(Ty::Struct(..)));
-        if !targs.is_empty() && !self.name_is_generic(name) && !alias_takes_targs {
-            self.error(span, format!("'{name}' takes no type arguments"));
-            for a in args {
-                self.infer(a);
-            }
-            return Some(Ty::Unknown);
-        }
-        // The `range`/`List`/`Set`/`Map` arms below are the ctor-RETURN-TYPE / generic-inference source
-        // for the container ctors (arity/overload check, element-type inference) — NOT a flat `FnSig`,
-        // so it stays HERE. Their `CallBuiltin` DISPATCH is table-sourced (the `Intrinsic::Ctor` PRELUDE
-        // rows); `builtin_container_sig` supplies only the flat display/placeholder sig. See `Intrinsic`.
-        // The three builtin variant ctors are expression arms below; every other builtin arm records
-        // its own `Builtin` entry as its first statement.
-        if matches!(name, "Ok" | "Some" | "Err")
-            && let Some(c) = callee
-        {
-            self.resolve_callee(c);
-        }
         match name {
             "print" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 for a in args {
                     self.infer_value(a);
                 }
@@ -1875,9 +1677,6 @@ impl Checker {
             // into the other branch's concrete type via `unify_branch`, and in tail position
             // `flow::stmt` (via `call_diverges` on this Resolution) treats it as a divergence.
             "panic" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 self.check_arity("panic", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
@@ -1888,9 +1687,6 @@ impl Checker {
                 Some(Ty::Unknown)
             }
             "range" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 for a in args {
                     self.expect_int_val(a);
                 }
@@ -1903,9 +1699,6 @@ impl Checker {
                 Some(Ty::list(Ty::Int))
             }
             "int" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 self.check_arity("int", 1, args, span);
                 if let Some(a) = args.first() {
                     let aty = self.infer_value(a);
@@ -1915,9 +1708,6 @@ impl Checker {
                 Some(Ty::Int)
             }
             "float" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 self.check_arity("float", 1, args, span);
                 if let Some(a) = args.first() {
                     let aty = self.infer_value(a);
@@ -1927,9 +1717,6 @@ impl Checker {
                 Some(Ty::Float)
             }
             "bool" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 self.check_arity("bool", 1, args, span);
                 // `bool(x)` is a total truthiness cast over the scalars (int/float/bool/str) —
                 // like `str`, it accepts any SCALAR. But an AGGREGATE arg
@@ -1942,18 +1729,12 @@ impl Checker {
                 Some(Ty::Bool)
             }
             "str" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 self.check_arity("str", 1, args, span);
                 // `str` is the Stringable display cast (accepts anything).
                 self.infer_all(args);
                 Some(Ty::Str)
             }
             "ord" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 self.check_arity("ord", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
@@ -1964,9 +1745,6 @@ impl Checker {
                 Some(Ty::Int)
             }
             "chr" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 self.check_arity("chr", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
@@ -1982,9 +1760,6 @@ impl Checker {
             // `range(a, b)` builtin is the materializer, and `List(range(0, 3))` works. The argument
             // is REQUIRED: an empty list is the `[]` literal (zero args can't infer T).
             "List" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `List[T]()` — explicit element type (turbofish), bare `List()` — empty list whose
                 // element type is refined from the expected type / first use (mirrors `Set()`), and
                 // `List(it)` builds from any for-iterable. With a turbofish AND an iterable, the
@@ -2043,9 +1818,6 @@ impl Checker {
                 }
             }
             "Set" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `Set()`/`Set[T]()` → empty set (element from the turbofish, else inferred from
                 // later use, like `{}` for maps); `Set(it)` → a set from ANY iterable VALUE
                 // (broadened from list-only), deduped. The element type flows through `iter_elem`;
@@ -2112,9 +1884,6 @@ impl Checker {
             // keys (like the `{k: v}` literal). The argument is REQUIRED: an empty map is the `{}`
             // literal. (Free-call `map(it)` is a distinct namespace from the `xs.map(f)` list HOF.)
             "Map" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `Map[K, V]()` → typed empty map (turbofish); bare `Map()` → empty map refined from
                 // the expected type / first use (mirrors the `{}` literal and `Set()`); `Map(it)` →
                 // a map from an iterable of EXACTLY 2-tuples. With a turbofish AND an iterable, the
@@ -2205,9 +1974,6 @@ impl Checker {
             // mutable copy), `bytearray([ints])` (from a `list[int]`, each 0–255 validated at runtime),
             // and `bytearray(ba)` (copy). Always infers `bytearray`.
             "bytearray" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 match args.len() {
                     0 => {}
                     1 => match self.infer_value(&args[0]) {
@@ -2226,9 +1992,6 @@ impl Checker {
             // `b"..."` literal is the other way to make a `bytes`). `bytes(ba)` snapshots a `bytearray`,
             // `bytes(b)` copies a `bytes`, `bytes([ints])` builds from a `list[int]`. Infers `bytes`.
             "bytes" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 match args.len() {
                     1 => match self.infer_value(&args[0]) {
                         Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
@@ -2248,9 +2011,6 @@ impl Checker {
                 Some(Ty::Bytes)
             }
             "Channel" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `Channel[T]()` — an unbounded mailbox; `Channel[T](cap)` — a bounded FIFO whose
                 // `send` blocks when `cap` messages are queued. The element type comes from the explicit
                 // type argument (it can't be inferred), and must be sendable. The optional capacity is a
@@ -2284,9 +2044,6 @@ impl Checker {
                 Some(Ty::channel(elem))
             }
             "Shared" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `Shared(v)` — a fresh cross-task box initialised with `v`. The element type is
                 // inferred from the value (value-first, unlike `Channel[T]()`); an OPTIONAL `[T]`
                 // turbofish pins it and is checked against the value's type (`Shared[str](0)` rejects).
@@ -2307,9 +2064,6 @@ impl Checker {
                 }
             }
             "RwShared" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `RwShared(v)` — a fresh cross-task read-write box initialised with `v`. The element
                 // type is inferred from the value (value-first, like `Shared`); an OPTIONAL `[T]`
                 // turbofish pins it and is checked against the value's type.
@@ -2327,9 +2081,6 @@ impl Checker {
                 }
             }
             "Atomic" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
                 // `Shared`; an OPTIONAL `[T]` turbofish pins the element type and is checked against
                 // the value's type.
@@ -2350,9 +2101,6 @@ impl Checker {
                 }
             }
             "timer" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `timer(ms)` — a one-shot timeout channel: a `Channel[bool]` that delivers `true`
                 // once, `ms` milliseconds after creation. The composable timeout primitive (recv it in
                 // a `wait` arm). Takes an int; a `[T]` type arg is rejected upstream. NOT a global
@@ -2380,9 +2128,6 @@ impl Checker {
                 }
             }
             "Executor" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
                 // Non-generic; zero arguments, or one `int` cap on the jobs running at once; a `[T]` type arg is rejected upstream. NOT a global
                 // builtin: requires `import std.concurrency` (the name STAYS reserved).
@@ -2399,9 +2144,6 @@ impl Checker {
                 }
             }
             "AtomicInt" => {
-                if let Some(c) = callee {
-                    self.resolve_callee(c);
-                }
                 // `AtomicInt(v)` — a fresh lock-free int atomic. Monomorphic (no `[T]`); the single arg
                 // must be an int. NOT a global builtin: requires `import std.concurrency` (the name
                 // STAYS reserved). The arg is checked even on the unlicensed path so a nested error
@@ -2451,186 +2193,178 @@ impl Checker {
                 });
                 self.one_arg_hinted(name, args, span, h.as_ref())
             })),
-            _ => {
-                // Struct constructor? Only a BARE-resolvable struct (`struct_names`): a locally
-                // declared, `from`-imported, or std type. A whole-module-imported USER struct's layout
-                // lives in `self.structs` for `m.S(...)`/field access, but its name is NOT in
-                // `struct_names`, so bare `S(...)` is not a constructor — it falls through to the
-                // unknown-name path (with an import hint).
-                if (self.struct_names.contains(name) || self.alias_struct_head(name).is_some())
-                    && let (key, pinned) = self
-                        .alias_struct_head(name)
-                        .map(|(k, p)| (k, Some(p)))
-                        .unwrap_or_else(|| (self.bare_key(name), None))
-                    && (self.raw_ctor_owner.as_deref() == Some(key.as_str())
-                        || !self.functions.contains_key(name))
-                    && let Some((tps, fields, defaulted)) = self.structs.get(&key).map(|i| {
-                        (
-                            i.type_params.clone(),
-                            i.fields.clone(),
-                            i.defaulted_fields.clone(),
-                        )
-                    })
-                {
-                    if let Some(c) = callee {
-                        self.resolve_callee(c);
-                    }
-                    let Some(targs) = self.written_head_args(
-                        name,
-                        self.type_param_count(&key),
-                        pinned,
-                        targs.to_vec(),
-                        span,
-                    ) else {
-                        self.infer_all(args);
-                        return Some(Ty::Unknown);
-                    };
-                    let targs = targs.as_slice();
-                    let slots = self.structs.get(&key).and_then(|i| i.field_slots.clone());
-                    let Some(bound) =
-                        self.bind_call(slots.as_deref(), name, args, targs.len(), span)
-                    else {
-                        return Some(Ty::Unknown);
-                    };
-                    let args: &[Expr] = &bound;
-                    let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
-                    if tps.is_empty() {
-                        // Struct ctor float fields are coerced per-field by the `NewStruct` site.
-                        self.check_args(name, &field_tys, args, span);
-                        return Some(Ty::strukt(key));
-                    }
-                    // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
-                    // when given, else are inferred by unifying the declared field types (which
-                    // contain the struct's `Ty::Param`s) against the argument types.
-                    let hints = self.ctor_arg_hints(
-                        hint,
-                        &Ty::Struct(key.clone(), param_shape(&tps)),
-                        &tps,
-                        &field_tys,
-                        targs,
-                    );
-                    let arg_tys = self.infer_generic_arg_tys(args, &field_tys, &hints);
-                    self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
-                    let mut sub = self.seed_targs(name, &tps, targs, span);
-                    for (decl, actual) in field_tys.iter().zip(&arg_tys) {
-                        unify(decl, actual, &mut sub);
-                    }
-                    self.recover_iter_elems(&tps, &mut sub, span);
-                    // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds
-                    // any type param the args left FREE, BEFORE the deadlock probe — so the annotation
-                    // breaks the `Heap([], fn(a, b): a < b)` deadlock (it pins `T`, which in turn pins
-                    // the comparator's closure params via the per-arg checking-mode re-infer below).
-                    seed_from_hint(hint, &Ty::Struct(key.clone(), param_shape(&tps)), &mut sub);
-                    self.widen_targs_from_hint(
-                        hint,
-                        &Ty::Struct(key.clone(), param_shape(&tps)),
-                        &tps,
-                        &field_tys,
-                        &arg_tys,
-                        !targs.is_empty(),
-                        &mut sub,
-                        span,
-                    );
-                    // Detect the un-inferable closure-param deadlock (e.g. `Heap([], fn(a,b): a<b)`)
-                    // BEFORE the per-arg check, so it reports the cause instead of leaking a
-                    // "cannot compare T and T" from inside the lambda. Binds the params to Unknown.
-                    self.report_uninferable_closure_params(
-                        name, &tps, &field_tys, args, &mut sub, span,
-                    );
-                    for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
-                        let expected = subst(decl, &sub);
-                        self.check_generic_arg(name, &expected, actual, arg);
-                    }
-                    self.enforce_bounds(&tps, &tps, &sub, span);
-                    let targs = tps
-                        .iter()
-                        .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
-                        .collect();
-                    return Some(Ty::Struct(key, targs));
-                }
-                // A bare user-variant constructor (`Circle(5)`) is no longer allowed — variants are
-                // scoped under their enum and must be written qualified (`Shape.Circle(5)`).
-                if self.variant_owners.contains_key(name) {
-                    let hint = self.qualify_hint(name);
-                    self.error(span, hint);
-                    for a in args {
-                        self.infer_value(a);
-                    }
-                    return Some(Ty::Unknown);
-                }
-                // Global function?
-                if self.slot_holds_fn_decl(name)
-                    && let Some(sig) = self.functions.get(name).cloned()
-                {
-                    let r = self.fn_resolution(name);
-                    let diverges = self.resolution_diverges(&r);
-                    if let Some(c) = callee {
-                        self.resolve_callee(c);
-                    }
-                    // W7-42r: this call site's arity/defaults/arg types are now fixed against the
-                    // fn's signature, so a later module-scope `name := …` retypes the ONE slot it
-                    // dispatches through (see `fn_reads`).
-                    self.record_fn_read(name);
-                    // TICKET-186: keyword labels through a module slot bind only where
-                    // `labels_certain` says the slot holds this fn (K5).
-                    if let Some(named) = self
-                        .call_ctx
-                        .as_ref()
-                        .filter(|c| !c.named.is_empty())
-                        .map(|c| c.named.clone())
-                        && self.labels_certain(name).is_err()
-                    {
-                        self.consume_named();
-                        for a in args {
-                            self.infer_value(a);
-                        }
-                        for (_, v) in &named {
-                            self.infer_value(v);
-                        }
-                        self.error(span, super::globals::kw_ambiguous_msg(name));
-                        return Some(sig.ret.clone());
-                    }
-                    let Some(bound) = self.bind_call(sig.slots.as_deref(), name, args, 0, span)
-                    else {
-                        return Some(Ty::Unknown);
-                    };
-                    let args: &[Expr] = &bound;
-                    // A generic function: infer its type parameters from the arguments, enforce
-                    // bounds, and substitute into the return type.
-                    if !sig.type_params.is_empty() {
-                        // M24 — the witness key span is the CALLEE TOKEN (`name_span`), never the
-                        // call node: a pipe chain's links all carry the infix expression's span, so
-                        // keying on it aliased two witness calls onto one entry.
-                        return Some(self.infer_generic_call(
-                            name,
-                            &sig,
-                            args,
-                            targs,
-                            name_span,
-                            span,
-                            hint,
-                            WitnessCallee::Free,
-                        ));
-                    }
-                    // Float params are coerced at the callee's prologue (compile_fn / extern).
-                    // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
-                    // `from`-imported fn with an optional arg); for plain sigs `min_params ==
-                    // params.len()`, so this is identical to the old exact-arity check.
-                    if sig.c_variadic {
-                        self.check_c_variadic_args(name, &sig.params, args, span);
-                    } else {
-                        self.check_args_range(name, &sig.params, sig.min_params, args, span);
-                    }
-                    // TICKET-077: a `from`-imported diverging native fn (`exit`, under any bound
-                    // name) bottom-types like `panic`, so it type-checks in value position.
-                    if diverges {
-                        return Some(Ty::Unknown);
-                    }
-                    return Some(sig.ret);
-                }
-                None
-            }
+            _ => None,
         }
+    }
+
+    /// A bare struct constructor `S(args)` / `Alias(args)` the rule table answered
+    /// `StructCtor(key)` for. Type arguments come from explicit call-site args (`S[int](…)`), an
+    /// alias's pinned ones, else unifying the declared field types against the argument types.
+    fn infer_struct_ctor_call(
+        &mut self,
+        name: &str,
+        key: &str,
+        args: &[Expr],
+        targs: &[Ty],
+        span: Span,
+        hint: Option<&Ty>,
+    ) -> Ty {
+        let key = key.to_string();
+        let pinned = self.alias_struct_head(name).map(|(_, p)| p);
+        let Some((tps, fields, defaulted)) = self.structs.get(&key).map(|i| {
+            (
+                i.type_params.clone(),
+                i.fields.clone(),
+                i.defaulted_fields.clone(),
+            )
+        }) else {
+            self.infer_all(args);
+            return Ty::Unknown;
+        };
+        let Some(targs) = self.written_head_args(
+            name,
+            self.type_param_count(&key),
+            pinned,
+            targs.to_vec(),
+            span,
+        ) else {
+            self.infer_all(args);
+            return Ty::Unknown;
+        };
+        let targs = targs.as_slice();
+        let slots = self.structs.get(&key).and_then(|i| i.field_slots.clone());
+        let Some(bound) = self.bind_call(slots.as_deref(), name, args, targs.len(), span) else {
+            return Ty::Unknown;
+        };
+        let args: &[Expr] = &bound;
+        let field_tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
+        if tps.is_empty() {
+            // Struct ctor float fields are coerced per-field by the `NewStruct` site.
+            self.check_args(name, &field_tys, args, span);
+            return Ty::strukt(key);
+        }
+        // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
+        // when given, else are inferred by unifying the declared field types (which
+        // contain the struct's `Ty::Param`s) against the argument types.
+        let hints = self.ctor_arg_hints(
+            hint,
+            &Ty::Struct(key.clone(), param_shape(&tps)),
+            &tps,
+            &field_tys,
+            targs,
+        );
+        let arg_tys = self.infer_generic_arg_tys(args, &field_tys, &hints);
+        self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
+        let mut sub = self.seed_targs(name, &tps, targs, span);
+        for (decl, actual) in field_tys.iter().zip(&arg_tys) {
+            unify(decl, actual, &mut sub);
+        }
+        self.recover_iter_elems(&tps, &mut sub, span);
+        // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds
+        // any type param the args left FREE, BEFORE the deadlock probe — so the annotation
+        // breaks the `Heap([], fn(a, b): a < b)` deadlock (it pins `T`, which in turn pins
+        // the comparator's closure params via the per-arg checking-mode re-infer below).
+        seed_from_hint(hint, &Ty::Struct(key.clone(), param_shape(&tps)), &mut sub);
+        self.widen_targs_from_hint(
+            hint,
+            &Ty::Struct(key.clone(), param_shape(&tps)),
+            &tps,
+            &field_tys,
+            &arg_tys,
+            !targs.is_empty(),
+            &mut sub,
+            span,
+        );
+        // Detect the un-inferable closure-param deadlock (e.g. `Heap([], fn(a,b): a<b)`)
+        // BEFORE the per-arg check, so it reports the cause instead of leaking a
+        // "cannot compare T and T" from inside the lambda. Binds the params to Unknown.
+        self.report_uninferable_closure_params(name, &tps, &field_tys, args, &mut sub, span);
+        for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
+            let expected = subst(decl, &sub);
+            self.check_generic_arg(name, &expected, actual, arg);
+        }
+        self.enforce_bounds(&tps, &tps, &sub, span);
+        let targs = tps
+            .iter()
+            .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
+            .collect();
+        Ty::Struct(key, targs)
+    }
+
+    /// A call of the module-level fn `name` the rule table answered `Fn` for, through its slot.
+    fn infer_fn_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        targs: &[Ty],
+        name_span: Span,
+        span: Span,
+        hint: Option<&Ty>,
+    ) -> Ty {
+        let Some(sig) = self.functions.get(name).cloned() else {
+            self.infer_all(args);
+            return Ty::Unknown;
+        };
+        let diverges = self.resolution_diverges(&self.fn_resolution(name));
+        // W7-42r: this call site's arity/defaults/arg types are now fixed against the
+        // fn's signature, so a later module-scope `name := …` retypes the ONE slot it
+        // dispatches through (see `fn_reads`).
+        self.record_fn_read(name);
+        // TICKET-186: keyword labels through a module slot bind only where
+        // `labels_certain` says the slot holds this fn (K5).
+        if let Some(named) = self
+            .call_ctx
+            .as_ref()
+            .filter(|c| !c.named.is_empty())
+            .map(|c| c.named.clone())
+            && self.labels_certain(name).is_err()
+        {
+            self.consume_named();
+            for a in args {
+                self.infer_value(a);
+            }
+            for (_, v) in &named {
+                self.infer_value(v);
+            }
+            self.error(span, super::globals::kw_ambiguous_msg(name));
+            return sig.ret.clone();
+        }
+        let Some(bound) = self.bind_call(sig.slots.as_deref(), name, args, 0, span) else {
+            return Ty::Unknown;
+        };
+        let args: &[Expr] = &bound;
+        // A generic function: infer its type parameters from the arguments, enforce
+        // bounds, and substitute into the return type.
+        if !sig.type_params.is_empty() {
+            // M24 — the witness key span is the CALLEE TOKEN (`name_span`), never the
+            // call node: a pipe chain's links all carry the infix expression's span, so
+            // keying on it aliased two witness calls onto one entry.
+            return self.infer_generic_call(
+                name,
+                &sig,
+                args,
+                targs,
+                name_span,
+                span,
+                hint,
+                WitnessCallee::Free,
+            );
+        }
+        // Float params are coerced at the callee's prologue (compile_fn / extern).
+        // Honor an optional trailing tail (`min_params < params.len()`, e.g. a native
+        // `from`-imported fn with an optional arg); for plain sigs `min_params ==
+        // params.len()`, so this is identical to the old exact-arity check.
+        if sig.c_variadic {
+            self.check_c_variadic_args(name, &sig.params, args, span);
+        } else {
+            self.check_args_range(name, &sig.params, sig.min_params, args, span);
+        }
+        // TICKET-077: a `from`-imported diverging native fn (`exit`, under any bound
+        // name) bottom-types like `panic`, so it type-checks in value position.
+        if diverges {
+            return Ty::Unknown;
+        }
+        sig.ret
     }
 
     /// Does the method `method` on receiver type `recv_ty` declare its OWN `[U]` type params? Only a

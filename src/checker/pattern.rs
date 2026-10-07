@@ -1,6 +1,7 @@
 // checker::pattern — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Pattern / match-arm binding and or-pattern consistency.
 
+use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
@@ -2748,32 +2749,48 @@ impl Checker {
     /// the head is no fn-like path with type params of its own.
     pub(super) fn infer_type_applied_fn_value(&mut self, e: &Expr) -> Option<Ty> {
         let app = crate::ast::type_application(e)?;
-        let pf = self.path_fn(app.head)?;
-        if pf.sig.type_params.len() == pf.head_params {
-            return None;
-        }
-        // TICKET-214: std.json's decode — `T` is written, so the value always records its
-        // descriptor (or reports a target that does not decode).
-        if let ExprKind::Field { obj: m, name, .. } = &app.head.kind
-            && let ExprKind::Ident(mn) = &m.kind
-            && self.json_decode_member(mn, name)
-        {
-            self.resolve_path(m);
-            let ty =
-                self.path_fn_value_ty(pf, Some((app.args.clone(), app.args_span)), app.head.span);
-            return Some(self.record_decode_value(app.head.id, ty, app.head.span));
-        }
         let head = app.head;
-        // A fn head resolves to `Resolution::Fn`, the one fact the compiler erases on (DEC-197).
-        self.resolve_path(head);
-        // The compiler loads a module head as a value (`Compiler::resolution` (5)).
-        if pf.res.is_none()
-            && let ExprKind::Field { obj: m, .. } = &head.kind
-            && let ExprKind::Ident(_) = &m.kind
-        {
-            self.resolve_path(m);
+        let written = Some((app.args.clone(), app.args_span));
+        match self.resolve_path(head, PathPos::Value) {
+            // A fn-like path: its own type params take the written arguments. A fn head resolves to
+            // `Resolution::Fn`, the one fact the compiler erases on (DEC-197).
+            Some(
+                r @ (Resolution::Fn { .. }
+                | Resolution::MethodFn { .. }
+                | Resolution::VariantFn { .. }
+                | Resolution::ParamMethodFn { .. }),
+            ) => {
+                let pf = self.path_fn(head)?;
+                if pf.sig.type_params.len() == pf.head_params {
+                    return None;
+                }
+                // The compiler loads a module fn's head as a value (`Compiler::resolution` (5)).
+                if let Resolution::Fn { .. } = r
+                    && let ExprKind::Field { obj: m, .. } = &head.kind
+                {
+                    self.infer(m);
+                }
+                Some(self.path_fn_value_ty(pf, written, head.span))
+            }
+            // TICKET-214: std.json's decode, which the table leaves unnamed — `T` is written, so
+            // the value always records its descriptor (or reports a target that does not decode).
+            None => {
+                let ExprKind::Field { obj: m, name, .. } = &head.kind else {
+                    return None;
+                };
+                let ExprKind::Ident(mn) = &m.kind else {
+                    return None;
+                };
+                if !self.json_decode_member(mn, name) {
+                    return None;
+                }
+                self.infer(m);
+                let pf = self.path_fn(head)?;
+                let ty = self.path_fn_value_ty(pf, written, head.span);
+                Some(self.record_decode_value(head.id, ty, head.span))
+            }
+            _ => None,
         }
-        Some(self.path_fn_value_ty(pf, Some((app.args.clone(), app.args_span)), head.span))
     }
 
     /// The members a type path names but never yields, reported at `name_span`: a protocol
@@ -2832,78 +2849,71 @@ impl Checker {
     /// this decides; the caller falls through to the ordinary field path.
     fn type_member_value(
         &mut self,
-        e: &Expr,
         obj: &Expr,
         name: &str,
         name_span: Span,
+        res: Option<&Resolution>,
     ) -> Option<Ty> {
         let (th, head_args) = self.peel_type_path(obj)?;
         let spelled = th.spelled.clone();
         if self.type_member_refusal(&th, name, name_span) {
             return Some(Ty::Unknown);
         }
-        if th.kind == TypeHeadKind::Protocol || th.native_handle {
-            return None;
-        }
         let key = th.key.clone();
-        if th.kind == TypeHeadKind::Enum
-            && self
-                .variants
-                .get(&(key.clone(), name.to_string()))
-                .is_some_and(|v| v.payload.is_empty())
-        {
-            // A nullary variant is a value of the enum: explicit head args resolve and arity-check,
-            // an alias head pins its own, a bare head leaves them Unknown.
-            self.resolve_path(e);
-            let tps = self.enum_type_params.get(&key).cloned().unwrap_or_default();
-            let written: Vec<Ty> = match &head_args {
-                Some((targs, _)) => targs
-                    .iter()
-                    .map(|t| self.resolve_type(t, obj.span))
-                    .collect(),
-                None => Vec::new(),
-            };
-            let Some(head) = self.written_head_args(
-                &spelled,
-                self.type_param_count(&key),
-                th.pinned.clone(),
-                written,
-                obj.span,
-            ) else {
-                return Some(Ty::Unknown);
-            };
-            let args = if head_args.is_some() {
-                self.seed_targs(&spelled, &tps, &head, obj.span);
-                head
-            } else if head.len() == tps.len() {
-                head
-            } else {
-                vec![Ty::Unknown; tps.len()]
-            };
-            return Some(Ty::Enum(key, args));
-        }
-        if let Some(pf) = self.type_member_fn(&th, head_args, name) {
-            if pf.res.is_some() {
-                self.resolve_path(e);
+        match res {
+            Some(Resolution::Variant { .. }) => {
+                // A nullary variant is a value of the enum: explicit head args resolve and
+                // arity-check, an alias head pins its own, a bare head leaves them Unknown.
+                let tps = self.enum_type_params.get(&key).cloned().unwrap_or_default();
+                let written: Vec<Ty> = match &head_args {
+                    Some((targs, _)) => targs
+                        .iter()
+                        .map(|t| self.resolve_type(t, obj.span))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let Some(head) = self.written_head_args(
+                    &spelled,
+                    self.type_param_count(&key),
+                    th.pinned.clone(),
+                    written,
+                    obj.span,
+                ) else {
+                    return Some(Ty::Unknown);
+                };
+                let args = if head_args.is_some() {
+                    self.seed_targs(&spelled, &tps, &head, obj.span);
+                    head
+                } else if head.len() == tps.len() {
+                    head
+                } else {
+                    vec![Ty::Unknown; tps.len()]
+                };
+                Some(Ty::Enum(key, args))
             }
-            return Some(self.path_fn_value_ty(pf, None, name_span));
+            Some(Resolution::MethodFn { .. } | Resolution::VariantFn { .. }) => {
+                let pf = self.type_member_fn(&th, head_args, name)?;
+                Some(self.path_fn_value_ty(pf, None, name_span))
+            }
+            // A miss on an enum: no such variant. A struct's miss reads `obj` as a value below,
+            // which reports the type.
+            None if th.kind == TypeHeadKind::Enum && !th.native_handle => {
+                // A declared enum is named bare, as the call path names it; an alias as written.
+                let ename = if th.pinned.is_some() {
+                    &spelled
+                } else {
+                    &th.name
+                };
+                let names = self.variant_names(&key);
+                self.error_help(
+                    name_span,
+                    format!("enum '{ename}' has no variant '{name}'"),
+                    suggest::did_you_mean(name, &names),
+                );
+                Some(Ty::Unknown)
+            }
+            _ => None,
         }
-        if th.kind == TypeHeadKind::Enum {
-            // A declared enum is named bare, as the call path names it; an alias as written.
-            let ename = if th.pinned.is_some() {
-                &spelled
-            } else {
-                &th.name
-            };
-            let names = self.variant_names(&key);
-            self.error_help(
-                name_span,
-                format!("enum '{ename}' has no variant '{name}'"),
-                suggest::did_you_mean(name, &names),
-            );
-            return Some(Ty::Unknown);
-        }
-        None
     }
 
     /// The one message for a type name read as a value, bare, imported, qualified or type-applied
@@ -3015,16 +3025,19 @@ impl Checker {
         // parameter. FIRST, because `lookup` reaches module globals (scope 0) — an inner LOCAL still
         // wins, which is what `shadowing_type_param` excludes. Go, the one-namespace ancestor, is the
         // reference: reading a type parameter as a value is *"foo (type) is not an expression"*.
-        if self.shadowing_type_param(name) {
+        // The rule table leaves exactly that name unnamed; every arm below reads its answer.
+        let Some(res) = self.resolve_path(e, PathPos::Value) else {
             return self.type_param_shadow_error(
                 name,
                 "a type parameter is a type, not a value — it is erased at runtime, so there is nothing to read",
                 span,
             );
-        }
-        if let Some(ty) = self.lookup(name) {
-            // What the name means does not depend on whether its type is known here.
-            self.resolve_path(e);
+        };
+        // A binding a scope holds. What the name means does not depend on whether its type is
+        // known here. (`Global` is also the answer for a name no scope binds: the diagnostics below.)
+        if let Resolution::Local | Resolution::Global { .. } | Resolution::Module(_) = res
+            && let Some(ty) = self.lookup(name)
+        {
             // TICKET-183 — a body reads a module global declared below it through the type
             // `seed_module_globals` gave it. An `Unknown` in that type (an un-annotated empty
             // collection, a value of un-inferable type) is pinned by walk-order code this body cannot
@@ -3073,7 +3086,11 @@ impl Checker {
             }
             return ty;
         }
-        if let Some(sig) = self.functions.get(name) {
+        // A module-level fn slot. A slot a later `:=` redeclares answers `Global` (the compiler
+        // loads the slot) and is still typed by its fn declaration here.
+        if let Resolution::Fn { .. } | Resolution::Global { .. } = res
+            && let Some(sig) = self.functions.get(name)
+        {
             let sig = sig.clone();
             let type_params = sig.type_params.clone();
             // M24 — the fn-as-value wall, at the BARE read (`g := reset`): both for the Scope-A pin
@@ -3082,7 +3099,6 @@ impl Checker {
             // W7-42r: this expression's type is now fixed against the fn's signature, so a later
             // module-scope `name := …` would retype the ONE slot underneath it (see `fn_reads`).
             self.record_fn_read(name);
-            self.resolve_path(e);
             // …and a FROM-IMPORTED fn read above its own `import` is the same use-before-import the
             // value arm rejects (`g := h` above `import h from lib.fns`). Leaving it accepted gave
             // two verdicts for one user-visible concept; both ancestors reject it too (CPython:
@@ -3132,24 +3148,24 @@ impl Checker {
         // `Ty::BuiltinFn` here rather than the harvested variadic sig from `builtin_sig` — this is the
         // design-sanctioned split (the call authority is the variadic prelude decl; the value form is
         // fixed).
-        if name == "print" {
-            self.resolve_path(e);
+        if let Resolution::Builtin(b) = &res
+            && b == "print"
+        {
             return Ty::BuiltinFn {
                 params: vec![Ty::Unknown],
                 ret: Box::new(Ty::Nil),
             };
         }
-        if is_firstclass_builtin_fn(name) {
-            self.resolve_path(e);
-            if let Some(sig) = self.builtin_sig(name) {
-                return Ty::BuiltinFn {
-                    params: sig.params,
-                    ret: Box::new(sig.ret),
-                };
-            }
+        if let Resolution::Builtin(b) = &res
+            && is_firstclass_builtin_fn(b)
+            && let Some(sig) = self.builtin_sig(name)
+        {
+            return Ty::BuiltinFn {
+                params: sig.params,
+                ret: Box::new(sig.ret),
+            };
         }
-        if name == "None" {
-            self.resolve_path(e);
+        if let Resolution::Variant { .. } = res {
             return Ty::option(Ty::Unknown);
         }
         // A type name read as a value (`f := Box`, TICKET-204).
@@ -4237,39 +4253,51 @@ impl Checker {
                 return Ty::Unknown;
             }
         }
-        // MEMBER-as-a-value position, and the same shadowing rule: `Col.Red` inside
-        // `fn f[Col: Tagged]` is the PARAMETER, so the enum/struct arms below must never see the
-        // name. Nothing is reachable through an erased type parameter except a STATIC method its
-        // bound declares, which is a CALL and is handled in `infer_call` before it ever gets here
-        // (rustc agrees: E0599 "no associated function or constant named `Red` found for type
-        // parameter `Col`").
-        if let ExprKind::Ident(tname) = &obj.kind
-            && self.shadowing_type_param(tname)
-        {
-            if let Some(pf) = self.param_member_fn(tname, name) {
-                if pf.res.is_some() {
-                    self.resolve_path(e);
+        // What `obj.name` names: the rule table's answer; every arm below reads it.
+        let res = self.resolve_path(e, PathPos::Value);
+        match &res {
+            // MEMBER-as-a-value position through a type parameter: `Col.Red` inside
+            // `fn f[Col: Tagged]` is the PARAMETER. Nothing is reachable through an erased type
+            // parameter except its bounds' methods: an instance method is a value, a STATIC one
+            // only a call (rustc agrees: E0599 "no associated function or constant named `Red`
+            // found for type parameter `Col`").
+            Some(Resolution::ParamMethodFn { .. } | Resolution::WitnessStatic(_)) => {
+                let ExprKind::Ident(tname) = &obj.kind else {
+                    return Ty::Unknown;
+                };
+                if let Some(Resolution::ParamMethodFn { .. }) = res
+                    && let Some(pf) = self.param_member_fn(tname, name)
+                {
+                    return self.path_fn_value_ty(pf, None, name_span);
                 }
-                return self.path_fn_value_ty(pf, None, name_span);
+                return self.type_param_shadow_error(
+                    tname,
+                    &format!(
+                        "a type parameter has no member '{name}'; through one you reach only the methods its bounds declare: an instance method as a value or a call (`{tname}.<method>(value, ...)`), a STATIC method only as a call (`{tname}.<method>(...)`)"
+                    ),
+                    obj.span,
+                );
             }
-            return self.type_param_shadow_error(
-                tname,
-                &format!(
-                    "a type parameter has no member '{name}'; through one you reach only the methods its bounds declare: an instance method as a value or a call (`{tname}.<method>(value, ...)`), a STATIC method only as a call (`{tname}.<method>(...)`)"
-                ),
-                obj.span,
-            );
+            // A type path read as a value (Rust's path-value rule, TICKET-204): `E.V`,
+            // `R1[int].L`, `Bx[int].make`, `Pt.getx`, `lib.E.V`, an alias head `A.L`; `None` is a
+            // type path's miss or std.json's decode.
+            Some(
+                Resolution::Variant { .. }
+                | Resolution::VariantFn { .. }
+                | Resolution::MethodFn { .. },
+            )
+            | None => {
+                if let Some(t) = self.type_member_value(obj, name, name_span, res.as_ref()) {
+                    return t;
+                }
+                if res.is_none()
+                    && let Some(t) = self.decode_value(e.id, obj, name, name_span)
+                {
+                    return t;
+                }
+            }
+            _ => {}
         }
-        // A type path read as a value (Rust's path-value rule, TICKET-204): `E.V`, `R1[int].L`,
-        // `Bx[int].make`, `Pt.getx`, `lib.E.V`, an alias head `A.L` — every head through
-        // `type_head`, every member through `type_member_fn`.
-        if let Some(t) = self.type_member_value(e, obj, name, name_span) {
-            return t;
-        }
-        if let Some(t) = self.decode_value(e.id, obj, name, name_span) {
-            return t;
-        }
-        self.resolve_path(e);
         let obj_ty = self.infer(obj);
         match &obj_ty {
             // `t.0`, `t.1`, … — tuple element access. The field name is the element index as a
@@ -5056,7 +5084,8 @@ impl Checker {
         if !self.json_decode_member(m, name) {
             return None;
         }
-        self.resolve_path(obj);
+        // The compiler loads the module head as a value.
+        self.infer(obj);
         let sig = json_decode_sig();
         let display = format!("{m}.{name}");
         let spelling = fn_spelling(&display, &sig.type_params);

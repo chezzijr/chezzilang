@@ -1,12 +1,13 @@
-//! TICKET-222 (R1) — the one writer of the resolutions table. What an expression path (`f`,
-//! `lib.f`, `a.b.f`, `T.m`, `Bx[int].make`, `E.A`) denotes is decided by ONE rule table,
-//! [`Checker::classify_path`], and written ONCE per NodeId by [`Checker::resolve_path`]. The call
-//! side, the value side and the compiler read that answer and never re-decide. A path keeps ONE
-//! kind whatever position reads it: a module fn is `Fn`, a type method `MethodFn`, a payload
-//! variant `VariantFn`; the compiler derives the opcode from the position.
+//! TICKET-222 (R1) — the one decider and the one writer of the resolutions table. What an
+//! expression path (`f`, `lib.f`, `a.b.f`, `T.m`, `Bx[int].make`, `E.A`) denotes is decided by ONE
+//! rule table, [`Checker::classify_path`], and written ONCE per NodeId by
+//! [`Checker::resolve_path`], which returns the answer. The call side (`infer_call_dispatch`), the
+//! value side (`infer_ident`, `infer_field`, the type-applied fn value) and the compiler take their
+//! branch from that answer and never re-decide. A path keeps ONE kind whatever position reads it:
+//! a module fn is `Fn`, a type method `MethodFn`, a payload variant `VariantFn`; the compiler
+//! derives the opcode from the position.
 //!
-//! [`Checker::commit_resolution`] is private here and has exactly four callers: `resolve` (behind
-//! `resolve_path` and `resolve_callee`),
+//! [`Checker::commit_resolution`] is private here and has exactly four callers: `resolve_path`,
 //! `record_pattern_head`, `record_index_call` and `record_decode`. A new path form adds a rule to
 //! `classify_path`; never add a `commit_resolution` call elsewhere or a `record_*` helper outside
 //! this file.
@@ -42,6 +43,16 @@ const BUILTIN_CALLEES: &[&str] = &[
     "AtomicInt",
 ];
 
+/// Where a path is read. It changes one rule of [`Checker::classify_path`] only: a struct's raw
+/// constructor inside its same-named fn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum PathPos {
+    /// The callee of a call (`P(..)`).
+    Callee,
+    /// Every other read (`f := P`, `ap(P, 1)`, `P == g`).
+    Value,
+}
+
 impl Checker {
     /// The one table write: fills `callee_diverges` on every walk, and the resolutions table on
     /// the recording walk only. A second, different write for one NodeId is a checker bug
@@ -74,36 +85,27 @@ impl Checker {
         );
     }
 
-    /// What the path `e` denotes, from the one rule table, memoised per NodeId on the recording
-    /// walk. A non-recording walk (a SYNTH id, the generic-arg prepass, `resolving_returns`)
-    /// classifies afresh and writes only `callee_diverges` (DEC-180, DEC-025). `None` when `e` is
-    /// no path this table classifies; nothing is written then.
-    pub(super) fn resolve_path(&mut self, e: &Expr) -> Option<Resolution> {
-        self.resolve(e, false)
-    }
-
-    /// [`Self::resolve_path`] for a call's callee. The callee position differs in one rule only:
-    /// a struct's raw constructor inside its same-named fn (DEC-029/055/172).
-    pub(super) fn resolve_callee(&mut self, e: &Expr) -> Option<Resolution> {
-        self.resolve(e, true)
-    }
-
-    fn resolve(&mut self, e: &Expr, callee: bool) -> Option<Resolution> {
+    /// What the path `e` denotes at position `pos`, from the one rule table, memoised per NodeId
+    /// on the recording walk. A non-recording walk (a SYNTH id, the generic-arg prepass,
+    /// `resolving_returns`) classifies afresh and writes only `callee_diverges` (DEC-180,
+    /// DEC-025). `None` when `e` names nothing this table classifies (a type parameter, a type
+    /// path's miss, std.json's decode); nothing is written then. Every reader matches on the answer.
+    pub(super) fn resolve_path(&mut self, e: &Expr, pos: PathPos) -> Option<Resolution> {
         if self.records_node(e.id)
             && let Some(r) = self.resolutions.get(&(self.graph_module_idx, e.id.0))
         {
             return Some(r.clone());
         }
-        let r = self.classify_path(e, callee)?;
+        let r = self.classify_path(e, pos)?;
         self.commit_resolution(e.id, r.clone(), e.span);
         Some(r)
     }
 
     /// THE rule table: what the path `e` names. Only an `Ident` or a non-tuple `Field` is a path;
     /// a bracket node is never classified, its head is. Every input is an existing `&self` decider.
-    pub(super) fn classify_path(&self, e: &Expr, callee: bool) -> Option<Resolution> {
+    pub(super) fn classify_path(&self, e: &Expr, pos: PathPos) -> Option<Resolution> {
         match &e.kind {
-            ExprKind::Ident(n) => self.classify_ident(e, n, callee),
+            ExprKind::Ident(n) => self.classify_ident(e, n, pos),
             ExprKind::Field { obj, name, .. } if !crate::ast::is_tuple_index(name) => {
                 self.classify_field(obj, name)
             }
@@ -111,7 +113,7 @@ impl Checker {
         }
     }
 
-    fn classify_ident(&self, e: &Expr, n: &str, callee: bool) -> Option<Resolution> {
+    fn classify_ident(&self, e: &Expr, n: &str, pos: PathPos) -> Option<Resolution> {
         // A default provider `desugar` synthesized (`$def$…`), unspellable by a user.
         if n.starts_with(crate::desugar::PROVIDER_PREFIX)
             && (e.id.0 == crate::ast::NodeId::SYNTH.0 || !self.functions.contains_key(n))
@@ -128,10 +130,14 @@ impl Checker {
         ) {
             return Some(self.value_head_resolution(n));
         }
-        // A struct's own raw constructor inside its same-named fn (DEC-029/055/172). Only the
-        // callee: a value read there is the fn, which is what `infer_ident` types it as.
+        // The one rule that reads the position: inside `fn P` of a module declaring `struct P`,
+        // the CALLEE `P(..)` is the struct's raw constructor and a VALUE read of `P` is the fn
+        // (DEC-029/055/172). Rust draws the same line with its two namespaces: with
+        // `struct P { x: i64 }` and `fn P(x: i64) -> P`, inside `fn P` the struct expression
+        // `P { x }` constructs and `let f = P;` is the fn (`rustc --edition 2021`, run:
+        // `P { x: 104 }`). Chezzi's callee `P(x=..)` is that struct-expression spelling.
         let ctor = self.struct_ctor_key(n);
-        if callee
+        if pos == PathPos::Callee
             && let Some(key) = &ctor
             && self.raw_ctor_owner.as_deref() == Some(key.as_str())
         {
@@ -198,24 +204,24 @@ impl Checker {
                 return Some(Resolution::Fn { module, name });
             }
         }
-        if let Some((th, _)) = self.peel_type_path(obj)
-            && th.native_handle
-            && self
-                .structs
-                .get(&th.key)
-                .is_some_and(|info| info.methods.contains_key(name))
-        {
-            // A native handle's method has no proto, so it is no path value; called, it is a
-            // static call on the type.
-            return Some(Resolution::MethodFn {
-                type_key: th.key,
-                method: name.to_string(),
-            });
-        }
-        if let Some((th, _)) = self.peel_type_path(obj)
-            && th.kind != TypeHeadKind::Protocol
-            && !th.native_handle
-        {
+        // A type path names a member of its type or nothing: `None` is a miss (or a protocol's
+        // method, which is no item), and its readers report it.
+        if let Some((th, _)) = self.peel_type_path(obj) {
+            if th.kind == TypeHeadKind::Protocol {
+                return None;
+            }
+            if th.native_handle {
+                // A native handle's method has no proto, so it is no path value; called, it is a
+                // static call on the type.
+                return self
+                    .structs
+                    .get(&th.key)
+                    .is_some_and(|info| info.methods.contains_key(name))
+                    .then(|| Resolution::MethodFn {
+                        type_key: th.key.clone(),
+                        method: name.to_string(),
+                    });
+            }
             if let Some(v) = self.variants.get(&(th.key.clone(), name.to_string()))
                 && v.payload.is_empty()
             {
@@ -224,9 +230,7 @@ impl Checker {
                     variant: name.to_string(),
                 });
             }
-            if let Some(r) = self.type_member_fn(&th, None, name).and_then(|pf| pf.res) {
-                return Some(r);
-            }
+            return self.type_member_fn(&th, None, name).and_then(|pf| pf.res);
         }
         Some(self.member_resolution(obj, name))
     }
