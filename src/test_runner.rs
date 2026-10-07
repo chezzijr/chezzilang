@@ -2179,6 +2179,11 @@ struct Suite:
     /// hang, 0.1 s.
     #[test]
     fn over_memory_trips_on_an_all_native_task_body() {
+        #[rustfmt::skip]
+        let in_parent = crate::vm::rerun_in_child("test_runner::tests::over_memory_trips_on_an_all_native_task_body");
+        if in_parent {
+            return;
+        }
         // Force the eager arm on rather than demanding the hardware provide it. The lock is the
         // house pattern for process-global test state (`native::rand::TEST_RNG_LOCK`); the guard
         // bundles it with the restore so an assertion failure below cannot leave the rest of the

@@ -2603,6 +2603,9 @@ fn pmap_limited_matches_pmap_both_engines() {
 /// the test compares wall time of the same 8 spawns flat vs nested in one program.
 #[test]
 fn nested_nursery_in_spawned_task_uses_all_workers() {
+    if crate::vm::rerun_in_child("vm::tests::nested_nursery_in_spawned_task_uses_all_workers") {
+        return;
+    }
     struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
     impl Drop for Workers {
         fn drop(&mut self) {
@@ -2657,6 +2660,11 @@ print(nested < flat * 1.6 + 0.05)
 /// thread assertion above stays on the first 8 shapes at T >= 2.
 #[test]
 fn runner_threads_reach_the_worker_count_in_every_nesting_shape() {
+    #[rustfmt::skip]
+    let in_parent = crate::vm::rerun_in_child("vm::tests::runner_threads_reach_the_worker_count_in_every_nesting_shape");
+    if in_parent {
+        return;
+    }
     struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
     impl Drop for Workers {
         fn drop(&mut self) {
@@ -2838,6 +2846,9 @@ parallel:
 /// of the 200 rounds claims runners at 4 workers; reused threads keep the starts far below 200.
 #[test]
 fn nursery_rounds_reuse_their_runner_threads() {
+    if crate::vm::rerun_in_child("vm::tests::nursery_rounds_reuse_their_runner_threads") {
+        return;
+    }
     struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
     impl Drop for Workers {
         fn drop(&mut self) {
@@ -6150,6 +6161,11 @@ main()
 /// suite wedging — it must fail loud via the watchdog, not via a stuck test binary.
 #[test]
 fn w8_7_demoted_fiber_yield_after_demote_does_not_strand_replacement() {
+    #[rustfmt::skip]
+    let in_parent = crate::vm::rerun_in_child("vm::tests::w8_7_demoted_fiber_yield_after_demote_does_not_strand_replacement");
+    if in_parent {
+        return;
+    }
     struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
     impl Drop for Workers {
         fn drop(&mut self) {
@@ -21890,6 +21906,11 @@ fn caught_error_carries_the_fault_origin_span() {
 /// scan cost the same way the filed measurement's 28-core default pool did.
 #[test]
 fn ticket126_idle_cancel_scan_is_not_paid_when_no_cancel_ever_trips() {
+    #[rustfmt::skip]
+    let in_parent = crate::vm::rerun_in_child("vm::tests::ticket126_idle_cancel_scan_is_not_paid_when_no_cancel_ever_trips");
+    if in_parent {
+        return;
+    }
     struct Workers(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
     impl Drop for Workers {
         fn drop(&mut self) {

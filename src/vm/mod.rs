@@ -432,9 +432,33 @@ impl ScopeCancel {
 /// A process-wide lock serializing every test that WRITES [`WORKER_OVERRIDE`]. The override is
 /// process-global and the harness runs tests on multiple threads, so an unguarded store would change
 /// the worker count under every concurrent parallel test. Same shape and same reason as
-/// `native::rand::TEST_RNG_LOCK`: hold it across the whole set-run-restore sequence.
+/// `native::rand::TEST_RNG_LOCK`: hold it across the whole set-run-restore sequence. A test that
+/// forces a count must start with [`rerun_in_child`].
 #[cfg(test)]
 pub(crate) static TEST_WORKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// TICKET-230: `set_worker_count` sets the cap of the process-wide `width::RUNNERS`, so a test that
+/// forces a count throttles every concurrently running lib test. It re-runs itself alone in a child
+/// copy of the test binary, which has its own gate. Returns `true` in the parent (the child already
+/// ran the body) and `false` in the child.
+#[cfg(test)]
+pub(crate) fn rerun_in_child(test_path: &str) -> bool {
+    if std::env::var_os("CHEZZI_FORCED_COUNT_CHILD").is_some() {
+        return false;
+    }
+    let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+        .args([test_path, "--exact", "--test-threads=1", "--nocapture"])
+        .env("CHEZZI_FORCED_COUNT_CHILD", "1")
+        .output()
+        .expect("spawn forced-count child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains(" 1 passed;"),
+        "forced-count child {test_path} failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    true
+}
 
 /// Override the M:N engine's worker count. `0` restores auto (= `available_parallelism()`). Must be
 /// called before the first parallel run; see [`WORKER_OVERRIDE`].
