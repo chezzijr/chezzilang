@@ -871,6 +871,319 @@ fn qenum_cells(out: &mut Vec<Cell>) {
     }
 }
 
+const BLIB: &str = "fn idt[T](x: T) -> T:
+    return x
+struct P:
+    x: int
+struct Bx[T]:
+    v: T
+    fn make(v: T) -> Bx[T]:
+        return Bx(v=v)
+    fn get(self) -> T:
+        return self.v
+enum E[T]:
+    A(T)
+    N
+";
+
+const BPRE: &str = "import std.json
+import std.math
+import lib
+import Bx, E from lib
+fn okv[T](r: Result[T]) -> T:
+    match r:
+        Ok(v):
+            return v
+        Err(e):
+            panic(e.message())
+fn un[T](e: E[T]) -> T:
+    match e:
+        E.A(v):
+            return v
+        E.N:
+            panic('N')
+fn yes[A](a: A) -> bool:
+    return true
+fn inc(x: int) -> int:
+    return x + 1
+";
+
+/// TICKET-222: type-argument shape x head x position. `head[X]` is one bracket whose `X` is read
+/// by the type grammar whatever its shape; the head picks type application over indexing. Each
+/// accept cell prints what the Rust reference printed (`idt::<(i64, String)>`, `(i64::abs)(-6)`).
+fn bracket_grid_cells(out: &mut Vec<Cell>) {
+    // (key, type, value, JSON text of the value, show of a result `{}`, printed)
+    let shapes = [
+        ("int", "int", "6", "6", "{}", "6"),
+        ("list", "List[int]", "[6]", "[6]", "{}", "[6]"),
+        (
+            "map",
+            "Map[str, int]",
+            "{'a': 6}",
+            r#"{"a": 6}"#,
+            "{}",
+            "{'a': 6}",
+        ),
+        (
+            "tuple",
+            "(int, str)",
+            "(6, 'a')",
+            r#"[6, "a"]"#,
+            "{}",
+            "(6, 'a')",
+        ),
+        ("fn", "fn(int) -> int", "inc", "", "{}(2)", "3"),
+        ("ltype", "lib.P", "lib.P(x=6)", r#"{"x": 6}"#, "{}.x", "6"),
+        (
+            "lgen",
+            "lib.Bx[int]",
+            "lib.Bx[int].make(6)",
+            r#"{"v": 6}"#,
+            "{}.v",
+            "6",
+        ),
+        ("opt", "int?", "None", "null", "{}", "None"),
+    ];
+    let heads = [
+        "local", "from", "mod", "full", "json", "abs", "make", "get", "variant", "nullary", "alias",
+    ];
+    let idt = "fn idt[T](x: T) -> T:\n    return x\n";
+    for (sk, x, v, jv, show, want) in shapes {
+        for head in heads {
+            // (prelude, path value, its type, argument, wrapper around a result before `show`)
+            let (pre, f, ft, arg, wrap) = match head {
+                "local" => (
+                    idt.to_string(),
+                    format!("idt[{x}]"),
+                    format!("fn({x}) -> {x}"),
+                    v.to_string(),
+                    "",
+                ),
+                "from" => (
+                    "import idt from lib\n".to_string(),
+                    format!("idt[{x}]"),
+                    format!("fn({x}) -> {x}"),
+                    v.to_string(),
+                    "",
+                ),
+                "mod" => (
+                    String::new(),
+                    format!("lib.idt[{x}]"),
+                    format!("fn({x}) -> {x}"),
+                    v.to_string(),
+                    "",
+                ),
+                "full" => (
+                    "import a.b\n".to_string(),
+                    format!("a.b.idt[{x}]"),
+                    format!("fn({x}) -> {x}"),
+                    v.to_string(),
+                    "",
+                ),
+                "json" => (
+                    String::new(),
+                    format!("json.decode[{x}]"),
+                    format!("fn(str) -> Result[{x}]"),
+                    format!("r'{jv}'"),
+                    "okv",
+                ),
+                "abs" => (
+                    String::new(),
+                    format!("math.abs[{x}]"),
+                    format!("fn({x}) -> {x}"),
+                    if sk == "int" {
+                        "-6".to_string()
+                    } else {
+                        v.to_string()
+                    },
+                    "",
+                ),
+                "make" => (
+                    String::new(),
+                    format!("Bx[{x}].make"),
+                    format!("fn({x}) -> Bx[{x}]"),
+                    v.to_string(),
+                    ".v",
+                ),
+                "alias" => (
+                    format!("type BX = Bx[{x}]\n"),
+                    "BX.make".to_string(),
+                    format!("fn({x}) -> Bx[{x}]"),
+                    v.to_string(),
+                    ".v",
+                ),
+                "get" => (
+                    String::new(),
+                    format!("Bx[{x}].get"),
+                    format!("fn(Bx[{x}]) -> {x}"),
+                    format!("Bx[{x}](v={v})"),
+                    "",
+                ),
+                "variant" => (
+                    String::new(),
+                    format!("E[{x}].A"),
+                    format!("fn({x}) -> E[{x}]"),
+                    v.to_string(),
+                    "un",
+                ),
+                _ => (
+                    String::new(),
+                    format!("E[{x}].N"),
+                    format!("E[{x}]"),
+                    String::new(),
+                    "",
+                ),
+            };
+            let shr = |r: &str| {
+                let w = match wrap {
+                    "" => r.to_string(),
+                    ".v" => format!("{r}.v"),
+                    fun => format!("{fun}({r})"),
+                };
+                show.replace("{}", &w)
+            };
+            let name = |p: &str| format!("bracket/{sk}/{head}/{p}");
+            let program = |body: String| {
+                vec![
+                    ("lib.chz", BLIB.to_string()),
+                    ("a/b.chz", idt.to_string()),
+                    ("main.chz", format!("{BPRE}{pre}{body}\n")),
+                ]
+            };
+            let reject = match (head, sk) {
+                ("json", "fn") => Some("decode: cannot decode into fn(int) -> int"),
+                ("abs", s) if s != "int" => Some("does not satisfy Num"),
+                _ => None,
+            };
+            if let Some(frag) = reject {
+                for (p, body) in [
+                    ("call", format!("print({f}({arg}))")),
+                    ("let", format!("g := {f}")),
+                ] {
+                    out.push(cell(name(p), program(body), Expect::Rejects(frag)));
+                }
+                continue;
+            }
+            if head == "nullary" {
+                let rows = [
+                    ("let", format!("g := {f}\nprint(g)")),
+                    ("typed", format!("g: {ft} = {f}\nprint(g)")),
+                    ("paren", format!("print(({f}))")),
+                    (
+                        "default",
+                        format!("fn k(e: {ft} = {f}) -> str:\n    return '{{e}}'\nprint(k())"),
+                    ),
+                    (
+                        "guard",
+                        format!(
+                            "match 1:\n    1 if yes({f}):\n        print({f})\n    _:\n        print('no')"
+                        ),
+                    ),
+                ];
+                for (p, body) in rows {
+                    out.push(cell(name(p), program(body), prints("N")));
+                }
+                continue;
+            }
+            let pr = |r: &str| format!("print({})", shr(r));
+            let rows = [
+                ("call", format!("r := {f}({arg})\n{}", pr("r"))),
+                ("let", format!("g := {f}\nr := g({arg})\n{}", pr("r"))),
+                (
+                    "typed",
+                    format!("g: {ft} = {f}\nr := g({arg})\n{}", pr("r")),
+                ),
+                (
+                    "hof",
+                    format!(
+                        "fn ap[A, B](h: fn(A) -> B, a: A) -> B:\n    return h(a)\nr := ap({f}, {arg})\n{}",
+                        pr("r")
+                    ),
+                ),
+                ("paren", format!("r := ({f})({arg})\n{}", pr("r"))),
+                ("eq", format!("g := {f}\nprint(g == g)")),
+                (
+                    "spawn_target",
+                    format!(
+                        "parallel:\n    spawn {f}({arg})\nr := {f}({arg})\n{}",
+                        pr("r")
+                    ),
+                ),
+                (
+                    "spawn_capture",
+                    format!(
+                        "c := Channel[str](1)\nparallel:\n    spawn:\n        y := {f}({arg})\n        c.send('{{{}}}')\nprint(c.recv())",
+                        shr("y")
+                    ),
+                ),
+                (
+                    "default",
+                    format!(
+                        "fn k(h: {ft} = {f}) -> str:\n    y := h({arg})\n    return '{{{}}}'\nprint(k())",
+                        shr("y")
+                    ),
+                ),
+                (
+                    "guard",
+                    format!(
+                        "match 1:\n    1 if yes({f}):\n        r := {f}({arg})\n        {}\n    _:\n        print('no')",
+                        pr("r")
+                    ),
+                ),
+            ];
+            for (p, body) in rows {
+                // A variant is a constructor, which `spawn` never takes as its target.
+                let expect = match p {
+                    "spawn_target" if head == "variant" => {
+                        Expect::Rejects("spawn requires a function or method call")
+                    }
+                    "eq" => prints("true"),
+                    _ => prints(want),
+                };
+                out.push(cell(name(p), program(body), expect));
+            }
+        }
+    }
+    // A value head keeps the index reading (TICKET-210), a parameter named like a type indexes,
+    // and a type-only or multi-type bracket on a value is rejected by name.
+    let fs = "fn a(x: int) -> int:\n    return x + 1\nfn b(x: int) -> int:\n    return x * 2\nfs := [a, b]\n";
+    let rows: Vec<(&str, String, Expect)> = vec![
+        (
+            "shadow/local_k",
+            format!("{fs}K := 1\nprint(fs[K](10))"),
+            prints("20"),
+        ),
+        (
+            "shadow/param_int",
+            "fn q(int: List[int]) -> int:\n    return int[0]\nprint(q([4, 5]))".to_string(),
+            prints("4"),
+        ),
+        (
+            "shadow/index_forms",
+            "xs := [1, 2, 3]\ni := 1\nxs[i] = 9\nprint(xs[i], xs[i + 1], xs[0:2])".to_string(),
+            prints("9 3 [1, 9]"),
+        ),
+        (
+            "wrong/type_only_on_value",
+            "xs := [1, 2]\nprint(xs[fn(int) -> int])".to_string(),
+            Expect::Rejects("a subscript takes an expression, found the type 'fn(int) -> int'"),
+        ),
+        (
+            "wrong/two_types_on_value",
+            "xs := [1, 2]\nprint(xs[int, str])".to_string(),
+            Expect::Rejects("a subscript takes one index, found 2"),
+        ),
+        (
+            "wrong/value_on_generic",
+            format!("{idt}print(idt[1])"),
+            Expect::Rejects("'idt' is generic and T is not determined here"),
+        ),
+    ];
+    for (n, src, e) in rows {
+        out.push(main_only(n, &src, e));
+    }
+}
+
 fn cells() -> Vec<Cell> {
     let mut out = Vec::new();
     arity_cells(&mut out);
@@ -887,4 +1200,11 @@ fn cells() -> Vec<Cell> {
 #[test]
 fn turbofish_value_grid() {
     run_grid("turbofish-value", &cells());
+}
+
+#[test]
+fn type_arg_bracket_grid() {
+    let mut out = Vec::new();
+    bracket_grid_cells(&mut out);
+    run_grid("type-arg-bracket", &out);
 }
