@@ -3489,3 +3489,51 @@ The `trips.chz` T=1 row is the re-run. Its first run measured base 104 (11) agai
 1.14x, outside base's spread; the re-run (load 5.59) is the row above. Executor round trips use
 `chezzi-exec` runners, which stay outside `runner_cache`. `nested_closed.chz` and `exec_open.chz`
 are the grid programs at N = 1000000. The churn, storm and trips programs live in `benches/sched/`.
+
+## TICKET-224 — a run-wide halt at every function entry, base vs fixed (2026-10-08)
+
+Release binaries: base `aecdc670` (`target/t224/chezzi-base`) and fixed (`target/t224/chezzi-fix`), `python3 benches/sched/ab_pair.py <base> <fixed> 5 <prog>:<threads> ...`, n=5 per side, interleaved. The chz table ran unpinned and again pinned with `AB_CPUS=0-7`; the sched table ran unpinned. `/proc/loadavg` is the first line of each table. Cells are `median ms (spread = max - min) / max RSS MB`; `ok` means the fixed median is at most the base median plus the base spread. Workers 0 = the default count. The sched table ran in two commands (the first hit `timeout 590` after the T=2 `primes_parallel` row); its last two rows are the second command, loadavg `2.75 2.26 2.42`.
+
+`ab-chz.txt`:
+
+    loadavg 2.39 2.74 2.93 2/642 2134745
+
+| program | T | base | fixed | ratio | verdict |
+|---|---|---|---|---|---|
+| fib.chz | 1 | 523 (16) / 15 | 497 (34) / 15 | 0.95x | ok |
+| poly_method.chz | 1 | 2495 (72) / 15 | 2484 (48) / 15 | 1.00x | ok |
+| closure.chz | 1 | 2408 (47) / 15 | 2404 (95) / 15 | 1.00x | ok |
+| loop.chz | 1 | 1721 (72) / 15 | 1729 (86) / 15 | 1.00x | ok |
+| hof.chz | 1 | 688 (56) / 15 | 684 (74) / 15 | 0.99x | ok |
+| struct.chz | 1 | 847 (28) / 15 | 842 (101) / 15 | 0.99x | ok |
+
+`ab-chz-pinned.txt`:
+
+    loadavg 1.71 2.43 2.80 2/650 2135748
+    AB_CPUS 0-7
+
+| program | T | base | fixed | ratio | verdict |
+|---|---|---|---|---|---|
+| fib.chz | 1 | 509 (76) / 15 | 527 (53) / 15 | 1.04x | ok |
+| poly_method.chz | 1 | 2537 (80) / 15 | 2449 (102) / 15 | 0.97x | ok |
+| closure.chz | 1 | 2399 (73) / 15 | 2402 (108) / 15 | 1.00x | ok |
+| loop.chz | 1 | 1732 (116) / 15 | 1724 (47) / 15 | 1.00x | ok |
+| hof.chz | 1 | 656 (30) / 15 | 665 (50) / 15 | 1.01x | ok |
+| struct.chz | 1 | 813 (42) / 15 | 788 (40) / 15 | 0.97x | ok |
+
+`ab-sched.txt`:
+
+    loadavg 1.62 2.21 2.68 2/640 2136746
+
+| program | T | base | fixed | ratio | verdict |
+|---|---|---|---|---|---|
+| rendezvous_pingpong.chz | 2 | 2835 (1794) / 15 | 3216 (1855) / 15 | 1.13x | ok |
+| churn2.chz | 2 | 2213 (171) / 21 | 2279 (201) / 20 | 1.03x | ok |
+| churn8.chz | 4 | 3314 (141) / 21 | 3385 (240) / 21 | 1.02x | ok |
+| storm.chz | 1 | 5705 (85) / 39 | 5682 (111) / 39 | 1.00x | ok |
+| trips.chz | 2 | 98 (11) / 15 | 103 (21) / 15 | 1.05x | ok |
+| primes_parallel.chz | 1 | 28970 (237) / 15 | 29082 (933) / 15 | 1.00x | ok |
+| primes_parallel.chz | 2 | 15013 (170) / 15 | 14984 (66) / 15 | 1.00x | ok |
+| primes_parallel.chz | 4 | 9904 (146) / 15 | 9877 (90) / 15 | 1.00x | ok |
+| primes_parallel.chz | 0 | 10072 (279) / 15 | 10067 (505) / 15 | 1.00x | ok |
+

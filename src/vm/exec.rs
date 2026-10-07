@@ -342,7 +342,8 @@ impl Vm {
     /// checkpoint. A native that calls user code ONCE (an operator or protocol hook, a generator
     /// resume, `update`/`read`/`write`) enters it here: that call does not wait, so it is not a
     /// cancellation point (owner decision 1, `docs/root-causes-w18.md`). The callee's own back-edges
-    /// and waits still cut it.
+    /// and waits still cut it. A run-wide halt still lands at the hook's frame push
+    /// ([`Vm::call_halt`], TICKET-224).
     pub(super) fn reentered<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
@@ -1253,6 +1254,9 @@ impl Vm {
         span: Span,
     ) -> Result<(), RuntimeError> {
         if counted {
+            if self.quiesce.run_halt_hint() {
+                self.call_halt(span)?;
+            }
             self.call_depth += 1;
             if self.call_depth > MAX_CALL_DEPTH {
                 self.call_depth -= 1;
@@ -1263,6 +1267,23 @@ impl Vm {
             }
         }
         Ok(())
+    }
+
+    /// TICKET-224 — the run-wide halt at a function entry. A loop-free recursion emits no back-edge
+    /// and no wait, so an `os.exit`, a fire-and-forget job fault or a latched deadlock verdict
+    /// waited for the whole recursion (`fib(36)` printed 8.5 s after a 100 ms exit). Only the
+    /// run-wide halt lands here, through [`Vm::exit_halt`] (DEC-208: one predicate, one funnel). A
+    /// cancel and a nursery child's fault do not: cancellation stays at waits and loop back-edges
+    /// (owner decision 2026-10-07, DEC-194), as Go's `context` and Python's `TaskGroup`.
+    /// Cold and out of line: every call runs `frame_depth_guard`, and a run with no pending halt
+    /// pays only the `run_halt_hint` load there.
+    #[cold]
+    #[inline(never)]
+    fn call_halt(&mut self, span: Span) -> Result<(), RuntimeError> {
+        match self.exit_halt(span) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Reserve the non-parameter local slots above `[base..]` and push the `CallFrame`. Assumes the
@@ -1878,6 +1899,7 @@ impl Vm {
     /// re-fire the check and skip the remaining defers while the cancel unwind is already in flight.
     /// The `Err` is funnelled by `run_until`'s post-step handler into `unwind_deferred(base_level,
     /// false)` — defers run, `recover:` inside the task is bypassed (a cancelled task must die).
+    /// A run-wide halt also lands at a function entry ([`Vm::call_halt`], TICKET-224); a cancel does not.
     pub(super) fn jump_checked(&mut self, target: usize, span: Span) -> Result<(), RuntimeError> {
         let ip = self.frames.last().unwrap().ip;
         if target < ip {
@@ -2044,8 +2066,9 @@ impl Vm {
         matches!(self.cut, Some(Cut::Cancelled))
     }
 
-    /// gaps.md W7-57 — how the two CPU-side checkpoints ([`Vm::jump_checked`]'s loop back-edge,
-    /// [`Vm::guarded`]'s native-HOF re-entry) deliver a run-wide `os.exit`. These two are the only
+    /// gaps.md W7-57 — how the three CPU-side checkpoints ([`Vm::jump_checked`]'s loop back-edge,
+    /// [`Vm::guarded`]'s native-HOF re-entry, [`Vm::frame_depth_guard`]'s function entry via
+    /// [`Vm::call_halt`], TICKET-224) deliver a run-wide `os.exit`. These three are the only
     /// halts a spinning party ever reaches, and they need one thing the blocking rungs' bare
     /// [`Vm::run_exit_err`] does not give them:
     ///

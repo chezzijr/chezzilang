@@ -59,6 +59,8 @@ Clean this wave:
 channel is the one outcome record). CHAN4 (fact 3, the verdict is a run halt) fixed by TICKET-223
 (one latch, `QuiesceState::decide`, delivered through `run_exit_err`). CHAN1 (fact 4) is a separate
 ticket.
+The recursive-main finding (a loop-free recursion has no cut point) is fixed by TICKET-224: a run-wide
+halt lands at every function entry. CHAN1 is TICKET-230.
 
 **Facts:**
 1. what state a job is in, and what its outcome is;

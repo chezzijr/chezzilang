@@ -1156,6 +1156,11 @@ fn serve(tok: Token, io: Channel[str]):
 > element (a sort of `compare` structs, `xs == ys` over `eq` structs, a `Map` build by `hash`, `str`
 > of a list) is one op and is not checked inside; the hook body's own loops still are.
 >
+> **A run-wide halt also lands at every function entry (TICKET-224).** An `os.exit`, a fire-and-forget
+> `Executor` job's fault and a deadlock verdict end the run, so a task also receives them when it enters
+> a Chezzi function, not only at the points above. A loop-free recursion stops at its next call, as Go's
+> `os.Exit` stops every goroutine. A cancel and a nursery child's fault are not delivered at a call.
+>
 > Two consequences of checkpoint delivery, both intended
 > (this is Trio-style structured concurrency; Go never preemptively kills a goroutine at all):
 >
@@ -1329,6 +1334,10 @@ fn serve(tok: Token, io: Channel[str]):
 > a checkpoint would put a checkpoint *before the `defer` line* of any prologue that calls a function and
 > would give back exactly the bug this design removed. Behaviour is identical across runs, so it is a limit,
 > not a divergence. Bound a recursive computation yourself if a task must tear down promptly.
+> This limit is for cancellation only, and it is deliberate (owner decision 2026-10-07): Go's `context`
+> cancel is cooperative and Python's `TaskGroup` cancels at an `await`, so neither stops a running
+> recursion. A run-wide halt (`os.exit`, a fire-and-forget job fault, a deadlock verdict) does stop it,
+> at its next function entry (TICKET-224).
 >
 > **Cross-task output order is NOT part of the contract.** One `print` = one locked write = line-atomic;
 > the *order* of prints from different tasks is nondeterministic on **both** engines (a cancelled task's
