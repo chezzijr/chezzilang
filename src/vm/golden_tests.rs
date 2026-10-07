@@ -3433,33 +3433,24 @@ fn exit_is_not_caught_by_recover() {
 #[test]
 fn exit_in_spawned_child_aborts_siblings() {
     // B1/B2: `std.os.exit` inside a child is a hard halt for the PROGRAM — the post-`parallel:`
-    // statement never runs and the exit code propagates. It is NOT a halt for the tasks the nursery
-    // has already spawned: those are torn down through the scope cancel, and (cancellation points) a
-    // spawned task always runs its straight-line prologue before it can observe that cancel. M:N has
-    // no choice about this — a scope completes only at `done == total`, so `b`'s queued fiber is
-    // popped and started after the exit trips the cancel, and it prints (measured 20/20). Serial's
-    // cancel drain therefore starts `b` too, and the two engines AGREE: `{"a","b"}` on both. (Before
-    // the N6 drain, serial abandoned the never-started sibling and printed only `"a"` — a
-    // near-deterministic line-SET divergence this test used to bless as "expected".) Cross-task
-    // ORDER stays nondeterministic, so the SET is what is asserted.
+    // statement never runs and the exit code propagates. Whether the sibling `b` prints depends on
+    // the schedule: since TICKET-224 a run-wide halt lands at every function entry, and `print` is a
+    // call, so `b` is cut before printing when the exit is already published (measured: T=1 100/100
+    // cut, T=2 and the default count 0/100). Go's `os.Exit` gives the same either-way result for a
+    // sibling goroutine. So `b` is not asserted; `a`, the missing "after" and the code are.
     let src = "import std.os\nfn a():\n    print(\"a\")\n    os.exit(3)\nfn b():\n    print(\"b\")\nfn main():\n    parallel:\n        spawn a()\n        spawn b()\n    print(\"after\")\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let (io, _ie, ir, ic) = run_file(&entry);
     let (vo, _ve, vr, vc) = run_file(&entry);
     assert!(
-        vo.contains('a') && vo.contains('b'),
-        "serial: the exiting child's output flushes and its already-spawned sibling still runs its prologue: got {vo:?}"
-    );
-    assert!(
-        io.contains('a') && io.contains('b'),
-        "M:N: same: got {io:?}"
+        vo.contains('a') && io.contains('a'),
+        "the exiting child's output flushes: got {vo:?} / {io:?}"
     );
     assert!(
         !io.contains("after") && !vo.contains("after"),
         "the post-parallel statement never runs after os.exit: mn={io:?} serial={vo:?}"
     );
-    assert_same_lines(&vo, &io);
     assert_eq!(vc, Some(3), "serial exit code");
     assert_eq!(ic, Some(3), "M:N exit code");
     assert!(

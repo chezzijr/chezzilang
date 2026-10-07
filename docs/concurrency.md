@@ -1244,7 +1244,8 @@ fn serve(tok: Token, io: Channel[str]):
 > run: M:N cannot do otherwise (a scope completes only at `done == total`, so a queued fiber is picked
 > up even after a sibling has faulted). So the task runs its prologue, prints what it prints, registers
 > its `defer`, and dies at its first checkpoint. (A sibling of a task that calls `std.os.exit` may
-> still run its prologue before the exit reaches it; it runs no `defer`.)
+> still run part of its prologue, up to its next function entry, where the exit reaches it (TICKET-224;
+> `print` is a call); it runs no `defer`.)
 >
 > **A `defer` is never itself cancelled** (by a cancel; an `os.exit` does cut it, see above, and a
 > fire-and-forget job fault does not). No cancellation point fires *inside* a deferred call — a
