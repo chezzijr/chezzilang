@@ -197,6 +197,8 @@ as a head.
 
 ## Family P4 — a generic fn value at a join (CK5)
 
+**Status: fixed (TICKET-225, 2026-10-07).** A generic fn value read with no pin takes type variables (`src/checker/tyvar.rs`); every join, argument and later use in its frame pins them through `join_ty` / `assignable`, and the frame verdict rejects one still unpinned.
+
 - `generic_fn_value_ty` (`src/checker/pattern.rs:2342`) decides pin-or-reject at the read, from the
   expected hint only.
 - The one deferral is for call arguments (`generic_fn_value_prepass`, `expr.rs:4533`).
@@ -207,6 +209,8 @@ as a head.
   sibling {concrete fn, `Option[fn]`, another undetermined generic (must reject)}.
 
 ## Family W2 — where a width meets a constant (FF1)
+
+**Status: fixed (TICKET-225, 2026-10-07).** `check_const_fits` is deleted; a constant meets its slot in `Checker::const_meets_slot`, and one evaluator (`src/ast/consteval.rs`) serves the overflow lint, the width check and the peephole.
 
 - `check_const_fits` (`src/checker/expr.rs:4355`) is hand-paired with `assignable` at about 15 of 56 call
   sites; its doc comment says "a new site must call it too".

@@ -755,11 +755,18 @@ struct Meters:
 > The same expected-type / turbofish machinery now also pins a generic fn used as a **VALUE** (not
 > called, or called indirectly): `g := ident[int]` (turbofish) and `h: fn(int) -> int = ident` /
 > HOF-param / return-position (against a concrete `fn(...) -> ...`) yield the substituted concrete fn
-> value; a bare un-pinned generic fn value is rejected **at the read** (Go's rule), named parameters and
-> both working spellings in the message. ARGUMENT position asks the same question and gives the same
-> answer — `[1,2,3].filter(pred)` / `.map(mk)` are errors when nothing determines `[T]` — but only at
-> the END of the call's inference, so `[1,2,3].fold(0, pick)`, pinned by the accumulator that precedes
-> it, still checks. The HOF may be **generic itself**: its own type parameters are pinned first (by the
+> value; a bare un-pinned generic fn value takes a **type variable** per type parameter (TICKET-225,
+> Rust's model), and any later use in its frame — one fn body, or one top-level statement — pins it:
+> a call, an argument, an assignment, a return, or a join with a sibling (`if`/`match` branches, `??`,
+> list/map literals, `==`, `in`, list `+`/`+=`, a `recover:` tail). Only `assignable` and
+> `Checker::join_ty` bind a variable (`src/checker/tyvar.rs`). A read still unpinned when its frame
+> closes is rejected at the read, named parameters and both working spellings in the message.
+> ARGUMENT position is the same case: `[1,2,3].filter(pred)` / `.map(mk)` are errors when nothing
+> determines `[T]`, and `[1,2,3].fold(0, pick)`, pinned by the accumulator that precedes it, checks.
+> **Untyped constants** (Go's model): a literal or constant expression (one evaluator,
+> `src/ast/consteval.rs`, folds `+ - * / % & | ^ << >>` and unary `-`) meets the slot it lands in, and
+> a value outside a C width there is `constant 256 does not fit int8 (-128..127)`; a constant
+> argument to a generic fn takes the width the expected type pins (`y: int8 = id(300)` rejects). The HOF may be **generic itself**: its own type parameters are pinned first (by the
 > other arguments, a call turbofish, or the annotation) and the passed fn then unifies against the
 > concrete slot, so `applyg(ident, 5)` for `fn applyg[U](f: fn(U) -> U, n: U) -> U` infers exactly what
 > Go and Rust infer (see `docs/syntax.md`, "A GENERIC fn as a value").

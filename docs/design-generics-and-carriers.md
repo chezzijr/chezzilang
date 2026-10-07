@@ -73,7 +73,7 @@ equality follows from that. Chezzi:
 - One classifier `Vm::callable(value)` read by call, spawn, `Executor.submit` and the entrypoint,
   replacing each consumer's hand-listed kinds.
 
-**R5. Type variables, solved across the body.** A generic value read without a pin gets a type variable,
+**R5. Type variables, solved across the body.** **Status: done (TICKET-225, 2026-10-07).** A generic value read without a pin gets a type variable,
 not an immediate reject. Joins (`if`/`match`/`??`/list/map/set/`==`), call arguments and later uses pin
 it; it is rejected only if still unpinned at the end. This is the general form of today's call-argument
 deferral, which becomes one case of it.

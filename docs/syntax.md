@@ -727,12 +727,14 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 > This table is the contract for the Pratt parser. The relative order follows Python (comparison
 > looser than `\|` < `^` < `&` < shifts). A shift amount outside `0..64` is a runtime error. A left
 > shift (`<<`) that drops a significant bit overflows like `+ - * /` — a recoverable
-> `integer overflow in Shl` (e.g. `1 << 63`), not a silent wrap; round-trip-safe shifts incl.
-> `-1 << 63 == INT_MIN` still succeed. `>>` never overflows. An **all-constant** int expression
-> under `+ - * / %` and unary `-` that overflows `i64` (`print(9223372036854775807 + 1)`) is a
-> **compile error** (TICKET-142; Go: `constant ... overflows int`); the same overflow with a
-> non-constant operand (`m := 9223372036854775807; m + 1`) stays the runtime fault. `<<` is not
-> folded, so `1 << 63` keeps its runtime `integer overflow in Shl`.
+> `integer overflow in Shl` (e.g. `n := 1; n << 63`), not a silent wrap; round-trip-safe shifts
+> incl. `-1 << 63 == INT_MIN` still succeed. `>>` never overflows. An **all-constant** int expression
+> under `+ - * / % & | ^ << >>` and unary `-` that overflows `i64` (`print(9223372036854775807 + 1)`,
+> `print(1 << 63)`) is a **compile error** (TICKET-142, TICKET-225; Go: `cannot use 1 << 63 (untyped
+> int constant 9223372036854775808) as int value ... (overflows)`); the same overflow with a
+> non-constant operand (`m := 9223372036854775807; m + 1`) stays the runtime fault. A constant zero
+> divisor and a constant shift amount outside `0..64` also stay runtime faults. One evaluator
+> (`src/ast/consteval.rs`) folds constants for the checker and the compiler's peephole alike.
 >
 > `??` binds tighter than every binary operator, so `m.get("a") ?? 0 + 1` is
 > `(m.get("a") ?? 0) + 1`, yielding `2`. `not` binds looser than the comparisons, so `not x in xs`
@@ -1439,21 +1441,27 @@ closure-taking container methods) pins its `[T]` from the element type — `[1,2
 The runtime is generic-**erased** — the value *is* the underlying function — so an indirect call
 adds no overhead and behaves identically.
 
-A **bare, un-pinned** generic fn value — `g := ident`, with no turbofish and nothing that determines
-`[T]` — is rejected **at the read**, whether or not it is ever called. This is Go's rule
-(`cannot use generic function id without instantiation`); the diagnostic names the undetermined
-parameters and the working spellings:
+A **bare, un-pinned** generic fn value — `g := ident`, with no turbofish and no expected type — takes
+one **type variable** per type parameter (TICKET-225, Rust's model: `let k = g; k(5)` compiles). Any
+later use in the same fn body pins them: a call (`g(5)`), an argument, an assignment, a `return`, or
+a **join** with a sibling — `if`/`elif`/`match` branches, `??`, a list/map literal, `==`, `in`, list
+`+` / `+=`, a `recover:` tail. `(o ?? g)(5)` with `o: Option[fn(int) -> int]` pins `T = int`, and so
+does `if c: inc else: g`. A frame is **one fn body, or one top-level statement**: a top-level
+`f := g` is not pinned by a later top-level `print(f(5))` (module globals are typed before any body is
+walked). If a variable is still unpinned when its frame closes, the read is rejected at its own span
+with the instantiate hint:
 
 ```chezzi
-g := ident        # 'ident' is generic and T is not determined here, so it cannot become a function
-                  # value — instantiate it (`ident[<T>]`), or give this position a concrete function
+fn main():
+    g := ident    # 'ident' is generic and T is not determined here, so it cannot become a function
+    print(g)      # value — instantiate it (`ident[<T>]`), or give this position a concrete function
                   # type (`fn(<T>) -> <T>`), writing a real type in place of each `<…>`
 ```
 
-The same read is the same error inside a `[...]`/`{...}` literal, in a `return` from a fn with an
-**inferred** return type, as a `print` argument, and in a generic **constructor** / generic **free fn**
-argument whose slot is not a function type (`Bx(ident)`, `take(ident)` on `fn take[U](f: U) -> int`) —
-nothing there determines `T` either. A generic with
+The same holds inside a `[...]`/`{...}` literal, in a `return` from a fn with an **inferred** return
+type, and in a generic **constructor** / generic **free fn** argument (`Bx(ident)` is pinned by a later
+`b.f(3)`; `print(take(ident))` on `fn take[U](f: U) -> int` is not). Two unpinned generics joined
+together (`if c: g else: h`, `g == h`) pin nothing and stay rejected. A generic with
 **two or more** type parameters takes them all in one turbofish (`pair[str, int]`, Go's
 `pair[string, int]`), and the diagnostic offers `pair[<A>, <B>]`. First-class (rank-N) polymorphism — one binding used at two
 different types — is a future addition; Go and Rust refuse it too.
@@ -5062,10 +5070,15 @@ an `ffi.store_<w>` store or a callback's return — must fit its width. Go and R
 programs (`cannot use 300 (untyped int constant) as int8 value … (overflows)`, `literal out of range
 for i8`):
 
-- A **constant** outside the range is a **compile error** at every slot whose declared type is a width:
-  extern/fn/method params, struct fields, enum payloads, annotated locals, returns, defaults, closure
-  bodies, type arguments (`List[int8] = [300]`, `Option[int8] = Some(300)`), the branches of
-  `if`/`match` and the right side of `??`: `constant 300 does not fit int8 (-128..127)`.
+- A **constant** — a literal or a constant expression (`1 << 8`, `127 | (127 + 1)`, `3e38 + 3e38`) —
+  is **untyped** until it meets a slot (Go's model, TICKET-225), and outside the slot's range it is a
+  **compile error** wherever the slot is a width: extern/fn/method params, struct fields, enum
+  payloads, annotated locals, assignments and `op=`, returns, defaults, closure bodies, `yield`, map
+  keys (`m[300] = "a"` on a `Map[int8, str]`), type arguments (`List[int8] = [300]`,
+  `Option[int8] = Some(300)`, `b: Bx[int8] = Bx(300)`), a generic return pinned by the expected type
+  (`y: int8 = id(300)`), the branches of `if`/`match` and the right side of `??`:
+  `constant 300 does not fit int8 (-128..127)`, `constant 256 does not fit int8 (-128..127)` for
+  `1 << 8`. A non-constant int (`[300].len()`, a call returning `int`) is not checked.
 - A **runtime value** is range-checked only where it crosses into C. Out of range is a recoverable
   fault, catchable by `recover:`: `value 300 does not fit int8 (-128..127)`. A Chezzi local of a width
   type holds any int until then.
