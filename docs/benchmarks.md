@@ -3565,3 +3565,38 @@ Release binaries: base `aecdc670` (`target/t224/chezzi-base`) and fixed (`target
 | primes_parallel.chz | 4 | 9904 (146) / 15 | 9877 (90) / 15 | 1.00x | ok |
 | primes_parallel.chz | 0 | 10072 (279) / 15 | 10067 (505) / 15 | 1.00x | ok |
 
+
+## TICKET-227 — implicit wrap at every typed slot, base vs branch (2026-10-08)
+
+Base `1ca43817` (merge-base) vs branch, both `cargo build --release` in their own target dir; `hyperfine -N --warmup 2 --runs 7`, base and branch interleaved in one invocation per bench, wall ms mean ± σ. Load average ~4 (other tickets building). The change is compile-time only (one `WrapTable` lookup per compiled expression); no bench program uses `?x`, `!e` or an implicit wrap.
+
+| bench | base | branch | delta |
+|---|---|---|---|
+| `closure` | 2581 ± 34 | 2517 ± 100 | -2.5% |
+| `empty` | 5 ± 0 | 5 ± 0 | -4% |
+| `enum` | 4046 ± 32 | 4002 ± 146 | -1.1% |
+| `fib` | 557 ± 22 | 585 ± 50 | 5% |
+| `hof` | 742 ± 43 | 712 ± 58 | -4% |
+| `list` | 697 ± 14 | 732 ± 28 | 5.1% |
+| `loop` | 1747 ± 56 | 1830 ± 41 | 4.8% |
+| `many_list` | 684 ± 18 | 686 ± 11 | 0.3% |
+| `many_map` | 484 ± 25 | 495 ± 30 | 2.3% |
+| `many_struct` | 819 ± 55 | 832 ± 48 | 1.5% |
+| `map` | 271 ± 13 | 265 ± 15 | -2.2% |
+| `map_str` | 380 ± 10 | 385 ± 15 | 1.2% |
+| `poly_method` | 2750 ± 56 | 2774 ± 106 | 0.9% |
+| `primes` | 1213 ± 38 | 1263 ± 12 | 4.2% |
+| `str` | 266 ± 12 | 267 ± 20 | 0.5% |
+| `struct` | 896 ± 15 | 873 ± 10 | -2.5% |
+| `unique` | 136 ± 12 | 130 ± 11 | -4.4% |
+
+Re-run with the order swapped (branch first), `--runs 10`, for the four benches that read +4% or more above:
+
+| bench | base | branch | delta |
+|---|---|---|---|
+| `fib` | 541 ± 19 | 565 ± 31 | 4.5% |
+| `list` | 749 ± 19 | 760 ± 37 | 1.5% |
+| `loop` | 1846 ± 38 | 1901 ± 43 | 2.9% |
+| `primes` | 1223 ± 37 | 1248 ± 24 | 2% |
+
+`list`, `loop` and `primes` fall to +1.5..+2.9%, inside one σ. `fib` reads +4.5% on both orders (541 ± 19 vs 565 ± 31 ms): within the branch σ, not attributed. The returned `fib(n - 1) + fib(n - 2)` compiles to the same ops as on base (no wrap is recorded); there is no bytecode dumper to diff it.
