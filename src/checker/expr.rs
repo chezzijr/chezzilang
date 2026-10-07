@@ -118,7 +118,7 @@ impl Checker {
             && name == "print"
             && self.names_builtin_fn(name)
         {
-            self.record_resolution(callee.id, Resolution::Builtin(name.clone()), callee.span);
+            self.resolve_path(callee);
             self.consume_named();
             let mut seen: Vec<&str> = Vec::new();
             for (k, _) in named {
@@ -163,7 +163,7 @@ impl Checker {
             && n.starts_with(crate::desugar::PROVIDER_PREFIX)
             && (callee.id.0 == crate::ast::NodeId::SYNTH.0 || !self.functions.contains_key(n))
         {
-            self.record_resolution(callee.id, Resolution::Provider, callee.span);
+            self.resolve_path(callee);
             return expected.cloned().unwrap_or(Ty::Unknown);
         }
         // `head[k](args)` with a head that denotes data: index, then call the element (Go,
@@ -230,7 +230,7 @@ impl Checker {
                 && !sig.member(name).is_some_and(MemberSig::holds_fn)
             {
                 let key = self.type_key(&mid, name);
-                self.record_resolution(callee.id, Resolution::StructCtor(key.clone()), callee.span);
+                self.resolve_path(callee);
                 return self
                     .infer_qualified_struct_call(info, name, &key, args, &targs, span, expected);
             }
@@ -241,12 +241,8 @@ impl Checker {
                 && !matches!(target, Ty::Enum(..))
                 && !self.module_declares_fn(mname, name)
             {
-                if let Ty::Struct(key, _) = &target {
-                    self.record_resolution(
-                        callee.id,
-                        Resolution::StructCtor(key.clone()),
-                        callee.span,
-                    );
+                if let Ty::Struct(..) = &target {
+                    self.resolve_path(callee);
                 }
                 let spelled = format!("{mname}.{name}");
                 return self.infer_alias_ctor_call(&target, &spelled, args, &targs, span, expected);
@@ -285,11 +281,7 @@ impl Checker {
                         return Ty::Unknown;
                     }
                     let vi = vinfo;
-                    let r = Resolution::Variant {
-                        enum_key: vi.enum_name.clone(),
-                        variant: name.clone(),
-                    };
-                    self.record_resolution(callee.id, r, callee.span);
+                    self.resolve_path(callee);
                     return self
                         .infer_variant_call(&vi, name, args, &targs, *name_span, span, expected);
                 }
@@ -301,7 +293,7 @@ impl Checker {
                 // `infer_static_call` writes quotes it back, and the witness pin advice
                 // (`WitnessCallee::Dotted`) has to name a form that actually compiles: bare
                 // `Enum.method[T](...)` here answers "unknown type 'Enum'".
-                self.record_static(callee, &key, name);
+                self.resolve_path(callee);
                 return self.infer_static_call(
                     &th,
                     &spelled,
@@ -333,10 +325,10 @@ impl Checker {
                     },
                 ) = self.qualified_type_head(mname, tname)
             {
-                let (key, spelled) = (th.key.clone(), th.spelled.clone());
+                let spelled = th.spelled.clone();
                 // …and the same for a qualified STRUCT static (`lib.Holder.build()`): the advice
                 // must carry `lib.`, which is the prefix the user reached it by (an alias included).
-                self.record_static(callee, &key, name);
+                self.resolve_path(callee);
                 return self.infer_static_call(
                     &th,
                     &spelled,
@@ -365,7 +357,7 @@ impl Checker {
                     },
                 ) = self.qualified_type_head(mname, aname)
             {
-                self.record_type_member(callee, &th.key, name);
+                self.resolve_path(callee);
                 return self.infer_alias_member_call(
                     &th,
                     &th.spelled,
@@ -396,8 +388,7 @@ impl Checker {
                     let callee_ty = self.infer(callee);
                     return self.apply_value_call(callee, callee_ty, args, named, span);
                 }
-                let r = Resolution::WitnessStatic(tname.clone());
-                self.record_resolution(callee.id, r, callee.span);
+                self.resolve_path(callee);
                 return self.infer_witness_static_call(tname, name, args, span);
             }
             // …and the same head under a TYPE-LEVEL turbofish (`Item[int].tag()`, in either carrier)
@@ -428,7 +419,7 @@ impl Checker {
                     },
                 ) = self.bare_type_head(aname)
             {
-                self.record_type_member(callee, &th.key, name);
+                self.resolve_path(callee);
                 return self.infer_alias_member_call(
                     &th, aname, name, args, &targs, *name_span, span, expected,
                 );
@@ -457,7 +448,7 @@ impl Checker {
                         None,
                     );
                 }
-                self.record_type_member(callee, &ekey, name);
+                self.resolve_path(callee);
                 if self
                     .variants
                     .contains_key(&(ekey.clone(), name.to_string()))
@@ -483,7 +474,7 @@ impl Checker {
                         span,
                         Some(&ekey),
                         expected,
-                        crate::ast::NodeId::SYNTH,
+                        None,
                     ) {
                         return ty;
                     }
@@ -518,7 +509,7 @@ impl Checker {
                 ) = self.bare_type_head(tname)
             {
                 let key = th.key.clone();
-                self.record_static(callee, &key, name);
+                self.resolve_path(callee);
                 // Editor hover (probe-gated no-op): record the receiver `Foo` of `Foo.default()` as
                 // its struct type.
                 if self.hover_probe.is_some() {
@@ -555,7 +546,7 @@ impl Checker {
             // no variant matches the member name, fall to the static-method path.
             if let Some((th, type_exprs)) = self.type_apply_head(obj) {
                 let (tname, key) = (th.name.clone(), th.key.clone());
-                self.record_type_member(callee, &key, name);
+                self.resolve_path(callee);
                 let written: Vec<Ty> = type_exprs
                     .iter()
                     .map(|t| self.resolve_type(t, span))
@@ -608,21 +599,10 @@ impl Checker {
                 && sig.types.contains(name)
             {
                 if Self::qualified_native_ctor(name) {
-                    self.record_resolution(
-                        callee.id,
-                        Resolution::Builtin(name.clone()),
-                        callee.span,
-                    );
+                    self.resolve_path(callee);
                     return self
                         .infer_named_call(
-                            name,
-                            args,
-                            &targs,
-                            *name_span,
-                            span,
-                            None,
-                            expected,
-                            crate::ast::NodeId::SYNTH,
+                            name, args, &targs, *name_span, span, None, expected, None,
                         )
                         .unwrap_or(Ty::Unknown);
                 }
@@ -642,8 +622,7 @@ impl Checker {
                     return Ty::Unknown;
                 }
             }
-            let r = self.member_resolution(obj, name);
-            self.record_resolution(callee.id, r, callee.span);
+            self.resolve_path(callee);
             return self.infer_method_call(obj, name, *name_span, args, &targs, span, expected);
         }
         if let ExprKind::Ident(name) = &callee.kind {
@@ -656,8 +635,7 @@ impl Checker {
                 HeadBinding::Local | HeadBinding::Global | HeadBinding::Module
             ) {
                 // The same answer `infer_ident` records when the value call infers the callee.
-                let r = self.value_head_resolution(name);
-                self.record_resolution(callee.id, r, callee.span);
+                self.resolve_path(callee);
             } else {
                 // A DIRECT call of a from-imported fn (`h()`) above its own `import` is the same
                 // use-before-import as the bare read (`g := h`), but a direct callee never reaches
@@ -706,17 +684,13 @@ impl Checker {
                     span,
                     None,
                     expected,
-                    callee.id,
+                    Some(callee),
                 ) {
                     return ty;
                 }
                 // Not a builtin, ctor or module-level fn: a value call through a module-level binding
                 // outside the scope stack (an imported value).
-                let r = Resolution::Global {
-                    module: self.graph_module_idx,
-                    name: name.clone(),
-                };
-                self.record_resolution(callee.id, r, callee.span);
+                self.resolve_path(callee);
             }
         }
         // A value-call (closure / arbitrary expr) cannot take explicit type arguments.
@@ -1720,7 +1694,7 @@ impl Checker {
     /// ([`crate::ast::NodeId::SYNTH`]) is never recorded, and neither is the generic-arg prepass (a
     /// closure body is walked there with its params unbound, DEC-025). Two different answers for one
     /// node are a hard `TableConflicts` error ([`crate::checker::record_call_table_entry`]).
-    /// Whether this walk may write a per-node side table ([`Self::record_resolution`], the call
+    /// Whether this walk may write a per-node side table ([`Self::resolve_path`], the call
     /// plans of [`Self::bind_call`]): never for a synthesized node, the generic-arg prepass, or the
     /// return-inference walk, whose scope is not the final one.
     pub(super) fn records_node(&self, id: crate::ast::NodeId) -> bool {
@@ -1742,7 +1716,7 @@ impl Checker {
     }
 
     /// TICKET-184 — whether `e` is a call whose resolved callee never returns (the divergence oracle
-    /// of `flow::stmt`). Reads what [`Self::record_resolution`] recorded for the callee.
+    /// of `flow::stmt`). Reads what [`Self::resolve_path`] recorded for the callee.
     pub(super) fn call_diverges(&self, e: &Expr) -> bool {
         matches!(&e.kind, ExprKind::Call { callee, .. }
             if self.callee_diverges.get(&(self.graph_module_idx, callee.id.0)) == Some(&true))
@@ -1797,32 +1771,6 @@ impl Checker {
         }
     }
 
-    /// Record `Resolution::Static` for the callee `Type.method`.
-    fn record_static(&mut self, callee: &Expr, type_key: &str, method: &str) {
-        let r = Resolution::Static {
-            type_key: type_key.to_string(),
-            method: method.to_string(),
-        };
-        self.record_resolution(callee.id, r, callee.span);
-    }
-
-    /// Record what `Type.member` names on the type keyed `key`: a variant first, else a static
-    /// method (the variant-first order every type-head arm uses).
-    fn record_type_member(&mut self, callee: &Expr, key: &str, member: &str) {
-        if self
-            .variants
-            .contains_key(&(key.to_string(), member.to_string()))
-        {
-            let r = Resolution::Variant {
-                enum_key: key.to_string(),
-                variant: member.to_string(),
-            };
-            self.record_resolution(callee.id, r, callee.span);
-        } else {
-            self.record_static(callee, key, member);
-        }
-    }
-
     /// What `obj.name` names when `obj` is not a type head: a member of a whole-module import when
     /// `obj` is that import's name, else a member of a value.
     pub(super) fn member_resolution(&self, obj: &Expr, name: &str) -> Resolution {
@@ -1842,7 +1790,7 @@ impl Checker {
     /// Does the slot `name` of the whole-module import bound as `mname` hold a function? A
     /// same-named fn (or a `:=` fn value, TICKET-196) replaces a type's ctor (DEC-029/055/172), so
     /// `lib.Q(..)` calls the slot.
-    fn module_declares_fn(&self, mname: &str, name: &str) -> bool {
+    pub(super) fn module_declares_fn(&self, mname: &str, name: &str) -> bool {
         self.imported_modules
             .get(mname)
             .and_then(|mid| self.module_sigs.get(mid))
@@ -1859,7 +1807,7 @@ impl Checker {
         span: Span,
         enum_qual: Option<&str>,
         hint: Option<&Ty>,
-        id: crate::ast::NodeId,
+        callee: Option<&Expr>,
     ) -> Option<Ty> {
         // Qualified `Enum.Variant(args)`: resolve strictly within the named enum, bypassing the bare
         // dispatch below — so a variant named like a built-in (`enum E: Ok(int)`) or a struct can't be
@@ -1906,12 +1854,16 @@ impl Checker {
         // rows); `builtin_container_sig` supplies only the flat display/placeholder sig. See `Intrinsic`.
         // The three builtin variant ctors are expression arms below; every other builtin arm records
         // its own `Builtin` entry as its first statement.
-        if matches!(name, "Ok" | "Some" | "Err") {
-            self.record_resolution(id, Resolution::Builtin(name.to_string()), name_span);
+        if matches!(name, "Ok" | "Some" | "Err")
+            && let Some(c) = callee
+        {
+            self.resolve_path(c);
         }
         match name {
             "print" => {
-                self.record_resolution(id, Resolution::Builtin("print".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 for a in args {
                     self.infer_value(a);
                 }
@@ -1923,7 +1875,9 @@ impl Checker {
             // into the other branch's concrete type via `unify_branch`, and in tail position
             // `flow::stmt` (via `call_diverges` on this Resolution) treats it as a divergence.
             "panic" => {
-                self.record_resolution(id, Resolution::Builtin("panic".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 self.check_arity("panic", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
@@ -1934,7 +1888,9 @@ impl Checker {
                 Some(Ty::Unknown)
             }
             "range" => {
-                self.record_resolution(id, Resolution::Builtin("range".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 for a in args {
                     self.expect_int_val(a);
                 }
@@ -1947,7 +1903,9 @@ impl Checker {
                 Some(Ty::list(Ty::Int))
             }
             "int" => {
-                self.record_resolution(id, Resolution::Builtin("int".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 self.check_arity("int", 1, args, span);
                 if let Some(a) = args.first() {
                     let aty = self.infer_value(a);
@@ -1957,7 +1915,9 @@ impl Checker {
                 Some(Ty::Int)
             }
             "float" => {
-                self.record_resolution(id, Resolution::Builtin("float".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 self.check_arity("float", 1, args, span);
                 if let Some(a) = args.first() {
                     let aty = self.infer_value(a);
@@ -1967,7 +1927,9 @@ impl Checker {
                 Some(Ty::Float)
             }
             "bool" => {
-                self.record_resolution(id, Resolution::Builtin("bool".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 self.check_arity("bool", 1, args, span);
                 // `bool(x)` is a total truthiness cast over the scalars (int/float/bool/str) —
                 // like `str`, it accepts any SCALAR. But an AGGREGATE arg
@@ -1980,14 +1942,18 @@ impl Checker {
                 Some(Ty::Bool)
             }
             "str" => {
-                self.record_resolution(id, Resolution::Builtin("str".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 self.check_arity("str", 1, args, span);
                 // `str` is the Stringable display cast (accepts anything).
                 self.infer_all(args);
                 Some(Ty::Str)
             }
             "ord" => {
-                self.record_resolution(id, Resolution::Builtin("ord".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 self.check_arity("ord", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
@@ -1998,7 +1964,9 @@ impl Checker {
                 Some(Ty::Int)
             }
             "chr" => {
-                self.record_resolution(id, Resolution::Builtin("chr".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 self.check_arity("chr", 1, args, span);
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
@@ -2014,7 +1982,9 @@ impl Checker {
             // `range(a, b)` builtin is the materializer, and `List(range(0, 3))` works. The argument
             // is REQUIRED: an empty list is the `[]` literal (zero args can't infer T).
             "List" => {
-                self.record_resolution(id, Resolution::Builtin("List".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `List[T]()` — explicit element type (turbofish), bare `List()` — empty list whose
                 // element type is refined from the expected type / first use (mirrors `Set()`), and
                 // `List(it)` builds from any for-iterable. With a turbofish AND an iterable, the
@@ -2073,7 +2043,9 @@ impl Checker {
                 }
             }
             "Set" => {
-                self.record_resolution(id, Resolution::Builtin("Set".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `Set()`/`Set[T]()` → empty set (element from the turbofish, else inferred from
                 // later use, like `{}` for maps); `Set(it)` → a set from ANY iterable VALUE
                 // (broadened from list-only), deduped. The element type flows through `iter_elem`;
@@ -2140,7 +2112,9 @@ impl Checker {
             // keys (like the `{k: v}` literal). The argument is REQUIRED: an empty map is the `{}`
             // literal. (Free-call `map(it)` is a distinct namespace from the `xs.map(f)` list HOF.)
             "Map" => {
-                self.record_resolution(id, Resolution::Builtin("Map".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `Map[K, V]()` → typed empty map (turbofish); bare `Map()` → empty map refined from
                 // the expected type / first use (mirrors the `{}` literal and `Set()`); `Map(it)` →
                 // a map from an iterable of EXACTLY 2-tuples. With a turbofish AND an iterable, the
@@ -2231,7 +2205,9 @@ impl Checker {
             // mutable copy), `bytearray([ints])` (from a `list[int]`, each 0–255 validated at runtime),
             // and `bytearray(ba)` (copy). Always infers `bytearray`.
             "bytearray" => {
-                self.record_resolution(id, Resolution::Builtin("bytearray".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 match args.len() {
                     0 => {}
                     1 => match self.infer_value(&args[0]) {
@@ -2250,7 +2226,9 @@ impl Checker {
             // `b"..."` literal is the other way to make a `bytes`). `bytes(ba)` snapshots a `bytearray`,
             // `bytes(b)` copies a `bytes`, `bytes([ints])` builds from a `list[int]`. Infers `bytes`.
             "bytes" => {
-                self.record_resolution(id, Resolution::Builtin("bytes".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 match args.len() {
                     1 => match self.infer_value(&args[0]) {
                         Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
@@ -2270,7 +2248,9 @@ impl Checker {
                 Some(Ty::Bytes)
             }
             "Channel" => {
-                self.record_resolution(id, Resolution::Builtin("Channel".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `Channel[T]()` — an unbounded mailbox; `Channel[T](cap)` — a bounded FIFO whose
                 // `send` blocks when `cap` messages are queued. The element type comes from the explicit
                 // type argument (it can't be inferred), and must be sendable. The optional capacity is a
@@ -2304,7 +2284,9 @@ impl Checker {
                 Some(Ty::channel(elem))
             }
             "Shared" => {
-                self.record_resolution(id, Resolution::Builtin("Shared".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `Shared(v)` — a fresh cross-task box initialised with `v`. The element type is
                 // inferred from the value (value-first, unlike `Channel[T]()`); an OPTIONAL `[T]`
                 // turbofish pins it and is checked against the value's type (`Shared[str](0)` rejects).
@@ -2325,7 +2307,9 @@ impl Checker {
                 }
             }
             "RwShared" => {
-                self.record_resolution(id, Resolution::Builtin("RwShared".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `RwShared(v)` — a fresh cross-task read-write box initialised with `v`. The element
                 // type is inferred from the value (value-first, like `Shared`); an OPTIONAL `[T]`
                 // turbofish pins it and is checked against the value's type.
@@ -2343,7 +2327,9 @@ impl Checker {
                 }
             }
             "Atomic" => {
-                self.record_resolution(id, Resolution::Builtin("Atomic".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `Atomic(v)` — a fresh cross-task atomic box initialised with `v`. Value-first like
                 // `Shared`; an OPTIONAL `[T]` turbofish pins the element type and is checked against
                 // the value's type.
@@ -2364,7 +2350,9 @@ impl Checker {
                 }
             }
             "timer" => {
-                self.record_resolution(id, Resolution::Builtin("timer".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `timer(ms)` — a one-shot timeout channel: a `Channel[bool]` that delivers `true`
                 // once, `ms` milliseconds after creation. The composable timeout primitive (recv it in
                 // a `wait` arm). Takes an int; a `[T]` type arg is rejected upstream. NOT a global
@@ -2392,7 +2380,9 @@ impl Checker {
                 }
             }
             "Executor" => {
-                self.record_resolution(id, Resolution::Builtin("Executor".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `Executor()` — a fresh, empty, explicitly-owned work queue (C5 escape hatch).
                 // Non-generic; zero arguments, or one `int` cap on the jobs running at once; a `[T]` type arg is rejected upstream. NOT a global
                 // builtin: requires `import std.concurrency` (the name STAYS reserved).
@@ -2409,7 +2399,9 @@ impl Checker {
                 }
             }
             "AtomicInt" => {
-                self.record_resolution(id, Resolution::Builtin("AtomicInt".into()), name_span);
+                if let Some(c) = callee {
+                    self.resolve_path(c);
+                }
                 // `AtomicInt(v)` — a fresh lock-free int atomic. Monomorphic (no `[T]`); the single arg
                 // must be an int. NOT a global builtin: requires `import std.concurrency` (the name
                 // STAYS reserved). The arg is checked even on the unlicensed path so a nested error
@@ -2480,7 +2472,9 @@ impl Checker {
                         )
                     })
                 {
-                    self.record_resolution(id, Resolution::StructCtor(key.clone()), name_span);
+                    if let Some(c) = callee {
+                        self.resolve_path(c);
+                    }
                     let Some(targs) = self.written_head_args(
                         name,
                         self.type_param_count(&key),
@@ -2570,7 +2564,9 @@ impl Checker {
                 {
                     let r = self.fn_resolution(name);
                     let diverges = self.resolution_diverges(&r);
-                    self.record_resolution(id, r, name_span);
+                    if let Some(c) = callee {
+                        self.resolve_path(c);
+                    }
                     // W7-42r: this call site's arity/defaults/arg types are now fixed against the
                     // fn's signature, so a later module-scope `name := …` retypes the ONE slot it
                     // dispatches through (see `fn_reads`).

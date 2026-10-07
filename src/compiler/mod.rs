@@ -4311,8 +4311,7 @@ impl Compiler {
         // local that merely SHADOWS a type or module name included) is a genuine receiver.
         Ok(matches!(
             self.resolution(callee)?,
-            Resolution::Static { .. }
-                | Resolution::MethodFn { .. }
+            Resolution::MethodFn { .. }
                 | Resolution::Variant { .. }
                 | Resolution::VariantFn { .. }
                 | Resolution::Fn { .. }
@@ -4844,12 +4843,15 @@ impl Compiler {
                     fc.emit(Op::NewStruct(key, argc), span);
                     return Ok(());
                 }
-                Resolution::Variant { enum_key, variant } => {
+                Resolution::Variant { enum_key, variant }
+                | Resolution::VariantFn {
+                    enum_key, variant, ..
+                } => {
                     self.compile_args(fc, args)?;
                     self.emit_new_enum(fc, &enum_key, &variant, args.len(), span);
                     return Ok(());
                 }
-                Resolution::Static { type_key, method } => {
+                Resolution::MethodFn { type_key, method } => {
                     self.emit_call_static(
                         fc,
                         type_key,

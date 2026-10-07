@@ -1060,9 +1060,8 @@ pub enum Resolution {
     IndexCall,
     /// An enum variant, by the enum's runtime key (`Op::NewEnum`).
     Variant { enum_key: String, variant: String },
-    /// A static method of a struct or enum, by the type's runtime key (`Op::CallStatic`).
-    Static { type_key: String, method: String },
-    /// A struct or enum method read as a VALUE through its type path (`Bx[int].make`,
+    /// A struct or enum method named through its type path (`Bx[int].make`, `Pt.getx`): called,
+    /// `Op::CallStatic`; read as a VALUE (`Bx[int].make`,
     /// `Pt.getx`); `Op::MakeMethodFunc`. An instance method takes its receiver as the first
     /// argument.
     MethodFn { type_key: String, method: String },

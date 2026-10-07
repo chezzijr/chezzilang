@@ -2165,7 +2165,7 @@ struct Checker {
     /// return's type into `collected_rets` instead of diagnosing against `current_ret`.
     inferring_ret: bool,
     /// True for the whole `infer_returns` call (its return fixpoint, `type_globals_pass` and
-    /// `report_untyped_globals`). `record_resolution` writes nothing while it is set: the main walk
+    /// `report_untyped_globals`). `resolve_path` writes nothing while it is set: the main walk
     /// is the one writer of every NodeId's Resolution (TICKET-180).
     resolving_returns: bool,
     /// Return types gathered from the body during return-type inference (see `infer_fn_ret`).
@@ -2365,7 +2365,7 @@ struct Checker {
     resolutions: ResolutionTable,
     /// TICKET-184 — whether each call head never returns, keyed like `resolutions`: the one input
     /// `flow::stmt` takes beyond the AST ([`Checker::call_diverges`]). Written by
-    /// `record_resolution` in EVERY walk and overwritten, because inference passes read it; the
+    /// `resolve_path` in EVERY walk and overwritten, because inference passes read it; the
     /// Resolution table itself stays main-pass-only (DEC-180).
     callee_diverges: HashMap<(usize, u32), bool>,
     /// TICKET-184 — fns proved unable to fall off their end; see [`NoFallOffTable`].

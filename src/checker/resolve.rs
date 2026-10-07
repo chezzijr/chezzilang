@@ -13,6 +13,34 @@
 use super::setup::{HeadBinding, TypeHeadKind};
 use super::*;
 
+/// The builtin constructors and fns a bare call names (`infer_named_call`'s builtin arms).
+const BUILTIN_CALLEES: &[&str] = &[
+    "Ok",
+    "Some",
+    "Err",
+    "print",
+    "panic",
+    "range",
+    "int",
+    "float",
+    "bool",
+    "str",
+    "ord",
+    "chr",
+    "List",
+    "Set",
+    "Map",
+    "bytearray",
+    "bytes",
+    "Channel",
+    "Shared",
+    "RwShared",
+    "Atomic",
+    "timer",
+    "Executor",
+    "AtomicInt",
+];
+
 impl Checker {
     /// The one table write: fills `callee_diverges` on every walk, and the resolutions table on
     /// the recording walk only. A second, different write for one NodeId is a checker bug
@@ -86,8 +114,17 @@ impl Checker {
         if matches!(
             self.head_binding(n),
             HeadBinding::Local | HeadBinding::Global | HeadBinding::Module
-        ) || self.functions.contains_key(n)
+        ) {
+            return Some(self.value_head_resolution(n));
+        }
+        // A struct's own raw constructor inside its same-named fn (DEC-029/055/172).
+        let ctor = self.struct_ctor_key(n);
+        if let Some(key) = &ctor
+            && self.raw_ctor_owner.as_deref() == Some(key.as_str())
         {
+            return Some(Resolution::StructCtor(key.clone()));
+        }
+        if self.functions.contains_key(n) {
             // `value_head_resolution` asks `slot_holds_fn_decl`, the one fn-slot test (DEC-201).
             return Some(self.value_head_resolution(n));
         }
@@ -97,10 +134,32 @@ impl Checker {
                 variant: n.to_string(),
             });
         }
-        if n == "print" || is_firstclass_builtin_fn(n) {
+        if n == "print" || is_firstclass_builtin_fn(n) || BUILTIN_CALLEES.contains(&n) {
             return Some(Resolution::Builtin(n.to_string()));
         }
-        None
+        if let Some(key) = ctor {
+            return Some(Resolution::StructCtor(key));
+        }
+        // A value call through a module-level binding outside the scope stack (an imported value).
+        Some(Resolution::Global {
+            module: self.graph_module_idx,
+            name: n.to_string(),
+        })
+    }
+
+    /// The struct a bare `n(..)` constructs: a bare-resolvable struct (`struct_names`) or an alias
+    /// of one, unless a same-named fn replaces its constructor outside its own body.
+    fn struct_ctor_key(&self, n: &str) -> Option<String> {
+        if !self.struct_names.contains(n) && self.alias_struct_head(n).is_none() {
+            return None;
+        }
+        let key = self
+            .alias_struct_head(n)
+            .map(|(k, _)| k)
+            .unwrap_or_else(|| self.bare_key(n));
+        ((self.raw_ctor_owner.as_deref() == Some(key.as_str()) || !self.functions.contains_key(n))
+            && self.structs.contains_key(&key))
+        .then_some(key)
     }
 
     fn classify_field(&self, obj: &Expr, name: &str) -> Option<Resolution> {
@@ -117,11 +176,28 @@ impl Checker {
             if self.json_decode_member(t, name) {
                 return None;
             }
+            if let Some(r) = self.qualified_ctor(t, name) {
+                return Some(r);
+            }
             if self.module_fn(t, name).is_some()
                 && let Resolution::ModuleMember { module, name } = self.member_resolution(obj, name)
             {
                 return Some(Resolution::Fn { module, name });
             }
+        }
+        if let Some((th, _)) = self.peel_type_path(obj)
+            && th.native_handle
+            && self
+                .structs
+                .get(&th.key)
+                .is_some_and(|info| info.methods.contains_key(name))
+        {
+            // A native handle's method has no proto, so it is no path value; called, it is a
+            // static call on the type.
+            return Some(Resolution::MethodFn {
+                type_key: th.key,
+                method: name.to_string(),
+            });
         }
         if let Some((th, _)) = self.peel_type_path(obj)
             && th.kind != TypeHeadKind::Protocol
@@ -142,9 +218,30 @@ impl Checker {
         Some(self.member_resolution(obj, name))
     }
 
-    /// The call side's writer until its dispatch reads `resolve_path` (TICKET-222 step 5).
-    pub(super) fn record_resolution(&mut self, id: crate::ast::NodeId, r: Resolution, span: Span) {
-        self.commit_resolution(id, r, span);
+    /// `m.name(..)` constructing through a whole-module import `m`: a qualified struct (not a
+    /// reserved native type, not replaced by a same-named fn slot), an exported struct alias, or a
+    /// native module's builtin constructor (`c.Shared(0)`, `time.timer(100)`).
+    fn qualified_ctor(&self, m: &str, name: &str) -> Option<Resolution> {
+        if !self.head_is_value(m)
+            && let Some(mid) = self.imported_modules.get(m)
+            && let Some(sig) = self.module_sigs.get(mid)
+        {
+            if self.qualified_builtin_ty(name, &[]).is_none()
+                && sig.struct_defs.contains_key(name)
+                && !sig.member(name).is_some_and(MemberSig::holds_fn)
+            {
+                return Some(Resolution::StructCtor(self.type_key(mid, name)));
+            }
+            if sig.types.contains(name) && Self::qualified_native_ctor(name) {
+                return Some(Resolution::Builtin(name.to_string()));
+            }
+        }
+        if let Some(Ty::Struct(key, _)) = self.qualified_alias_ty(m, name)
+            && !self.module_declares_fn(m, name)
+        {
+            return Some(Resolution::StructCtor(key));
+        }
+        None
     }
 
     /// Record a pattern head (`PatBinding`, `PatStruct`, a pattern `Variant`). A pattern is no
