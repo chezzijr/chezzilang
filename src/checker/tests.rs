@@ -38145,3 +38145,10 @@ fn bang_prefix_without_a_pinning_use_is_rejected() {
         "cannot infer the success type",
     );
 }
+
+#[test]
+fn carrier_variants_resolve_like_user_enums() {
+    ok(
+        "fn main():\n    x := Result[int, str].Ok(5)\n    y := Option[int].None\n    z := Option.Some(1)\n    f := Some\n    w := [1, 2].map(Some)\n",
+    );
+}
