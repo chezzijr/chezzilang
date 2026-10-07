@@ -120,6 +120,7 @@ dependencies = [
  "tokio",
  "tower-lsp",
  "ureq",
+ "url",
 ]
 
 [[package]]

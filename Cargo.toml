@@ -11,6 +11,7 @@ polling = "3"
 regex = "1"
 socket2 = "0.5"
 ureq = "3"
+url = "2"
 # Editor LSP server deps — OPTIONAL, gated behind the `lsp` feature so neither the dependency tree nor
 # the `chezzi-lsp` bin is part of the default `cargo build`/`cargo test`. tower-lsp pulls in tokio (an
 # async runtime is unavoidable for an stdio JSON-RPC server), so both are gated together.

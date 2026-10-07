@@ -18,8 +18,8 @@
 //! total deadline overriding the agent's default caps for that call (`<= 0`/omitted = defaults; a
 //! timeout lowers to `Err` like any transport failure). Streaming bodies are still deferred.
 //!
-//! Redirects are followed up to ten hops (ureq 3's default; CPython and Go both cap at ten) and the
-//! eleventh is `Err("... too many redirects")`. Measured wire/message changes the ureq 2 -> 3 move
+//! Redirects are followed by `send`, one hop at a time, with Go's rules (see `send`): up to ten,
+//! and the eleventh redirect response is `Err("... too many redirects")`. Measured wire/message changes the ureq 2 -> 3 move
 //! brought: custom REQUEST header names go out lowercased (the `http` crate normalizes every
 //! `HeaderName`; RFC 9110 field names are case-insensitive); the `HTTP_PROXY`/`HTTPS_PROXY`/
 //! `ALL_PROXY` family and the lowercase twins are HONOURED, with Go's loopback exemption (`127.0.0.0/8`,
@@ -29,9 +29,9 @@
 //! with the header dropped). An `HTTP/1.2` status line and an obs-fold continuation are accepted,
 //! the folded value joined with one space, as Go does (W14-30c; see `request_head`).
 //!
-//! A request that fails on a reused pooled connection before any response byte is re-run once on
-//! fresh connections when Go would retry it (`Request.isReplayable`; see `send`). ureq follows
-//! redirects inside one call, so the re-run repeats the whole chain (TICKET-212).
+//! A hop that fails on a reused pooled connection before any response byte is sent once more on
+//! fresh connections when Go would retry that hop (`Request.isReplayable` on the hop's own method
+//! and headers; see `send_hop`). Only the failed hop is re-sent (TICKET-212, TICKET-221).
 
 use super::request_head::{LenientHeadConnector, is_closed_idle};
 use super::{Host, HostError, Kind, NativeFn, NativeRet, expect_args, expect_args_range};
@@ -55,25 +55,27 @@ thread_local! {
     /// A process-lifetime agent with connect/send/response-head timeouts. The language is
     /// single-threaded with no way to abort a stuck call, so a hung peer would otherwise block the
     /// engine forever; these caps guarantee `get`/`post` eventually return (an `Err` on timeout).
-    /// Three settings are NOT ureq 3's defaults and are load-bearing:
+    /// Four settings are NOT ureq 3's defaults and are load-bearing:
     /// - `http_status_as_error(false)`: ureq 3 otherwise turns a `>= 400` into `Error::StatusCode`
     ///   and drops the response, but a `>= 400` is a normal `Response` here.
     /// - `allow_non_standard_methods(true)`: `request("FOO", ...)` is refused otherwise.
     /// - `proxy(None)`: the agent default stays `None`; `send` sets the proxy PER REQUEST from the
     ///   env (`proxy_for`) so a loopback target goes direct, as in Go (W14-30d). An agent-level
     ///   proxy would be decided by whichever request built the process-lifetime agent first.
+    /// - `max_redirects(0)`: ureq returns every redirect response and `send` follows it, one hop at
+    ///   a time, so each hop decides its own retry (TICKET-221).
     ///
     /// The connector chain ends in `LenientHeadConnector`, which rewrites each response head so an
     /// `HTTP/1.2` status line and an obs-fold continuation parse (W14-30c).
     ///
     /// The body-phase timeouts stay UNSET: ureq 2's read/write timeouts reset on every socket op, but
-    /// ureq 3's are whole-phase deadlines that would kill a slow 64MB download. `max_redirects` is
-    /// deliberately left at ureq 3's default of ten, which is what both CPython and Go cap at.
+    /// ureq 3's are whole-phase deadlines that would kill a slow 64MB download.
     static AGENT: Agent = {
         let config = Agent::config_builder()
             .http_status_as_error(false)
             .allow_non_standard_methods(true)
             .proxy(None)
+            .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_send_request(Some(Duration::from_secs(30)))
             .timeout_recv_response(Some(Duration::from_secs(30)))
@@ -126,28 +128,166 @@ fn is_replayable(method: &str, headers: &[(String, String)]) -> bool {
         })
 }
 
-/// Build and run one request. `timeout` is a per-request total deadline over the agent's caps.
+/// Redirects followed before the next redirect response is `Err(TooManyRedirects)`: ureq 3's
+/// default, kept when `send` took the loop over (DEC-153; CPython and Go both stop near ten).
+const MAX_REDIRECTS: usize = 10;
+
+/// Headers Go drops on every hop after one that leaves the first URL's domain (`makeHeadersCopier`).
+const SENSITIVE_HEADERS: [&str; 6] = [
+    "authorization",
+    "www-authenticate",
+    "cookie",
+    "cookie2",
+    "proxy-authorization",
+    "proxy-authenticate",
+];
+
+/// Headers Go drops on every hop after one that drops the body (`makeHeadersCopier`).
+const BODY_HEADERS: [&str; 4] = [
+    "content-encoding",
+    "content-language",
+    "content-location",
+    "content-type",
+];
+
+/// Go's `redirectBehavior`: the next hop's method and whether it carries the body, or `None` when
+/// `status` is not a followed redirect.
+fn redirect_behavior(status: u16, method: &str) -> Option<(&str, bool)> {
+    match status {
+        301..=303 if matches!(method, "GET" | "HEAD") => Some((method, false)),
+        301..=303 => Some(("GET", false)),
+        307 | 308 => Some((method, true)),
+        _ => None,
+    }
+}
+
+/// Go's `isDomainOrSubdomain`: `sub` is `parent` or ends in `.parent`; an IPv6 `sub` only equals.
+fn is_domain_or_subdomain(sub: &str, parent: &str) -> bool {
+    sub == parent
+        || (!sub.contains([':', '%']) && sub.strip_suffix(parent).is_some_and(|p| p.ends_with('.')))
+}
+
+/// The headers of the hop after `prev`: the caller's `headers`, minus [`SENSITIVE_HEADERS`] unless
+/// `keep_sensitive` and minus [`BODY_HEADERS`] unless `keep_body`, plus Go's `Referer`
+/// (`refererForURL`): `prev` without credentials, never from https to http, never over a caller's.
+fn hop_headers(
+    headers: &[(String, String)],
+    prev: &url::Url,
+    next: &url::Url,
+    keep_sensitive: bool,
+    keep_body: bool,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(k, _)| {
+            let k = k.to_ascii_lowercase();
+            (keep_sensitive || !SENSITIVE_HEADERS.contains(&k.as_str()))
+                && (keep_body || !BODY_HEADERS.contains(&k.as_str()))
+        })
+        .cloned()
+        .collect();
+    let explicit = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("referer"));
+    if !explicit && !(prev.scheme() == "https" && next.scheme() == "http") {
+        let mut referer = prev.clone();
+        let _ = referer.set_username("");
+        let _ = referer.set_password(None);
+        out.push(("Referer".to_string(), referer.to_string()));
+    }
+    out
+}
+
+/// Read up to 2 KiB of a followed redirect's body, then drop it: a small body leaves its connection
+/// reusable for the next hop, as Go's `maxBodySlurpSize` does.
+fn discard_redirect_body(resp: Response<Body>) {
+    let _ = resp
+        .into_body()
+        .into_reader()
+        .take(2048)
+        .read_to_end(&mut Vec::new());
+}
+
+/// Send one hop, and send it once more on fresh connections iff Go would
+/// (`Transport.shouldRetryRequest`): it failed on a REUSED pooled connection before any response
+/// byte (the server closed it while idle), and the hop's OWN method and headers are replayable
+/// ([`is_replayable`]). A fresh connection's failure, or one after a response byte, is never
+/// retried. Both attempts share `deadline`. This is the one place a retry is decided.
+fn send_hop(
+    agent: &Agent,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    deadline: Option<Instant>,
+    body: Option<&str>,
+) -> Result<Response<Body>, ureq::Error> {
+    let attempt = |fresh: bool| {
+        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        match body {
+            Some(b) => send_on(agent, method, url, headers, left, fresh, b),
+            None => send_on(agent, method, url, headers, left, fresh, ()),
+        }
+    };
+    match attempt(false) {
+        Err(e) if is_closed_idle(&e) && is_replayable(method, headers) => attempt(true),
+        r => r,
+    }
+}
+
+/// Run one request and follow its redirects one hop at a time, by Go's `Client.do`:
+/// 1. A 301/302/303 makes the next hop a bodiless GET (a HEAD stays HEAD); a 307/308 keeps the
+///    method and the body ([`redirect_behavior`]). Once a hop drops the body, no later hop has it.
+/// 2. Each hop's headers come from [`hop_headers`]; the sensitive ones stay dropped once a hop has
+///    left the first URL's domain and its subdomains.
+/// 3. A redirect status without `Location` is the response. After [`MAX_REDIRECTS`] redirects, the
+///    next redirect response is `Err(TooManyRedirects)`.
 ///
-/// Go's retry rule (`Transport.shouldRetryRequest`): a request that fails on a REUSED pooled
-/// connection before any response byte arrives (the server closed it while idle) runs once more,
-/// on fresh connections, iff it is replayable ([`is_replayable`]). A fresh connection's failure, or
-/// one after a response byte, is never retried. ureq follows redirects inside one `run`, so the
-/// retry re-sends the hops before the failed one too; Go re-sends only the failed hop.
-fn send<T: AsSendBody + Copy>(
+/// Each hop decides its own retry with its own method and headers ([`send_hop`]), so only the
+/// failed hop is re-sent. `timeout` is one deadline over every hop and every retry.
+fn send(
     method: &str,
     url: &str,
     headers: &[(String, String)],
     timeout: Option<Duration>,
-    body: T,
+    body: Option<&str>,
 ) -> Result<Response<Body>, ureq::Error> {
     AGENT.with(|agent| {
-        let start = Instant::now();
-        match send_on(agent, method, url, headers, timeout, false, body) {
-            Err(e) if is_closed_idle(&e) && is_replayable(method, headers) => {
-                let left = timeout.map(|t| t.saturating_sub(start.elapsed()));
-                send_on(agent, method, url, headers, left, true, body)
+        let deadline = timeout.map(|t| Instant::now() + t);
+        let (mut hop_method, mut hop_url, mut hop_hdrs, mut hop_body) =
+            (method.to_string(), url.to_string(), headers.to_vec(), body);
+        let (mut keep_sensitive, mut keep_body) = (true, true);
+        let mut redirects = 0;
+        loop {
+            let resp = send_hop(agent, &hop_method, &hop_url, &hop_hdrs, deadline, hop_body)?;
+            let Some((next_method, with_body)) =
+                redirect_behavior(resp.status().as_u16(), &hop_method)
+            else {
+                return Ok(resp);
+            };
+            let Some(location) = resp.headers().get(ureq::http::header::LOCATION) else {
+                return Ok(resp);
+            };
+            let bad = |e: &dyn std::fmt::Display| {
+                ureq::Error::BadUri(format!("failed to parse Location header {location:?}: {e}"))
+            };
+            let prev = url::Url::parse(&hop_url).map_err(|e| bad(&e))?;
+            let loc = location.to_str().map_err(|e| bad(&e))?;
+            let next = prev.join(loc).map_err(|e| bad(&e))?;
+            if redirects == MAX_REDIRECTS {
+                return Err(ureq::Error::TooManyRedirects);
             }
-            r => r,
+            discard_redirect_body(resp);
+            let first = url::Url::parse(url).ok();
+            keep_sensitive &= match (next.host_str(), first.as_ref().and_then(|f| f.host_str())) {
+                (Some(n), Some(f)) => is_domain_or_subdomain(n, f),
+                _ => false,
+            };
+            keep_body &= with_body;
+            hop_hdrs = hop_headers(headers, &prev, &next, keep_sensitive, keep_body);
+            hop_method = next_method.to_string();
+            hop_body = if keep_body { body } else { None };
+            hop_url = next.to_string();
+            redirects += 1;
         }
     })
 }
@@ -308,15 +448,15 @@ fn lower_result_bytes(url: &str, r: Result<Response<Body>, ureq::Error>) -> Nati
 }
 
 fn do_get(url: &str, timeout: Option<Duration>) -> NativeRet {
-    lower_result(url, send("GET", url, &[], timeout, ()))
+    lower_result(url, send("GET", url, &[], timeout, None))
 }
 
 fn do_get_bytes(url: &str, timeout: Option<Duration>) -> NativeRet {
-    lower_result_bytes(url, send("GET", url, &[], timeout, ()))
+    lower_result_bytes(url, send("GET", url, &[], timeout, None))
 }
 
 fn do_post(url: &str, body: &str, timeout: Option<Duration>) -> NativeRet {
-    lower_result(url, send("POST", url, &[], timeout, body))
+    lower_result(url, send("POST", url, &[], timeout, Some(body)))
 }
 
 /// Whether ureq 3 frames an empty body on this verb. A `()` body on these puts
@@ -341,12 +481,12 @@ fn do_request(
     headers: &[(String, String)],
     timeout: Option<Duration>,
 ) -> NativeRet {
-    let r = if !body.is_empty() || takes_body(method) {
-        send(method, url, headers, timeout, body)
+    let body = if !body.is_empty() || takes_body(method) {
+        Some(body)
     } else {
-        send(method, url, headers, timeout, ())
+        None
     };
-    lower_result(url, r)
+    lower_result(url, send(method, url, headers, timeout, body))
 }
 
 /// Read an optional trailing `timeout_ms: int` at arg index `idx` (guarded by `arg_count`): absent
@@ -1124,12 +1264,12 @@ mod tests {
     }
 
     #[test]
-    fn a_redirect_hop_dropped_on_a_reused_connection_reruns_the_chain_on_fresh_connections() {
+    fn a_redirect_hop_dropped_on_a_reused_connection_is_retried_alone() {
         let (url, log) = serve_drop_second_request(redirect_root_to_a);
         let ret = do_get(&url, None);
         assert!(matches!(ret, NativeRet::Ok(_)), "got {ret:?}");
         assert_eq!(field(&ret, "body"), &NativeRet::Str("ok".into()));
-        assert_eq!(logged(&log), ["GET /", "GET /a", "GET /", "GET /a"]);
+        assert_eq!(logged(&log), ["GET /", "GET /a", "GET /a"]);
     }
 
     fn see_other_r_to_a(line: &str) -> &'static [u8] {

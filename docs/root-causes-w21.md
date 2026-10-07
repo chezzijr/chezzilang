@@ -241,7 +241,9 @@ as a head.
 
 ## Isolated
 
-- **C3:** `std.request`'s retry decides from the original method (`src/native/request.rs:146`). Go decides
+- **C3:** **FIXED (TICKET-221, 2026-10-07).** Chezzi follows redirects itself, and each hop's own method
+  decides its retry, as Go's. The text below is the analysis as filed.
+  `std.request`'s retry decides from the original method (`src/native/request.rs:146`). Go decides
   from the failed hop's method. ureq follows redirects inside one call, so the fix needs Chezzi to follow
   redirects itself, or to learn the failed hop's method.
 - **CK6:** diagnostics are printed with `eprintln!`, which panics on a closed stderr. There are 89 sites in
@@ -256,6 +258,7 @@ as a head.
 2. **Width = N process-wide at every T** (CHAN1), main included, as Go's `GOMAXPROCS`. TICKET-205 accepted
    the gate's cost at T=1 only. The gate at T>1 needs measuring.
 3. **C3:** follow redirects in Chezzi so the failed hop decides the retry (Go), or document the divergence.
+   Decided 2026-10-06: match Go (TICKET-221).
 4. **Held job on exit / run fault / shutdown_now:** it never starts, and its handle settles `Err(cancelled)`
    (CPython `cancel_futures`). This is already what the docs say, so it is listed only for confirmation.
 

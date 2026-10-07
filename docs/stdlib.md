@@ -1158,8 +1158,16 @@ A response header sent more than once is **joined with `, `** in `Response.heade
 `Set-Cookie: a=1` + `Set-Cookie: b=2` → `a=1, b=2`). Each header value is decoded **latin-1** (byte → code point, never fails), so every header the server
 sends is present; a UTF-8 `café` reads back `cafÃ©`, as CPython `urllib` does (`docs/gaps.md` W14-30b).
 Behaviours to know (backed by ureq 3): custom REQUEST header names go on the wire **lowercased**
-(RFC 9110 field names are case-insensitive); redirects are followed up to **ten** hops and the eleventh
-is `Err("<url>: too many redirects")` (CPython and Go both cap at ten); `get_bytes`' non-2xx `Err` names
+(RFC 9110 field names are case-insensitive); redirects are followed one hop at a time by Go's rules
+(`net/http` `Client.Do`): a `301`/`302`/`303` turns any method but `GET`/`HEAD` into a `GET` without a
+body, and drops `Content-Type`, `Content-Encoding`, `Content-Language` and `Content-Location`, for every
+later hop; a `307`/`308` keeps the method and the body; a redirect status without `Location` is the
+response itself. Every hop carries the caller's headers, except that `Authorization`, `Cookie`,
+`Cookie2`, `Proxy-Authorization`, `WWW-Authenticate` and `Proxy-Authenticate` are dropped for every hop
+after one whose host is not the first URL's host or a subdomain of it. Each hop sends `Referer` naming
+the previous hop's URL (none from `https` to `http`; a caller's own `Referer` wins). Up to **ten**
+redirects are followed and the eleventh is `Err("<url>: too many redirects")` (CPython and Go both stop
+near ten); `get_bytes`' non-2xx `Err` names
 the canonical reason (`HTTP 404 Not Found`), not the server's wire phrase; an `Err` message starts with
 the URL. A response with an `HTTP/1.2` status line or an obs-fold continuation is `Ok` (the folded
 value joins with one space, Go's rule; CPython and Go both accept these). A control byte or NUL in a
@@ -1175,10 +1183,10 @@ before any response byte arrives, and the request is replayable, it runs once mo
 connections. Replayable is Go's `isReplayable`: `GET`, `HEAD`, `OPTIONS`, `TRACE`, or any method
 with an `Idempotency-Key` or `X-Idempotency-Key` header. `PUT`, `DELETE`, `PATCH` and `POST` without
 that header are not retried, and neither is a failure on a fresh connection or after a response
-byte: those stay `Err`. A `timeout_ms` covers both attempts. One measured divergence from Go:
-redirects are followed inside one call, so a retry re-sends the whole chain from the first URL
-(`GET /`, `GET /a` dropped, then `GET /`, `GET /a`); Go re-sends only the failed hop. Every re-sent
-hop is replayable, because only a replayable request is retried.
+byte: those stay `Err`. A `timeout_ms` covers both attempts. Each redirect hop decides its own retry,
+with its own method and headers, and only the failed hop is re-sent, as in Go: `POST /r` answered
+`303` to `/a`, then `GET /a` dropped on the reused connection, re-sends `GET /a` alone. The `Err`
+message keeps the first URL as its prefix.
 `Match`, `Response`, and `ProcResult` are **module-owned** struct types (of `std.regex`, `std.request`,
 and `std.process` respectively), **not** reserved program-global names. Field access on a returned value
 (`.text`/`.status`/`.code`, …) works with **no import**; naming or constructing the type (`m: Match` /
