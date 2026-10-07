@@ -1,0 +1,316 @@
+# TICKET-226 (generics design R4, grid 2): a fn value is (item, type args), and every consumer takes
+# every callable kind. Kind {plain fn, method path, variant fn, `T.m`, `json.decode[T]`, closure,
+# native, builtin, extern} x consumer {call, spawn direct callee, spawn argument, Executor.submit,
+# submit_result, channel round trip, == (same site, two sites, two modules, across a spawn), repr,
+# global snapshot}. The zero-arg consumers (submit, submit_result) take the kinds that have a
+# zero-arg member: plain, method path, closure, native, extern. A variant fn, `T.m` and
+# `json.decode[T]` always take an argument, and so does every builtin value (`print` as a value is
+# `fn(?) -> nil`, so `ex.submit(print)` is a type error). A closure is one value per
+# binding, and a crossing or a Channel rebuilds it (DEC-215), so its only `==` row is same-site.
+# The second module is `fn_value_grid_lib.chz`. Go `g := math.Sqrt; go g(9.0)` runs; CPython
+# `ex.submit(time.time)` runs; Rust `decode::<i32> == decode::<i32>` is true.
+import std.json
+import std.math
+import std.time
+import fn_value_grid_lib
+import Executor from std.concurrency
+import int32 from std.ffi
+
+extern "libm":
+    fn cos(x: float) -> float
+
+extern "libc":
+    fn getpid() -> int32
+
+struct P:
+    n: int
+    fn mk(n: int) -> P:
+        return P(n)
+    fn zero() -> int:
+        return 0
+
+enum E:
+    A(int)
+    B
+
+protocol Named:
+    fn name(self) -> str
+
+struct N:
+    s: str
+    fn name(self) -> str:
+        return self.s
+
+fn plain(n: int) -> int:
+    return n
+
+fn plain0() -> int:
+    return 7
+
+fn tm[T: Named]() -> fn(T) -> str:
+    return T.name
+
+fn payload(e: E) -> int:
+    match e:
+        E.A(n):
+            return n
+        E.B:
+            return -1
+
+GP := plain
+GM := P.mk
+GV := E.A
+GD := json.decode[int]
+GN := math.sqrt
+GB := ord
+GX := cos
+
+fn cell(bad: List[str], name: str, ok: bool):
+    if not ok:
+        bad.push(name)
+
+fn ran(bad: List[str], name: str, r: Result[nil]):
+    match r:
+        Ok(_):
+            pass
+        Err(e):
+            bad.push(name + ": " + e.message())
+
+fn isok[T](r: Result[T]) -> bool:
+    match r:
+        Ok(_):
+            return true
+        Err(_):
+            return false
+
+fn via[A, R](f: fn(A) -> R, a: A, out: Channel[R]):
+    out.send(f(a))
+
+fn run_in[A, R](f: fn(A) -> R, a: A):
+    parallel:
+        spawn f(a)
+
+test fn grid_call():
+    bad: List[str] = []
+    a := plain
+    cell(bad, "plain", a(2) == 2)
+    b := P.mk
+    cell(bad, "method path", b(3).n == 3)
+    c := E.A
+    cell(bad, "variant fn", payload(c(4)) == 4)
+    cell(bad, "T.m", tm[N]()(N("x")) == "x")
+    d := json.decode[int]
+    cell(bad, "json.decode[T]", d("5") == Ok(5))
+    k := 1
+    cl := fn(n: int) -> int: n + k
+    cell(bad, "closure", cl(1) == 2)
+    g := math.sqrt
+    cell(bad, "native", g(9.0) == 3.0)
+    o := ord
+    cell(bad, "builtin", o("a") == 97)
+    x := cos
+    cell(bad, "extern", x(0.0) == 1.0)
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_spawn_direct_callee():
+    bad: List[str] = []
+    a := plain
+    r := recover: run_in(a, 2)
+    ran(bad, "plain", r)
+    r := recover: run_in(P.mk, 3)
+    ran(bad, "method path", r)
+    r := recover: run_in(E.A, 4)
+    ran(bad, "variant fn", r)
+    r := recover: run_in(tm[N](), N("x"))
+    ran(bad, "T.m", r)
+    r := recover: run_in(json.decode[int], "5")
+    ran(bad, "json.decode[T]", r)
+    k := 1
+    r := recover: run_in(fn(n: int) -> int: n + k, 1)
+    ran(bad, "closure", r)
+    r := recover: run_in(math.sqrt, 9.0)
+    ran(bad, "native", r)
+    r := recover: run_in(ord, "a")
+    ran(bad, "builtin", r)
+    r := recover: run_in(cos, 0.0)
+    ran(bad, "extern", r)
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_spawn_argument():
+    bad: List[str] = []
+    ci := Channel[int](9)
+    cp := Channel[P](1)
+    ce := Channel[E](1)
+    cs := Channel[str](2)
+    cd := Channel[Result[int]](1)
+    cf := Channel[float](2)
+    k := 1
+    parallel:
+        spawn via(plain, 2, ci)
+        spawn via(P.mk, 3, cp)
+        spawn via(E.A, 4, ce)
+        spawn via(tm[N](), N("x"), cs)
+        spawn via(json.decode[int], "5", cd)
+        spawn via(fn(n: int) -> int: n + k, 1, ci)
+        spawn via(math.sqrt, 9.0, cf)
+        spawn via(ord, "a", ci)
+        spawn via(cos, 0.0, cf)
+    ints := [ci.recv(), ci.recv(), ci.recv()]
+    ints.sort()
+    cell(bad, "plain, closure, builtin", ints == [2, 2, 97])
+    cell(bad, "method path", cp.recv().n == 3)
+    cell(bad, "variant fn", payload(ce.recv()) == 4)
+    cell(bad, "T.m", cs.recv() == "x")
+    cell(bad, "json.decode[T]", cd.recv() == Ok(5))
+    floats := [cf.recv(), cf.recv()]
+    floats.sort()
+    cell(bad, "native, extern", floats == [1.0, 3.0])
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_executor_submit():
+    bad: List[str] = []
+    k := 1
+    r := recover: Executor().submit(plain0)
+    ran(bad, "plain", r)
+    r := recover: Executor().submit(P.zero)
+    ran(bad, "method path", r)
+    r := recover: Executor().submit(fn() -> int: k)
+    ran(bad, "closure", r)
+    r := recover: Executor().submit(time.now_ms)
+    ran(bad, "native", r)
+    r := recover: Executor().submit(getpid)
+    ran(bad, "extern", r)
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_submit_result():
+    bad: List[str] = []
+    ex := Executor()
+    k := 1
+    cell(bad, "plain", ex.submit_result(plain0).recv() == Ok(7))
+    cell(bad, "method path", ex.submit_result(P.zero).recv() == Ok(0))
+    cell(bad, "closure", ex.submit_result(fn() -> int: k).recv() == Ok(1))
+    cell(bad, "native", isok(ex.submit_result(time.now_ms).recv()))
+    cell(bad, "extern", isok(ex.submit_result(getpid).recv()))
+    ex.shutdown()
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_channel_round_trip():
+    bad: List[str] = []
+    c1 := Channel[fn(int) -> int](1)
+    c1.send(plain)
+    cell(bad, "plain", c1.recv() == plain)
+    c2 := Channel[fn(int) -> P](1)
+    c2.send(P.mk)
+    cell(bad, "method path", c2.recv() == P.mk)
+    c3 := Channel[fn(int) -> E](1)
+    c3.send(E.A)
+    cell(bad, "variant fn", c3.recv() == E.A)
+    t := tm[N]()
+    c4 := Channel[fn(N) -> str](1)
+    c4.send(t)
+    cell(bad, "T.m", c4.recv() == t)
+    c5 := Channel[fn(str) -> Result[int]](1)
+    c5.send(json.decode[int])
+    cell(bad, "json.decode[T]", c5.recv() == json.decode[int])
+    c6 := Channel[fn(float) -> float](1)
+    c6.send(math.sqrt)
+    cell(bad, "native", c6.recv() == math.sqrt)
+    c7 := Channel[fn(str) -> int](1)
+    c7.send(ord)
+    cell(bad, "builtin", c7.recv() == ord)
+    c6.send(cos)
+    cell(bad, "extern", c6.recv() == cos)
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_eq_same_site():
+    bad: List[str] = []
+    cell(bad, "plain", plain == plain)
+    cell(bad, "method path", P.mk == P.mk)
+    cell(bad, "variant fn", E.A == E.A)
+    cell(bad, "T.m", tm[N]() == tm[N]())
+    cell(bad, "json.decode[T]", json.decode[int] == json.decode[int])
+    k := 1
+    cl := fn(n: int) -> int: n + k
+    cell(bad, "closure", cl == cl)
+    cell(bad, "native", math.sqrt == math.sqrt)
+    cell(bad, "builtin", ord == ord)
+    cell(bad, "extern", cos == cos)
+    cell(bad, "decode targets differ", not (json.decode[int] == json.decode[float]))
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_eq_two_sites():
+    bad: List[str] = []
+    a := plain
+    cell(bad, "plain", a == plain)
+    b := P.mk
+    cell(bad, "method path", b == P.mk)
+    c := E.A
+    cell(bad, "variant fn", c == E.A)
+    d := json.decode[int]
+    cell(bad, "json.decode[T]", d == json.decode[int])
+    g := math.sqrt
+    cell(bad, "native", g == math.sqrt)
+    o := ord
+    cell(bad, "builtin", o == ord)
+    x := cos
+    cell(bad, "extern", x == cos)
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_eq_two_modules():
+    bad: List[str] = []
+    cell(bad, "json.decode[T]", fn_value_grid_lib.read_decode() == json.decode[int])
+    cell(bad, "native", fn_value_grid_lib.read_sqrt() == math.sqrt)
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_eq_across_a_spawn():
+    bad: List[str] = []
+    c1 := Channel[fn(int) -> int](1)
+    c2 := Channel[fn(int) -> P](1)
+    c3 := Channel[fn(int) -> E](1)
+    c5 := Channel[fn(str) -> Result[int]](1)
+    c6 := Channel[fn(float) -> float](2)
+    c7 := Channel[fn(str) -> int](1)
+    parallel:
+        spawn:
+            c1.send(plain)
+            c2.send(P.mk)
+            c3.send(E.A)
+            c5.send(json.decode[int])
+            c6.send(math.sqrt)
+            c7.send(ord)
+            c6.send(cos)
+    cell(bad, "plain", c1.recv() == plain)
+    cell(bad, "method path", c2.recv() == P.mk)
+    cell(bad, "variant fn", c3.recv() == E.A)
+    cell(bad, "json.decode[T]", c5.recv() == json.decode[int])
+    cell(bad, "native", c6.recv() == math.sqrt)
+    cell(bad, "builtin", c7.recv() == ord)
+    cell(bad, "extern", c6.recv() == cos)
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_repr():
+    bad: List[str] = []
+    cell(bad, "plain", str(plain) == "<fn plain>")
+    cell(bad, "json.decode[T]", str(json.decode[int]) == "<fn json.decode>")
+    k := 1
+    cell(bad, "closure", str(fn(n: int) -> int: n + k) == "<closure>")
+    cell(bad, "native", str(math.sqrt) == "<native fn sqrt>")
+    cell(bad, "builtin", str(ord) == "<builtin fn ord>")
+    cell(bad, "extern", str(cos) == "<extern fn cos>")
+    assert bad.len() == 0, ", ".join(bad)
+
+test fn grid_global_snapshot():
+    out := Channel[List[str]](1)
+    parallel:
+        spawn:
+            bad: List[str] = []
+            cell(bad, "plain", GP == plain)
+            cell(bad, "method path", GM == P.mk)
+            cell(bad, "variant fn", GV == E.A)
+            cell(bad, "json.decode[T]", GD == json.decode[int])
+            cell(bad, "native", GN == math.sqrt)
+            cell(bad, "builtin", GB == ord)
+            cell(bad, "extern", GX == cos)
+            out.send(bad)
+    bad := out.recv()
+    assert bad.len() == 0, ", ".join(bad)

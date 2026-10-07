@@ -1,0 +1,9 @@
+# TICKET-226: the second module of `fn_value_grid_test.chz`'s grid.
+import std.json
+import std.math
+
+fn read_decode() -> fn(str) -> Result[int]:
+    return json.decode[int]
+
+fn read_sqrt() -> fn(float) -> float:
+    return math.sqrt
