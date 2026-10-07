@@ -470,7 +470,11 @@ impl Checker {
                 Ty::Result(p, _) if self.assignable(p, &t) => {
                     self.record_wrap(c.node, crate::checker::Wrap::Ok, c.span);
                 }
-                z if z.is_unknown() => {}
+                // A var another compare bound to `Unknown` (`ys := [y]; ys = []`) pinned
+                // nothing: the `?x` keeps the unpinned default, an optional.
+                z if z.is_unknown() => {
+                    self.record_wrap(c.node, crate::checker::Wrap::Some, c.span);
+                }
                 z => self.error(
                     c.span,
                     format!("'?' builds an optional or success value, found {z}"),

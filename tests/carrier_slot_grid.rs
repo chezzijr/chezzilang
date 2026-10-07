@@ -537,6 +537,7 @@ fn extra_cells(cells: &mut Vec<Cell>) {
     let r = Expect::Rejects;
     cells.extend([
         m("q_default_optional", "fn main():\n    y := ?5\n    print(y)\nmain()", prints("Some(5)")),
+        m("q_var_bound_unknown", "fn main():\n    y := ?5\n    ys := [y]\n    ys = []\n    print(y)\n    print(ys)\nmain()", prints("Some(5)\n[]")),
         m("q_pinned_by_result", "fn take(r: int!str):\n    print(r)\nfn main():\n    z := ?5\n    take(z)\nmain()", prints("Ok(5)")),
         m("bang_pinned_by_return", "fn f() -> int!:\n    e := !\"disk\"\n    return e\nprint(f())", prints("Err('disk')")),
         m("bang_unpinned_fn", "fn main():\n    w := !\"disk\"\n    print(w)\nmain()", r("cannot infer the success type")),
