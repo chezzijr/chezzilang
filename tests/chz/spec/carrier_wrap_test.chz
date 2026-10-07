@@ -1,0 +1,55 @@
+# TICKET-227 (D2, D3): a plain value wraps into the `T?` / `T!E` carrier of every typed slot; `!e`
+# builds an error value and `?x` a present/success value. Each wrapped value equals its explicit
+# `Some`/`Ok`/`Err` spelling. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+struct Box:
+    n: int?
+
+fn take(x: int?) -> int?:
+    return x
+
+fn save(p: str) -> None!str:
+    if p == "":
+        return !"empty"
+    pass
+
+test fn a_let_wraps():
+    x: int? = 5
+    assert x == Some(5)
+    r: int!str = 5
+    assert r == Ok(5)
+
+test fn an_arg_wraps():
+    assert take(5) == Some(5)
+
+test fn collection_elements_wrap():
+    xs: List[int?] = [5, None]
+    assert xs == [Some(5), None]
+    m: Map[str, int!str] = {"k": 5}
+    assert m["k"] == Ok(5)
+    t: (int?, int) = (5, 0)
+    assert t.0 == Some(5)
+
+test fn a_field_assign_wraps():
+    b := Box(n=None)
+    b.n = 5
+    assert b.n == Some(5)
+
+test fn bang_is_an_error_value():
+    e: int!str = !"e"
+    assert e == Err("e")
+
+test fn question_none_at_a_nested_optional_is_the_inner_absent():
+    v: int?? = ?None
+    assert v == Some(None)
+    w: int?? = None
+    assert w == None
+
+test fn a_none_bang_fn_falls_off_as_success():
+    assert save("a") == Ok()
+    assert save("") == Err("empty")
+
+test fn an_elif_tail_wraps():
+    c := false
+    d := true
+    x: int? = if c: Some(6) elif d: 5 else: 7
+    assert x == Some(5)
