@@ -267,6 +267,21 @@ as a head.
 4. **Held job on exit / run fault / shutdown_now:** it never starts, and its handle settles `Err(cancelled)`
    (CPython `cancel_futures`). This is already what the docs say, so it is listed only for confirmation.
 
+## Owner decisions (2026-10-07)
+
+1. **Only run-wide halts reach into a CPU-bound task at a call** (TICKET-224, option c): `os.exit` and a
+   fault that ends the run (a no-handle `ex.submit` job fault, an unhandled top-level fault) stop a
+   loop-free recursion at its next call. A nursery's implicit cancel and `std.cancel` stay at waits and
+   loop back-edges (DEC-194 unchanged), as Go (`os.Exit` immediate, `context` cooperative) and Python
+   (`TaskGroup` cancels at `await`).
+2. **`parallel:` stays fail-fast** (the first fault cancels its siblings, then re-raises at the block
+   end), the default of Python `TaskGroup`, Trio and Go `errgroup`. A cancelled sibling stops only at a
+   cut point, runs its `defer`s, and its partial state stays in its own airlock copy. "Wait for all" is
+   already expressible with handle jobs (`submit_task` each, `get()` each).
+3. **Future, not filed:** a `shield:` block (Trio `CancelScope(shield=True)`, `asyncio.shield`) for a
+   section that must finish once started.
+4. Runner width (CHAN1) is its own ticket, TICKET-230.
+
 ## Plan order (proposed)
 
 1. **E2** (job lifecycle): C1, C1b, C2, CHAN3, CHAN4, CHAN1. The largest family; may split width into its own ticket.
