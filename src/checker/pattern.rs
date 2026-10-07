@@ -6,6 +6,11 @@ use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 use crate::ast::consteval;
 
+/// TICKET-225: whether `e` folds to a constant (`300`, `1 << 8`, `3e38 + 3e38`).
+pub(super) fn is_const_expr(e: &Expr) -> bool {
+    matches!(consteval::eval(e, &mut 0), consteval::Fold::Value(_))
+}
+
 /// The one diagnostic for a range used where it has no runtime value. It names every legal position
 /// AND the materialization escape hatch — the `range(a, b)` builtin, which really does return a
 /// `List[int]` (so `List(0..3)` is rejected and `Set(range(0, 3))` is the way).
@@ -1606,6 +1611,9 @@ impl Checker {
                 ),
             );
         }
+        if !covered {
+            self.const_meets_slot(expr, None);
+        }
         self.arith_parent = is_arith;
         let ty = self.infer_kind_inner(expr);
         self.arith_parent = covered;
@@ -1615,6 +1623,63 @@ impl Checker {
             Ty::Width(_) => ty.scalar().clone(),
             t => t,
         }
+    }
+
+    /// TICKET-225 (R5, Go's untyped constants) — the one place a constant meets its slot. A literal
+    /// or a constant expression (`1 << 8`, `3e38 + 3e38`) is checked against the C width of the
+    /// expected type it is inferred under: `constant 256 does not fit int8 (-128..127)`. `slot` is
+    /// `None` from `infer_kind`, which reads `expected_hint`; an assignment passes its target type,
+    /// which no hint carries (`infer` reads an lvalue as its scalar). Skipped while inferring a
+    /// return (DEC-183) or in the generic-arg prepass; one report per span.
+    pub(super) fn const_meets_slot(&mut self, expr: &Expr, slot: Option<&Ty>) {
+        use crate::ast::consteval::{Const, Fold};
+        if self.inferring_ret
+            || self.generic_arg_prepass
+            || !matches!(
+                expr.kind,
+                ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+            )
+        {
+            return;
+        }
+        let Some(w) = slot
+            .or(self.expected_hint.as_ref())
+            .and_then(|h| h.width())
+            .cloned()
+        else {
+            return;
+        };
+        let float = w == crate::native::cffi::CType::Float32;
+        let shown = match consteval::eval(expr, &mut self.const_scan_visits) {
+            Fold::Value(Const::Float(f)) if float && !w.fits_f64(f) => format!("{f:e}"),
+            Fold::Value(Const::Int(k)) if !float && !w.fits_int(k, true) => k.to_string(),
+            _ => return,
+        };
+        if self.const_overflow_seen.insert(expr.span) {
+            let name = w.width_name().unwrap_or("?");
+            let range = w.range_text();
+            self.error(
+                expr.span,
+                format!("constant {shown} does not fit {name} {range}"),
+            );
+        }
+    }
+
+    /// TICKET-225: infer a constant `e` under `slot` as its expected type, so it meets the slot's
+    /// width; any other `e` infers with no hint. For value sites that thread no hint of their own.
+    pub(super) fn infer_const_in(&mut self, e: &Expr, slot: Option<Ty>) -> Ty {
+        if is_const_expr(e)
+            && let Some(s) = slot
+        {
+            self.expected_hint = Some(s);
+            let t = self.infer(e);
+            self.expected_hint = None;
+            return t;
+        }
+        self.infer(e)
     }
 
     fn infer_kind_inner(&mut self, expr: &Expr) -> Ty {
@@ -4475,7 +4540,7 @@ impl Checker {
         // Map keys are NOT int — infer the object first and check the index against the key type.
         match obj_ty {
             Ty::Map(k, v) => {
-                let idx_ty = self.infer_value(index);
+                let idx_ty = self.infer_arg(index, Some(&k));
                 if !compatible(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
                     let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
                     self.error(index.span, format!("map key must be {k_s}, found {idx_s}"));
@@ -5570,7 +5635,8 @@ impl Checker {
             })
             .collect();
         self.ret_coerce_sink = ret.is_some().then(|| self.current_ret.clone());
-        let body_ty = self.infer(body);
+        let slot = ret.is_some().then(|| self.current_ret.clone());
+        let body_ty = self.infer_const_in(body, slot);
         self.ret_coerce_sink = None;
         self.last_closure_writes = self
             .closure_write_frames
@@ -5609,7 +5675,6 @@ impl Checker {
                 {
                     self.record_ret_coerce(body.span, Some(m));
                 }
-                self.check_const_fits(&declared, body);
                 if mode.is_none() && !self.assignable(&declared, &body_ty) {
                     self.error(
                         body.span,

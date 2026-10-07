@@ -38011,7 +38011,7 @@ fn untyped_constant_width_grid() {
     }
     // Neighbours: a non-constant int into a width slot stays accepted.
     for body in [
-        "x: int8 = len([300])\nprint(x)\n",
+        "x: int8 = [300].len()\nprint(x)\n",
         "x: int8 = str(300).len()\nprint(x)\n",
         "fn n(a: int) -> int8:\n    return 0\nx: int8 = n(300)\nprint(x)\n",
     ] {

@@ -3738,6 +3738,13 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         (Ty::Param(n), a) => {
             if !a.is_unknown() && !map.contains_key(n) {
                 map.insert(n.clone(), a.clone());
+            } else if let Ty::Width(_) = a
+                && map.get(n) == Some(a.scalar())
+            {
+                // TICKET-225: an `int` bound from a constant argument takes the width the expected
+                // type carries (`y: int8 = id(300)` binds `T = int8`), so the constant meets it.
+                // A width never changes assignability, so no acceptance moves.
+                map.insert(n.clone(), a.clone());
             }
         }
         (Ty::List(d), Ty::List(a)) | (Ty::Set(d), Ty::Set(a)) | (Ty::Option(d), Ty::Option(a)) => {

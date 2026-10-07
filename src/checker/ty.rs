@@ -419,7 +419,7 @@ pub enum Ty {
     /// return, field, payload or type argument declared with an imported `std.ffi` width. Built only
     /// by `ffi_width_ty`. It is a tag on `int`/`float`, never a distinct type: `compatible` and
     /// `assignable` ignore it, and `infer_kind` erases it, so every VALUE type is the plain scalar
-    /// ([`Ty::scalar`]). `check_const_fits` reads it to reject a constant outside the width.
+    /// ([`Ty::scalar`]). `Checker::const_meets_slot` reads it to reject a constant outside the width.
     Width(crate::native::cffi::CType),
     /// A protocol used *as a value type* (existential), e.g. the default error type `Error`, or a
     /// PARAMETERIZED protocol `Container[int]`. The `Vec<Ty>` carries the protocol's concrete type

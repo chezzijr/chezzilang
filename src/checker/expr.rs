@@ -1775,7 +1775,7 @@ impl Checker {
                 match args.len() {
                     0 => Some(Ty::list(targ_elem.unwrap_or(Ty::Unknown))),
                     1 => {
-                        let it = self.infer_value(&args[0]);
+                        let it = self.infer_conv_arg(&args[0], targ_elem.clone());
                         let elem = match self.iter_elem(&it) {
                             Some(e) => e,
                             None if it.is_unknown() => Ty::Unknown,
@@ -1789,7 +1789,6 @@ impl Checker {
                         };
                         match targ_elem {
                             Some(t) => {
-                                self.check_const_fits(&Ty::list(t.clone()), &args[0]);
                                 if !t.is_unknown()
                                     && !elem.is_unknown()
                                     && !self.assignable(&t, &elem)
@@ -1834,7 +1833,7 @@ impl Checker {
                 let elem = match args.len() {
                     0 => targ_elem.unwrap_or(Ty::Unknown),
                     1 => {
-                        let it = self.infer_value(&args[0]);
+                        let it = self.infer_conv_arg(&args[0], targ_elem.clone());
                         let elem = match self.iter_elem(&it) {
                             Some(e) => e,
                             None if it.is_unknown() => Ty::Unknown,
@@ -1848,7 +1847,6 @@ impl Checker {
                         };
                         match targ_elem {
                             Some(t) => {
-                                self.check_const_fits(&Ty::set(t.clone()), &args[0]);
                                 if !t.is_unknown()
                                     && !elem.is_unknown()
                                     && !self.assignable(&t, &elem)
@@ -1899,7 +1897,10 @@ impl Checker {
                 let (k, v) = match args.len() {
                     0 => targ_kv.clone().unwrap_or((Ty::Unknown, Ty::Unknown)),
                     1 => {
-                        let it = self.infer_value(&args[0]);
+                        let it = self.infer_conv_arg(
+                            &args[0],
+                            targ_kv.clone().map(|(k, v)| Ty::Tuple(vec![k, v])),
+                        );
                         let elem = match self.iter_elem(&it) {
                             Some(e) => e,
                             None if it.is_unknown() => Ty::Unknown,
@@ -1925,10 +1926,6 @@ impl Checker {
                             }
                         };
                         if let Some((tk, tv)) = &targ_kv {
-                            self.check_const_fits(
-                                &Ty::list(Ty::Tuple(vec![tk.clone(), tv.clone()])),
-                                &args[0],
-                            );
                             if !tk.is_unknown() && !k.is_unknown() && !self.assignable(tk, &k) {
                                 let note = self.protocol_note(tk, &k);
                                 let [tk_s, tv_s, k_s] = Ty::render_distinct([tk, tv, &k]);
@@ -3971,79 +3968,6 @@ impl Checker {
 
     /// Check argument count and each argument's type against a known parameter list. STRICT — an int
     /// never widens into a `float` slot (D3, TICKET-138).
-    /// TICKET-218 — reject a CONSTANT outside the C width a slot carries (`x: int8 = 1000`):
-    /// `constant 1000 does not fit int8 (-128..127)`. Called beside the `assignable` of every
-    /// value-into-slot site; a new site must call it too, or a constant there reaches C unchecked
-    /// (and faults at run time). It descends through list/set/map/tuple literals, `Some`/`Ok`/`Err`,
-    /// `if`/`match` branches and the `rhs` of `??`. Skipped while inferring a return (DEC-183) or in
-    /// the generic-arg prepass; one report per span (`const_overflow_seen`).
-    pub(super) fn check_const_fits(&mut self, slot: &Ty, value: &Expr) {
-        if self.inferring_ret || self.generic_arg_prepass {
-            return;
-        }
-        if let Some(w) = slot.width() {
-            use crate::ast::consteval::{Const, Fold, eval};
-            let float = *w == crate::native::cffi::CType::Float32;
-            let shown = match eval(value, &mut self.const_scan_visits) {
-                Fold::Value(Const::Float(f)) if float && !w.fits_f64(f) => Some(format!("{f:e}")),
-                Fold::Value(Const::Int(k)) if !float && !w.fits_int(k, true) => Some(k.to_string()),
-                _ => None,
-            };
-            if let Some(k) = shown
-                && self.const_overflow_seen.insert(value.span)
-            {
-                let name = w.width_name().unwrap_or("?");
-                let range = w.range_text();
-                self.error(
-                    value.span,
-                    format!("constant {k} does not fit {name} {range}"),
-                );
-            }
-        }
-        match (slot, &value.kind) {
-            (Ty::List(e) | Ty::Set(e), ExprKind::List(items, _) | ExprKind::Set(items)) => {
-                for it in items {
-                    self.check_const_fits(e, it);
-                }
-            }
-            (Ty::Map(k, v), ExprKind::Map(es)) => {
-                for (ke, ve) in es {
-                    self.check_const_fits(k, ke);
-                    self.check_const_fits(v, ve);
-                }
-            }
-            (Ty::Tuple(ts), ExprKind::Tuple(xs)) => {
-                for (t, x) in ts.iter().zip(xs) {
-                    self.check_const_fits(t, x);
-                }
-            }
-            (_, ExprKind::Call { callee, args, .. }) if args.len() == 1 => {
-                let ExprKind::Ident(n) = &callee.kind else {
-                    return;
-                };
-                match (n.as_str(), slot) {
-                    ("Some", Ty::Option(e))
-                    | ("Ok", Ty::Result(e, _))
-                    | ("Err", Ty::Result(_, e)) => {
-                        self.check_const_fits(e, &args[0]);
-                    }
-                    _ => {}
-                }
-            }
-            (_, ExprKind::IfElse { then, els, .. }) => {
-                self.check_const_fits(slot, then);
-                self.check_const_fits(slot, els);
-            }
-            (_, ExprKind::Match { arms, .. }) => {
-                for a in arms {
-                    self.check_const_fits(slot, &a.body);
-                }
-            }
-            (_, ExprKind::NullCoalesce { rhs, .. }) => self.check_const_fits(slot, rhs),
-            _ => {}
-        }
-    }
-
     pub(super) fn check_args(&mut self, name: &str, params: &[Ty], args: &[Expr], span: Span) {
         self.check_args_range(name, params, params.len(), args, span);
     }
@@ -4098,6 +4022,23 @@ impl Checker {
                     ),
                 );
             }
+        }
+    }
+
+    /// TICKET-225: the iterable of a type-applied conversion (`List[int8]([300])`). A list literal
+    /// infers under `List[elem]` when `elem` (or a part of a `(K, V)` element) is a C width, so each
+    /// constant element meets the width it lands in. Anything else infers bottom-up, and the
+    /// conversion's own element check reports a mismatch.
+    fn infer_conv_arg(&mut self, arg: &Expr, elem: Option<Ty>) -> Ty {
+        let widths = |e: &Ty| match e {
+            Ty::Tuple(ps) => ps.iter().any(|p| p.width().is_some()),
+            e => e.width().is_some(),
+        };
+        match elem {
+            Some(e) if matches!(arg.kind, ExprKind::List(..)) && widths(&e) => {
+                self.infer_arg(arg, Some(&Ty::list(e)))
+            }
+            _ => self.infer_value(arg),
         }
     }
 
@@ -4207,21 +4148,23 @@ impl Checker {
         fallback: &Ty,
         arg: &Expr,
     ) -> Ty {
-        let refined = if matches!(arg.kind, ExprKind::Closure { .. }) {
-            // Re-infer the closure in checking-mode against the substituted expected type: this binds
-            // its unannotated params and re-reports its body errors (which `infer_generic_arg_tys`
-            // suppressed). The assignability check below still uses the first-pass `fallback`
-            // (Unknown-bearing) type — its params/return are leniently assignable, so a type param
-            // bound ONLY from this closure's body (e.g. `Mapped`'s `U`, recovered from the closure's
-            // return) doesn't spuriously fail against an unbound `Ty::Param`. The param binding + body
-            // re-check is the real enforcement; the `fallback` check still catches an arity or
-            // annotated-return mismatch. The re-inferred type (`fn(int) -> int`) is RETURNED for the
-            // caller's loop-back unify.
-            self.infer_arg(arg, Some(expected))
-        } else {
-            fallback.clone()
-        };
-        self.check_const_fits(expected, arg);
+        // TICKET-225: a constant argument is re-inferred against the substituted slot too, so it
+        // meets the width a hint pinned into `T` (`y: int8 = id(300)`).
+        let refined =
+            if matches!(arg.kind, ExprKind::Closure { .. }) || super::pattern::is_const_expr(arg) {
+                // Re-infer the closure in checking-mode against the substituted expected type: this binds
+                // its unannotated params and re-reports its body errors (which `infer_generic_arg_tys`
+                // suppressed). The assignability check below still uses the first-pass `fallback`
+                // (Unknown-bearing) type — its params/return are leniently assignable, so a type param
+                // bound ONLY from this closure's body (e.g. `Mapped`'s `U`, recovered from the closure's
+                // return) doesn't spuriously fail against an unbound `Ty::Param`. The param binding + body
+                // re-check is the real enforcement; the `fallback` check still catches an arity or
+                // annotated-return mismatch. The re-inferred type (`fn(int) -> int`) is RETURNED for the
+                // caller's loop-back unify.
+                self.infer_arg(arg, Some(expected))
+            } else {
+                fallback.clone()
+            };
         if !self.assignable(expected, fallback) {
             let [fallback_s, expected_s] = Ty::render_distinct([fallback, expected]);
             self.error(
@@ -4491,7 +4434,6 @@ impl Checker {
             // un-inferred / generic slot does not spuriously satisfy the requirement.
             if let Some(pt) = params.get(i) {
                 self.constrain_empty_arg(arg, pt);
-                self.check_const_fits(pt, arg);
             }
             if let Some(pt) = params.get(i)
                 && !self.assignable(pt, &at)

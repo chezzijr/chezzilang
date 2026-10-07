@@ -2663,7 +2663,6 @@ impl Checker {
                 let name = &names[0];
                 let mut declared = match annotated {
                     Some(expected) => {
-                        self.check_const_fits(&expected, value);
                         if !self.assignable(&expected, &val_ty) {
                             let note = self.protocol_note(&expected, &val_ty);
                             let [val_s, expected_s] = Ty::render_distinct([&val_ty, &expected]);
@@ -3094,7 +3093,6 @@ impl Checker {
                         let actual = self.infer_arg(def, fhint.as_ref());
                         let actual = self.resolve_default_binders(&expected, actual);
                         self.decl_site_default = saved_dsd;
-                        self.check_const_fits(&expected, def);
                         if !matches!(expected, Ty::Unknown) && !self.assignable(&expected, &actual)
                         {
                             let note = self.protocol_note(&expected, &actual);
@@ -4339,7 +4337,7 @@ impl Checker {
                 self.refine_index_receiver(obj, index, &val_ty);
                 match self.infer(obj) {
                     Ty::Map(k, v) => {
-                        let idx_ty = self.infer(index);
+                        let idx_ty = self.infer_arg(index, Some(&k));
                         if !compatible(&k, &idx_ty) && !self.assignable(&k, &idx_ty) {
                             let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
                             self.error(index.span, format!("map key must be {k_s}, found {idx_s}"));
@@ -4554,13 +4552,12 @@ impl Checker {
         value: Option<&Expr>,
         span: Span,
     ) {
-        // TICKET-218: a constant outside the slot's C width is rejected, for `=` and for a compound
-        // operand (Go: `300 (untyped int constant) overflows int8`) except a shift count. Then a
-        // width slot takes what its scalar takes.
+        // A constant meets the target's width, for `=` and a compound operand (Go: `300 (untyped
+        // int constant) overflows int8`), except a shift count.
         if let Some(v) = value
             && !matches!(op, AssignOp::ShlEq | AssignOp::ShrEq)
         {
-            self.check_const_fits(target_ty, v);
+            self.const_meets_slot(v, Some(target_ty));
         }
         let target_ty = target_ty.scalar();
         match op {
@@ -4747,7 +4744,6 @@ impl Checker {
                         None
                     };
                     self.record_ret_coerce(e.span, mode);
-                    self.check_const_fits(&ret, e);
                     if mode.is_some() {
                     } else if !self.assignable(&ret, &ty) {
                         let note = self.protocol_note(&ret, &ty);
@@ -4853,7 +4849,8 @@ impl Checker {
     /// `yield <expr>` — legal only inside a generator function (one whose return type is
     /// `Iterator[T]`); the operand must be assignable to the element type `T`.
     pub(super) fn check_yield(&mut self, e: &Expr, span: Span) {
-        let ty = self.infer(e);
+        let slot = self.yield_ty.clone().filter(|_| !self.inferring_ret);
+        let ty = self.infer_const_in(e, slot);
         // `in_generator` (not `yield_ty.is_some()`) is the in-bounds signal: during return-type
         // inference the element type is not yet pinned (`yield_ty` is `None`) but a `yield` is still
         // legal and its type must be COLLECTED to seed the inferred `Iterator[T]`.
@@ -4869,9 +4866,6 @@ impl Checker {
         }
         // Pass 2: validate each yield against the pinned element type `T`. An `int` yielded under an
         // inferred/annotated `float` `T` is rejected (D3: no int→float slot widening).
-        if let Some(elem) = self.yield_ty.clone() {
-            self.check_const_fits(&elem, e);
-        }
         if let Some(elem) = self.yield_ty.clone()
             && !self.assignable(&elem, &ty)
         {
@@ -5216,7 +5210,6 @@ impl Checker {
                 self.decl_site_default = saved_dsd;
                 self.current_ret = saved_ret;
                 self.in_fn_body = saved_in_fn;
-                self.check_const_fits(&ty, def);
                 if !matches!(ty, Ty::Unknown) && !self.assignable(&ty, &actual) {
                     let note = self.protocol_note(&ty, &actual);
                     let [ty_s, actual_s] = Ty::render_distinct([&ty, &actual]);
@@ -5262,7 +5255,7 @@ impl Checker {
             // TICKET-107 (W12-13) — same gate as the coercion mode computed below.
             self.ret_coerce_sink =
                 (decl.ret.is_some() && !self.in_default_provider).then(|| ret.clone());
-            let ty = self.infer(e);
+            let ty = self.infer_const_in(e, decl.ret.is_some().then(|| ret.clone()));
             self.ret_coerce_sink = None;
             if ret == Ty::Nil {
                 // A NON-nil expr against `-> nil` is a void fn that actually returns a value —
@@ -5280,7 +5273,6 @@ impl Checker {
                     None
                 };
                 self.record_ret_coerce(e.span, mode);
-                self.check_const_fits(&ret, e);
                 if mode.is_none() && !self.assignable(&ret, &ty) {
                     let note = self.protocol_note(&ret, &ty);
                     let [ret_s, ty_s] = Ty::render_distinct([&ret, &ty]);
