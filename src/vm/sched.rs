@@ -4137,15 +4137,22 @@ impl Vm {
     // so it is not the usual ownership-less `from_*` constructor the lint expects.
     #[allow(clippy::wrong_self_convention)]
     pub(super) fn from_wire(&mut self, w: WireValue) -> Value {
+        self.from_wire_on(Route::Handoff, w)
+    }
+
+    /// [`from_wire`](Vm::from_wire) on `route`: the one place a whole-value rebuild sets the mark.
+    #[allow(clippy::wrong_self_convention)]
+    pub(super) fn from_wire_on(&mut self, route: Route, w: WireValue) -> Value {
         // Fresh rebuild memo per root: it maps each identity-preserved wire `id` (a `Cell`/`Closure` or
         // a container) to the heap `GcRef` of its placeholder, so a `WireValue::Backref(id)` nested
         // inside resolves to the already-alloc'd (and about-to-be-patched) node — tying a serialized
         // value cycle back together.
         let mut rebuild = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        // TICKET-189: every `from_wire` caller is a hand-off read (Channel/Shared/RwShared/Atomic,
-        // an Executor job root), which `crossing::marks` never marks.
+        // TICKET-189: the caller names the route and `crossing::marks` decides the mark. Every
+        // `from_wire` caller is a hand-off read (Channel/Shared/RwShared/Atomic, an Executor job
+        // root), which it never marks; `airlock_native` rebuilds under `Route::CopyRead` (TICKET-220).
         let saved_copy_mark = self.copy_mark;
-        self.copy_mark = crossing::marks(Route::Handoff, saved_copy_mark);
+        self.copy_mark = crossing::marks(route, saved_copy_mark);
         let v = self.from_wire_memo(w, &mut rebuild);
         self.copy_mark = saved_copy_mark;
         // W7-11 — every caller of `from_wire` rebuilds a WHOLE crossing, so its rebuild map spans the
@@ -4158,6 +4165,25 @@ impl Vm {
              (a piecewise drain must call from_wire_piece)"
         );
         v
+    }
+
+    /// TICKET-220 — the engine half of `std.concurrency.task_copy_of` (`Kind::InterceptAirlock`):
+    /// serialize the value and rebuild it under `Route::CopyRead`, so a task copy's read takes every
+    /// rule the rebuild has (the generator frame mask, the module stop) with no second walker.
+    pub(super) fn airlock_native(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match name {
+            "task_copy_of" => {
+                let v = args.first().copied().unwrap_or_else(Value::nil);
+                let w = self.to_wire_memo_at(v, span, &mut WireMemo::default())?;
+                Ok(self.from_wire_on(Route::CopyRead, w))
+            }
+            _ => unreachable!("airlock_native on '{name}'"),
+        }
     }
 
     /// TICKET-154 — does every depth-1 piece of a stored `RwShared` wire stand alone? A piece stands

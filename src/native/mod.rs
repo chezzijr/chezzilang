@@ -575,6 +575,10 @@ pub enum Kind {
     /// `read_line` is `unreachable!`); instead the engine demotes the worker around the call and
     /// gives its width slot back, so a runnable sibling is not starved (`Vm::invoke_native`).
     HostWait,
+    /// TICKET-220 -- `std.concurrency.task_copy_of`. It returns a heap value rebuilt under
+    /// `Route::CopyRead`, which a `NativeRet` cannot carry, so the engine runs it
+    /// (`Vm::airlock_native`) and the registered `concurrency::intercepted` placeholder never executes.
+    InterceptAirlock,
 }
 
 impl Kind {
@@ -589,7 +593,11 @@ impl Kind {
     pub fn blocks(self) -> bool {
         match self {
             Kind::Blocking | Kind::TimedWait => true,
-            Kind::Inline | Kind::HostWait | Kind::InterceptIo | Kind::InterceptNet => false,
+            Kind::Inline
+            | Kind::HostWait
+            | Kind::InterceptIo
+            | Kind::InterceptNet
+            | Kind::InterceptAirlock => false,
         }
     }
 
@@ -603,7 +611,11 @@ impl Kind {
     pub fn holds_host_thread(self) -> bool {
         match self {
             Kind::Blocking | Kind::HostWait => true,
-            Kind::Inline | Kind::TimedWait | Kind::InterceptIo | Kind::InterceptNet => false,
+            Kind::Inline
+            | Kind::TimedWait
+            | Kind::InterceptIo
+            | Kind::InterceptNet
+            | Kind::InterceptAirlock => false,
         }
     }
 }
@@ -1061,14 +1073,15 @@ mod tests {
             Some("std.concurrency")
         );
         // ...and its callable members are is_task_copy (TICKET-191), mark_task_copy (TICKET-213),
-        // and the handle-channel pair _settle / is_settled (TICKET-219).
+        // the handle-channel pair _settle / is_settled (TICKET-219), and task_copy_of (TICKET-220).
         assert_eq!(
             kinds("std.concurrency"),
             [
                 ("is_task_copy", Kind::Inline),
                 ("mark_task_copy", Kind::Inline),
                 ("_settle", Kind::Inline),
-                ("is_settled", Kind::Inline)
+                ("is_settled", Kind::Inline),
+                ("task_copy_of", Kind::InterceptAirlock)
             ]
         );
         // The len-3 `std.concurrency.collection` is the REAL file — NOT native (no collision).
@@ -1098,6 +1111,7 @@ mod tests {
         assert!(!Kind::InterceptNet.blocks());
         // TICKET-151: a stdin read waits on the host but must NOT reach the offload gate.
         assert!(!Kind::HostWait.blocks());
+        assert!(!Kind::InterceptAirlock.blocks());
     }
 
     /// TICKET-151: the two kinds the engine runs on the worker thread while they wait on the host
@@ -1110,6 +1124,7 @@ mod tests {
         assert!(!Kind::TimedWait.holds_host_thread());
         assert!(!Kind::InterceptIo.holds_host_thread());
         assert!(!Kind::InterceptNet.holds_host_thread());
+        assert!(!Kind::InterceptAirlock.holds_host_thread());
     }
 
     /// D5 — every member of `std.fs` (filesystem syscalls), `std.request` (HTTP via `ureq`) and
@@ -1262,6 +1277,9 @@ mod tests {
                 match kind {
                     Kind::InterceptIo => assert_eq!(*module, "std.io", "{module}.{name}"),
                     Kind::InterceptNet => assert_eq!(*module, "std.net", "{module}.{name}"),
+                    Kind::InterceptAirlock => {
+                        assert_eq!(*module, "std.concurrency", "{module}.{name}")
+                    }
                     _ => {}
                 }
             }

@@ -103,7 +103,7 @@ impl WaitSpec {
             Kind::TimedWait => Some(WaitSpec::Sleep),
             Kind::Blocking => Some(WaitSpec::Offload),
             Kind::HostWait => Some(WaitSpec::Stdin),
-            Kind::Inline | Kind::InterceptIo | Kind::InterceptNet => None,
+            Kind::Inline | Kind::InterceptIo | Kind::InterceptNet | Kind::InterceptAirlock => None,
         }
     }
 }

@@ -136,6 +136,13 @@ native fn is_task_copy(v) -> bool
 # a handoff, and the receiver owns it.
 native fn mark_task_copy(v) -> nil
 
+# Returns `v` rebuilt as this task's copy (`Route::CopyRead`): the rebuild every crossing runs, so
+# a write to it faults instead of vanishing, a function inside it leaves its module's globals
+# unmarked, and a generator's private frame slots stay writable (TICKET-190). For std code reading
+# a shared core on behalf of a handle its owner aliases (`Task.get`, a `memoize1` wrapper). Not for
+# a general read path: a plain `Shared.get()` or `ch.recv()` is a handoff, and the receiver owns it.
+native fn task_copy_of[T](v: T) -> T
+
 # A std internal (TICKET-219): seal the handle channel `ch` with the outcome `v`. The first seal
 # wins; a later one changes nothing. Called only by `run_outcome`.
 native fn _settle(ch, v) -> nil
