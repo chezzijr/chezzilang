@@ -5280,7 +5280,7 @@ impl Checker {
         // shared derivation at `Undetermined`/`Skip` → bail, arg type unchanged. Reporting an
         // `Undetermined` here would be an EAGER check and would refuse `[1,2,3].fold(0, pick)`; the
         // verdict is re-asked once, at the end of the call, by
-        // [`Checker::report_undetermined_generic_fn_value_args`].
+        // [`Checker::close_tyvar_frame`].
         let FnValuePin::Pinned(m, refined) =
             pin_generic_fn_value(&sig.type_params, &declared, want, &|n| {
                 self.rigid_param(n, call_free)

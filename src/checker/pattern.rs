@@ -3018,7 +3018,7 @@ impl Checker {
     /// THE ONE diagnostic for "this read of generic fn `name` cannot become a function value here",
     /// shared by both positions that can reach the verdict: the immediate read (`infer_ident`, whose
     /// expected-type hint either determines the params or does not) and the DEFERRED end-of-call
-    /// check on a generic method's argument ([`Checker::report_undetermined_generic_fn_value_args`]).
+    /// check on a generic method's argument ([`Checker::close_tyvar_frame`]).
     /// One rule, one sentence — the whole point of the extension is that a binding and an argument
     /// stop giving one function two verdicts.
     pub(super) fn reject_undetermined_generic_fn_value(
