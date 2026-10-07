@@ -64,3 +64,46 @@ test fn a_task_that_finished_carries_no_cancel_message():
     match t.get():
         Ok(v): assert v == 5
         Err(e): assert false, "a finished job must not report a cancel: " + e.message()
+
+# TICKET-219 (C2) — under `Executor(1)` the first job runs and the rest are held, whatever the
+# timing. `shutdown_now()` drops the held jobs; each handle settles `Err` (CPython
+# `cancel_futures=True`), and a sealed channel gives the same `Err` on every `recv`.
+test fn a_held_job_dropped_by_shutdown_now_settles_err():
+    msg := "task cancelled: shutdown_now() stopped it before it finished"
+    hold := Channel[int](1)
+    ex := Executor(1)
+    first := submit_task(ex, fn(): slow(hold))
+    a := submit_task(ex, fn() -> int: 1)
+    b := submit_task(ex, fn() -> int: 2)
+    c := ex.submit_result(fn() -> int: 3)
+    ex.shutdown_now()
+    for t in [first, a, b]:
+        assert t.done(), "done() must be true after shutdown_now()"
+        match t.get():
+            Ok(_): assert false, "a dropped job must not yield a value"
+            Err(e): assert e.message() == msg
+    for _ in 0..2:
+        match c.recv():
+            Ok(_): assert false, "a dropped job must not send a value"
+            Err(e): assert e.message() == msg
+
+# TICKET-219 — `is_settled` reads a channel; any other value faults instead of answering.
+test fn is_settled_rejects_a_non_channel():
+    r := recover: concurrency.is_settled(5)
+    match r:
+        Ok(_): assert false, "is_settled(5) must fault"
+        Err(e): assert e.message().contains("Channel"), e.message()
+
+# TICKET-219 — the std internals `_settle` and `_submit_settled` seal only a channel; any other
+# value faults instead of being treated as one.
+test fn the_settle_internals_reject_a_non_channel():
+    r := recover: concurrency._settle(5, 1)
+    match r:
+        Ok(_): assert false, "_settle(5, 1) must fault"
+        Err(e): assert e.message().contains("Channel"), e.message()
+    ex := Executor()
+    s := recover: ex._submit_settled(fn(): pass, 5)
+    match s:
+        Ok(_): assert false, "_submit_settled with a non-channel must fault"
+        Err(e): assert e.message().contains("requires a Channel"), e.message()
+    ex.shutdown()
