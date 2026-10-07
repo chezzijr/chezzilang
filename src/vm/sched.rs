@@ -2629,6 +2629,9 @@ impl Vm {
             //       `finish` themselves, which is a pre-existing scheduler-bug path (see
             //       `eager_joiner_runs_fibers`' own hazard note).
             if self.demoted {
+                // TICKET-230 — a worker keeps its permit across fibers while no thread queues, so
+                // it returns the permit here, on its way out.
+                self.width_release();
                 sched.notify_waiters();
                 debug_assert!(!width::holds(), "TICKET-141: exit holding a permit");
                 return;
