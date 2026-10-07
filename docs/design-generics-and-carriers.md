@@ -27,9 +27,11 @@ surface follows **Zig** (`?T`, `E!T`, `orelse`, `catch`).
 
 ### Rust's model, adopted step by step
 
-**R1. One resolution pass.** Before type checking, every path node (`f`, `lib.f`, `a.b.f`, `T.m`,
-`Bx[int].make`, `E.A`) gets exactly one resolution (item + kind), recorded once in one table. Type
-checking reads it and never re-decides. Deletes: the call-side "defensive fallback"
+**R1. One resolution, one writer.** Every path node (`f`, `lib.f`, `a.b.f`, `T.m`, `Bx[int].make`,
+`E.A`) gets exactly one resolution (item + kind) from one decider inside the checker, `resolve_path`,
+memoised per node and written once. The call side, the value side and the compiler only read it
+(owner decision 2026-10-07; a separate pre-pass would need a second scope model, and Rust itself
+resolves type-relative paths like `Vec::<i32>::new` / `T::method` during type checking). Deletes: the call-side "defensive fallback"
 (`checker/expr.rs:649-718`), the per-shape call arms, and every second writer of the resolutions table.
 Makes W7-49 ("two decisions for one position") impossible by construction.
 
@@ -320,6 +322,7 @@ None at the moment. Resolved on 2026-10-07: "nothing, or an error" is `None!E`; 
 | date | decision |
 |---|---|
 | 2026-10-06 | generics follow Rust's architecture (Part 1); keep `[]` for type args |
+| 2026-10-07 | R1 is one `resolve_path` decider inside the checker (not a pre-pass), the only writer |
 | 2026-10-07 | hide `Option`/`Result` behind `T?`/`T!E`; same enum model underneath |
 | 2026-10-07 | one "nothing" word: `None`; `nil` removed |
 | 2026-10-07 | errors are values: `Error` protocol stays, `Err` removed; prefix `!e` builds an error, `return !e` returns it; no `fail` keyword |
