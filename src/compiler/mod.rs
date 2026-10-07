@@ -213,6 +213,25 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     Ok(c.program)
 }
 
+/// A compiler-synthesized fn value, keyed by (item, the type args its body depends on)
+/// (TICKET-226, generics design R4). A new synthesized fn kind adds an arm here and goes through
+/// [`Compiler::synth_fn_proto`]; never a per-kind memo beside it.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum SynthFn {
+    /// A payload variant read as a value (`R1[int].L`, TICKET-204): its constructor fn.
+    Variant { enum_key: String, variant: String },
+    /// A bound's instance method read through a type parameter (`T.get`): one per (method, arity).
+    ParamMethod { method: String, arity: usize },
+    /// `json.decode[T]` read as a value (TICKET-214), keyed by the target's shape.
+    Decode(crate::json_decode::TypeDescriptor<()>),
+}
+
+/// The provider-table name of a `json.decode[T]` value proto. Unspellable (`$`), so no user decl
+/// can collide with it.
+fn decode_fn_name(pid: ProtoId) -> String {
+    format!("$json.decode#{pid}")
+}
+
 struct Compiler {
     program: Program,
     /// M23 — struct/enum runtime key → its `Eq` protocol hook (`(proto, home module index)`), for the
@@ -227,12 +246,9 @@ struct Compiler {
     /// Default-argument provider NAME → `(its proto, the index of the module declaring it)`, filled
     /// as each declaring module is compiled. Materialized into `Program::providers` at the end.
     provider_defs: HashMap<String, (ProtoId, usize)>,
-    /// `(enum key, variant)` → the synthesized constructor fn of a payload variant read as a value
-    /// (`R1[int].L`, TICKET-204). See [`Compiler::variant_fn_proto`].
-    variant_fns: HashMap<(String, String), ProtoId>,
-    /// One synthesized proto per (method, arity) for a bound's instance method read through a type
-    /// parameter (`T.get`, `Resolution::ParamMethodFn`).
-    param_method_fns: HashMap<(String, usize), ProtoId>,
+    /// The ONE memo of compiler-synthesized fn values (TICKET-226): one proto per [`SynthFn`], so
+    /// two reads of the same item are one `Vm::fn_value`. See [`Compiler::synth_fn_proto`].
+    synth_fns: HashMap<SynthFn, ProtoId>,
     /// M19 Phase 2b — the current module's global name → slot map, rebuilt at the start of each
     /// `compile_module`. Shared across the toplevel proto and every fn/method/closure compiled for
     /// the module, so a global reference anywhere in the module resolves to the same slot.
@@ -578,8 +594,7 @@ impl Compiler {
             globals: HashMap::new(),
             provider_ids: HashMap::new(),
             provider_defs: HashMap::new(),
-            variant_fns: HashMap::new(),
-            param_method_fns: HashMap::new(),
+            synth_fns: HashMap::new(),
             fn_names: std::collections::HashSet::new(),
             global_slots: Vec::new(),
             global_let_lines: Vec::new(),
@@ -3534,7 +3549,13 @@ impl Compiler {
                     }
                     // A bound's instance method through a type parameter (`T.get`).
                     Resolution::ParamMethodFn { method, arity } => {
-                        let p = self.param_method_fn_proto(&method, arity);
+                        let p = self.synth_fn_proto(
+                            SynthFn::ParamMethod {
+                                method: method.clone(),
+                                arity,
+                            },
+                            |c| Ok(c.build_param_method_fn(&method, arity)),
+                        )?;
                         fc.emit(Op::MakeFunc(p), expr.span);
                     }
                     // A payload variant read as a value (`R1[int].L`): its constructor fn.
@@ -3543,7 +3564,13 @@ impl Compiler {
                         variant,
                         arity,
                     } => {
-                        let p = self.variant_fn_proto(&enum_key, &variant, arity);
+                        let p = self.synth_fn_proto(
+                            SynthFn::Variant {
+                                enum_key: enum_key.clone(),
+                                variant: variant.clone(),
+                            },
+                            |c| Ok(c.build_variant_fn(&enum_key, &variant, arity)),
+                        )?;
                         fc.emit(Op::MakeFunc(p), expr.span);
                     }
                     // std.json's decode read as a value (TICKET-214).
@@ -4824,6 +4851,15 @@ impl Compiler {
             let desc = desc.clone();
             self.compile_expr(fc, obj)?;
             self.compile_expr(fc, arg)?;
+            let ic = self.next_method_ic();
+            fc.emit(
+                Op::CallMethod {
+                    name: "parse".to_string(),
+                    argc: 1,
+                    ic,
+                },
+                span,
+            );
             self.emit_json_decode(fc, &desc, span)?;
             return Ok(());
         }
@@ -5049,13 +5085,25 @@ impl Compiler {
         Ok(true)
     }
 
-    /// The memoised proto of `T.method` as a value: a fn of `arity` params that calls `method` on
-    /// its first, so it dispatches on the receiver's runtime type and needs no witness.
-    fn param_method_fn_proto(&mut self, method: &str, arity: usize) -> ProtoId {
-        let k = (method.to_string(), arity);
-        if let Some(&p) = self.param_method_fns.get(&k) {
-            return p;
+    /// THE memo of compiler-synthesized fn values (TICKET-226): the proto of `key`, built by
+    /// `build` on its first read. One proto per key is what makes two reads one `Vm::fn_value`.
+    fn synth_fn_proto(
+        &mut self,
+        key: SynthFn,
+        build: impl FnOnce(&mut Self) -> Result<ProtoId, CompileError>,
+    ) -> Result<ProtoId, CompileError> {
+        if let Some(&p) = self.synth_fns.get(&key) {
+            return Ok(p);
         }
+        let p = build(self)?;
+        self.synth_fns.insert(key, p);
+        Ok(p)
+    }
+
+    /// The proto of `T.method` as a value: a fn of `arity` params that calls `method` on its
+    /// first, so it dispatches on the receiver's runtime type and needs no witness. Memoised by
+    /// [`Compiler::synth_fn_proto`].
+    fn build_param_method_fn(&mut self, method: &str, arity: usize) -> ProtoId {
         let mut vf = FnComp::new(method.to_string(), arity, false);
         for i in 0..arity {
             let slot = vf.add_local(format!("$v{i}"));
@@ -5071,18 +5119,12 @@ impl Compiler {
             Span::RUNTIME,
         );
         vf.emit(Op::Return, Span::RUNTIME);
-        let p = self.finish(vf);
-        self.param_method_fns.insert(k, p);
-        p
+        self.finish(vf)
     }
 
     /// A payload variant has no proto of its own; its value is this constructor fn (Rust
-    /// `E::<T>::V`), synthesized once per `(enum key, variant)`.
-    fn variant_fn_proto(&mut self, enum_key: &str, variant: &str, arity: usize) -> ProtoId {
-        let k = (enum_key.to_string(), variant.to_string());
-        if let Some(&p) = self.variant_fns.get(&k) {
-            return p;
-        }
+    /// `E::<T>::V`), memoised per `(enum key, variant)` by [`Compiler::synth_fn_proto`].
+    fn build_variant_fn(&mut self, enum_key: &str, variant: &str, arity: usize) -> ProtoId {
         let mut vf = FnComp::new(
             format!("{}.{variant}", bare_display(enum_key)),
             arity,
@@ -5094,9 +5136,7 @@ impl Compiler {
         }
         self.emit_new_enum(&mut vf, enum_key, variant, arity, Span::RUNTIME);
         vf.emit(Op::Return, Span::RUNTIME);
-        let p = self.finish(vf);
-        self.variant_fns.insert(k, p);
-        p
+        self.finish(vf)
     }
 
     /// TICKET-180 — what the name head `e` denotes: the checker's recorded [`Resolution`], the
@@ -5256,8 +5296,8 @@ impl Compiler {
         Ok(crate::json_decode::DefaultThunk { proto, module })
     }
 
-    /// `obj.parse(s)` then the descriptor's coercion, with `obj` and `s` already pushed: the one
-    /// lowering of std.json's decode, for the call and the value thunk.
+    /// The descriptor's coercion of the parsed `Result[Json]` on the stack: the one coercion step
+    /// of std.json's decode, shared by the call and the value proto.
     fn emit_json_decode(
         &mut self,
         fc: &mut FnComp,
@@ -5265,21 +5305,13 @@ impl Compiler {
         span: Span,
     ) -> Result<(), CompileError> {
         let desc = desc.try_map_defaults(&mut |f| self.compile_default_thunk(f, span))?;
-        let ic = self.next_method_ic();
-        fc.emit(
-            Op::CallMethod {
-                name: "parse".to_string(),
-                argc: 1,
-                ic,
-            },
-            span,
-        );
         fc.emit(Op::JsonDecode(desc), span);
         Ok(())
     }
 
-    /// `json.decode[T]` read as a value (TICKET-214): a one-param proto that decodes its argument.
-    /// Homed in the reading module by `MakeFunc`, where the `json` import's slot lives.
+    /// `json.decode[T]` read as a value (TICKET-214): one proto per target shape
+    /// ([`SynthFn::Decode`]), homed in std.json by `Op::MakeFuncIn`, so its home is fixed per heap
+    /// and two reads in any modules are one `Vm::fn_value` (TICKET-226).
     fn compile_decode_fn_value(
         &mut self,
         fc: &mut FnComp,
@@ -5287,15 +5319,48 @@ impl Compiler {
         desc: &crate::json_decode::TypeDescriptor<crate::checker::ArgFill>,
         span: Span,
     ) -> Result<(), CompileError> {
+        let Resolution::Module(json_idx) = *self.resolution(obj)? else {
+            return Err(CompileError {
+                message: "internal: json.decode's module is not a whole-module import".into(),
+                span,
+            });
+        };
+        let pid = self.synth_fn_proto(SynthFn::Decode(desc.shape()), |c| {
+            c.build_decode_fn(json_idx, desc)
+        })?;
+        let id = self.provider_id(&decode_fn_name(pid));
+        fc.emit(Op::MakeFuncIn(id), span);
+        Ok(())
+    }
+
+    /// The body of a `json.decode[T]` value: std.json's own `parse` slot (it reads no reader
+    /// global), then the coercion. Registered in the provider table under [`decode_fn_name`].
+    fn build_decode_fn(
+        &mut self,
+        json_idx: usize,
+        desc: &crate::json_decode::TypeDescriptor<crate::checker::ArgFill>,
+    ) -> Result<ProtoId, CompileError> {
         let mut vf = FnComp::new("json.decode".to_string(), 1, false);
         let s = vf.add_local("$s".to_string());
-        self.compile_expr(&mut vf, obj)?;
-        vf.emit_get_local_raw(s, span);
-        self.emit_json_decode(&mut vf, desc, span)?;
-        vf.emit(Op::Return, span);
+        let Some(parse) = self.program.modules[json_idx]
+            .global_slots
+            .iter()
+            .position(|n| n == "parse")
+        else {
+            return Err(CompileError {
+                message: "internal: std.json has no parse slot".into(),
+                span: Span::RUNTIME,
+            });
+        };
+        vf.emit(Op::GetGlobalSlot(parse as u32), Span::RUNTIME);
+        vf.emit_get_local_raw(s, Span::RUNTIME);
+        vf.emit(Op::Call(1), Span::RUNTIME);
+        self.emit_json_decode(&mut vf, desc, Span::RUNTIME)?;
+        vf.emit(Op::Return, Span::RUNTIME);
         let pid = self.finish(vf);
-        fc.emit(Op::MakeFunc(pid), span);
-        Ok(())
+        self.provider_defs
+            .insert(decode_fn_name(pid), (pid, json_idx));
+        Ok(pid)
     }
 
     /// Push a call's arguments -- by its plan when the checker bound it, else as written -- and

@@ -10,7 +10,7 @@ use crate::checker::Ty;
 
 /// A resolved, self-contained description of a type `json.decode` can target. `F` is a struct
 /// field's default: the checker's `ArgFill`, then the compiler's `DefaultThunk` (TICKET-198).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeDescriptor<F> {
     Int,
     Float,
@@ -40,7 +40,7 @@ pub enum TypeDescriptor<F> {
 
 /// One struct field of a decode target: its name, its descriptor, and its default, if it has one.
 /// A missing key takes `default` — the SAME fill `S(...)` uses for an omitted field (TICKET-198).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FieldDesc<F> {
     pub name: String,
     pub desc: TypeDescriptor<F>,
@@ -97,6 +97,13 @@ impl<F> TypeDescriptor<F> {
                 }
             }
         })
+    }
+
+    /// The descriptor with every default's payload dropped (which fields HAVE a default stays):
+    /// the target type alone, hashable. TICKET-226 keys the `json.decode[T]` value memo on it.
+    pub fn shape(&self) -> TypeDescriptor<()> {
+        self.try_map_defaults(&mut |_| Ok::<(), std::convert::Infallible>(()))
+            .unwrap_or_else(|e| match e {})
     }
 }
 
@@ -185,5 +192,35 @@ pub fn json_kind(variant: &str) -> &'static str {
         "Arr" => "array",
         "Obj" => "object",
         _ => "value",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(key: &str, default: Option<u8>) -> TypeDescriptor<u8> {
+        TypeDescriptor::Struct {
+            key: key.to_string(),
+            display: "S".to_string(),
+            fields: vec![FieldDesc {
+                name: "a".to_string(),
+                desc: TypeDescriptor::Int,
+                default,
+            }],
+        }
+    }
+
+    /// TICKET-226: the decode value memo keys on `shape()`, which drops each default's payload
+    /// but keeps the target type and which fields have a default.
+    #[test]
+    fn shape_drops_default_payloads_only() {
+        assert_eq!(s("m::S", Some(1)).shape(), s("m::S", Some(2)).shape());
+        assert_ne!(s("m::S", Some(1)).shape(), s("n::S", Some(1)).shape());
+        assert_ne!(s("m::S", Some(1)).shape(), s("m::S", None).shape());
+        assert_ne!(
+            TypeDescriptor::<u8>::List(Box::new(TypeDescriptor::Int)).shape(),
+            TypeDescriptor::<u8>::List(Box::new(TypeDescriptor::Float)).shape()
+        );
     }
 }
