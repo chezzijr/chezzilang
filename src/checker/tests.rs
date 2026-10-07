@@ -37757,3 +37757,10 @@ fn type_arg_bracket_reads_with_the_type_grammar() {
         "fn idt[T](x: T) -> T:\n    return x\nfn main():\n    g := idt[(int, str)]\n    print(g((1, \"a\")))\n",
     );
 }
+
+#[test]
+fn generic_fn_value_pinned_by_sibling_at_coalesce_join() {
+    ok(
+        "fn inc(x: int) -> int:\n    return x + 1\nfn g[T](x: T) -> T:\n    return x\nfn main():\n    o: Option[fn(int) -> int] = Some(inc)\n    print((o ?? g)(5))\n",
+    );
+}
