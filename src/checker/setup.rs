@@ -4708,7 +4708,11 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
                 segs.push(PathSeg::Field(name.clone()));
                 e = obj;
             }
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index {
+                obj,
+                index: Some(index),
+                ..
+            } => {
                 segs.push(match &index.kind {
                     ExprKind::Int(i) if *i >= 0 => PathSeg::Int(*i),
                     ExprKind::Str(s) => PathSeg::Str((**s).to_owned()),

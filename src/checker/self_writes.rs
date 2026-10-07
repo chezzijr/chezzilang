@@ -150,7 +150,6 @@ impl Scan {
             | ExprKind::Bool(_)
             | ExprKind::Pass
             | ExprKind::Ident(_) => {}
-            ExprKind::TypeApply { head, .. } => self.expr(head),
             ExprKind::List(items, _) | ExprKind::Tuple(items) | ExprKind::Set(items) => {
                 items.iter().for_each(|item| self.expr(item));
             }
@@ -207,9 +206,11 @@ impl Scan {
                     call.named.iter().for_each(|(_, value)| self.expr(value));
                 }
             }
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index { obj, index, .. } => {
                 self.expr(obj);
-                self.expr(index);
+                if let Some(index) = index {
+                    self.expr(index);
+                }
             }
             ExprKind::Slice {
                 obj,

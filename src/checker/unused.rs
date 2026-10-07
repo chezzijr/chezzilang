@@ -257,7 +257,6 @@ impl Scan {
             | ExprKind::RawStr(_)
             | ExprKind::Bool(_)
             | ExprKind::Pass => {}
-            ExprKind::TypeApply { head, .. } => self.expr(head),
             ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
                 es.iter().for_each(|x| self.expr(x))
             }
@@ -310,9 +309,11 @@ impl Scan {
                     c.named.iter().for_each(|(_, v)| self.expr(v));
                 }
             }
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index { obj, index, .. } => {
                 self.expr(obj);
-                self.expr(index);
+                if let Some(index) = index {
+                    self.expr(index);
+                }
             }
             ExprKind::Slice {
                 obj,

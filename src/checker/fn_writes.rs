@@ -151,12 +151,14 @@ impl UseWalk<'_> {
                         ExprKind::Ident(n) => self.keep(n, RootUse::Field(name.clone())),
                         _ => self.value(obj),
                     },
-                    ExprKind::Index { obj, index } => {
+                    ExprKind::Index { obj, index, .. } => {
                         match &obj.kind {
                             ExprKind::Ident(n) => self.keep(n, RootUse::Index),
                             _ => self.value(obj),
                         }
-                        self.value(index);
+                        if let Some(index) = index {
+                            self.value(index);
+                        }
                     }
                     _ => self.escape_free(target),
                 }
@@ -305,9 +307,11 @@ impl UseWalk<'_> {
                 ExprKind::Ident(n) => self.keep(n, RootUse::Field(name.clone())),
                 _ => self.value(obj),
             },
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index { obj, index, .. } => {
                 self.indexed(obj);
-                self.value(index);
+                if let Some(index) = index {
+                    self.value(index);
+                }
             }
             ExprKind::Slice {
                 obj,

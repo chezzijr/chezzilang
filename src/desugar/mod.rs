@@ -767,11 +767,6 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Pass => {}
-        // A type application's head is an expression (`pair`, `lib.Pair`); its args are `Type`s.
-        ExprKind::TypeApply { head, args } => {
-            walk_idents_and_types(head, f, tf);
-            args.iter().for_each(tf);
-        }
         // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Reached once
         // `desugar` has rewritten the literal; before that the raw-`Str` arm above parses it.
         ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
@@ -833,9 +828,13 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
             type_args.iter().for_each(&mut *tf);
         }
         ExprKind::Field { obj, .. } => walk_idents_and_types(obj, f, tf),
-        ExprKind::Index { obj, index } => {
+        // The bracket's head and index reading are expressions; its type reading holds `Type`s.
+        ExprKind::Index { obj, index, types } => {
             walk_idents_and_types(obj, f, tf);
-            walk_idents_and_types(index, f, tf);
+            if let Some(i) = index {
+                walk_idents_and_types(i, f, tf);
+            }
+            types.iter().for_each(tf);
         }
         ExprKind::Slice {
             obj,
@@ -1371,9 +1370,11 @@ impl Walker<'_> {
                 }
             }
             ExprKind::Field { obj, .. } => self.walk_expr(obj)?,
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index { obj, index, .. } => {
                 self.walk_expr(obj)?;
-                self.walk_expr(index)?;
+                if let Some(index) = index {
+                    self.walk_expr(index)?;
+                }
             }
             ExprKind::Slice {
                 obj,
@@ -1518,7 +1519,6 @@ impl Walker<'_> {
             | ExprKind::RawStr(_)
             | ExprKind::Bool(_)
             | ExprKind::Pass => {}
-            ExprKind::TypeApply { head, .. } => self.walk_expr(head)?,
         }
         Ok(())
     }

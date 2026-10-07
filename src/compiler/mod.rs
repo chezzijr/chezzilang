@@ -1876,7 +1876,11 @@ impl Compiler {
                     span,
                 );
             }
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index {
+                obj,
+                index: Some(index),
+                ..
+            } => {
                 let tmp = fc.add_hidden();
                 fc.emit_hidden_set(tmp, span);
                 self.compile_expr(fc, obj)?;
@@ -2117,7 +2121,11 @@ impl Compiler {
             }
             // `obj[i] = v` → RHS first (Python order), then `emit_assign_value_first` rebuilds the
             // `[obj, i, v]` order `SetIndex` expects. Compound dups `[obj, i]` to read-modify-write.
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index {
+                obj,
+                index: Some(index),
+                ..
+            } => {
                 // No `AsInt`: the index may be a map key (str/bool). `GetIndex`/`SetIndex`
                 // validate int-ness in their list/str arms at runtime.
                 if let Some(bin) = op.to_binop() {
@@ -2204,7 +2212,11 @@ impl Compiler {
                     span,
                 );
             }
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index {
+                obj,
+                index: Some(index),
+                ..
+            } => {
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, index)?;
                 fc.emit_hidden_get(tuple_slot, span);
@@ -2676,7 +2688,8 @@ impl Compiler {
                             id: crate::ast::NodeId::SYNTH,
                             kind: ExprKind::Index {
                                 obj: Box::new(acc),
-                                index: Box::new(key),
+                                index: Some(Box::new(key)),
+                                types: Vec::new(),
                             },
                             span,
                         },
@@ -3559,10 +3572,21 @@ impl Compiler {
                     }
                 }
             }
-            ExprKind::Index { obj, index } => {
+            // One bracket, two readings (TICKET-222): a type-applied fn value (`pair[str, int]`,
+            // `idt[(int, str)]`) when the checker resolved the head to a fn-like item; as the
+            // receiver of a member access / call it resolved into a variant ctor, static-method
+            // call or nullary variant, which never lowers the head. Otherwise the index reading.
+            ExprKind::Index { obj, index, .. } => {
                 if self.compile_type_applied_fn_value(fc, expr)? {
                     return Ok(());
                 }
+                let Some(index) = index else {
+                    return Err(CompileError {
+                        message: "internal: a type-only bracket reached the index lowering"
+                            .to_string(),
+                        span: expr.span,
+                    });
+                };
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, index)?;
                 // No `AsInt`: the index may be a map key (str/bool), not just a list/str int.
@@ -3682,19 +3706,6 @@ impl Compiler {
                     }
                 }
                 self.compile_expr(fc, &c)?;
-            }
-            // A `TypeApply` in value position is a type-applied fn value (`pair[str, int]`); as the
-            // receiver of a member access / call the checker resolved it into a variant ctor,
-            // static-method call or nullary variant, which never lowers the head.
-            ExprKind::TypeApply { .. } => {
-                if !self.compile_type_applied_fn_value(fc, expr)? {
-                    return Err(CompileError {
-                        message:
-                            "internal: a type application reached codegen without a fn-like head"
-                                .to_string(),
-                        span: expr.span,
-                    });
-                }
             }
             ExprKind::Closure { params, body, .. } => {
                 self.compile_closure(fc, params, body, expr.span)?
@@ -5136,7 +5147,7 @@ impl Compiler {
     /// it compiles as a value. (4) A value `Field`, including `MethodFn` and `VariantFn` (a type
     /// path's method or payload variant read as a value). (5) The `obj` of a `Field` is compiled,
     /// and so falls under (3), only when that `Field`'s entry is `Member`, `ModuleMember` or `Fn`.
-    /// (6) The `Ident` or `Field` head of a type-applied fn value, `Index` or `TypeApply`
+    /// (6) The `Ident` or `Field` head of a type-applied fn value `Index`
     /// (`m.f[int]`, `pair[str, int]`, `Bx[int].put[str]`), recorded as `Fn`, `MethodFn` or
     /// `VariantFn`. It never asks
     /// about a type head (`T` in `T.m()`, `E` in `E.V`, `Box` in `Box[int].of()`) or a type
@@ -5947,7 +5958,6 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::Bool(_)
         | ExprKind::Pass
         | ExprKind::Ident(_) => {}
-        ExprKind::TypeApply { head, .. } => find_boundary_free_expr(head, out),
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| find_boundary_free_expr(x, out))
         }
@@ -6007,9 +6017,11 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
                     .for_each(|(_, v)| find_boundary_free_expr(v, out));
             }
         }
-        ExprKind::Index { obj, index } => {
+        ExprKind::Index { obj, index, .. } => {
             find_boundary_free_expr(obj, out);
-            find_boundary_free_expr(index, out);
+            if let Some(index) = index {
+                find_boundary_free_expr(index, out);
+            }
         }
         ExprKind::Slice {
             obj,
@@ -6464,7 +6476,6 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::Pass => {}
-        ExprKind::TypeApply { head, .. } => free_names_expr(head, bound, out),
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| free_names_expr(x, bound, out))
         }
@@ -6541,9 +6552,11 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
                     .for_each(|(_, v)| free_names_expr(v, bound, out));
             }
         }
-        ExprKind::Index { obj, index } => {
+        ExprKind::Index { obj, index, .. } => {
             free_names_expr(obj, bound, out);
-            free_names_expr(index, bound, out);
+            if let Some(index) = index {
+                free_names_expr(index, bound, out);
+            }
         }
         ExprKind::Slice {
             obj,
@@ -6619,7 +6632,6 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::Bool(_)
         | ExprKind::Pass
         | ExprKind::Ident(_) => {}
-        ExprKind::TypeApply { head, .. } => collect_frame_binds_expr(head, out),
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| collect_frame_binds_expr(x, out))
         }
@@ -6682,9 +6694,11 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
                     .for_each(|(_, v)| collect_frame_binds_expr(v, out));
             }
         }
-        ExprKind::Index { obj, index } => {
+        ExprKind::Index { obj, index, .. } => {
             collect_frame_binds_expr(obj, out);
-            collect_frame_binds_expr(index, out);
+            if let Some(index) = index {
+                collect_frame_binds_expr(index, out);
+            }
         }
         ExprKind::Slice {
             obj,
@@ -6767,7 +6781,6 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
         | ExprKind::Bool(_)
         | ExprKind::Pass
         | ExprKind::Ident(_) => false,
-        ExprKind::TypeApply { head, .. } => expr_has_bare_spawn(head),
         ExprKind::Interp(chunks) => chunk_exprs(chunks).into_iter().any(expr_has_bare_spawn),
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().any(expr_has_bare_spawn)
@@ -6810,7 +6823,9 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
                         || c.named.iter().any(|(_, v)| expr_has_bare_spawn(v))
                 })
         }
-        ExprKind::Index { obj, index } => expr_has_bare_spawn(obj) || expr_has_bare_spawn(index),
+        ExprKind::Index { obj, index, .. } => {
+            expr_has_bare_spawn(obj) || index.as_deref().is_some_and(expr_has_bare_spawn)
+        }
         ExprKind::Slice {
             obj,
             start,

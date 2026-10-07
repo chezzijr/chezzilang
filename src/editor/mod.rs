@@ -822,7 +822,6 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
         | ExprKind::Bool(_)
         | ExprKind::Pass
         | ExprKind::Ident(_) => {}
-        ExprKind::TypeApply { head, .. } => overlay_expr(head, map),
         // Interpolation fragments are ordinary expressions — color them like any other child.
         ExprKind::Interp(chunks) => {
             for c in chunks {
@@ -873,9 +872,11 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
             overlay_expr(start, map);
             overlay_expr(end, map);
         }
-        ExprKind::Index { obj, index } => {
+        ExprKind::Index { obj, index, .. } => {
             overlay_expr(obj, map);
-            overlay_expr(index, map);
+            if let Some(index) = index {
+                overlay_expr(index, map);
+            }
         }
         ExprKind::Slice {
             obj,

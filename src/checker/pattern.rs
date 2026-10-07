@@ -1735,7 +1735,9 @@ impl Checker {
                 name,
                 name_span,
             } => self.infer_field(expr.id, obj, name, *name_span),
-            ExprKind::Index { obj, index } => self.infer_index(expr, obj, index),
+            ExprKind::Index { obj, index, types } => {
+                self.infer_index(expr, obj, index.as_deref(), types)
+            }
             ExprKind::Try(inner) => self.infer_try(inner, expr.span),
             // W7-43 — optional-chaining `?.` / null-coalescing `??` are CARRIER nodes: the checker
             // types the operand, picks the lowering, then clone-lowers and infers the clone. The
@@ -1759,25 +1761,6 @@ impl Checker {
                 self.infer_if_else(cond, then, els, ret_sink, expr.span)
             }
             ExprKind::Recover(block) => self.infer_recover(block),
-            // `head[T1, T2]`: a type-applied fn value, a type used as a value, or a multi-index
-            // subscript (Go: "more than one index").
-            ExprKind::TypeApply { head, args } => {
-                if let Some(t) = self.infer_type_applied_fn_value(expr) {
-                    t
-                } else if let Some(th) = self.type_head(head) {
-                    self.type_not_value(&th, expr.span);
-                    Ty::Unknown
-                } else {
-                    let t = self.infer_value(head);
-                    if !t.is_unknown() {
-                        self.error(
-                            expr.span,
-                            format!("a subscript takes one index, found {}", args.len()),
-                        );
-                    }
-                    Ty::Unknown
-                }
-            }
         }
     }
 
@@ -4419,10 +4402,19 @@ impl Checker {
         }
     }
 
-    pub(super) fn infer_index(&mut self, e: &Expr, obj: &Expr, index: &Expr) -> Ty {
-        // A type-applied fn value `idt[int]` (TICKET-197/204): one resolution for both carriers.
-        // Runs BEFORE `infer_value(obj)`/inferring the index, which would wrongly report `int` as
-        // an unknown name and "cannot index into fn".
+    /// `obj[…]`, one bracket with both readings (TICKET-222). The head picks: a type-applied fn
+    /// value, then a type used as a value, then the index reading. A bracket with no index reading
+    /// on a value head is a type where a subscript belongs (Go: `more than one index`).
+    pub(super) fn infer_index(
+        &mut self,
+        e: &Expr,
+        obj: &Expr,
+        index: Option<&Expr>,
+        types: &[crate::ast::Type],
+    ) -> Ty {
+        // A type-applied fn value `idt[int]` (TICKET-197/204). Runs BEFORE `infer_value(obj)` /
+        // inferring the index, which would wrongly report `int` as an unknown name and "cannot
+        // index into fn".
         if let Some(t) = self.infer_type_applied_fn_value(e) {
             return t;
         }
@@ -4449,17 +4441,30 @@ impl Checker {
             }
             return Ty::Unknown;
         }
-        self.index_value(obj, index)
+        let Some(index) = index else {
+            if !self.infer_value(obj).is_unknown() {
+                let msg = match types {
+                    [t] => format!(
+                        "a subscript takes an expression, found the type '{}'",
+                        self.resolve_type(t, e.span)
+                    ),
+                    _ => format!("a subscript takes one index, found {}", types.len()),
+                };
+                self.error(e.span, msg);
+            }
+            return Ty::Unknown;
+        };
+        self.index_value(obj, index, !types.is_empty())
     }
 
     /// `obj[index]` read as a value index, once the type-application readings declined. When
-    /// inferring `obj` reported an error and `index` is type-shaped (`Nope[int]`), the index is not
-    /// inferred: that reading would report `int` as an unknown name on top of the head's error
-    /// (DEC-158: the mark counts errors only).
-    pub(super) fn index_value(&mut self, obj: &Expr, index: &Expr) -> Ty {
+    /// inferring `obj` reported an error and the bracket also read as a type (`Nope[int]`), the
+    /// index is not inferred: that reading would report `int` as an unknown name on top of the
+    /// head's error (DEC-158: the mark counts errors only).
+    pub(super) fn index_value(&mut self, obj: &Expr, index: &Expr, type_shaped: bool) -> Ty {
         let mark = self.errors.len();
         let obj_ty = self.infer_value(obj);
-        if self.errors.len() > mark && crate::ast::index_as_type(index).is_some() {
+        if self.errors.len() > mark && type_shaped {
             return Ty::Unknown;
         }
         // Map keys are NOT int — infer the object first and check the index against the key type.
@@ -5273,9 +5278,11 @@ impl Checker {
                     self.scan_expr_for_pin(name, a, match_pin, member_pin);
                 }
             }
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index { obj, index, .. } => {
                 self.scan_expr_for_pin(name, obj, match_pin, member_pin);
-                self.scan_expr_for_pin(name, index, match_pin, member_pin);
+                if let Some(index) = index {
+                    self.scan_expr_for_pin(name, index, match_pin, member_pin);
+                }
             }
             ExprKind::Slice {
                 obj,
@@ -5327,9 +5334,6 @@ impl Checker {
             // inside a `recover:` body stays un-inferable and requires an annotation (sound: this is
             // the conservative v1 fallback, never a mis-pin). Leaves (`Ident`/literals/`RawStr`)
             // have no child to scan.
-            ExprKind::TypeApply { head, .. } => {
-                self.scan_expr_for_pin(name, head, match_pin, member_pin)
-            }
             _ => {}
         }
     }

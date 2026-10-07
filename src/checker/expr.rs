@@ -175,7 +175,7 @@ impl Checker {
             if let Some(id) = self.call_ctx.as_ref().map(|c| c.id) {
                 self.record_resolution(id, Resolution::IndexCall, span);
             }
-            let callee_ty = self.index_value(callee, &ix);
+            let callee_ty = self.index_value(callee, &ix, true);
             return self.apply_value_call(callee, callee_ty, args, named, span);
         }
         // Explicit call-site type arguments `name[T, …](…)`. Resolved once here; only generic
@@ -549,8 +549,8 @@ impl Checker {
             //   • SINGLE type arg — `Field{obj: Index{Ident(Type), idx}, name}` (the `[..]` is
             //     followed by `.` not `(`, so the turbofish-call steal never fires; the parser can't
             //     tell `Type[int].x` from `arr[i].field`, so the checker reinterprets the index).
-            //   • MULTI type arg — `Field{obj: TypeApply{head, args}, name}` (the parser committed a
-            //     real type list because of the disambiguating comma).
+            //   • MULTI type arg — `Field{obj: Index{head, types}, name}` (a type-only bracket: the
+            //     type list has no expression reading).
             // VARIANT-FIRST (a same-named static method is barred at decl time by disjointness); if
             // no variant matches the member name, fall to the static-method path.
             if let Some((th, type_exprs)) = self.type_apply_head(obj) {
@@ -656,8 +656,10 @@ impl Checker {
         // index is the single method type argument. Gate on the head being a KNOWN, NON-local struct/enum.
         if let ExprKind::Index {
             obj: callee_obj,
-            index: mt,
+            types,
+            ..
         } = &callee.kind
+            && let [mt] = types.as_slice()
             && let ExprKind::Field {
                 obj: head,
                 name,
@@ -676,10 +678,8 @@ impl Checker {
                     .map(|th| (th, Vec::new())),
                 _ => None,
             });
-            if let Some((th, type_exprs)) = resolved_head
-                && let Some(mt_ty) =
-                    crate::ast::index_as_type(mt).map(|t| self.resolve_type(&t, span))
-            {
+            if let Some((th, type_exprs)) = resolved_head {
+                let mt_ty = self.resolve_type(mt, span);
                 let (tname, key) = (th.name.clone(), th.key.clone());
                 self.record_type_member(callee_obj, &key, name);
                 let written: Vec<Ty> = type_exprs
@@ -5218,19 +5218,17 @@ pub(super) fn callable_slots(
 }
 
 /// The bare head NAME of a type-level turbofish, in either carrier the parser produces:
-/// `Type[int]` arrives as `Index` over an `Ident`, `Type[int, str]` as `TypeApply`. Syntax only —
+/// `Type[int]` and `Type[int, str]` both arrive as an `Index` over an `Ident`. Syntax only —
 /// whether that name is a shadowing type parameter is [`Checker::shadowing_type_param`]'s single
 /// answer. That excludes a LOCAL binding (so `arr[i].len()` is untouched) but deliberately NOT a
 /// module GLOBAL: a type parameter is the inner scope, so it shadows a global of the same name for
 /// the whole body, and `g[0]` under `fn h[g](…)` is the parameter — Go answers the same.
 fn type_apply_param_head(obj: &Expr) -> Option<String> {
     match &obj.kind {
-        ExprKind::TypeApply { head: tobj, .. } | ExprKind::Index { obj: tobj, .. } => {
-            match &tobj.kind {
-                ExprKind::Ident(n) => Some(n.clone()),
-                _ => None,
-            }
-        }
+        ExprKind::Index { obj: tobj, .. } => match &tobj.kind {
+            ExprKind::Ident(n) => Some(n.clone()),
+            _ => None,
+        },
         _ => None,
     }
 }

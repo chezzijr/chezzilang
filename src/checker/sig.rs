@@ -622,14 +622,12 @@ impl Checker {
             ExprKind::Ident(n) => self.labels_certain(n).ok(),
             // TICKET-187/204: `g := m.f`, a type-applied fn value (`pair[str, int]`) and a type
             // path value (`Bx[int].make`) hold one known function exactly as `g := f` does.
-            ExprKind::Index { .. } | ExprKind::TypeApply { .. } | ExprKind::Field { .. } => {
-                crate::ast::type_application(value)
-                    .map_or_else(
-                        || self.path_fn(value).is_some(),
-                        |app| self.path_fn(app.head).is_some(),
-                    )
-                    .then(Vec::new)
-            }
+            ExprKind::Index { .. } | ExprKind::Field { .. } => crate::ast::type_application(value)
+                .map_or_else(
+                    || self.path_fn(value).is_some(),
+                    |app| self.path_fn(app.head).is_some(),
+                )
+                .then(Vec::new),
             _ => None,
         }
     }
@@ -4328,7 +4326,11 @@ impl Checker {
             }
             // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
             // aren't indexable. (`infer_index` would green-light a str index — handle it here.)
-            ExprKind::Index { obj, index } => {
+            ExprKind::Index {
+                obj,
+                index: Some(index),
+                ..
+            } => {
                 // Refine-on-first-use for `m[k]=v` / `xs[i]=v`: when `obj` is a simple variable whose
                 // type has an `Unknown` key/value/element slot (an empty `{}`/`[]`), the supplied
                 // (idx_ty, val_ty) makes the slot concrete — re-pin the binding so a later conflicting
@@ -6201,11 +6203,11 @@ fn method_binders(methods: &[FnDecl], owner: &str) -> Vec<(String, Span, String)
 }
 
 /// M24-5b — the bare type NAME a dotted callee's head spells, peeling either type-level turbofish
-/// carrier (`Enum[T]` parses as an `Index` over the name, `E[T, U]` as a `TypeApply`).
+/// carrier (`Enum[T]` and `E[T, U]` both parse as an `Index` over the name).
 fn bare_head_name(kind: &ExprKind) -> Option<&str> {
     match kind {
         ExprKind::Ident(n) => Some(n),
-        ExprKind::Index { obj, .. } | ExprKind::TypeApply { head: obj, .. } => match &obj.kind {
+        ExprKind::Index { obj, .. } => match &obj.kind {
             ExprKind::Ident(n) => Some(n),
             _ => None,
         },
@@ -6217,7 +6219,7 @@ fn bare_head_name(kind: &ExprKind) -> Option<&str> {
 /// (`module.Enum[T]` is an `Index` over the `Field`).
 fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
     let field = match kind {
-        ExprKind::Index { obj, .. } | ExprKind::TypeApply { head: obj, .. } => &obj.kind,
+        ExprKind::Index { obj, .. } => &obj.kind,
         k => k,
     };
     match field {

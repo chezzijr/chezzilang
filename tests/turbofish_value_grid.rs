@@ -1052,6 +1052,7 @@ fn bracket_grid_cells(out: &mut Vec<Cell>) {
             };
             let reject = match (head, sk) {
                 ("json", "fn") => Some("decode: cannot decode into fn(int) -> int"),
+                ("json", "lgen") => Some("decode: cannot decode into generic struct Bx[int]"),
                 ("abs", s) if s != "int" => Some("does not satisfy Num"),
                 _ => None,
             };
