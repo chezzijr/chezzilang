@@ -891,12 +891,35 @@ impl MethodIcSite {
 }
 
 /// TICKET-215 — what names a bare fn value in [`Vm::fn_values`]: a Chezzi fn item by proto, a native
-/// std fn by member name + fn pointer, an extern fn by its shared `Arc<Cffi>` address.
+/// std fn by member name + fn pointer, an extern fn by its shared `Arc<Cffi>` address, a universe
+/// builtin by name (TICKET-226).
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum FnKey {
     Proto(ProtoId),
     Native(Box<str>, usize),
     Cffi(usize),
+    Builtin(Box<str>),
+}
+
+/// TICKET-226 — how a callable value runs: [`Vm::callable`]'s answer, read by call, `lower_task`,
+/// `Executor.submit` and the entrypoint. Holds only `Copy`/cheap fields, so reading it allocates
+/// nothing on the hot user-fn/closure paths.
+pub(crate) enum Callee {
+    Func {
+        proto: ProtoId,
+        home: GcRef,
+    },
+    Closure {
+        proto: ProtoId,
+        home: GcRef,
+    },
+    Native {
+        func: crate::native::NativeFn,
+        name: Box<str>,
+        kind: crate::native::Kind,
+    },
+    Builtin(Box<str>),
+    Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
 }
 
 pub struct Vm {
@@ -1788,18 +1811,13 @@ enum Lowered {
         home: Option<usize>,
         span: Span,
     },
-    Func {
-        proto: ProtoId,
-        args: Vec<WireValue>,
-        home: Option<usize>,
-        span: Span,
-    },
-    /// `spawn f(args)` where `f` is a first-class builtin fn value (`Obj::Builtin`) — the callee is
-    /// pure code (no captures, no home), so it crosses by name and the worker re-allocs a fresh
-    /// `Obj::Builtin`, mirroring `Func`. Without this arm a builtin callee hit `prepare_worker`'s
-    /// reject `_` and could not be spawned at all.
-    Builtin {
-        name: Box<str>,
+    /// TICKET-226 — `spawn f(args)` where `f` is any non-closure callable ([`Vm::callable`]): a bare
+    /// fn, method path, variant ctor, `T.m`, `json.decode[T]`, native, builtin or extern fn. The
+    /// callee crosses by value through `to_wire`, and `from_wire_memo` lands it in the worker heap's
+    /// one `fn_value` slot. A closure stays [`Lowered::Closure`] for TICKET-016's no-globals rule.
+    /// Never add a per-kind arm beside this one.
+    Value {
+        callee: WireValue,
         args: Vec<WireValue>,
         span: Span,
     },

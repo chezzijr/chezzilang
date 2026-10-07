@@ -4249,10 +4249,7 @@ impl Vm {
         // walk locks the core. A submit racing a `shutdown()` is rejected by the slot
         // reservation itself (the join closes scope 0 under the sched's core lock), so a job
         // is either rejected or counted by that join.
-        if !f
-            .as_obj()
-            .is_some_and(|c| matches!(self.heap.get(c), Obj::Func { .. } | Obj::Closure { .. }))
-        {
+        if self.callable(f).is_none() {
             return Err(self.err("submit requires a function or closure".to_string(), span));
         }
         let sched = {

@@ -4417,8 +4417,10 @@ impl Vm {
             WireValue::Reader(core) => Value::obj(self.heap.alloc(Obj::Reader(core))),
             // Rebuild a fresh `Obj::Ptr` from the raw address carried by value (heap-independent).
             WireValue::Ptr(a) => Value::obj(self.heap.alloc(Obj::Ptr(a))),
-            // Re-alloc a fresh `Obj::Builtin` from the name carried by value (pure code, no state).
-            WireValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name))),
+            // The heap's one `Obj::Builtin` for this name ([`Vm::fn_value`], TICKET-226).
+            WireValue::Builtin(name) => {
+                self.fn_value(FnKey::Builtin(name.clone()), || Obj::Builtin(name))
+            }
             // The heap's one `Obj::Native` for this fn ([`Vm::fn_value`], TICKET-215), from the name +
             // fn pointer carried by value (pure code) — same as the `SnapValue::Native` rebuild.
             WireValue::Native { name, func, kind } => {
@@ -5063,59 +5065,48 @@ impl Vm {
         let lowered = match task {
             PendingCall::Call { callee, args, span } => {
                 let wargs = self.wire_args(&args, span, &mut memo)?;
-                match callee.as_obj() {
-                    Some(h) => match self.heap.get(h).clone() {
-                        Obj::Closure {
-                            proto,
-                            captured,
-                            home,
-                        } => {
-                            // Lever #3: captures are positional; carry names from the proto in slot
-                            // order so the wire format (Vec<(name, value)>) is unchanged. TICKET-016
-                            // (W8-25): this is the DIRECT spawn callee — no `globals` snapshot here,
-                            // see the `Lowered::Closure` doc comment (its home module is already
-                            // covered by `pin_snapshot`). A nested closure captured here still gets
-                            // its own globals installed through `to_wire_memo_at`'s `WireValue::Closure`
-                            // arm.
-                            let names = self.program.protos[proto].capture_names.clone();
-                            let mut wcap = Vec::with_capacity(captured.len());
-                            for (i, v) in captured.into_iter().enumerate() {
-                                let w = self.to_wire_memo_at(v, span, &mut memo)?;
-                                self.ensure_crossable(&w, span)?;
-                                let name = names.get(i).cloned().unwrap_or_default();
-                                wcap.push((name, w));
-                            }
-                            Lowered::Closure {
-                                proto,
-                                captured: wcap,
-                                args: wargs,
-                                home: self.home_index(home),
-                                span,
-                            }
+                match self.callable(callee) {
+                    Some(Callee::Closure { proto, home }) => {
+                        let h = callee.as_obj().expect("a closure is an object");
+                        let Obj::Closure { captured, .. } = self.heap.get(h) else {
+                            unreachable!("callable classified a closure")
+                        };
+                        let captured = captured.clone();
+                        // Lever #3: captures are positional; carry names from the proto in slot
+                        // order so the wire format (Vec<(name, value)>) is unchanged. TICKET-016
+                        // (W8-25): this is the DIRECT spawn callee — no `globals` snapshot here,
+                        // see the `Lowered::Closure` doc comment (its home module is already
+                        // covered by `pin_snapshot`). A nested closure captured here still gets
+                        // its own globals installed through `to_wire_memo_at`'s `WireValue::Closure`
+                        // arm.
+                        let names = self.program.protos[proto].capture_names.clone();
+                        let mut wcap = Vec::with_capacity(captured.len());
+                        for (i, v) in captured.into_iter().enumerate() {
+                            let w = self.to_wire_memo_at(v, span, &mut memo)?;
+                            self.ensure_crossable(&w, span)?;
+                            let name = names.get(i).cloned().unwrap_or_default();
+                            wcap.push((name, w));
                         }
-                        Obj::Func { proto, home } => Lowered::Func {
+                        Lowered::Closure {
                             proto,
+                            captured: wcap,
                             args: wargs,
                             home: self.home_index(home),
                             span,
-                        },
-                        // A first-class builtin fn value (`f := ord; spawn f(x)`) is pure code — cross
-                        // it by name; the worker re-allocs a fresh `Obj::Builtin`. Mirrors `Func`.
-                        Obj::Builtin(name) => Lowered::Builtin {
-                            name,
+                        }
+                    }
+                    // TICKET-226: every other callable kind crosses by value, AFTER the args (the
+                    // order `rebuild_ready` rebuilds in); `from_wire_memo` lands it in the
+                    // worker heap's one `fn_value` slot.
+                    Some(_) => {
+                        let w = self.to_wire_memo_at(callee, span, &mut memo)?;
+                        self.ensure_crossable(&w, span)?;
+                        Lowered::Value {
+                            callee: w,
                             args: wargs,
                             span,
-                        },
-                        _ => {
-                            return Err(self.err(
-                                format!(
-                                    "spawn: '{}' is not an isolable task",
-                                    self.type_name(callee)
-                                ),
-                                span,
-                            ));
                         }
-                    },
+                    }
                     None => {
                         return Err(self.err(
                             format!(
@@ -5214,20 +5205,10 @@ impl Vm {
                 }));
                 (ReadyCall::Invoke { callee, args }, span)
             }
-            Lowered::Func {
-                proto,
-                args,
-                home,
-                span,
-            } => {
-                let home = self.worker_home(home);
-                let callee = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
+            Lowered::Value { callee, args, span } => {
+                // ARGS FIRST — `lower_task` serializes them before the callee.
                 let args = self.rebuild_items(args, rb, |w| w);
-                (ReadyCall::Invoke { callee, args }, span)
-            }
-            Lowered::Builtin { name, args, span } => {
-                let callee = Value::obj(self.heap.alloc(Obj::Builtin(name)));
-                let args = self.rebuild_items(args, rb, |w| w);
+                let callee = self.from_wire_memo(callee, rb);
                 (ReadyCall::Invoke { callee, args }, span)
             }
             Lowered::Method {
@@ -6280,8 +6261,10 @@ impl Vm {
                     }
                 })
             }
-            // Re-alloc a fresh `Obj::Builtin` from the carried name (pure code, no state to share).
-            SnapValue::Builtin(name) => Value::obj(self.heap.alloc(Obj::Builtin(name.clone()))),
+            // The heap's one `Obj::Builtin` for this name ([`Vm::fn_value`], TICKET-226).
+            SnapValue::Builtin(name) => {
+                self.fn_value(FnKey::Builtin(name.clone()), || Obj::Builtin(name.clone()))
+            }
             SnapValue::Uninit(line) => Value::uninit(*line),
             // Re-alloc from the SAME shared `Arc<Cffi>` — no re-dlopen (shared address space).
             SnapValue::Cffi(c) => self.fn_value(FnKey::Cffi(Arc::as_ptr(c) as usize), || {

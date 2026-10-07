@@ -812,13 +812,7 @@ impl Vm {
         })?;
         let callee = self.read_slot(home, idx, span)?;
         // Guard with a clear message before `invoke_value`'s generic "not callable" fault.
-        let callable = matches!(
-            callee.as_obj(),
-            Some(h) if matches!(
-                self.heap.get(h),
-                Obj::Func { .. } | Obj::Closure { .. } | Obj::Native { .. } | Obj::Cffi(_)
-            )
-        );
+        let callable = self.callable(callee).is_some();
         if !callable {
             return Err(self.err(
                 format!(
@@ -2509,8 +2503,9 @@ impl Vm {
             }
             Op::CallBuiltin(name, argc) => self.do_builtin(name, *argc, span)?,
             Op::LoadBuiltin(name) => {
-                let h = self.heap.alloc(Obj::Builtin(name.as_str().into()));
-                self.push(Value::obj(h));
+                let name: Box<str> = name.as_str().into();
+                let v = self.fn_value(FnKey::Builtin(name.clone()), || Obj::Builtin(name));
+                self.push(v);
             }
             Op::CallPrint(argc) => self.do_print(*argc, span)?,
             Op::CallPrintSep { argc } => self.do_print_sep(*argc, span)?,

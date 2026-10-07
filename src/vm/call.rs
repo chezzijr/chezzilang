@@ -136,168 +136,168 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let argc = args.len();
-        match callee.view() {
-            ValueView::Obj(h) => {
-                // Borrow the heap object only long enough to read its `Copy` fields. The old code
-                // `self.heap.get(h).clone()` deep-cloned the whole `Obj` on *every* call — for a
-                // closure that meant cloning its captured-environment `HashMap` each time — just to
-                // read `proto`/`home`. `Native` still clones its (small) name `String`, but the hot
-                // user-function/closure paths now copy three scalars and allocate nothing.
-                enum Callee {
-                    Func {
-                        proto: ProtoId,
-                        home: GcRef,
-                    },
-                    Closure {
-                        proto: ProtoId,
-                        home: GcRef,
-                    },
-                    Native {
-                        func: crate::native::NativeFn,
-                        name: Box<str>,
-                        kind: crate::native::Kind,
-                    },
-                    Builtin(Box<str>),
-                    Cffi(std::sync::Arc<crate::native::cffi::Cffi>),
-                    NotCallable,
-                }
-                let callee_kind = match self.heap.get(h) {
-                    Obj::Func { proto, home } => Callee::Func {
-                        proto: *proto,
-                        home: *home,
-                    },
-                    Obj::Closure { proto, home, .. } => Callee::Closure {
-                        proto: *proto,
-                        home: *home,
-                    },
-                    Obj::Native { func, name, kind } => Callee::Native {
-                        func: *func,
-                        name: name.clone(),
-                        kind: *kind,
-                    },
-                    Obj::Builtin(name) => Callee::Builtin(name.clone()),
-                    Obj::Cffi(c) => Callee::Cffi(std::sync::Arc::clone(c)),
-                    _ => Callee::NotCallable,
-                };
-                match callee_kind {
-                    Callee::Func { proto, home } => {
-                        self.check_proto_arity(proto, argc, span)?;
-                        // Experimental generators — allocate, don't run (see `do_call`'s fast path).
-                        if self.program.protos[proto].is_generator {
-                            return Ok(self.alloc_generator(proto, home, None, args));
-                        }
-                        self.run_proto(proto, home, None, args, true, false, span)
-                    }
-                    Callee::Closure { proto, home } => {
-                        if self.program.protos[proto].min_arity < self.program.protos[proto].arity {
-                            self.check_proto_arity(proto, argc, span)?;
-                        } else if argc != self.program.protos[proto].arity {
-                            return Err(self.err(
-                                format!(
-                                    "closure expects {} argument(s), got {argc}",
-                                    self.program.protos[proto].arity
-                                ),
-                                span,
-                            ));
-                        }
-                        if self.program.protos[proto].is_generator {
-                            return Ok(self.alloc_generator(proto, home, Some(h), args));
-                        }
-                        self.run_proto(proto, home, Some(h), args, true, false, span)
-                    }
-                    Callee::Native { func, name, kind } => {
-                        self.invoke_native(func, &name, kind, args, span)
-                    }
-                    // A first-class universe builtin fn value (`print`/`ord`/`chr`/`panic`) — route
-                    // back into the SAME logic direct calls use. `print` replicates `do_print`'s
-                    // value-form defaults (space-join + trailing '\n'; sep=/end= are direct-call-only
-                    // via `CallPrintSep`). `panic` returns `Err` (mirrors `do_builtin`'s panic arm) so
-                    // defers still unwind. `ord`/`chr` reuse `builtin_ord`/`builtin_chr` directly.
-                    Callee::Builtin(name) => match name.as_ref() {
-                        "print" => {
-                            // ROOT the args on the operand stack while stringifying. `args` was
-                            // `split_off` the stack (do_call slow path), so it is NOT a GC root; a
-                            // `Stringable` `str` method runs user code that can `collect()` at a
-                            // safepoint and would sweep the LATER (still-unrendered) args — a
-                            // use-after-free. `do_print` guards this exact hazard by keeping the args
-                            // on the operand stack across the whole stringify loop; mirror it here:
-                            // push them back, render from the rooted slots, then truncate.
-                            let at = self.stack.len();
-                            for v in &args {
-                                self.push(*v);
-                            }
-                            let mut parts = Vec::with_capacity(args.len());
-                            for i in 0..args.len() {
-                                let v = self.stack[at + i];
-                                parts.push(self.stringify(v, span, 0)?);
-                            }
-                            self.stack.truncate(at);
-                            let mut line = parts.join(" ");
-                            line.push('\n');
-                            self.emit_out(&line);
-                            match self.stream_halt(span) {
-                                Some(halt) => Err(halt), // stdout died — halt like `os.exit`
-                                None => Ok(Value::nil()),
-                            }
-                        }
-                        "ord" => self.builtin_ord(&args, span),
-                        "chr" => self.builtin_chr(&args, span),
-                        "panic" => {
-                            let message = match args.first().copied() {
-                                Some(v) => match v.as_obj().map(|h| self.heap.get(h)) {
-                                    Some(Obj::Str(s)) => s.to_string(),
-                                    _ => self.type_name(v).to_string(),
-                                },
-                                None => String::new(),
-                            };
-                            let sp = self.panic_origin(args.first().copied(), span);
-                            Err(self.err(message, sp).raised_by_panic())
-                        }
-                        _ => unreachable!("non-first-class builtin {name} reached invoke_value"),
-                    },
-                    Callee::Cffi(cffi) => {
-                        // Arity is checker-guaranteed, but guard defensively (a hand-built program
-                        // could bypass the checker) so a wrong arg count never indexes out of bounds.
-                        if !cffi.is_c_variadic() {
-                            self.check_arity(
-                                "function",
-                                cffi.name(),
-                                cffi.param_count(),
-                                argc,
-                                span,
-                            )?;
-                        } else if argc < cffi.param_count() {
-                            return Err(self.err(
-                                format!(
-                                    "function '{}' expects at least {} argument(s), got {argc}",
-                                    cffi.name(),
-                                    cffi.param_count()
-                                ),
-                                span,
-                            ));
-                        }
-                        let mut host = VmHost { vm: self, args };
-                        let ret = cffi.call(&mut host).map_err(|e| RuntimeError {
-                            message: e.message,
-                            span,
-                            is_assert: false,
-                            is_over_memory: false,
-                            is_timed_out: false,
-                            is_deadlock: false,
-                            is_panic: false,
-                        })?;
-                        Ok(self.lower_native(ret))
-                    }
-                    Callee::NotCallable => Err(self.err(
-                        format!("'{}' is not callable", self.type_name(callee)),
-                        span,
-                    )),
-                }
-            }
-            _ => Err(self.err(
+        let Some(callee_kind) = self.callable(callee) else {
+            return Err(self.err(
                 format!("'{}' is not callable", self.type_name(callee)),
                 span,
-            )),
+            ));
+        };
+        match callee_kind {
+            Callee::Func { proto, home } => {
+                self.check_proto_arity(proto, argc, span)?;
+                // Experimental generators — allocate, don't run (see `do_call`'s fast path).
+                if self.program.protos[proto].is_generator {
+                    return Ok(self.alloc_generator(proto, home, None, args));
+                }
+                self.run_proto(proto, home, None, args, true, false, span)
+            }
+            Callee::Closure { proto, home } => {
+                let h = callee.as_obj().expect("callable is an object");
+                if self.program.protos[proto].min_arity < self.program.protos[proto].arity {
+                    self.check_proto_arity(proto, argc, span)?;
+                } else if argc != self.program.protos[proto].arity {
+                    return Err(self.err(
+                        format!(
+                            "closure expects {} argument(s), got {argc}",
+                            self.program.protos[proto].arity
+                        ),
+                        span,
+                    ));
+                }
+                if self.program.protos[proto].is_generator {
+                    return Ok(self.alloc_generator(proto, home, Some(h), args));
+                }
+                self.run_proto(proto, home, Some(h), args, true, false, span)
+            }
+            Callee::Native { func, name, kind } => {
+                self.invoke_native(func, &name, kind, args, span)
+            }
+            // A first-class universe builtin fn value (`print`/`ord`/`chr`/`panic`) — route
+            // back into the SAME logic direct calls use. `print` replicates `do_print`'s
+            // value-form defaults (space-join + trailing '\n'; sep=/end= are direct-call-only
+            // via `CallPrintSep`). `panic` returns `Err` (mirrors `do_builtin`'s panic arm) so
+            // defers still unwind. `ord`/`chr` reuse `builtin_ord`/`builtin_chr` directly.
+            Callee::Builtin(name) => match name.as_ref() {
+                "print" => {
+                    // ROOT the args on the operand stack while stringifying. `args` was
+                    // `split_off` the stack (do_call slow path), so it is NOT a GC root; a
+                    // `Stringable` `str` method runs user code that can `collect()` at a
+                    // safepoint and would sweep the LATER (still-unrendered) args — a
+                    // use-after-free. `do_print` guards this exact hazard by keeping the args
+                    // on the operand stack across the whole stringify loop; mirror it here:
+                    // push them back, render from the rooted slots, then truncate.
+                    let at = self.stack.len();
+                    for v in &args {
+                        self.push(*v);
+                    }
+                    let mut parts = Vec::with_capacity(args.len());
+                    for i in 0..args.len() {
+                        let v = self.stack[at + i];
+                        parts.push(self.stringify(v, span, 0)?);
+                    }
+                    self.stack.truncate(at);
+                    let mut line = parts.join(" ");
+                    line.push('\n');
+                    self.emit_out(&line);
+                    match self.stream_halt(span) {
+                        Some(halt) => Err(halt), // stdout died — halt like `os.exit`
+                        None => Ok(Value::nil()),
+                    }
+                }
+                "ord" => self.builtin_ord(&args, span),
+                "chr" => self.builtin_chr(&args, span),
+                "panic" => {
+                    let message = match args.first().copied() {
+                        Some(v) => match v.as_obj().map(|h| self.heap.get(h)) {
+                            Some(Obj::Str(s)) => s.to_string(),
+                            _ => self.type_name(v).to_string(),
+                        },
+                        None => String::new(),
+                    };
+                    let sp = self.panic_origin(args.first().copied(), span);
+                    Err(self.err(message, sp).raised_by_panic())
+                }
+                _ => unreachable!("non-first-class builtin {name} reached invoke_value"),
+            },
+            Callee::Cffi(cffi) => {
+                // Arity is checker-guaranteed, but guard defensively (a hand-built program
+                // could bypass the checker) so a wrong arg count never indexes out of bounds.
+                if !cffi.is_c_variadic() {
+                    self.check_arity("function", cffi.name(), cffi.param_count(), argc, span)?;
+                } else if argc < cffi.param_count() {
+                    return Err(self.err(
+                        format!(
+                            "function '{}' expects at least {} argument(s), got {argc}",
+                            cffi.name(),
+                            cffi.param_count()
+                        ),
+                        span,
+                    ));
+                }
+                let mut host = VmHost { vm: self, args };
+                let ret = cffi.call(&mut host).map_err(|e| RuntimeError {
+                    message: e.message,
+                    span,
+                    is_assert: false,
+                    is_over_memory: false,
+                    is_timed_out: false,
+                    is_deadlock: false,
+                    is_panic: false,
+                })?;
+                Ok(self.lower_native(ret))
+            }
+        }
+    }
+
+    /// TICKET-226 — THE answer to "is `v` callable, and how": call, `lower_task`, `Executor.submit`
+    /// and the entrypoint all read it. Borrows the heap object only long enough to copy its
+    /// `Copy`/cheap fields, so the hot fn/closure paths allocate nothing. The `match` names every
+    /// `Obj` variant and has no `_` arm: a new `Obj` kind does not compile until it is classified.
+    #[inline]
+    pub(super) fn callable(&self, v: Value) -> Option<Callee> {
+        let h = v.as_obj()?;
+        match self.heap.get(h) {
+            Obj::Func { proto, home } => Some(Callee::Func {
+                proto: *proto,
+                home: *home,
+            }),
+            Obj::Closure { proto, home, .. } => Some(Callee::Closure {
+                proto: *proto,
+                home: *home,
+            }),
+            Obj::Native { func, name, kind } => Some(Callee::Native {
+                func: *func,
+                name: name.clone(),
+                kind: *kind,
+            }),
+            Obj::Builtin(name) => Some(Callee::Builtin(name.clone())),
+            Obj::Cffi(c) => Some(Callee::Cffi(std::sync::Arc::clone(c))),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Module(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -1919,9 +1919,10 @@ impl Vm {
     }
 
     /// The one fn object for `key` in this heap (TICKET-215), and the only allocator of `Obj::Func`,
-    /// `Obj::Native` and `Obj::Cffi`: a fn read twice, in two modules, or after a crossing is one
-    /// value. A proto is keyed alone: one heap has one module view, so a user proto's home is fixed,
-    /// and a synthesized proto reads no global.
+    /// `Obj::Native`, `Obj::Cffi` and `Obj::Builtin`: a fn read twice, in two modules, or after a
+    /// crossing is one value. A proto is keyed alone: one heap has one module view, so a user
+    /// proto's home is fixed, and a synthesized proto's home is fixed too (it reads no global, or,
+    /// for `json.decode[T]`, is homed in std.json by `Op::MakeFuncIn`, TICKET-226).
     pub(super) fn fn_value(&mut self, key: FnKey, make: impl FnOnce() -> Obj) -> Value {
         if let Some(&h) = self.fn_values.get(&key) {
             return Value::obj(h);
