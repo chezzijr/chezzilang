@@ -522,6 +522,11 @@ primitive `std.concurrency.task.submit_task` / `Task[T]` wraps. There is no vari
 into a caller's channel: std seals only a channel std created (TICKET-219).
 No held job starts after an `os.exit`, a fire-and-forget job fault, `shutdown_now()` or a creator
 cancel (`concurrency.md` "Job states").
+`shutdown_now()` cancels held jobs only (TICKET-232). A `submit` that returned without a fault and
+is under the cap always starts, and runs to its first cancellation point; the one exception is a
+run halt (an `os.exit`, a fire-and-forget job fault, a deadlock verdict), which drops it. A
+`submit` that reads the Executor as shut faults `submit on a shut-down Executor (it no longer
+accepts work)`, which a `submit` racing a job's `shutdown_now()` can meet.
 
 **Jobs do not print in submission order, and `shutdown()` does not withhold their output.** Under
 `chezzi run` a job's `print` reaches stdout the moment it runs, so concurrent jobs interleave in

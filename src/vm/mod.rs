@@ -3437,8 +3437,9 @@ impl MnSched {
     }
 
     /// TICKET-219 — a submitted job, for `Executor.submit`, which starts its runners between the
-    /// reserve and this call: [`SchedCore::job_event`] starts it, holds it over the cap, or drops it
-    /// under a run halt or a cancel.
+    /// reserve and this call: [`SchedCore::job_event`] starts it when it is under the cap, and
+    /// drops it only under a run halt. Over the cap it is held, and dropped under a run halt or a
+    /// cancel (TICKET-232).
     fn submit_job(&self, fiber: Fiber) {
         let mut c = self.lock();
         let step = c.job_event(JobEvent::Submit(Box::new(fiber)), self.quiesce.run_halt());
@@ -5980,21 +5981,28 @@ impl SchedCore {
     ///    cancel value. A `defer` still runs whole after a job fault, and it may read the handle.
     /// 3. else: release held jobs while `exec_active < exec_limit`.
     ///
+    /// TICKET-232 — a `Submit` under the cap reads the halt alone, never `cancelled`: the submit
+    /// was accepted at the slot reservation, and `spawn_into` starts runner threads between that
+    /// lock hold and this one, so a job's `shutdown_now()` can land there. A cancel read here
+    /// dropped the job with exit status zero. A `Submit` over the cap is held and falls through to
+    /// the tail, the one cancel read.
+    ///
     /// A fault's cell is stored before any sched's flag trips, so the halt read closes that window.
     fn job_event(&mut self, ev: JobEvent, halt: RunHalt) -> JobStep {
         let mut step = JobStep::default();
         match ev {
             JobEvent::Submit(fiber) => {
                 let fiber = *fiber;
-                if halt != RunHalt::Running || self.job_cancelled() {
+                if halt != RunHalt::Running {
                     self.drop_job(fiber, halt.settles(), &mut step);
-                } else if self.exec_limit == 0 || self.exec_active < self.exec_limit {
+                    return step;
+                }
+                if self.exec_limit == 0 || self.exec_active < self.exec_limit {
                     self.exec_active += 1;
                     step.start.push(fiber);
-                } else {
-                    self.exec_held.push_back(fiber);
+                    return step;
                 }
-                return step;
+                self.exec_held.push_back(fiber);
             }
             JobEvent::Ended {
                 task_index,

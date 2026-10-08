@@ -2257,6 +2257,19 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 >    and it may read a handle.
 > 3. else: release held jobs while fewer than `n` run.
 >
+> **A submit that returned without a fault and is under the cap always starts (TICKET-232).** The
+> one exception is a run halt (an exit, a job fault, a deadlock verdict), which drops it. A
+> refusal is always a fault the submitter sees: `submit on a shut-down Executor (it no longer
+> accepts work)`, or the creator-cancel fault. The submit event of a job under the cap does not
+> read the cancel: `submit` reserves the slot, starts runner threads, then submits, and a job's
+> `shutdown_now()` can land between the two. A cancel read there dropped the job with exit status
+> zero (measured 255 of 300 runs with a handle at `--threads=0`). `shutdown_now()` marks the
+> Executor shut before it trips the cancel, so a `submit` racing a job's `shutdown_now()` either
+> faults or starts its job. `shutdown_now()` cancels held jobs only; a started job runs to its
+> first cancellation point. CPython can drop such a job in principle (`cancel_futures=True`
+> drains the work queue); Chezzi does not, because a job under the cap is dispatched at the
+> submit. Grid: `tests/executor_stop_grid.rs`.
+>
 > So no held job starts after an exit, a job fault, `shutdown_now()` or a creator cancel. A job
 > fault's cell is stored before any sched's cancel flag trips, so the halt read closes that window.
 > One shape stays accepted: a non-`defer` reader already waiting on a handle when a job fault lands
