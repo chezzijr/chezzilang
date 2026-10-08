@@ -647,8 +647,10 @@ what each call head means and the backend reads that record, so the local wins a
 | `Map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
 | `Set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `Set()` |
 | `tuple` | `(1, "a")` | fixed-arity, immutable |
-| `Result[T, E]` | `Ok(x)` / `Ok()` / `Err(e)` | §9; shorthand `T!E`, or `T!` (E = `Error`); `Ok()` (zero-arg) is `Result[nil, E]`'s success value |
+| `Result[T, E]` | `Ok(x)` / `Ok()` / `Err(e)` | §9; shorthand `T!E`, or `T!` (E = `Error`); `Ok()` (zero-arg) is `Result[None, E]`'s success value |
 | `Option[T]` | `Some(x)` / `None` | §9; shorthand `T?` |
+
+Diagnostics print a type in this shorthand: `int?`, `str!IoErr`, `int!` (E = `Error`), `None!E`.
 
 > **Naming.** The three builtin containers spell their type **and** constructor in PascalCase —
 > `List`/`Map`/`Set` (e.g. `List[int]`, `Set(xs)`). The lowercase `list`/`map`/`set` are no longer
@@ -664,7 +666,7 @@ and `T!` for `Result[T, Error]` (E defaults to the built-in `Error` protocol). E
 assignment target, an argument, a field, a collection or tuple element, a conversion or box ctor
 element, a comprehension element, `return`, `yield`, an inline or closure body, a parameter or field
 default — a plain success value implicitly wraps: `T -> T?` gives `Some(v)`, `T -> T!E` gives `Ok(v)` —
-and a bare `return` (or falling off the end) at a `Result[nil, E]` (`None!E`) fn gives `Ok()`. `None`
+and a bare `return` (or falling off the end) at a `Result[None, E]` (`None!E`) fn gives `Ok()`. `None`
 and error values (`!e`, `Err(e)`) stay explicit; a value that is ALREADY an `Option`/`Result` is never
 re-wrapped (`Option[Option[int]]: return Some(1)` still needs `Some(Some(1))`); the wrap never chains
 onto the int→float rule (`float?: return 1` is still an error, D3); and it declines at a slot
@@ -799,7 +801,7 @@ fn add(a: int, b: int) -> int:     # param types REQUIRED; '-> T' optional
 fn double(x: int):                 # no '-> T' → return type inferred from the body (here: int)
     return x * 2
 
-fn log(msg: str):                  # body returns no value → inferred 'nil' (returns nothing)
+fn log(msg: str):                  # body returns no value → inferred 'None' (returns nothing)
     print(msg)
 
 # closures / anonymous functions — body after ':'
@@ -996,22 +998,22 @@ fn pick(n: int) -> int: if n > 0: 1 else: 2     # pick(5) == 1, pick(-5) == 2
 ```
 
 Only a *bare expression* inline body returns implicitly. An inline **non-expression** statement does
-not: `fn a(): x = 5` (an assignment) returns `nil`, and `fn a(): return 10` is an explicit return as
+not: `fn a(): x = 5` (an assignment) returns `None`, and `fn a(): return 10` is an explicit return as
 written. An inline **call** returns the call's value (it is an expression-statement): `fn a(): foo()`
-returns `foo()`'s value — which is `nil` if `foo` is void (that just makes `a` a void fn). An
+returns `foo()`'s value — which is `None` if `foo` is void (that just makes `a` a void fn). An
 annotated inline-expr body is checked against its return type exactly like `return <expr>` would be:
-`fn a() -> int: "x"` is a type error, and a **non-nil** expr against an explicit `-> nil`
-(`fn a() -> nil: 10`) is rejected with *"function returns nothing, cannot return a value"* (a nil-typed
-inline expr against `-> nil`, e.g. a bare void call, stays legal).
+`fn a() -> int: "x"` is a type error, and a **non-None** expr against an explicit `-> None`
+(`fn a() -> None: 10`) is rejected with *"function returns nothing, cannot return a value"* (a None-typed
+inline expr against `-> None`, e.g. a bare void call, stays legal).
 
 **Multiline bodies are statement sequences (no implicit return).** A multiline body — even a
 1-statement one — does **not** implicitly return: `fn a():\n    10` evaluates `10` and falls through to
-`nil`. Multiline functions return via an explicit `return`.
+`None`. Multiline functions return via an explicit `return`.
 
 **Return type inference.** Omitting `-> T` infers the return type: for an inline-expr body it is the
 expression's type (`fn ten(): 10` infers `-> int`); otherwise **all** the body's `return` branches
 (plus an implicit trailing/inline expression) are typed and **merged** with a join. A body with no
-value-returning `return` infers `nil`. Param types stay required. The join `J(a, b)` is: (1) equal
+value-returning `return` infers `None`. Param types stay required. The join `J(a, b)` is: (1) equal
 types → that type; (2) mixed `{int, float}` branches **conflict** — no `int` ever widens into a
 `float` (rule D3, §3), so write `1.0`; (3) the **same** type-constructor (`Result`/`Option`/`List`/`Map`/
 `Set`, or the same generic struct/enum) with differing type-args → **merge slot-wise** (each slot: one
@@ -1041,7 +1043,7 @@ return-position analogue of the empty-collection diagnostic) — annotate them (
 `-> List[int]`).
 
 A function whose **sole body is a diverging call** — `fn boom(): panic("msg")` (or `exit(...)`) — is
-**not** un-inferable: it never returns a value normally, so its return type defaults to `nil` (like a
+**not** un-inferable: it never returns a value normally, so its return type defaults to `None` (like a
 void body), and callers type-check. (An annotated diverging body — `fn b() -> int: panic(...)` — is
 already valid: bottom fits any return position.)
 
@@ -1077,13 +1079,16 @@ A `for` body may run zero times, so a `return` inside it does not terminate. An 
 return annotation infers `int` from the inline expr and is unaffected — the enforcement only fires on a
 multiline body whose *declared* non-void return can be reached by falling off the end.
 
-**`nil` is not a value.** `nil` is a return-only / void type: a void function's result (e.g.
-`print(...)`, `list.push(...)`, `list.sort()`) may **not** be used in value position. Binding it
+**`None` is the one "nothing" word.** As a **type**, `None` means "returns nothing" and is a
+return annotation only (`fn log(m: str) -> None`); `None?` is not a type. As a **value**, `None`
+means absent and is legal only where a `T?` is expected. (`nil` is an ordinary identifier.) A void
+function's result (e.g. `print(...)`, `list.push(...)`, `list.sort()`) may **not** be used in value
+position. Binding it
 (`x := print("hi")`), passing it as an argument (`print(print("hi"))`), putting it in a collection
 (`[print("hi")]`), or using it as an operand (`1 + print("hi")`) is a type error: *"expression returns
-no value (nil) and cannot be used as a value"*. A bare void call **as a statement** (`print("hi")` on
-its own line) is the normal use and stays legal. Returning `nil` from a function (making it void) is
-*not* "using nil as a value" — that is how you write a void fn.
+no value (None) and cannot be used as a value"*. A bare void call **as a statement** (`print("hi")` on
+its own line) is the normal use and stays legal. Declaring `-> None` (making the fn void) is
+*not* "using a void result as a value" — that is how you write a void fn.
 
 **Default + named arguments.** A free function (or a struct constructor) may give trailing
 parameters a **default** — any expression that does **not** reference another parameter (`= 10`,
@@ -1182,9 +1187,9 @@ defaults are rejected.)
 compiled **once**, as a hidden zero-arg function in the module that declares it; an omitting call site
 calls that function. (A self-contained literal — `= 1`, `= -1`, `= 1 + 2`, `= None`, `= []`, a
 brace-free string — is still copied inline. That costs no call and behaves identically in every
-program that does not *shadow* the name: `None` and `nil` are keywords to the lexer, but a local
+program that does not *shadow* the name: a local
 binding called `None` in the caller does reach the copy — `fn f(x: int? = None)` called from a body
-containing `None := 5` reports `argument 1 of 'f': expected Option[int], found int` at the
+containing `None := 5` reports `argument 1 of 'f': expected int?, found int` at the
 declaration. That corner predates this design and is unchanged by it.) Five
 consequences are worth writing down, because each is a rule you can hit:
 
@@ -1267,7 +1272,7 @@ Built-ins take no named arguments, with **one** exception: **`print`** accepts `
 joins the positional args) and `end=` (default `"\n"`, appended after) — both `str` (see `docs/stdlib.md`).
 So `print("a", end="")` writes `a` with no trailing newline, and `print("a","b", sep="-", end="!")`
 writes `a-b!`. Any other named argument on a built-in is an error. `print`'s signature is the
-file-backed variadic decl `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> nil`.
+file-backed variadic decl `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None`.
 
 **Variadic parameters (`...name: T`).** A parameter written `...xs: T` is **variadic**: it collects
 the surplus trailing positional arguments into a fresh `List[T]` (Go/Swift `T...` style).
@@ -1304,9 +1309,9 @@ takes the collapsed `List[T]` slot (`fs := [sum_all]; fs[0]([1, 2, 3])`), the sa
 rule as `print`.
 
 **`Any` (the top type).** `Any` is an **empty structural protocol** — zero required methods, so **every**
-type satisfies it (scalars `int`/`float`/`bool`/`str` and `nil` included, not just structs/enums). It
+type satisfies it (scalars `int`/`float`/`bool`/`str` and `None` included, not just structs/enums). It
 is the honest element type of a universal slot such as `print(...args: Any)`, and can annotate any
-binding or parameter (`x: Any = 42`, `fn log(v: Any) -> nil`). It is **not** dynamic typing: an `Any`
+binding or parameter (`x: Any = 42`, `fn log(v: Any) -> None`). It is **not** dynamic typing: an `Any`
 value carries no methods, so you can pass it around and display it but not call methods on it (a
 downcast `cast[T]` is a documented future addition — see `docs/future.md`). `Any` is a reserved
 protocol name (a program may not redeclare it). `Any` is now **expressible** as an ordinary empty
@@ -1331,7 +1336,7 @@ g(name="Bob", greeting="Hi")           # "Hi Bob" — by label, through a value
 g(greeting="Hi", name="Bob")           # same — labels may be reordered
 g("Bob", "Hi")                         # positional through the value still works
 
-fn apply(f: fn(name: str) -> nil):
+fn apply(f: fn(name: str) -> None):
     f(name="X")     # ERROR: keyword arguments through a function value need a binding that
                     # holds one known function (...); pass the arguments positionally
     f("X")          # fine — positional through any value
@@ -1348,7 +1353,7 @@ and binding by the runtime callee's names instead is unsound when the two functi
 same-position parameters differently. The gate is deliberately conservative: `h := f; h = f2` with
 identical labels is rejected too.
 
-Labels stay **surface-only for typing**: `fn(str) -> nil` and `fn(name: str) -> nil` are the **same
+Labels stay **surface-only for typing**: `fn(str) -> None` and `fn(name: str) -> None` are the **same
 type** — mutually assignable, so an unlabelled callback flows into a labelled parameter and vice-versa
 (no impact on existing HOF/callback/protocol code). A value call through a binding certain to hold
 one fn binds that fn's own parameter slots (TICKET-197), so it fills every default it can name, a
@@ -1686,11 +1691,11 @@ while cond:
 **(1) A no-op statement.** `pass` does nothing. It is valid anywhere a statement is — a fn/method
 body, an `if`/`else` branch, a `for`/`while` body, a statement `match` arm, or a concurrency block —
 and is the idiomatic way to write an empty body. A function whose body is a lone `pass` runs, falls
-off the end, and returns `nil` — exactly like a lone `return`:
+off the end, and returns `None` — exactly like a lone `return`:
 
 ```chezzi
 fn todo():
-    pass                # empty body; returns nil (same as `return`)
+    pass                # empty body; returns None (same as `return`)
 
 for x in xs:
     pass                # a deliberately-empty loop body
@@ -3456,14 +3461,14 @@ the carrier its slot expects:
 | `T?` | `T` or absent (`Option[T]`) | a plain `T`, `None`, `?x` |
 | `T!E` / `T!` | `T` or an error `E` (`Result[T, E]`; `T!` = `T!Error`) | a plain `T`, `!e`, `?x` |
 | `None` | returns nothing (an annotation only: `fn log(m: str) -> None`) | — |
-| `None!E` | nothing, or an error (`Result[nil, E]`) | `!e`; a bare `return` or falling off the end is success |
+| `None!E` | nothing, or an error (`Result[None, E]`) | `!e`; a bare `return` or falling off the end is success |
 | `T??` | nested optional (`Option[Option[T]]`) | `None` is the OUTER absent, `?None` the inner one |
 
 ```chezzi
 fn save(path: str) -> None!str:
     if path == "":
         return !"empty path"     # prefix `!` builds an error value; there is no `fail` keyword
-    write(path)                  # falling off the end returns Ok(nil)
+    write(path)                  # falling off the end returns Ok(None)
 
 fn find(xs: List[int], k: int) -> int?:
     for x in xs:
@@ -3497,15 +3502,15 @@ rs: List[int!str] = [1, !"disk", 3]   # [Ok(1), Err('disk'), Ok(3)]
   `!e` must be annotated.
 - **Set elements and map keys** never wrap in effect: no carrier is `Hashable`.
 
-**`Result[nil, E]`'s success value.** There is no `nil` expression — `nil` only means "returns no
-value" — so a `Result` with no payload is constructed with zero-arg `Ok()`, not `Ok(nil)`:
+**`Result[None, E]`'s success value.** A `Result` with no payload (`None!E`) is constructed with
+zero-arg `Ok()`. It prints `Ok(None)`, as Python prints its void value:
 
 ```chezzi
-fn f() -> Result[nil, str]:
+fn f() -> Result[None, str]:
     return Ok()
 
 fn main():
-    print(f())      # Ok(nil)
+    print(f())      # Ok(None)
 ```
 
 **The `Error` type (Go-style).** `E` defaults to the built-in `Error` protocol — one method,
@@ -3537,7 +3542,7 @@ match query():
 `?` must match the enclosing function's return **kind**: a `Result`-`?` needs a `Result`-returning fn (and its
 propagated error type must fit the function's error type), an `Option`-`?` needs an `Option`-returning fn. **A
 function must return `Result`/`Option` to use `?`** — there is **no `fn main`/entrypoint exception**; a
-nil-returning fn (named or nested) that uses `?` is a compile error (the propagated `Err`/`None` would be
+None-returning fn (named or nested) that uses `?` is a compile error (the propagated `Err`/`None` would be
 silently swallowed). Only **module top-level** code (outside any fn) accepts either kind — the runtime unwinds
 the unhandled `Err`/`None` at the program boundary and exits (rc=1). A manifest `module:function` entrypoint may
 therefore legitimately be `-> T!` and use `?`; if that entry fn returns `Err`/`None`, `chezzi run` surfaces it
@@ -3678,8 +3683,8 @@ match r:
 The block's value is its **trailing expression**. A trailing statement-form `match`/`if` counts too:
 when every arm/branch produces a value (a total `match`; an `if` with an `else`, every branch ending
 in a value), the whole construct is the block's value expression and `Ok` wraps its unified arm/branch
-type — so `recover: … ; match x: 3: 100; _: 200` is `Result[int]`, not `Result[nil]`. A tail that
-does *not* uniformly produce a value has no single value type, so the block falls back to `Result[nil]`
+type — so `recover: … ; match x: 3: 100; _: 200` is `Result[int]`, not `Result[None]`. A tail that
+does *not* uniformly produce a value has no single value type, so the block falls back to `Result[None]`
 (value dropped, consumed only via `Ok(_)`) — never an error. This covers a trailing `let`, a non-total
 `match`, an `else`-less `if`, **and** a `match`/`if` whose arms produce genuinely *different* types (a
 `str` arm next to an `int` arm, or a void `print(...)` arm mixed with a value arm). (A tail that provably
@@ -4223,7 +4228,7 @@ iterate with `for c in s:` or `s.chars()`, and bridge to codepoints with `ord`/`
 List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.contains(v)`
 `xs.index_of(v)` `xs.sum()` (numeric; empty `-> 0`, or `0.0` for a `List[float]`)
 `xs.sort()` (ascending, in place); `xs.concat(ys)→list` (new list) and
-`xs.extend(ys)` (append in place, → nil); `xs.copy()→list` (new list, shallow); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
+`xs.extend(ys)` (append in place, → None); `xs.copy()→list` (new list, shallow); higher-order `xs.map(f)` `xs.filter(p)` `xs.fold(init, f)`;
 `xs.sort_by(fn(a, b) -> int)` — a custom comparator (negative = `a` before `b`), stable, in place;
 and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str, or a struct
 or enum defining `compare`), stable, in place.
@@ -4333,7 +4338,7 @@ or enum defining `compare`), stable, in place.
 > `b: Box[str] = e` is still `ok: no type errors`. The first constraining use — an annotated sink, a
 > typed argument, a typed `return`, a `??` with a typed right-hand side, or a `Some(v)`/`Variant(v)`
 > write — records a pin. A later WRITE that disagrees with the pin is a type error:
-> `x := None` / `y: Option[str] = x` / `x = Some(1)` is `cannot assign Option[int] to 'x' -- its
+> `x := None` / `y: Option[str] = x` / `x = Some(1)` is `cannot assign int? to 'x' -- its
 > payload was pinned to Option[str] by an earlier use`. A write also REPINS the binding, so every
 > later read sees the written payload and a `match` arm binds a concrete `v`. The escapes are an
 > annotation at the declaration (`x: Option[int] = None`) or a re-declaration. `Result[T, E]` is
@@ -4343,7 +4348,7 @@ or enum defining `compare`), stable, in place.
 Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
 `m.items()→List[(K, V)]` (insertion order, so `Map(m.items()) == m`) `m.copy()→map` (shallow);
 `m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,
-→ nil); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m`
+→ None); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m`
 / `for k, v in m`.
 
 Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
@@ -4655,8 +4660,8 @@ import str as s from lib.sh     # ok — and `str(5)` keeps working
 import Shared from std.concurrency   # ok — a reserved TYPE member licensing the builtin itself
 ```
 
-The reserved set is the builtin callables + reserved type names + `nil` + the builtin variant ctors
-(`Ok`/`Err`/`Some`/`None`). (The std string module is `std.string` for exactly this reason: `str` is a
+The reserved set is the builtin callables + reserved type names (`None` included) + the builtin
+variant ctors (`Ok`/`Err`/`Some`/`None`). (The std string module is `std.string` for exactly this reason: `str` is a
 reserved scalar/ctor name.) A collision with a *user-declared* top-level `fn` or type is the next rule.
 
 **The named-import form is `import X from M`, not Python's `from M import X`** — the module path comes
@@ -4816,7 +4821,7 @@ return widens exactly: `sqrtf(2.0)` is `1.4142135381698608`, like ctypes `c_floa
 `ptr` ↔ C `void*` (an **opaque handle** — see below). An `int` never widens into a
 C `double` param either (rule D3, §3): `cos(2)` is a type error naming `write 1.0`; write `cos(2.0)`.
 A non-numeric arg like a `str`/`bool` is rejected too. A no-return signature (`fn srand(seed: int)`) — or an explicit
-`-> nil` — maps to C `void`; `nil` is a **return-only** type (it is rejected as a parameter). A
+`-> None` — maps to C `void`; `None` is a **return-only** type (it is rejected as a parameter). A
 **`struct`** of those (nested structs included) marshals **by value** as a C struct (see below). The
 checker rejects any other non-marshallable param/return (list/map/set/tuple/enum/generic
 struct/struct-with-a-`str`-field/…) with a *not C-marshallable* error. Calls run inline, so a slow C call pins its worker.
@@ -4910,7 +4915,7 @@ signature leaves `%al` unset on x86-64).
 pointer C calls *back* synchronously, during the extern call. Declare the param with the **existing**
 function-type spelling — `fn(scalars) -> scalar` (no new syntax) — restricted to C scalars
 (`int`/`float`/`bool`/`ptr`/`int8`..`uint64`; no `str`, struct, or nested callback). The callback's
-**return** may also be `nil` (void, `fn(int) -> nil`) — the `foreach`/`twalk`-style shape, matching
+**return** may also be `None` (void, `fn(int) -> None`) — the `foreach`/`twalk`-style shape, matching
 Python `ctypes.CFUNCTYPE(None, ...)` — while every **param** must still be a C scalar:
 
 ```chezzi
@@ -5293,7 +5298,7 @@ native ctor bytearray(x) -> bytearray
 
 The universe builtins `print`, `ord`, `chr`, `panic` (fns) and `int`, `float`, `str`, `bytes`,
 `bytearray` (ctors) are declared this way in `std/prelude.chz`. `print` is now expressible as the
-variadic decl `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> nil` (its lowering
+variadic decl `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None` (its lowering
 still uses the specialized print opcodes — the decl is the checker-only signature authority), retiring
 the last engine-synthetic signature. `range` + the `List`/`Map`/`Set` container ctors remain built-in
 for now (their type-arg-driven generic identity is not a flat signature).
@@ -5340,7 +5345,7 @@ modules and use them from a bodied fn (e.g. `import std.string`). A `test` metho
   still rejects a bodied method (`native enum methods are not supported`) — extending bodied methods to
   native enums is a symmetric follow-up, not yet wired (no native enum needs one today).
 - A `native struct` may be **generic** (`native struct Shared[T]:`, phase 4c-concurrency): its method
-  sigs may reference the type params (`native fn get(self) -> T`, `native fn set(self, v: T) -> nil`), and each
+  sigs may reference the type params (`native fn get(self) -> T`, `native fn set(self, v: T) -> None`), and each
   call site **substitutes** the value's element type (`Shared[int].set` expects `int`) — the same subst
   the generic-struct machinery uses. This is how `std.concurrency` declares `Shared[T]`/`RwShared[T]`/
   `Atomic[T]` (and non-generic `Executor`). A method whose sig a plain harvested decl can't express (a
@@ -5358,7 +5363,7 @@ modules and use them from a bodied fn (e.g. `import std.string`). A `test` metho
   return-position type param from an (even unannotated) closure argument's body** via a *closure-return
   loop-back* — this bidirectional inference is general (not map-special), so `Box(3).apply(fn(x): x + 1)`
   on a user `fn apply[U](self, f: fn(T) -> U) -> U` recovers `U = int` too. (`sort` IS file-backed as
-  `native fn sort(self) -> nil where T: Comparable`; `sum` is `native fn sum(self) -> T where T: Add` but
+  `native fn sort(self) -> None where T: Comparable`; `sum` is `native fn sum(self) -> T where T: Add` but
   keeps a residual numeric check-gate — its true requirement is Monoid, so `where T: Add` alone is too
   broad.) A type param may carry a bound
   (`Map[K: Hashable, V]`), letting the internal `Map[K, V]`/`Set[T]` return types resolve at harvest.

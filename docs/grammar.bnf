@@ -140,7 +140,7 @@
 # An omitted "ARROW" <type> is not "returns nothing": the checker infers the return type from
 # the body. Param types remain required.
 # A MULTILINE body is a sequence of STATEMENTS: its return type comes from the body's `return`s
-# (nil when no value is returned), and a DECLARED non-void "ARROW" <type> whose multiline body can
+# (None when no value is returned), and a DECLARED non-void "ARROW" <type> whose multiline body can
 # fall off the end without a value `return` is rejected (add a `return`).
 # The INLINE-expr body (`<block> ::= COLON <simpleStmt>` where the simpleStmt is a bare exprStmt)
 # IMPLICITLY RETURNS that expression — exactly like a closure `fn(x): expr`. So `fn a(): 10` infers
@@ -168,7 +168,7 @@
 # entries (each the shape of one <typeParam>), reusing <boundList>. Attaches after a fn/native-fn
 # signature; the checker merges each entry's bounds into the matching declared type parameter.
 # A bound name is normally a protocol; a SCALAR TYPE name (`int`/`float`/`bool`/`str`/`bytes`/
-# `bytearray`/`nil`) is instead an EQUALITY constraint — `T` must be exactly that scalar (it takes no
+# `bytearray`/`None`) is instead an EQUALITY constraint — `T` must be exactly that scalar (it takes no
 # type args). Used by `Channel[T].trip()`'s `where T: bool`.
 <whereClause> ::= "WHERE" <whereList>
 <whereList>   ::= <typeParam> | <typeParam> "COMMA" <whereList>
@@ -476,8 +476,8 @@
              | <type> "QUESTION" | <type> "QUESTIONQUESTION" | <type> "BANG" | <type> "BANG" <type>
 <typeList> ::= <type> | <type> "COMMA" <typeList>
 # A `fn(...)` TYPE parameter may carry an OPTIONAL Swift-style LABEL (`IDENT ":"`) before its type
-# (`fn(name: str, greeting: str) -> nil`), enabling keyword arguments through a function VALUE
-# (`g := greet; g(name="Bob")`). Labels are SURFACE-ONLY: `fn(str)->nil` and `fn(name:str)->nil` are
+# (`fn(name: str, greeting: str) -> None`), enabling keyword arguments through a function VALUE
+# (`g := greet; g(name="Bob")`). Labels are SURFACE-ONLY: `fn(str)->None` and `fn(name:str)->None` are
 # the same type (mutually assignable). A bare param (no label) is still valid.
 <fnParamList> ::= <fnParam> | <fnParam> "COMMA" <fnParamList>
 <fnParam>     ::= <type> | "IDENT" "COLON" <type>

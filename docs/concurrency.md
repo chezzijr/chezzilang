@@ -409,7 +409,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 
 | Method | Signature | Notes |
 |--------|-----------|-------|
-| `send` | `send(self, v: T) -> nil` | enqueue (move/copy at the airlock); the sender MAY keep using the value — the crossing copies, so its later writes are simply not seen by the receiver. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` — a blocked sender (rendezvous or full bounded) publishes its value as an OFFER, so a poll can take it, and `send` returns only once a receiver took it; `len()` does not count it |
+| `send` | `send(self, v: T) -> None` | enqueue (move/copy at the airlock); the sender MAY keep using the value — the crossing copies, so its later writes are simply not seen by the receiver. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` — a blocked sender (rendezvous or full bounded) publishes its value as an OFFER, so a poll can take it, and `send` returns only once a receiver took it; `len()` does not count it |
 | `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, a **bounded** channel is **full**, or a **rendezvous** channel has no receiver already waiting. Never blocks/parks |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
 | `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty, or a value handed over by a parked rendezvous sender — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
@@ -601,8 +601,8 @@ fn bump(s: Shared[int]):
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `get`    | `get(self) -> T` | **snapshot copy out** (a request/reply under real concurrency) |
-| `set`    | `set(self, v: T) -> nil` | overwrite |
-| `update` | `update(self, f: fn(T) -> T) -> nil` | read-modify-write, serialised by the owner |
+| `set`    | `set(self, v: T) -> None` | overwrite |
+| `update` | `update(self, f: fn(T) -> T) -> None` | read-modify-write, serialised by the owner |
 
 > **Gotcha — `get()` returns a copy, not the box.** The value lives **off the GC heap** (a
 > lock-guarded wire form so it can cross OS threads safely), so `get` deep-copies it *out* into a
@@ -655,7 +655,7 @@ fn bump(a: Atomic[int]):
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `load`     | `load(self) -> T` | read out |
-| `store`    | `store(self, v: T) -> nil` | overwrite |
+| `store`    | `store(self, v: T) -> None` | overwrite |
 | `exchange` | `exchange(self, v: T) -> T` | swap; returns the **old** value |
 | `cas`      | `cas(self, expected: T, new: T) -> bool` | compare-and-swap; swaps iff the box equals `expected`; returns whether it did |
 | `add`      | `add(self, x: T) -> T` | numeric `T` only; returns the **new** value |
@@ -706,7 +706,7 @@ main()
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `load`     | `load(self) -> int` | read out |
-| `store`    | `store(self, v: int) -> nil` | overwrite |
+| `store`    | `store(self, v: int) -> None` | overwrite |
 | `exchange` | `exchange(self, v: int) -> int` | swap; returns the **old** value |
 | `cas`      | `cas(self, expected: int, new: int) -> bool` | compare-and-swap; swaps iff the box equals `expected` |
 | `add`      | `add(self, x: int) -> int` | returns the **new** value; overflow **faults** |
@@ -741,9 +741,9 @@ fn total(r: RwShared[Map[str, int]]) -> int:
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `get`   | `get(self) -> T` | shared read guard; **snapshot copy out** (== `read(identity)`) — mutating it is a no-op (see the `Shared` `get()` gotcha above); mutate via `write` |
-| `set`   | `set(self, v: T) -> nil` | exclusive write guard; overwrite |
+| `set`   | `set(self, v: T) -> None` | exclusive write guard; overwrite |
 | `read`  | `read(self, f: fn(T) -> R) -> R` | **shared** read guard: run `f` against the current value, return `f`'s result; **no** write-back. Many `read`s run concurrently |
-| `write` | `write(self, f: fn(T) -> T) -> nil` | **exclusive** write guard: `Shared.update` under the write lock — read-modify-write, store `f`'s return |
+| `write` | `write(self, f: fn(T) -> T) -> None` | **exclusive** write guard: `Shared.update` under the write lock — read-modify-write, store `f`'s return |
 
 `write`'s read-modify-write is atomic across threads (the box's contract, exactly like
 `Shared.update`): under `--parallel` the whole `write`/`set` is serialised by the box's **update
@@ -1118,7 +1118,7 @@ child := c.derive()              # a CHILD token — cancelled when c (or any an
 | `cancelled()` | `bool` | own `flag` (an ancestor cancel is *pushed* into it) OR own deadline passed OR the `parent` chain says so. **Measured QUADRATIC in depth, not linear: 0.53 µs at depth 0, 178 µs at 100, 2360 µs at 400 (2026-09-03, release). The ancestor walk is O(depth); the rooted chain is also re-walked by the GC mark pass — see `benchmarks.md` "The chain is still superlinear in depth". Go's `ctx.Err()` is flat O(1) at every depth. Polls, never blocks.** |
 | `reason()` | `str?` | `"cancelled"` (manual or cascaded) \| `"timeout"` (own/inherited deadline) \| `None` (live). NEAREST cause wins (own first, else the ancestor's), and the FIRST cause **latches**: a cascaded cancel beats a later own deadline, while an already-elapsed own deadline stays `"timeout"` even under an explicit `cancel()`. |
 | `done()` | `Channel[bool]` | ready (recv → `true`) when done — for a `wait:` arm. Same handle every call. |
-| `cancel()` | `nil` | manual cancel, anytime, any task; idempotent; sets the cancel bit, then wakes `done()` waiters and **cascades down** — drains each node's immediate-child registry and marks every transitive descendant (work-list, not recursion). |
+| `cancel()` | `None` | manual cancel, anytime, any task; idempotent; sets the cancel bit, then wakes `done()` waiters and **cascades down** — drains each node's immediate-child registry and marks every transitive descendant (work-list, not recursion). |
 | `derive()` | `Token` | a child token: cancelled when self (or an ancestor) is; tightest deadline; one-directional. **O(1)** — one send into self's registry. Also `cancel.derive(parent)`. |
 | `deadline_at()` | `float` | absolute monotonic secs, or `0.0` if none. |
 
@@ -1847,7 +1847,7 @@ not universal — measured against the release binary, three shapes still lose t
 1 depends on the order the crossing's memo visits the values:
 
 1. **Closure capture vs. a sibling reference — order-dependent, one shared memo per send.** A tuple
-   `(xs, f)`, `f := fn() -> nil: xs.push(2)`, sent in one crossing over a `Channel` to a different
+   `(xs, f)`, `f := fn() -> None: xs.push(2)`, sent in one crossing over a `Channel` to a different
    spawned task, both writes done under `recover:`. Measured on the release binary:
    - `ch.send((xs, f))` (`xs` first): `xf: f() ok` then `xf: xs.push ok` — NEITHER write faults; the
      push is silently lost, matching D2's old behaviour.
@@ -2016,7 +2016,7 @@ either.
 
   ```
   struct Ctr:
-      inc: fn() -> nil
+      inc: fn() -> None
       get: fn() -> int
   fn make() -> Ctr:
       n := 0
@@ -2109,7 +2109,7 @@ either.
   an inert placeholder: a task that never drives it runs clean, and driving it faults
   `a module-global generator that was running when this task was spawned has no copy in the task;
   send its values through a Channel` (or `... holding a value that cannot cross tasks ...`), never
-  `type nil has no method 'next'`. Every parked slot is wired recursively, so a
+  `type None has no method 'next'`. Every parked slot is wired recursively, so a
   **non-sendable parked slot** still **rejects at the crossing** — a slot is checked at serialize time,
   so there is no under-gate.
   TICKET-041 — a generator crossed **WHILE it is running** (its own body calls `Channel.send`/
@@ -2149,7 +2149,7 @@ either.
   frame-local case in ONE way: `snapshot_modules` walks **every** global of the nursery's snapshot, reached
   or not, so it must NOT eager-fault on a generator the program merely *holds*. Instead `to_snap`'s slow arm
   snapshots such a generator as an inert **`Nil` placeholder** — a task that never touches it runs **clean**,
-  and one that **reaches** it faults recoverably **at the use site** (`cannot iterate over nil`).
+  and one that **reaches** it faults recoverably **at the use site** (`cannot iterate over None`).
   (Fault only when reached; the frame-local crossing, by contrast, rejects eagerly at the
   `to_wire` serialize point because it crosses only the value actually sent.) (The earlier **Option-B
   reach-gate** model — which scanned each task for a *possible* reach and faulted it — is **retired**:
@@ -2506,7 +2506,7 @@ Ships the canonical worker/fan-out example.
   `Type::Generic("Channel", [T])` → `Ty::Channel`.
 - **Checker methods** `src/checker/expr.rs` (`infer_method_call`): `Ty::Channel` arm resolving via
   `native_handle_method("Channel", …)` against the file-backed `native struct Channel[T]` method table in
-  `std/prelude.chz` (`send(T)->nil`, `recv()->T`, `len()->int`, … — the retired bespoke
+  `std/prelude.chz` (`send(T)->None`, `recv()->T`, `len()->int`, … — the retired bespoke
   `channel_method_sig`'s replacement); `Channel()` constructor (builtin free fn, mirror `Set()`).
 - **Sendability:** a `sendable(&Ty)` predicate gating `spawn` captures + `Channel.send`; read-only
   captured bindings (reassign of a captured name inside a task = error).
@@ -2517,8 +2517,8 @@ Ships the canonical worker/fan-out example.
   example golden.
 
 ### C3 — `Shared[T]` (interp)
-- **Checker** `ty.rs`: `Ty::Shared(Box<Ty>)`; methods `get()->T`, `set(T)->nil`,
-  `update(fn(T)->T)->nil`; `Shared(v)` constructor → `Ty::Shared(typeof v)`; `Shared` is sendable.
+- **Checker** `ty.rs`: `Ty::Shared(Box<Ty>)`; methods `get()->T`, `set(T)->None`,
+  `update(fn(T)->T)->None`; `Shared(v)` constructor → `Ty::Shared(typeof v)`; `Shared` is sendable.
 - **Interp** `value.rs`: `Value::Shared(Rc<RefCell<Value>>)`; `eval_shared_method`; `Shared()`
   constructor; passed by handle in `deep_clone`.
 - **Tests:** cross-task increment via `Shared`; an in-task mutable struct is **not** sendable while `Shared` is.

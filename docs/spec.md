@@ -42,7 +42,8 @@ exhaustiveness treat them like a user enum (`Option[int].None`, `Result[int, str
 `f := Some`); any module can do the same for its own enum with `import Red, Green from Color`
 ([`syntax.md` §12 "Variant import"](syntax.md)). `Result[T, E]` is two-param: `T!` = `Result[T, Error]`, `T!E` =
 `Result[T, E]`, `T?` = `Option[T]`, `T??` = `Option[Option[T]]` (E defaults to the built-in `Error`
-protocol); `None` as a type means "returns nothing" and `None!E` = `Result[nil, E]`, whose bare `return`
+protocol); diagnostics print types in this sugar (`int?`, `str!IoErr`, `int!`, `None!E`);
+`None` as a type means "returns nothing" and `None!E` = `Result[None, E]`, whose bare `return`
 or fall-off is `Ok()`. A plain success value at ANY typed slot (binding, assignment, argument, field,
 element, return, yield, default) implicitly wraps to `Some(v)`/`Ok(v)` (`docs/syntax.md` §9); prefix
 `!e` builds an error value (`return !e`; `e` must satisfy `Error`) and prefix `?x` a present/success
@@ -125,7 +126,7 @@ g(name="Bob")` works) — but only through a binding that holds **one known func
 fn or closure literal, or a nested `fn`, never reassigned); a keyword call through a HOF parameter,
 list slot or reassigned binding is a compile error (TICKET-139/W14-2: the callee's own parameter
 names are not statically certain, so pass positionally). Labels are
-**surface-only** (SE-0111) — `fn(str)->nil` ≡ `fn(name:str)->nil`, so no impact on HOF/callback/protocol
+**surface-only** (SE-0111) — `fn(str)->None` ≡ `fn(name:str)->None`, so no impact on HOF/callback/protocol
 typing — and a value call is scope-cut: it must supply every parameter (declaration-site **defaults do
 not fill through a value**; a direct call still does), and built-in fn values take no keywords.
 Resolution is fully static (the checker rewrites the keyword call to positional), so the runtime ABI
@@ -250,9 +251,9 @@ The reject shapes stay: a genuinely non-sendable parked slot (a `Module` handle,
 >depth-cap acyclic nest), a value cycle threaded through the generator, and the three HARD-ARM parked
 shapes (mid-`recover:` is now sendable; pending `defer` and multi-frame are checker-unreachable defensive
 guards) all reject cleanly with a graceful, catchable `... cannot be sent across tasks` error, **never** a
-panic, identically. (The earlier **Option-B reach-gate + poison→`nil`** model for
+panic, identically. (The earlier **Option-B reach-gate + poison→`None`** model for
 module-global generators is retired — safety is now provided by the by-value deep copy, which rebuilds a
-fresh generator on the receiving heap and never shares a cross-heap handle, not by an inert `nil` leaf.)
+fresh generator on the receiving heap and never shares a cross-heap handle, not by an inert `None` leaf.)
 
 A generator is likewise **not re-entrant**: resuming one that is *already running* — a `.next()` or a
 `for` over the generator currently executing, reached from inside its own body — raises the same shape
@@ -338,7 +339,7 @@ main()                                 # no auto-entry — `main` is a normal fn
 **`pass` — the no-op keyword.** `pass` is a reserved keyword that does nothing. As a **statement** it
 is a no-op valid in any statement position (empty fn/method body, `if`/`for`/`while` body, statement
 `match` arm, concurrency block) — a lone-`pass` body is identical to a lone `return` (runs, falls off
-the end, returns `nil`). It is statement-only, so it is not valid in a closure or an expression-match
+the end, returns `None`). It is statement-only, so it is not valid in a closure or an expression-match
 arm, EXCEPT a closure body right after `:` (`fn(): pass` is the no-op closure spelling). As the **sole line** of a `protocol` or `struct` body it is an
 empty-body marker: `protocol Name:` + `pass` is a zero-method **accept-all top type** (structural ⇒
 satisfied by every type — this is how `Any` itself is defined, and any user empty protocol behaves
@@ -362,7 +363,7 @@ at run time, in every position alike. Those are exactly the positions `chezzi ch
 (`docs/gaps.md` **W8-2**, following Rust's `unused_must_use`, with `r := …` / `_ := …` as the escapes).
 See [`syntax.md` §9](syntax.md) for the position-by-position table. `?` is valid at module top-level (the runtime unwinds the
 propagated `Err`/`None` at the program boundary) and inside a `Result`/`Option`-returning fn — but a
-**nil-returning fn (including a `main` you write) may not use `?`**: it would silently swallow the
+**None-returning fn (including a `main` you write) may not use `?`**: it would silently swallow the
 error (there is no `fn main`/entrypoint exception — a fn must return `Result`/`Option`). A bare
 `chezzi run` (no file argument) runs the project manifest's `[project] entrypoint` — a **dotted module
 path**, optionally suffixed with **`:function`** (e.g. `"src.main:main"`). The module runs
@@ -994,7 +995,7 @@ CONCRETE receiver: **through a protocol bound `a.eq(b)` is always the protocol's
 `≡ a == b` above holds unconditionally there**, matching how rustc resolves `a.eq(b)` under `T: Eq` to
 `<T as PartialEq>::eq` rather than to an inherent same-named method, `docs/gaps.md` **W7-53** I1′),
 `c.index(k)` ≡ `c[k]`, `c.set_index(k, v)` ≡ `c[k] = v` (returns
-`nil`), `c.slice(s, e, st)` ≡ `c[s:e:st]` (its three components are `int?`, i.e. `Option[int]`), and
+`None`), `c.slice(s, e, st)` ≡ `c[s:e:st]` (its three components are `int?`, i.e. `Option[int]`), and
 `x.hash()` is exactly the hash `x` gets as a map/set key. `hash()`'s numeric value itself is
 **unspecified** (a build-dependent 64-bit hash, possibly negative) — only its consistency is
 guaranteed: equal values hash equally, and it agrees with container membership.

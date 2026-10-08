@@ -5,10 +5,10 @@ methods on the built-in types, the runtime types, and the `std.*` modules. Langu
 in [`syntax.md`](syntax.md); this file is the **library** surface.
 
 Conventions used below:
-- Signatures use Chezzi types: `int`, `float`, `bool`, `str`, `nil`, `List[T]`, `Map[K, V]`,
+- Signatures use Chezzi types: `int`, `float`, `bool`, `str`, `None`, `List[T]`, `Map[K, V]`,
   `Set[T]`, `tuple` (`(A, B)`), `bytes`, `bytearray`, `Option[T]`, `Result[T]` / `Result[T, E]`,
   `fn(A) -> B` (function values).
-- "*mutates*" means the call changes the receiver in place and returns `nil`; otherwise a method
+- "*mutates*" means the call changes the receiver in place and returns `None`; otherwise a method
   returns a fresh value and leaves the receiver untouched.
 - `import std.X` then call as `X.func(...)`. Built-in (global) functions and type methods need no import.
 
@@ -18,7 +18,7 @@ Conventions used below:
 
 | Function | Signature | Notes |
 |----------|-----------|-------|
-| `print` | `print(...args: Any, sep: str = " ", end: str = "\n") -> nil` | Write each argument (any type) to stdout. Variadic — declared as `native fn print(...args: Any, sep, end)` in `std/prelude.chz`; `Any` is the top type so every value is accepted. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended after — both `str` keyword-only (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline (incremental output); `print("a","b", sep="-", end="!")` emits `a-b!`. The **value form** (`p := print`) is a fixed 1-arg call (see `syntax.md`). |
+| `print` | `print(...args: Any, sep: str = " ", end: str = "\n") -> None` | Write each argument (any type) to stdout. Variadic — declared as `native fn print(...args: Any, sep, end)` in `std/prelude.chz`; `Any` is the top type so every value is accepted. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended after — both `str` keyword-only (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline (incremental output); `print("a","b", sep="-", end="!")` emits `a-b!`. The **value form** (`p := print`) is a fixed 1-arg call (see `syntax.md`). |
 | `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> List[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). A string parse accepts PEP-515 single underscores between digits (`"1_000"` → `1000`), mirroring the lexer's numeric-literal rule. ASCII digits only — `int("١٢")`/`int("１２")` raise (Go/Rust semantics; CPython's `int()` accepts Unicode decimal digits). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. A string parse accepts PEP-515 single underscores between digits (`"1_0.5"` → `10.5`). Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
@@ -95,7 +95,7 @@ primitives are Go's, not Python's.
 | `Channel[T].recv()`, closed and drained | `receive on a closed channel` | Go 1.26: `v, ok := <-ch` returns the zero value + `false`, **no panic** — a divergence | **`try_recv() -> T?`** |
 | `json.stringify(j)`, depth ceiling | `json.stringify: exceeded max depth` | CPython's `json.dumps` raises `RecursionError` on a tree built past its recursion limit | — |
 | `json.stringify(j)`, `Json.Num` holding NaN/±inf | `cannot serialize non-finite float to JSON` | CPython's `json.dumps` emits a bare `NaN`/`Infinity` (invalid JSON, no error); Go's `json.Marshal` errors `json: unsupported value: NaN` (measured) — Chezzi refuses, matching Go | — |
-| `fs.get_str`/`get_bool`/`get_int(name)` on an unregistered name | `flag: unregistered str flag --nope` (also `bool`/`int`) | CPython: `AttributeError: 'Namespace' object has no attribute 'nope'` (`argparse`); Go's `flag.Lookup` returns `nil`, no panic, and has no name-keyed typed getter at all — the Go divergence is already noted at `std/flag.chz:19-22` | — |
+| `fs.get_str`/`get_bool`/`get_int(name)` on an unregistered name | `flag: unregistered str flag --nope` (also `bool`/`int`) | CPython: `AttributeError: 'Namespace' object has no attribute 'nope'` (`argparse`); Go's `flag.Lookup` returns `None`, no panic, and has no name-keyed typed getter at all — the Go divergence is already noted at `std/flag.chz:19-22` | — |
 | `ffi.load_*`/`ffi.load_*_at`/`ffi.free`, a dangling/misaligned/OOB (non-null) `ptr` | **SIGSEGV — not a recoverable Chezzi fault** | `ctypes`/`cgo` are identically unsafe | — (there is no carrier for undefined behavior) |
 
 The last row above is the **one entry in this whole table that is not recoverable**: every other fault
@@ -107,11 +107,11 @@ above this table must not carry that belief into FFI.
 Two entries go the **opposite** direction — they **swallow** an error the owning ancestor reports,
 rather than fault:
 
-* **`net.Socket.close()` / `net.Listener.close()`** return `nil` unconditionally, silently dropping any
+* **`net.Socket.close()` / `net.Listener.close()`** return `None` unconditionally, silently dropping any
   flush error. CPython's `socket.close()` also returns `None` (measured); **Go's `Close() error`
   reports it** (measured, Go 1.26) — a divergence. Contrast `io.Writer.close(self) -> None!`,
   which gets this right.
-* **`os.setenv(key, value)`** returns `nil` unconditionally for any `key`/`value`, including one
+* **`os.setenv(key, value)`** returns `None` unconditionally for any `key`/`value`, including one
   Python/Go would reject (e.g. a key containing `=`) — Chezzi writes an in-process `Map`, not the real
   OS environment, so there is nothing to validate against. Go's `os.Setenv` returns `error` there;
   CPython raises `ValueError: illegal environment variable name` (measured) — both a divergence.
@@ -196,17 +196,17 @@ quote-doubling with it (unaffected: it always passes a literal `"` as `old`, nev
 | Method | Signature | Notes |
 |--------|-----------|-------|
 | `len` | `() -> int` | |
-| `push` | `(x: T) -> nil` | *mutates* — append. |
+| `push` | `(x: T) -> None` | *mutates* — append. |
 | `pop` | `() -> T?` | *mutates* — remove & return last (`None` if empty). |
-| `reverse` | `() -> nil` | *mutates* — reverse in place. |
+| `reverse` | `() -> None` | *mutates* — reverse in place. |
 | `contains` | `(x: T) -> bool` | |
 | `index_of` | `(x: T) -> int` | First index, or `-1`. A **sentinel, not a carrier** — see the `-1` hazard below. |
 | `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
-| `extend` | `(other: List[T]) -> nil` | *mutates* — append all of `other`. |
+| `extend` | `(other: List[T]) -> None` | *mutates* — append all of `other`. |
 | `sum` | `() -> T` | Numeric lists (`int`→`int`). Integer sums use checked add — overflow raises a recoverable `integer overflow in Add`, never wraps; any-float lists accumulate to `float` with CPython 3.12+'s Neumaier compensation (ints included: `[0.1, 0.2, 0.3].sum()` is `0.6`, `[1e16, 1.0, 1.0].sum()` is `1.0000000000000002e+16`; may reach `inf`, never `nan` from the compensation). The ELEMENT TYPE decides the numeric kind, not the runtime elements, so an EMPTY one sums to `0.0` for `List[float]` and to `0` for `List[int]`. |
-| `sort` | `() -> nil` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`, or tuples, `List`s and `Option`s of orderable elements — lexicographic, `None < Some`) or `Comparable` structs or enums. Float `NaN` is handled by a total order (`NaN` sorts to one end), deterministic; `+0.0` and `-0.0` are Equal (input order kept, like CPython). Faults if the callback mutates the receiver (only reachable via a `Comparable` struct's or enum's `compare`). |
-| `sort_by` | `(cmp: fn(T, T) -> int) -> nil` | *mutates* — custom comparator (`<0`, `0`, `>0`). Faults if the callback mutates the receiver. |
-| `sort_by_key` | `(key: fn(T) -> K) -> nil` | *mutates* — sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()`. Faults if the callback mutates the receiver. |
+| `sort` | `() -> None` | *mutates* — ascending. Orderable elements (`int`/`float`/`str`, or tuples, `List`s and `Option`s of orderable elements — lexicographic, `None < Some`) or `Comparable` structs or enums. Float `NaN` is handled by a total order (`NaN` sorts to one end), deterministic; `+0.0` and `-0.0` are Equal (input order kept, like CPython). Faults if the callback mutates the receiver (only reachable via a `Comparable` struct's or enum's `compare`). |
+| `sort_by` | `(cmp: fn(T, T) -> int) -> None` | *mutates* — custom comparator (`<0`, `0`, `>0`). Faults if the callback mutates the receiver. |
+| `sort_by_key` | `(key: fn(T) -> K) -> None` | *mutates* — sort by a derived orderable/`Comparable` key. A `NaN` float key sorts deterministically (total order, `NaN` to one end), consistent with `sort()`. Faults if the callback mutates the receiver. |
 | `map` | `(f: fn(T) -> U) -> List[U]` | Returns a new list. |
 | `filter` | `(pred: fn(T) -> bool) -> List[T]` | Returns a new list. |
 | `fold` | `(init: U, f: fn(U, T) -> U) -> U` | Left fold. |
@@ -214,7 +214,7 @@ quote-doubling with it (unaffected: it always passes a literal `"` as `old`, nev
 | `min_by` / `max_by` | `(key: fn(T) -> K) -> T?` | The **element** whose derived key `K` (orderable/`Comparable`) is smallest / largest, wrapped in `Some`; first-seen ties. Empty list is `None`, never a fault. |
 | `first` / `last` | `() -> T?` | The first / last element, `None` if empty. Non-mutating. |
 | `reversed` | `() -> List[T]` | Returns a **new** reversed list — the receiver is untouched (contrast in-place `reverse`). |
-| `insert` | `(i: int, x: T) -> nil` | *mutates* — insert `x` before index `i`. Python-clamped: `i > len` appends, negatives are length-relative and clamp to `0`; never faults. |
+| `insert` | `(i: int, x: T) -> None` | *mutates* — insert `x` before index `i`. Python-clamped: `i > len` appends, negatives are length-relative and clamp to `0`; never faults. |
 | `remove_at` | `(i: int) -> T` | *mutates* — remove & return the element at index `i` (Python-relative negatives). A true out-of-range index **faults** (`index {i} out of bounds (len {n})`). |
 | `unique` | `() -> List[T]` | Returns a **new** list with all duplicates removed, first-occurrence order preserved (Python `dict.fromkeys`). Structural equality; never mutates the receiver. One pass over a hash index when every element is a flat scalar key; a container, `bytearray`, or user-`eq` element falls back to a linear scan with the same result. |
 | `dedup` | `() -> List[T]` | Returns a **new** list collapsing only **consecutive** duplicate runs (Rust `Vec::dedup`) — non-adjacent duplicates survive. |
@@ -272,7 +272,7 @@ Keep callbacks pure; if you need both, sort a copy and merge after.
 | `items` | `() -> List[(K, V)]` | Insertion order, the same order as `keys()`, so `Map(m.items()) == m`. Returns a fresh list (CPython returns a live view; Chezzi returns a snapshot, like `keys()`). |
 | `remove` | `(key: K) -> V?` | *mutates* — returns the removed value, or `None`. |
 | `merge` | `(other: Map[K, V]) -> Map[K, V]` | Returns a **new** map (`other` wins on key clash). |
-| `update` | `(other: Map[K, V]) -> nil` | *mutates* — merge `other` into self. |
+| `update` | `(other: Map[K, V]) -> None` | *mutates* — merge `other` into self. |
 | `copy` | `() -> Map[K, V]` | Returns a **new** map, shallow in the values (Python `dict.copy()`); struct/enum keys are snapshotted, as `merge` does. |
 
 Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
@@ -282,7 +282,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 |--------|-----------|-------|
 | `len` | `() -> int` | |
 | `has` | `(x: T) -> bool` | |
-| `add` | `(x: T) -> nil` | *mutates* — idempotent insert. |
+| `add` | `(x: T) -> None` | *mutates* — idempotent insert. |
 | `remove` | `(x: T) -> bool` | *mutates* — returns whether it was present. |
 | `union` / `intersection` / `difference` | `(other: Set[T]) -> Set[T]` | Return a **new** set. Operator forms: `a \| b` / `a & b` / `a - b`. |
 | `copy` | `() -> Set[T]` | Returns a **new** set (shallow, Python `set.copy()`); struct/enum elements are snapshotted, as `add` does. |
@@ -308,9 +308,9 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | both | `decode` | `() -> str` | UTF-8 decode (recoverable fault on invalid UTF-8). |
 | `bytes` | `decode_lossy` | `() -> str` | UTF-8 decode with each **maximal invalid subsequence** replaced by `U+FFFD` — Python's `b.decode(errors="replace")`, Rust's `String::from_utf8_lossy`. **Never faults**, so it is the DISPLAY twin of `decode` (it is what `path.Path.str()` is built on). Not injective: use `decode` when the exact bytes matter. |
 | both | `len` | `() -> int` | Byte count. |
-| `bytearray` | `push` | `(byte: int) -> nil` | *mutates* — append a byte (0–255). |
+| `bytearray` | `push` | `(byte: int) -> None` | *mutates* — append a byte (0–255). |
 | `bytearray` | `pop` | `() -> int?` | *mutates* — remove & return last byte. |
-| `bytearray` | `extend` | `(other: bytes \| bytearray) -> nil` | *mutates* — append all of `other`. |
+| `bytearray` | `extend` | `(other: bytes \| bytearray) -> None` | *mutates* — append all of `other`. |
 | `bytearray` | `copy` | `() -> bytearray` | Returns a **new** bytearray (Python `bytearray.copy()`). |
 
 Index either with `b[i]` (byte as `int`); `bytearray` also supports `b[i] = byte`. **Both types slice**
@@ -355,12 +355,12 @@ Three shapes: `Channel[T]()` is an **unbounded** FIFO (`send` never blocks); `Ch
 **rendezvous** channel — `send` blocks until a receiver is already waiting (Go's `make(chan T)`);
 `Channel[T](cap)` (`cap > 0`) is a **bounded** FIFO whose `send` **blocks/parks** while `cap` messages
 are queued and resumes once a `recv` frees a slot (Go's buffered channel; a full/rendezvous `send`
-with no possible consumer is a deadlock fault, not an over-fill or a hang). Methods: `send(x: T) -> nil`
+with no possible consumer is a deadlock fault, not an over-fill or a hang). Methods: `send(x: T) -> None`
 · `try_send(x: T) -> bool` (`false` = closed, full, **or** rendezvous with no waiting receiver — never
 blocks) · `recv() -> T` ·
 `try_recv() -> T?` (`Some(v)` if queued or offered by a parked sender, `None` otherwise)
-· `close() -> nil` ·
-`trip() -> nil` (permanent level-trigger latch — **`Channel[bool]` only**, gated by `where T: bool`, since
+· `close() -> None` ·
+`trip() -> None` (permanent level-trigger latch — **`Channel[bool]` only**, gated by `where T: bool`, since
 it always delivers `true`; the primitive behind `std.cancel`'s `done()`) · `len() -> int` (buffered values only — a parked sender's value is not counted, as in Go) · `cap() -> int`
 (`-1` for unbounded, `0` for rendezvous, the bound otherwise). Iterate received values with
 `for v in ch:` (ends when closed and drained). Backpressure only changes *which* task runs *when*,
@@ -372,7 +372,7 @@ depend on the no-arg form never blocking. Port Go's `make(chan T)` to `Channel[T
 `Channel[T]()`.
 
 ### `Shared[T]` — cross-task shared cell
-`get() -> T` · `set(x: T) -> nil` · `update(f: fn(T) -> T) -> nil`. `get` is a **snapshot copy out**
+`get() -> T` · `set(x: T) -> None` · `update(f: fn(T) -> T) -> None`. `get` is a **snapshot copy out**
 (the value lives off the GC heap so it can cross threads): mutating it — `s.get().push(x)` — changes a
 throwaway, not the box, and is silently lost. Mutate via `update` (or `set` a whole new value). Same for
 `RwShared`/`Atomic`; *unlike* a plain in-task `struct` field, whose reads alias the live value but can't cross a spawn.
@@ -395,8 +395,8 @@ longer AB-BA cycle across boxes) faults. (`rw.write` nested inside `rw.read` is 
 crossing — `read` never takes the guard, so the nested `write` persists.)
 
 ### `RwShared[T]` — cross-task read-write cell (many readers OR one writer)
-`get() -> T` · `set(x: T) -> nil` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
-result, no write-back) · `write(f: fn(T) -> T) -> nil` (exclusive write guard; `Shared.update` under
+`get() -> T` · `set(x: T) -> None` · `read(f: fn(T) -> R) -> R` (shared read guard; returns `f`'s
+result, no write-back) · `write(f: fn(T) -> T) -> None` (exclusive write guard; `Shared.update` under
 the write lock). Reach for it over `Shared` when reads dominate. Same reentrancy limit as
 `Shared.update`, with the same three measured outcomes (see the table above): a nested `write` or
 `set` on the same box faults through the update-guard deadlock detector, while a nested `read`/`get`
@@ -410,16 +410,16 @@ to the element's HEAD constructor (Tuple **excluded** — heterogeneous):
 - `RwShared[List[E]]`: `len() -> int` · `at(i: int) -> E?` (out of range is `None`, never a
   fault — same as `get_key` below and `std.json.at`; negative index normalizes like `xs[i]`. `RwShared`
   has no `[]` of its own, so this is its only read accessor) · `slice(lo: int, hi: int) -> List[E]` ·
-  `for_each(f: fn(E) -> _) -> nil` · `fold(init: R, f: fn(R, E) -> R) -> R`.
+  `for_each(f: fn(E) -> _) -> None` · `fold(init: R, f: fn(R, E) -> R) -> R`.
 - `RwShared[Map[K,V]]`: `len() -> int` · `get_key(k: K) -> V?` · `has(k: K) -> bool` ·
-  `for_each_entry(f: fn(K, V) -> _) -> nil` · `fold_entries(init: R, f: fn(R, K, V) -> R) -> R`.
-  Single-entry writers (TICKET-192): `set_key(k: K, v: V) -> nil` (insert or overwrite; an overwrite
+  `for_each_entry(f: fn(K, V) -> _) -> None` · `fold_entries(init: R, f: fn(R, K, V) -> R) -> R`.
+  Single-entry writers (TICKET-192): `set_key(k: K, v: V) -> None` (insert or overwrite; an overwrite
   keeps the stored key, as `d[k] = v`) · `remove_key(k: K) -> V?` · `get_or_insert(k: K, v: V)
   -> V` (the stored value, else inserts `v` and returns it). Each takes the box's update guard, the one
   `set`/`write` take, so a same-box re-entry from a user `eq`/`hash` faults like `write` does.
   `get_key`/`has`/`contains` and `set_key`/`get_or_insert` are **O(1) expected**: the stored map keeps
   the heap map's hash index. `remove_key` is O(n), as `Map.remove`.
-- `RwShared[Set[E]]`: `len() -> int` · `contains(e: E) -> bool` · `for_each(f: fn(E) -> _) -> nil` ·
+- `RwShared[Set[E]]`: `len() -> int` · `contains(e: E) -> bool` · `for_each(f: fn(E) -> _) -> None` ·
   `fold(init: R, f: fn(R, E) -> R) -> R`.
 
 (`fold*`'s R is inferred from `init`.) These walk the stored value **entry-at-a-time** and materialize
@@ -438,7 +438,7 @@ whole-container `get()`/`read()`, and `slice` (one call returning a container), 
 share — see [`concurrency.md`](concurrency.md) §airlock.
 
 ### `Atomic[T]` — cross-task atomic (numeric `T` for add/sub)
-`load() -> T` · `store(x: T) -> nil` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·
+`load() -> T` · `store(x: T) -> None` · `exchange(x: T) -> T` · `cas(expected: T, new: T) -> bool` ·
 `add(x: T) -> T` · `sub(x: T) -> T` (return the **new** value).
 `cas` compares **structurally**, never through a user `eq` — so a payload type that *reaches* a user
 `eq` (its own, or one on any element/entry/field/payload the structural compare recurses into) is a
@@ -447,7 +447,7 @@ compare, so the guarantee holds even where the checker cannot see the witness (a
 payload). See [`concurrency.md`](concurrency.md).
 
 ### `AtomicInt` — monomorphic **lock-free** int atomic
-`load() -> int` · `store(x: int) -> nil` · `exchange(x: int) -> int` · `cas(expected: int, new: int) -> bool` ·
+`load() -> int` · `store(x: int) -> None` · `exchange(x: int) -> int` · `cas(expected: int, new: int) -> bool` ·
 `add(x: int) -> int` · `sub(x: int) -> int` (return the **new** value; overflow **faults**, like `+`/`-`).
 The monomorphic-int sibling of `Atomic[T]` — no `[T]`, so it is backed by a genuine lock-free
 `std::sync::atomic::AtomicI64` (Rust `AtomicI64` / Java `AtomicInteger` / Go `atomic.Int64` style) instead
@@ -500,14 +500,14 @@ internals for `submit_result`; user code calls `submit_result`.
 cap is held and starts when a running one finishes. `Executor(0)` (or any `n < 1`) faults
 `Executor(n) needs n >= 1`. A job parked in a blocking op still counts toward the cap, so `n` jobs
 that each wait for a held job are a deadlock, reported at the parked job's blocking op ·
-`submit(task: fn() -> _) -> nil` — **starts the job immediately** (detached, fire-and-forget), like
+`submit(task: fn() -> _) -> None` — **starts the job immediately** (detached, fire-and-forget), like
 Python's `ThreadPoolExecutor.submit`. `task` is any zero-arg callable: a fn, method path, closure,
 std native (`time.now_ms`) or extern fn (TICKET-226). **A job is a spawned task** (TICKET-208): it copies its
 globals at the submit, inherits its creator's cancel chain and parks like any `spawn`ed task. A
 fire-and-forget job's fault ends the run; no `recover:` catches it ·
-`shutdown() -> nil` (**wait** for the submitted work; it raises no job fault: a handle job's fault
+`shutdown() -> None` (**wait** for the submitted work; it raises no job fault: a handle job's fault
 is its handle's `Err`, see `concurrency.md` §8) ·
-`shutdown_now() -> nil` (ask running jobs to stop **cooperatively**, then wait — Java `shutdownNow`;
+`shutdown_now() -> None` (ask running jobs to stop **cooperatively**, then wait — Java `shutdownNow`;
 a RUNNING job with no cancellation point still finishes, but one **sleeping, waiting a timer, or
 parked in a nested `Executor` join is ended**; a job held by the `Executor(n)` cap never starts,
 and its handle settles `Err` (CPython `shutdown(cancel_futures=True)`) — see `concurrency.md`
@@ -558,7 +558,7 @@ works. Details and the residual cases in `docs/gaps.md` (`W7-12r / W7-15`) and `
 ### `Socket` / `Listener` — from `std.net` (see §4)
 - `Socket`: `read(n: int, timeout_ms?: int) -> str!` · `write(s: str, timeout_ms?: int) -> int!` ·
   `read_bytes(n: int, timeout_ms?: int) -> bytes!` · `write_bytes(b: bytes, timeout_ms?: int) -> int!` ·
-  `close() -> nil`.
+  `close() -> None`.
   `read` is a **`str`-only seam** — it decodes, and it never decodes lossily (no U+FFFD, ever):
   - `n` bounds the NEW bytes taken off the socket. If the previous read ended mid-codepoint, its ≤3-byte
     tail is carried on the socket and prepended here — so `read(n)` can return **up to `n + 3` bytes**,
@@ -590,7 +590,7 @@ works. Details and the residual cases in `docs/gaps.md` (`W7-12r / W7-15`) and `
     `read` returns the same `Err` rather than silently eating the stream. A `str` seam can never hand
     those bytes back — switch to `read_bytes` (below), which hands them over byte-exactly.
   - An incomplete codepoint left when the peer closes → `Err("invalid utf-8 at eof: …")`.
-  - `close()` returns `nil` (no error channel): a still-carried tail at `close` is dropped silently — the
+  - `close()` returns `None` (no error channel): a still-carried tail at `close` is dropped silently — the
     EOF error surfaces on the `read` that sees the close, not on `close`.
   - `close()` from another task wakes a task parked in `accept`/`read`/`read_bytes`/`write`/`write_bytes`
     on the same handle; that call returns `Err("<op> on a closed listener|socket")` (Go's `Close`
@@ -607,7 +607,7 @@ works. Details and the residual cases in `docs/gaps.md` (`W7-12r / W7-15`) and `
     `Err("invalid utf-8 …")` refused to deliver, so mixing the two on one socket is lossless.
     `write_bytes` takes a `bytes` (convert a `bytearray` with `bytes(ba)`). `timeout_ms` behaves exactly
     as for `read`/`write`.
-- `Listener`: `accept(timeout_ms?: int) -> Socket!` · `addr() -> str!` · `close() -> nil`.
+- `Listener`: `accept(timeout_ms?: int) -> Socket!` · `addr() -> str!` · `close() -> None`.
   `close()` from another task wakes a task parked in `accept`; that call returns `Err("accept on a
   closed listener")` (Go's `Close` cancelling a blocked `Accept`).
 - `Socket`/`Listener` are **reserved type names** (no user `struct Socket`) and a bare annotation
@@ -710,12 +710,12 @@ The file seams (`read_file`/`write_file`/`read_bytes`/`write_bytes`) are
 
 | Function | Signature | Notes |
 |----------|-----------|-------|
-| `print` | `(s: str) -> nil` | stdout + newline. |
-| `eprint` | `(s: str) -> nil` | stderr + newline. |
+| `print` | `(s: str) -> None` | stdout + newline. |
+| `eprint` | `(s: str) -> None` | stderr + newline. |
 | `read_line` | `() -> str?` | Blocking stdin line, newline stripped (`None` at EOF). |
 | `read_all` | `() -> str` | Drain **all** remaining stdin to EOF as one `str` (Python `sys.stdin.read()`); `""` at a clean EOF. Shares the one stdin source with `read_line` (a later read then sees EOF). Non-UTF-8 stdin is a **fault** — there is no stdin `read_bytes` hatch. |
 | `read_char` | `() -> str?` | Read one Unicode scalar as a 1-char `str` (Chezzi has no `char` scalar); `None` at a clean EOF, a **fault** on a partial/invalid UTF-8 sequence. |
-| `flush` | `() -> nil` | Flush this process's stdout. Effectively a **no-op**: the CLI's stdout is unbuffered (every write, partial line included, is flushed as it is produced) and captured output has nothing to flush. Kept because it is the portable idiom — and it never waits on stdout's consumer, so it cannot stall a task. (For real buffering, wrap `stdout()` in `buffered(...)` and call the *Writer*'s `flush()`.) |
+| `flush` | `() -> None` | Flush this process's stdout. Effectively a **no-op**: the CLI's stdout is unbuffered (every write, partial line included, is flushed as it is produced) and captured output has nothing to flush. Kept because it is the portable idiom — and it never waits on stdout's consumer, so it cannot stall a task. (For real buffering, wrap `stdout()` in `buffered(...)` and call the *Writer*'s `flush()`.) |
 | `input` | `(prompt: str) -> str?` | Print the prompt (no newline), flush, read one line. Exactly `print(prompt, end="") + flush + read_line` (`None` at EOF). |
 | `isatty` | `() -> bool` | `true` when **stdout** is a real terminal, `false` when piped/redirected (via `std::io::IsTerminal`). Python `sys.stdout.isatty()` / Go `isatty`. Lets a CLI colorize only when not piped. |
 | `isatty_stdin` | `() -> bool` | Same, over **stdin**. |
@@ -799,7 +799,7 @@ opened by `open(path)`): stream a large file line- or chunk-by-chunk instead of 
   because `TextIOWrapper` decodes a whole chunk at a time — and every `readline()` after that returns
   `''`, a **silent EOF claim** over `"gamma"`, which is still in the file. Go's `bufio.Scanner` does
   advance (`Scan()` returns true three times, `Text()` gives back `"bad\xff\xfebytes"` verbatim with
-  `sc.Err() == nil`), but only because a Go `string` may hold invalid UTF-8; a Chezzi `str` may not, so
+  `sc.Err() == None`), but only because a Go `string` may hold invalid UTF-8; a Chezzi `str` may not, so
   that option is not available here. Chezzi returns `Some("alpha")`, then faults — loudly, repeatedly,
   and with every byte still recoverable through `read_bytes`. That is `correct > silent > wrong`, so the
   stickiness **stays**: it is not a bug to be fixed into a skip.
@@ -885,7 +885,7 @@ the whole remainder (so a later read in any task sees EOF), `read_char` consumes
 | `args` | `() -> List[str]` | Program args (the positionals after the script path). Decoded **lossily** — see the decoding note. |
 | `env` | `(key: str) -> str?` | Environment variable (reads the injected env — see note). |
 | `environ` | `() -> Map[str, str]` | ALL environment variables, **sorted by key** (deterministic across runs + engines). Same source as `env`. Keys + values are decoded **lossily** — see the decoding note. |
-| `setenv` | `(key: str, value: str) -> nil` | Set an env var. Observed by both `env` and `environ`, and **visible across tasks** (the env map is shared by all M:N workers — process-global, like Python `os.environ` / Go `os.Setenv`). Writes the injected env map — **not** a child's real env; `process.cmd` still inherits the real process env. |
+| `setenv` | `(key: str, value: str) -> None` | Set an env var. Observed by both `env` and `environ`, and **visible across tasks** (the env map is shared by all M:N workers — process-global, like Python `os.environ` / Go `os.Setenv`). Writes the injected env map — **not** a child's real env; `process.cmd` still inherits the real process env. |
 | `getpid` | `() -> int` | Current process id. |
 | `platform` | `() -> str` | OS name: `"linux"` / `"macos"` / `"windows"` / … (`std::env::consts::OS`). |
 | `hostname` | `() -> str?` | System hostname (`None` on the rare `gethostname` syscall failure). |
@@ -953,7 +953,7 @@ the verdict never depends on whether the directory exists — `Ok([])` never aga
 was not understood". A directory that does not exist, cannot be read, or is not a directory at all —
 after the pattern has already validated — yields `Ok([])`, not `Err`: measured Go 1.26.6
 `filepath.Glob("nope/*")`, `Glob("noperm/*")` (mode 000) and `Glob("plain.txt/*")` all return
-`[] err=<nil>`, and its docs say "Glob ignores file system errors such as I/O errors reading
+`[] err=<None>`, and its docs say "Glob ignores file system errors such as I/O errors reading
 directories"; measured CPython 3.14.7 `glob.glob` also returns `[]` in all three cases. This is the
 opposite of `fs.walk`, which deliberately aborts at the first unreadable directory (see the
 `fs.walk` entry below and DEC-011). Matched over **raw bytes**, so an ASCII pattern still matches a non-UTF-8
@@ -982,7 +982,7 @@ the message names that directory, not the root you passed in — and the walk st
 partial listing, since the return is `Result[List[Path]]`. (The sorted order is required for
 determinism.)
 
-**Mutations** (all `Result[nil]` — a permission-denied / missing-parent failure is a catchable `Err`,
+**Mutations** (all `Result[None]` — a permission-denied / missing-parent failure is a catchable `Err`,
 never a panic):
 `mkdir(path) -> None!` — create a directory **recursively** (like `mkdir -p`: missing parents
 are created, an existing dir is a no-op/idempotent); an **empty path is an `Err`** (`No such file or
@@ -1014,7 +1014,7 @@ list) + `remove_file`/`remove_dir` in Chezzi if you need it.
 ### `std.time`
 `now() -> int` (Unix epoch seconds, UTC) · `now_ms() -> int` (Unix epoch **milliseconds**, UTC; a wall
 clock that can step backwards and is never clamped — never subtract a `monotonic()` reading from it) · `monotonic() -> float` (seconds, immune to clock changes) ·
-`sleep_ms(ms: int) -> nil` · `format(epoch: int) -> str` (`"YYYY-MM-DD HH:MM:SS"`, UTC).
+`sleep_ms(ms: int) -> None` · `format(epoch: int) -> str` (`"YYYY-MM-DD HH:MM:SS"`, UTC).
 Also licenses the opcode-backed `timer(ms) -> Channel[bool]` builtin (one-shot timeout channel; see
 [§3](#3-runtime-types-concurrency--iteration) and `concurrency.md §6c`): `import std.time` (whole-module)
 or `import timer from std.time` (per-name; `timer` cannot be renamed on import).
@@ -1073,7 +1073,7 @@ risk); use `run_args` instead.
 result (binary stdout *plus* stderr *plus* the code in one value).
 
 ### `std.rand`
-Pseudo-random scalars (SplitMix64 PRNG). `seed(n: int) -> nil` (reseed deterministically) ·
+Pseudo-random scalars (SplitMix64 PRNG). `seed(n: int) -> None` (reseed deterministically) ·
 `float() -> float` (uniform in `[0, 1)`) · `int(lo: int, hi: int) -> int` (uniform in the half-open
 `[lo, hi)`; **faults** `rand.int(lo, hi): hi must be > lo` if `hi <= lo`) · `bool() -> bool`.
 The stream auto-seeds on first use; call `seed(n)` to make it reproducible. Draws are
@@ -1280,7 +1280,7 @@ the value). Loads:
   with `load_uint8_at` instead. The `str`/`owned_str`/`str?` **extern return** paths validate alike.
 
 Stores mirror every width except `str` (a `store_str` is deferred — an unbounded write into a caller
-buffer is a footgun). Each returns `nil`:
+buffer is a footgun). Each returns `None`:
 `store_int`/`store_int8`..`store_int64`/`store_uint8`..`store_uint64`/`store_float`/`store_float32`/
 `store_bool`/`store_ptr` — base form `(p, v)`, `_at` form `(p, off, v)`. Stores write at the value's
 **natural C width** (`store_int8` writes one byte only, leaving adjacent bytes untouched). A width
@@ -1312,7 +1312,7 @@ buffer can be handed to a C fn that itself reallocs/frees it.
 
 - `alloc(nbytes) -> ptr` — `malloc(nbytes)`; the bytes are **garbage** (uninitialized).
 - `alloc_zeroed(nbytes) -> ptr` — `calloc`-style; the bytes are **zeroed**.
-- `free(p)` — release a buffer; returns `nil`. `free(ffi.null())` is a safe **no-op**. Freeing the
+- `free(p)` — release a buffer; returns `None`. `free(ffi.null())` is a safe **no-op**. Freeing the
   same buffer **twice is undefined behavior and aborts the process** (measured: `free(): double free
   detected in tcache 2`, SIGABRT) — this is the libc allocator, so it is not catchable by `recover:`.
   CPython `ctypes` aborts identically on the same program; the mitigation is the same one as for a
@@ -1449,7 +1449,7 @@ Password hashing (bcrypt/argon2) is not yet provided.
 
 ### `std.uuid`
 RFC 4122 version-4 (random) UUIDs. `v4() -> str` returns a fresh random UUID as the canonical 36-char
-`8-4-4-4-12` lowercase-hex string (version nibble `4`, variant in `8/9/a/b`). `uuid_seed(n: int) -> nil`
+`8-4-4-4-12` lowercase-hex string (version nibble `4`, variant in `8/9/a/b`). `uuid_seed(n: int) -> None`
 switches the stream to a reproducible one (for golden runs).
 **By default `v4()` is secure:** it draws 16 fresh bytes from the OS CSPRNG per call — the same source
 as `crypto.secure_bytes`, and the same shape as CPython's `uuid.uuid4()`
@@ -1665,7 +1665,7 @@ comparator params (`fn(x: int, y: int): …`) work too.
 | `min_heap` | `() -> Heap[int]` | Int min-heap factory (`a < b`). |
 | `max_heap` | `() -> Heap[int]` | Int max-heap factory (`a > b`). |
 | `from_list` | `(xs, less) -> Heap[T]` | Heapify (push-loop, **O(n log n)**, NOT bottom-up O(n)); `xs` untouched. |
-| `.push(x)` | `(T) -> nil` | Sift-up. **O(log n)**. |
+| `.push(x)` | `(T) -> None` | Sift-up. **O(log n)**. |
 | `.pop()` | `() -> T?` | Remove+return the extremum (sift-down), `None` if empty. **O(log n)**. |
 | `.peek()` | `() -> T?` | The extremum without removing, `None` if empty. **O(1)**. |
 | `.len()` / `.is_empty()` | `() -> int` / `-> bool` | **O(1)**. |
@@ -1678,7 +1678,7 @@ peek is worst-case O(1). Construct directly: **`Deque([], [])`** — `T` is infe
 
 | member | signature | semantics / complexity |
 | --- | --- | --- |
-| `.push_front(x)` / `.push_back(x)` | `(T) -> nil` | **O(1)**. |
+| `.push_front(x)` / `.push_back(x)` | `(T) -> None` | **O(1)**. |
 | `.pop_front()` / `.pop_back()` | `() -> T?` | Remove+return the head/tail, `None` if empty. **Amortized O(1)**. |
 | `.peek_front()` / `.peek_back()` | `() -> T?` | Head/tail without removing, `None` if empty. **O(1)**. |
 | `.len()` / `.is_empty()` | `() -> int` / `-> bool` | **O(1)**. |
@@ -1690,8 +1690,8 @@ like any map key — `Hashable` alone does not imply `Eq`, `docs/gaps.md` W7-53)
 
 | member | signature | semantics / complexity |
 | --- | --- | --- |
-| `.add(x)` | `(T) -> nil` | `add_n(x, 1)`. **O(1)**. |
-| `.add_n(x, n)` | `(T, int) -> nil` | Increment by `n` (creates the entry if absent; `n` may be negative). **O(1)**. |
+| `.add(x)` | `(T) -> None` | `add_n(x, 1)`. **O(1)**. |
+| `.add_n(x, n)` | `(T, int) -> None` | Increment by `n` (creates the entry if absent; `n` may be negative). **O(1)**. |
 | `.count(x)` | `(T) -> int` | Count of `x`, **0 if never added**. **O(1)**. |
 | `.total()` | `() -> int` | Sum of all counts. **O(n)**. |
 | `.most_common(k)` | `(int) -> List[(T, int)]` | Top `k` `(item, count)` pairs by **descending count**; `k` clamped to `[0, len]` (`k<=0`→`[]`, `k>=len`→all). **O(n log n)**. |
@@ -1744,8 +1744,8 @@ single-entry writers under the box's **one update guard**. Lookups and inserts a
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
 | `.get(key)` | `(K) -> V?` | **concurrent read** (`get_key`). `Some(v)` / `None`. |
-| `.set(key, val)` | `(K, V) -> nil` | **update guard** (`set_key`). Insert or overwrite. |
-| `.remove(key)` | `(K) -> nil` | **update guard** (`remove_key`). No-op if absent. |
+| `.set(key, val)` | `(K, V) -> None` | **update guard** (`set_key`). Insert or overwrite. |
+| `.remove(key)` | `(K) -> None` | **update guard** (`remove_key`). No-op if absent. |
 | `.contains(key)` | `(K) -> bool` | **concurrent read**. |
 | `.len()` | `() -> int` | **concurrent read**. |
 | `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC** (`RwShared.get_or_insert`): the probe and the insert run under ONE update guard with no user closure, so a concurrent `remove` cannot slip between them. Returns the existing value, or `default` if it was absent. |
@@ -1758,8 +1758,8 @@ their read-modify-write inside **one** closure, so N tasks each incrementing the
 
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
-| `.increment(key)` | `(K) -> nil` | **exclusive write**, atomic RMW `+1` (created at 1 if absent). |
-| `.add(key, n)` | `(K, int) -> nil` | **exclusive write**, atomic RMW `+n` (`n` may be negative; created at `n` if absent). |
+| `.increment(key)` | `(K) -> None` | **exclusive write**, atomic RMW `+1` (created at 1 if absent). |
+| `.add(key, n)` | `(K, int) -> None` | **exclusive write**, atomic RMW `+n` (`n` may be negative; created at `n` if absent). |
 | `.count(key)` | `(K) -> int` | **concurrent read**, **0 if absent**. |
 | `.total()` | `() -> int` | **concurrent read**, sum of all counts. |
 
@@ -1889,7 +1889,7 @@ Result[List[str]]` — `Ok(positionals)` on success (folds Go's `Parse()` + `Arg
 `get_str(name) -> str` · `get_bool(name) -> bool` · `get_int(name) -> int` (the registered default
 until parse overwrites it; **panics** on an *unregistered* name — a programmer error, not a
 user-input path; closer to Python argparse's `AttributeError` on an unregistered destination than to
-Go, whose `flag.Lookup` returns `nil` for an unknown name and never panics — measured, Go 1.26) ·
+Go, whose `flag.Lookup` returns `None` for an unknown name and never panics — measured, Go 1.26) ·
 `positionals() -> List[str]` · `usage() -> str` (Go `PrintDefaults`-style, one line
 per flag in registration order — prints the value **registered** as each flag's default, the Go
 `Flag.DefValue` analog, never the parsed value: measured Go 1.26.6 still prints `how many (default 1)`
@@ -2023,8 +2023,8 @@ enum Json:
 > **`encode(x) -> str` is the `dumps`-shaped inverse of `decode[T]`** (`docs/gaps.md` **W8-20**):
 > `decode[T](encode(x))` gives back `x`. It accepts bool, int, float, str, `List`, tuple, `Map`
 > with `str` keys, a struct (in declaration field order), `Some(v)`/`None`, and an already-built
-> `Json` value (passed through unchanged). (There is no bare `nil` *value* to pass — `nil` is a type
-> spelling only, and `json.encode(nil)` is `unknown name 'nil'`; the JSON null you get back out is
+> `Json` value (passed through unchanged). (There is no bare `None` *value* to pass — `None` is a type
+> spelling only, and `json.encode(None)` is `unknown name 'None'`; the JSON null you get back out is
 > `Json.Null`, produced by `None`.) It **faults** — recoverably, catchable under `recover:` —
 > on a `Result` (`json.encode: cannot encode a Result`), on any other enum
 > (`json.encode: cannot encode enum <name>`), and on any other object
@@ -2107,7 +2107,7 @@ A JSON *literal in Chezzi source* clashes with string interpolation, so use a ra
 string is interpolation.
 
 ### `std.cancel` — cooperative cancellation & timeouts
-`struct Token` with methods `cancelled() -> bool` · `reason() -> str?` · `cancel() -> nil` ·
+`struct Token` with methods `cancelled() -> bool` · `reason() -> str?` · `cancel() -> None` ·
 `done() -> Channel[bool]` (use in `wait:`) · `deadline_at() -> float` · `derive() -> Token` (linked child).
 Constructors: `manual() -> Token` · `timeout(ms: int) -> Token` · `derive(parent: Token) -> Token`.
 Registration is Go `context.WithCancel`'s: `derive()` is **O(1)** — it registers the child into its

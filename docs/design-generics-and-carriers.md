@@ -146,6 +146,8 @@ Error messages print the sugar (`int?`, `str!IoErr`). Generic code needs no long
 
 ### D1. One "nothing" word: `None` (owner decision 2026-10-07)
 
+**Status: done (TICKET-231, 2026-10-08).** Messages print the sugar.
+
 `nil` is deleted. `None` is used in two positions that never collide, as in Python:
 
 | position | meaning | example |

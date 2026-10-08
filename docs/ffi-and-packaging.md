@@ -146,7 +146,7 @@ Recorded so a revisit starts from a plan, not a blank page:
    *Python ref:* `ctypes` uses typed `POINTER(c_int)` args and `a[0]` to deref — Chezzi exposes the
    same as explicit typed load/store builtins on a `ptr`. Purely additive (no callback-engine change).
 3. **(LANDED) C-buffer alloc layer** — `ffi.alloc(nbytes) -> ptr` (malloc; garbage bytes),
-   `ffi.alloc_zeroed(nbytes) -> ptr` (calloc; zeroed), `ffi.free(p)` (free; returns nil). Backed by the
+   `ffi.alloc_zeroed(nbytes) -> ptr` (calloc; zeroed), `ffi.free(p)` (free; returns None). Backed by the
    **libc allocator** (so a buffer may be handed to a C fn that reallocs/frees it). Fill/read with the
    existing `store_*`/`load_*` builtins — there is **no** bulk list↔buffer copy helper (the loop idiom
    is the surface; a `write_ints`/`read_ints` is deferred). Manual free (`defer ffi.free(p)`); a `ptr`
