@@ -38274,3 +38274,11 @@ mod ticket_231_none_word {
         assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
     }
 }
+
+#[test]
+fn bare_constant_in_pattern_rejected() {
+    rejects(
+        "LIMIT: const int = 3\nfn main():\n    match 5:\n        LIMIT:\n            print(\"hit\")\n        _:\n            print(\"miss\")\n",
+        "`LIMIT` is a constant",
+    );
+}
