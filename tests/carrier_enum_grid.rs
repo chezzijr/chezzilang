@@ -60,8 +60,10 @@ fn to_carrier(text: &str) -> String {
 enum Want {
     Prints(&'static str),
     Rejects(&'static str),
+    /// A reject whose text names the type: the carrier twin prints its sugar (second field).
+    RejectsAs(&'static str, &'static str),
 }
-use Want::{Prints, Rejects};
+use Want::{Prints, Rejects, RejectsAs};
 
 fn expect_of(w: &Want, carrier: bool) -> Expect {
     let conv = |s: &str| {
@@ -74,6 +76,7 @@ fn expect_of(w: &Want, carrier: bool) -> Expect {
     match w {
         Prints(s) => Expect::Prints(conv(s)),
         Rejects(s) => Expect::Rejects(Box::leak(conv(s).into_boxed_str())),
+        RejectsAs(user, sugar) => Expect::Rejects(if carrier { sugar } else { user }),
     }
 }
 
@@ -234,13 +237,19 @@ fn carrier_enum_grid() {
         c,
         "C17 payload mismatch",
         "x: Opt1[int] = Som(\"s\")\n",
-        Rejects("cannot assign Opt1[str] to variable of type Opt1[int]"),
+        RejectsAs(
+            "cannot assign Opt1[str] to variable of type Opt1[int]",
+            "cannot assign str? to variable of type int?",
+        ),
     );
     twin(
         c,
         "C18 the payload hint is a seed only",
         "x: Opt1[Opt1[int]] = Som(5)\n",
-        Rejects("cannot assign Opt1[int] to variable of type Opt1[Opt1[int]]"),
+        RejectsAs(
+            "cannot assign Opt1[int] to variable of type Opt1[Opt1[int]]",
+            "cannot assign int? to variable of type int??",
+        ),
     );
     // Red when the bare-callee rule also takes a nullary variant (`Non() expects 0 argument(s)`).
     twin(

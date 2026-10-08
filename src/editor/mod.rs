@@ -1399,6 +1399,18 @@ mod tests {
     }
 
     #[test]
+    fn hover_prints_carrier_sugar() {
+        // A hover reads the one type renderer, so it shows the sugar the user writes.
+        let h = hov(
+            "fn f(x: Map[str, Result[int, str]]):\n    print(x)\n",
+            1,
+            10,
+        )
+        .expect("hover on param body use");
+        assert_eq!(h.display, "Map[str, int!str]");
+    }
+
+    #[test]
     fn hover_destructure_first() {
         // `a, b := (1, 2)` — hovering the first binding `a` (col 0) reports its tuple-element type.
         let h = hov("a, b := (1, 2)\nprint(a)\n", 0, 0).expect("hover on destructure first");
@@ -1603,7 +1615,7 @@ mod tests {
     fn hover_fn_shows_doc() {
         // A `#` comment immediately above a `fn` becomes its doc, surfaced on hover of the fn's use.
         let h = hov("# greet the world\nfn f():\n    1\nf\n", 3, 0).expect("hover on fn use");
-        assert_eq!(h.display, "fn() -> nil");
+        assert_eq!(h.display, "fn() -> None");
         assert_eq!(h.doc.as_deref(), Some("greet the world"));
     }
 
@@ -1742,7 +1754,7 @@ mod tests {
         // keyword-only `sep`/`end` (both `str`), returning `nil`. (More informative than the old
         // synthetic `fn(?) -> nil`.)
         let h = hov("print(\"hi\")\n", 0, 0).expect("hover on builtin print callee");
-        assert_eq!(h.display, "fn(List[Any], str, str) -> nil");
+        assert_eq!(h.display, "fn(List[Any], str, str) -> None");
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
     }
 

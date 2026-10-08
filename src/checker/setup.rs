@@ -2871,7 +2871,7 @@ impl Checker {
     /// Value arms now pin persistently, exactly like statement position (`docs/syntax.md`'s
     /// scope-wide first-use rule). `m[k]=v` is a statement and cannot appear in a value arm at all;
     /// `xs.push(1)` CAN be written there and does reach `refine_receiver`, but it returns nil, so
-    /// such a program is rejected either way (*expression returns no value (nil) and cannot be used
+    /// such a program is rejected either way (*expression returns no value (None) and cannot be used
     /// as a value*) — removing the barrier changes which diagnostic it gets, not whether it is
     /// accepted. The only refinement that can change an ACCEPTED program in a value arm is therefore
     /// `constrain_empty_arg` (a call taking the binding). The consequence, measured on the pre-fix

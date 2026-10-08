@@ -4157,11 +4157,11 @@ fn builtin_type_doc(name: &str) -> Option<String> {
             None,
         ),
         "Result" => (
-            "success-or-error — Result[T] / Result[T, E]; Ok(v) / Err(e), unwrap with ? or match",
+            "success-or-error — T!E / T! (long form Result[T, E]); Ok(v) / Err(e), unwrap with ? or match",
             None,
         ),
         "Option" => (
-            "a value or nothing — Option[T]; Some(v) / None, unwrap with ? or match",
+            "a value or nothing — T? (long form Option[T]); Some(v) / None, unwrap with ? or match",
             None,
         ),
         "Iterator" => (

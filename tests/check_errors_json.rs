@@ -1169,3 +1169,17 @@ fn a_later_unannotated_literal_of_the_same_type_still_reports() {
     );
     assert!(stdout.contains("\"line\":2,\"col\":7"), "stdout={stdout}");
 }
+
+/// `--errors=json` reads the one type renderer, so its message text prints the sugar.
+#[test]
+fn errors_json_prints_carrier_sugar() {
+    let t = TmpDir::new();
+    let main = t.write("main.chz", "x: Option[Option[int]] = true\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", main.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("variable of type int??"), "stdout={stdout}");
+    assert!(!stdout.contains("Option["), "stdout={stdout}");
+}

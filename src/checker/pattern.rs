@@ -1521,7 +1521,7 @@ impl Checker {
         if ty == Ty::Nil {
             self.error(
                 expr.span,
-                "expression returns no value (nil) and cannot be used as a value".to_string(),
+                "expression returns no value (None) and cannot be used as a value".to_string(),
             );
             return Ty::Unknown;
         }

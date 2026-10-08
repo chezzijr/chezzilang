@@ -714,6 +714,32 @@ impl fmt::Display for Named<'_> {
     }
 }
 
+/// Does a `Result`'s error type print after the `!` (anything but the default `Error` protocol or
+/// a still-unconstrained error)?
+fn has_explicit_error(e: &Ty) -> bool {
+    !matches!(e, Ty::Unknown) && !matches!(e, Ty::Protocol(p, pa) if p == "Error" && pa.is_empty())
+}
+
+/// The operand of a `?` / `!` suffix. Parenthesized exactly where `parse_type_postfix` would
+/// read the bare spelling differently: a fn type (`fn() -> int?` returns `int?`) and a `Result`
+/// with an explicit error (`int!str?` is `Result[int, Option[str]]`).
+struct Operand<'a>(&'a Ty, Option<&'a HashMap<String, String>>);
+
+impl fmt::Display for Operand<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parens = match self.0 {
+            Ty::Func { .. } | Ty::BuiltinFn { .. } => true,
+            Ty::Result(_, e) => has_explicit_error(e),
+            _ => false,
+        };
+        if parens {
+            write!(f, "({})", Named(self.0, self.1))
+        } else {
+            write!(f, "{}", Named(self.0, self.1))
+        }
+    }
+}
+
 /// Strip a trailing `#<digits>` from a module key: the `module_keys` duplicate-label tiebreak
 /// (`src/resolver/mod.rs`). `#` is unspellable in source, so it never reaches a message.
 fn strip_dup_label(module: &str) -> &str {
@@ -849,20 +875,19 @@ impl Ty {
             Ty::Str => write!(f, "str"),
             Ty::Bytes => write!(f, "bytes"),
             Ty::ByteArray => write!(f, "bytearray"),
-            Ty::Nil => write!(f, "nil"),
+            Ty::Nil => write!(f, "None"),
             Ty::List(t) => write!(f, "List[{}]", Named(t, names)),
             Ty::Map(k, v) => write!(f, "Map[{}, {}]", Named(k, names), Named(v, names)),
             Ty::Set(t) => write!(f, "Set[{}]", Named(t, names)),
-            // `Result[T]` when the error is the default `Error` or still unconstrained (`?`);
-            // `Result[T, E]` for an explicit error type.
-            Ty::Result(t, e) => match e.as_ref() {
-                Ty::Protocol(p, pa) if p == "Error" && pa.is_empty() => {
-                    write!(f, "Result[{}]", Named(t, names))
+            // The sugar: `T!` when the error is the default `Error` or unconstrained, else `T!E`.
+            Ty::Result(t, e) => {
+                write!(f, "{}!", Operand(t, names))?;
+                if has_explicit_error(e) {
+                    write!(f, "{}", Named(e, names))?;
                 }
-                Ty::Unknown => write!(f, "Result[{}]", Named(t, names)),
-                _ => write!(f, "Result[{}, {}]", Named(t, names), Named(e, names)),
-            },
-            Ty::Option(t) => write!(f, "Option[{}]", Named(t, names)),
+                Ok(())
+            }
+            Ty::Option(t) => write!(f, "{}?", Operand(t, names)),
             Ty::Channel(t) => write!(f, "Channel[{}]", Named(t, names)),
             Ty::Shared(t) => write!(f, "Shared[{}]", Named(t, names)),
             Ty::RwShared(t) => write!(f, "RwShared[{}]", Named(t, names)),
@@ -968,7 +993,7 @@ mod tests {
     #[test]
     fn display_renders_source_forms() {
         assert_eq!(Ty::list(Ty::Int).to_string(), "List[int]");
-        assert_eq!(Ty::result(Ty::Int).to_string(), "Result[int]");
+        assert_eq!(Ty::result(Ty::Int).to_string(), "int!");
         assert_eq!(Ty::strukt("Point").to_string(), "Point");
         assert_eq!(
             Ty::Struct("Pair".into(), vec![Ty::Int, Ty::Str]).to_string(),
@@ -1016,7 +1041,7 @@ mod tests {
             &Ty::list(nominal("pkg.a::Col")),
             &Ty::option(nominal("pkg.b::Col")),
         ]);
-        assert_eq!((a.as_str(), b.as_str()), ("List[a.Col]", "Option[b.Col]"));
+        assert_eq!((a.as_str(), b.as_str()), ("List[a.Col]", "b.Col?"));
     }
 
     #[test]

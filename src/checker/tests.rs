@@ -3483,17 +3483,17 @@ fn a_write_after_the_first_constraining_use_pins_the_payload() {
     // (a) the primary repro.
     rejects(
         "x := None\ny: Option[str] = x\nx = Some(1)\nz: Option[str] = x\nprint(z)\n",
-        "cannot assign Option[int] to 'x'",
+        "cannot assign int? to 'x'",
     );
     // (b) the `??` fault twin.
     rejects(
         "x := None\na: str = x ?? \"s\"\nx = Some(1)\nb: str = x ?? \"t\"\nprint(b.len())\n",
-        "cannot assign Option[int] to 'x'",
+        "cannot assign int? to 'x'",
     );
     // (c) write-then-write, no annotated sink between them.
     rejects(
         "x := None\nx = Some(1)\nx = Some(\"s\")\nprint(x)\n",
-        "cannot assign Option[str] to Option[int]",
+        "cannot assign str? to int?",
     );
     // (d) the Box twin.
     rejects(
@@ -3510,7 +3510,7 @@ fn a_write_after_the_first_constraining_use_pins_the_payload() {
     // (f) the typed-argument sink.
     rejects(
         "fn f(o: Option[str]) -> int:\n    return 1\nx := None\nn := f(x)\nx = Some(1)\nprint(n)\n",
-        "cannot assign Option[int] to 'x'",
+        "cannot assign int? to 'x'",
     );
 }
 
@@ -3542,7 +3542,7 @@ fn a_carrier_write_that_agrees_with_its_pin_is_accepted() {
 fn a_carrier_write_repins_the_binding_for_later_reads() {
     rejects(
         "x := None\nx = Some(1)\ny: Option[str] = x\nprint(y)\n",
-        "cannot assign Option[int] to variable of type Option[str]",
+        "cannot assign int? to variable of type str?",
     );
     rejects(
         "x := None\nx = Some(1)\nmatch x:\n    Some(v):\n        print(v + \"s\")\n    None:\n        print(0)\n",
@@ -4700,7 +4700,7 @@ fn list_min_max_return_option_and_keep_their_bound() {
     for call in ["min()", "max()", "min_by(fn(x: int) -> int: x)"] {
         rejects(
             &format!("xs := [3, 1, 2]\nv: int = xs.{call}\n"),
-            "cannot assign Option[int] to variable of type int",
+            "cannot assign int? to variable of type int",
         );
         ok(&format!("xs := [3, 1, 2]\nv: Option[int] = xs.{call}\n"));
     }
@@ -5257,7 +5257,7 @@ struct Box[T]:
     // erasure is still refused, which is the property this row proves.
     entry_rejects(
         &format!("{SRC}o: Option[Tagged] = Some(Box(Tag(1)))\n"),
-        "cannot assign Option[Box[Tag]] to variable of type Option[Tagged]",
+        "cannot assign Box[Tag]? to variable of type Tagged?",
     );
     // (d) erasure through a struct field.
     entry_rejects(
@@ -5299,7 +5299,7 @@ struct MyErr[T]:
     // the erasure is still refused, which is what this row proves.
     entry_rejects(
         &format!("{ERR_SRC}fn f() -> int!:\n    return Err(MyErr(Tag(1)))\n"),
-        "expected return type Result[int",
+        "expected return type int!",
     );
     entry_ok(&format!(
         "{ERR_SRC}fn f() -> int!:\n    return Err(MyErr(7))\n"
@@ -6532,7 +6532,7 @@ fn disjoint_types_equality_rejected() {
     );
     entry_rejects(
         "enum Shadow:\n    A\n    B\nfn main():\n    o: Option[int] = Some(1)\n    print(o == Shadow.A)\nmain()\n",
-        "cannot compare Option[int] and Shadow for equality",
+        "cannot compare int? and Shadow for equality",
     );
     // A protocol existential is NOT a free pass: a concrete that does NOT conform stays disjoint.
     entry_rejects(
@@ -6548,7 +6548,7 @@ fn disjoint_types_equality_rejected() {
     );
     entry_rejects(
         "fn cmp(a: Option[int], b: Option[str]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
-        "cannot compare Option[int] and Option[str] for equality",
+        "cannot compare int? and str? for equality",
     );
     entry_rejects(
         "fn cmp(a: Map[str, int], b: Map[str, bool]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
@@ -7947,7 +7947,7 @@ b := Box.of(Q(1))
 fn sort_where_clause_returns_nil() {
     // The file-backed `native fn sort(self) -> nil where T: Comparable` resolves to a nil return —
     // using it as a value is rejected exactly like before (regression guard on the ported sig).
-    rejects("xs := [3, 1, 2]\nn := xs.sort() + 1\n", "no value (nil)");
+    rejects("xs := [3, 1, 2]\nn := xs.sort() + 1\n", "no value (None)");
 }
 
 #[test]
@@ -8227,7 +8227,7 @@ fn void_preserved_when_no_value_return() {
     // rejected up-front (Part 2: nil in value position), before it can flow into an arithmetic op.
     rejects(
         "fn log(m: str):\n    print(m)\nx := log(\"h\")\ny := x + 1\n",
-        "no value (nil)",
+        "no value (None)",
     );
 }
 
@@ -10091,7 +10091,7 @@ fn try_in_named_nil_fn_rejected() {
                fn f():\n    x := g()?\n    print(x)\n";
     rejects(
         src,
-        "'?' used in a function that returns nil, not Result or Option",
+        "'?' used in a function that returns None, not Result or Option",
     );
 }
 
@@ -10102,7 +10102,7 @@ fn try_in_named_nil_main_rejected() {
                fn main():\n    x := g()?\n    print(x)\n";
     rejects(
         src,
-        "'?' used in a function that returns nil, not Result or Option",
+        "'?' used in a function that returns None, not Result or Option",
     );
 }
 
@@ -10114,7 +10114,7 @@ fn try_in_nested_nil_fn_rejected() {
                fn outer() -> Result[int]:\n    fn inner():\n        x := helper()?\n        print(x)\n    inner()\n    return Ok(0)\n";
     rejects(
         src,
-        "'?' used in a function that returns nil, not Result or Option",
+        "'?' used in a function that returns None, not Result or Option",
     );
 }
 
@@ -10176,7 +10176,7 @@ fn try_option_in_option_ok() {
 fn result_ok_payload_must_match_return() {
     rejects(
         "fn f() -> Result[int]:\n    return Ok(\"s\")\n",
-        "expected return type Result[int], found Result[str]",
+        "expected return type int!, found str!",
     );
 }
 
@@ -10403,7 +10403,7 @@ fn list_sort_float_ok() {
 fn list_sort_returns_nil_rejected_as_value() {
     // sort() mutates in place and yields nil — using its result as a value (a binary operand) is
     // now rejected up-front (Part 2: nil in value position).
-    rejects("xs := [3, 1, 2]\nn := xs.sort() + 1\n", "no value (nil)");
+    rejects("xs := [3, 1, 2]\nn := xs.sort() + 1\n", "no value (None)");
 }
 
 #[test]
@@ -10580,7 +10580,7 @@ fn str_to_int_result_is_option_not_int() {
     // The result is Option[int], so binding it to a bare int must be rejected.
     rejects(
         "n: int = \"4\".to_int()\n",
-        "Option[int] to variable of type int",
+        "cannot assign int? to variable of type int",
     );
 }
 
@@ -12507,17 +12507,14 @@ fn module_scope_redeclare_unknown_carve_out_is_one_sided() {
     //   `x := []` / `f := fn() -> List[int]: x` / `x := 42`      → printed `42`
     //   `x := None` / `f := fn() -> Option[int]: x` / `x := 42`  → printed `42`
     //   `x := 1` / `f := fn() -> int: x` / `x := []` / `x.push(3)` → `Add to List and int` at runtime
-    rejects(
-        "x := 1\nf := fn() -> int: x\nx := None\n",
-        "int -> Option[?]",
-    );
+    rejects("x := 1\nf := fn() -> int: x\nx := None\n", "int -> ??");
     rejects(
         "x := []\nf := fn() -> List[int]: x\nx := 42\n",
         "List[?] -> int",
     );
     rejects(
         "x := None\nf := fn() -> Option[int]: x\nx := 42\n",
-        "Option[?] -> int",
+        "?? -> int",
     );
     rejects(
         "x := 1\nf := fn() -> int: x\nx := []\nx.push(3)\n",
@@ -15563,7 +15560,7 @@ fn recover_non_never_value_unaffected() {
     // Non-diverging statement tail (a `let`) -> Ok payload stays nil -> value use rejected.
     entry_rejects(
         "fn main():\n    r := recover:\n        x := 5\n    match r:\n        Ok(v): print(\"{v}\")\n        Err(e): print(\"err\")\nmain()\n",
-        "expression returns no value (nil) and cannot be used as a value",
+        "expression returns no value (None) and cannot be used as a value",
     );
 }
 
@@ -15589,7 +15586,7 @@ fn recover_tail_stmt_if_value_is_result_of_branch_type() {
     // A trailing `if` WITHOUT an `else` is not total -> stays `Result[nil]` (value use rejected).
     entry_rejects(
         "fn main():\n    r := recover:\n        x := 3\n        if x == 3:\n            100\n    match r:\n        Ok(v): print(\"{v}\")\n        Err(e): print(\"err\")\nmain()\n",
-        "expression returns no value (nil) and cannot be used as a value",
+        "expression returns no value (None) and cannot be used as a value",
     );
 }
 
@@ -15612,7 +15609,7 @@ fn recover_tail_stmt_match_heterogeneous_arms_falls_back_to_nil() {
     // the fall-back really is nil, so the heterogeneous runtime payload is never observable).
     entry_rejects(
         "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"failed\")\nfoo(\"a\")\n",
-        "expression returns no value (nil) and cannot be used as a value",
+        "expression returns no value (None) and cannot be used as a value",
     );
 }
 
@@ -16265,7 +16262,7 @@ fn main():
         print(x)
 main()
 ";
-    rejects(src, "expected return type Option[T], found Option[str]");
+    rejects(src, "expected return type T?, found str?");
 }
 
 // ===== slicing + Index/IndexSet/Slice protocols =====
@@ -16849,7 +16846,7 @@ fn opt_chain_double_option_not_flattened() {
     // three bogus Option-variant errors survived so long.)
     rejects_desugared(
         "struct P:\n    maybe: Option[int]\nop := Some(P(Some(1)))\nbad: Option[int] = op?.maybe\n",
-        "cannot assign Option[Option[int]] to variable of type Option[int]",
+        "cannot assign int?? to variable of type int?",
     );
 }
 
@@ -16937,7 +16934,7 @@ fn opt_chain_on_result_inherits_infer_trys_gates() {
             &format!(
                 "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g():\n    n := {carrier}\n    print(n)\n"
             ),
-            "'?' used in a function that returns nil, not Result or Option",
+            "'?' used in a function that returns None, not Result or Option",
         );
         // (b) an Option-returning fn: kinds may not be mixed.
         rejects_desugared(
@@ -20008,7 +20005,7 @@ fn ffi_alloc_layer_typechecks() {
     // free returns nil — using it as an int is a type error.
     entry_rejects(
         "import std.ffi\nfn main():\n    p := ffi.alloc(8)\n    n: int = ffi.free(p)\n    print(n)\n",
-        "nil",
+        "returns no value (None)",
     );
     // alloc's arg is an int; passing a str is a type error.
     entry_rejects(
@@ -20032,7 +20029,7 @@ fn ffi_deref_wrong_arg_type_rejected() {
     // store returns nil — using it as an int is a type error.
     entry_rejects(
         "import std.ffi\nfn main():\n    p := ffi.null()\n    n: int = ffi.store_int(p, 1)\n    print(n)\n",
-        "nil",
+        "returns no value (None)",
     );
 }
 
@@ -21632,7 +21629,7 @@ fn inline_non_expr_body_stays_nil() {
     // Using the void result as a value is then rejected (Part 2).
     rejects(
         "fn a():\n    x := 5\nfn main():\n    y := a()\nmain()\n",
-        "no value (nil)",
+        "no value (None)",
     );
 }
 
@@ -21643,22 +21640,22 @@ fn nil_in_value_position_rejected() {
     // assignment RHS
     rejects(
         "fn main():\n    x := print(\"hi\")\nmain()\n",
-        "no value (nil)",
+        "no value (None)",
     );
     // function/call argument
     rejects(
         "fn main():\n    print(print(\"hi\"))\nmain()\n",
-        "no value (nil)",
+        "no value (None)",
     );
     // collection-literal element
     rejects(
         "fn main():\n    xs := [print(\"hi\")]\nmain()\n",
-        "no value (nil)",
+        "no value (None)",
     );
     // binary operand
     rejects(
         "fn main():\n    x := 1 + print(\"hi\")\nmain()\n",
-        "no value (nil)",
+        "no value (None)",
     );
 }
 
@@ -21675,7 +21672,7 @@ fn void_fn_then_used_as_value() {
     // but using its void result as a value is rejected.
     rejects(
         "fn a(): print(\"x\")\nfn main():\n    y := a()\nmain()\n",
-        "no value (nil)",
+        "no value (None)",
     );
 }
 
@@ -21684,7 +21681,7 @@ fn user_fn_arg_nil_rejected() {
     // a void result passed as a USER function's argument (not a builtin).
     rejects(
         "fn takes(n: int):\n    print(\"{n}\")\nfn main():\n    takes(print(\"hi\"))\nmain()\n",
-        "no value (nil)",
+        "no value (None)",
     );
 }
 
@@ -22042,7 +22039,7 @@ fn ok_zero_arg_is_result_nil() {
     );
     rejects(
         "fn f() -> Result[int, str]:\n    return Ok()\nfn main():\n    pass\nmain()\n",
-        "Result",
+        "expected return type int!str, found None!",
     );
 }
 
@@ -26134,7 +26131,7 @@ fn return_void_call_single_diagnostic() {
     assert!(
         !errs
             .iter()
-            .any(|e| e.message.contains("returns no value (nil)")),
+            .any(|e| e.message.contains("returns no value (None)")),
         "a return expr must not get the value-position nil rejection, got: {errs:?}"
     );
 }
@@ -28312,7 +28309,7 @@ fn fn_declared_in_defer_block_gets_own_q_context() {
     );
     assert!(
         errs.iter()
-            .any(|e| e.message.contains("returns nil, not Result or Option")),
+            .any(|e| e.message.contains("returns None, not Result or Option")),
         "a nil fn declared inside a defer block must still reject `?`, got: {errs:?}"
     );
     entry_ok(
@@ -32445,7 +32442,7 @@ fn ticket_054_closure_float_return_neighbours() {
     );
     entry_rejects(
         "g := fn() -> float?: 3\nprint(g())\n",
-        "closure body has type int, but its return type is Option[float]",
+        "closure body has type int, but its return type is float?",
     );
     entry_ok("g := fn() -> int?: 3\nprint(g())\n");
 }
@@ -32590,7 +32587,7 @@ fn ticket_066_pass_stays_statement_only_outside_a_closure_body() {
 
     rejects(
         "f := fn() -> int: pass\n",
-        "closure body has type nil, but its return type is int",
+        "closure body has type None, but its return type is int",
     );
 }
 
@@ -32819,7 +32816,7 @@ fn fn_type_error_grant_does_not_smuggle_a_builtin_into_a_param() {
 fn fn_type_param_invariance_reaches_a_nested_type_argument() {
     rejects(
         "struct Dog:\n    name: str\nfn idd(d: Dog) -> Dog:\n    return d\nh: fn(Option[Any]) -> Dog = fn(o: Option[Dog]): idd(Dog(\"x\"))\n",
-        "cannot assign fn(Option[Dog]) -> Dog to variable of type fn(Option[Any]) -> Dog",
+        "cannot assign fn(Dog?) -> Dog to variable of type fn(Any?) -> Dog",
     );
 }
 
@@ -33250,7 +33247,7 @@ fn ticket_107_unguarded_bare_catch_all_warns_a_later_arm_unreachable() {
 fn ticket_107_bare_catch_all_on_option_binds_the_whole_option() {
     rejects(
         "fn f(o: int?) -> int:\n    match o:\n        whole: return whole\n",
-        "expected return type int, found Option[int]",
+        "expected return type int, found int?",
     );
 }
 
@@ -33318,19 +33315,19 @@ fn ticket_107_mixed_branch_coercion_wraps_at_every_typed_slot() {
     );
     rejects(
         "fn f(c: bool) -> float?:\n    return if c: 1 else: None\n",
-        "branches have incompatible types: int and Option[?]",
+        "branches have incompatible types: int and ??",
     );
     rejects(
         "fn f(o: int?) -> int?:\n    return o ?? None\n",
-        "branches have incompatible types: int and Option[?]",
+        "branches have incompatible types: int and ??",
     );
     rejects(
         "fn f[T](x: T, c: bool) -> T?:\n    return if c: x else: None\n",
-        "branches have incompatible types: T and Option[?]",
+        "branches have incompatible types: T and ??",
     );
     rejects(
         "fn f(c: bool) -> Option[Option[int]]:\n    return if c: Some(1) else: None\n",
-        "expected return type Option[Option[int]], found Option[int]",
+        "expected return type int??, found int?",
     );
 }
 
@@ -33857,7 +33854,7 @@ fn nested_ctor_hint_keeps_invariance() {
     );
     rejects(
         "fn main():\n    o: float? = Some(1)\n    print(o)\n",
-        "cannot assign Option[int] to variable of type Option[float]",
+        "cannot assign int? to variable of type float?",
     );
 }
 
@@ -37504,7 +37501,7 @@ fn native_fn_and_num_protocol_grid() {
         (
             "dec_typed_mismatch",
             "d: fn(str) -> Result[str] = json.decode[int]",
-            Some("cannot assign fn(str) -> Result[int] to variable of type fn(str) -> Result[str]"),
+            Some("cannot assign fn(str) -> int! to variable of type fn(str) -> str!"),
         ),
         (
             "dec_hof",
@@ -38194,5 +38191,46 @@ mod ticket_231_none_word {
     #[test]
     fn mismatch_message_prints_option_sugar() {
         rejects("fn main():\n    x: int? = \"a\"\n", "int?");
+    }
+
+    /// Every carrier shape, on the checker-message surface: the message prints the sugar the
+    /// user writes, never the long form.
+    #[test]
+    fn display_grid_prints_the_sugar() {
+        let pairs = [
+            ("Option[int]", "int?"),
+            ("Result[int, str]", "int!str"),
+            ("Result[int]", "int!"),
+            ("Result[None, str]", "None!str"),
+            ("List[Option[int]]", "List[int?]"),
+            ("Map[str, Result[int, str]]", "Map[str, int!str]"),
+            ("Option[Option[int]]", "int??"),
+            ("Option[Result[int, str]]", "(int!str)?"),
+            ("Option[Result[int]]", "int!?"),
+            ("Result[Option[int], str]", "int?!str"),
+            ("Option[fn() -> int]", "(fn() -> int)?"),
+            ("Result[Result[int, str], int]", "(int!str)!int"),
+        ];
+        let mut red = Vec::new();
+        for (written, want) in pairs {
+            let errs = check_src(&format!("x: {written} = true\n"));
+            let needle = format!("variable of type {want}");
+            let long = |m: &str| m.contains("Option[") || m.contains("Result[");
+            if !errs.iter().any(|e| e.message.contains(&needle))
+                || errs.iter().any(|e| long(&e.message))
+            {
+                red.push(format!("{written} -> want {needle:?}, got {errs:?}"));
+            }
+        }
+        let errs = check_src("fn f() -> None:\n    pass\nx := f()\nprint(x)\n");
+        if !errs
+            .iter()
+            .any(|e| e.message.contains("returns no value (None)"))
+        {
+            red.push(format!(
+                "void use -> want \"returns no value (None)\", got {errs:?}"
+            ));
+        }
+        assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
     }
 }
