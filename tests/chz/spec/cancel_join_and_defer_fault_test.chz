@@ -20,7 +20,7 @@ fn escape(started: Channel[int]):
 test fn cancelled_child_defer_panic_is_a_fault():
     started := Channel[int](1)
     r := recover: escape(started)
-    assert "{r}" == "Err('cleanup failed')"
+    assert "{r}" == "!cleanup failed"
 
 
 fn inner(ran: Shared[int], started: Channel[int]):
@@ -39,7 +39,7 @@ test fn cancelled_owner_does_not_run_code_after_nursery_join():
             spawn:
                 _ := started.recv()
                 panic("boom")
-    assert "{r}".starts_with("Err(")
+    assert "{r}".starts_with("!")
     assert ran.get() == 0
 
 
@@ -50,7 +50,7 @@ test fn shutdown_now_surfaces_a_cancelled_jobs_defer_fault():
     ex.submit(fn(): cleanup_fails(started))
     _ := started.recv()
     r := recover: ex.shutdown_now()
-    assert "{r}" == "Err('cleanup failed')"
+    assert "{r}" == "!cleanup failed"
 
 
 fn owner(started: Channel[int], hold: Channel[int]):
@@ -65,7 +65,7 @@ test fn shutdown_now_surfaces_a_nested_childs_defer_fault():
     ex.submit(fn(): owner(started, hold))
     _ := started.recv()
     r := recover: ex.shutdown_now()
-    assert "{r}" == "Err('cleanup failed')"
+    assert "{r}" == "!cleanup failed"
 
 
 # The other escape routes (`break`, `?`) abort the nursery through the same path as `return`: the
@@ -80,7 +80,7 @@ fn break_out(started: Channel[int]):
 test fn a_break_out_of_a_nursery_surfaces_a_cancelled_childs_defer_fault():
     started := Channel[int](1)
     r := recover: break_out(started)
-    assert "{r}" == "Err('cleanup failed')"
+    assert "{r}" == "!cleanup failed"
 
 
 fn fails() -> int!str:
@@ -97,7 +97,7 @@ fn try_out(started: Channel[int]) -> int!str:
 test fn a_try_out_of_a_nursery_surfaces_a_cancelled_childs_defer_fault():
     started := Channel[int](1)
     r := recover: try_out(started)
-    assert "{r}" == "Err('cleanup failed')"
+    assert "{r}" == "!cleanup failed"
 
 
 # Must still pass: a `defer` is never cancelled, so a nursery join INSIDE a cancelled task's defer body
@@ -121,7 +121,7 @@ test fn a_nursery_join_inside_a_defer_is_not_a_cancel_point():
     started := Channel[int](1)
     hold := Channel[int]()
     r := recover: escape_ok(ran, started, hold)
-    assert "{r}" == "Ok(None)"
+    assert "{r}" == "None"
     assert ran.get() == 11
 
 
@@ -135,4 +135,4 @@ test fn a_sibling_fault_outranks_a_cancelled_siblings_defer_fault():
             spawn:
                 _ := started.recv()
                 panic("boom")
-    assert "{r}" == "Err('boom')"
+    assert "{r}" == "!boom"

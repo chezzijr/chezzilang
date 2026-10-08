@@ -5,7 +5,7 @@ fn done() -> Result[None, str]:
 
 test fn ok_zero_arg_constructs_a_result_nil():
     r := done()
-    assert str(r) == "Ok(None)"
+    assert str(r) == "None"
     match r:
         Ok(_):
             assert true

@@ -7121,8 +7121,8 @@ mod recover_nursery_prescan_tests {
         let src = "fn main2():\n    r := recover:\n        spawn: print(\"t5\")\n        x := 1 / 0\n        print(\"{x}\")\n        1\n    print(\"r5={r}\")\nmain2()\n";
         let out = run_capture(src).expect("program should run without a top-level fault");
         assert!(
-            out.contains("r5=Err('division by zero')"),
-            "expected stdout to contain r5=Err('division by zero'), got: {out:?}"
+            out.contains("r5=!division by zero"),
+            "expected stdout to contain r5=!division by zero, got: {out:?}"
         );
         assert!(
             out.contains("t5"),

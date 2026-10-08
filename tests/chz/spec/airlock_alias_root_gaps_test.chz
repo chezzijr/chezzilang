@@ -133,7 +133,7 @@ test fn local_alias_of_a_global_generator_is_one_generator():
             b := gg[0].next()
             r.send("{a} {b}")
     got := r.recv()
-    assert got == "Some(1) Some(2)", "generator alias is two live copies: {got}"
+    assert got == "1 2", "generator alias is two live copies: {got}"
 
 # W13-1 (docs/gaps.md) — a spawn-ADOPTED alias of a module global (`a := gl` in the parent,
 # `a.push(2)` in the task). Under D2/TICKET-111 the adopted alias IS the task's copy of the global.

@@ -44,7 +44,7 @@ test fn a_sibling_fault_cancels_a_spinning_update():
             spawn s.update(fn(x): wait_flag(flag, x))
             spawn:
                 panic("sib")
-    assert "{r}" == "Err('sib')"
+    assert "{r}" == "!sib"
     assert s.get() == 0
 
 test fn a_nursery_inside_a_preempted_callback_joins():

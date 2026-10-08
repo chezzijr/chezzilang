@@ -56,12 +56,17 @@ test fn struct_fields_are_quoted():
     assert str(S(name="hi", n=1)) == "S(name='hi', n=1)"
     assert str([S(name="hi", n=1)]) == "[S(name='hi', n=1)]"
 
-test fn enum_payload_is_quoted():
-    assert str(Some("h")) == "Some('h')"
+# A carrier prints as the user writes it: its payload is bare at the top level and quoted when
+# the carrier itself is nested.
+test fn carrier_payload_is_quoted_only_when_nested():
+    assert str(Some("h")) == "h"
+    assert str([Some("h")]) == "['h']"
     r := recover: [1][5]
     match r:
         Ok(_): assert false, "expected a fault"
-        Err(e): assert str(r).starts_with("Err('"), "Err payload is quoted: {r}"
+        Err(e):
+            assert str(r).starts_with("!index 5"), "a top-level error payload is bare: {r}"
+            assert str([r]).starts_with("[!'index 5"), "a nested error payload is quoted: {[r]}"
 
 # ---- a display hook's own output is NOT a nested value ----
 

@@ -203,10 +203,7 @@ fn main():
     print(m.remove(K(0)))
     print(m.len())
 main()";
-    assert_eq!(
-        run_capture_stress(src),
-        "01234567\ntrue\nSome('5')\nSome('2')\nSome('0')\n7\n"
-    );
+    assert_eq!(run_capture_stress(src), "01234567\ntrue\n5\n2\n0\n7\n");
 }
 
 /// Set construction (`Set([..])`) + `add` over structs whose `hash()` allocates, including
@@ -286,7 +283,7 @@ main()";
     // a = {1,2,3,4}; b = {3,4,5}; |a∪b|=5, |a∩b|=2, |a\\b|=2, |a^b|=3
     assert_eq!(
         run_capture_stress(src),
-        "3\n4\n5 2 2\n5 3\ntrue\ntrue\n3 3\ntrue\ntrue Some('5') Some('2') 1\n6 Some('0') 5\n6\n1 1\n1\n3\n"
+        "3\n4\n5 2 2\n5 3\ntrue\ntrue\n3 3\ntrue\ntrue 5 2 1\n6 0 5\n6\n1 1\n1\n3\n"
     );
 }
 
@@ -316,7 +313,7 @@ fn main():
 main()";
     assert_eq!(
         run_capture_stress(src),
-        "true false Some(['2', '3']) None\ntrue false\n"
+        "true false ['2', '3'] None\ntrue false\n"
     );
 }
 

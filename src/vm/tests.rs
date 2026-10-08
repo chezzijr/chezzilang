@@ -438,7 +438,7 @@ fn implicit_nursery_nested_functions() {
 #[test]
 fn implicit_nursery_try_preserves_error_value() {
     let src = "fn w():\n    print(\"task ran\")\nfn g() -> int!:\n    return Err(\"boom-value\")\nfn f() -> int!:\n    spawn w()\n    x := g()?\n    return Ok(x)\nfn main():\n    r := recover:\n        f()?\n        99\n    print(\"after: {r}\")\nmain()\n";
-    assert_mc_parity(src, "task ran\nafter: Err('boom-value')\n");
+    assert_mc_parity(src, "task ran\nafter: !boom-value\n");
 }
 
 /// M-C regression (review-panel BUG): a bare `spawn` inside a `defer:` block is legal — the
@@ -11745,14 +11745,14 @@ fn vm_generator_basic_for_loop() {
 #[test]
 fn golden_generators_chz() {
     let out = run(include_str!("../../examples/generators.chz"));
-    assert_eq!(out, "0\n1\n2\n10\n11\n12\nSome(0)\nSome(1)\nNone\n5\n");
+    assert_eq!(out, "0\n1\n2\n10\n11\n12\n0\n1\nNone\n5\n");
 }
 
 /// Driving a generator by explicit `.next()` yields `Some(v)` per yield, then `None` forever.
 #[test]
 fn vm_generator_explicit_next() {
     let src = "fn two() -> Iterator[int]:\n    yield 10\n    yield 20\nfn main():\n    g := two()\n    print(g.next())\n    print(g.next())\n    print(g.next())\n    print(g.next())\nmain()\n";
-    assert_eq!(run(src), "Some(10)\nSome(20)\nNone\nNone\n");
+    assert_eq!(run(src), "10\n20\nNone\nNone\n");
 }
 
 /// A generator whose `yield` is never reached drains immediately: the `for` body never runs.
@@ -11871,7 +11871,7 @@ fn generator_captured_in_executor_submit_crosses_by_value() {
         "    ex.shutdown()\n",
         "main()\n"
     );
-    assert_eq!(run_capture(src).expect("M:N"), "Some(1)\n");
+    assert_eq!(run_capture(src).expect("M:N"), "1\n");
 }
 
 /// F3 path C: an `Executor` task that RETURNS a generator under `--parallel` now crosses the return
@@ -12635,7 +12635,7 @@ fn try_operator_works_on_native_option_under_variant_shadow() {
     let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: List[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    print(\"first\", first([10, 20]))\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(
-        vm_out, "first Some(20)\n",
+        vm_out, "first 20\n",
         "? must unwrap a genuine native Option even under Some shadowing"
     );
 }
@@ -21966,7 +21966,7 @@ fn caught_error_location_is_nil_without_a_recorded_span() {
 #[test]
 fn caught_error_carries_the_fault_origin_span() {
     let src = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e):\n            print(e.line())\n            print(e.col())\nmain()\n";
-    assert_eq!(run(src), "Some(3)\nSome(15)\n");
+    assert_eq!(run(src), "3\n15\n");
 }
 
 /// TICKET-126 (W13-24) — TICKET-118 added `SchedCore::cancelled_scope_awaiting_drain` to the idle
@@ -22276,10 +22276,7 @@ print("job done? {done.try_recv()}")
         out.contains("job finished its work"),
         "job was stopped: out={out:?}"
     );
-    assert!(
-        out.contains("job done? Some(1)"),
-        "job was stopped: out={out:?}"
-    );
+    assert!(out.contains("job done? 1"), "job was stopped: out={out:?}");
 }
 
 /// TICKET-195 C3: an Executor job's fault outranks the deadlock verdict of a main that waits on a
@@ -22333,7 +22330,7 @@ print(r)
         res.err().map(|e| e.message)
     );
     assert!(
-        out.contains("Err('boom')"),
+        out.contains("!boom"),
         "cut owner's defer fault won: out={out:?}"
     );
 }
@@ -22660,4 +22657,16 @@ fn the_sched_idle_judge_latches_the_verdict_before_it_flags_a_leaf() {
     );
     assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop));
     assert_eq!(sched.quiesce.run_halt(), RunHalt::Deadlock);
+}
+
+/// TICKET-228 — the `no match arm` fault names a carrier by the pattern that matches it.
+#[test]
+fn no_arm_text_prints_pattern_syntax() {
+    use crate::vm::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
+    assert_eq!(Vm::carrier_pattern_text(VID_SOME), Some("?_"));
+    assert_eq!(Vm::carrier_pattern_text(VID_OK), Some("?_"));
+    assert_eq!(Vm::carrier_pattern_text(VID_ERR), Some("!_"));
+    assert_eq!(Vm::carrier_pattern_text(VID_NONE_VARIANT), Some("None"));
+    // A user variant keeps its name: the function answers nothing for it.
+    assert_eq!(Vm::carrier_pattern_text(VID_NONE_VARIANT + 1), None);
 }

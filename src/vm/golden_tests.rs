@@ -388,7 +388,7 @@ fn derived_cancel_token_done_implies_cancelled_runtime() {
     let out = golden_entry(
         "import std.cancel\nc := cancel.timeout(10).derive()\n_ := c.done().recv()\nprint(\"{c.cancelled()} {c.reason()}\")\n",
     );
-    assert_eq!(out, "true Some('timeout')\n");
+    assert_eq!(out, "true timeout\n");
 }
 
 /// Stdlib: `import min_heap from std.collections; min_heap().push(3)` runs.
@@ -1347,10 +1347,7 @@ fn main():
 
 main()
 "#;
-    assert_golden_out(
-        src,
-        "Ok(42)\nOk(7)\nErr(\"cannot parse 'x' as an integer\")\n",
-    );
+    assert_golden_out(src, "42\n7\n!cannot parse 'x' as an integer\n");
 }
 
 #[test]
@@ -1363,7 +1360,7 @@ fn main():
 
 main()
 "#;
-    assert_golden_out(src, "Ok(3.14)\nErr(\"cannot parse 'x' as a float\")\n");
+    assert_golden_out(src, "3.14\n!cannot parse 'x' as a float\n");
 }
 
 #[test]
@@ -3386,10 +3383,10 @@ main()
 "#;
     assert_golden_out(
         src,
-        "a 0\na 1\na2 0\na2 1\nb 0\nb-resume Some(1)\nc 1\nc caught\nc closed None\nc-after 0\nc-after 1\nd 0\nd 10\n",
+        "a 0\na 1\na2 0\na2 1\nb 0\nb-resume 1\nc 1\nc caught\nc closed None\nc-after 0\nc-after 1\nd 0\nd 10\n",
     );
     let out = run_capture(src).expect("no path leaves a generator poisoned as running");
-    let want = "a 0\na 1\na2 0\na2 1\nb 0\nb-resume Some(1)\nc 1\nc caught\nc closed None\nc-after 0\nc-after 1\nd 0\nd 10\n";
+    let want = "a 0\na 1\na2 0\na2 1\nb 0\nb-resume 1\nc 1\nc caught\nc closed None\nc-after 0\nc-after 1\nd 0\nd 10\n";
     assert_eq!(out, want, "every unwind path clears the running guard");
 }
 
@@ -9390,11 +9387,11 @@ fn vm_bytearray_ops() {
     );
     assert_golden_out(
         src,
-        "bytearray(b'')\nbytearray(b'\\x00\\x00\\x00')\nbytearray(b'\\x01\\x02')\nbytearray(b'\\x01\\x02\\x03')\n1\n3\nbytearray(b'\\x03\\x02\\x01')\n6\n3\nbytearray(b'\\x01\\x02\\x03\\x04')\nSome(4)\nbytearray(b'\\x01\\x02\\x03\\xff\\x07\\x08')\ntrue\ntrue\n",
+        "bytearray(b'')\nbytearray(b'\\x00\\x00\\x00')\nbytearray(b'\\x01\\x02')\nbytearray(b'\\x01\\x02\\x03')\n1\n3\nbytearray(b'\\x03\\x02\\x01')\n6\n3\nbytearray(b'\\x01\\x02\\x03\\x04')\n4\nbytearray(b'\\x01\\x02\\x03\\xff\\x07\\x08')\ntrue\ntrue\n",
     );
     assert_eq!(
         run_capture(src).expect("vm"),
-        "bytearray(b'')\nbytearray(b'\\x00\\x00\\x00')\nbytearray(b'\\x01\\x02')\nbytearray(b'\\x01\\x02\\x03')\n1\n3\nbytearray(b'\\x03\\x02\\x01')\n6\n3\nbytearray(b'\\x01\\x02\\x03\\x04')\nSome(4)\nbytearray(b'\\x01\\x02\\x03\\xff\\x07\\x08')\ntrue\ntrue\n"
+        "bytearray(b'')\nbytearray(b'\\x00\\x00\\x00')\nbytearray(b'\\x01\\x02')\nbytearray(b'\\x01\\x02\\x03')\n1\n3\nbytearray(b'\\x03\\x02\\x01')\n6\n3\nbytearray(b'\\x01\\x02\\x03\\x04')\n4\nbytearray(b'\\x01\\x02\\x03\\xff\\x07\\x08')\ntrue\ntrue\n"
     );
 }
 
@@ -9510,7 +9507,7 @@ fn bytearray_crosses_channel_deep_copy() {
 fn iter_next_idempotent_both_engines() {
     // next() yields Some(10), Some(20), then None forever (idempotent past exhaustion).
     let src = "fn main():\n    it := [10, 20].iter()\n    print(it.next())\n    print(it.next())\n    print(it.next())\n    print(it.next())\nmain()\n";
-    assert_golden_out(src, "Some(10)\nSome(20)\nNone\nNone\n");
+    assert_golden_out(src, "10\n20\nNone\nNone\n");
 }
 
 #[test]
@@ -9550,7 +9547,7 @@ fn iter_snapshot_order_matches_for() {
 fn iter_self_on_iterator_value() {
     // iter() on a cursor returns self (idempotent); driving the result still works.
     let src = "fn main():\n    it := [1, 2].iter().iter()\n    print(it.next())\nmain()\n";
-    assert_golden_out(src, "Some(1)\n");
+    assert_golden_out(src, "1\n");
 }
 
 #[test]
@@ -9699,8 +9696,8 @@ fn iter_of_iter_fresh_cursor() {
         "        print(x)\n",
         "main()\n"
     );
-    assert_eq!(run_capture(src).unwrap(), "Some(5)\n6\n");
-    assert_golden_out(src, "Some(5)\n6\n");
+    assert_eq!(run_capture(src).unwrap(), "5\n6\n");
+    assert_golden_out(src, "5\n6\n");
 }
 
 #[test]
@@ -9732,10 +9729,10 @@ fn cursor_crosses_spawn_airlock_three_engine_parity() {
         "    print(ch.recv().next())\n",
         "main()\n"
     );
-    assert_golden_out(src, "Some(1)\n");
+    assert_golden_out(src, "1\n");
     assert_eq!(
         run_capture(src).expect("--parallel"),
-        "Some(1)\n",
+        "1\n",
         "cursor crosses the M:N airlock"
     );
 }
@@ -9754,7 +9751,7 @@ fn generator_iter_returns_self_vm() {
         "    print(it.next())\n",
         "main()\n"
     );
-    assert_eq!(run_capture(src).expect("vm"), "Some(1)\nSome(2)\nNone\n");
+    assert_eq!(run_capture(src).expect("vm"), "1\n2\nNone\n");
 }
 
 // ===== mixed int/float VALUE arithmetic (D3: no int→float slot widening, no runtime coercion) =====

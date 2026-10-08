@@ -3152,7 +3152,7 @@ void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
         let _ = std::fs::remove_file(&entry);
         assert!(res.is_ok(), "faulted: {res:?}");
         assert_eq!(
-            out, "1\nErr('division by zero')\n",
+            out, "1\n!division by zero\n",
             "the comparator must fault exactly once, not be re-invoked by qsort's later comparisons"
         );
     }
@@ -3207,7 +3207,7 @@ void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
         let _ = std::fs::remove_file(&entry);
         assert!(res.is_ok(), "faulted: {res:?}");
         assert_eq!(
-            out, "Err('index 5 out of bounds (len 1)')\n",
+            out, "!index 5 out of bounds (len 1)\n",
             "the FIRST callback fault must be the one re-raised, not the last"
         );
     }

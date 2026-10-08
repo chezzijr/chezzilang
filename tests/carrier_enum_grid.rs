@@ -59,11 +59,14 @@ fn to_carrier(text: &str) -> String {
 
 enum Want {
     Prints(&'static str),
+    /// A print of a carrier value: the carrier twin prints it as the user writes it (second
+    /// field: `5`, `!x`), the user twin prints its variant name (first field).
+    PrintsAs(&'static str, &'static str),
     Rejects(&'static str),
     /// A reject whose text names the type: the carrier twin prints its sugar (second field).
     RejectsAs(&'static str, &'static str),
 }
-use Want::{Prints, Rejects, RejectsAs};
+use Want::{Prints, PrintsAs, Rejects, RejectsAs};
 
 fn expect_of(w: &Want, carrier: bool) -> Expect {
     let conv = |s: &str| {
@@ -75,6 +78,7 @@ fn expect_of(w: &Want, carrier: bool) -> Expect {
     };
     match w {
         Prints(s) => Expect::Prints(conv(s)),
+        PrintsAs(user, shown) => Expect::Prints((if carrier { shown } else { user }).to_string()),
         Rejects(s) => Expect::Rejects(Box::leak(conv(s).into_boxed_str())),
         RejectsAs(user, sugar) => Expect::Rejects(if carrier { sugar } else { user }),
     }
@@ -137,7 +141,7 @@ fn carrier_enum_grid() {
         c,
         "C1 qualified call",
         "print(Opt1.Som(5), Res2.Okk(5), Res2.Errr(\"x\"))\n",
-        Prints("Som(5) Okk(5) Errr('x')"),
+        PrintsAs("Som(5) Okk(5) Errr('x')", "5 5 !x"),
     );
     twin(
         c,
@@ -149,31 +153,34 @@ fn carrier_enum_grid() {
         c,
         "C3 type-applied",
         "print(Opt1[int].Som(5), Opt1[int].Non, Res2[int, str].Okk(5), Res2[int, str].Errr(\"x\"))\n",
-        Prints("Som(5) Non Okk(5) Errr('x')"),
+        PrintsAs("Som(5) Non Okk(5) Errr('x')", "5 None 5 !x"),
     );
     twin(
         c,
         "C4 bare imported",
         "print(Som(5), Non, Okk(5), Errr(\"x\"))\n",
-        Prints("Som(5) Non Okk(5) Errr('x')"),
+        PrintsAs("Som(5) Non Okk(5) Errr('x')", "5 None 5 !x"),
     );
     twin(
         c,
         "C5 HOF",
         "print([1, 2].map(Som), [1, 2].map(Opt1.Som), [1, 2].map(Opt1[int].Som))\n",
-        Prints("[Som(1), Som(2)] [Som(1), Som(2)] [Som(1), Som(2)]"),
+        PrintsAs(
+            "[Som(1), Som(2)] [Som(1), Som(2)] [Som(1), Som(2)]",
+            "[1, 2] [1, 2] [1, 2]",
+        ),
     );
     twin(
         c,
         "C6 annotated value",
         "f: fn(int) -> Opt1[int] = Som\nprint(f(3))\n",
-        Prints("Som(3)"),
+        PrintsAs("Som(3)", "3"),
     );
     twin(
         c,
         "C7 pinned by a later use",
         "fn main():\n    f := Som\n    print(f(3))\nmain()\n",
-        Prints("Som(3)"),
+        PrintsAs("Som(3)", "3"),
     );
     twin(
         c,
@@ -288,7 +295,7 @@ fn carrier_enum_grid() {
         c,
         "C21 alias value",
         "type F = Opt1[int]\nprint(F.Som(1))\n",
-        Prints("Som(1)"),
+        PrintsAs("Som(1)", "1"),
     );
     twin(
         c,
@@ -306,7 +313,7 @@ fn carrier_enum_grid() {
         c,
         "C24 alias of a two-parameter enum",
         "type G = Res2[int, str]\nprint(G.Okk(1), G.Errr(\"x\"))\n",
-        Prints("Okk(1) Errr('x')"),
+        PrintsAs("Okk(1) Errr('x')", "1 !x"),
     );
     twin(
         c,
@@ -318,21 +325,21 @@ fn carrier_enum_grid() {
         c,
         "C26 alias variant as a fn value",
         "type F = Opt1[int]\nprint([1, 2].map(F.Som))\nf := F.Som\nprint(f(3))\n",
-        Prints("[Som(1), Som(2)]\nSom(3)"),
+        PrintsAs("[Som(1), Som(2)]\nSom(3)", "[1, 2]\n3"),
     );
     twin_lib(
         c,
         "C27 module-qualified alias",
         "type Tone = Opt1[int]\n",
         "import lib\nprint(lib.Tone.Som(1), lib.Tone.Non)\nv: lib.Tone = lib.Tone.Som(3)\nmatch v:\n    lib.Tone.Som(n): print(n)\n    lib.Tone.Non: print(0)\n",
-        Prints("Som(1) Non\n3"),
+        PrintsAs("Som(1) Non\n3", "1 None\n3"),
     );
     twin_lib(
         c,
         "C28 from-imported alias",
         "type Tone = Opt1[int]\n",
         "import Tone from lib\nprint(Tone.Som(1), Tone.Non)\nv: Tone = Tone.Som(3)\nmatch v:\n    Tone.Som(n): print(n)\n    Tone.Non: print(0)\n",
-        Prints("Som(1) Non\n3"),
+        PrintsAs("Som(1) Non\n3", "1 None\n3"),
     );
     twin(
         c,
@@ -429,7 +436,7 @@ fn carrier_enum_grid() {
             ("Option.chz", "fn helper() -> int:\n    return 7\n"),
             ("Result.chz", "fn helper() -> int:\n    return 8\n"),
         ],
-        Prints("Some(1) None Ok(2) Err('x')\n3"),
+        Prints("1 None 2 !x\n3"),
     );
     only(
         c,
@@ -456,7 +463,7 @@ fn carrier_enum_grid() {
             "main.chz",
             "enum E:\n    Some(int)\n    Other\nprint(E.Some(1))\nv: Option[int] = Some(2)\nprint(v)\n",
         )],
-        Prints("Some(1)\nSome(2)"),
+        Prints("Some(1)\n2"),
     );
     only(
         c,

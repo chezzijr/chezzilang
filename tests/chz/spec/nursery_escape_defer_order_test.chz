@@ -144,7 +144,7 @@ test fn return_escape_runs_body_then_child_then_owner_defers():
 
 test fn try_escape_runs_child_defer_before_owner_defer():
     log := Shared("")
-    assert "{try_order(log)}" == "Err('bail')"
+    assert "{try_order(log)}" == "!bail"
     assert log.get() == "CO"
 
 

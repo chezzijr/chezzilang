@@ -1849,7 +1849,7 @@ fn success_coercion_survives_a_speculative_return_inference_pass() {
         "fn outer():\n    fn g() -> int?:\n        return h()\n    print(g())\n\nfn h(): 1\n\nouter()\n",
     )
     .expect("should run clean, not hit the return-coercion table conflict");
-    assert_eq!(out, "Some(1)\n");
+    assert_eq!(out, "1\n");
 }
 
 /// Lossy / wrong-direction conversions MUST stay type errors (the widen arm is one-way Float←Int only).
@@ -38299,8 +38299,8 @@ mod ticket_231_none_word {
         // The void value prints `None`, as Python's does.
         let out =
             crate::vm::run_capture("fn f() -> Result[None, str]:\n    return Ok()\nprint(f())\n");
-        if out.as_deref().ok() != Some("Ok(None)\n") {
-            red.push(format!("void print -> want \"Ok(None)\", got {out:?}"));
+        if out.as_deref().ok() != Some("None\n") {
+            red.push(format!("void print -> want \"None\", got {out:?}"));
         }
         assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
     }

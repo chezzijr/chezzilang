@@ -2977,14 +2977,22 @@ impl Vm {
             )?,
             Op::MatchNoArm(slot) => {
                 let v = self.stack[self.base() + *slot];
-                let variant = match v.view() {
+                let id = match v.view() {
                     ValueView::Obj(h) => match self.heap.get(h) {
-                        Obj::Enum { variant_id, .. } => self.enum_names(*variant_id).1.to_string(),
-                        _ => String::new(),
+                        Obj::Enum { variant_id, .. } => Some(*variant_id),
+                        _ => None,
                     },
-                    _ => String::new(),
+                    _ => None,
                 };
-                return Err(self.err(format!("no match arm for variant '{variant}'"), span));
+                // A carrier is named by the pattern that would match it, a user variant by name.
+                let message = match id.and_then(Self::carrier_pattern_text) {
+                    Some(pattern) => format!("no match arm for pattern '{pattern}'"),
+                    None => {
+                        let variant = id.map_or("", |id| self.enum_names(id).1);
+                        format!("no match arm for variant '{variant}'")
+                    }
+                };
+                return Err(self.err(message, span));
             }
             Op::EnterNursery => {
                 self.sched_seed_point();

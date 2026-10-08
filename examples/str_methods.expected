@@ -31,12 +31,12 @@ file
 file.txt
 ['a', 'b', 'c']
 x
-Some(42)
-Some(9)
+42
+9
 None
-Some(4.5)
+4.5
 None
-Ok(42)
-Err("cannot parse 'x' as an integer")
-Ok(3.14)
-Err("cannot parse 'x' as a float")
+42
+!cannot parse 'x' as an integer
+3.14
+!cannot parse 'x' as a float

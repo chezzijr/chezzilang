@@ -27,7 +27,7 @@ test fn a_guarded_bare_name_arm_runs_only_when_its_guard_holds():
     assert f(E.B, 0) == "b"
 
 test fn a_bare_name_binds_the_whole_option():
-    assert whole(Some(5)) == "wSome(5)"
+    assert whole(Some(5)) == "w5"
     assert whole(None) == "wNone"
 
 test fn a_bare_name_binds_the_whole_enum_value():

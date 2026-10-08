@@ -442,6 +442,78 @@ impl Vm {
             .map_or(("?", "?"), |d| (d.enum_name.as_str(), d.name.as_str()))
     }
 
+    /// The display rule of a carrier (TICKET-228): what a `T?` / `T!E` value prints in front of
+    /// its payload, the way the user writes it. An error is `!e`; a success or a present value is
+    /// its bare payload; `?` prints only in front of an absent payload (`?None`), so it stays
+    /// distinct from `None`. Rust `None` for a non-carrier and for the absent value itself, which
+    /// print by their variant name. `absent_payload` says whether the payload is absent or is
+    /// itself a `?`-prefixed present value.
+    fn carrier_prefix_of(
+        variant_id: u32,
+        absent_payload: impl FnOnce() -> bool,
+    ) -> Option<&'static str> {
+        match variant_id {
+            crate::vm::op::VID_ERR => Some("!"),
+            crate::vm::op::VID_OK => Some(""),
+            crate::vm::op::VID_SOME => Some(if absent_payload() { "?" } else { "" }),
+            _ => None,
+        }
+    }
+
+    /// [`Self::carrier_prefix_of`] for a heap carrier.
+    pub(super) fn carrier_prefix(
+        &self,
+        variant_id: u32,
+        payload: &[Value],
+    ) -> Option<&'static str> {
+        Self::carrier_prefix_of(variant_id, || {
+            payload
+                .first()
+                .and_then(|v| v.as_obj())
+                .is_some_and(|h| match self.heap.get(h) {
+                    Obj::Enum {
+                        variant_id: inner,
+                        payload: inner_payload,
+                    } => {
+                        *inner == crate::vm::op::VID_NONE_VARIANT
+                            || (*inner == crate::vm::op::VID_SOME
+                                && self.carrier_prefix(*inner, inner_payload) == Some("?"))
+                    }
+                    _ => false,
+                })
+        })
+    }
+
+    /// [`Self::carrier_prefix_of`] for a wire carrier.
+    fn carrier_prefix_wire(variant_id: u32, payload: &[WireValue]) -> Option<&'static str> {
+        Self::carrier_prefix_of(variant_id, || match payload.first() {
+            Some(WireValue::Enum {
+                variant_id: inner,
+                payload: inner_payload,
+                ..
+            }) => {
+                *inner == crate::vm::op::VID_NONE_VARIANT
+                    || (*inner == crate::vm::op::VID_SOME
+                        && Self::carrier_prefix_wire(*inner, inner_payload) == Some("?"))
+            }
+            _ => false,
+        })
+    }
+
+    /// The pattern a carrier variant is matched by, for the `no match arm` fault text; Rust
+    /// `None` for a user variant.
+    pub(crate) fn carrier_pattern_text(variant_id: u32) -> Option<&'static str> {
+        use crate::ast::CarrierTag;
+        match variant_id {
+            crate::vm::op::VID_SOME | crate::vm::op::VID_OK => {
+                Some(CarrierTag::Present.pattern_text())
+            }
+            crate::vm::op::VID_ERR => Some(CarrierTag::Error.pattern_text()),
+            crate::vm::op::VID_NONE_VARIANT => Some(Self::NONE_TEXT),
+            _ => None,
+        }
+    }
+
     /// The index of the module that declared the enum keyed by `enum_key` (its method bodies resolve
     /// top-level names against that module's globals). Defaults to module 0 if unrecorded.
     pub(super) fn enum_home_module(&self, enum_key: &str) -> usize {
@@ -2262,6 +2334,17 @@ impl Vm {
                     variant_id,
                     payload,
                 } => {
+                    // A carrier prints its prefix, then its payload in the mode of the position
+                    // the carrier itself occupies (top level: bare; nested: repr).
+                    if let Some(prefix) = self.carrier_prefix(*variant_id, payload) {
+                        let inner = match payload.first() {
+                            Some(v) => {
+                                self.display_guarded(*v, if depth == 0 { 0 } else { depth + 1 })?
+                            }
+                            None => Self::NONE_TEXT.to_string(),
+                        };
+                        return Ok(format!("{prefix}{inner}"));
+                    }
                     // M19 lever #2 — recover the variant name from the id (cold display path).
                     let variant = self.enum_names(*variant_id).1.to_string();
                     let payload: Vec<Value> = payload.clone();
@@ -2437,6 +2520,14 @@ impl Vm {
                 payload,
                 ..
             } => {
+                // A carrier: its prefix, then its payload (a wire position is always nested).
+                if let Some(prefix) = Self::carrier_prefix_wire(*variant_id, payload) {
+                    let inner = match payload.first() {
+                        Some(v) => self.display_wire(v),
+                        None => Self::NONE_TEXT.to_string(),
+                    };
+                    return format!("{prefix}{inner}");
+                }
                 // M19 lever #2 — the wire form carries the id; resolve the variant name on this cold
                 // display path via the shared program's `variants_by_id`.
                 let variant = self.enum_names(*variant_id).1;
@@ -2708,6 +2799,24 @@ impl Vm {
             out.push_str(&crate::slice::str_repr(s));
             return Ok(());
         }
+        // A nested carrier keeps the nested (repr) mode for its payload: `[!'boom']`.
+        if let Some(h) = v.as_obj()
+            && let Obj::Enum {
+                variant_id,
+                payload,
+            } = self.heap.get(h)
+            && let Some(prefix) = self.carrier_prefix(*variant_id, payload)
+        {
+            let inner = payload.first().copied();
+            out.push_str(prefix);
+            return match inner {
+                Some(p) => self.stringify_nested_into(out, p, span, depth + 1),
+                None => {
+                    out.push_str(Self::NONE_TEXT);
+                    Ok(())
+                }
+            };
+        }
         self.stringify_into(out, v, span, depth)
     }
 
@@ -2860,6 +2969,19 @@ impl Vm {
                     if let Obj::Enum { payload: cur, .. } = self.heap.get(h) {
                         payload = cur.clone();
                     }
+                }
+                // A carrier prints its prefix, then its payload in the mode of the position the
+                // carrier itself occupies. This is the bare (str) mode; a nested carrier is
+                // rendered by `stringify_nested_into` before it reaches here.
+                if let Some(prefix) = self.carrier_prefix(variant_id, &payload) {
+                    out.push_str(prefix);
+                    return match payload.first() {
+                        Some(v) => self.stringify_into(out, *v, span, depth),
+                        None => {
+                            out.push_str(Self::NONE_TEXT);
+                            Ok(())
+                        }
+                    };
                 }
                 // M19 lever #2 — recover the variant name from the id (cold stringify path).
                 out.push_str(self.enum_names(variant_id).1);

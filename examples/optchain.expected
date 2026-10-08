@@ -7,11 +7,11 @@ bob
 —
 30
 name=bob, age=-1
-Ok(7)
-Err('offline')
-Ok(7)
-Err('offline')
-Ok(true)
+7
+!offline
+7
+!offline
+true
 fell back: offline
 payload
 none

@@ -339,7 +339,7 @@ parallel:
     spawn lib.say(23)
 "#;
 
-const SHAPES_OUT: &str = "2\nL2\nT(x=3)\nS(k=4)\nRed\nVal(5)\nA\nB(6)\nBox(v=7)\nPair(a=8, b='p')\n9\n10\nw\n12\n13\n14\nL15\n18\n19\nOk(T(x=20))\nbody\nS22\nD21\nD23";
+const SHAPES_OUT: &str = "2\nL2\nT(x=3)\nS(k=4)\nRed\nVal(5)\nA\nB(6)\nBox(v=7)\nPair(a=8, b='p')\n9\n10\nw\n12\n13\n14\nL15\n18\n19\nT(x=20)\nbody\nS22\nD21\nD23";
 
 /// One program with every head position the compiler lowers as a name. A node the compiler reads
 /// without a checker record turns it red with `internal: no name resolution recorded`.
@@ -826,12 +826,12 @@ fn t187_cells() -> Vec<Cell> {
         one(
             "t187/decode/json_module",
             "import std.json\nprint(json.decode[int](\"7\"))\n".into(),
-            Expect::Prints("Ok(7)".into()),
+            Expect::Prints("7".into()),
         ),
         one(
             "t187/decode/json_alias",
             "import std.json as j\nprint(j.decode[List[int]](\"[1]\"))\n".into(),
-            Expect::Prints("Ok([1])".into()),
+            Expect::Prints("[1]".into()),
         ),
         one(
             "t187/decode/int_receiver",

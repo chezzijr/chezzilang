@@ -13,7 +13,7 @@ bytearray(b'A\x03')
 389
 4
 bytearray(b'AB\x03\xff\n')
-Some(10)
+10
 bytearray(b'AB\x03\xff\xaa\x07\x08')
 true
 true

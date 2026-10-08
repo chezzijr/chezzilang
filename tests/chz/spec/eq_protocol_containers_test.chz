@@ -54,13 +54,13 @@ test fn ci_map_probes_dispatch_eq():
     m[CI("ab")] = 1
     assert m[CI("aB")] == 1, "index"
     assert m.has(CI("AB")) == true, "has"
-    assert str(m.get(CI("Ab"))) == "Some(1)", "get"
+    assert str(m.get(CI("Ab"))) == "1", "get"
     assert (CI("aB") in m) == true, "`in` on a map probes KEYS"
     # a differently-spelled EQUAL key updates the existing entry rather than adding one
     m[CI("AB")] = 2
     assert m.len() == 1
     assert m[CI("ab")] == 2
-    assert str(m.remove(CI("aB"))) == "Some(2)"
+    assert str(m.remove(CI("aB"))) == "2"
     assert m.len() == 0
 
 test fn ci_set_probes_dispatch_eq():
