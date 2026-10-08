@@ -68,13 +68,17 @@ fn len_spaced_err() -> int!str:
     return Ok(serr()? .len())
 
 test fn result_carrier_ok_path_equals_the_spaced_spelling():
-    assert "{len_dot()}" == "5", "got {len_dot()}"
+    match len_dot():
+        ?v: assert v == 5
+        _: assert false, "wrong shape"
     assert "{len_dot()}" == "{len_spaced()}", "`?.` and `? .` must agree"
 
 test fn result_carrier_err_path_equals_the_spaced_spelling():
     # The Err is propagated by the `?`, so the CALLER binds it (a bare top-level Err exits).
     r := len_dot_err()
-    assert "{r}" == "!boom", "got {r}"
+    match r:
+        !e: assert e == "boom"
+        _: assert false, "wrong shape"
     assert "{r}" == "{len_spaced_err()}", "`?.` and `? .` must agree on the Err path"
     match r:
         Ok(_): assert false, "expected Err"
@@ -95,7 +99,9 @@ fn add_spaced_err() -> int!MyErr:
     return Ok(berr()? .add(5))
 
 test fn result_carrier_method_call_with_args():
-    assert "{add_dot()}" == "15", "got {add_dot()}"
+    match add_dot():
+        ?v: assert v == 15
+        _: assert false, "wrong shape"
     assert "{add_dot()}" == "{add_spaced()}"
     assert "{add_dot_err()}" == "{add_spaced_err()}"
     match add_dot_err():
@@ -122,17 +128,25 @@ fn tag_spaced_both_named() -> str!MyErr:
 
 test fn result_carrier_named_args_and_omitted_default():
     # `prefix` is omitted → its default "p" is filled; `n` is passed by NAME out of position order.
-    assert "{tag_dot()}" == "p15", "got {tag_dot()}"
+    match tag_dot():
+        ?v: assert v == "p15"
+        _: assert false, "wrong shape"
     assert "{tag_dot()}" == "{tag_spaced()}"
     # Both named, and in REVERSE declaration order — the permutation must be rebound positionally.
-    assert "{tag_dot_both_named()}" == "q12", "got {tag_dot_both_named()}"
+    match tag_dot_both_named():
+        ?v: assert v == "q12"
+        _: assert false, "wrong shape"
     assert "{tag_dot_both_named()}" == "{tag_spaced_both_named()}"
 
 test fn option_carrier_named_args_and_omitted_default():
     ob := Some(Box(10))
     # Option mode: the access is applied to the payload and RE-WRAPPED, so the result is an Option.
-    assert "{ob?.tag(n=5)}" == "p15", "got {ob?.tag(n=5)}"
-    assert "{ob?.tag(n=2, prefix='q')}" == "q12"
+    match ob?.tag(n=5):
+        ?v: assert v == "p15"
+        _: assert false, "wrong shape"
+    match ob?.tag(n=2, prefix="q"):
+        ?v: assert v == "q12"
+        _: assert false, "wrong shape"
     none_box: Option[Box] = None
     assert "{none_box?.tag(n=5)}" == "None"
     # …and the hand-written `match` it means is the same value.
@@ -154,24 +168,36 @@ struct Holder:
 
 test fn option_carrier_some_and_none():
     ob := Some(Box(4))
-    assert "{ob?.v}" == "4"
-    assert "{ob?.get()}" == "4"
+    match ob?.v:
+        ?v: assert v == 4
+        _: assert false, "wrong shape"
+    match ob?.get():
+        ?v: assert v == 4
+        _: assert false, "wrong shape"
     nb: Option[Box] = None
     assert "{nb?.v}" == "None"
     assert "{nb?.get()}" == "None"
 
 test fn option_carrier_chains():
     o := Some(Outer(Some(Inner(7))))
-    assert "{o?.b}" == "Inner(c=7)"
+    match o?.b:
+        ?(?v): assert v.c == 7
+        _: assert false, "wrong shape"
     empty := Some(Outer(None))
-    assert "{empty?.b}" == "?None"
+    match empty?.b:
+        ?None: assert true
+        _: assert false, "wrong shape"
 
 test fn option_of_option_is_not_flattened():
     h := Some(Holder(Some(1)))
     r: Option[Option[int]] = h?.maybe
-    assert "{r}" == "1"
+    match r:
+        ?(?v): assert v == 1
+        _: assert false, "wrong shape"
     n := Some(Holder(None))
-    assert "{n?.maybe}" == "?None"
+    match n?.maybe:
+        ?None: assert true
+        _: assert false, "wrong shape"
 
 test fn null_coalesce_on_option_unwraps_or_falls_back():
     o := Some(5)
@@ -228,7 +254,9 @@ test fn result_carrier_inside_recover_short_circuits_to_the_boundary():
     assert "{r}" == "{spaced}", "`?.` and `? .` must agree inside recover:"
     good := recover: bok()?.add(1)
     good_spaced := recover: bok()? .add(1)
-    assert "{good}" == "11", "got {good}"
+    match good:
+        ?v: assert v == 11
+        _: assert false, "wrong shape"
     assert "{good}" == "{good_spaced}"
 
 # ---- 7: `?.` on a Result inside `defer:` — observable side effects ----
@@ -286,7 +314,9 @@ fn closure_and_nested_spaced() -> int!str:
     return Ok(g()? + nested()?)
 
 test fn result_carrier_in_a_closure_and_a_nested_fn():
-    assert "{closure_and_nested_dot()}" == "11", "got {closure_and_nested_dot()}"
+    match closure_and_nested_dot():
+        ?v: assert v == 11
+        _: assert false, "wrong shape"
     assert "{closure_and_nested_dot()}" == "{closure_and_nested_spaced()}"
 
 # ---- 9: inside `parallel:` and inside `spawn:` ----
@@ -319,7 +349,9 @@ fn nursery_spaced() -> int!str:
     return Ok(total.get())
 
 test fn result_carrier_inside_parallel_and_spawn():
-    assert "{nursery_dot()}" == "20", "got {nursery_dot()}"
+    match nursery_dot():
+        ?v: assert v == 20
+        _: assert false, "wrong shape"
     assert "{nursery_dot()}" == "{nursery_spaced()}"
 
 # ---- 10: the MIXED chain — the key-uniqueness case ----
@@ -342,8 +374,12 @@ fn mixed_spaced(has: bool) -> Result[Option[int], str]:
     return Ok(mkouter(has)? .b?.c)
 
 test fn mixed_result_then_option_chain():
-    assert "{mixed_dot(true)}" == "7", "got {mixed_dot(true)}"
-    assert "{mixed_dot(false)}" == "None", "got {mixed_dot(false)}"
+    match mixed_dot(true):
+        ?(?v): assert v == 7
+        _: assert false, "wrong shape"
+    match mixed_dot(false):
+        ?None: assert true
+        _: assert false, "wrong shape"
     assert "{mixed_dot(true)}" == "{mixed_spaced(true)}"
     assert "{mixed_dot(false)}" == "{mixed_spaced(false)}"
 
@@ -354,9 +390,13 @@ test fn mixed_option_then_result_chain():
     # The reverse mix: `a` is an Option, `a.b` is a Result. The single `?.` link is Option-mode, so
     # the Result is re-wrapped, NOT unwrapped — `Option[Result[…]]`, consistent with "no flattening".
     o := Some(Outer2(Ok(Inner(3))))
-    assert "{o?.b}" == "Inner(c=3)", "got {o?.b}"
+    match o?.b:
+        ?(?v): assert v.c == 3
+        _: assert false, "wrong shape"
     bad := Some(Outer2(Err("nope")))
-    assert "{bad?.b}" == "!nope", "got {bad?.b}"
+    match bad?.b:
+        ?(!e): assert e == "nope"
+        _: assert false, "wrong shape"
     none_o: Option[Outer2] = None
     assert "{none_o?.b}" == "None"
 
@@ -375,18 +415,24 @@ fn interp_two_frags_spaced() -> str!MyErr:
     return Ok("{bok()? .add(1)}|{bok()? .add(2)}")
 
 test fn result_carrier_inside_interpolation():
-    assert "{interp_dot()}" == "len=5", "got {interp_dot()}"
+    match interp_dot():
+        ?v: assert v == "len=5"
+        _: assert false, "wrong shape"
     assert "{interp_dot()}" == "{interp_spaced()}"
 
 test fn two_result_carrier_fragments_in_one_literal():
     # Two fragments in ONE literal — they are told apart by the fragment ORDINAL component of the
     # carrier key, not by their spans.
-    assert "{interp_two_frags_dot()}" == "11|12", "got {interp_two_frags_dot()}"
+    match interp_two_frags_dot():
+        ?v: assert v == "11|12"
+        _: assert false, "wrong shape"
     assert "{interp_two_frags_dot()}" == "{interp_two_frags_spaced()}"
 
 test fn option_carrier_inside_interpolation():
     o := Some("abc")
-    assert "{o?.len()}" == "3"
+    match o?.len():
+        ?v: assert v == 3
+        _: assert false, "wrong shape"
     n: Option[str] = None
     assert "{n?.len()}" == "None"
     assert "{o?.len()}/{n?.len()}" == "3/None"
@@ -410,16 +456,22 @@ fn capturing_closure_arg_spaced(k: int) -> int!MyErr:
     return Ok(bok()? .apply(fn(n: int) -> int: n * k))
 
 test fn result_carrier_method_argument_is_a_closure():
-    assert "{closure_arg_dot()}" == "20", "got {closure_arg_dot()}"
+    match closure_arg_dot():
+        ?v: assert v == 20
+        _: assert false, "wrong shape"
     assert "{closure_arg_dot()}" == "{closure_arg_spaced()}"
     # …and one that CAPTURES an enclosing local, so the capture walkers must see through the carrier
-    assert "{capturing_closure_arg_dot(3)}" == "30", "got {capturing_closure_arg_dot(3)}"
+    match capturing_closure_arg_dot(3):
+        ?v: assert v == 30
+        _: assert false, "wrong shape"
     assert "{capturing_closure_arg_dot(3)}" == "{capturing_closure_arg_spaced(3)}"
 
 test fn option_carrier_method_argument_is_a_capturing_closure():
     ob := Some(Box(10))
     k := 4
-    assert "{ob?.apply(fn(n: int) -> int: n * k)}" == "40"
+    match ob?.apply(fn(n: int) -> int: n * k):
+        ?v: assert v == 40
+        _: assert false, "wrong shape"
     nb: Option[Box] = None
     assert "{nb?.apply(fn(n: int) -> int: n * k)}" == "None"
 

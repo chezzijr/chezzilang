@@ -1,7 +1,9 @@
 //! TICKET-227 (D3) — implicit wrap at every typed slot, one program per (carrier, slot, value).
-//! Every accept cell RUNS and checks the printed value: a seam whose value does not own its slot
-//! turns a plain-`5` cell into a reject; a missed `compile_expr` hook prints `5` where `Some(5)`
-//! is expected; a double wrap prints `Some(Some(5))`.
+//! Every accept cell RUNS and is read through a generated `fn show(x: C)` that matches each layer
+//! by pattern (`?v`, `!e`, `None`) and uses the payload at its own type. Printed text is not the
+//! oracle: a carrier prints as the user writes it, so `5` and `?5` print the same. A missed wrap
+//! faults in `show` (`cannot match on int`); a double wrap faults there too (`cannot apply Add to
+//! enum and int`).
 
 #[path = "support/grid_cell.rs"]
 mod grid_cell;
@@ -59,83 +61,83 @@ const SLOTS: &[Slot] = &[
     Slot {
         name: "typed_let",
         decls: "",
-        body: "x: {C} = {v}\nprint(x)",
+        body: "x: {C} = {v}\nshow(x)",
         reject: "cannot assign",
         tail: true,
     },
     Slot {
         name: "assign",
         decls: "",
-        body: "x: {C} = {SEED}\nx = {v}\nprint(x)",
+        body: "x: {C} = {SEED}\nx = {v}\nshow(x)",
         reject: "cannot assign",
         tail: true,
     },
     Slot {
         name: "field_assign",
         decls: "struct S:\n    n: {C}\n",
-        body: "s := S(n={SEED})\ns.n = {v}\nprint(s.n)",
+        body: "s := S(n={SEED})\ns.n = {v}\nshow(s.n)",
         reject: "cannot assign",
         tail: true,
     },
     Slot {
         name: "list_index_assign",
         decls: "",
-        body: "xs: List[{C}] = [{SEED}]\nxs[0] = {v}\nprint(xs[0])",
+        body: "xs: List[{C}] = [{SEED}]\nxs[0] = {v}\nshow(xs[0])",
         reject: "cannot assign",
         tail: true,
     },
     Slot {
         name: "map_index_assign",
         decls: "",
-        body: "m: Map[str, {C}] = {}\nm[\"k\"] = {v}\nprint(m[\"k\"])",
+        body: "m: Map[str, {C}] = {}\nm[\"k\"] = {v}\nshow(m[\"k\"])",
         reject: "cannot assign",
         tail: true,
     },
     Slot {
         name: "user_index_set",
         decls: "struct U:\n    val: {C}\n    fn index(self, k: int) -> {C}:\n        return self.val\n    fn set_index(self, k: int, v: {C}):\n        self.val = v\n",
-        body: "u := U(val={SEED})\nu[0] = {v}\nprint(u[0])",
+        body: "u := U(val={SEED})\nu[0] = {v}\nshow(u[0])",
         reject: "cannot assign",
         tail: false,
     },
     Slot {
         name: "multi_assign",
         decls: "",
-        body: "x: {C} = {SEED}\ny := 0\nx, y = {v}, 0\nprint(x)",
+        body: "x: {C} = {SEED}\ny := 0\nx, y = {v}, 0\nshow(x)",
         reject: "cannot assign",
         tail: false,
     },
     Slot {
         name: "multi_index_assign",
         decls: "",
-        body: "xs: List[{C}] = [{SEED}]\ny := 0\nxs[0], y = {v}, 0\nprint(xs[0])",
+        body: "xs: List[{C}] = [{SEED}]\ny := 0\nxs[0], y = {v}, 0\nshow(xs[0])",
         reject: "cannot assign",
         tail: false,
     },
     Slot {
         name: "positional_arg",
-        decls: "fn t(x: {C}):\n    print(x)\n",
+        decls: "fn t(x: {C}):\n    show(x)\n",
         body: "t({v})",
         reject: "argument 1 of 't'",
         tail: false,
     },
     Slot {
         name: "keyword_arg",
-        decls: "fn k(a: int, b: {C} = {SEED}):\n    print(b)\n",
+        decls: "fn k(a: int, b: {C} = {SEED}):\n    show(b)\n",
         body: "k(0, b={v})",
         reject: "argument 2 of 'k'",
         tail: false,
     },
     Slot {
         name: "variadic_arg",
-        decls: "fn va(...xs: {C}):\n    print(xs[0])\n",
+        decls: "fn va(...xs: {C}):\n    show(xs[0])\n",
         body: "va({v})",
         reject: "list element",
         tail: false,
     },
     Slot {
         name: "generic_arg",
-        decls: "fn f[T](a: T, b: {C}):\n    print(b)\n",
+        decls: "fn f[T](a: T, b: {C}):\n    show(b)\n",
         body: "f(0, {v})",
         reject: "argument to 'f'",
         tail: false,
@@ -143,27 +145,27 @@ const SLOTS: &[Slot] = &[
     Slot {
         name: "ctor_field",
         decls: "struct S:\n    n: {C}\n",
-        body: "print(S(n={v}).n)",
+        body: "show(S(n={v}).n)",
         reject: "argument 1 of 'S'",
         tail: false,
     },
     Slot {
         name: "variant_payload",
         decls: "enum E:\n    V({C})\n",
-        body: "match E.V({v}):\n    E.V(x):\n        print(x)",
+        body: "match E.V({v}):\n    E.V(x):\n        show(x)",
         reject: "argument 1 of 'V'",
         tail: false,
     },
     Slot {
         name: "generic_variant_payload",
         decls: "enum G[T]:\n    V(T, {C})\n",
-        body: "match G.V(0, {v}):\n    G.V(_, x):\n        print(x)",
+        body: "match G.V(0, {v}):\n    G.V(_, x):\n        show(x)",
         reject: "argument to 'V'",
         tail: false,
     },
     Slot {
         name: "method_arg",
-        decls: "struct M:\n    k: int\n    fn put(self, x: {C}):\n        print(x)\n",
+        decls: "struct M:\n    k: int\n    fn put(self, x: {C}):\n        show(x)\n",
         body: "M(0).put({v})",
         reject: "argument 1 of 'put'",
         tail: false,
@@ -171,13 +173,13 @@ const SLOTS: &[Slot] = &[
     Slot {
         name: "native_method_arg",
         decls: "",
-        body: "xs: List[{C}] = []\nxs.push({v})\nprint(xs[0])",
+        body: "xs: List[{C}] = []\nxs.push({v})\nshow(xs[0])",
         reject: "argument 1 of 'push'",
         tail: false,
     },
     Slot {
         name: "generic_static_method_arg",
-        decls: "struct H[T]:\n    v: T\n    fn mk(a: T, x: {C}):\n        print(x)\n",
+        decls: "struct H[T]:\n    v: T\n    fn mk(a: T, x: {C}):\n        show(x)\n",
         body: "H.mk(0, {v})",
         reject: "argument to 'mk'",
         tail: false,
@@ -185,125 +187,125 @@ const SLOTS: &[Slot] = &[
     Slot {
         name: "channel_send",
         decls: "",
-        body: "ch := Channel[{C}](1)\nch.send({v})\nprint(ch.recv())",
+        body: "ch := Channel[{C}](1)\nch.send({v})\nshow(ch.recv())",
         reject: "argument 1 of 'send'",
         tail: false,
     },
     Slot {
         name: "wait_send_arm",
         decls: "",
-        body: "ch := Channel[{C}](1)\nwait:\n    ch.send({v}):\n        print(ch.recv())",
+        body: "ch := Channel[{C}](1)\nwait:\n    ch.send({v}):\n        show(ch.recv())",
         reject: "argument 1 of 'send'",
         tail: false,
     },
     Slot {
         name: "shared_set",
         decls: "import Shared from std.concurrency\n",
-        body: "s := Shared[{C}]({SEED})\ns.set({v})\nprint(s.get())",
+        body: "s := Shared[{C}]({SEED})\ns.set({v})\nshow(s.get())",
         reject: "argument 1 of 'set'",
         tail: false,
     },
     Slot {
         name: "shared_ctor",
         decls: "import Shared from std.concurrency\n",
-        body: "s := Shared[{C}]({v})\nprint(s.get())",
+        body: "s := Shared[{C}]({v})\nshow(s.get())",
         reject: "expected element type",
         tail: false,
     },
     Slot {
         name: "rwshared_ctor",
         decls: "import RwShared from std.concurrency\n",
-        body: "s := RwShared[{C}]({v})\nprint(s.get())",
+        body: "s := RwShared[{C}]({v})\nshow(s.get())",
         reject: "expected element type",
         tail: false,
     },
     Slot {
         name: "list_element",
         decls: "",
-        body: "xs: List[{C}] = [{v}]\nprint(xs[0])",
+        body: "xs: List[{C}] = [{v}]\nshow(xs[0])",
         reject: "list element",
         tail: false,
     },
     Slot {
         name: "map_value",
         decls: "",
-        body: "m: Map[str, {C}] = {\"k\": {v}}\nprint(m[\"k\"])",
+        body: "m: Map[str, {C}] = {\"k\": {v}}\nshow(m[\"k\"])",
         reject: "map value",
         tail: false,
     },
     Slot {
         name: "tuple_element",
         decls: "",
-        body: "t: ({C}, int) = ({v}, 0)\nprint(t.0)",
+        body: "t: ({C}, int) = ({v}, 0)\nshow(t.0)",
         reject: "cannot assign",
         tail: false,
     },
     Slot {
         name: "list_conversion",
         decls: "",
-        body: "xs := List[{C}]([{v}])\nprint(xs[0])",
+        body: "xs := List[{C}]([{v}])\nshow(xs[0])",
         reject: "list element",
         tail: false,
     },
     Slot {
         name: "map_conversion",
         decls: "",
-        body: "m := Map[str, {C}]([(\"k\", {v})])\nprint(m[\"k\"])",
+        body: "m := Map[str, {C}]([(\"k\", {v})])\nshow(m[\"k\"])",
         reject: "list element",
         tail: false,
     },
     Slot {
         name: "list_comprehension",
         decls: "",
-        body: "xs: List[{C}] = [{v} for i in [0]]\nprint(xs[0])",
+        body: "xs: List[{C}] = [{v} for i in [0]]\nshow(xs[0])",
         reject: "cannot assign",
         tail: false,
     },
     Slot {
         name: "map_comprehension_value",
         decls: "",
-        body: "m: Map[str, {C}] = {\"k\": {v} for i in [0]}\nprint(m[\"k\"])",
+        body: "m: Map[str, {C}] = {\"k\": {v} for i in [0]}\nshow(m[\"k\"])",
         reject: "cannot assign",
         tail: false,
     },
     Slot {
         name: "return",
         decls: "fn r() -> {C}:\n    return {v}\n",
-        body: "print(r())",
+        body: "show(r())",
         reject: "expected return type",
         tail: true,
     },
     Slot {
         name: "inline_body",
         decls: "fn r() -> {C}: {v}\n",
-        body: "print(r())",
+        body: "show(r())",
         reject: "expected return type",
         tail: false,
     },
     Slot {
         name: "yield",
         decls: "fn g() -> Iterator[{C}]:\n    yield {v}\n",
-        body: "for y in g():\n    print(y)",
+        body: "for y in g():\n    show(y)",
         reject: "expected yield type",
         tail: true,
     },
     Slot {
         name: "annotated_closure",
         decls: "",
-        body: "k := fn() -> {C}: {v}\nprint(k())",
+        body: "k := fn() -> {C}: {v}\nshow(k())",
         reject: "closure body has type",
         tail: false,
     },
     Slot {
         name: "closure_in_typed_slot",
-        decls: "fn g(k: fn() -> {C}):\n    print(k())\n",
+        decls: "fn g(k: fn() -> {C}):\n    show(k())\n",
         body: "g(fn(): {v})",
         reject: "argument 1 of 'g'",
         tail: false,
     },
     Slot {
         name: "param_default",
-        decls: "fn dflt(x: {C} = {v}):\n    print(x)\n",
+        decls: "fn dflt(x: {C} = {v}):\n    show(x)\n",
         body: "dflt()",
         reject: "default value for parameter",
         tail: false,
@@ -311,13 +313,20 @@ const SLOTS: &[Slot] = &[
     Slot {
         name: "field_default",
         decls: "struct D:\n    n: {C} = {v}\n",
-        body: "print(D().n)",
+        body: "show(D().n)",
         reject: "default value for field",
         tail: false,
     },
 ];
 
-/// How a value fares at a carrier: the printed text, the slot's own rejection, or a named one.
+/// The structural readers, one per carrier type: each names every layer by pattern and uses the
+/// innermost payload in an operation of its own type.
+const SHOW_OPT: &str = "fn show(x: int?):\n    match x:\n        ?v:\n            print(\"some {v + 0}\")\n        None:\n            print(\"none\")\n";
+const SHOW_RES: &str = "fn show(x: int!str):\n    match x:\n        ?v:\n            print(\"ok {v + 0}\")\n        !e:\n            print(\"err {e.upper()}\")\n";
+const SHOW_VOID: &str = "fn show(x: None!str):\n    match x:\n        ?_:\n            print(\"ok\")\n        !e:\n            print(\"err {e.upper()}\")\n";
+const SHOW_OPT2: &str = "fn show(x: int??):\n    match x:\n        ?(?v):\n            print(\"some some {v + 0}\")\n        ?None:\n            print(\"some none\")\n        None:\n            print(\"none\")\n";
+
+/// How a value fares at a carrier: the text `show` prints, the slot's own rejection, or a named one.
 #[derive(Clone, Copy)]
 enum Out {
     Prints(&'static str),
@@ -327,6 +336,8 @@ enum Out {
 
 struct Carrier {
     ty: &'static str,
+    /// The `fn show(x: C)` every accept cell of this carrier is read through.
+    show: &'static str,
     seed: &'static str,
     /// `ALT` of the branch values: the other branch's carrier-shaped value.
     alt: &'static str,
@@ -341,54 +352,58 @@ const BR_INCOMPATIBLE: Out = Out::Rejects("branches have incompatible types");
 const CARRIERS: &[Carrier] = &[
     Carrier {
         ty: "int?",
+        show: SHOW_OPT,
         seed: "None",
         alt: "None",
         values: [
-            ("5", Out::Prints("Some(5)")),
-            ("None", Out::Prints("None")),
-            ("?5", Out::Prints("Some(5)")),
+            ("5", Out::Prints("some 5")),
+            ("None", Out::Prints("none")),
+            ("?5", Out::Prints("some 5")),
             ("!\"e\"", Out::SlotRejects),
-            ("Some(5)", Out::Prints("Some(5)")),
-            ("BR", Out::Prints("Some(5)")),
+            ("Some(5)", Out::Prints("some 5")),
+            ("BR", Out::Prints("some 5")),
         ],
-        shapes: Some(("Some(6)", "Some(5)")),
+        shapes: Some(("Some(6)", "some 5")),
     },
     Carrier {
         ty: "int!str",
+        show: SHOW_RES,
         seed: "Err(\"s\")",
         alt: "!\"e\"",
         values: [
-            ("5", Out::Prints("Ok(5)")),
+            ("5", Out::Prints("ok 5")),
             ("None", Out::SlotRejects),
-            ("?5", Out::Prints("Ok(5)")),
-            ("!\"e\"", Out::Prints("Err('e')")),
-            ("Ok(5)", Out::Prints("Ok(5)")),
-            ("BR", Out::Prints("Ok(5)")),
+            ("?5", Out::Prints("ok 5")),
+            ("!\"e\"", Out::Prints("err E")),
+            ("Ok(5)", Out::Prints("ok 5")),
+            ("BR", Out::Prints("ok 5")),
         ],
-        shapes: Some(("Ok(6)", "Ok(5)")),
+        shapes: Some(("Ok(6)", "ok 5")),
     },
     Carrier {
         ty: "None!str",
+        show: SHOW_VOID,
         seed: "Ok()",
         alt: "!\"e\"",
         values: [
             ("5", Out::SlotRejects),
             ("None", Out::SlotRejects),
             ("?5", Out::Rejects("'?' value: expected")),
-            ("!\"e\"", Out::Prints("Err('e')")),
-            ("Ok()", Out::Prints("Ok(None)")),
+            ("!\"e\"", Out::Prints("err E")),
+            ("Ok()", Out::Prints("ok")),
             ("BR", BR_INCOMPATIBLE),
         ],
         shapes: None,
     },
     Carrier {
         ty: "int??",
+        show: SHOW_OPT2,
         seed: "None",
         alt: "None",
         values: [
             ("5", Out::SlotRejects),
-            ("None", Out::Prints("None")),
-            ("?5", Out::Prints("Some(Some(5))")),
+            ("None", Out::Prints("none")),
+            ("?5", Out::Prints("some some 5")),
             ("!\"e\"", Out::SlotRejects),
             ("Some(5)", Out::SlotRejects),
             ("BR", BR_INCOMPATIBLE),
@@ -414,7 +429,7 @@ fn fill(tmpl: &str, c: &Carrier, v: &str) -> String {
         .join("\n")
 }
 
-/// A whole program: the branch flags, the slot's declarations, and `main`.
+/// A whole program: the branch flags, the carrier's `show`, the slot's declarations, and `main`.
 fn program(slot: &Slot, c: &Carrier, v: &str, flags: (bool, bool)) -> String {
     let body = fill(slot.body, c, v)
         .lines()
@@ -423,8 +438,8 @@ fn program(slot: &Slot, c: &Carrier, v: &str, flags: (bool, bool)) -> String {
         .join("\n");
     let decls = fill(slot.decls, c, v);
     format!(
-        "c := {}\nd := {}\n{decls}\nfn main():\n{body}\nmain()\n",
-        flags.0, flags.1
+        "c := {}\nd := {}\n{}{decls}\nfn main():\n{body}\nmain()\n",
+        flags.0, flags.1, c.show
     )
 }
 
@@ -493,7 +508,7 @@ fn wait_recv_assign_cells(cells: &mut Vec<Cell>) {
     let slot = Slot {
         name: "wait_recv_assign",
         decls: "",
-        body: "ch := Channel[int](1)\nch.send(5)\nx: {C} = {SEED}\nwait:\n    x = ch.recv():\n        print(x)",
+        body: "ch := Channel[int](1)\nch.send(5)\nx: {C} = {SEED}\nwait:\n    x = ch.recv():\n        show(x)",
         reject: "cannot assign",
         tail: false,
     };
@@ -534,32 +549,36 @@ fn hashable_cells(cells: &mut Vec<Cell>) {
 
 fn extra_cells(cells: &mut Vec<Cell>) {
     let m = |name: &str, src: &str, e: Expect| main_only(name.to_string(), format!("{src}\n"), e);
+    // A cell read through `show`: the carrier's reader goes in front of the cell source.
+    let ms = |name: &str, show: &str, src: &str, e: Expect| {
+        main_only(name.to_string(), format!("{show}{src}\n"), e)
+    };
     let r = Expect::Rejects;
     cells.extend([
-        m("q_default_optional", "fn main():\n    y := ?5\n    print(y)\nmain()", prints("Some(5)")),
-        m("q_var_bound_unknown", "fn main():\n    y := ?5\n    ys := [y]\n    ys = []\n    print(y)\n    print(ys)\nmain()", prints("Some(5)\n[]")),
-        m("q_pinned_by_result", "fn take(r: int!str):\n    print(r)\nfn main():\n    z := ?5\n    take(z)\nmain()", prints("Ok(5)")),
-        m("bang_pinned_by_return", "fn f() -> int!:\n    e := !\"disk\"\n    return e\nprint(f())", prints("Err('disk')")),
+        ms("q_default_optional", SHOW_OPT, "fn main():\n    y := ?5\n    show(y)\nmain()", prints("some 5")),
+        ms("q_var_bound_unknown", SHOW_OPT, "fn main():\n    y := ?5\n    ys := [y]\n    ys = []\n    show(y)\n    print(ys)\nmain()", prints("some 5\n[]")),
+        ms("q_pinned_by_result", SHOW_RES, "fn take(r: int!str):\n    show(r)\nfn main():\n    z := ?5\n    take(z)\nmain()", prints("ok 5")),
+        m("bang_pinned_by_return", "fn f() -> int!:\n    e := !\"disk\"\n    return e\nmatch f():\n    ?v:\n        print(\"ok {v + 0}\")\n    !e:\n        print(\"err {e.message()}\")", prints("err disk")),
         m("bang_unpinned_fn", "fn main():\n    w := !\"disk\"\n    print(w)\nmain()", r("cannot infer the success type")),
         m("bang_unpinned_top", "w := !\"disk\"\nprint(w)", r("cannot infer the success type")),
         m("bang_not_error", "fn f() -> int!:\n    return !5\nprint(f())", r("int does not satisfy Error")),
-        m("bang_whole_operand", "fn wrap(s: str) -> str:\n    return s + \"!\"\nfn f() -> int!str:\n    return !wrap(\"x\")\nprint(f())", prints("Err('x!')")),
-        m("bang_in_list", "rs: List[int!str] = [1, !\"disk\", 3]\nprint(rs)", prints("[Ok(1), Err('disk'), Ok(3)]")),
-        m("none_bang_falls_off", "fn save(p: str) -> None!str:\n    if p == \"\":\n        return !\"empty\"\n    pass\nprint(save(\"a\"))", prints("Ok(None)")),
+        ms("bang_whole_operand", SHOW_RES, "fn wrap(s: str) -> str:\n    return s + \"!\"\nfn f() -> int!str:\n    return !wrap(\"x\")\nshow(f())", prints("err X!")),
+        ms("bang_in_list", SHOW_RES, "rs: List[int!str] = [1, !\"disk\", 3]\nfor r in rs:\n    show(r)", prints("ok 1\nerr DISK\nok 3")),
+        ms("none_bang_falls_off", SHOW_VOID, "fn save(p: str) -> None!str:\n    if p == \"\":\n        return !\"empty\"\n    pass\nshow(save(\"a\"))", prints("ok")),
         m("none_bang_is_not_a_value", "fn save() -> None!str:\n    return\nfn main():\n    x := save()?\nmain()", r("cannot be used as a value")),
         m("generic_slot_declines", "fn f[T](x: T) -> T?:\n    return x\nprint(f(1))", r("expected return type")),
         m("no_int_float", "fn f() -> float?:\n    return 1\nprint(f())", r("expected return type")),
-        m("operands_never_wrap", "x: int? = 1 + 2\nprint(x)", prints("Some(3)")),
+        ms("operands_never_wrap", SHOW_OPT, "x: int? = 1 + 2\nshow(x)", prints("some 3")),
         m("carrier_payload_is_seed", "x: Option[Option[int]] = Some(5)\nprint(x)", r("cannot assign")),
-        m("default_list", "fn f(xs: List[int?] = [5]):\n    print(xs)\nf()", prints("[Some(5)]")),
-        m("default_provider_param", "fn g() -> int:\n    return 5\nfn f(x: int? = g()):\n    print(x)\nf()", prints("Some(5)")),
-        m("default_provider_field", "fn g() -> int:\n    return 5\nstruct S:\n    n: int? = g()\nprint(S().n)", prints("Some(5)")),
-        m("default_q", "fn f(x: int? = ?5):\n    print(x)\nf()", prints("Some(5)")),
-        m("default_bang", "fn f(x: int!str = !\"e\"):\n    print(x)\nf()", prints("Err('e')")),
-        m("interp_arg", "fn t(x: int?) -> int?:\n    return x\nprint(\"{t(5)}\")", prints("Some(5)")),
-        m("pipe_arg", "fn t(x: int?) -> int?:\n    return x\nprint(5 |> t())", prints("Some(5)")),
-        m("coalesce_option", "o: int? = Some(5)\nx: int? = o ?? 0\nprint(x)", prints("Some(5)")),
-        m("coalesce_result", "o: int? = Some(5)\nx: int!str = o ?? 0\nprint(x)", prints("Ok(5)")),
+        ms("default_list", SHOW_OPT, "fn f(xs: List[int?] = [5]):\n    show(xs[0])\nf()", prints("some 5")),
+        ms("default_provider_param", SHOW_OPT, "fn g() -> int:\n    return 5\nfn f(x: int? = g()):\n    show(x)\nf()", prints("some 5")),
+        ms("default_provider_field", SHOW_OPT, "fn g() -> int:\n    return 5\nstruct S:\n    n: int? = g()\nshow(S().n)", prints("some 5")),
+        ms("default_q", SHOW_OPT, "fn f(x: int? = ?5):\n    show(x)\nf()", prints("some 5")),
+        ms("default_bang", SHOW_RES, "fn f(x: int!str = !\"e\"):\n    show(x)\nf()", prints("err E")),
+        m("interp_arg", "fn t(x: int?) -> str:\n    match x:\n        ?v:\n            return \"some {v + 0}\"\n        None:\n            return \"none\"\nprint(\"{t(5)}\")", prints("some 5")),
+        m("pipe_arg", "fn t(x: int?) -> str:\n    match x:\n        ?v:\n            return \"some {v + 0}\"\n        None:\n            return \"none\"\nprint(5 |> t())", prints("some 5")),
+        ms("coalesce_option", SHOW_OPT, "o: int? = Some(5)\nx: int? = o ?? 0\nshow(x)", prints("some 5")),
+        ms("coalesce_result", SHOW_RES, "o: int? = Some(5)\nx: int!str = o ?? 0\nshow(x)", prints("ok 5")),
         m("coalesce_none_arm", "fn f(o: int?) -> int?:\n    return o ?? None\nprint(f(None))", r("branches have incompatible types")),
         m("comprehension_barrier", "ys: List[int] = [y for xs in [[1, 2], [3]] for y in xs]\nprint(ys)", prints("[1, 2, 3]")),
         m("inferred_return_not_a_slot", "fn f(c: bool):\n    if c:\n        return Some(2)\n    return if c: 1 else: None\nprint(f(true))", r("branches have incompatible types")),
@@ -571,19 +590,22 @@ fn extra_cells(cells: &mut Vec<Cell>) {
         vec![
             (
                 "lib.chz",
-                "fn f(xs: List[int?] = [5]):\n    print(xs)\n".to_string(),
+                format!("{SHOW_OPT}fn f(xs: List[int?] = [5]):\n    show(xs[0])\n"),
             ),
             ("main.chz", "import lib\nlib.f()\n".to_string()),
         ],
-        prints("[Some(5)]"),
+        prints("some 5"),
     ));
     cells.push(cell(
         "default_from_lib".to_string(),
         vec![
-            ("lib.chz", "fn f(x: int? = 5):\n    print(x)\n".to_string()),
+            (
+                "lib.chz",
+                format!("{SHOW_OPT}fn f(x: int? = 5):\n    show(x)\n"),
+            ),
             ("main.chz", "import lib\nlib.f()\n".to_string()),
         ],
-        prints("Some(5)"),
+        prints("some 5"),
     ));
 }
 

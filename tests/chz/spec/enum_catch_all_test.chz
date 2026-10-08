@@ -12,9 +12,14 @@ fn f(e: E, n: int) -> str:
         E.A(_): "a"
         E.B: "b"
 
+fn shape(o: int?) -> str:
+    match o:
+        ?v: return "some {v + 0}"
+        None: return "none"
+
 fn whole(o: int?) -> str:
     return match o:
-        w: "w{w}"
+        w: shape(w)
 
 fn rest_of(e: E) -> E:
     return match e:
@@ -27,8 +32,8 @@ test fn a_guarded_bare_name_arm_runs_only_when_its_guard_holds():
     assert f(E.B, 0) == "b"
 
 test fn a_bare_name_binds_the_whole_option():
-    assert whole(Some(5)) == "w5"
-    assert whole(None) == "wNone"
+    assert whole(Some(5)) == "some 5"
+    assert whole(None) == "none"
 
 test fn a_bare_name_binds_the_whole_enum_value():
     match rest_of(E.A(3)):

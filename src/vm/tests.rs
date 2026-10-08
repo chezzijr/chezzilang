@@ -12632,7 +12632,7 @@ fn shared_variant_name_dispatches_per_enum() {
 /// fix the VM faulted with `'?' expects a `T?` or `T!E` value, found enum`.
 #[test]
 fn try_operator_works_on_native_option_under_variant_shadow() {
-    let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: List[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    print(\"first\", first([10, 20]))\nmain()\n";
+    let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: List[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    match first([10, 20]):\n        ?v:\n            print(\"first {v + 0}\")\n        None:\n            print(\"none\")\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(
         vm_out, "first 20\n",

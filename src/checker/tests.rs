@@ -1846,10 +1846,10 @@ fn success_coercion_never_decides_an_inference() {
 #[test]
 fn success_coercion_survives_a_speculative_return_inference_pass() {
     let out = crate::vm::run_capture(
-        "fn outer():\n    fn g() -> int?:\n        return h()\n    print(g())\n\nfn h(): 1\n\nouter()\n",
+        "fn outer():\n    fn g() -> int?:\n        return h()\n    match g():\n        ?v:\n            print(\"some {v + 0}\")\n        None:\n            print(\"none\")\n\nfn h(): 1\n\nouter()\n",
     )
     .expect("should run clean, not hit the return-coercion table conflict");
-    assert_eq!(out, "1\n");
+    assert_eq!(out, "some 1\n");
 }
 
 /// Lossy / wrong-direction conversions MUST stay type errors (the widen arm is one-way Float←Int only).
