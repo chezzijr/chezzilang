@@ -2031,7 +2031,7 @@ enum Json:
 > `Json` value (passed through unchanged). (There is no bare `None` *value* to pass — `None` is a type
 > spelling only, and `json.encode(None)` is `unknown name 'None'`; the JSON null you get back out is
 > `Json.Null`, produced by `None`.) It **faults** — recoverably, catchable under `recover:` —
-> on a `Result` (`json.encode: cannot encode a Result`), on any other enum
+> on a `Result` (`json.encode: cannot encode a `T!E` value`), on any other enum
 > (`json.encode: cannot encode enum <name>`), and on any other object
 > (`json.encode: cannot encode <type>`). It carries its own nesting-depth cap of 2 000, independent of
 > `stringify`'s: a struct is a reference value and may be cyclic, so the cap guards the walk itself

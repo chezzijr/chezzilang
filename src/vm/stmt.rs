@@ -368,7 +368,10 @@ impl Vm {
             }
         }
         Err(self.err(
-            format!("'?' expects Result or Option, found {}", self.type_name(v)),
+            format!(
+                "'?' expects a `T?` or `T!E` value, found {}",
+                self.type_name(v)
+            ),
             span,
         ))
     }
@@ -1467,32 +1470,21 @@ impl Vm {
                     })?,
                 };
                 let Some(rh) = res.as_obj() else {
-                    return Err(self.err(
-                        format!(
-                            "iterator next() must return Option, found {}",
-                            self.type_name(res)
-                        ),
-                        span,
-                    ));
+                    return Err(self.bad_next_value(res, span));
                 };
                 let Obj::Enum {
                     variant_id,
                     payload,
                 } = self.heap.get(rh)
                 else {
-                    return Err(self.err(
-                        format!(
-                            "iterator next() must return Option, found {}",
-                            self.type_name(res)
-                        ),
-                        span,
-                    ));
+                    return Err(self.bad_next_value(res, span));
                 };
                 match *variant_id {
                     crate::vm::op::VID_SOME => {
                         let item = *payload.first().ok_or_else(|| {
                             self.err(
-                                "iterator next() returned Some with no payload".to_string(),
+                                "iterator next() returned a present value with no payload"
+                                    .to_string(),
                                 span,
                             )
                         })?;
@@ -1503,13 +1495,7 @@ impl Vm {
                     }
                     crate::vm::op::VID_NONE_VARIANT => break,
                     _ => {
-                        return Err(self.err(
-                            format!(
-                                "iterator next() must return Option, found {}",
-                                self.type_name(res)
-                            ),
-                            span,
-                        ));
+                        return Err(self.bad_next_value(res, span));
                     }
                 }
             }
@@ -2118,6 +2104,17 @@ impl Vm {
 
     /// The text of the void value, in every display and in a fault's `type None`.
     pub(super) const NONE_TEXT: &str = "None";
+
+    /// The fault for an iterator whose `next()` gave something that is not a `T?` value.
+    fn bad_next_value(&self, res: Value, span: Span) -> RuntimeError {
+        self.err(
+            format!(
+                "iterator next() must return a `T?` value, found {}",
+                self.type_name(res)
+            ),
+            span,
+        )
+    }
 
     pub(super) fn type_name(&self, v: Value) -> &'static str {
         // A boxed float is Float-tagged → `view` yields `Obj(h)` → the `Obj::FloatBox => "float"` arm

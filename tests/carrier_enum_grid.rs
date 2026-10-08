@@ -205,13 +205,19 @@ fn carrier_enum_grid() {
         c,
         "C12 exhaustiveness",
         "v: Opt1[int] = Som(3)\nmatch v:\n    Som(n): print(n)\n",
-        Rejects("non-exhaustive match on Opt1: missing Non"),
+        RejectsAs(
+            "non-exhaustive match on Opt1: missing Non",
+            "non-exhaustive match on int?: missing None",
+        ),
     );
     twin(
         c,
         "C13 exhaustiveness, two parameters",
         "r: Res2[int, str] = Okk(1)\nmatch r:\n    Okk(n): print(n)\n",
-        Rejects("non-exhaustive match on Res2: missing Errr"),
+        RejectsAs(
+            "non-exhaustive match on Res2: missing Errr",
+            "non-exhaustive match on int!str: missing !_",
+        ),
     );
     twin(
         c,
@@ -262,13 +268,19 @@ fn carrier_enum_grid() {
         c,
         "C19 nested witness",
         "w: Opt1[Opt1[int]] = Som(Non)\nmatch w:\n    Som(Som(n)): print(n)\n    Non: print(0)\n",
-        Rejects("pattern `Som(Non)` is not covered"),
+        RejectsAs(
+            "pattern `Som(Non)` is not covered",
+            "pattern `?None` is not covered",
+        ),
     );
     twin(
         c,
         "C20 nested witness, two parameters",
         "r: Res2[Res2[int, str], str] = Okk(Errr(\"x\"))\nmatch r:\n    Okk(Okk(n)): print(n)\n    Errr(e): print(e)\n",
-        Rejects("pattern `Okk(Errr(_))` is not covered"),
+        RejectsAs(
+            "pattern `Okk(Errr(_))` is not covered",
+            "pattern `?(!_)` is not covered",
+        ),
     );
 
     // --- a type alias of the enum is a path head ----------------------------------------------

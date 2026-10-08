@@ -8,9 +8,34 @@ use crate::{lexer, parser};
 fn check_src(src: &str) -> Vec<CheckError> {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
     let module = parser::parse(tokens).expect("parse should succeed");
-    match check(&module) {
+    let errs = match check(&module) {
         Ok(()) => Vec::new(),
         Err(e) => e,
+    };
+    assert_no_removed_spelling(src, &errs);
+    errs
+}
+
+/// TICKET-228 (D6) — a diagnostic names a carrier by its type (`int?`, `int!str`) or its pattern
+/// (`?_`, `!_`), never by a long name the user cannot write. When no word of `src` is one of the
+/// five removed names, no `message` or `help` may hold one. No allow-list: fix the message.
+fn assert_no_removed_spelling(src: &str, diags: &[CheckError]) {
+    const REMOVED: [&str; 5] = ["Option", "Result", "Some", "Ok", "Err"];
+    fn words(text: &str) -> impl Iterator<Item = &str> {
+        text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+    }
+    if words(src).any(|w| REMOVED.contains(&w)) {
+        return;
+    }
+    for d in diags {
+        for text in [Some(d.message.as_str()), d.help.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(w) = words(text).find(|w| REMOVED.contains(w)) {
+                panic!("a diagnostic names the removed spelling `{w}`: {text:?}\nsource:\n{src}");
+            }
+        }
     }
 }
 
@@ -54,7 +79,10 @@ fn warn_src(src: &str) -> (Vec<CheckError>, Vec<CheckError>) {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
     let module = parser::parse(tokens).expect("parse should succeed");
     let (res, warns) = check_diags(&module);
-    (res.err().unwrap_or_default(), warns)
+    let errs = res.err().unwrap_or_default();
+    assert_no_removed_spelling(src, &errs);
+    assert_no_removed_spelling(src, &warns);
+    (errs, warns)
 }
 
 /// Assert the source type-checks CLEAN and emits a warning containing `needle`. The clean assertion
@@ -197,11 +225,11 @@ fn discarded_carrier_warns() {
     // Inside a function body — the position that is silent today.
     warns(
         &format!("{g}fn f():\n    g()\nf()\n"),
-        "the Result returned by 'g' is discarded",
+        "the `int!` value returned by 'g' is discarded",
     );
     warns(
         &format!("{o}fn f():\n    o()\nf()\n"),
-        "the Option returned by 'o' is discarded",
+        "the `int?` value returned by 'o' is discarded",
     );
     // A `spawn:` block and a `defer:` block each compile to their OWN child proto, so a drop in one
     // is swallowed even at MODULE TOP LEVEL (measured: both print the following statement and exit
@@ -209,39 +237,39 @@ fn discarded_carrier_warns() {
     // deliberately not set at a `spawn:` block boundary.
     warns(
         &format!("{g}parallel:\n    spawn:\n        g()\n"),
-        "the Result returned by 'g' is discarded",
+        "the `int!` value returned by 'g' is discarded",
     );
     warns(
         &format!("{g}defer:\n    g()\nprint(1)\n"),
-        "the Result returned by 'g' is discarded",
+        "the `int!` value returned by 'g' is discarded",
     );
     // …and the same two nested inside a function, their neighbours.
     warns(
         &format!("{g}fn f():\n    parallel:\n        spawn:\n            g()\nf()\n"),
-        "the Result returned",
+        "the `int!` value returned",
     );
     warns(
         &format!("{g}fn f():\n    defer:\n        g()\n    print(1)\nf()\n"),
-        "the Result returned",
+        "the `int!` value returned",
     );
     // Nested inside a function, both block kinds — the neighbours of the fn-body case above.
     warns(
         &format!("{g}fn f():\n    if true:\n        g()\nf()\n"),
-        "the Result returned",
+        "the `int!` value returned",
     );
     warns(
         &format!("{g}fn f():\n    for i in 0..1:\n        g()\nf()\n"),
-        "the Result returned",
+        "the `int!` value returned",
     );
     // A method call names the METHOD, not the receiver expression.
     warns(
         "fn f():\n    xs := [1, 2]\n    xs.pop()\nf()\n",
-        "the Option returned by 'pop' is discarded",
+        "the `int?` value returned by 'pop' is discarded",
     );
     // Not a call, so there is no callee to name — the message falls back to the position.
     warns(
         &format!("{o}fn f():\n    x := o()\n    x\nf()\n"),
-        "the Option value here is discarded",
+        "the `int?` value here is discarded",
     );
     // Every message carries both escapes, or it is not actionable — and for a plain `g()` callee
     // the hint spells the call back rather than eliding it.
@@ -274,7 +302,7 @@ fn discarded_carrier_warns() {
     // …and the subject still names the callee, which is what points at the culprit.
     warns(
         "fn takes(n: int, s: str) -> Result[int, Error]:\n    return Ok(n)\nfn f():\n    takes(1, \"a\")\nf()\n",
-        "the Result returned by 'takes' is discarded",
+        "the `int!` value returned by 'takes' is discarded",
     );
 }
 
@@ -380,7 +408,7 @@ fn a_carrier_that_is_not_discarded_does_not_warn() {
     // The order matters: a carrier in a NON-final position of the same block is a real drop.
     warns(
         &format!("{g}fn f():\n    r := recover:\n        g()\n        1\n    print(r)\nf()\n"),
-        "the Result returned by 'g' is discarded",
+        "the `int!` value returned by 'g' is discarded",
     );
     // 3. `?` / `??` yield the UNWRAPPED payload, so the statement's type is not a carrier.
     no_warn(&format!(
@@ -392,7 +420,7 @@ fn a_carrier_that_is_not_discarded_does_not_warn() {
     // `#[must_use]`). Pinned here, next to its siblings, because the shape reads like theirs.
     warns(
         "fn o() -> str?:\n    return Some(\"a\")\nfn f():\n    o()?.len()\nf()\n",
-        "the Option value here is discarded",
+        "the `int?` value here is discarded",
     );
     // 4. `defer` is its own statement arm and stays excluded on purpose — `defer f.Close()` is Go's
     //    canonical unchecked idiom, and the corpus has 27 of them.
@@ -1617,10 +1645,12 @@ fn check_desugared(src: &str) -> Vec<CheckError> {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
     let mut module = parser::parse(tokens).expect("parse should succeed");
     crate::desugar::run_standalone(&mut module).expect("desugar should succeed");
-    match check(&module) {
+    let errs = match check(&module) {
         Ok(()) => Vec::new(),
         Err(e) => e,
-    }
+    };
+    assert_no_removed_spelling(src, &errs);
+    errs
 }
 
 /// Assert the desugared source type-checks clean.
@@ -10064,7 +10094,7 @@ fn match_int_with_wildcard_in_enum_match_ok() {
 fn try_on_non_result_rejected() {
     rejects(
         "fn f() -> Result[int]:\n    x := 5?\n    return Ok(x)\n",
-        "'?' expects Result or Option",
+        "'?' expects a `T?` or `T!E` value",
     );
 }
 
@@ -10091,7 +10121,7 @@ fn try_in_named_nil_fn_rejected() {
                fn f():\n    x := g()?\n    print(x)\n";
     rejects(
         src,
-        "'?' used in a function that returns None, not Result or Option",
+        "'?' used in a function that returns None, not a `T?` or `T!E` value",
     );
 }
 
@@ -10102,7 +10132,7 @@ fn try_in_named_nil_main_rejected() {
                fn main():\n    x := g()?\n    print(x)\n";
     rejects(
         src,
-        "'?' used in a function that returns None, not Result or Option",
+        "'?' used in a function that returns None, not a `T?` or `T!E` value",
     );
 }
 
@@ -10114,7 +10144,7 @@ fn try_in_nested_nil_fn_rejected() {
                fn outer() -> Result[int]:\n    fn inner():\n        x := helper()?\n        print(x)\n    inner()\n    return Ok(0)\n";
     rejects(
         src,
-        "'?' used in a function that returns None, not Result or Option",
+        "'?' used in a function that returns None, not a `T?` or `T!E` value",
     );
 }
 
@@ -10144,7 +10174,7 @@ fn try_result_in_option_fn_rejected() {
                fn f() -> int?:\n    x := pr()?\n    return Some(x)\n\
                fn main():\n    match f():\n        Some(v): print(\"some {v}\")\n        None: print(\"none\")\n\
                main()\n";
-    entry_rejects(src, "returns Option, not Result");
+    entry_rejects(src, "returns a `T?` value, not a `T!E` value");
 }
 
 #[test]
@@ -10153,7 +10183,7 @@ fn try_option_in_result_fn_rejected() {
                fn f() -> int!:\n    x := find()?\n    return Ok(x)\n\
                fn main():\n    match f():\n        Ok(v): print(v)\n        Err(e): print(e.message())\n\
                main()\n";
-    entry_rejects(src, "returns Result, not Option");
+    entry_rejects(src, "returns a `T!E` value, not a `T?` value");
 }
 
 #[test]
@@ -10365,7 +10395,7 @@ fn foreign_enum_qualifier_in_match_arm_is_rejected() {
     // (the arm carries Light's distinct variant_id). Regression guard for that soundness hole.
     rejects(
         "enum Color:\n    Red\n    Blue\nenum Light:\n    Red\n    Green\nfn f(c: Color) -> str:\n    return match c:\n        Light.Red: \"red\"\n        Color.Blue: \"blue\"\n",
-        "variant 'Light.Red' cannot match a value of enum 'Color'",
+        "variant 'Light.Red' cannot match a value of type Color",
     );
 }
 
@@ -14519,7 +14549,7 @@ fn math_io_os_fn_hover_doc_preserved() {
     let os = native_module_sig_via_graph("os");
     assert_eq!(
         os.certain_fn("getcwd").unwrap().doc.as_deref(),
-        Some("the current working directory (Result)")
+        Some("the current working directory (may fail)")
     );
 }
 
@@ -15513,7 +15543,7 @@ fn recover_question_mark_allowed_in_non_result_fn() {
 fn recover_question_mark_on_option_rejected() {
     rejects(
         "fn find() -> int?:\n    return None\nfn main():\n    r := recover:\n        v := find()?\n        v\n    print(r)\nmain()\n",
-        "Option is not allowed inside a recover block",
+        "'?' on a `T?` value is not allowed inside a recover block",
     );
 }
 
@@ -15650,7 +15680,7 @@ fn closure_question_mark_on_nonresult_return_rejected() {
     // A closure declared `-> int` may not use `?` — it would leak an Err into a List[int].
     rejects(
         "fn parse(s: str) -> int!:\n    return Err(\"x\")\nfn main():\n    ys := [\"2\"].map(fn(s: str) -> int: parse(s)? * 2)\n    print(ys)\nmain()\n",
-        "not Result or Option",
+        "not a `T?` or `T!E` value",
     );
 }
 
@@ -15667,7 +15697,7 @@ fn closure_question_mark_inferred_return_rejected() {
     // No return annotation → `?` has no Result/Option context → rejected (annotate to allow).
     rejects(
         "fn parse(s: str) -> int!:\n    return Err(\"x\")\nfn main():\n    ys := [\"2\"].map(fn(s): parse(s)?)\n    print(ys)\nmain()\n",
-        "Result or Option",
+        "a `T?` or `T!E` value",
     );
 }
 
@@ -16724,7 +16754,7 @@ fn null_coalesce_on_a_non_carrier_one_error() {
     assert!(
         errs[0]
             .message
-            .contains("'??' applies to an Option or a Result, found int"),
+            .contains("'??' applies to a `T?` or `T!E` value, found int"),
         "got: {errs:?}"
     );
 }
@@ -16893,7 +16923,7 @@ fn opt_chain_on_non_carrier_one_error() {
     assert!(
         errs[0]
             .message
-            .contains("'?.' applies to an Option or a Result, found int"),
+            .contains("'?.' applies to a `T?` or `T!E` value, found int"),
         "got: {errs:?}"
     );
 }
@@ -16928,14 +16958,14 @@ fn opt_chain_on_result_inherits_infer_trys_gates() {
             &format!(
                 "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g():\n    n := {carrier}\n    print(n)\n"
             ),
-            "'?' used in a function that returns None, not Result or Option",
+            "'?' used in a function that returns None, not a `T?` or `T!E` value",
         );
         // (b) an Option-returning fn: kinds may not be mixed.
         rejects_desugared(
             &format!(
                 "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g() -> int?:\n    return Some({carrier})\n"
             ),
-            "'?' propagates a Result error, but the enclosing function returns Option, not Result",
+            "'?' propagates an error, but the enclosing function returns a `T?` value, not a `T!E` value",
         );
         // (c) inside `recover:` the `?` short-circuits to the boundary, whose error slot is the
         // `Error` existential — so the propagated error must satisfy `Error`.
@@ -28288,7 +28318,7 @@ fn defer_block_q_still_rejects_non_sum_operand() {
     );
     assert!(
         errs.iter()
-            .any(|e| e.message.contains("expects Result or Option")),
+            .any(|e| e.message.contains("expects a `T?` or `T!E` value")),
         "expected non-sum `?` rejection in defer block, got: {errs:?}"
     );
 }
@@ -28301,8 +28331,9 @@ fn fn_declared_in_defer_block_gets_own_q_context() {
         "fn g() -> int!:\n    return Err(\"x\")\nfn f():\n    defer:\n        fn inner():\n            v := g()?\n            print(v)\n        inner()\n    print(\"b\")\nf()\n",
     );
     assert!(
-        errs.iter()
-            .any(|e| e.message.contains("returns None, not Result or Option")),
+        errs.iter().any(|e| e
+            .message
+            .contains("returns None, not a `T?` or `T!E` value")),
         "a None fn declared inside a defer block must still reject `?`, got: {errs:?}"
     );
     entry_ok(
@@ -28443,7 +28474,7 @@ fn q_on_a_non_carrier_in_a_spawn_block_still_reports_the_type() {
     assert!(
         errs.iter().any(|e| e
             .message
-            .contains("'?' expects Result or Option, found int")),
+            .contains("'?' expects a `T?` or `T!E` value, found int")),
         "a non-carrier operand must keep its own diagnostic, not be masked by the spawn message: {errs:?}"
     );
     assert!(
@@ -32735,7 +32766,7 @@ fn adding_a_variant_makes_the_product_non_exhaustive_again() {
 fn deeply_nested_or_pattern_beyond_max_depth_still_rejected() {
     rejects(
         "fn f(x: Option[Option[Option[Option[Option[Option[Option[int]]]]]]]) -> int:\n    match x:\n        Some(Some(Some(Some(Some(Some(Some(0) | None) | None) | None) | None) | None) | None): return 1\n        None: return 0\n",
-        "non-exhaustive match on Option: missing Some",
+        "non-exhaustive match on int???????: missing ?_",
     );
 }
 
@@ -33259,7 +33290,7 @@ fn ticket_107_bare_variant_names_stay_rejected_on_enum_scrutinees() {
     );
     rejects(
         "fn f(o: int?) -> int:\n    match o:\n        Ok: return 1\n        _: return 2\n",
-        "'Ok' is not a variant of Option",
+        "'Ok' is not a variant of int?",
     );
     rejects(
         "enum E:\n    A\n    B\n\nfn f(e: E) -> int:\n    match e:\n        A: return 1\n        _: return 2\n",
@@ -38422,5 +38453,97 @@ fn imported_constant_in_pattern_rejected() {
         errs.iter()
             .any(|e| e.message.contains("`LIMIT` is a constant")),
         "got: {errs:?}"
+    );
+}
+
+/// TICKET-228 — an exhaustiveness witness prints the pattern the user would write.
+#[test]
+fn witness_prints_pattern_syntax() {
+    rejects_help(
+        "fn o() -> int?:\n    return 1\nfn main():\n    match o():\n        ?v:\n            print(v)\n",
+        "non-exhaustive match on int?: missing None",
+        "pattern `None` is not covered",
+    );
+    rejects_help(
+        "fn r() -> int!str:\n    return 1\nfn main():\n    match r():\n        ?v:\n            print(v)\n",
+        "non-exhaustive match on int!str: missing !_",
+        "pattern `!_` is not covered",
+    );
+    rejects_help(
+        "fn r() -> int!str:\n    return 1\nfn main():\n    match r():\n        !e:\n            print(e)\n",
+        "non-exhaustive match on int!str: missing ?_",
+        "pattern `?_` is not covered",
+    );
+    rejects_help(
+        "fn oo() -> int??:\n    return None\nfn main():\n    match oo():\n        ?(?v):\n            print(v)\n        None:\n            print(0)\n",
+        "non-exhaustive match",
+        "pattern `?None` is not covered",
+    );
+    rejects_help(
+        "fn oo() -> int??:\n    return None\nfn main():\n    match oo():\n        ?None:\n            print(1)\n        None:\n            print(0)\n",
+        "non-exhaustive match",
+        "pattern `?(?_)` is not covered",
+    );
+}
+
+/// TICKET-228 — the three `?`-outside-a-carrier texts name the types by their spelling.
+#[test]
+fn try_messages_name_no_removed_spelling() {
+    let cells = [
+        (
+            "fn g() -> int?:\n    return 1\nstruct H:\n    n: int = g()?\nfn main():\n    print(H().n)\n",
+            "use `??` or produce a `T?` value",
+        ),
+        (
+            "fn g() -> int?:\n    return 1\nfn main():\n    f := fn(n: int): g()? + n\n    print(f(1))\n",
+            "declare it to return a `T?` or `T!E` value (e.g. `-> int?`)",
+        ),
+        (
+            "fn g() -> int?:\n    return 1\nfn f() -> int!:\n    x := g()?\n    return x\n",
+            "'?' propagates a None, but the enclosing function returns a `T!E` value, not a `T?` value",
+        ),
+    ];
+    for (i, (src, want)) in cells.into_iter().enumerate() {
+        // Both funnels run `assert_no_removed_spelling` over every error. A default expression
+        // is judged in its desugared provider.
+        let errs = if i == 0 {
+            check_desugared(src)
+        } else {
+            check_src(src)
+        };
+        assert!(
+            errs.iter().any(|e| e.message.contains(want)),
+            "expected {want:?}, got: {errs:?}"
+        );
+    }
+}
+
+/// TICKET-228 — a warning or an error about a carrier prints its type, never an enum key.
+#[test]
+fn carrier_messages_name_no_removed_spelling() {
+    let (errs, warns) = warn_src("xs: List[int] = [1]\nxs.pop()\n");
+    assert!(errs.is_empty(), "{errs:?}");
+    assert!(
+        warns.iter().any(|w| w
+            .message
+            .contains("the `int?` value returned by 'pop' is discarded")),
+        "{warns:?}"
+    );
+    let (errs, _) = warn_src(
+        "fn f(x: int?):\n    match x:\n        Foo(v):\n            print(v)\n        _:\n            print(0)\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("'Foo' is not a variant of int?")),
+        "{errs:?}"
+    );
+    let (errs, _) = warn_src(
+        "enum Color:\n    Red\n    Green\nfn f(x: int?):\n    match x:\n        Color.Red:\n            print(1)\n        _:\n            print(0)\n",
+    );
+    assert!(
+        errs.iter().any(|e| e
+            .message
+            .contains("variant 'Color.Red' cannot match a value of type int?")),
+        "{errs:?}"
     );
 }

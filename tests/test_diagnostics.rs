@@ -84,7 +84,7 @@ fn test_warning_names_its_file() {
     );
     let (_stdout, stderr) = run_test(&[entry.to_str().unwrap()]);
     assert!(
-        stderr.contains("w_test.chz:5:5): the Result returned by 'g' is discarded"),
+        stderr.contains("w_test.chz:5:5): the `int!str` value returned by 'g' is discarded"),
         "stderr: {stderr}"
     );
     assert!(

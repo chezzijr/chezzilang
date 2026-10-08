@@ -15,7 +15,9 @@ pub(super) enum Dom {
     /// `Option`/`Result`, `bare_display(label)` for a user enum) — used only when rendering a
     /// witness. Each member is `(variant name, payload types)`, sorted by name for a deterministic
     /// witness.
-    Sum(String, Vec<(String, Vec<Ty>)>),
+    /// The trailing `bool` marks the two carriers (`T?`, `T!E`), whose witnesses print in pattern
+    /// syntax.
+    Sum(String, Vec<(String, Vec<Ty>)>, bool),
     /// A tuple or struct: exactly one constructor. Leading `String` is the IDENTITY KEY — `""` for
     /// a tuple, else the struct's `label` (what `resolve_struct_ctor` compares against).
     Prod(String, Vec<Ty>),
@@ -44,6 +46,8 @@ enum Pat {
 enum Wit {
     Wild,
     Ctor(String, Vec<Wit>),
+    /// The present / success / error side of a carrier, printed as the pattern `?w` / `!w`.
+    Carrier(crate::ast::CarrierTag, Box<Wit>),
 }
 
 /// The accumulated one-column pattern matrix for one `match`.
@@ -101,7 +105,27 @@ fn render_wit(w: &Wit) -> String {
                 args.iter().map(render_wit).collect::<Vec<_>>().join(", ")
             )
         }
+        // `?w` / `!w`, the operand in parentheses when it is itself a carrier witness (`?(?_)`).
+        Wit::Carrier(tag, w) => {
+            let head = &tag.pattern_text()[..1];
+            match **w {
+                Wit::Carrier(..) => format!("{head}({})", render_wit(w)),
+                _ => format!("{head}{}", render_wit(w)),
+            }
+        }
     }
+}
+
+/// The witness for constructor `name` of `dom` over `args`: a carrier's one-payload variant is the
+/// pattern `?w` / `!w`, everything else its displayed constructor.
+fn wit_ctor(dom: &Dom, name: &str, mut args: Vec<Wit>) -> Wit {
+    if let Dom::Sum(_, _, true) = dom
+        && args.len() == 1
+        && let Some(tag) = Checker::carrier_tag_of_variant(name)
+    {
+        return Wit::Carrier(tag, Box::new(args.remove(0)));
+    }
+    Wit::Ctor(ctor_display(dom, name), args)
 }
 
 impl Checker {
@@ -144,7 +168,7 @@ impl Checker {
         };
         let mut members: Vec<(String, Vec<Ty>)> = variants.into_iter().collect();
         members.sort_by(|a, b| a.0.cmp(&b.0));
-        Dom::Sum(prefix, members)
+        Dom::Sum(prefix, members, matches!(key, "Option" | "Result"))
     }
 
     /// The variant a bare pattern name spells: the variant an `import V from Enum` binds it to,
@@ -164,7 +188,7 @@ impl Checker {
         match pattern {
             Pattern::Wildcard => vec![Pat::Wild],
             Pattern::Ident(name, _, _) => {
-                if let Dom::Sum(_, members) = dom
+                if let Dom::Sum(_, members, _) = dom
                     && let Some(iv) = self.imported_variants.get(name)
                     && members
                         .iter()
@@ -189,7 +213,7 @@ impl Checker {
             // The same constructor as the long form: the variant `carrier_variant_of_key` names.
             Pattern::Carrier { tag, inner, .. } => {
                 let member = match dom {
-                    Dom::Sum(_, members) => ["Option", "Result"]
+                    Dom::Sum(_, members, _) => ["Option", "Result"]
                         .iter()
                         .filter_map(|key| Self::carrier_variant_of_key(*tag, key))
                         .find_map(|v| members.iter().find(|(n, tys)| n == v && tys.len() == 1)),
@@ -226,7 +250,7 @@ impl Checker {
                         vec![Pat::Never]
                     }
                 }
-                Dom::Sum(_, members) => match members.iter().find(|(n, _)| {
+                Dom::Sum(_, members, _) => match members.iter().find(|(n, _)| {
                     n == self.bare_variant_name(enum_name.is_none() && module_name.is_none(), name)
                 }) {
                     Some((vname, tys)) if tys.len() == bindings.len() => {
@@ -328,7 +352,7 @@ impl Checker {
         }
         let (dom0, rest_doms) = doms.split_first()?;
         let ctors: Vec<(String, Vec<Ty>)> = match dom0 {
-            Dom::Sum(_, members) => members.clone(),
+            Dom::Sum(_, members, _) => members.clone(),
             Dom::Prod(label, tys) => vec![(label.clone(), tys.clone())],
             Dom::Bool => vec![("true".to_string(), vec![]), ("false".to_string(), vec![])],
             Dom::Open => vec![],
@@ -348,7 +372,7 @@ impl Checker {
                 let specialized = specialize(rows, name, tys.len());
                 if let Some(mut w) = self.exh_witness_rec(&specialized, &sub_doms, depth + 1) {
                     let args: Vec<Wit> = w.drain(..tys.len()).collect();
-                    let mut out = vec![Wit::Ctor(ctor_display(dom0, name), args)];
+                    let mut out = vec![wit_ctor(dom0, name, args)];
                     out.extend(w);
                     return Some(out);
                 }
@@ -359,9 +383,7 @@ impl Checker {
             let w = self.exh_witness_rec(&defaulted, rest_doms, depth + 1)?;
             let missing = ctors.iter().find(|(n, _)| !used.contains(n.as_str()));
             let head = match missing {
-                Some((name, tys)) => {
-                    Wit::Ctor(ctor_display(dom0, name), vec![Wit::Wild; tys.len()])
-                }
+                Some((name, tys)) => wit_ctor(dom0, name, vec![Wit::Wild; tys.len()]),
                 None => Wit::Wild,
             };
             let mut out = vec![head];
@@ -386,7 +408,7 @@ impl Checker {
 /// The display prefix/label of a domain, for `display_of`.
 fn dom_label(dom: &Dom) -> &str {
     match dom {
-        Dom::Sum(prefix, _) => prefix,
+        Dom::Sum(prefix, _, _) => prefix,
         Dom::Prod(label, _) => label,
         Dom::Bool | Dom::Open => "",
     }

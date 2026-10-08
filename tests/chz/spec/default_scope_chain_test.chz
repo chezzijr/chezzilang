@@ -195,7 +195,7 @@ test fn a_variadic_call_default_fills_a_pre_slot_and_a_keyword_only_tail():
 # `?` early-returns within the provider, handing the parameter the `Err`. That accepted half is the
 # widening the narrowing came with, and it is pinned here because a widening is structurally
 # untested by the suite that passed before it. Measured on `b1307258`, and on `e2d9bd4e` before the
-# diagnostic was tailored: `'?' used in a function that returns int, not Result or Option`, 1 error.
+# diagnostic was tailored: `'?' used in a function that returns int, not a `T?` or `T!E` value`, 1 error.
 # Here: `4` and `-1`.
 
 fn geto2() -> Option[int]:

@@ -120,7 +120,7 @@ pub const KNOWN_TARGETS: &[KnownTarget] = &[
     KnownTarget {
         file_name: "net_close_test.chz",
         row: "W15-3",
-        reason: "a write parked on a closed Socket can return Ok instead of an error, at CHEZZI_THREADS=1",
+        reason: "a write parked on a closed Socket can report success instead of an error, at CHEZZI_THREADS=1",
     },
     KnownTarget {
         file_name: "generator_channel_test.chz",

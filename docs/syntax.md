@@ -1195,7 +1195,7 @@ consequences are worth writing down, because each is a rule you can hit:
 
 1. **`?` cannot propagate *out of* a default.** `fn f(x: int = getr()?.len()) -> int` is a compile
    error: *"a default expression cannot propagate with `?` — defaults are evaluated in their defining
-   module, which has no caller to propagate to; use `??` or return an Option"*. An error escaping into
+   module, which has no caller to propagate to; use `??` or produce a `T?` value"*. An error escaping into
    the *caller* from an expression owned by the *definer* is exactly the coupling this design removes.
    It also **widens**: a `Result`-typed parameter whose default propagates *inside* its own scope now
    works, where it used to be rejected — `fn f(x: int!str = Ok(getr()?.len()))` compiles, and returns
@@ -3585,14 +3585,14 @@ error type `E` — Chezzi is GC'd and runs no destructor on the dropped value. T
 diagnostic is on a non-carrier operand:
 
 ```
-'??' applies to an Option or a Result, found int
+'??' applies to a `T?` or `T!E` value, found int
 ```
 
 `f()?.len() ?? 0` on a `Result` is still an error on the **`??`**: `f()?.len()` is already an `int`,
 not a carrier, regardless of the widening.
 
 Both operators require the two chars **adjacent** (`x?.f`, `a ?? b`); on a **non-carrier** operand
-`?.` is one error, `'?.' applies to an Option or a Result, found int`.
+`?.` is one error, `'?.' applies to a `T?` or `T!E` value, found int`.
 
 **Unhandled errors only exit the program at a `?` or a manifest entrypoint's return.** A top-level `?`
 that hits an `Err`/`None` terminates the program with `unhandled error: <detail>` and a non-zero exit
@@ -3608,14 +3608,14 @@ trace, and that is exactly where `chezzi check` **warns**, following Rust (which
 
 ```chezzi
 fn g() -> Result[int, Error]: return !"E"
-g()                    # warning … the Result returned by 'g' is discarded, and rc stays 0
+g()                    # warning … the `int!` value returned by 'g' is discarded, and rc stays 0
 fn f():
-    g()                # warning … the Result returned by 'g' is discarded, and rc stays 0
+    g()                # warning … the `int!` value returned by 'g' is discarded, and rc stays 0
 f()
 ```
 
 ```
-warning (line 4, col 5): the Result returned by 'g' is discarded — bind it (`r := g()`), or discard it explicitly (`_ := g()`)
+warning (line 4, col 5): the `int!` value returned by 'g' is discarded — bind it (`r := g()`), or discard it explicitly (`_ := g()`)
 ```
 
 A warning is **non-fatal**: the program still type-checks and the exit code is unchanged. The escapes

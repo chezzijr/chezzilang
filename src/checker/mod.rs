@@ -2004,10 +2004,10 @@ const MODULE_FN_DOCS: &[(&str, &[(&str, &str)])] = &[
                 "input",
                 "input(prompt): print the prompt (no newline), flush, read one line (None at EOF)",
             ),
-            ("read_file", "read a whole file as text (Result)"),
+            ("read_file", "read a whole file as text (may fail)"),
             (
                 "write_file",
-                "write/overwrite a file with the given text (Result)",
+                "write/overwrite a file with the given text (may fail)",
             ),
         ],
     ),
@@ -2019,7 +2019,7 @@ const MODULE_FN_DOCS: &[(&str, &[(&str, &str)])] = &[
                 "program arguments (positionals after the script path)",
             ),
             ("env", "look up an environment variable (None if unset)"),
-            ("getcwd", "the current working directory (Result)"),
+            ("getcwd", "the current working directory (may fail)"),
             (
                 "exit",
                 "halt the program with an exit code (does NOT run defers)",
@@ -4154,11 +4154,11 @@ fn builtin_type_doc(name: &str) -> Option<String> {
             None,
         ),
         "Result" => (
-            "success-or-error — T!E / T! (long form Result[T, E]); Ok(v) / Err(e), unwrap with ? or match",
+            "success-or-error — T!E / T!; build with a plain value or !e, handle with ?, ??, else or match",
             None,
         ),
         "Option" => (
-            "a value or nothing — T? (long form Option[T]); Some(v) / None, unwrap with ? or match",
+            "a value or nothing — T?; a plain value or None, handle with ?, ??, else or match",
             None,
         ),
         "Iterator" => (
@@ -4689,7 +4689,7 @@ mod graph_tests {
         let errs = errors(&entry);
         assert!(
             errs.iter()
-                .any(|e| e.contains("cannot match a value of enum 'Color'")),
+                .any(|e| e.contains("cannot match a value of type Color")),
             "expected bare 'Color' in foreign-qualifier match error, got: {errs:?}"
         );
         assert!(
@@ -4806,7 +4806,7 @@ mod graph_tests {
         let errs = errors(&entry);
         assert!(
             errs.iter()
-                .any(|e| e.contains("cannot match a value of enum 'Color'")),
+                .any(|e| e.contains("cannot match a value of type Color")),
             "expected bare cross-enum error, got: {errs:?}"
         );
         assert!(

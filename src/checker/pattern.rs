@@ -64,6 +64,18 @@ impl Checker {
         }
     }
 
+    /// The carrier pattern head that means the variant `variant`, read back from
+    /// `carrier_variant_of_key`; `None` for `None` and for a user variant name.
+    pub(super) fn carrier_tag_of_variant(variant: &str) -> Option<CarrierTag> {
+        [CarrierTag::Present, CarrierTag::Error]
+            .into_iter()
+            .find(|tag| {
+                ["Option", "Result"]
+                    .iter()
+                    .any(|key| Self::carrier_variant_of_key(*tag, key) == Some(variant))
+            })
+    }
+
     /// The `(enum key, variant)` a `?` / `!` head means over a value of type `ty`, or why it
     /// cannot match one.
     pub(super) fn carrier_variant(
@@ -404,7 +416,7 @@ impl Checker {
                     module_name,
                     enum_name,
                     name,
-                    Self::scrutinee_enum(ty),
+                    Self::scrutinee_enum(ty).map(|k| (k, ty)),
                     span,
                 );
                 match self.variants_of(ty) {
@@ -744,7 +756,7 @@ impl Checker {
                             module_name,
                             enum_name,
                             name,
-                            Some(label.as_str()),
+                            Some((label.as_str(), scrut)),
                             span,
                         );
                         let vname = self.pattern_variant_name(
@@ -758,13 +770,7 @@ impl Checker {
                             self.record_variant(*id, &label.clone(), name, span);
                         }
                         if payload.is_none() && !qualifier_reported {
-                            self.error(
-                                span,
-                                format!(
-                                    "'{name}' is not a variant of {}",
-                                    crate::compiler::bare_display(label.as_str())
-                                ),
-                            );
+                            self.error(span, format!("'{name}' is not a variant of {scrut}"));
                         }
                         // Bind the payload FIRST, accumulating whether every sub-pattern is
                         // irrefutable (a wildcard or plain binding). A literal/range/nested-variant
@@ -1146,20 +1152,32 @@ impl Checker {
         match kind {
             MatchKind::Skip => {}
             MatchKind::Variants {
-                label, variants, ..
+                label,
+                variants,
+                scrut,
             } => {
+                // A carrier prints as its type and its missing variants as patterns (`!_`); a
+                // user enum keeps its name and its variant names.
+                let carrier = matches!(scrut, Ty::Option(_) | Ty::Result(..));
                 let mut missing: Vec<String> = variants
                     .keys()
                     .filter(|v| !covered.contains(*v))
-                    .cloned()
+                    .map(|v| match Self::carrier_tag_of_variant(v) {
+                        Some(tag) if carrier => tag.pattern_text().to_string(),
+                        _ => v.clone(),
+                    })
                     .collect();
                 if !missing.is_empty() {
                     missing.sort();
+                    let shown = if carrier {
+                        scrut.to_string()
+                    } else {
+                        crate::compiler::bare_display(label.as_str())
+                    };
                     self.error_help(
                         span,
                         format!(
-                            "non-exhaustive match on {}: missing {}",
-                            crate::compiler::bare_display(label.as_str()),
+                            "non-exhaustive match on {shown}: missing {}",
                             missing.join(", ")
                         ),
                         help,
@@ -4427,11 +4445,11 @@ impl Checker {
         module_name: &Option<String>,
         enum_name: &Option<String>,
         name: &str,
-        scrut_enum: Option<&str>,
+        scrut: Option<(&str, &Ty)>,
         span: Span,
     ) -> bool {
         let mark = self.errors.len();
-        self.check_pattern_qualifier_inner(module_name, enum_name, name, scrut_enum, span);
+        self.check_pattern_qualifier_inner(module_name, enum_name, name, scrut, span);
         self.errors.len() > mark
     }
 
@@ -4446,7 +4464,7 @@ impl Checker {
         module_name: &Option<String>,
         enum_name: &Option<String>,
         name: &str,
-        scrut_enum: Option<&str>,
+        scrut: Option<(&str, &Ty)>,
         span: Span,
     ) {
         // A leading module binder (`module.Enum.Variant`) is validated here then dropped: the module
@@ -4509,7 +4527,7 @@ impl Checker {
                         Some((k, _)) => k,
                         None => match self.bare_types.get(en) {
                             Some(k) => k.clone(),
-                            None => match scrut_enum {
+                            None => match scrut.map(|(k, _)| k) {
                                 Some(s)
                                     if crate::compiler::bare_display(s) == *en
                                         && (self.enum_names.contains(en)
@@ -4537,15 +4555,12 @@ impl Checker {
                 // The qualifier must name the scrutinee's own enum. (Skipped when the scrutinee enum
                 // is unknown — an int/str/bool or un-inferable scrutinee, handled by the caller.) The
                 // scrutinee carries the runtime key, so compare against the resolved `ekey`.
-                if let Some(s) = scrut_enum
+                if let Some((s, ty)) = scrut
                     && ekey != s
                 {
                     self.error(
                         span,
-                        format!(
-                            "variant '{en}.{name}' cannot match a value of enum '{}'",
-                            crate::compiler::bare_display(s)
-                        ),
+                        format!("variant '{en}.{name}' cannot match a value of type {ty}"),
                     );
                 }
             }
@@ -5120,7 +5135,7 @@ impl Checker {
                 self.record_carrier(key, CarrierMode::Unknown, span, "?.");
                 self.error(
                     span,
-                    format!("'?.' applies to an Option or a Result, found {other}"),
+                    format!("'?.' applies to a `T?` or `T!E` value, found {other}"),
                 );
                 Ty::Unknown
             }
@@ -5213,7 +5228,7 @@ impl Checker {
                 self.record_carrier(key, CarrierMode::Unknown, op_span, "??");
                 self.error(
                     op_span,
-                    format!("'??' applies to an Option or a Result, found {other}"),
+                    format!("'??' applies to a `T?` or `T!E` value, found {other}"),
                 );
                 Ty::Unknown
             }
@@ -5229,14 +5244,14 @@ impl Checker {
     fn try_outside_carrier_msg(&self, ret: &Ty) -> String {
         if self.in_default_provider {
             "a default expression cannot propagate with `?` — defaults are evaluated in their \
-             defining module, which has no caller to propagate to; use `??` or return an Option"
+             defining module, which has no caller to propagate to; use `??` or produce a `T?` value"
                 .to_string()
         } else if matches!(ret, Ty::Unknown) {
             "'?' used in a function whose return type is not declared; declare it to return \
-             Result or Option (e.g. `-> int?`)"
+             a `T?` or `T!E` value (e.g. `-> int?`)"
                 .to_string()
         } else {
-            format!("'?' used in a function that returns {ret}, not Result or Option")
+            format!("'?' used in a function that returns {ret}, not a `T?` or `T!E` value")
         }
     }
 
@@ -5269,11 +5284,14 @@ impl Checker {
                 }
                 Ty::Unknown => Ty::Unknown,
                 Ty::Option(_) => {
-                    self.error(span, "'?' on an Option is not allowed inside a recover block (its result is Result-typed); use match instead".to_string());
+                    self.error(span, "'?' on a `T?` value is not allowed inside a recover block (its result is a `T!E` value); use match instead".to_string());
                     Ty::Unknown
                 }
                 other => {
-                    self.error(span, format!("'?' expects Result or Option, found {other}"));
+                    self.error(
+                        span,
+                        format!("'?' expects a `T?` or `T!E` value, found {other}"),
+                    );
                     Ty::Unknown
                 }
             };
@@ -5289,7 +5307,10 @@ impl Checker {
                 Ty::Option(inner) => *inner,
                 Ty::Unknown => Ty::Unknown,
                 other => {
-                    self.error(span, format!("'?' expects Result or Option, found {other}"));
+                    self.error(
+                        span,
+                        format!("'?' expects a `T?` or `T!E` value, found {other}"),
+                    );
                     Ty::Unknown
                 }
             };
@@ -5315,7 +5336,10 @@ impl Checker {
                 }
                 Ty::Unknown => Ty::Unknown,
                 other => {
-                    self.error(span, format!("'?' expects Result or Option, found {other}"));
+                    self.error(
+                        span,
+                        format!("'?' expects a `T?` or `T!E` value, found {other}"),
+                    );
                     Ty::Unknown
                 }
             };
@@ -5349,7 +5373,7 @@ impl Checker {
                     Ty::Option(_) => {
                         self.error(
                             span,
-                            "'?' propagates a Result error, but the enclosing function returns Option, not Result".to_string(),
+                            "'?' propagates an error, but the enclosing function returns a `T?` value, not a `T!E` value".to_string(),
                         );
                     }
                     other => {
@@ -5366,7 +5390,7 @@ impl Checker {
                     Ty::Result(..) => {
                         self.error(
                             span,
-                            "'?' propagates a None, but the enclosing function returns Result, not Option".to_string(),
+                            "'?' propagates a None, but the enclosing function returns a `T!E` value, not a `T?` value".to_string(),
                         );
                     }
                     other => {
@@ -5377,7 +5401,10 @@ impl Checker {
             }
             Ty::Unknown => Ty::Unknown,
             other => {
-                self.error(span, format!("'?' expects Result or Option, found {other}"));
+                self.error(
+                    span,
+                    format!("'?' expects a `T?` or `T!E` value, found {other}"),
+                );
                 Ty::Unknown
             }
         }

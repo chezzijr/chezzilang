@@ -11120,7 +11120,7 @@ fn f() -> int:
     // Reaching `?` on an int is a runtime error.
     assert!(
         run_err(&format!("{src}\nfn main():\n    print(f())\nmain()"))
-            .contains("'?' expects Result or Option, found int")
+            .contains("'?' expects a `T?` or `T!E` value, found int")
     );
 }
 
@@ -12629,7 +12629,7 @@ fn shared_variant_name_dispatches_per_enum() {
 /// M19 lever #2 regression guard — `?` on a GENUINE native Option must still work when a user enum
 /// shadows the `Some` name. `pop()` stamps the fixed VID_SOME directly, so `?`'s `variant_id ==
 /// VID_SOME` gate hits even though `variants["Some"]` now resolves to the user variant. Before the
-/// fix the VM faulted with `'?' expects Result or Option, found enum`.
+/// fix the VM faulted with `'?' expects a `T?` or `T!E` value, found enum`.
 #[test]
 fn try_operator_works_on_native_option_under_variant_shadow() {
     let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: List[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    print(\"first\", first([10, 20]))\nmain()\n";

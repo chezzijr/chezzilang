@@ -3689,12 +3689,10 @@ impl Checker {
                     );
                     return;
                 }
-                let carrier = match t {
-                    Ty::Result(..) => "Result",
-                    Ty::Option(_) => "Option",
-                    // `Unknown` lands here too: an already-reported expression must not cascade.
-                    _ => return,
-                };
+                // `Unknown` lands here too: an already-reported expression must not cascade.
+                if !matches!(t, Ty::Result(..) | Ty::Option(_)) {
+                    return;
+                }
                 // Name the callee when there is one, so the warning points at the culprit rather
                 // than at a line. The hint has to be code the user can actually TYPE, so it spells
                 // the call back only when the call is genuinely reproducible from the callee name
@@ -3706,7 +3704,7 @@ impl Checker {
                 let (subject, fix) = match &e.kind {
                     ExprKind::Call { callee, args, .. } => match &callee.kind {
                         ExprKind::Ident(name) => (
-                            format!("the {carrier} returned by '{name}'"),
+                            format!("the `{t}` value returned by '{name}'"),
                             if args.is_empty() {
                                 format!("{name}()")
                             } else {
@@ -3714,11 +3712,11 @@ impl Checker {
                             },
                         ),
                         ExprKind::Field { name, .. } => {
-                            (format!("the {carrier} returned by '{name}'"), "…".into())
+                            (format!("the `{t}` value returned by '{name}'"), "…".into())
                         }
-                        _ => (format!("the {carrier} value here"), "…".to_string()),
+                        _ => (format!("the `{t}` value here"), "…".to_string()),
                     },
-                    _ => (format!("the {carrier} value here"), "…".to_string()),
+                    _ => (format!("the `{t}` value here"), "…".to_string()),
                 };
                 self.warn(
                     e.span,

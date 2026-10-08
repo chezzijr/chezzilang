@@ -763,7 +763,7 @@ impl Vm {
         // VM, which collects, and the parsed tree must survive it. `base - 1` is `res`'s slot.
         let res = self.stack[self.stack.len() - 1];
         let base = self.stack.len();
-        let bad = "decode: parse did not return a Result".to_string();
+        let bad = "decode: parse did not return a `T!E` value".to_string();
         let Some((rty, variant, payload)) = self.enum_parts(res) else {
             self.stack.truncate(base - 1);
             return Err(self.err(bad, span));
@@ -1185,7 +1185,9 @@ impl Vm {
                     match variant_id {
                         // `VID_SOME` is peeled at the top of this fn, before this match.
                         VID_NONE_VARIANT => self.json_variant("Null", Vec::new()),
-                        VID_OK | VID_ERR => Err("json.encode: cannot encode a Result".to_string()),
+                        VID_OK | VID_ERR => {
+                            Err("json.encode: cannot encode a `T!E` value".to_string())
+                        }
                         _ => Err(format!("json.encode: cannot encode enum {ty}")),
                     }
                 }
