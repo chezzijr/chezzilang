@@ -2499,16 +2499,20 @@ impl Vm {
         }
         let _turn = OwnTurn;
         let mut tick: u64 = 0;
+        let mut kept: Option<Fiber> = None;
         loop {
             // TICKET-199 — `tick` counts FRESH slices (Go's `schedtick`): an inherited `runnext`
             // pick runs on the current slice and leaves it unchanged.
             let next = tick.wrapping_add(1);
-            let (mut fiber, slice) = match sched.take_runnable(wid, next, owner_scope) {
-                Take::Run(f, slice) => (f, slice),
-                Take::Stop => {
-                    debug_assert!(!width::holds(), "TICKET-141: exit holding a permit");
-                    return;
-                }
+            let (mut fiber, slice) = match kept.take() {
+                Some(f) => (f, Slice::Fresh),
+                None => match sched.take_runnable(wid, next, owner_scope) {
+                    Take::Run(f, slice) => (f, slice),
+                    Take::Stop => {
+                        debug_assert!(!width::holds(), "TICKET-141: exit holding a permit");
+                        return;
+                    }
+                },
             };
             if slice == Slice::Fresh {
                 tick = next;
@@ -2542,6 +2546,21 @@ impl Vm {
                 Disp::SendPark(key) => sched.park_send(key, fiber),
                 // §6d — multi-channel `wait` park: file ONE shared token in every arm's bucket.
                 Disp::WaitPark(arms) => sched.park_wait(arms, fiber),
+                // TICKET-230 — nothing else is runnable, so the next pick would return this fiber
+                // from `global`. Queueing it let an idle worker's look take it in the
+                // push-to-re-pop window and run it on a CPU that was idle (`primes_parallel` T=0:
+                // per-slice time 1.24x, wall 1.36x). The fiber stays counted in `running`. A
+                // demoted worker leaves right after this match, so it yields as before. Seeded mode
+                // keeps its replayed yield order (DEC-209). A worker that handed its permit over
+                // (`waiting() > 0`) no longer holds one and yields as before.
+                Disp::Yield
+                    if !self.demoted
+                        && !sched_seed::on()
+                        && width::holds()
+                        && sched.runnable.load(Ordering::Relaxed) == 0 =>
+                {
+                    kept = Some(fiber);
+                }
                 Disp::Yield => sched.yield_fiber(fiber),
                 // D5 — the fiber hit a blocking native; hand it + the call to the dirty pool (frees
                 // this worker). The pool re-enqueues it on completion via `complete_offload`.

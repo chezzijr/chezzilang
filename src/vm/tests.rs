@@ -15170,6 +15170,35 @@ fn fibers_scale_ready_queue_not_quadratic() {
     );
 }
 
+/// TICKET-230 — a preempted fiber with nothing else runnable keeps its worker. Queueing it in
+/// `global` let an idle worker's free-permit look (or its 5 ms timed wake) take it in the
+/// push-to-re-pop window and run it on a CPU that was idle: `primes_parallel` T=0 measured per-slice
+/// time 1.24x and wall 1.36x, with no spinning and no ready-queue wait. Pinned with a COUNT: every
+/// slice end that goes back through `global` re-enters `take_runnable` and adds one pick (about 200
+/// slices here).
+#[test]
+fn a_preempted_fiber_with_nothing_else_runnable_keeps_its_worker() {
+    let src = [
+        "fn burn():",
+        "    i := 0",
+        "    while i < 200000:",
+        "        i += 1",
+        "fn main():",
+        "    parallel:",
+        "        spawn burn()",
+        "    print(\"done\")",
+        "main()",
+    ]
+    .join("\n");
+    let (out, picks) = run_capture_counting_picks(&src);
+    let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
+    assert_eq!(out, "done\n");
+    assert!(
+        picks <= 20,
+        "a fiber alone in its sched must keep its worker across slices: {picks} picks"
+    );
+}
+
 /// D0 — the `blocked_on` wake path: one consumer parks on a shared channel and is re-woken by each
 /// of many producers' `send`s. Sibling fibers hold DISTINCT `GcRef`s aliasing the same
 /// `Arc<ChannelCore>` (cooperative `spawn` deep-clones the channel), so the wake map must key on
