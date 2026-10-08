@@ -1455,11 +1455,20 @@ kind of party:
   always queues, so T=1 order is unchanged. Every runner thread is gated from birth and its spawner
   lists its slot (`spawn_runner_thread`).
 - **A worker keeps its permit across fibers while no thread queues (TICKET-230).**
-  `Vm::mn_worker_loop` returns its permit at a fiber boundary only when `RUNNERS.waiting() > 0`.
-  Then it queues its own next turn first, while it still holds the permit, when a fiber is runnable
-  or its fiber yielded (DEC-206); the `OwnTurn` guard withdraws a turn the loop exits without
-  taking. A callback thread does the same in `Vm::slice_end_in_place`, where the acquire that
-  follows always takes the ticket.
+  `Vm::mn_worker_loop` returns its permit at a fiber boundary only when `width::handover_due` says
+  so, and that needs a queued thread. Then it queues its own next turn first, while it still holds
+  the permit, when a fiber is runnable or its fiber yielded (DEC-206); the `OwnTurn` guard
+  withdraws a turn the loop exits without taking. A callback thread does the same in
+  `Vm::slice_end_in_place`, where the acquire that follows always takes the ticket.
+- **A preempted holder hands over once per quantum, not per slice (TICKET-230).** At a preemption
+  slice end a holder hands over only once `width::HANDOVER_QUANTUM` (100 ms) has passed since it
+  first saw a queued thread. A park, a finish, an offload or an in-place wait hands over at once.
+  Seeded mode hands over at every slice end, so replay does not depend on a clock. Cost: a queued
+  thread behind N CPU-bound holders can wait up to one quantum; fibers inside one sched still
+  rotate every slice. Why: with more runner threads than permits, a hand-over per slice makes
+  every thread run part of the time on its own core, and `schedutil` clocks those cores down. Two
+  Executors at `--threads=2` used 16.9 s of CPU for 7.2 s of work; 10, 20 and 30 ms left 13-17 s,
+  100 ms gave 7.2 s.
 - **A preempted fiber keeps its worker when nothing else is runnable (TICKET-230).** At a slice end
   with `runnable == 0`, an unseeded worker that holds its permit and is not demoted runs the same
   fiber again on a fresh slice instead of pushing it to `global`. Go gives a P with empty queues

@@ -2376,7 +2376,8 @@ impl Vm {
             .as_ref()
             .is_some_and(|s| s.runnable.load(Ordering::Relaxed) > 0);
         let job_waits = crate::vm::pool::job_waits_for_my_slot();
-        if !fiber_waits && !job_waits && width::RUNNERS.waiting() == 0 {
+        let due = width::handover_due(true);
+        if !fiber_waits && !job_waits && !due {
             return;
         }
         if let Some(sched) = self.mn.clone()
@@ -2391,9 +2392,13 @@ impl Vm {
         self.offer_pool_slot();
         // TICKET-206 — the thread queues its own next turn while it still holds the permit: the
         // release wakes the queue head, which could otherwise queue a third thread first.
-        width::reserve(&width::my_slot());
-        self.width_release();
-        self.width_acquire();
+        // TICKET-230 — with no thread queued this round trip took the thread's own ticket back at
+        // once, so it is skipped; with one queued it runs once per `HANDOVER_QUANTUM`.
+        if due {
+            width::reserve(&width::my_slot());
+            self.width_release();
+            self.width_acquire();
+        }
     }
 
     /// TICKET-147 (W14-15) — a nursery join is a cancellation point for its OWNER. `join_nursery`
@@ -2526,8 +2531,9 @@ impl Vm {
             // TICKET-230 — a worker keeps its permit across fibers while no thread queues for one.
             // Releasing and re-taking it per fiber was a gate round trip per park (measured: the
             // head-of-line wait made `send_one_channel` T=0 29.2x base). When a thread queues, the
-            // worker hands the permit over at this fiber boundary.
-            if width::RUNNERS.waiting() > 0 {
+            // worker hands the permit over at this fiber boundary: a preempted fiber's worker once
+            // per `width::HANDOVER_QUANTUM`, any other boundary at once.
+            if width::handover_due(matches!(disp, Disp::Yield)) {
                 // TICKET-206 — a worker queues its own next turn while it still holds the permit,
                 // so its place does not depend on how long the bookkeeping below takes. The reserve
                 // stays above the release (DEC-206).

@@ -45,11 +45,49 @@ impl Drop for HoldGuard {
     }
 }
 
+/// TICKET-230 - how long a PREEMPTED permit holder keeps its permit after it first sees a thread
+/// queued. The one owner of this number. More runner threads than permits means each thread runs
+/// part of the time on its own core, and `schedutil` clocks such cores down: with a hand-over per
+/// slice, two Executors at `--threads=2` used 16.9 s of CPU for 7.2 s of work. Measured user s at
+/// 10/20/30/50/100 ms: 16.9, 16.5, 13.2, 7.9-9.3, 7.2. Go's 10 ms does not help here (DEC-168
+/// measured the same).
+pub(super) const HANDOVER_QUANTUM: std::time::Duration = std::time::Duration::from_millis(100);
+
+thread_local! {
+    /// When this thread, holding a permit, first saw a queued thread at a preemption. Cleared by
+    /// [`release`].
+    static WAITER_SEEN: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) static PREEMPT_HANDOVERS: AtomicUsize = AtomicUsize::new(0);
+
+/// TICKET-230 - the one owner of: does this permit holder hand its permit over at this boundary.
+/// `preempted` is true at a slice end (the party would keep running) and false at any other fiber
+/// boundary (park, finish, offload), which hands over at once as before. Seeded mode keeps the
+/// per-slice rule so replay does not depend on a clock (DEC-209).
+pub(super) fn handover_due(preempted: bool) -> bool {
+    let due = WAITER_SEEN.with(|seen| {
+        RUNNERS.due(
+            preempted && !super::sched_seed::on(),
+            seen,
+            HANDOVER_QUANTUM,
+        )
+    });
+    #[cfg(test)]
+    if due && preempted {
+        PREEMPT_HANDOVERS.fetch_add(1, Ordering::Relaxed);
+    }
+    due
+}
+
 pub(super) fn holds() -> bool {
     HOLDS.with(|h| h.0.get())
 }
 pub(super) fn release() {
     if holds() {
+        WAITER_SEEN.with(|w| w.set(None));
         HOLDS.with(|h| h.0.set(false));
         probe_leave();
         RUNNERS.release();
@@ -271,6 +309,30 @@ impl WidthGate {
     fn tight(&self, own: usize) -> bool {
         self.held.load(Ordering::SeqCst) - own + self.waiting.load(Ordering::SeqCst) + 2
             > (self.cap)()
+    }
+
+    /// Whether a holder hands over now. Untimed: whenever a thread queues. Timed: once `quantum`
+    /// has passed since `seen` was first set. The clock is read only while a thread queues, so an
+    /// uncontended run pays nothing.
+    fn due(
+        &self,
+        timed: bool,
+        seen: &std::cell::Cell<Option<std::time::Instant>>,
+        quantum: std::time::Duration,
+    ) -> bool {
+        if self.waiting() == 0 {
+            return false;
+        }
+        if !timed {
+            return true;
+        }
+        match seen.get() {
+            None => {
+                seen.set(Some(std::time::Instant::now()));
+                false
+            }
+            Some(t) => t.elapsed() >= quantum,
+        }
     }
 
     /// Take a permit if one is free beyond the first `ahead` queued tickets.
@@ -510,6 +572,28 @@ mod tests {
         h.join().expect("acquirer panicked");
         g.release();
         assert_eq!(g.waiting(), 0);
+    }
+
+    /// TICKET-230: a preempted holder hands over only once the quantum has passed since it first
+    /// saw a queued thread; any other boundary hands over at once, and nothing is due (and no clock
+    /// is read) while no thread queues.
+    #[test]
+    fn a_preempted_holder_hands_over_only_after_the_quantum() {
+        let g = WidthGate::new(|| 1);
+        let seen = std::cell::Cell::new(None);
+        let hour = std::time::Duration::from_secs(3600);
+        assert!(!g.due(true, &seen, std::time::Duration::ZERO));
+        assert!(seen.get().is_none());
+        g.acquire();
+        let a = Slot::new();
+        g.reserve(&a);
+        assert!(g.due(false, &seen, hour));
+        assert!(seen.get().is_none());
+        assert!(!g.due(true, &seen, hour));
+        assert!(!g.due(true, &seen, hour));
+        assert!(g.due(true, &seen, std::time::Duration::ZERO));
+        g.cancel(&a);
+        g.release();
     }
 
     /// TICKET-230: an idle worker is listed for a waker's ticket only when fewer than two permits

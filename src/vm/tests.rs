@@ -15199,6 +15199,52 @@ fn a_preempted_fiber_with_nothing_else_runnable_keeps_its_worker() {
     );
 }
 
+/// TICKET-230 — a preempted permit holder hands over once per `width::HANDOVER_QUANTUM`, not per
+/// slice. With more runner threads than permits, a hand-over per slice makes every thread run part
+/// of the time on its own core, and `schedutil` clocks those cores down: two Executors at
+/// `--threads=2` used 16.9 s of CPU for 7.2 s of work. Pinned with a COUNT of preemption
+/// hand-overs (measured on the debug CLI: about 2000 per-slice, 16-19 with the quantum).
+#[test]
+fn oversubscribed_runners_keep_their_permit_across_slices() {
+    #[rustfmt::skip]
+    let in_parent = crate::vm::rerun_in_child("vm::tests::oversubscribed_runners_keep_their_permit_across_slices");
+    if in_parent {
+        return;
+    }
+    let _lock = crate::vm::TEST_WORKER_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::vm::set_worker_count(2);
+    let src = "
+import std.concurrency
+fn burn():
+    i := 0
+    while i < 200000:
+        i += 1
+a := Executor()
+b := Executor()
+for _ in 0..4:
+    a.submit(fn(): burn())
+    b.submit(fn(): burn())
+a.shutdown()
+b.shutdown()
+print(\"done\")
+";
+    let before = super::width::PREEMPT_HANDOVERS.load(std::sync::atomic::Ordering::Relaxed);
+    let out = run_capture(src);
+    let handovers =
+        super::width::PREEMPT_HANDOVERS.load(std::sync::atomic::Ordering::Relaxed) - before;
+    crate::vm::set_worker_count(crate::vm::test_baseline_worker_count());
+    assert_eq!(
+        out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}")),
+        "done\n"
+    );
+    assert!(
+        handovers <= 500,
+        "four runner threads on two permits must hand over per quantum, not per slice: {handovers} preemption hand-overs"
+    );
+}
+
 /// D0 — the `blocked_on` wake path: one consumer parks on a shared channel and is re-woken by each
 /// of many producers' `send`s. Sibling fibers hold DISTINCT `GcRef`s aliasing the same
 /// `Arc<ChannelCore>` (cooperative `spawn` deep-clones the channel), so the wake map must key on
