@@ -245,13 +245,12 @@ impl Checker {
                     }
                 }
                 // A bare imported variant (`Som(5)` after `import Som from Opt1`, or the prelude's
-                // `Some` / `Ok` / `Err`): the variant constructor of its enum.
-                Some(
-                    Resolution::Variant { enum_key, variant }
-                    | Resolution::VariantFn {
-                        enum_key, variant, ..
-                    },
-                ) => {
+                // `Some` / `Ok` / `Err`): the variant constructor of its enum. A NULLARY variant is a
+                // value, so calling it (`None(1)`) is the value call's `is not callable` below
+                // (Rust: E0618).
+                Some(Resolution::VariantFn {
+                    enum_key, variant, ..
+                }) => {
                     if self.reject_item_targs(name, args, &targs, span) {
                         return Ty::Unknown;
                     }

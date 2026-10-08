@@ -242,6 +242,13 @@ fn carrier_enum_grid() {
         "x: Opt1[Opt1[int]] = Som(5)\n",
         Rejects("cannot assign Opt1[int] to variable of type Opt1[Opt1[int]]"),
     );
+    // Red when the bare-callee rule also takes a nullary variant (`Non() expects 0 argument(s)`).
+    twin(
+        c,
+        "C30 a nullary variant is not callable",
+        "x: Opt1[int] = Non(1)\n",
+        Rejects("is not callable"),
+    );
     twin(
         c,
         "C19 nested witness",
