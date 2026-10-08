@@ -38282,3 +38282,145 @@ fn bare_constant_in_pattern_rejected() {
         "`LIMIT` is a constant",
     );
 }
+
+/// TICKET-228 (D5) — the whole grid of "a bare, payload-free name in a pattern": every scrutinee
+/// kind x every thing the name can be. A constant is rejected at every position; a fresh name and
+/// a local that shadows a constant bind (and the program RUNS); a bare unimported variant stays
+/// rejected with its own text.
+#[test]
+fn pattern_bare_name_grid() {
+    // (label, prelude, the match with `@` for the name, expected stdout when the name binds)
+    let scrutinees: [(&str, &str, &str, &str); 6] = [
+        (
+            "int",
+            "",
+            "    match 5:\n        @:\n            print(1)\n",
+            "1\n",
+        ),
+        (
+            "tuple",
+            "",
+            "    match (1, 2):\n        (@, b):\n            print(b)\n",
+            "2\n",
+        ),
+        (
+            "enum payload",
+            "enum E:\n    A(int)\n    B\n",
+            "    match E.A(1):\n        E.A(@):\n            print(1)\n        E.B:\n            print(0)\n",
+            "1\n",
+        ),
+        (
+            "struct field",
+            "struct P:\n    x: int\n    y: int\n",
+            "    match P(1, 2):\n        P(@, y):\n            print(y)\n",
+            "2\n",
+        ),
+        (
+            "T?",
+            "fn g() -> int?:\n    return 1\n",
+            "    match g():\n        Some(@):\n            print(1)\n        None:\n            print(0)\n",
+            "1\n",
+        ),
+        (
+            "un-inferable",
+            "fn u(x):\n    match x:\n        @:\n            print(1)\n",
+            "    u(5)\n",
+            "1\n",
+        ),
+    ];
+    let consts = |errs: &[CheckError]| {
+        errs.iter()
+            .filter(|e| e.message.contains("is a constant"))
+            .count()
+    };
+    for (label, prelude, body, out) in scrutinees {
+        // A fresh name binds, and the program runs.
+        let fresh = format!("{prelude}fn main():\n{body}main()\n").replace('@', "n");
+        // An un-inferable scrutinee needs an untyped parameter, which is its own error: that row
+        // counts the constant errors only.
+        let inferable = label != "un-inferable";
+        if inferable {
+            ok(&fresh);
+            assert_eq!(
+                crate::vm::run_capture(&fresh).expect("runs"),
+                out,
+                "{label}: fresh name"
+            );
+        } else {
+            assert_eq!(consts(&check_src(&fresh)), 0, "{label}: fresh name");
+        }
+        // A local variable that shadows a global constant is a new binder (un-inferable: the
+        // shadow lives in `u`, where the match is).
+        let shadow = format!(
+            "LIMIT: const int = 3\n{}fn main():\n    LIMIT := 9\n    print(LIMIT)\n{body}main()\n",
+            prelude.replace(
+                "    match x:",
+                "    LIMIT := 9\n    print(LIMIT)\n    match x:"
+            )
+        )
+        .replace('@', "LIMIT");
+        let errs = check_src(&shadow);
+        assert_eq!(consts(&errs), 0, "{label}: shadowing local, got {errs:?}");
+        // A global constant is rejected, once, and it is the only error.
+        let global = format!("LIMIT: const int = 3\n{prelude}fn main():\n{body}main()\n")
+            .replace('@', "LIMIT");
+        let errs = check_src(&global);
+        assert_eq!(consts(&errs), 1, "{label}: global const, got {errs:?}");
+        if inferable {
+            assert_eq!(errs.len(), 1, "{label}: global const, got {errs:?}");
+        }
+        assert!(
+            errs.iter().any(|e| e.message.contains(
+                "`LIMIT` is a constant; to compare write `x if x == LIMIT`, to bind use a new name"
+            )),
+            "{label}: {errs:?}"
+        );
+        // A local constant, same rule.
+        let local = format!(
+            "{}fn main():\n    L2: const int = 4\n{body}main()\n",
+            prelude.replace("    match x:", "    L2: const int = 4\n    match x:")
+        )
+        .replace('@', "L2");
+        let errs = check_src(&local);
+        assert_eq!(consts(&errs), 1, "{label}: local const, got {errs:?}");
+        // A bare unimported variant is never a binder and never "a constant".
+        let variant = format!("enum C:\n    Red\n    Green\n{prelude}fn main():\n{body}main()\n")
+            .replace('@', "Red");
+        let errs = check_src(&variant);
+        assert!(!errs.is_empty(), "{label}: bare variant must be rejected");
+        assert_eq!(consts(&errs), 0, "{label}: bare variant, got {errs:?}");
+    }
+    // A constant inside an or-alternative, and the same constant twice in one tuple pattern.
+    let errs = check_src(
+        "LIMIT: const int = 3\nfn main():\n    match 5:\n        LIMIT | 4:\n            print(1)\n        _:\n            print(2)\n",
+    );
+    assert_eq!(consts(&errs), 1, "or-alternative, got {errs:?}");
+    let errs = check_src(
+        "LIMIT: const int = 3\nfn main():\n    match (1, 2):\n        (LIMIT, LIMIT):\n            print(1)\n",
+    );
+    assert!(consts(&errs) >= 1, "const twice, got {errs:?}");
+    assert!(
+        !errs
+            .iter()
+            .any(|e| e.message.contains("bound more than once")),
+        "a constant is not a binder: {errs:?}"
+    );
+}
+
+/// TICKET-228 (D5) — a constant IMPORTED from another module is rejected in a pattern too.
+#[test]
+fn imported_constant_in_pattern_rejected() {
+    let t = TmpDir::new();
+    t.write("lib.chz", "LIMIT: const int = 3\n");
+    let entry = t.write(
+        "main.chz",
+        "import LIMIT from lib\nfn main():\n    match 5:\n        LIMIT:\n            print(1)\n",
+    );
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = check_graph(&graph).err().unwrap_or_default();
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("`LIMIT` is a constant")),
+        "got: {errs:?}"
+    );
+}

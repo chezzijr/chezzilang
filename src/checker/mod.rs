@@ -2766,8 +2766,8 @@ fn render_targs(targs: &[Ty]) -> String {
 /// `is_binder(name)` returns `true` iff a bare `Pattern::Ident(name)` actually BINDS a fresh variable
 /// here, rather than naming a (refutable) nullary variant. A bare `None`/`Ok`/`Err`/`Some` or a user
 /// variant name binds nothing (it's a variant test — see `bind_subpattern`), so two of them in one
-/// pattern (e.g. `(None, None, None)`) is NOT a duplicate binding. Mirrors `bind_subpattern`'s
-/// Ident-as-variant recognition so this pre-pass doesn't falsely reject correct code.
+/// pattern (e.g. `(None, None, None)`) is NOT a duplicate binding. `is_binder` reads
+/// `Checker::bare_pattern_name`.
 fn first_duplicate_binder(p: &Pattern, is_binder: &impl Fn(&str) -> bool) -> Option<String> {
     fn go(
         p: &Pattern,

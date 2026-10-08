@@ -17,7 +17,69 @@ pub(super) fn is_const_expr(e: &Expr) -> bool {
 pub(super) const RANGE_NOT_A_VALUE: &str = "a range is only valid as the iterable of a `for` loop or comprehension, as a slice receiver, \
      or as a `match` pattern — use `range(a, b)` to materialize a `List[int]`";
 
+/// What a bare, payload-free name in a pattern is. `Checker::bare_pattern_name` is the one
+/// classifier; every pattern walker reads it.
+pub(super) enum BareName {
+    /// A variant an `import V from Enum` (or the prelude) binds bare.
+    Imported { key: String, variant: String },
+    /// A variant no import binds: it must be written qualified.
+    Variant,
+    /// A `const` binding in scope: a pattern neither compares against it nor rebinds it.
+    Const,
+    /// A fresh name: the default arm, binding the whole value.
+    Binder,
+}
+
+impl BareName {
+    pub(super) fn is_variant(&self) -> bool {
+        matches!(self, BareName::Imported { .. } | BareName::Variant)
+    }
+}
+
 impl Checker {
+    pub(super) fn bare_pattern_name(&self, name: &str) -> BareName {
+        if let Some(iv) = self.imported_variants.get(name) {
+            BareName::Imported {
+                key: iv.head.key.clone(),
+                variant: iv.variant.clone(),
+            }
+        } else if self.variant_owners.contains_key(name) {
+            BareName::Variant
+        } else if self.is_const_decl(name) {
+            BareName::Const
+        } else {
+            BareName::Binder
+        }
+    }
+
+    /// Bind a bare pattern name to `ty`: the one place a pattern declares a name. A constant is
+    /// rejected and declares nothing; the arm stays a catch-all (`true`), so no second error
+    /// follows. `hover` is the binding token's own span, where the caller has one.
+    fn bind_pattern_name(
+        &mut self,
+        id: crate::ast::NodeId,
+        name: &str,
+        ty: Ty,
+        span: Span,
+        hover: Option<Span>,
+    ) -> bool {
+        if matches!(self.bare_pattern_name(name), BareName::Const) {
+            self.error(
+                span,
+                format!(
+                    "`{name}` is a constant; to compare write `x if x == {name}`, to bind use a new name"
+                ),
+            );
+            return true;
+        }
+        if let Some(h) = hover {
+            self.hover_record_at(h, &ty, HoverKind::Local, None);
+        }
+        self.record_pattern_head(id, Resolution::PatBinding, span);
+        self.declare(name, ty);
+        true
+    }
+
     /// The variant a pattern head `name` names in the enum `ekey`. A bare name an `import V from
     /// Enum` binds is the variant that import names, and only in that import's enum (`None` for
     /// any other enum); a qualified head, or a name no import binds, names itself.
@@ -64,11 +126,12 @@ impl Checker {
                 // A nested bare identifier names a *built-in* nullary variant of the matched type (a
                 // refutable variant match — `Some(None)`, `Ok(Err(e))`), or a fresh binding. User
                 // variants must be written qualified (handled below), never resolved bare here.
-                let imported = self
-                    .imported_variants
-                    .get(name)
-                    .map(|iv| (iv.head.key.clone(), iv.variant.clone()));
-                if let Some((ikey, ivar)) = &imported {
+                let class = self.bare_pattern_name(name);
+                if let BareName::Imported {
+                    key: ikey,
+                    variant: ivar,
+                } = &class
+                {
                     if Self::scrutinee_enum(ty) == Some(ikey.as_str())
                         && let Some(vmap) = self.variants_of(ty)
                         && let Some(payload) = vmap.get(ivar)
@@ -106,7 +169,7 @@ impl Checker {
                 // A variant that is not imported must be written qualified — never resolved bare,
                 // never silently a binding (the bare→binding trap). Reject with a hint to the
                 // qualified form.
-                if imported.is_none() && self.variant_owners.contains_key(name) {
+                if matches!(class, BareName::Variant) {
                     let hint = self.qualify_hint(name);
                     self.error(span, hint);
                     return false;
@@ -115,10 +178,7 @@ impl Checker {
                 // NAME, not an `Expr` the probe visits — record its decl-site hover at the binding
                 // token's OWN span (`bind_span`, not the arm-level `span`), exactly as the for-loop
                 // uses `var_spans`. No-op unless a probe is armed → zero overhead on normal checks.
-                self.hover_record_at(*bind_span, ty, HoverKind::Local, None);
-                self.record_pattern_head(*id, Resolution::PatBinding, span);
-                self.declare(name, ty.clone());
-                true
+                self.bind_pattern_name(*id, name, ty.clone(), span, Some(*bind_span))
             }
             Pattern::Or(alts) => self.bind_or_alternatives(alts, ty, span),
             Pattern::Literal(lit) => {
@@ -456,8 +516,8 @@ impl Checker {
         // on each alt above, so a duplicate inside one alt is still caught.
         // A bare ident is a real binder UNLESS it names a (refutable) nullary variant — the built-in
         // `Ok`/`Err`/`Some`/`None` or a user enum variant — which binds nothing (see `bind_subpattern`).
-        // Mirror that registry here so `(None, None, None)` isn't falsely flagged as a duplicate binding.
-        let is_binder = |name: &str| !self.variant_owners.contains_key(name);
+        // So `(None, None, None)` isn't falsely flagged as a duplicate binding.
+        let is_binder = |name: &str| matches!(self.bare_pattern_name(name), BareName::Binder);
         if let Some(dup) = first_duplicate_binder(pattern, &is_binder) {
             self.error(
                 span,
@@ -489,15 +549,13 @@ impl Checker {
                         // typed-`Literal` path; treating it as a refutable variant instead would both
                         // leave the binding undeclared (`unknown name`) and wrongly report the match
                         // non-exhaustive.
-                        let is_known_variant = self.variant_owners.contains_key(name);
+                        let is_known_variant = self.bare_pattern_name(name).is_variant();
                         if enum_name.is_none()
                             && module_name.is_none()
                             && bindings.is_empty()
                             && !is_known_variant
                         {
-                            self.record_pattern_head(*id, Resolution::PatBinding, span);
-                            self.declare(name, Ty::Unknown);
-                            return true;
+                            return self.bind_pattern_name(*id, name, Ty::Unknown, span, None);
                         }
                         // A structural arm over an un-inferable scrutinee is rejected upstream
                         // (`reconstruct_unknown_kind`), except inside a rolled-back carrier walk,
@@ -539,11 +597,9 @@ impl Checker {
                         if enum_name.is_none()
                             && module_name.is_none()
                             && bindings.is_empty()
-                            && !self.variant_owners.contains_key(name)
+                            && !self.bare_pattern_name(name).is_variant()
                         {
-                            self.record_pattern_head(*id, Resolution::PatBinding, span);
-                            self.declare(name, scrut.clone());
-                            return true;
+                            return self.bind_pattern_name(*id, name, scrut.clone(), span, None);
                         }
                         let qualifier_reported = self.check_pattern_qualifier(
                             module_name,
@@ -706,7 +762,7 @@ impl Checker {
                         }
                         // Match the compiler's variant registry: user enums PLUS the built-in
                         // Result/Option variants (which the checker special-cases elsewhere).
-                        if self.variant_owners.contains_key(name) {
+                        if self.bare_pattern_name(name).is_variant() {
                             self.error(
                                 span,
                                 format!(
@@ -715,9 +771,7 @@ impl Checker {
                             );
                             return false;
                         }
-                        self.record_pattern_head(*id, Resolution::PatBinding, span);
-                        self.declare(name, ty.clone());
-                        return true;
+                        return self.bind_pattern_name(*id, name, ty.clone(), span, None);
                     }
                     Pattern::Variant {
                         id,
@@ -776,7 +830,7 @@ impl Checker {
                 } = pattern
                     && bindings.is_empty()
                 {
-                    if self.variant_owners.contains_key(name) {
+                    if self.bare_pattern_name(name).is_variant() {
                         self.error(
                             span,
                             format!(
@@ -786,9 +840,7 @@ impl Checker {
                         );
                         return false;
                     }
-                    self.record_pattern_head(*id, Resolution::PatBinding, span);
-                    self.declare(name, Ty::Tuple(tys.clone()));
-                    return true;
+                    return self.bind_pattern_name(*id, name, Ty::Tuple(tys.clone()), span, None);
                 }
                 self.error(
                     span,
@@ -827,7 +879,7 @@ impl Checker {
                         // (same rule as the `MatchKind::Literal` path).
                         let is_bare = enum_name.is_none() && module_name.is_none();
                         if is_bare && ctor.is_err() && bindings.is_empty() {
-                            if self.variant_owners.contains_key(name) {
+                            if self.bare_pattern_name(name).is_variant() {
                                 self.error(
                                     span,
                                     format!(
@@ -836,9 +888,8 @@ impl Checker {
                                 );
                                 return false;
                             }
-                            self.record_pattern_head(*id, Resolution::PatBinding, span);
-                            self.declare(name, Ty::Struct(label.clone(), targs.clone()));
-                            return true;
+                            let ty = Ty::Struct(label.clone(), targs.clone());
+                            return self.bind_pattern_name(*id, name, ty, span, None);
                         }
                         // A constructor pattern: the name must be the struct's own name, and the
                         // field count must match (a clean checker error, never a runtime panic).

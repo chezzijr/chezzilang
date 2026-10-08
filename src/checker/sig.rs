@@ -5980,7 +5980,7 @@ impl Checker {
                     // catch-all binding → not structural.
                     let is_variant = module_name.is_some()
                         || enum_name.is_some()
-                        || self.variant_owners.contains_key(name)
+                        || self.bare_pattern_name(name).is_variant()
                         || !bindings.is_empty();
                     if is_variant {
                         structural.get_or_insert("variant");

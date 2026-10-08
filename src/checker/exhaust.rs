@@ -172,7 +172,7 @@ impl Checker {
                 {
                     return vec![Pat::Ctor(iv.variant.clone(), vec![])];
                 }
-                if self.variant_owners.contains_key(name) {
+                if self.bare_pattern_name(name).is_variant() {
                     vec![Pat::Never]
                 } else {
                     vec![Pat::Wild]
@@ -220,7 +220,7 @@ impl Checker {
                         if enum_name.is_none()
                             && module_name.is_none()
                             && bindings.is_empty()
-                            && !self.variant_owners.contains_key(name)
+                            && !self.bare_pattern_name(name).is_variant()
                         {
                             vec![Pat::Wild]
                         } else {
@@ -232,7 +232,7 @@ impl Checker {
                     if enum_name.is_none()
                         && module_name.is_none()
                         && bindings.is_empty()
-                        && !self.variant_owners.contains_key(name)
+                        && !self.bare_pattern_name(name).is_variant()
                     {
                         vec![Pat::Wild]
                     } else {
