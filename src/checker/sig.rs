@@ -1643,13 +1643,11 @@ impl Checker {
     /// Then `head(…)`'s type is fixed by the declaration alone and cannot mention any type parameter.
     /// Anything else is `false` (charge): one of `decl`'s own type params, a plain function whose
     /// return type this syntactic walk cannot see, a generic struct (its args could be `T`), or a
-    /// name this module does not know. A USER enum's variant never reaches here — bare
-    /// it is a checker error (`Sq(2)` → "'Sq' is a variant of enum 'Shape'; write it qualified as
-    /// 'Shape.Sq'"), and qualified its callee is a field, not an ident head. The BUILTIN variants DO
-    /// reach here: `Ok(1)` / `Err(e)` / `Some(x)` are accepted bare, and each is an ident-headed call,
-    /// so `head` really can be `"Ok"`. They answer `false` — a builtin variant is not in
-    /// `struct_names` — which is the CHARGE direction, i.e. the safe one; that they are conservatively
-    /// charged rather than unreachable is the accurate statement.
+    /// name this module does not know. A variant never reaches here as a struct: a bare variant
+    /// head is an imported variant (`Som(2)` after `import Som from Opt1`, or the prelude's
+    /// `Some`/`Ok`/`Err`); it is not in `struct_names`, so it answers `false` -- the charge
+    /// direction, the safe one. A bare variant that is not imported is a checker error before this
+    /// runs.
     fn concrete_ctor_head(&self, head: &str, decl: &FnDecl) -> bool {
         !decl.type_params.iter().any(|tp| tp.name == head)
             && self.struct_names.contains(head)

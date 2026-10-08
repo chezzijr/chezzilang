@@ -1324,7 +1324,7 @@ impl Compiler {
         // returns `Ok(nil)` (TICKET-227).
         fc.emit(Op::Nil, Span::RUNTIME);
         if fall_off == Some(crate::checker::FallOff::OkNil) {
-            self.emit_builtin_variant(&mut fc, "Ok", Span::RUNTIME)?;
+            self.emit_carrier_wrap(&mut fc, "Result", "Ok", Span::RUNTIME)?;
         }
         fc.emit(Op::Return, Span::RUNTIME);
         Ok(self.finish(fc))
@@ -2795,18 +2795,6 @@ impl Compiler {
         patterns.into_iter().all(|p| self.pattern_is_literal(p))
     }
 
-    /// The `(enum, variant)` registry key of a built-in variant (`Ok`/`Err` in `Result`,
-    /// `Some`/`None` in `Option`), or `None` for any other name. Callers reach it only after the
-    /// checker decided the name is that built-in (a `Builtin` call record, a `RetCoerce` wrap).
-    fn builtin_variant_pair(name: &str) -> Option<(String, String)> {
-        let en = match name {
-            "Ok" | "Err" => "Result",
-            "Some" | "None" => "Option",
-            _ => return None,
-        };
-        Some((en.to_string(), name.to_string()))
-    }
-
     /// What the checker recorded for a pattern head (`Pattern::Variant` or a nested
     /// `Pattern::Ident`): `Variant`, `PatStruct` or `PatBinding`. The checker records every head
     /// of a pattern it accepts, so a miss is an internal error. `None` for a pattern with no head.
@@ -3411,12 +3399,12 @@ impl Compiler {
         id: crate::ast::NodeId,
         span: Span,
     ) -> Result<(), CompileError> {
-        let name = match self.wraps.get(&(self.current_module_idx, id.0)) {
+        let (enum_key, variant) = match self.wraps.get(&(self.current_module_idx, id.0)) {
             None => return Ok(()),
-            Some(crate::checker::Wrap::Some) => "Some",
-            Some(crate::checker::Wrap::Ok) => "Ok",
+            Some(crate::checker::Wrap::Some) => ("Option", "Some"),
+            Some(crate::checker::Wrap::Ok) => ("Result", "Ok"),
         };
-        self.emit_builtin_variant(fc, name, span)
+        self.emit_carrier_wrap(fc, enum_key, variant, span)
     }
 
     /// The dispatch over `ExprKind`; call [`Self::compile_expr`] instead, except to re-enter a
@@ -3478,7 +3466,7 @@ impl Compiler {
                     }
                     // `!e` is `Err(e)`; `?x` compiles its operand, and the checker's wrap
                     // record on this node (applied by `compile_expr`) builds the carrier.
-                    UnaryOp::ErrVal => self.emit_builtin_variant(fc, "Err", expr.span)?,
+                    UnaryOp::ErrVal => self.emit_carrier_wrap(fc, "Result", "Err", expr.span)?,
                     UnaryOp::Wrap => {}
                 }
             }
@@ -3602,16 +3590,7 @@ impl Compiler {
                         enum_key,
                         variant,
                         arity,
-                    } => {
-                        let p = self.synth_fn_proto(
-                            SynthFn::Variant {
-                                enum_key: enum_key.clone(),
-                                variant: variant.clone(),
-                            },
-                            |c| Ok(c.build_variant_fn(&enum_key, &variant, arity)),
-                        )?;
-                        fc.emit(Op::MakeFunc(p), expr.span);
-                    }
+                    } => self.emit_variant_fn_value(fc, &enum_key, &variant, arity, expr.span)?,
                     // std.json's decode read as a value (TICKET-214).
                     Resolution::Decode(desc) => {
                         self.compile_decode_fn_value(fc, obj, &desc, expr.span)?
@@ -4034,6 +4013,12 @@ impl Compiler {
             Resolution::Variant { enum_key, variant } => {
                 self.emit_new_enum(fc, &enum_key, &variant, 0, e.span);
             }
+            // A bare imported payload variant read as a value (`f := Some`): its constructor fn.
+            Resolution::VariantFn {
+                enum_key,
+                variant,
+                arity,
+            } => self.emit_variant_fn_value(fc, &enum_key, &variant, arity, e.span)?,
             Resolution::Builtin(b) => fc.emit(Op::LoadBuiltin(b), e.span),
             Resolution::Local
             | Resolution::Global { .. }
@@ -4259,38 +4244,75 @@ impl Compiler {
             self.kw_frag_ord,
             span,
         );
-        let name = match self.ret_coerce.get(&key) {
-            None | Some(crate::checker::RetCoerce::NoWrap) => return Ok(()),
-            Some(crate::checker::RetCoerce::WrapOkNil) => "Ok",
-        };
-        self.emit_builtin_variant(fc, name, span)
+        match self.ret_coerce.get(&key) {
+            None | Some(crate::checker::RetCoerce::NoWrap) => Ok(()),
+            Some(crate::checker::RetCoerce::WrapOkNil) => {
+                self.emit_carrier_wrap(fc, "Result", "Ok", span)
+            }
+        }
     }
 
-    /// Build the builtin carrier variant `name` (`Some`/`Ok`/`Err`) around the stack top.
-    fn emit_builtin_variant(
+    /// Build the carrier variant `enum_key.variant` around the stack top, for a wrap the CHECKER
+    /// decided (`FallOff::OkNil`, `Wrap`, `!e`, `RetCoerce`) — a verdict, never a name in source.
+    fn emit_carrier_wrap(
         &mut self,
         fc: &mut FnComp,
-        name: &str,
+        enum_key: &str,
+        variant: &str,
         span: Span,
     ) -> Result<(), CompileError> {
-        let variant_id = Self::builtin_variant_pair(name)
-            .and_then(|k| self.program.variants.get(&k))
-            .map(|def| def.variant_id)
-            .ok_or_else(|| CompileError {
+        if self.variant_id_of_key(enum_key, variant) == crate::vm::op::VID_NONE {
+            return Err(CompileError {
                 message: format!(
-                    "internal: no '{name}' variant registered for a carrier value \
+                    "internal: no '{variant}' variant registered for a carrier value \
                      -- the type-checker and the backend disagree"
                 ),
                 span,
-            })?;
-        fc.emit(
-            Op::NewEnum {
-                variant: name.to_string(),
-                variant_id,
-                argc: 1,
+            });
+        }
+        self.emit_new_enum(fc, enum_key, variant, 1, span);
+        Ok(())
+    }
+
+    /// A variant constructor call `enum_key.variant(args)`, qualified or through a bare imported
+    /// name. Zero-arg `Result.Ok()` is `Result[nil, E]`'s success value (DEC-017, the checker rule
+    /// is in `infer_variant_call`): the `nil` payload is synthesized.
+    fn compile_variant_call(
+        &mut self,
+        fc: &mut FnComp,
+        enum_key: &str,
+        variant: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<(), CompileError> {
+        if args.is_empty() && (enum_key, variant) == ("Result", "Ok") {
+            fc.emit(Op::Nil, span);
+            self.emit_new_enum(fc, enum_key, variant, 1, span);
+            return Ok(());
+        }
+        self.compile_args(fc, args)?;
+        self.emit_new_enum(fc, enum_key, variant, args.len(), span);
+        Ok(())
+    }
+
+    /// A payload variant read as a value (`R1[int].L`, a bare imported `Some`): its constructor
+    /// fn, through the one memo of variant fn values (DEC-226).
+    fn emit_variant_fn_value(
+        &mut self,
+        fc: &mut FnComp,
+        enum_key: &str,
+        variant: &str,
+        arity: usize,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        let p = self.synth_fn_proto(
+            SynthFn::Variant {
+                enum_key: enum_key.to_string(),
+                variant: variant.to_string(),
             },
-            span,
-        );
+            |c| Ok(c.build_variant_fn(enum_key, variant, arity)),
+        )?;
+        fc.emit(Op::MakeFunc(p), span);
         Ok(())
     }
 
@@ -4760,38 +4782,6 @@ impl Compiler {
             }
             return Ok(());
         }
-        // A bare *built-in* variant constructor (`Ok(x)`, `Some(x)`) — user variants are qualified
-        // (handled in the `Field` arm above), so only built-ins resolve bare here.
-        if let Some(def) =
-            Self::builtin_variant_pair(name).and_then(|k| self.program.variants.get(&k))
-        {
-            let variant_id = def.variant_id;
-            // Zero-arg `Ok()` is `Result[nil, E]`'s success value (checker arm:
-            // `src/checker/expr.rs`, the `"Ok"` case) — synthesize the `nil` payload `Op::NewEnum`
-            // expects, since `Ok`'s registered arity stays 1.
-            if name == "Ok" && args.is_empty() {
-                fc.emit(Op::Nil, span);
-                fc.emit(
-                    Op::NewEnum {
-                        variant: name.clone(),
-                        variant_id,
-                        argc: 1,
-                    },
-                    span,
-                );
-                return Ok(());
-            }
-            self.compile_args(fc, args)?;
-            fc.emit(
-                Op::NewEnum {
-                    variant: name.clone(),
-                    variant_id,
-                    argc: args.len(),
-                },
-                span,
-            );
-            return Ok(());
-        }
         Err(CompileError {
             message: format!("internal: no lowering for the builtin call '{name}'"),
             span,
@@ -4900,11 +4890,7 @@ impl Compiler {
                 Resolution::Variant { enum_key, variant }
                 | Resolution::VariantFn {
                     enum_key, variant, ..
-                } => {
-                    self.compile_args(fc, args)?;
-                    self.emit_new_enum(fc, &enum_key, &variant, args.len(), span);
-                    return Ok(());
-                }
+                } => return self.compile_variant_call(fc, &enum_key, &variant, args, span),
                 Resolution::MethodFn { type_key, method } => {
                     self.emit_call_static(
                         fc,
@@ -5029,6 +5015,11 @@ impl Compiler {
                     fc.emit(Op::NewStruct(key, argc), span);
                     return Ok(());
                 }
+                // A bare imported variant constructor (`Som(5)`, the prelude's `Some(5)`).
+                Resolution::Variant { enum_key, variant }
+                | Resolution::VariantFn {
+                    enum_key, variant, ..
+                } => return self.compile_variant_call(fc, &enum_key, &variant, args, span),
                 // `std.json`'s own `_to_json` lowers to its opcode. A user module cannot declare a
                 // `native fn`, so no user fn is ever this pair.
                 Resolution::Fn { module, name }

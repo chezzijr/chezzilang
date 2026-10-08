@@ -157,13 +157,11 @@ fn is_inline_default(e: &Expr) -> bool {
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_) => true,
         ExprKind::Str(s) => !s.contains('{') && !s.contains('}'),
-        // The only identifiers that are self-contained VALUES rather than references to a namespace:
-        // the nullary builtin variant and `nil`. Both are keywords to the LEXER, which is what makes
-        // the clone safe in practice — NOT a guarantee that the name means the same thing in the
-        // caller. A local really can shadow `None`: `fn f(x: int? = None)` called from a body
-        // containing `None := 5` reports `argument 1 of 'f': expected Option[int], found int` at the
-        // DECLARATION, i.e. the caller's local reached the clone. Identical on `b1307258`, so this
-        // is a pre-existing corner of the inline class and not something W7-51 introduced.
+        // `nil` and `None` are the only identifiers inlined. `None` means `Option.None` in every
+        // module because no import may rebind a prelude variant name
+        // (`note_variant_import_binds`); a local, a global or a user fn named `None` can still
+        // capture the caller's clone, a pre-existing corner. Do not move `None` to a provider: a
+        // callee-filled `b: T? = None` then breaks every call that fills a later parameter.
         ExprKind::Ident(n) => n == "None" || n == "nil",
         ExprKind::Unary { expr, .. } => is_inline_default(expr),
         ExprKind::Binary { lhs, rhs, .. } => is_inline_default(lhs) && is_inline_default(rhs),
