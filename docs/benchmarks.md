@@ -3600,3 +3600,102 @@ Re-run with the order swapped (branch first), `--runs 10`, for the four benches 
 | `primes` | 1223 ± 37 | 1248 ± 24 | 2% |
 
 `list`, `loop` and `primes` fall to +1.5..+2.9%, inside one σ. `fib` reads +4.5% on both orders (541 ± 19 vs 565 ± 31 ms): within the branch σ, not attributed. The returned `fib(n - 1) + fib(n - 2)` compiles to the same ops as on base (no wrap is recorded); there is no bytecode dumper to diff it.
+
+## TICKET-230 — one process-wide runner budget (2026-10-07)
+
+Release binaries: base `e93d7299` (the merge-base with `main`) and branch `5045d3d2`. Driver:
+`python3 benches/sched/ab_pair.py <base> <fixed> <n> <prog>:<threads> ...`, runs interleaved, wall
+ms as `median (max - min) / max RSS MiB`. `T` 0 is the default worker count (28 CPUs). A row is
+`ok` when the fixed median is at most the base median plus base's spread. Measured 2026-10-08.
+
+The `primes_parallel` and `send_one_channel` rows ran at n=15, the others at n=7. Base's n=7 spread
+for `send_one_channel` T=0 moved between 30 ms and 68 ms across runs, which is too unstable to
+judge a 2-4% difference. One `primes_parallel` T=1 cell takes about 870 s at n=15, over the 600 s
+limit of one command, so those two rows ran as 8 pairs then 7 pairs with the same interleaved loop.
+
+Unpinned. `uptime` load averages at each chunk start and at the end: 2.86, 3.44, 3.76; 2.49, 2.80, 3.50; 1.70, 1.70, 2.18.
+
+| program | T | n | base | fixed | ratio | verdict |
+|---|---|---|---|---|---|---|
+| fib.chz | 0 | 7 | 492 (75) / 15 | 504 (99) / 15 | 1.02x | ok |
+| poly_method.chz | 0 | 7 | 2536 (105) / 15 | 2528 (136) / 15 | 1.00x | ok |
+| closure.chz | 0 | 7 | 2452 (55) / 15 | 2405 (54) / 15 | 0.98x | ok |
+| rendezvous_pingpong.chz | 1 | 7 | 4093 (1051) / 15 | 3140 (490) / 15 | 0.77x | ok |
+| rendezvous_pingpong.chz | 2 | 7 | 3939 (1207) / 15 | 4342 (1806) / 15 | 1.10x | ok |
+| rendezvous_pingpong.chz | 4 | 7 | 4398 (2644) / 15 | 3103 (2004) / 15 | 0.71x | ok |
+| rendezvous_pingpong.chz | 0 | 7 | 3928 (2400) / 15 | 4107 (2147) / 15 | 1.05x | ok |
+| churn2.chz | 4 | 7 | 2341 (127) / 20 | 2340 (88) / 21 | 1.00x | ok |
+| churn8.chz | 4 | 7 | 3306 (214) / 20 | 3350 (216) / 21 | 1.01x | ok |
+| churn8.chz | 0 | 7 | 3500 (172) / 21 | 3569 (174) / 21 | 1.02x | ok |
+| storm.chz | 2 | 7 | 3356 (260) / 52 | 3184 (828) / 51 | 0.95x | ok |
+| storm.chz | 0 | 7 | 5575 (315) / 380 | 5611 (236) / 379 | 1.01x | ok |
+| trips.chz | 2 | 7 | 98 (28) / 15 | 105 (28) / 15 | 1.07x | ok |
+| trips.chz | 0 | 7 | 105 (11) / 15 | 110 (18) / 15 | 1.05x | ok |
+| fan_open.chz | 2 | 7 | 913 (45) / 15 | 914 (68) / 15 | 1.00x | ok |
+| fan_open.chz | 0 | 7 | 285 (22) / 15 | 268 (35) / 15 | 0.94x | ok |
+| body_and_spawn.chz | 2 | 7 | 7574 (203) / 924 | 7461 (493) / 924 | 0.99x | ok |
+| body_and_spawn.chz | 0 | 7 | 7707 (260) / 924 | 7527 (167) / 924 | 0.98x | ok |
+| deep_nurseries.chz | 2 | 7 | 548 (155) / 15 | 534 (254) / 15 | 0.98x | ok |
+| deep_nurseries.chz | 0 | 7 | 2979 (661) / 15 | 2864 (271) / 15 | 0.96x | ok |
+| send_one_channel.chz | 1 | 15 | 937 (117) / 15 | 831 (149) / 15 | 0.89x | ok |
+| send_one_channel.chz | 2 | 15 | 467 (503) / 15 | 458 (230) / 15 | 0.98x | ok |
+| send_one_channel.chz | 0 | 15 | 759 (83) / 15 | 760 (84) / 15 | 1.00x | ok |
+| primes_parallel.chz | 0 | 15 | 10175 (222) / 15 | 9708 (336) / 15 | 0.95x | ok |
+| primes_parallel.chz | 4 | 15 | 10024 (163) / 15 | 9672 (1729) / 15 | 0.96x | ok |
+| primes_parallel.chz | 2 | 15 | 15241 (810) / 15 | 15012 (380) / 15 | 0.98x | ok |
+| primes_parallel.chz | 1 | 15 | 29389 (514) / 15 | 28532 (373) / 15 | 0.97x | ok |
+
+Pinned, `AB_CPUS=0-3`. `uptime` load averages at each chunk start and at the end: 4.07, 5.51, 4.90; 2.49, 2.80, 3.50; 1.56, 1.67, 2.17; 2.66, 2.70, 2.86.
+
+| program | T | n | base | fixed | ratio | verdict |
+|---|---|---|---|---|---|---|
+| fib.chz | 0 | 7 | 522 (46) / 15 | 517 (39) / 15 | 0.99x | ok |
+| poly_method.chz | 0 | 7 | 2529 (64) / 15 | 2467 (109) / 15 | 0.98x | ok |
+| closure.chz | 0 | 7 | 2427 (86) / 15 | 2392 (55) / 15 | 0.99x | ok |
+| rendezvous_pingpong.chz | 1 | 7 | 3931 (1424) / 15 | 3095 (695) / 15 | 0.79x | ok |
+| rendezvous_pingpong.chz | 2 | 7 | 4341 (2054) / 15 | 4301 (1945) / 15 | 0.99x | ok |
+| rendezvous_pingpong.chz | 4 | 7 | 4458 (2648) / 15 | 3982 (1955) / 15 | 0.89x | ok |
+| rendezvous_pingpong.chz | 0 | 7 | 3987 (2796) / 15 | 4077 (2415) / 15 | 1.02x | ok |
+| churn2.chz | 4 | 7 | 2110 (207) / 22 | 2088 (45) / 22 | 0.99x | ok |
+| churn8.chz | 4 | 7 | 2843 (255) / 23 | 2923 (125) / 23 | 1.03x | ok |
+| churn8.chz | 0 | 7 | 2897 (174) / 23 | 2984 (243) / 23 | 1.03x | ok |
+| storm.chz | 2 | 7 | 3207 (220) / 52 | 3120 (195) / 52 | 0.97x | ok |
+| storm.chz | 0 | 7 | 5402 (26) / 77 | 5387 (79) / 77 | 1.00x | ok |
+| trips.chz | 2 | 7 | 90 (12) / 15 | 98 (16) / 15 | 1.09x | ok |
+| trips.chz | 0 | 7 | 103 (11) / 15 | 106 (11) / 15 | 1.03x | ok |
+| fan_open.chz | 2 | 7 | 921 (103) / 15 | 932 (57) / 15 | 1.01x | ok |
+| fan_open.chz | 0 | 7 | 493 (26) / 15 | 490 (16) / 15 | 0.99x | ok |
+| body_and_spawn.chz | 2 | 7 | 7623 (303) / 924 | 7543 (125) / 925 | 0.99x | ok |
+| body_and_spawn.chz | 0 | 7 | 7691 (410) / 925 | 7525 (112) / 925 | 0.98x | ok |
+| deep_nurseries.chz | 2 | 7 | 493 (350) / 15 | 529 (161) / 15 | 1.07x | ok |
+| deep_nurseries.chz | 0 | 7 | 951 (234) / 15 | 926 (282) / 15 | 0.97x | ok |
+| send_one_channel.chz | 1 | 15 | 1034 (246) / 15 | 924 (226) / 15 | 0.89x | ok |
+| send_one_channel.chz | 2 | 15 | 454 (316) / 15 | 463 (419) / 15 | 1.02x | ok |
+| send_one_channel.chz | 0 | 15 | 1092 (117) / 15 | 1058 (252) / 15 | 0.97x | ok |
+| primes_parallel.chz | 0 | 15 | 10040 (512) / 15 | 9636 (1676) / 15 | 0.96x | ok |
+| primes_parallel.chz | 4 | 15 | 10017 (294) / 15 | 9660 (291) / 15 | 0.96x | ok |
+| primes_parallel.chz | 2 | 15 | 15258 (648) / 15 | 14981 (630) / 15 | 0.98x | ok |
+| primes_parallel.chz | 1 | 15 | 29478 (549) / 15 | 28526 (442) / 15 | 0.97x | ok |
+
+Every row is `ok`, `rendezvous_pingpong` T=1 included (0.77x unpinned, 0.79x pinned; DEC-205's
+1.30x allowance was not needed). `fan_open` is TICKET-159's shape and W15-9's landing condition.
+
+**Open cost: more runner threads than permits.** No row above has more runner threads than
+`--threads`. Two `Executor()`s with 4 CPU-burning jobs each do (8 runner threads). The cap holds,
+but the threads hand the permit over at every slice end, and CPU time doubles. Go's CPU time does
+not move. `~/.cache/hunt6/chan/p/w8.chz` (the ticket's repro) and its Go twin, one run each unless
+a range is given, release:
+
+| run | wall s | user s | voluntary switches |
+|---|---|---|---|
+| base `--threads=2` (uses 4 cores, the bug) | 1.87-1.91 | 7.43-7.55 | 31191-31511 |
+| branch `--threads=2`, n=4 | 7.82-8.94 | 15.57-17.90 | 271984-281526 |
+| branch `--threads=4` | 4.21 | 17.00 | 406538 |
+| base `--threads=1` (DEC-205's hand-over) | 15.49 | 15.31 | 148920 |
+| branch `--threads=1` | 15.57 | 15.20 | 148919 |
+| Go `GOMAXPROCS=2` | 4.26 | 8.51 | 488 |
+| Go `GOMAXPROCS=4` | 2.34 | 9.04 | 304 |
+
+One Executor plus a top-level `parallel:` (`w9.chz`) at `--threads=2`: base 1.88 s wall and 7.40 s
+user, branch 8.28 s wall and 16.47 s user. This is the T=1 hand-over cost, now paid at every T
+when runner threads outnumber permits. It is not fixed on this branch.
