@@ -8,7 +8,8 @@
 //! base `61a27a6b`: `AFTER` in 27 to 67 of 600 runs per worker count, 9 of 9 samples red.
 //! The test makes its own load: 64 children at once.
 
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -31,6 +32,35 @@ main()
 
 const RUNS: usize = 600;
 
+/// Runs the program at `threads` workers. The flag is true when the harness killed the child at
+/// ten seconds: a hang bound, not a measure.
+fn run(path: &Path, threads: &str) -> (bool, Output) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("run")
+        .arg(path)
+        .env("CHEZZI_THREADS", threads)
+        .env_remove("CHEZZI_SCHED_SEED")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chezzi");
+    // The program prints at most one short line per stream, so the pipes cannot fill before
+    // the exit.
+    let start = Instant::now();
+    let killed = loop {
+        if child.try_wait().expect("wait").is_some() {
+            break false;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    (killed, child.wait_with_output().expect("output"))
+}
+
 #[test]
 fn a_guard_freed_by_the_sched_verdict_never_lets_main_run_on() {
     let dir = std::env::temp_dir().join(format!("chz-t232-verdict-{}", std::process::id()));
@@ -45,30 +75,7 @@ fn a_guard_freed_by_the_sched_verdict_never_lets_main_run_on() {
             for _ in 0..64 {
                 sc.spawn(|| {
                     while next.fetch_add(1, Ordering::Relaxed) < RUNS {
-                        let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-                            .arg("run")
-                            .arg(&path)
-                            .env("CHEZZI_THREADS", t)
-                            .env_remove("CHEZZI_SCHED_SEED")
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::piped())
-                            .spawn()
-                            .expect("spawn chezzi");
-                        // The program prints at most one short line per stream, so the pipes
-                        // cannot fill before the exit.
-                        let start = Instant::now();
-                        let killed = loop {
-                            if child.try_wait().expect("wait").is_some() {
-                                break false;
-                            }
-                            if start.elapsed() > Duration::from_secs(10) {
-                                let _ = child.kill();
-                                break true;
-                            }
-                            std::thread::sleep(Duration::from_millis(2));
-                        };
-                        let out = child.wait_with_output().expect("output");
+                        let (killed, out) = run(&path, t);
                         let stdout = String::from_utf8_lossy(&out.stdout);
                         let stderr = String::from_utf8_lossy(&out.stderr);
                         if killed
