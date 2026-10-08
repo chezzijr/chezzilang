@@ -59,10 +59,20 @@ D6): user code never spells `Option`, `Result`, `Some`, `Ok` or `Err`. This inte
 fixes S2's class (special-cased built-ins disagreeing with the path code); S2's surface forms
 (`Result[int, str].Ok(5)`, `f := Some`) disappear with the names.
 
+**Done (TICKET-229, 2026-10-08):** the prelude's `native enum Option[T]` / `Result[T, E]` are
+registered in the ordinary enum tables; `Ty::enum_ty` / `Ty::as_enum` are the one map between the enum
+key and the carrier type; `variants_of` is the one variant reader. The surface names stay until D6
+(TICKET-228), so S2's spellings work through the ordinary-enum path today.
+
 **R3b. Variant import (Rust's `use Enum::Variant`).** `import Red, Green from Color` makes variants bare
 names in the importing module, for user enums. A bare variant is still rejected unless imported, as
 today (`'Green' is a variant of enum 'Color'; write it qualified`). `None` is the one bare carrier name
 (D1); the prelude provides it.
+
+**Done (TICKET-229, 2026-10-08):** `Import::Variants`, classified once when a file is loaded
+(`ast::classify_variant_imports`; a module that resolves wins); `Checker::imported_variants` is the only
+table that makes a bare name a variant, and the prelude feeds it with `import Some, None from Option` /
+`import Ok, Err from Result` until D6 removes the long names. Grid: `tests/carrier_enum_grid.rs`.
 
 **R4. A fn value is (item, type args).** Rust's fn item value is its `DefId` + substitutions, and
 equality follows from that. Chezzi:

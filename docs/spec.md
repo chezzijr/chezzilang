@@ -35,7 +35,12 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 
 **Core:** `int float bool str`, `List[T]`, `Map[K,V]`, `Set[T]`, `tuple`, `fn`, `struct`, `enum`,
 `if/else`, `for/while`, `Result[T, E]` & `Option[T]` + `?`, closures (`fn(x): x*2`), built-in generics
-(`List`/`Map`/`Set`/`Result`). `Result[T, E]` is two-param: `T!` = `Result[T, Error]`, `T!E` =
+(`List`/`Map`/`Set`/`Result`). `Option` and `Result` are ordinary enums the prelude declares
+(`native enum Option[T]` / `Result[T, E]`), and the prelude imports their variants as bare names
+(`import Some, None from Option`, `import Ok, Err from Result`), so paths, patterns and
+exhaustiveness treat them like a user enum (`Option[int].None`, `Result[int, str].Ok(5)`,
+`f := Some`); any module can do the same for its own enum with `import Red, Green from Color`
+([`syntax.md` §12 "Variant import"](syntax.md)). `Result[T, E]` is two-param: `T!` = `Result[T, Error]`, `T!E` =
 `Result[T, E]`, `T?` = `Option[T]`, `T??` = `Option[Option[T]]` (E defaults to the built-in `Error`
 protocol); `None` as a type means "returns nothing" and `None!E` = `Result[nil, E]`, whose bare `return`
 or fall-off is `Ok()`. A plain success value at ANY typed slot (binding, assignment, argument, field,

@@ -146,7 +146,9 @@ is open (R3).
     or `fn(..)`.
   - **Single source:** the parser keeps both readings from the one type grammar (`Index.as_type`, as
     `bracket_expression` `:3095` already does for calls). `index_as_type` is deleted.
-- **S2, built-in enums are not ordinary enums.**
+- **S2, built-in enums are not ordinary enums.** **Fixed (TICKET-229, 2026-10-08):** the prelude's
+  `Option` / `Result` decls are registered as ordinary enums and every decider listed below is
+  deleted; the lines that follow describe the code before that fix.
   - `type_head` (`src/checker/setup.rs:2615`) answers from `struct_names`/`enum_names`.
   - `Option`/`Result` live instead in inline `variants_of` arms (`sig.rs:6061-6090`), a prelude mirror
     with a drift `debug_assert` (`setup.rs:1185-1222`), `builtin_ok` (`pattern.rs:4176`), `resolve_type`

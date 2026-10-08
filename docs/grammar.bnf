@@ -111,6 +111,9 @@
 
 # An un-aliased `import a.b` binds `b` AND the full path `a.b` (TICKET-175); `import a.b as c` binds
 # only `c`. `import math from std` names std's module `math` (Python's `from os import path`).
+# In `import V from X`, a one-segment `X` may name an ENUM of this file (declared or from-imported)
+# when no module `X` resolves: the names are then its variants, bound bare (TICKET-229). The
+# grammar is the same; the loader decides which one it is.
 <importStmt> ::= "IMPORT" <dottedPath> "NEWLINE"
                | "IMPORT" <dottedPath> "AS" "IDENT" "NEWLINE"
                | "IMPORT" <importNames> "FROM" <dottedPath> "NEWLINE"

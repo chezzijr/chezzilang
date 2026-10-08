@@ -4594,6 +4594,40 @@ core.db.pool.get()               # …or by its full path (un-aliased import onl
 import math from std             # a std module by name, like `import std.math` (Python `from os import path`)
 ```
 
+### Variant import  (TICKET-229)
+
+`import V from Enum` makes an enum variant a bare name in the importing module (Rust's
+`use Enum::Variant`). The enum is one this file declares, or a name a from-import of this file binds.
+
+```chezzi
+enum Color:
+    Red
+    Green
+import Red, Green from Color     # variants become bare names here
+print(Red, Green)                # Red Green
+match Color.Red:
+    Red: print("r")              # a bare imported variant is a pattern head too
+    Green: print("g")
+import Green as G from Color     # an alias binds `G` to `Color.Green`
+import Red from Color            # error: 'Red' is already imported (one bind per name)
+```
+
+- **Not imported, not bare.** `print(Green)` without the import is `'Green' is a variant of enum
+  'Color'; write it qualified as 'Color.Green'`.
+- **A module wins.** `import Point from geo` is a module import whenever a module `geo` resolves;
+  it is a variant import only when none does. `import V from a.b` (a dotted path) is always a module.
+- **Collisions.** A variant import and a same-module `fn`, `struct`, `enum`, alias or protocol of
+  the same name, or a second import of the name, is `'V' is already imported` (Rust: E0255 / E0252).
+- **Shadowing.** A local or a top-level `x := …` binding of the same name shadows the variant, as it
+  shadows a from-imported fn.
+- **`Option` and `Result` are prelude enums.** The prelude declares them and imports their four
+  variants (`import Some, None from Option`, `import Ok, Err from Result`), so `Some(1)`, `None`,
+  `Ok(1)`, `Err(e)` are bare in every module, and the qualified and type-applied spellings work
+  like a user enum's: `Option.Some(1)`, `Option[int].None`, `Result[int, str].Ok(5)`, `f := Some`,
+  `[1, 2].map(Some)`, `type F = Option[int]` then `F.Some(1)`. A user `fn`, global or local named
+  like one of the four shadows it. An explicit `import Some from Mine` is rejected (`'Some' is
+  already imported from Option by the prelude`).
+
 **Resolution:** walk up from the file for `chezzi.toml`; found → that's the project root, else the
 script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/c.chz`. No `./` relative imports.
 

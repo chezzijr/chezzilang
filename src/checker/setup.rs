@@ -1235,7 +1235,7 @@ impl Checker {
 
     /// Phase 5c-protocols — harvest the SHAPE of a reserved protocol declared in `std/prelude.chz` as a
     /// plain `protocol` decl (its `type_params`, `embeds`, and method `FnSig`s), WITHOUT inserting it
-    /// into `self.protocols` or emitting any error. Mirrors [`harvest_native_enum_table`] but for a
+    /// into `self.protocols` or emitting any error. It reads a
     /// `StmtKind::Protocol`, replicating the exact `Self` + own-type-param scope [`hoist_protocol`] uses
     /// to resolve the method sigs (`self` → `Ty::Unknown`, `Self`/own params → `Ty::Param`). Used ONLY by
     /// the always-on debug DRIFT GUARD [`assert_native_protocol_shape_matches`] to prove the file-backed
@@ -4454,8 +4454,8 @@ impl Checker {
             // additionally parks UN-LICENSED stdlib layouts (`Match`/`Response`/…) in it, which would
             // over-reject an extern whose owning std module was never imported). Same predicate the
             // nested-fn collision guard uses. Plus enum *variant* names (`variant_owners`), the four
-            // BUILTIN `Result`/`Option` variant ctors (absent from `variant_owners` — their identity
-            // lives in `resolve_type`). ENUMERATE the whole
+            // prelude `Result`/`Option` variant names (a binder reservation of its own, kept until
+            // TICKET-228 removes those names from the surface). ENUMERATE the whole
             // bare-visible ctor set here — a predicate that covers only SOME of its sources is the
             // very partial-coverage class this sweep exists to close.
             // NOT a collision: an enum/`Result`/`Option` *type* name (not callable in either engine,
