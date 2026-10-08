@@ -1058,7 +1058,7 @@ impl Checker {
             })
             .collect();
         let ret = match &decl.ret {
-            Some(t) => self.resolve_type(t, decl.span),
+            Some(t) => self.resolve_ret_type(t, decl.span),
             None => Ty::Unknown,
         };
         // TICKET-202: resolve the bounds BEFORE the scope closes, while the enclosing native
@@ -1279,7 +1279,7 @@ impl Checker {
                         let ret = m
                             .ret
                             .as_ref()
-                            .map(|t| self.resolve_type(t, s.span))
+                            .map(|t| self.resolve_ret_type(t, s.span))
                             .unwrap_or(Ty::Nil);
                         let mut sig = FnSig::plain(params, ret);
                         sig.labels = super::proto::protocol_labels(&m.params);
@@ -4198,7 +4198,7 @@ impl Checker {
                             .collect();
                         let ret = match &ef.ret {
                             Some(t) => {
-                                let ty = self.resolve_type(t, ef.span);
+                                let ty = self.resolve_ret_type(t, ef.span);
                                 // The return slot may be `nil` (void) in addition to the C scalars.
                                 // Deferred to the post-loop sweep (a by-value struct return may be
                                 // declared after this extern block).
@@ -4498,7 +4498,7 @@ impl Checker {
             })
             .collect();
         let ret = match &decl.ret {
-            Some(t) => self.resolve_type(t, decl.span),
+            Some(t) => self.resolve_ret_type(t, decl.span),
             None => Ty::Unknown,
         };
         self.exit_type_params(saved_tps);

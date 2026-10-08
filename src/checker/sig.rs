@@ -4,6 +4,15 @@
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
+/// Where a spelled type sits: `None` ("returns nothing") is a type only in a `Void` position.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum TypePos {
+    /// A value position: a parameter, a field, an element, a type argument.
+    Value,
+    /// A declared return, a fn-type return, the success side of a carrier.
+    Void,
+}
+
 impl Checker {
     /// The seed at the decl-site default resolves a provider's binders only where the hint actually
     /// REACHES — it is a single slot, drained by the first consumer, so in `idl(mkl())` the outer
@@ -151,7 +160,7 @@ impl Checker {
         let ret = decl
             .ret
             .as_ref()
-            .map(|t| self.resolve_type(t, span))
+            .map(|t| self.resolve_ret_type(t, span))
             .unwrap_or(Ty::Unknown);
         // TICKET-202: bounds resolve HERE, in the declaration's scope (the receiver's params are
         // entered by the type hoist), and never again at a use site.
@@ -1830,13 +1839,38 @@ impl Checker {
     }
 
     pub(super) fn resolve_type(&mut self, t: &Type, span: Span) -> Ty {
+        self.resolve_type_at(t, span, TypePos::Value)
+    }
+
+    /// [`Self::resolve_type`] for a position where `None` ("returns nothing") is legal: a declared
+    /// return, a fn-type return, the success side of a carrier.
+    pub(super) fn resolve_ret_type(&mut self, t: &Type, span: Span) -> Ty {
+        self.resolve_type_at(t, span, TypePos::Void)
+    }
+
+    /// Resolve a spelled type at `pos`. `resolve_type` is the value-position default, so a new
+    /// container or annotation site rejects `None` with no edit.
+    pub(super) fn resolve_type_at(&mut self, t: &Type, span: Span, pos: TypePos) -> Ty {
         match t {
             Type::Named {
                 name: n,
                 span: name_span,
             } => {
                 let resolved = match n.as_str() {
-                    s if let Some(t) = Self::scalar_bound_ty(s) => t,
+                    // The one arm that resolves the name `None`: it is no value type, so every
+                    // value position rejects it here.
+                    s if let Some(t) = Self::scalar_bound_ty(s) => {
+                        if t == Ty::Nil && pos == TypePos::Value {
+                            self.error(
+                                span,
+                                "'None' is not a value type: None means \"returns nothing\" and is \
+                                 legal only as a return type or as the success side of `None!E`",
+                            );
+                            Ty::Unknown
+                        } else {
+                            t
+                        }
+                    }
                     // A generic type parameter (`T`) or `Self`, in scope while checking a generic fn
                     // signature/body or a protocol method. Resolved BEFORE every reserved/module name
                     // below (ptr / owned_str / Executor / Shared|RwShared|Atomic / Socket / Listener)
@@ -2018,7 +2052,8 @@ impl Checker {
                         } else {
                             let aliased = self.aliases[n].clone();
                             self.alias_resolving.push(n.clone());
-                            let ty = self.resolve_type(&aliased, span);
+                            // An alias expands at the position of its USE.
+                            let ty = self.resolve_type_at(&aliased, span, pos);
                             self.alias_resolving.pop();
                             ty
                         }
@@ -2128,7 +2163,12 @@ impl Checker {
                             .iter()
                             .any(|e| e.span == at && e.message == attributed)
                         {
-                            let help = suggest::did_you_mean(n, &self.type_names());
+                            // `nil` was the old spelling of `None`; too far for the suggester.
+                            let help = if n == "nil" {
+                                Some("did you mean 'None'?".to_string())
+                            } else {
+                                suggest::did_you_mean(n, &self.type_names())
+                            };
                             self.error_help(at, msg, help);
                         }
                         Ty::Unknown
@@ -2170,7 +2210,7 @@ impl Checker {
                 labels,
             } => Ty::Func {
                 params: params.iter().map(|p| self.resolve_type(p, span)).collect(),
-                ret: Box::new(self.resolve_type(ret, span)),
+                ret: Box::new(self.resolve_ret_type(ret, span)),
                 // Carry the annotation's optional labels onto the type (surface-only), so a value call
                 // through e.g. a HOF param `f: fn(name: str) -> nil` can resolve `f(name="X")`.
                 labels: FnLabels::new(labels.clone()),
@@ -2285,8 +2325,20 @@ impl Checker {
                     // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
                     _ if self.enum_names.contains(n) => {
                         let key = self.bare_key(n);
-                        let resolved: Vec<Ty> =
-                            args.iter().map(|a| self.resolve_type(a, span)).collect();
+                        // The success side of a carrier may be `None` (`None!E`; `None?` has
+                        // its own reject below).
+                        let carrier = key == "Option" || key == "Result";
+                        let resolved: Vec<Ty> = args
+                            .iter()
+                            .enumerate()
+                            .map(|(i, a)| {
+                                if carrier && i == 0 {
+                                    self.resolve_ret_type(a, span)
+                                } else {
+                                    self.resolve_type(a, span)
+                                }
+                            })
+                            .collect();
                         let resolved = self.carrier_default_args(&key, resolved);
                         if key == "Option" && resolved.first() == Some(&Ty::Nil) {
                             self.error(
@@ -3252,7 +3304,7 @@ impl Checker {
                 if self.hover_probe.is_some()
                     && let Some(body) = self.aliases.get(name).cloned()
                 {
-                    let ty = self.resolve_type(&body, *name_span);
+                    let ty = self.resolve_ret_type(&body, *name_span);
                     self.hover_record_at(*name_span, &ty, HoverKind::Struct, doc.clone());
                 }
             }
@@ -4768,7 +4820,7 @@ impl Checker {
                     None
                 };
                 self.record_ret_coerce(span, mode);
-                if mode.is_none() && ret != Ty::Nil {
+                if mode.is_none() && ret != Ty::Nil && !ret.is_unknown() {
                     self.error(span, format!("expected a return value of type {ret}"));
                 }
             }

@@ -5934,7 +5934,7 @@ impl Checker {
         // errors). Mirrors `check_fn_body`'s `current_ret` handling. An expected (slot) return type
         // supplies that context when the closure is unannotated.
         let declared_ret = ret
-            .map(|t| self.resolve_type(t, body.span))
+            .map(|t| self.resolve_ret_type(t, body.span))
             .or_else(|| exp_ret.clone().filter(|r| !r.is_unknown()))
             .unwrap_or(Ty::Unknown);
         let saved_ret = std::mem::replace(&mut self.current_ret, declared_ret);
@@ -6075,7 +6075,7 @@ impl Checker {
         self.gen_frame = saved_gf;
         let ret_ty = match ret {
             Some(t) => {
-                let declared = self.resolve_type(t, body.span);
+                let declared = self.resolve_ret_type(t, body.span);
                 // The body owned the declared return as its slot, so a wrapped body already has
                 // the declared type (TICKET-227).
                 if !self.assignable(&declared, &body_ty) {

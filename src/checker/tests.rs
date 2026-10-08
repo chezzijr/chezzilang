@@ -19270,7 +19270,7 @@ fn extern_callback_nil_param_still_rejected() {
     // lowering and must stay rejected.
     rejects(
         "extern \"libt.so\":\n    fn each(n: int, f: fn(None) -> int)\n",
-        "not C-marshallable",
+        "'None' is not a value type",
     );
 }
 
@@ -20582,7 +20582,7 @@ fn extern_nil_param_rejected() {
     // void-returning extern yields a `Nil` value, which would otherwise satisfy a `nil` param.
     rejects(
         "extern \"libc.so.6\":\n    fn f(x: None) -> int\n",
-        "not C-marshallable",
+        "'None' is not a value type",
     );
 }
 
@@ -38586,4 +38586,124 @@ fn prefix_error_type_grid() {
             );
         }
     }
+}
+
+/// TICKET-228 — `None` as a TYPE means "returns nothing": legal as a return type and as the
+/// success side of `None!E`, rejected in every value position. The whole position grid.
+#[test]
+fn none_type_position_grid() {
+    const MSG: &str = "'None' is not a value type";
+    // Value positions: exactly one error, and it is this one.
+    let reject_once = [
+        ("List", "fn f(x: List[None]):\n    print(1)\n"),
+        ("Map value", "x: Map[str, None] = {}\n"),
+        ("Channel", "fn f(c: Channel[None]):\n    print(1)\n"),
+        ("Iterator", "fn f(c: Iterator[None]):\n    print(1)\n"),
+        ("tuple element", "fn f(x: (int, None)):\n    print(1)\n"),
+        (
+            "fn-type parameter",
+            "fn f(g: fn(None) -> int):\n    print(1)\n",
+        ),
+        ("variant payload", "enum E:\n    A(None)\n    B\n"),
+        ("struct field", "struct S:\n    x: None\n"),
+        ("parameter", "fn f(x: None):\n    print(1)\n"),
+        (
+            "error side of T!E",
+            "fn f(g: fn() -> int!None):\n    print(1)\n",
+        ),
+        (
+            "alias of None as an element",
+            "type V = None\nfn f(x: List[V]):\n    print(1)\n",
+        ),
+        (
+            "alias of None as a parameter",
+            "type V = None\nfn f(x: V):\n    print(1)\n",
+        ),
+        (
+            "alias body, at its use",
+            "type V = List[None]\nfn f(x: V):\n    print(1)\n",
+        ),
+    ];
+    for (label, src) in reject_once {
+        let errs = check_src(src);
+        assert_eq!(errs.len(), 1, "{label}: {errs:?}");
+        assert!(errs[0].message.contains(MSG), "{label}: {errs:?}");
+    }
+    // Value positions where the unresolved type may add a follow-on error: this one is among them.
+    for (label, src) in [
+        ("let annotation", "fn g():\n    print(1)\nx: None = g()\n"),
+        (
+            "turbofish",
+            "fn id[T](x: T) -> T:\n    return x\nfn main():\n    print(id[None](1))\n",
+        ),
+        ("Set", "fn f(x: Set[None]):\n    print(1)\n"),
+    ] {
+        rejects(src, MSG);
+        let _ = label;
+    }
+    // Every return-type holder, the success side of a carrier, and positions that spell no
+    // value type.
+    for (label, src) in [
+        ("top-level fn", "fn f() -> None:\n    print(1)\n"),
+        (
+            "method",
+            "struct S:\n    x: int\n    fn m(self) -> None:\n        print(self.x)\n",
+        ),
+        (
+            "protocol requirement",
+            "protocol P:\n    fn m(self) -> None\n",
+        ),
+        (
+            "nested fn",
+            "fn f():\n    fn g() -> None:\n        print(1)\n    g()\n",
+        ),
+        (
+            "extern fn",
+            "extern \"libc.so.6\":\n    fn srand(seed: int) -> None\n\nsrand(1)\n",
+        ),
+        ("lambda", "h := fn() -> None: print(1)\nh()\n"),
+        (
+            "lambda against an expected fn type",
+            "fn run(g: fn() -> None):\n    g()\nrun(fn() -> None: print(1))\n",
+        ),
+        ("None!E return", "fn f() -> None!str:\n    return\n"),
+        ("prefix !E return", "fn f() -> !str:\n    return\n"),
+        ("fn-type return", "fn run(g: fn() -> None):\n    g()\n"),
+        (
+            "alias of None as a return",
+            "type V = None\nfn f() -> V:\n    print(1)\n",
+        ),
+        ("unused alias body", "type V = List[None]\nprint(1)\n"),
+        (
+            "None!E as an element",
+            "fn f(x: List[None!str]):\n    print(1)\n",
+        ),
+        ("None!E as a parameter", "fn f(x: !str):\n    print(1)\n"),
+    ] {
+        let errs = check_src(src);
+        assert!(errs.is_empty(), "{label}: {errs:?}");
+    }
+    // DEC-231's own reject keeps its own text.
+    rejects("x: None? = 5\n", "'None?' is not a type");
+}
+
+/// TICKET-228 — an unknown return type reports once, with the `None` hint for `nil`.
+#[test]
+fn unknown_return_type_reports_once() {
+    let errs = check_src("fn f() -> nil:\n    return\n");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].message.contains("unknown type 'nil'"), "{errs:?}");
+    assert_eq!(
+        errs[0].help.as_deref(),
+        Some("did you mean 'None'?"),
+        "{errs:?}"
+    );
+    // A genuine near miss keeps the suggester's own help.
+    let errs = check_src("fn f() -> Eror:\n    return\n");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert_eq!(
+        errs[0].help.as_deref(),
+        Some("did you mean 'Error'?"),
+        "{errs:?}"
+    );
 }

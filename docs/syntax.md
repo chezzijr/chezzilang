@@ -653,6 +653,9 @@ what each call head means and the backend reads that record, so the local wins a
 Diagnostics print a type in this shorthand: `int?`, `str!IoErr`, `int!` (E = `Error`), `!E`.
 The prefix type `!E` is `None!E` (and a bare `!` is `None!`): a fallible call with no value, as in
 `fn save(p: str) -> !IoErr`. Both spellings are one type.
+As a type, `None` means "returns nothing". It is legal only as a return type (`-> None`,
+`fn() -> None`) and as the success side of `None!E`. Every value position rejects it
+(`List[None]`, `x: None`, `int!None`): `'None' is not a value type`.
 
 > **Naming.** The three builtin containers spell their type **and** constructor in PascalCase —
 > `List`/`Map`/`Set` (e.g. `List[int]`, `Set(xs)`). The lowercase `list`/`map`/`set` are no longer

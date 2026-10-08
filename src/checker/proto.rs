@@ -625,7 +625,7 @@ impl Checker {
                 let ret = m
                     .ret
                     .as_ref()
-                    .map(|t| self.resolve_type(t, span))
+                    .map(|t| self.resolve_ret_type(t, span))
                     .unwrap_or(Ty::Nil);
                 // A protocol method whose first param is NOT `self` (or which has no params) is a STATIC
                 // (associated) requirement — mirrors `Checker::fn_sig`'s rule for concrete methods. This
