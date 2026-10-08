@@ -487,15 +487,15 @@ main()";
 #[test]
 fn value_propagated_by_try_survives() {
     let src = "\
-fn d() -> Result[str]:
-    return Err(str(99))
-fn use() -> Result[str]:
+fn d() -> str!:
+    return !str(99)
+fn use() -> str!:
     x := d()?
-    return Ok(x)
+    return ?x
 fn main():
     match use():
-        Ok(v): print(v)
-        Err(e): print(\"got {e}\")
+        ?v: print(v)
+        !e: print(\"got {e}\")
 main()";
     assert_eq!(run_capture_stress(src), "got 99\n");
 }

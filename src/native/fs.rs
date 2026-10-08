@@ -874,9 +874,9 @@ mod tests {
         match r {
             NativeRet::Ok(inner) => match *inner {
                 NativeRet::Bytes(b) => String::from_utf8(b).expect("utf-8 fixture path"),
-                other => panic!("expected Ok(Bytes), got Ok({other:?})"),
+                other => panic!("expected ?Bytes, got ?{other:?}"),
             },
-            other => panic!("expected Ok(Bytes), got {other:?}"),
+            other => panic!("expected ?Bytes, got {other:?}"),
         }
     }
 
@@ -953,9 +953,9 @@ mod tests {
         match r {
             NativeRet::Ok(inner) => match *inner {
                 NativeRet::Struct { name, fields } => (name, fields),
-                other => panic!("expected Ok(Struct), got Ok({other:?})"),
+                other => panic!("expected ?Struct, got ?{other:?}"),
             },
-            other => panic!("expected Ok(Struct), got {other:?}"),
+            other => panic!("expected ?Struct, got {other:?}"),
         }
     }
 
@@ -1017,9 +1017,9 @@ mod tests {
                         other => panic!("expected Bytes item, got {other:?}"),
                     })
                     .collect(),
-                other => panic!("expected Ok(List), got Ok({other:?})"),
+                other => panic!("expected ?List, got ?{other:?}"),
             },
-            other => panic!("expected Ok(List), got {other:?}"),
+            other => panic!("expected ?List, got {other:?}"),
         }
     }
 

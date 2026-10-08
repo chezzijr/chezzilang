@@ -25,8 +25,8 @@ fn cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers() {
                         spawn:\n                            \
                             never.recv()\n            \
                 match r:\n                \
-                    Ok(_): print(\"inner ok\")\n                \
-                    Err(e): print(\"inner err\")\n            \
+                    ?_: print(\"inner ok\")\n                \
+                    !e: print(\"inner err\")\n            \
                 x.send(1)\n        \
             spawn:\n            \
                 parallel:\n                \

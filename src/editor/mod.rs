@@ -1405,12 +1405,8 @@ mod tests {
     #[test]
     fn hover_prints_carrier_sugar() {
         // A hover reads the one type renderer, so it shows the sugar the user writes.
-        let h = hov(
-            "fn f(x: Map[str, Result[int, str]]):\n    print(x)\n",
-            1,
-            10,
-        )
-        .expect("hover on param body use");
+        let h = hov("fn f(x: Map[str, int!str]):\n    print(x)\n", 1, 10)
+            .expect("hover on param body use");
         assert_eq!(h.display, "Map[str, int!str]");
     }
 

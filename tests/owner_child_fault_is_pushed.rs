@@ -52,10 +52,10 @@ fn child_fault_cuts_owner_blocked_in_socket_read() {
     let src = [
         "import std.net",
         "import std.time",
-        "fn must[T](r: Result[T]) -> T:",
+        "fn must[T](r: T!) -> T:",
         "    match r:",
-        "        Ok(v): return v",
-        "        Err(e): panic(e.message())",
+        "        ?v: return v",
+        "        !e: panic(e.message())",
         "ln := must(net.listen(\"127.0.0.1:0\"))",
         "c := must(net.connect(must(ln.addr())))",
         "peer := must(ln.accept())",

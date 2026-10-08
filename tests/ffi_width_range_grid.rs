@@ -240,8 +240,8 @@ fn program(prelude: &str, cells: &[Cell]) -> String {
     );
     for (i, c) in cells.iter().enumerate() {
         src.push_str(&format!(
-            "r{i} := recover: {}\nmatch r{i}:\n    Ok(x): print(\"{} ok \" + str(x))\n    \
-             Err(e): print(\"{} err \" + e.message())\n",
+            "r{i} := recover: {}\nmatch r{i}:\n    ?x: print(\"{} ok \" + str(x))\n    \
+             !e: print(\"{} err \" + e.message())\n",
             c.expr, c.name, c.name
         ));
     }

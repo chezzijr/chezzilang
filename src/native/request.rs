@@ -582,7 +582,7 @@ mod tests {
     /// Pull a named field out of a lowered `Response` struct `NativeRet` (test helper).
     fn field<'a>(ret: &'a NativeRet, key: &str) -> &'a NativeRet {
         let NativeRet::Ok(inner) = ret else {
-            panic!("expected Ok(Response), got {ret:?}");
+            panic!("expected ?Response, got {ret:?}");
         };
         let NativeRet::Struct { name, fields } = inner.as_ref() else {
             panic!("expected Struct, got {inner:?}");

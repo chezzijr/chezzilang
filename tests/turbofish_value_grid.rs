@@ -795,7 +795,7 @@ fn native_cells(out: &mut Vec<Cell>) {
     ));
     out.push(main_only(
         "native_hof",
-        "import std.io\nfn ap(f: fn(io.Reader) -> Result[None]) -> int:\n    return 0\nprint(ap(io.Reader.close))",
+        "import std.io\nfn ap(f: fn(io.Reader) -> None!) -> int:\n    return 0\nprint(ap(io.Reader.close))",
         not_value(),
     ));
     out.push(main_only(
@@ -890,11 +890,11 @@ const BPRE: &str = "import std.json
 import std.math
 import lib
 import Bx, E from lib
-fn okv[T](r: Result[T]) -> T:
+fn okv[T](r: T!) -> T:
     match r:
-        Ok(v):
+        ?v:
             return v
-        Err(e):
+        !e:
             panic(e.message())
 fn un[T](e: E[T]) -> T:
     match e:
@@ -983,7 +983,7 @@ fn bracket_grid_cells(out: &mut Vec<Cell>) {
                 "json" => (
                     String::new(),
                     format!("json.decode[{x}]"),
-                    format!("fn(str) -> Result[{x}]"),
+                    format!("fn(str) -> {x}!"),
                     format!("r'{jv}'"),
                     "okv",
                 ),

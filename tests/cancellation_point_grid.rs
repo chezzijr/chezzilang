@@ -346,12 +346,12 @@ fn ops() -> Vec<Op> {
             out: "Channel[int](1)",
             ready: Some((
                 "src.send(7)",
-                "match src.try_recv():\n    Some(x): got.add(x)\n    None: pass",
+                "match src.try_recv():\n    ?x: got.add(x)\n    None: pass",
                 "got.load() == 7",
             )),
             wait: Some((
                 "",
-                "match src.try_recv():\n    Some(x): got.add(x)\n    None: pass",
+                "match src.try_recv():\n    ?x: got.add(x)\n    None: pass",
                 "after.load() == 1",
                 None,
             )),
@@ -471,7 +471,7 @@ const HOOKS: [(&str, &str); 12] = [
     ("str hook", "if str(PS(v)) == \"P\":\n    got.add(7)"),
     (
         "generator .next()",
-        "g := gen(v)\nmatch g.next():\n    Some(x): got.add(x)\n    None: pass",
+        "g := gen(v)\nmatch g.next():\n    ?x: got.add(x)\n    None: pass",
     ),
     (
         "for x in struct iter()",
@@ -492,8 +492,8 @@ const SUBMIT_RESULT_ROUND: &str = "fn round() -> bool:
     ex.shutdown_now()
     ok := false
     match o.try_recv():
-        Some(Ok(x)): ok = x == 7
-        Some(Err(_)): pass
+        ?(?x): ok = x == 7
+        ?(!_): pass
         None: pass
     return ok
 ";

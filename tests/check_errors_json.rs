@@ -1174,7 +1174,7 @@ fn a_later_unannotated_literal_of_the_same_type_still_reports() {
 #[test]
 fn errors_json_prints_carrier_sugar() {
     let t = TmpDir::new();
-    let main = t.write("main.chz", "x: Option[Option[int]] = true\n");
+    let main = t.write("main.chz", "x: int?? = true\n");
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .args(["check", main.to_str().unwrap(), "--errors=json"])
         .output()

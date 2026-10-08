@@ -2960,10 +2960,10 @@ struct Suite:
                      _ := server.accept()\n\
                  test fn t():\n    \
                      match net.listen(\"127.0.0.1:0\"):\n        \
-                         Ok(server):\n            \
+                         ?server:\n            \
                              parallel:\n                \
                                  spawn serve(server)\n        \
-                         Err(e): print(\"NOLISTEN\")\n    \
+                         !e: print(\"NOLISTEN\")\n    \
                      assert false, \"SWALLOWED\"\n",
             ),
             (
@@ -2971,8 +2971,8 @@ struct Suite:
                 "import std.net\n\
                  fn dial():\n    \
                      match net.connect(\"192.0.2.1:9\"):\n        \
-                         Ok(s): print(\"CONNECTED\")\n        \
-                         Err(e): print(\"REFUSED\")\n\
+                         ?s: print(\"CONNECTED\")\n        \
+                         !e: print(\"REFUSED\")\n\
                  test fn t():\n    \
                      parallel:\n        \
                          spawn dial()\n    \
@@ -3026,27 +3026,27 @@ struct Suite:
             "import std.net\n\
              fn serve(server: Listener):\n    \
                  match server.accept():\n        \
-                     Ok(conn):\n            \
+                     ?conn:\n            \
                          defer:\n                \
                              match conn.write(\"bye\"):\n                    \
-                                 Ok(n): print(\"DEFER-WROTE {n}\")\n                    \
-                                 Err(e): print(\"DEFER-ERR:\" + e.message())\n            \
+                                 ?n: print(\"DEFER-WROTE {n}\")\n                    \
+                                 !e: print(\"DEFER-ERR:\" + e.message())\n            \
                          _ := conn.read(64)\n        \
-                     Err(e): print(\"NOACCEPT\")\n\
+                     !e: print(\"NOACCEPT\")\n\
              fn client(addr: str):\n    \
                  match net.connect(addr):\n        \
-                     Ok(sock): _ := sock.read(64)\n        \
-                     Err(e): print(\"NOCONNECT\")\n\
+                     ?sock: _ := sock.read(64)\n        \
+                     !e: print(\"NOCONNECT\")\n\
              fn body():\n    \
                  match net.listen(\"127.0.0.1:0\"):\n        \
-                     Ok(server):\n            \
+                     ?server:\n            \
                          match server.addr():\n                \
-                             Ok(addr):\n                    \
+                             ?addr:\n                    \
                                  parallel:\n                        \
                                      spawn serve(server)\n                        \
                                      spawn client(addr)\n                \
-                             Err(e): print(\"NOADDR\")\n        \
-                     Err(e): print(\"NOLISTEN\")\n\
+                             !e: print(\"NOADDR\")\n        \
+                     !e: print(\"NOLISTEN\")\n\
              test fn t():\n    \
                  body()\n    \
                  assert false, \"SWALLOWED\"\n",
@@ -3275,8 +3275,8 @@ struct Suite:
             "import std.net\n\
              test fn t():\n    \
                  match net.connect(\"192.0.2.1:9\"):\n        \
-                     Ok(s): print(\"CONNECTED\")\n        \
-                     Err(e): print(\"ERR:\" + e.message())\n    \
+                     ?s: print(\"CONNECTED\")\n        \
+                     !e: print(\"ERR:\" + e.message())\n    \
                  assert false, \"SWALLOWED\"\n",
         );
         let (text, passed) = run_tests_timed_watchdog("netconnecttop_test.chz", &f, 300);
@@ -3314,15 +3314,15 @@ struct Suite:
             "import std.net\n\
              fn serve(server: Listener, out: Channel[str]):\n    \
                  match server.accept(150):\n        \
-                     Ok(conn): out.send(\"UNEXPECTED CONNECTION\")\n        \
-                     Err(e): out.send(\"ERR:\" + e.message())\n\
+                     ?conn: out.send(\"UNEXPECTED CONNECTION\")\n        \
+                     !e: out.send(\"ERR:\" + e.message())\n\
              test fn t():\n    \
                  out := Channel[str](1)\n    \
                  match net.listen(\"127.0.0.1:0\"):\n        \
-                     Ok(server):\n            \
+                     ?server:\n            \
                          parallel:\n                \
                              spawn serve(server, out)\n        \
-                     Err(e): out.send(\"NOLISTEN\")\n    \
+                     !e: out.send(\"NOLISTEN\")\n    \
                  assert out.recv() == \"ERR:timeout\"\n",
         );
         let (text, passed) = run_tests_timed_watchdog("netcatch_test.chz", &f, 5000);

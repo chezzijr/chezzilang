@@ -436,6 +436,7 @@
                 | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" "RPAREN"
                 | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
+                | <carrierPattern>
                 | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
 # A leading "MINUS" makes the int literal / range bound negative (int-only — there is no float
@@ -461,10 +462,17 @@
                 | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" "RPAREN"
                 | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
+                | <carrierPattern>
                 | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE"
                 | "INT" "DOTDOT" "INT"
 <subpatterns> ::= <subpattern> | <subpattern> "COMMA" <subpatterns>
 <tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN"
+# A carrier pattern compares the outer tag and binds inside it: `?v` is a present `T?` or a
+# successful `T!E`, `!e` is the error of a `T!E`. The operand is one sub-pattern primary, so an
+# or-alternation or a tuple payload takes parentheses (`?(a | b)`, `?(a, b)`); `??v` is `?(?v)`.
+<carrierPattern> ::= "QUESTION" <subpatternPrimary>
+                | "BANG" <subpatternPrimary>
+                | "QUESTIONQUESTION" <subpatternPrimary>
 
 # ===== types =====
 # Postfix sugar on a base type: `T?` = Option[T], `T!` = Result[T, Error], `T!E` = Result[T, E]

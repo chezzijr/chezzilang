@@ -208,8 +208,8 @@ fn wr():
 fn wr_recovered():
     r := recover: xs.push(9)
     match r:
-        Ok(_): out.send(\"no fault\")
-        Err(e): out.send(e.message())
+        ?_: out.send(\"no fault\")
+        !e: out.send(e.message())
 fn parked():
     hs.send(1)
     _ := stuck.recv()
@@ -395,8 +395,8 @@ fn cancel_reaches_every_party() {
 const HANDLE_DECLS: &str = "fn h(e: Executor):
     t := submit_task(e, bad_int)
     match t.get():
-        Ok(_): print(\"ok\")
-        Err(x): print(\"err \" + x.message())
+        ?_: print(\"ok\")
+        !x: print(\"err \" + x.message())
     hs.send(1)
 fn h_own():
     e := Executor()
@@ -784,8 +784,8 @@ fn the_grid_holds_inside_a_test_fn() {
             body.extend([
                 "t := submit_task(ex, bad_int)",
                 "match t.get():",
-                "    Ok(_): assert false",
-                "    Err(e): assert e.message().contains(\"boom\")",
+                "    ?_: assert false",
+                "    !e: assert e.message().contains(\"boom\")",
                 "$S(parked)",
                 "hs.recv()",
                 "ex.shutdown_now()",

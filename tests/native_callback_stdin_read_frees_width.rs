@@ -28,7 +28,7 @@ fn main():
             ys := [40000000].map(fn(n: int) -> int: spin(n))
             print("map done")
             ch.send(1)
-            zs := [1].map(fn(k: int) -> Option[str]: io.input(""))
+            zs := [1].map(fn(k: int) -> str?: io.input(""))
             print("read done")
         spawn:
             v := ch.recv()

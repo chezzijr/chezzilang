@@ -1901,7 +1901,7 @@ mod tests {
     /// TICKET-180 — renumbering the clone clears the duplicates.
     #[test]
     fn renumber_clears_a_duplicate() {
-        let mut m = parse_module("match x:\n    Some(y): print(y)\n    None: pass\n");
+        let mut m = parse_module("match x:\n    ?y: print(y)\n    None: pass\n");
         let mut copy = m.stmts[0].clone();
         match &mut copy.kind {
             StmtKind::Match { scrutinee, arms } => {

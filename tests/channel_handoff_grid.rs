@@ -113,7 +113,7 @@ fn drain(ch: Channel[int]) -> List[int]:
     xs: List[int] = List()
     while true:
         match ch.try_recv():
-            Some(v): xs.push(v)
+            ?v: xs.push(v)
             None: return xs
     return xs
 
@@ -131,7 +131,7 @@ fn rx_one(rk: int, ch: Channel[int], never: Channel[int]) -> int:
     if rk == 1:
         while true:
             match ch.try_recv():
-                Some(v): return v
+                ?v: return v
                 None: spin(1)
     if rk == 2:
         for v in ch:
@@ -156,7 +156,7 @@ fn receiver(rk: int, ch: Channel[int], never: Channel[int], order: int, close: i
             ch.close()
     while true:
         match ch.try_recv():
-            Some(v): got.send(v)
+            ?v: got.send(v)
             None: return
 
 fn send_one(sk: int, ch: Channel[int], never: Channel[int], v: int) -> bool:
@@ -180,8 +180,8 @@ fn sender(sk: int, ch: Channel[int], never: Channel[int], order: int, v1: int, s
     for v in [v1, v1 + 1]:
         r := recover: send_one(sk, ch, never, v)
         match r:
-            Ok(_): sent.send(v)
-            Err(e):
+            ?_: sent.send(v)
+            !e:
                 st.set(e.message())
                 return
     st.set("ok")

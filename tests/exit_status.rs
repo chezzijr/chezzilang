@@ -91,7 +91,7 @@ fn os_exit_in_a_match_arm_exits_with_that_status() {
     let t = TmpDir::new();
     let entry = t.write(
         "main.chz",
-        "import std.os\nfn main():\n    r: Result[int, str] = Err(\"boom\")\n    x := match r:\n        Ok(v): v\n        Err(e): os.exit(2)\n    print(x)\nmain()\n",
+        "import std.os\nfn main():\n    r: int!str = !\"boom\"\n    x := match r:\n        ?v: v\n        !e: os.exit(2)\n    print(x)\nmain()\n",
     );
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .arg("run")
@@ -174,7 +174,7 @@ fn closing_a_listener_wakes_a_parked_accept() {
     let entry = t.write(
         "main.chz",
         r#"import std.net
-fn main() -> Result[None]:
+fn main() -> None!:
     for _i in range(200):
         ln := net.listen("127.0.0.1:0")?
         parallel:
@@ -183,7 +183,7 @@ fn main() -> Result[None]:
             spawn:
                 ln.close()
     print("done")
-    return Ok()
+    return
 main()?
 "#,
     );
@@ -219,7 +219,7 @@ fn closing_a_socket_wakes_a_parked_read() {
     let entry = t.write(
         "main.chz",
         r#"import std.net
-fn main() -> Result[None]:
+fn main() -> None!:
     ln := net.listen("127.0.0.1:0")?
     addr := ln.addr()?
     for _i in range(200):
@@ -231,7 +231,7 @@ fn main() -> Result[None]:
             spawn:
                 c.close()
     print("done")
-    return Ok()
+    return
 main()?
 "#,
     );
@@ -278,14 +278,14 @@ fn bail():
 ex := Executor()
 ex.submit(bail)
 match net.listen("127.0.0.1:0"):
-    Ok(l):
+    ?l:
         print("listening")
         match l.accept():
-            Ok(c):
+            ?c:
                 print("accepted")
-            Err(e):
+            !e:
                 print("accept err")
-    Err(e):
+    !e:
         print("listen err")
 "#,
     );
@@ -1276,7 +1276,7 @@ print("THIS LINE NEVER PRINTS")
         "main ran before the fault: {out:?}"
     );
     assert!(
-        !out.contains("r=Err('boom')"),
+        !out.contains("r=!'boom'"),
         "BUG: the recover: caught the module nursery cancel: {out:?}"
     );
     assert!(

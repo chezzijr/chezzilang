@@ -127,8 +127,8 @@ const RECOVERED: &str = r#"fn main():
                     spawn:
                         ch.recv()
             match r:
-                Ok(_): print("inner ok")
-                Err(e): print("inner err")
+                ?_: print("inner ok")
+                !e: print("inner err")
             print("task got {out.recv()}")
         spawn:
             out.send(1)
@@ -146,8 +146,8 @@ const RECOVERED_SWAPPED: &str = r#"fn main():
                     spawn:
                         ch.recv()
             match r:
-                Ok(_): print("inner ok")
-                Err(e): print("inner err")
+                ?_: print("inner ok")
+                !e: print("inner err")
             out.send(1)
         spawn:
             print("task got {out.recv()}")
@@ -184,8 +184,8 @@ const LATE_RECOVER: &str = r#"fn main():
                         ch.recv()
                     started.send(1)
             match r:
-                Ok(_): print("inner ok")
-                Err(e): print("inner err")
+                ?_: print("inner ok")
+                !e: print("inner err")
             print("task got {out.recv()}")
         started.recv()
         spawn:
@@ -218,8 +218,8 @@ const RECSTUCK: &str = r#"fn main():
                     spawn:
                         ch.recv()
             match r:
-                Ok(_): print("inner ok")
-                Err(e): print("inner err")
+                ?_: print("inner ok")
+                !e: print("inner err")
             print("after recover")
             print("task got {out.recv()}")
     print("done")
@@ -240,8 +240,8 @@ const COUSIN_FED: &str = r#"fn main():
                     spawn:
                         never.recv()
             match r:
-                Ok(_): print("inner ok")
-                Err(e): print("inner err")
+                ?_: print("inner ok")
+                !e: print("inner err")
             x.send(1)
         spawn:
             parallel:
@@ -325,8 +325,8 @@ fn job():
                                 never.recv()
                     x.recv()
     match r:
-        Ok(_): print("job ok")
-        Err(e): print("job err")
+        ?_: print("job ok")
+        !e: print("job err")
 
 fn main():
     ex := Executor()
@@ -371,12 +371,12 @@ fn main():
 main()
 "#;
 
-const TRY_FED: &str = r#"fn g(ch: Channel[int]) -> Result[int, str]:
+const TRY_FED: &str = r#"fn g(ch: Channel[int]) -> int!str:
     spawn:
         print("g got {ch.recv()}")
-    r: Result[int, str] = Err("bail")
+    r: int!str = !"bail"
     v := r?
-    return Ok(v)
+    return ?v
 
 fn main():
     ch := Channel[int](0)

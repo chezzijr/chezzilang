@@ -27,7 +27,7 @@ fn an_exported_proxy_env_var_does_not_reroute_a_request() {
     std::fs::create_dir_all(&dir).unwrap();
     let prog = dir.join("p.chz");
     let src = format!(
-        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    Ok(resp): print(resp.status)\n    Err(e): print(\"err\", e)\n"
+        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    ?resp: print(resp.status)\n    !e: print(\"err\", e)\n"
     );
     std::fs::write(&prog, src).unwrap();
 
@@ -58,7 +58,7 @@ fn an_exported_proxy_env_var_routes_a_public_host_request() {
     let dir = std::env::temp_dir().join(format!("chezzi_proxyenv_pub_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let prog = dir.join("p.chz");
-    let src = "import std.request\nmatch request.get(\"http://example.invalid/\"):\n    Ok(resp): print(\"direct\", resp.status)\n    Err(e): print(\"err\", e)\n";
+    let src = "import std.request\nmatch request.get(\"http://example.invalid/\"):\n    ?resp: print(\"direct\", resp.status)\n    !e: print(\"err\", e)\n";
     std::fs::write(&prog, src).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .arg("run")

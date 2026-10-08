@@ -525,7 +525,7 @@ const BODY_BP_NET: &str = "fn burn(n: int) -> int:
         i += 1
     return x
 import std.net
-fn main() -> Result[int]:
+fn main() -> int!:
     ln := net.listen(\"127.0.0.1:0\")?
     addr := ln.addr()?
     parallel:
@@ -534,7 +534,7 @@ fn main() -> Result[int]:
             _c := net.connect(addr)
         peer := ln.accept()?
         print(\"accepted\")
-    return Ok(0)
+    return ?0
 _ := main()
 ";
 
@@ -1122,8 +1122,8 @@ const COUSIN_FED: &str = "fn main():
                     spawn:
                         never.recv()
             match r:
-                Ok(_): print(\"inner ok\")
-                Err(e): print(\"inner err\")
+                ?_: print(\"inner ok\")
+                !e: print(\"inner err\")
             x.send(1)
         spawn:
             parallel:
@@ -1319,8 +1319,8 @@ const RECOVERED_DEADLOCK_THEN_COUSIN_JOIN: &str = "fn main():
                         never := Channel[int](0)
                         never.recv()
             match r:
-                Ok(_): print(\"ok\")
-                Err(e): print(\"err\")
+                ?_: print(\"ok\")
+                !e: print(\"err\")
             out.send(5)
         spawn:
             parallel:
@@ -1345,8 +1345,8 @@ const RECOVERED_DEADLOCK_ROLES_SWAPPED: &str = "fn main():
                                 never := Channel[int](0)
                                 never.recv()
                     match r:
-                        Ok(_): print(\"ok\")
-                        Err(e): print(\"err\")
+                        ?_: print(\"ok\")
+                        !e: print(\"err\")
                     print(\"task got {out.recv()}\")
         spawn:
             parallel:
@@ -1367,8 +1367,8 @@ const RECOVERED_PANIC_THEN_COUSIN_JOIN: &str = "fn main():
                     spawn:
                         panic(\"boom\")
             match r:
-                Ok(_): print(\"ok\")
-                Err(e): print(\"err\")
+                ?_: print(\"ok\")
+                !e: print(\"err\")
             out.send(5)
         spawn:
             parallel:
@@ -1640,8 +1640,8 @@ const TWO_RECOVERERS_FAN_IN: &str = "fn main():
                             never := Channel[int](0)
                             never.recv()
                 match r:
-                    Ok(_): out.send(0)
-                    Err(e): out.send(1)
+                    ?_: out.send(0)
+                    !e: out.send(1)
         t := 0
         for i in range(2):
             t = t + out.recv()
@@ -1666,8 +1666,8 @@ fn job():
                             spawn:
                                 never.recv()
     match r:
-        Ok(_): print(\"job ok\")
-        Err(e): print(\"job err\")
+        ?_: print(\"job ok\")
+        !e: print(\"job err\")
 
 fn main():
     ex := Executor()
@@ -1802,8 +1802,8 @@ const B4A_EXECUTOR_JOB_RECOVERS_NESTED_DEADLOCK: &str = "import std.concurrency\
                         never.recv()
             never.recv()
     match r:
-        Ok(_): print(\"job ok\")
-        Err(e): print(\"job err\")
+        ?_: print(\"job ok\")
+        !e: print(\"job err\")
 fn main():
     ex := Executor()
     ex.submit(fn(): job())
@@ -1930,7 +1930,7 @@ fn edge_table_cell(depth: usize, channel_owner: bool, recovered: bool) -> String
     let body = nested(1, depth, 4, channel_owner);
     if recovered {
         format!(
-            "fn main():\n    never := Channel[int](0)\n    r := recover:\n{}    match r:\n        Ok(_): print(\"ok\")\n        Err(e): print(\"err\")\n    print(\"done\")\nmain()\n",
+            "fn main():\n    never := Channel[int](0)\n    r := recover:\n{}    match r:\n        ?_: print(\"ok\")\n        !e: print(\"err\")\n    print(\"done\")\nmain()\n",
             body.lines()
                 .map(|l| format!("    {l}\n"))
                 .collect::<String>()

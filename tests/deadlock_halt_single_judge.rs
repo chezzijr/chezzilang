@@ -374,8 +374,8 @@ main()
     },
     Row {
         name: "try_defer",
-        src: r#"fn bad() -> Result[int, str]:
-    return Err("bad")
+        src: r#"fn bad() -> int!str:
+    return !"bad"
 fn main():
     stuck := Channel[int](0)
     r := recover:
@@ -392,8 +392,8 @@ main()
     },
     Row {
         name: "try_par",
-        src: r#"fn bad() -> Result[int, str]:
-    return Err("bad")
+        src: r#"fn bad() -> int!str:
+    return !"bad"
 fn main():
     stuck := Channel[int](0)
     r := recover:

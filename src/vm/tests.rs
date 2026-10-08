@@ -215,8 +215,8 @@ fn parallel_faulting_task_flushes_partial_output_3engine() {
                    \x20       parallel:\n\
                    \x20           spawn bad()\n\
                    \x20   match r:\n\
-                   \x20       Ok(v): print(\"ok\")\n\
-                   \x20       Err(e): print(\"caught {e.message()}\")\n\
+                   \x20       ?v: print(\"ok\")\n\
+                   \x20       !e: print(\"caught {e.message()}\")\n\
                    main()\n";
     assert_mc_parity(src, "SOLO-PARTIAL\ncaught boom\n");
 }
@@ -413,7 +413,7 @@ fn concurrency_file_backed_three_engine() {
 /// M-C: a `?` early-return is a JOIN point — pending tasks run before the error propagates.
 #[test]
 fn implicit_nursery_try_joins_before_propagating() {
-    let src = "fn w():\n    print(\"task ran\")\nfn g() -> int!:\n    return Err(\"inner\")\nfn f() -> int!:\n    spawn w()\n    x := g()?\n    print(\"unreached\")\n    return Ok(x)\nfn main():\n    r := recover:\n        f()?\n        0\n    print(\"done\")\nmain()\n";
+    let src = "fn w():\n    print(\"task ran\")\nfn g() -> int!:\n    return !\"inner\"\nfn f() -> int!:\n    spawn w()\n    x := g()?\n    print(\"unreached\")\n    return ?x\nfn main():\n    r := recover:\n        f()?\n        0\n    print(\"done\")\nmain()\n";
     assert_mc_parity(src, "task ran\ndone\n");
 }
 
@@ -437,7 +437,7 @@ fn implicit_nursery_nested_functions() {
 /// previously let the spawned task's `finish_frame` clear the in-flight `?` value.
 #[test]
 fn implicit_nursery_try_preserves_error_value() {
-    let src = "fn w():\n    print(\"task ran\")\nfn g() -> int!:\n    return Err(\"boom-value\")\nfn f() -> int!:\n    spawn w()\n    x := g()?\n    return Ok(x)\nfn main():\n    r := recover:\n        f()?\n        99\n    print(\"after: {r}\")\nmain()\n";
+    let src = "fn w():\n    print(\"task ran\")\nfn g() -> int!:\n    return !\"boom-value\"\nfn f() -> int!:\n    spawn w()\n    x := g()?\n    return ?x\nfn main():\n    r := recover:\n        f()?\n        99\n    print(\"after: {r}\")\nmain()\n";
     assert_mc_parity(src, "task ran\nafter: !boom-value\n");
 }
 
@@ -653,7 +653,7 @@ fn list_predicate_shrinking_no_panic() {
     let c = "xs := [1, 2, 3, 4]\nfn f(x: int) -> bool:\n    if x == 1:\n        xs.pop()\n    return x > 0\nprint(xs.count(f))\n";
     assert_mc_parity(c, "4\n");
     // position: pred shrinks the receiver; snapshot scan finds index 2 without OOB.
-    let p = "xs := [1, 2, 3, 4]\nfn f(x: int) -> bool:\n    xs.pop()\n    return x == 3\nfn showpos(o: Option[int]) -> int:\n    match o:\n        Some(i): return i\n        None: return -1\nprint(showpos(xs.position(f)))\n";
+    let p = "xs := [1, 2, 3, 4]\nfn f(x: int) -> bool:\n    xs.pop()\n    return x == 3\nfn showpos(o: int?) -> int:\n    match o:\n        ?i: return i\n        None: return -1\nprint(showpos(xs.position(f)))\n";
     assert_mc_parity(p, "2\n");
     // take_while: pred shrinks the receiver; snapshot scan is unaffected.
     let t = "xs := [1, 2, 3, 4]\nfn f(x: int) -> bool:\n    xs.pop()\n    return x < 3\nprint(xs.take_while(f))\n";
@@ -898,8 +898,8 @@ fn idx_parity(src: &str, expected: Result<&str, &str>) {
     match (run_capture(src), expected) {
         (Ok(out), Ok(want)) => assert_eq!(out, want),
         (Err(e), Err(want)) => assert_eq!(e.message, want),
-        (Ok(out), Err(want)) => panic!("expected fault {want:?}, got Ok({out:?})"),
-        (Err(e), Ok(want)) => panic!("expected Ok({want:?}), got fault {e:?}"),
+        (Ok(out), Err(want)) => panic!("expected fault {want:?}, got ?{out:?}"),
+        (Err(e), Ok(want)) => panic!("expected ?{want:?}, got fault {e:?}"),
     }
 }
 
@@ -1733,12 +1733,12 @@ fn comprehension_stateful_struct_iterator_lazy_parity() {
     let src = "\
 struct Counter:
     n: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         v := self.n
         self.n = self.n + 1
         if v >= 3:
             return None
-        return Some(v)
+        return ?v
 
 fn main():
     c := Counter(0)
@@ -2918,8 +2918,8 @@ fn task_submit_get_submission_order_both_engines() {
                \x20   ex.shutdown()\n\
                \x20   for t in ts:\n\
                \x20       match t.get():\n\
-               \x20           Ok(v): print(v)\n\
-               \x20           Err(e): print(e.message())\n\
+               \x20           ?v: print(v)\n\
+               \x20           !e: print(e.message())\n\
                main()\n";
     assert_eq!(pmap_both("task_order", src), "1\n4\n9\n16\n25\n");
 }
@@ -2936,11 +2936,11 @@ fn task_get_idempotent_and_done_both_engines() {
                \x20   ex.shutdown()\n\
                \x20   print(t.done())\n\
                \x20   match t.get():\n\
-               \x20       Ok(v): print(v)\n\
-               \x20       Err(e): print(e.message())\n\
+               \x20       ?v: print(v)\n\
+               \x20       !e: print(e.message())\n\
                \x20   match t.get():\n\
-               \x20       Ok(v): print(v)\n\
-               \x20       Err(e): print(e.message())\n\
+               \x20       ?v: print(v)\n\
+               \x20       !e: print(e.message())\n\
                \x20   print(t.done())\n\
                main()\n";
     assert_eq!(pmap_both("task_idem", src), "true\n42\n42\ntrue\n");
@@ -2964,8 +2964,8 @@ fn executor_submit_result_both_engines() {
                \x20   ex.shutdown()\n\
                \x20   for ch in chs:\n\
                \x20       match ch.recv():\n\
-               \x20           Ok(v): print(v)\n\
-               \x20           Err(e): print(e.message())\n\
+               \x20           ?v: print(v)\n\
+               \x20           !e: print(e.message())\n\
                main()\n";
     assert_eq!(pmap_both("submit_result", src), "1\n4\n9\n16\n25\n");
 }
@@ -5468,7 +5468,7 @@ import std.time
 
 fn read_reply(s: Socket) -> str!:
     line := s.read(64)?
-    return Ok(line)
+    return ?line
 
 fn do_client(addr: str) -> str!:
     sock := net.connect(addr)?
@@ -5476,12 +5476,12 @@ fn do_client(addr: str) -> str!:
     replies := socks.map(read_reply)
     line := replies[0]?
     sock.close()
-    return Ok(line)
+    return ?line
 
 fn client(addr: str):
     match do_client(addr):
-        Ok(line): print(line)
-        Err(e): print(\"ERR:\" + e.message())
+        ?line: print(line)
+        !e: print(\"ERR:\" + e.message())
 
 fn server(listener: Listener) -> int!:
     conn := listener.accept()?
@@ -5489,7 +5489,7 @@ fn server(listener: Listener) -> int!:
     conn.write(\"hello\")?
     conn.close()
     listener.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     listener := net.listen(\"127.0.0.1:0\")?
@@ -5497,12 +5497,12 @@ fn run() -> int!:
     parallel:
         spawn server(listener)
         spawn client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"\")
-        Err(e): print(\"RUN-ERR:\" + e.message())
+        ?_: print(\"\")
+        !e: print(\"RUN-ERR:\" + e.message())
 
 main()
 ";
@@ -5548,26 +5548,26 @@ fn accept_one(l: Listener) -> int!:
     conn := l.accept()?
     conn.read(64)?
     conn.close()
-    return Ok(1)
+    return ?1
 
 fn do_server(listener: Listener) -> int!:
     ls := [listener]
     got := ls.map(accept_one)
     n := got[0]?
     listener.close()
-    return Ok(n)
+    return ?n
 
 fn server(listener: Listener):
     match do_server(listener):
-        Ok(n): print(n)
-        Err(e): print(\"ERR:\" + e.message())
+        ?n: print(n)
+        !e: print(\"ERR:\" + e.message())
 
 fn client(addr: str) -> int!:
     time.sleep_ms(50)
     sock := net.connect(addr)?
     sock.write(\"ping\")?
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     listener := net.listen(\"127.0.0.1:0\")?
@@ -5575,12 +5575,12 @@ fn run() -> int!:
     parallel:
         spawn server(listener)
         spawn client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"\")
-        Err(e): print(\"RUN-ERR:\" + e.message())
+        ?_: print(\"\")
+        !e: print(\"RUN-ERR:\" + e.message())
 
 main()
 ";
@@ -6473,8 +6473,8 @@ import std.process
 
 fn checker(sink: Shared[int]):
     match process.cmd(\"true\"):
-        Ok(out): sink.update(fn(x): x + 1)
-        Err(e): print(e.message())
+        ?out: sink.update(fn(x): x + 1)
+        !e: print(e.message())
 
 fn main():
     sink := Shared(0)
@@ -8143,8 +8143,8 @@ fn concurrency_from_import_runs_both_engines() {
 #[test]
 fn net_from_import_runs_both_engines() {
     for src in [
-        "import Socket from std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64)?\n    n := s.write(a)?\n    s.close()\n    return Ok(n)\nfn main():\n    print(1)\nmain()\n",
-        "import std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64, 100)?\n    n := s.write(a, 100)?\n    s.close()\n    return Ok(n)\nfn use_listener(l: Listener) -> str!:\n    c := l.accept()?\n    ad := l.addr()?\n    c.close()\n    l.close()\n    return Ok(ad)\nfn main():\n    print(1)\nmain()\n",
+        "import Socket from std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64)?\n    n := s.write(a)?\n    s.close()\n    return ?n\nfn main():\n    print(1)\nmain()\n",
+        "import std.net\nfn use_sock(s: Socket) -> int!:\n    a := s.read(64, 100)?\n    n := s.write(a, 100)?\n    s.close()\n    return ?n\nfn use_listener(l: Listener) -> str!:\n    c := l.accept()?\n    ad := l.addr()?\n    c.close()\n    l.close()\n    return ?ad\nfn main():\n    print(1)\nmain()\n",
     ] {
         let dir = std::env::temp_dir().join(format!("chezzi_vm_net_from_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -11082,10 +11082,10 @@ main()";
 #[test]
 fn try_unwraps_ok() {
     let src = "\
-fn safe_div(a: int, b: int) -> Result[int]:
+fn safe_div(a: int, b: int) -> int!:
     if b == 0:
-        return Err(\"divide by zero\")
-    return Ok(a / b)
+        return !\"divide by zero\"
+    return ?(a / b)
 fn main():
     r := safe_div(10, 2)?
     print(r)
@@ -11096,17 +11096,17 @@ main()";
 #[test]
 fn try_propagates_err_to_caller() {
     let src = "\
-fn safe_div(a: int, b: int) -> Result[int]:
+fn safe_div(a: int, b: int) -> int!:
     if b == 0:
-        return Err(\"zero\")
-    return Ok(a / b)
-fn use() -> Result[int]:
+        return !\"zero\"
+    return ?(a / b)
+fn use() -> int!:
     r := safe_div(1, 0)?
-    return Ok(r + 1)
+    return ?(r + 1)
 fn main():
     match use():
-        Ok(v): print(\"ok {v}\")
-        Err(e): print(\"err {e}\")
+        ?v: print(\"ok {v}\")
+        !e: print(\"err {e}\")
 main()";
     assert_eq!(run(src), "err zero\n");
 }
@@ -11127,20 +11127,20 @@ fn f() -> int:
 #[test]
 fn top_level_try_err_is_unhandled_error() {
     // A `?` at the top level whose Err reaches the top is an unhandled error (no main needed).
-    assert_eq!(run_err(r#"x := Err("oops")?"#), "unhandled error: oops");
+    assert_eq!(run_err(r#"x := (!"oops")?"#), "unhandled error: oops");
 }
 
 #[test]
 fn top_level_try_err_renders_a_one_tuple_with_trailing_comma() {
     // display_guarded (the error-message renderer) must carry the same trailing-comma rule as
     // stringify_obj_into (the str()/print path) — TICKET-069.
-    assert_eq!(run_err(r#"x := Err((1,))?"#), "unhandled error: (1,)");
+    assert_eq!(run_err(r#"x := (!(1,))?"#), "unhandled error: (1,)");
 }
 
 #[test]
 fn top_level_try_err_reports_real_line() {
     // The `?` is on line 3 — report there, not at a hard-coded line 1.
-    let e = run_capture("fn d() -> Result[int]:\n    return Err(\"x\")\nx := d()?\n").unwrap_err();
+    let e = run_capture("fn d() -> int!:\n    return !\"x\"\nx := d()?\n").unwrap_err();
     assert_eq!(e.message, "unhandled error: x");
     assert_eq!(e.span.line, 3, "expected the `?` line, got {}", e.span.line);
 }
@@ -11152,8 +11152,8 @@ fn bare_discarded_result_call_at_top_level_does_not_abort() {
     // ignored `Result` — warn (checker, not asserted here) and keep running, rc=0 — not abort
     // the program. It currently aborts with `unhandled error`.
     let src = "\
-fn g() -> Result[int, str]:
-    return Err(\"boom\")
+fn g() -> int!str:
+    return !\"boom\"
 g()
 print(\"after\")";
     assert_eq!(run_capture(src).unwrap(), "after\n");
@@ -11172,7 +11172,7 @@ fn inline_panic_body_faults_both_engines() {
     assert_eq!(s_res.unwrap_err().message, "x");
     assert_eq!(m_res.unwrap_err().message, "x");
     // A `recover:` around the call catches it as `Err("x")` — recoverable.
-    let rec = "fn boom(): panic(\"x\")\nfn main():\n    r := recover:\n        boom()\n        0\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"caught {e.message()}\")\nmain()\n";
+    let rec = "fn boom(): panic(\"x\")\nfn main():\n    r := recover:\n        boom()\n        0\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"caught {e.message()}\")\nmain()\n";
     assert_eq!(run_capture(rec).unwrap(), "caught x\n");
     assert_eq!(run_capture(rec).unwrap(), "caught x\n");
 }
@@ -11726,7 +11726,7 @@ fn vm_nested_nullary_variant() {
     // only the inner-none case; everything else falls to `_`. A single outer `Some` arm + `_` keeps
     // this CLI-valid (the checker allows one arm per outer variant), so the test reflects a program
     // a user can actually run, not just the checker-skipping runtime harness.
-    let src = "fn f(oo: Option[Option[int]]) -> str:\n    return match oo:\n        Some(None): \"inner-none\"\n        _: \"other\"\nx: Option[Option[int]] = Some(None)\ny: Option[Option[int]] = Some(Some(5))\nprint(f(x))\nprint(f(y))\n";
+    let src = "fn f(oo: int??) -> str:\n    return match oo:\n        ?None: \"inner-none\"\n        _: \"other\"\nx: int?? = ?None\ny: int?? = ?(?5)\nprint(f(x))\nprint(f(y))\n";
     let out = run(src);
     assert_eq!(out, "inner-none\nother\n");
 }
@@ -12632,7 +12632,7 @@ fn shared_variant_name_dispatches_per_enum() {
 /// fix the VM faulted with `'?' expects a `T?` or `T!E` value, found enum`.
 #[test]
 fn try_operator_works_on_native_option_under_variant_shadow() {
-    let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: List[int]) -> int?:\n    v := xs.pop()?\n    return Some(v)\nfn main():\n    match first([10, 20]):\n        ?v:\n            print(\"first {v + 0}\")\n        None:\n            print(\"none\")\nmain()\n";
+    let src = "enum Foo:\n    Some(int)\n    Bar\nfn first(xs: List[int]) -> int?:\n    v := xs.pop()?\n    return ?v\nfn main():\n    match first([10, 20]):\n        ?v:\n            print(\"first {v + 0}\")\n        None:\n            print(\"none\")\nmain()\n";
     let vm_out = run_capture(src).expect("vm run");
     assert_eq!(
         vm_out, "first 20\n",
@@ -12784,7 +12784,7 @@ fn bytearray_decode_matches_bytes() {
 /// error message is byte-identical.
 #[test]
 fn invalid_utf8_decode_recoverable() {
-    let src = "fn main():\n    r := recover:\n        b\"\\xff\\xfe\".decode()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"caught\")\nmain()\n";
+    let src = "fn main():\n    r := recover:\n        b\"\\xff\\xfe\".decode()\n    match r:\n        ?v: print(v)\n        !e: print(\"caught\")\nmain()\n";
     let out = run(src);
     assert_eq!(out, "caught\n");
     // Uncaught, the same fault propagates as a recoverable RuntimeError with the same message.
@@ -12799,7 +12799,7 @@ fn invalid_utf8_decode_recoverable() {
 /// VM/interp. The map last-wins on a duplicate key mirrors the `{k: v}` literal.
 #[test]
 fn constructors_over_user_iterator_and_dupkey() {
-    let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    print(List(C(0, 4)).sum())\n    print(Set(C(0, 4)).len())\n    m := Map([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
+    let src = "struct C:\n    n: int\n    limit: int\n    fn next(self) -> int?:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return ?v\nfn main():\n    print(List(C(0, 4)).sum())\n    print(Set(C(0, 4)).len())\n    m := Map([(1, \"a\"), (1, \"b\")])\n    print(m.len())\n    print(m[1])\nmain()\n";
     let out = run(src);
     assert_eq!(out, "6\n4\n1\nb\n");
 }
@@ -13250,7 +13250,7 @@ fn golden_assert_chz_matches_expected_and_interp() {
 /// too — byte-identical against a literal golden.
 #[test]
 fn vm_panic_under_recover_yields_err_with_message() {
-    let src = "fn main():\n    r := recover:\n        panic(\"boom\")\n    match r:\n        Ok(v): print(\"ok: {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n";
+    let src = "fn main():\n    r := recover:\n        panic(\"boom\")\n    match r:\n        ?v: print(\"ok: {v}\")\n        !e: print(\"recovered: {e.message()}\")\nmain()\n";
     assert_eq!(run(src), "recovered: boom\n");
 }
 
@@ -13265,7 +13265,7 @@ fn vm_panic_uncaught_returns_runtime_error() {
 /// `defer`s run during the VM panic unwind, identically to the interp.
 #[test]
 fn vm_panic_runs_defers_during_unwind() {
-    let src = "fn log(m: str):\n    print(m)\nfn risky():\n    defer log(\"cleanup ran\")\n    panic(\"kaboom\")\nfn main():\n    r := recover:\n        risky()\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()\n";
+    let src = "fn log(m: str):\n    print(m)\nfn risky():\n    defer log(\"cleanup ran\")\n    panic(\"kaboom\")\nfn main():\n    r := recover:\n        risky()\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"recovered: {e.message()}\")\nmain()\n";
     assert_eq!(run(src), "cleanup ran\nrecovered: kaboom\n");
 }
 
@@ -14037,8 +14037,8 @@ fn executor_faulting_job_does_not_hang_shutdown() {
                ex.submit(fn(): panic(\"boom\"))\n\
                r := recover: ex.shutdown()\n\
                match r:\n    \
-                   Ok(_): print(\"no fault\")\n    \
-                   Err(e): print(\"caught: {e.message()}\")\n";
+                   ?_: print(\"no fault\")\n    \
+                   !e: print(\"caught: {e.message()}\")\n";
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(run_capture(src));
@@ -14117,7 +14117,7 @@ fn parallel_try_escape_leaves_clean_nursery_stack() {
     // `main()?`, not a bare `main()`: a bare top-level drop no longer aborts, so the `?` is
     // what keeps the program faulting.
     let src = "fn noop():\n    0\n\
-                   fn boom() -> int!:\n    return Err(\"x\")\n\
+                   fn boom() -> int!:\n    return !\"x\"\n\
                    fn main() -> int!:\n    parallel:\n        spawn noop()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()?\n";
     let (vm_out, nursery_depth) = run_capture_nursery_len(src);
     assert!(vm_out.is_err(), "the uncaught ? faults the program");
@@ -14144,7 +14144,7 @@ fn parallel_try_escape_leaves_clean_nursery_stack() {
 #[test]
 fn parallel_try_caught_by_recover_leaves_clean_nursery_stack() {
     let src = "fn noop():\n    0\n\
-                   fn boom() -> int!:\n    return Err(\"x\")\n\
+                   fn boom() -> int!:\n    return !\"x\"\n\
                    fn main():\n    r := recover:\n        parallel:\n            spawn noop()\n            y := boom()?\n            print(y)\n        0\n    print(\"recovered\")\n    parallel:\n        spawn noop()\nmain()\n";
     let (vm_out, nursery_depth) = run_capture_nursery_len(src);
     let vm_out = vm_out.expect("the ? is caught by recover, so the program completes");
@@ -14170,7 +14170,7 @@ fn parallel_try_caught_by_recover_leaves_clean_nursery_stack() {
 fn parallel_recover_scoped_try_orders_report_after_body_defer() {
     let src = "fn noop():\n    0\n\
                    fn pdefer():\n    print(\"PDEFER\")\n\
-                   fn boom() -> int!:\n    return Err(\"x\")\n\
+                   fn boom() -> int!:\n    return !\"x\"\n\
                    fn main():\n    r := recover:\n        parallel:\n            defer pdefer()\n            spawn noop()\n            y := boom()?\n            print(y)\n        0\n    print(\"recovered\")\nmain()\n";
     let expected = "PDEFER\nrecovered\n";
     let interp_out = run_capture(src).expect("repeat run");
@@ -14223,7 +14223,7 @@ fn parallel_try_escape_cancels_pending_silently() {
     // `main()?`, not a bare `main()`: a bare top-level drop no longer aborts, so the `?` is
     // what keeps the program faulting.
     let src = "fn side():\n    0\n\
-                   fn boom() -> int!:\n    return Err(\"x\")\n\
+                   fn boom() -> int!:\n    return !\"x\"\n\
                    fn main() -> int!:\n    parallel:\n        spawn side()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()?\n";
     let (vm_out, depth) = run_capture_nursery_len(src);
     assert!(vm_out.is_err(), "the uncaught ? faults the program");
@@ -17818,8 +17818,8 @@ fn main():
     ex.submit(boom_b)
     r := recover: ex.shutdown()
     match r:
-        Ok(_): print("no fault")
-        Err(e): print("fault: {e.message()}")
+        ?_: print("no fault")
+        !e: print("fault: {e.message()}")
 
 main()
 "#;
@@ -17942,7 +17942,7 @@ fn defer_block_form_shares_latest_value() {
 #[test]
 fn defer_block_form_discards_question_propagation() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(1)\n    return Err(\"boom\")\nfn main() -> int!:\n    defer:\n        log(\"clean start\")\n        n := risky(false)?\n        log(\"clean end\")\n    log(\"body\")\n    return Ok(0)\nmain()\n",
+        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main() -> int!:\n    defer:\n        log(\"clean start\")\n        n := risky(false)?\n        log(\"clean end\")\n    log(\"body\")\n    return ?0\nmain()\n",
         "body\nclean start\n",
     );
 }
@@ -17973,7 +17973,7 @@ fn defer_break_inside_if_drains_inner_first() {
 #[test]
 fn defer_recover_runs_on_ok_path() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(1)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        defer log(\"release\")\n        x := risky(true)?\n        x\n    log(\"got\")\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
+        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main():\n    r := recover:\n        defer log(\"release\")\n        x := risky(true)?\n        x\n    log(\"got\")\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
         "release\ngot\nok 1\n",
     );
 }
@@ -17983,7 +17983,7 @@ fn defer_recover_runs_on_ok_path() {
 #[test]
 fn defer_recover_runs_on_try_path() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return Ok(1)\n    return Err(\"boom\")\nfn main():\n    r := recover:\n        defer log(\"release\")\n        x := risky(false)?\n        x\n    log(\"got\")\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
+        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main():\n    r := recover:\n        defer log(\"release\")\n        x := risky(false)?\n        x\n    log(\"got\")\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
         "release\ngot\nerr boom\n",
     );
 }
@@ -17993,7 +17993,7 @@ fn defer_recover_runs_on_try_path() {
 #[test]
 fn defer_recover_runs_on_fault_path() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn main():\n    r := recover:\n        defer log(\"release\")\n        xs := [1]\n        y := xs[5]\n        y\n    log(\"got\")\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
+        "fn log(s: str):\n    print(s)\nfn main():\n    r := recover:\n        defer log(\"release\")\n        xs := [1]\n        y := xs[5]\n        y\n    log(\"got\")\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
         "release\ngot\nerr index 5 out of bounds (len 1)\n",
     );
 }
@@ -18003,7 +18003,7 @@ fn defer_recover_runs_on_fault_path() {
 #[test]
 fn defer_recover_fault_supersedes() {
     assert_defer_scope(
-        "fn boom():\n    xs := [1]\n    x := xs[9]\nfn main():\n    r := recover:\n        defer boom()\n        42\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err {e.message()}\")\nmain()\n",
+        "fn boom():\n    xs := [1]\n    x := xs[9]\nfn main():\n    r := recover:\n        defer boom()\n        42\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
         "err index 9 out of bounds (len 1)\n",
     );
 }
@@ -18035,7 +18035,7 @@ fn defer_nested_scope_in_faulting_recover_no_marker_leak() {
 #[test]
 fn defer_nested_scope_in_try_recover_no_marker_leak() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn boom() -> int!:\n    return Err(\"x\")\nfn main():\n    for i in 0..2:\n        defer log(\"loop{i}\")\n        r := recover:\n            if true:\n                defer log(\"inner{i}\")\n                n := boom()?\n                n\n            0\n        log(\"end{i}\")\nmain()\n",
+        "fn log(s: str):\n    print(s)\nfn boom() -> int!:\n    return !\"x\"\nfn main():\n    for i in 0..2:\n        defer log(\"loop{i}\")\n        r := recover:\n            if true:\n                defer log(\"inner{i}\")\n                n := boom()?\n                n\n            0\n        log(\"end{i}\")\nmain()\n",
         "inner0\nend0\nloop0\ninner1\nend1\nloop1\n",
     );
 }
@@ -18228,8 +18228,8 @@ fn pad_left_empty_fill_is_recoverable_fault() {
                \x20   r := recover:\n\
                \x20       \"a\".pad_left(5, \"\")\n\
                \x20   match r:\n\
-               \x20       Ok(v): print(\"ok {v}\")\n\
-               \x20       Err(e): print(\"caught {e.message()}\")\n\
+               \x20       ?v: print(\"ok {v}\")\n\
+               \x20       !e: print(\"caught {e.message()}\")\n\
                main()\n";
     let want = format!("caught {MSG}\n");
     assert_eq!(run_capture(rec).expect("serial: recover"), want);
@@ -18682,8 +18682,8 @@ fn main():
             spawn use_it(a)
         \"done\"
     match r:
-        Ok(v):  print(\"ok: {v}\")
-        Err(e): print(\"caught: {e.message()}\")
+        ?v:  print(\"ok: {v}\")
+        !e: print(\"caught: {e.message()}\")
 main()
 ";
     assert_mc_parity(src, "got 1\nok: done\n");
@@ -18709,8 +18709,8 @@ fn main():
         ch.send(a)
         \"done\"
     match r:
-        Ok(v):  print(\"ok: {v}\")
-        Err(e): print(\"caught: {e.message()}\")
+        ?v:  print(\"ok: {v}\")
+        !e: print(\"caught: {e.message()}\")
 main()
 ";
     assert_mc_parity(chan_src, "ok: done\n");
@@ -18728,8 +18728,8 @@ fn main():
         s := Shared(a)
         \"done\"
     match r:
-        Ok(v):  print(\"ok: {v}\")
-        Err(e): print(\"caught: {e.message()}\")
+        ?v:  print(\"ok: {v}\")
+        !e: print(\"caught: {e.message()}\")
 main()
 ";
     assert_mc_parity(shared_src, "ok: done\n");
@@ -18992,13 +18992,13 @@ main()
 fn airlock_deep_module_global_depth_fault_is_not_quadratic() {
     let src = "\
 struct N:
-    next: Option[N]
+    next: N?
 fn mk() -> N:
     head := N(None)
     cur := head
     for i in range(5000):
         n := N(None)
-        cur.next = Some(n)
+        cur.next = ?n
         cur = n
     return head
 gl: N = mk()
@@ -19009,8 +19009,8 @@ fn main():
                 print(\"crossed\")
         0
     match r:
-        Ok(v): print(\"ok\")
-        Err(e): print(\"err: {e.message()}\")
+        ?v: print(\"ok\")
+        !e: print(\"err: {e.message()}\")
 main()
 ";
     let t = std::time::Instant::now();
@@ -19035,13 +19035,13 @@ fn airlock_deep_module_global_with_a_payload_at_every_level_is_not_quadratic() {
     let src = "\
 struct N:
     tag: List[int]
-    next: Option[N]
+    next: N?
 fn mk() -> N:
     head := N([1], None)
     cur := head
     for i in range(5000):
         n := N([i], None)
-        cur.next = Some(n)
+        cur.next = ?n
         cur = n
     return head
 gl: N = mk()
@@ -19052,8 +19052,8 @@ fn main():
                 print(\"crossed\")
         0
     match r:
-        Ok(v): print(\"ok\")
-        Err(e): print(\"err: {e.message()}\")
+        ?v: print(\"ok\")
+        !e: print(\"err: {e.message()}\")
 main()
 ";
     let t = std::time::Instant::now();
@@ -19090,8 +19090,8 @@ fn main():
                 print(\"crossed\")
         0
     match r:
-        Ok(v): print(\"ok\")
-        Err(e): print(\"err: {e.message()}\")
+        ?v: print(\"ok\")
+        !e: print(\"err: {e.message()}\")
 main()
 ";
     let t = std::time::Instant::now();
@@ -19121,7 +19121,7 @@ fn airlock_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
     let entry = dir.join("main.chz");
-    let src = "import k\nstruct N:\n    next: Option[N]\nstruct Last:\n    count: fn() -> int\n    tail: N\nstruct P:\n    next: Option[P]\n    last: Option[Last]\nstruct Holder:\n    gen: Iterator[int]\n    x: N\n    y: P\nfn make() -> fn() -> int:\n    p := [k]\n    fn count() -> int:\n        return p.len()\n    return count\nfn mk(k: int) -> N:\n    head := N(None)\n    cur := head\n    for i in range(k):\n        n := N(None)\n        cur.next = Some(n)\n        cur = n\n    return head\nfn chain_to(k: int, tail: N) -> N:\n    head := N(None)\n    cur := head\n    for i in range(k):\n        n := N(None)\n        cur.next = Some(n)\n        cur = n\n    cur.next = Some(tail)\n    return head\nfn nth(h: N, i: int) -> N:\n    cur := h\n    for j in range(i):\n        match cur.next:\n            Some(n): cur = n\n            None: return cur\n    return cur\nfn drive(deep: N) -> Iterator[int]:\n    yield 1\n    match deep.next:\n        Some(n): yield 2\n        None: yield 0\nfn build() -> Holder:\n    h := mk(3000)\n    y := P(None, Some(Last(make(), h)))\n    for i in range(2600):\n        y = P(Some(y), None)\n    return Holder(drive(chain_to(2500, h)), nth(h, 1000), y)\nholder: Holder = build()\nstarted := holder.gen.next()\nfn main():\n    r := recover:\n        parallel:\n            spawn:\n                print(\"crossed\")\n        0\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"err: {e.message()}\")\nmain()\n";
+    let src = "import k\nstruct N:\n    next: N?\nstruct Last:\n    count: fn() -> int\n    tail: N\nstruct P:\n    next: P?\n    last: Last?\nstruct Holder:\n    gen: Iterator[int]\n    x: N\n    y: P\nfn make() -> fn() -> int:\n    p := [k]\n    fn count() -> int:\n        return p.len()\n    return count\nfn mk(k: int) -> N:\n    head := N(None)\n    cur := head\n    for i in range(k):\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    return head\nfn chain_to(k: int, tail: N) -> N:\n    head := N(None)\n    cur := head\n    for i in range(k):\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    cur.next = ?tail\n    return head\nfn nth(h: N, i: int) -> N:\n    cur := h\n    for j in range(i):\n        match cur.next:\n            ?n: cur = n\n            None: return cur\n    return cur\nfn drive(deep: N) -> Iterator[int]:\n    yield 1\n    match deep.next:\n        ?n: yield 2\n        None: yield 0\nfn build() -> Holder:\n    h := mk(3000)\n    y := P(None, ?Last(make(), h))\n    for i in range(2600):\n        y = P(?y, None)\n    return Holder(drive(chain_to(2500, h)), nth(h, 1000), y)\nholder: Holder = build()\nstarted := holder.gen.next()\nfn main():\n    r := recover:\n        parallel:\n            spawn:\n                print(\"crossed\")\n        0\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"err: {e.message()}\")\nmain()\n";
     std::fs::write(&entry, src).unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
@@ -19139,8 +19139,8 @@ fn airlock_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
 fn airlock_cyclic_module_global_with_a_shorter_reentry_still_crosses() {
     let src = "\
 struct G:
-    a: Option[G]
-    b: Option[G]
+    a: G?
+    b: G?
 fn build() -> G:
     r := G(None, None)
     z := G(None, None)
@@ -19150,21 +19150,21 @@ fn build() -> G:
     cur := y
     for i in range(4950):
         n := G(None, None)
-        cur.a = Some(n)
+        cur.a = ?n
         cur = n
-    r.a = Some(z)
-    z.a = Some(w)
-    z.b = Some(y)
-    w.a = Some(h)
-    h.a = Some(z)
+    r.a = ?z
+    z.a = ?w
+    z.b = ?y
+    w.a = ?h
+    h.a = ?z
     a1 := G(None, None)
-    h.b = Some(a1)
+    h.b = ?a1
     p := a1
     for i in range(50):
         q := G(None, None)
-        p.a = Some(q)
+        p.a = ?q
         p = q
-    p.a = Some(y)
+    p.a = ?y
     return r
 gl: G = build()
 fn main():
@@ -19174,8 +19174,8 @@ fn main():
                 print(\"crossed\")
         0
     match r:
-        Ok(v): print(\"ok\")
-        Err(e): print(\"err: {e.message()}\")
+        ?v: print(\"ok\")
+        !e: print(\"err: {e.message()}\")
 main()
 ";
     assert_eq!(run(src), "crossed\nok\n");
@@ -19190,7 +19190,7 @@ fn airlock_module_global_skip_honours_the_depth_the_doom_was_recorded_at() {
     let src = "\
 struct N:
     tag: List[int]
-    next: Option[N]
+    next: N?
 struct Holder:
     gen: Iterator[int]
     a: N
@@ -19200,7 +19200,7 @@ fn mk(k: int) -> N:
     cur := head
     for i in range(k):
         n := N([i], None)
-        cur.next = Some(n)
+        cur.next = ?n
         cur = n
     return head
 fn chain_to(k: int, tail: N) -> N:
@@ -19208,9 +19208,9 @@ fn chain_to(k: int, tail: N) -> N:
     cur := head
     for i in range(k):
         n := N([i], None)
-        cur.next = Some(n)
+        cur.next = ?n
         cur = n
-    cur.next = Some(tail)
+    cur.next = ?tail
     return head
 fn drive(deep: N) -> Iterator[int]:
     yield 1
@@ -19238,13 +19238,13 @@ main()
 fn airlock_module_global_just_under_the_depth_cap_still_crosses() {
     let src = "\
 struct N:
-    next: Option[N]
+    next: N?
 fn mk() -> N:
     head := N(None)
     cur := head
     for i in range(4500):
         n := N(None)
-        cur.next = Some(n)
+        cur.next = ?n
         cur = n
     return head
 gl: N = mk()
@@ -19255,8 +19255,8 @@ fn main():
                 print(\"crossed\")
         0
     match r:
-        Ok(v): print(\"ok\")
-        Err(e): print(\"err: {e.message()}\")
+        ?v: print(\"ok\")
+        !e: print(\"err: {e.message()}\")
 main()
 ";
     assert_eq!(run(src), "crossed\nok\n");
@@ -19268,13 +19268,13 @@ main()
 fn airlock_deep_module_global_alias_still_crosses_as_one_object() {
     let src = "\
 struct N:
-    next: Option[N]
+    next: N?
 fn mk(k: int) -> N:
     head := N(None)
     cur := head
     for i in range(k):
         n := N(None)
-        cur.next = Some(n)
+        cur.next = ?n
         cur = n
     return head
 shared: List[int] = [1]
@@ -19679,8 +19679,8 @@ fn main():
             spawn worker()
         \"done\"
     match r:
-        Ok(v):  print(\"ok: {v}\")
-        Err(e): print(\"caught: {e.message()}\")
+        ?v:  print(\"ok: {v}\")
+        !e: print(\"caught: {e.message()}\")
 main()
 ";
     let out = run_capture(src).expect("M:N run should not crash");
@@ -20030,13 +20030,13 @@ fn golden_calc_chz_matches_expected_and_interp() {
 
 #[test]
 fn for_over_struct_iterator_counts() {
-    let src = "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> Option[int]:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return Some(v)\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n";
+    let src = "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> int?:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return ?v\nfn main():\n    for x in Counter(0, 5):\n        print(x)\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n3\n4\n");
 }
 
 #[test]
 fn for_over_struct_iterator_break_lazy() {
-    let src = "struct Fib:\n    a: int\n    b: int\n    fn next(self) -> Option[int]:\n        v := self.a\n        nb := self.a + self.b\n        self.a = self.b\n        self.b = nb\n        return Some(v)\nfn main():\n    for x in Fib(0, 1):\n        if x > 10:\n            break\n        print(x)\nmain()\n";
+    let src = "struct Fib:\n    a: int\n    b: int\n    fn next(self) -> int?:\n        v := self.a\n        nb := self.a + self.b\n        self.a = self.b\n        self.b = nb\n        return ?v\nfn main():\n    for x in Fib(0, 1):\n        if x > 10:\n            break\n        print(x)\nmain()\n";
     assert_eq!(run(src), "0\n1\n1\n2\n3\n5\n8\n");
 }
 
@@ -20099,8 +20099,8 @@ b.next.push(a)
 r := recover:
     print(a)
 match r:
-    Ok(v): print(\"ok\")
-    Err(e): print(\"caught: {e.message()}\")
+    ?v: print(\"ok\")
+    !e: print(\"caught: {e.message()}\")
 ";
     assert_eq!(run(src), "Node(next=[Node(next=[...])])\nok\n");
 }
@@ -20581,12 +20581,12 @@ fn go() -> int!:
     print(b.len())
     print(b[0])
     print(b[2])
-    return Ok(0)
+    return ?0
 
 fn main():
     match go():
-        Ok(_): print(\"ok\")
-        Err(e): print(\"ERR:\" + e.message())
+        ?_: print(\"ok\")
+        !e: print(\"ERR:\" + e.message())
 main()
 ";
     assert_mc_parity_file("r1_ret_bytes", src, "3\n0\n255\nok\n");
@@ -20693,14 +20693,14 @@ fn go() -> int!:
         print(x)
     print(back == b)
     match io.read_file(\"{p}\"):
-        Ok(s): print(\"decoded?! \" + s)
-        Err(e): print(e.message().contains(\"read_bytes\"))
-    return Ok(0)
+        ?s: print(\"decoded?! \" + s)
+        !e: print(e.message().contains(\"read_bytes\"))
+    return ?0
 
 fn main():
     match go():
-        Ok(_): print(\"ok\")
-        Err(e): print(\"ERR:\" + e.message())
+        ?_: print(\"ok\")
+        !e: print(\"ERR:\" + e.message())
 main()
 "
     );
@@ -20900,7 +20900,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         ("next", "{r}.next()"),
         ("index", "{r}.index({k})"),
         ("set_index", "{r}.set_index({k}, {v})"),
-        ("slice", "{r}.slice(Some(0), Some(1), None)"),
+        ("slice", "{r}.slice(?0, ?1, None)"),
         ("add", "{r}.add(b)"),
         ("sub", "{r}.sub(b)"),
         ("mul", "{r}.mul(b)"),
@@ -21954,10 +21954,10 @@ fn ticket_193_await_update_guard_free_never_takes_the_guard() {
 fn caught_error_location_is_nil_without_a_recorded_span() {
     // A user-constructed `Err(...)` returned as a plain value (no fault, so no `recover:`
     // boundary ever runs) was never stamped.
-    let src = "fn a() -> int!:\n    return Err(\"boom\")\nfn main():\n    match a():\n        Ok(v): print(v)\n        Err(e):\n            print(e.line())\n            print(e.col())\n            print(e.file())\nmain()\n";
+    let src = "fn a() -> int!:\n    return !\"boom\"\nfn main():\n    match a():\n        ?v: print(v)\n        !e:\n            print(e.line())\n            print(e.col())\n            print(e.file())\nmain()\n";
     assert_eq!(run(src), "None\nNone\nNone\n");
 
-    let src_struct = "struct MyErr:\n    code: int\n    fn message(self) -> str:\n        return \"code {self.code}\"\nfn b() -> int!:\n    return Err(MyErr(7))\nfn main():\n    match b():\n        Ok(v): print(v)\n        Err(e): print(e.line())\nmain()\n";
+    let src_struct = "struct MyErr:\n    code: int\n    fn message(self) -> str:\n        return \"code {self.code}\"\nfn b() -> int!:\n    return !MyErr(7)\nfn main():\n    match b():\n        ?v: print(v)\n        !e: print(e.line())\nmain()\n";
     assert_eq!(run(src_struct), "None\n");
 }
 
@@ -22200,8 +22200,8 @@ for _ in 0..20:
     gate.send(7)
     ex.shutdown_now()
     match out.try_recv():
-        Some(Ok(_)): pass
-        Some(Err(_)): lost += 1
+        ?(?_): pass
+        ?(!_): lost += 1
         None: lost += 1
 print("lost={lost}")
 "#;

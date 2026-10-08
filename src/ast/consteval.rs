@@ -140,7 +140,7 @@ mod tests {
         let mut src = String::new();
         for (i, (_, sym)) in ops.iter().enumerate() {
             src += &format!(
-                "fn t{i}(a: int, b: int):\n    r := recover: a {sym} b\n    match r:\n        Ok(v): print(str(v))\n        Err(e): print(\"F \" + e.message())\n"
+                "fn t{i}(a: int, b: int):\n    r := recover: a {sym} b\n    match r:\n        ?v: print(str(v))\n        !e: print(\"F \" + e.message())\n"
             );
         }
         let mut want = Vec::new();

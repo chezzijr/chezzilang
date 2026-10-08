@@ -304,7 +304,7 @@ fn a_shared_modules_warning_prints_once_per_test_run() {
     // The W8-2 discarded-carrier warning: a `Result` dropped inside a fn body.
     t.write(
         "lib.chz",
-        "fn g() -> Result[int, Error]:\n    return Ok(1)\nfn helper():\n    g()\n",
+        "fn g() -> int!Error:\n    return ?1\nfn helper():\n    g()\n",
     );
     t.write(
         "a_test.chz",
@@ -393,7 +393,7 @@ fn manifest_entrypoint_err_reports_the_entry_file() {
     t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
     t.write(
         "src/main.chz",
-        "fn main() -> int!str:\n    return Err(\"main failed\")\n",
+        "fn main() -> int!str:\n    return !\"main failed\"\n",
     );
     let (stdout, stderr, ok) = run(&t.0, &["run"]);
     assert!(!ok, "an Err entrypoint must fault; stdout:\n{stdout}");
@@ -477,7 +477,7 @@ fn a_closure_entrypoint_keeps_its_bare_coordinate() {
     t.write("chezzi.toml", "[project]\nentrypoint = \"src.main:main\"\n");
     t.write(
         "src/main.chz",
-        "main := fn() -> int!str: Err(\"closure failed\")\n",
+        "main := fn() -> int!str: !\"closure failed\"\n",
     );
     let (stdout, stderr, ok) = run(&t.0, &["run"]);
     assert!(

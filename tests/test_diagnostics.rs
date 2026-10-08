@@ -80,7 +80,7 @@ fn test_warning_names_its_file() {
     let t = TmpDir::new();
     let entry = t.write(
         "w_test.chz",
-        "fn g() -> Result[int, str]:\n    return Ok(1)\n\ntest fn t():\n    g()\n    assert true\n",
+        "fn g() -> int!str:\n    return ?1\n\ntest fn t():\n    g()\n    assert true\n",
     );
     let (_stdout, stderr) = run_test(&[entry.to_str().unwrap()]);
     assert!(
@@ -189,7 +189,7 @@ fn run_errors_json_emits_warnings_as_json() {
     let t = TmpDir::new();
     let entry = t.write(
         "f8.chz",
-        "fn g() -> int!str:\n    return Ok(1)\n\ng()\nprint(\"ran\")\n",
+        "fn g() -> int!str:\n    return ?1\n\ng()\nprint(\"ran\")\n",
     );
     let (stdout, stderr) = run_cmd("run", &["--errors=json", entry.to_str().unwrap()]);
     assert!(

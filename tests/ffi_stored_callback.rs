@@ -89,15 +89,15 @@ import std.string
 
 fn field(key: str) -> int:
     match io.read_file("/proc/self/status"):
-        Ok(s):
+        ?s:
             for line in s.split("\n"):
                 if line.starts_with(key):
                     v := line.replace(key, "").replace("kB", "").strip()
                     match v.to_int():
-                        Some(n): return n
+                        ?n: return n
                         None: return -3
             return -2
-        Err(e):
+        !e:
             return -1
 "#;
 
@@ -298,8 +298,8 @@ errs := 0
 for i in range({iters}):
     r := recover: puts(cb, bad)
     match r:
-        Ok(v): pass
-        Err(e): errs = errs + 1
+        ?v: pass
+        !e: errs = errs + 1
 hw := field("VmHWM:")
 print("errs={{errs}} hwm={{hw}}")
 "#
@@ -393,8 +393,8 @@ ffi.store_int64_at(buf, 8, 4)
 for i in range(2000000):
     r := recover: qsort(buf, 2, 8, cmp)
     match r:
-        Ok(v): pass
-        Err(e):
+        ?v: pass
+        !e:
             print("clean: {{e.message()}}")
             break
 print("survived")

@@ -272,7 +272,7 @@ fn kinds() -> Vec<Kind> {
             wrap: tagged("opt"),
             build: |p, a| {
                 main_only(format!(
-                    "struct S:\n    x: int\n{}o: S? = Some(S(0))\nprint(o?.m({a}))\n",
+                    "struct S:\n    x: int\n{}o: S? = ?S(0)\nprint(o?.m({a}))\n",
                     fn_decl("m", "m", &format!("self, {p}"), "    ")
                 ))
             },

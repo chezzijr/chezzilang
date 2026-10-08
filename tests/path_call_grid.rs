@@ -475,17 +475,17 @@ fn hint_cells(out: &mut Vec<Cell>) {
             ),
             (
                 "some",
-                "fn o[U](x: U) -> U:\n    h: Option[fn(U) -> U] = Some(ident)\n    match h:\n        Some(f):\n            return f(x)\n        None:\n            return x\nprint(o(2))",
+                "fn o[U](x: U) -> U:\n    h: (fn(U) -> U)? = ?ident\n    match h:\n        ?f:\n            return f(x)\n        None:\n            return x\nprint(o(2))",
                 "2",
             ),
             (
                 "some_reassign",
-                "fn o[U](x: U) -> U:\n    h: Option[fn(U) -> U] = None\n    h = Some(ident)\n    match h:\n        Some(f):\n            return f(x)\n        None:\n            return x\nprint(o(2))",
+                "fn o[U](x: U) -> U:\n    h: (fn(U) -> U)? = None\n    h = ?ident\n    match h:\n        ?f:\n            return f(x)\n        None:\n            return x\nprint(o(2))",
                 "2",
             ),
             (
                 "ok",
-                "fn o[U](x: U) -> Result[fn(U) -> U, str]:\n    return Ok(ident)\nmatch o(1):\n    Ok(f):\n        print(f(4))\n    Err(e):\n        print(e)",
+                "fn o[U](x: U) -> (fn(U) -> U)!str:\n    return ?ident\nmatch o(1):\n    ?f:\n        print(f(4))\n    !e:\n        print(e)",
                 "4",
             ),
             (

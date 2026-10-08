@@ -102,10 +102,10 @@ fn bodied_native_struct_method_runs() {
             "import std.io\n\
              r := io.open(\"{}\")\n\
              match r:\n\
-            \x20   Ok(f):\n\
+            \x20   ?f:\n\
             \x20       for l in f.lines():\n\
             \x20           print(l)\n\
-            \x20   Err(e):\n\
+            \x20   !e:\n\
             \x20       print(\"err\")\n",
             data.display()
         ),
@@ -207,7 +207,7 @@ fn ill_typed_bodied_native_struct_method_is_rejected() {
     // Corrupt `Reader.lines`: yield an int under its `-> Iterator[str]` declaration.
     let io = stddir.0.join("io.chz");
     let src = std::fs::read_to_string(&io).unwrap();
-    let bad = src.replace("Some(l): yield l", "Some(l): yield 42");
+    let bad = src.replace("?l: yield l", "?l: yield 42");
     assert_ne!(bad, src, "test fixture did not patch Reader.lines");
     std::fs::write(&io, bad).unwrap();
 

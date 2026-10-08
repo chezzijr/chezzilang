@@ -96,7 +96,7 @@ print(\"name? \", end=\"\")
 io.flush()
 n := io.read_line()
 match n:
-    Some(v): print(\"hi\", v)
+    ?v: print(\"hi\", v)
     None: print(\"hi ?\")
 ";
 
@@ -203,7 +203,7 @@ const INPUT_PROG: &str = "\
 import input from std.io
 n := input(\"name? \")
 match n:
-    Some(v): print(\"hi\", v)
+    ?v: print(\"hi\", v)
     None: print(\"hi ?\")
 ";
 
@@ -230,7 +230,7 @@ const STDIN_TASKS_PROG: &str = "\
 import std.io
 fn t():
     match io.read_line():
-        Some(v): io.print(\"got {v}\")
+        ?v: io.print(\"got {v}\")
         None: io.print(\"eof\")
 
 parallel:
@@ -272,7 +272,7 @@ const READ_LINE_CR_PROG: &str = "\
 import std.io
 while true:
     match io.read_line():
-        Some(l): print(l.encode())
+        ?l: print(l.encode())
         None: break
 ";
 
@@ -329,7 +329,7 @@ const READ_CHAR_PROG: &str = "\
 import std.io
 while true:
     match io.read_char():
-        Some(c): io.print(\"[{c}]\")
+        ?c: io.print(\"[{c}]\")
         None:
             io.print(\"done\")
             break
@@ -359,7 +359,7 @@ import std.io
 fn drain():
     while true:
         match io.read_char():
-            Some(c): io.print(c)
+            ?c: io.print(c)
             None: break
 
 parallel:
@@ -568,7 +568,7 @@ fn dead_stdout_does_not_cancel_sibling_executor_jobs(threads: Option<usize>, wri
 fn dead_stdout_under_an_executor(threads: Option<usize>, writes: usize, handle: bool) {
     let tail = if handle {
         "t := submit_task(ex, spew)\nex.submit(markers)\nex.shutdown()\n\
-         match t.get():\n    Ok(_): pass\n    Err(e): panic(e.message())\n"
+         match t.get():\n    ?_: pass\n    !e: panic(e.message())\n"
     } else {
         "ex.submit(spew)\nex.submit(markers)\nex.shutdown()\n"
     };
@@ -1195,7 +1195,7 @@ fn read_all_faults_recoverably_on_non_utf8_stdin() {
     let t = TmpDir::new();
     let entry = t.write(
         "readall.chz",
-        "import std.io\n\nr := recover: io.read_all()\nmatch r:\n    Ok(v): print(\"ok len \" + str(v.len()))\n    Err(e): print(\"err: \" + e.message())\n",
+        "import std.io\n\nr := recover: io.read_all()\nmatch r:\n    ?v: print(\"ok len \" + str(v.len()))\n    !e: print(\"err: \" + e.message())\n",
     );
 
     // Invalid UTF-8: 0xff/0xfe can never appear in a well-formed UTF-8 stream.

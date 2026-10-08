@@ -153,7 +153,7 @@ fn bind(binder: &str, n: &str, p: &Pos) -> Option<String> {
         "toplevel_let" => format!("{n} := {e}\nprint({r})\n"),
         "for_var" => format!("for {n} in [{e}]:\n    print({r})\n"),
         "match_binding" => {
-            format!("match Some({e}):\n    Some({n}): print({r})\n    None: print(\"none\")\n")
+            format!("match ?{e}:\n    ?{n}: print({r})\n    None: print(\"none\")\n")
         }
         "closure_param" => format!("print((fn({n}: {ty}) -> {ret}: {r})({e}))\n"),
         "comprehension_var" => format!("print([{r} for {n} in [{e}]][0])\n"),
@@ -516,7 +516,7 @@ fn field_bind(binder: &str, n: &str, ty: &str, e: &str, r: &str, ctx: &str) -> O
         "toplevel_let" => format!("{n} := {e}\n{}", b(0)),
         "for_var" => format!("for {n} in [{e}]:\n{}", b(4)),
         "match_binding" => format!(
-            "match Some({e}):\n    Some({n}):\n{}    None: print(\"none\")\n",
+            "match ?{e}:\n    ?{n}:\n{}    None: print(\"none\")\n",
             b(8)
         ),
         "wait_recv" => format!(

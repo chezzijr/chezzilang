@@ -245,14 +245,14 @@ s := Shared[int](0)
 g := Shared[int](0)
 sink := Channel[int](0)
 {PRELUDE}
-fn must[T](r: Result[T]) -> T:
+fn must[T](r: T!) -> T:
     match r:
-        Ok(v): return v
-        Err(e): panic(e.message())
-fn show[T](r: Result[T]) -> str:
+        ?v: return v
+        !e: panic(e.message())
+fn show[T](r: T!) -> str:
     match r:
-        Ok(_): return \"ok\"
-        Err(e): return \"err \" + e.message()
+        ?_: return \"ok\"
+        !e: return \"err \" + e.message()
 fn op(n: int) -> int:
 {OP}
     return 0

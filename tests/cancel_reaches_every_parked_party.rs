@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 #[path = "support/hang_deadline.rs"]
 mod hang_deadline;
 
-const NET_PRELUDE: &str = "import std.time\nimport std.net\nimport std.concurrency\nfn lis() -> Listener:\n    match net.listen(\"127.0.0.1:0\"):\n        Ok(l): return l\n        Err(e): panic(\"{e}\")\n";
+const NET_PRELUDE: &str = "import std.time\nimport std.net\nimport std.concurrency\nfn lis() -> Listener:\n    match net.listen(\"127.0.0.1:0\"):\n        ?l: return l\n        !e: panic(\"{e}\")\n";
 
 #[test]
 fn shutdown_now_reaches_a_job_nursery_fiber_parked_in_accept() {
@@ -95,10 +95,10 @@ const GRID_PRELUDE: &str = "import std.time
 import std.net
 import std.os
 import std.concurrency
-fn must[T](r: Result[T]) -> T:
+fn must[T](r: T!) -> T:
     match r:
-        Ok(v): return v
-        Err(e): panic(e.message())
+        ?v: return v
+        !e: panic(e.message())
 stuck := Channel[int](0)
 fc := Channel[int](1)
 g := Shared[int](0)

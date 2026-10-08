@@ -299,7 +299,7 @@ fn ffi_handle_crosses_shared_set() {
 #[test]
 fn ffi_handle_send_succeeds() {
     assert_golden_out(
-        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nch := Channel[fn(float) -> float]()\nr := recover: ch.send(sqrt)\nmatch r:\n    Ok(v): print(\"false\")\n    Err(e): print(\"true\")\n",
+        "extern \"libm.so.6\":\n    fn sqrt(x: float) -> float\nch := Channel[fn(float) -> float]()\nr := recover: ch.send(sqrt)\nmatch r:\n    ?v: print(\"false\")\n    !e: print(\"true\")\n",
         "false\n",
     );
 }
@@ -483,13 +483,13 @@ fn regex_offsets_are_codepoint_slicable_parity() {
     let src = "import std.regex\n\
                    s := \"héllo\"\n\
                    match regex.find(\"l+\", s):\n\
-                   \x20   Ok(opt):\n\
+                   \x20   ?opt:\n\
                    \x20       match opt:\n\
-                   \x20           Some(m):\n\
+                   \x20           ?m:\n\
                    \x20               print(s[m.start:m.end])\n\
                    \x20               print(str(s[m.start:m.end] == m.text))\n\
                    \x20           None: print(\"none\")\n\
-                   \x20   Err(e): print(e)\n";
+                   \x20   !e: print(e)\n";
     let out = golden_entry(src);
     assert_eq!(out, "ll\ntrue\n");
     let t = TmpDir::new();
@@ -520,11 +520,11 @@ fn regex_match_file_backed_three_engine_parity() {
                    lit: Match = regex.Match(\"lit\", 9, 12, [\"g\"])\n\
                    print(describe(lit))\n\
                    match regex.find(\"[0-9]+\", \"a12b\"):\n\
-                   \x20   Ok(opt):\n\
+                   \x20   ?opt:\n\
                    \x20       match opt:\n\
-                   \x20           Some(m): print(describe(m))\n\
+                   \x20           ?m: print(describe(m))\n\
                    \x20           None: print(\"none\")\n\
-                   \x20   Err(e): print(e)\n";
+                   \x20   !e: print(e)\n";
     // Single-file path via `golden_entry`.
     let out = golden_entry(src);
     assert_eq!(out, "lit@9-12:g\n12@1-3:\n");
@@ -814,7 +814,7 @@ fn decode_collision_loser_against_correct_layout() {
             ("dep.chz", "struct Point:\n    x: int\n"),
             (
                 "main.chz",
-                "import std.json\nimport dep\nstruct Point:\n    a: int\n    b: int\np := json.decode[Point](\"{{\\\"a\\\":5,\\\"b\\\":9}}\")\nmatch p:\n    Ok(v): print(v.a)\n    Err(e): print(e)\n",
+                "import std.json\nimport dep\nstruct Point:\n    a: int\n    b: int\np := json.decode[Point](\"{{\\\"a\\\":5,\\\"b\\\":9}}\")\nmatch p:\n    ?v: print(v.a)\n    !e: print(e)\n",
             ),
         ],
         "main.chz",
@@ -830,7 +830,7 @@ fn decode_qualified_target() {
             ("dep.chz", "struct Point:\n    x: int\n"),
             (
                 "main.chz",
-                "import std.json\nimport dep\nstruct Point:\n    a: int\n    b: int\np := json.decode[dep.Point](\"{{\\\"x\\\":7}}\")\nmatch p:\n    Ok(v): print(v.x)\n    Err(e): print(e)\n",
+                "import std.json\nimport dep\nstruct Point:\n    a: int\n    b: int\np := json.decode[dep.Point](\"{{\\\"x\\\":7}}\")\nmatch p:\n    ?v: print(v.x)\n    !e: print(e)\n",
             ),
         ],
         "main.chz",
@@ -870,7 +870,7 @@ fn decode_nested_struct_field_in_defining_module() {
             ),
             (
                 "main.chz",
-                "import std.json\nimport dep\nstruct Inner:\n    other: int\np := json.decode[dep.Wrap](\"{{\\\"inner\\\":{{\\\"k\\\":3}}}}\")\nmatch p:\n    Ok(w): print(w.inner.k)\n    Err(e): print(e)\n",
+                "import std.json\nimport dep\nstruct Inner:\n    other: int\np := json.decode[dep.Wrap](\"{{\\\"inner\\\":{{\\\"k\\\":3}}}}\")\nmatch p:\n    ?w: print(w.inner.k)\n    !e: print(e)\n",
             ),
         ],
         "main.chz",
@@ -885,7 +885,7 @@ fn decode_collision_three_engine() {
         ("dep.chz", "struct Point:\n    x: int\n"),
         (
             "main.chz",
-            "import std.json\nimport dep\nstruct Point:\n    a: int\n    b: int\nmatch json.decode[Point](\"{{\\\"a\\\":5,\\\"b\\\":9}}\"):\n    Ok(v): print(v.a)\n    Err(e): print(e)\n",
+            "import std.json\nimport dep\nstruct Point:\n    a: int\n    b: int\nmatch json.decode[Point](\"{{\\\"a\\\":5,\\\"b\\\":9}}\"):\n    ?v: print(v.a)\n    !e: print(e)\n",
         ),
     ];
     let t = TmpDir::new();
@@ -1130,16 +1130,16 @@ fn regex_find_all_replace_split_parity() {
     let out = golden_entry(
         r##"import std.regex
 match regex.find_all("[0-9]+", "a1 22 333"):
-    Ok(ms):
+    ?ms:
         for m in ms:
             print(m.text)
-    Err(e): print(e)
+    !e: print(e)
 match regex.replace_all("[0-9]+", "a1b22c", "#"):
-    Ok(s): print(s)
-    Err(e): print(e)
+    ?s: print(s)
+    !e: print(e)
 match regex.split(",", "a,b,c"):
-    Ok(parts): print("|".join(parts))
-    Err(e): print(e)
+    ?parts: print("|".join(parts))
+    !e: print(e)
 "##,
     );
     assert_eq!(out, "1\n22\n333\na#b#c\na|b|c\n");
@@ -1168,7 +1168,7 @@ fn request_get_parity_against_local_server() {
     });
 
     let src = format!(
-        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    Ok(resp):\n        print(str(resp.status))\n        print(resp.body)\n        print(resp.headers[\"x-test\"])\n    Err(e): print(e)\n"
+        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    ?resp:\n        print(str(resp.status))\n        print(resp.body)\n        print(resp.headers[\"x-test\"])\n    !e: print(e)\n"
     );
     let out = golden_entry(&src);
     server.join().unwrap();
@@ -1194,7 +1194,7 @@ fn request_joins_duplicate_headers_against_local_server() {
     });
 
     let src = format!(
-        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    Ok(resp):\n        print(resp.headers[\"set-cookie\"])\n        print(resp.headers[\"x-one\"])\n    Err(e): print(e)\n"
+        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    ?resp:\n        print(resp.headers[\"set-cookie\"])\n        print(resp.headers[\"x-one\"])\n    !e: print(e)\n"
     );
     let out = golden_entry(&src);
     server.join().unwrap();
@@ -1220,7 +1220,7 @@ fn request_keeps_non_ascii_header_against_local_server() {
     });
 
     let src = format!(
-        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    Ok(resp):\n        print(resp.headers[\"x-ascii\"])\n        print(\"x-cafe\" in resp.headers)\n    Err(e): print(e)\n"
+        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    ?resp:\n        print(resp.headers[\"x-ascii\"])\n        print(\"x-cafe\" in resp.headers)\n    !e: print(e)\n"
     );
     let out = golden_entry(&src);
     server.join().unwrap();
@@ -1246,7 +1246,7 @@ fn request_decodes_a_non_ascii_header_value_latin1() {
     });
 
     let src = format!(
-        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    Ok(resp): print(resp.headers[\"x-cafe\"])\n    Err(e): print(e)\n"
+        "import std.request\nmatch request.get(\"http://{addr}/\"):\n    ?resp: print(resp.headers[\"x-cafe\"])\n    !e: print(e)\n"
     );
     let out = golden_entry(&src);
     server.join().unwrap();
@@ -1286,7 +1286,7 @@ fn request_verbs_and_headers_parity_against_local_server() {
 
     // A PUT verb wrapper, then a header-carrying general DELETE.
     let src = format!(
-        "import std.request\nmatch request.put(\"http://{addr}/\", \"payload\"):\n    Ok(r): print(str(r.status))\n    Err(e): print(e)\nmatch request.request(\"DELETE\", \"http://{addr}/\", \"\", {{\"X-Custom\": \"value\"}}):\n    Ok(r): print(str(r.status))\n    Err(e): print(e)\n"
+        "import std.request\nmatch request.put(\"http://{addr}/\", \"payload\"):\n    ?r: print(str(r.status))\n    !e: print(e)\nmatch request.request(\"DELETE\", \"http://{addr}/\", \"\", {{\"X-Custom\": \"value\"}}):\n    ?r: print(str(r.status))\n    !e: print(e)\n"
     );
     let out = golden_entry(&src);
     server.join().unwrap();
@@ -1312,11 +1312,11 @@ fn regex_find_groups_and_span_parity() {
     let out = golden_entry(
         r#"import std.regex
 match regex.find("([a-z]+)@([a-z]+)", "xx ann@host"):
-    Ok(opt):
+    ?opt:
         match opt:
-            Some(m): print(m.text + " " + str(m.start) + " " + ",".join(m.groups))
+            ?m: print(m.text + " " + str(m.start) + " " + ",".join(m.groups))
             None: print("none")
-    Err(e): print(e)
+    !e: print(e)
 "#,
     );
     assert_eq!(out, "ann@host 3 ann,host\n");
@@ -1417,7 +1417,7 @@ fn match_tuple_literal_arm_parity() {
 #[test]
 fn match_nested_variant_in_tuple_parity() {
     assert_golden_out(
-        "o: (int, int)? = Some((10, 20))\nmatch o:\n    None: print(\"none\")\n    Some((a, b)): print(a + b)\n",
+        "o: (int, int)? = ?(10, 20)\nmatch o:\n    None: print(\"none\")\n    ?(a, b): print(a + b)\n",
         "30\n",
     );
 }
@@ -1426,7 +1426,7 @@ fn match_nested_variant_in_tuple_parity() {
 fn match_nested_heap_payload_gc_stress() {
     // Nested pattern binding heap values (strings) inside a tuple inside a variant; a GC mid-bind
     // must not collect the still-referenced payload.
-    let src = "o: (str, str)? = Some((\"a\" + \"b\", \"c\" + \"d\"))\nmatch o:\n    None: print(\"none\")\n    Some((x, y)): print(x + y)\n";
+    let src = "o: (str, str)? = ?(\"a\" + \"b\", \"c\" + \"d\")\nmatch o:\n    None: print(\"none\")\n    ?(x, y): print(x + y)\n";
     assert_golden_out(src, "abcd\n");
     assert_eq!(vm_outcome(src).unwrap(), "abcd\n");
     assert_eq!(
@@ -1494,7 +1494,7 @@ fn field_named_decode_is_indexable_parity() {
 #[test]
 fn json_malformed_numbers_are_errors_parity() {
     let out = golden_entry(
-        "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        Ok(j): return \"OK \" + json.stringify(j)\n        Err(e): return \"ERR\"\nprint(tp(\"1e\"))\nprint(tp(\"1.\"))\nprint(tp(\"100000000000000000000\"))\n",
+        "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        ?j: return \"OK \" + json.stringify(j)\n        !e: return \"ERR\"\nprint(tp(\"1e\"))\nprint(tp(\"1.\"))\nprint(tp(\"100000000000000000000\"))\n",
     );
     assert_eq!(out, "ERR\nERR\nOK 1e+20\n");
 }
@@ -1505,7 +1505,7 @@ fn json_malformed_numbers_are_errors_parity() {
 #[test]
 fn json_control_char_escape_roundtrip_parity() {
     let out = golden_entry(
-        "import std.json\ns := \"x\" + chr(1) + chr(31) + chr(0) + \"y\"\nout := json.stringify(Json.Str(s))\ncodes := List[int]()\nfor c in out.chars():\n    codes.push(ord(c))\nprint(codes)\nmatch json.parse(out):\n    Ok(j):\n        match j:\n            Json.Str(back):\n                if back == s:\n                    print(\"RT_OK\")\n                else:\n                    print(\"RT_FAIL\")\n            _: print(\"NOT_STR\")\n    Err(e): print(\"PARSE_ERR\")\n",
+        "import std.json\ns := \"x\" + chr(1) + chr(31) + chr(0) + \"y\"\nout := json.stringify(Json.Str(s))\ncodes := List[int]()\nfor c in out.chars():\n    codes.push(ord(c))\nprint(codes)\nmatch json.parse(out):\n    ?j:\n        match j:\n            Json.Str(back):\n                if back == s:\n                    print(\"RT_OK\")\n                else:\n                    print(\"RT_FAIL\")\n            _: print(\"NOT_STR\")\n    !e: print(\"PARSE_ERR\")\n",
     );
     assert_eq!(
         out,
@@ -1518,7 +1518,7 @@ fn json_control_char_escape_roundtrip_parity() {
 #[test]
 fn json_leading_zero_numbers_are_errors_parity() {
     let out = golden_entry(
-        "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        Ok(j): return \"OK \" + json.stringify(j)\n        Err(e): return \"ERR\"\nprint(tp(\"01\"))\nprint(tp(\"007\"))\nprint(tp(\"-01\"))\nprint(tp(\"01.5\"))\nprint(tp(\"08\"))\nprint(tp(\"0\"))\nprint(tp(\"-0\"))\nprint(tp(\"0.5\"))\nprint(tp(\"10\"))\nprint(tp(\"0e1\"))\n",
+        "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        ?j: return \"OK \" + json.stringify(j)\n        !e: return \"ERR\"\nprint(tp(\"01\"))\nprint(tp(\"007\"))\nprint(tp(\"-01\"))\nprint(tp(\"01.5\"))\nprint(tp(\"08\"))\nprint(tp(\"0\"))\nprint(tp(\"-0\"))\nprint(tp(\"0.5\"))\nprint(tp(\"10\"))\nprint(tp(\"0e1\"))\n",
     );
     assert_eq!(
         out,
@@ -1532,7 +1532,7 @@ fn json_leading_zero_numbers_are_errors_parity() {
 #[test]
 fn json_raw_control_char_in_string_is_error_parity() {
     let out = golden_entry(
-        "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        Ok(j): return \"OK\"\n        Err(e): return \"ERR\"\nraw := \"\\\"x\" + chr(10) + \"y\\\"\"\nprint(tp(raw))\nprint(tp(\"\\\"a\\\\nb\\\"\"))\n",
+        "import std.json\nfn tp(s: str) -> str:\n    match json.parse(s):\n        ?j: return \"OK\"\n        !e: return \"ERR\"\nraw := \"\\\"x\" + chr(10) + \"y\\\"\"\nprint(tp(raw))\nprint(tp(\"\\\"a\\\\nb\\\"\"))\n",
     );
     assert_eq!(out, "ERR\nOK\n");
 }
@@ -1544,7 +1544,7 @@ fn json_raw_control_char_in_string_is_error_parity() {
 #[test]
 fn json_stringify_non_finite_faults_parity() {
     let out = golden_entry(
-        "import std.json\nfn tp(x: float) -> str:\n    doc := Json.Obj({\"v\": Json.Num(x)})\n    r := recover:\n        json.stringify(doc)\n    match r:\n        Ok(s): return \"OK \" + s\n        Err(e): return e.message()\nprint(tp(1.0 / 0.0))\nprint(tp(-1.0 / 0.0))\nprint(tp(0.0 / 0.0))\n",
+        "import std.json\nfn tp(x: float) -> str:\n    doc := Json.Obj({\"v\": Json.Num(x)})\n    r := recover:\n        json.stringify(doc)\n    match r:\n        ?s: return \"OK \" + s\n        !e: return e.message()\nprint(tp(1.0 / 0.0))\nprint(tp(-1.0 / 0.0))\nprint(tp(0.0 / 0.0))\n",
     );
     assert_eq!(
         out,
@@ -1580,7 +1580,7 @@ fn python_float_repr_str_parity() {
 #[test]
 fn json_stringify_finite_roundtrip_unchanged_parity() {
     let out = golden_entry(
-        "import std.json\ndoc := Json.Arr([Json.Num(3.0), Json.Num(1.5), Json.Num(1e300), Json.Num(0.0 - 2.5), Json.Str(\"hi\"), Json.Obj({\"k\": Json.Num(42.0)})])\ns := json.stringify(doc)\nprint(s)\nmatch json.parse(s):\n    Ok(v): print(\"roundtrip \" + json.stringify(v))\n    Err(e): print(\"ERR \" + e.message())\n",
+        "import std.json\ndoc := Json.Arr([Json.Num(3.0), Json.Num(1.5), Json.Num(1e300), Json.Num(0.0 - 2.5), Json.Str(\"hi\"), Json.Obj({\"k\": Json.Num(42.0)})])\ns := json.stringify(doc)\nprint(s)\nmatch json.parse(s):\n    ?v: print(\"roundtrip \" + json.stringify(v))\n    !e: print(\"ERR \" + e.message())\n",
     );
     // 1e300 is FINITE and far outside the i64 window: it must stringify normally (via `str(f)`),
     // NOT fault. `str(1e300)` renders in scientific notation (CPython repr parity, exponent >= 16):
@@ -1593,7 +1593,7 @@ fn json_stringify_finite_roundtrip_unchanged_parity() {
 #[test]
 fn json_decode_struct_parity() {
     let out = golden_entry(
-        "import std.json\nstruct P:\n    x: int\n    y: int\nmatch json.decode[P](\"{{\\\"x\\\":1,\\\"y\\\":2}}\"):\n    Ok(p): print(p.x + p.y)\n    Err(e): print(e)\n",
+        "import std.json\nstruct P:\n    x: int\n    y: int\nmatch json.decode[P](\"{{\\\"x\\\":1,\\\"y\\\":2}}\"):\n    ?p: print(p.x + p.y)\n    !e: print(e)\n",
     );
     assert_eq!(out, "3\n");
 }
@@ -1601,7 +1601,7 @@ fn json_decode_struct_parity() {
 #[test]
 fn json_decode_error_parity() {
     let out = golden_entry(
-        "import std.json\nstruct P:\n    x: int\nmatch json.decode[P](\"{{\\\"y\\\":2}}\"):\n    Ok(p): print(p.x)\n    Err(e): print(e)\n",
+        "import std.json\nstruct P:\n    x: int\nmatch json.decode[P](\"{{\\\"y\\\":2}}\"):\n    ?p: print(p.x)\n    !e: print(e)\n",
     );
     assert_eq!(out, "decode: missing key 'x' at $\n");
 }
@@ -1613,7 +1613,7 @@ fn json_decode_error_parity() {
 #[test]
 fn json_as_int_out_of_range_parity() {
     let out = golden_entry(
-        "import std.json\nfn a(s: str) -> str:\n    match json.parse(s):\n        Ok(j):\n            match json.as_int(j):\n                Some(v): return \"SOME \" + str(v)\n                None: return \"NONE\"\n        Err(e): return \"PARSEERR\"\nprint(a(\"9999999999999999999\"))\nprint(a(\"42\"))\nprint(a(\"9223372036854775807\"))\nprint(a(\"-9223372036854775808\"))\nprint(a(\"2.5\"))\nprint(a(\"1e400\"))\n",
+        "import std.json\nfn a(s: str) -> str:\n    match json.parse(s):\n        ?j:\n            match json.as_int(j):\n                ?v: return \"SOME \" + str(v)\n                None: return \"NONE\"\n        !e: return \"PARSEERR\"\nprint(a(\"9999999999999999999\"))\nprint(a(\"42\"))\nprint(a(\"9223372036854775807\"))\nprint(a(\"-9223372036854775808\"))\nprint(a(\"2.5\"))\nprint(a(\"1e400\"))\n",
     );
     assert_eq!(
         out,
@@ -1629,7 +1629,7 @@ fn json_as_int_out_of_range_parity() {
 #[test]
 fn json_parse_rejects_non_finite_parity() {
     let out = golden_entry(
-        "import std.json\nfn p(s: str) -> str:\n    match json.parse(s):\n        Ok(j): return \"OK\"\n        Err(e): return \"PARSEERR\"\nprint(p(\"1e400\"))\nprint(p(\"-1e400\"))\nprint(p(\"[1e400]\"))\nprint(p(\"1.5\"))\nprint(p(\"123\"))\nprint(p(\"1e-400\"))\n",
+        "import std.json\nfn p(s: str) -> str:\n    match json.parse(s):\n        ?j: return \"OK\"\n        !e: return \"PARSEERR\"\nprint(p(\"1e400\"))\nprint(p(\"-1e400\"))\nprint(p(\"[1e400]\"))\nprint(p(\"1.5\"))\nprint(p(\"123\"))\nprint(p(\"1e-400\"))\n",
     );
     assert_eq!(out, "PARSEERR\nPARSEERR\nPARSEERR\nOK\nOK\nOK\n");
 }
@@ -1667,7 +1667,7 @@ fn i64_min_literal_runs_parity() {
 #[test]
 fn json_decode_int_out_of_range_parity() {
     let out = golden_entry(
-        "import std.json\nfn d(s: str) -> str:\n    match json.decode[int](s):\n        Ok(v): return \"OK \" + str(v)\n        Err(e): return \"ERR\"\nprint(d(\"1000000000000000000000000000000\"))\nprint(d(\"-1000000000000000000000000000000\"))\nprint(d(\"18446744073709551615\"))\nprint(d(\"9223372036854775807\"))\nprint(d(\"-9223372036854775808\"))\nprint(d(\"42\"))\n",
+        "import std.json\nfn d(s: str) -> str:\n    match json.decode[int](s):\n        ?v: return \"OK \" + str(v)\n        !e: return \"ERR\"\nprint(d(\"1000000000000000000000000000000\"))\nprint(d(\"-1000000000000000000000000000000\"))\nprint(d(\"18446744073709551615\"))\nprint(d(\"9223372036854775807\"))\nprint(d(\"-9223372036854775808\"))\nprint(d(\"42\"))\n",
     );
     assert_eq!(
         out,
@@ -1680,7 +1680,7 @@ fn json_decode_int_out_of_range_parity() {
 #[test]
 fn json_int_boundary_consistency_parity() {
     let out = golden_entry(
-        "import std.json\ns := \"9999999999999999999\"\nmatch json.decode[int](s):\n    Ok(v): print(\"decode OK\")\n    Err(e): print(\"decode ERR\")\nmatch json.parse(s):\n    Ok(j):\n        match json.as_int(j):\n            Some(v): print(\"as_int SOME\")\n            None: print(\"as_int NONE\")\n    Err(e): print(\"parse ERR\")\n",
+        "import std.json\ns := \"9999999999999999999\"\nmatch json.decode[int](s):\n    ?v: print(\"decode OK\")\n    !e: print(\"decode ERR\")\nmatch json.parse(s):\n    ?j:\n        match json.as_int(j):\n            ?v: print(\"as_int SOME\")\n            None: print(\"as_int NONE\")\n    !e: print(\"parse ERR\")\n",
     );
     assert_eq!(out, "decode ERR\nas_int NONE\n");
 }
@@ -1688,7 +1688,7 @@ fn json_int_boundary_consistency_parity() {
 #[test]
 fn process_cmd_ok_and_err_parity() {
     let out = golden_entry(
-        "import std.process\nmatch process.cmd(\"printf abc\"):\n    Ok(s): print(\"ok:\" + s)\n    Err(e): print(\"err:\" + e)\nmatch process.cmd(\"exit 2\"):\n    Ok(s): print(\"ok\")\n    Err(e): print(\"err:\" + e)\n",
+        "import std.process\nmatch process.cmd(\"printf abc\"):\n    ?s: print(\"ok:\" + s)\n    !e: print(\"err:\" + e)\nmatch process.cmd(\"exit 2\"):\n    ?s: print(\"ok\")\n    !e: print(\"err:\" + e)\n",
     );
     assert_eq!(out, "ok:abc\nerr:command exited with status 2\n");
 }
@@ -1722,16 +1722,16 @@ fn fs_stat_walk_fileinfo_parity() {
         "import std.fs\n\
          import FileInfo from std.fs\n\
          match fs.stat(\"{file}\"):\n\
-         \x20   Ok(fi):\n\
+         \x20   ?fi:\n\
          \x20       print(str(fi.size))\n\
          \x20       print(str(fi.is_file))\n\
          \x20       print(str(fi.is_dir))\n\
-         \x20   Err(e): print(\"staterr\")\n\
+         \x20   !e: print(\"staterr\")\n\
          match fs.walk(\"{root}\"):\n\
-         \x20   Ok(xs):\n\
+         \x20   ?xs:\n\
          \x20       for p in xs:\n\
          \x20           print(p)\n\
-         \x20   Err(e): print(\"walkerr\")\n",
+         \x20   !e: print(\"walkerr\")\n",
     );
     let out = golden_entry(&src);
     let expected = format!(
@@ -2056,7 +2056,7 @@ fn match_wildcard_reached_parity() {
 fn match_variant_regression_parity() {
     // A variant match still lowers via the variant path unchanged.
     assert_golden_out(
-        "o := Some(5)\nmatch o:\n    Some(v): print(\"got {v}\")\n    None: print(\"none\")\n",
+        "o := ?5\nmatch o:\n    ?v: print(\"got {v}\")\n    None: print(\"none\")\n",
         "got 5\n",
     );
 }
@@ -2097,7 +2097,7 @@ fn parity_float_ieee_div_mod() {
 #[test]
 fn parity_int_div_by_zero_still_faults() {
     // INTEGER division by zero still faults — caught + printed identically.
-    let src = "fn run() -> int!:\n    r := recover:\n        1 / 0\n    match r:\n        Ok(v): return Ok(v)\n        Err(e): print(e.message())\n    return Ok(0)\nfn main():\n    _ := run()\nmain()";
+    let src = "fn run() -> int!:\n    r := recover:\n        1 / 0\n    match r:\n        ?v: return ?v\n        !e: print(e.message())\n    return ?0\nfn main():\n    _ := run()\nmain()";
     assert_eq!(golden_entry(src), "division by zero\n");
 }
 
@@ -2122,14 +2122,14 @@ fn parity_large_int_map_keys_distinct() {
 fn recover_tail_stmt_match_value_run_parity() {
     // A `recover:` whose TAIL is a statement-form `match` with value-producing arms yields
     // `Ok(<arm value>)` — the value is NOT dropped (the old bug wrapped `Ok(nil)`). v=100.
-    let src = "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3: 100\n            _: 200\n    match r:\n        Ok(v): print(\"v={v}\")\n        Err(e): print(\"err\")\nmain()";
+    let src = "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3: 100\n            _: 200\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()";
     assert_golden_out(src, "v=100\n");
 }
 
 #[test]
 fn recover_tail_stmt_if_value_run_parity() {
     // Trailing statement-form `if/else` analog: the taken branch's value is the `Ok` payload.
-    let src = "fn main():\n    r := recover:\n        x := 3\n        if x == 3:\n            100\n        else:\n            200\n    match r:\n        Ok(v): print(\"v={v}\")\n        Err(e): print(\"err\")\nmain()";
+    let src = "fn main():\n    r := recover:\n        x := 3\n        if x == 3:\n            100\n        else:\n            200\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()";
     assert_golden_out(src, "v=100\n");
 }
 
@@ -2137,7 +2137,7 @@ fn recover_tail_stmt_if_value_run_parity() {
 fn recover_tail_stmt_match_value_defer_in_arm_run_parity() {
     // A `defer` inside a value-producing tail-match arm must run for effect WITHOUT clobbering the
     // trailing value that becomes the `Ok` payload (defers touch frame.deferred, never the stack).
-    let src = "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3:\n                defer print(\"cleanup\")\n                100\n            _: 200\n    match r:\n        Ok(v): print(\"v={v}\")\n        Err(e): print(\"err\")\nmain()";
+    let src = "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3:\n                defer print(\"cleanup\")\n                100\n            _: 200\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()";
     assert_golden_out(src, "cleanup\nv=100\n");
 }
 
@@ -2145,7 +2145,7 @@ fn recover_tail_stmt_match_value_defer_in_arm_run_parity() {
 fn recover_tail_match_value_catches_fault_is_err() {
     // Must-not-break: even though the block is now value-typed, a fault raised BEFORE the tail-match
     // is still caught and converted to `Err` (single-Result stack invariant preserved).
-    let src = "fn main():\n    r := recover:\n        xs := [1, 2]\n        y := xs[9]\n        match y:\n            _: 100\n    match r:\n        Ok(v): print(\"ok={v}\")\n        Err(e): print(\"err\")\nmain()";
+    let src = "fn main():\n    r := recover:\n        xs := [1, 2]\n        y := xs[9]\n        match y:\n            _: 100\n    match r:\n        ?v: print(\"ok={v}\")\n        !e: print(\"err\")\nmain()";
     assert_golden_out(src, "err\n");
 }
 
@@ -2155,14 +2155,14 @@ fn recover_tail_match_heterogeneous_arms_run_parity() {
     // checker but the compiler still compiles the tail as a value — whichever arm runs, its value is
     // `Ok`-wrapped and simply IGNORED by `Ok(_)`. The program must check + RUN identically
     // (the first cut of the feature rejected it at `check`).
-    let src = "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(\"a\")";
+    let src = "fn foo(cmd: str):\n    r := recover:\n        match cmd:\n            \"a\": \"hello\"\n            _: 42\n    match r:\n        ?_: print(\"done\")\n        !e: print(\"failed\")\nfoo(\"a\")";
     assert_golden_out(src, "done\n");
 }
 
 #[test]
 fn recover_tail_if_heterogeneous_branches_run_parity() {
     // The `if/else` analog of the heterogeneous fall-back: runs, value ignored.
-    let src = "fn foo(n: int):\n    r := recover:\n        if n == 0:\n            \"zero\"\n        else:\n            n\n    match r:\n        Ok(_): print(\"done\")\n        Err(e): print(\"failed\")\nfoo(0)";
+    let src = "fn foo(n: int):\n    r := recover:\n        if n == 0:\n            \"zero\"\n        else:\n            n\n    match r:\n        ?_: print(\"done\")\n        !e: print(\"failed\")\nfoo(0)";
     assert_golden_out(src, "done\n");
 }
 
@@ -2239,7 +2239,7 @@ fn math_abs_min_overflows() {
 #[test]
 fn math_abs_min_overflow_is_recoverable() {
     // The overflow is a normal recoverable fault: `recover:` turns it into an Err, not a crash.
-    let src = "import std.math\nfn main():\n    x := -9223372036854775807 - 1\n    r := recover:\n        math.abs(x)\n    match r:\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()";
+    let src = "import std.math\nfn main():\n    x := -9223372036854775807 - 1\n    r := recover:\n        math.abs(x)\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nmain()";
     let out = golden_entry(src);
     assert!(out.contains("integer overflow in abs"), "{out}");
 }
@@ -2366,8 +2366,8 @@ fn main():
             print(v)
         0
     match x:
-        Ok(_): print("no fault")
-        Err(e): print("caught: {e.message()}")
+        ?_: print("no fault")
+        !e: print("caught: {e.message()}")
     print("still alive")
 main()
 "#;
@@ -2409,10 +2409,10 @@ fn gen() -> Iterator[int]:
     yield 1
     yield 2
 g := gen()
-h.g = Some(g)
+h.g = ?g
 print("orig", g.next())
 match ch.recv().g:
-    Some(x): print("copy", x.next(), x.next())
+    ?x: print("copy", x.next(), x.next())
     None: print("none")
 "#;
     let out = golden_entry_fault(src);
@@ -2438,10 +2438,10 @@ fn gen() -> Iterator[int]:
     yield 1
     yield 2
 g := gen()
-h.g = Some(g)
+h.g = ?g
 print("orig", g.next())
 match a.load().g:
-    Some(x): print("copy", x.next(), x.next())
+    ?x: print("copy", x.next(), x.next())
     None: print("none")
 "#;
     let out = golden_entry_fault(src);
@@ -3176,8 +3176,8 @@ fn main():
         res := recover:
             inner.push(2)
         match res:
-            Ok(_): return "{inner} {gl[0]}"
-            Err(_): return "fault"
+            ?_: return "{inner} {gl[0]}"
+            !_: return "fault"
     parallel:
         spawn:
             f := c.recv()
@@ -3208,8 +3208,8 @@ fn f(x: List[int], r: Channel[str]):
     res := recover:
         x.push(2)
     match res:
-        Ok(_): r.send("no-fault {x} {gl[0]}")
-        Err(_): r.send("fault {x} {gl[0]}")
+        ?_: r.send("no-fault {x} {gl[0]}")
+        !_: r.send("fault {x} {gl[0]}")
 
 fn main():
     r := Channel[str](1)
@@ -3240,8 +3240,8 @@ fn main():
             res := recover:
                 a[0].push(2)
             match res:
-                Ok(_): r.send("no-fault {a} {gl}")
-                Err(_): r.send("fault {a} {gl}")
+                ?_: r.send("no-fault {a} {gl}")
+                !_: r.send("fault {a} {gl}")
     print("whole alias: {r.recv()}")
 main()
 "#;
@@ -3369,8 +3369,8 @@ fn main():
             print("c {x}")
         0
     match r:
-        Ok(_): print("c no fault")
-        Err(_): print("c caught")
+        ?_: print("c no fault")
+        !_: print("c caught")
     # a generator whose body faulted is CLOSED (like Python) — a later resume answers None
     print("c closed {bad.next()}")
     for x in count(2):
@@ -3394,7 +3394,7 @@ main()
 fn defer_top_level_runs_on_unhandled_error() {
     // An unhandled top-level `?` error still unwinds through the module body's defers (cleanup
     // runs before the program reports the error).
-    let src = "fn log(s: str):\n    print(s)\nfn boom() -> int!:\n    return Err(\"nope\")\ndefer log(\"cleanup\")\nprint(\"before\")\nx := boom()?\nprint(\"after\")\n";
+    let src = "fn log(s: str):\n    print(s)\nfn boom() -> int!:\n    return !\"nope\"\ndefer log(\"cleanup\")\nprint(\"before\")\nx := boom()?\nprint(\"after\")\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let (io, _ie, ir, _ic) = run_file(&entry);
@@ -3597,8 +3597,8 @@ fn deadlock_fault_is_not_recoverable_new_message() {
                \x20       for v in ch:\n\
                \x20           print(v)\n\
                \x20   match r:\n\
-               \x20       Ok(_): print(\"ok\")\n\
-               \x20       Err(e): print(\"caught: {e.message()}\")\n\
+               \x20       ?_: print(\"ok\")\n\
+               \x20       !e: print(\"caught: {e.message()}\")\n\
                main()\n";
     let msg = golden_entry_fault(src);
     assert!(msg.contains("deadlock"), "got: {msg}");
@@ -3696,7 +3696,7 @@ fn serve(server: Listener) -> int!:
     conn.write("echo:" + msg)?
     conn.close()
     server.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str) -> int!:
     sock := net.connect(addr)?
@@ -3704,7 +3704,7 @@ fn client(addr: str) -> int!:
     reply := sock.read(64)?
     print(reply)
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     server := net.listen("127.0.0.1:0")?
@@ -3712,12 +3712,12 @@ fn run() -> int!:
     parallel:
         spawn serve(server)
         spawn client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print("done")
-        Err(e): print("net error: " + e.message())
+        ?_: print("done")
+        !e: print("net error: " + e.message())
 
 main()
 "#;
@@ -3777,13 +3777,13 @@ fn server(listener: Listener) -> int!:
     time.sleep_ms(400)
     conn.close()
     listener.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str):
     sock := net.connect(addr)?
     match sock.read(64, 100):
-        Ok(s): print(\"GOT:\" + s)
-        Err(e): print(\"ERR:\" + e.message())
+        ?s: print(\"GOT:\" + s)
+        !e: print(\"ERR:\" + e.message())
     sock.close()
 
 fn run() -> int!:
@@ -3792,19 +3792,19 @@ fn run() -> int!:
     parallel:
         spawn server(listener)
         spawn client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"\")
-        Err(e): print(\"RUN-ERR:\" + e.message())
+        ?_: print(\"\")
+        !e: print(\"RUN-ERR:\" + e.message())
 
 main()
 ";
     let out = run_net_timeout_watchdog("read_timeout", src);
     assert!(
         out.contains("ERR:timeout"),
-        "read(64, 100) must surface Err(\"timeout\"): {out:?}"
+        "read(64, 100) must surface !\"timeout\": {out:?}"
     );
     assert!(
         !out.contains("GOT:"),
@@ -3826,7 +3826,7 @@ fn serve(server: Listener) -> int!:
     conn.write(\"héllo\")?
     conn.close()
     server.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str) -> int!:
     sock := net.connect(addr)?
@@ -3838,7 +3838,7 @@ fn client(addr: str) -> int!:
         acc = acc + chunk
     print(\"GOT:\" + acc)
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     server := net.listen(\"127.0.0.1:0\")?
@@ -3846,12 +3846,12 @@ fn run() -> int!:
     parallel:
         spawn serve(server)
         spawn client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 ";
@@ -3898,21 +3898,21 @@ fn client() -> int!:
     i := 0
     while i < 3:
         match sock.read(64):
-            Ok(s): print(\"GOT:[\" + s + \"]\")
-            Err(e): print(\"ERR:\" + e.message())
+            ?s: print(\"GOT:[\" + s + \"]\")
+            !e: print(\"ERR:\" + e.message())
         i = i + 1
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn client()
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 "
@@ -3962,19 +3962,19 @@ fn client() -> int!:
     sock := net.connect(\"{addr}\")?
     sock.close()
     match sock.read(0):
-        Ok(s): print(\"OK:[\" + s + \"]\")
-        Err(e): print(\"ERR:\" + e.message())
-    return Ok(0)
+        ?s: print(\"OK:[\" + s + \"]\")
+        !e: print(\"ERR:\" + e.message())
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn client()
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 "
@@ -4021,28 +4021,28 @@ fn client() -> int!:
     seen := 0
     while true:
         match sock.read(8, 0):
-            Ok(s):
+            ?s:
                 if s == \"\":
                     break
                 acc = acc + s
-            Err(e):
+            !e:
                 m := e.message()
                 if m != \"timeout\" and seen == 0:
                     print(\"ERR:\" + m)
                     seen = 1
     print(\"ACC:\" + acc)
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn client()
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 "
@@ -4088,25 +4088,25 @@ import std.net
 
 fn grab(s: Socket) -> str:
     match s.read(8, 200):
-        Ok(v): return \"GOT:\" + v
-        Err(e): return \"ERR:\" + e.message()
+        ?v: return \"GOT:\" + v
+        !e: return \"ERR:\" + e.message()
 
 fn client() -> int!:
     sock := net.connect(\"{addr}\")?
     outs := [sock].map(grab)
     print(outs[0])
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn client()
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 "
@@ -4197,12 +4197,12 @@ fn serve() -> int!:
     conn.write(\"echo:\" + msg)?
     conn.close()
     l.close()
-    return Ok(0)
+    return ?0
 
 fn main():
     match serve():
-        Ok(_): print(\"done\")
-        Err(e): print(\"ERR:\" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"ERR:\" + e.message())
 
 main()
 "
@@ -4235,12 +4235,12 @@ fn serve() -> int!:
     conn.write(\"echo:hi\")?
     conn.close()
     l.close()
-    return Ok(0)
+    return ?0
 
 fn main():
     match serve():
-        Ok(_): print(\"done\")
-        Err(e): print(\"ERR:\" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"ERR:\" + e.message())
 
 main()
 "
@@ -4276,25 +4276,25 @@ fn client() -> int!:
     sock := net.connect(\"{addr}\")?
     while true:
         match sock.read(8):
-            Ok(s):
+            ?s:
                 if s == \"\":
                     break
                 print(\"GOT:\" + s)
-            Err(e):
+            !e:
                 print(\"ERR:\" + e.message())
                 break
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn client()
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 "
@@ -4328,7 +4328,7 @@ fn serve(server: Listener) -> int!:
     conn.write(\"héllo\")?
     conn.close()
     server.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str) -> int!:
     sock := net.connect(addr)?
@@ -4339,7 +4339,7 @@ fn client(addr: str) -> int!:
     rest := sock.read(64)?          # the carry is still owed — \"éllo\"
     print(\"REST:\" + rest)
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     server := net.listen(\"127.0.0.1:0\")?
@@ -4347,12 +4347,12 @@ fn run() -> int!:
     parallel:
         spawn serve(server)
         spawn client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 ";
@@ -4360,7 +4360,7 @@ main()
     assert!(out.contains("FIRST:h"), "{out:?}");
     assert!(
         out.contains("ZERO:[]"),
-        "read(0) is a no-op Ok(\"\"), not a spin and not a false EOF error: {out:?}"
+        "read(0) is a no-op ?\"\", not a spin and not a false EOF error: {out:?}"
     );
     assert!(
         out.contains("REST:éllo"),
@@ -4389,16 +4389,16 @@ fn serve(server: Listener) -> int!:
         i = i + 1
     conn.close()
     server.close()
-    return Ok(0)
+    return ?0
 
 fn drain(sock: Socket, seen: Shared[int], bad: Shared[int]) -> int!:
     while seen.get() < 300 and bad.get() == 0:
         match sock.read(3, 0):
-            Ok(s):
+            ?s:
                 got := s.chars().len()
                 if got > 0:
                     seen.update(fn(v: int) -> int: v + got)
-            Err(e):
+            !e:
                 # \"timeout\" (nothing ready) and \"incomplete utf-8\" (this poll took a partial
                 # codepoint — retained, the next read finishes it) are both benign poll-once retry
                 # signals. \"invalid utf-8\" is THE bug this test guards: valid text mis-decoded
@@ -4406,7 +4406,7 @@ fn drain(sock: Socket, seen: Shared[int], bad: Shared[int]) -> int!:
                 if e.message().starts_with(\"invalid utf-8\"):
                     print(\"ERR:\" + e.message())
                     bad.update(fn(v: int) -> int: v + 1)
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     server := net.listen(\"127.0.0.1:0\")?
@@ -4421,15 +4421,15 @@ fn run() -> int!:
                 spawn drain(sock, seen, bad)
                 spawn drain(sock, seen, bad)
             sock.close()
-            return Ok(0)
+            return ?0
     print(\"SEEN:\" + str(seen.get()))
     print(\"BAD:\" + str(bad.get()))
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 ";
@@ -4479,20 +4479,20 @@ import std.net
 fn client() -> int!:
     sock := net.connect(\"{addr}\")?
     match sock.read(64, 400):
-        Ok(s): print(\"GOT:\" + s)
-        Err(e): print(\"ERR:\" + e.message())
+        ?s: print(\"GOT:\" + s)
+        !e: print(\"ERR:\" + e.message())
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn client()
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 "
@@ -4527,7 +4527,7 @@ fn server(listener: Listener) -> int!:
     _ := listener.accept()?
     time.sleep_ms(3000)
     listener.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str):
     sock := net.connect(addr)?
@@ -4536,8 +4536,8 @@ fn client(addr: str):
     i := 0
     while i < 200:
         match sock.write(payload, 300):
-            Ok(n): total = total + n
-            Err(e):
+            ?n: total = total + n
+            !e:
                 print(\"ERR:\" + e.message())
                 break
         i = i + 1
@@ -4549,19 +4549,19 @@ fn run() -> int!:
     parallel:
         spawn server(listener)
         spawn client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error:\" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error:\" + e.message())
 
 main()
 ";
     let out = run_net_timeout_watchdog("write_timeout_full", src);
     assert!(
         out.contains("ERR:timeout"),
-        "a write(_, 300) against a full send buffer must surface Err(\"timeout\"): {out:?}"
+        "a write(_, 300) against a full send buffer must surface !\"timeout\": {out:?}"
     );
     assert!(
         out.contains("done"),
@@ -4596,23 +4596,23 @@ import std.net
 fn client() -> int!:
     sock := net.connect(\"{addr}\")?
     match sock.read(8, 200):
-        Ok(s): print(\"A-OK:\" + s)
-        Err(e): print(\"A:\" + e.message())
+        ?s: print(\"A-OK:\" + s)
+        !e: print(\"A:\" + e.message())
     match sock.read(8, 200):
-        Ok(s): print(\"B-OK:\" + s)
-        Err(e): print(\"B:\" + e.message())
+        ?s: print(\"B-OK:\" + s)
+        !e: print(\"B:\" + e.message())
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn client()
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error:\" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error:\" + e.message())
 
 main()
 "
@@ -4643,27 +4643,27 @@ import std.net
 
 fn server(listener: Listener):
     match listener.accept(100):
-        Ok(_): print(\"ACCEPTED\")
-        Err(e): print(\"ERR:\" + e.message())
+        ?_: print(\"ACCEPTED\")
+        !e: print(\"ERR:\" + e.message())
     listener.close()
 
 fn run() -> int!:
     listener := net.listen(\"127.0.0.1:0\")?
     parallel:
         spawn server(listener)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"RUN-ERR:\" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"RUN-ERR:\" + e.message())
 
 main()
 ";
     let out = run_net_timeout_watchdog("accept_timeout", src);
     assert!(
         out.contains("ERR:timeout"),
-        "accept(100) with no client must surface Err(\"timeout\"): {out:?}"
+        "accept(100) with no client must surface !\"timeout\": {out:?}"
     );
     assert!(
         out.contains("done"),
@@ -4688,13 +4688,13 @@ fn server(listener: Listener) -> int!:
     conn.write(\"late\")?
     conn.close()
     listener.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str):
     sock := net.connect(addr)?
     match sock.read(64):
-        Ok(s): print(\"GOT:\" + s)
-        Err(e): print(\"ERR:\" + e.message())
+        ?s: print(\"GOT:\" + s)
+        !e: print(\"ERR:\" + e.message())
     sock.close()
 
 fn run() -> int!:
@@ -4703,12 +4703,12 @@ fn run() -> int!:
     parallel:
         spawn server(listener)
         spawn client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"\")
-        Err(e): print(\"RUN-ERR:\" + e.message())
+        ?_: print(\"\")
+        !e: print(\"RUN-ERR:\" + e.message())
 
 main()
 ";
@@ -4761,24 +4761,24 @@ fn net_faulting_sibling_aborts_accept_parked_peer() {
     let src = r#"import std.net
 
 fn faulter(z: int) -> int!:
-    return Ok(10 / z)
+    return ?(10 / z)
 
 fn acceptor(server: Listener) -> int!:
     conn := server.accept()?
     conn.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     server := net.listen("127.0.0.1:0")?
     parallel:
         spawn acceptor(server)
         spawn faulter(0)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print("joined ok")
-        Err(e): print("caught: " + e.message())
+        ?_: print("joined ok")
+        !e: print("caught: " + e.message())
 
 main()
 "#;
@@ -4806,23 +4806,23 @@ fn net_connect_parks_and_is_drained_on_fault() {
     let src = r#"import std.net
 
 fn faulter(z: int) -> int!:
-    return Ok(10 / z)
+    return ?(10 / z)
 
 fn dialer() -> int!:
     sock := net.connect("192.0.2.1:9")?
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn dialer()
         spawn faulter(0)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print("joined ok")
-        Err(e): print("caught: " + e.message())
+        ?_: print("joined ok")
+        !e: print("caught: " + e.message())
 
 main()
 "#;
@@ -4867,7 +4867,7 @@ fn net_connect_top_level_dead_port_errors_not_hangs() {
         l.local_addr().unwrap()
     };
     let src = format!(
-        "import std.net\nfn main():\n    match net.connect(\"{dead}\"):\n        Ok(_): print(\"connected\")\n        Err(e): print(\"ERR: {{e.message()}}\")\nmain()\n"
+        "import std.net\nfn main():\n    match net.connect(\"{dead}\"):\n        ?_: print(\"connected\")\n        !e: print(\"ERR: {{e.message()}}\")\nmain()\n"
     );
     let want = "connect failed: ";
     let (tx, rx) = std::sync::mpsc::channel();
@@ -4909,7 +4909,7 @@ fn acceptor(server: Listener, n: int) -> int!:
         conn.write("echo:" + msg)?
         conn.close()
     server.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str, served: AtomicInt) -> int!:
     sock := net.connect(addr)?
@@ -4918,7 +4918,7 @@ fn client(addr: str, served: AtomicInt) -> int!:
     sock.close()
     if reply == "echo:ping":
         served.add(1)
-    return Ok(0)
+    return ?0
 
 fn run(n: int) -> int!:
     server := net.listen("127.0.0.1:0")?
@@ -4928,12 +4928,12 @@ fn run(n: int) -> int!:
         spawn acceptor(server, n)
         for _ in 0..n:
             spawn client(addr, served)
-    return Ok(served.load())
+    return ?served.load()
 
 fn main():
     match run(100):
-        Ok(served): print("all served: {served}")
-        Err(e): print("error: " + e.message())
+        ?served: print("all served: {served}")
+        !e: print("error: " + e.message())
 
 main()
 "#;
@@ -4970,7 +4970,7 @@ fn handle(conn: Socket) -> int!:
     msg := conn.read(64)?
     conn.write("echo:" + msg)?
     conn.close()
-    return Ok(0)
+    return ?0
 
 fn acceptor(server: Listener, n: int) -> int!:
     parallel:
@@ -4978,7 +4978,7 @@ fn acceptor(server: Listener, n: int) -> int!:
             conn := server.accept()?
             spawn handle(conn)
     server.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str, served: AtomicInt) -> int!:
     sock := net.connect(addr)?
@@ -4987,7 +4987,7 @@ fn client(addr: str, served: AtomicInt) -> int!:
     sock.close()
     if reply == "echo:ping":
         served.add(1)
-    return Ok(0)
+    return ?0
 
 fn run(n: int) -> int!:
     server := net.listen("127.0.0.1:0")?
@@ -4997,12 +4997,12 @@ fn run(n: int) -> int!:
         spawn acceptor(server, n)
         for _ in 0..n:
             spawn client(addr, served)
-    return Ok(served.load())
+    return ?served.load()
 
 fn main():
     match run(100):
-        Ok(served): print("all served: {served}")
-        Err(e): print("error: " + e.message())
+        ?served: print("all served: {served}")
+        !e: print("error: " + e.message())
 
 main()
 "#;
@@ -5044,7 +5044,7 @@ fn handle(conn: Socket) -> int!:
     msg := conn.read(64)?
     conn.write("echo:" + msg)?
     conn.close()
-    return Ok(0)
+    return ?0
 
 fn acceptor(server: Listener, n: int) -> int!:
     parallel:
@@ -5052,7 +5052,7 @@ fn acceptor(server: Listener, n: int) -> int!:
             conn := server.accept()?
             spawn handle(conn)
     server.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str, n: int, served: AtomicInt) -> int!:
     for _ in 0..n:
@@ -5062,7 +5062,7 @@ fn client(addr: str, n: int, served: AtomicInt) -> int!:
         sock.close()
         if reply == "echo:ping":
             served.add(1)
-    return Ok(0)
+    return ?0
 
 fn run(n: int) -> int!:
     server := net.listen("127.0.0.1:0")?
@@ -5071,12 +5071,12 @@ fn run(n: int) -> int!:
     parallel:
         spawn acceptor(server, n)
         spawn client(addr, n, served)
-    return Ok(served.load())
+    return ?served.load()
 
 fn main():
     match run(8):
-        Ok(served): print("all served: {served}")
-        Err(e): print("error: " + e.message())
+        ?served: print("all served: {served}")
+        !e: print("error: " + e.message())
 
 main()
 "#;
@@ -5118,10 +5118,10 @@ fn handle(conn: Socket, i: int) -> int!:
     if i == 0:
         conn.close()
         boom := [1]
-        return Ok(boom[10])
+        return ?boom[10]
     conn.write("echo:" + msg)?
     conn.close()
-    return Ok(0)
+    return ?0
 
 fn acceptor(server: Listener, n: int) -> int!:
     parallel:
@@ -5129,14 +5129,14 @@ fn acceptor(server: Listener, n: int) -> int!:
             conn := server.accept()?
             spawn handle(conn, i)
     server.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str) -> int!:
     sock := net.connect(addr)?
     sock.write("ping")?
     reply := sock.read(64)?
     sock.close()
-    return Ok(1)
+    return ?1
 
 fn run(n: int) -> int!:
     server := net.listen("127.0.0.1:0")?
@@ -5145,12 +5145,12 @@ fn run(n: int) -> int!:
         spawn acceptor(server, n)
         for _ in 0..n:
             spawn client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run(6):
-        Ok(_): print("all served")
-        Err(e): print("error: " + e.message())
+        ?_: print("all served")
+        !e: print("error: " + e.message())
 
 main()
 "#;
@@ -5219,7 +5219,7 @@ fn handle(conn: Socket) -> int!:
     msg := conn.read(64)?
     conn.write("echo:" + msg)?
     conn.close()
-    return Ok(0)
+    return ?0
 
 fn server_loop(server: Listener, n: int) -> int!:
     parallel:
@@ -5227,7 +5227,7 @@ fn server_loop(server: Listener, n: int) -> int!:
             conn := server.accept()?
             spawn handle(conn)
     server.close()
-    return Ok(0)
+    return ?0
 
 fn pinger(addr: str, served: AtomicInt) -> int!:
     sock := net.connect(addr)?
@@ -5236,7 +5236,7 @@ fn pinger(addr: str, served: AtomicInt) -> int!:
     sock.close()
     if reply == "echo:ping":
         served.add(1)
-    return Ok(0)
+    return ?0
 
 fn one_server(n: int, served: AtomicInt) -> int!:
     server := net.listen("127.0.0.1:0")?
@@ -5245,19 +5245,19 @@ fn one_server(n: int, served: AtomicInt) -> int!:
         spawn server_loop(server, n)
         for _ in 0..n:
             spawn pinger(addr, served)
-    return Ok(0)
+    return ?0
 
 fn run(servers: int, conns: int) -> int!:
     served := AtomicInt(0)
     parallel:
         for _ in 0..servers:
             spawn one_server(conns, served)
-    return Ok(served.load())
+    return ?served.load()
 
 fn main():
     match run(4, 12):
-        Ok(served): print("all servers done: {served}")
-        Err(e): print("error: " + e.message())
+        ?served: print("all servers done: {served}")
+        !e: print("error: " + e.message())
 
 main()
 "#;
@@ -5333,7 +5333,7 @@ fn parity_std_io_read_write_file() {
     let t = TmpDir::new();
     let data = t.0.join("data.txt").display().to_string();
     let src = format!(
-        "import std.io\nfn main():\n    match io.write_file(\"{data}\", \"hello\\nworld\"):\n        Ok(_): io.print(\"wrote\")\n        Err(e): io.print(e)\n    match io.read_file(\"{data}\"):\n        Ok(s): io.print(s)\n        Err(e): io.print(e)\nmain()"
+        "import std.io\nfn main():\n    match io.write_file(\"{data}\", \"hello\\nworld\"):\n        ?_: io.print(\"wrote\")\n        !e: io.print(e)\n    match io.read_file(\"{data}\"):\n        ?s: io.print(s)\n        !e: io.print(e)\nmain()"
     );
     let entry = t.write("main.chz", &src);
     let (io_out, _ie, ir, _) = run_file(&entry);
@@ -5347,7 +5347,7 @@ fn parity_std_io_read_write_file() {
 fn parity_std_io_read_missing_file_errs() {
     // The error text comes from the same `std::fs` call, so it matches; we only
     // assert the Err branch is taken (deterministic regardless of OS message).
-    let src = "import std.io\nfn main():\n    match io.read_file(\"/no/such/chezzi/path/xyz\"):\n        Ok(s): io.print(s)\n        Err(e): io.print(\"err\")\nmain()";
+    let src = "import std.io\nfn main():\n    match io.read_file(\"/no/such/chezzi/path/xyz\"):\n        ?s: io.print(s)\n        !e: io.print(\"err\")\nmain()";
     assert_eq!(golden_entry(src), "err\n");
 }
 
@@ -5355,14 +5355,14 @@ fn parity_std_io_read_missing_file_errs() {
 #[cfg(target_os = "linux")]
 fn read_file_caps_oversized_input() {
     // /dev/zero is unbounded; read_file must return an Err (the size cap), not OOM.
-    let src = "import std.io\nfn main():\n    match io.read_file(\"/dev/zero\"):\n        Ok(s): io.print(\"ok\")\n        Err(e): io.print(\"capped\")\nmain()";
+    let src = "import std.io\nfn main():\n    match io.read_file(\"/dev/zero\"):\n        ?s: io.print(\"ok\")\n        !e: io.print(\"capped\")\nmain()";
     assert_eq!(golden_entry(src), "capped\n");
 }
 
 #[test]
 fn parity_std_io_read_line_consumes_injected_stdin() {
     use crate::native::{HostConfig, Stdin};
-    let src = "import std.io\nfn main():\n    match io.read_line():\n        Some(l): io.print(\"got {l}\")\n        None: io.print(\"eof\")\n    match io.read_line():\n        Some(l): io.print(l)\n        None: io.print(\"eof\")\nmain()";
+    let src = "import std.io\nfn main():\n    match io.read_line():\n        ?l: io.print(\"got {l}\")\n        None: io.print(\"eof\")\n    match io.read_line():\n        ?l: io.print(l)\n        None: io.print(\"eof\")\nmain()";
     let out = golden_entry_cfg(src, || HostConfig {
         stdin: Stdin::lines(["alpha".to_string()]),
         ..Default::default()
@@ -5394,7 +5394,7 @@ fn parity_std_io_read_all_drains_injected_stdin() {
 #[test]
 fn parity_std_io_read_char_yields_scalars_then_eof() {
     use crate::native::{HostConfig, Stdin};
-    let src = "import std.io\nfn main():\n    while true:\n        match io.read_char():\n            Some(c): io.print(\"[{c}]\")\n            None:\n                io.print(\"done\")\n                break\nmain()";
+    let src = "import std.io\nfn main():\n    while true:\n        match io.read_char():\n            ?c: io.print(\"[{c}]\")\n            None:\n                io.print(\"done\")\n                break\nmain()";
     let out = golden_entry_cfg(src, || HostConfig {
         stdin: Stdin::lines(["aé".to_string()]),
         ..Default::default()
@@ -5410,7 +5410,7 @@ fn parity_std_io_read_char_yields_scalars_then_eof() {
 #[test]
 fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
     use crate::native::{HostConfig, Stdin};
-    let src = "import std.io\nfn main():\n    io.flush()\n    match io.input(\"p: \"):\n        Some(l): io.print(\"got {l}\")\n        None: io.print(\"eof\")\nmain()";
+    let src = "import std.io\nfn main():\n    io.flush()\n    match io.input(\"p: \"):\n        ?l: io.print(\"got {l}\")\n        None: io.print(\"eof\")\nmain()";
     let out = golden_entry_cfg(src, || HostConfig {
         stdin: Stdin::lines(["ada".to_string()]),
         ..Default::default()
@@ -5429,7 +5429,7 @@ fn parity_std_io_input_prompt_then_line_and_flush_is_a_noop() {
 #[test]
 fn parity_spawned_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
-    let src = "import std.io\nfn t():\n    match io.read_line():\n        Some(v): io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    parallel:\n        spawn: t()\n        spawn: t()\n    t()\nmain()";
+    let src = "import std.io\nfn t():\n    match io.read_line():\n        ?v: io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    parallel:\n        spawn: t()\n        spawn: t()\n    t()\nmain()";
     let out = golden_entry_cfg_lines(src, || HostConfig {
         stdin: Stdin::lines(["a".to_string(), "b".to_string(), "c".to_string()]),
         ..Default::default()
@@ -5442,7 +5442,7 @@ fn parity_spawned_tasks_share_stdin_exactly_once() {
 #[test]
 fn parity_executor_tasks_share_stdin_exactly_once() {
     use crate::native::{HostConfig, Stdin};
-    let src = "import std.io\nimport std.concurrency\nfn t():\n    match io.read_line():\n        Some(v): io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    e := Executor()\n    e.submit(t)\n    e.submit(t)\n    e.shutdown()\n    t()\nmain()";
+    let src = "import std.io\nimport std.concurrency\nfn t():\n    match io.read_line():\n        ?v: io.print(\"got {v}\")\n        None: io.print(\"eof\")\nfn main():\n    e := Executor()\n    e.submit(t)\n    e.submit(t)\n    e.shutdown()\n    t()\nmain()";
     let out = golden_entry_cfg_lines(src, || HostConfig {
         stdin: Stdin::lines(["a".to_string(), "b".to_string(), "c".to_string()]),
         ..Default::default()
@@ -5480,7 +5480,7 @@ fn parity_std_log_defaults_to_stderr() {
 #[test]
 fn parity_std_os_args_and_env() {
     use crate::native::HostConfig;
-    let src = "import std.io\nimport std.os\nfn main():\n    for a in os.args():\n        io.print(a)\n    match os.env(\"CHEZZI_TEST_VAR\"):\n        Some(v): io.print(v)\n        None: io.print(\"no var\")\nmain()";
+    let src = "import std.io\nimport std.os\nfn main():\n    for a in os.args():\n        io.print(a)\n    match os.env(\"CHEZZI_TEST_VAR\"):\n        ?v: io.print(v)\n        None: io.print(\"no var\")\nmain()";
     let out = golden_entry_cfg(src, || HostConfig {
         args: vec!["x".to_string(), "y".to_string()],
         env: std::sync::Arc::new(std::sync::Mutex::new(
@@ -5496,14 +5496,14 @@ fn parity_std_os_args_and_env() {
 #[test]
 fn parity_std_os_env_missing_is_none() {
     use crate::native::HostConfig;
-    let src = "import std.io\nimport std.os\nfn main():\n    match os.env(\"DEFINITELY_UNSET_XYZ\"):\n        Some(v): io.print(v)\n        None: io.print(\"none\")\nmain()";
+    let src = "import std.io\nimport std.os\nfn main():\n    match os.env(\"DEFINITELY_UNSET_XYZ\"):\n        ?v: io.print(v)\n        None: io.print(\"none\")\nmain()";
     let out = golden_entry_cfg(src, HostConfig::default);
     assert_eq!(out, "none\n");
 }
 
 #[test]
 fn parity_std_os_getcwd_ok() {
-    let src = "import std.io\nimport std.os\nfn main():\n    match os.getcwd():\n        Ok(p): io.print(\"ok\")\n        Err(e): io.print(\"err\")\nmain()";
+    let src = "import std.io\nimport std.os\nfn main():\n    match os.getcwd():\n        ?p: io.print(\"ok\")\n        !e: io.print(\"err\")\nmain()";
     assert_eq!(golden_entry(src), "ok\n");
 }
 
@@ -5542,8 +5542,8 @@ struct Out:
     m: Map[str, In]
     name: str = "d" + str(1)
 match json.decode[Out](r'{"xs":[{"w":"a"},{"w":"b"},{"w":"c"}],"m":{"k":{"w":"q"}}}'):
-    Ok(o): print(o)
-    Err(e): print(e)
+    ?o: print(o)
+    !e: print(e)
 "#;
     assert_eq!(
         vm_run_file_stress(src, crate::native::HostConfig::default()),
@@ -5566,11 +5566,11 @@ struct In:
     w: str
     tags: List[str] = mk()
 match json.decode[Map[str, In]](r'{"a":{"w":"x"},"b":{"w":"y"}}'):
-    Ok(m): print(m)
-    Err(e): print(e)
+    ?m: print(m)
+    !e: print(e)
 match json.decode[(In, In)](r'[{"w":"p"},{"w":"q"}]'):
-    Ok(t): print(t)
-    Err(e): print(e)
+    ?t: print(t)
+    !e: print(e)
 "#;
     assert_eq!(
         vm_run_file_stress(src, crate::native::HostConfig::default()),
@@ -5767,7 +5767,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // ? operator (Ok + Err propagation)
     (
-        "fn d(a: int, b: int) -> Result[int]:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(a / b)\nfn use() -> Result[int]:\n    r := d(10, 0)?\n    return Ok(r)\nfn main():\n    match use():\n        Ok(v): print(v)\n        Err(e): print(e)\nmain()",
+        "fn d(a: int, b: int) -> int!:\n    if b == 0:\n        return !\"zero\"\n    return ?(a / b)\nfn use() -> int!:\n    r := d(10, 0)?\n    return ?r\nfn main():\n    match use():\n        ?v: print(v)\n        !e: print(e)\nmain()",
         Ok("zero\n"),
     ),
     // for + while loops
@@ -5787,12 +5787,12 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // inferred return type (no `-> T`): runtime is unaffected
     (
-        "fn add(a: int, b: int):\n    return a + b\nfn classify(n: int):\n    if n == 0:\n        return Some(0)\n    return None\nfn main():\n    print(add(2, 3))\n    match classify(0):\n        Some(v): print(v)\n        None: print(\"none\")\nmain()",
+        "fn add(a: int, b: int):\n    return a + b\nfn classify(n: int):\n    if n == 0:\n        return ?0\n    return None\nfn main():\n    print(add(2, 3))\n    match classify(0):\n        ?v: print(v)\n        None: print(\"none\")\nmain()",
         Ok("5\n0\n"),
     ),
     // expression-valued match (multiline) + if (inline)
     (
-        "fn lookup(k: int) -> int?:\n    if k == 0:\n        return None\n    return Some(k)\nfn main():\n    found := match lookup(7):\n        Some(v): v\n        None: -1\n    print(found)\n    sign := if found > 0: \"pos\" else: \"neg\"\n    print(sign)\n    none := match lookup(0):\n        Some(v): v\n        None: -1\n    print(none)\nmain()",
+        "fn lookup(k: int) -> int?:\n    if k == 0:\n        return None\n    return ?k\nfn main():\n    found := match lookup(7):\n        ?v: v\n        None: -1\n    print(found)\n    sign := if found > 0: \"pos\" else: \"neg\"\n    print(sign)\n    none := match lookup(0):\n        ?v: v\n        None: -1\n    print(none)\nmain()",
         Ok("7\npos\n-1\n"),
     ),
     // ----- M6: core-type methods (str) -----
@@ -5804,65 +5804,65 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ("print(\"boom\".message())", Ok("boom\n")),
     // Go-style Result[T, E]: custom struct error (T!E), match, message() dispatch
     (
-        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db {self.code}\"\nfn q(ok: bool) -> int!DbErr:\n    if ok:\n        return Ok(1)\n    return Err(DbErr(503))\nfn main():\n    match q(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n    match q(true):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db {self.code}\"\nfn q(ok: bool) -> int!DbErr:\n    if ok:\n        return ?1\n    return !DbErr(503)\nfn main():\n    match q(false):\n        ?v: print(v)\n        !e: print(e.message())\n    match q(true):\n        ?v: print(v)\n        !e: print(e.message())\nmain()",
         Ok("db 503\n1\n"),
     ),
     // default-Error path: Err(str) flows as Result[int, Error], consumed via message()
     (
-        "fn parse(ok: bool) -> int!:\n    if ok:\n        return Ok(42)\n    return Err(\"bad input\")\nfn main():\n    match parse(false):\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+        "fn parse(ok: bool) -> int!:\n    if ok:\n        return ?42\n    return !\"bad input\"\nfn main():\n    match parse(false):\n        ?v: print(v)\n        !e: print(e.message())\nmain()",
         Ok("bad input\n"),
     ),
     // ----- M11 Phase B: recover boundary -----
     // recover catches index-OOB; Ok path wraps the trailing value
     (
-        "fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"recovered: {e.message()}\")\nmain()",
+        "fn main():\n    r := recover:\n        [1, 2][9]\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"recovered: {e.message()}\")\nmain()",
         Ok("recovered: index 9 out of bounds (len 2)\n"),
     ),
     // recover catches divide-by-zero
     (
-        "fn main():\n    r := recover:\n        10 / 0\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"err: {e.message()}\")\nmain()",
+        "fn main():\n    r := recover:\n        10 / 0\n    match r:\n        ?v: print(v)\n        !e: print(\"err: {e.message()}\")\nmain()",
         Ok("err: division by zero\n"),
     ),
     // recover catches integer overflow
     (
-        "fn main():\n    r := recover:\n        9223372036854775807 * 2\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"ovf\")\nmain()",
+        "fn main():\n    r := recover:\n        9223372036854775807 * 2\n    match r:\n        ?v: print(v)\n        !e: print(\"ovf\")\nmain()",
         Ok("ovf\n"),
     ),
     // recover ok-path wraps the value
     (
-        "fn main():\n    r := recover:\n        2 + 3\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(\"err\")\nmain()",
+        "fn main():\n    r := recover:\n        2 + 3\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err\")\nmain()",
         Ok("ok 5\n"),
     ),
     // a fault three calls deep is caught at the boundary (no per-call wrapping)
     (
-        "fn a() -> int:\n    return b()\nfn b() -> int:\n    return c()\nfn c() -> int:\n    return [1][9]\nfn main():\n    r := recover:\n        a()\n    match r:\n        Ok(v): print(v)\n        Err(e): print(\"deep recovered\")\nmain()",
+        "fn a() -> int:\n    return b()\nfn b() -> int:\n    return c()\nfn c() -> int:\n    return [1][9]\nfn main():\n    r := recover:\n        a()\n    match r:\n        ?v: print(v)\n        !e: print(\"deep recovered\")\nmain()",
         Ok("deep recovered\n"),
     ),
     // `?` inside recover short-circuits to `r` (try-block): the Err lands in `r`, and code
     // AFTER the recover still runs — the enclosing fn returns a plain str, so this only works
     // if `?` did NOT exit the function.
     (
-        "fn d(b: int) -> int!:\n    if b == 0:\n        return Err(\"zero\")\n    return Ok(10 / b)\nfn use() -> str:\n    r := recover:\n        x := d(0)?\n        x + 1\n    match r:\n        Ok(v): return \"ok\"\n        Err(e): return \"caught {e.message()}\"\nfn main():\n    print(use())\nmain()",
+        "fn d(b: int) -> int!:\n    if b == 0:\n        return !\"zero\"\n    return ?(10 / b)\nfn use() -> str:\n    r := recover:\n        x := d(0)?\n        x + 1\n    match r:\n        ?v: return \"ok\"\n        !e: return \"caught {e.message()}\"\nfn main():\n    print(use())\nmain()",
         Ok("caught zero\n"),
     ),
     // `?` Ok path inside recover: value unwrapped, trailing expression becomes the Ok result
     (
-        "fn d(b: int) -> int!:\n    return Ok(10 / b)\nfn main():\n    r := recover:\n        x := d(2)?\n        x + 1\n    match r:\n        Ok(v): print(\"ok {v}\")\n        Err(e): print(e.message())\nmain()",
+        "fn d(b: int) -> int!:\n    return ?(10 / b)\nfn main():\n    r := recover:\n        x := d(2)?\n        x + 1\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(e.message())\nmain()",
         Ok("ok 6\n"),
     ),
     // side effects before a caught fault PERSIST (keep semantics)
     (
-        "fn main():\n    x := 1\n    r := recover:\n        x = 99\n        [1][9]\n    match r:\n        Ok(v): print(\"ok\")\n        Err(e): print(\"recovered\")\n    print(\"x={x}\")\nmain()",
+        "fn main():\n    x := 1\n    r := recover:\n        x = 99\n        [1][9]\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"recovered\")\n    print(\"x={x}\")\nmain()",
         Ok("recovered\nx=99\n"),
     ),
     // nested recover: the inner boundary catches, the outer sees a normal value
     (
-        "fn main():\n    r := recover:\n        inner := recover:\n            [1][9]\n        match inner:\n            Ok(v): v\n            Err(e): 0\n    match r:\n        Ok(v): print(\"outer ok {v}\")\n        Err(e): print(\"outer err\")\nmain()",
+        "fn main():\n    r := recover:\n        inner := recover:\n            [1][9]\n        match inner:\n            ?v: v\n            !e: 0\n    match r:\n        ?v: print(\"outer ok {v}\")\n        !e: print(\"outer err\")\nmain()",
         Ok("outer ok 0\n"),
     ),
     // recovered value composes with `?` after the boundary\n
     (
-        "fn run() -> int!:\n    r := recover:\n        [10, 20][0]\n    v := r?\n    return Ok(v + 1)\nfn main():\n    match run():\n        Ok(v): print(v)\n        Err(e): print(e.message())\nmain()",
+        "fn run() -> int!:\n    r := recover:\n        [10, 20][0]\n    v := r?\n    return ?(v + 1)\nfn main():\n    match run():\n        ?v: print(v)\n        !e: print(e.message())\nmain()",
         Ok("11\n"),
     ),
     (
@@ -5944,16 +5944,16 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ("fn main():\n    print(\"hi\")", Ok("")), // main defined but never called → no output
     ("Err(\"boom\")", Ok("")), // bare top-level Err → discarded, W8-2 warns, no exit
     (
-        "x := Err(\"oops\")?",
-        Err("runtime error (line 1, col 6): unhandled error: oops"),
+        "x := (!\"oops\")?",
+        Err("runtime error (line 1, col 7): unhandled error: oops"),
     ), // top-level `?` Err → unhandled error
-    ("fn g() -> Option[int]:\n    return None\ng()", Ok("")), // bare None → discarded, no exit
+    ("fn g() -> int?:\n    return None\ng()", Ok("")), // bare None → discarded, no exit
     (
-        "fn f() -> Result[int]:\n    return Err(\"x\")\nr := f()\nprint(\"handled\")",
+        "fn f() -> int!:\n    return !\"x\"\nr := f()\nprint(\"handled\")",
         Ok("handled\n"),
     ), // Err bound = handled → no exit
     (
-        "fn main():\n    print(\"before\")\n    x := Err(\"boom\")?\n    print(\"after\")\nmain()",
+        "fn main():\n    print(\"before\")\n    x := (!\"boom\")?\n    print(\"after\")\nmain()",
         Ok("before\n"),
     ), // `?` inside main, main() itself is a bare discarded drop → no exit
     // a user enum shadowing `Err` is a normal value: bare one must NOT exit, `?` must reject it
@@ -5962,7 +5962,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         Ok("made it\n"),
     ),
     (
-        "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := Err(5)?\n    return x\nf()",
+        "enum Signal:\n    Err(int)\n    Quiet\nfn f() -> int:\n    x := (!5)?\n    return x\nf()",
         Ok(""),
     ), // f() -> int is not a carrier type: no runtime check, no W8-2 warning either
     // unhandled top-level error INSIDE a top-level block (interp: call_depth 0, VM: is_toplevel)
@@ -5975,7 +5975,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
         Ok("after\n"),
     ), // bare Err in `for` → discarded, no exit
     (
-        "fn d() -> Result[int]:\n    return Err(\"z\")\nif true:\n    x := d()?\n    print(x)",
+        "fn d() -> int!:\n    return !\"z\"\nif true:\n    x := d()?\n    print(x)",
         Err("runtime error (line 4, col 10): unhandled error: z"),
     ), // top-level `?` in block → exit
 ];
@@ -6002,7 +6002,7 @@ fn parity_full_suite_vm_vs_interp() {
 #[test]
 fn manifest_entrypoint_err_surfaced_both_engines() {
     let dir = TmpDir::new();
-    let entry = dir.write("main.chz", "fn main() -> int!:\n    return Err(\"boom\")\n");
+    let entry = dir.write("main.chz", "fn main() -> int!:\n    return !\"boom\"\n");
     let (_out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
         &entry,
         crate::native::HostConfig::default(),
@@ -6034,7 +6034,7 @@ fn manifest_entrypoint_ok_runs_clean_both_engines() {
     let dir = TmpDir::new();
     let entry = dir.write(
         "main.chz",
-        "fn main() -> int!:\n    print(\"ran\")\n    return Ok(0)\n",
+        "fn main() -> int!:\n    print(\"ran\")\n    return ?0\n",
     );
     let (out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
         &entry,
@@ -6411,7 +6411,7 @@ fn golden_isatty_via_run_file() {
 /// survives — proving one consistent env source. serial==M:N (per-VM HostConfig, deterministic).
 #[test]
 fn golden_os_setenv_environ_consistency() {
-    let src = "import std.os\nos.setenv(\"K\", \"V\")\nmatch os.env(\"K\"):\n    Some(v): print(v)\n    None: print(\"NONE\")\nprint(os.environ()[\"K\"])\nprint(os.environ()[\"SEED\"])\n";
+    let src = "import std.os\nos.setenv(\"K\", \"V\")\nmatch os.env(\"K\"):\n    ?v: print(v)\n    None: print(\"NONE\")\nprint(os.environ()[\"K\"])\nprint(os.environ()[\"SEED\"])\n";
     let out = golden_entry_cfg(src, || {
         let mut env = std::collections::HashMap::new();
         env.insert("SEED".to_string(), "1".to_string());
@@ -6429,7 +6429,7 @@ fn golden_os_setenv_environ_consistency() {
 #[test]
 fn golden_os_queries() {
     let out = golden_entry(
-        "import std.os\nprint(str(os.getpid() > 0))\nprint(os.platform())\nprint(str(os.temp_dir() != \"\"))\nmatch os.home_dir():\n    Some(_): print(\"H\")\n    None: print(\"NH\")\n",
+        "import std.os\nprint(str(os.getpid() > 0))\nprint(os.platform())\nprint(str(os.temp_dir() != \"\"))\nmatch os.home_dir():\n    ?_: print(\"H\")\n    None: print(\"NH\")\n",
     );
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 4, "expected 4 os-query lines, got {out:?}");
@@ -6452,7 +6452,7 @@ fn golden_os_chdir() {
         .unwrap_or_else(|e| e.into_inner());
     let saved = std::env::current_dir().expect("cwd");
     let out = golden_entry(
-        "import std.os\nmatch os.chdir(os.temp_dir()):\n    Ok(_): print(\"OK\")\n    Err(_): print(\"ERR\")\nmatch os.chdir(\"/no/such/chezzi/dir\"):\n    Ok(_): print(\"OK\")\n    Err(_): print(\"ERR\")\n",
+        "import std.os\nmatch os.chdir(os.temp_dir()):\n    ?_: print(\"OK\")\n    !_: print(\"ERR\")\nmatch os.chdir(\"/no/such/chezzi/dir\"):\n    ?_: print(\"OK\")\n    !_: print(\"ERR\")\n",
     );
     std::env::set_current_dir(&saved).expect("restore cwd");
     assert_eq!(out, "OK\nERR\n");
@@ -6493,7 +6493,7 @@ fn golden_os_environ_deterministic_order() {
 /// `os.Setenv` (visible across threads). Without sharing, this would print "unset" instead.
 #[test]
 fn golden_os_setenv_visible_across_tasks() {
-    let src = "import std.io\nimport std.os\nfn t():\n    os.setenv(\"TASKVAR\", \"fromtask\")\nfn main():\n    parallel:\n        spawn: t()\n    match os.env(\"TASKVAR\"):\n        Some(v): io.print(v)\n        None: io.print(\"unset\")\nmain()";
+    let src = "import std.io\nimport std.os\nfn t():\n    os.setenv(\"TASKVAR\", \"fromtask\")\nfn main():\n    parallel:\n        spawn: t()\n    match os.env(\"TASKVAR\"):\n        ?v: io.print(v)\n        None: io.print(\"unset\")\nmain()";
     assert_eq!(
         golden_entry_cfg(src, crate::native::HostConfig::default),
         "fromtask\n"
@@ -6645,7 +6645,7 @@ fn run_cancel_src(tag: &str, src: &str) -> String {
 fn cancel_child_polls_parent_cancel() {
     let out = run_cancel_snippet(
         "cancel_child_polls_parent",
-        "    p := cancel.manual()\n    c := p.derive()\n    print(\"c before: {c.cancelled()}\")\n    p.cancel()\n    print(\"c after: {c.cancelled()}\")\n    match c.reason():\n        Some(r): print(\"c reason: {r}\")\n        None:    print(\"c reason: none\")\n",
+        "    p := cancel.manual()\n    c := p.derive()\n    print(\"c before: {c.cancelled()}\")\n    p.cancel()\n    print(\"c after: {c.cancelled()}\")\n    match c.reason():\n        ?r: print(\"c reason: {r}\")\n        None:    print(\"c reason: none\")\n",
     );
     assert_eq!(out, "c before: false\nc after: true\nc reason: cancelled\n");
 }
@@ -6655,7 +6655,7 @@ fn cancel_child_polls_parent_cancel() {
 fn cancel_child_cancel_does_not_touch_parent() {
     let out = run_cancel_snippet(
         "cancel_child_one_directional",
-        "    p := cancel.manual()\n    c := p.derive()\n    c.cancel()\n    print(\"c: {c.cancelled()}\")\n    print(\"p: {p.cancelled()}\")\n    match p.reason():\n        Some(r): print(\"p reason: {r}\")\n        None:    print(\"p reason: none\")\n",
+        "    p := cancel.manual()\n    c := p.derive()\n    c.cancel()\n    print(\"c: {c.cancelled()}\")\n    print(\"p: {p.cancelled()}\")\n    match p.reason():\n        ?r: print(\"p reason: {r}\")\n        None:    print(\"p reason: none\")\n",
     );
     assert_eq!(out, "c: true\np: false\np reason: none\n");
 }
@@ -6665,7 +6665,7 @@ fn cancel_child_cancel_does_not_touch_parent() {
 fn cancel_transitive_grandchild() {
     let out = run_cancel_snippet(
         "cancel_transitive_grandchild",
-        "    p := cancel.manual()\n    c := p.derive()\n    g := c.derive()\n    p.cancel()\n    print(\"g: {g.cancelled()}\")\n    match g.reason():\n        Some(r): print(\"g reason: {r}\")\n        None:    print(\"g reason: none\")\n",
+        "    p := cancel.manual()\n    c := p.derive()\n    g := c.derive()\n    p.cancel()\n    print(\"g: {g.cancelled()}\")\n    match g.reason():\n        ?r: print(\"g reason: {r}\")\n        None:    print(\"g reason: none\")\n",
     );
     assert_eq!(out, "g: true\ng reason: cancelled\n");
 }
@@ -6675,7 +6675,7 @@ fn cancel_transitive_grandchild() {
 fn cancel_child_done_ready_after_parent_cancel() {
     let out = run_cancel_snippet(
         "cancel_child_done_fanout",
-        "    p := cancel.manual()\n    c := p.derive()\n    p.cancel()\n    match c.done().try_recv():\n        Some(v): print(\"done: {v}\")\n        None:    print(\"not done\")\n",
+        "    p := cancel.manual()\n    c := p.derive()\n    p.cancel()\n    match c.done().try_recv():\n        ?v: print(\"done: {v}\")\n        None:    print(\"not done\")\n",
     );
     assert_eq!(out, "done: true\n");
 }
@@ -6687,7 +6687,7 @@ fn cancel_child_done_ready_after_parent_cancel() {
 fn cancel_grandchild_done_ready_after_grandparent_cancel() {
     let out = run_cancel_snippet(
         "cancel_grandchild_done_fanout",
-        "    gp := cancel.manual()\n    mid := gp.derive()\n    leaf := mid.derive()\n    gp.cancel()\n    match leaf.done().try_recv():\n        Some(v): print(\"done: {v}\")\n        None:    print(\"not done\")\n",
+        "    gp := cancel.manual()\n    mid := gp.derive()\n    leaf := mid.derive()\n    gp.cancel()\n    match leaf.done().try_recv():\n        ?v: print(\"done: {v}\")\n        None:    print(\"not done\")\n",
     );
     assert_eq!(out, "done: true\n");
 }
@@ -6698,7 +6698,7 @@ fn cancel_grandchild_done_ready_after_grandparent_cancel() {
 fn cancel_great_grandchild_done_ready_after_root_cancel() {
     let out = run_cancel_snippet(
         "cancel_ggchild_done_fanout",
-        "    root := cancel.manual()\n    a := root.derive()\n    b := a.derive()\n    leaf := b.derive()\n    root.cancel()\n    match leaf.done().try_recv():\n        Some(v): print(\"done: {v}\")\n        None:    print(\"not done\")\n",
+        "    root := cancel.manual()\n    a := root.derive()\n    b := a.derive()\n    leaf := b.derive()\n    root.cancel()\n    match leaf.done().try_recv():\n        ?v: print(\"done: {v}\")\n        None:    print(\"not done\")\n",
     );
     assert_eq!(out, "done: true\n");
 }
@@ -6709,7 +6709,7 @@ fn cancel_great_grandchild_done_ready_after_root_cancel() {
 fn cancel_child_inherits_tightest_deadline() {
     let out = run_cancel_snippet(
         "cancel_child_tightest_deadline",
-        "    p := cancel.timeout(0)\n    c := p.derive()\n    print(\"c cancelled: {c.cancelled()}\")\n    match c.reason():\n        Some(r): print(\"c reason: {r}\")\n        None:    print(\"c reason: none\")\n    match c.done().try_recv():\n        Some(v): print(\"c done: {v}\")\n        None:    print(\"c not done\")\n    print(\"deadline match: {c.deadline_at() == p.deadline_at()}\")\n",
+        "    p := cancel.timeout(0)\n    c := p.derive()\n    print(\"c cancelled: {c.cancelled()}\")\n    match c.reason():\n        ?r: print(\"c reason: {r}\")\n        None:    print(\"c reason: none\")\n    match c.done().try_recv():\n        ?v: print(\"c done: {v}\")\n        None:    print(\"c not done\")\n    print(\"deadline match: {c.deadline_at() == p.deadline_at()}\")\n",
     );
     assert_eq!(
         out,
@@ -6961,11 +6961,11 @@ fn flag_parse_value_and_eq_form_parity() {
          fs.str_flag(\"name\", \"def\", \"the name\")\n\
          fs.int_flag(\"count\", 0, \"how many\")\n\
          match fs.parse([\"--name\", \"alice\", \"--count=3\", \"pos1\"]):\n\
-         \x20   Ok(p):\n\
+         \x20   ?p:\n\
          \x20       print(fs.get_str(\"name\"))\n\
          \x20       print(fs.get_int(\"count\"))\n\
          \x20       print(p[0])\n\
-         \x20   Err(e):\n\
+         \x20   !e:\n\
          \x20       print(e.message())\n",
     );
     assert_eq!(out, "alice\n3\npos1\n");
@@ -6979,10 +6979,10 @@ fn flag_bool_presence_and_terminator_parity() {
          fs := flag.new()\n\
          fs.bool_flag(\"verbose\", false, \"v\")\n\
          match fs.parse([\"--verbose\", \"--\", \"--notaflag\", \"x\"]):\n\
-         \x20   Ok(p):\n\
+         \x20   ?p:\n\
          \x20       print(fs.get_bool(\"verbose\"))\n\
          \x20       print(\" \".join(fs.positionals()))\n\
-         \x20   Err(e):\n\
+         \x20   !e:\n\
          \x20       print(e.message())\n",
     );
     assert_eq!(out, "true\n--notaflag x\n");
@@ -6995,8 +6995,8 @@ fn flag_error_paths_parity() {
         "import std.flag\n\
          fs := flag.new()\n\
          match fs.parse([\"--nope\"]):\n\
-         \x20   Ok(p): print(\"ok\")\n\
-         \x20   Err(e): print(e.message())\n",
+         \x20   ?p: print(\"ok\")\n\
+         \x20   !e: print(e.message())\n",
     );
     assert_eq!(unknown, "unknown flag --nope\n");
 
@@ -7005,8 +7005,8 @@ fn flag_error_paths_parity() {
          fs := flag.new()\n\
          fs.str_flag(\"name\", \"\", \"n\")\n\
          match fs.parse([\"--name\"]):\n\
-         \x20   Ok(p): print(\"ok\")\n\
-         \x20   Err(e): print(e.message())\n",
+         \x20   ?p: print(\"ok\")\n\
+         \x20   !e: print(e.message())\n",
     );
     assert_eq!(missing, "flag --name: missing value\n");
 
@@ -7015,8 +7015,8 @@ fn flag_error_paths_parity() {
          fs := flag.new()\n\
          fs.int_flag(\"count\", 0, \"c\")\n\
          match fs.parse([\"--count\", \"abc\"]):\n\
-         \x20   Ok(p): print(\"ok\")\n\
-         \x20   Err(e): print(\"errored\")\n",
+         \x20   ?p: print(\"ok\")\n\
+         \x20   !e: print(\"errored\")\n",
     );
     assert_eq!(badint, "errored\n");
 }
@@ -7125,8 +7125,8 @@ fn main():
     r := recover:
         iter.reduce(e, fn(a: int, b: int) -> int: a + b)
     match r:
-        Ok(v): print("no fault {v}")
-        Err(err): print("caught: {err.message()}")
+        ?v: print("no fault {v}")
+        !err: print("caught: {err.message()}")
     print(iter.reduce([1, 2, 3], fn(a: int, b: int) -> int: a + b))
     print(iter.reduce([7], fn(a: int, b: int) -> int: a + b))
 main()
@@ -7670,7 +7670,7 @@ fn a_defer_inside_the_recover_block_does_not_leak_its_prefix_to_a_later_fault() 
 /// all — the same leak shape as the `recover:`-catch path, one level lower.
 #[test]
 fn a_defer_inside_a_recover_scoped_question_mark_does_not_leak_its_prefix() {
-    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn maybe() -> int!str:\n    return Err(\"boom\")\nfn main():\n    it := g()\n    r := recover:\n        defer it.next()\n        maybe()?\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn maybe() -> int!str:\n    return !\"boom\"\nfn main():\n    it := g()\n    r := recover:\n        defer it.next()\n        maybe()?\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("defer_in_question_mark_recover_leak.chz");
@@ -8400,13 +8400,13 @@ struct Buf:
         self.xs[k] = v
     fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         match (start, end, step):
-            (Some(s), Some(e), Some(c)): return self.xs[s:e:c]
-            (Some(s), Some(e), None): return self.xs[s:e]
-            (Some(s), None, Some(c)): return self.xs[s::c]
-            (Some(s), None, None): return self.xs[s:]
-            (None, Some(e), Some(c)): return self.xs[:e:c]
-            (None, Some(e), None): return self.xs[:e]
-            (None, None, Some(c)): return self.xs[::c]
+            (?s, ?e, ?c): return self.xs[s:e:c]
+            (?s, ?e, None): return self.xs[s:e]
+            (?s, None, ?c): return self.xs[s::c]
+            (?s, None, None): return self.xs[s:]
+            (None, ?e, ?c): return self.xs[:e:c]
+            (None, ?e, None): return self.xs[:e]
+            (None, None, ?c): return self.xs[::c]
             (None, None, None): return self.xs[:]
             _: return self.xs[:]
 fn main():
@@ -8802,8 +8802,8 @@ fn main():
         res := recover:
             count = count + 1
         match res:
-            Ok(_): return count
-            Err(_): return -1
+            ?_: return count
+            !_: return -1
     pair := [bump, bump]
     r := Channel[int]()
     parallel:
@@ -8917,8 +8917,8 @@ fn main():
             res := recover:
                 p[0].n = 9
             match res:
-                Ok(_): r.send(\"{p[0].n} {p[1].n}\")
-                Err(_): r.send(\"fault {p[0].n} {p[1].n}\")
+                ?_: r.send(\"{p[0].n} {p[1].n}\")
+                !_: r.send(\"fault {p[0].n} {p[1].n}\")
     print(r.recv())
 main()";
     assert_golden_out(src, "fault 1 1\n");
@@ -8938,8 +8938,8 @@ fn work(a: List[int], b: List[int], r: Channel[str]):
     res := recover:
         a.push(2)
     match res:
-        Ok(_): r.send(\"{a.len()} {b.len()}\")
-        Err(_): r.send(\"fault {a.len()} {b.len()}\")
+        ?_: r.send(\"{a.len()} {b.len()}\")
+        !_: r.send(\"fault {a.len()} {b.len()}\")
 fn main():
     xs := [1]
     r := Channel[str]()
@@ -9303,8 +9303,8 @@ fn vm_bytes_index_out_of_range_recoverable() {
         "    x := recover:\n",
         "        b[9]\n",
         "    match x:\n",
-        "        Ok(v): print(v)\n",
-        "        Err(e): print(\"caught\")\n",
+        "        ?v: print(v)\n",
+        "        !e: print(\"caught\")\n",
         "main()\n"
     );
     assert_golden_out(src, "caught\n");
@@ -9421,13 +9421,13 @@ fn vm_bytearray_oob_and_value_range_recoverable() {
         "    r1 := recover:\n",
         "        ba[9] = 1\n",
         "    match r1:\n",
-        "        Ok(v): print(\"ok\")\n",
-        "        Err(e): print(\"caught oob index\")\n",
+        "        ?v: print(\"ok\")\n",
+        "        !e: print(\"caught oob index\")\n",
         "    r2 := recover:\n",
         "        ba[0] = 999\n",
         "    match r2:\n",
-        "        Ok(v): print(\"ok\")\n",
-        "        Err(e): print(\"caught bad value\")\n",
+        "        ?v: print(\"ok\")\n",
+        "        !e: print(\"caught bad value\")\n",
         "main()\n"
     );
     assert_golden_out(src, "caught oob index\ncaught bad value\n");
@@ -9446,8 +9446,8 @@ fn vm_bytearray_huge_size_is_recoverable_not_abort() {
         "    r := recover:\n",
         "        bytearray(9999999999999)\n",
         "    match r:\n",
-        "        Ok(v): print(\"ok\")\n",
-        "        Err(e): print(\"caught huge\")\n",
+        "        ?v: print(\"ok\")\n",
+        "        !e: print(\"caught huge\")\n",
         "main()\n"
     );
     assert_golden_out(src, "caught huge\n");
@@ -9530,7 +9530,7 @@ fn iter_snapshot_order_matches_for() {
     ] {
         let via_for = format!("fn main():\n    for x in {coll}:\n        print(x)\nmain()\n");
         let via_iter = format!(
-            "fn main():\n    it := ({coll}).iter()\n    while true:\n        match it.next():\n            Some(x):\n                print(x)\n            None:\n                break\nmain()\n"
+            "fn main():\n    it := ({coll}).iter()\n    while true:\n        match it.next():\n            ?x:\n                print(x)\n            None:\n                break\nmain()\n"
         );
         assert_golden_out(&via_for, want);
         assert_golden_out(&via_iter, want);
@@ -9569,7 +9569,7 @@ fn cursor_composes_into_adapter() {
         "struct Take[I: Iterator[T], T]:\n",
         "    inner: I\n",
         "    left: int\n",
-        "    fn next(self) -> Option[T]:\n",
+        "    fn next(self) -> T?:\n",
         "        if self.left <= 0:\n",
         "            return None\n",
         "        self.left = self.left - 1\n",
@@ -9600,12 +9600,12 @@ fn for_over_pure_iterable_struct() {
     let both = concat!(
         "struct Two:\n",
         "    n: int\n",
-        "    fn next(self) -> Option[int]:\n",
+        "    fn next(self) -> int?:\n",
         "        if self.n >= 2:\n",
         "            return None\n",
         "        v := self.n\n",
         "        self.n = self.n + 1\n",
-        "        return Some(v + 100)\n",
+        "        return ?(v + 100)\n",
         "    fn iter(self) -> Iterator[int]:\n",
         "        return [999].iter()\n",
         "fn main():\n",
@@ -9895,12 +9895,12 @@ fn defer_block_q_discards_fired_err_parity() {
     // nil-returning fn returns normally. (The checker fix that made this
     // program compile under a nil-returning fn — F1 — must not change the runtime discard.)
     assert_golden_out(
-        "fn g() -> int!:\n    return Err(\"x\")\nfn f():\n    defer:\n        v := g()?\n        print(\"never {v}\")\n    print(\"body\")\nf()\nprint(\"done\")\n",
+        "fn g() -> int!:\n    return !\"x\"\nfn f():\n    defer:\n        v := g()?\n        print(\"never {v}\")\n    print(\"body\")\nf()\nprint(\"done\")\n",
         "body\ndone\n",
     );
     // An Ok value flows past `?` into the rest of the cleanup body:
     assert_golden_out(
-        "fn g() -> int!:\n    return Ok(7)\nfn f():\n    defer:\n        v := g()?\n        print(\"got {v}\")\n    print(\"body\")\nf()\nprint(\"done\")\n",
+        "fn g() -> int!:\n    return ?7\nfn f():\n    defer:\n        v := g()?\n        print(\"got {v}\")\n    print(\"body\")\nf()\nprint(\"done\")\n",
         "body\ngot 7\ndone\n",
     );
 }
@@ -10517,8 +10517,8 @@ fn gen() -> Iterator[int]:
         99
     yield 3
     match r:
-        Ok(v): yield v
-        Err(e): yield -1
+        ?v: yield v
+        !e: yield -1
 fn main():
     it := gen()
     started := it.next()
@@ -10552,8 +10552,8 @@ fn gen() -> Iterator[int]:
         boom
     yield 20
     match r:
-        Ok(v): yield v
-        Err(e): yield 99
+        ?v: yield v
+        !e: yield 99
 fn main():
     it := gen()
     started := it.next()
@@ -10584,8 +10584,8 @@ fn gen() -> Iterator[int]:
         boom
     yield 20
     match r:
-        Ok(v): yield v
-        Err(e): yield 99
+        ?v: yield v
+        !e: yield 99
 fn main():
     it := gen()
     started := it.next()
@@ -10791,8 +10791,8 @@ fn main():
             defer ch.close()
         1
     match r:
-        Ok(v): print(\"ok, len={ch.len()}\")
-        Err(e): print(\"err: {e.message()}\")
+        ?v: print(\"ok, len={ch.len()}\")
+        !e: print(\"err: {e.message()}\")
 main()";
     assert_golden_out(src, "ok, len=1\n");
 }
@@ -11020,11 +11020,11 @@ fn cyclic_struct_key_inserts_and_resolves() {
     let src = r#"
 struct Node:
     val: int
-    next: Option[Node]
+    next: Node?
     fn hash(self) -> int: return self.val
 fn main():
     a := Node(1, None)
-    a.next = Some(a)
+    a.next = ?a
     s := {a}
     print(s.len())          # 1 — built, not a runtime fault
     m: Map[Node, str] = {}
@@ -11125,12 +11125,12 @@ fn deep_acyclic_struct_key_inserts_and_resolves() {
     let src = r#"
 struct Node:
     val: int
-    next: Option[Node]
+    next: Node?
     fn hash(self) -> int: return self.val
 fn main():
     n := Node(0, None)
     for i in range(10050):
-        n = Node(i, Some(n))
+        n = Node(i, ?n)
     m: Map[Node, str] = {}
     m[n] = "deep"
     print(m[n])          # deep — held key still resolves past MAX_STRUCTURAL_DEPTH
@@ -11284,7 +11284,7 @@ struct W:
 t := T({})
 t[0] = 9
 match t[0]:
-    Some(v): print(v)
+    ?v: print(v)
     None: print(\"none\")
 w := W([\"a\"])
 w[0] = 1
@@ -11376,17 +11376,17 @@ fn client() -> int!:
     eof := sock.read_bytes(16, 5000)?
     print(\"EOF:{{eof.len()}}\")
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn client()
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 "
@@ -11423,27 +11423,27 @@ import std.net
 fn client() -> int!:
     sock := net.connect(\"{addr}\")?
     match sock.read(64, 5000):
-        Ok(s): print(\"GOT:[\" + s + \"]\")
-        Err(e): print(\"ERR\")
+        ?s: print(\"GOT:[\" + s + \"]\")
+        !e: print(\"ERR\")
     match sock.read(64, 5000):
-        Ok(s): print(\"GOT2:[\" + s + \"]\")
-        Err(e): print(\"ERR2\")
+        ?s: print(\"GOT2:[\" + s + \"]\")
+        !e: print(\"ERR2\")
     b := sock.read_bytes(64, 5000)?
     print(\"BYTES:{{b.len()}}\")
     for x in b:
         print(x)
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     parallel:
         spawn client()
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print(\"done\")
-        Err(e): print(\"net error: \" + e.message())
+        ?_: print(\"done\")
+        !e: print(\"net error: \" + e.message())
 
 main()
 "
@@ -11911,7 +11911,7 @@ fn writer_use_after_close_clean_err_parity() {
         let t = TmpDir::new();
         let f = t.0.join("x.txt");
         let src = format!(
-            "import create from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.close()?\n    match w.write(\"z\"):\n        Ok(n): print(\"wrote \" + str(n))\n        Err(e): print(\"ERR:\" + e.message())\nmain()\n",
+            "import create from std.io\nfn main():\n    w := create(\"{f}\")?\n    w.close()?\n    match w.write(\"z\"):\n        ?n: print(\"wrote \" + str(n))\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -12016,7 +12016,7 @@ fn create_into_missing_dir_clean_err_parity() {
         let t = TmpDir::new();
         let f = t.0.join("no_such_dir").join("x.txt");
         let src = format!(
-            "import create from std.io\nfn main():\n    match create(\"{f}\"):\n        Ok(w): print(\"opened\")\n        Err(e): print(\"ERR\")\nmain()\n",
+            "import create from std.io\nfn main():\n    match create(\"{f}\"):\n        ?w: print(\"opened\")\n        !e: print(\"ERR\")\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -12034,7 +12034,7 @@ fn writer_program_type_checks_clean() {
     // `main` must return Result to use `?` (no `fn main` exception — see the try-in-nil-fn soundness fix).
     let src = "import create, buffered, stdout, Writer from std.io\n\
                fn tag(w: Writer) -> Writer:\n    return w\n\
-               fn main() -> int!:\n    w := create(\"/tmp/x\")?\n    w.write(\"a\")?\n    w.write_bytes(bytes([1]))?\n    w.flush()?\n    w.close()?\n    bw := tag(buffered(stdout(), 4096))\n    bw.write(\"b\")?\n    bw.flush()?\n    return Ok(0)\nmain()\n";
+               fn main() -> int!:\n    w := create(\"/tmp/x\")?\n    w.write(\"a\")?\n    w.write_bytes(bytes([1]))?\n    w.flush()?\n    w.close()?\n    bw := tag(buffered(stdout(), 4096))\n    bw.write(\"b\")?\n    bw.flush()?\n    return ?0\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
@@ -12074,7 +12074,7 @@ fn reader_open_read_line_parity() {
         let f = t.0.join("in.txt");
         std::fs::write(&f, "one\ntwo\nthree\n").unwrap();
         let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            Some(ln): print(ln)\n            None: break\n    r.close()?\nmain()\n",
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            ?ln: print(ln)\n            None: break\n    r.close()?\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -12092,7 +12092,7 @@ fn reader_read_line_no_trailing_newline_parity() {
         let f = t.0.join("in.txt");
         std::fs::write(&f, "a\nb").unwrap();
         let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            Some(ln): print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            ?ln: print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -12112,7 +12112,7 @@ fn reader_read_line_strips_bare_cr_parity() {
         let f = t.0.join("in.txt");
         std::fs::write(&f, "a\r\nb\r").unwrap(); // CRLF line, then a bare-CR final line (no \n)
         let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            Some(ln): print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    while true:\n        match r.read_line():\n            ?ln: print(\"[\" + ln + \"]\")\n            None: break\n    r.close()?\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -12189,7 +12189,7 @@ fn reader_use_after_close_clean_err_parity() {
         let f = t.0.join("x.txt");
         std::fs::write(&f, "data").unwrap();
         let src = format!(
-            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    r.close()?\n    match r.read_bytes(4):\n        Ok(b): print(\"got \" + str(b.len()))\n        Err(e): print(\"ERR:\" + e.message())\nmain()\n",
+            "import open from std.io\nfn main():\n    r := open(\"{f}\")?\n    r.close()?\n    match r.read_bytes(4):\n        ?b: print(\"got \" + str(b.len()))\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -12212,7 +12212,7 @@ fn reader_open_missing_file_clean_err_parity() {
         let t = TmpDir::new();
         let f = t.0.join("no_such_dir").join("x.txt");
         let src = format!(
-            "import open from std.io\nfn main():\n    match open(\"{f}\"):\n        Ok(r): print(\"opened\")\n        Err(e): print(\"ERR:\" + e.message())\nmain()\n",
+            "import open from std.io\nfn main():\n    match open(\"{f}\"):\n        ?r: print(\"opened\")\n        !e: print(\"ERR:\" + e.message())\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -12235,7 +12235,7 @@ fn import_reader_type_and_send_across_spawn_parity() {
         let f = t.0.join("in.txt");
         std::fs::write(&f, "hello\n").unwrap();
         let src = format!(
-            "import Reader, open from std.io\nfn first(r: Reader) -> Option[str]:\n    return r.read_line()\nfn main():\n    r := open(\"{f}\")?\n    parallel:\n        spawn:\n            match first(r):\n                Some(ln): print(ln)\n                None: print(\"empty\")\nmain()\n",
+            "import Reader, open from std.io\nfn first(r: Reader) -> str?:\n    return r.read_line()\nfn main():\n    r := open(\"{f}\")?\n    parallel:\n        spawn:\n            match first(r):\n                ?ln: print(ln)\n                None: print(\"empty\")\nmain()\n",
             f = f.display()
         );
         let entry = t.write("main.chz", &src);
@@ -12256,7 +12256,7 @@ fn reader_program_type_checks_clean() {
     // `main` must return Result to use `?` (no `fn main` exception — see the try-in-nil-fn soundness fix).
     let src = "import open, Reader from std.io\n\
                fn tag(r: Reader) -> Reader:\n    return r\n\
-               fn main() -> int!:\n    r := tag(open(\"/tmp/x\")?)\n    match r.read_line():\n        Some(ln): print(ln)\n        None: print(\"eof\")\n    b := r.read_bytes(8)?\n    print(str(b.len()))\n    r.close()?\n    return Ok(0)\nmain()\n";
+               fn main() -> int!:\n    r := tag(open(\"/tmp/x\")?)\n    match r.read_line():\n        ?ln: print(ln)\n        None: print(\"eof\")\n    b := r.read_bytes(8)?\n    print(str(b.len()))\n    r.close()?\n    return ?0\nmain()\n";
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
@@ -12572,7 +12572,7 @@ fn sequential_mutation_between_nurseries_reads_fresh_parity() {
 fn spawn_task_first_global_access_is_write_parity() {
     // TICKET-169 (D4 layer C): the task's first access being a WRITE now faults cleanly (D4)
     // instead of the historical W6-19 panic — the worker's own read still sees its unfaulted `1`.
-    let src = "g: int = 1\nfn worker():\n    res := recover:\n        g = 99\n    match res:\n        Ok(_): print(\"worker g =\", g)\n        Err(_): print(\"worker g fault, g =\", g)\nfn main():\n    parallel:\n        spawn worker()\n    print(\"parent g =\", g)\nmain()\n";
+    let src = "g: int = 1\nfn worker():\n    res := recover:\n        g = 99\n    match res:\n        ?_: print(\"worker g =\", g)\n        !_: print(\"worker g fault, g =\", g)\nfn main():\n    parallel:\n        spawn worker()\n    print(\"parent g =\", g)\nmain()\n";
     assert_eq!(golden_entry(src), "worker g fault, g = 1\nparent g = 1\n");
 }
 
@@ -12697,9 +12697,9 @@ fn run() -> int!:
     r := recover:
         _ := x * 2
     match r:
-        Ok(v): return Ok(v)
-        Err(e): print(e.message())
-    return Ok(0)
+        ?v: return ?v
+        !e: print(e.message())
+    return ?0
 fn main():
     _ := run()
 main()";
@@ -12789,7 +12789,7 @@ struct Cut:
         return self.xs[k]
     fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> int:
         match start:
-            Some(s): return s
+            ?s: return s
             None: return 0
 fn main():
     c := Cut([1])

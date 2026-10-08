@@ -1,7 +1,7 @@
 # examples/native_enum_smoke.chz — phase 5b-native-enum ARTIFACT.
 #
-# The reserved `T?`/`T!E` variant SHAPE is now file-backed (`native enum T?` /
-# `native enum T!E` in std/prelude.chz), but the `?` operator, exhaustive `match`, top-level
+# The reserved `T?`/`T!E` variant SHAPE is now file-backed (the two `native enum`
+# declarations in std/prelude.chz), but the `?` operator, exhaustive `match`, top-level
 # error propagation, and a value / None/success/an error CONSTRUCTION all stay Rust-wired. This program exercises that
 # whole surface — construction, `?` on a `T!E`-returning AND a `T?`-returning fn, and exhaustive
 # matches — so its byte-identical golden output is the phase-5b behavior-preservation gate.

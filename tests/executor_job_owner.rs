@@ -267,7 +267,7 @@ fn prog(p: Party, h: Handle, s: State, e: Event) -> String {
             "fn rd(h: task.Task[int]):\n    print(\"got {h.get()}\")\n    print(\"done {h.done()}\")\n",
         ),
         Handle::SubmitResult => {
-            src.push_str("fn rd(h: Channel[Result[int]]):\n    print(\"got {h.recv()}\")\n")
+            src.push_str("fn rd(h: Channel[int!]):\n    print(\"got {h.recv()}\")\n")
         }
     }
 

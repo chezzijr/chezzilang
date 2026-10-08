@@ -2124,7 +2124,7 @@ mod tests {
 
     #[test]
     fn opt_chain_field_survives_desugar() {
-        let stmts = desugar_ok("struct P:\n    x: int\na := Some(P(1))\nv := a?.x\n");
+        let stmts = desugar_ok("struct P:\n    x: int\na := ?P(1)\nv := a?.x\n");
         match last_let_value(&stmts).kind {
             ExprKind::OptChain { name, call, .. } => {
                 assert_eq!(name, "x");
@@ -2177,7 +2177,7 @@ mod tests {
                     panic!("match")
                 };
                 let ExprKind::Call { args, .. } = &arms[0].body.kind else {
-                    panic!("Some(...) wrapper")
+                    panic!("?... wrapper")
                 };
                 let ExprKind::Call { callee, .. } = &args[0].kind else {
                     panic!("method call")
@@ -2214,7 +2214,7 @@ mod tests {
 
     #[test]
     fn lower_carrier_result_coalesce_builds_ok_err_arms() {
-        let stmts = desugar_ok("fn g() -> int!str:\n    return Ok(1)\nx := g() ?? 0\n");
+        let stmts = desugar_ok("fn g() -> int!str:\n    return ?1\nx := g() ?? 0\n");
         let mut e = last_let_value(&stmts);
         lower_carrier_result_coalesce(&mut e, 0);
         let ExprKind::Match { arms, .. } = &e.kind else {
@@ -2240,7 +2240,7 @@ mod tests {
         // `(a ?? 0) + (b ?? 0)` — both carriers now survive desugar, and the temp names are minted
         // by whoever lowers them. Assert the property at that point instead: two lowerings with
         // distinct counter values bind DISTINCT temps.
-        let stmts = desugar_ok("a := Some(1)\nb := Some(2)\nx := (a ?? 0) + (b ?? 0)\n");
+        let stmts = desugar_ok("a := ?1\nb := ?2\nx := (a ?? 0) + (b ?? 0)\n");
         let ExprKind::Binary {
             mut lhs, mut rhs, ..
         } = last_let_value(&stmts).kind

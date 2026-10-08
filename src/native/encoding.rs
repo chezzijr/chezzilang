@@ -520,7 +520,7 @@ mod tests {
         match f(&mut host(s)).unwrap() {
             NativeRet::Ok(b) => match *b {
                 NativeRet::Str(out) => out,
-                other => panic!("expected Ok(Str), got {other:?}"),
+                other => panic!("expected ?Str, got {other:?}"),
             },
             other => panic!("expected Ok, got {other:?}"),
         }

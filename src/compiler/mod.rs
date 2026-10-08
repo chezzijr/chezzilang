@@ -7108,7 +7108,7 @@ mod recover_nursery_prescan_tests {
 
     #[test]
     fn spawn_inside_recover_in_a_struct_field_default_runs() {
-        let src = "struct S:\n    n: Result[int] = recover:\n        spawn: print(\"d\")\n        1\ns := S()\nprint(\"{s.n}\")\n";
+        let src = "struct S:\n    n: int! = recover:\n        spawn: print(\"d\")\n        1\ns := S()\nprint(\"{s.n}\")\n";
         let out = run_capture(src).expect("program should run without a top-level fault");
         assert!(
             out.contains("d"),
@@ -7143,7 +7143,7 @@ mod recover_nursery_prescan_tests {
 
     #[test]
     fn a_spawn_in_a_closure_body_recover_gates_only_the_closure() {
-        let src = "r := recover:\n    f := fn() -> Result[int]: recover:\n        spawn: print(\"9\")\n        1\n    1\n";
+        let src = "r := recover:\n    f := fn() -> int!: recover:\n        spawn: print(\"9\")\n        1\n    1\n";
         let tokens = crate::lexer::tokenize(src).expect("lex");
         let module = crate::parser::parse(tokens).expect("parse");
         let prog = super::compile_module_standalone(&module).expect("compile");
@@ -8065,7 +8065,7 @@ mod carrier_lowering_tests {
 
     #[test]
     fn result_carrier_compiles_identically_to_the_spaced_spelling() {
-        let src = "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g() -> int!str:\n    return Ok(f()?C?len())\ng()\n";
+        let src = "fn f() -> str!str:\n    return ?\"hi\"\nfn g() -> int!str:\n    return ?(f()?C?len())\ng()\n";
         assert_spellings_agree(src);
         // …and the emitted program really IS the try-then-dot one (a SHARED bug would also be
         // "identical"): `Op::Try` is present, which only the Result lowering emits.
@@ -8081,7 +8081,7 @@ mod carrier_lowering_tests {
     #[test]
     fn result_carrier_method_with_args_compiles_identically() {
         assert_spellings_agree(
-            "struct B:\n    v: int\n    fn add(self, n: int) -> int:\n        return self.v + n\nfn f() -> B!str:\n    return Ok(B(1))\nfn g() -> int!str:\n    return Ok(f()?C?add(5))\ng()\n",
+            "struct B:\n    v: int\n    fn add(self, n: int) -> int:\n        return self.v + n\nfn f() -> B!str:\n    return ?B(1)\nfn g() -> int!str:\n    return ?(f()?C?add(5))\ng()\n",
         );
     }
 
@@ -8091,7 +8091,7 @@ mod carrier_lowering_tests {
         // spelling is an ordinary `Call` bound the same way. Identical bytecode is the proof
         // that the two normalizations agree.
         assert_spellings_agree(
-            "struct B:\n    v: int\n    fn tag(self, prefix: str = \"p\", n: int = 1) -> str:\n        return \"{prefix}{self.v + n}\"\nfn f() -> B!str:\n    return Ok(B(1))\nfn g() -> str!str:\n    return Ok(f()?C?tag(n=5))\ng()\n",
+            "struct B:\n    v: int\n    fn tag(self, prefix: str = \"p\", n: int = 1) -> str:\n        return \"{prefix}{self.v + n}\"\nfn f() -> B!str:\n    return ?B(1)\nfn g() -> str!str:\n    return ?(f()?C?tag(n=5))\ng()\n",
         );
     }
 
@@ -8100,7 +8100,7 @@ mod carrier_lowering_tests {
         // Interpolation fragments are re-parsed after the module pass, so they carry their own
         // `kw_frag_ctx`/`kw_frag_ord` key discriminators — two fragments in one literal included.
         assert_spellings_agree(
-            "fn f() -> str!str:\n    return Ok(\"hi\")\nfn g() -> str!str:\n    return Ok(\"{f()?C?len()}|{f()?C?len()}\")\ng()\n",
+            "fn f() -> str!str:\n    return ?\"hi\"\nfn g() -> str!str:\n    return ?\"{f()?C?len()}|{f()?C?len()}\"\ng()\n",
         );
     }
 
@@ -8111,7 +8111,7 @@ mod carrier_lowering_tests {
         // `Op::Try`; the Option link emits the `match` lowering (a jump, and a `None` variant
         // construction). Both present in one proto = both links lowered on their own operand.
         let prog = compile(
-            "struct I:\n    c: int\nstruct O:\n    b: Option[I]\nfn f() -> O!str:\n    return Ok(O(Some(I(7))))\nfn g() -> Result[Option[int], str]:\n    return Ok(f()?.b?.c)\ng()\n",
+            "struct I:\n    c: int\nstruct O:\n    b: I?\nfn f() -> O!str:\n    return ?O(?I(7))\nfn g() -> int?!str:\n    return ?(f()?.b?.c)\ng()\n",
         );
         let g = prog
             .protos
@@ -8130,7 +8130,7 @@ mod carrier_lowering_tests {
         );
         // And the whole thing is identical to spelling the Result link with a space.
         let spaced = compile(
-            "struct I:\n    c: int\nstruct O:\n    b: Option[I]\nfn f() -> O!str:\n    return Ok(O(Some(I(7))))\nfn g() -> Result[Option[int], str]:\n    return Ok(f()? .b?.c)\ng()\n",
+            "struct I:\n    c: int\nstruct O:\n    b: I?\nfn f() -> O!str:\n    return ?O(?I(7))\nfn g() -> int?!str:\n    return ?(f()? .b?.c)\ng()\n",
         );
         assert_eq!(ops(&prog), ops(&spaced));
     }

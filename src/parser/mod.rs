@@ -3986,7 +3986,7 @@ mod tests {
             bodied_methods,
             ..
         } = only(
-            "native struct R:\n    native fn read_line(self) -> Option[str]\n    fn lines(self) -> Iterator[str]:\n        yield \"x\"\n",
+            "native struct R:\n    native fn read_line(self) -> str?\n    fn lines(self) -> Iterator[str]:\n        yield \"x\"\n",
         )
         else {
             panic!("expected StmtKind::NativeStruct");
@@ -4007,7 +4007,7 @@ mod tests {
         // the file-backed spelling of std.request's optional-tail sig. The parser now accepts a
         // default in a native decl (grammar already permits it); the `= 0` is a marker only.
         let StmtKind::Native(d) =
-            only("native fn get(url: str, timeout_ms: int = 0) -> Result[Response]\n")
+            only("native fn get(url: str, timeout_ms: int = 0) -> Response!\n")
         else {
             panic!("expected StmtKind::Native");
         };
@@ -4206,7 +4206,7 @@ mod tests {
             methods,
             ..
         } = only(
-            "native struct Socket:\n    native fn read(self, n: int, timeout_ms: int = 0) -> Result[str]\n    native fn close(self)\n",
+            "native struct Socket:\n    native fn read(self, n: int, timeout_ms: int = 0) -> str!\n    native fn close(self)\n",
         )
         else {
             panic!("expected StmtKind::NativeStruct");
@@ -6500,7 +6500,7 @@ mod tests {
     /// `T!` is sugar for `Result[T]` in type position.
     #[test]
     fn result_type_shorthand() {
-        let StmtKind::Fn(decl) = only("fn f() -> int!:\n    return Ok(1)\n") else {
+        let StmtKind::Fn(decl) = only("fn f() -> int!:\n    return ?1\n") else {
             panic!()
         };
         assert_eq!(
@@ -6620,8 +6620,7 @@ mod tests {
     /// `match` in expression position parses to `ExprKind::Match` with value-expression arms.
     #[test]
     fn match_expression_parses() {
-        let StmtKind::Let { value, .. } = only("x := match s:\n    Some(v): v\n    None: 0\n")
-        else {
+        let StmtKind::Let { value, .. } = only("x := match s:\n    ?v: v\n    None: 0\n") else {
             panic!()
         };
         let ExprKind::Match { arms, .. } = value.kind else {

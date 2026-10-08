@@ -188,7 +188,7 @@ mod tests {
     /// field's `NativeRet`. Panics with a clear message if the shape is wrong.
     fn proc_field<'a>(ret: &'a NativeRet, field: &str) -> &'a NativeRet {
         let NativeRet::Ok(inner) = ret else {
-            panic!("expected Ok(ProcResult), got {ret:?}");
+            panic!("expected ?ProcResult, got {ret:?}");
         };
         let NativeRet::Struct { name, fields } = inner.as_ref() else {
             panic!("expected Struct ProcResult, got {inner:?}");
