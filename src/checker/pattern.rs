@@ -4,6 +4,7 @@
 use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
+use crate::ast::CarrierTag;
 use crate::ast::consteval;
 
 /// TICKET-225: whether `e` folds to a constant (`300`, `1 << 8`, `3e38 + 3e38`).
@@ -49,6 +50,95 @@ impl Checker {
             BareName::Const
         } else {
             BareName::Binder
+        }
+    }
+
+    /// The variant a `?` / `!` pattern head means in the enum keyed `key`: the one map from a
+    /// carrier tag to a variant.
+    pub(super) fn carrier_variant_of_key(tag: CarrierTag, key: &str) -> Option<&'static str> {
+        match (key, tag) {
+            ("Option", CarrierTag::Present) => Some("Some"),
+            ("Result", CarrierTag::Present) => Some("Ok"),
+            ("Result", CarrierTag::Error) => Some("Err"),
+            _ => None,
+        }
+    }
+
+    /// The `(enum key, variant)` a `?` / `!` head means over a value of type `ty`, or why it
+    /// cannot match one.
+    pub(super) fn carrier_variant(
+        tag: CarrierTag,
+        ty: &Ty,
+    ) -> Result<(&'static str, &'static str), String> {
+        let key = match ty {
+            Ty::Option(_) => Some("Option"),
+            Ty::Result(..) => Some("Result"),
+            _ => None,
+        };
+        if let Some(key) = key
+            && let Some(variant) = Self::carrier_variant_of_key(tag, key)
+        {
+            return Ok((key, variant));
+        }
+        Err(match (tag, key) {
+            (CarrierTag::Error, Some(_)) => {
+                format!("`!e` matches an error, and {ty} has none; write `None`")
+            }
+            (CarrierTag::Error, None) => {
+                format!("`!e` matches the error of a `T!E` value, found {ty}")
+            }
+            (CarrierTag::Present, _) => {
+                format!("`?v` matches a present `T?` or a successful `T!E`, found {ty}")
+            }
+        })
+    }
+
+    /// A carrier pattern over a value of type `ty`, as the one-payload variant pattern it means,
+    /// on the same head id: the variant path then checks, records and binds it like the long
+    /// form. `None` after reporting why the head cannot match `ty` (an un-inferable `ty` is the
+    /// caller's to report).
+    fn carrier_as_variant(
+        &mut self,
+        tag: CarrierTag,
+        inner: &Pattern,
+        id: crate::ast::NodeId,
+        ty: &Ty,
+        span: Span,
+    ) -> Option<Pattern> {
+        if ty.is_unknown() {
+            return None;
+        }
+        match Self::carrier_variant(tag, ty) {
+            Ok((_, variant)) => Some(Pattern::Variant {
+                name: variant.to_string(),
+                id,
+                bindings: vec![inner.clone()],
+                enum_name: None,
+                module_name: None,
+            }),
+            Err(msg) => {
+                self.error(span, msg);
+                None
+            }
+        }
+    }
+
+    /// Declare every name `pattern` would bind as `Unknown`, after its head was rejected, so the
+    /// arm body does not cascade into `unknown name` errors.
+    fn declare_pattern_names_unknown(&mut self, pattern: &Pattern) {
+        match pattern {
+            Pattern::Ident(name, _, _) => {
+                if matches!(self.bare_pattern_name(name), BareName::Binder) {
+                    self.declare(name, Ty::Unknown);
+                }
+            }
+            Pattern::Variant { bindings: subs, .. } | Pattern::Tuple(subs) | Pattern::Or(subs) => {
+                for sub in subs {
+                    self.declare_pattern_names_unknown(sub);
+                }
+            }
+            Pattern::Carrier { inner, .. } => self.declare_pattern_names_unknown(inner),
+            Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
         }
     }
 
@@ -181,6 +271,22 @@ impl Checker {
                 self.bind_pattern_name(*id, name, ty.clone(), span, Some(*bind_span))
             }
             Pattern::Or(alts) => self.bind_or_alternatives(alts, ty, span),
+            Pattern::Carrier { tag, inner, id } => {
+                if ty.is_unknown() {
+                    self.error(
+                        span,
+                        "cannot match a variant pattern on a value of un-inferable type; annotate it"
+                            .to_string(),
+                    );
+                }
+                match self.carrier_as_variant(*tag, inner, *id, ty, span) {
+                    Some(variant) => self.bind_subpattern(&variant, ty, span),
+                    None => {
+                        self.declare_pattern_names_unknown(inner);
+                        false
+                    }
+                }
+            }
             Pattern::Literal(lit) => {
                 let lit_ty = lit_pattern_ty(lit);
                 if !ty.is_unknown() && &lit_ty != ty.scalar() {
@@ -482,6 +588,38 @@ impl Checker {
             self.push_scope();
             return true;
         }
+        // A carrier pattern is the variant pattern it means over this scrutinee; the variant path
+        // below checks it. Only the duplicate-arm text differs: it prints the pattern as written.
+        if let Pattern::Carrier { tag, inner, id } = pattern {
+            let scrut = match kind {
+                MatchKind::Variants { scrut, .. } => scrut.clone(),
+                MatchKind::Literal(ty) => ty.clone(),
+                MatchKind::Tuple(tys) => Ty::Tuple(tys.clone()),
+                MatchKind::Struct { label, targs, .. } => Ty::Struct(label.clone(), targs.clone()),
+                // Reported upstream (`reconstruct_unknown_kind`).
+                MatchKind::Skip => Ty::Unknown,
+            };
+            let Some(variant) = self.carrier_as_variant(*tag, inner, *id, &scrut, span) else {
+                self.push_scope();
+                self.declare_pattern_names_unknown(inner);
+                return false;
+            };
+            let Pattern::Variant { name, .. } = &variant else {
+                unreachable!("carrier_as_variant builds a Variant")
+            };
+            let duplicate = covered.remove(name);
+            if duplicate {
+                self.error(
+                    span,
+                    format!("duplicate match arm '{}'", tag.pattern_text()),
+                );
+            }
+            let irref = self.bind_match_arm(&variant, kind, span, covered, guarded);
+            if duplicate {
+                covered.insert(name.clone());
+            }
+            return irref;
+        }
         // An or-pattern at the top of an arm: bind each alternative into a scratch scope (threading
         // coverage so `Red | Green | Blue` closes the variant domain), enforce that all alternatives
         // bind the same names with unifiable types, then declare the agreed set into the arm scope.
@@ -571,6 +709,7 @@ impl Checker {
                             self.bind_subpattern(s, &Ty::Unknown, span);
                         }
                     }
+                    Pattern::Carrier { inner, .. } => self.declare_pattern_names_unknown(inner),
                     _ => {}
                 }
             }
@@ -685,8 +824,11 @@ impl Checker {
                             crate::compiler::bare_display(label.as_str())
                         ),
                     ),
-                    Pattern::Ident(..) | Pattern::Wildcard | Pattern::Or(_) => {
-                        unreachable!("ident/wildcard/or handled elsewhere")
+                    Pattern::Ident(..)
+                    | Pattern::Wildcard
+                    | Pattern::Or(_)
+                    | Pattern::Carrier { .. } => {
+                        unreachable!("ident/wildcard/or/carrier handled elsewhere")
                     }
                 }
             }
@@ -794,8 +936,11 @@ impl Checker {
                     Pattern::Tuple(_) => {
                         self.error(span, format!("cannot match a tuple against {ty}"))
                     }
-                    Pattern::Ident(..) | Pattern::Wildcard | Pattern::Or(_) => {
-                        unreachable!("ident/wildcard/or handled elsewhere")
+                    Pattern::Ident(..)
+                    | Pattern::Wildcard
+                    | Pattern::Or(_)
+                    | Pattern::Carrier { .. } => {
+                        unreachable!("ident/wildcard/or/carrier handled elsewhere")
                     }
                 }
             }
@@ -943,8 +1088,11 @@ impl Checker {
                     Pattern::Tuple(_) => {
                         self.error(span, format!("cannot match a tuple against {label}"))
                     }
-                    Pattern::Ident(..) | Pattern::Wildcard | Pattern::Or(_) => {
-                        unreachable!("ident/wildcard/or handled elsewhere")
+                    Pattern::Ident(..)
+                    | Pattern::Wildcard
+                    | Pattern::Or(_)
+                    | Pattern::Carrier { .. } => {
+                        unreachable!("ident/wildcard/or/carrier handled elsewhere")
                     }
                 }
             }
@@ -5528,6 +5676,8 @@ impl Checker {
     pub(super) fn pin_ty_of_pattern(&self, p: &Pattern) -> Option<Ty> {
         match p {
             Pattern::Or(alts) => alts.first().and_then(|a| self.pin_ty_of_pattern(a)),
+            // `?v` fits a `T?` and a `T!E` alike: no pin.
+            Pattern::Carrier { .. } => None,
             Pattern::Tuple(subs) => Some(Ty::Tuple(vec![Ty::Unknown; subs.len()])),
             Pattern::Literal(lit) => Some(lit_pattern_ty(lit)),
             Pattern::Range { .. } => Some(Ty::Int),

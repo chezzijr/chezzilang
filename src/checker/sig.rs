@@ -5994,6 +5994,9 @@ impl Checker {
                 Pattern::Range { .. } if lit_ty.is_none() => {
                     lit_ty = Some(Ty::Int);
                 }
+                Pattern::Carrier { .. } => {
+                    structural.get_or_insert("variant");
+                }
                 // Ident/Wildcard/(nested Or) — no structural or literal signal.
                 _ => {}
             }

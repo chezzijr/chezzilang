@@ -1983,6 +1983,38 @@ impl Parser {
             }
             // A parenthesised group is a tuple pattern (gap #15).
             Token::LParen => return self.parse_tuple_pattern(),
+            // `?p` / `!p` -- a carrier pattern. The prefixes are collected in a loop (`??` lexes as
+            // one token and is two nested `?`), so a long run costs no native stack. The operand
+            // is always a sub-position: a bare name there binds.
+            Token::Question | Token::QuestionQuestion | Token::Bang => {
+                use crate::ast::CarrierTag;
+                let mut tags = Vec::new();
+                loop {
+                    match self.peek() {
+                        Token::Question => tags.push(CarrierTag::Present),
+                        Token::QuestionQuestion => {
+                            tags.push(CarrierTag::Present);
+                            tags.push(CarrierTag::Present);
+                        }
+                        Token::Bang => tags.push(CarrierTag::Error),
+                        _ => break,
+                    }
+                    self.advance();
+                }
+                let mut pat = if self.check(&Token::LParen) {
+                    self.parse_tuple_pattern()?
+                } else {
+                    self.parse_pattern_primary(false)?
+                };
+                for tag in tags.into_iter().rev() {
+                    pat = Pattern::Carrier {
+                        tag,
+                        inner: Box::new(pat),
+                        id: crate::ast::NodeId::fresh(),
+                    };
+                }
+                return Ok(pat);
+            }
             // `_` is an identifier; it's a wildcard unless followed by `(` (a payload, i.e. a
             // variant literally named `_`).
             Token::Ident(name) if name == "_" && self.peek_at(1) != &Token::LParen => {

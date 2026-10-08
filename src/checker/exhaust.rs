@@ -186,6 +186,22 @@ impl Checker {
                 }
             }
             Pattern::Literal(_) | Pattern::Range { .. } => vec![Pat::Never],
+            // The same constructor as the long form: the variant `carrier_variant_of_key` names.
+            Pattern::Carrier { tag, inner, .. } => {
+                let member = match dom {
+                    Dom::Sum(_, members) => ["Option", "Result"]
+                        .iter()
+                        .filter_map(|key| Self::carrier_variant_of_key(*tag, key))
+                        .find_map(|v| members.iter().find(|(n, tys)| n == v && tys.len() == 1)),
+                    _ => None,
+                };
+                match member {
+                    Some((vname, tys)) => {
+                        self.exh_product(vname, std::slice::from_ref(&**inner), tys, depth)
+                    }
+                    None => vec![Pat::Never],
+                }
+            }
             Pattern::Tuple(subs) => match dom {
                 Dom::Prod(p, tys) if p.is_empty() && tys.len() == subs.len() => {
                     self.exh_product("", subs, tys, depth)

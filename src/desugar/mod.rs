@@ -1530,6 +1530,7 @@ fn bind_pattern(pat: &Pattern, f: &mut impl FnMut(String)) {
                 bind_pattern(b, f);
             }
         }
+        Pattern::Carrier { inner, .. } => bind_pattern(inner, f),
         Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
     }
 }

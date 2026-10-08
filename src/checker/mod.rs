@@ -2813,6 +2813,7 @@ fn first_duplicate_binder(p: &Pattern, is_binder: &impl Fn(&str) -> bool) -> Opt
                 }
                 None
             }
+            Pattern::Carrier { inner, .. } => go(inner, seen, is_binder),
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => None,
         }
     }
@@ -3836,6 +3837,7 @@ fn pattern_binds(p: &Pattern, name: &str) -> bool {
             name: vn, bindings, ..
         } => (bindings.is_empty() && vn == name) || bindings.iter().any(|b| pattern_binds(b, name)),
         Pattern::Tuple(subs) | Pattern::Or(subs) => subs.iter().any(|s| pattern_binds(s, name)),
+        Pattern::Carrier { inner, .. } => pattern_binds(inner, name),
         Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => false,
     }
 }

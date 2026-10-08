@@ -2800,7 +2800,9 @@ impl Compiler {
     /// of a pattern it accepts, so a miss is an internal error. `None` for a pattern with no head.
     fn pat_resolution(&self, p: &Pattern, span: Span) -> Option<Result<&Resolution, CompileError>> {
         let id = match p {
-            Pattern::Variant { id, .. } | Pattern::Ident(_, _, id) => id,
+            Pattern::Variant { id, .. }
+            | Pattern::Ident(_, _, id)
+            | Pattern::Carrier { id, .. } => id,
             _ => return None,
         };
         Some(
@@ -2827,7 +2829,7 @@ impl Compiler {
     /// emit the `EnsureEnum` scrutinee guard). A struct pattern (`Point(x, y)`, L2) and a bare
     /// whole-value catch-all binding (`rest:`) are not.
     fn pattern_needs_enum(&self, p: &Pattern) -> bool {
-        matches!(p, Pattern::Variant { .. }) && self.pat_is_variant(p)
+        matches!(p, Pattern::Variant { .. } | Pattern::Carrier { .. }) && self.pat_is_variant(p)
     }
 
     /// M19 lever #2 — the dense `variant_id` of the variant `name` of the enum keyed `enum_key` (the
@@ -2885,6 +2887,7 @@ impl Compiler {
                     self.collect_binding_names(b, out);
                 }
             }
+            Pattern::Carrier { inner, .. } => self.collect_binding_names(inner, out),
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
         }
     }
@@ -2992,6 +2995,106 @@ impl Compiler {
         Ok(())
     }
 
+    /// The variant-headed arm of [`Self::emit_pattern`]: `pattern` is the head the checker
+    /// recorded (a struct pattern, a whole-value binding named `name`, or a variant test) and
+    /// `bindings` its payload sub-patterns.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_variant_pattern(
+        &mut self,
+        fc: &mut FnComp,
+        pattern: &Pattern,
+        name: &str,
+        bindings: &[Pattern],
+        enum_name: &Option<String>,
+        scrut: usize,
+        fails: &mut Vec<usize>,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        let res = self
+            .pat_resolution(pattern, span)
+            .transpose()?
+            .cloned()
+            .expect("a Variant pattern has a head");
+        // Struct pattern (L2): `Point(x, y)` destructures a struct by DECLARED FIELD NAME.
+        // A struct has one constructor, so this is structurally IRREFUTABLE — no `MatchArm`
+        // tag test, no fail-jump of its own; refutable SUB-patterns (`Point(0, y)`) push their
+        // own fails when they recurse. Mirrors the `Pattern::Tuple` arm but keys `GetField` on
+        // the field name instead of a numeric index (the VM resolves both the same way).
+        if let Resolution::PatStruct(key) = &res {
+            let field_names = self.program.structs[key].fields.clone();
+            for (b, fname) in bindings.iter().zip(field_names.iter()) {
+                fc.emit_hidden_get(scrut, span);
+                fc.emit(
+                    Op::GetField {
+                        name: fname.clone(),
+                        ic: NO_IC,
+                    },
+                    span,
+                );
+                let elem = fc.add_hidden();
+                fc.emit_hidden_set(elem, span);
+                self.emit_pattern(fc, b, elem, fails, span)?;
+            }
+            return Ok(());
+        }
+        // A bare whole-value binding catch-all (`rest:` after a refutable struct arm) —
+        // reachable in a struct, enum, `Option` or `Result` match (TICKET-107). Bind the
+        // scrutinee like a plain `Pattern::Ident`.
+        let Resolution::Variant { enum_key, variant } = res else {
+            fc.emit_hidden_get(scrut, span);
+            fc.emit_decl_named(name.to_string(), span);
+            return Ok(());
+        };
+        // One slot per payload element, written positionally by `MatchArm`. An UNBOXED plain
+        // `Ident` binding names its slot directly (so `Some(c)` binds `c` with no copy); a
+        // BOXED plain ident (captured by a closure in the arm) needs a cell, but `MatchArm`
+        // writes a raw value — so it gets a hidden RAW slot here and the user cell is bound
+        // from it after the arm. A nested nullary-variant `Ident` (e.g. the `None` in
+        // `Some(None)`) and any other sub-pattern also get a hidden slot to test/destructure.
+        let bind_start = fc.next_slot();
+        for b in bindings {
+            match b {
+                Pattern::Ident(n, _, _) if !self.pat_is_variant(b) && !fc.is_boxed_name(n) => {
+                    fc.add_local(n.clone());
+                }
+                _ => {
+                    fc.add_hidden();
+                }
+            }
+        }
+        let variant_id = self.variant_id_of_key(&enum_key, &variant);
+        let arm_op = fc.emit_jump(
+            Op::MatchArm {
+                scrut,
+                variant,
+                variant_id,
+                // SCRUTINEE-DRIVEN fallback — carry the BARE written enum qualifier so the
+                // VM can resolve an id-compare MISS against the scrutinee's own enum key
+                // (two whole-imported same-named enums). `None` for a built-in (`Ok`/`Err`).
+                enum_name: enum_name.clone(),
+                nbind: bindings.len(),
+                bind_start,
+                next: 0,
+            },
+            span,
+        );
+        fails.push(arm_op);
+        for (i, b) in bindings.iter().enumerate() {
+            match b {
+                // Unboxed plain binding — the VM wrote it straight into its user slot.
+                Pattern::Ident(n, _, _) if !self.pat_is_variant(b) && !fc.is_boxed_name(n) => {}
+                // Boxed plain binding — bind the user cell from the raw slot the VM wrote.
+                Pattern::Ident(n, _, _) if !self.pat_is_variant(b) => {
+                    fc.emit_hidden_get(bind_start + i, span);
+                    fc.emit_decl_named(n.clone(), span);
+                }
+                // Nested / nullary-variant sub-pattern: test/destructure the raw slot.
+                _ => self.emit_pattern(fc, b, bind_start + i, fails, span)?,
+            }
+        }
+        Ok(())
+    }
+
     /// Emit code testing the value in local `scrut` against `pattern`. Failed tests push their jump
     /// onto `fails` (the caller patches them to the next arm); successful matches bind every name in
     /// the pattern to a fresh local in the current scope. Recurses for nested tuple/variant
@@ -3066,93 +3169,19 @@ impl Compiler {
                 bindings,
                 enum_name,
                 ..
-            } => {
-                let res = self
-                    .pat_resolution(pattern, span)
-                    .transpose()?
-                    .cloned()
-                    .expect("a Variant pattern has a head");
-                // Struct pattern (L2): `Point(x, y)` destructures a struct by DECLARED FIELD NAME.
-                // A struct has one constructor, so this is structurally IRREFUTABLE — no `MatchArm`
-                // tag test, no fail-jump of its own; refutable SUB-patterns (`Point(0, y)`) push their
-                // own fails when they recurse. Mirrors the `Pattern::Tuple` arm but keys `GetField` on
-                // the field name instead of a numeric index (the VM resolves both the same way).
-                if let Resolution::PatStruct(key) = &res {
-                    let field_names = self.program.structs[key].fields.clone();
-                    for (b, fname) in bindings.iter().zip(field_names.iter()) {
-                        fc.emit_hidden_get(scrut, span);
-                        fc.emit(
-                            Op::GetField {
-                                name: fname.clone(),
-                                ic: NO_IC,
-                            },
-                            span,
-                        );
-                        let elem = fc.add_hidden();
-                        fc.emit_hidden_set(elem, span);
-                        self.emit_pattern(fc, b, elem, fails, span)?;
-                    }
-                    return Ok(());
-                }
-                // A bare whole-value binding catch-all (`rest:` after a refutable struct arm) —
-                // reachable in a struct, enum, `Option` or `Result` match (TICKET-107). Bind the
-                // scrutinee like a plain `Pattern::Ident`.
-                let Resolution::Variant { enum_key, variant } = res else {
-                    fc.emit_hidden_get(scrut, span);
-                    fc.emit_decl_named(name.clone(), span);
-                    return Ok(());
-                };
-                // One slot per payload element, written positionally by `MatchArm`. An UNBOXED plain
-                // `Ident` binding names its slot directly (so `Some(c)` binds `c` with no copy); a
-                // BOXED plain ident (captured by a closure in the arm) needs a cell, but `MatchArm`
-                // writes a raw value — so it gets a hidden RAW slot here and the user cell is bound
-                // from it after the arm. A nested nullary-variant `Ident` (e.g. the `None` in
-                // `Some(None)`) and any other sub-pattern also get a hidden slot to test/destructure.
-                let bind_start = fc.next_slot();
-                for b in bindings {
-                    match b {
-                        Pattern::Ident(n, _, _)
-                            if !self.pat_is_variant(b) && !fc.is_boxed_name(n) =>
-                        {
-                            fc.add_local(n.clone());
-                        }
-                        _ => {
-                            fc.add_hidden();
-                        }
-                    }
-                }
-                let variant_id = self.variant_id_of_key(&enum_key, &variant);
-                let arm_op = fc.emit_jump(
-                    Op::MatchArm {
-                        scrut,
-                        variant,
-                        variant_id,
-                        // SCRUTINEE-DRIVEN fallback — carry the BARE written enum qualifier so the
-                        // VM can resolve an id-compare MISS against the scrutinee's own enum key
-                        // (two whole-imported same-named enums). `None` for a built-in (`Ok`/`Err`).
-                        enum_name: enum_name.clone(),
-                        nbind: bindings.len(),
-                        bind_start,
-                        next: 0,
-                    },
-                    span,
-                );
-                fails.push(arm_op);
-                for (i, b) in bindings.iter().enumerate() {
-                    match b {
-                        // Unboxed plain binding — the VM wrote it straight into its user slot.
-                        Pattern::Ident(n, _, _)
-                            if !self.pat_is_variant(b) && !fc.is_boxed_name(n) => {}
-                        // Boxed plain binding — bind the user cell from the raw slot the VM wrote.
-                        Pattern::Ident(n, _, _) if !self.pat_is_variant(b) => {
-                            fc.emit_hidden_get(bind_start + i, span);
-                            fc.emit_decl_named(n.clone(), span);
-                        }
-                        // Nested / nullary-variant sub-pattern: test/destructure the raw slot.
-                        _ => self.emit_pattern(fc, b, bind_start + i, fails, span)?,
-                    }
-                }
-            }
+            } => self
+                .emit_variant_pattern(fc, pattern, name, bindings, enum_name, scrut, fails, span)?,
+            // The checker recorded which variant the `?` / `!` head means on the pattern's id.
+            Pattern::Carrier { inner, .. } => self.emit_variant_pattern(
+                fc,
+                pattern,
+                "",
+                std::slice::from_ref(&**inner),
+                &None,
+                scrut,
+                fails,
+                span,
+            )?,
             Pattern::Or(alts) => {
                 // Pre-allocate ONE canonical slot per agreed binding name (the checker has verified
                 // every alternative binds the same set). Each alternative binds into fresh scratch
@@ -3359,7 +3388,10 @@ impl Compiler {
                     }
                     fc.end_scope();
                 }
-                Pattern::Variant { .. } | Pattern::Tuple(_) | Pattern::Ident(..) => {
+                Pattern::Variant { .. }
+                | Pattern::Tuple(_)
+                | Pattern::Ident(..)
+                | Pattern::Carrier { .. } => {
                     unreachable!(
                         "literal match has only literal/range/wildcard/binding arms (arms_are_literal)"
                     )
@@ -5748,6 +5780,7 @@ pub(crate) fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
         }
         Pattern::Variant { bindings, .. } => bindings.iter().for_each(|b| pattern_binds(b, out)),
         Pattern::Tuple(ps) | Pattern::Or(ps) => ps.iter().for_each(|b| pattern_binds(b, out)),
+        Pattern::Carrier { inner, .. } => pattern_binds(inner, out),
         Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
     }
 }

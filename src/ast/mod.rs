@@ -657,6 +657,34 @@ pub enum Pattern {
     /// Every alternative must bind the same set of variables with unifiable types; the agreed set
     /// is declared once. Irrefutable iff every alternative is.
     Or(Vec<Pattern>),
+    /// A carrier pattern: `?p` matches a present `T?` or a successful `T!E` and matches its
+    /// payload against `p`; `!p` matches the error of a `T!E`. The checker records which variant
+    /// the head means on `id` (`Checker::carrier_variant`); no later phase re-derives it.
+    Carrier {
+        tag: CarrierTag,
+        inner: Box<Pattern>,
+        /// Equality-neutral identity of the pattern head; see [`NodeId`].
+        id: NodeId,
+    },
+}
+
+/// Which side of a carrier a `?p` / `!p` pattern (or an `else` guard) tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarrierTag {
+    /// `?p`: the present value of a `T?`, the success value of a `T!E`.
+    Present,
+    /// `!p`: the error of a `T!E`.
+    Error,
+}
+
+impl CarrierTag {
+    /// The one spelling of a carrier pattern in a message.
+    pub fn pattern_text(self) -> &'static str {
+        match self {
+            CarrierTag::Present => "?_",
+            CarrierTag::Error => "!_",
+        }
+    }
 }
 
 /// A literal value usable as a `match` pattern.
@@ -1644,6 +1672,10 @@ fn ids_in_pattern(p: &mut Pattern, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
             for b in ps {
                 ids_in_pattern(b, f);
             }
+        }
+        Pattern::Carrier { inner, id, .. } => {
+            f(id, Span::default(), 1);
+            ids_in_pattern(inner, f);
         }
         Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
     }
