@@ -2257,6 +2257,12 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 >    and it may read a handle.
 > 3. else: release held jobs while fewer than `n` run.
 >
+> The cancel `Err` is sealed inside the transition, in the lock hold that ends the job
+> (`SchedCore::settle_job`, TICKET-232); only the wake of its readers runs after the unlock. A
+> join returns on the job's slot, so a seal written after the unlock left a reader on an empty
+> channel with no counted party, and `h.get()` reported a false deadlock at `task.chz` (measured
+> 1 of 600 runs at `--threads=0`, and 60 of 60 with a 30 ms delay before the seal).
+>
 > **A submit that returned without a fault and is under the cap always starts (TICKET-232).** The
 > one exception is a run halt (an exit, a job fault, a deadlock verdict), which drops it. A
 > refusal is always a fault the submitter sees: `submit on a shut-down Executor (it no longer

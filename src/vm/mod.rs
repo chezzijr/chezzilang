@@ -2682,11 +2682,13 @@ enum JobEvent {
 }
 
 /// TICKET-219 — what the caller of [`SchedCore::job_event`] does next: enqueue `start` under the
-/// sched lock, then seal `settle` after it drops the lock ([`MnSched::seal_settles`]).
+/// sched lock, then wake the readers of `sealed` after it drops the lock
+/// ([`MnSched::wake_sealed`]). `sealed` holds the handle channels the transition itself sealed
+/// with their cancel value ([`SchedCore::settle_job`], TICKET-232).
 #[derive(Default)]
 struct JobStep {
     start: Vec<Fiber>,
-    settle: Vec<JobSettle>,
+    sealed: Vec<Arc<ChannelCore>>,
 }
 
 struct SchedCore {
@@ -3448,10 +3450,10 @@ impl MnSched {
             self.enqueue_locked(&mut c, f);
         }
         drop(c);
-        if started || !step.settle.is_empty() {
+        if started || !step.sealed.is_empty() {
             self.notify_waiters();
         }
-        self.seal_settles(step.settle);
+        self.wake_sealed(step.sealed);
     }
 
     /// TICKET-219 — `shutdown_now` drops the held jobs ([`JobEvent::DropHeld`]).
@@ -3459,23 +3461,15 @@ impl MnSched {
         let mut c = self.lock();
         let step = c.job_event(JobEvent::DropHeld, self.quiesce.run_halt());
         drop(c);
-        self.seal_settles(step.settle);
+        self.wake_sealed(step.sealed);
     }
 
-    /// TICKET-219 — seal each dropped or cut handle job's channel with its cancel value, with no
-    /// sched lock held: [`MnSched::close_wake`] takes it. The first writer wins: a job body that
-    /// already sealed its value keeps it, and nothing is woken.
-    fn seal_settles(&self, settle: Vec<JobSettle>) {
-        for s in settle {
-            let sum = crate::vm::core::wire_summary(&s.cancel);
-            let sealed =
-                s.ch.q
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .seal(sum, s.cancel);
-            if sealed {
-                self.close_wake(Arc::as_ptr(&s.ch) as usize, &s.ch);
-            }
+    /// TICKET-232 — wake the readers of each handle channel [`SchedCore::settle_job`] sealed,
+    /// with no sched lock held: [`MnSched::close_wake`] takes it. The seal itself is already
+    /// written, inside the transition.
+    fn wake_sealed(&self, sealed: Vec<Arc<ChannelCore>>) {
+        for ch in sealed {
+            self.close_wake(Arc::as_ptr(&ch) as usize, &ch);
         }
     }
 
@@ -5135,7 +5129,7 @@ impl MnSched {
         }
         self.notify_waiters();
         drop(c);
-        self.seal_settles(step.settle);
+        self.wake_sealed(step.sealed);
         aborts
     }
 
@@ -6013,12 +6007,7 @@ impl SchedCore {
                     return step;
                 }
                 self.exec_active -= 1;
-                if let Some(s) = self.job_settle.remove(&task_index)
-                    && !done
-                    && halt.settles()
-                {
-                    step.settle.push(s);
-                }
+                self.settle_job(task_index, !done && halt.settles(), &mut step);
             }
             JobEvent::Reaped {
                 task_index,
@@ -6028,7 +6017,7 @@ impl SchedCore {
                 // `None` slot would hang the join; the parked job's `Deadlocked` is the report.
                 if self.is_job_scope(scope_id) {
                     self.exec_active -= 1;
-                    self.job_settle.remove(&task_index);
+                    self.settle_job(task_index, false, &mut step);
                     self.drop_held(false, &mut step);
                 }
                 return step;
@@ -6080,10 +6069,30 @@ impl SchedCore {
             stderr: Vec::new(),
         });
         self.scopes[f.scope_id].done += 1;
-        if let Some(s) = self.job_settle.remove(&f.task_index)
-            && settle
-        {
-            step.settle.push(s);
+        self.settle_job(f.task_index, settle, step);
+    }
+
+    /// TICKET-232 — THE writer of a handle's cancel outcome: forget job `task_index`'s settle
+    /// record and, when `settle` is set, seal its channel with the cancel value here, in the lock
+    /// hold that ends the job. The join returns on the slot, so a seal written after the unlock
+    /// leaves a reader on an empty channel with no counted party: a false deadlock. The first
+    /// writer wins: a job body that already sealed its value keeps it, and nothing is woken.
+    /// Lock order `SchedCore` then `ChannelCore::q`, as `send_wake`.
+    fn settle_job(&mut self, task_index: usize, settle: bool, step: &mut JobStep) {
+        let Some(s) = self.job_settle.remove(&task_index) else {
+            return;
+        };
+        if !settle {
+            return;
+        }
+        let sum = crate::vm::core::wire_summary(&s.cancel);
+        let sealed =
+            s.ch.q
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .seal(sum, s.cancel);
+        if sealed {
+            step.sealed.push(s.ch);
         }
     }
 
