@@ -38149,6 +38149,14 @@ fn bang_prefix_without_a_pinning_use_is_rejected() {
 #[test]
 fn carrier_variants_resolve_like_user_enums() {
     ok(
-        "fn main():\n    x := Result[int, str].Ok(5)\n    y := Option[int].None\n    z := Option.Some(1)\n    f := Some\n    w := [1, 2].map(Some)\n",
+        "fn main():\n    x := Result[int, str].Ok(5)\n    y := Option[int].None\n    z := Option.Some(1)\n    f := Some\n    print(f(1))\n    w := [1, 2].map(Some)\n",
+    );
+}
+
+#[test]
+fn an_unpinned_carrier_variant_value_is_rejected_like_a_user_one() {
+    rejects(
+        "fn main():\n    f := Some\n    print(1)\n",
+        "is generic and T is not determined here",
     );
 }
