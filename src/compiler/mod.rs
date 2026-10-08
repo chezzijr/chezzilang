@@ -767,6 +767,8 @@ impl Compiler {
                         .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                     add(name, &mut self.globals, &mut self.global_slots);
                 }
+                // The resolver never resolves a variant import, so none reaches here.
+                Import::Variants { .. } => {}
                 Import::From { names, .. } => {
                     for (member, alias) in names {
                         add(
@@ -930,6 +932,8 @@ impl Compiler {
                         self.imported_modules.insert(bind, tidx);
                     }
                 }
+                // The resolver never resolves a variant import, so none reaches here.
+                Import::Variants { .. } => {}
                 Import::From { names, .. } => {
                     if let Some(tidx) = self.program.module_index(&imp.target) {
                         for (member, alias) in names {

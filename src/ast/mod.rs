@@ -699,6 +699,57 @@ pub enum Import {
         /// equality-neutral, runtime-inert.
         name_spans: Vec<Span>,
     },
+    /// `import V1, V2 as a, … from Enum` — enum variants bound as bare names (TICKET-229, R3b).
+    /// Never produced by the parser: [`classify_variant_imports`] rewrites a one-segment
+    /// [`Import::From`] into it when the file is loaded.
+    Variants {
+        enum_name: String,
+        names: Vec<(String, Option<String>)>,
+        /// As [`Import::From::name_spans`].
+        name_spans: Vec<Span>,
+    },
+}
+
+/// Decide, once per loaded file, which `import V from X` statements import enum VARIANTS. A
+/// top-level one-segment `import … from X` becomes [`Import::Variants`] exactly when no module `X`
+/// resolves (`module_exists`) and `X` is a top-level `enum` / `native enum` of this file or a name
+/// a top-level from-import of this file binds. A module that resolves always wins.
+pub fn classify_variant_imports(m: &mut Module, module_exists: &dyn Fn(&str) -> bool) {
+    let mut enum_like: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in &m.stmts {
+        match &s.kind {
+            StmtKind::Enum { name, .. } | StmtKind::NativeEnum { name, .. } => {
+                enum_like.insert(name.clone());
+            }
+            StmtKind::Import(Import::From { names, .. }) => {
+                enum_like.extend(names.iter().map(|(n, a)| a.clone().unwrap_or(n.clone())));
+            }
+            _ => {}
+        }
+    }
+    for s in &mut m.stmts {
+        let StmtKind::Import(imp) = &mut s.kind else {
+            continue;
+        };
+        let Import::From {
+            path,
+            names,
+            name_spans,
+        } = imp
+        else {
+            continue;
+        };
+        let [x] = path.as_slice() else {
+            continue;
+        };
+        if enum_like.contains(x) && !module_exists(x) {
+            *imp = Import::Variants {
+                enum_name: x.clone(),
+                names: std::mem::take(names),
+                name_spans: std::mem::take(name_spans),
+            };
+        }
+    }
 }
 
 /// Hand-written so the bound-NAME spans are EQUALITY-NEUTRAL (see the `Import` doc): everything else
@@ -730,6 +781,18 @@ impl PartialEq for Import {
                     ..
                 },
             ) => p1 == p2 && n1 == n2,
+            (
+                Import::Variants {
+                    enum_name: e1,
+                    names: n1,
+                    ..
+                },
+                Import::Variants {
+                    enum_name: e2,
+                    names: n2,
+                    ..
+                },
+            ) => e1 == e2 && n1 == n2,
             _ => false,
         }
     }
@@ -1837,5 +1900,51 @@ mod tests {
         let plain = parse_module("print(\"a\")\n");
         let bracketed = parse_module("print(\"\\\"((((((((\")\n");
         assert_eq!(debug_nesting(&bracketed), debug_nesting(&plain));
+    }
+
+    /// TICKET-229 (R3b) — a one-segment `import V from X` is a variant import exactly when no
+    /// module `X` resolves and `X` is an enum of this file or a name a from-import of it binds.
+    #[test]
+    fn import_from_an_enum_is_a_variant_import_unless_a_module_resolves() {
+        let classify = |src: &str, exists: &dyn Fn(&str) -> bool| {
+            let mut m = parse_module(src);
+            classify_variant_imports(&mut m, exists);
+            m.stmts
+                .iter()
+                .filter_map(|s| match &s.kind {
+                    StmtKind::Import(Import::Variants {
+                        enum_name, names, ..
+                    }) => Some(format!("variants {enum_name} {names:?}")),
+                    StmtKind::Import(Import::From { path, .. }) => Some(format!("from {path:?}")),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let local = "enum Color:\n    Red\n    Green\nimport Red, Green from Color\n";
+        assert_eq!(
+            classify(local, &|_| false),
+            ["variants Color [(\"Red\", None), (\"Green\", None)]"]
+        );
+        assert_eq!(classify(local, &|x| x == "Color"), ["from [\"Color\"]"]);
+        let hop = "import geo from lib\nimport Point from geo\n";
+        assert_eq!(
+            classify(hop, &|_| false),
+            ["from [\"lib\"]", "variants geo [(\"Point\", None)]"]
+        );
+        assert_eq!(
+            classify(hop, &|x| x == "geo"),
+            ["from [\"lib\"]", "from [\"geo\"]"]
+        );
+        assert_eq!(
+            classify("import Red from color_mod\n", &|_| false),
+            ["from [\"color_mod\"]"]
+        );
+        // A dotted path is always a module, even when its last segment is a local enum.
+        assert_eq!(
+            classify("enum Color:\n    Red\nimport Red from lib.Color\n", &|_| {
+                false
+            }),
+            ["from [\"lib\", \"Color\"]"]
+        );
     }
 }

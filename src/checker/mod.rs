@@ -165,6 +165,7 @@ impl CheckError {
 fn module_label(import: &Import) -> String {
     let path = match import {
         Import::Module { path, .. } | Import::From { path, .. } => path,
+        Import::Variants { enum_name, .. } => return enum_name.clone(),
     };
     path.join(".")
 }
@@ -1446,6 +1447,7 @@ fn entry_module_binds(stmts: &[Stmt], imports: &[ResolvedImport], name: &str) ->
         Import::Module { path, alias, .. } => {
             alias.as_deref().or(path.last().map(String::as_str)) == Some(name)
         }
+        Import::Variants { .. } => false,
         Import::From { names, .. } => names
             .iter()
             .any(|(member, alias)| alias.as_deref().unwrap_or(member) == name),

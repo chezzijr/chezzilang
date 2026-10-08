@@ -2102,6 +2102,8 @@ impl Checker {
                     self.imported_io.insert("Reader".to_string());
                 }
             }
+            // The resolver never resolves a variant import; `bind_variant_imports` binds it.
+            Import::Variants { .. } => {}
             Import::From {
                 path,
                 names,
@@ -4420,7 +4422,10 @@ impl Checker {
     fn parse_prelude_source() -> Option<crate::ast::Module> {
         let src = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()]).ok()?;
         let toks = crate::lexer::tokenize(&src).ok()?;
-        crate::parser::parse(toks).ok()
+        let mut module = crate::parser::parse(toks).ok()?;
+        // A std file never probes the project root (as `Resolver::parse` classifies it).
+        crate::ast::classify_variant_imports(&mut module, &|_| false);
+        Some(module)
     }
 
     /// A test-only graph with no prelude module (`standalone_graph`) still needs the carrier enums:

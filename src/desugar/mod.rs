@@ -1807,6 +1807,13 @@ fn module_level_names(
             | StmtKind::Protocol { name, .. } => {
                 out.insert(name.clone());
             }
+            StmtKind::Import(Import::Variants { names, .. }) => {
+                out.extend(
+                    names
+                        .iter()
+                        .map(|(n, a)| a.clone().unwrap_or_else(|| n.clone())),
+                );
+            }
             _ => {}
         }
     }
@@ -1821,6 +1828,8 @@ fn module_level_names(
                 }
                 out.insert(bound);
             }
+            // The resolver never resolves a variant import; the `stmts` loop above names it.
+            Import::Variants { .. } => {}
             Import::From { names, .. } => {
                 out.extend(
                     names

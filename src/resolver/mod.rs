@@ -100,14 +100,7 @@ impl LoadedModule {
     /// module-keyed (they keep their bare name, resolvable bare wherever the std module is imported), so
     /// the qualification pre-pass skips std modules exactly like the synthetic native ones.
     pub fn is_std(&self) -> bool {
-        self.native.is_some()
-            || self.dotted.first().map(String::as_str) == Some("std")
-            // Path-aware: a std file checked/run AS THE ENTRY (`chezzi check std/foo.chz`) has an
-            // empty `dotted` path, so the two checks above miss it — yet its body relies on stdlib
-            // auto-privilege (e.g. bare `RwShared`/`Map` field types in std/concurrency/collection.chz).
-            // Recognise it by its file location under `std_root()` so the entry `check`/`run` path
-            // grants the same auto-license the import path does (no false "unknown type" diagnostics).
-            || path_under_std_root(&self.id.0)
+        self.native.is_some() || is_std_file(&self.dotted, &self.id.0)
     }
 
     /// Human label for messages: the dotted name, or the file stem for the entry.
@@ -271,6 +264,13 @@ fn std_miss_message(dotted: &[String], miss: &StdMiss) -> String {
             dotted_label(dotted)
         ),
     }
+}
+
+/// The one "is this a std file" rule: its dotted path starts with `std`, or its file lives under
+/// [`std_root`] (a std file checked/run AS THE ENTRY has an empty dotted path, yet its body relies
+/// on stdlib auto-privilege). [`LoadedModule::is_std`] and `Resolver::parse` both read it.
+fn is_std_file(dotted: &[String], path: &Path) -> bool {
+    dotted.first().map(String::as_str) == Some("std") || path_under_std_root(path)
 }
 
 /// Whether `p` lives under the stdlib directory ([`std_root`]). Used so a std file checked/run as the
@@ -575,10 +575,12 @@ impl Builder {
         // THIS module's own source, whose `file` id `parse` is about to assign — `parse` itself has
         // no `id` in scope to attribute it (it only takes `source`/`dotted`), so the caller fills it
         // in on the way back out.
-        let (ast, file) = self.parse(&source, dotted).map_err(|mut e| {
-            e.path = Some(id.0.clone());
-            e
-        })?;
+        let (ast, file) = self
+            .parse(&source, dotted, is_std_file(dotted, &id.0))
+            .map_err(|mut e| {
+                e.path = Some(id.0.clone());
+                e
+            })?;
         let resolved = self.resolve_ast_imports(id, dotted, &ast)?;
 
         self.visited.insert(id.clone(), ());
@@ -743,7 +745,7 @@ impl Builder {
         // `id.0` (this native module's own synthetic `<native:…>` id), same reasoning as `visit`'s
         // `parse` call: a lex/parse failure in the file-backed native's OWN source belongs to it, not
         // the importer, and `parse` itself has no `id` to attribute it with.
-        let (ast, file) = self.parse(&source, &dotted).map_err(|mut e| {
+        let (ast, file) = self.parse(&source, &dotted, true).map_err(|mut e| {
             e.path = Some(id.0.clone());
             e
         })?;
@@ -770,7 +772,12 @@ impl Builder {
     /// [`Span::file`] id is assigned: `1..n`, never 0 (0 is reserved for synthesized / standalone
     /// single-file lexes). That id is what keeps the checker→compiler side tables injective across
     /// modules — see the [`Span`] doc and `docs/gaps.md` W7-49.
-    fn parse(&self, source: &str, dotted: &[String]) -> Result<(Module, u32), ResolveError> {
+    fn parse(
+        &self,
+        source: &str,
+        dotted: &[String],
+        std_file: bool,
+    ) -> Result<(Module, u32), ResolveError> {
         // `Cell`, not `&mut self`: `parse` is called from `&self` contexts.
         let file = self.file_seq.get() + 1;
         self.file_seq.set(file);
@@ -797,7 +804,7 @@ impl Builder {
                 // `parse` itself does not.
                 path: None,
             })?;
-        let ast = parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
+        let mut ast = parser::parse_with_docs(tokens, comments).map_err(|e| ResolveError {
             // `e.message`, NOT `e.to_string()`: same reason as the lex arm above — `ParseError`'s own
             // `Display` carries its own `parse error (line N, col M): ` prefix, and the position is
             // already on `span` below, re-rendered by the caller. Using `e.to_string()` here stuttered
@@ -808,6 +815,13 @@ impl Builder {
             module: opt_label(dotted),
             path: None,
         })?;
+        let std_root = &self.std_root;
+        let project_root = &self.project_root;
+        // A std file never probes the project root: a user `Option.chz` must not turn the
+        // prelude's carrier import into a module import.
+        crate::ast::classify_variant_imports(&mut ast, &|x: &str| {
+            !std_file && module_file(&[x.to_string()], project_root, std_root).exists()
+        });
         Ok((ast, file))
     }
 
@@ -815,6 +829,8 @@ impl Builder {
         ast.stmts
             .iter()
             .filter_map(|s| match &s.kind {
+                // A variant import names an enum of this file; there is no module to load.
+                StmtKind::Import(Import::Variants { .. }) => None,
                 StmtKind::Import(import) => Some((import.clone(), s.span)),
                 _ => None,
             })
@@ -895,6 +911,8 @@ fn import_path(import: &Import) -> Vec<String> {
     match import {
         Import::Module { path, .. } => path.clone(),
         Import::From { path, .. } => path.clone(),
+        // A variant import names an enum of the importing file, never a module.
+        Import::Variants { .. } => Vec::new(),
     }
 }
 

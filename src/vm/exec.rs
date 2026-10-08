@@ -1106,6 +1106,8 @@ impl Vm {
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                 self.module_define(into, &name, Value::obj(target_obj));
             }
+            // The resolver never resolves a variant import, so none reaches here.
+            Import::Variants { .. } => {}
             Import::From { names, .. } => {
                 for (member, alias) in names {
                     // `std.concurrency`'s four exported ctor/TYPE names (`Shared`/`RwShared`/`Atomic`/
