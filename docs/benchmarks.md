@@ -3718,3 +3718,22 @@ release, one run each unless a range is given; "pre-quantum" is branch `5045d3d2
 A 10 ms quantum cut hand-overs 77x and left user CPU at 16.9 s, so the hand-over count is not the
 cost. `width::HANDOVER_QUANTUM` is 100 ms, the smallest value measured that meets the bound at
 T=2 and T=4 (user s at 10/20/30/50/100 ms: 16.9, 16.5, 13.2, 7.9-9.3, 7.2).
+
+## TICKET-232 — Executor job state and the sched's own verdict, base vs fixed (2026-10-09)
+
+Release binaries: base `61a27a6b` and branch `d2c1f4db`. The base binary was built in this
+worktree before any `src/` change outside `#[cfg(test)]`. Driver:
+`python3 benches/sched/ab_pair.py <base> <fixed> 7 <prog>:<threads> ...`, runs interleaved, wall
+ms as `median (max - min) / max RSS MiB`. `T` 0 is the default worker count (28 CPUs). A row is
+`ok` when the fixed median is at most the base median plus base's spread. Unpinned, three chunks;
+1-minute load at each chunk start 3.69, 2.18, 1.76, and 2.92 at the end.
+
+| program | T | n | base | fixed | ratio | verdict |
+|---|---|---|---|---|---|---|
+| trips.chz | 0 | 7 | 102 (13) / 15 | 107 (20) / 15 | 1.05x | ok |
+| two_executors.chz | 1 | 7 | 6703 (422) / 15 | 6689 (545) / 15 | 1.00x | ok |
+| two_executors.chz | 2 | 7 | 3572 (78) / 15 | 3574 (110) / 15 | 1.00x | ok |
+| two_executors.chz | 4 | 7 | 1864 (56) / 15 | 1889 (69) / 15 | 1.01x | ok |
+| executor_and_parallel.chz | 1 | 7 | 6655 (407) / 15 | 6604 (201) / 15 | 0.99x | ok |
+| executor_and_parallel.chz | 2 | 7 | 3566 (123) / 15 | 3528 (86) / 15 | 0.99x | ok |
+| executor_and_parallel.chz | 4 | 7 | 1830 (81) / 15 | 1850 (33) / 15 | 1.01x | ok |
