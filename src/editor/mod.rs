@@ -918,6 +918,10 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
             overlay_expr(els, map);
         }
         ExprKind::Recover(block) => overlay_block(block, map),
+        ExprKind::ElseGuard { value, body, .. } => {
+            overlay_expr(value, map);
+            overlay_block(body, map);
+        }
     }
 }
 

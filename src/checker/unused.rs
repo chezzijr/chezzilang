@@ -347,6 +347,16 @@ impl Scan {
                 self.expr(els);
             }
             ExprKind::Recover(b) => self.block(b),
+            // The error name binds like a match-arm binding: never reported as unread.
+            ExprKind::ElseGuard { value, err, body } => {
+                self.expr(value);
+                self.scoped(|s| {
+                    if let Some((name, span)) = err {
+                        s.bind(name, *span, false);
+                    }
+                    s.block_items(body);
+                });
+            }
         }
     }
 }

@@ -339,6 +339,10 @@ impl UseWalk<'_> {
                 }
             }
             ExprKind::Recover(body) => self.block(body),
+            ExprKind::ElseGuard { value, body, .. } => {
+                self.value(value);
+                self.block(body);
+            }
             // A closure, comprehension, interpolation, `?`, `?.` or anything else.
             _ => self.escape_free(e),
         }

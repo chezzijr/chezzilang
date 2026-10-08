@@ -228,6 +228,10 @@ impl Scan {
                 self.expr(els);
             }
             ExprKind::Recover(body) => self.block(body),
+            ExprKind::ElseGuard { value, body, .. } => {
+                self.expr(value);
+                self.block(body);
+            }
         }
     }
 }

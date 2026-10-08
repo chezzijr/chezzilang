@@ -1191,6 +1191,15 @@ pub enum ExprKind {
     /// statement-form `match`/`if` whose every arm/branch produces a value (see [`match_tail_is_value`]
     /// / [`if_tail_is_value`]) is ALSO the block's value expression — its unified arm type becomes `T`.
     Recover(Block),
+    /// `value else e: <block>` — the `else` guard (design D4). Evaluates to the present / success
+    /// payload of `value`; on an absent or error `value` the block runs, with the error bound to
+    /// `err` when named, and must leave (the checker proves it). Built by the parser only as the
+    /// whole value of a `let` or of an expression statement.
+    ElseGuard {
+        value: Box<Expr>,
+        err: Option<(String, Span)>,
+        body: Block,
+    },
 }
 
 /// The call part of an optional-chained method call `obj?.name(args)` — see [`ExprKind::OptChain`].
@@ -1404,6 +1413,12 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         }
         // The one block-carrying expression: record it; the caller recurses into its statements.
         ExprKind::Recover(block) => out.push(block),
+        // The `else` guard carries a block too: its statements run in this frame, so a
+        // statement-level walk must see them exactly as it sees a `recover:` block's.
+        ExprKind::ElseGuard { value, body, .. } => {
+            go(value);
+            out.push(body);
+        }
     }
 }
 
@@ -1817,6 +1832,10 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
             go(els, f);
         }
         ExprKind::Recover(b) => ids_in_block(b, f),
+        ExprKind::ElseGuard { value, body, .. } => {
+            go(value, f);
+            ids_in_block(body, f);
+        }
     }
 }
 

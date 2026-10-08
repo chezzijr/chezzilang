@@ -339,6 +339,7 @@ fn parser_rules_match_fns() {
         ("subpattern", "parse_subpattern"),
         ("tuplePattern", "parse_tuple_pattern"),
         ("returnStmt", "parse_return"),
+        ("elseGuard", "parse_else_guard"),
         ("yieldStmt", "parse_yield"),
         ("deferStmt", "parse_defer"),
         ("assertStmt", "parse_assert"),

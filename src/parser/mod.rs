@@ -629,6 +629,7 @@ impl Parser {
             let ty = self.parse_type()?;
             self.expect(&Token::Assign)?;
             let value = self.parse_expr()?;
+            let value = self.parse_else_guard(value)?;
             return Ok(StmtKind::Let {
                 names: vec![name],
                 name_spans: vec![name_span],
@@ -640,6 +641,20 @@ impl Parser {
         }
 
         let expr = self.parse_expr()?;
+
+        // `f() else e: <block>` -- the guard in statement form: the success value is discarded.
+        if self.check(&Token::Else) {
+            let span = expr.span;
+            let value = self.parse_else_guard(expr)?;
+            return Ok(StmtKind::Let {
+                names: vec!["_".to_string()],
+                name_spans: vec![span],
+                ty: None,
+                value,
+                is_const: false,
+                doc: None,
+            });
+        }
 
         // A comma after the first lvalue introduces a *multi-target* form (a bare-ident list).
         // Two shapes share this seam:
@@ -780,6 +795,7 @@ impl Parser {
             Token::Walrus => {
                 self.advance();
                 let value = self.parse_expr()?;
+                let value = self.parse_else_guard(value)?;
                 let name = match expr.kind {
                     ExprKind::Ident(n) => n,
                     _ => {
@@ -1865,6 +1881,34 @@ impl Parser {
                 cond: Box::new(cond),
                 then: Box::new(then),
                 els: Box::new(els),
+            },
+            span,
+        })
+    }
+
+    /// `<value> else e: <block>` -- the `else` guard, read only after a let's whole value (an if
+    /// expression has already taken its own `else` inside `parse_expr`). Returns `value` unchanged
+    /// when no `else` follows.
+    fn parse_else_guard(&mut self, value: Expr) -> PResult<Expr> {
+        if !self.check(&Token::Else) {
+            return Ok(value);
+        }
+        let span = self.cur_span();
+        self.advance();
+        let err = match self.peek() {
+            Token::Ident(_) => {
+                let name_span = self.cur_span();
+                Some((self.expect_ident()?, name_span))
+            }
+            _ => None,
+        };
+        let body = self.parse_block()?;
+        Ok(Expr {
+            id: crate::ast::NodeId::fresh(),
+            kind: ExprKind::ElseGuard {
+                value: Box::new(value),
+                err,
+                body,
             },
             span,
         })

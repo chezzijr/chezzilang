@@ -63,6 +63,13 @@
             # A block-valued RHS (`r := recover:` …) is terminated by the block's DEDENT, not a
             # trailing NEWLINE (mirrors the parser's `expect_stmt_end`).
             | "IDENT" "WALRUS" <recoverExpr>
+            # The `else` guard (design D4): the block runs when the value is absent or an error,
+            # and must leave (`return`, `break`, `continue`, `panic`); it ends the statement.
+            | "IDENT" "WALRUS" <expr> <elseGuard>
+            | "IDENT" "COLON" <type> "ASSIGN" <expr> <elseGuard>
+            | "IDENT" "COLON" "CONST" <type> "ASSIGN" <expr> <elseGuard>
+# `else:` handles an absent `T?` (or ignores an error); `else e:` binds the error of a `T!E`.
+<elseGuard> ::= "ELSE" <block> | "ELSE" "IDENT" <block>
 <identList> ::= "IDENT" "COMMA" "IDENT" | "IDENT" "COMMA" <identList>
 
 # Assignment target is restricted to a name / field / index (the parser's lvalue guard):
@@ -125,7 +132,8 @@
 # a custom str message. `cond` must be bool and `msg` (if given) str — enforced by the checker.
 <assertStmt> ::= "ASSERT" <expr> "NEWLINE" | "ASSERT" <expr> "COMMA" <expr> "NEWLINE"
 
-<exprStmt> ::= <expr> "NEWLINE"
+# The second form is the `else` guard on a discarded value: `save(p) else e: return !e`.
+<exprStmt> ::= <expr> "NEWLINE" | <expr> <elseGuard>
 
 # ===== blocks =====
 # Indented block: ':' NEWLINE INDENT stmts DEDENT. Inline block: ':' followed by ONE simple

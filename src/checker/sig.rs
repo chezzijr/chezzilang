@@ -586,6 +586,13 @@ impl Checker {
             // so a non-call value never leaks it into the next statement.
             // TICKET-227: the value owns the annotation as its slot (it may wrap).
             Some(expected) => self.infer_arg(value, Some(expected)),
+            // A discarded `else` guard (`save(p) else e: ...`, `_ := save(p) else e: ...`) may
+            // guard a `None!E` call: its success value is nothing, and nothing binds it.
+            None if matches!(value.kind, ExprKind::ElseGuard { .. })
+                && matches!(names, [n] if n == "_") =>
+            {
+                self.infer(value)
+            }
             None => self.infer_value(value),
         };
         (annotated, val_ty)

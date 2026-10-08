@@ -2055,6 +2055,9 @@ impl Checker {
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms, owned),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els, owned),
             ExprKind::Recover(block) => self.infer_recover(block),
+            ExprKind::ElseGuard { value, err, body } => {
+                self.infer_else_guard(expr, value, err, body)
+            }
         }
     }
 
@@ -2298,6 +2301,75 @@ impl Checker {
 
     /// `recover: <block>` yields `Result[T, Error]` where `T` is the type of the block's trailing
     /// expression (or `nil`). Non-final statements are checked for their effects.
+    /// `value else e: <block>` (design D4): the payload of a present / successful `value`. On
+    /// failure the block runs with the error bound to `err`, and must leave.
+    fn infer_else_guard(
+        &mut self,
+        e: &Expr,
+        value: &Expr,
+        err: &Option<(String, Span)>,
+        body: &Block,
+    ) -> Ty {
+        // The two positions with nowhere to leave to, as for `?` and `return`.
+        if self.in_spawn_block {
+            self.error(
+                e.span,
+                "'else' guard is not allowed inside a spawn block: a spawned task has no caller to leave to"
+                    .to_string(),
+            );
+        } else if self.in_defer_block {
+            self.error(
+                e.span,
+                "'else' guard is not allowed inside a defer block: a defer cannot leave"
+                    .to_string(),
+            );
+        }
+        let ty = self.infer(value);
+        let (payload, err_ty) = match &ty {
+            Ty::Option(t) => ((**t).clone(), None),
+            Ty::Result(t, er) => ((**t).clone(), Some((**er).clone())),
+            // Already reported: stay silent.
+            Ty::Unknown => (Ty::Unknown, Some(Ty::Unknown)),
+            other => {
+                self.error(
+                    e.span,
+                    format!("`else` needs a `T?` or `T!E` value, found {other}"),
+                );
+                (Ty::Unknown, Some(Ty::Unknown))
+            }
+        };
+        if let Ok((key, variant)) = Self::carrier_variant(CarrierTag::Present, &ty) {
+            self.record_variant(e.id, key, variant, e.span);
+        }
+        self.push_scope();
+        if let Some((name, name_span)) = err {
+            let bound = err_ty.unwrap_or_else(|| {
+                self.error(
+                    *name_span,
+                    format!(
+                        "`else {name}:` needs an error to bind, and {ty} has none; write `else:`"
+                    ),
+                );
+                Ty::Unknown
+            });
+            self.hover_record_at(*name_span, &bound, HoverKind::Local, None);
+            self.declare(name, bound);
+        }
+        for stmt in body {
+            self.check_stmt(stmt);
+        }
+        self.pop_scope();
+        // Read after the body is checked: `call_diverges` knows a `panic` / `os.exit` call only
+        // once that call has been inferred.
+        if self.block_flow(body).falls_through {
+            self.error(
+                e.span,
+                "else block must leave (return, break, continue, panic)".to_string(),
+            );
+        }
+        payload
+    }
+
     pub(super) fn infer_recover(&mut self, block: &Block) -> Ty {
         // A `recover:` block is a value, not a control-flow target: `return`/`break`/`continue` that
         // would escape it are rejected. `?` is fine — it propagates normally.

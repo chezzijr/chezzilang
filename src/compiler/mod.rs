@@ -3792,6 +3792,9 @@ impl Compiler {
             }
             ExprKind::IfElse { cond, then, els } => self.compile_if_expr(fc, cond, then, els)?,
             ExprKind::Recover(block) => self.compile_recover(fc, block, expr.span)?,
+            ExprKind::ElseGuard { value, err, body } => {
+                self.compile_else_guard(fc, expr, value, err, body)?
+            }
         }
         Ok(())
     }
@@ -3799,6 +3802,83 @@ impl Compiler {
     /// `recover: <block>` — install a handler over the block; on the happy path wrap the block's
     /// trailing-expression value in `Ok`, on a caught fault the VM has pushed the message `str` and
     /// we wrap it in `Err`. Both paths leave exactly one `Result` value on the stack.
+    /// `value else e: <block>`: test `value` for the success variant the checker recorded on the
+    /// guard, leaving its payload; otherwise bind the error and run the block. The checker proved
+    /// the block leaves, so the code after it is a trap, never a fall-through.
+    fn compile_else_guard(
+        &mut self,
+        fc: &mut FnComp,
+        expr: &Expr,
+        value: &Expr,
+        err: &Option<(String, Span)>,
+        body: &[Stmt],
+    ) -> Result<(), CompileError> {
+        let span = expr.span;
+        let Some(Resolution::Variant { enum_key, variant }) = self
+            .resolutions
+            .get(&(self.current_module_idx, expr.id.0))
+            .cloned()
+        else {
+            return Err(CompileError {
+                message: "internal: no carrier variant recorded for this else guard -- the \
+                          type-checker and the backend disagree"
+                    .to_string(),
+                span,
+            });
+        };
+        self.compile_expr(fc, value)?;
+        let guarded = fc.add_hidden();
+        fc.emit_hidden_set(guarded, span);
+        let payload = fc.add_hidden();
+        let variant_id = self.variant_id_of_key(&enum_key, &variant);
+        let success = fc.emit_jump(
+            Op::MatchArm {
+                scrut: guarded,
+                variant,
+                variant_id,
+                enum_name: None,
+                nbind: 1,
+                bind_start: payload,
+                next: 0,
+            },
+            span,
+        );
+        let to_done = fc.emit_jump(Op::Jump(0), span);
+        fc.patch_jump(success);
+        fc.begin_scope();
+        let mut not_err = None;
+        if let Some((name, _)) = err
+            && name != "_"
+        {
+            // `MatchArm` writes a raw value; the named binding (a cell when a closure captures
+            // it) is declared from that slot.
+            let raw = fc.add_hidden();
+            not_err = Some(fc.emit_jump(
+                Op::MatchArm {
+                    scrut: guarded,
+                    variant: "Err".to_string(),
+                    variant_id: crate::vm::op::VID_ERR,
+                    enum_name: None,
+                    nbind: 1,
+                    bind_start: raw,
+                    next: 0,
+                },
+                span,
+            ));
+            fc.emit_hidden_get(raw, span);
+            fc.emit_decl_named(name.clone(), span);
+        }
+        self.compile_block_flat(fc, body)?;
+        fc.end_scope();
+        if let Some(j) = not_err {
+            fc.patch_jump(j);
+        }
+        fc.emit(Op::MatchNoArm(guarded), span);
+        fc.patch_jump(to_done);
+        fc.emit_hidden_get(payload, span);
+        Ok(())
+    }
+
     fn compile_recover(
         &mut self,
         fc: &mut FnComp,
@@ -6114,6 +6194,10 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
             find_boundary_free_expr(els, out);
         }
         ExprKind::Recover(block) => find_boundary_free_block(block, out),
+        ExprKind::ElseGuard { value, body, .. } => {
+            find_boundary_free_expr(value, out);
+            find_boundary_free_block(body, out);
+        }
     }
 }
 
@@ -6655,6 +6739,12 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             free_names_expr(els, bound, out);
         }
         ExprKind::Recover(block) => free_names_block(block, bound, out),
+        ExprKind::ElseGuard { value, err, body } => {
+            free_names_expr(value, bound, out);
+            let mut inner = bound.clone();
+            inner.extend(err.iter().map(|(name, _)| name.clone()));
+            free_names_block(body, &inner, out);
+        }
     }
 }
 
@@ -6791,6 +6881,11 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
             collect_frame_binds_expr(els, out);
         }
         ExprKind::Recover(block) => collect_frame_binds(block, out),
+        ExprKind::ElseGuard { value, err, body } => {
+            collect_frame_binds_expr(value, out);
+            out.extend(err.iter().map(|(name, _)| name.clone()));
+            collect_frame_binds(body, out);
+        }
     }
 }
 
@@ -6837,6 +6932,9 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Closure { .. } => false,
         ExprKind::Recover(block) => block_has_bare_spawn(block),
+        ExprKind::ElseGuard { value, body, .. } => {
+            expr_has_bare_spawn(value) || block_has_bare_spawn(body)
+        }
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Str(_)

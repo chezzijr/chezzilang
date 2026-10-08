@@ -154,6 +154,20 @@ pub(super) fn stmt(s: &Stmt, diverges: &dyn Fn(&Expr) -> bool) -> Flow {
             falls_through: !diverges(e),
             ..Flow::NEXT
         },
+        // An `else` guard: the statement falls through on success, and its block leaves on
+        // failure, so the block's `return` / `break` / `continue` are this statement's.
+        StmtKind::Let { value, .. } => match &value.kind {
+            ExprKind::ElseGuard { body, .. } => {
+                let b = block(body, diverges);
+                Flow {
+                    returns: b.returns,
+                    breaks: b.breaks,
+                    continues: b.continues,
+                    ..Flow::NEXT
+                }
+            }
+            _ => Flow::NEXT,
+        },
         _ => Flow::NEXT,
     }
 }
