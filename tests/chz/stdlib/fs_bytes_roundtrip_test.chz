@@ -22,7 +22,7 @@ fn cat(a: bytes, b: bytes) -> bytes:
         ba.push(x)
     return bytes(ba)
 
-# `Result` unwrappers that ASSERT instead of propagating (a `test fn` returns nil, so `?` is out).
+# `Result` unwrappers that ASSERT instead of propagating (a `test fn` returns None, so `?` is out).
 fn paths(r: Result[List[path.Path]]) -> List[path.Path]:
     match r:
         Ok(v): return v
@@ -37,7 +37,7 @@ fn one(r: Result[path.Path]) -> path.Path:
             assert false, "expected Ok, got Err: " + e.message()
             return path.Path(b"")
 
-fn ok_nil(r: Result[nil], what: str):
+fn ok_nil(r: Result[None], what: str):
     match r:
         Ok(_): pass
         Err(e): assert false, what + ": " + e.message()

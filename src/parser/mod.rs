@@ -2511,13 +2511,7 @@ impl Parser {
             Type::Generic(name, args, name_span)
         } else {
             Type::Named {
-                // TICKET-227: `None` names the void type. The parser owns this one alias until
-                // TICKET-231 makes `None` canonical.
-                name: if name == "None" {
-                    "nil".to_string()
-                } else {
-                    name
-                },
+                name,
                 span: name_span,
             }
         };
@@ -3748,7 +3742,7 @@ mod tests {
     #[test]
     fn variadic_param_native_and_keyword_only_tail() {
         // native decl may be variadic; a post-variadic param is legal (keyword-only).
-        let StmtKind::Native(d) = only("native fn print(...args: int, sep: str = \" \") -> nil\n")
+        let StmtKind::Native(d) = only("native fn print(...args: int, sep: str = \" \") -> None\n")
         else {
             panic!("expected native");
         };
@@ -3836,7 +3830,7 @@ mod tests {
 
         // A bounded method type param (`sort_by_key[K: Comparable]`) carries its bound.
         let StmtKind::NativeStruct { methods, .. } = only(
-            "native struct List[T]:\n    native fn sort_by_key[K: Comparable](self, f: fn(T) -> K) -> nil\n",
+            "native struct List[T]:\n    native fn sort_by_key[K: Comparable](self, f: fn(T) -> K) -> None\n",
         ) else {
             panic!("expected StmtKind::NativeStruct");
         };
@@ -3886,7 +3880,7 @@ mod tests {
 
         // A `native fn` method sig inside a `native struct` carries `where_bounds` too.
         let StmtKind::NativeStruct { methods, .. } =
-            only("native struct L[T]:\n    native fn sort(self) -> nil where T: Comparable\n")
+            only("native struct L[T]:\n    native fn sort(self) -> None where T: Comparable\n")
         else {
             panic!("expected StmtKind::NativeStruct");
         };

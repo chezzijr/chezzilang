@@ -202,13 +202,13 @@ fn cell(name: str, ctx: int, sk: int, rk: int, cap: int, order: int, close: int,
             spawn: receiver(rk, ch, never, order, close, got)
     elif ctx == 1:
         ex := Executor()
-        ex.submit(fn() -> nil: sender(sk, ch, never, order, v1, sent, st))
+        ex.submit(fn() -> None: sender(sk, ch, never, order, v1, sent, st))
         parallel:
             spawn: receiver(rk, ch, never, order, close, got)
         ex.shutdown()
     elif ctx == 2:
         ex := Executor()
-        ex.submit(fn() -> nil: receiver(rk, ch, never, order, close, got))
+        ex.submit(fn() -> None: receiver(rk, ch, never, order, close, got))
         sender(sk, ch, never, order, v1, sent, st)
         ex.shutdown()
     elif ctx == 3:

@@ -111,7 +111,7 @@ fn c1_timed_wait_in_fiber_callback_completes() {
 /// Go at GOMAXPROCS=1 and CPython complete.
 #[test]
 fn x1_executor_shutdown_in_fiber_releases_the_runner() {
-    let src = "import std.concurrency\nfn main():\n    ch := Channel[int](0)\n    parallel:\n        spawn:\n            ex := Executor()\n            ex.submit(fn() -> nil:\n                print(ch.recv())\n            )\n            ex.shutdown()\n            print(\"done\")\n        spawn:\n            ch.send(7)\nmain()\n";
+    let src = "import std.concurrency\nfn main():\n    ch := Channel[int](0)\n    parallel:\n        spawn:\n            ex := Executor()\n            ex.submit(fn() -> None:\n                print(ch.recv())\n            )\n            ex.shutdown()\n            print(\"done\")\n        spawn:\n            ch.send(7)\nmain()\n";
     assert_cell("x1", src, "7\ndone\n");
 }
 
@@ -204,16 +204,16 @@ fn viadefer():
     pass
 fn bump(v: int) -> int:
     return v + op(0)
-fn job() -> nil:
+fn job() -> None:
     _ := op(0)
-fn job_cb() -> nil:
+fn job_cb() -> None:
     _ := [0].map(op)
 fn inc(v: int) -> int:
     return v + 1
 fn hold(v: int) -> int:
     time.sleep_ms(50)
     return v
-fn recv_job() -> nil:
+fn recv_job() -> None:
     print(ch.recv())
 fn recv7() -> int:
     return ch.recv()

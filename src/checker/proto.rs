@@ -465,7 +465,7 @@ impl Checker {
             Ty::Str => "str",
             Ty::Bytes => "bytes",
             Ty::ByteArray => "bytearray",
-            Ty::Nil => "nil",
+            Ty::Nil => "None",
             Ty::List(_) => "list",
             Ty::Map(_, _) => "map",
             Ty::Set(_) => "set",
@@ -1616,13 +1616,7 @@ impl Checker {
         }
         match t {
             Type::Named { name: n, .. } => match n.as_str() {
-                "int" => Ty::Int,
-                "float" => Ty::Float,
-                "bool" => Ty::Bool,
-                "str" => Ty::Str,
-                "bytes" => Ty::Bytes,
-                "bytearray" => Ty::ByteArray,
-                "nil" => Ty::Nil,
+                s if let Some(t) = Self::scalar_bound_ty(s) => t,
                 "AtomicInt" => Ty::AtomicInt,
                 "Executor" => Ty::Executor,
                 "Socket" => Ty::Socket,
@@ -1953,6 +1947,7 @@ impl Checker {
     /// to scalars — the concrete-equality case the surface needs (`Channel[T].trip()`'s `where T: bool`)
     /// without opening generic-struct equality. Returns the scalar `Ty`, or `None` if `name` is not a
     /// scalar type (so the caller falls back to the protocol path / an `unknown protocol` error).
+    /// This is the one scalar type-name table: `resolve_type` and `resolve_ty_ro_d` read it.
     pub(super) fn scalar_bound_ty(name: &str) -> Option<Ty> {
         Some(match name {
             "int" => Ty::Int,
@@ -1961,7 +1956,7 @@ impl Checker {
             "str" => Ty::Str,
             "bytes" => Ty::Bytes,
             "bytearray" => Ty::ByteArray,
-            "nil" => Ty::Nil,
+            "None" => Ty::Nil,
             _ => return None,
         })
     }
@@ -2183,7 +2178,7 @@ impl Checker {
         // (W7-41's actual defect). Its `Some` is the refusal, and **its `None` is this grant**, which
         // is why every "cannot tell" inside it answers `Some`.
         if protocol == "Eq"
-            && !matches!(Self::intrinsic_recv_kind(ty), "?" | "nil")
+            && !matches!(Self::intrinsic_recv_kind(ty), "?" | "None")
             && !Self::is_cursor_ty(ty)
             && self
                 .declared_methods(ty)

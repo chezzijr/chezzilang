@@ -405,7 +405,7 @@ fn shadow_cells(out: &mut Vec<Cell>) {
         ),
         (
             "defer_field",
-            "fn pa(x: int):\n    print(x + 1)\nfn pb(x: int):\n    print(x + 2)\nstruct H:\n    fs: List[fn(int) -> nil]\nfn run():\n    h := H([pa, pb])\n    k := 1\n    defer h.fs[k](1)\n    print(\"body\")\nrun()",
+            "fn pa(x: int):\n    print(x + 1)\nfn pb(x: int):\n    print(x + 2)\nstruct H:\n    fs: List[fn(int) -> None]\nfn run():\n    h := H([pa, pb])\n    k := 1\n    defer h.fs[k](1)\n    print(\"body\")\nrun()",
             prints("body\n3"),
         ),
         (
@@ -420,7 +420,7 @@ fn shadow_cells(out: &mut Vec<Cell>) {
         ),
         (
             "spawn_field",
-            "fn pa(x: int):\n    print(x + 1)\nfn pb(x: int):\n    print(x + 2)\nstruct H:\n    fs: List[fn(int) -> nil]\nh := H([pa, pb])\nk := 1\nparallel:\n    spawn h.fs[k](10)\nprint(\"after\")",
+            "fn pa(x: int):\n    print(x + 1)\nfn pb(x: int):\n    print(x + 2)\nstruct H:\n    fs: List[fn(int) -> None]\nh := H([pa, pb])\nk := 1\nparallel:\n    spawn h.fs[k](10)\nprint(\"after\")",
             prints("12\nafter"),
         ),
         (

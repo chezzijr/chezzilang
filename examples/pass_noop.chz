@@ -1,5 +1,5 @@
 # `pass` — a no-op statement. A function whose body is a lone `pass` behaves exactly like a
-# `return`-only body: it runs, falls off the end, and returns nil.
+# `return`-only body: it runs, falls off the end, and returns None.
 fn empty_pass():
     pass
 
@@ -7,7 +7,7 @@ fn empty_return():
     return
 
 fn main():
-    # A lone-`pass` body runs and falls off the end (returns nil), exactly like a lone-`return` body.
+    # A lone-`pass` body runs and falls off the end (returns None), exactly like a lone-`return` body.
     empty_pass()
     empty_return()
     print("both ran")

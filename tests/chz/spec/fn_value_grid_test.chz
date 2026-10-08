@@ -5,7 +5,7 @@
 # global snapshot}. The zero-arg consumers (submit, submit_result) take the kinds that have a
 # zero-arg member: plain, method path, closure, native, extern. A variant fn, `T.m` and
 # `json.decode[T]` always take an argument, and so does every builtin value (`print` as a value is
-# `fn(?) -> nil`, so `ex.submit(print)` is a type error). A closure is one value per
+# `fn(?) -> None`, so `ex.submit(print)` is a type error). A closure is one value per
 # binding, and a crossing or a Channel rebuilds it (DEC-215), so its only `==` row is same-site.
 # The second module is `fn_value_grid_lib.chz`. Go `g := math.Sqrt; go g(9.0)` runs; CPython
 # `ex.submit(time.time)` runs; Rust `decode::<i32> == decode::<i32>` is true.
@@ -69,7 +69,7 @@ fn cell(bad: List[str], name: str, ok: bool):
     if not ok:
         bad.push(name)
 
-fn ran(bad: List[str], name: str, r: Result[nil]):
+fn ran(bad: List[str], name: str, r: Result[None]):
     match r:
         Ok(_):
             pass

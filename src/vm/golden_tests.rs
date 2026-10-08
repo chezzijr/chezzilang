@@ -2765,11 +2765,11 @@ fn airlock_same_task_closure_round_trip_mutates_module_list_in_place() {
     // of the live module slot.
     let src = r#"
 xs := [1]
-fn mk() -> fn() -> nil:
+fn mk() -> fn() -> None:
     fn f():
         xs.push(9)
     return f
-ch := Channel[fn() -> nil](2)
+ch := Channel[fn() -> None](2)
 ch.send(mk())
 ch.recv()()
 print("module xs: {xs}")
@@ -10394,7 +10394,7 @@ fn main():
 main()";
     let ve = vm_outcome(src).expect_err("reached non-sendable generator must fault");
     assert!(
-        ve.contains("holding a value that cannot cross tasks") && !ve.contains("nil"),
+        ve.contains("holding a value that cannot cross tasks") && !ve.contains("None"),
         "{ve}"
     );
 }

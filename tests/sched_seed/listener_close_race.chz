@@ -1,6 +1,6 @@
 import std.net
 import std.time
-fn main() -> Result[nil]:
+fn main() -> Result[None]:
     ln := net.listen("127.0.0.1:0")?
     parallel:
         spawn:

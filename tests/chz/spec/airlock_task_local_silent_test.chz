@@ -187,8 +187,8 @@ test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
 # airlock_task_local_fault_test.chz's a_closure_visited_first_in_one_crossing_marks_the_shared_capture.
 test fn a_list_visited_first_in_one_crossing_leaves_the_shared_capture_unmarked():
     xs := [1]
-    f := fn() -> nil: xs.push(2)
-    ch := Channel[(List[int], fn() -> nil)](1)
+    f := fn() -> None: xs.push(2)
+    ch := Channel[(List[int], fn() -> None)](1)
     ch.send((xs, f))
     r1 := Channel[str](1)
     r2 := Channel[str](1)

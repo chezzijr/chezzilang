@@ -53,7 +53,7 @@ test fn aliased_generator_globals_do_not_become_nil_in_a_task():
                 y := g2.next() ?? -1
                 print("{x} {y}")
     msg := "{r}"
-    assert not msg.contains("type nil"), "got {msg}"
+    assert not msg.contains("type None"), "got {msg}"
 
 w: List[int] = [1]
 
@@ -98,7 +98,7 @@ test fn a_running_module_generator_faults_clearly_in_a_task():
             pass
     msg := "{r}"
     assert msg.contains("was running when this task was spawned"), "got {msg}"
-    assert not msg.contains("type nil"), "got {msg}"
+    assert not msg.contains("type None"), "got {msg}"
 
 struct DeepL:
     kids: List[DeepL]

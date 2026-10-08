@@ -7,7 +7,7 @@ import std.concurrency
 fn d4_push2(xs: List[int]):
     xs.push(2)
 
-fn d4_invoke(g: fn() -> nil):
+fn d4_invoke(g: fn() -> None):
     g()
 
 test fn captured_scalar_write_inside_spawn_faults():
@@ -325,8 +325,8 @@ test fn a_handle_holding_global_struct_field_write_in_a_task_faults():
 # silent in airlock_task_local_silent_test.chz.
 test fn a_closure_visited_first_in_one_crossing_marks_the_shared_capture():
     xs := [1]
-    f := fn() -> nil: xs.push(2)
-    ch := Channel[(fn() -> nil, List[int])](1)
+    f := fn() -> None: xs.push(2)
+    ch := Channel[(fn() -> None, List[int])](1)
     ch.send((f, xs))
     r1 := Channel[str](1)
     r2 := Channel[str](1)

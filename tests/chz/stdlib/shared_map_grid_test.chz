@@ -40,7 +40,7 @@ enum Tag:
 
 # ---- the one op sequence -------------------------------------------------------------------------
 # keys[0..5] are inserted; keys[5] is never inserted before the last `goi` (the miss probe).
-fn _ops[K: Hashable + Eq](keys: List[K], put: fn(K, int) -> nil, del: fn(K) -> nil, get: fn(K) -> Option[int], has: fn(K) -> bool, len: fn() -> int, goi: fn(K, int) -> int, items: fn() -> str) -> str:
+fn _ops[K: Hashable + Eq](keys: List[K], put: fn(K, int) -> None, del: fn(K) -> None, get: fn(K) -> Option[int], has: fn(K) -> bool, len: fn() -> int, goi: fn(K, int) -> int, items: fn() -> str) -> str:
     i := 0
     while i < 5:
         put(keys[i], i)

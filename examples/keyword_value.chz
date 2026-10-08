@@ -14,7 +14,7 @@ g("Kim", greeting="Sup")         # mixed: positional then label
 
 # A keyword call through a higher-order-function PARAMETER is a compile error (TICKET-139/W14-2):
 # labels are surface-only, so the callee may name its parameters differently. Pass positionally.
-fn apply(f: fn(name: str) -> nil):
+fn apply(f: fn(name: str) -> None):
     f("X")
 apply(fn(name: str): print(name))
 
@@ -36,7 +36,7 @@ print("{sA(y=1, x=10)} {sP(p=3, q=2)}")   # 9 1
 # Chained value calls (currying): a function value RETURNS another function value. Keywords apply to
 # the FIRST call, through a binding of one known fn; the returned value is called positionally (a
 # keyword call through a returned value is a compile error, TICKET-139/W14-2).
-fn make_greeter(prefix: str) -> fn(name: str, punct: str) -> nil:
+fn make_greeter(prefix: str) -> fn(name: str, punct: str) -> None:
     return fn(name: str, punct: str): print(prefix, name, punct)
 mk := make_greeter
 mk(prefix="Hello")("World", "!")   # Hello World !

@@ -2116,13 +2116,16 @@ impl Vm {
 
     // ----- display / type names -----
 
+    /// The text of the void value, in every display and in a fault's `type None`.
+    pub(super) const NONE_TEXT: &str = "None";
+
     pub(super) fn type_name(&self, v: Value) -> &'static str {
         // A boxed float is Float-tagged → `view` yields `Obj(h)` → the `Obj::FloatBox => "float"` arm
         // below names it (a boxed `BigInt` likewise → "int").
         match v.view() {
             ValueView::Int(_) => "int",
             ValueView::Bool(_) => "bool",
-            ValueView::Nil => "nil",
+            ValueView::Nil => Self::NONE_TEXT,
             ValueView::Obj(h) => match self.heap.get(h) {
                 Obj::Str(_) => "str",
                 Obj::Bytes(_) => "bytes",
@@ -2178,7 +2181,7 @@ impl Vm {
         match v.view() {
             ValueView::Int(n) => Ok(n.to_string()),
             ValueView::Bool(b) => Ok(b.to_string()),
-            ValueView::Nil => Ok("nil".to_string()),
+            ValueView::Nil => Ok(Self::NONE_TEXT.to_string()),
             // A boxed float/big-int is heap-tagged → the `Obj::FloatBox`/`Obj::BigInt` arms below.
             ValueView::Obj(h) => match self.heap.get(h) {
                 // NESTED (`depth > 0`) means this string sits inside a container / field / payload,
@@ -2374,7 +2377,7 @@ impl Vm {
             WireValue::Int(n) => n.to_string(),
             WireValue::Float(x) => format_float(*x),
             WireValue::Bool(b) => b.to_string(),
-            WireValue::Nil => "nil".to_string(),
+            WireValue::Nil => Self::NONE_TEXT.to_string(),
             // Every `display_wire` caller renders a NESTED position — inside `Shared(…)`/`Atomic(…)`,
             // a container, or a struct field — so a wire string is always quoted (`Shared(['a'])`).
             WireValue::Str(s) => crate::slice::str_repr(s),
@@ -2664,7 +2667,7 @@ impl Vm {
         } else if let Some(b) = v.as_bool() {
             out.push_str(if b { "true" } else { "false" });
         } else if v.is_nil() {
-            out.push_str("nil");
+            out.push_str(Self::NONE_TEXT);
         } else if let Some(h) = v.as_obj() {
             // ROOT the object on the operand stack: a `str` method runs nested frames that GC at
             // instruction boundaries, and the container keeps its transitive contents reachable.

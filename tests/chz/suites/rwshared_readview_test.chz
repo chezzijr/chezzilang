@@ -310,8 +310,8 @@ test fn cyclic_set_element_views():
 # crash it replaced). `slice` shares ONE rebuild map across its elements, deliberately, so sibling
 # closures land on one cell. The first fix ATTEMPTED each piece and reacted to the miss afterwards —
 # so element 0's half-finished attempt left a `Cell` holding the inert placeholder in that shared map,
-# and element 1 hit the cell's first-wins dedupe and got `nil`:
-#   sl[1]()  ->  runtime error: type nil has no method 'len'
+# and element 1 hit the cell's first-wins dedupe and got `None`:
+#   sl[1]()  ->  runtime error: type None has no method 'len'
 # The check is now a PRE-check (`WireValue::backrefs_resolvable`): nothing is allocated until the piece
 # is known to be rebuildable, so the map is never poisoned. Both engines agreed on the wrong answer,
 # so parity could not have caught it.
@@ -361,7 +361,7 @@ test fn cyclic_slice_shares_when_only_a_LATER_element_is_cyclic():
 
 # ADVERSARIAL REVIEW, charge 3 — a `Generator` carries NO wire id (its parked frame can never be a
 # `Backref` target), but it CAN contain one through its backing closure. The first cut read "no id" as
-# "cannot dangle" and handed back the degraded placeholder; the generator then faulted on `nil`.
+# "cannot dangle" and handed back the degraded placeholder; the generator then faulted on `None`.
 test fn cyclic_generator_element_rebuilds_against_the_whole_container():
     xs: List[Iterator[int]] = []
     fn g() -> Iterator[int]:

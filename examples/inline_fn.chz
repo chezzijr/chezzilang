@@ -1,6 +1,6 @@
 # Inline-expr function bodies implicitly return their expression (Option A, inline-only) —
-# exactly like a closure `fn(x): expr`. A multiline body still falls through to nil unless it
-# `return`s, and `nil` (a void result) may never be used as a value.
+# exactly like a closure `fn(x): expr`. A multiline body still falls through to None unless it
+# `return`s, and `None` (a void result) may never be used as a value.
 
 # Inferred `-> int`: the inline expr IS the return.
 fn ten(): 10

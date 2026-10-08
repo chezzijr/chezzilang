@@ -3,7 +3,7 @@
 # A function body sees every top-level binding, including one declared below it, as Go's package
 # scope and Python's module globals do. Top-level statements stay lexical. A body that reads a
 # global before the top-level statement that initializes it has run faults with
-# "'x' is read before its initialization at line N" (CPython: NameError), never a nil read.
+# "'x' is read before its initialization at line N" (CPython: NameError), never a None read.
 # A write before that statement initializes the slot, and the let then rebinds it.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 

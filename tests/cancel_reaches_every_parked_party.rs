@@ -109,7 +109,7 @@ peer := must(ln.accept())
 fn hold3s(v: int) -> int:
     time.sleep_ms(3000)
     return v
-fn holder() -> nil:
+fn holder() -> None:
     g.update(hold3s)
 fn bump(v: int) -> int:
     return v + 1

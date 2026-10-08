@@ -75,35 +75,35 @@ native fn load_ptr_at(p: ptr, off: int) -> ptr
 native fn load_str(p: ptr) -> str
 native fn load_str_at(p: ptr, off: int) -> str
 
-# --- stores: write C-owned memory behind a `ptr`. Each has a base form `(ptr, v) -> nil` and an
-#     `_at(ptr, off: int, v) -> nil` byte-offset form (the offset comes BEFORE the value). The value
+# --- stores: write C-owned memory behind a `ptr`. Each has a base form `(ptr, v) -> None` and an
+#     `_at(ptr, off: int, v) -> None` byte-offset form (the offset comes BEFORE the value). The value
 #     is of the matching kind; there is NO `str` store. `str` has no store counterpart.
-native fn store_int(p: ptr, v: int) -> nil
-native fn store_int_at(p: ptr, off: int, v: int) -> nil
-native fn store_int8(p: ptr, v: int8) -> nil
-native fn store_int8_at(p: ptr, off: int, v: int8) -> nil
-native fn store_int16(p: ptr, v: int16) -> nil
-native fn store_int16_at(p: ptr, off: int, v: int16) -> nil
-native fn store_int32(p: ptr, v: int32) -> nil
-native fn store_int32_at(p: ptr, off: int, v: int32) -> nil
-native fn store_int64(p: ptr, v: int64) -> nil
-native fn store_int64_at(p: ptr, off: int, v: int64) -> nil
-native fn store_uint8(p: ptr, v: uint8) -> nil
-native fn store_uint8_at(p: ptr, off: int, v: uint8) -> nil
-native fn store_uint16(p: ptr, v: uint16) -> nil
-native fn store_uint16_at(p: ptr, off: int, v: uint16) -> nil
-native fn store_uint32(p: ptr, v: uint32) -> nil
-native fn store_uint32_at(p: ptr, off: int, v: uint32) -> nil
-native fn store_uint64(p: ptr, v: uint64) -> nil
-native fn store_uint64_at(p: ptr, off: int, v: uint64) -> nil
-native fn store_float(p: ptr, v: float) -> nil
-native fn store_float_at(p: ptr, off: int, v: float) -> nil
-native fn store_float32(p: ptr, v: float32) -> nil
-native fn store_float32_at(p: ptr, off: int, v: float32) -> nil
-native fn store_bool(p: ptr, v: bool) -> nil
-native fn store_bool_at(p: ptr, off: int, v: bool) -> nil
-native fn store_ptr(p: ptr, v: ptr) -> nil
-native fn store_ptr_at(p: ptr, off: int, v: ptr) -> nil
+native fn store_int(p: ptr, v: int) -> None
+native fn store_int_at(p: ptr, off: int, v: int) -> None
+native fn store_int8(p: ptr, v: int8) -> None
+native fn store_int8_at(p: ptr, off: int, v: int8) -> None
+native fn store_int16(p: ptr, v: int16) -> None
+native fn store_int16_at(p: ptr, off: int, v: int16) -> None
+native fn store_int32(p: ptr, v: int32) -> None
+native fn store_int32_at(p: ptr, off: int, v: int32) -> None
+native fn store_int64(p: ptr, v: int64) -> None
+native fn store_int64_at(p: ptr, off: int, v: int64) -> None
+native fn store_uint8(p: ptr, v: uint8) -> None
+native fn store_uint8_at(p: ptr, off: int, v: uint8) -> None
+native fn store_uint16(p: ptr, v: uint16) -> None
+native fn store_uint16_at(p: ptr, off: int, v: uint16) -> None
+native fn store_uint32(p: ptr, v: uint32) -> None
+native fn store_uint32_at(p: ptr, off: int, v: uint32) -> None
+native fn store_uint64(p: ptr, v: uint64) -> None
+native fn store_uint64_at(p: ptr, off: int, v: uint64) -> None
+native fn store_float(p: ptr, v: float) -> None
+native fn store_float_at(p: ptr, off: int, v: float) -> None
+native fn store_float32(p: ptr, v: float32) -> None
+native fn store_float32_at(p: ptr, off: int, v: float32) -> None
+native fn store_bool(p: ptr, v: bool) -> None
+native fn store_bool_at(p: ptr, off: int, v: bool) -> None
+native fn store_ptr(p: ptr, v: ptr) -> None
+native fn store_ptr_at(p: ptr, off: int, v: ptr) -> None
 
 # --- C-buffer alloc layer — libc malloc/calloc/free-backed raw buffers for C array/buffer APIs
 #     (qsort/bsearch/fread-into-buffer). `alloc`/`alloc_zeroed` take a byte count and return a raw
@@ -111,7 +111,7 @@ native fn store_ptr_at(p: ptr, off: int, v: ptr) -> nil
 #     A negative size or OOM is a recoverable runtime error; `free(ffi.null())` is a no-op.
 native fn alloc(nbytes: int) -> ptr
 native fn alloc_zeroed(nbytes: int) -> ptr
-native fn free(p: ptr) -> nil
+native fn free(p: ptr) -> None
 
 # --- explicit wrap: Go's `int8(v)` / Rust's `v as i8`. A value passed to C must fit its width (a
 #     constant outside it is a compile error, a runtime value faults at the C boundary); `cast_<w>`

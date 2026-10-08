@@ -1,7 +1,7 @@
 # Module-global FRESHNESS across nurseries (gaps.md W6-2 + W6-19).
 #
 # A task sees the module globals as they were when IT was spawned, at EVERY depth — including a
-# global first initialized AFTER an earlier nursery (which used to replay as `nil`) and a value
+# global first initialized AFTER an earlier nursery (which used to replay as `None`) and a value
 # mutated between two nurseries (which used to replay the frozen first-nursery copy). Per-task
 # ISOLATION is unchanged: a task mutates its OWN deep copy and never writes through to the parent;
 # `Shared`/`RwShared`/`Atomic`/`Channel` stay the only real sharing. A NESTED `parallel:` inside a
@@ -46,7 +46,7 @@ xg: int = 1
 
 # --- the repro ---------------------------------------------------------------------------------
 
-# A global declared AFTER the first nursery used to replay as `nil` inside every later task.
+# A global declared AFTER the first nursery used to replay as `None` inside every later task.
 test fn task_sees_global_declared_after_first_nursery():
     seen := Shared(0)
     parallel:
@@ -262,7 +262,7 @@ test fn executor_alongside_a_nursery():
 
 # A bare `spawn` binds to the implicit nursery the compiler opens at the TOP of the body and joins at
 # its end — so the snapshot instant has to be the SPAWN, not the nursery: a per-nursery pin would
-# freeze the whole body at its first bare `spawn` and replay every later global as `nil`.
+# freeze the whole body at its first bare `spawn` and replay every later global as `None`.
 fn bare_spawn_pair(a: Shared[int], b: Shared[int]):
     spawn: a.set(bsg)
     bsg = 42

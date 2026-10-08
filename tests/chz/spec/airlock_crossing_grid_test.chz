@@ -104,7 +104,7 @@ test fn grid_module_global():
     assert out.recv() == "ok,fault,fault,fault,ok"
     assert t179_glist == [1]
 
-fn t179_call(f: fn() -> nil, out: Channel[str]):
+fn t179_call(f: fn() -> None, out: Channel[str]):
     res := recover:
         f()
         0

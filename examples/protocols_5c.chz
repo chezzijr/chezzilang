@@ -52,7 +52,7 @@ struct Grid:
     cells: List[int]
     fn index(self, k: int) -> int:
         return self.cells[k]
-    fn set_index(self, k: int, v: int) -> nil:
+    fn set_index(self, k: int, v: int) -> None:
         self.cells[k] = v
 
 fn main():

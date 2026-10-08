@@ -6542,11 +6542,11 @@ fn extern_in_spawn_parallel_snapshot() {
 #[test]
 #[cfg(target_os = "linux")]
 fn extern_explicit_nil_return_runs() {
-    let src = "extern \"libc.so.6\":\n    fn srand(seed: int) -> nil\n\nsrand(1)\nprint(42)\n";
+    let src = "extern \"libc.so.6\":\n    fn srand(seed: int) -> None\n\nsrand(1)\nprint(42)\n";
     let entry = write_temp_chz("ffi_nilret", src);
     let (out, _e, res, _) = run_file(&entry);
     let _ = std::fs::remove_file(&entry);
-    assert!(res.is_ok(), "VM faulted on `-> nil` extern: {res:?}");
+    assert!(res.is_ok(), "VM faulted on `-> None` extern: {res:?}");
     assert_eq!(out, "42\n");
 }
 
@@ -19303,7 +19303,7 @@ main()
 fn airlock_module_global_shared_binding_survives_gc_stress() {
     let src = "\
 struct Ctr:
-    inc: fn() -> nil
+    inc: fn() -> None
     get: fn() -> int
 fn make() -> Ctr:
     n := 0
@@ -19347,7 +19347,7 @@ fn airlock_cross_module_shared_binding_is_one_cell() {
         dir.join("k.chz"),
         "\
 struct Ctr:
-    inc: fn() -> nil
+    inc: fn() -> None
     get: fn() -> int
 fn make() -> Ctr:
     n := 0
@@ -19425,7 +19425,7 @@ fn airlock_handle_bearing_cell_keeps_one_binding() {
         "\
 import k
 struct Sw:
-    add: fn() -> nil
+    add: fn() -> None
     count: fn() -> int
 fn make() -> Sw:
     p := [k]
@@ -19535,7 +19535,7 @@ fn airlock_shared_cell_takes_the_spawn_time_value_on_both_engines() {
         &entry,
         "\
 struct Ctr:
-    inc: fn() -> nil
+    inc: fn() -> None
     get: fn() -> int
 fn make() -> Ctr:
     n := 0
@@ -19592,7 +19592,7 @@ fn airlock_discarded_wire_attempt_does_not_forge_a_backref() {
         dir.join("k.chz"),
         "\
 struct Ctr:
-    inc: fn() -> nil
+    inc: fn() -> None
     get: fn() -> int
 fn make() -> Ctr:
     n := 7

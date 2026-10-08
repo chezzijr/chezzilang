@@ -498,7 +498,7 @@ fn store_scalar(
 /// takes the offset BEFORE the value. Both write at `$ct`'s natural C width and return `nil`.
 macro_rules! store_fn {
     ($base:ident, $at:ident, $name:literal, $at_name:literal, $ct:expr) => {
-        #[doc = concat!("`", $name, "(p, v)` — write `v` to the C value at `p` (offset 0); returns nil.")]
+        #[doc = concat!("`", $name, "(p, v)` — write `v` to the C value at `p` (offset 0); returns None.")]
         fn $base(h: &mut dyn Host) -> Result<NativeRet, HostError> {
             expect_args(h, $name, 2)?;
             #[cfg(unix)]
@@ -513,7 +513,7 @@ macro_rules! store_fn {
                 deref_unsupported($name)
             }
         }
-        #[doc = concat!("`", $at_name, "(p, off, v)` — write `v` at byte offset `off`; returns nil.")]
+        #[doc = concat!("`", $at_name, "(p, off, v)` — write `v` at byte offset `off`; returns None.")]
         fn $at(h: &mut dyn Host) -> Result<NativeRet, HostError> {
             expect_args(h, $at_name, 3)?;
             #[cfg(unix)]
@@ -1349,7 +1349,7 @@ mod tests {
         assert_eq!(
             free(&mut ArgHost::default().ptr(addr)),
             Ok(NativeRet::Nil),
-            "free must return nil without crashing"
+            "free must return None without crashing"
         );
     }
 
@@ -1398,7 +1398,7 @@ mod tests {
         assert_eq!(
             free(&mut ArgHost::default().ptr(0)),
             Ok(NativeRet::Nil),
-            "free(null) must be a safe no-op returning nil"
+            "free(null) must be a safe no-op returning None"
         );
     }
 

@@ -84,7 +84,7 @@ cases.
 2. **Differential vs CPython.** ✅ **Built** — `src/difftest/` (see "Differential oracle" below). The
    external oracle that defeats the shared-bug blind spot: it would flag `sum()` overflow and `nan <`
    immediately. The documented intentional divergences are handled *structurally* by a Python
-   **shim** (mirrors Chezzi's spec — `true`/`false`/`nil` spelling, truncating
+   **shim** (mirrors Chezzi's spec — `true`/`false` spelling, truncating
    `/`,`%`) rather than by a big allow-list, so the allow-list stays near-empty and any hit is a
    genuinely new category to triage.
 3. **Miri + ASan on the `unsafe` surface** (GC, FFI/libffi, raw pointers, any `transmute`).
@@ -557,7 +557,7 @@ ENCODED it, so the oracle could never have reported it — a detector written to
 implementation cannot see a bug in what it mirrors.
 
 **Why it isn't a tautology.** The Python backend prepends a fixed *shim* that implements Chezzi's
-**specification** (`_chz_str` for `true`/`false`/`nil` + Chezzi float format;
+**specification** (`_chz_str` for `true`/`false` + Chezzi float format;
 `_chz_div`/`_chz_mod` for truncate-toward-zero / sign-of-dividend). Chezzi source uses the real
 **implementation**. The shim absorbs only the by-design surface/semantic differences — never the
 actual arithmetic or control-flow *result* — so a stdout divergence means the implementation

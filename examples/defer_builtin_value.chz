@@ -15,7 +15,7 @@ fn main():
     g := chr
     print(g(66))           # B
 
-    # panic-as-value: `p := panic` must raise the recoverable error (not return nil)
+    # panic-as-value: `p := panic` must raise the recoverable error (not return None)
     p := panic
     r := recover:
         p("boom")

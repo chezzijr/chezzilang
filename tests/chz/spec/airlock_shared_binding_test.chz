@@ -11,7 +11,7 @@
 import std.concurrency
 
 struct Ctr:
-    inc: fn() -> nil
+    inc: fn() -> None
     get: fn() -> int
 
 fn make() -> Ctr:
@@ -102,7 +102,7 @@ test fn struct_field_keeps_one_binding():
 # Same-task round-trip — see the owner ruling above `channel_send_keeps_one_binding`.
 test fn cursor_keeps_one_binding():
     c := make()
-    # `inc` returns nil, so wrap it to keep the cursor homogeneous (`fn() -> int`).
+    # `inc` returns None, so wrap it to keep the cursor homogeneous (`fn() -> int`).
     fn bump() -> int:
         c.inc()
         return 0
@@ -149,7 +149,7 @@ test fn channel_send_to_a_different_task_faults():
 test fn spawn_named_args_keep_one_binding():
     c := make()
     r := Channel[str](1)
-    fn work(i: fn() -> nil, g: fn() -> int, out: Channel[str]):
+    fn work(i: fn() -> None, g: fn() -> int, out: Channel[str]):
         res := recover:
             i()
         match res:

@@ -8,8 +8,8 @@
 # Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/io.rs`,
 # dispatched via `native_members("std.io")`). The backends compile NOTHING for a `native fn`.
 
-native fn print(s: str) -> nil
-native fn eprint(s: str) -> nil
+native fn print(s: str) -> None
+native fn eprint(s: str) -> None
 native fn read_line() -> Option[str]
 # Drain ALL remaining stdin to EOF as one str (Python `sys.stdin.read()`); "" at a clean EOF. Shares
 # the ONE stdin source with `read_line` (a later read then sees EOF). Non-UTF-8 real stdin is a
@@ -21,7 +21,7 @@ native fn read_all() -> str
 # Read one Unicode scalar as a 1-char str (Chezzi has no `char` scalar); None at a clean EOF, a
 # runtime FAULT on a partial/invalid UTF-8 sequence at EOF.
 native fn read_char() -> Option[str]
-native fn flush() -> nil
+native fn flush() -> None
 # TTY detection (gaps §6) — true when the given stream is a real terminal, false when piped/redirected
 # (Python `sys.stdout.isatty()`, Go `isatty`-equivalent). Lets a CLI colorize only when not piped.
 native fn isatty() -> bool
@@ -31,14 +31,14 @@ native fn input(prompt: str) -> Option[str]
 # W7-8 — the INTERNAL byte seam (raw OS `bytes` path in); see std/fs.chz for the convention. The
 # PUBLIC wrappers below take a `PathLike`, so a bare `str` literal still works with no annotation.
 native fn _read_file(path: bytes) -> Result[str]
-native fn _write_file(path: bytes, text: str) -> Result[nil]
+native fn _write_file(path: bytes, text: str) -> Result[None]
 native fn _read_bytes(path: bytes) -> Result[bytes]
-native fn _write_bytes(path: bytes, data: bytes) -> Result[nil]
+native fn _write_bytes(path: bytes, data: bytes) -> Result[None]
 
 fn read_file(p: PathLike) -> Result[str]:
     return _read_file(p.as_path())
 
-fn write_file(p: PathLike, text: str) -> Result[nil]:
+fn write_file(p: PathLike, text: str) -> Result[None]:
     return _write_file(p.as_path(), text)
 
 # Binary whole-file I/O (R1). `read_file` DECODES UTF-8, so it errs on a binary file — `read_bytes`
@@ -48,7 +48,7 @@ fn write_file(p: PathLike, text: str) -> Result[nil]:
 fn read_bytes(p: PathLike) -> Result[bytes]:
     return _read_bytes(p.as_path())
 
-fn write_bytes(p: PathLike, data: bytes) -> Result[nil]:
+fn write_bytes(p: PathLike, data: bytes) -> Result[None]:
     return _write_bytes(p.as_path(), data)
 
 # Writer / file-handle type (R2) — buffered + streaming write-only output. `Writer` is a RESERVED
@@ -69,8 +69,8 @@ fn write_bytes(p: PathLike, data: bytes) -> Result[nil]:
 native struct Writer:
     native fn write(self, data: str) -> Result[int]
     native fn write_bytes(self, data: bytes) -> Result[int]
-    native fn flush(self) -> Result[nil]
-    native fn close(self) -> Result[nil]
+    native fn flush(self) -> Result[None]
+    native fn close(self) -> Result[None]
 
 native fn _create(path: bytes) -> Result[Writer]
 native fn _append(path: bytes) -> Result[Writer]
@@ -125,7 +125,7 @@ native fn buffered(w: Writer, size: int = 8192) -> Writer
 native struct Reader:
     native fn read_line(self) -> Option[str]
     native fn read_bytes(self, n: int) -> Result[bytes]
-    native fn close(self) -> Result[nil]
+    native fn close(self) -> Result[None]
     fn lines(self) -> Iterator[str]:
         while true:
             match self.read_line():

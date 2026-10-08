@@ -8,7 +8,7 @@
 # remain a declined shape and layer C catches the write.
 # DO NOT "fix" toward sharing — the isolation IS the memory-safety line (design §4
 # F1/F3): a plain capture into a task is snapshot-copied; use `Shared[T]` to share across tasks.
-fn invoke(g: fn() -> nil):
+fn invoke(g: fn() -> None):
     _ := recover: g()
 
 fn main():

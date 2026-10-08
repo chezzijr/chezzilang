@@ -8,18 +8,18 @@
 # Every declaration is BODY-LESS: the implementations stay native (name-keyed in `src/native/os.rs`,
 # dispatched via `native_members("std.os")`). The backends compile NOTHING for a `native fn`.
 #
-# `exit(code)` never returns, but the checker has no `never` type; `nil` is the closest void-ish
+# `exit(code)` never returns, but the checker has no `never` type; `None` is the closest void-ish
 # result and lets (unreachable) statements follow it.
 
 import std.path
 
 native fn args() -> List[str]
 native fn env(key: str) -> Option[str]
-native fn exit(code: int) -> nil
+native fn exit(code: int) -> None
 
 # W7-8 — the INTERNAL byte seam (raw OS `bytes` in/out); see std/fs.chz for the convention.
 native fn _getcwd() -> Result[bytes]
-native fn _chdir(path: bytes) -> Result[nil]
+native fn _chdir(path: bytes) -> Result[None]
 
 # `getcwd()` hands back a `path.Path` — the raw cwd bytes, NOT a lossily-decoded `str` (a non-UTF-8
 # cwd used to come back U+FFFD-substituted, naming nothing). CONCRETE return type: no type argument,
@@ -52,12 +52,12 @@ fn temp_dir() -> path.Path:
 # (process-global, like Python/Go). Children spawned via `std.process.cmd` still inherit the REAL
 # process env (that axis is unchanged).
 native fn environ() -> Map[str, str]
-# `nil`, never `Result` — an invalid `key`/`value` (e.g. a key containing `=`) is accepted silently
+# `None`, never `Result` — an invalid `key`/`value` (e.g. a key containing `=`) is accepted silently
 # (this writes an in-process `Map`, not the real OS environment, so there is nothing to reject). Go's
 # `os.Setenv` returns `error` there and CPython's `os.environ[...]` raises `ValueError: illegal
 # environment variable name` (measured) — both a divergence.
-native fn setenv(key: str, value: str) -> nil
+native fn setenv(key: str, value: str) -> None
 # `chdir` mutates the REAL process cwd (like `getcwd` reads it). Process-global: shared by all M:N
 # workers, so a task's `chdir` affects sibling tasks' relative paths (Python/Go have the same ceiling).
-fn chdir(p: PathLike) -> Result[nil]:
+fn chdir(p: PathLike) -> Result[None]:
     return _chdir(p.as_path())

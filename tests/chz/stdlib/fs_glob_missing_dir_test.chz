@@ -1,7 +1,7 @@
 # tests/chz/stdlib/fs_glob_missing_dir_test.chz — TICKET-046(b): `fs.glob` must not `Err` just
 # because the pattern's directory does not exist.
 #
-# Measured: Go `filepath.Glob("nope/*")` -> `[] err=<nil>` ("Glob ignores file system errors such
+# Measured: Go `filepath.Glob("nope/*")` -> `[] err=<None>` ("Glob ignores file system errors such
 # as I/O errors reading directories"); Python `glob.glob("nope/*")` -> `[]`. A malformed pattern
 # must still be `Err`.
 

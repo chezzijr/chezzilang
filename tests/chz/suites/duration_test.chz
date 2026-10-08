@@ -13,7 +13,7 @@ test fn t_roundtrip():
             Err(_e):
                 assert false, "parse errored for " + str(ms)
 
-# Parse-or-sentinel helper (test fn returns nil, so no `?`; a parse Err surfaces as -1 and fails the eq).
+# Parse-or-sentinel helper (test fn returns None, so no `?`; a parse Err surfaces as -1 and fails the eq).
 fn pm(text: str) -> int:
     match duration.parse(text):
         Ok(g):

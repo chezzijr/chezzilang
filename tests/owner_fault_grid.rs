@@ -269,9 +269,9 @@ fn inc(v: int) -> int:
 fn hold3s(v: int) -> int:
     time.sleep_ms(3000)
     return v
-fn holder() -> nil:
+fn holder() -> None:
     g.update(hold3s)
-fn recv_job() -> nil:
+fn recv_job() -> None:
     print(ch.recv())
 {OWNER}";
 
@@ -323,7 +323,7 @@ fn owner_src(kind: &str, ctx: &str) -> String {
             indent(&body, 12)
         ),
         "executor_job" => format!(
-            "fn owner_job() -> nil:\n{}ex := Executor()\nex.submit(owner_job)\nex.shutdown()\n",
+            "fn owner_job() -> None:\n{}ex := Executor()\nex.submit(owner_job)\nex.shutdown()\n",
             indent(&body, 4)
         ),
         _ => unreachable!("owner kind {kind}"),

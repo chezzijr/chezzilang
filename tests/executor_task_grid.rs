@@ -189,12 +189,12 @@ out := Channel[str](4)
 hs := Channel[int](8)
 stuck := Channel[int](0)
 flag := Shared[bool](false)
-fn nest(f: fn() -> nil):
+fn nest(f: fn() -> None):
     parallel:
         spawn f()
-fn resubmit(e: Executor, f: fn() -> nil):
+fn resubmit(e: Executor, f: fn() -> None):
     e.submit(f)
-fn own_ex(f: fn() -> nil):
+fn own_ex(f: fn() -> None):
     e2 := Executor()
     e2.submit(f)
     e2.shutdown()

@@ -6786,7 +6786,7 @@ fn ffi_type_display(ty: Option<&Type>) -> String {
         Some(Type::Qualified { module, name, .. }) => format!("{module}.{name}"),
         Some(Type::Generic(n, ..)) => n.clone(),
         Some(_) => "<unsupported>".to_string(),
-        None => "nil".to_string(),
+        None => "None".to_string(),
     }
 }
 
@@ -7673,7 +7673,7 @@ mod capture_layout_tests {
         };
         assert_eq!(traps("fn a() -> int:\n    return 1\nprint(a())\n"), 1);
         assert_eq!(traps("fn b():\n    print(1)\nb()\n"), 0);
-        assert_eq!(traps("type N = nil\nfn f() -> N:\n    print(1)\nf()\n"), 0);
+        assert_eq!(traps("type N = None\nfn f() -> N:\n    print(1)\nf()\n"), 0);
     }
 
     #[test]

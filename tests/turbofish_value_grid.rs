@@ -795,7 +795,7 @@ fn native_cells(out: &mut Vec<Cell>) {
     ));
     out.push(main_only(
         "native_hof",
-        "import std.io\nfn ap(f: fn(io.Reader) -> Result[nil]) -> int:\n    return 0\nprint(ap(io.Reader.close))",
+        "import std.io\nfn ap(f: fn(io.Reader) -> Result[None]) -> int:\n    return 0\nprint(ap(io.Reader.close))",
         not_value(),
     ));
     out.push(main_only(

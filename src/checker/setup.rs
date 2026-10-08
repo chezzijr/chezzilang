@@ -589,7 +589,7 @@ impl Checker {
                     "str",
                     "bytes",
                     "bytearray",
-                    "nil",
+                    "None",
                     "tuple",
                     "range",
                     "List",
@@ -3679,10 +3679,7 @@ impl Checker {
                     self.struct_names.insert(name.clone());
                 }
                 StmtKind::TypeAlias { name, ty, .. } => {
-                    if matches!(
-                        name.as_str(),
-                        "int" | "float" | "bool" | "str" | "bytes" | "bytearray" | "nil"
-                    ) || is_reserved_type(name)
+                    if is_reserved_type(name)
                         || is_reserved_protocol(name)
                         || crate::native::ffi::is_width(name)
                     {

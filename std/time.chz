@@ -19,6 +19,6 @@
 native fn now() -> int
 native fn now_ms() -> int
 native fn monotonic() -> float
-native fn sleep_ms(ms: int) -> nil
+native fn sleep_ms(ms: int) -> None
 native fn format(ts: int) -> str
 native fn timer(ms: int) -> Channel[bool]

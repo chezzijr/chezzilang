@@ -29,7 +29,7 @@
 # Bad USER input never faults: an unknown flag, a missing value, or a non-int for an int flag all
 # return a clean `Err`. `get_*` on an UNREGISTERED name is a programmer error and panics — the closer
 # analogue is Python's `argparse`, which raises `AttributeError` from `getattr(args, name)` on an
-# unregistered destination. (NOT Go-parity: Go's `flag.Lookup` on an unknown name returns `nil`, no
+# unregistered destination. (NOT Go-parity: Go's `flag.Lookup` on an unknown name returns `None`, no
 # panic, and has no name-keyed typed getter at all — measured, Go 1.26.)
 #
 # `--help`/`-h` return the `ContinueOnError` analog of Go's `ErrHelp`: no printing, no exit, just an
@@ -221,7 +221,7 @@ struct FlagSet:
 
     # The string value of registered flag `name` (its default until parse overwrites it). Panics on
     # an unregistered name — a programmer error, closer to Python argparse's `AttributeError` than
-    # to Go (which returns `nil` from `flag.Lookup` on an unknown name, never panics).
+    # to Go (which returns `None` from `flag.Lookup` on an unknown name, never panics).
     fn get_str(self, name: str) -> str:
         match self.strs.get(name):
             Some(v): return v

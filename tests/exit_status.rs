@@ -174,7 +174,7 @@ fn closing_a_listener_wakes_a_parked_accept() {
     let entry = t.write(
         "main.chz",
         r#"import std.net
-fn main() -> Result[nil]:
+fn main() -> Result[None]:
     for _i in range(200):
         ln := net.listen("127.0.0.1:0")?
         parallel:
@@ -219,7 +219,7 @@ fn closing_a_socket_wakes_a_parked_read() {
     let entry = t.write(
         "main.chz",
         r#"import std.net
-fn main() -> Result[nil]:
+fn main() -> Result[None]:
     ln := net.listen("127.0.0.1:0")?
     addr := ln.addr()?
     for _i in range(200):

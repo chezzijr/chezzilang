@@ -32,7 +32,6 @@ def _chz_fmod(a, b):
 def _chz_str(v):
     if v is True: return "true"
     if v is False: return "false"
-    if v is None: return "nil"
     if isinstance(v, float):
         if v != v: return "NaN"
         if v == float("inf"): return "inf"

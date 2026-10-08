@@ -157,12 +157,12 @@ fn is_inline_default(e: &Expr) -> bool {
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_) => true,
         ExprKind::Str(s) => !s.contains('{') && !s.contains('}'),
-        // `nil` and `None` are the only identifiers inlined. `None` means `Option.None` in every
+        // `None` is the only identifier inlined. `None` means `Option.None` in every
         // module because no import may rebind a prelude variant name
         // (`note_variant_import_binds`); a local, a global or a user fn named `None` can still
         // capture the caller's clone, a pre-existing corner. Do not move `None` to a provider: a
         // callee-filled `b: T? = None` then breaks every call that fills a later parameter.
-        ExprKind::Ident(n) => n == "None" || n == "nil",
+        ExprKind::Ident(n) => n == "None",
         ExprKind::Unary { expr, .. } => is_inline_default(expr),
         ExprKind::Binary { lhs, rhs, .. } => is_inline_default(lhs) && is_inline_default(rhs),
         ExprKind::Range { start, end } => is_inline_default(start) && is_inline_default(end),

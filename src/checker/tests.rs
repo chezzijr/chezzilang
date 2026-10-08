@@ -830,7 +830,7 @@ fn d4_user_method_write_inference_declines() {
         "struct C:\n    n: int\n    fn get(self) -> int:\n        return self.n\nfn f():\n    c := C(1)\n    parallel:\n        spawn:\n            print(c.get())\nf()\n",
         "struct C:\n    n: int\n    fn local(self):\n        x := 0\n        x = 1\n        print(x)\nfn f():\n    c := C(1)\n    parallel:\n        spawn:\n            c.local()\nf()\n",
         "G := 0\nstruct C:\n    fn global(self):\n        G = 1\nfn f():\n    c := C()\n    parallel:\n        spawn:\n            c.global()\nf()\n",
-        "struct C:\n    inc: fn() -> nil\nfn f():\n    c := C(fn(): print(1))\n    parallel:\n        spawn:\n            c.inc()\nf()\n",
+        "struct C:\n    inc: fn() -> None\nfn f():\n    c := C(fn(): print(1))\n    parallel:\n        spawn:\n            c.inc()\nf()\n",
         "protocol P:\n    fn bump(self)\nfn f(p: P):\n    parallel:\n        spawn:\n            p.bump()\n",
         "protocol P:\n    fn bump(self)\nfn f[T: P](v: T):\n    parallel:\n        spawn:\n            v.bump()\n",
         "struct C:\n    xs: List[int]\n    fn later(self):\n        f := fn(): self.xs.push(1)\n        f()\nfn run():\n    c := C([1])\n    parallel:\n        spawn:\n            c.later()\nrun()\n",
@@ -878,9 +878,9 @@ fn d4_rule3_writing_closure_crossing_a_task_is_an_error() {
 #[test]
 fn d4_rule3_declines() {
     for src in [
-        "fn run(g: fn() -> nil):\n    print(\"not called\")\nfn f():\n    xs := [1]\n    g := fn(): xs.push(3)\n    parallel:\n        spawn run(g)\n    print(xs)\nf()\n",
-        "fn run(g: fn() -> nil):\n    print(\"not called\")\nfn f():\n    xs := [1]\n    parallel:\n        spawn run(fn(): xs.push(3))\n    print(xs)\nf()\n",
-        "fn f():\n    xs := [1]\n    ch := Channel[fn() -> nil](1)\n    ch.send(fn(): xs.push(2))\n    g := ch.recv()\n    print(xs)\n    print(g)\nf()\n",
+        "fn run(g: fn() -> None):\n    print(\"not called\")\nfn f():\n    xs := [1]\n    g := fn(): xs.push(3)\n    parallel:\n        spawn run(g)\n    print(xs)\nf()\n",
+        "fn run(g: fn() -> None):\n    print(\"not called\")\nfn f():\n    xs := [1]\n    parallel:\n        spawn run(fn(): xs.push(3))\n    print(xs)\nf()\n",
+        "fn f():\n    xs := [1]\n    ch := Channel[fn() -> None](1)\n    ch.send(fn(): xs.push(2))\n    g := ch.recv()\n    print(xs)\n    print(g)\nf()\n",
         "fn f():\n    xs := [1]\n    g := fn(): print(xs[0])\n    parallel:\n        spawn g()\nf()\n",
         "fn f():\n    xs := [1]\n    parallel:\n        spawn:\n            g := fn(): xs.push(2)\n            g()\n    print(xs)\nf()\n",
         "fn f():\n    xs := [1]\n    g := fn(): xs.push(2)\n    g = fn(): print(1)\n    parallel:\n        spawn g()\n    print(xs)\nf()\n",
@@ -1724,7 +1724,7 @@ fn bare_value_coerces_at_result_sink() {
 /// W8-21 — a bare `return` at a `Result[nil, E]` sink coerces to DEC-017's zero-arg `Ok()`.
 #[test]
 fn bare_return_coerces_at_result_nil_sink() {
-    ok("fn f() -> Result[nil, str]:\n    return\nfn main():\n    pass\n");
+    ok("fn f() -> Result[None, str]:\n    return\nfn main():\n    pass\n");
 }
 
 /// W8-21 — the coercion applies at a closure's declared return sink too, both for a closure literal
@@ -11109,22 +11109,16 @@ fn rebinding_from_imported_global_rejected() {
     ]);
 }
 
-/// `nil` is a value-builtin resolved through the scope stack, so a module bound to it wins in
-/// EXPRESSION position and the `nil` literal silently becomes a module — the exact Bug-4 failure
-/// mode. It is a rejected module bind (un-aliased AND aliased), even though it stays a legal
-/// from-import ALIAS target (`import x as nil` binds a value, and a value still works as a value).
+/// `nil` is an ordinary name (TICKET-231), so a module may be named it or aliased to it. `None`,
+/// the one "nothing" word, is still a rejected module alias.
 #[test]
-fn module_bind_named_nil_rejected() {
+fn module_bind_named_nil_is_an_ordinary_name() {
     let m = ("lib/nil.chz", "fn f() -> int:\n    return 1\n");
+    files_ok(&[m, ("main.chz", "import lib.nil\nprint(nil.f())\n")]);
+    let geo = ("lib/geo.chz", "struct Point:\n    x: int\n");
+    files_ok(&[geo, ("main.chz", "import lib.geo as nil\nprint(1)\n")]);
     files_reject(
-        &[m, ("main.chz", "import lib.nil\nx := nil\nprint(x)\n")],
-        "reserved (builtin)",
-    );
-    files_reject(
-        &[
-            ("lib/geo.chz", "struct Point:\n    x: int\n"),
-            ("main.chz", "import lib.geo as nil\nprint(1)\n"),
-        ],
+        &[geo, ("main.chz", "import lib.geo as None\nprint(1)\n")],
         "reserved (builtin)",
     );
 }
@@ -14364,7 +14358,7 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     let io = native_module_sig_via_graph("io");
     let print = io.certain_fn("print").expect("io.print");
     assert_eq!(print.params, vec![Ty::Str]);
-    assert_eq!(print.ret, Ty::Nil, "io.print must return nil, not Unknown");
+    assert_eq!(print.ret, Ty::Nil, "io.print must return None, not Unknown");
     // W7-8 — every path param is `PathLike` now (a bare `str` literal still binds to it).
     let write_file = io.certain_fn("write_file").expect("io.write_file");
     assert_eq!(write_file.params, vec![pathlike(), Ty::Str]);
@@ -15635,12 +15629,12 @@ fn interpolation_void_fragment_error_span_is_not_one_one() {
     assert_eq!(
         nil_errs.len(),
         1,
-        "expected exactly one nil error, got: {errs:?}"
+        "expected exactly one None error, got: {errs:?}"
     );
     let span = nil_errs[0].span;
     assert_eq!(
         span.line, 4,
-        "nil-fragment error should point at the print line, got: {span}"
+        "None-fragment error should point at the print line, got: {span}"
     );
     assert_ne!(
         (span.line, span.col),
@@ -18005,9 +17999,7 @@ fn import_module_as_reserved_type_rejected() {
 
 #[test]
 fn import_alias_nil_from_accepted() {
-    // BOUNDARY (carve-out): `nil` is a shadowable value-builtin (`nil := 5` is accepted), NOT a type
-    // name to reject as an alias target. The widened guard must exclude it — a naive
-    // `|| is_reserved_type(a)` would over-reject since `is_reserved_type("nil")` is true.
+    // BOUNDARY: `nil` is an ordinary name (TICKET-231), so it is a legal alias target.
     let t = TmpDir::new();
     t.write("lib.chz", "fn who() -> int:\n    return 1\n");
     let entry = t.write(
@@ -18022,7 +18014,7 @@ fn import_alias_nil_from_accepted() {
     // THIS guard must not reject `nil`; if some UNRELATED path errors, at least it's not `reserved`.
     assert!(
         !errs.iter().any(|e| e.message.contains("reserved")),
-        "nil alias must not be rejected as reserved, got: {errs:?}"
+        "None alias must not be rejected as reserved, got: {errs:?}"
     );
 }
 
@@ -18451,7 +18443,7 @@ fn reserved_builtin_type_names_rejected_at_decl() {
         "str",
         "bytes",
         "bytearray",
-        "nil",
+        "None",
         "List",
         "Set",
         "Map",
@@ -18505,7 +18497,7 @@ fn protocol_named_reserved_type_rejected_at_decl() {
         "str",
         "bytes",
         "bytearray",
-        "nil",
+        "None",
         "List",
         "Set",
         "Map",
@@ -19239,7 +19231,7 @@ fn extern_callback_void_return_accepted() {
     // (foreach/twalk-style). Must be accepted like the top-level extern-fn return-slot `allow_void`
     // case; the checker currently rejects a `nil` callback RETURN even though it accepts `nil` as
     // the extern fn's own return type.
-    ok("extern \"libt.so\":\n    fn each(n: int, f: fn(int) -> nil)\n");
+    ok("extern \"libt.so\":\n    fn each(n: int, f: fn(int) -> None)\n");
 }
 
 #[test]
@@ -19247,7 +19239,7 @@ fn extern_callback_nil_param_still_rejected() {
     // The widening is on the callback's RETURN slot only — a `nil` callback PARAM has no `CType`
     // lowering and must stay rejected.
     rejects(
-        "extern \"libt.so\":\n    fn each(n: int, f: fn(nil) -> int)\n",
+        "extern \"libt.so\":\n    fn each(n: int, f: fn(None) -> int)\n",
         "not C-marshallable",
     );
 }
@@ -20559,7 +20551,7 @@ fn extern_nil_param_rejected() {
     // case, so accepting it as a param would panic every engine on a checked program). A
     // void-returning extern yields a `Nil` value, which would otherwise satisfy a `nil` param.
     rejects(
-        "extern \"libc.so.6\":\n    fn f(x: nil) -> int\n",
+        "extern \"libc.so.6\":\n    fn f(x: None) -> int\n",
         "not C-marshallable",
     );
 }
@@ -21083,14 +21075,15 @@ fn uninferable_guard_does_not_overfire_on_harmless_closure_body() {
     // closure-param slot textually mentions an unbound `T`. A body that imposes NO constraint on
     // `T` (e.g. `print(x)` / a constant) stays inferable-free and must keep type-checking clean —
     // these compiled and ran on `main`; rejecting them breaks the don't-reject-valid-code contract.
-    ok("fn each[T](xs: List[T], f: fn(T) -> nil):\n    return\neach([], fn(x): print(x))\n");
+    ok("fn each[T](xs: List[T], f: fn(T) -> None):\n    return\neach([], fn(x): print(x))\n");
     ok(
         "fn mapper[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:\n    return []\nx := mapper([], fn(x): 42)\n",
     );
     // An UNRELATED body error (not about `T`) must surface as itself, not be masked by the
     // inference-deadlock message.
-    let errs =
-        check_src("fn each[T](xs: List[T], f: fn(T) -> nil):\n    return\neach([], fn(x): nope)\n");
+    let errs = check_src(
+        "fn each[T](xs: List[T], f: fn(T) -> None):\n    return\neach([], fn(x): nope)\n",
+    );
     assert!(
         !errs
             .iter()
@@ -21714,12 +21707,12 @@ fn inline_nonnil_expr_against_nil_ret_rejected() {
     // engines emit Return(10) for a void-typed fn. Reject it with the same diagnostic the
     // multiline path uses.
     rejects(
-        "fn a() -> nil: 10\nfn main():\n    a()\nmain()\n",
+        "fn a() -> None: 10\nfn main():\n    a()\nmain()\n",
         "function returns nothing, cannot return a value",
     );
     // A void fn whose inline expr is itself nil-typed stays legal (implicitly returns nil).
     ok("fn a(): print(\"x\")\nfn main():\n    a()\nmain()\n");
-    ok("fn a() -> nil: print(\"x\")\nfn main():\n    a()\nmain()\n");
+    ok("fn a() -> None: print(\"x\")\nfn main():\n    a()\nmain()\n");
 }
 
 // ===== user-callable panic(msg) builtin (raises a recoverable RuntimeError; bottom-typed) =====
@@ -22027,7 +22020,7 @@ fn ok_nil_cannot_be_spelled() {
     // success value. Per `## Decisions` the chosen spelling is zero-arg `Ok()`, not `Ok(nil)` — `nil`
     // has no expression form (`infer_value` rejects any `Ty::Nil` operand as "returns no value").
     // Until the zero-arg checker arm lands, `Ok()` fails arity checking instead.
-    ok("fn f() -> Result[nil, str]:\n    return Ok()\nfn main():\n    pass\nmain()\n");
+    ok("fn f() -> Result[None, str]:\n    return Ok()\nfn main():\n    pass\nmain()\n");
 }
 
 #[test]
@@ -22035,7 +22028,7 @@ fn ok_zero_arg_is_result_nil() {
     // W8-30: zero-arg `Ok()` constructs `Result[nil, E]`'s success value; a mismatched declared `T`
     // (here `int`) is still rejected.
     ok(
-        "fn f() -> Result[nil, str]:\n    return Ok()\nfn g() -> Result[nil, str]:\n    return Err(\"boom\")\nfn main():\n    print(f())\n    print(g())\nmain()\n",
+        "fn f() -> Result[None, str]:\n    return Ok()\nfn g() -> Result[None, str]:\n    return Err(\"boom\")\nfn main():\n    print(f())\n    print(g())\nmain()\n",
     );
     rejects(
         "fn f() -> Result[int, str]:\n    return Ok()\nfn main():\n    pass\nmain()\n",
@@ -24583,7 +24576,7 @@ fn width_ty_is_a_tag_on_its_scalar() {
     );
     rejects_entry(
         &format!(
-            "{prefix}protocol A:\n    fn m(self, x: int8) -> nil\nprotocol B:\n    fn m(self, x: int) -> nil\nprotocol C:\n    A + B\n"
+            "{prefix}protocol A:\n    fn m(self, x: int8) -> None\nprotocol B:\n    fn m(self, x: int) -> None\nprotocol C:\n    A + B\n"
         ),
         "conflicting signature",
     );
@@ -24645,10 +24638,10 @@ fn ffi_width_constant_grid() {
     // `{w}` is the width, `{k}` the constant.
     let sites: &[&str] = &[
         "extern \"libc.so.6\":\n    fn idw(x: {w}) -> {w}\nidw({k})\n",
-        "fn f(x: {w}) -> nil:\n    pass\nf({k})\n",
-        "struct S:\n    n: int\n    fn m(self, x: {w}) -> nil:\n        pass\ns := S(1)\ns.m({k})\n",
-        "protocol P:\n    fn m(self, x: {w}) -> nil\nfn h(q: P) -> nil:\n    q.m({k})\n",
-        "protocol P:\n    fn m(self, x: {w}) -> nil\nfn g[T: P](t: T) -> nil:\n    t.m({k})\n",
+        "fn f(x: {w}) -> None:\n    pass\nf({k})\n",
+        "struct S:\n    n: int\n    fn m(self, x: {w}) -> None:\n        pass\ns := S(1)\ns.m({k})\n",
+        "protocol P:\n    fn m(self, x: {w}) -> None\nfn h(q: P) -> None:\n    q.m({k})\n",
+        "protocol P:\n    fn m(self, x: {w}) -> None\nfn g[T: P](t: T) -> None:\n    t.m({k})\n",
         "struct S:\n    f: {w}\ns := S({k})\n",
         "enum E:\n    A({w})\ne := E.A({k})\n",
         "enum G[T]:\n    B({w}, T)\ng := G.B({k}, 1)\n",
@@ -24656,9 +24649,9 @@ fn ffi_width_constant_grid() {
         "l: List[{w}] = [0]\nl[0] = {k}\n",
         "x: {w} = {k}\n",
         "x: {w} = 0\nx = {k}\n",
-        "fn g(x: {w} = {k}) -> nil:\n    pass\n",
+        "fn g(x: {w} = {k}) -> None:\n    pass\n",
         "struct S:\n    f: {w} = {k}\n",
-        "fn setg() -> nil:\n    G = {k}\nG: {w} = 0\n",
+        "fn setg() -> None:\n    G = {k}\nG: {w} = 0\n",
         "fn r() -> {w}:\n    return {k}\n",
         "fn r() -> {w}: {k}\n",
         "fn gen() -> Iterator[{w}]:\n    yield {k}\n",
@@ -26132,7 +26125,7 @@ fn return_void_call_single_diagnostic() {
         !errs
             .iter()
             .any(|e| e.message.contains("returns no value (None)")),
-        "a return expr must not get the value-position nil rejection, got: {errs:?}"
+        "a return expr must not get the value-position None rejection, got: {errs:?}"
     );
 }
 
@@ -26324,12 +26317,12 @@ fn ffi_qualified_width_in_extern_sig() {
 fn kw_labels_are_surface_only() {
     // A labelled user-fn value flows into an UNLABELLED fn param.
     ok(
-        "fn use_it(f: fn(str) -> nil):\n    f(\"a\")\nfn greet(name: str):\n    print(name)\nuse_it(greet)\n",
+        "fn use_it(f: fn(str) -> None):\n    f(\"a\")\nfn greet(name: str):\n    print(name)\nuse_it(greet)\n",
     );
     // A closure passed to a LABELLED fn param (labels ignored in the arity/assignability check).
-    ok("fn use_it(f: fn(name: str) -> nil):\n    f(\"a\")\nuse_it(fn(s: str): print(s))\n");
+    ok("fn use_it(f: fn(name: str) -> None):\n    f(\"a\")\nuse_it(fn(s: str): print(s))\n");
     entry_ok(
-        "fn use_it(f: fn(str) -> nil):\n    f(\"a\")\nfn greet(name: str):\n    print(name)\nfn main():\n    use_it(greet)\nmain()\n",
+        "fn use_it(f: fn(str) -> None):\n    f(\"a\")\nfn greet(name: str):\n    print(name)\nfn main():\n    use_it(greet)\nmain()\n",
     );
 }
 
@@ -26358,11 +26351,11 @@ fn kw_value_call_accepts() {
 #[test]
 fn kw_value_call_through_a_param_is_rejected() {
     rejects(
-        "fn apply(f: fn(name: str) -> nil):\n    f(name=\"X\")\napply(fn(name: str): print(name))\n",
+        "fn apply(f: fn(name: str) -> None):\n    f(name=\"X\")\napply(fn(name: str): print(name))\n",
         "need a binding that holds one known function",
     );
     entry_rejects(
-        "fn apply(f: fn(name: str) -> nil):\n    f(name=\"X\")\nfn main():\n    apply(fn(name: str): print(name))\nmain()\n",
+        "fn apply(f: fn(name: str) -> None):\n    f(name=\"X\")\nfn main():\n    apply(fn(name: str): print(name))\nmain()\n",
         "need a binding that holds one known function",
     );
 }
@@ -26540,7 +26533,7 @@ fn any_top_type_accepts_scalars() {
 #[test]
 fn any_param_accepts_anything() {
     entry_ok(
-        "struct P:\n    x: int\n\nfn g(v: Any) -> nil:\n    return\n\nfn main():\n    g(1)\n    g(P(x=1))\n    g(\"hi\")\n",
+        "struct P:\n    x: int\n\nfn g(v: Any) -> None:\n    return\n\nfn main():\n    g(1)\n    g(P(x=1))\n    g(\"hi\")\n",
     );
 }
 
@@ -28310,7 +28303,7 @@ fn fn_declared_in_defer_block_gets_own_q_context() {
     assert!(
         errs.iter()
             .any(|e| e.message.contains("returns None, not Result or Option")),
-        "a nil fn declared inside a defer block must still reject `?`, got: {errs:?}"
+        "a None fn declared inside a defer block must still reject `?`, got: {errs:?}"
     );
     entry_ok(
         "fn src() -> int!:\n    return Ok(5)\nfn f():\n    defer:\n        fn inner() -> int!:\n            return Ok(src()? + 1)\n        print(\"in {inner()}\")\n    print(\"b\")\nf()\n",
@@ -32143,7 +32136,7 @@ fn builtin_user_protocol_shape_mismatch_rejected_ticket_024() {
         "type List[int] does not satisfy Sized (method 'len' has the wrong signature)",
     );
     rejects(
-        "protocol Pushy:\n    fn push(self, v: int) -> nil\n\nfn total(x: Pushy):\n    x.push(1)\n\nfn main():\n    xs: List[str] = []\n    total(xs)\n",
+        "protocol Pushy:\n    fn push(self, v: int) -> None\n\nfn total(x: Pushy):\n    x.push(1)\n\nfn main():\n    xs: List[str] = []\n    total(xs)\n",
         "type List[str] does not satisfy Pushy (method 'push' has the wrong signature)",
     );
     rejects(
@@ -32162,10 +32155,10 @@ fn builtin_user_protocol_shape_mismatch_rejected_ticket_024() {
 #[test]
 fn builtin_native_method_gates_bound_protocol_satisfaction_ticket_024() {
     ok(
-        "protocol Sortable:\n    fn sort(self) -> nil\n\nfn srt(x: Sortable):\n    x.sort()\n\nfn main():\n    xs := [3,1,2]\n    srt(xs)\n",
+        "protocol Sortable:\n    fn sort(self) -> None\n\nfn srt(x: Sortable):\n    x.sort()\n\nfn main():\n    xs := [3,1,2]\n    srt(xs)\n",
     );
     rejects(
-        "struct Foo:\n    v: int\n\nprotocol Sortable:\n    fn sort(self) -> nil\n\nfn srt(x: Sortable):\n    x.sort()\n\nfn main():\n    xs: List[Foo] = [Foo(v=1)]\n    srt(xs)\n",
+        "struct Foo:\n    v: int\n\nprotocol Sortable:\n    fn sort(self) -> None\n\nfn srt(x: Sortable):\n    x.sort()\n\nfn main():\n    xs: List[Foo] = [Foo(v=1)]\n    srt(xs)\n",
         "type List[Foo] does not satisfy Sortable (method 'sort' requires Foo: Comparable)",
     );
     ok(
@@ -36539,7 +36532,7 @@ fn hook_param_name_grid() {
     for ((k, v), bad) in [(("i", "val"), true), (("k", "v"), false)] {
         cells.push((
             "set_index".to_string(),
-            format!("    fn index(self, k: int) -> int:\n        return self.n\n    fn set_index(self, {k}: int, {v}: int) -> nil:\n        self.n = {v}\n"),
+            format!("    fn index(self, k: int) -> int:\n        return self.n\n    fn set_index(self, {k}: int, {v}: int) -> None:\n        self.n = {v}\n"),
             "v := V(1)\nv[0] = 4\nprint(v.n)\n".to_string(),
             bad.then_some("i"),
         ));
@@ -37938,7 +37931,7 @@ fn untyped_constant_width_grid() {
     let slots: &[(&str, bool)] = &[
         ("x: {W} = {K}\nprint(x)\n", false),
         ("x: {W} = 0\nx = {K}\nprint(x)\n", false),
-        ("fn take(x: {W}) -> nil:\n    pass\ntake({K})\n", false),
+        ("fn take(x: {W}) -> None:\n    pass\ntake({K})\n", false),
         ("fn r() -> {W}:\n    return {K}\nprint(r())\n", false),
         ("struct S:\n    v: {W}\ns := S({K})\nprint(s)\n", false),
         (
@@ -38017,7 +38010,7 @@ fn untyped_constant_width_grid() {
         "fn n(a: int) -> int8:\n    return 0\nx: int8 = n(300)\nprint(x)\n",
         // An index subscript is an `int`, not the slot's width (Go: `var x int8 = xs[200]`).
         "xs: List[int8] = [1]\nx: int8 = xs[200]\nprint(x)\n",
-        "xs: List[int8] = [1]\nfn take(v: int8) -> nil:\n    pass\ntake(xs[200])\n",
+        "xs: List[int8] = [1]\nfn take(v: int8) -> None:\n    pass\ntake(xs[200])\n",
         "xs: List[int8] = [1]\nfn r() -> int8:\n    return xs[200]\nprint(r())\n",
         "xs: List[int8] = [1]\nx: int8 = xs[200] + 1\nprint(x)\n",
         "xs: List[int8] = [1]\nx: int8 = xs[0:200][0]\nprint(x)\n",
@@ -38230,6 +38223,53 @@ mod ticket_231_none_word {
             red.push(format!(
                 "void use -> want \"returns no value (None)\", got {errs:?}"
             ));
+        }
+        assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
+    }
+
+    /// D1: `None` is the one "nothing" word. As a type it is a return annotation only; as a value
+    /// it is the absent `T?`; `nil` is an ordinary identifier.
+    #[test]
+    fn none_word_grid() {
+        const LOG: &str = "fn log(m: str) -> None:\n    print(m)\n";
+        let log_call = format!("{LOG}log(\"a\")\n");
+        let log_bound = format!("{LOG}x := log(\"a\")\n");
+        let cells: [(&str, Option<&str>); 12] = [
+            (&log_call, None),
+            (&log_bound, Some("returns no value (None)")),
+            ("x: None? = 5\n", Some("'None?' is not a type")),
+            ("x: Option[None] = 5\n", Some("'None?' is not a type")),
+            ("type N = None\nx: N? = 5\n", Some("'None?' is not a type")),
+            ("nil := 5\nprint(nil)\n", None),
+            ("fn nil() -> int:\n    return 1\nprint(nil())\n", None),
+            ("fn f() -> nil:\n    pass\n", Some("unknown type 'nil'")),
+            (
+                "struct None:\n    a: int\n",
+                Some("type 'None' is reserved (builtin)"),
+            ),
+            (
+                "fn f() -> Result[None, str]:\n    return Ok()\nprint(f())\n",
+                None,
+            ),
+            ("fn f() -> None!str:\n    return Ok()\nprint(f())\n", None),
+            ("x: int? = None\nprint(x)\n", None),
+        ];
+        let mut red = Vec::new();
+        for (src, want) in cells {
+            let errs = check_src(src);
+            let pass = match want {
+                None => errs.is_empty(),
+                Some(n) => errs.iter().any(|e| e.message.contains(n)),
+            };
+            if !pass {
+                red.push(format!("{src:?} -> want {want:?}, got {errs:?}"));
+            }
+        }
+        // The void value prints `None`, as Python's does.
+        let out =
+            crate::vm::run_capture("fn f() -> Result[None, str]:\n    return Ok()\nprint(f())\n");
+        if out.as_deref().ok() != Some("Ok(None)\n") {
+            red.push(format!("void print -> want \"Ok(None)\", got {out:?}"));
         }
         assert!(red.is_empty(), "red cells:\n{}", red.join("\n"));
     }

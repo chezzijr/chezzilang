@@ -12,7 +12,7 @@
 #
 # `float`/`int`/`bool` reuse reserved scalar/ctor names as FUNCTION names — legal for module members.
 
-native fn seed(seed: int) -> nil
+native fn seed(seed: int) -> None
 native fn float() -> float
 native fn int(lo: int, hi: int) -> int
 native fn bool() -> bool

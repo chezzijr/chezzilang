@@ -200,7 +200,7 @@ fn module_label(import: &Import) -> String {
 /// / `enum List` / `struct Socket` would type-check clean (the decl guards only consulted this set)
 /// and then the use-site (`x: int` / `l: List[int]` / `s: Socket`) would silently resolve to the
 /// builtin, yielding an unreachable user type + self-contradictory diagnostics (`expected Socket,
-/// found Socket`). So the builtin SCALAR (`int`/`float`/`bool`/`str`/`bytes`/`bytearray`/`nil`),
+/// found Socket`). So the builtin SCALAR (`int`/`float`/`bool`/`str`/`bytes`/`bytearray`/`None`),
 /// CONTAINER (`List`/`Set`/`Map`/`Channel`/`range`), and HANDLE (`Socket`/`Listener`/`ptr`/
 /// `owned_str`) type names are all reserved at declaration too — `struct X` is rejected with the same
 /// `type 'X' is reserved (builtin)` error `struct Result` already gives. (The fixed-width FFI integer
@@ -217,7 +217,7 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "str"
         || name == "bytes"
         || name == "bytearray"
-        || name == "nil"
+        || name == "None"
         // Builtin container/collection type names — recognized by `resolve_type`'s generic arms
         // (`List[T]`/`Set[T]`/`Map[K,V]`/`Channel[T]`) and `range` (a reserved callable whose ctor a
         // `struct range` would silently shadow). (List/Map/Set/range's `CallBuiltin` DISPATCH is
@@ -402,11 +402,8 @@ fn is_reserved_name(name: &str) -> bool {
 /// silently rebinds the builtin (the builtin wins at call/type sites, the import binding is dead),
 /// so both are rejected `reserved (builtin)`, symmetric with the struct/enum/type DECL guard which
 /// already rejects all of these via `is_reserved_type`. Reuses that same predicate — no second list.
-/// EXCEPTION: `nil` is a shadowable value-builtin (`nil := 5` is accepted, unlike `true := 5` which
-/// is a parse error), NOT a type, so it is carved out of the type-name reject to avoid over-rejecting
-/// a legit `import x as nil` — the one name `is_reserved_type` lists that is a value, not a type.
 fn is_reserved_alias_target(name: &str) -> bool {
-    is_reserved_name(name) || (is_reserved_type(name) && name != "nil")
+    is_reserved_name(name) || is_reserved_type(name)
 }
 
 /// The four BUILT-IN variant constructors of `Result`/`Option`. They are NOT in `is_reserved_type`
@@ -421,17 +418,15 @@ pub(super) fn is_builtin_variant(name: &str) -> bool {
 /// namespace, where it beats a same-named builtin/ctor in EXPRESSION position (`import std.str` used
 /// to make `str(5)` fail with "module str is not callable"). A RESERVED bound name is therefore
 /// rejected — the module stays usable under a non-reserved alias (`import lib.int as ints`).
-/// Covers reserved CALLABLES + reserved TYPE names (`is_reserved_alias_target`) + `nil` + the builtin
-/// variant ctors. `nil` is carved out of `is_reserved_alias_target` because a from-import ALIAS binds
-/// a VALUE (and a value still works as a value); a MODULE is not a value, so `import lib.nil` /
-/// `import m as nil` would silently retype the `nil` literal — reject it here.
+/// Covers reserved CALLABLES + reserved TYPE names (`is_reserved_alias_target`) + the builtin
+/// variant ctors.
 /// The FROM-import path guards the same VALUE namespace with `is_reserved_alias_target ||
-/// is_builtin_variant` (this predicate minus `nil`) — see `bind_import`.
+/// is_builtin_variant` (this same predicate) — see `bind_import`.
 /// A module bind colliding with a USER `fn` or type of the same name (`import lib.Point` +
 /// `struct Point`) is not gated here: `Checker::reject_import_decl_collisions` rejects it once the
 /// module's declarations are known ("'Point' is already imported", TICKET-180).
 pub(super) fn is_reserved_module_bind(name: &str) -> bool {
-    is_reserved_alias_target(name) || name == "nil" || is_builtin_variant(name)
+    is_reserved_alias_target(name) || is_builtin_variant(name)
 }
 
 /// The kind of intrinsic a universe builtin lowers to on a DIRECT call. `Print` → the dedicated

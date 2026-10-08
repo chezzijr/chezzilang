@@ -2,7 +2,7 @@
 //! a divergence to a non-finding.
 //!
 //! This list is intentionally tiny: the Python shim already absorbs every *documented*
-//! intentional difference (bool/nil spelling, raw nested strings, truncating int `/`/`%`).
+//! intentional difference (bool spelling, raw nested strings, truncating int `/`/`%`).
 //! An entry here is for a corner we have consciously decided not to chase — but it must be
 //! narrow, cite why, and must not mask a **value** divergence, only a **formatting** one.
 //!

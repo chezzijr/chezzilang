@@ -7,7 +7,7 @@ protocol Sized:
     fn len(self) -> int
 
 protocol Sortable:
-    fn sort(self) -> nil
+    fn sort(self) -> None
 
 protocol Has:
     fn contains(self, item: int) -> bool

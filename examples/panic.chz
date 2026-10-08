@@ -23,7 +23,7 @@ fn main():
         Err(e): print("recovered: {e.message()}")
 
     # The defer fires as the panic unwinds, before the boundary regains control.
-    # `recover:` over a VOID call yields `Result[nil, Error]`, so the `Ok` arm binds `_`: nil has no
+    # `recover:` over a VOID call yields `Result[None, Error]`, so the `Ok` arm binds `_`: None has no
     # value form, and binding it (`Ok(v)` + `{v}`) is a type error.
     b := recover:
         risky()

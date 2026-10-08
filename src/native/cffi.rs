@@ -3336,7 +3336,7 @@ void each(int n, void (*f)(long)) { for (long i = 0; i < n; i++) f(i); }
         // callback shape (foreach/twalk-style). `each(3, show)` prints "0", "1", "2".
         let so = build_callback_so();
         let src = format!(
-            "extern \"{}\":\n    fn each(n: int, f: fn(int) -> nil)\n\nfn show(i: int):\n    print(i)\n\neach(3, show)\n",
+            "extern \"{}\":\n    fn each(n: int, f: fn(int) -> None)\n\nfn show(i: int):\n    print(i)\n\neach(3, show)\n",
             so.to_str().unwrap()
         );
         let out = crate::vm::run_capture(&src).expect("run");

@@ -1829,13 +1829,7 @@ impl Checker {
                 span: name_span,
             } => {
                 let resolved = match n.as_str() {
-                    "int" => Ty::Int,
-                    "float" => Ty::Float,
-                    "bool" => Ty::Bool,
-                    "str" => Ty::Str,
-                    "bytes" => Ty::Bytes,
-                    "bytearray" => Ty::ByteArray,
-                    "nil" => Ty::Nil,
+                    s if let Some(t) = Self::scalar_bound_ty(s) => t,
                     // A generic type parameter (`T`) or `Self`, in scope while checking a generic fn
                     // signature/body or a protocol method. Resolved BEFORE every reserved/module name
                     // below (ptr / owned_str / Executor / Shared|RwShared|Atomic / Socket / Listener)
@@ -2287,9 +2281,19 @@ impl Checker {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
                         let resolved = self.carrier_default_args(&key, resolved);
-                        let tps = self.enum_type_params.get(&key).cloned();
-                        self.check_type_arity_and_bounds(n, tps, &resolved, span);
-                        Ty::enum_ty(key, resolved)
+                        if key == "Option" && resolved.first() == Some(&Ty::Nil) {
+                            self.error(
+                                span,
+                                "'None?' is not a type: None means \"returns nothing\", so it has \
+                                 no optional form"
+                                    .to_string(),
+                            );
+                            Ty::Unknown
+                        } else {
+                            let tps = self.enum_type_params.get(&key).cloned();
+                            self.check_type_arity_and_bounds(n, tps, &resolved, span);
+                            Ty::enum_ty(key, resolved)
+                        }
                     }
                     // A parameterized protocol used as a value type (`Container[int]`): resolve the
                     // args, arity-check against the protocol's own type params, and carry them on the

@@ -121,7 +121,7 @@ test fn a_nursery_join_inside_a_defer_is_not_a_cancel_point():
     started := Channel[int](1)
     hold := Channel[int]()
     r := recover: escape_ok(ran, started, hold)
-    assert "{r}" == "Ok(nil)"
+    assert "{r}" == "Ok(None)"
     assert ran.get() == 11
 
 

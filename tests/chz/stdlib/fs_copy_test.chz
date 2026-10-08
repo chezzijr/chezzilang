@@ -1,7 +1,7 @@
 # tests/chz/stdlib/fs_copy_test.chz — `fs.copy` same-file guard (W7-1).
 #
 # `std::fs::copy` opens the DESTINATION with O_TRUNC, so copying a file onto ITSELF used to return
-# `Ok(nil)` after truncating the file to 0 bytes — silent data loss. Python's `shutil.copyfile`
+# `Ok(None)` after truncating the file to 0 bytes — silent data loss. Python's `shutil.copyfile`
 # raises `SameFileError` and coreutils `cp a a` errors "are the same file"; both leave the file
 # alone, so Chezzi returns a recoverable `Err` and the bytes must survive.
 # Identity is INODE identity (dev+ino), not a path-string compare: a symlink (and a hardlink) reaches

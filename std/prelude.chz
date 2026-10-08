@@ -21,7 +21,7 @@
 # 1-arg function (the specialized opcodes are unreachable through a bound value). range + List/Map/Set:
 # phase 2b (still hard-coded).
 
-native fn print(...args: Any, sep: str = " ", end: str = "\n") -> nil
+native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None
 native fn ord(c: str) -> int
 native fn chr(n: int) -> str
 native fn panic(msg: str)
@@ -55,9 +55,9 @@ native ctor bytearray(x) -> bytearray
 
 native struct List[T]:
     native fn len(self) -> int
-    native fn push(self, v: T) -> nil
+    native fn push(self, v: T) -> None
     native fn pop(self) -> Option[T]
-    native fn reverse(self) -> nil
+    native fn reverse(self) -> None
     native fn contains(self, item: T) -> bool
     # SENTINEL, NOT A CARRIER — `-1` on a miss, the shape of Python's `str.find` (`'hi'.find('zz')` is
     # `-1`, measured). HAZARD: indexing is Python-negative, so `xs[xs.index_of(v)]` on a miss silently
@@ -68,8 +68,8 @@ native struct List[T]:
     # `List` and `str`, kept because changing it is a breaking API change, not because lists inherit it.
     native fn index_of(self, v: T) -> int
     native fn concat(self, other: List[T]) -> List[T]
-    native fn extend(self, other: List[T]) -> nil
-    native fn sort(self) -> nil where T: Comparable
+    native fn extend(self, other: List[T]) -> None
+    native fn sort(self) -> None where T: Comparable
     # Fold `T`'s `+` across the list (empty list -> `T`'s zero). An `int` list FAULTS `integer overflow
     # in Add` if the running total overflows i64 — CPython's `sum()` never overflows (arbitrary
     # precision), so this is the same upward divergence as the language-wide integer-overflow fault.
@@ -77,8 +77,8 @@ native struct List[T]:
     native fn map[U](self, f: fn(T) -> U) -> List[U]
     native fn filter(self, p: fn(T) -> bool) -> List[T]
     native fn fold[U](self, init: U, f: fn(U, T) -> U) -> U
-    native fn sort_by(self, cmp: fn(T, T) -> int) -> nil
-    native fn sort_by_key[K: Comparable](self, f: fn(T) -> K) -> nil
+    native fn sort_by(self, cmp: fn(T, T) -> int) -> None
+    native fn sort_by_key[K: Comparable](self, f: fn(T) -> K) -> None
     native fn min(self) -> Option[T] where T: Comparable
     native fn max(self) -> Option[T] where T: Comparable
     native fn min_by[K: Comparable](self, f: fn(T) -> K) -> Option[T]
@@ -86,7 +86,7 @@ native struct List[T]:
     native fn first(self) -> Option[T]
     native fn last(self) -> Option[T]
     native fn reversed(self) -> List[T]
-    native fn insert(self, i: int, x: T) -> nil
+    native fn insert(self, i: int, x: T) -> None
     native fn remove_at(self, i: int) -> T
     native fn unique(self) -> List[T]
     native fn dedup(self) -> List[T]
@@ -109,7 +109,7 @@ native struct Map[K: Hashable + Eq, V]:
     native fn values(self) -> List[V]
     native fn remove(self, k: K) -> Option[V]
     native fn merge(self, other: Map[K, V]) -> Map[K, V]
-    native fn update(self, other: Map[K, V]) -> nil
+    native fn update(self, other: Map[K, V]) -> None
     # TICKET-160 — insertion order, identical to keys(); Map(m.items()) == m.
     native fn items(self) -> List[(K, V)]
     native fn copy(self) -> Map[K, V]
@@ -117,7 +117,7 @@ native struct Map[K: Hashable + Eq, V]:
 native struct Set[T: Hashable + Eq]:
     native fn len(self) -> int
     native fn has(self, v: T) -> bool
-    native fn add(self, v: T) -> nil
+    native fn add(self, v: T) -> None
     native fn remove(self, v: T) -> bool
     native fn union(self, other: Set[T]) -> Set[T]
     native fn intersection(self, other: Set[T]) -> Set[T]
@@ -135,7 +135,7 @@ native struct Channel[T]:
     # sendable-checked at the channel's construction).
     # Faults `send on a closed channel` after `close()` (Go: `panic: send on closed channel`,
     # identical). `try_send` is the non-faulting sibling.
-    native fn send(self, v: T) -> nil
+    native fn send(self, v: T) -> None
     # `try_send` is the non-blocking partner of `send` (mirrors `try_recv` vs `recv`): returns `false`
     # when the send can't proceed — the channel is CLOSED, a BOUNDED channel is FULL, or a RENDEZVOUS
     # channel (`Channel[T](0)`) has no receiver already waiting — and `true` once the value is queued.
@@ -148,11 +148,11 @@ native struct Channel[T]:
     native fn try_recv(self) -> Option[T]
     # `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then faults,
     # and `for v in ch:` ends cleanly once drained.
-    native fn close(self) -> nil
+    native fn close(self) -> None
     # `trip()` flips a permanent level-trigger latch: the channel then reports ready (`true`) on every
     # `recv`/`try_recv`/`wait`, fanning out to any number of receivers (the primitive behind
     # `std.cancel`'s `done()`). Idempotent; takes no args.
-    native fn trip(self) -> nil where T: bool
+    native fn trip(self) -> None where T: bool
     native fn len(self) -> int
     # `cap()` reports the channel's capacity: `-1` for an unbounded `Channel[T]()`, `0` for a
     # rendezvous `Channel[T](0)`, or the bound passed to `Channel[T](cap)`.
@@ -224,7 +224,7 @@ native struct bytes:
 # FnSig).
 native struct bytearray:
     native fn len(self) -> int
-    native fn push(self, b: int) -> nil
+    native fn push(self, b: int) -> None
     native fn pop(self) -> Option[int]
     native fn decode(self) -> str
     native fn copy(self) -> bytearray
@@ -339,7 +339,7 @@ protocol Index[K, V]:
 # ordered Vec, and the drift guard pins the order).
 protocol IndexSet[K, V]:
     fn index(self, k: K) -> V
-    fn set_index(self, k: K, v: V) -> nil
+    fn set_index(self, k: K, v: V) -> None
 
 # Python-style slicing: three `int?` (Option[int]) components (start/end/step), each None when omitted;
 # the VM always passes all three explicitly. `R` is the slice result type, recovered at call sites.

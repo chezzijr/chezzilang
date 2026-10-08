@@ -1,6 +1,6 @@
-# TICKET-066 W10-20: docs promised `fn(): nil` as a no-op closure spelling; neither that nor the
+# TICKET-066 W10-20: docs promised `fn(): None` as a no-op closure spelling; neither that nor the
 # natural alternative `fn(): pass` compiled. `fn(): pass` is now the working spelling.
-fn run(g: fn() -> nil):
+fn run(g: fn() -> None):
     g()
 
 test fn noop_closure_calls_without_effect():
