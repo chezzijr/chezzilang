@@ -1,0 +1,16 @@
+import std.concurrency
+fn burn(n: int) -> int:
+    s := 0
+    for i in 0..n:
+        s += i % 7
+    return s
+fn main():
+    ex := Executor()
+    for i in 0..4:
+        ex.submit(fn(): print("a{i} {burn(8000000)}"))
+    parallel:
+        for i in 0..4:
+            spawn:
+                print("s{i} {burn(8000000)}")
+    ex.shutdown()
+main()

@@ -3608,6 +3608,24 @@ Release binaries: base `e93d7299` (the merge-base with `main`) and branch `5045d
 ms as `median (max - min) / max RSS MiB`. `T` 0 is the default worker count (28 CPUs). A row is
 `ok` when the fixed median is at most the base median plus base's spread. Measured 2026-10-08.
 
+| program | T | n | reference user s / wall s | user s / wall s | user ratio | wall ratio | verdict |
+|---|---|---|---|---|---|---|---|
+| two_executors.chz | 1 | 7 | 6.93 / 6.73 | 6.77 / 6.65 | 0.98x | 0.99x | ok |
+| executor_and_parallel.chz | 1 | 7 | 6.93 / 6.73 | 6.70 / 6.59 | 0.97x | 0.98x | ok |
+| two_executors.chz | 2 | 7 | 6.79 / 3.41 | 7.29 / 3.56 | 1.07x | 1.05x | ok |
+| executor_and_parallel.chz | 2 | 7 | 6.79 / 3.41 | 6.93 / 3.48 | 1.02x | 1.02x | ok |
+| two_executors.chz | 4 | 7 | 7.13 / 1.79 | 7.39 / 1.86 | 1.04x | 1.04x | ok |
+| executor_and_parallel.chz | 4 | 7 | 7.13 / 1.79 | 7.30 / 1.84 | 1.02x | 1.03x | ok |
+
+**More runner threads than permits (hand-over quantum).** `two_executors.chz` and
+`executor_and_parallel.chz` run 8 CPU burns on 8 runner threads. The reference,
+`burn8_nursery.chz`, is the same work with at most N runner threads. The bound is 1.15x of the
+reference on the same binary (owner, 2026-10-08), not base, because base ran these shapes on more
+than N runners. Driver: `python3 benches/sched/oversub_pair.py <bin> 7 benches/sched/burn8_nursery.chz
+1 2 4 -- benches/sched/two_executors.chz benches/sched/executor_and_parallel.chz`, branch
+`aaf520fb`, load averages 2.91, 2.69, 2.73 at the start and 3.47, 2.70, 2.69 at the end. Before
+the quantum (a hand-over at every slice end) the T=2 rows read 2.89x and 2.78x user.
+
 The `primes_parallel` and `send_one_channel` rows ran at n=15, the others at n=7. Base's n=7 spread
 for `send_one_channel` T=0 moved between 30 ms and 68 ms across runs, which is too unstable to
 judge a 2-4% difference. One `primes_parallel` T=1 cell takes about 870 s at n=15, over the 600 s
@@ -3680,22 +3698,19 @@ Pinned, `AB_CPUS=0-3`. `uptime` load averages at each chunk start and at the end
 Every row is `ok`, `rendezvous_pingpong` T=1 included (0.77x unpinned, 0.79x pinned; DEC-205's
 1.30x allowance was not needed). `fan_open` is TICKET-159's shape and W15-9's landing condition.
 
-**Open cost: more runner threads than permits.** No row above has more runner threads than
-`--threads`. Two `Executor()`s with 4 CPU-burning jobs each do (8 runner threads). The cap holds,
-but the threads hand the permit over at every slice end, and CPU time doubles. Go's CPU time does
-not move. `~/.cache/hunt6/chan/p/w8.chz` (the ticket's repro) and its Go twin, one run each unless
-a range is given, release:
+**Before the hand-over quantum.** With a hand-over at every slice end, runner threads that
+outnumber permits each ran part of the time on their own core, and `schedutil` clocked those cores
+down. `~/.cache/hunt6/chan/p/w8.chz` (the ticket's repro, `two_executors.chz`) and its Go twin,
+release, one run each unless a range is given; "pre-quantum" is branch `5045d3d2`:
 
-| run | wall s | user s | voluntary switches |
-|---|---|---|---|
-| base `--threads=2` (uses 4 cores, the bug) | 1.87-1.91 | 7.43-7.55 | 31191-31511 |
-| branch `--threads=2`, n=4 | 7.82-8.94 | 15.57-17.90 | 271984-281526 |
-| branch `--threads=4` | 4.21 | 17.00 | 406538 |
-| base `--threads=1` (DEC-205's hand-over) | 15.49 | 15.31 | 148920 |
-| branch `--threads=1` | 15.57 | 15.20 | 148919 |
-| Go `GOMAXPROCS=2` | 4.26 | 8.51 | 488 |
-| Go `GOMAXPROCS=4` | 2.34 | 9.04 | 304 |
+| run | wall s | user s |
+|---|---|---|
+| base `--threads=2` (uses 4 cores, the bug) | 1.87-1.91 | 7.43-7.55 |
+| pre-quantum `--threads=2`, n=4 | 7.82-8.94 | 15.57-17.90 |
+| pre-quantum `--threads=4` | 4.21 | 17.00 |
+| Go `GOMAXPROCS=2` | 4.26 | 8.51 |
+| Go `GOMAXPROCS=4` | 2.34 | 9.04 |
 
-One Executor plus a top-level `parallel:` (`w9.chz`) at `--threads=2`: base 1.88 s wall and 7.40 s
-user, branch 8.28 s wall and 16.47 s user. This is the T=1 hand-over cost, now paid at every T
-when runner threads outnumber permits. It is not fixed on this branch.
+A 10 ms quantum cut hand-overs 77x and left user CPU at 16.9 s, so the hand-over count is not the
+cost. `width::HANDOVER_QUANTUM` is 100 ms, the smallest value measured that meets the bound at
+T=2 and T=4 (user s at 10/20/30/50/100 ms: 16.9, 16.5, 13.2, 7.9-9.3, 7.2).

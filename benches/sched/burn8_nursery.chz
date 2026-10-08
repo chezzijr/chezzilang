@@ -1,0 +1,11 @@
+fn burn(n: int) -> int:
+    s := 0
+    for i in 0..n:
+        s += i % 7
+    return s
+fn main():
+    parallel:
+        for i in 0..8:
+            spawn:
+                print("s{i} {burn(8000000)}")
+main()
