@@ -1777,11 +1777,11 @@ impl Vm {
                     } else if sched.is_deadlocked(&c) {
                         // Path C self-sufficient deadlock detection: evaluate the predicate HERE rather
                         // than depending on a separate idle puller being alive to fire it.
-                        c.flag_deadlock(&sched.deadlock_err);
-                        reg.release(&sched, &mut c);
+                        // TICKET-232 — through the one entry; the next pass returns through
+                        // `run_exit_err` or `terminate`, which releases `reg`.
                         drop(c);
-                        sched.notify_waiters();
-                        Err(sched.deadlock_err.clone())
+                        sched.fault_own_deadlock();
+                        continue;
                     } else {
                         drop(c);
                         // --- wait on the channel's OWN condvar (q-only; core lock A released) ---
@@ -1863,11 +1863,10 @@ impl Vm {
                     return Err(sched.deadlock_err.clone());
                 }
                 if sched.is_deadlocked(&c) {
-                    c.flag_deadlock(&sched.deadlock_err);
-                    reg.release(&sched, &mut c);
+                    // TICKET-232 — the next pass returns through `run_exit_err` or `terminate`.
                     drop(c);
-                    sched.notify_waiters();
-                    return Err(sched.deadlock_err.clone());
+                    sched.fault_own_deadlock();
+                    continue;
                 }
             }
             width::released(|| {
@@ -1975,11 +1974,10 @@ impl Vm {
                 // A pending timer guarantees future progress (its deadline send), so it vetoes the
                 // self-detected deadlock just like an `inflight` job does on the snapshot-park path.
                 if sched.is_deadlocked(&c) {
-                    c.flag_deadlock(&sched.deadlock_err);
-                    reg.release(&sched, &mut c);
+                    // TICKET-232 — the next pass returns through `run_exit_err` or `terminate`.
                     drop(c);
-                    sched.notify_waiters();
-                    return Err(sched.deadlock_err.clone());
+                    sched.fault_own_deadlock();
+                    continue;
                 }
             }
             // No single condvar to wait on (N arms, N condvars) → bounded backoff poll. Sleep on the

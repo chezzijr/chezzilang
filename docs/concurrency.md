@@ -496,6 +496,17 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   waits; the job fault stays the report. A verdict that names only a join party latches nothing: its
   report is the victims' slots.
 
+  **A scheduler's own verdict latches before it cuts a victim (TICKET-232).** A scheduler that
+  sees all of its own tasks parked (a `parallel:` block's deadlock) goes through one entry,
+  `MnSched::latch_own_verdict`: it latches the verdict first, then faults the parked tasks. Before,
+  five sites faulted the tasks with no latch. A faulted task unwound and freed the `Shared` guard
+  it held, main took the guard and ran on: `print("AFTER")` ran past the deadlock in 27 to 67 of
+  600 runs (`tests/deadlock_verdict_stress.rs`). The latched report of a scheduler's own verdict is
+  that scheduler's text (`deadlock: every task in this parallel: block is blocked …` at the block),
+  not the waiting party's site: main ends with the child's fault or with the latched report,
+  whichever it reads first, and the two are now one text. A wait registers as a blocked party
+  before it marks its body blocked, so a judge never sees a blocked body with no party.
+
   A deadlock message raised inside
   a native callback that cannot park at all is an ordinary recoverable fault and still runs
   `defer`s. A `defer` that blocks forever is not that case: it is a counted party, so it reaches the verdict

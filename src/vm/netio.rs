@@ -390,16 +390,15 @@ impl Vm {
                 break Err(e);
             }
             if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
-                let mut c = sched.lock();
+                let c = sched.lock();
                 if c.terminate {
                     drop(c);
                     break Err(sched.deadlock_err.clone());
                 }
                 if sched.is_deadlocked(&c) {
-                    c.flag_deadlock(&sched.deadlock_err);
+                    // TICKET-232 — the next pass ends the wait through the run halt or `terminate`.
                     drop(c);
-                    sched.notify_waiters();
-                    break Err(sched.deadlock_err.clone());
+                    sched.fault_own_deadlock();
                 }
             }
         };
@@ -2278,15 +2277,17 @@ impl Vm {
     ) -> BlockGuard {
         // The wait is published WITH the `body_blocked` mark, in one `SchedCore` acquisition per
         // sched (`set_body_wait`) — see its doc for the race that two acquisitions leave open. The
-        // party (P) is taken after, with no `SchedCore` held, so the documented P → A order holds.
-        // ONE `Arc<PartyWait>` is shared by the sched registration and the party, so the two can
-        // never disagree about what this thread is waiting for.
+        // party (P) is taken FIRST (TICKET-232), with no `SchedCore` held, so the documented P → A
+        // order holds: the mark lifts the body veto, and a judge that saw a blocked body and no
+        // party had no site to latch. ONE `Arc<PartyWait>` is shared by the sched registration and
+        // the party, so the two can never disagree about what this thread is waiting for.
         let wait = Arc::new(wait);
-        let mut g = self.blocked_bodies_guard_with(false, Some(Arc::clone(&wait)));
-        g._party = self
-            .block_ctx()
-            .judged()
-            .then(|| self.quiesce.block_shared(wait, self.wake_set(), site));
+        let party = self.block_ctx().judged().then(|| {
+            self.quiesce
+                .block_shared(Arc::clone(&wait), self.wake_set(), site)
+        });
+        let mut g = self.blocked_bodies_guard_with(false, Some(wait));
+        g._party = party;
         g
     }
 

@@ -62,6 +62,11 @@ run Chezzi code at once) is fixed by TICKET-230: `width::RUNNERS` is the one pro
 budget of `--threads=N`, main included.
 The recursive-main finding (a loop-free recursion has no cut point) is fixed by TICKET-224: a run-wide
 halt lands at every function entry.
+Three regressions of this family are fixed by TICKET-232 (2026-10-09), each one fact with one owner:
+a submit under the cap is dropped only by a run halt (the `Submit` arm's cancel read is deleted);
+`SchedCore::settle_job` seals a cut handle inside the transition (`seal_settles` is deleted); and
+`MnSched::latch_own_verdict` is the one entry for a sched's own deadlock verdict (four inline
+`flag_deadlock` copies are deleted). Grid: `tests/executor_stop_grid.rs`.
 
 **Facts:**
 1. what state a job is in, and what its outcome is;

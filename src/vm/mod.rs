@@ -4091,6 +4091,13 @@ impl MnSched {
             // hold the core lock and `running == 0` excludes the only out-of-lock mutator (a running
             // worker's local push/steal), so no fiber can be in flight to become runnable.
             if self.is_deadlocked_given(&c, awaiting_drain) {
+                // TICKET-232 — latch the verdict before any leaf is flagged; the lock is dropped
+                // for it, so the verdict is re-derived under the new hold.
+                drop(c);
+                let Some(relocked) = self.latch_own_verdict() else {
+                    continue;
+                };
+                c = relocked;
                 // TICKET-103 — fault joined leaves first. A non-terminating flag `continue`s: a
                 // SENTINEL helper treats `Stop` as exit-forever, and the leaf's inline owner reaches
                 // its scope-scoped owner stop on the next pass.
@@ -5367,6 +5374,37 @@ impl MnSched {
     /// mutator, and `inflight` is mutated only under the core lock, so both reads are sound.
     fn is_deadlocked(&self, c: &SchedCore) -> bool {
         self.is_deadlocked_given(c, None)
+    }
+
+    /// TICKET-232 — THE entry for this sched's own deadlock verdict. Every site that saw
+    /// [`MnSched::is_deadlocked`] calls it with NO sched lock held (`parties` is taken before
+    /// `SchedCore`). It calls [`quiesce::QuiesceState::decide`] first, with this sched's own
+    /// report, so the verdict is a run halt before any victim is cut: a flagged leaf unwinds and
+    /// frees what it holds, and a party that then takes it (a ready wait outranks a halt,
+    /// DEC-194) is stopped by the halt. It then re-derives the verdict under a fresh lock and
+    /// hands the guard back when it still holds.
+    ///
+    /// The answer of `decide` is not read: a party inside a callback is never registered
+    /// (`BlockCtx::judged`), so a strict judge would hang its deadlock.
+    fn latch_own_verdict(&self) -> Option<std::sync::MutexGuard<'_, SchedCore>> {
+        self.quiesce.decide(
+            crate::vm::quiesce::Judge::Sched,
+            Some((&self.deadlock_err.message, self.deadlock_err.span)),
+        );
+        let c = self.lock();
+        self.is_deadlocked(&c).then_some(c)
+    }
+
+    /// TICKET-232 — a wait that detects this sched's deadlock in place: latch the verdict
+    /// ([`MnSched::latch_own_verdict`]), then fault every parked fiber. The caller holds no sched
+    /// lock, and its next pass returns through the run halt or `terminate`. A new self-detecting
+    /// wait calls this, never `SchedCore::flag_deadlock`.
+    pub(super) fn fault_own_deadlock(&self) {
+        if let Some(mut c) = self.latch_own_verdict() {
+            c.flag_deadlock(&self.deadlock_err);
+            drop(c);
+            self.notify_waiters();
+        }
     }
 
     /// TICKET-118 (W13-8) — [`MnSched::is_deadlocked`], parameterised on an already-computed
