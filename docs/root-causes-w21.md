@@ -57,10 +57,11 @@ Clean this wave:
 **Status (2026-10-07):** C1, C1b, C2 and CHAN3 fixed by TICKET-219 (facts 1 and 2: one transition,
 `SchedCore::job_event`, reads the run halt before it releases a held job; the handle's sealed
 channel is the one outcome record). CHAN4 (fact 3, the verdict is a run halt) fixed by TICKET-223
-(one latch, `QuiesceState::decide`, delivered through `run_exit_err`). CHAN1 (fact 4) is a separate
-ticket.
+(one latch, `QuiesceState::decide`, delivered through `run_exit_err`). CHAN1 (fact 4, how many threads
+run Chezzi code at once) is fixed by TICKET-230: `width::RUNNERS` is the one process-wide runner
+budget of `--threads=N`, main included.
 The recursive-main finding (a loop-free recursion has no cut point) is fixed by TICKET-224: a run-wide
-halt lands at every function entry. CHAN1 is TICKET-230.
+halt lands at every function entry.
 
 **Facts:**
 1. what state a job is in, and what its outcome is;
