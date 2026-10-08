@@ -1643,7 +1643,7 @@ impl Checker {
                 }
                 _ if self.imported_alias_tys.contains_key(n) => self.imported_alias_tys[n].clone(),
                 _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
-                _ if self.enum_names.contains(n) => Ty::Enum(self.bare_key(n), Vec::new()),
+                _ if self.enum_names.contains(n) => Ty::enum_ty(self.bare_key(n), Vec::new()),
                 _ if self.protocol_shape(n).is_some() => {
                     Ty::Protocol(self.protocol_key(n), Vec::new())
                 }
@@ -1652,16 +1652,10 @@ impl Checker {
             Type::Generic(n, args, ..) => match (n.as_str(), args.as_slice()) {
                 ("List", [x]) => Ty::list(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Set", [x]) => Ty::set(self.resolve_ty_ro_d(x, depth + 1)),
-                ("Option", [x]) => Ty::option(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Channel", [x]) => Ty::channel(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Shared", [x]) => Ty::shared(self.resolve_ty_ro_d(x, depth + 1)),
                 ("RwShared", [x]) => Ty::rwshared(self.resolve_ty_ro_d(x, depth + 1)),
                 ("Atomic", [x]) => Ty::atomic(self.resolve_ty_ro_d(x, depth + 1)),
-                ("Result", [x]) => Ty::result(self.resolve_ty_ro_d(x, depth + 1)),
-                ("Result", [x, e]) => Ty::result_e(
-                    self.resolve_ty_ro_d(x, depth + 1),
-                    self.resolve_ty_ro_d(e, depth + 1),
-                ),
                 ("Map", [k, v]) => Ty::map(
                     self.resolve_ty_ro_d(k, depth + 1),
                     self.resolve_ty_ro_d(v, depth + 1),
@@ -1681,12 +1675,15 @@ impl Checker {
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
                         .collect(),
                 ),
-                _ if self.enum_names.contains(n) => Ty::Enum(
-                    self.bare_key(n),
-                    args.iter()
+                _ if self.enum_names.contains(n) => {
+                    let key = self.bare_key(n);
+                    let resolved = args
+                        .iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
-                        .collect(),
-                ),
+                        .collect();
+                    let resolved = self.carrier_default_args(&key, resolved);
+                    Ty::enum_ty(key, resolved)
+                }
                 // A parameterized protocol used as a value type (`Container[int]`). Mint the carried
                 // args so the read-only resolver no longer silent-accepts it as `Unknown` (which would
                 // erase the witness). Mirrors the mutable `resolve_type` protocol arm.
@@ -1741,7 +1738,7 @@ impl Checker {
         if sig.struct_defs.contains_key(name) && self.qualified_builtin_ty(name, &[]).is_none() {
             Ty::Struct(self.type_key(mid, name), args.to_vec())
         } else if sig.enum_defs.contains_key(name) {
-            Ty::Enum(self.type_key(mid, name), args.to_vec())
+            Ty::enum_ty(self.type_key(mid, name), args.to_vec())
         } else if let Some(asig) = sig.type_aliases.get(name) {
             asig.body.clone()
         } else if sig.protocol_defs.contains_key(name) {
@@ -2433,16 +2430,20 @@ impl Checker {
             // Enum conformance is structural exactly like a struct's: the enum satisfies `protocol`
             // iff its `methods` map carries every protocol method with a matching signature. This
             // unlocks Stringable/Hashable/Add/Sub/Mul/Comparable for enums and protocol-bound generics.
-            Ty::Enum(ename, _) => {
-                // MISS-ONLY identity-key fallback (gap #4): resolve a named-fn-imported enum value's
-                // method table from the owning `ModuleSig` on a local-table miss (see the struct arm).
-                let Some(methods) = self.enum_methods_of(ename) else {
-                    return Err(format!("type {ty} does not satisfy {protocol_display}"));
-                };
-                self.satisfies_methods(ty, protocol, args, pinfo, methods)
-                    .map(|()| Grant::no_intrinsic_method())
-            }
-            _ => Err(format!("type {ty} does not satisfy {protocol_display}")),
+            // A carrier that no intrinsic arm above granted reads its (empty) method table here too.
+            _ => match ty.as_enum() {
+                Some((ename, _)) => {
+                    // MISS-ONLY identity-key fallback (gap #4): resolve a named-fn-imported enum
+                    // value's method table from the owning `ModuleSig` on a local-table miss (see
+                    // the struct arm).
+                    let Some(methods) = self.enum_methods_of(ename) else {
+                        return Err(format!("type {ty} does not satisfy {protocol_display}"));
+                    };
+                    self.satisfies_methods(ty, protocol, args, pinfo, methods)
+                        .map(|()| Grant::no_intrinsic_method())
+                }
+                None => Err(format!("type {ty} does not satisfy {protocol_display}")),
+            },
         }
     }
 

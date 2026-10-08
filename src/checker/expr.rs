@@ -502,7 +502,7 @@ impl Checker {
         // `Foo.default()` as its type.
         if self.hover_probe.is_some() && matches!(obj.kind, ExprKind::Ident(_)) {
             let ty = match th.kind {
-                TypeHeadKind::Enum => Ty::Enum(th.key.clone(), Vec::new()),
+                TypeHeadKind::Enum => Ty::enum_ty(th.key.clone(), Vec::new()),
                 _ => Ty::Struct(th.key.clone(), Vec::new()),
             };
             self.hover_record_at(obj.span, &ty, HoverKind::Other, None);
@@ -1311,7 +1311,7 @@ impl Checker {
             let targs_disp: Vec<Ty> = tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect();
             let fty = Ty::Func {
                 params: v.payload.clone(),
-                ret: Box::new(Ty::Enum(v.enum_name.clone(), targs_disp)),
+                ret: Box::new(Ty::enum_ty(v.enum_name.clone(), targs_disp)),
                 labels: crate::checker::FnLabels::default(),
             };
             self.hover_record_at(name_span, &fty, HoverKind::Func, None);
@@ -1321,7 +1321,7 @@ impl Checker {
                 self.error(span, format!("'{name}' takes no type arguments"));
             }
             self.check_args(name, &v.payload, args, span);
-            return Ty::Enum(v.enum_name.clone(), Vec::new());
+            return Ty::enum_ty(v.enum_name.clone(), Vec::new());
         }
         // Generic enum: type arguments come from explicit call-site args (`Tree.Node[int](…)`) when
         // given, else are inferred by unifying the variant's declared payload types (which contain
@@ -1329,7 +1329,7 @@ impl Checker {
         // substituted payload.
         let hints = self.ctor_arg_hints(
             hint,
-            &Ty::Enum(v.enum_name.clone(), param_shape(&tps)),
+            &Ty::enum_ty(v.enum_name.clone(), param_shape(&tps)),
             &tps,
             &v.payload,
             targs,
@@ -1348,12 +1348,12 @@ impl Checker {
         // AFTER arg-unification, so turbofish/args win and the seed only breaks a genuine deadlock.
         seed_from_hint(
             hint,
-            &Ty::Enum(v.enum_name.clone(), param_shape(&tps)),
+            &Ty::enum_ty(v.enum_name.clone(), param_shape(&tps)),
             &mut sub,
         );
         self.widen_targs_from_hint(
             hint,
-            &Ty::Enum(v.enum_name.clone(), param_shape(&tps)),
+            &Ty::enum_ty(v.enum_name.clone(), param_shape(&tps)),
             &tps,
             &v.payload,
             &arg_tys,
@@ -1370,7 +1370,7 @@ impl Checker {
             .iter()
             .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
             .collect();
-        Ty::Enum(v.enum_name.clone(), targs_out)
+        Ty::enum_ty(v.enum_name.clone(), targs_out)
     }
 
     /// `module.Alias(args)` through an exported alias whose `target` is a struct
@@ -4613,7 +4613,7 @@ impl Checker {
             .get(&key)
             .map(|tps| tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect())
             .unwrap_or_default();
-        Ty::Enum(key, args)
+        Ty::enum_ty(key, args)
     }
 
     /// Reject a reserved builtin type name used as a generic type-PARAMETER identifier (`struct

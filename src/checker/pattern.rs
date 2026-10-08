@@ -2583,7 +2583,7 @@ impl Checker {
         let (mut sig, head_decl, res) = match th.kind {
             TypeHeadKind::Enum => {
                 let tps = self.enum_type_params.get(key).cloned().unwrap_or_default();
-                let recv = Ty::Enum(key.clone(), params_of(&tps));
+                let recv = Ty::enum_ty(key.clone(), params_of(&tps));
                 if let Some(v) = self.variants.get(&(key.clone(), name.to_string())) {
                     if v.payload.is_empty() {
                         return None;
@@ -2943,7 +2943,7 @@ impl Checker {
                 } else {
                     vec![Ty::Unknown; tps.len()]
                 };
-                Some(Ty::Enum(key, args))
+                Some(Ty::enum_ty(key, args))
             }
             Some(Resolution::MethodFn { .. } | Resolution::VariantFn { .. }) => {
                 let pf = self.type_member_fn(&th, head_args, name)?;
@@ -4186,12 +4186,7 @@ impl Checker {
     /// or `None` for a non-enum / un-inferable type. Used to validate a pattern's `Enum.` qualifier
     /// against the value being matched.
     pub(super) fn scrutinee_enum(ty: &Ty) -> Option<&str> {
-        match ty {
-            Ty::Enum(name, _) => Some(name),
-            Ty::Result(..) => Some("Result"),
-            Ty::Option(_) => Some("Option"),
-            _ => None,
-        }
+        ty.as_enum().map(|(k, _)| k)
     }
 
     /// [`Self::check_pattern_qualifier_inner`], returning whether it reported an error. The caller
@@ -4249,10 +4244,9 @@ impl Checker {
                 return;
             };
             // An exported alias of an enum (`lib.Tone.Dark(n)`, TICKET-172) keys on its target.
-            let alias_ekey = match self.qualified_alias_ty(m, en) {
-                Some(Ty::Enum(k, _)) => Some(k),
-                _ => None,
-            };
+            let alias_ekey = self
+                .qualified_alias_ty(m, en)
+                .and_then(|t| t.as_enum().map(|(k, _)| k.to_string()));
             match self.module_sigs.get(&mid) {
                 Some(sig) if sig.enum_defs.contains_key(en) => {
                     module_ekey = Some(self.type_key(&mid, en));
@@ -4299,16 +4293,9 @@ impl Checker {
                         },
                     },
                 };
-                // User variants live in `self.variants` keyed by `(enum, variant)`; the built-in
-                // Result/Option variants don't, so accept their canonical enums explicitly.
-                let builtin_ok = matches!(
-                    (en.as_str(), name),
-                    ("Result", "Ok") | ("Result", "Err") | ("Option", "Some") | ("Option", "None")
-                );
-                if !builtin_ok
-                    && !self
-                        .variants
-                        .contains_key(&(ekey.clone(), name.to_string()))
+                if !self
+                    .variants
+                    .contains_key(&(ekey.clone(), name.to_string()))
                 {
                     let names = self.variant_names(&ekey);
                     self.error_help(
@@ -5508,7 +5495,7 @@ impl Checker {
             .get(key)
             .map(|tps| tps.len())
             .unwrap_or(0);
-        Ty::Enum(key.to_string(), vec![Ty::Unknown; n])
+        Ty::enum_ty(key.to_string(), vec![Ty::Unknown; n])
     }
 
     /// If exactly one struct declares a field OR method `member`, return that struct's type (type args

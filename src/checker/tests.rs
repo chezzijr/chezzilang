@@ -24795,48 +24795,44 @@ fn native_type_is_std_only() {
     );
 }
 
-/// Phase 5b BEHAVIOR-PRESERVING DRIFT GUARD: the reserved `Option`/`Result` variant SHAPE is now ALSO
-/// declared in `std/prelude.chz` as `native enum Option[T]` / `native enum Result[T, E]`, but their
-/// identity, `?` propagation, match exhaustiveness, and `Ok`/`Err`/`Some`/`None` construction stay
-/// 100% Rust-inline (`variants_of`/`match_kind`/`resolve_type`, untouched). This asserts the
-/// parsed+resolved variant set from the `.chz` decl BYTE-EQUALS the inline `variants_of` maps, so the
-/// two source-of-truth expressions can never drift. Compared with EXPLICIT `E` (the `Result`'s
-/// `Error`-protocol surface default is injected by `resolve_type`, NOT encoded in the variant), and
-/// asserts NO ported methods (Option/Result carry zero bespoke method arms).
+/// The prelude's `native enum Option[T]` / `native enum Result[T, E]` decls ARE the registered
+/// carrier enums (TICKET-229): harvested and seeded, `variants_of` answers the declared shape for
+/// the carrier types from the ordinary enum tables, with no method.
 #[test]
-fn native_enum_option_result_shape_matches_inline() {
+fn native_enum_option_result_register_as_ordinary_enums() {
     let path = crate::resolver::std_root().join("prelude.chz");
     let src = std::fs::read_to_string(&path).expect("read std/prelude.chz");
     let toks = crate::lexer::tokenize(&src).expect("tokenize prelude");
     let module = crate::parser::parse(toks).expect("parse prelude");
     let mut c = Checker::new();
     c.current_module_is_stdlib = true;
-    // Option[T]: Some(T)/None — the harvested shape must equal variants_of(Ty::option(Param "T")).
-    let (opt_vmap, opt_methods) = c
-        .harvest_native_enum_table(&module, "Option")
-        .expect("native enum Option must be declared in std/prelude.chz");
-    assert!(opt_methods.is_empty(), "Option carries no ported methods");
-    let opt_inline = c
-        .variants_of(&Ty::option(Ty::Param("T".to_string())))
-        .expect("inline Option variants_of");
+    c.carrier_seeds = c.harvest_native_enums(&module);
+    c.seed_carrier_enums();
+    let t = || Ty::Param("T".to_string());
+    let e = || Ty::Param("E".to_string());
     assert_eq!(
-        opt_vmap, opt_inline,
-        "native enum Option drifted from inline variants_of"
+        c.enums["Option"],
+        vec!["Some".to_string(), "None".to_string()]
     );
-    // Result[T, E]: Ok(T)/Err(E) — must equal variants_of(Ty::result_e(Param "T", Param "E")).
-    let (res_vmap, res_methods) = c
-        .harvest_native_enum_table(&module, "Result")
-        .expect("native enum Result must be declared in std/prelude.chz");
-    assert!(res_methods.is_empty(), "Result carries no ported methods");
-    let res_inline = c
-        .variants_of(&Ty::result_e(
-            Ty::Param("T".to_string()),
-            Ty::Param("E".to_string()),
-        ))
-        .expect("inline Result variants_of");
+    assert_eq!(c.enums["Result"], vec!["Ok".to_string(), "Err".to_string()]);
+    assert!(c.enum_methods["Option"].is_empty() && c.enum_methods["Result"].is_empty());
+    let opt = c.variants_of(&Ty::option(t())).expect("Option variants");
     assert_eq!(
-        res_vmap, res_inline,
-        "native enum Result drifted from inline variants_of"
+        opt,
+        HashMap::from([
+            ("Some".to_string(), vec![t()]),
+            ("None".to_string(), vec![])
+        ])
+    );
+    let res = c
+        .variants_of(&Ty::result_e(t(), e()))
+        .expect("Result variants");
+    assert_eq!(
+        res,
+        HashMap::from([
+            ("Ok".to_string(), vec![t()]),
+            ("Err".to_string(), vec![e()])
+        ])
     );
 }
 
@@ -24856,6 +24852,10 @@ fn native_protocol_shapes_match_prebuilt_seed() {
     let module = crate::parser::parse(toks).expect("parse prelude");
     let mut c = Checker::new();
     c.current_module_is_stdlib = true;
+    // The prelude protocols name `Option[T]` (`Iterator.next`), which resolves through the enum
+    // tables: seed the carriers as every checking path does before it reads the prelude.
+    c.carrier_seeds = c.harvest_native_enums(&module);
+    c.seed_carrier_enums();
     let seed = prebuilt_protocols();
     for &name in crate::checker::RESERVED_PROTOCOLS {
         let got = c.harvest_protocol_shape(&module, name).unwrap_or_else(|| {
@@ -38159,4 +38159,30 @@ fn an_unpinned_carrier_variant_value_is_rejected_like_a_user_one() {
         "fn main():\n    f := Some\n    print(1)\n",
         "is generic and T is not determined here",
     );
+}
+
+#[test]
+fn enum_ty_and_as_enum_are_inverse_on_every_enum_shape() {
+    let shapes = [
+        ("Option", vec![Ty::Int], Ty::option(Ty::Int)),
+        (
+            "Result",
+            vec![Ty::Int, Ty::Str],
+            Ty::result_e(Ty::Int, Ty::Str),
+        ),
+        (
+            "Opt1",
+            vec![Ty::Int],
+            Ty::Enum("Opt1".to_string(), vec![Ty::Int]),
+        ),
+        ("Color", vec![], Ty::Enum("Color".to_string(), vec![])),
+    ];
+    for (key, args, want) in shapes {
+        let built = Ty::enum_ty(key.to_string(), args.clone());
+        assert_eq!(built, want, "enum_ty({key})");
+        let (k, a) = built.as_enum().expect("an enum shape");
+        assert_eq!((k, a), (key, args), "as_enum({key})");
+    }
+    assert!(Ty::Int.as_enum().is_none());
+    assert!(Ty::list(Ty::Int).as_enum().is_none());
 }

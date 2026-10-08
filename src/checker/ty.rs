@@ -472,6 +472,28 @@ impl Ty {
     pub fn option(inner: Ty) -> Ty {
         Ty::Option(Box::new(inner))
     }
+    /// The type of the enum registered under `key`, applied to `args`. The prelude's `Option` /
+    /// `Result` enums are spelled by their carrier types; every other key is a `Ty::Enum`. The one
+    /// map from an enum key to its type — [`Ty::as_enum`] is its inverse.
+    pub(crate) fn enum_ty(key: String, mut args: Vec<Ty>) -> Ty {
+        match (key.as_str(), args.len()) {
+            ("Option", 1) => Ty::option(args.remove(0)),
+            ("Result", 2) => {
+                let e = args.remove(1);
+                Ty::result_e(args.remove(0), e)
+            }
+            _ => Ty::Enum(key, args),
+        }
+    }
+    /// The enum key and type arguments of an enum type, carrier or user; `None` for any other type.
+    pub(crate) fn as_enum(&self) -> Option<(&str, Vec<Ty>)> {
+        match self {
+            Ty::Option(t) => Some(("Option", vec![(**t).clone()])),
+            Ty::Result(t, e) => Some(("Result", vec![(**t).clone(), (**e).clone()])),
+            Ty::Enum(k, a) => Some((k.as_str(), a.clone())),
+            _ => None,
+        }
+    }
     pub fn channel(inner: Ty) -> Ty {
         Ty::Channel(Box::new(inner))
     }

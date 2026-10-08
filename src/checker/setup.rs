@@ -210,6 +210,7 @@ impl Checker {
             concurrency_seeds: HashMap::new(),
             time_timer_sig: None,
             container_seeds: HashMap::new(),
+            carrier_seeds: Vec::new(),
             native_prelude_sigs: HashMap::new(),
             type_keys: HashMap::new(),
             current_module_id: None,
@@ -265,13 +266,14 @@ impl Checker {
     }
 
     /// `ty` when it names a struct/enum whose shape this module can reach (local table or
-    /// the owning module's sig), else `None` — a scalar, protocol or builtin alias body is a type
+    /// the owning module's sig), else `None` — a scalar, protocol or container alias body is a type
     /// spelling, never a constructor head.
     fn nominal_alias_target(&self, ty: &Ty) -> Option<Ty> {
         let known = match ty {
             Ty::Struct(k, _) => self.struct_shape(k).is_some(),
-            Ty::Enum(k, _) => self.enums.contains_key(k) || self.owning_enum_def(k).is_some(),
-            _ => false,
+            _ => ty.as_enum().is_some_and(|(k, _)| {
+                self.enums.contains_key(k) || self.owning_enum_def(k).is_some()
+            }),
         };
         known.then(|| ty.clone())
     }
@@ -332,10 +334,9 @@ impl Checker {
     /// an alias of a non-enum body (a scalar alias like `type M = int` keeps its existing "not a
     /// constructor" error) or a cycle.
     pub(super) fn alias_enum_head(&self, name: &str) -> Option<(String, Vec<Ty>)> {
-        match self.alias_body_ty(name)? {
-            Ty::Enum(k, targs) => Some((k, targs)),
-            _ => None,
-        }
+        self.alias_body_ty(name)?
+            .as_enum()
+            .map(|(k, a)| (k.to_string(), a))
     }
 
     /// An alias whose body is a struct instantiation: `(identity key, pinned type args)`.
@@ -777,6 +778,7 @@ impl Checker {
         for (name, info) in &self.container_seeds {
             self.structs.insert(name.clone(), info.clone());
         }
+        self.seed_carrier_enums();
     }
 
     /// Phase 4b — harvest a FILE-BACKED native std module's whole SIGNATURE from its parsed in-module
@@ -1138,34 +1140,23 @@ impl Checker {
         None
     }
 
-    /// Phase 5b-native-enum — harvest the VARIANT SHAPE (+ any leading-`self` methods) of one
-    /// `native enum` (by bare name) from a parsed module AST. The ENUM analog of
-    /// [`harvest_native_struct_table`], used for the always-linked `std/prelude.chz`'s reserved
-    /// `Option`/`Result`: their identity stays the reserved `Ty::Option`/`Ty::Result` (NOT a nominal
-    /// enum), and their `?`/match/construction wiring stays Rust-inline — so this harvest is a
-    /// DRIFT GUARD ONLY (the parsed variant set must byte-match the inline `variants_of` maps), never a
-    /// runtime-consumed table. Type params are in scope while resolving each variant payload so
-    /// `Some(T)`/`Ok(T)`/`Err(E)` resolve to `Ty::Param`. Returns `(variant_map, method_table)` — the
-    /// variant map keyed by variant name to its resolved payload types — or `None` if the named native
-    /// enum is absent. The leading bare `self` on any method is STRIPPED by
-    /// `harvest_native_fn_sig(_, true)`, exactly like native-struct methods.
-    pub(super) fn harvest_native_enum_table(
-        &mut self,
-        ast: &crate::ast::Module,
-        name: &str,
-    ) -> Option<NativeEnumShape> {
+    /// Harvest every `native enum` of a parsed module (the prelude's `Option[T]` / `Result[T, E]`):
+    /// its name, its type parameters and its variants in declaration order, each payload resolved
+    /// with the enum's type parameters in scope (`Some(T)` holds `Ty::Param("T")`). These decls ARE
+    /// the registered carrier enums: [`Checker::seed_carrier_enums`] puts them into the ordinary
+    /// enum tables, and every variant, pattern and exhaustiveness reader answers from there.
+    pub(super) fn harvest_native_enums(&mut self, ast: &crate::ast::Module) -> Vec<NativeEnumSeed> {
+        let mut out = Vec::new();
         for s in &ast.stmts {
             if let StmtKind::NativeEnum {
-                name: en,
+                name,
                 type_params,
                 variants,
-                methods,
                 ..
             } = &s.kind
-                && en == name
             {
                 let saved = self.enter_type_params(type_params);
-                let vmap: HashMap<String, Vec<Ty>> = variants
+                let variants = variants
                     .iter()
                     .map(|v| {
                         let payload = v
@@ -1176,58 +1167,40 @@ impl Checker {
                         (v.name.clone(), payload)
                     })
                     .collect();
-                let mtable: HashMap<String, FnSig> = methods
-                    .iter()
-                    .map(|m| (m.name.clone(), self.harvest_native_fn_sig(m, true)))
-                    .collect();
                 self.exit_type_params(saved);
-                return Some((vmap, mtable));
+                let type_params = self.resolve_bounds(type_params, s.span);
+                out.push(NativeEnumSeed {
+                    name: name.clone(),
+                    type_params,
+                    variants,
+                });
             }
         }
-        None
+        out
     }
 
-    /// Phase 5b-native-enum DRIFT GUARD — assert the `Option`/`Result` variant SHAPE declared in
-    /// `std/prelude.chz`'s `native enum` decls byte-matches the reserved-type shape synthesized INLINE
-    /// by [`variants_of`]. This is the behavior-preservation contract: the file-backed shape is an
-    /// ADDITIVE mirror, so a change to either the `.chz` decl or the inline map that makes them disagree
-    /// is a bug. Compared with EXPLICIT `E` (the `Result[T]` → `Error`-protocol surface default is
-    /// injected by `resolve_type`, not encoded in the variant), and asserts NO ported methods
-    /// (Option/Result carry zero bespoke method arms). Called only on the always-linked prelude module;
-    /// the body is guarded on `cfg!(debug_assertions)` so it is a NO-OP at runtime in release yet stays
-    /// COMPILED (so `harvest_native_enum_table` is never dead code).
-    pub(super) fn assert_native_enum_shape_matches(&mut self, ast: &crate::ast::Module) {
-        if !cfg!(debug_assertions) {
-            return;
-        }
-        if let Some((vmap, methods)) = self.harvest_native_enum_table(ast, "Option") {
-            debug_assert!(
-                methods.is_empty(),
-                "native enum Option must have no methods"
-            );
-            let inline = self
-                .variants_of(&Ty::option(Ty::Param("T".to_string())))
-                .expect("inline Option variants_of");
-            debug_assert_eq!(
-                vmap, inline,
-                "native enum Option in std/prelude.chz drifted from inline variants_of"
-            );
-        }
-        if let Some((vmap, methods)) = self.harvest_native_enum_table(ast, "Result") {
-            debug_assert!(
-                methods.is_empty(),
-                "native enum Result must have no methods"
-            );
-            let inline = self
-                .variants_of(&Ty::result_e(
-                    Ty::Param("T".to_string()),
-                    Ty::Param("E".to_string()),
-                ))
-                .expect("inline Result variants_of");
-            debug_assert_eq!(
-                vmap, inline,
-                "native enum Result in std/prelude.chz drifted from inline variants_of"
-            );
+    /// Register the prelude's carrier enums (`carrier_seeds`) in the ordinary enum tables of the
+    /// current module, under their bare names. A carrier declares no method (DEC-064), so its
+    /// method table is empty.
+    pub(super) fn seed_carrier_enums(&mut self) {
+        for seed in &self.carrier_seeds {
+            let key = seed.name.clone();
+            let mut names = Vec::new();
+            for (vname, payload) in &seed.variants {
+                names.push(vname.clone());
+                self.variants.insert(
+                    (key.clone(), vname.clone()),
+                    VariantInfo {
+                        enum_name: key.clone(),
+                        payload: payload.clone(),
+                    },
+                );
+            }
+            self.enums.insert(key.clone(), names);
+            self.enum_type_params
+                .insert(key.clone(), seed.type_params.clone());
+            self.enum_methods.insert(key.clone(), HashMap::new());
+            self.enum_names.insert(key);
         }
     }
 
@@ -2810,24 +2783,18 @@ impl Checker {
     /// empty list) — its direct slot is `List[Unknown]`, so it is NOT an empty collection and must not
     /// be flagged. This also DELIBERATELY excludes `Option[Unknown]` (`x := None`) and nullary-enum
     /// producers (`Box[Unknown]`): the requirement is scoped to the three literal container kinds.
-    /// TICKET-064 — is `t` a carrier (`None`/nullary-enum-variant) that has never been pinned? A
-    /// `Ty::Option` counts when its payload slot is `Unknown`; a `Ty::Enum` counts when it carries at
-    /// least one type argument and EVERY argument is `Unknown` (a PARTIALLY concrete carrier like
-    /// `Result[int, Unknown]` is deliberately excluded — see `## Decisions`, `Result` is out of scope).
+    /// TICKET-064 — is `t` an enum type, carrier or user, whose every type argument is `Unknown`
+    /// (`None`, a nullary variant of a generic enum) and so has never been pinned? It needs at least
+    /// one type argument; a PARTLY concrete `Result[int, Unknown]` is excluded (DEC-064).
     pub(super) fn is_unpinned_carrier(t: &Ty) -> bool {
-        match t {
-            Ty::Option(p) => p.is_unknown(),
-            Ty::Enum(_, args) => !args.is_empty() && args.iter().all(|a| a.is_unknown()),
-            _ => false,
-        }
+        t.as_enum()
+            .is_some_and(|(_, args)| !args.is_empty() && args.iter().all(|a| a.is_unknown()))
     }
-    /// TICKET-064 — do `a` and `b` name the SAME carrier (so a pin recorded from one is comparable to
-    /// a write of the other)? Two `Option`s always match; two `Enum`s match when their names and
-    /// argument counts agree.
+    /// TICKET-064 — do `a` and `b` name the SAME enum type, carrier or user, with the same number of
+    /// type arguments (so a pin recorded from one is comparable to a write of the other)?
     pub(super) fn same_carrier_shape(a: &Ty, b: &Ty) -> bool {
-        match (a, b) {
-            (Ty::Option(_), Ty::Option(_)) => true,
-            (Ty::Enum(na, aa), Ty::Enum(nb, ab)) => na == nb && aa.len() == ab.len(),
+        match (a.as_enum(), b.as_enum()) {
+            (Some((ka, aa)), Some((kb, ab))) => ka == kb && aa.len() == ab.len(),
             _ => false,
         }
     }
@@ -3947,6 +3914,10 @@ impl Checker {
                         || crate::native::ffi::is_width(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
+                        // A carrier is already registered under this name; keep its tables.
+                        if self.enums.contains_key(&self.bare_key(name)) {
+                            continue;
+                        }
                     }
                     // The LAYOUT tables (`enums`/`variants`/`enum_type_params`) are keyed by this
                     // module's runtime key (bare unless disambiguated), so a value's `Ty::Enum(key)`
@@ -4219,14 +4190,10 @@ impl Checker {
                         );
                     }
                 }
-                // `native enum` is PRELUDE/STD-ONLY, the ENUM analog of `native struct` (a user
-                // program can't declare a reserved builtin enum's variant shape). Reject it in a
-                // non-stdlib module (the guard). In a stdlib module it is a NO-OP (falls to `_`): the
-                // ONLY native enums are `std/prelude.chz`'s `Option`/`Result`, whose variant SHAPE is
-                // harvested as a DRIFT-GUARD MIRROR (see `harvest_native_enum_table`) and whose identity
-                // stays the reserved `Ty::Option`/`Ty::Result`. Crucially it must NOT register into
-                // `self.enums`/`enum_names` — that would mint a colliding nominal `Ty::Enum` and
-                // silently break `?`/match; type identity stays 100% in `resolve_type`.
+                // `native enum` is PRELUDE/STD-ONLY: reject it in a non-stdlib module. In a stdlib
+                // module this arm does nothing; the prelude's `Option` / `Result` decls ARE the
+                // registered carrier enums, harvested by `harvest_native_enums` and put into the
+                // enum tables of every module by `seed_carrier_enums`.
                 StmtKind::NativeEnum { span, .. } if !self.current_module_is_stdlib => {
                     self.error(
                         *span,
@@ -4446,6 +4413,25 @@ impl Checker {
         self.native_prelude_sigs.insert(decl.name.clone(), sig);
     }
 
+    /// The parsed `std/prelude.chz`, for the two test-only paths that check a program with no
+    /// prelude module in a graph (`seed_native_prelude_sigs`, `seed_carriers_without_prelude`).
+    /// Same source chain as the resolver ($CHEZZI_STD → embedded) — no reader bypasses it.
+    #[cfg(test)]
+    fn parse_prelude_source() -> Option<crate::ast::Module> {
+        let src = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()]).ok()?;
+        let toks = crate::lexer::tokenize(&src).ok()?;
+        crate::parser::parse(toks).ok()
+    }
+
+    /// A test-only graph with no prelude module (`standalone_graph`) still needs the carrier enums:
+    /// harvest them from the prelude source, so `begin_module` seeds them like on every other path.
+    #[cfg(test)]
+    pub(super) fn seed_carriers_without_prelude(&mut self) {
+        if let Some(module) = Self::parse_prelude_source() {
+            self.carrier_seeds = self.harvest_native_enums(&module);
+        }
+    }
+
     /// Populate [`Checker::native_prelude_sigs`] from the always-linked `std/prelude.chz` on the
     /// SINGLE-MODULE `check` path (test-only — the graph path hoists the prelude module directly, which
     /// registers these during `hoist`). Without this, a single-module `check` (`ok()`/`check_src`) has
@@ -4457,17 +4443,13 @@ impl Checker {
         if !self.native_prelude_sigs.is_empty() {
             return;
         }
-        // Same source chain as the resolver ($CHEZZI_STD → embedded) — no reader bypasses it.
-        let Ok(src) = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
-        else {
+        let Some(module) = Self::parse_prelude_source() else {
             return;
         };
-        let Ok(toks) = crate::lexer::tokenize(&src) else {
-            return;
-        };
-        let Ok(module) = crate::parser::parse(toks) else {
-            return;
-        };
+        // The carriers come first: the native sigs and container tables below name `Option[T]` /
+        // `Result[T, E]`, and those resolve through the enum tables.
+        self.carrier_seeds = self.harvest_native_enums(&module);
+        self.seed_carrier_enums();
         for s in &module.stmts {
             if let StmtKind::Native(decl) = &s.kind {
                 self.register_native_decl(decl);
@@ -4748,8 +4730,10 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
 fn alias_type_head(name: &str, spelled: String, body: Ty) -> Option<TypeHead> {
     let (kind, key, args) = match body {
         Ty::Struct(k, a) => (TypeHeadKind::Struct, k, a),
-        Ty::Enum(k, a) => (TypeHeadKind::Enum, k, a),
-        _ => return None,
+        other => {
+            let (k, a) = other.as_enum()?;
+            (TypeHeadKind::Enum, k.to_string(), a)
+        }
     };
     Some(TypeHead {
         kind,

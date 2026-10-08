@@ -2091,7 +2091,7 @@ impl Checker {
                                 format!("type '{n}' expects {nparams} type argument(s), got 0"),
                             );
                         }
-                        Ty::Enum(key, Vec::new())
+                        Ty::enum_ty(key, Vec::new())
                     }
                     // A protocol name used as a value type (existential), e.g. `Error`. BUT a protocol
                     // with a STATIC method requirement (`Convert`-style static ctor) is witnessable only
@@ -2184,11 +2184,6 @@ impl Checker {
                 // `Intrinsic::Ctor` PRELUDE rows); `builtin_container_sig` = flat display/placeholder.
                 let resolved = match (n.as_str(), args.as_slice()) {
                     ("List", [inner]) => Ty::list(self.resolve_type(inner, span)),
-                    ("Result", [inner]) => Ty::result(self.resolve_type(inner, span)),
-                    ("Result", [t, e]) => {
-                        Ty::result_e(self.resolve_type(t, span), self.resolve_type(e, span))
-                    }
-                    ("Option", [inner]) => Ty::option(self.resolve_type(inner, span)),
                     // `Iterator[T]` as a *value* type — the result of calling a generator function.
                     // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
                     // type `iter_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it —
@@ -2293,9 +2288,10 @@ impl Checker {
                         let key = self.bare_key(n);
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
+                        let resolved = self.carrier_default_args(&key, resolved);
                         let tps = self.enum_type_params.get(&key).cloned();
                         self.check_type_arity_and_bounds(n, tps, &resolved, span);
-                        Ty::Enum(key, resolved)
+                        Ty::enum_ty(key, resolved)
                     }
                     // A parameterized protocol used as a value type (`Container[int]`): resolve the
                     // args, arity-check against the protocol's own type params, and carry them on the
@@ -2343,7 +2339,7 @@ impl Checker {
                                 self.check_type_arity_and_bounds(n, tps, &targs, span);
                                 match th.kind {
                                     TypeHeadKind::Struct => Ty::Struct(th.key, targs),
-                                    TypeHeadKind::Enum => Ty::Enum(th.key, targs),
+                                    TypeHeadKind::Enum => Ty::enum_ty(th.key, targs),
                                     TypeHeadKind::Protocol => Ty::Unknown,
                                 }
                             }
@@ -2426,7 +2422,7 @@ impl Checker {
                             ),
                         );
                     }
-                    Ty::Enum(self.type_key(&mid, name), resolved)
+                    Ty::enum_ty(self.type_key(&mid, name), resolved)
                 } else if let Some(asig) = sig.type_aliases.get(name) {
                     // Pre-resolved in the exporting module by the read-only resolver (no gate) — re-gate
                     // a static-ctor protocol out of value position (`import a; c: a.Foo`).
@@ -3177,7 +3173,7 @@ impl Checker {
                         {
                             let fty = Ty::Func {
                                 params: vi.payload,
-                                ret: Box::new(Ty::Enum(vi.enum_name, targs_disp.clone())),
+                                ret: Box::new(Ty::enum_ty(vi.enum_name, targs_disp.clone())),
                                 labels: crate::checker::FnLabels::default(),
                             };
                             self.hover_record_at(v.name_span, &fty, HoverKind::Func, None);
@@ -5893,46 +5889,15 @@ impl Checker {
     /// ok then trapped at runtime). See `reconstruct_unknown_kind`.
     pub(super) fn match_kind(&mut self, scrutinee: &Expr, patterns: &[&Pattern]) -> MatchKind {
         let sty = self.infer(scrutinee);
+        // Every enum type, carrier or user, reads its variants from the one table reader.
+        if let Some((name, _)) = sty.as_enum() {
+            return MatchKind::Variants {
+                label: name.to_string(),
+                variants: self.variants_of(&sty).unwrap_or_default(),
+                scrut: sty.clone(),
+            };
+        }
         match &sty {
-            Ty::Enum(name, targs) => {
-                let map = self.enum_param_map(name, targs);
-                let variants = self
-                    .enums
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|v| {
-                        let payload = self.variants[&(name.clone(), v.clone())]
-                            .payload
-                            .iter()
-                            .map(|p| subst(p, &map))
-                            .collect();
-                        (v, payload)
-                    })
-                    .collect();
-                MatchKind::Variants {
-                    label: name.clone(),
-                    variants,
-                    scrut: sty.clone(),
-                }
-            }
-            Ty::Result(ok, err) => MatchKind::Variants {
-                label: "Result".into(),
-                variants: HashMap::from([
-                    ("Ok".into(), vec![(**ok).clone()]),
-                    ("Err".into(), vec![(**err).clone()]),
-                ]),
-                scrut: sty.clone(),
-            },
-            Ty::Option(inner) => MatchKind::Variants {
-                label: "Option".into(),
-                variants: HashMap::from([
-                    ("Some".into(), vec![(**inner).clone()]),
-                    ("None".into(), vec![]),
-                ]),
-                scrut: sty.clone(),
-            },
             // int/str/bool scrutinees match against literal patterns (+ a `_` wildcard).
             Ty::Int => MatchKind::Literal(Ty::Int),
             Ty::Str => MatchKind::Literal(Ty::Str),
@@ -6062,36 +6027,34 @@ impl Checker {
             .unwrap_or_default()
     }
 
-    /// The variant→payload map for an enum/Option/Result type, else `None`. Shared by `match_kind`
-    /// and the nested-pattern checker (gap #15) so they agree on what counts as a variant.
-    pub(super) fn variants_of(&self, ty: &Ty) -> Option<HashMap<String, Vec<Ty>>> {
-        match ty {
-            Ty::Enum(name, targs) => {
-                let map = self.enum_param_map(name, targs);
-                let vs = self.enums.get(name)?;
-                Some(
-                    vs.iter()
-                        .map(|v| {
-                            let payload = self.variants[&(name.clone(), v.clone())]
-                                .payload
-                                .iter()
-                                .map(|p| subst(p, &map))
-                                .collect();
-                            (v.clone(), payload)
-                        })
-                        .collect(),
-                )
-            }
-            Ty::Result(ok, err) => Some(HashMap::from([
-                ("Ok".into(), vec![(**ok).clone()]),
-                ("Err".into(), vec![(**err).clone()]),
-            ])),
-            Ty::Option(inner) => Some(HashMap::from([
-                ("Some".into(), vec![(**inner).clone()]),
-                ("None".into(), vec![]),
-            ])),
-            _ => None,
+    /// The one type-parameter default an enum has (a named interim, TICKET-228 D2): `Result[T]` in
+    /// TYPE position means `Result[T, Error]`. Every other enum, and every other arity, is unchanged.
+    pub(super) fn carrier_default_args(&self, key: &str, mut args: Vec<Ty>) -> Vec<Ty> {
+        if key == "Result" && args.len() == 1 {
+            args.push(Ty::error_proto());
         }
+        args
+    }
+
+    /// The variant→payload map for an enum type (carrier or user, read through `Ty::as_enum`),
+    /// else `None`. The one reader of the variant tables: `match_kind` and the nested-pattern
+    /// checker (gap #15) both call it.
+    pub(super) fn variants_of(&self, ty: &Ty) -> Option<HashMap<String, Vec<Ty>>> {
+        let (name, targs) = ty.as_enum()?;
+        let map = self.enum_param_map(name, &targs);
+        let vs = self.enums.get(name)?;
+        Some(
+            vs.iter()
+                .map(|v| {
+                    let payload = self.variants[&(name.to_string(), v.clone())]
+                        .payload
+                        .iter()
+                        .map(|p| subst(p, &map))
+                        .collect();
+                    (v.clone(), payload)
+                })
+                .collect(),
+        )
     }
 
     /// The INSTANTIATED positional field types of a USER struct (`Ty::Struct`) — the shape a struct

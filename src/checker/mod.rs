@@ -48,11 +48,15 @@ pub struct ExternCSig {
 /// module's scope, collision-proof by construction. Produced by [`resolve_extern_signatures`].
 pub type ExternTable = HashMap<(usize, String), ExternCSig>;
 
-/// The harvested SHAPE of a `native enum` (phase 5b): its variant map (variant name → resolved payload
-/// types, with the enum's type params left as `Ty::Param`) plus any leading-`self`-stripped method
-/// table. Produced by [`Checker::harvest_native_enum_table`] purely as the drift-guard mirror for the
-/// reserved `Option`/`Result` shapes — never a runtime-consumed table.
-type NativeEnumShape = (HashMap<String, Vec<Ty>>, HashMap<String, FnSig>);
+/// One `native enum` of the prelude (`Option[T]`, `Result[T, E]`) as harvested by
+/// [`Checker::harvest_native_enums`]: the data [`Checker::seed_carrier_enums`] registers in the
+/// ordinary enum tables of every module.
+pub(super) struct NativeEnumSeed {
+    name: String,
+    type_params: Vec<TyParam>,
+    /// `(variant, payload)` in declaration order.
+    variants: Vec<(String, Vec<Ty>)>,
+}
 
 /// What a `match` scrutinee is being matched against, threaded through the match-checking helpers.
 enum MatchKind {
@@ -1462,6 +1466,10 @@ impl Checker {
     /// signatures into `self.extern_sigs`.
     fn run_graph_pass(&mut self, graph: &ModuleGraph, harvest_externs: bool) {
         let c = self;
+        #[cfg(test)]
+        if !graph.modules.iter().any(|m| m.dotted == ["std", "prelude"]) {
+            c.seed_carriers_without_prelude();
+        }
         // Every file's index is known before any body is checked.
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of_file.insert(lm.file, idx);
@@ -1740,6 +1748,12 @@ impl Checker {
             } else {
                 Some(lm.label())
             };
+            // The prelude is graph module 0. Harvest its carrier enums before its own
+            // `begin_module`, so `seed_stdlib_structs` registers them for every module, the
+            // prelude included.
+            if c.carrier_seeds.is_empty() && lm.dotted == ["std", "prelude"] {
+                c.carrier_seeds = c.harvest_native_enums(&lm.ast);
+            }
             c.begin_module(label);
             // Stamp the current module's graph index so the extern loop keys its resolved C signatures
             // the SAME way both backends look them up. `None` outside the harvesting pass.
@@ -1768,16 +1782,7 @@ impl Checker {
                     }
                 }
             }
-            // Phase 5b-native-enum — DRIFT GUARD (assert-only, resolution-inert). Option/Result's variant
-            // SHAPE is now ALSO declared in `std/prelude.chz` as `native enum Option[T]`/`Result[T, E]`,
-            // but their identity, `?` propagation, match exhaustiveness, and `Ok`/`Err`/`Some`/`None`
-            // construction stay 100% Rust-inline (`variants_of`/`match_kind`/`resolve_type`, untouched).
-            // The `.chz` decl is a checked source-of-truth MIRROR: assert the parsed+resolved variant set
-            // byte-equals the inline `variants_of` maps so the two can't drift. Runs on the always-linked
-            // prelude module; keeps `harvest_native_enum_table` production-live (no dead_code) AND is
-            // assert-only (no effect on resolution/output), so behavior + output are unchanged.
             if lm.dotted == ["std", "prelude"] {
-                c.assert_native_enum_shape_matches(&lm.ast);
                 // Phase 5c-protocols — DRIFT GUARD (assert-only, resolution-inert). All 18 reserved
                 // protocols (`Any`, Comparable/Stringable/Error/Hashable, the operator protocols, the
                 // `Arithmetic` bundle, `Iterator`, `Iterable`, `Index`/`IndexSet`/`Slice`, `Convert`) are now ALSO declared in
@@ -2583,6 +2588,9 @@ struct Checker {
     /// import-gated seeds, these are UNIVERSE (always in scope) — no licensing set gates them. Empty until
     /// harvested.
     container_seeds: HashMap<String, StructInfo>,
+    /// The prelude's `native enum` decls, registered as ordinary enums in every module by
+    /// `seed_carrier_enums`. Harvested before the prelude itself is checked.
+    carrier_seeds: Vec<NativeEnumSeed>,
     /// The signatures of the eight migrated universe builtins (`ord`/`chr`/`panic`/`int`/`float`/
     /// `str`/`bytes`/`bytearray`), harvested from the always-linked `std/prelude.chz`'s `native
     /// fn`/`native ctor` decls (phase 3a). This REPLACES the hand-built `sig_ord`/… Rust functions —
