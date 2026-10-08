@@ -153,12 +153,22 @@ fn probe_leave() {}
 #[derive(Debug)]
 pub(super) struct Slot {
     ticket: std::sync::atomic::AtomicU64,
+    /// TICKET-230 - is this slot in its sched's `gated_idle` list, so a waker may reserve a ticket
+    /// for it? Written only under that list's lock, read by its own thread.
+    listed: std::sync::atomic::AtomicBool,
 }
 impl Slot {
     const fn new() -> Self {
         Slot {
             ticket: std::sync::atomic::AtomicU64::new(0),
+            listed: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+    pub(super) fn is_listed(&self) -> bool {
+        self.listed.load(Ordering::Relaxed)
+    }
+    pub(super) fn set_listed(&self, on: bool) {
+        self.listed.store(on, Ordering::Relaxed);
     }
 }
 /// Withdraws a reserved ticket nobody will take when its thread exits.
@@ -200,6 +210,15 @@ pub(super) fn cancel(slot: &Slot) {
 /// Has a waker queued this thread for the permit?
 pub(super) fn reserved() -> bool {
     with_slot(|s| s.ticket.load(Ordering::Relaxed) != 0)
+}
+/// TICKET-230 - may a waker reserve a ticket for this thread (is its slot listed as idle)?
+pub(super) fn listed() -> bool {
+    with_slot(|s| s.is_listed())
+}
+/// TICKET-230 - fewer than two permits are free besides this thread's own (see
+/// [`WidthGate::tight`]).
+pub(super) fn tight() -> bool {
+    RUNNERS.tight(usize::from(holds()))
 }
 /// TICKET-230 — no permit is free beyond the queued tickets.
 pub(super) fn full() -> bool {
@@ -244,6 +263,14 @@ impl WidthGate {
     /// How many threads are queued for a permit (lock-free; a hint for the preemption safepoint).
     pub(super) fn waiting(&self) -> usize {
         self.waiting.load(Ordering::Relaxed)
+    }
+
+    /// TICKET-230 - fewer than two permits are free, not counting the caller's `own` permit: one
+    /// for the waker, one for the wakee. Only then can a wake find the gate full, so only then
+    /// must a waker be able to queue this thread. At cap 1 it is always true.
+    fn tight(&self, own: usize) -> bool {
+        self.held.load(Ordering::SeqCst) - own + self.waiting.load(Ordering::SeqCst) + 2
+            > (self.cap)()
     }
 
     /// Take a permit if one is free beyond the first `ahead` queued tickets.
@@ -483,6 +510,22 @@ mod tests {
         h.join().expect("acquirer panicked");
         g.release();
         assert_eq!(g.waiting(), 0);
+    }
+
+    /// TICKET-230: an idle worker is listed for a waker's ticket only when fewer than two permits
+    /// are free besides its own.
+    #[test]
+    fn a_gate_is_tight_with_fewer_than_two_free_permits() {
+        let g = WidthGate::new(|| 3);
+        assert!(!g.tight(0));
+        g.acquire();
+        assert!(!g.tight(0));
+        g.acquire();
+        assert!(g.tight(0));
+        assert!(!g.tight(1));
+        g.release();
+        g.release();
+        assert!(WidthGate::new(|| 1).tight(0));
     }
 
     /// TICKET-230: a waker queues the wakee only when no permit is free beyond the queued tickets.

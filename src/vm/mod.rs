@@ -3311,10 +3311,12 @@ impl MnSched {
     /// that the old broadcast would have reached.
     /// TICKET-205 — list a worker's slot as idle (once).
     pub(super) fn idle_register(&self, slot: &Arc<width::Slot>) {
-        let mut g = self.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
-        if !g.iter().any(|s| Arc::ptr_eq(s, slot)) {
-            g.push(Arc::clone(slot));
+        if slot.is_listed() {
+            return;
         }
+        let mut g = self.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
+        g.push(Arc::clone(slot));
+        slot.set_listed(true);
     }
 
     /// TICKET-205 — the spawner of a gated worker lists the child's slot, and queues it for the
@@ -3322,6 +3324,7 @@ impl MnSched {
     pub(super) fn idle_register_child(&self, slot: &Arc<width::Slot>) {
         let mut g = self.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
         g.push(Arc::clone(slot));
+        slot.set_listed(true);
         if self.runnable.load(Ordering::Relaxed) > 0 {
             width::reserve(slot);
         }
@@ -3329,10 +3332,10 @@ impl MnSched {
 
     /// TICKET-205 — drop a slot whose thread the OS refused, with any ticket reserved for it.
     pub(super) fn idle_forget(&self, slot: &Arc<width::Slot>) {
-        self.gated_idle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|s| !Arc::ptr_eq(s, slot));
+        let mut g = self.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|s| !Arc::ptr_eq(s, slot));
+        slot.set_listed(false);
+        drop(g);
         width::cancel(slot);
     }
 
@@ -3895,12 +3898,14 @@ impl MnSched {
         struct IdleReg<'a>(&'a MnSched);
         impl Drop for IdleReg<'_> {
             fn drop(&mut self) {
+                if !width::listed() {
+                    return;
+                }
                 let me = width::my_slot();
-                self.0
-                    .gated_idle
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retain(|s| !Arc::ptr_eq(s, &me));
+                let mut g = self.0.gated_idle.lock().unwrap_or_else(|e| e.into_inner());
+                g.retain(|s| !Arc::ptr_eq(s, &me));
+                me.set_listed(false);
+                drop(g);
                 width::cancel(&me);
             }
         }
@@ -4032,7 +4037,14 @@ impl MnSched {
             // The owner stops only when its whole FAMILY — the origin scope plus any TICKET-103
             // continuation scopes sharing its cancel token — is done, not the origin alone
             // (`SchedCore::owner_scope_done`, TICKET-128/W13-25).
-            self.idle_register(&width::my_slot());
+            // TICKET-230 - a waker reserves a ticket only for a listed slot and only when the gate
+            // is full. With two or more permits free the woken worker takes one itself, and
+            // listing every idle worker cost `send_one_channel` T=0 about 3% (one `gated_idle`
+            // lock pair and one timer per idle wait). The read comes before the release so a
+            // cap-1 worker always lists (seeded T=1 replay unchanged).
+            if width::tight() {
+                self.idle_register(&width::my_slot());
+            }
             width::release();
             // TICKET-208 — an Executor holds no thread while it is idle: its runner leaves here and
             // gives its wid back under this lock, so `submit` starts a new one.
@@ -4252,10 +4264,16 @@ impl MnSched {
                 // a bare `cv.notify_all()`/`notify_one()` would miss it.
                 // TICKET-205 — a waker reserves this thread's permit ticket WITHOUT `c`, so a ticket
                 // can land between the checks above and this wait, and the waker's `idle_sleepers`
-                // read can miss it. A sleeper therefore never sleeps untimed: asleep with a ticket at
-                // the head of the queue it would block every other thread (TICKET-230: every worker
-                // is gated, so no idle worker sleeps untimed).
-                if !width::reserved() {
+                // read can miss it. A LISTED sleeper therefore never sleeps untimed: a ticket can land
+                // without `c`. TICKET-230 - an unlisted sleeper can receive no ticket, so it sleeps
+                // untimed on `idle_cv` as before TICKET-230, and every wake reaches it through
+                // `notify_waiters` or `recruit`.
+                if !width::listed() {
+                    self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
+                    let guard = self.idle_cv.wait(c).unwrap_or_else(|e| e.into_inner());
+                    self.idle_sleepers.fetch_sub(1, Ordering::Relaxed);
+                    drop(guard);
+                } else if !width::reserved() {
                     self.idle_sleepers.fetch_add(1, Ordering::Relaxed);
                     let (guard, _) = self
                         .idle_cv

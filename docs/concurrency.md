@@ -1467,9 +1467,11 @@ kind of party:
   a seeded-only gate, queue or park path. A direct guard hand-off (the releaser gives the guard to
   the first queued waiter) is ruled out: every contended update then costs one thread switch
   (`tests/shared_update_contention.rs` one-box source at T=1: 225 ms against 29 ms).
-- **An idle worker never sleeps untimed**: a ticket can land just before its sleep, and a ticket
-  nobody takes blocks every gated thread. Its sleep is bounded by one `DEMOTE_POLL_BACKOFF` tick.
-  Since TICKET-230 every worker is gated, so no idle worker sleeps untimed.
+- **A listed idle worker never sleeps untimed**: a waker can reserve a ticket for a listed worker
+  just before its sleep, and a ticket nobody takes holds a permit back. Its sleep is bounded by
+  one `DEMOTE_POLL_BACKOFF` tick. A worker is listed only when fewer than two permits are free
+  besides its own (`width::tight()`, TICKET-230; always true at `--threads=1`). An unlisted worker
+  can receive no ticket, so it sleeps untimed on `idle_cv`.
 - **A runner thread parks in `runner_cache` holding no permit and no ticket**, so gated threads are
   reused across nurseries like ungated ones were (TICKET-230).
 - **Cost.** A hand-over has no CPU cost of its own, but a serialized `--threads=1` run of two CPU
