@@ -156,10 +156,21 @@ const GATE_FILE: &str = "no_wall_clock_ratio_gates.rs";
 /// (TICKET-049's own escape hatch: "A future timing test that genuinely needs a division must change
 /// this test and say why in the same commit"). Matched by the expression's TEXT, not a line number, so
 /// the entry survives an edit above it and breaks if the expression itself changes.
-const NON_WALL_CLOCK_DURATION_RATIOS: [(&str, &str); 1] = [(
-    "tests/chezzi_threads_sys_time.rs",
-    "let ratio = sys.as_secs_f64() / user.as_secs_f64();",
-)];
+///
+/// `tests/runner_budget_process_wide.rs`'s `cpu / wall.as_secs_f64()` (TICKET-230) divides ONE child
+/// run's CPU time (user + sys from its `wait4` rusage) by that same run's wall time. That is a cores
+/// measurement of one run, not a ratio of two wall-clock samples: a busy box can only lower it, so
+/// load cannot turn the `<= bound` assertion red (DEC-059).
+const NON_WALL_CLOCK_DURATION_RATIOS: [(&str, &str); 2] = [
+    (
+        "tests/chezzi_threads_sys_time.rs",
+        "let ratio = sys.as_secs_f64() / user.as_secs_f64();",
+    ),
+    (
+        "tests/runner_budget_process_wide.rs",
+        "let cores_used = cpu / wall.as_secs_f64();",
+    ),
+];
 
 /// Every `path:line: text` under `src/` and `tests/` that divides two `Duration`-shaped wall-clock
 /// samples -- the RUST half of TICKET-049's ratio ban (the original scanned only `tests/chz`).
