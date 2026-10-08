@@ -1460,6 +1460,12 @@ kind of party:
   or its fiber yielded (DEC-206); the `OwnTurn` guard withdraws a turn the loop exits without
   taking. A callback thread does the same in `Vm::slice_end_in_place`, where the acquire that
   follows always takes the ticket.
+- **A preempted fiber keeps its worker when nothing else is runnable (TICKET-230).** At a slice end
+  with `runnable == 0`, an unseeded worker that holds its permit and is not demoted runs the same
+  fiber again on a fresh slice instead of pushing it to `global`. Go gives a P with empty queues
+  its preempted goroutine back. Queueing it let an idle worker take it and run it on a CPU that was
+  idle (`primes_parallel` at the default count: 1.36x wall). When another fiber is runnable the
+  fiber still yields to `global`. Seeded mode keeps its replayed yield order.
 - **Seeded replay is exact only where that is free (owner decision 2026-10-05).** The seed is a
   fuzzer first. A nursery join in place, a `Shared` guard wait, an `Executor` join and job start,
   and a `recv` or `wait:` inside a native callback replay at a measured rate (`docs/gaps.md`
