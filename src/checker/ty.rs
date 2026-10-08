@@ -880,8 +880,12 @@ impl Ty {
             Ty::Map(k, v) => write!(f, "Map[{}, {}]", Named(k, names), Named(v, names)),
             Ty::Set(t) => write!(f, "Set[{}]", Named(t, names)),
             // The sugar: `T!` when the error is the default `Error` or unconstrained, else `T!E`.
+            // A fallible call with no value prints the prefix form the parser reads: `!E`, `!`.
             Ty::Result(t, e) => {
-                write!(f, "{}!", Operand(t, names))?;
+                if **t != Ty::Nil {
+                    write!(f, "{}", Operand(t, names))?;
+                }
+                write!(f, "!")?;
                 if has_explicit_error(e) {
                     write!(f, "{}", Named(e, names))?;
                 }

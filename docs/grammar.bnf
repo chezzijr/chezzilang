@@ -482,6 +482,8 @@
              | "FN" "LPAREN" <fnParamList> "RPAREN" "ARROW" <type>
              | "LPAREN" <typeList> "RPAREN"
              | <type> "QUESTION" | <type> "QUESTIONQUESTION" | <type> "BANG" | <type> "BANG" <type>
+             # Prefix `!E` is `None!E`, a bare `!` is `None!`: a fallible call with no value.
+             | "BANG" | "BANG" <type>
 <typeList> ::= <type> | <type> "COMMA" <typeList>
 # A `fn(...)` TYPE parameter may carry an OPTIONAL Swift-style LABEL (`IDENT ":"`) before its type
 # (`fn(name: str, greeting: str) -> None`), enabling keyword arguments through a function VALUE

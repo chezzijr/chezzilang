@@ -650,7 +650,9 @@ what each call head means and the backend reads that record, so the local wins a
 | `Result[T, E]` | `Ok(x)` / `Ok()` / `Err(e)` | §9; shorthand `T!E`, or `T!` (E = `Error`); `Ok()` (zero-arg) is `Result[None, E]`'s success value |
 | `Option[T]` | `Some(x)` / `None` | §9; shorthand `T?` |
 
-Diagnostics print a type in this shorthand: `int?`, `str!IoErr`, `int!` (E = `Error`), `None!E`.
+Diagnostics print a type in this shorthand: `int?`, `str!IoErr`, `int!` (E = `Error`), `!E`.
+The prefix type `!E` is `None!E` (and a bare `!` is `None!`): a fallible call with no value, as in
+`fn save(p: str) -> !IoErr`. Both spellings are one type.
 
 > **Naming.** The three builtin containers spell their type **and** constructor in PascalCase —
 > `List`/`Map`/`Set` (e.g. `List[int]`, `Set(xs)`). The lowercase `list`/`map`/`set` are no longer

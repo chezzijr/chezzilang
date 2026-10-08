@@ -2544,6 +2544,15 @@ impl Parser {
             ty = self.parse_type_postfix(ty)?;
             return Ok(ty);
         }
+        // Prefix `!E` (and a bare `!`): `None!E`, the type of a fallible call with no value. The
+        // `!` is left for `parse_type_postfix`, so both spellings are one production.
+        if self.check(&Token::Bang) {
+            let ty = Type::Named {
+                name: "None".to_string(),
+                span: self.cur_span(),
+            };
+            return self.parse_type_postfix(ty);
+        }
         let name_span = self.cur_span();
         let name = self.expect_ident()?;
         // A module-qualified type `module.Type` (mirrors how `module.func()` is reached): after the

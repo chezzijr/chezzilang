@@ -22062,7 +22062,7 @@ fn ok_zero_arg_is_result_nil() {
     );
     rejects(
         "fn f() -> Result[int, str]:\n    return Ok()\nfn main():\n    pass\nmain()\n",
-        "expected return type int!str, found None!",
+        "expected return type int!str, found !",
     );
 }
 
@@ -38225,7 +38225,7 @@ mod ticket_231_none_word {
             ("Option[int]", "int?"),
             ("Result[int, str]", "int!str"),
             ("Result[int]", "int!"),
-            ("Result[None, str]", "None!str"),
+            ("Result[None, str]", "!str"),
             ("List[Option[int]]", "List[int?]"),
             ("Map[str, Result[int, str]]", "Map[str, int!str]"),
             ("Option[Option[int]]", "int??"),
@@ -38546,4 +38546,44 @@ fn carrier_messages_name_no_removed_spelling() {
             .contains("variant 'Color.Red' cannot match a value of type int?")),
         "{errs:?}"
     );
+}
+
+/// TICKET-228 — the prefix type `!E` is `None!E` (and `!` is `None!`): one type in every
+/// position, printed in the short form.
+#[test]
+fn prefix_error_type_grid() {
+    for (short, long) in [("!str", "None!str"), ("!", "None!")] {
+        // One value flows between the two spellings in each position: equal types, no error.
+        let positions = [
+            format!("fn a() -> {short}:\n    return\nfn b() -> {long}:\n    return a()\n"),
+            format!("fn a() -> {long}:\n    return\nfn b() -> {short}:\n    return a()\n"),
+            format!("fn a(x: {short}):\n    print(1)\nfn b(y: {long}):\n    a(y)\n"),
+            format!("fn a(x: List[{short}]):\n    print(1)\nfn b(y: List[{long}]):\n    a(y)\n"),
+            format!(
+                "fn a(f: fn() -> {short}):\n    print(1)\nfn b(g: fn() -> {long}):\n    a(g)\n"
+            ),
+            format!(
+                "type R = {short}\nfn a() -> R:\n    return\nfn b() -> {long}:\n    return a()\n"
+            ),
+        ];
+        for src in &positions {
+            ok(src);
+        }
+        // A mismatch prints the short form, whichever spelling the source used.
+        for spelled in [short, long] {
+            let src = format!(
+                "fn a() -> {spelled}:\n    return\nfn main():\n    x: int = a()\n    print(x)\n"
+            );
+            let errs = check_src(&src);
+            assert!(
+                errs.iter()
+                    .any(|e| e.message.contains(&format!("cannot assign {short} to"))),
+                "{spelled}: {errs:?}"
+            );
+            assert!(
+                !errs.iter().any(|e| e.message.contains("None!")),
+                "{spelled}: {errs:?}"
+            );
+        }
+    }
 }
