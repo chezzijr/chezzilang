@@ -654,7 +654,7 @@ type BX = Bx[int]
         ("mod", "lib.g[int]", "6", "{}", "6"),
         ("alias_mod", "L.g[int]", "6", "{}", "6"),
         ("full", "a.b.g[int]", "7", "{}", "7"),
-        ("json", "json.decode[int]", "'3'", "{}", "Ok(3)"),
+        ("json", "json.decode[int]", "'3'", "{}", "3"),
         ("abs", "math.abs[int]", "-6", "{}", "6"),
         ("make", "Bx[int].make", "6", "{}.v", "6"),
         ("get", "Bx[int].get", "Bx[int](v=6)", "{}", "6"),

@@ -422,13 +422,13 @@ fn ok(e: Expect, g: &Got) -> bool {
         }
         Expect::Deadlock => g.code != 0 && err.contains("deadlock"),
         Expect::ShutdownSurvives => {
-            g.code == 0 && out.contains("Err('boom')") && out.contains("job done? Some(1)")
+            g.code == 0 && out.contains("!boom") && out.contains("job done? 1")
         }
         Expect::ShutdownStuckFatal => {
             g.code != 0
                 && err.contains("boom")
                 && !err.contains("deadlock")
-                && !out.contains("Err('boom')")
+                && !out.contains("!boom")
                 && !out.contains("job done?")
         }
         Expect::TimedOut => out.contains("TIMED-OUT cell") && out.contains("1 timed out"),

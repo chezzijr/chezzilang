@@ -239,9 +239,5 @@ fn std_native_fault_on_main_headline_and_caught_origin_agree() {
     );
     let (stdout, stderr, ok) = run(&t.0, &["run", "caught.chz"]);
     assert!(ok, "the recovered program must succeed, got:\n{stderr}");
-    assert_eq!(
-        stdout.trim(),
-        "Some('caught.chz') Some(5) Some(15)",
-        "caught origin"
-    );
+    assert_eq!(stdout.trim(), "caught.chz 5 15", "caught origin");
 }

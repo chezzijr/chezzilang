@@ -89,7 +89,7 @@ fn kinds() -> Vec<Kind> {
             "s" => |v| format!("s:{v}"),
             "m" => |v| format!("m:{v}"),
             "c" => |v| format!("c:{v}"),
-            "opt" => |v| format!("Some('m:{v}')"),
+            "opt" => |v| format!("m:{v}"),
             _ => |v| v.to_string(),
         }
     }

@@ -471,7 +471,7 @@ fn fixed_nested_nursery_shapes_complete_at_every_worker_count() {
             (
                 "try_fed",
                 TRY_FED,
-                Expect::Exact(&["g got 7", "g -> Err('bail')", "done"]),
+                Expect::Exact(&["g got 7", "g -> !bail", "done"]),
             ),
             (
                 "late_feed",

@@ -185,7 +185,7 @@ fn sibling_fault_cancels_a_spinning_update_at_one_worker() {
         status.success(),
         "expected rc=0, got {status} (stdout: {stdout})"
     );
-    assert_eq!(stdout, "Err('sib') 0\n");
+    assert_eq!(stdout, "!sib 0\n");
 }
 
 #[test]

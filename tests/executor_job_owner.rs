@@ -49,7 +49,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-const CANCELLED: &str = "Err('task cancelled: shutdown_now() stopped it before it finished')";
+const CANCELLED: &str = "!task cancelled: shutdown_now() stopped it before it finished";
 
 /// One finished run. `code` is `None` when the harness killed the child at ten seconds.
 struct Got {
@@ -386,7 +386,7 @@ fn check(p: Party, h: Handle, s: State, e: Event, g: &Got) -> Option<String> {
     if dropped_held && g.started {
         return Some("a held job started".into());
     }
-    let ok_or_cancel = |l: &str| l == "got Ok(7)" || l == format!("got {CANCELLED}");
+    let ok_or_cancel = |l: &str| l == "got 7" || l == format!("got {CANCELLED}");
     match e {
         Event::OwnExit | Event::ForeignExit => {
             if g.code != Some(17) {
@@ -408,7 +408,7 @@ fn check(p: Party, h: Handle, s: State, e: Event, g: &Got) -> Option<String> {
                     return Some("the held handle did not settle cancelled".into());
                 }
                 if !ok_or_cancel(gots[0]) {
-                    return Some("the got line is neither Ok(7) nor cancelled".into());
+                    return Some("the got line is neither 7 nor cancelled".into());
                 }
                 if h == Handle::SubmitTask && !g.out.contains("done true") {
                     return Some("no `done true`".into());
@@ -417,8 +417,11 @@ fn check(p: Party, h: Handle, s: State, e: Event, g: &Got) -> Option<String> {
         }
         Event::HandleFault => {
             if handle {
-                if !gots.iter().any(|l| l.contains("Err(") && l.contains("bad")) {
-                    return Some("no `got Err(...bad...)` line".into());
+                if !gots
+                    .iter()
+                    .any(|l| l.starts_with("got !") && l.contains("bad"))
+                {
+                    return Some("no `got !...bad...` line".into());
                 }
                 if !m_end {
                     return Some("no `M end`".into());
@@ -431,8 +434,8 @@ fn check(p: Party, h: Handle, s: State, e: Event, g: &Got) -> Option<String> {
             if g.code != Some(0) || !g.out.contains("T end") || !m_end {
                 return Some("shutdown did not run the job to its end".into());
             }
-            if handle && !gots.iter().all(|l| *l == "got Ok(7)") {
-                return Some("a handle did not read Ok(7)".into());
+            if handle && !gots.iter().all(|l| *l == "got 7") {
+                return Some("a handle did not read 7".into());
             }
         }
         Event::ShutdownNow => {
@@ -441,7 +444,7 @@ fn check(p: Party, h: Handle, s: State, e: Event, g: &Got) -> Option<String> {
             }
             if handle {
                 if gots.len() != 1 || !ok_or_cancel(gots[0]) {
-                    return Some("want exactly one Ok(7) or cancelled got line".into());
+                    return Some("want exactly one 7 or cancelled got line".into());
                 }
                 if h == Handle::SubmitTask && !g.out.contains("done true") {
                     return Some("no `done true`".into());
