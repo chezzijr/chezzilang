@@ -2400,7 +2400,7 @@ impl Vm {
         // first party site the verdict named. `None` while main is at a join: the report there is
         // the victims' slots (DEC-208), and the join must stay until they are recorded.
         let (msg, site) = self.quiesce.deadlock_report()?;
-        Some(self.err(msg.to_string(), site).deadlock())
+        Some(self.err(msg, site).deadlock())
     }
 
     /// TICKET-208 — THE predicate "a run-wide halt is pending for this party": an `os.exit` from
@@ -2481,7 +2481,7 @@ impl Vm {
         // sched worker's judge shares. The latched verdict is a run halt, so this party ends through
         // `run_exit_err` with the report of the first registered party's site, whichever judge
         // decided first.
-        if self.block_ctx().judged() && self.quiesce.decide(quiesce::Judge::Party) {
+        if self.block_ctx().judged() && self.quiesce.decide(quiesce::Judge::Party, None) {
             // TICKET-134 — the child can record its fault and complete between the rung above and
             // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
             // child's fault-slot write, so this re-read sees the fault.

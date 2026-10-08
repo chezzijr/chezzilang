@@ -1015,7 +1015,7 @@ impl Vm {
             });
         }
         match (r, dl) {
-            (Ok(()), Some((msg, site))) => Err(self.err(msg.to_string(), site).deadlock()),
+            (Ok(()), Some((msg, site))) => Err(self.err(msg, site).deadlock()),
             (r, _) => r,
         }
     }

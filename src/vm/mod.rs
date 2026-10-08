@@ -4142,7 +4142,7 @@ impl MnSched {
                 drop(c);
                 // TICKET-223 — through the one latch the party judge shares: the verdict is a run
                 // halt BEFORE any victim below is flagged, so a party never runs past it.
-                let verdict = self.quiesce.decide(crate::vm::quiesce::Judge::Sched);
+                let verdict = self.quiesce.decide(crate::vm::quiesce::Judge::Sched, None);
                 c = self.lock();
                 if verdict && self.is_deadlocked_ignoring_jobs(&c) {
                     // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict

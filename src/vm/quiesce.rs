@@ -237,7 +237,7 @@ struct Party {
 #[derive(Default)]
 struct DeadlockCell {
     decided: bool,
-    report: Option<(&'static str, Span)>,
+    report: Option<(String, Span)>,
 }
 
 /// TICKET-223 — which judge asks [`QuiesceState::decide`]: a party at its own poll, or a sched
@@ -484,13 +484,13 @@ impl QuiesceState {
     }
 
     /// TICKET-223 — the latched report's text and site, while a verdict is decided.
-    pub(super) fn deadlock_report(&self) -> Option<(&'static str, Span)> {
+    pub(super) fn deadlock_report(&self) -> Option<(String, Span)> {
         let g = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
-        if g.decided { g.report } else { None }
+        if g.decided { g.report.clone() } else { None }
     }
 
     /// TICKET-223 — take the latched report; the verdict stays decided. ONE caller, `Vm::rank_end`.
-    pub(super) fn take_deadlock_report(&self) -> Option<(&'static str, Span)> {
+    pub(super) fn take_deadlock_report(&self) -> Option<(String, Span)> {
         self.deadlock
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -566,7 +566,12 @@ impl QuiesceState {
     ///
     /// Lock order: `parties` (P), then the verdict's own walk, then the `deadlock` cell alone. The
     /// cell is never held across the walk, because `run_halt` reads it under a `SchedCore` lock.
-    pub(super) fn decide(&self, judge: Judge) -> bool {
+    ///
+    /// TICKET-232 — `own` is the report of a sched that judges its own deadlock
+    /// (`MnSched::latch_own_verdict`). It replaces the party's text and site in the latch, so the
+    /// latched report equals the fault that sched writes into its victims' slots: a party dies
+    /// with either, whichever it reads first (DEC-063). It never stands in for a missing site.
+    pub(super) fn decide(&self, judge: Judge, own: Option<(&str, Span)>) -> bool {
         let parties = self.parties.lock().unwrap_or_else(|e| e.into_inner());
         if self
             .deadlock
@@ -582,7 +587,10 @@ impl QuiesceState {
         }
         let mut cell = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
         cell.decided = site.is_some();
-        cell.report = site;
+        cell.report = site.map(|(m, at)| match own {
+            Some((om, oat)) => (om.to_string(), oat),
+            None => (m.to_string(), at),
+        });
         if site.is_some() {
             self.run_halt_hint.store(true, Ordering::Release);
         }
@@ -720,14 +728,49 @@ mod tests {
             WakeSet::default(),
             Some(("x", crate::ast::Span::default())),
         );
-        assert!(q.decide(Judge::Sched));
+        assert!(q.decide(Judge::Sched, None));
         drop(g);
         assert!(!q.quiesced());
-        assert!(q.decide(Judge::Party));
+        assert!(q.decide(Judge::Party, None));
         assert_eq!(q.run_halt(), RunHalt::Deadlock);
         assert!(q.take_deadlock_report().is_some());
         q.clear_exit();
         assert_eq!(q.run_halt(), RunHalt::Running);
+    }
+
+    /// TICKET-232 — a sched that judges its own deadlock passes its own report, and the latch
+    /// holds that text and site, not the party's: main dies with the child fault or with the
+    /// latched report, whichever it reads first, so the two must be equal (DEC-063).
+    #[test]
+    fn decide_latches_the_judging_scheds_own_report() {
+        let q = Arc::new(QuiesceState::default());
+        let _g = q.block_shared(
+            Arc::new(PartyWait::Send(Pending::new())),
+            WakeSet::default(),
+            Some(("party text", crate::ast::Span::default())),
+        );
+        assert!(q.decide(
+            Judge::Sched,
+            Some(("sched text", crate::ast::Span::RUNTIME))
+        ));
+        assert_eq!(
+            q.take_deadlock_report(),
+            Some(("sched text".to_string(), crate::ast::Span::RUNTIME))
+        );
+    }
+
+    /// TICKET-232 — the judge's own report replaces a party site, it does not stand in for one:
+    /// a verdict that names no party site still latches nothing (DEC-223).
+    #[test]
+    fn decide_with_an_own_report_and_no_party_site_latches_nothing() {
+        let q = Arc::new(QuiesceState::default());
+        let _g = q.block(PartyWait::Send(Pending::new()), WakeSet::default());
+        assert!(q.decide(
+            Judge::Sched,
+            Some(("sched text", crate::ast::Span::RUNTIME))
+        ));
+        assert_eq!(q.run_halt(), RunHalt::Running);
+        assert_eq!(q.take_deadlock_report(), None);
     }
 
     /// TICKET-223 — a verdict that names no party site (main at a join) is answered but not
@@ -736,10 +779,10 @@ mod tests {
     fn decide_without_a_party_site_latches_nothing() {
         let q = Arc::new(QuiesceState::default());
         let g = q.block(PartyWait::Send(Pending::new()), WakeSet::default());
-        assert!(q.decide(Judge::Sched));
+        assert!(q.decide(Judge::Sched, None));
         assert_eq!(q.run_halt(), RunHalt::Running);
         drop(g);
-        assert!(!q.decide(Judge::Sched));
+        assert!(!q.decide(Judge::Sched, None));
     }
 
     /// TICKET-223 — a latched verdict outranks a waiting job fault (it cuts a `defer`, a job fault
@@ -752,7 +795,7 @@ mod tests {
             WakeSet::default(),
             Some(("x", crate::ast::Span::default())),
         );
-        assert!(q.decide(Judge::Party));
+        assert!(q.decide(Judge::Party, None));
         q.request_job_fault(super::super::RuntimeError::default(), Vec::new());
         assert_eq!(q.run_halt(), RunHalt::Deadlock);
         q.request_exit(17);
