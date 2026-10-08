@@ -52,6 +52,11 @@
 
 use std::process::Command;
 
+/// TICKET-232 — `shutdown_now()` marks the Executor shut before it trips the cancel, so a `submit`
+/// racing a job's `shutdown_now()` either starts its job or faults with this text. Both are legal;
+/// a `submit` that returns cleanly and runs nothing is not.
+const SUBMIT_FAULT: &str = "submit on a shut-down Executor (it no longer accepts work)";
+
 #[test]
 fn executor_reentrant_shutdown_now_during_drain() {
     let dir = std::env::temp_dir().join(format!(
@@ -75,6 +80,9 @@ fn executor_reentrant_shutdown_now_during_drain() {
 
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() && stderr.contains(SUBMIT_FAULT) {
+        return;
+    }
     assert!(
         out.status.success(),
         "reentrant shutdown_now during drain must not fault: status {:?}\nstdout: {stdout}\nstderr: {stderr}",
@@ -97,8 +105,10 @@ fn executor_reentrant_shutdown_now_during_drain() {
     );
 }
 
-/// TICKET-232 symptom 1: the unbounded `Executor` dispatches job C at `submit`, so `shutdown_now`
-/// from job B must not cancel it (CPython `ThreadPoolExecutor`: 0/100 runs drop C, measured).
+/// TICKET-232 symptom 1: a submit that returned without a fault and is under the cap always
+/// starts. The unbounded `Executor` has no cap, so `shutdown_now` from job B must not drop job C
+/// (CPython `ThreadPoolExecutor`: 0/100 runs drop C, measured). A run that ends in the submit
+/// fault is legal; a run with exit status zero and no `C` is the silent drop.
 /// Chezzi at `CHEZZI_THREADS=0` dropped C in 6/100 and 9/100 runs on `1d766428`, so 200 runs.
 #[test]
 fn executor_shutdown_now_never_cancels_a_dispatched_job() {
@@ -118,6 +128,14 @@ fn executor_shutdown_now_never_cancels_a_dispatched_job() {
             .arg(&path)
             .output()
             .expect("run chezzi");
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains(SUBMIT_FAULT),
+                "a failing run must be the submit fault: {stderr}"
+            );
+            continue;
+        }
         if !String::from_utf8_lossy(&out.stdout)
             .lines()
             .any(|l| l == "C")

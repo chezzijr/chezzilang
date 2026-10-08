@@ -22610,3 +22610,54 @@ fn sequential_executor_round_trips_reuse_their_runner() {
         "200 sequential round trips started {starts} runner threads: the runner is not reused"
     );
 }
+
+/// TICKET-232 — a cut job's handle is sealed inside `job_event`, under the sched lock. The join
+/// returns on the slot, so a seal written after the unlock leaves a reader on an empty channel
+/// with no counted party: a false deadlock. Fails if the seal moves back out of the transition.
+#[test]
+fn a_cut_job_handle_is_sealed_in_the_lock_hold_that_ends_the_job() {
+    let sched = mk_sched(1);
+    let ch = empty_core();
+    let mut c = sched.lock();
+    c.leaf_site = true;
+    c.exec_active = 1;
+    c.job_settle.insert(
+        0,
+        JobSettle {
+            ch: Arc::clone(&ch),
+            cancel: WireValue::Int(7),
+        },
+    );
+    let _step = c.job_event(
+        JobEvent::Ended {
+            task_index: 0,
+            scope_id: 0,
+            done: false,
+        },
+        RunHalt::Running,
+    );
+    assert!(
+        ch.q.lock().unwrap().is_sealed(),
+        "the handle is unsealed when job_event returns under the sched lock"
+    );
+    drop(c);
+}
+
+/// TICKET-232 — a sched that judges its own deadlock latches the verdict as a run halt BEFORE it
+/// flags a victim. A flagged leaf unwinds and frees what it holds; with no halt latched, a party
+/// waiting on that takes it (a ready wait outranks a halt, DEC-194) and runs on.
+#[test]
+fn the_sched_idle_judge_latches_the_verdict_before_it_flags_a_leaf() {
+    let sched = mk_sched(1);
+    let core = empty_core();
+    sched.seed(vec![mk_fiber(0)]);
+    let f0 = take_run(&sched);
+    sched.park(core_key(&core), Arc::clone(&core), f0);
+    let _party = sched.quiesce.block_shared(
+        Arc::new(quiesce::PartyWait::Send(crate::vm::core::Pending::new())),
+        crate::vm::block::WakeSet::default(),
+        Some(("x", Span::RUNTIME)),
+    );
+    assert!(matches!(sched.take_runnable(0, 1, 0), Take::Stop));
+    assert_eq!(sched.quiesce.run_halt(), RunHalt::Deadlock);
+}
