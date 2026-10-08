@@ -57,7 +57,8 @@ const MAX_ROWS: usize = 512;
 const MAX_DEPTH: usize = 12;
 
 /// Map a matched-on `Ty` to its constructor domain, for a NESTED position (a tuple element or
-/// variant/struct payload slot). Mirrors `match_kind`'s top-level classification.
+/// variant/struct payload slot). An enum slot is built by `Checker::sum_dom`, the one witness
+/// prefix rule, exactly as `exh_new` builds the top-level one.
 fn dom_of_ty(chk: &Checker, ty: &Ty) -> Dom {
     match ty {
         Ty::Tuple(tys) => Dom::Prod(String::new(), tys.clone()),
@@ -66,18 +67,9 @@ fn dom_of_ty(chk: &Checker, ty: &Ty) -> Dom {
             None => Dom::Open,
         },
         Ty::Bool => Dom::Bool,
-        _ => match chk.variants_of(ty) {
-            Some(vmap) => {
-                let prefix = match ty {
-                    Ty::Option(_) | Ty::Result(_, _) => String::new(),
-                    Ty::Enum(name, _) => crate::compiler::bare_display(name),
-                    _ => String::new(),
-                };
-                let mut members: Vec<(String, Vec<Ty>)> = vmap.into_iter().collect();
-                members.sort_by(|a, b| a.0.cmp(&b.0));
-                Dom::Sum(prefix, members)
-            }
-            None => Dom::Open,
+        _ => match (ty.as_enum(), chk.variants_of(ty)) {
+            (Some((key, _)), Some(vmap)) => chk.sum_dom(key, vmap),
+            _ => Dom::Open,
         },
     }
 }
@@ -113,7 +105,8 @@ fn render_wit(w: &Wit) -> String {
 }
 
 impl Checker {
-    /// Start a new pattern matrix for a match over `kind`, if this shape can be modelled. Mirrors
+    /// Start a new pattern matrix for a match over `kind`, if this shape can be modelled. An enum
+    /// scrutinee is built by `sum_dom`, the one witness prefix rule. It follows
     /// `match_kind`'s cases; `Literal`/`Skip` return `None` (see the module-level doc: `bool` is
     /// already closed by `bool_domain_closed`, and `int`/`str` are open domains a matrix can't
     /// close anyway).
@@ -121,16 +114,7 @@ impl Checker {
         let dom = match kind {
             MatchKind::Variants {
                 label, variants, ..
-            } => {
-                let prefix = if label == "Option" || label == "Result" {
-                    String::new()
-                } else {
-                    crate::compiler::bare_display(label)
-                };
-                let mut members: Vec<(String, Vec<Ty>)> = variants.clone().into_iter().collect();
-                members.sort_by(|a, b| a.0.cmp(&b.0));
-                Dom::Sum(prefix, members)
-            }
+            } => self.sum_dom(label, variants.clone()),
             MatchKind::Tuple(tys) => Dom::Prod(String::new(), tys.clone()),
             MatchKind::Struct { label, fields, .. } => Dom::Prod(label.clone(), fields.clone()),
             MatchKind::Literal(_) | MatchKind::Skip => return None,
@@ -142,6 +126,36 @@ impl Checker {
         })
     }
 
+    /// The constructor domain of the enum `key` with the variants `variants`: the ONE place a
+    /// `Dom::Sum` is built, so a top-level and a nested witness share one prefix rule. A witness
+    /// prints a variant bare exactly when the bare spelling is legal here — every variant of the
+    /// enum is bound, under its own name, by an `import V from Enum` (the prelude does that for
+    /// its two carriers) — and `Enum.Variant` otherwise.
+    fn sum_dom(&self, key: &str, variants: HashMap<String, Vec<Ty>>) -> Dom {
+        let all_bare = variants.keys().all(|v| {
+            self.imported_variants
+                .get(v)
+                .is_some_and(|iv| iv.head.key == key && iv.variant == *v)
+        });
+        let prefix = if all_bare {
+            String::new()
+        } else {
+            crate::compiler::bare_display(key)
+        };
+        let mut members: Vec<(String, Vec<Ty>)> = variants.into_iter().collect();
+        members.sort_by(|a, b| a.0.cmp(&b.0));
+        Dom::Sum(prefix, members)
+    }
+
+    /// The variant a bare pattern name spells: the variant an `import V from Enum` binds it to,
+    /// else the name itself.
+    fn bare_variant_name<'a>(&'a self, bare: bool, name: &'a str) -> &'a str {
+        match self.imported_variants.get(name) {
+            Some(iv) if bare => &iv.variant,
+            _ => name,
+        }
+    }
+
     /// Lower one surface pattern into its matrix row(s) — one per or-alternative — against `dom`.
     fn exh_lower(&self, pattern: &Pattern, dom: &Dom, depth: usize) -> Vec<Pat> {
         if depth > MAX_DEPTH {
@@ -151,14 +165,14 @@ impl Checker {
             Pattern::Wildcard => vec![Pat::Wild],
             Pattern::Ident(name, _, _) => {
                 if let Dom::Sum(_, members) = dom
-                    && members.iter().any(|(n, p)| n == name && p.is_empty())
-                    && crate::checker::is_builtin_variant(name)
+                    && let Some(iv) = self.imported_variants.get(name)
+                    && members
+                        .iter()
+                        .any(|(n, p)| *n == iv.variant && p.is_empty())
                 {
-                    return vec![Pat::Ctor(name.clone(), vec![])];
+                    return vec![Pat::Ctor(iv.variant.clone(), vec![])];
                 }
-                if self.variant_owners.contains_key(name)
-                    || crate::checker::is_builtin_variant(name)
-                {
+                if self.variant_owners.contains_key(name) {
                     vec![Pat::Never]
                 } else {
                     vec![Pat::Wild]
@@ -196,16 +210,17 @@ impl Checker {
                         vec![Pat::Never]
                     }
                 }
-                Dom::Sum(_, members) => match members.iter().find(|(n, _)| n == name) {
-                    Some((_, tys)) if tys.len() == bindings.len() => {
-                        self.exh_product(name, bindings, tys, depth)
+                Dom::Sum(_, members) => match members.iter().find(|(n, _)| {
+                    n == self.bare_variant_name(enum_name.is_none() && module_name.is_none(), name)
+                }) {
+                    Some((vname, tys)) if tys.len() == bindings.len() => {
+                        self.exh_product(vname, bindings, tys, depth)
                     }
                     _ => {
                         if enum_name.is_none()
                             && module_name.is_none()
                             && bindings.is_empty()
                             && !self.variant_owners.contains_key(name)
-                            && !crate::checker::is_builtin_variant(name)
                         {
                             vec![Pat::Wild]
                         } else {
@@ -218,7 +233,6 @@ impl Checker {
                         && module_name.is_none()
                         && bindings.is_empty()
                         && !self.variant_owners.contains_key(name)
-                        && !crate::checker::is_builtin_variant(name)
                     {
                         vec![Pat::Wild]
                     } else {

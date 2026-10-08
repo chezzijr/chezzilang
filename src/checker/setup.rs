@@ -210,7 +210,8 @@ impl Checker {
             concurrency_seeds: HashMap::new(),
             time_timer_sig: None,
             container_seeds: HashMap::new(),
-            carrier_seeds: Vec::new(),
+            carrier_seeds: CarrierSeeds::default(),
+            imported_variants: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
             type_keys: HashMap::new(),
             current_module_id: None,
@@ -1145,7 +1146,7 @@ impl Checker {
     /// with the enum's type parameters in scope (`Some(T)` holds `Ty::Param("T")`). These decls ARE
     /// the registered carrier enums: [`Checker::seed_carrier_enums`] puts them into the ordinary
     /// enum tables, and every variant, pattern and exhaustiveness reader answers from there.
-    pub(super) fn harvest_native_enums(&mut self, ast: &crate::ast::Module) -> Vec<NativeEnumSeed> {
+    pub(super) fn harvest_native_enums(&mut self, ast: &crate::ast::Module) -> CarrierSeeds {
         let mut out = Vec::new();
         for s in &ast.stmts {
             if let StmtKind::NativeEnum {
@@ -1176,14 +1177,26 @@ impl Checker {
                 });
             }
         }
-        out
+        CarrierSeeds {
+            enums: out,
+            imports: variant_import_binds(&ast.stmts)
+                .into_iter()
+                .map(|(bind, en, variant, _)| (bind, en, variant))
+                .collect(),
+        }
     }
 
     /// Register the prelude's carrier enums (`carrier_seeds`) in the ordinary enum tables of the
-    /// current module, under their bare names. A carrier declares no method (DEC-064), so its
-    /// method table is empty.
+    /// current module, under their bare names, and bind the variant names the prelude imports
+    /// from them. A carrier declares no method (DEC-064), so its method table is empty.
     pub(super) fn seed_carrier_enums(&mut self) {
-        for seed in &self.carrier_seeds {
+        let seeds = std::mem::take(&mut self.carrier_seeds);
+        self.seed_carrier_enums_from(&seeds);
+        self.carrier_seeds = seeds;
+    }
+
+    fn seed_carrier_enums_from(&mut self, seeds: &CarrierSeeds) {
+        for seed in &seeds.enums {
             let key = seed.name.clone();
             let mut names = Vec::new();
             for (vname, payload) in &seed.variants {
@@ -1195,12 +1208,28 @@ impl Checker {
                         payload: payload.clone(),
                     },
                 );
+                self.variant_owners
+                    .entry(vname.clone())
+                    .or_default()
+                    .push(key.clone());
             }
             self.enums.insert(key.clone(), names);
             self.enum_type_params
                 .insert(key.clone(), seed.type_params.clone());
             self.enum_methods.insert(key.clone(), HashMap::new());
             self.enum_names.insert(key);
+        }
+        for (bind, en, variant) in &seeds.imports {
+            if let Some(head) = self.bare_type_head(en) {
+                self.imported_variants.insert(
+                    bind.clone(),
+                    ImportedVariant {
+                        head,
+                        variant: variant.clone(),
+                        prelude: true,
+                    },
+                );
+            }
         }
     }
 
@@ -1533,6 +1562,7 @@ impl Checker {
         self.enum_names.clear();
         self.aliases.clear();
         self.bare_types.clear();
+        self.imported_variants.clear();
         self.seed_stdlib_structs();
         self.current_ret = Ty::Nil;
         self.in_fn_body = false;
@@ -1577,10 +1607,12 @@ impl Checker {
         for imp in imports {
             self.bind_import(imp);
         }
+        self.note_variant_import_binds(stmts);
         self.reject_import_decl_collisions(stmts);
         self.collect_names(stmts);
         self.collect_docs(stmts);
         self.hoist(stmts);
+        self.bind_variant_imports(stmts);
         self.infer_self_writers(stmts);
         self.infer_fn_writers(stmts);
         // SINGLE-RESOLVER FFI fix: cache every struct declared in THIS module under its identity key,
@@ -1631,13 +1663,19 @@ impl Checker {
         false
     }
 
-    /// A whole-module import bind (`import lib`, `import lib as E`, `import a.b`) and a same-module
-    /// top-level `fn` or type may not share a name, in either source order (Go: `E redeclared in
-    /// this block`). The module-level name registry is `import_binds` (import vs import) plus this
-    /// one check (import vs declaration); the error lands on the later of the two. Without it the
-    /// import and a `fn` would share one runtime global slot, and a type head would have two
-    /// meanings with no source order to choose between them.
+    /// A whole-module import bind (`import lib`, `import lib as E`, `import a.b`) or a variant
+    /// import bind (`import Red from Color`) and a same-module top-level `fn` or type may not
+    /// share a name, in either source order (Go: `E redeclared in this block`; Rust: `use
+    /// Color::Red` + `fn Red` is E0255). The module-level name registry is `import_binds` (import
+    /// vs import) plus this one check (import vs declaration); the error lands on the later of the
+    /// two. Without it the import and a `fn` would share one runtime global slot, and a type head
+    /// would have two meanings with no source order to choose between them.
     fn reject_import_decl_collisions(&mut self, stmts: &[Stmt]) {
+        let variant_binds: HashSet<String> = variant_import_binds(stmts)
+            .into_iter()
+            .map(|(bind, ..)| bind)
+            .filter(|bind| self.import_binds.contains_key(bind))
+            .collect();
         for s in stmts {
             let name = match &s.kind {
                 StmtKind::Fn(decl) => &decl.name,
@@ -1647,7 +1685,7 @@ impl Checker {
                 | StmtKind::Protocol { name, .. } => name,
                 _ => continue,
             };
-            if !self.imported_modules.contains_key(name) {
+            if !self.imported_modules.contains_key(name) && !variant_binds.contains(name) {
                 continue;
             }
             let imp = self.import_binds.get(name).copied().unwrap_or(s.span);
@@ -1657,6 +1695,69 @@ impl Checker {
                 s.span
             };
             self.error(later, format!("'{name}' is already imported"));
+        }
+    }
+
+    /// Enter every variant import of this module into the import registry (TICKET-229). A name the
+    /// prelude binds may not be rebound (the prelude's own import of it is skipped silently); a
+    /// reserved bound name is rejected like a from-import alias; `note_import_bind` reports a second
+    /// import of one name. Adds no collision test of its own.
+    fn note_variant_import_binds(&mut self, stmts: &[Stmt]) {
+        for (bind, en, variant, span) in variant_import_binds(stmts) {
+            if let Some(iv) = self.imported_variants.get(&bind)
+                && iv.prelude
+            {
+                if iv.head.name != en || iv.variant != variant {
+                    let owner = iv.head.name.clone();
+                    self.error(
+                        span,
+                        format!("'{bind}' is already imported from {owner} by the prelude"),
+                    );
+                }
+                continue;
+            }
+            if crate::checker::is_reserved_alias_target(&bind) {
+                self.error(span, format!("import alias '{bind}' is reserved (builtin)"));
+                continue;
+            }
+            self.note_import_bind(&bind, span);
+        }
+    }
+
+    /// Bind the variant imports `note_variant_import_binds` accepted, once `hoist` has declared
+    /// this module's enums: `imported_variants` is the only table that makes a bare name a variant.
+    fn bind_variant_imports(&mut self, stmts: &[Stmt]) {
+        for (bind, en, variant, span) in variant_import_binds(stmts) {
+            if self.import_binds.get(&bind) != Some(&span) {
+                continue;
+            }
+            let Some(head) = self
+                .bare_type_head(&en)
+                .filter(|h| h.kind == TypeHeadKind::Enum)
+            else {
+                self.error(span, format!("'{en}' is not an enum"));
+                continue;
+            };
+            if !self
+                .variants
+                .contains_key(&(head.key.clone(), variant.clone()))
+            {
+                let names = self.variant_names(&head.key);
+                self.error_help(
+                    span,
+                    format!("enum '{en}' has no variant '{variant}'"),
+                    suggest::did_you_mean(&variant, &names),
+                );
+                continue;
+            }
+            self.imported_variants.insert(
+                bind,
+                ImportedVariant {
+                    head,
+                    variant,
+                    prelude: false,
+                },
+            );
         }
     }
 
@@ -4728,6 +4829,30 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
             _ => return None,
         }
     }
+}
+
+/// Every variant import of a module, one entry per bound name: `(bound name — the alias wins, enum
+/// name, variant, bound-name span)`. The checker's one reader of `Import::Variants`.
+fn variant_import_binds(stmts: &[Stmt]) -> Vec<(String, String, String, Span)> {
+    let mut out = Vec::new();
+    for s in stmts {
+        if let StmtKind::Import(Import::Variants {
+            enum_name,
+            names,
+            name_spans,
+        }) = &s.kind
+        {
+            for (i, (member, alias)) in names.iter().enumerate() {
+                out.push((
+                    alias.clone().unwrap_or_else(|| member.clone()),
+                    enum_name.clone(),
+                    member.clone(),
+                    name_spans.get(i).copied().unwrap_or(s.span),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// The [`TypeHead`] of a type alias whose nominal body is `body`: the target's kind and canonical

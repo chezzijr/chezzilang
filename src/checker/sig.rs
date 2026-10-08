@@ -5978,7 +5978,6 @@ impl Checker {
                     // catch-all binding → not structural.
                     let is_variant = module_name.is_some()
                         || enum_name.is_some()
-                        || crate::checker::is_builtin_variant(name)
                         || self.variant_owners.contains_key(name)
                         || !bindings.is_empty();
                     if is_variant {

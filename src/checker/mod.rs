@@ -58,6 +58,25 @@ pub(super) struct NativeEnumSeed {
     variants: Vec<(String, Vec<Ty>)>,
 }
 
+/// What the prelude gives every module (`Checker::harvest_native_enums`): its carrier enums and
+/// the variant imports it declares for them (`import Some, None from Option`).
+#[derive(Default)]
+pub(super) struct CarrierSeeds {
+    enums: Vec<NativeEnumSeed>,
+    /// `(bound name, enum name, variant)` per prelude variant import.
+    imports: Vec<(String, String, String)>,
+}
+
+/// A bare name an `import V from Enum` binds to an enum variant (TICKET-229, R3b).
+pub(super) struct ImportedVariant {
+    /// The enum's head, as `bare_type_head` answered it at the import (DEC-204).
+    head: setup::TypeHead,
+    variant: String,
+    /// Bound by the prelude (`Some` / `None` / `Ok` / `Err`): a declaration may shadow it, and an
+    /// explicit import may not rebind it.
+    prelude: bool,
+}
+
 /// What a `match` scrutinee is being matched against, threaded through the match-checking helpers.
 enum MatchKind {
     /// Enum/Result/Option scrutinee — arms are variant patterns.
@@ -1753,7 +1772,7 @@ impl Checker {
             // The prelude is graph module 0. Harvest its carrier enums before its own
             // `begin_module`, so `seed_stdlib_structs` registers them for every module, the
             // prelude included.
-            if c.carrier_seeds.is_empty() && lm.dotted == ["std", "prelude"] {
+            if c.carrier_seeds.enums.is_empty() && lm.dotted == ["std", "prelude"] {
                 c.carrier_seeds = c.harvest_native_enums(&lm.ast);
             }
             c.begin_module(label);
@@ -2592,7 +2611,11 @@ struct Checker {
     container_seeds: HashMap<String, StructInfo>,
     /// The prelude's `native enum` decls, registered as ordinary enums in every module by
     /// `seed_carrier_enums`. Harvested before the prelude itself is checked.
-    carrier_seeds: Vec<NativeEnumSeed>,
+    carrier_seeds: CarrierSeeds,
+    /// Bare variant names of the current module: bound name → the variant an `import V from Enum`
+    /// binds it to. The only table that makes a bare name a variant; the prelude's own two imports
+    /// feed it through `carrier_seeds`.
+    imported_variants: HashMap<String, ImportedVariant>,
     /// The signatures of the eight migrated universe builtins (`ord`/`chr`/`panic`/`int`/`float`/
     /// `str`/`bytes`/`bytearray`), harvested from the always-linked `std/prelude.chz`'s `native
     /// fn`/`native ctor` decls (phase 3a). This REPLACES the hand-built `sig_ord`/… Rust functions —

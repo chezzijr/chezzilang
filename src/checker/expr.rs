@@ -244,6 +244,38 @@ impl Checker {
                         return ty;
                     }
                 }
+                // A bare imported variant (`Som(5)` after `import Som from Opt1`, or the prelude's
+                // `Some` / `Ok` / `Err`): the variant constructor of its enum.
+                Some(
+                    Resolution::Variant { enum_key, variant }
+                    | Resolution::VariantFn {
+                        enum_key, variant, ..
+                    },
+                ) => {
+                    if self.reject_item_targs(name, args, &targs, span) {
+                        return Ty::Unknown;
+                    }
+                    if let Some(v) = self.variants.get(&(enum_key.clone(), variant.clone())) {
+                        let v = v.clone();
+                        let pinned = self
+                            .imported_variants
+                            .get(name)
+                            .and_then(|iv| iv.head.pinned.clone())
+                            .unwrap_or_default();
+                        for (_, a) in named {
+                            self.infer_value(a);
+                        }
+                        return self.infer_variant_call(
+                            &v,
+                            name,
+                            args,
+                            &pinned,
+                            callee.span,
+                            span,
+                            expected,
+                        );
+                    }
+                }
                 // A bare user-variant constructor (`Circle(5)`) is no longer allowed — variants are
                 // scoped under their enum and must be written qualified (`Shape.Circle(5)`). The
                 // table answers `Global` for a name no scope binds.
@@ -1299,6 +1331,11 @@ impl Checker {
         span: Span,
         hint: Option<&Ty>,
     ) -> Ty {
+        // DEC-017 — `Ok()` with no argument is `Result[nil, E]`'s success value (a named interim,
+        // TICKET-228 D2).
+        if args.is_empty() && v.enum_name == "Result" && name == "Ok" {
+            return Ty::result_e(Ty::Nil, Ty::Unknown);
+        }
         let tps = self
             .enum_type_params
             .get(&v.enum_name)
@@ -2157,39 +2194,6 @@ impl Checker {
                     Some(Ty::Unknown)
                 }
             }
-            // Generic built-in constructors for Result / Option.
-            // `Ok(x)`: success type known, error type open (unifies with the declared `E`).
-            // Zero-arg `Ok()` is the spelling of `Result[nil, E]`'s success value (`## Decisions`,
-            // TICKET-017) — `check_arity` is skipped so it never faults on 0 args. The matching
-            // lowering is the `Op::Nil` + `Op::NewEnum` branch in `src/compiler/mod.rs`; keep both in
-            // sync.
-            "Ok" => Some(Ty::result_e(
-                if args.is_empty() {
-                    Ty::Nil
-                } else {
-                    let h = hint.and_then(|h| match h {
-                        Ty::Result(t, _) => Some((**t).clone()),
-                        _ => None,
-                    });
-                    self.one_arg_seeded(name, args, span, h.as_ref())
-                },
-                Ty::Unknown,
-            )),
-            "Some" => Some(Ty::option({
-                let h = hint.and_then(|h| match h {
-                    Ty::Option(t) => Some((**t).clone()),
-                    _ => None,
-                });
-                self.one_arg_seeded(name, args, span, h.as_ref())
-            })),
-            // `Err(x)`: error type known (`typeof x`), success type open.
-            "Err" => Some(Ty::result_e(Ty::Unknown, {
-                let h = hint.and_then(|h| match h {
-                    Ty::Result(_, e) => Some((**e).clone()),
-                    _ => None,
-                });
-                self.one_arg_seeded(name, args, span, h.as_ref())
-            })),
             _ => None,
         }
     }
@@ -3950,27 +3954,6 @@ impl Checker {
         match h {
             Some(t) if ty_concrete_but(t, &|n| self.rigid_param(n, &[])) => {
                 self.infer_arg(a, Some(t))
-            }
-            _ => self.infer_value(a),
-        }
-    }
-
-    /// [`Self::one_arg_hinted`] with `h` as a seed only: the `Some`/`Ok`/`Err` payload, which never
-    /// wraps (`x: Option[Option[int]] = Some(5)` keeps rejecting).
-    pub(super) fn one_arg_seeded(
-        &mut self,
-        name: &str,
-        args: &[Expr],
-        span: Span,
-        h: Option<&Ty>,
-    ) -> Ty {
-        self.check_arity(name, 1, args, span);
-        let Some(a) = args.first() else {
-            return Ty::Unknown;
-        };
-        match h {
-            Some(t) if ty_concrete_but(t, &|n| self.rigid_param(n, &[])) => {
-                self.infer_arg_seeded(a, t)
             }
             _ => self.infer_value(a),
         }

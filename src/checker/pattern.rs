@@ -17,31 +17,39 @@ pub(super) fn is_const_expr(e: &Expr) -> bool {
 pub(super) const RANGE_NOT_A_VALUE: &str = "a range is only valid as the iterable of a `for` loop or comprehension, as a slice receiver, \
      or as a `match` pattern — use `range(a, b)` to materialize a `List[int]`";
 
-/// The enum a built-in variant belongs to: `Ok`/`Err` are `Result`'s, `Some`/`None` are `Option`'s.
-fn builtin_variant_enum(name: &str) -> &'static str {
-    if matches!(name, "Ok" | "Err") {
-        "Result"
-    } else {
-        "Option"
-    }
-}
-
 impl Checker {
-    /// Record a built-in variant head (`Some(x)`, `Option.None`) that no scrutinee type confirms:
-    /// an un-inferable or literal scrutinee. The checker has already reported the arm unless it is
-    /// inside a rolled-back carrier walk; the lowering tests the variant tag either way.
-    fn record_builtin_pattern_variant(
+    /// The variant a pattern head `name` names in the enum `ekey`. A bare name an `import V from
+    /// Enum` binds is the variant that import names, and only in that import's enum (`None` for
+    /// any other enum); a qualified head, or a name no import binds, names itself.
+    pub(super) fn pattern_variant_name(
+        &self,
+        bare: bool,
+        name: &str,
+        ekey: Option<&str>,
+    ) -> Option<String> {
+        match self.imported_variants.get(name).filter(|_| bare) {
+            Some(iv) => (ekey == Some(iv.head.key.as_str())).then(|| iv.variant.clone()),
+            None => Some(name.to_string()),
+        }
+    }
+
+    /// Record a bare imported variant head (`Some(x)`) or its qualified spelling (`Option.None`)
+    /// that no scrutinee type confirms: an un-inferable or literal scrutinee. The checker has
+    /// already reported the arm unless it is inside a rolled-back carrier walk; the lowering tests
+    /// the variant tag either way.
+    fn record_imported_pattern_variant(
         &mut self,
         id: crate::ast::NodeId,
         enum_name: &Option<String>,
         name: &str,
         span: Span,
     ) {
-        let owner = builtin_variant_enum(name);
-        if crate::checker::is_builtin_variant(name)
-            && enum_name.as_deref().is_none_or(|e| e == owner)
-        {
-            self.record_variant(id, owner, name, span);
+        let Some(iv) = self.imported_variants.get(name) else {
+            return;
+        };
+        if enum_name.as_deref().is_none_or(|e| e == iv.head.name) {
+            let (key, variant) = (iv.head.key.clone(), iv.variant.clone());
+            self.record_variant(id, &key, &variant, span);
         }
     }
 
@@ -56,14 +64,18 @@ impl Checker {
                 // A nested bare identifier names a *built-in* nullary variant of the matched type (a
                 // refutable variant match — `Some(None)`, `Ok(Err(e))`), or a fresh binding. User
                 // variants must be written qualified (handled below), never resolved bare here.
-                let is_builtin_variant = crate::checker::is_builtin_variant(name);
-                if is_builtin_variant {
-                    if let Some(vmap) = self.variants_of(ty)
-                        && let Some(payload) = vmap.get(name)
+                let imported = self
+                    .imported_variants
+                    .get(name)
+                    .map(|iv| (iv.head.key.clone(), iv.variant.clone()));
+                if let Some((ikey, ivar)) = &imported {
+                    if Self::scrutinee_enum(ty) == Some(ikey.as_str())
+                        && let Some(vmap) = self.variants_of(ty)
+                        && let Some(payload) = vmap.get(ivar)
                     {
                         if payload.is_empty() {
-                            // A nullary built-in variant of `ty`: a refutable match, binds nothing.
-                            self.record_variant(*id, builtin_variant_enum(name), name, span);
+                            // A nullary imported variant of `ty`: a refutable match, binds nothing.
+                            self.record_variant(*id, ikey, ivar, span);
                             return false;
                         }
                         // A non-nullary variant used without its payload — needs `Name(...)`.
@@ -82,14 +94,19 @@ impl Checker {
                     }
                     // Over an un-inferable slot the nullary `None` is still the variant (a
                     // refutable test that binds nothing); a payload variant name binds.
-                    if name == "None" {
-                        self.record_variant(*id, "Option", name, span);
+                    if self
+                        .variants
+                        .get(&(ikey.clone(), ivar.clone()))
+                        .is_some_and(|v| v.payload.is_empty())
+                    {
+                        self.record_variant(*id, ikey, ivar, span);
                         return false;
                     }
                 }
-                // A *user* variant must be written qualified — never resolved bare, never silently a
-                // binding (the bare→binding trap). Reject with a hint to the qualified form.
-                if self.variant_owners.contains_key(name) {
+                // A variant that is not imported must be written qualified — never resolved bare,
+                // never silently a binding (the bare→binding trap). Reject with a hint to the
+                // qualified form.
+                if imported.is_none() && self.variant_owners.contains_key(name) {
                     let hint = self.qualify_hint(name);
                     self.error(span, hint);
                     return false;
@@ -232,10 +249,15 @@ impl Checker {
                         // `Some(0)` (literal payload) stays refutable; `Outer.Wrap(Inner.Only(x))`
                         // over single-variant enums is irrefutable and may close its parent variant.
                         let single_variant = vmap.len() == 1;
-                        match vmap.get(name) {
+                        let vname = self.pattern_variant_name(
+                            enum_name.is_none() && module_name.is_none(),
+                            name,
+                            Self::scrutinee_enum(ty),
+                        );
+                        match vname.as_ref().and_then(|v| vmap.get(v)) {
                             Some(payload) => {
-                                if let Some(ekey) = Self::scrutinee_enum(ty) {
-                                    self.record_variant(*id, ekey, name, span);
+                                if let (Some(ekey), Some(v)) = (Self::scrutinee_enum(ty), &vname) {
+                                    self.record_variant(*id, ekey, v, span);
                                 }
                                 if payload.len() != bindings.len() {
                                     self.error(
@@ -435,9 +457,7 @@ impl Checker {
         // A bare ident is a real binder UNLESS it names a (refutable) nullary variant — the built-in
         // `Ok`/`Err`/`Some`/`None` or a user enum variant — which binds nothing (see `bind_subpattern`).
         // Mirror that registry here so `(None, None, None)` isn't falsely flagged as a duplicate binding.
-        let is_binder = |name: &str| {
-            !(self.variant_owners.contains_key(name) || crate::checker::is_builtin_variant(name))
-        };
+        let is_binder = |name: &str| !self.variant_owners.contains_key(name);
         if let Some(dup) = first_duplicate_binder(pattern, &is_binder) {
             self.error(
                 span,
@@ -469,8 +489,7 @@ impl Checker {
                         // typed-`Literal` path; treating it as a refutable variant instead would both
                         // leave the binding undeclared (`unknown name`) and wrongly report the match
                         // non-exhaustive.
-                        let is_known_variant = self.variant_owners.contains_key(name)
-                            || crate::checker::is_builtin_variant(name);
+                        let is_known_variant = self.variant_owners.contains_key(name);
                         if enum_name.is_none()
                             && module_name.is_none()
                             && bindings.is_empty()
@@ -483,7 +502,7 @@ impl Checker {
                         // A structural arm over an un-inferable scrutinee is rejected upstream
                         // (`reconstruct_unknown_kind`), except inside a rolled-back carrier walk,
                         // whose lowering names only the built-in variants.
-                        self.record_builtin_pattern_variant(*id, enum_name, name, span);
+                        self.record_imported_pattern_variant(*id, enum_name, name, span);
                         covered.insert(name.clone());
                         for b in bindings {
                             self.bind_subpattern(b, &Ty::Unknown, span);
@@ -521,7 +540,6 @@ impl Checker {
                             && module_name.is_none()
                             && bindings.is_empty()
                             && !self.variant_owners.contains_key(name)
-                            && !crate::checker::is_builtin_variant(name)
                         {
                             self.record_pattern_head(*id, Resolution::PatBinding, span);
                             self.declare(name, scrut.clone());
@@ -534,7 +552,13 @@ impl Checker {
                             Some(label.as_str()),
                             span,
                         );
-                        let payload = variants.get(name).cloned();
+                        let vname = self.pattern_variant_name(
+                            enum_name.is_none() && module_name.is_none(),
+                            name,
+                            Some(label.as_str()),
+                        );
+                        let payload = vname.as_ref().and_then(|v| variants.get(v)).cloned();
+                        let name = vname.as_deref().unwrap_or(name);
                         if payload.is_some() {
                             self.record_variant(*id, &label.clone(), name, span);
                         }
@@ -581,7 +605,7 @@ impl Checker {
                         if covered.contains(name) {
                             self.error(span, format!("duplicate match arm '{name}'"));
                         } else if !guarded && payload_irref {
-                            covered.insert(name.clone());
+                            covered.insert(name.to_string());
                         }
                     }
                     Pattern::Literal(_) => self.error(
@@ -682,9 +706,7 @@ impl Checker {
                         }
                         // Match the compiler's variant registry: user enums PLUS the built-in
                         // Result/Option variants (which the checker special-cases elsewhere).
-                        if self.variant_owners.contains_key(name)
-                            || crate::checker::is_builtin_variant(name)
-                        {
+                        if self.variant_owners.contains_key(name) {
                             self.error(
                                 span,
                                 format!(
@@ -706,7 +728,7 @@ impl Checker {
                     } => {
                         self.check_pattern_qualifier(module_name, enum_name, name, None, span);
                         self.error(span, format!("cannot match a variant against {ty}"));
-                        self.record_builtin_pattern_variant(*id, enum_name, name, span);
+                        self.record_imported_pattern_variant(*id, enum_name, name, span);
                         // Still bind the payload sub-patterns (as Unknown) so the arm body doesn't
                         // cascade into spurious "unknown name" errors — notably the desugared `?.`
                         // case, where the payload binding is an internal `__opt` temp the user can't
@@ -754,9 +776,7 @@ impl Checker {
                 } = pattern
                     && bindings.is_empty()
                 {
-                    if self.variant_owners.contains_key(name)
-                        || crate::checker::is_builtin_variant(name)
-                    {
+                    if self.variant_owners.contains_key(name) {
                         self.error(
                             span,
                             format!(
@@ -807,9 +827,7 @@ impl Checker {
                         // (same rule as the `MatchKind::Literal` path).
                         let is_bare = enum_name.is_none() && module_name.is_none();
                         if is_bare && ctor.is_err() && bindings.is_empty() {
-                            if self.variant_owners.contains_key(name)
-                                || crate::checker::is_builtin_variant(name)
-                            {
+                            if self.variant_owners.contains_key(name) {
                                 self.error(
                                     span,
                                     format!(
@@ -2518,11 +2536,16 @@ impl Checker {
                 {
                     return None;
                 }
-                let sig = self
+                if let Some(sig) = self
                     .functions
                     .get(name)
-                    .filter(|_| self.slot_holds_fn_decl(name))?;
-                Some(PathFn::of_fn(name.clone(), sig.clone()))
+                    .filter(|_| self.slot_holds_fn_decl(name))
+                {
+                    return Some(PathFn::of_fn(name.clone(), sig.clone()));
+                }
+                // A bare imported variant constructor, through the head its import stored.
+                let iv = self.imported_variants.get(name)?;
+                self.type_member_fn(&iv.head, None, &iv.variant)
             }
             ExprKind::Field { obj, name, .. } => {
                 // A type parameter shadows a module or type of that name here, as in a call.
@@ -3224,8 +3247,15 @@ impl Checker {
                 ret: Box::new(sig.ret),
             };
         }
-        if let Resolution::Variant { .. } = res {
-            return Ty::option(Ty::Unknown);
+        // A bare imported variant: the nullary one is its enum's value, a payload one is the
+        // variant constructor as a fn value (DEC-225 pins or rejects its type parameters).
+        if let Resolution::Variant { enum_key, .. } = &res {
+            return self.enum_ty_unknown_args(enum_key);
+        }
+        if let Resolution::VariantFn { .. } = res
+            && let Some(pf) = self.path_fn(e)
+        {
+            return self.path_fn_value_ty(e.id, pf, None, span);
         }
         // A type name read as a value (`f := Box`, TICKET-204).
         if let Some(th) = self.bare_type_head(name) {
@@ -4321,9 +4351,11 @@ impl Checker {
                 }
             }
             None => {
-                // A bare user-variant name in a pattern must be qualified. (Built-ins are not in
-                // `variant_owners`, so they pass through untouched.)
-                if self.variant_owners.contains_key(name) {
+                // A bare variant name in a pattern must be imported (`import V from Enum`, or the
+                // prelude's four) or written qualified.
+                if !self.imported_variants.contains_key(name)
+                    && self.variant_owners.contains_key(name)
+                {
                     let hint = self.qualify_hint(name);
                     self.error(span, hint);
                 }
@@ -5466,8 +5498,10 @@ impl Checker {
                         .then(|| self.enum_ty_unknown_args(&key));
                 }
                 match name.as_str() {
-                    "Ok" | "Err" => Some(Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown))),
-                    "Some" | "None" => Some(Ty::Option(Box::new(Ty::Unknown))),
+                    other if self.imported_variants.contains_key(other) => {
+                        let key = self.imported_variants[other].head.key.clone();
+                        Some(self.enum_ty_unknown_args(&key))
+                    }
                     other => {
                         // A bare variant uniquely owned by one enum pins it; an ambiguous one, or a
                         // bare binding name (not a known variant), does not.

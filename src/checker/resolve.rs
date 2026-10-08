@@ -17,9 +17,6 @@ use super::*;
 
 /// The builtin constructors and fns a bare call names (`infer_named_call`'s builtin arms).
 const BUILTIN_CALLEES: &[&str] = &[
-    "Ok",
-    "Some",
-    "Err",
     "print",
     "panic",
     "range",
@@ -147,10 +144,21 @@ impl Checker {
             // `value_head_resolution` asks `slot_holds_fn_decl`, the one fn-slot test (DEC-201).
             return Some(self.value_head_resolution(n));
         }
-        if n == "None" {
-            return Some(Resolution::Variant {
-                enum_key: "Option".to_string(),
-                variant: n.to_string(),
+        // A bare variant: a name an `import V from Enum` binds (the prelude's four included).
+        if let Some(iv) = self.imported_variants.get(n) {
+            let (enum_key, variant) = (iv.head.key.clone(), iv.variant.clone());
+            let arity = self
+                .variants
+                .get(&(enum_key.clone(), variant.clone()))
+                .map_or(0, |v| v.payload.len());
+            return Some(if arity == 0 {
+                Resolution::Variant { enum_key, variant }
+            } else {
+                Resolution::VariantFn {
+                    enum_key,
+                    variant,
+                    arity,
+                }
             });
         }
         if n == "print" || is_firstclass_builtin_fn(n) || BUILTIN_CALLEES.contains(&n) {

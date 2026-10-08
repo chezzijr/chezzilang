@@ -244,6 +244,12 @@ native enum Result[T, E]:
     Ok(T)
     Err(E)
 
+# The four bare variant names every module reads are ordinary variant imports of the two enums
+# above. A declaration, a global or a local of the same name shadows them; an explicit
+# `import V from E` may not rebind them.
+import Some, None from Option
+import Ok, Err from Result
+
 # The builtin/reserved STRUCTURAL PROTOCOLS' shape (phase 5c-protocols). These 22 are UNIVERSE protocols
 # (always in scope, usable as a generic bound — `[T: Comparable]` / `[T: Arithmetic]` — but never
 # redeclarable by a user program: `is_reserved_protocol` rejects a user `protocol Comparable:`). Only the
