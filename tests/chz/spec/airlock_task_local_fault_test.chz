@@ -21,8 +21,8 @@ test fn captured_scalar_write_inside_spawn_faults():
             res := recover:
                 write_n()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     assert r.recv() != "no-fault"
 
 test fn captured_list_push_inside_spawn_faults():
@@ -34,8 +34,8 @@ test fn captured_list_push_inside_spawn_faults():
             res := recover:
                 write_xs(xs)
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     assert r.recv() != "no-fault"
 
 struct Counter:
@@ -56,8 +56,8 @@ test fn struct_method_write_on_spawned_copy_faults():
             res := recover:
                 write_c(c)
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     assert r.recv() != "no-fault"
 
 r3_n := 1
@@ -73,8 +73,8 @@ test fn module_global_slot_store_in_a_task_faults():
             res := recover:
                 write_r3()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got == "'r3_n' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()", got
 
@@ -91,8 +91,8 @@ test fn module_global_list_push_in_a_task_faults():
             res := recover:
                 write_r4()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -109,8 +109,8 @@ test fn a_top_level_binding_written_in_spawn_faults():
             res := recover:
                 write_r1()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("'r1_g' is this task's copy:"), got
 
@@ -123,8 +123,8 @@ test fn a_captured_closure_that_pushes_faults():
             res := recover:
                 d4_invoke(f)
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     assert r.recv() != "no-fault"
 
 gl5 := [[1]]
@@ -137,8 +137,8 @@ test fn a_channel_sent_closure_pushing_a_captured_alias_faults():
         res := recover:
             inner.push(2)
         match res:
-            Ok(_): return "no-fault"
-            Err(e): return e.message()
+            ?_: return "no-fault"
+            !e: return e.message()
     parallel:
         spawn:
             f := c.recv()
@@ -156,16 +156,16 @@ test fn a_nested_element_push_faults():
             res := recover:
                 write_element(xs[0])
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     assert r.recv() != "no-fault"
 
 fn faults[T](f: fn() -> T) -> bool:
     res := recover:
         f()
     match res:
-        Ok(_): return false
-        Err(_): return true
+        ?_: return false
+        !_: return true
 
 fn idx_set(xs: List[int]):
     xs[0] = 9
@@ -220,8 +220,8 @@ fn push_arg(ys: List[int], r: Channel[str]):
     res := recover:
         ys.push(9)
     match res:
-        Ok(_): r.send("no-fault")
-        Err(e): r.send(e.message())
+        ?_: r.send("no-fault")
+        !e: r.send(e.message())
 
 test fn a_spawn_arg_written_by_the_callee_faults():
     xs := [1]
@@ -245,16 +245,16 @@ test fn a_nested_struct_method_write_faults():
             res := recover:
                 write_holder(h)
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     assert r.recv() != "no-fault"
 
 fn executor_job(xs: List[int], r: Channel[str]):
     res := recover:
         xs.push(2)
     match res:
-        Ok(_): r.send("no-fault")
-        Err(e): r.send(e.message())
+        ?_: r.send("no-fault")
+        !e: r.send(e.message())
 
 test fn an_executor_job_writing_a_capture_faults():
     xs := [1]
@@ -275,8 +275,8 @@ test fn a_nested_nursery_inner_task_write_to_a_parent_task_object_faults():
                     res := recover:
                         write_ys(ys)
                     match res:
-                        Ok(_): r.send("no-fault")
-                        Err(e): r.send(e.message())
+                        ?_: r.send("no-fault")
+                        !e: r.send(e.message())
     assert r.recv() != "no-fault"
 
 r_hl := [Channel[int](1)]
@@ -292,8 +292,8 @@ test fn a_handle_holding_global_list_push_in_a_task_faults():
             res := recover:
                 write_hl()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -314,8 +314,8 @@ test fn a_handle_holding_global_struct_field_write_in_a_task_faults():
             res := recover:
                 write_hs()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -336,13 +336,13 @@ test fn a_closure_visited_first_in_one_crossing_marks_the_shared_capture():
             res1 := recover:
                 p.0()
             match res1:
-                Ok(_): r1.send("no-fault")
-                Err(e): r1.send(e.message())
+                ?_: r1.send("no-fault")
+                !e: r1.send(e.message())
             res2 := recover:
                 p.1.push(3)
             match res2:
-                Ok(_): r2.send("no-fault")
-                Err(e): r2.send(e.message())
+                ?_: r2.send("no-fault")
+                !e: r2.send(e.message())
     got1 := r1.recv()
     got2 := r2.recv()
     assert got1.starts_with("this value is this task's copy:"), got1

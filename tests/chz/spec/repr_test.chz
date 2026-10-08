@@ -59,12 +59,12 @@ test fn struct_fields_are_quoted():
 # A carrier prints as the user writes it: its payload is bare at the top level and quoted when
 # the carrier itself is nested.
 test fn carrier_payload_is_quoted_only_when_nested():
-    assert str(Some("h")) == "h"
-    assert str([Some("h")]) == "['h']"
+    assert str(?"h") == "h"
+    assert str([?"h"]) == "['h']"
     r := recover: [1][5]
     match r:
-        Ok(_): assert false, "expected a fault"
-        Err(e):
+        ?_: assert false, "expected a fault"
+        !e:
             assert str(r).starts_with("!index 5"), "a top-level error payload is bare: {r}"
             assert str([r]).starts_with("[!'index 5"), "a nested error payload is quoted: {[r]}"
 

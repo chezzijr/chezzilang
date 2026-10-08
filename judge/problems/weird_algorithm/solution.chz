@@ -5,7 +5,7 @@ import std.io
 fn main():
     n := 0
     match io.read_line():
-        Some(l): n = int(l)
+        ?l: n = int(l)
         None:    return
     out := []
     while n != 1:

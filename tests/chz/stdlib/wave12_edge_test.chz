@@ -12,12 +12,12 @@ import std.duration
 test fn int_and_parse_int_overflow_say_overflow_not_cannot_parse():
     r1 := recover: int("9223372036854775808")
     match r1:
-        Ok(_): assert false, "9223372036854775808 does not fit i64"
-        Err(e): assert e.message().contains("overflow"), e.message()
+        ?_: assert false, "9223372036854775808 does not fit i64"
+        !e: assert e.message().contains("overflow"), e.message()
     r2 := recover: "9223372036854775808".parse_int()?
     match r2:
-        Ok(_): assert false, "9223372036854775808 does not fit i64"
-        Err(e): assert e.message().contains("overflow"), e.message()
+        ?_: assert false, "9223372036854775808 does not fit i64"
+        !e: assert e.message().contains("overflow"), e.message()
 
 # W12-19: a single-line hole's `#` comments out its own closing `}` and is a compile error — pinned
 # in src/checker/tests.rs (hash_comment_in_a_hole_runs_to_the_real_end_of_line) because a compile
@@ -45,8 +45,8 @@ test fn stringify_depth_cap_matches_parse():
         i += 1
     r := recover: json.stringify(j)
     match r:
-        Ok(_): assert false, "stringify accepted a tree one level past parse's own MAX_NEST_DEPTH"
-        Err(e): assert e.message() == "json.stringify: exceeded max depth"
+        ?_: assert false, "stringify accepted a tree one level past parse's own MAX_NEST_DEPTH"
+        !e: assert e.message() == "json.stringify: exceeded max depth"
 
 # W12-20a: at exactly parse's own cutoff, stringify must accept AND the output must parse back.
 test fn stringify_at_the_depth_cap_parses_back():
@@ -57,8 +57,8 @@ test fn stringify_at_the_depth_cap_parses_back():
         i += 1
     t := json.stringify(j)
     match json.parse(t):
-        Ok(_): assert true
-        Err(e): assert false, "stringify output must parse: " + e.message()
+        ?_: assert true
+        !e: assert false, "stringify output must parse: " + e.message()
 
 # W12-20b: csv.parse follows Go's encoding/csv record-separator set (CRLF or LF); a lone CR is
 # ordinary field data, not a record break.
@@ -77,12 +77,12 @@ test fn csv_lone_cr_neighbours_match_go():
     assert csv.parse(csv.format(rows)) == rows
 
 # W12-20c: `${}` (an empty capture-group name) is malformed and stays literal text, matching Go's
-# ReplaceAllString("12 34", "${}") -> "${} ${}", not an Err.
+# ReplaceAllString("12 34", "${}") -> "${} ${}", not an error.
 test fn regex_dollar_brace_empty_name_stays_literal_like_go():
     r := regex.replace_all(r"(\d+)", "12 34", r"${}")
     match r:
-        Ok(v): assert v == "${{}} ${{}}", v
-        Err(e): assert false, e.message()
+        ?v: assert v == "${{}} ${{}}", v
+        !e: assert false, e.message()
 
 # W12-20d: the magnitude of a duration literal is parsed UNSIGNED before the sign is applied, so
 # i64::MIN milliseconds (whose magnitude alone overflows a signed i64) must parse, matching its own
@@ -90,28 +90,28 @@ test fn regex_dollar_brace_empty_name_stays_literal_like_go():
 test fn duration_parse_accepts_i64_min_millis():
     r := duration.parse("-9223372036854775808ms")
     match r:
-        Ok(g): assert g.as_millis() == -9223372036854775808
-        Err(e): assert false, "i64::MIN ms must parse: " + e.message()
+        ?g: assert g.as_millis() == -9223372036854775808
+        !e: assert false, "i64::MIN ms must parse: " + e.message()
 
 # W12-20d: the negative edge's neighbours — one past i64::MIN in either direction Errs, the fraction
 # path and a multi-group sum both reach i64::MIN, and the pre-existing overflow guard on the
 # opposite unit still fires.
 test fn duration_parse_negative_edge_neighbours():
     match duration.parse("9223372036854775808ms"):
-        Ok(_): assert false, "one past i64::MAX ms must Err"
-        Err(_): assert true
+        ?_: assert false, "one past i64::MAX ms must Err"
+        !_: assert true
     match duration.parse("-9223372036854775809ms"):
-        Ok(_): assert false, "one past i64::MIN ms must Err"
-        Err(_): assert true
+        ?_: assert false, "one past i64::MIN ms must Err"
+        !_: assert true
     match duration.parse("-9223372036854775.808s"):
-        Ok(g): assert g.as_millis() == -9223372036854775807 - 1
-        Err(e): assert false, e.message()
+        ?g: assert g.as_millis() == -9223372036854775807 - 1
+        !e: assert false, e.message()
     match duration.parse("-9223372036854775807ms1ms"):
-        Ok(g): assert g.as_millis() == -9223372036854775807 - 1
-        Err(e): assert false, e.message()
+        ?g: assert g.as_millis() == -9223372036854775807 - 1
+        !e: assert false, e.message()
     match duration.parse("-9223372036854775807ms2ms"):
-        Ok(_): assert false, "a multi-group sum one past i64::MIN must Err"
-        Err(_): assert true
+        ?_: assert false, "a multi-group sum one past i64::MIN must Err"
+        !_: assert true
     match duration.parse("-2562047788015.9h"):
-        Ok(_): assert false, "the pre-existing overflow guard must still fire"
-        Err(_): assert true
+        ?_: assert false, "the pre-existing overflow guard must still fire"
+        !_: assert true

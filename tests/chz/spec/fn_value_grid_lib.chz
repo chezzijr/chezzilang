@@ -2,7 +2,7 @@
 import std.json
 import std.math
 
-fn read_decode() -> fn(str) -> Result[int]:
+fn read_decode() -> fn(str) -> int!:
     return json.decode[int]
 
 fn read_sqrt() -> fn(float) -> float:

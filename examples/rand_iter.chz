@@ -17,13 +17,13 @@ fn main():
 
     print("choice:")
     match iter.choice(nums):
-        Some(v): print(v)
+        ?v: print(v)
         None: print("none")
 
     empty: List[int] = []
     print("choice empty:")
     match iter.choice(empty):
-        Some(v): print(v)
+        ?v: print(v)
         None: print("none")
 
     print("sample 3:")

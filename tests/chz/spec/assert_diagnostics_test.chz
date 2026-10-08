@@ -2,10 +2,10 @@
 # Currently a failing bare `assert` reports only "assertion failed" with neither operand,
 # per docs/gaps.md W8-13.
 
-fn msg_of[T](r: Result[T, Error], where_: str) -> str:
+fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
-        Ok(_): assert false, where_ + " must fault"
-        Err(e): return e.message()
+        ?_: assert false, where_ + " must fault"
+        !e: return e.message()
     return ""
 
 test fn bare_assert_shows_operands():

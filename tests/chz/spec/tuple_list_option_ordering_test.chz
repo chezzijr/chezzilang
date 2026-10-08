@@ -1,5 +1,5 @@
-# TICKET-146 (docs/gaps.md W14-23): a tuple, `List[T]` and `Option[T]` are Comparable when every
-# element is, lexicographically (Rust's order: `None < Some(_)`). CPython sorts a list of tuples.
+# TICKET-146 (docs/gaps.md W14-23): a tuple, `List[T]` and `T?` are Comparable when every
+# element is, lexicographically (Rust's order: `None < ?_`). CPython sorts a list of tuples.
 import std.cmp
 
 struct P:
@@ -29,9 +29,12 @@ test fn list_less_than():
     assert [1] < [1, 0]
 
 test fn option_less_than():
-    assert Some(1) < Some(2)
+    one: int? = 1
+    two: int? = 2
+    assert one < two
     a: int? = None
-    assert a < Some(0)
+    zero: int? = 0
+    assert a < zero
 
 test fn min_max_of_tuples():
     xs := [(2, 1), (1, 5)]
@@ -51,9 +54,9 @@ test fn sort_list_of_lists_and_options():
     xs := [[3], [1, 2], [1]]
     xs.sort()
     assert xs == [[1], [1, 2], [3]]
-    os := [Some(2), None, Some(1)]
+    os := [?2, None, ?1]
     os.sort()
-    assert os == [None, Some(1), Some(2)]
+    assert os == [None, ?1, ?2]
 
 test fn all_four_operators():
     assert (1, 2) <= (1, 2)
@@ -94,8 +97,8 @@ struct Mut:
 test fn sort_mutation_through_tuple_faults():
     r := recover: mut_xs.sort()
     match r:
-        Ok(_): assert false, "tuple sort with a mutating compare did not fault"
-        Err(e): assert e.message().contains("modified during"), e.message()
+        ?_: assert false, "tuple sort with a mutating compare did not fault"
+        !e: assert e.message().contains("modified during"), e.message()
 
 # CPython 3.14.7: sorted([(1, 0.0), (1, -0.0)]) -> [(1, 0.0), (1, -0.0)]
 #                 min([(0, 0.0), (0, -0.0)])    -> (0, 0.0)
@@ -130,10 +133,12 @@ test fn nan_elements_follow_cpython():
 test fn nested_containers_order():
     assert [(1, "a"), (1, "b")] < [(1, "a"), (2, "a")]
     assert [[1, 2], [1]] > [[1, 2], []]
-    a: (int, str)? = Some((1, "x"))
-    b: (int, str)? = Some((1, "y"))
+    a: (int, str)? = ?(1, "x")
+    b: (int, str)? = ?(1, "y")
     assert a < b
-    assert Some([1]) < Some([1, 0])
-    os: List[int?] = [Some(3), None, Some(1)]
+    short: List[int]? = [1]
+    long: List[int]? = [1, 0]
+    assert short < long
+    os: List[int?] = [?3, None, ?1]
     os.sort()
-    assert os == [None, Some(1), Some(3)]
+    assert os == [None, ?1, ?3]

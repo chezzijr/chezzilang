@@ -13,7 +13,7 @@ fn main():
     print(xs.index_of(3))           # 2
     print(xs.index_of(9))           # -1
     match xs.pop():
-        Some(v): print("popped {v}")  # popped 4
+        ?v: print("popped {v}")  # popped 4
         None: print("empty")
     xs.reverse()
     print(xs[0])                     # 3
@@ -37,10 +37,10 @@ fn main():
     print(m.has("a"))                # true
     print(m.has("z"))                # false
     match m.get("b"):
-        Some(v): print("b={v}")       # b=2
+        ?v: print("b={v}")       # b=2
         None: print("b absent")
     match m.get("z"):
-        Some(v): print("z={v}")
+        ?v: print("z={v}")
         None: print("z absent")       # z absent
     print(m.keys())                  # [a, b]
     print(m.values())                # [1, 2]
@@ -49,7 +49,7 @@ fn main():
     m.update({"b": 20, "d": 4})
     print(m)                         # {a: 1, b: 20, d: 4}
     match m.remove("a"):
-        Some(v): print("removed {v}")  # removed 1
+        ?v: print("removed {v}")  # removed 1
         None: print("nothing")
     print(m.len())                   # 2
 

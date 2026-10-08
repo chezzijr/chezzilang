@@ -29,12 +29,12 @@ fn parse(ok: bool) -> int!:
     defer log("parse cleanup")
     if not ok:
         return !"bad input"
-    return Ok(7)
+    return ?7
 
 fn use_q() -> int!:
     defer log("use_q cleanup")
     n := parse(false)?   # short-circuits here; both frames' defers still run
-    return Ok(n)
+    return ?n
 
 # --- block scope: a loop-body defer runs at the END of each iteration; each iteration snapshots
 #     its own `i` at the defer statement (Go arg semantics) ---
@@ -78,7 +78,7 @@ fn block_q(ok: bool) -> int!:
         log("block_q cleanup 2")
     if not ok:
         return !"nope"
-    return Ok(1)
+    return ?1
 
 # --- defers run as a panic unwinds, before a `recover:` boundary regains control ---
 fn faults():
@@ -104,8 +104,8 @@ fn main():
     log("== ? path ==")
     r := use_q()
     match r:
-        Ok(n): log("ok {n}")
-        Err(e): log("err {e}")
+        ?n: log("ok {n}")
+        !e: log("err {e}")
 
     log("== args now ==")
     args_now()
@@ -119,21 +119,21 @@ fn main():
     log("== block form on ? path ==")
     rq := block_q(false)
     match rq:
-        Ok(_): log("bq ok")
-        Err(e): log("bq err {e}")
+        ?_: log("bq ok")
+        !e: log("bq err {e}")
 
     log("== panic + recover ==")
     res := recover:
         faults()
     match res:
-        Ok(_): log("recovered ok")
-        Err(e): log("recovered err: {e}")
+        ?_: log("recovered ok")
+        !e: log("recovered err: {e}")
 
     log("== deferred fault ==")
     res2 := recover:
         bad_defer()
     match res2:
-        Ok(_): log("ok")
-        Err(e): log("caught: {e}")
+        ?_: log("ok")
+        !e: log("caught: {e}")
 
 main()

@@ -71,7 +71,7 @@ struct Token:
         if self.deadline > 0.0 and time.monotonic() >= self.deadline:
             return true
         match self.parent:
-            Some(p): return p.cancelled()
+            ?p: return p.cancelled()
             None:    return false
 
     # Why this token is done: "cancelled" (manual/cascaded), "timeout" (deadline), or None (still
@@ -80,11 +80,11 @@ struct Token:
     # "timeout", because `_mark`/`cancel()` skip flag.set on that arm. Agrees with cancelled().
     fn reason(self) -> str?:
         if self.flag.get():
-            return Some("cancelled")
+            return ?"cancelled"
         if self.deadline > 0.0 and time.monotonic() >= self.deadline:
-            return Some("timeout")
+            return ?"timeout"
         match self.parent:
-            Some(p): return p.reason()
+            ?p: return p.reason()
             None:    return None
 
     # Mark a token done: set its cancel bit, then trip its done() — UNLESS its own deadline has
@@ -118,11 +118,11 @@ struct Token:
         work := [self]
         while work.len() > 0:
             match work.pop():
-                Some(t):
+                ?t:
                     t._mark()
                     while true:
                         match t.kids.try_recv():
-                            Some(k): work.push(k)
+                            ?k: work.push(k)
                             None:    break
                 None:
                     break
@@ -166,7 +166,7 @@ struct Token:
             cdl = timer(rem_ms)
         fl := Shared(false)
         kch := Channel[Token]()
-        child := Token(flag=fl, deadline=d, dl=cdl, parent=Some(self), kids=kch)
+        child := Token(flag=fl, deadline=d, dl=cdl, parent=?self, kids=kch)
         # Register into the IMMEDIATE parent only (Go). O(1) — an unbounded channel send never blocks.
         # What is registered is a PARENT-LESS TWIN of the child, sharing its `flag` / `dl` / `kids`
         # cores. A channel send crosses the airlock and DEEP-COPIES the struct, so sending `child`

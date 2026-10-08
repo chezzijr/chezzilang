@@ -23,8 +23,8 @@ fn t179_try(xs: List[int], p: T179G, op: str) -> str:
             p.x = 9
         0
     match res:
-        Ok(_): return "ok"
-        Err(_): return "fault"
+        ?_: return "ok"
+        !_: return "fault"
 
 fn t179_row(xs: List[int], p: T179G, out: Channel[str]):
     parts: List[str] = []
@@ -35,10 +35,10 @@ fn t179_row(xs: List[int], p: T179G, out: Channel[str]):
 fn t179_id(xs: List[int]) -> List[int]:
     return xs
 
-fn t179_outcome(res: Result[int]) -> str:
+fn t179_outcome(res: int!) -> str:
     match res:
-        Ok(_): return "ok"
-        Err(_): return "fault"
+        ?_: return "ok"
+        !_: return "fault"
 
 test fn grid_spawn_arg_named():
     xs := [1]
@@ -166,8 +166,8 @@ fn t179_second(g: Iterator[str], out: Channel[str]):
         v := g.next() ?? "none"
         v
     match res:
-        Ok(v): out.send(v)
-        Err(_): out.send("fault")
+        ?v: out.send(v)
+        !_: out.send("fault")
 
 test fn grid_generator_suspended_private_frame():
     out := Channel[str](1)
@@ -201,7 +201,7 @@ test fn grid_generator_suspended_yielded_and_held():
     parallel:
         spawn t179_drain_lists(g, out)
     assert out.recv() == "fault"
-    assert held == Some([])
+    assert held == ?[]
 
 fn t179_pend(xs: List[int]) -> Iterator[int]:
     xs.push(1)
@@ -214,8 +214,8 @@ fn t179_drain_ints(g: Iterator[int], out: Channel[str]):
             n += v
         n
     match res:
-        Ok(n): out.send("{n}")
-        Err(_): out.send("fault")
+        ?n: out.send("{n}")
+        !_: out.send("fault")
 
 test fn grid_generator_pending_fresh_arg():
     out := Channel[str](1)
@@ -257,4 +257,4 @@ test fn grid_generator_copy_is_independent_of_the_parent():
     out := Channel[str](1)
     parallel:
         spawn t179_drain_ints(g, out)
-    assert g.next() == Some(2)
+    assert g.next() == ?2

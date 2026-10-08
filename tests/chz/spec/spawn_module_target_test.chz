@@ -44,5 +44,5 @@ test fn spawn_native_module_fn():
     parallel:
         spawn io.write_file(p, "spawned")
     match io.read_file(p):
-        Ok(s): assert s == "spawned", "spawned native-module fn wrote: " + s
-        Err(e): assert false, "spawned native-module fn did not write: " + e.message()
+        ?s: assert s == "spawned", "spawned native-module fn wrote: " + s
+        !e: assert false, "spawned native-module fn did not write: " + e.message()

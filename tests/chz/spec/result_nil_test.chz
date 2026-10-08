@@ -1,13 +1,13 @@
-# W8-30: `Result[None, E]`'s success value is spelled zero-arg `Ok()` — see TICKET-017 `## Decisions`.
+# W8-30: `None!E`'s success value is spelled zero-arg `success` — see TICKET-017 `## Decisions`.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
-fn done() -> Result[None, str]:
-    return Ok()
+fn done() -> None!str:
+    return
 
 test fn ok_zero_arg_constructs_a_result_nil():
     r := done()
     assert str(r) == "None"
     match r:
-        Ok(_):
+        ?_:
             assert true
-        Err(e):
+        !e:
             assert false

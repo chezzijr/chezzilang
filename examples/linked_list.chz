@@ -10,20 +10,20 @@ struct Cell:
 
 # Prepend v, returning the new head.
 fn cons(head: Cell?, v: int) -> Cell?:
-    return Some(Cell(v, head))
+    return ?Cell(v, head)
 
 fn length(head: Cell?) -> int:
     match head:
         None:
             return 0
-        Some(c):
+        ?c:
             return 1 + length(c.next)
 
 fn sum(head: Cell?) -> int:
     match head:
         None:
             return 0
-        Some(c):
+        ?c:
             return c.val + sum(c.next)
 
 # Iterative reverse: pop from `head`, push onto `acc`.
@@ -34,8 +34,8 @@ fn reverse(head: Cell?) -> Cell?:
         match cur:
             None:
                 return acc
-            Some(c):
-                acc = Some(Cell(c.val, acc))
+            ?c:
+                acc = ?Cell(c.val, acc)
                 cur = c.next
 
 fn show(head: Cell?) -> str:
@@ -45,7 +45,7 @@ fn show(head: Cell?) -> str:
         match cur:
             None:
                 return out
-            Some(c):
+            ?c:
                 if out != "":
                     out = out + " -> "
                 out = out + str(c.val)

@@ -1,7 +1,7 @@
 # `Iterable[T]` + `.iter()` — a formal "can produce a cursor" protocol.
 #
 # Every collection now exposes `.iter()`, returning a COMPOSABLE cursor typed as the existing
-# `Iterator[T]` existential. A cursor has `.next() -> Option[T]` (Some, then None forever), so a
+# `Iterator[T]` existential. A cursor has `.next() -> T?` (a value, then None forever), so a
 # plain `list`/`set`/`map`/`str`/`bytes`/`bytearray` can flow into the SAME lazy adapter pipeline as
 # a hand-written struct iterator — something that was impossible before (you can't call `.next()` on
 # a `list`). `Iterable` is the looser sibling of `Iterator`: an `Iterable` only promises a cursor; an
@@ -11,7 +11,7 @@
 struct Take[I: Iterator[T], T]:
     inner: I
     left: int
-    fn next(self) -> Option[T]:
+    fn next(self) -> T?:
         if self.left <= 0:
             return None
         self.left = self.left - 1
@@ -20,10 +20,10 @@ struct Take[I: Iterator[T], T]:
 struct Mapped[I: Iterator[T], T, U]:
     inner: I
     f: fn(T) -> U
-    fn next(self) -> Option[U]:
+    fn next(self) -> U?:
         match self.inner.next():
-            Some(x):
-                return Some(self.f(x))
+            ?x:
+                return ?self.f(x)
             None:
                 return None
 
@@ -31,12 +31,12 @@ struct Mapped[I: Iterator[T], T, U]:
 struct Counter:
     n: int
     limit: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         if self.n >= self.limit:
             return None
         v := self.n
         self.n = self.n + 1
-        return Some(v)
+        return ?v
 
 # A PURE-`Iterable` struct: it has `iter()` but NO `next()`. It is for-iterable via a one-time
 # `.iter()` that hands back a cursor.
@@ -62,28 +62,28 @@ fn main():
     for v in doubled:
         print(v)                          # 2, 4, 6
 
-    # --- `.iter()` + manual `.next()` on every collection (Some… then None) ---
+    # --- `.iter()` + manual `.next()` on every collection (a value… then None) ---
     li := [1, 2].iter()
-    print(li.next())                      # Some(1)
-    print(li.next())                      # Some(2)
+    print(li.next())                      # 1
+    print(li.next())                      # 2
     print(li.next())                      # None
     print(li.next())                      # None  (idempotent past exhaustion)
 
     si := {7}.iter()
-    print(si.next())                      # Some(7)
+    print(si.next())                      # 7
 
     mi := {1: "a", 2: "b"}.iter()
-    print(mi.next())                      # Some(1)  (map iterates KEYS)
-    print(mi.next())                      # Some(2)
+    print(mi.next())                      # 1  (map iterates KEYS)
+    print(mi.next())                      # 2
 
     ci := "hi".iter()
-    print(ci.next())                      # Some(h)
+    print(ci.next())                      # h
 
     bi := b"AB".iter()
-    print(bi.next())                      # Some(65)
+    print(bi.next())                      # 65
 
     bai := bytearray([9]).iter()
-    print(bai.next())                     # Some(9)
+    print(bai.next())                     # 9
 
     # --- empty-collection cursor → None immediately ---
     empty: List[int] = []
@@ -91,7 +91,7 @@ fn main():
 
     # --- iter() is idempotent on an Iterator value (returns self) ---
     again := [5, 6].iter().iter()
-    print(again.next())                   # Some(5)
+    print(again.next())                   # 5
 
     # --- an [S: Iterable[T]] fn over a list AND a struct iterator ---
     print(total([1, 2, 3, 4]))            # 10
@@ -111,7 +111,7 @@ fn main():
     for x in it:
         if x == 2:
             break                         # consumed 1, 2 — cursor now sits before 3
-    print(it.next())                      # Some(3)  (advances past 3)
+    print(it.next())                      # 3  (advances past 3)
     print(List(it))                       # [4]      (drains the remainder in place)
     print(it.next())                      # None     (exhausted)
 

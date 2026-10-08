@@ -5,7 +5,7 @@ import std.io
 fn main():
     line := ""
     match io.read_line():
-        Some(l): line = l
+        ?l: line = l
         None:    return
     parts := []
     for t in line.split(" "):

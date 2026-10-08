@@ -1,9 +1,9 @@
 # tests/chz/stdlib/fs_copy_test.chz — `fs.copy` same-file guard (W7-1).
 #
 # `std::fs::copy` opens the DESTINATION with O_TRUNC, so copying a file onto ITSELF used to return
-# `Ok(None)` after truncating the file to 0 bytes — silent data loss. Python's `shutil.copyfile`
+# `?None` after truncating the file to 0 bytes — silent data loss. Python's `shutil.copyfile`
 # raises `SameFileError` and coreutils `cp a a` errors "are the same file"; both leave the file
-# alone, so Chezzi returns a recoverable `Err` and the bytes must survive.
+# alone, so Chezzi returns a recoverable `!e` and the bytes must survive.
 # Identity is INODE identity (dev+ino), not a path-string compare: a symlink (and a hardlink) reaches
 # the same inode under a different name and truncates exactly the same way — the symlink case below
 # is what pins that.
@@ -21,13 +21,13 @@ fn scratch(name: str) -> str:
 
 fn seed(p: str, text: str):
     match io.write_file(p, text):
-        Ok(_): pass
-        Err(e): assert false, "setup: " + e.message()
+        ?_: pass
+        !e: assert false, "setup: " + e.message()
 
 fn contents(p: str) -> str:
     match io.read_file(p):
-        Ok(s): return s
-        Err(e):
+        ?s: return s
+        !e:
             assert false, "read: " + e.message()
             return ""
 
@@ -36,8 +36,8 @@ test fn copy_same_path_errs_and_preserves():
     defer fs.remove_file(p)
     seed(p, "important-data")
     match fs.copy(p, p):
-        Ok(_): assert false, "copying a file onto itself must Err, not truncate it"
-        Err(e): assert e.message().contains("same file"), e.message()
+        ?_: assert false, "copying a file onto itself must Err, not truncate it"
+        !e: assert e.message().contains("same file"), e.message()
     assert contents(p) == "important-data", "the file must be byte-identical after a refused copy"
 
 test fn copy_through_symlink_errs_and_preserves():
@@ -48,11 +48,11 @@ test fn copy_through_symlink_errs_and_preserves():
     defer fs.remove_file(link)
     seed(src, "important-data")
     match pr.run_args("ln", ["-sf", src, link]):
-        Ok(_): pass
-        Err(e): assert false, "setup ln: " + e.message()
+        ?_: pass
+        !e: assert false, "setup ln: " + e.message()
     match fs.copy(link, src):
-        Ok(_): assert false, "copying through a symlink to the same inode must Err"
-        Err(e): assert e.message().contains("same file"), e.message()
+        ?_: assert false, "copying through a symlink to the same inode must Err"
+        !e: assert e.message().contains("same file"), e.message()
     assert contents(src) == "important-data", "the file must be byte-identical after a refused copy"
 
 test fn copy_distinct_files_still_works():
@@ -62,8 +62,8 @@ test fn copy_distinct_files_still_works():
     defer fs.remove_file(b)
     seed(a, "payload-a")
     match fs.copy(a, b):
-        Ok(_): pass
-        Err(e): assert false, "a normal copy must still work: " + e.message()
+        ?_: pass
+        !e: assert false, "a normal copy must still work: " + e.message()
     assert contents(b) == "payload-a"
 
 test fn copy_onto_existing_different_dest_overwrites():
@@ -74,6 +74,6 @@ test fn copy_onto_existing_different_dest_overwrites():
     seed(a, "payload-a")
     seed(b, "stale-b")
     match fs.copy(a, b):
-        Ok(_): pass
-        Err(e): assert false, "overwriting a different dest must still work: " + e.message()
+        ?_: pass
+        !e: assert false, "overwriting a different dest must still work: " + e.message()
     assert contents(b) == "payload-a"

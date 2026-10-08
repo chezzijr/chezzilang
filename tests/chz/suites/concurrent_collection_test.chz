@@ -18,7 +18,7 @@ test fn airlock_shares_handle():
                 ctr.increment("k")
     assert ctr.count("k") == 101
 
-# Single-thread ConcurrentMap surface: set/get (Some/None), contains, len, remove, get_or_insert.
+# Single-thread ConcurrentMap surface: set/get (a value / None), contains, len, remove, get_or_insert.
 test fn map_basic():
     m := collection.ConcurrentMap(RwShared({}))
     assert m.len() == 0
@@ -26,7 +26,7 @@ test fn map_basic():
     assert not m.contains("a")
     m.set("a", 1)
     m.set("b", 2)
-    assert m.get("a") == Some(1)
+    assert m.get("a") == ?1
     assert m.contains("a")
     assert m.len() == 2
     m.remove("a")
@@ -35,9 +35,9 @@ test fn map_basic():
     assert m.len() == 1
     # get_or_insert: absent -> inserts default and returns it; present -> returns existing.
     assert m.get_or_insert("c", 9) == 9
-    assert m.get("c") == Some(9)
+    assert m.get("c") == ?9
     assert m.get_or_insert("c", 100) == 9      # already present: default ignored
-    assert m.get("c") == Some(9)
+    assert m.get("c") == ?9
     assert m.len() == 2
 
 # snapshot returns a COPY of the map (a concurrent read).
@@ -89,7 +89,7 @@ test fn map_each_own_key():
     s := 0
     for i in range(0, 10):
         match m.get(i):
-            Some(v): s = s + v
+            ?v: s = s + v
             None: assert false
     assert s == 285                     # sum of i*i for i in 0..10
     assert m.len() == 10
@@ -108,5 +108,5 @@ test fn get_or_insert_race_no_fault():
             spawn:
                 m.remove("k")
     match m.get("k"):
-        Some(v): assert v == 7
+        ?v: assert v == 7
         None: assert true

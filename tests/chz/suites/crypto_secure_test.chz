@@ -31,12 +31,12 @@ test fn t_secure_bytes_neg_fails_closed():
     r := recover:
         crypto.secure_bytes(-1)
     match r:
-        Ok(_): assert false, "secure_bytes(-1) must fault"
-        Err(_): assert true
+        ?_: assert false, "secure_bytes(-1) must fault"
+        !_: assert true
 
 test fn t_token_hex_neg_fails_closed():
     r := recover:
         crypto.token_hex(-1)
     match r:
-        Ok(_): assert false, "token_hex(-1) must fault"
-        Err(_): assert true
+        ?_: assert false, "token_hex(-1) must fault"
+        !_: assert true

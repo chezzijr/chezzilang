@@ -37,7 +37,7 @@ fn main():
     for y in Range(10, 13).each():
         print(y)
 
-    # 3) explicit `.next()` — Some(v) per yield, then None once exhausted
+    # 3) explicit `.next()` — ?v per yield, then None once exhausted
     g := count_up(2)
     print(g.next())
     print(g.next())

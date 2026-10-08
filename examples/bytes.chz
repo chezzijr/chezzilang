@@ -46,7 +46,7 @@ fn main():
     r := recover:
         b[99]
     match r:
-        Ok(v): print(v)
-        Err(e): print("caught out-of-range")
+        ?v: print(v)
+        !e: print("caught out-of-range")
 
 main()

@@ -2,8 +2,8 @@
 #
 # `parse` is recursive-descent in pure Chezzi, so nesting depth in the INPUT becomes call-stack
 # depth in the program; past `MAX_NEST_DEPTH` (2000, measured — the release binary dies at nesting
-# depth 5000 with a bare document) it now returns a clean `Err` instead of aborting the process
-# (`docs/gaps.md` W8-5). `stringify` has no `Result` to put an error in, so it faults instead, with a
+# depth 5000 with a bare document) it now returns a clean `!e` instead of aborting the process
+# (`docs/gaps.md` W8-5). `stringify` has no `T!E` to put an error in, so it faults instead, with a
 # message naming the cause. `json.len` faults on the three scalar variants instead of silently
 # returning `0`. Run: `cargo run -- test tests/chz/`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
@@ -29,8 +29,8 @@ test fn parse_large_string_is_not_quadratic():
     r := json.parse(doc)
     d := time.monotonic() - t0
     match r:
-        Ok(_): assert true
-        Err(e): assert false, "expected Ok: " + e.message()
+        ?_: assert true
+        !e: assert false, "expected Ok: " + e.message()
     assert d < 4.0, "json.parse({n}-char string) took {d}s, expected < 4.0s"
 
 test fn stringify_large_string_is_not_quadratic():
@@ -44,16 +44,16 @@ test fn stringify_large_string_is_not_quadratic():
 test fn parse_at_depth_limit_still_ok():
     doc := "[".repeat(2000) + "]".repeat(2000)
     match json.parse(doc):
-        Ok(_): assert true
-        Err(e): assert false, "expected Ok exactly at the depth limit: " + e.message()
+        ?_: assert true
+        !e: assert false, "expected Ok exactly at the depth limit: " + e.message()
 
 test fn parse_past_depth_limit_returns_err_and_keeps_running():
     # No `recover:` needed here — the whole point of the fix is that the depth guard turns what
-    # used to be an uncaught VM abort into an ordinary `Err`, in-band with the `Result` contract.
+    # used to be an uncaught VM abort into an ordinary `!e`, in-band with the `T!E` contract.
     deep := "[".repeat(2001) + "]".repeat(2001)
     match json.parse(deep):
-        Ok(_): assert false, "expected Err past the depth limit"
-        Err(e): assert e.message() == "exceeded max depth"
+        ?_: assert false, "expected Err past the depth limit"
+        !e: assert e.message() == "exceeded max depth"
     # the program is still alive: this assertion must execute
     assert true, "still alive"
 
@@ -61,8 +61,8 @@ test fn parse_original_repro_stays_alive():
     # The exact shape from docs/gaps.md W8-5's original repro (100k-deep, well past the limit).
     huge := "[".repeat(100000) + "]".repeat(100000)
     match json.parse(huge):
-        Ok(_): assert false, "expected Err on a 100k-deep document"
-        Err(e): assert e.message() == "exceeded max depth"
+        ?_: assert false, "expected Err on a 100k-deep document"
+        !e: assert e.message() == "exceeded max depth"
     assert true, "still alive"
 
 test fn stringify_past_depth_limit_faults_with_own_name():
@@ -73,8 +73,8 @@ test fn stringify_past_depth_limit_faults_with_own_name():
         i += 1
     r := recover: json.stringify(j)
     match r:
-        Ok(_): assert false, "expected a depth fault"
-        Err(e): assert e.message() == "json.stringify: exceeded max depth"
+        ?_: assert false, "expected a depth fault"
+        !e: assert e.message() == "json.stringify: exceeded max depth"
     # the process survives a stringify depth fault same as a parse one
     assert true, "still alive"
 
@@ -85,34 +85,34 @@ test fn len_containers_count_scalars_fault():
 
     r1 := recover: json.len(Json.Null)
     match r1:
-        Ok(_): assert false, "Null has no length"
-        Err(e): assert e.message() == "json.len: Null has no length"
+        ?_: assert false, "Null has no length"
+        !e: assert e.message() == "json.len: Null has no length"
 
     r2 := recover: json.len(Json.Bool(true))
     match r2:
-        Ok(_): assert false, "Bool has no length"
-        Err(e): assert e.message() == "json.len: Bool has no length"
+        ?_: assert false, "Bool has no length"
+        !e: assert e.message() == "json.len: Bool has no length"
 
     r3 := recover: json.len(Json.Num(3.0))
     match r3:
-        Ok(_): assert false, "Num has no length"
-        Err(e): assert e.message() == "json.len: Num has no length"
+        ?_: assert false, "Num has no length"
+        !e: assert e.message() == "json.len: Num has no length"
 
 test fn stringify_round_trips_negative_zero_and_large_int():
     # W8-35 — numbers go through f64, so -0.0 loses its sign and a 19-digit
     # integer leaves in exponent form instead of round-tripping byte-exact
     # (docs/gaps.md W8-35; CPython and Go both round-trip these).
     match json.parse("-0.0"):
-        Ok(j): assert json.stringify(j) == "-0.0"
-        Err(e): assert false, "expected Ok: " + e.message()
+        ?j: assert json.stringify(j) == "-0.0"
+        !e: assert false, "expected Ok: " + e.message()
     match json.parse("9223372036854775000"):
-        Ok(j): assert json.stringify(j) == "9223372036854775000"
-        Err(e): assert false, "expected Ok: " + e.message()
+        ?j: assert json.stringify(j) == "9223372036854775000"
+        !e: assert false, "expected Ok: " + e.message()
 
 test fn parse_error_names_a_location():
     # W8-36 — a json.parse error carries no line/column/offset, so a failure
     # in a large document locates nothing (docs/gaps.md W8-36).
     match json.parse(r'{"a": 1,
  "b": }'):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message().contains("line") and e.message().contains("column")
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message().contains("line") and e.message().contains("column")

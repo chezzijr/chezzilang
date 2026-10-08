@@ -1,9 +1,9 @@
 # examples/enum_layout.chz — M19 memory-layout lever #2 (enum variant_id). Exercises every
 # observable surface the per-instance variant/type-name → dense `variant_id: u32` change touches:
-# nullary + payload variants, a generic Option[T]/Result[T,E], exhaustive match, match-with-binding,
+# nullary + payload variants, a generic T?/T!E, exhaustive match, match-with-binding,
 # a guard, enum == (equal / unequal-by-variant / unequal-by-enum-type), Display + `{}` interpolation,
-# nested enums, Result/Option + the `?` operator, variant-name SHADOWING (a user enum reusing the
-# native `Some` name — native vs user identity + `?` on a genuine native), and an enum crossing a
+# nested enums, `T!E`/`T?` + the `?` operator, variant-name SHADOWING (a user enum reusing the
+# native `?v` name — native vs user identity + `?` on a genuine native), and an enum crossing a
 # spawn+Channel (wire/snap carry the dense variant_id directly). Byte-identical on the VM, interp, and
 # --parallel — variant_id is behavior-preserving, so any divergence turns the golden RED.
 
@@ -21,22 +21,22 @@ enum Tree[T]:
     Leaf
     Node(T, Tree[T], Tree[T])
 
-# Variant-name SHADOWING: a user enum may REUSE a native name (`Some`/`None`/...) for one of its
+# Variant-name SHADOWING: a user enum may REUSE a native name (`?v`/`None`/...) for one of its
 # variants (main allows this). This never conflicts, because the two are reached by DIFFERENT syntax:
-# bare `Some(..)`/`None` ALWAYS build the NATIVE builtin (the compiler hardcodes `Some`→Option and
-# stamps `VID_SOME`); the user variant is reachable ONLY qualified, as `Shadow.Some(..)`. The reserved
-# native ids `VID_SOME`/`VID_NONE_VARIANT` stay DISJOINT from this enum's user ids, so a native Option
+# bare `?..`/`None` ALWAYS build the NATIVE builtin (the compiler hardcodes `?v`→a `T?` value and
+# stamps `VID_SOME`); the user variant is reachable ONLY qualified, through its enum `Shadow`. The reserved
+# native ids `VID_SOME`/`VID_NONE_VARIANT` stay DISJOINT from this enum's user ids, so a native `T?` value
 # value never compares equal to a `Shadow` value and `?` still recognises genuine natives.
 enum Shadow:
     Some(int)
     Bar
 
-# `return Some(v)` is the NATIVE Option (bare `Some` = builtin), matching `-> int?`. `?` on a genuine
-# native Option (xs.pop(), which stamps VID_SOME/VID_NONE_VARIANT directly) is recognised by `?`'s gate
-# regardless of the `Shadow.Some` name reuse — bare names never resolve to the user enum.
+# `return ?v` is the NATIVE a `T?` value (bare `?v` = builtin), matching `-> int?`. `?` on a genuine
+# native `T?` value (xs.pop(), which stamps VID_SOME/VID_NONE_VARIANT directly) is recognised by `?`'s gate
+# regardless of the name `Shadow` reuses — bare names never resolve to the user enum.
 fn first_native(xs: List[int]) -> int?:
     v := xs.pop()?
-    return Some(v)
+    return ?v
 
 # Exhaustive match (no `_`) selecting an arm by variant id.
 fn color_name(c: Color) -> str:
@@ -66,27 +66,27 @@ fn tree_sum(t: Tree[int]) -> int:
         Tree.Leaf: 0
         Tree.Node(v, l, r): tree_sum(l) + v + tree_sum(r)
 
-# Result/Option + the `?` operator (gated on the fixed native variant ids).
+# `T!E`/`T?` + the `?` operator (gated on the fixed native variant ids).
 fn safe_div(a: int, b: int) -> int!:
     if b == 0:
         return !"divide by zero"
-    return Ok(a / b)
+    return ?(a / b)
 
 fn chained(a: int, b: int, c: int) -> int!:
     x := safe_div(a, b)?
     y := safe_div(x, c)?
-    return Ok(y)
+    return ?y
 
 fn first_even(xs: List[int]) -> int?:
     for x in xs:
         if x % 2 == 0:
-            return Some(x)
+            return ?x
     return None
 
-# An enum value crossing a spawn + Channel: the worker sends an Option[int] back; the receiver
+# An enum value crossing a spawn + Channel: the worker sends an int? back; the receiver
 # matches it. Exercises wire/snap variant-id rebuild on the --parallel path.
 fn producer(out: Channel[int?]):
-    out.send(Some(99))
+    out.send(?99)
     out.send(None)
 
 fn main():
@@ -115,36 +115,36 @@ fn main():
     print(Color.Red == Color.Green)
     print(Shape.Circle(5) == Shape.Circle(5))
     print(Shape.Circle(5) == Shape.Circle(6))
-    print(Some(1) == Some(1))
-    print(Some(1) == None)
+    print(?1 == ?1)
+    print(?1 == None)
 
     # Interpolation of an enum value.
     s := Shape.Circle(8)
     print("shape is {s}, area {shape_area(s)}")
-    o := Some(42)
+    o: int? = 42
     print("opt is {o}")
 
-    # Result/Option + `?`.
+    # `T!E`/`T?` + `?`.
     match chained(100, 5, 2):
-        Ok(v): print("chained ok {v}")
-        Err(e): print("chained err {e}")
+        ?v: print("chained ok {v}")
+        !e: print("chained err {e}")
     match chained(100, 0, 2):
-        Ok(v): print("chained ok {v}")
-        Err(e): print("chained err {e}")
+        ?v: print("chained ok {v}")
+        !e: print("chained err {e}")
     match first_even([1, 3, 4, 7]):
-        Option.Some(v): print("first even {v}")
+        ?v: print("first even {v}")
         None: print("no even")
     match first_even([1, 3, 5]):
-        Option.Some(v): print("first even {v}")
+        ?v: print("first even {v}")
         None: print("no even")
 
-    # Variant-name shadowing: native Option/Result identity must survive a user enum reusing the
-    # names. `Shadow.Some(5)` is the user variant; a native Option::Some(5) from pop() is NOT equal
-    # to it, and `?` still unwraps a genuine native Option.
+    # Variant-name shadowing: native `T?`/`T!E` identity must survive a user enum reusing the
+    # names. the `Shadow` variant holding 5 is the user variant; a native `int?` holding 5 from pop() is NOT equal
+    # to it, and `?` still unwraps a genuine native `T?` value.
     sh := Shadow.Some(5)
     print(sh)
-    nat := [5].pop()              # native int? == Some(5)
-    # `nat == sh` spelled directly is a COMPILE error (`Option[int]` and `Shadow` are provably
+    nat := [5].pop()              # native int? == ?5
+    # `nat == sh` spelled directly is a COMPILE error (`int?` and `Shadow` are provably
     # disjoint — docs/gaps.md B2), which is the identity enforced one phase earlier. Through the
     # `Any` existential the runtime still answers it: distinct enum types are never equal.
     lhs: Any = nat
@@ -160,10 +160,10 @@ fn main():
     a := ch.recv()
     b := ch.recv()
     match a:
-        Option.Some(v): print("recv Some {v}")
+        ?v: print("recv Some {v}")
         None: print("recv None")
     match b:
-        Option.Some(v): print("recv Some {v}")
+        ?v: print("recv Some {v}")
         None: print("recv None")
 
 main()

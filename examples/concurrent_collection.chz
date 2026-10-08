@@ -33,7 +33,7 @@ fn main():
     s := 0
     for i in range(0, 10):
         match m.get(i):
-            Some(v): s = s + v
+            ?v: s = s + v
             None: s = s - 1
     print(s)                            # 285  (sum of i*i, i in 0..10)
     print(m.len())                      # 10

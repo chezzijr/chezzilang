@@ -5,7 +5,7 @@
 # "is this value present?" membership queries.
 #
 # Showcases: recursion (merge sort), lists (build with push + read by index), structs & methods,
-# enums via Option + match, std.math (sqrt), and string interpolation. Pure build-and-read style —
+# enums via a `T?` value + match, std.math (sqrt), and string interpolation. Pure build-and-read style —
 # Chezzi lists are append + index-read (no in-place element assignment), which suits a functional
 # merge sort that returns fresh sorted lists.
 #
@@ -56,7 +56,7 @@ fn sort(xs: List[int]) -> List[int]:
 
 # ---- search --------------------------------------------------------------------------------------
 
-# Binary search over a sorted list. Returns Some(index) if present, else None.
+# Binary search over a sorted list. Returns ?index if present, else None.
 fn bsearch(xs: List[int], target: int) -> int?:
     lo := 0
     hi := xs.len() - 1
@@ -64,7 +64,7 @@ fn bsearch(xs: List[int], target: int) -> int?:
         mid := (lo + hi) / 2
         v := xs[mid]
         if v == target:
-            return Some(mid)
+            return ?mid
         elif v < target:
             lo = mid + 1
         else:
@@ -131,7 +131,7 @@ fn main():
 
     for q in [23, 50, 99, 1]:
         match bsearch(ordered, q):
-            Some(idx): io.print("found {q} at index {idx}")
+            ?idx: io.print("found {q} at index {idx}")
             None:      io.print("{q} not present")
 
 main()

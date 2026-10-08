@@ -10,8 +10,8 @@ fn probe(label: str, f: fn() -> int):
     r := recover:
         f()
     match r:
-        Ok(v): print("{label}: ok {v}")
-        Err(e): print("{label}: {e.message()}")
+        ?v: print("{label}: ok {v}")
+        !e: print("{label}: {e.message()}")
 
 # ---- arithmetic faults (all caught) --------------------------------------------------------------
 
@@ -83,15 +83,15 @@ fn collections():
     xs[0] = 10
     xs[1] += 5
     print(xs)
-    print(xs.pop())                   # Some(4)
+    print(xs.pop())                   # 4
     print(xs)
 
     m := {"x": 1}
     m["y"] = 2
-    print(m.get("x"))                 # Some(1)
+    print(m.get("x"))                 # 1
     print(m.get("z"))                 # None
     print(m.has("y"))
-    print(m.remove("x"))              # Some(1)
+    print(m.remove("x"))              # 1
     print(m.len())
 
     a := {1, 2, 3}
@@ -211,8 +211,8 @@ fn defers():
         n := defer_q()?
         n
     match r:
-        Ok(v): print("ok {v}")
-        Err(e): print("caught {e.message()}")
+        ?v: print("ok {v}")
+        !e: print("caught {e.message()}")
 
 # ---- comprehensions ----------------------------------------------------------------------------
 

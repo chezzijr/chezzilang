@@ -46,10 +46,10 @@ fn str_m[T: Stringable](a: T) -> str:
 
 # ---- helpers ----
 
-fn msg_of[T](r: Result[T, Error], where_: str) -> str:
+fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
-        Ok(_): assert false, where_ + " must fault"
-        Err(e): return e.message()
+        ?_: assert false, where_ + " must fault"
+        !e: return e.message()
     return ""
 
 # ---- int / float arithmetic methods == the operator forms ----
@@ -138,12 +138,12 @@ test fn min_mod_zero_and_min_div_neg_one_still_fault():
     MIN := -9223372036854775807 - 1
     rm := recover: MIN % 0
     match rm:
-        Ok(_): assert false, "MIN % 0 must still fault"
-        Err(e): assert e.message() == "modulo by zero"
+        ?_: assert false, "MIN % 0 must still fault"
+        !e: assert e.message() == "modulo by zero"
     rd := recover: MIN / -1
     match rd:
-        Ok(_): assert false, "MIN / -1 must still fault — the real overflow, unchanged"
-        Err(e): assert e.message() == "integer overflow in Div"
+        ?_: assert false, "MIN / -1 must still fault — the real overflow, unchanged"
+        !e: assert e.message() == "integer overflow in Div"
 
 test fn ordinary_mod_sign_unaffected():
     # pinned against measured Go 1.26 / this project's documented policy (docs/spec.md's integer
@@ -237,10 +237,10 @@ test fn list_index_and_slice_methods_match_operators():
     assert ix_li(xs, 0) == xs[0]
     assert ix_li(xs, 2) == xs[2]
     assert ix_li(xs, -1) == xs[-1], "negative indexing identical to the operator"
-    assert sl_li(xs, Some(0), Some(2), None) == xs[0:2]
+    assert sl_li(xs, ?0, ?2, None) == xs[0:2]
     assert sl_li(xs, None, None, None) == xs[:]
-    assert sl_li(xs, None, None, Some(-1)) == xs[::-1], "reversed slice"
-    assert sl_li(xs, Some(-2), None, None) == xs[-2:]
+    assert sl_li(xs, None, None, ?(-1)) == xs[::-1], "reversed slice"
+    assert sl_li(xs, ?(-2), None, None) == xs[-2:]
     # fault messages identical to the operator form
     rm := recover: ix_li(xs, 9)
     ro := recover: xs[9]
@@ -277,8 +277,8 @@ test fn str_index_and_slice_methods_match_operators():
     s := "hello"
     assert ix_str(s, 0) == s[0]
     assert ix_str(s, -1) == s[-1]
-    assert sl_str(s, Some(1), Some(3), None) == s[1:3]
-    assert sl_str(s, None, None, Some(-1)) == s[::-1]
+    assert sl_str(s, ?1, ?3, None) == s[1:3]
+    assert sl_str(s, None, None, ?(-1)) == s[::-1]
     rm := recover: ix_str(s, 9)
     ro := recover: s[9]
     assert msg_of(rm, "str.index") == msg_of(ro, "s[9]")
@@ -417,13 +417,13 @@ test fn compare_on_nan_uses_the_total_order():
 # ---- `Iterator` = a cursor, `Iterable` = anything you can iterate (W6-3b) ----
 #
 # `next` is STATEFUL, so the `Iterator` bound only accepts something that HOLDS a position: a `.iter()`
-# cursor, a generator's `Iterator[T]`, or a user struct with `next(self) -> Option[T]`. A raw collection
+# cursor, a generator's `Iterator[T]`, or a user struct with `next(self) -> T?`. A raw collection
 # used to satisfy it too and then faulted with `type list has no method 'next'`; it now satisfies only
 # `Iterable`, and `[S: Iterable[T], T]` is the bound that accepts everything. The reject side is a
 # checker diagnostic (`checker::tests::raw_collection_does_not_satisfy_iterator`); what is asserted here
 # is that every ACCEPTED form really works.
 
-fn next_m[S: Iterator[T], T](it: S) -> Option[T]:
+fn next_m[S: Iterator[T], T](it: S) -> T?:
     return it.next()
 
 fn n_of[S: Iterable[T], T](xs: S) -> int:
@@ -438,25 +438,25 @@ fn ones() -> Iterator[int]:
 
 struct Down:
     n: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         if self.n <= 0:
             return None
         self.n = self.n - 1
-        return Some(self.n)
+        return ?self.n
 
 test fn iterator_bound_is_cursors_iterable_bound_is_collections():
     # a cursor minted from a raw list — `.next()` advances it
     c := [10, 20].iter()
-    assert next_m(c) == Some(10)
-    assert next_m(c) == Some(20)
+    assert next_m(c) == ?10
+    assert next_m(c) == ?20
     assert next_m(c) == None
     # a generator result is a cursor too
     g := ones()
-    assert next_m(g) == Some(1)
+    assert next_m(g) == ?1
     # …and so is a user struct with `next`
     d := Down(2)
-    assert next_m(d) == Some(1)
-    assert next_m(d) == Some(0)
+    assert next_m(d) == ?1
+    assert next_m(d) == ?0
     assert next_m(d) == None
     # a RAW collection goes through the `Iterable` bound, which recovers its element type
     assert n_of([1, 2, 3]) == 3
@@ -530,8 +530,8 @@ test fn iterable_typed_cursor_is_stateful_once():
 test fn iterable_typed_value_still_mints_a_cursor():
     # the pre-fix workaround (`.iter()` first) keeps working and still yields a real cursor
     c := to_cursor([8, 9])
-    assert c.next() == Some(8)
-    assert c.next() == Some(9)
+    assert c.next() == ?8
+    assert c.next() == ?9
     assert c.next() == None
 
 # ---- the CROSS PRODUCT: every `Iterable`-consuming ctor x the `iter`-only-struct witness ----
@@ -562,8 +562,8 @@ test fn iterable_typed_iter_only_struct_feeds_every_consumer():
     assert as_map(Pairs([("a", 1), ("b", 2)])) == {"a": 1, "b": 2}, "Map() over an iter-only struct"
     assert doubled(Wrap([5])) == [10], "a comprehension over an iter-only struct"
     c := cursor_of(Wrap([6, 7]))
-    assert c.next() == Some(6), ".iter() over an iter-only struct"
-    assert c.next() == Some(7)
+    assert c.next() == ?6, ".iter() over an iter-only struct"
+    assert c.next() == ?7
     assert c.next() == None
     # the ctors are unchanged for every other witness
     assert as_set([1, 1, 2]) == {1, 2}
@@ -580,11 +580,11 @@ test fn iterable_typed_iter_only_struct_feeds_every_consumer():
 struct Both:
     n: int
     ys: List[int]
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         if self.n <= 0:
             return None
         self.n = self.n - 1
-        return Some(self.n)
+        return ?self.n
     fn iter(self) -> Iterator[int]:
         return self.ys.iter()
 

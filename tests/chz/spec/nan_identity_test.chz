@@ -37,7 +37,7 @@ test fn t_nan_element_identity_nested():
     assert Box(n) == Box(n)
     assert {"k": n} == {"k": n}
     assert [[n]] == [[n]]
-    assert Some(n) == Some(n)
+    assert ?n == ?n
 
 test fn t_nan_dedup_uses_element_identity():
     n := make_nan()

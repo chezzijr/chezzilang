@@ -13,7 +13,7 @@ fn id[T](x: T) -> T:
     return x
 
 test fn coalesce_join_pins_from_the_option():
-    o: Option[fn(int) -> int] = Some(inc)
+    o: (fn(int) -> int)? = ?inc
     assert (o ?? g)(5) == 6
 
 test fn if_join_pins_in_either_order():

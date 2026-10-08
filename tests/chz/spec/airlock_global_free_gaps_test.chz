@@ -18,8 +18,8 @@ fn producer_a(c1: Channel[fn() -> int], c2: Channel[fn() -> int], fr: Channel[st
     res := recover:
         n = 100
     match res:
-        Ok(_): fr.send("no-fault")
-        Err(e): fr.send(e.message())
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
     c1.send(fn() -> int: helper())
     c2.send(fn() -> int: n)
 
@@ -46,13 +46,13 @@ fn producer_b(c: Channel[fn() -> int], c2: Channel[fn() -> int], fr1: Channel[st
     res1 := recover:
         xs = [1, 2]
     match res1:
-        Ok(_): fr1.send("no-fault")
-        Err(e): fr1.send(e.message())
+        ?_: fr1.send("no-fault")
+        !e: fr1.send(e.message())
     res2 := recover:
         ys.push(2)
     match res2:
-        Ok(_): fr2.send("no-fault")
-        Err(e): fr2.send(e.message())
+        ?_: fr2.send("no-fault")
+        !e: fr2.send(e.message())
     c.send(fn() -> int: xs.len())
     c2.send(fn() -> int: ys.len())
 

@@ -1,5 +1,5 @@
 # TICKET-142 (W14-32): `_ := e` discards at module top level, any number of times, any types — the
-# escape the discarded-`Result`/`Option` warning recommends. Regression pin for the top-level Let path
+# escape the discarded-`T!E`/`T?` warning recommends. Regression pin for the top-level Let path
 # (the red-first test for the compiler's `_ =` lowering is `blank_identifier_test.chz`).
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 fn f() -> int?:

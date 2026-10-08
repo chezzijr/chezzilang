@@ -21,11 +21,11 @@ import std.concurrency
 import submit_task, Task from std.concurrency.task
 import memoize1 from std.memoize
 
-# A handle carries a `Result`; these tests read a job that did not fault.
-fn must[T](r: Result[T]) -> T:
+# A handle carries a `T!E`; these tests read a job that did not fault.
+fn must[T](r: T!) -> T:
     match r:
-        Ok(v): return v
-        Err(e): panic(e.message())
+        ?v: return v
+        !e: panic(e.message())
 
 fn mk() -> List[int]:
     return [1]
@@ -182,10 +182,10 @@ test fn owner_get_stays_one_object_after_a_crossing():
     assert str(must(t.get())) == "[1, 99, 7]", str(must(t.get()))
     assert str(m(1)) == "[1, 99, 7]", str(m(1))
 
-fn send_outcome[T](r: Result[T, Error], out: Channel[str]):
+fn send_outcome[T](r: T!Error, out: Channel[str]):
     match r:
-        Ok(_): out.send("write ok")
-        Err(e): out.send(e.message())
+        ?_: out.send("write ok")
+        !e: out.send(e.message())
 
 fn copy_write(t: Task[List[int]], m: fn(int) -> List[int], out: Channel[str]):
     rt := recover: must(t.get()).push(5)
@@ -343,10 +343,10 @@ test fn a_function_valued_copy_result_leaves_the_readers_globals_writable():
     assert b.f(1) == 2
     rb := recover: b.xs.push(5)
     match rb:
-        Ok(_): assert false, "the marked result took a write"
-        Err(e): assert e.message() == d4_msg(), e.message()
+        ?_: assert false, "the marked result took a write"
+        !e: assert e.message() == d4_msg(), e.message()
     rg := recover: owner_global.push(3)
     match rg:
-        Ok(_): pass
-        Err(e): assert false, e.message()
+        ?_: pass
+        !e: assert false, e.message()
     assert str(owner_global) == "[1, 3]", str(owner_global)

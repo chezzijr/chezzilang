@@ -14,7 +14,7 @@ fn main():
     i = 0
     while i < n:
         match box.get_key(i):
-            Some(v): hits = hits + 1
+            ?v: hits = hits + 1
             None: hits = hits
         i = i + 1
     print(hits)

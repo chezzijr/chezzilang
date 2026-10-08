@@ -11,29 +11,29 @@
 #   --verbose         # a bool flag is presence => true
 #   --verbose=false   # ...or set explicitly
 #   --                # terminator: every later token is a positional, even if it starts with `-`
-#   --help / -h       # returns Err("flag: help requested\n" + usage()) unless the caller registered
+#   --help / -h       # returns !("flag: help requested\n" + usage()) unless the caller registered
 #                      # their own `help`/`h` flag, in which case that registration wins (Go's rule)
 # One or two leading dashes are stripped, so a flag named `n` answers to BOTH `-n` and `--n` (a
 # deliberate v1 simplification vs strict Go, which registers each spelling separately — add explicit
 # short-alias params only if a real need appears). A third dash, or `-=x` / `--=x`, is Go's
 # `bad flag syntax: <tok>` (Go 1.27). A lone `-` (len 1) is a positional.
 # An int flag takes Go's `ParseInt(s, 0, 64)` syntax: `0x`/`0o`/`0b` prefixes, a leading `0` is octal
-# (`010` = 8), `_` between digits, no whitespace; out of i64 range is an Err.
+# (`010` = 8), `_` between digits, no whitespace; out of i64 range is an error.
 #
 # Divergence from Go, deliberate: flags are still recognised AFTER the first positional.
-# `parse(["a", "--name", "x", "b"])` is `Ok(["a", "b"])` with `name = "x"`. Measured Go 1.26.6 stops
+# `parse(["a", "--name", "x", "b"])` is `?["a", "b"]` with `name = "x"`. Measured Go 1.26.6 stops
 # at the first non-flag, leaving `name` unchanged and `Args() = [a --name x b]`. Measured CPython
 # 3.14.7 `argparse.parse_known_args` does NOT stop there either — it matches this parser. Adopting
 # Go's rule would silently stop parsing flags that working programs pass today, with no error.
 #
 # Bad USER input never faults: an unknown flag, a missing value, or a non-int for an int flag all
-# return a clean `Err`. `get_*` on an UNREGISTERED name is a programmer error and panics — the closer
+# return a clean `!e`. `get_*` on an UNREGISTERED name is a programmer error and panics — the closer
 # analogue is Python's `argparse`, which raises `AttributeError` from `getattr(args, name)` on an
 # unregistered destination. (NOT Go-parity: Go's `flag.Lookup` on an unknown name returns `None`, no
 # panic, and has no name-keyed typed getter at all — measured, Go 1.26.)
 #
 # `--help`/`-h` return the `ContinueOnError` analog of Go's `ErrHelp`: no printing, no exit, just an
-# `Err` the caller can match on. `parse` REPLACES the positionals on every call (Go `FlagSet.Parse`),
+# `!e` the caller can match on. `parse` REPLACES the positionals on every call (Go `FlagSet.Parse`),
 # but never resets flag VALUES — those persist across calls, matching Go.
 #
 # ponytail: v1 scope is str/bool/int + long/short + `=`-form + positionals + `--` + a usage line.
@@ -46,8 +46,8 @@ import std.math as math
 # trims) and NOT `math.parse_int_base(s, 0)` (Python-style: no leading-0 octal, trims). Base from the
 # prefix: `0x`/`0o`/`0b` (any case) or a leading `0` = octal, else decimal. `_` is allowed only
 # between digits, or straight after a base prefix (Go `underscoreOK`). No whitespace, no second sign.
-# Err texts keep the `int()` family wording (`cannot parse`) so scripts that grep it stay stable.
-fn _parse_go_int(s: str) -> Result[int, str]:
+# an error texts keep the `int()` family wording (`cannot parse`) so scripts that grep it stay stable.
+fn _parse_go_int(s: str) -> int!str:
     bad := "cannot parse '" + s + "' as an integer"
     body := s
     sign := ""
@@ -94,15 +94,15 @@ fn _parse_go_int(s: str) -> Result[int, str]:
     clean := digits.replace("_", "")
     if clean == "":
         if body.starts_with("0") and not prefixed:
-            return Ok(0)
+            return ?0
         return !bad
     valid := "0123456789abcdef"[0 : base]
     for c in clean.lower():
         if not valid.contains(c):
             return !bad
     match math.parse_int_base(sign + clean, base):
-        Ok(v): return Ok(v)
-        Err(_): return !("'" + s + "' overflows i64 (range -9223372036854775808..=9223372036854775807)")
+        ?v: return ?v
+        !_: return !("'" + s + "' overflows i64 (range -9223372036854775808..=9223372036854775807)")
 
 struct FlagSet:
     names: List[str]        # registration order → deterministic usage()
@@ -138,13 +138,13 @@ struct FlagSet:
         self.ints[name] = default
         self.defs[name] = str(default)
 
-    # Parse `args` into the registered flags. Returns `Ok(positionals)` on success (folding Go's
-    # `Parse()` + `Args()` into one), or a clean `Err` on an unknown flag / missing value / non-int.
+    # Parse `args` into the registered flags. Returns `?positionals` on success (folding Go's
+    # `Parse()` + `Args()` into one), or a clean `!e` on an unknown flag / missing value / non-int.
     # Never faults on bad input.
-    fn parse(self, args: List[str]) -> Result[List[str]]:
+    fn parse(self, args: List[str]) -> List[str]!:
         # Go's FlagSet.Parse REPLACES the positionals on every call. Rebind (never `.clear()`): `pos`
         # is a reference value, so `clear()` would retroactively empty the list a PREVIOUS call
-        # already handed back via `Ok(self.pos)`.
+        # already handed back via `?self.pos`.
         self.pos = []
         only_pos := false
         i := 0
@@ -176,10 +176,10 @@ struct FlagSet:
                     has_inline = true
                 kind := ""
                 match self.kind.get(name):
-                    Some(k): kind = k
+                    ?k: kind = k
                     None:
                         # Checked in the UNREGISTERED arm so a user-registered `help`/`h` flag wins,
-                        # matching Go. Returns an Err (ContinueOnError analog of Go's ErrHelp) — it
+                        # matching Go. Returns an error (ContinueOnError analog of Go's ErrHelp) — it
                         # never prints or exits, leaving that choice to the caller.
                         if name == "help" or name == "h":
                             return !("flag: help requested\n" + self.usage())
@@ -209,34 +209,34 @@ struct FlagSet:
                     i += 2
                 if kind == "int":
                     match _parse_go_int(val):
-                        Ok(iv): self.ints[name] = iv
-                        Err(m): return !("flag --" + name + ": " + m)
+                        ?iv: self.ints[name] = iv
+                        !m: return !("flag --" + name + ": " + m)
                 else:
                     self.strs[name] = val
                 continue
             # a bare non-flag token is a positional
             self.pos.push(tok)
             i += 1
-        return Ok(self.pos)
+        return ?self.pos
 
     # The string value of registered flag `name` (its default until parse overwrites it). Panics on
     # an unregistered name — a programmer error, closer to Python argparse's `AttributeError` than
     # to Go (which returns `None` from `flag.Lookup` on an unknown name, never panics).
     fn get_str(self, name: str) -> str:
         match self.strs.get(name):
-            Some(v): return v
+            ?v: return v
             None: panic("flag: unregistered str flag --" + name)
 
     # The bool value of registered flag `name`. Panics on an unregistered name.
     fn get_bool(self, name: str) -> bool:
         match self.bools.get(name):
-            Some(v): return v
+            ?v: return v
             None: panic("flag: unregistered bool flag --" + name)
 
     # The int value of registered flag `name`. Panics on an unregistered name.
     fn get_int(self, name: str) -> int:
         match self.ints.get(name):
-            Some(v): return v
+            ?v: return v
             None: panic("flag: unregistered int flag --" + name)
 
     # The leftover non-flag arguments, in order (Go `flag.Args()`).
@@ -247,7 +247,7 @@ struct FlagSet:
     # a string for `usage()` (the Go `Flag.DefValue` analog — captured once at registration).
     fn default_str(self, name: str, kind: str) -> str:
         match self.defs.get(name):
-            Some(v): return v
+            ?v: return v
             None:
                 if kind == "str":
                     return ""
@@ -261,11 +261,11 @@ struct FlagSet:
         for name in self.names:
             kind := ""
             match self.kind.get(name):
-                Some(k): kind = k
+                ?k: kind = k
                 None: kind = ""
             h := ""
             match self.help.get(name):
-                Some(x): h = x
+                ?x: h = x
                 None: h = ""
             lines.push("  --" + name + " (" + kind + ") default=" + self.default_str(name, kind) + ": " + h)
         return "\n".join(lines)

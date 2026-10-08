@@ -8,7 +8,7 @@
 # effects land is not fixed. So this example never prints from inside a job: each job puts its result
 # on its OWN channel, and the results are read back in SUBMISSION order after `shutdown()`. That is
 # the shape to copy — read (or assert) after `shutdown()`, never between it and the `submit`.
-# `ex.submit_result(f)` packages this pattern into one call: its channel carries a `Result[T]`.
+# `ex.submit_result(f)` packages this pattern into one call: its channel carries a `T!`.
 
 import std.concurrency
 

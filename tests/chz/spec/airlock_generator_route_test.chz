@@ -5,11 +5,11 @@ import std.time as time
 import submit_task from std.concurrency.task
 import memoize1 from std.memoize
 
-# A handle carries a `Result`; these tests read a job that did not fault.
-fn must[T](r: Result[T]) -> T:
+# A handle carries a `T!E`; these tests read a job that did not fault.
+fn must[T](r: T!) -> T:
     match r:
-        Ok(v): return v
-        Err(e): panic(e.message())
+        ?v: return v
+        !e: panic(e.message())
 
 fn t190_gen() -> Iterator[int]:
     acc: List[int] = []
@@ -24,8 +24,8 @@ fn t190_drain(g: Iterator[int]) -> str:
             total += v
         total
     match res:
-        Ok(t): return "{t}"
-        Err(e): return e.message()
+        ?t: return "{t}"
+        !e: return e.message()
 
 test fn started_generator_drained_in_executor_job_runs():
     g := t190_gen()
@@ -65,8 +65,8 @@ fn t190_cell(g: Iterator[int]) -> str:
             total += v
         total
     match res:
-        Ok(t): return "{t}"
-        Err(_): return "fault"
+        ?t: return "{t}"
+        !_: return "fault"
 
 fn t190_push(xs: List[int], v: int):
     xs.push(v)
@@ -167,8 +167,8 @@ fn t190_route(route: str, g: Iterator[int]) -> str:
         parallel:
             spawn:
                 match t.get():
-                    Ok(x): out.send(t190_cell(x))
-                    Err(e): out.send("err: {e.message()}")
+                    ?x: out.send(t190_cell(x))
+                    !e: out.send("err: {e.message()}")
     elif route == "memoize":
         m := memoize1(fn(k: int) -> Iterator[int]: g)
         parallel:
@@ -378,8 +378,8 @@ test fn task_get_copy_of_frame_local_generator_runs():
     parallel:
         spawn:
             match t.get():
-                Ok(g): out.send(t190_cell(g))
-                Err(e): out.send("err: {e.message()}")
+                ?g: out.send(t190_cell(g))
+                !e: out.send("err: {e.message()}")
     assert out.recv() == "2"
 
 # TICKET-220: a copy's memoize1 cache HIT (a key another task filled) runs the frame-local

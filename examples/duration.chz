@@ -20,17 +20,17 @@ show(duration.millis(3661000))
 # parse round-trips
 for txt in ["1h30m", "250ms", ".5s", "0.25s", "1h30m0s"]:
     match duration.parse(txt):
-        Ok(g):
+        ?g:
             print(txt + " -> " + str(g.as_millis()) + "ms -> " + g.to_string())
-        Err(_e):
+        !_e:
             print(txt + " -> ERR")
 
-# malformed -> Err
+# malformed -> an error
 for bad in ["1us", "1.2.3s", "99999999999999h", ""]:
     match duration.parse(bad):
-        Ok(_g):
+        ?_g:
             print(bad + " -> unexpected Ok")
-        Err(_e):
+        !_e:
             print(bad + " -> Err")
 
 # accessors + arithmetic

@@ -7,36 +7,36 @@ import std.time
 
 test fn replace_all_dollar_group_refs_work():
     match regex.replace_all(r"(\d+)-(\d+)", "10-20", r"$2:$1"):
-        Ok(v): assert v == "20:10"
-        Err(_): assert false, "$2:$1 is the RE2 group-ref form and must keep working"
+        ?v: assert v == "20:10"
+        !_: assert false, "$2:$1 is the RE2 group-ref form and must keep working"
 
 test fn replace_all_rejects_python_backslash_group_refs():
     # RE2 (the Rust `regex` crate) has no `\1` group-ref syntax; `$1` is the only form.
     # A replacement string containing a Python-style `\1`/`\2` must surface the dialect
-    # mismatch as an Err, not silently emit the literal backslash-digit text.
+    # mismatch as an error, not silently emit the literal backslash-digit text.
     match regex.replace_all(r"(\d+)-(\d+)", "10-20", r"\2:\1"):
-        Ok(v): assert false, "expected a dialect-mismatch Err, got Ok('" + v + "')"
-        Err(e): assert e.message().contains("'$2'"), e.message()
+        ?v: assert false, "expected a dialect-mismatch Err, got Ok('" + v + "')"
+        !e: assert e.message().contains("'$2'"), e.message()
 
 test fn replace_all_rejects_python_named_group_refs():
     # Python's `\g<name>` form fails the same silent way; `${name}` is the RE2 spelling.
     # The needle is a RAW string: in a normal string `{y}` is an interpolation hole (W8-1).
     match regex.replace_all(r"(?<y>\d+)", "1999", r"\g<y>!"):
-        Ok(v): assert false, "expected a dialect-mismatch Err, got Ok('" + v + "')"
-        Err(e): assert e.message().contains(r"'${y}'"), e.message()
+        ?v: assert false, "expected a dialect-mismatch Err, got Ok('" + v + "')"
+        !e: assert e.message().contains(r"'${y}'"), e.message()
 
 test fn replace_all_keeps_a_literal_backslash_before_a_non_digit():
     # Only backslash-digit and `\g<` are rejected; every other backslash stays literal.
     match regex.replace_all(r"x", "x", r"\n"):
-        Ok(v): assert v == r"\n", "a backslash not before a digit stays literal, got '" + v + "'"
-        Err(e): assert false, e.message()
+        ?v: assert v == r"\n", "a backslash not before a digit stays literal, got '" + v + "'"
+        !e: assert false, e.message()
 
 test fn replace_all_rejects_a_dollar_ref_to_a_missing_group():
     # `$1px` names a group called `1px` (RE2 takes the longest `[0-9A-Za-z_]` run after `$`), which
     # this one-group pattern does not have.
     match regex.replace_all(r"(\d+)", "12 34", "$1px"):
-        Ok(v): assert false, "expected a missing-group Err, got Ok('" + v + "')"
-        Err(e): assert e.message().contains(r"${1}"), e.message()
+        ?v: assert false, "expected a missing-group Err, got Ok('" + v + "')"
+        !e: assert e.message().contains(r"${1}"), e.message()
 
 # TICKET-086: `find_all` builds a `Match` struct per hit (text, start, end, groups), so a tokenizer
 # written as find_all + a `.text` loop took 1.64-1.83s over 1 000 000 tokens on the release binary.
@@ -70,33 +70,33 @@ test fn find_all_text_extraction_over_a_million_tokens_is_not_too_slow():
 
     t0 := time.monotonic()
     match regex.find_all_text(r"[A-Za-z0-9']+", subject):
-        Ok(toks):
+        ?toks:
             d := time.monotonic() - t0
             assert toks.len() == n
             assert toks[0] == "word0"
             assert toks[n - 1] == "word9"
             assert d < 1.0, "find_all_text over {n} tokens took {d}s, expected < 1.0s"
-        Err(e):
+        !e:
             assert false, e.message()
 
 # `find_all_text` is exactly the `.text` of every `find_all` match: the whole match, never the
 # capture groups (Go `FindAllString`; Python's `re.findall` returns the groups instead), the
-# RE2 empty-match rule, codepoint-correct on non-ASCII, and a bad pattern is an Err.
+# RE2 empty-match rule, codepoint-correct on non-ASCII, and a bad pattern is an error.
 fn match_texts(pat: str, subj: str) -> List[str]:
     out := List[str]()
     match regex.find_all(pat, subj):
-        Ok(ms):
+        ?ms:
             for m in ms:
                 out.push(m.text)
-        Err(e):
+        !e:
             assert false, e.message()
     return out
 
 fn all_texts(pat: str, subj: str) -> List[str]:
     match regex.find_all_text(pat, subj):
-        Ok(v):
+        ?v:
             return v
-        Err(e):
+        !e:
             assert false, e.message()
     return List[str]()
 
@@ -107,5 +107,5 @@ test fn find_all_text_is_the_text_of_every_find_all_match():
     assert all_texts(r"(\d+)-(\d+)", "1-2 x 33-44") == ["1-2", "33-44"]
     assert all_texts(r"a*", "baaa") == ["", "aaa"]
     match regex.find_all_text(r"(", "x"):
-        Ok(v): assert false, "expected a parse Err"
-        Err(e): assert e.message().contains("unclosed group"), e.message()
+        ?v: assert false, "expected a parse Err"
+        !e: assert e.message().contains("unclosed group"), e.message()

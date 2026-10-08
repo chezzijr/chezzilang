@@ -7,12 +7,12 @@
 
 struct Counter:
     n: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         v := self.n
         self.n = self.n + 1
         if v >= 3:
             return None
-        return Some(v)
+        return ?v
 
 fn main():
     # Single clause: the element reads `c.n` after each step advanced it. With lazy iteration the

@@ -10,11 +10,11 @@ import std.fs
 import std.math
 import std.ffi
 
-# A handle carries a `Result`; these tests read a job that did not fault.
-fn must[T](r: Result[T]) -> T:
+# A handle carries a `T!E`; these tests read a job that did not fault.
+fn must[T](r: T!) -> T:
     match r:
-        Ok(v): return v
-        Err(e): panic(e.message())
+        ?v: return v
+        !e: panic(e.message())
 
 test fn channel_equal_to_its_alias_inside_a_spawned_task():
     c1 := Channel[int]()
@@ -129,11 +129,11 @@ extern "libm.so.6":
 fn cas_self[T](a: Atomic[T], v: T) -> bool:
     return a.cas(a.load(), v)
 
-fn refused(r: Result[bool], want: str) -> bool:
+fn refused(r: bool!, want: str) -> bool:
     match r:
-        Ok(_):
+        ?_:
             return false
-        Err(e):
+        !e:
             return e.message() == "Atomic.cas: the payload holds " + want + ", which cas cannot compare"
 
 fn named_fn() -> int:
@@ -177,32 +177,32 @@ test fn atomic_cas_refuses_a_function_value_nested_in_content():
 
 fn a_listener() -> Listener:
     match net.listen("127.0.0.1:0"):
-        Ok(l):
+        ?l:
             return l
-        Err(e):
+        !e:
             panic(e.message())
 
 fn a_socket() -> Socket:
     l := a_listener()
     addr := match l.addr():
-        Ok(s): s
-        Err(e): panic(e.message())
+        ?s: s
+        !e: panic(e.message())
     match net.connect(addr):
-        Ok(s):
+        ?s:
             return s
-        Err(e):
+        !e:
             panic(e.message())
 
 fn a_reader(name: str) -> Reader:
     p := os.temp_dir().str() + "/chz_t177_" + name + "_" + str(os.getpid())
     match io.write_file(p, "x"):
-        Ok(_):
+        ?_:
             pass
-        Err(e):
+        !e:
             panic(e.message())
     r := match io.open(p):
-        Ok(r): r
-        Err(e): panic(e.message())
+        ?r: r
+        !e: panic(e.message())
     _ := fs.remove_file(p)
     return r
 
@@ -226,7 +226,7 @@ fn ops_channel(a: Channel[int], b: Channel[int], c: Channel[int]) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -262,7 +262,7 @@ fn ops_shared(a: Shared[int], b: Shared[int], c: Shared[int]) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -298,7 +298,7 @@ fn ops_rwshared(a: RwShared[int], b: RwShared[int], c: RwShared[int]) -> List[st
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -334,7 +334,7 @@ fn ops_atomic(a: Atomic[int], b: Atomic[int], c: Atomic[int]) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -370,7 +370,7 @@ fn ops_atomic_int(a: AtomicInt, b: AtomicInt, c: AtomicInt) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -406,7 +406,7 @@ fn ops_executor(a: Executor, b: Executor, c: Executor) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -442,7 +442,7 @@ fn ops_socket(a: Socket, b: Socket, c: Socket) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -478,7 +478,7 @@ fn ops_listener(a: Listener, b: Listener, c: Listener) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -514,7 +514,7 @@ fn ops_writer(a: Writer, b: Writer, c: Writer) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -550,7 +550,7 @@ fn ops_reader(a: Reader, b: Reader, c: Reader) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
@@ -586,7 +586,7 @@ fn ops_ptr(a: ptr, b: ptr, c: ptr) -> List[str]:
         bad.push("struct")
     if HOne.One(a) != HOne.One(b):
         bad.push("enum")
-    if Some(a) != Some(b):
+    if ?a != ?b:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")

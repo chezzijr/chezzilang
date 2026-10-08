@@ -1,6 +1,6 @@
 # tests/chz/suites/collections_test.chz — TDD table for std.collections (pure-Chezzi Heap/Deque/Counter).
 # Run: `cargo run -- test tests/chz/suites/collections_test.chz`. Pure Chezzi, so results are
-# deterministic by construction. Empty-removal/peek = Option[T] (matches builtin list.pop()).
+# deterministic by construction. Empty-removal/peek = T? (matches builtin list.pop()).
 
 import std.collections as col
 
@@ -13,12 +13,12 @@ test fn t_heap_min():
     assert h.len() == 7
     assert h.is_empty() == false
     match h.peek():
-        Some(v): assert v == 1
+        ?v: assert v == 1
         None: assert false, "peek empty"
     out := []
     while true:
         match h.pop():
-            Some(v): out.push(v)
+            ?v: out.push(v)
             None: break
     assert out == [1, 2, 3, 5, 7, 8, 9]
     assert h.is_empty() == true
@@ -30,7 +30,7 @@ test fn t_heap_max_and_reverse():
     out := []
     while true:
         match g.pop():
-            Some(v): out.push(v)
+            ?v: out.push(v)
             None: break
     assert out == [9, 8, 7, 5, 3, 2, 1]
     # raw custom comparator path (reverse == max-heap)
@@ -38,16 +38,16 @@ test fn t_heap_max_and_reverse():
     for x in [2, 5, 1]:
         r.push(x)
     match r.pop():
-        Some(v): assert v == 5
+        ?v: assert v == 5
         None: assert false, "empty"
 
 test fn t_heap_empty():
     h := col.min_heap()
     match h.pop():
-        Some(_): assert false, "pop empty should be None"
+        ?_: assert false, "pop empty should be None"
         None: assert true
     match h.peek():
-        Some(_): assert false, "peek empty should be None"
+        ?_: assert false, "peek empty should be None"
         None: assert true
     assert h.is_empty() == true
     assert h.len() == 0
@@ -57,7 +57,7 @@ test fn t_heap_from_list():
     out := []
     while true:
         match h.pop():
-            Some(v): out.push(v)
+            ?v: out.push(v)
             None: break
     assert out == [1, 2, 3, 4, 5]
 
@@ -72,7 +72,7 @@ test fn t_deque_fifo():
     out := []
     while true:
         match d.pop_front():
-            Some(v): out.push(v)
+            ?v: out.push(v)
             None: break
     assert out == [1, 2, 3]
 
@@ -84,7 +84,7 @@ test fn t_deque_lifo():
     out := []
     while true:
         match d.pop_back():
-            Some(v): out.push(v)
+            ?v: out.push(v)
             None: break
     assert out == [3, 2, 1]
 
@@ -95,15 +95,15 @@ test fn t_deque_both_ends():
     d.push_front(0)
     # peek across the empty-near-stack boundary
     match d.peek_front():
-        Some(v): assert v == 0
+        ?v: assert v == 0
         None: assert false, "peek_front empty"
     match d.peek_back():
-        Some(v): assert v == 2
+        ?v: assert v == 2
         None: assert false, "peek_back empty"
     out := []
     while true:
         match d.pop_front():
-            Some(v): out.push(v)
+            ?v: out.push(v)
             None: break
     assert out == [0, 1, 2]
 
@@ -114,26 +114,26 @@ test fn t_deque_interleaved():
     d.push_front(1)
     d.push_front(0)
     # drain front entirely so pop_back forces a rebalance from front -> back
-    assert d.pop_front() == Some(0)
-    assert d.pop_front() == Some(1)
+    assert d.pop_front() == ?0
+    assert d.pop_front() == ?1
     # now front stack is empty; pop_back must drain the front-derived items correctly
-    assert d.pop_back() == Some(3)
-    assert d.pop_front() == Some(2)
+    assert d.pop_back() == ?3
+    assert d.pop_front() == ?2
     assert d.is_empty() == true
 
 test fn t_deque_empty():
     d := col.Deque([], [])
     match d.pop_front():
-        Some(_): assert false
+        ?_: assert false
         None: assert true
     match d.pop_back():
-        Some(_): assert false
+        ?_: assert false
         None: assert true
     match d.peek_front():
-        Some(_): assert false
+        ?_: assert false
         None: assert true
     match d.peek_back():
-        Some(_): assert false
+        ?_: assert false
         None: assert true
     assert d.is_empty() == true
     assert d.len() == 0

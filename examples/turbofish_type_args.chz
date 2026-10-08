@@ -1,5 +1,5 @@
 # turbofish at the DECLARATION site (PART 1, type-side). Explicit type args for a generic TYPE go
-# ON THE TYPE — `Box[int].Has(5)`, `Result[int, str].Ok(5)`, nullary `Box[int].Empty` — uniformly
+# ON THE TYPE — `Box[int].Has(5)`, nullary `Box[int].Empty` — uniformly
 # for enum variants AND generic static methods. The OLD gliding form `Box.Has[int](5)` (type args on
 # the variant) is removed. Type-erased: the turbofish only drives the checker; runtime is identical
 # to the inferred form.
@@ -14,7 +14,7 @@ enum Box[T]:
             Box.Has(_): return 1
             Box.Empty: return 0
 
-# A 2-param Result-like enum: the multi-type-arg turbofish carrier (`E[int, str].Pair(…)`).
+# A 2-param enum: the multi-type-arg turbofish carrier (`E[int, str].Pair(…)`).
 enum Pair[T, U]:
     Both(T, U)
     Neither

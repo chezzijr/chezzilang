@@ -2,9 +2,9 @@
 #
 # Pipeline: tokenize (string scan) -> recursive-descent parse into an AST enum -> evaluate.
 # Exercises: enums with payloads (tokens + a self-recursive AST), pattern matching, recursion,
-# a mutable struct cursor, `Result`/`?` error propagation through every layer, string indexing,
+# a mutable struct cursor, `T!E`/`?` error propagation through every layer, string indexing,
 # and `ord`-based digit math. Errors (bad char, unbalanced parens, trailing input, divide-by-zero)
-# are surfaced as `Err` and printed — no process kill — so the output is deterministic.
+# are surfaced as `!e` and printed — no process kill — so the output is deterministic.
 
 # ---- tokens ------------------------------------------------------------------------------------
 
@@ -23,7 +23,7 @@ fn is_digit(c: str) -> bool:
 fn digit_val(c: str) -> int:
     return ord(c) - ord("0")
 
-# Scan a source string into a token list. Unknown characters fail with an Err.
+# Scan a source string into a token list. Unknown characters fail with an error.
 fn tokenize(src: str) -> List[Tok]!:
     toks := []
     i := 0
@@ -58,7 +58,7 @@ fn tokenize(src: str) -> List[Tok]!:
             toks.push(Tok.Num(val))
         else:
             return !"bad character '{c}' at {i}"
-    return Ok(toks)
+    return ?toks
 
 # ---- AST ---------------------------------------------------------------------------------------
 
@@ -79,7 +79,7 @@ struct Parser:
 
     fn peek(self) -> Tok?:
         if self.pos < self.toks.len():
-            return Some(self.toks[self.pos])
+            return ?self.toks[self.pos]
         return None
 
     fn advance(self):
@@ -89,8 +89,8 @@ struct Parser:
         left := self.parse_term()?
         while true:
             match self.peek():
-                None: return Ok(left)
-                Some(t):
+                None: return ?left
+                ?t:
                     match t:
                         Tok.Plus:
                             self.advance()
@@ -100,15 +100,15 @@ struct Parser:
                             self.advance()
                             right := self.parse_term()?
                             left = Ast.Bin("-", left, right)
-                        _: return Ok(left)
-        return Ok(left)
+                        _: return ?left
+        return ?left
 
     fn parse_term(self) -> Ast!:
         left := self.parse_factor()?
         while true:
             match self.peek():
-                None: return Ok(left)
-                Some(t):
+                None: return ?left
+                ?t:
                     match t:
                         Tok.Star:
                             self.advance()
@@ -118,27 +118,27 @@ struct Parser:
                             self.advance()
                             right := self.parse_factor()?
                             left = Ast.Bin("/", left, right)
-                        _: return Ok(left)
-        return Ok(left)
+                        _: return ?left
+        return ?left
 
     fn parse_factor(self) -> Ast!:
         match self.peek():
             None: return !"expected a number or '('"
-            Some(t):
+            ?t:
                 match t:
                     Tok.Num(v):
                         self.advance()
-                        return Ok(Ast.Lit(v))
+                        return ?Ast.Lit(v)
                     Tok.LParen:
                         self.advance()
                         inner := self.parse_expr()?
                         match self.peek():
                             None: return !"expected ')'"
-                            Some(rt):
+                            ?rt:
                                 match rt:
                                     Tok.RParen:
                                         self.advance()
-                                        return Ok(inner)
+                                        return ?inner
                                     _: return !"expected ')'"
                     _: return !"expected a number or '('"
 
@@ -147,18 +147,18 @@ struct Parser:
 fn eval(node: Ast) -> int!:
     match node:
         Ast.Lit(v):
-            return Ok(v)
+            return ?v
         Ast.Bin(op, l, r):
             a := eval(l)?
             b := eval(r)?
             match op:
-                "+": return Ok(a + b)
-                "-": return Ok(a - b)
-                "*": return Ok(a * b)
+                "+": return ?(a + b)
+                "-": return ?(a - b)
+                "*": return ?(a * b)
                 "/":
                     if b == 0:
                         return !"division by zero"
-                    return Ok(a / b)
+                    return ?(a / b)
                 _: return !"unknown operator '{op}'"
 
 # ---- driver ------------------------------------------------------------------------------------
@@ -168,16 +168,16 @@ fn calc(input: str) -> int!:
     p := Parser(toks, 0)
     ast := p.parse_expr()?
     match p.peek():
-        Some(_): return !"trailing input"
+        ?_: return !"trailing input"
         None:    return eval(ast)
 
 fn main():
-    # left-assoc: "10 - 4 - 3" is (10-4)-3 = 3; "7 / 0" -> Err; "1 + " parse error;
+    # left-assoc: "10 - 4 - 3" is (10-4)-3 = 3; "7 / 0" -> an error; "1 + " parse error;
     # "3 % 2" bad character; "(1 + 2" unbalanced.
     inputs := ["1 + 2 * 3", "(1 + 2) * 3", "2 * (3 + 4) - 5", "100 / 5 / 2", "10 - 4 - 3", "2 + 3 * 4 - 10 / 2", "7 / 0", "1 + ", "3 % 2", "(1 + 2", "42"]
     for src in inputs:
         match calc(src):
-            Ok(v):  print("{src} = {v}")
-            Err(e): print("{src} -> error: {e.message()}")
+            ?v:  print("{src} = {v}")
+            !e: print("{src} -> error: {e.message()}")
 
 main()

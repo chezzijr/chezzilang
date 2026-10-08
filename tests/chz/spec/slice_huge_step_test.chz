@@ -22,7 +22,7 @@ test fn huge_step_on_str_and_bytes():
 
 test fn huge_step_under_recover_is_a_value_not_a_crash():
     r := recover: [0, 1, 2, 3][1::9223372036854775807]
-    assert r == Ok([1])
+    assert r == ?[1]
 
 test fn huge_step_on_a_range():
     r := range(0, 10)

@@ -96,14 +96,14 @@ test fn a_fn_typed_copy_field_still_calls():
 test fn copy_works_on_a_native_struct():
     r := regex.find("[0-9]+", "a1b22c")
     match r:
-        Ok(o):
+        ?o:
             match o:
-                Some(mm):
+                ?mm:
                     d := mm.copy()
                     d.start = 9
                     assert mm.start == 1
                     assert str(d) == "Match(text='1', start=9, end=2, groups=[])"
                 None:
                     assert false, "regex.find must match the digit run"
-        Err(e):
+        !e:
             assert false, "regex.find must not error"

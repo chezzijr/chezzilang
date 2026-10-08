@@ -1,6 +1,6 @@
 # TICKET-104 (docs/gaps.md W12-2, W12-3): every consumer that orders by `compare` must treat a
 # Comparable ENUM exactly like its Comparable STRUCT twin. The expected orders are Rust's: a
-# `Vec<Lv>` with `impl Ord` sorts to `[Lo, Hi(1), Hi(3)]`, and `iter().min()` is `Some(Lo)`.
+# `Vec<Lv>` with `impl Ord` sorts to `[Lo, Hi(1), Hi(3)]`, and `iter().min()` is `?Lo`.
 import std.cmp
 import std.bisect
 import std.collections as col

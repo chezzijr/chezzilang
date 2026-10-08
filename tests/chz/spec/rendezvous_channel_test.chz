@@ -4,16 +4,16 @@
 import std.concurrency
 import std.time
 
-fn fault_msg[T](r: Result[T, Error]) -> str:
+fn fault_msg[T](r: T!Error) -> str:
     match r:
-        Ok(_): return "NO FAULT"
-        Err(e): return e.message()
+        ?_: return "NO FAULT"
+        !e: return e.message()
     return ""
 
 fn poll_after_delay(rz: Channel[int], got: Shared[int]):
     time.sleep_ms(150)
     match rz.try_recv():
-        Some(v): got.set(v)
+        ?v: got.set(v)
         None: got.set(-1)
 
 test fn rendezvous_cap_is_zero_and_unbounded_is_minus_one():
@@ -39,7 +39,7 @@ test fn try_recv_sees_a_parked_rendezvous_sender():
         spawn:
             time.sleep_ms(150)
             match rz.try_recv():
-                Some(v): got.set(v)
+                ?v: got.set(v)
                 None:
                     got.set(-1)
                     # bug present: the value is still parked with the sender — drain it with a
@@ -124,12 +124,12 @@ test fn a_parked_rendezvous_value_is_delivered_exactly_once():
         spawn:
             time.sleep_ms(150)
             match rz.try_recv():
-                Some(v):
+                ?v:
                     first_some.set(true)
                     first_val.set(v)
                 None: first_some.set(false)
             match rz.try_recv():
-                Some(_): second_none.set(false)
+                ?_: second_none.set(false)
                 None: second_none.set(true)
     assert first_some.get(), "the first try_recv must take the deposit"
     assert first_val.get() == 7
@@ -150,7 +150,7 @@ test fn close_withdraws_a_parked_rendezvous_senders_value():
             rz.close()
             time.sleep_ms(150)
             match rz.try_recv():
-                Some(_): after_close_none.set(false)
+                ?_: after_close_none.set(false)
                 None: after_close_none.set(true)
     assert sender_result.get() == "send on a closed channel"
     assert after_close_none.get(), "try_recv after close must not see a withdrawn deposit"
@@ -207,9 +207,9 @@ test fn a_parked_bounded_sender_completes_when_the_receiver_takes_then_closes():
         ch.send(1)
         r := recover: ch.send(2)
         status.set(fault_msg(r))
-    assert out.try_recv() == Some(1)
+    assert out.try_recv() == ?1
     if status.get() == "NO FAULT":
-        assert out.try_recv() == Some(2), "a completed send's value must be received"
+        assert out.try_recv() == ?2, "a completed send's value must be received"
     else:
         assert status.get() == "send on a closed channel", status.get()
     assert out.try_recv() == None

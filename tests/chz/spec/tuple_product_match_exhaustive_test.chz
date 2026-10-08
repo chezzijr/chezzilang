@@ -1,4 +1,4 @@
-# TICKET-076: a `match` over a tuple (or a nested `Option`) whose arms cover the full cartesian
+# TICKET-076: a `match` over a tuple (or a nested `T?`) whose arms cover the full cartesian
 # product of the constituent domains is exhaustive without a `_` arm, matching rustc. This RUNS
 # each program (not just checks it) — proving the compiler can lower a no-`_` product without
 # reaching `Op::MatchNoArm`. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
@@ -21,13 +21,13 @@ test fn tuple_product_of_two_enums():
     assert f(E.B, F.X) == "bx"
 
 test fn nested_option_arms():
-    fn f(x: Option[Option[int]]) -> str:
+    fn f(x: int??) -> str:
         match x:
-            Some(None): return "in"
-            Some(Some(v)): return "v {v}"
+            ?None: return "in"
+            ?(?v): return "v {v}"
             None: return "on"
-    assert f(Some(Some(4))) == "v 4"
-    assert f(Some(None)) == "in"
+    assert f(?(?4)) == "v 4"
+    assert f(?None) == "in"
     assert f(None) == "on"
 
 test fn product_with_a_bool_column():

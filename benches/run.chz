@@ -18,14 +18,14 @@ fn bench(name: str):
     py := "python3 benches/py/{name}.py"
     cmd := "hyperfine --warmup 2 -N --export-markdown benches/last-{name}.md '{chz}' '{py}'"
     match process.cmd(cmd):
-        Ok(out): print(out)
-        Err(e): print("FAILED [{name}]: {e.message()}")
+        ?out: print(out)
+        !e: print("FAILED [{name}]: {e.message()}")
 
 fn main():
     print("building release binary (cargo build --release)...")
     match process.cmd("cargo build --release"):
-        Ok(_): print("build ok\n")
-        Err(e):
+        ?_: print("build ok\n")
+        !e:
             print("build failed: {e.message()}")
             return
 

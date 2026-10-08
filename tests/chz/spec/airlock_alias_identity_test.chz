@@ -18,8 +18,8 @@ test fn container_alias_write_through_one_alias_faults():
             res := recover:
                 write_outer(outer)
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -39,7 +39,7 @@ test fn struct_alias_write_through_one_alias_faults():
             res := recover:
                 write_pair(pair)
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got

@@ -6,13 +6,13 @@ fn main():
     t := cancel.manual()
     print("before: cancelled={t.cancelled()}")
     match t.reason():
-        Some(r): print("before reason: {r}")
+        ?r: print("before reason: {r}")
         None:    print("before reason: none")
 
     t.cancel()
     print("after: cancelled={t.cancelled()}")
     match t.reason():
-        Some(r): print("after reason: {r}")
+        ?r: print("after reason: {r}")
         None:    print("after reason: none")
 
     # done() is now tripped → recv returns immediately (same task, deterministic).

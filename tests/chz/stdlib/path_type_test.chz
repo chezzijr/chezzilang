@@ -28,8 +28,8 @@ test fn path_decode_is_exact_and_recoverable():
     assert path.Path(b"ok/dir").decode() == "ok/dir"
     r := recover: path.Path(b"A\xffB").decode()
     match r:
-        Ok(_): assert false, "decode() on non-UTF-8 must fault"
-        Err(e): assert e.message().contains("invalid UTF-8"), "got: " + e.message()
+        ?_: assert false, "decode() on non-UTF-8 must fault"
+        !e: assert e.message().contains("invalid UTF-8"), "got: " + e.message()
 
 test fn path_str_is_lossy_and_never_faults():
     # ASCII round-trips unchanged.
@@ -55,8 +55,8 @@ test fn path_fns_still_take_a_bare_str_literal():
     assert not fs.is_file("/")
     assert not fs.exists("/definitely/not/here/w78")
     match io.read_file("/definitely/not/here/w78"):
-        Ok(_): assert false, "a missing file must Err"
-        Err(e): pass
+        ?_: assert false, "a missing file must Err"
+        !e: pass
 
 test fn path_fns_take_bytes_and_path_too():
     assert fs.exists(b"/")
@@ -64,12 +64,12 @@ test fn path_fns_take_bytes_and_path_too():
     assert fs.exists(path.Path(b"/"))
     assert fs.is_dir(path.Path(b"/"))
 
-# `os.getcwd()` is `Result[Path]` — NO type argument, NO turbofish.
+# `os.getcwd()` is `Path!` — NO type argument, NO turbofish.
 test fn getcwd_returns_a_path():
     match os.getcwd():
-        Ok(p):
+        ?p:
             assert p.bytes().len() > 0
             # On a normal (UTF-8) cwd the exact and the lossy conversion agree.
             assert p.decode() == p.str()
             assert fs.is_dir(p)
-        Err(e): assert false, "getcwd: " + e.message()
+        !e: assert false, "getcwd: " + e.message()

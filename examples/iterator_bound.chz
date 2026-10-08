@@ -3,7 +3,7 @@
 # `[S: Iterable[T], T]` = "give me anything I can iterate" (Rust's `IntoIterator`, Go's `range`):
 #   - built-in list / set / map / str / bytes / bytearray
 #   - a cursor from `.iter()`, or a generator's `Iterator[T]`
-#   - any user struct with `next(self) -> Option[T]`
+#   - any user struct with `next(self) -> T?`
 #     (a struct with ONLY `iter(self) -> Iterator[T]` is for-iterable and satisfies `Iterable`, but the
 #      `T` RECOVERY does not fire for it — bound that one concretely, e.g. `[S: Iterable[int]]`)
 #   Its body iterates with `for` — that is what this file's three functions do.
@@ -37,12 +37,12 @@ fn to_list[S: Iterable[T], T](xs: S) -> List[T]:
 struct Counter:
     n: int
     limit: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         if self.n >= self.limit:
             return None
         v := self.n
         self.n = self.n + 1
-        return Some(v)
+        return ?v
 
 fn main():
     nums := [10, 20, 30]

@@ -85,10 +85,10 @@ fn case_inputs(slug: str, samples_only: bool) -> List[str]:
         pats.push("judge/data/{slug}/*.in")
     for pat in pats:
         match fs.glob(pat):
-            Ok(paths):
+            ?paths:
                 for p in paths:
                     ins.push(p.str())
-            Err(e):    ins.extend([])
+            !e:    ins.extend([])
     return ins
 
 # Run one case; return its verdict.
@@ -96,11 +96,11 @@ fn judge_case(chezzi: str, timeout_s: int, sol: str, infile: str) -> Verdict:
     expfile := infile.strip_suffix(".in") + ".out"
     expected := ""
     match io.read_file(expfile):
-        Ok(t):  expected = t
-        Err(e): return Verdict("NOEXP", "no .out for {infile}")
+        ?t:  expected = t
+        !e: return Verdict("NOEXP", "no .out for {infile}")
     cmd := "timeout {timeout_s} {chezzi} run {sol} < {infile}"
     match process.run(cmd):
-        Ok(r):
+        ?r:
             if r.code == 124:
                 return Verdict("TIME", "killed after {timeout_s}s")
             if r.stderr.contains("panicked at"):
@@ -110,13 +110,13 @@ fn judge_case(chezzi: str, timeout_s: int, sol: str, infile: str) -> Verdict:
             if " ".join(tokens(r.stdout)) == " ".join(tokens(expected)):
                 return Verdict("PASS", "")
             return Verdict("WRONG", first_diff(norm_lines(r.stdout), norm_lines(expected)))
-        Err(e):
+        !e:
             return Verdict("SPAWN", e.message())
 
 fn find_problems(only: str) -> List[str]:
     out := []
     match fs.list_dir("judge/problems"):
-        Ok(names):
+        ?names:
             for entry in names:
                 # `fs.list_dir` hands back `List[path.Path]`; the slug is compared and
                 # interpolated as `str`, so render it once here.
@@ -125,7 +125,7 @@ fn find_problems(only: str) -> List[str]:
                     continue
                 if fs.is_file("judge/problems/{name}/solution.chz"):
                     out.push(name)
-        Err(e):
+        !e:
             print("cannot read judge/problems/ ({e}) — run from the repo root")
     return out
 

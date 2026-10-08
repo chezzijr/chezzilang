@@ -1,26 +1,26 @@
 import std.net
 
-# W15-3 (TICKET-176): `write`/`write_bytes` return `Ok(n)` only once every byte is sent -- Go's
+# W15-3 (TICKET-176): `write`/`write_bytes` return `?n` only once every byte is sent -- Go's
 # `Conn.Write`. The payload is larger than the kernel buffers, so the writer parks for room while
 # the sibling drains it; the writer closes its end so the drain sees EOF.
 
-fn count_text(r: Result[int]) -> str:
+fn count_text(r: int!) -> str:
     match r:
-        Ok(n): return "Ok {n}"
-        Err(e): return e.message()
+        ?n: return "Ok {n}"
+        !e: return e.message()
 
 fn drain(peer: Socket) -> int:
     total := 0
     while true:
         match peer.read_bytes(65536):
-            Ok(b):
+            ?b:
                 if b.len() == 0:
                     return total
                 total += b.len()
-            Err(_): return total
+            !_: return total
     return total
 
-fn write_all_case(op: str, timeout_ms: int) -> Result[str]:
+fn write_all_case(op: str, timeout_ms: int) -> str!:
     ln := net.listen("127.0.0.1:0")?
     c := net.connect(ln.addr()?)?
     peer := ln.accept()?
@@ -44,9 +44,9 @@ fn write_all_case(op: str, timeout_ms: int) -> Result[str]:
             got.send(drain(peer))
     peer.close()
     ln.close()
-    return Ok("{out.recv()} read {got.recv()}")
+    return ?"{out.recv()} read {got.recv()}"
 
-fn after_a_timed_out_write() -> Result[str]:
+fn after_a_timed_out_write() -> str!:
     ln := net.listen("127.0.0.1:0")?
     stuck := net.connect(ln.addr()?)?
     stuck_peer := ln.accept()?
@@ -60,10 +60,10 @@ fn after_a_timed_out_write() -> Result[str]:
     stuck_peer.close()
     peer.close()
     ln.close()
-    return Ok("{first} / {second} / {got}")
+    return ?"{first} / {second} / {got}"
 
 # A timed-out write leaves its sent offset behind only if `drop_poll_latch` forgets it; the next
-# write on the same task would then skip that many bytes and report Ok without sending them.
+# write on the same task would then skip that many bytes and report success without sending them.
 test fn a_write_after_a_timed_out_write_sends_every_byte():
     msg := after_a_timed_out_write() ?? "setup failed"
     assert msg == "timeout / Ok 5 / hello", msg

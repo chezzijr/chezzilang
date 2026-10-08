@@ -17,16 +17,16 @@
 import std.concurrency
 import airlock_crossing_policy_lib as lib
 
-# A handle carries a `Result`; these tests read a job that did not fault.
-fn must[T](r: Result[T]) -> T:
+# A handle carries a `T!E`; these tests read a job that did not fault.
+fn must[T](r: T!) -> T:
     match r:
-        Ok(v): return v
-        Err(e): panic(e.message())
+        ?v: return v
+        !e: panic(e.message())
 
-fn t189_out(res: Result[int]) -> str:
+fn t189_out(res: int!) -> str:
     match res:
-        Ok(n): return "ok {n}"
-        Err(_): return "fault"
+        ?n: return "ok {n}"
+        !_: return "fault"
 
 fn t189_try(xs: List[int]) -> str:
     res := recover:

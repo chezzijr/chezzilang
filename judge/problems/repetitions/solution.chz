@@ -5,7 +5,7 @@ import std.io
 fn main():
     s := ""
     match io.read_line():
-        Some(l): s = l.trim()
+        ?l: s = l.trim()
         None:    return
     best := 0
     cur := 0

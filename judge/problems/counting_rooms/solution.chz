@@ -7,7 +7,7 @@ fn read_tokens() -> List[str]:
     text := ""
     while true:
         match io.read_line():
-            Some(l): text = text + l + " "
+            ?l: text = text + l + " "
             None:    break
     toks := []
     for t in text.split(" "):
@@ -43,7 +43,7 @@ fn main():
                 visited[sr][sc] = true
                 while stack.len() > 0:
                     match stack.pop():
-                        Some(cell):
+                        ?cell:
                             r := cell.0
                             c := cell.1
                             for d in dirs:

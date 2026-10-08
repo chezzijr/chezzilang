@@ -1,10 +1,10 @@
-# examples/optchain.chz — optional chaining `?.` on both carriers, null-coalescing `??` on Option.
+# examples/optchain.chz — optional chaining `?.` on both carriers, null-coalescing `??` on a `T?` value.
 # The carriers survive desugar; the CHECKER picks the lowering from the operand's type.
-#   `?.` on an Option -> a `match`: None short-circuits, Some(v) applies the access and re-wraps.
-#   `?.` on a Result  -> `?` then `.`: propagate the Err, then access the unwrapped value. Identical
+#   `?.` on a `T?` value -> a `match`: None short-circuits, ?v applies the access and re-wraps.
+#   `?.` on a `T!E` value  -> `?` then `.`: propagate the error, then access the unwrapped value. Identical
 #                        to the spaced spelling `x? .f`, and subject to the same return-kind rule.
-# `??` takes both carriers: on an Option it unwraps `Some(v)` to `v`; on a Result it unwraps
-# `Ok(v)` to `v` and DISCARDS the `Err` payload (Rust's `unwrap_or`, not `?`).
+# `??` takes both carriers: on a `T?` value it unwraps `?v` to `v`; on a `T!E` value it unwraps
+# `?v` to `v` and DISCARDS the `!e` payload (Rust's `unwrap_or`, not `?`).
 
 struct Profile:
     name: str
@@ -17,21 +17,21 @@ struct User:
         return self.profile.name
 
 # --- null-coalescing: pick the inner value, or the fallback on None ---
-some_name := Some("alice")
-no_name: Option[str] = None
+some_name: str? = "alice"
+no_name: str? = None
 print(some_name ?? "anon")     # alice
 print(no_name ?? "anon")       # anon
 
 # `??` is right-associative and chains.
-a: Option[int] = None
-b: Option[int] = None
+a: int? = None
+b: int? = None
 print(a ?? b ?? 99)            # 99
 
-# --- optional chaining: field access through an Option ---
-u := Some(User(Profile("bob", 30)))
-none_user: Option[User] = None
+# --- optional chaining: field access through a `T?` value ---
+u: User? = User(Profile("bob", 30))
+none_user: User? = None
 
-# u?.profile yields Option[Profile]; chain again for the name, then default with ??.
+# u?.profile yields Profile?; chain again for the name, then default with ??.
 print(u?.profile?.name ?? "nobody")          # bob
 print(none_user?.profile?.name ?? "nobody")  # nobody  (short-circuits at the first None)
 
@@ -46,37 +46,37 @@ print(u?.profile?.age ?? 0)       # 30
 fallback := "nobody"
 print("name={u?.profile?.name ?? fallback}, age={none_user?.profile?.age ?? -1}")  # name=bob, age=-1
 
-# --- optional chaining on a Result: `?` then `.` ---
-fn fetch(ok: bool) -> Result[str, str]:
+# --- optional chaining on a `T!E` value: `?` then `.` ---
+fn fetch(ok: bool) -> str!str:
     if ok:
-        return Ok("payload")
+        return ?"payload"
     return !"offline"
 
-# In a Result-returning fn, `fetch(ok)?.len()` propagates the Err, then `.len()`s the unwrapped str.
-fn size(ok: bool) -> Result[int, str]:
-    return Ok(fetch(ok)?.len())
+# In a `T!E`-returning fn, `fetch(ok)?.len()` propagates the error, then `.len()`s the unwrapped str.
+fn size(ok: bool) -> int!str:
+    return ?(fetch(ok)?.len())
 
 # The SPACED spelling is the same program — same value, same bytecode, same diagnostics.
-fn size_spaced(ok: bool) -> Result[int, str]:
-    return Ok(fetch(ok)? .len())
+fn size_spaced(ok: bool) -> int!str:
+    return ?(fetch(ok)? .len())
 
-print(size(true))          # Ok(7)
-print(size(false))         # Err('offline')   — the `?` propagated, `.len()` never ran
-print(size_spaced(true))   # Ok(7)
-print(size_spaced(false))  # Err('offline')
+print(size(true))          # 7
+print(size(false))         # !offline   — the `?` propagated, `.len()` never ran
+print(size_spaced(true))   # 7
+print(size_spaced(false))  # !offline
 
-# `?.` also carries method ARGS through a Result.
-fn shout(ok: bool) -> Result[bool, str]:
-    return Ok(fetch(ok)?.starts_with("pay"))
+# `?.` also carries method ARGS through a `T!E` value.
+fn shout(ok: bool) -> bool!str:
+    return ?(fetch(ok)?.starts_with("pay"))
 
-print(shout(true))         # Ok(true)
+print(shout(true))         # true
 
-# `?.` on a Result still propagates with `?`, while `??` discards: `fetch(true)?.len() ?? 0` is
+# `?.` on a `T!E` value still propagates with `?`, while `??` discards: `fetch(true)?.len() ?? 0` is
 # still an error, because `fetch(true)?.len()` is already an int, not a carrier.
 match fetch(false):
-    Ok(s):  print(s.len())
-    Err(e): print("fell back: {e}")   # fell back: offline
+    ?s:  print(s.len())
+    !e: print("fell back: {e}")   # fell back: offline
 
-# `??` on a Result: unwrap Ok, or discard the Err and fall back.
+# `??` on a `T!E` value: unwrap success, or discard the error and fall back.
 print(fetch(true) ?? "none")   # payload
 print(fetch(false) ?? "none")  # none

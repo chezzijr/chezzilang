@@ -25,12 +25,12 @@ print(classify((4, 4)))     # diagonal
 print(classify((7, 0)))     # on x-axis
 print(classify((2, 5)))     # point 2,5
 
-# Nested: an Option wrapping a tuple, destructured in the Some arm.
-fn first_pair(xs: List[(int, str)]) -> Option[(int, str)]:
+# Nested: a `T?` value wrapping a tuple, destructured in the `?v` arm.
+fn first_pair(xs: List[(int, str)]) -> (int, str)?:
     for p in xs:
-        return Some(p)
+        return ?p
     return None
 
 match first_pair([(1, "a"), (2, "b")]):
-    Some((n, s)): print("first: {n}{s}")   # first: 1a
+    ?(n, s): print("first: {n}{s}")   # first: 1a
     None: print("empty")

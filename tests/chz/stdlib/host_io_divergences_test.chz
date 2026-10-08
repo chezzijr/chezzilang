@@ -9,40 +9,40 @@ test fn flag_int_accepts_go_prefixed_bases():
     fs := flag.new()
     fs.int_flag("n", 0, "count")
     match fs.parse(["-n", "0x10"]):
-        Ok(_): pass
-        Err(e): assert false, "unexpected Err(" + e.message() + ")"
+        ?_: pass
+        !e: assert false, "unexpected Err(" + e.message() + ")"
     assert fs.get_int("n") == 16, str(fs.get_int("n"))
 
 test fn flag_int_leading_zero_is_octal():
     fs := flag.new()
     fs.int_flag("n", 0, "count")
     match fs.parse(["-n", "010"]):
-        Ok(_): pass
-        Err(e): assert false, "unexpected Err(" + e.message() + ")"
+        ?_: pass
+        !e: assert false, "unexpected Err(" + e.message() + ")"
     assert fs.get_int("n") == 8, str(fs.get_int("n"))
 
 test fn base64_decode_ignores_newlines():
     match encoding.base64_decode("Zm9v\r\nYmFy\n"):
-        Ok(s): assert s == "foobar", s
-        Err(e): assert false, "unexpected Err(" + e.message() + ")"
+        ?s: assert s == "foobar", s
+        !e: assert false, "unexpected Err(" + e.message() + ")"
 
-# Parse one `-n <val>` against an int flag; `Ok(n)` or the `Err` message.
-fn parse_n(val: str) -> Result[int, str]:
+# Parse one `-n <val>` against an int flag; `?n` or the `!e` message.
+fn parse_n(val: str) -> int!str:
     fs := flag.new()
     fs.int_flag("n", 0, "count")
     match fs.parse(["-n", val]):
-        Ok(_): return Ok(fs.get_int("n"))
-        Err(e): return !e.message()
+        ?_: return ?fs.get_int("n")
+        !e: return !e.message()
 
 fn expect_n(val: str, want: int):
     match parse_n(val):
-        Ok(n): assert n == want, val + " -> " + str(n)
-        Err(m): assert false, val + " unexpected Err(" + m + ")"
+        ?n: assert n == want, val + " -> " + str(n)
+        !m: assert false, val + " unexpected Err(" + m + ")"
 
 fn expect_bad_n(val: str):
     match parse_n(val):
-        Ok(n): assert false, "'" + val + "' parsed as " + str(n) + ", Go rejects it"
-        Err(m): assert m.contains("cannot parse"), m
+        ?n: assert false, "'" + val + "' parsed as " + str(n) + ", Go rejects it"
+        !m: assert m.contains("cannot parse"), m
 
 # Go `strconv.ParseInt(s, 0, 64)` rejects these (measured Go 1.27.0).
 test fn flag_int_rejects_what_go_rejects():
@@ -71,21 +71,21 @@ test fn flag_int_accepts_go_underscores():
     expect_n("0", 0)
     expect_n("00", 0)
 
-# The i64 boundary: MIN parses, one past either end is an Err.
+# The i64 boundary: MIN parses, one past either end is an error.
 test fn flag_int_i64_boundary():
     expect_n("9223372036854775807", 9223372036854775807)
     expect_n("-9223372036854775808", -9223372036854775807 - 1)
     expect_n("-0x8000000000000000", -9223372036854775807 - 1)
     match parse_n("9223372036854775808"):
-        Ok(n): assert false, "overflow parsed as " + str(n)
-        Err(m): assert m.contains("overflows"), m
+        ?n: assert false, "overflow parsed as " + str(n)
+        !m: assert m.contains("overflows"), m
 
 fn bad_syntax(args: List[str]) -> str:
     fs := flag.new()
     fs.str_flag("name", "", "n")
     match fs.parse(args):
-        Ok(_): return "OK"
-        Err(e): return e.message()
+        ?_: return "OK"
+        !e: return e.message()
 
 test fn flag_bad_syntax_like_go():
     assert bad_syntax(["---name", "x"]).contains("bad flag syntax: ---name"), bad_syntax(["---name", "x"])
@@ -100,13 +100,13 @@ test fn flag_dash_forms_still_parse():
 
 fn b64(s: str) -> str:
     match encoding.base64_decode(s):
-        Ok(v): return "Ok(" + v + ")"
-        Err(e): return "Err"
+        ?v: return "Ok(" + v + ")"
+        !e: return "Err"
 
 fn b64u(s: str) -> str:
     match encoding.base64_decode_url(s):
-        Ok(v): return "Ok(" + v + ")"
-        Err(e): return "Err"
+        ?v: return "Ok(" + v + ")"
+        !e: return "Err"
 
 # Go `Std/URLEncoding.DecodeString` drops every \r and \n anywhere (measured Go 1.27.0) and Errs on
 # space/tab and on padding split by a newline.

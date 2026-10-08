@@ -20,10 +20,10 @@ fn area(s: Shape) -> float:
         Shape.Circle(r): return 3.14 * float(r * r)
         Shape.Square(n): return float(n * n)
 
-fn safe_div(a: int, b: int) -> Result[int]:
+fn safe_div(a: int, b: int) -> int!:
     if b == 0:
         return !"divide by zero"
-    return Ok(a / b)
+    return ?(a / b)
 
 fn main() -> int!:
     print(greet("chezzi"))
@@ -41,6 +41,6 @@ fn main() -> int!:
 
     r := safe_div(10, 2)?
     print("div: {r}")
-    return Ok(0)
+    return ?0
 
 main()?

@@ -1,6 +1,6 @@
 # TICKET-107 (W12-11): a bare, unqualified, payload-free name that is not a registered variant is a
-# whole-value catch-all on an enum/Option/Result scrutinee, not just a struct/tuple/int one. rustc
-# 1.98.1 reference (2026-09-10): `g a b` / `wSome(5)` for the guarded-enum and Option shapes.
+# whole-value catch-all on an enum/`T?`/`T!E` scrutinee, not just a struct/tuple/int one. rustc
+# 1.98.1 reference (2026-09-10): `g a b` / `wSome(5)` for the guarded-enum and a `T?` value shapes.
 enum E:
     A(int)
     B
@@ -32,7 +32,7 @@ test fn a_guarded_bare_name_arm_runs_only_when_its_guard_holds():
     assert f(E.B, 0) == "b"
 
 test fn a_bare_name_binds_the_whole_option():
-    assert whole(Some(5)) == "some 5"
+    assert whole(?5) == "some 5"
     assert whole(None) == "none"
 
 test fn a_bare_name_binds_the_whole_enum_value():

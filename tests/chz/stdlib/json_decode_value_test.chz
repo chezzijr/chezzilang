@@ -5,7 +5,7 @@ struct P:
     x: int
     y: int = 7
 
-fn app2[V](f: fn(str) -> Result[V], v: V) -> Result[V]:
+fn app2[V](f: fn(str) -> V!, v: V) -> V!:
     return f("5")
 
 fn id[T](x: T) -> T:
@@ -13,29 +13,29 @@ fn id[T](x: T) -> T:
 
 test fn let_and_hof():
     d := json.decode[int]
-    assert d("5") == Ok(5)
-    assert ["1", "2"].map(json.decode[int]) == [Ok(1), Ok(2)]
+    assert d("5") == ?5
+    assert ["1", "2"].map(json.decode[int]) == [?1, ?2]
     match d("x"):
-        Ok(_): assert false
-        Err(_): assert true
+        ?_: assert false
+        !_: assert true
 
 test fn typed_let_struct_default_and_float():
-    dp: fn(str) -> Result[P] = json.decode
+    dp: fn(str) -> P! = json.decode
     match dp("{{\"x\": 1}}"):
-        Ok(p): assert p.x == 1 and p.y == 7
-        Err(_): assert false
+        ?p: assert p.x == 1 and p.y == 7
+        !_: assert false
     df := (json.decode[float])
-    assert df("2.5") == Ok(2.5)
+    assert df("2.5") == ?2.5
 
 test fn pinned_by_generic_callee():
-    assert app2(json.decode, 3) == Ok(5)
+    assert app2(json.decode, 3) == ?5
 
 test fn pinned_through_a_bare_generic_slot_and_an_option():
-    f: fn(str) -> Result[int] = id(json.decode)
-    assert f("5") == Ok(5)
-    o: Option[fn(str) -> Result[int]] = Some(json.decode)
+    f: fn(str) -> int! = id(json.decode)
+    assert f("5") == ?5
+    o: (fn(str) -> int!)? = ?json.decode
     match o:
-        Some(g): assert g("6") == Ok(6)
+        ?g: assert g("6") == ?6
         None: assert false
 
 test fn crosses_spawn():

@@ -18,12 +18,12 @@ fn main():
     print(scores.has("linus"))
     print(scores.has("ken"))
 
-    # Safe accessor returns Option[V].
+    # Safe accessor returns `V?`.
     match scores.get("grace"):
-        Some(v): print("grace: {v}")
+        ?v: print("grace: {v}")
         None: print("grace: absent")
     match scores.get("ken"):
-        Some(v): print("ken: {v}")
+        ?v: print("ken: {v}")
         None: print("ken: absent")
 
     # keys() / values() preserve insertion order.
@@ -35,9 +35,9 @@ fn main():
     scores["ada"] += 5
     print(scores["ada"])
 
-    # remove() returns the removed value as Option[V].
+    # remove() returns the removed value as `V?`.
     match scores.remove("linus"):
-        Some(v): print("removed {v}")
+        ?v: print("removed {v}")
         None: print("nothing removed")
     print(scores)
 

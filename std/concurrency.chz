@@ -31,13 +31,13 @@ native struct Shared[T]:
 # A `RwShared[T]` whose element `T` is a CONTAINER ALSO gains ZERO-COPY read-view methods (checker
 # arm-resolved, NOT harvested here — E/K/V are not nameable in the `RwShared[T]` surface). Gated by a
 # constructor-kind `where T: List/Map/Set` bound to the container HEAD (Tuple EXCLUDED — heterogeneous):
-#   `RwShared[List[E]]`: `len(self) -> int`, `at(self, i: int) -> Option[E]` (the SAFE index — out of
+#   `RwShared[List[E]]`: `len(self) -> int`, `at(self, i: int) -> E?` (the SAFE index — out of
 #     range is `None`, never a fault; negative index normalizes like `xs[i]`), `slice(self, lo, hi) -> List[E]`,
 #     `for_each(self, f: fn(E) -> _) -> None`, `fold(self, init: R, f: fn(R, E) -> R) -> R`.
-#   `RwShared[Map[K,V]]`: `len(self) -> int`, `get_key(self, k: K) -> Option[V]`, `has(self, k: K) -> bool`,
+#   `RwShared[Map[K,V]]`: `len(self) -> int`, `get_key(self, k: K) -> V?`, `has(self, k: K) -> bool`,
 #     `for_each_entry(self, f: fn(K, V) -> _) -> None`, `fold_entries(self, init: R, f: fn(R, K, V) -> R) -> R`,
 #     and the single-entry WRITERS (TICKET-192) `set_key(self, k: K, v: V) -> None`,
-#     `remove_key(self, k: K) -> Option[V]`, `get_or_insert(self, k: K, v: V) -> V`: each takes the box's
+#     `remove_key(self, k: K) -> V?`, `get_or_insert(self, k: K, v: V) -> V`: each takes the box's
 #     update guard (the one `set`/`write` take) and splices one entry, never re-encoding the map. The stored
 #     map keeps the heap map's hash index, so lookups and inserts are O(1) expected; `remove_key` is O(n).
 #   `RwShared[Set[E]]`: `len(self) -> int`, `contains(self, e: E) -> bool`,
@@ -89,30 +89,30 @@ native struct Executor:
     native fn shutdown(self) -> None
     native fn shutdown_now(self) -> None
     # A std internal (TICKET-219): submit `f` as a handle job whose result channel is `out`. The
-    # job transition seals `out` with the cancel `Err` when it drops or cuts the job. Its only
+    # job transition seals `out` with the cancel `!e` when it drops or cuts the job. Its only
     # caller is `submit_result`, with the fresh cap-1 channel it created.
     native fn _submit_settled(self, f: fn() -> None, out) -> None
     # A BODIED generic method (the first on a native struct): submit `f` and hand back a cap-1
-    # `Channel[Result[T]]` that carries its outcome: `Ok(value)`, or `Err(message)` for exactly
+    # `Channel[T!]` that carries its outcome: `?value`, or `!message` for exactly
     # what `recover:` catches. The job itself never faults, so `shutdown()` raises nothing for it
     # and its siblings keep running (CPython `Future.result()`). The channel is SEALED once: every
     # `recv` returns the same outcome and takes nothing, so do not iterate it with `for`. The
     # primitive `submit_task`/`Task[T]` wraps.
-    fn submit_result[T](self, f: fn() -> T) -> Channel[Result[T]]:
-        ch := Channel[Result[T]](1)
+    fn submit_result[T](self, f: fn() -> T) -> Channel[T!]:
+        ch := Channel[T!](1)
         self._submit_settled(fn(): run_outcome(f, ch), ch)
         return ch
 
 # Chezzi closures are single-expression only, so a multi-statement job body must be a named
 # top-level fn the lambda calls.
 #
-# `recover:` decides what becomes an `Err`; there is no second list. What it cannot catch
+# `recover:` decides what becomes an `!e`; there is no second list. What it cannot catch
 # (`os.exit`, `--timeout`, `--max-heap`, a deadlock verdict) ends the run with its own report.
 #
 # A handle job's outcome is written ONCE into its channel by a seal (TICKET-219); the first writer
 # wins under the channel's lock. Two writers exist:
 # 1. this body, for the value of `recover: f()`;
-# 2. the job transition (`SchedCore::job_event`), for the cancel `Err` when it drops a held job
+# 2. the job transition (`SchedCore::job_event`), for the cancel `!e` when it drops a held job
 #    or a job ends cut: by `shutdown_now()`, a creator cancel, or a fire-and-forget job fault,
 #    after which every `defer` still runs and may read the handle (CPython
 #    `shutdown(cancel_futures=True)`). An `os.exit` settles nothing: it runs no `defer`, and no
@@ -120,7 +120,7 @@ native struct Executor:
 # A slot never carries a job's return value, so the body is the value's writer. `_submit_settled`
 # and `_settle` are std internals; the only channel they seal is the fresh cap-1 one
 # `submit_result` creates.
-fn run_outcome[T](f: fn() -> T, out: Channel[Result[T]]):
+fn run_outcome[T](f: fn() -> T, out: Channel[T!]):
     r := recover: f()
     _settle(out, r)
 

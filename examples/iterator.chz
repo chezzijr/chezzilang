@@ -1,4 +1,4 @@
-# Iterable user structs: a `for` drives any struct with `next(self) -> Option[T]`,
+# Iterable user structs: a `for` drives any struct with `next(self) -> T?`,
 # calling next() lazily each step until it yields None. No new syntax — just a wider
 # iterand type. Both VM engines (serial + M:N) must agree.
 
@@ -6,24 +6,24 @@
 struct Counter:
     n: int
     limit: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         if self.n >= self.limit:
             return None
         v := self.n
         self.n = self.n + 1
-        return Some(v)
+        return ?v
 
 # An INFINITE iterator: the Fibonacci sequence. Only a `break` stops it — proof that
 # iteration is lazy (next() is called per step, never materialized up front).
 struct Fib:
     a: int
     b: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         v := self.a
         nb := self.a + self.b
         self.a = self.b
         self.b = nb
-        return Some(v)
+        return ?v
 
 fn main():
     print("counter:")

@@ -103,17 +103,17 @@ test fn a_channel_send_from_a_task_is_silent():
 test fn closing_a_listener_from_a_task_is_silent():
     ln := net.listen("127.0.0.1:0")
     match ln:
-        Ok(l):
+        ?l:
             r := Channel[str](1)
             parallel:
                 spawn:
                     res := recover:
                         l.close()
                     match res:
-                        Ok(_): r.send("no-fault")
-                        Err(e): r.send(e.message())
+                        ?_: r.send("no-fault")
+                        !e: r.send(e.message())
             assert r.recv() == "no-fault"
-        Err(_): assert false, "setup failed: could not bind a listener"
+        !_: assert false, "setup failed: could not bind a listener"
 
 gl_before_after := [1, 2]
 
@@ -175,8 +175,8 @@ test fn a_copied_struct_set_index_writing_through_a_shared_field_is_silent():
             res := recover:
                 t[0] = 5
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     assert r.recv() == "no-fault"
     assert t.s.get() == 5
 
@@ -198,12 +198,12 @@ test fn a_list_visited_first_in_one_crossing_leaves_the_shared_capture_unmarked(
             res1 := recover:
                 p.1()
             match res1:
-                Ok(_): r1.send("no-fault")
-                Err(e): r1.send(e.message())
+                ?_: r1.send("no-fault")
+                !e: r1.send(e.message())
             res2 := recover:
                 p.0.push(3)
             match res2:
-                Ok(_): r2.send("no-fault")
-                Err(e): r2.send(e.message())
+                ?_: r2.send("no-fault")
+                !e: r2.send(e.message())
     assert r1.recv() == "no-fault"
     assert r2.recv() == "no-fault"

@@ -16,18 +16,18 @@ fn kv() -> Iterator[(str, int)]:
 
 struct Pairs:
     n: int
-    fn next(self) -> Option[(int, str)]:
+    fn next(self) -> (int, str)?:
         if self.n <= 0:
             return None
         self.n -= 1
-        return Some((self.n, "p{self.n}"))
+        return ?(self.n, "p{self.n}")
 
 # Infinite: only `break` ends it.
 struct Squares:
     n: int
-    fn next(self) -> Option[(int, int)]:
+    fn next(self) -> (int, int)?:
         self.n += 1
-        return Some((self.n, self.n * self.n))
+        return ?(self.n, self.n * self.n)
 
 # Pure `Iterable`: `iter`, no `next`.
 struct Wrap:
@@ -62,7 +62,7 @@ test fn a_generator_of_triples_destructures_into_three_names():
 test fn a_named_cursor_destructures_and_is_drained_in_place():
     c := [(1, "x"), (2, "y"), (3, "z")].iter()
     skipped := c.next()
-    assert skipped == Some((1, "x")), "got {skipped}"
+    assert skipped == ?(1, "x"), "got {skipped}"
     got: List[str] = []
     for a, b in c:
         got.push("{a}{b}")

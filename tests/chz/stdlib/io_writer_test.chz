@@ -13,7 +13,7 @@ import std.fs
 
 # Write `text` through `buffered(create(p), cap)`, then flush (or close), then read the file back
 # in-process. Returns the file's contents.
-fn write_then_read(p: str, cap: int, text: str, use_close: bool) -> Result[str]:
+fn write_then_read(p: str, cap: int, text: str, use_close: bool) -> str!:
     w0 := io.create(p)?
     w := io.buffered(w0, cap)
     w.write(text)?
@@ -31,8 +31,8 @@ fn check(name: str, cap: int, text: str, use_close: bool):
     p := scratch(name)
     defer fs.remove_file(p)
     match write_then_read(p, cap, text, use_close):
-        Ok(s): assert s == text, name + ": expected " + text + ", got " + s
-        Err(e): assert false, name + ": " + e.message()
+        ?s: assert s == text, name + ": expected " + text + ", got " + s
+        !e: assert false, name + ": " + e.message()
 
 test fn buffered_flush_persists_after_mid_write_drain():
     # 8 bytes into a cap-4 buffer ⇒ mid-write drain, then flush.
@@ -53,8 +53,8 @@ test fn buffered_cap1_two_writes_persist():
     p := scratch("cap1")
     defer fs.remove_file(p)
     match write_then_read(p, 1, "ab", true):
-        Ok(s): assert s == "ab", "cap1: got " + s
-        Err(e): assert false, "cap1: " + e.message()
+        ?s: assert s == "ab", "cap1: got " + s
+        !e: assert false, "cap1: " + e.message()
 
 test fn nested_buffered_chain_flushes_every_level():
     # The recursion is the whole point: a `buffered(buffered(file))` chain must flush EVERY core
@@ -62,14 +62,14 @@ test fn nested_buffered_chain_flushes_every_level():
     p := scratch("nested")
     defer fs.remove_file(p)
     match write_then_read2(p, 8, 4, "abc"):
-        Ok(s): assert s == "abc", "nested (tail in the outer buf): got " + s
-        Err(e): assert false, "nested: " + e.message()
+        ?s: assert s == "abc", "nested (tail in the outer buf): got " + s
+        !e: assert false, "nested: " + e.message()
     match write_then_read2(p, 8, 4, "abcdefghij"):
-        Ok(s): assert s == "abcdefghij", "nested (mid-write drain): got " + s
-        Err(e): assert false, "nested drain: " + e.message()
+        ?s: assert s == "abcdefghij", "nested (mid-write drain): got " + s
+        !e: assert false, "nested drain: " + e.message()
 
 # Two-level chain: `buffered(buffered(create(p), inner_cap), outer_cap)`.
-fn write_then_read2(p: str, inner_cap: int, outer_cap: int, text: str) -> Result[str]:
+fn write_then_read2(p: str, inner_cap: int, outer_cap: int, text: str) -> str!:
     w1 := io.buffered(io.create(p)?, inner_cap)
     w2 := io.buffered(w1, outer_cap)
     w2.write(text)?
@@ -82,18 +82,18 @@ test fn flush_through_a_closed_inner_is_a_clean_err_naming_the_inner():
     p := scratch("closed_inner")
     defer fs.remove_file(p)
     match io.create(p):
-        Ok(w0):
+        ?w0:
             w := io.buffered(w0, 8)
             _ := w.write("abc")
             _ := w0.close()
             match w.flush():
-                Ok(_): assert false, "flush into a closed inner must be Err"
-                Err(e): assert e.message().contains("inner writer"), e.message()
+                ?_: assert false, "flush into a closed inner must be Err"
+                !e: assert e.message().contains("inner writer"), e.message()
             # `close()` must not mask it either.
             match w.close():
-                Ok(_): assert false, "close over a closed inner must be Err"
-                Err(e): assert e.message().contains("inner writer"), e.message()
-        Err(e): assert false, "create: " + e.message()
+                ?_: assert false, "close over a closed inner must be Err"
+                !e: assert e.message().contains("inner writer"), e.message()
+        !e: assert false, "create: " + e.message()
 
 # ===== W6-9 — `write_bytes` is BYTE-EXACT and returns the input length =====
 #
@@ -105,13 +105,13 @@ test fn flush_through_a_closed_inner_is_a_clean_err_naming_the_inner():
 
 test fn stdout_write_bytes_returns_the_input_length():
     match io.stdout().write_bytes(b"\xff\xfe"):
-        Ok(n): assert n == 2, "stdout write_bytes returned " + str(n)
-        Err(e): assert false, "stdout write_bytes: " + e.message()
+        ?n: assert n == 2, "stdout write_bytes returned " + str(n)
+        !e: assert false, "stdout write_bytes: " + e.message()
 
 test fn stderr_write_bytes_returns_the_input_length():
     match io.stderr().write_bytes(b"\xff\xfe"):
-        Ok(n): assert n == 2, "stderr write_bytes returned " + str(n)
-        Err(e): assert false, "stderr write_bytes: " + e.message()
+        ?n: assert n == 2, "stderr write_bytes returned " + str(n)
+        !e: assert false, "stderr write_bytes: " + e.message()
 
 test fn file_write_bytes_round_trips_non_utf8():
     # The file arm was ALREADY byte-exact; pin it so the sink retype cannot regress it.
@@ -119,15 +119,15 @@ test fn file_write_bytes_round_trips_non_utf8():
     defer fs.remove_file(p)
     raw := b"\xff\xfe\x00A\x80"
     match io.create(p):
-        Ok(w):
+        ?w:
             match w.write_bytes(raw):
-                Ok(n): assert n == 5, "file write_bytes returned " + str(n)
-                Err(e): assert false, "file write_bytes: " + e.message()
+                ?n: assert n == 5, "file write_bytes returned " + str(n)
+                !e: assert false, "file write_bytes: " + e.message()
             _ := w.close()
-        Err(e): assert false, "create: " + e.message()
+        !e: assert false, "create: " + e.message()
     match io.read_bytes(p):
-        Ok(got): assert got == raw, "non-UTF-8 bytes did not round-trip"
-        Err(e): assert false, "read_bytes: " + e.message()
+        ?got: assert got == raw, "non-UTF-8 bytes did not round-trip"
+        !e: assert false, "read_bytes: " + e.message()
 
 test fn large_write_bytes_returns_the_full_count():
     # Nothing in `write_to_core` can short-write (write_all / in-memory / an unbounded queue), so the
@@ -139,25 +139,25 @@ test fn large_write_bytes_returns_the_full_count():
         ba.push(255)
     big := bytes(ba)
     match io.create(p):
-        Ok(w):
+        ?w:
             match w.write_bytes(big):
-                Ok(n): assert n == 200000, "large write_bytes returned " + str(n)
-                Err(e): assert false, "large write_bytes: " + e.message()
+                ?n: assert n == 200000, "large write_bytes returned " + str(n)
+                !e: assert false, "large write_bytes: " + e.message()
             _ := w.close()
-        Err(e): assert false, "create: " + e.message()
+        !e: assert false, "create: " + e.message()
     match io.read_bytes(p):
-        Ok(got): assert got.len() == 200000, "short file: " + str(got.len())
-        Err(e): assert false, "read_bytes: " + e.message()
+        ?got: assert got.len() == 200000, "short file: " + str(got.len())
+        !e: assert false, "read_bytes: " + e.message()
 
 test fn write_that_drains_into_a_closed_inner_names_the_inner_too():
     # Sibling arm: `write_to_core`'s drain recursion carries the same wrong-handle risk.
     p := scratch("closed_inner_w")
     defer fs.remove_file(p)
     match io.create(p):
-        Ok(w0):
+        ?w0:
             w := io.buffered(w0, 2)
             _ := w0.close()
             match w.write("abcd"):        # 4 > cap 2 ⇒ drains into the closed inner
-                Ok(_): assert false, "a drain into a closed inner must be Err"
-                Err(e): assert e.message().contains("inner writer"), e.message()
-        Err(e): assert false, "create: " + e.message()
+                ?_: assert false, "a drain into a closed inner must be Err"
+                !e: assert e.message().contains("inner writer"), e.message()
+        !e: assert false, "create: " + e.message()

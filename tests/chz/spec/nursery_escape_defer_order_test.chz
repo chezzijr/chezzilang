@@ -16,7 +16,7 @@ fn flushed() -> int:
             log.close()
             while true:
                 match log.try_recv():
-                    Some(m): count.update(fn(c: int) -> int: c + 1)
+                    ?m: count.update(fn(c: int) -> int: c + 1)
                     None: break
         parallel:
             spawn:
@@ -72,8 +72,8 @@ fn try_order(log: Shared[str]) -> int!str:
         spawn child(log, ready, hold)
         _ := ready.recv()
         v := fails()?
-        return Ok(v)
-    return Ok(0)
+        return ?v
+    return ?0
 
 
 fn break_order(log: Shared[str]):
@@ -170,6 +170,6 @@ test fn body_defer_fault_above_an_implicit_nursery_is_reported():
     log := Shared("")
     r := recover: impl_fault(log)
     match r:
-        Err(e): assert e.message().contains("body cleanup failed")
-        Ok(_): assert false
+        !e: assert e.message().contains("body cleanup failed")
+        ?_: assert false
     assert log.get() == "CO"

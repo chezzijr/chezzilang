@@ -40,12 +40,12 @@ fn maxOf[T: Comparable](a: T, b: T) -> T:
 struct Squares:
     n: int
     limit: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         if self.n >= self.limit:
             return None
         v := self.n * self.n
         self.n = self.n + 1
-        return Some(v)
+        return ?v
 
 # --- A user IndexSet struct (index + set_index) -------------------------------------------------------
 struct Grid:

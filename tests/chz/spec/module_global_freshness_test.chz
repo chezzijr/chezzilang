@@ -302,25 +302,25 @@ test fn a_faulting_task_still_propagates():
         parallel:
             spawn boom()
     match r:
-        Ok(_): assert false, "expected a fault"
-        Err(e): assert e.message().contains("task blew up"), "got {e.message()}"
+        ?_: assert false, "expected a fault"
+        !e: assert e.message().contains("task blew up"), "got {e.message()}"
 
 # A `?`-style escape out of a nursery: the escape propagates and the scope tears down cleanly.
 # TICKET-169 (D4 layer C): `esc = 2` runs inside the spawned task, so it now faults instead of
 # silently mutating a copy the parent never sees — wrapped so it cannot race the escape.
-fn escape_out() -> Result[int, Error]:
+fn escape_out() -> int!Error:
     parallel:
         spawn:
             write_esc := d4_set_esc
             _ := recover: write_esc()
         return !"bail"
-    return Ok(0)
+    return ?0
 
 test fn escape_out_of_a_nursery_tears_down():
     r := escape_out()
     match r:
-        Ok(_): assert false, "expected the escape"
-        Err(e): assert e.message() == "bail"
+        ?_: assert false, "expected the escape"
+        !e: assert e.message() == "bail"
 
 # A nested nursery inside a task that then faults: teardown must not desync the per-nursery pin.
 fn nested_then_fault(out: Shared[int]):
@@ -334,8 +334,8 @@ test fn nested_nursery_inside_a_faulting_task():
         parallel:
             spawn nested_then_fault(out)
     match r:
-        Ok(_): assert false, "expected a fault"
-        Err(e): assert e.message().contains("after nested"), "got {e.message()}"
+        ?_: assert false, "expected a fault"
+        !e: assert e.message().contains("after nested"), "got {e.message()}"
     assert out.get() == 42, "nested task saw {out.get()}"
 
 # A `defer` that reads a module global while running during teardown.

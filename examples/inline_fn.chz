@@ -1,14 +1,14 @@
-# Inline-expr function bodies implicitly return their expression (Option A, inline-only) —
+# Inline-expr function bodies implicitly return their expression (choice A, inline-only) —
 # exactly like a closure `fn(x): expr`. A multiline body still falls through to None unless it
 # `return`s, and `None` (a void result) may never be used as a value.
 
 # Inferred `-> int`: the inline expr IS the return.
 fn ten(): 10
 
-# Annotated inline-expr body is valid (Option B does not fire — the expr terminates the body).
+# Annotated inline-expr body is valid (choice B does not fire — the expr terminates the body).
 fn answer() -> int: 42
 
-# Usable as a value / a `.map` argument (the whole point of inline-only Option A).
+# Usable as a value / a `.map` argument (the whole point of inline-only choice A).
 fn dbl(x: int): x * 2
 
 fn main():

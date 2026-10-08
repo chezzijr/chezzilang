@@ -28,8 +28,8 @@ fn main():
     r := recover:
         panic("boom")
     match r:
-        Ok(_): print("no panic")
-        Err(e): print("caught: {e}")
+        ?_: print("no panic")
+        !e: print("caught: {e}")
 
     # print with sep= / end= (variadic — stays synthetic)
     print("x", "y", "z", sep="-")     # x-y-z

@@ -10,95 +10,95 @@ struct Pt:
 
 test fn parse_keeps_integers_exact():
     match json.parse("9223372036854775000"):
-        Ok(j): assert json.stringify(j) == "9223372036854775000"
-        Err(e): assert false, "expected Ok: " + e.message()
+        ?j: assert json.stringify(j) == "9223372036854775000"
+        !e: assert false, "expected Ok: " + e.message()
     match json.parse("-0.0"):
-        Ok(j): assert json.stringify(j) == "-0.0"
-        Err(e): assert false, "expected Ok: " + e.message()
+        ?j: assert json.stringify(j) == "-0.0"
+        !e: assert false, "expected Ok: " + e.message()
     match json.parse("1.0"):
-        Ok(j): assert json.stringify(j) == "1.0"
-        Err(e): assert false, "expected Ok: " + e.message()
+        ?j: assert json.stringify(j) == "1.0"
+        !e: assert false, "expected Ok: " + e.message()
     match json.parse("1"):
-        Ok(j): assert json.stringify(j) == "1"
-        Err(e): assert false, "expected Ok: " + e.message()
+        ?j: assert json.stringify(j) == "1"
+        !e: assert false, "expected Ok: " + e.message()
     match json.parse("-0"):
-        Ok(j): assert json.stringify(j) == "0"
-        Err(e): assert false, "expected Ok: " + e.message()
+        ?j: assert json.stringify(j) == "0"
+        !e: assert false, "expected Ok: " + e.message()
     match json.decode[int]("9223372036854775000"):
-        Ok(n): assert n == 9223372036854775000
-        Err(e): assert false, "expected Ok: " + e.message()
+        ?n: assert n == 9223372036854775000
+        !e: assert false, "expected Ok: " + e.message()
 
 test fn parse_error_names_the_exact_spot():
     match json.parse(r'{"a": 1,
  "b": }'):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "unexpected character '}}' at line 2 column 7 (char 15)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "unexpected character '}}' at line 2 column 7 (char 15)"
     match json.parse("[1, 2,]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "unexpected character ']' at line 1 column 7 (char 6)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "unexpected character ']' at line 1 column 7 (char 6)"
     deep := "[".repeat(2001) + "]".repeat(2001)
     match json.parse(deep):
-        Ok(_): assert false, "expected Err past the depth limit"
-        Err(e): assert e.message() == "exceeded max depth"
+        ?_: assert false, "expected Err past the depth limit"
+        !e: assert e.message() == "exceeded max depth"
 
 test fn multi_char_token_errors_name_the_token_start():
-    # TICKET-057: a multi-character token's Err must name where the token STARTED, matching
+    # TICKET-057: a multi-character token's an error must name where the token STARTED, matching
     # CPython's json.loads, not where the scanner stopped. `"hello (unterminated) starts at
     # char 0; CPython: "Unterminated string starting at: line 1 column 1 (char 0)".
     match json.parse(r'"hello'):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "unterminated string at line 1 column 1 (char 0)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "unterminated string at line 1 column 1 (char 0)"
     # `nll` (bad `null` literal) starts at char 14; CPython: "Expecting value: line 1 column 15
     # (char 14)".
     match json.parse(r'{"a": 1, "b": nll}'):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "invalid literal, expected 'null' at line 1 column 15 (char 14)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "invalid literal, expected 'null' at line 1 column 15 (char 14)"
 
 test fn number_shape_errors_name_the_token_start():
     # TICKET-057: a malformed fraction/exponent names the `.`/`e` it started at, not where the
     # scanner stopped. Positions are CPython 3.14.7's own, measured 2026-09-04.
     match json.parse("[1.]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "invalid number: digits required after '.' at line 1 column 3 (char 2)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "invalid number: digits required after '.' at line 1 column 3 (char 2)"
     match json.parse("[1.5e]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "invalid number: digits required in exponent at line 1 column 5 (char 4)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "invalid number: digits required in exponent at line 1 column 5 (char 4)"
     # The sign case: the exponent site must not derive its position from `self.pos - 1`, since
     # this branch also consumes an optional `+`/`-` after the `e`.
     match json.parse("[1.5e+]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "invalid number: digits required in exponent at line 1 column 5 (char 4)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "invalid number: digits required in exponent at line 1 column 5 (char 4)"
     match json.parse("[fals]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "invalid literal, expected 'false' at line 1 column 2 (char 1)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "invalid literal, expected 'false' at line 1 column 2 (char 1)"
     match json.parse("[tru]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "invalid literal, expected 'true' at line 1 column 2 (char 1)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "invalid literal, expected 'true' at line 1 column 2 (char 1)"
 
 test fn single_char_token_error_positions_do_not_move():
     # TICKET-057: these single-character error positions are unaffected by the fix and must stay
     # byte-identical, measured on the pre-fix release binary 2026-09-04.
     match json.parse(""):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "unexpected end of input at line 1 column 1 (char 0)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "unexpected end of input at line 1 column 1 (char 0)"
     match json.parse(r'{"a" 1}'):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "expected ':' after object key at line 1 column 6 (char 5)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "expected ':' after object key at line 1 column 6 (char 5)"
     match json.parse("[1, 2] x"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "trailing characters after JSON value at line 1 column 8 (char 7)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "trailing characters after JSON value at line 1 column 8 (char 7)"
     match json.parse("[@]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "unexpected character '@' at line 1 column 2 (char 1)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "unexpected character '@' at line 1 column 2 (char 1)"
     match json.parse("[-]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "invalid number: expected a digit at line 1 column 2 (char 1)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "invalid number: expected a digit at line 1 column 2 (char 1)"
     match json.parse("[01]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "invalid number: leading zero at line 1 column 2 (char 1)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "invalid number: leading zero at line 1 column 2 (char 1)"
     match json.parse("[1e400]"):
-        Ok(_): assert false, "expected a parse Err"
-        Err(e): assert e.message() == "invalid number: value out of range at line 1 column 2 (char 1)"
+        ?_: assert false, "expected a parse Err"
+        !e: assert e.message() == "invalid number: value out of range at line 1 column 2 (char 1)"
 
 test fn encode_covers_the_value_shapes():
     assert json.encode(42) == "42"
@@ -111,13 +111,13 @@ test fn encode_covers_the_value_shapes():
     assert json.encode(Pt(1, "b")) == "{{\"x\":1,\"y\":\"b\"}}"
 
 test fn encode_faults_on_a_non_encodable_value():
-    res: Result[int] = Ok(1)
+    res: int! = ?1
     r1 := recover: json.encode(res)
     match r1:
-        Ok(_): assert false, "expected a Result to fault"
-        Err(e): assert e.message() == "json.encode: cannot encode a `T!E` value"
+        ?_: assert false, "expected a Result to fault"
+        !e: assert e.message() == "json.encode: cannot encode a `T!E` value"
 
     r2 := recover: json.encode(math.nan)
     match r2:
-        Ok(_): assert false, "expected a non-finite float to fault"
-        Err(e): assert e.message() == "cannot serialize non-finite float to JSON"
+        ?_: assert false, "expected a non-finite float to fault"
+        !e: assert e.message() == "cannot serialize non-finite float to JSON"

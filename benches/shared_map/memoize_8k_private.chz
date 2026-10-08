@@ -2,7 +2,7 @@
 # captured private `Map`. Same workload, same output, 341269336000.
 fn _memo_get(cache: Map[int, int], f: fn(int) -> int, k: int) -> int:
     match cache.get(k):
-        Some(v):
+        ?v:
             return v
         None:
             v := f(k)

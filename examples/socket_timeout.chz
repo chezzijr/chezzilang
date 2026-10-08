@@ -2,11 +2,11 @@
 #
 # std.net sockets are non-blocking and park a fiber on fd-readiness. By default a read/accept parks
 # FOREVER; passing an optional trailing `timeout_ms` bounds the wait — on expiry the op returns the
-# existing Err variant with message "timeout" (the return type is unchanged):
+# existing an error variant with message "timeout" (the return type is unchanged):
 #
-#   conn.read(n, timeout_ms)     -> str!     # Err("timeout") if no data within timeout_ms
-#   sock.write(s, timeout_ms)    -> int!     # Ok(len) once every byte is sent; Err("timeout") if not done within timeout_ms
-#   server.accept(timeout_ms)    -> Socket!  # Err("timeout") if no connection within timeout_ms
+#   conn.read(n, timeout_ms)     -> str!     # !"timeout" if no data within timeout_ms
+#   sock.write(s, timeout_ms)    -> int!     # ?len once every byte is sent; !"timeout" if not done within timeout_ms
+#   server.accept(timeout_ms)    -> Socket!  # !"timeout" if no connection within timeout_ms
 #
 # The timeout bounds the wait whether the op parks a fiber (a `spawn`/`parallel:` fiber) or blocks its
 # thread (top-level `main`):
@@ -19,8 +19,8 @@ import std.time
 # Demo 1: accept(timeout_ms) with NO client connecting → the accept times out.
 fn accept_demo(listener: Listener):
     match listener.accept(100):
-        Ok(_): print("accept: unexpectedly accepted")
-        Err(e): print("accept: " + e.message())
+        ?_: print("accept: unexpectedly accepted")
+        !e: print("accept: " + e.message())
     listener.close()
 
 # Demo 2: the server accepts but never writes; the client's read(n, timeout_ms) times out.
@@ -29,15 +29,15 @@ fn read_server(listener: Listener) -> int!:
     time.sleep_ms(400)   # outlast the client's read deadline, then hang up
     conn.close()
     listener.close()
-    return Ok(0)
+    return ?0
 
 fn read_client(addr: str) -> int!:
     sock := net.connect(addr)?
     match sock.read(64, 100):
-        Ok(s): print("read: unexpectedly got " + s)
-        Err(e): print("read: " + e.message())
+        ?s: print("read: unexpectedly got " + s)
+        !e: print("read: " + e.message())
     sock.close()
-    return Ok(0)
+    return ?0
 
 fn run() -> int!:
     # Demo 1 — a lone listener, no client.
@@ -51,11 +51,11 @@ fn run() -> int!:
     parallel:
         spawn read_server(server)
         spawn read_client(addr)
-    return Ok(0)
+    return ?0
 
 fn main():
     match run():
-        Ok(_): print("done")
-        Err(e): print("error: " + e.message())
+        ?_: print("done")
+        !e: print("error: " + e.message())
 
 main()

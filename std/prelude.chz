@@ -62,7 +62,7 @@ native struct List[T]:
     # SENTINEL, NOT A CARRIER — `-1` on a miss, the shape of Python's `str.find` (`'hi'.find('zz')` is
     # `-1`, measured). HAZARD: indexing is Python-negative, so `xs[xs.index_of(v)]` on a miss silently
     # returns the LAST element instead of faulting — Python has the identical trap
-    # (`'hello'['hello'.find('zz')]` is `'o'`, measured). Use `position(pred) -> Option[int]` below, or
+    # (`'hello'['hello'.find('zz')]` is `'o'`, measured). Use `position(pred) -> int?` below, or
     # `contains`, when a miss must be visible. NOTE Python's LIST twin, `list.index(x)`, raises
     # `ValueError` rather than returning `-1`: the sentinel here is the uniform Chezzi choice across
     # `List` and `str`, kept because changing it is a breaking API change, not because lists inherit it.
@@ -143,7 +143,7 @@ native struct Channel[T]:
     native fn try_send(self, v: T) -> bool
     # Faults `receive on a closed channel` once closed AND drained — a distinct fault from deadlock
     # detection. Go's `v, ok := <-ch` returns the zero value + `false` instead, no panic: a divergence.
-    # `try_recv` (below) is the non-faulting, `Option`-returning sibling.
+    # `try_recv` (below) is the non-faulting, `T?`-returning sibling.
     native fn recv(self) -> T
     native fn try_recv(self) -> Option[T]
     # `close()` marks the channel closed (idempotent); a later `send` faults, `recv` drains then faults,
@@ -192,7 +192,7 @@ native struct str:
     # SENTINEL, NOT A CARRIER — `-1` on a miss, exactly Python's `str.find`. Same hazard as
     # `List.index_of`: `s[s.index_of(t)]` on a miss silently yields the LAST character, and Python does
     # the same (`'hello'['hello'.find('zz')]` is `'o'`, measured). `contains` is the miss-visible check;
-    # there is no `Option` twin on `str` (`List.position` is the list one).
+    # there is no `T?` twin on `str` (`List.position` is the list one).
     native fn index_of(self, needle: str) -> int
     native fn count(self, needle: str) -> int
     native fn strip_prefix(self, prefix: str) -> str
@@ -200,10 +200,10 @@ native struct str:
     native fn split_lines(self) -> List[str]
     # `strip` is a trim alias.
     native fn strip(self) -> str
-    # Safe numeric parse — Option-returning (None on bad input) instead of raising.
+    # Safe numeric parse — `T?`-returning (None on bad input) instead of raising.
     native fn to_int(self) -> Option[int]
     native fn to_float(self) -> Option[float]
-    # Result-returning parse siblings: `Ok(n)` or `Err(msg)` carrying a human-readable parse-error
+    # `T!E`-returning parse siblings: `?n` or `!msg` carrying a human-readable parse-error
     # string (explicit `str` error type, not the default `Error` existential).
     native fn parse_int(self) -> Result[int, str]
     native fn parse_float(self) -> Result[float, str]
@@ -218,7 +218,7 @@ native struct bytes:
     native fn len(self) -> int
 
 # `bytearray` (mutable byte buffer): `len`, `push(int)` (appends one byte, 0-255 validated at runtime),
-# `pop() -> Option[int]` (removes the last), `decode() -> str` (UTF-8, recoverable fault on invalid
+# `pop() -> int?` (removes the last), `decode() -> str` (UTF-8, recoverable fault on invalid
 # UTF-8), `copy() -> bytearray` (a new buffer). `extend` is NOT here — it takes any byte-sequence
 # shape (bytes|bytearray|List[int]) and stays an explicit branch in `infer_method_call` (not a flat
 # FnSig).
@@ -229,11 +229,10 @@ native struct bytearray:
     native fn decode(self) -> str
     native fn copy(self) -> bytearray
 
-# The two carrier ENUMS. These decls ARE the registered `Option` / `Result` enums: the checker harvests
-# them (`harvest_native_enums`) into its ordinary enum tables, so variants, patterns, exhaustiveness and
-# paths (`Option[int].Some(1)`) read them like any user enum. `Ty::Option` / `Ty::Result` are only their
-# type spelling. `Result` has two slots, `Result[T, E]`; the surface `Result[T]` means `Result[T, Error]`
-# in type position only. Neither declares a method. The `?` operator, error propagation and native
+# The two carrier ENUMS. These decls ARE the enums behind `T?` and `T!E`: the checker harvests them
+# (`harvest_native_enums`) into its ordinary enum tables, so variants, patterns and exhaustiveness
+# read them like any user enum. The checker's two carrier `Ty` variants are only their type spelling.
+# The error carrier has two slots; the surface `T!` means `T!Error` in type position only. Neither declares a method. The `?` operator, error propagation and native
 # construction stay runtime-wired on the fixed variant ids.
 
 native enum Option[T]:
@@ -317,7 +316,7 @@ protocol Num:
     Arithmetic + Mod + Neg + Comparable
 
 # `Iterator[Elem]` carries one type param (the element) so the generic-arity check treats `Iterator[T]`
-# uniformly, but its `next` sig is `-> Option[Self]` (Elem is arity-only, unused in the sig — matching the
+# uniformly, but its `next` sig is `-> Self?` (Elem is arity-only, unused in the sig — matching the
 # Rust seed); real element recovery + conformance stay special-cased (`iter_elem`).
 protocol Iterator[Elem]:
     fn next(self) -> Option[Self]
@@ -341,7 +340,7 @@ protocol IndexSet[K, V]:
     fn index(self, k: K) -> V
     fn set_index(self, k: K, v: V) -> None
 
-# Python-style slicing: three `int?` (Option[int]) components (start/end/step), each None when omitted;
+# Python-style slicing: three `int?` components (start/end/step), each None when omitted;
 # the VM always passes all three explicitly. `R` is the slice result type, recovered at call sites.
 protocol Slice[R]:
     fn slice(self, start: int?, end: int?, step: int?) -> R

@@ -7,5 +7,5 @@ fn q() -> int!DbErr:
     return !DbErr(1)
 fn p() -> int!:
     return !"oops"
-fn r() -> Result[int, str]:
-    return Ok(1)
+fn r() -> int!str:
+    return ?1

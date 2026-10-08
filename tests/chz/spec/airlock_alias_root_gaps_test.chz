@@ -27,8 +27,8 @@ test fn local_alias_of_global_element_write_through_alias_faults():
             res := recover:
                 write_inner(inner)
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -39,8 +39,8 @@ fn producer_alias(c: Channel[fn() -> str], fr: Channel[str]):
     res := recover:
         xs.push(2)
     match res:
-        Ok(_): fr.send("no-fault")
-        Err(e): fr.send(e.message())
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
     c.send(fn() -> str: "{g}")
 
 test fn write_through_local_alias_of_global_faults_and_read_stays_the_receivers_copy():
@@ -60,8 +60,8 @@ fn add(xs: List[int], fr: Channel[str]):
     res := recover:
         xs.push(2)
     match res:
-        Ok(_): fr.send("no-fault")
-        Err(e): fr.send(e.message())
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
 
 fn producer_param(c: Channel[fn() -> str], fr: Channel[str]):
     add(h, fr)
@@ -89,8 +89,8 @@ test fn local_alias_of_a_whole_global_write_through_alias_faults():
             res := recover:
                 write_a(a[0])
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -112,8 +112,8 @@ test fn local_alias_of_a_struct_in_a_global_map_write_through_alias_faults():
             res := recover:
                 write_p(p)
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -149,8 +149,8 @@ test fn write_through_spawn_adopted_alias_faults():
             res := recover:
                 write_a(a)
             match res:
-                Ok(_): c.send("no-fault")
-                Err(e): c.send(e.message())
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
     got := c.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -167,8 +167,8 @@ test fn element_alias_write_faults():
             res := recover:
                 write_inner(inner)
             match res:
-                Ok(_): c.send("no-fault")
-                Err(e): c.send(e.message())
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
     got := c.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -178,8 +178,8 @@ fn w4(xs: List[int], c: Channel[str]):
     res := recover:
         xs.push(2)
     match res:
-        Ok(_): c.send("no-fault")
-        Err(e): c.send(e.message())
+        ?_: c.send("no-fault")
+        !e: c.send(e.message())
 
 test fn spawn_arg_alias_write_faults():
     c := Channel[str](1)
@@ -205,8 +205,8 @@ test fn struct_in_map_alias_write_faults():
             res := recover:
                 write_p(p)
             match res:
-                Ok(_): c.send("no-fault")
-                Err(e): c.send(e.message())
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
     got := c.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -222,8 +222,8 @@ test fn closure_built_before_the_alias_push_faults():
             res := recover:
                 write_a(a)
             match res:
-                Ok(_): c.send("no-fault")
-                Err(e): c.send(e.message())
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
     got := c.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -238,8 +238,8 @@ test fn nested_nursery_send_faults():
             res := recover:
                 write_a(a)
             match res:
-                Ok(_): c.send("no-fault")
-                Err(e): c.send(e.message())
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
             parallel:
                 spawn:
                     pass
@@ -257,8 +257,8 @@ test fn executor_job_alias_write_faults():
             res := recover:
                 d4_push2(a)
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
             ex.submit(fn(): r.send("{gl8}"))
     fault := r.recv()
     assert fault.starts_with("this value is this task's copy:"), fault
@@ -278,8 +278,8 @@ test fn two_hop_closure_alias_write_faults():
             res := recover:
                 write_a(a)
             match res:
-                Ok(_): c.send("no-fault")
-                Err(e): c.send(e.message())
+                ?_: c.send("no-fault")
+                !e: c.send(e.message())
             fc.send(fn() -> str: "{gl9}")
         spawn:
             f := fc.recv()
@@ -300,8 +300,8 @@ fn producer_w13_2(c: Channel[fn() -> str], fr: Channel[str]):
     res := recover:
         g2.push(2)
     match res:
-        Ok(_): fr.send("no-fault")
-        Err(e): fr.send(e.message())
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
     c.send(fn() -> str: "{g2}")
 
 test fn receiver_own_write_survives_arriving_closure_write():
@@ -327,8 +327,8 @@ fn producer_w13_2_index(c: Channel[fn() -> str], fr: Channel[str]):
     res := recover:
         g18.push(2)
     match res:
-        Ok(_): fr.send("no-fault")
-        Err(e): fr.send(e.message())
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
     c.send(fn() -> str: "{g18}")
 
 test fn receiver_index_assign_survives_arriving_closure():
@@ -353,8 +353,8 @@ fn producer_w13_2_field(c: Channel[fn() -> str], fr: Channel[str]):
     res := recover:
         g22.a = 2
     match res:
-        Ok(_): fr.send("no-fault")
-        Err(e): fr.send(e.message())
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
     c.send(fn() -> str: "{g22.a}")
 
 test fn receiver_field_write_survives_arriving_closure():
@@ -375,16 +375,16 @@ fn producer_w13_2_sibling(c: Channel[fn() -> str], fr: Channel[str]):
     res := recover:
         g21.push(2)
     match res:
-        Ok(_): fr.send("no-fault")
-        Err(e): fr.send(e.message())
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
     c.send(fn() -> str: "{g21}")
 
 fn consumer_w13_2_sibling(c: Channel[fn() -> str], r: Channel[str], fr: Channel[str]):
     res := recover:
         g21.push(9)
     match res:
-        Ok(_): fr.send("no-fault")
-        Err(e): fr.send(e.message())
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
     f := c.recv()
     r.send("{f()} {g21}")
 
@@ -409,8 +409,8 @@ fn producer_w13_2_control(c: Channel[fn() -> str], fr: Channel[str]):
     res := recover:
         g20.push(2)
     match res:
-        Ok(_): fr.send("no-fault")
-        Err(e): fr.send(e.message())
+        ?_: fr.send("no-fault")
+        !e: fr.send(e.message())
     c.send(fn() -> str: "{g20}")
 
 # TICKET-137 — the receiver's `9` is pushed BEFORE the nursery, on the ROOT task, so it lands

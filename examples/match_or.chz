@@ -2,7 +2,7 @@
 #
 # An or-pattern matches if ANY alternative matches (first match wins). Every alternative must bind
 # the same variables (so the body sees them regardless of which alternative hit). A nested bare
-# capitalized name like the `None` in `Some(None)` is a refutable variant match, not a binding.
+# capitalized name like the `None` in `?None` is a refutable variant match, not a binding.
 
 # --- or-pattern without bindings: literals ---
 fn size(n: int) -> str:
@@ -52,22 +52,22 @@ print(classify(2))
 print(classify(3))
 print(classify(8))
 
-# --- nested nullary variant: the bare `None` in `Some(None)` is a refutable variant match ---
-fn describe(oo: Option[Option[int]]) -> str:
+# --- nested nullary variant: the bare `None` in `?None` is a refutable variant match ---
+fn describe(oo: int??) -> str:
     return match oo:
-        Some(None): "inner-none"
+        ?None: "inner-none"
         _: "other"
 
-a: Option[Option[int]] = Some(None)
-b: Option[Option[int]] = Some(Some(42))
-c: Option[Option[int]] = None
+a: int?? = ?None
+b: int?? = ?(?42)
+c: int?? = None
 print(describe(a))
 print(describe(b))
 print(describe(c))
 
-# --- nested nullary in a Result: `Ok(Err(e))` (distinct outer variants per arm) ---
-nested: Result[Result[int, str], str] = Ok(Err("boom"))
+# --- nested nullary in a `T!E` value: `?(!e)` (distinct outer variants per arm) ---
+nested: (int!str)!str = ?(!"boom")
 match nested:
-    Ok(Err(e)): print("nested-err-{e}")
-    Err(e): print("outer-err-{e}")
+    ?(!e): print("nested-err-{e}")
+    !e: print("outer-err-{e}")
     _: print("nested-ok")

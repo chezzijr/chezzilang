@@ -33,8 +33,8 @@ fn try_escape(log: Shared[str]) -> int!str:
     parallel:
         spawn: park(ch)
         v := fails()?
-        return Ok(v)
-    return Ok(0)
+        return ?v
+    return ?0
 
 fn loop_escape(log: Shared[str]) -> int:
     n := 0

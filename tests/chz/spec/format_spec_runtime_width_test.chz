@@ -4,10 +4,10 @@
 # ONLY here, in Chezzi, where the value is capped at `MAX_FIELD` (4096) before any buffer is sized;
 # CPython has no cap and would try to allocate the string.
 
-fn msg_of(r: Result[str, Error]) -> str:
+fn msg_of(r: str!Error) -> str:
     match r:
-        Ok(_): return "no fault"
-        Err(e): return e.message()
+        ?_: return "no fault"
+        !e: return e.message()
     return ""
 
 test fn nested_width_matches_cpython():

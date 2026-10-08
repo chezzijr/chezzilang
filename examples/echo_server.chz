@@ -26,7 +26,7 @@ fn acceptor(server: Listener, n: int) -> int!:
         conn.write("echo:" + line)?
         conn.close()
     server.close()
-    return Ok(0)
+    return ?0
 
 fn client(addr: str, served: AtomicInt) -> int!:
     sock := net.connect(addr)?
@@ -35,7 +35,7 @@ fn client(addr: str, served: AtomicInt) -> int!:
     sock.close()
     if reply == "echo:ping":
         served.add(1)             # counted only by a client that got its own echo back
-    return Ok(0)
+    return ?0
 
 fn run(n: int) -> int!:
     server := net.listen("127.0.0.1:0")?
@@ -45,11 +45,12 @@ fn run(n: int) -> int!:
         spawn acceptor(server, n)
         for _ in 0..n:
             spawn client(addr, served)
-    return Ok(served.load())      # the nursery has joined, so every client has finished counting
+    return ?served.load()      # the nursery has joined, so every client has finished counting
 
 fn main():
-    match run(50):
-        Ok(served): print("echo server handled {served} connections")
-        Err(e): print("error: " + e.message())
+    served := run(50) else e:
+        print("error: " + e.message())
+        return
+    print("echo server handled {served} connections")
 
 main()

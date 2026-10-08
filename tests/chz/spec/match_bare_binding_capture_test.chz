@@ -8,12 +8,12 @@ test fn a_bare_match_binding_can_be_captured_by_a_closure():
     assert r == 5, "got {r}"
 
 test fn a_bare_binding_over_an_option_can_be_captured():
-    o: int? = Some(3)
+    o: int? = ?3
     r: int? = None
     match o:
         None: r = None
         w: r = (fn() -> int?: w)()
-    assert r == Some(3), "got {r}"
+    assert r == ?3, "got {r}"
 
 test fn each_match_of_a_bare_binding_gets_its_own_cell():
     fs: List[fn() -> int] = []

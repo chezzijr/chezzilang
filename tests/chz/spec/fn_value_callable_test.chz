@@ -12,7 +12,7 @@ test fn native_fn_value_spawns():
         parallel:
             spawn g(9.0)
     match r:
-        Ok(_):
+        ?_:
             assert true
-        Err(e):
+        !e:
             assert false, e.message()

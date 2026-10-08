@@ -85,10 +85,10 @@ fn tone_q(s: tl.Shade) -> int:
         tl.Tone.Dark(n): n
         tl.Tone.Light: -1
 
-fn opt_tone(o: Option[tl.Shade]) -> int:
+fn opt_tone(o: tl.Shade?) -> int:
     return match o:
-        Some(Tone.Dark(n)): n
-        Some(Tone.Light): -1
+        ?Tone.Dark(n): n
+        ?Tone.Light: -1
         None: -2
 
 fn pos_sum(p: tl.Point) -> int:
@@ -113,8 +113,8 @@ test fn imported_alias_nominal_paths():
     assert tone_n(tl.Tone.Light) == -1
     assert tone_q(Tone.Dark(7)) == 7
     assert tone_q(Tone.Light) == -1
-    assert opt_tone(Some(Tone.Dark(8))) == 8
-    assert opt_tone(Some(Tone.Light)) == -1
+    assert opt_tone(?Tone.Dark(8)) == 8
+    assert opt_tone(?Tone.Light) == -1
     assert opt_tone(None) == -2
     assert pos_sum(Position(2, 3)) == 5
     assert pos_sum_q(tl.Position(2, 3)) == 23

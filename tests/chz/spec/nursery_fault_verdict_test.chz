@@ -12,8 +12,8 @@ test fn owner_parked_recv_reports_the_child_fault():
                 panic("task died")
             ch.recv()
     match r:
-        Ok(_): assert false, "expected the child fault, got Ok"
-        Err(e): assert e.message() == "task died", "got: {e.message()}"
+        ?_: assert false, "expected the child fault, got Ok"
+        !e: assert e.message() == "task died", "got: {e.message()}"
 
 test fn owner_parked_wait_reports_the_child_fault():
     ch := Channel[int]()
@@ -24,8 +24,8 @@ test fn owner_parked_wait_reports_the_child_fault():
             wait:
                 v := ch.recv(): print(v)
     match r:
-        Ok(_): assert false, "expected the child fault, got Ok"
-        Err(e): assert e.message() == "task died", "got: {e.message()}"
+        ?_: assert false, "expected the child fault, got Ok"
+        !e: assert e.message() == "task died", "got: {e.message()}"
 
 test fn owner_blocked_bounded_send_reports_the_child_fault():
     ch := Channel[int](1)
@@ -36,8 +36,8 @@ test fn owner_blocked_bounded_send_reports_the_child_fault():
             ch.send(1)
             ch.send(2)
     match r:
-        Ok(_): assert false, "expected the child fault, got Ok"
-        Err(e): assert e.message() == "task died", "got: {e.message()}"
+        ?_: assert false, "expected the child fault, got Ok"
+        !e: assert e.message() == "task died", "got: {e.message()}"
 
 test fn main_recv_in_a_native_map_callback_with_a_live_sender():
     ch := Channel[int]()

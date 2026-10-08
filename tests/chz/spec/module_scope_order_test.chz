@@ -38,8 +38,8 @@ test fn a_body_reads_a_global_after_its_let_runs():
 
 test fn a_read_before_the_let_runs_faults():
     match early:
-        Ok(v): assert false, "expected a fault, got {v}"
-        Err(e): assert e.message().contains("is read before its initialization"), "got {e.message()}"
+        ?v: assert false, "expected a fault, got {v}"
+        !e: assert e.message().contains("is read before its initialization"), "got {e.message()}"
 
 test fn the_let_rebinds_a_global_an_earlier_write_initialized():
     assert get_z() == 1, "get_z() = {get_z()}"

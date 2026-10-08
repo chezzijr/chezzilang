@@ -9,12 +9,12 @@
 struct Counter:
     n: int
     limit: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         if self.n >= self.limit:
             return None
         v := self.n
         self.n = self.n + 1
-        return Some(v)
+        return ?v
 
 fn main():
     # --- str.encode() -> bytes / bytes.decode() -> str round-trip (multi-byte char) ---
@@ -32,8 +32,8 @@ fn main():
     r := recover:
         b"\xff\xfe".decode()
     match r:
-        Ok(v): print(v)
-        Err(e): print("caught")
+        ?v: print(v)
+        !e: print("caught")
 
     # --- List(it) over every for-iterable shape; sum to stay order-independent ---
     print(List([10, 20, 30]).sum())        # 60 (from a list)

@@ -42,10 +42,10 @@ fn main():
     # len.
     print(ba.len())
 
-    # Mutating methods: push (one byte), pop (-> Option[int]), extend (bytes / bytearray / List[int]).
+    # Mutating methods: push (one byte), pop (-> int?), extend (bytes / bytearray / List[int]).
     ba.push(10)
     print(ba)
-    print(ba.pop())                    # Some(10)
+    print(ba.pop())                    # 10
     ba.extend(b"\xAA")
     ba.extend([7, 8])
     print(ba)
@@ -68,12 +68,12 @@ fn main():
     r1 := recover:
         back[99] = 1
     match r1:
-        Ok(v): print("ok")
-        Err(e): print("caught oob write")
+        ?v: print("ok")
+        !e: print("caught oob write")
     r2 := recover:
         back[0] = 999
     match r2:
-        Ok(v): print("ok")
-        Err(e): print("caught bad value")
+        ?v: print("ok")
+        !e: print("caught bad value")
 
 main()

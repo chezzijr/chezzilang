@@ -135,9 +135,9 @@ test fn a_builtin_witnesses_a_parameterized_bound():
     # rebuilds it with the receiver prepended, the way `satisfies_native` does. Without that the
     # arity test is off by one and this call was `cannot infer type parameter R for 'take'`.
     v := take([1, 2, 3])
-    assert v == Some(3)
+    assert v == ?3
     s := take(["a", "b"])
-    assert s == Some("b")
+    assert s == ?"b"
 
 protocol Q[S]:
     Produces[S]

@@ -27,7 +27,7 @@ native fn _to_json(x: Any) -> Json
 # The `dumps`-shaped inverse of `decode[T]` (docs/gaps.md W8-20): `encode(x)` walks a struct/list/
 # map/scalar value into `Json` and serializes it in one call, so `decode[T](encode(x))` gives back
 # `x`. An int encodes as `Json.Int` and never passes through f64 (the W8-35 split this ticket also
-# fixes). A non-encodable value (a `Result`, a non-`Option` enum, a function, …) faults recoverably;
+# fixes). A non-encodable value (a `T!E`, a non-`T?` enum, a function, …) faults recoverably;
 # see `_to_json`'s runtime walk (`Vm::json_of`) for the exact fault messages.
 fn encode(x: Any) -> str:
     return stringify(_to_json(x))
@@ -37,10 +37,10 @@ fn encode(x: Any) -> str:
 # A cursor over the input's codepoints. Fields mutate in place across method calls.
 # `depth` tracks array/object nesting: `parse_value` is recursive-descent, so nesting depth in the
 # INPUT becomes call-stack depth in the program. Attacker-controlled input could otherwise recurse
-# past the VM's `maximum call depth` guard and abort the whole process — a fault `Result` can't
-# express, so a caller who correctly matched `Ok`/`Err` would still need to remember to wrap the
+# past the VM's `maximum call depth` guard and abort the whole process — a fault `T!E` can't
+# express, so a caller who correctly matched `?v`/`!e` would still need to remember to wrap the
 # call in `recover:` to survive it. `MAX_NEST_DEPTH` keeps parsing inside that budget so a too-deep
-# document instead returns a clean `Err` on its own, no `recover:` needed — matching Go's
+# document instead returns a clean `!e` on its own, no `recover:` needed — matching Go's
 # `encoding/json` and CPython's `json.loads`, both total. Measured on the release binary
 # (2026-08-18): a `[`-only document dies at nesting depth 5000 with no surrounding call frames (each
 # level costs 2 VM frames against the 10 000 cap); depth 2000 leaves ample headroom for caller frames
@@ -92,7 +92,7 @@ struct Parser:
                 col += 1
         return msg + " at line " + str(line) + " column " + str(col) + " (char " + str(pos) + ")"
 
-    fn parse_value(self) -> Result[Json]:
+    fn parse_value(self) -> Json!:
         self.skip_ws()
         c := self.peek()
         if c == "":
@@ -103,7 +103,7 @@ struct Parser:
             return self.parse_array()
         if c == "\"":
             s := self.parse_string()?
-            return Ok(Json.Str(s))
+            return ?Json.Str(s)
         if c == "t":
             return self.parse_lit("true", Json.Bool(true))
         if c == "f":
@@ -114,14 +114,14 @@ struct Parser:
             return self.parse_number()
         return !self.at("unexpected character '" + c + "'")
 
-    fn parse_lit(self, word: str, val: Json) -> Result[Json]:
+    fn parse_lit(self, word: str, val: Json) -> Json!:
         start := self.pos
         for expected in word:
             if self.bump() != expected:
                 return !self.at_pos("invalid literal, expected '" + word + "'", start)
-        return Ok(val)
+        return ?val
 
-    fn parse_string(self) -> Result[str]:
+    fn parse_string(self) -> str!:
         open_quote := self.pos
         self.pos += 1                       # consume the opening quote
         parts: List[str] = []
@@ -136,7 +136,7 @@ struct Parser:
                 if run < self.pos:
                     parts.push("".join(self.src[run : self.pos]))
                 self.pos += 1
-                return Ok("".join(parts))
+                return ?"".join(parts)
             if c == "\\":
                 if run < self.pos:
                     parts.push("".join(self.src[run : self.pos]))
@@ -161,7 +161,7 @@ struct Parser:
                 self.pos += 1
 
     # A `\uXXXX` escape, combining a high+low surrogate pair into one codepoint.
-    fn parse_unicode(self) -> Result[str]:
+    fn parse_unicode(self) -> str!:
         hi := self.parse_hex4()?
         if hi >= 55296 and hi <= 56319:                 # high surrogate
             if self.bump() != "\\" or self.bump() != "u":
@@ -170,24 +170,24 @@ struct Parser:
             if lo < 56320 or lo > 57343:
                 return !self.at("invalid low surrogate")
             cp := 65536 + (hi - 55296) * 1024 + (lo - 56320)
-            return Ok(chr(cp))
+            return ?chr(cp)
         if hi >= 56320 and hi <= 57343:
             return !self.at("unexpected low surrogate")
-        return Ok(chr(hi))
+        return ?chr(hi)
 
-    fn parse_hex4(self) -> Result[int]:
+    fn parse_hex4(self) -> int!:
         n := 0
         for i in 0..4:
             c := self.bump()
             match hex_val(c):
-                Ok(d): n = n * 16 + d
+                ?d: n = n * 16 + d
                 # `hex_val` is a free fn with no `self`, so the location wraps here instead.
-                Err(m): return !self.at_pos(m.message(), self.pos - 1)
-        return Ok(n)
+                !m: return !self.at_pos(m.message(), self.pos - 1)
+        return ?n
 
-    fn parse_number(self) -> Result[Json]:
+    fn parse_number(self) -> Json!:
         # Scan a JSON number, validating its shape FIRST so `float(raw)` below only ever sees a
-        # well-formed numeral (a bad numeral would otherwise abort the program, not return Err).
+        # well-formed numeral (a bad numeral would otherwise abort the program, not return an error).
         start := self.pos
         if self.peek() == "-":
             self.pos += 1
@@ -230,12 +230,12 @@ struct Parser:
         raw := "".join(self.src[start : self.pos])
         if is_int:
             match raw.to_int():
-                Some(i): return Ok(Json.Int(i))
+                ?i: return ?Json.Int(i)
                 # Outside the i64 window: Chezzi has no bignum, so fall back to the lossy f64 path.
                 None: return self.num_float(raw, start)
         return self.num_float(raw, start)
 
-    fn num_float(self, raw: str, start: int) -> Result[Json]:
+    fn num_float(self, raw: str, start: int) -> Json!:
         f := float(raw)
         # Go's `encoding/json` rejects a numeral that overflows f64 (`1e400` → +inf) AT DECODE, so we
         # never manufacture a `Json.Num(inf/-inf/NaN)` that our own `stringify` (num_str) would then
@@ -243,10 +243,10 @@ struct Parser:
         # (Underflow like `1e-400` → `0.0` is finite and stays accepted.)
         if f - f != 0.0:
             return !self.at_pos("invalid number: value out of range", start)
-        return Ok(Json.Num(f))
+        return ?Json.Num(f)
 
-    fn parse_array(self) -> Result[Json]:
-        # `?` on a nested `parse_value` propagates an `Err` straight out of the whole `parse()`
+    fn parse_array(self) -> Json!:
+        # `?` on a nested `parse_value` propagates an `!e` straight out of the whole `parse()`
         # call (no mid-parse recovery reuses this `Parser`), so `depth` only needs decrementing on
         # the SUCCESS paths below — a sibling array at the same nesting level must see `depth` back
         # where it started, not inflated by an earlier sibling's subtree.
@@ -259,7 +259,7 @@ struct Parser:
         if self.peek() == "]":
             self.pos += 1
             self.depth -= 1
-            return Ok(Json.Arr(items))
+            return ?Json.Arr(items)
         while true:
             v := self.parse_value()?
             items.push(v)
@@ -267,11 +267,11 @@ struct Parser:
             c := self.bump()
             if c == "]":
                 self.depth -= 1
-                return Ok(Json.Arr(items))
+                return ?Json.Arr(items)
             if c != ",":
                 return !self.at_pos("expected ',' or ']' in array", self.pos - 1)
 
-    fn parse_object(self) -> Result[Json]:
+    fn parse_object(self) -> Json!:
         self.depth += 1
         if self.depth > MAX_NEST_DEPTH:
             return !"exceeded max depth"
@@ -281,7 +281,7 @@ struct Parser:
         if self.peek() == "}}":
             self.pos += 1
             self.depth -= 1
-            return Ok(Json.Obj(obj))
+            return ?Json.Obj(obj)
         while true:
             self.skip_ws()
             if self.peek() != "\"":
@@ -296,30 +296,30 @@ struct Parser:
             c := self.bump()
             if c == "}}":
                 self.depth -= 1
-                return Ok(Json.Obj(obj))
+                return ?Json.Obj(obj)
             if c != ",":
                 return !self.at_pos("expected ',' or '}}' in object", self.pos - 1)
 
 fn is_digit(c: str) -> bool:
     return c >= "0" and c <= "9"
 
-fn hex_val(c: str) -> Result[int]:
+fn hex_val(c: str) -> int!:
     if c >= "0" and c <= "9":
-        return Ok(ord(c) - ord("0"))
+        return ?(ord(c) - ord("0"))
     if c >= "a" and c <= "f":
-        return Ok(ord(c) - ord("a") + 10)
+        return ?(ord(c) - ord("a") + 10)
     if c >= "A" and c <= "F":
-        return Ok(ord(c) - ord("A") + 10)
+        return ?(ord(c) - ord("A") + 10)
     return !("invalid hex digit '" + c + "'")
 
 # Parse a JSON document into a `Json` tree. Trailing non-whitespace is an error.
-fn parse(s: str) -> Result[Json]:
+fn parse(s: str) -> Json!:
     p := Parser(s.chars(), 0, s.len(), 0)
     v := p.parse_value()?
     p.skip_ws()
     if p.pos < p.len:
         return !p.at("trailing characters after JSON value")
-    return Ok(v)
+    return ?v
 
 # ----- serializing ---------------------------------------------------------------------------
 
@@ -380,7 +380,7 @@ fn num_str(f: float) -> str:
 # Serialize a `Json` tree to a JSON document. `Arr`/`Obj` recurse structurally, so a tree built
 # directly (no `parse` involved — `j = Json.Arr([j])` in a loop) can nest past the VM's `maximum
 # call depth` guard just like `parse` can (`docs/gaps.md` W8-5). Unlike `parse`, `stringify` has no
-# `Result` to put an error in and CPython's `json.dumps` also raises `RecursionError` here — so this
+# `T!E` to put an error in and CPython's `json.dumps` also raises `RecursionError` here — so this
 # stays a fault, just a LEGIBLE one naming the cause instead of an opaque VM message pointing at a
 # `std/json.chz` line the caller never opened. Same limit as `parse`, counted the same way
 # (outermost container = level 1), so everything stringify emits parses back.
@@ -436,61 +436,61 @@ fn is_null(j: Json) -> bool:
         Json.Null: return true
         _: return false
 
-fn as_bool(j: Json) -> Option[bool]:
+fn as_bool(j: Json) -> bool?:
     match j:
-        Json.Bool(b): return Some(b)
+        Json.Bool(b): return ?b
         _: return None
 
-fn as_float(j: Json) -> Option[float]:
+fn as_float(j: Json) -> float?:
     match j:
-        Json.Int(i): return Some(float(i))
-        Json.Num(n): return Some(n)
+        Json.Int(i): return ?float(i)
+        Json.Num(n): return ?n
         _: return None
 
-fn as_int(j: Json) -> Option[int]:
+fn as_int(j: Json) -> int?:
     match j:
-        Json.Int(i): return Some(i)
+        Json.Int(i): return ?i
         Json.Num(n):
             # JSON stores every number as f64; `int()` faults on out-of-range/non-finite. Keep
             # this a total function: gate on the i64 window and return None when unrepresentable.
             # `n == 2^63` (== i64::MAX after f64 rounding) is special-cased since int(2^63) faults.
             if n == 9223372036854775808.0:
-                return Some(9223372036854775807)
+                return ?9223372036854775807
             if n >= -9223372036854775808.0 and n < 9223372036854775808.0:
-                return Some(int(n))
+                return ?int(n)
             return None
         _: return None
 
-fn as_str(j: Json) -> Option[str]:
+fn as_str(j: Json) -> str?:
     match j:
-        Json.Str(s): return Some(s)
+        Json.Str(s): return ?s
         _: return None
 
 # The object's underlying `Map[str, Json]` (None if `j` is not an object).
-fn as_object(j: Json) -> Option[Map[str, Json]]:
+fn as_object(j: Json) -> Map[str, Json]?:
     match j:
-        Json.Obj(m): return Some(m)
+        Json.Obj(m): return ?m
         _: return None
 
 # The array's underlying `List[Json]` (None if `j` is not an array).
-fn as_array(j: Json) -> Option[List[Json]]:
+fn as_array(j: Json) -> List[Json]?:
     match j:
-        Json.Arr(xs): return Some(xs)
+        Json.Arr(xs): return ?xs
         _: return None
 
 # Look up a key in an object (None if not an object or key is absent).
-fn get(j: Json, key: str) -> Option[Json]:
+fn get(j: Json, key: str) -> Json?:
     match j:
         Json.Obj(m): return m.get(key)
         _: return None
 
 # Index into an array (None if not an array or out of bounds).
-fn at(j: Json, i: int) -> Option[Json]:
+fn at(j: Json, i: int) -> Json?:
     match j:
         Json.Arr(xs):
             if i < 0 or i >= xs.len():
                 return None
-            return Some(xs[i])
+            return ?xs[i]
         _: return None
 
 # Element count: array length, object size, or string length. Faults on `Null`/`Bool`/`Num` — a

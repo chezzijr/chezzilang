@@ -1,7 +1,7 @@
 xs := [1, 2, 3]
 last := xs.pop()
 match last:
-    Some(v): print("popped {v}")
+    ?v: print("popped {v}")
     None: print("empty")
 print(xs.len())
 
@@ -19,12 +19,12 @@ print([1, 2, 3, 4].sum())
 print([1.0, 2.5, 0.5].sum())
 
 # value/ergonomics methods (gaps.md §2)
-# min/max/min_by/max_by return Option[T] — None on empty, like first/last/pop
+# min/max/min_by/max_by return T? — None on empty, like first/last/pop
 print([3, 1, 2].min() ?? 0)
 print([3, 1, 2].max() ?? 0)
 empties: List[int] = []
 match empties.min():
-    Some(v): print("min {v}")
+    ?v: print("min {v}")
     None: print("min of []: none")
 
 struct Item:
@@ -32,18 +32,18 @@ struct Item:
     name: str
 items := [Item(3, "box"), Item(1, "pin"), Item(2, "cup")]
 match items.min_by(fn(it: Item) -> int: it.weight):
-    Some(it): print(it.name)
+    ?it: print(it.name)
     None: print("none")
 match items.max_by(fn(it: Item) -> int: it.weight):
-    Some(it): print(it.name)
+    ?it: print(it.name)
     None: print("none")
 
 zs := [10, 20, 30]
 match zs.first():
-    Some(v): print("first {v}")
+    ?v: print("first {v}")
     None: print("none")
 match zs.last():
-    Some(v): print("last {v}")
+    ?v: print("last {v}")
     None: print("none")
 
 # reversed() returns a NEW list; the original is untouched
@@ -75,8 +75,8 @@ print([5, 1].take_while(fn(x: int) -> bool: x < 3))
 print([1, 2].drop_while(fn(x: int) -> bool: true))
 print([1, 2, 3, 2, 1].count(fn(x: int) -> bool: x == 2))
 match [1, 2, 3, 2].position(fn(x: int) -> bool: x == 2):
-    Some(i): print("pos {i}")
+    ?i: print("pos {i}")
     None: print("nopos")
 match [1, 3].position(fn(x: int) -> bool: x == 2):
-    Some(i): print("pos {i}")
+    ?i: print("pos {i}")
     None: print("nopos")

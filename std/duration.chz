@@ -4,7 +4,7 @@
 # of MILLISECONDS. Millis (not nanos) is the base unit deliberately: it matches `sleep_ms`/`timer(ms)`,
 # and an i64 of ms overflows only at ~292 million years (a Go nanos i64 caps at ~292 YEARS). The cost
 # is a SUB-MILLISECOND CEILING: microseconds/nanoseconds are unrepresentable — `parse("1us")` /
-# `parse("1ns")` are a clean Err, and a fractional literal below 1ms (e.g. "0.0005s") floors to 0ms.
+# `parse("1ns")` are a clean an error, and a fractional literal below 1ms (e.g. "0.0005s") floors to 0ms.
 #
 # `to_string` emits Go's `time.Duration.String()` decimal-seconds shape: "1h30m0s", "1.5s", "250ms",
 # "0s", "-1.5s". `parse` is its inverse and also accepts the looser forms Go accepts ("1h30m", ".5s",
@@ -124,25 +124,25 @@ fn _to_uint(x: str) -> int:
     return n
 
 # ASCII digits -> the NEGATED int (accumulates on the negative side of i64, the only side that
-# reaches magnitude 2^63), clean Err instead of an i64-overflow fault. Caller MUST _all_digits-guard
+# reaches magnitude 2^63), clean an error instead of an i64-overflow fault. Caller MUST _all_digits-guard
 # first. An oversized digit string (e.g. 24 nines) must not fault `n * 10 - d`. The constants are
 # i64::MIN split as `n * 10 - d`: `-922337203685477580` is `i64::MIN / 10`, `8` is `-i64::MIN % 10`
 # (W12-20d).
-fn _to_neg_checked(x: str) -> Result[int]:
+fn _to_neg_checked(x: str) -> int!:
     n := 0
     for c in x:
         d := ord(c) - 48
         if n < -922337203685477580 or (n == -922337203685477580 and d > 8):
             return !("duration out of range '" + x + "'")
         n = n * 10 - d
-    return Ok(n)
+    return ?n
 
 # Convert one magnitude token ("1", "1.5", ".5", "0.25") in the given unit (ms per unit) to SIGNED
-# millis (the sign the caller already parsed), flooring any sub-ms fraction. Clean Err on malformed
+# millis (the sign the caller already parsed), flooring any sub-ms fraction. Clean an error on malformed
 # input or i64-overflow-sized magnitudes. The magnitude is accumulated on the negative side of i64
 # (`_to_neg_checked`), the only side that reaches 2^63, so a magnitude of exactly i64::MIN ms is
 # representable (W12-20d).
-fn _num_ms(numstr: str, unit_ms: int, neg: bool) -> Result[int]:
+fn _num_ms(numstr: str, unit_ms: int, neg: bool) -> int!:
     i64_min := -9223372036854775807 - 1
     parts := numstr.split(".")
     intpart := parts[0]
@@ -184,15 +184,15 @@ fn _num_ms(numstr: str, unit_ms: int, neg: bool) -> Result[int]:
         return !("duration out of range '" + numstr + "'")
     mag := whole - frac_ms
     if neg:
-        return Ok(mag)
+        return ?mag
     if mag == i64_min:
         return !("duration out of range '" + numstr + "'")
-    return Ok(-mag)
+    return ?(-mag)
 
 # Parse a Go-style duration string -> Duration. Accepts an optional leading '+'/'-', one or more
 # `<number><unit>` groups (units h/m/s/ms, unordered and summed), decimal magnitudes ("1.5h", ".5s"),
-# and a bare "0". Sub-ms units (us/ns/µs) and anything malformed are a clean Err.
-fn parse(input: str) -> Result[Duration]:
+# and a bare "0". Sub-ms units (us/ns/µs) and anything malformed are a clean an error.
+fn parse(input: str) -> Duration!:
     if input.len() == 0:
         return !"empty duration string"
     cs := input.chars()      # O(n) index; never re-slice per char (the pure-Chezzi O(n^2) trap)
@@ -206,7 +206,7 @@ fn parse(input: str) -> Result[Duration]:
         return !("no digits in duration '" + input + "'")
     # Go accepts a lone "0" (no unit).
     if input[i:] == "0":
-        return Ok(Duration(0))
+        return ?Duration(0)
     total := 0
     i64_max := 9223372036854775807   # i64::MAX — the ms range ceiling (Chezzi has no int-max const)
     i64_min := -9223372036854775807 - 1   # i64::MIN — unrepresentable via a positive negate
@@ -223,7 +223,7 @@ fn parse(input: str) -> Result[Duration]:
         if dots > 1:
             return !("malformed number in '" + input + "'")
         numstr := input[start:i]
-        # 2. unit: lowercase ASCII letters (µ in µs is not a-z, so us/µs/ns all fall through to Err)
+        # 2. unit: lowercase ASCII letters (µ in µs is not a-z, so us/µs/ns all fall through to an error)
         ustart := i
         while i < n and cs[i] >= "a" and cs[i] <= "z":
             i = i + 1
@@ -251,7 +251,7 @@ fn parse(input: str) -> Result[Duration]:
             if part > i64_max - total:
                 return !("duration out of range '" + input + "'")
         total = total + part
-    return Ok(Duration(total))
+    return ?Duration(total)
 
 # ---- clock convenience (imports native std.time; NOT part of the deterministic round-trip surface) ----
 

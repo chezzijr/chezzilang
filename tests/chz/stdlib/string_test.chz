@@ -47,8 +47,8 @@ test fn replace_empty_old_agrees_with_count_and_both_spellings():
 test fn repeat_huge_n_faults_recoverably():
     r := recover: string.repeat("ab", 9223372036854775807)
     match r:
-        Ok(_): assert false, "expected a capacity fault"
-        Err(e): assert e.message() == "string repeat capacity overflow"
+        ?_: assert false, "expected a capacity fault"
+        !e: assert e.message() == "string repeat capacity overflow"
     # the process is still alive afterwards
     assert string.repeat("ab", 3) == "ababab"
 

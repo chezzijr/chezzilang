@@ -34,9 +34,9 @@ test fn optional_type_argument():
 test fn nested_generic_type_argument_on_decode():
     d := json.decode[Map[str, int]]
     match d(r'{"a": 1}'):
-        Ok(m):
+        ?m:
             assert m == {"a": 1}
-        Err(e):
+        !e:
             assert false, e.message()
 
 test fn nested_generic_type_argument_on_a_type_head():
@@ -56,9 +56,9 @@ test fn parenthesised_turbofish_callee():
     assert (math.abs[int])(-6) == 6
     assert (idt[int])(6) == 6
     match (json.decode[int])("3"):
-        Ok(n):
+        ?n:
             assert n == 3
-        Err(e):
+        !e:
             assert false, e.message()
 
 test fn a_value_head_indexes():

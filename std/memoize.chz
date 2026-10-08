@@ -23,17 +23,17 @@
 import std.concurrency
 
 # Cache lookup-or-compute, split out because a closure body is a single expression: the returned
-# wrapper delegates here so it can do the `Option` match + compute + store.
+# wrapper delegates here so it can do the `T?` match + compute + store.
 fn _memo_get[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], own: Map[K, V], f: fn(K) -> V, k: K) -> V:
     match own.get(k):
-        Some(v):
+        ?v:
             return v
         None:
             pass
     if concurrency.is_task_copy(own):
         return _memo_copy_read(shared, f, k)
     v := match shared.get_key(k):
-        Some(x): x
+        ?x: x
         None: _memo_fill(shared, f, k)
     own[k] = v
     return v
@@ -45,13 +45,13 @@ fn _memo_get[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], own: Map[K, V], f
 # and the fill's own value is returned unmarked (no recursion: `f` runs once per call, as on base).
 fn _memo_copy_read[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
     match shared.get_key(k):
-        Some(x):
+        ?x:
             return concurrency.task_copy_of(x)
         None:
             pass
     v := _memo_fill(shared, f, k)
     match shared.get_key(k):
-        Some(x):
+        ?x:
             return concurrency.task_copy_of(x)
         None:
             return v

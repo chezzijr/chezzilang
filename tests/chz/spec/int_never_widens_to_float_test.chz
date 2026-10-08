@@ -41,18 +41,18 @@ test fn a_float_literal_list_prints_as_floats():
 test fn json_decode_of_an_int_text_into_a_float_is_a_real_float():
     # The JSON text `1` is an int token; decoding it into a `float` slot must hand back `1.0`.
     match json.decode[float]("1"):
-        Ok(x):
+        ?x:
             assert str(x) == "1.0"
             assert x / 2 == 0.5
-        Err(e):
+        !e:
             assert false, e.message()
 
 test fn json_decode_into_a_float_field_is_a_real_float():
     match json.decode[Pt]("{{\"x\": 1, \"y\": 2}}"):
-        Ok(p):
+        ?p:
             assert str(p.x) == "1.0"
             assert p.y / 4 == 0.5
-        Err(e):
+        !e:
             assert false, e.message()
 
 test fn an_extern_float_param_takes_a_float():

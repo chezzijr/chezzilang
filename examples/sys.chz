@@ -16,14 +16,14 @@ fn shown(ps: List[path.Path]) -> str:
         out.push(p.str())
     return ",".join(out)
 
-# --- std.process: a command's output comes back as Result[str] (Ok=stdout, Err=stderr) ---
+# --- std.process: a command's output comes back as str! (success=stdout, an error=stderr) ---
 match process.cmd("echo hello from the shell"):
-    Ok(out): print("stdout: " + out.trim())
-    Err(e): print("error: " + e.message().trim())
+    ?out: print("stdout: " + out.trim())
+    !e: print("error: " + e.message().trim())
 
 match process.cmd("exit 7"):
-    Ok(out): print("ok: " + out)
-    Err(e): print("failed: " + e.message())
+    ?out: print("ok: " + out)
+    !e: print("failed: " + e.message())
 
 # --- std.fs: existence, type, size, listing, and a simple */? glob ---
 print("exists(Cargo.toml): " + str(fs.exists("Cargo.toml")))
@@ -32,16 +32,16 @@ print("is_dir(examples): " + str(fs.is_dir("examples")))
 print("is_file(examples): " + str(fs.is_file("examples")))
 
 match fs.list_dir("examples/sysfixture"):
-    Ok(names): print("list: " + shown(names))
-    Err(e): print("error: " + e.message())
+    ?names: print("list: " + shown(names))
+    !e: print("error: " + e.message())
 
 match fs.glob("examples/sysfixture/*.txt"):
-    Ok(hits): print("glob: " + shown(hits))
-    Err(e): print("error: " + e.message())
+    ?hits: print("glob: " + shown(hits))
+    !e: print("error: " + e.message())
 
 match fs.size("examples/sysfixture/a.txt"):
-    Ok(n): print("size: " + str(n))
-    Err(e): print("error: " + e.message())
+    ?n: print("size: " + str(n))
+    !e: print("error: " + e.message())
 
 # --- std.time: wall clock (non-deterministic → booleans), then deterministic formatting ---
 print("now > 0: " + str(time.now() > 0))

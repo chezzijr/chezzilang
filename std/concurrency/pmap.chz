@@ -45,7 +45,7 @@ fn pmap[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:
                 results.send(_PmapCell(idx=i, val=f(x)))
     return _collect_sorted(results, n)
 
-# Like `pmap`, but at most `limit` tasks run `f` at once (the rest wait). `limit` must be `> 0`. Result
+# Like `pmap`, but at most `limit` tasks run `f` at once (the rest wait). `limit` must be `> 0`. a `T!E` value
 # is still in submission order — the limiter only bounds concurrency, not the reassembly.
 fn pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]:
     if limit <= 0:

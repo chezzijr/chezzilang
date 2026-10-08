@@ -78,9 +78,9 @@ fn lit_arith(n: int = 1 + 2) -> int:
 fn lit_neg(n: int = -1) -> int:
     return n
 
-fn lit_none(o: Option[int] = None) -> int:
+fn lit_none(o: int? = None) -> int:
     match o:
-        Some(v): return v
+        ?v: return v
         None: return -7
 
 fn lit_empty(xs: List[int] = []) -> int:
@@ -93,7 +93,7 @@ test fn a_self_contained_literal_default_still_evaluates():
     assert lit_arith() == 3, "got {lit_arith()}"
     assert lit_neg() == -1, "got {lit_neg()}"
     assert lit_none() == -7, "got {lit_none()}"
-    assert lit_none(Some(4)) == 4, "got {lit_none(Some(4))}"
+    assert lit_none(?4) == 4, "got {lit_none(?4)}"
     assert lit_empty() == 0, "got {lit_empty()}"
     assert lit_empty([1, 2, 3]) == 3, "got {lit_empty([1, 2, 3])}"
     assert lit_str() == "hi", "got {lit_str()}"
@@ -190,27 +190,27 @@ test fn a_variadic_call_default_fills_a_pre_slot_and_a_keyword_only_tail():
 # --- the non-propagating carriers, and the ONE `?` shape that is accepted -------------------------
 #
 # `?` cannot propagate OUT of a default (see the header of `default_splice_keys_test.chz`), but
-# neither Option-mode `?.` nor `??` propagates, so both still evaluate — and a `?` INSIDE a
-# Result-typed parameter's default is fine, because the provider is declared `-> int!str` and the
-# `?` early-returns within the provider, handing the parameter the `Err`. That accepted half is the
+# neither a `T?` value-mode `?.` nor `??` propagates, so both still evaluate — and a `?` INSIDE a
+# a `T!E` value-typed parameter's default is fine, because the provider is declared `-> int!str` and the
+# `?` early-returns within the provider, handing the parameter the `!e`. That accepted half is the
 # widening the narrowing came with, and it is pinned here because a widening is structurally
 # untested by the suite that passed before it. Measured on `b1307258`, and on `e2d9bd4e` before the
 # diagnostic was tailored: `'?' used in a function that returns int, not a `T?` or `T!E` value`, 1 error.
 # Here: `4` and `-1`.
 
-fn geto2() -> Option[int]:
-    return Some(3)
+fn geto2() -> int?:
+    return ?3
 
 fn getr() -> str!str:
-    return Ok("wxyz")
+    return ?"wxyz"
 
 fn coalesced(x: int = geto2() ?? 0) -> int:
     return x
 
-fn res_param(x: int!str = Ok(getr()?.len())) -> int:
+fn res_param(x: int!str = ?(getr()?.len())) -> int:
     match x:
-        Ok(v): return v
-        Err(e): return -1
+        ?v: return v
+        !e: return -1
 
 test fn a_null_coalescing_default_still_evaluates():
     assert coalesced() == 3, "got {coalesced()}"
@@ -218,9 +218,9 @@ test fn a_null_coalescing_default_still_evaluates():
 
 test fn a_result_typed_parameters_default_may_use_try_inside_the_provider():
     assert res_param() == 4, "the `?` resolves INSIDE the provider — got {res_param()}"
-    e := res_param(Err("no"))
+    e := res_param(!"no")
     assert e == -1, "got {e}"
-    assert res_param(Ok(7)) == 7, "got {res_param(Ok(7))}"
+    assert res_param(?7) == 7, "got {res_param(?7)}"
 
 # --- a cycle the compile-time check cannot see ----------------------------------------------------
 #
@@ -239,8 +239,8 @@ fn mk_cyc() -> Cyc:
 test fn a_default_cycle_routed_through_an_ordinary_fn_faults_cleanly():
     r := recover: Cyc().n
     match r:
-        Ok(v): assert false, "expected a fault, got {v}"
-        Err(e): assert e.message().contains("maximum call depth"), "got {e.message()}"
+        ?v: assert false, "expected a fault, got {v}"
+        !e: assert e.message().contains("maximum call depth"), "got {e.message()}"
 
 # --- a `Self`-typed parameter keeps the INLINE clone ----------------------------------------------
 #

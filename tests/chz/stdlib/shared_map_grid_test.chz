@@ -13,11 +13,11 @@ import std.concurrency
 import ConcurrentMap from std.concurrency.collection
 import memoize1 from std.memoize
 
-# A handle carries a `Result`; these tests read a job that did not fault.
-fn must[T](r: Result[T]) -> T:
+# A handle carries a `T!E`; these tests read a job that did not fault.
+fn must[T](r: T!) -> T:
     match r:
-        Ok(v): return v
-        Err(e): panic(e.message())
+        ?v: return v
+        !e: panic(e.message())
 
 struct P:
     n: int
@@ -40,7 +40,7 @@ enum Tag:
 
 # ---- the one op sequence -------------------------------------------------------------------------
 # keys[0..5] are inserted; keys[5] is never inserted before the last `goi` (the miss probe).
-fn _ops[K: Hashable + Eq](keys: List[K], put: fn(K, int) -> None, del: fn(K) -> None, get: fn(K) -> Option[int], has: fn(K) -> bool, len: fn() -> int, goi: fn(K, int) -> int, items: fn() -> str) -> str:
+fn _ops[K: Hashable + Eq](keys: List[K], put: fn(K, int) -> None, del: fn(K) -> None, get: fn(K) -> int?, has: fn(K) -> bool, len: fn() -> int, goi: fn(K, int) -> int, items: fn() -> str) -> str:
     i := 0
     while i < 5:
         put(keys[i], i)
@@ -60,7 +60,7 @@ fn _show[K](k: K, v: int) -> str:
 # ---- holders ---------------------------------------------------------------------------------------
 fn _map_ops[K: Hashable + Eq](keys: List[K]) -> str:
     m: Map[K, int] = {}
-    return _ops(keys, fn(k: K, v: int): _map_put(m, k, v), fn(k: K): _map_del(m, k), fn(k: K) -> Option[int]: m.get(k), fn(k: K) -> bool: m.has(k), fn() -> int: m.len(), fn(k: K, v: int) -> int: _map_goi(m, k, v), fn() -> str: _map_items(m))
+    return _ops(keys, fn(k: K, v: int): _map_put(m, k, v), fn(k: K): _map_del(m, k), fn(k: K) -> int?: m.get(k), fn(k: K) -> bool: m.has(k), fn() -> int: m.len(), fn(k: K, v: int) -> int: _map_goi(m, k, v), fn() -> str: _map_items(m))
 
 fn _map_put[K: Hashable + Eq](m: Map[K, int], k: K, v: int):
     m[k] = v
@@ -70,7 +70,7 @@ fn _map_del[K: Hashable + Eq](m: Map[K, int], k: K):
 
 fn _map_goi[K: Hashable + Eq](m: Map[K, int], k: K, v: int) -> int:
     match m.get(k):
-        Some(x):
+        ?x:
             return x
         None:
             m[k] = v
@@ -91,11 +91,11 @@ fn _map_del_ret[K: Hashable + Eq, V](m: Map[K, V], k: K) -> Map[K, V]:
     return m
 
 fn _shared_ops[K: Hashable + Eq](s: Shared[Map[K, int]], keys: List[K]) -> str:
-    return _ops(keys, fn(k: K, v: int): s.update(fn(m): _map_put_ret(m, k, v)), fn(k: K): s.update(fn(m): _map_del_ret(m, k)), fn(k: K) -> Option[int]: s.get().get(k), fn(k: K) -> bool: s.get().has(k), fn() -> int: s.get().len(), fn(k: K, v: int) -> int: _shared_goi(s, k, v), fn() -> str: _map_items(s.get()))
+    return _ops(keys, fn(k: K, v: int): s.update(fn(m): _map_put_ret(m, k, v)), fn(k: K): s.update(fn(m): _map_del_ret(m, k)), fn(k: K) -> int?: s.get().get(k), fn(k: K) -> bool: s.get().has(k), fn() -> int: s.get().len(), fn(k: K, v: int) -> int: _shared_goi(s, k, v), fn() -> str: _map_items(s.get()))
 
 fn _shared_goi[K: Hashable + Eq](s: Shared[Map[K, int]], k: K, v: int) -> int:
     match s.get().get(k):
-        Some(x):
+        ?x:
             return x
         None:
             s.update(fn(m): _map_put_ret(m, k, v))
@@ -112,13 +112,13 @@ fn _rw_goi[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K, v: V) -> V:
     return b.get_or_insert(k, v)
 
 fn _rw_ops[K: Hashable + Eq](b: RwShared[Map[K, int]], keys: List[K]) -> str:
-    return _ops(keys, fn(k: K, v: int): _rw_put(b, k, v), fn(k: K): _rw_del(b, k), fn(k: K) -> Option[int]: b.get_key(k), fn(k: K) -> bool: b.has(k), fn() -> int: b.len(), fn(k: K, v: int) -> int: _rw_goi(b, k, v), fn() -> str: _rw_items(b))
+    return _ops(keys, fn(k: K, v: int): _rw_put(b, k, v), fn(k: K): _rw_del(b, k), fn(k: K) -> int?: b.get_key(k), fn(k: K) -> bool: b.has(k), fn() -> int: b.len(), fn(k: K, v: int) -> int: _rw_goi(b, k, v), fn() -> str: _rw_items(b))
 
 fn _rw_items[K: Hashable + Eq](b: RwShared[Map[K, int]]) -> str:
     return b.fold_entries("", fn(a, k, v): a + _show(k, v))
 
 fn _cm_ops[K: Hashable + Eq](c: ConcurrentMap[K, int], keys: List[K]) -> str:
-    return _ops(keys, fn(k: K, v: int): c.set(k, v), fn(k: K): c.remove(k), fn(k: K) -> Option[int]: c.get(k), fn(k: K) -> bool: c.contains(k), fn() -> int: c.len(), fn(k: K, v: int) -> int: c.get_or_insert(k, v), fn() -> str: _map_items(c.snapshot()))
+    return _ops(keys, fn(k: K, v: int): c.set(k, v), fn(k: K): c.remove(k), fn(k: K) -> int?: c.get(k), fn(k: K) -> bool: c.contains(k), fn() -> int: c.len(), fn(k: K, v: int) -> int: c.get_or_insert(k, v), fn() -> str: _map_items(c.snapshot()))
 
 # ---- callers ---------------------------------------------------------------------------------------
 fn _child_shared[K: Hashable + Eq](s: Shared[Map[K, int]], keys: List[K], ch: Channel[str]):
@@ -187,8 +187,8 @@ fn _tagged[K](calls: AtomicInt, k: K) -> str:
 fn _child_memo[K: Hashable + Eq](m: fn(K) -> str, keys: List[K], ch: Channel[str]):
     r := recover: _call_all(m, keys)
     match r:
-        Ok(v): ch.send(v)
-        Err(e): ch.send(e.message())
+        ?v: ch.send(v)
+        !e: ch.send(e.message())
 
 fn _call_all[K: Hashable + Eq](m: fn(K) -> str, keys: List[K]) -> str:
     s := ""
@@ -303,7 +303,7 @@ test fn remove_and_overwrite_keep_a_cross_entry_alias_alive():
     b := RwShared(m)
     _rw_del(b, "a")
     match b.get_key("b"):
-        Some(v): assert v == [1, 2], str(v)
+        ?v: assert v == [1, 2], str(v)
         None: assert false, "b missing after removing a"
     _rw_put(b, "c", [4])
     _rw_put(b, "b", [5])
@@ -331,7 +331,7 @@ fn _look(b: RwShared[Map[P, int]], stop: AtomicInt, ch: Channel[int]):
         if not b.has(P(14)):
             misses = misses + 1
         match b.get_key(P(14)):
-            Some(v):
+            ?v:
                 if v != 14:
                     misses = misses + 1
             None:

@@ -6,7 +6,7 @@
 # (`tests/chz_suite.rs`).
 import std.concurrency
 
-fn recover_with_spawn(ch: Channel[int]) -> Result[int]:
+fn recover_with_spawn(ch: Channel[int]) -> int!:
     r := recover:
         spawn: ch.send(7)
         1
@@ -16,17 +16,17 @@ test fn spawn_inside_recover_in_a_fn_body_runs():
     ch := Channel[int]()
     r := recover_with_spawn(ch)
     match r:
-        Ok(v): assert v == 1
-        Err(e): assert false, "recover: returned Err instead of running the task: {e.message()}"
+        ?v: assert v == 1
+        !e: assert false, "recover: returned Err instead of running the task: {e.message()}"
     assert ch.recv() == 7
 
 test fn spawn_inside_recover_in_a_closure_body_runs():
     ch := Channel[int]()
-    f := fn() -> Result[int]: recover:
+    f := fn() -> int!: recover:
         spawn: ch.send(9)
         1
     r := f()
     match r:
-        Ok(v): assert v == 1
-        Err(e): assert false, "recover: returned Err instead of running the task: {e.message()}"
+        ?v: assert v == 1
+        !e: assert false, "recover: returned Err instead of running the task: {e.message()}"
     assert ch.recv() == 9

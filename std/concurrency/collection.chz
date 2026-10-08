@@ -41,8 +41,8 @@ import std.concurrency
 struct ConcurrentMap[K: Hashable + Eq, V]:
     inner: RwShared[Map[K, V]]
 
-    # Look up `key`. CONCURRENT READ. Returns Some(value) or None.
-    fn get(self, key: K) -> Option[V]:
+    # Look up `key`. CONCURRENT READ. Returns ?value or None.
+    fn get(self, key: K) -> V?:
         return self.inner.get_key(key)
 
     # Insert or overwrite `key` -> `val`. One update guard.
@@ -102,13 +102,13 @@ struct ConcurrentCounter[K: Hashable + Eq]:
 # Read-modify-write `key` += `n` in ONE pass (called inside the exclusive write closure).
 fn _inc[K: Hashable + Eq](m: Map[K, int], key: K, n: int) -> Map[K, int]:
     match m.get(key):
-        Some(c): m[key] = c + n
+        ?c: m[key] = c + n
         None: m[key] = n
     return m
 
 fn _count[K: Hashable + Eq](m: Map[K, int], key: K) -> int:
     match m.get(key):
-        Some(c): return c
+        ?c: return c
         None: return 0
 
 fn _sum[K: Hashable + Eq](m: Map[K, int]) -> int:

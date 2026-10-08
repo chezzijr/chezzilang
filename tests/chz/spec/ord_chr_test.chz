@@ -17,13 +17,13 @@ test fn ord_faults_on_anything_but_one_character():
     for s, n in cases:
         r := recover: ord(s)
         match r:
-            Ok(_):  assert false, "a multi-character str must fault, not return the first codepoint"
-            Err(e): assert e.message() == "ord() expects a 1-character str, got {n} characters"
+            ?_:  assert false, "a multi-character str must fault, not return the first codepoint"
+            !e: assert e.message() == "ord() expects a 1-character str, got {n} characters"
     # The empty case was already guarded; it keeps its own message.
     re := recover: ord("")
     match re:
-        Ok(_):  assert false, "expected a fault"
-        Err(e): assert e.message() == "ord() of an empty string"
+        ?_:  assert false, "expected a fault"
+        !e: assert e.message() == "ord() of an empty string"
 
 test fn chr_round_trips_ord():
     assert chr(97) == "a"
@@ -35,11 +35,11 @@ test fn chr_faults_outside_the_unicode_range():
     for bad in [-1, 1114112]:
         r := recover: chr(bad)
         match r:
-            Ok(_):  assert false, "chr() must reject a codepoint outside range(0x110000)"
-            Err(e): assert e.message().contains("not a valid Unicode codepoint")
+            ?_:  assert false, "chr() must reject a codepoint outside range(0x110000)"
+            !e: assert e.message().contains("not a valid Unicode codepoint")
     # DIVERGENCE, recorded not fixed (docs/stdlib.md): CPython returns a lone surrogate here,
     # Chezzi faults — `str` is UTF-8 and cannot hold one. A loud fault, not a wrong value.
     rs := recover: chr(55296)
     match rs:
-        Ok(_):  assert false, "a lone surrogate has no UTF-8 encoding"
-        Err(e): assert e.message().contains("55296")
+        ?_:  assert false, "a lone surrogate has no UTF-8 encoding"
+        !e: assert e.message().contains("55296")

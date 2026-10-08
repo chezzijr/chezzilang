@@ -1,7 +1,7 @@
 # examples/match_nested.chz — nested / tuple match patterns (gap #15).
 #
 # Before: every step down a tree/tuple needed a flat `match` then field access. Now an arm can
-# destructure a tuple `(a, b)`, a nested variant `Some((x, y))`, or mix in literals `(1, n)`.
+# destructure a tuple `(a, b)`, a nested variant `?(x, y)`, or mix in literals `(1, n)`.
 
 enum Tree:
     Leaf
@@ -28,8 +28,8 @@ print(describe((0, 5)))
 print(describe((3, 0)))
 print(describe((3, 4)))
 
-# Nested variant + tuple: Some((a, b)).
-o: (int, int)? = Some((10, 20))
+# Nested variant + tuple: (?(a, b)).
+o: (int, int)? = ?(10, 20)
 match o:
     None: print("none")
-    Some((a, b)): print("pair {a} {b}")
+    ?(a, b): print("pair {a} {b}")

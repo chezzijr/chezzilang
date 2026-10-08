@@ -22,12 +22,12 @@ fn main():
     print(iter.all(nums, fn(x: int) -> bool: x > 0))
     print(iter.all(nums, fn(x: int) -> bool: x > 2))
 
-    # find: Some(first match) and None.
+    # find: ?(first match) and None.
     match iter.find(nums, fn(x: int) -> bool: x > 3):
-        Some(v): print(v)
+        ?v: print(v)
         None: print("none")
     match iter.find(nums, fn(x: int) -> bool: x > 99):
-        Some(v): print(v)
+        ?v: print(v)
         None: print("none")
 
     # flatten: one level of nesting, order-preserving.

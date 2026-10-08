@@ -1,7 +1,7 @@
 # tests/chz/stdlib/executor_drain_test.chz — `Executor.shutdown` drain semantics (W7-5).
 #
 # Contract (TICKET-208): `shutdown` waits for EVERY submitted job and raises no job fault. A HANDLE
-# job's fault is its handle's `Err` and costs its own result, never a sibling's work. A
+# job's fault is its handle's `!e` and costs its own result, never a sibling's work. A
 # fire-and-forget job's fault ends the whole run, so it has no test here (see
 # `tests/executor_task_grid.rs`). Early-stop is opt-in via a `std.cancel.Token`, not a drain mode.
 #
@@ -23,17 +23,17 @@ fn blow_up_int() -> int:
 fn blow_up_late_int() -> int:
     panic("late boom")
 
-fn err_of(r: Result[int]) -> str:
+fn err_of(r: int!) -> str:
     match r:
-        Ok(_): return "no fault"
-        Err(e): return e.message()
+        ?_: return "no fault"
+        !e: return e.message()
 
 fn guarded_bump(tok: cancel.Token, c: AtomicInt):
     if tok.cancelled():
         return
     c.add(1)
 
-# A HANDLE job's fault is its handle's `Err`: `shutdown()` raises nothing, and no sibling is cut.
+# A HANDLE job's fault is its handle's `!e`: `shutdown()` raises nothing, and no sibling is cut.
 test fn every_job_runs_despite_a_handle_job_fault():
     ex := Executor()
     c := AtomicInt(0)
@@ -122,8 +122,8 @@ test fn a_job_may_shutdown_now_its_own_executor():
     ex.submit(fn(): ex.shutdown_now())
     r := recover: ex.shutdown()
     match r:
-        Ok(_): pass
-        Err(e): assert false, "a job that shuts down its own executor must not fault: " + e.message()
+        ?_: pass
+        !e: assert false, "a job that shuts down its own executor must not fault: " + e.message()
 
 test fn an_uncancelled_token_is_a_no_op():
     ex := Executor()

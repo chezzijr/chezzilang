@@ -1,10 +1,10 @@
 # tests/chz/stdlib/task_fault_test.chz — TICKET-045.
 #
-# A faulted job's `Task.get()` must return the job's own error as `Err`, not a deadlock, and `Task.done()`
+# A faulted job's `Task.get()` must return the job's own error as `!e`, not a deadlock, and `Task.done()`
 # must become true once the job has finished (faulted or not). See docs/gaps.md / TICKET-045.
 #
 # Reference — CPython `concurrent.futures.ThreadPoolExecutor` (the owning ancestor for the Executor
-# family), measured: `shutdown()` does not raise; `future.result()` re-raises the job's own exception (Chezzi returns it as `Err`);
+# family), measured: `shutdown()` does not raise; `future.result()` re-raises the job's own exception (Chezzi returns it as `!e`);
 # `future.done()` is `True` once the job has finished.
 
 import std.concurrency
@@ -18,8 +18,8 @@ test fn task_get_on_a_faulted_job_reports_the_job_error_not_deadlock():
     t0 := submit_task(ex, bad)
     ex.shutdown()
     match t0.get():
-        Ok(_): assert false, "get() on a faulted job must not return Ok"
-        Err(e): assert e.message().contains("job failed"), e.message()
+        ?_: assert false, "get() on a faulted job must not return Ok"
+        !e: assert e.message().contains("job failed"), e.message()
     assert t0.done(), "done() must be true once the faulted job has finished"
 
 fn ok_job() -> int:
@@ -30,8 +30,8 @@ test fn raw_submit_result_on_a_faulted_job_does_not_report_deadlock():
     c := ex.submit_result(bad)
     ex.shutdown()
     match c.recv():
-        Ok(_): assert false, "recv() on a faulted job's channel must not return Ok"
-        Err(e): assert e.message().contains("job failed"), e.message()
+        ?_: assert false, "recv() on a faulted job's channel must not return Ok"
+        !e: assert e.message().contains("job failed"), e.message()
 
 test fn a_successful_task_is_unchanged_by_the_fault_path():
     ex := Executor()
@@ -54,13 +54,13 @@ test fn a_faulted_tasks_error_is_memoized():
     g1 := t.get()
     g2 := t.get()
     match g1:
-        Ok(_): assert false, "first get() on a faulted job must not return Ok"
-        Err(e):
+        ?_: assert false, "first get() on a faulted job must not return Ok"
+        !e:
             assert e.message().contains("job failed"), e.message()
             assert not e.message().contains("closed"), e.message()
     match g2:
-        Ok(_): assert false, "second get() on a faulted job must not return Ok"
-        Err(e):
+        ?_: assert false, "second get() on a faulted job must not return Ok"
+        !e:
             assert e.message().contains("job failed"), e.message()
             assert not e.message().contains("closed"), e.message()
 
@@ -69,8 +69,8 @@ test fn a_faulted_tasks_error_carries_no_origin():
     t0 := submit_task(ex, bad)
     ex.shutdown()
     match t0.get():
-        Ok(_): assert false, "get() on a faulted job must not return Ok"
-        Err(e):
+        ?_: assert false, "get() on a faulted job must not return Ok"
+        !e:
             assert e.file() == None, "Task.get()'s error crosses an airlock and must answer None"
             assert e.line() == None, "Task.get()'s error must answer None for line()"
             assert e.col() == None, "Task.get()'s error must answer None for col()"

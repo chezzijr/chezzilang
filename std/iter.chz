@@ -120,11 +120,11 @@ fn all[T](xs: List[T], pred: fn(T) -> bool) -> bool:
             return false
     return true
 
-# The first element for which `pred` holds, `Some(x)`, or `None` if there is none.
-fn find[T](xs: List[T], pred: fn(T) -> bool) -> Option[T]:
+# The first element for which `pred` holds, `?x`, or `None` if there is none.
+fn find[T](xs: List[T], pred: fn(T) -> bool) -> T?:
     for x in xs:
         if pred(x):
-            return Some(x)
+            return ?x
     return None
 
 # Concatenate a list of lists into one list (one level of nesting, order-preserving).
@@ -218,11 +218,11 @@ fn shuffle[T](xs: List[T]) -> List[T]:
         i -= 1
     return out
 
-# A uniformly-random element of `xs`, `Some(x)`, or `None` if `xs` is empty.
-fn choice[T](xs: List[T]) -> Option[T]:
+# A uniformly-random element of `xs`, `?x`, or `None` if `xs` is empty.
+fn choice[T](xs: List[T]) -> T?:
     if xs.len() == 0:
         return None
-    return Some(xs[rand.int(0, xs.len())])
+    return ?xs[rand.int(0, xs.len())]
 
 # `k` elements drawn WITHOUT replacement (a random subset, in random order). `k` is clamped to
 # `[0, len]`. Uses a partial Fisher–Yates on a copy, then takes the first `k`. Non-mutating.

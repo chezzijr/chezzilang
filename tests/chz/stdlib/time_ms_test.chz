@@ -49,16 +49,16 @@ test fn parse_iso8601_reads_the_fraction_as_milli():
     for pair in [("2026-09-21T12:34:56.789Z", 789), ("2026-09-21T12:34:56.5", 500), ("2026-09-21T12:34:56.123456", 123), ("2026-09-21T12:34:56.9999Z", 999), ("2026-09-21T12:34:56.789+05:30", 789), ("2026-09-21T12:34:56Z", 0), ("2026-09-21T12:34:56.00000000000000000000001", 0)]:
         iso, want := pair
         match datetime.parse_iso8601(iso):
-            Ok(d): assert d.milli == want, "{iso} gave milli {d.milli}"
-            Err(msg): assert false, "{iso}: unexpected Err {msg}"
+            ?d: assert d.milli == want, "{iso} gave milli {d.milli}"
+            !msg: assert false, "{iso}: unexpected Err {msg}"
 
 test fn parse_iso8601_round_trips_milli():
     iso := "2026-09-21T12:34:56.789Z"
     match datetime.parse_iso8601(iso):
-        Ok(d):
+        ?d:
             assert datetime.to_iso8601(d) == iso
             assert datetime.to_epoch_ms(d) == 1789994096789
-        Err(msg): assert false, "{msg}"
+        !msg: assert false, "{msg}"
     match datetime.parse_iso8601("1969-12-31T23:59:59.999Z"):
-        Ok(d): assert datetime.to_epoch_ms(d) == -1
-        Err(msg): assert false, "{msg}"
+        ?d: assert datetime.to_epoch_ms(d) == -1
+        !msg: assert false, "{msg}"

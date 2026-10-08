@@ -1,8 +1,8 @@
-# examples/bst.chz — binary search tree: recursive struct + Option child links.
+# examples/bst.chz — binary search tree: recursive struct + a `T?` value child links.
 #
 # Showcases (round-2 probe, Domain A): a SELF-REFERENTIAL struct — `Node` holds two
 # `Node?` children — built and walked recursively. Confirms recursive
-# struct field resolution, `Option[Node]` construction (`Some(Node(...))` / `None`), in-place
+# struct field resolution, `Node?` construction (`?Node(...)` / `None`), in-place
 # field assignment to rebuild links (gap #2), and by-reference list accumulation.
 #
 # Friction noted in gaps.md: every child step needs a full `match` (no nested patterns,
@@ -17,20 +17,20 @@ struct Node:
 fn insert(root: Node?, v: int) -> Node?:
     match root:
         None:
-            return Some(Node(v, None, None))
-        Some(n):
+            return ?Node(v, None, None)
+        ?n:
             if v < n.val:
                 n.left = insert(n.left, v)
             elif v > n.val:
                 n.right = insert(n.right, v)
-            return Some(n)
+            return ?n
 
 # In-order walk, appending values into `out` (shared by reference).
 fn inorder(root: Node?, out: List[int]):
     match root:
         None:
             return
-        Some(n):
+        ?n:
             inorder(n.left, out)
             out.push(n.val)
             inorder(n.right, out)
@@ -40,7 +40,7 @@ fn height(root: Node?) -> int:
     match root:
         None:
             return 0
-        Some(n):
+        ?n:
             lh := height(n.left)
             rh := height(n.right)
             if lh > rh:
@@ -51,7 +51,7 @@ fn contains(root: Node?, v: int) -> bool:
     match root:
         None:
             return false
-        Some(n):
+        ?n:
             if v == n.val:
                 return true
             if v < n.val:

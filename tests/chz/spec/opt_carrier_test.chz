@@ -1,8 +1,8 @@
-# tests/chz/spec/opt_carrier_test.chz — W7-43: `?.` on a `Result` is `?` then `.`.
+# tests/chz/spec/opt_carrier_test.chz — W7-43: `?.` on a `T!E` is `?` then `.`.
 #
 # `f()?.len()` where `fn f() -> str!str` used to emit THREE errors, none of them mentioning `?.`
-# ("'Some' is not a variant of Result", "'None' is not a variant of Result", "non-exhaustive match
-# on Result") — the desugar pass rewrote every `?.` into a `match` with hard-coded `Some`/`None`
+# (a present arm "is not a variant" of the `T!E` type, likewise for `None`, "non-exhaustive match
+# on a `T!E` value") — the desugar pass rewrote every `?.` into a `match` with hard-coded `?v`/`None`
 # arms BEFORE anything was typed. `f()? .len()` — one space — always worked. Rust is the owning
 # ancestor for `?` (`f()?.len()` compiles there), so the whitespace cliff was a bug.
 #
@@ -12,9 +12,9 @@
 # the spaced spelling is the oracle (see `docs/gaps.md` W7-43, project memory
 # "a widening is untested by its own suite").
 #
-# Option semantics for `?.` are UNCHANGED (`Some`/`None` short-circuit, no flattening) — re-pinned
+# a `T?` value semantics for `?.` are UNCHANGED (`?v`/`None` short-circuit, no flattening) — re-pinned
 # here because the carrier now survives desugar and is lowered twice (checker + compiler) instead
-# of once. `??` takes both carriers (TICKET-039): `Option` unwraps to the payload, `Result` unwraps
+# of once. `??` takes both carriers (TICKET-039): `T?` unwraps to the payload, `T!E` unwraps
 # and discards the error, like Rust's `unwrap_or`.
 #
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
@@ -39,33 +39,33 @@ struct Box:
         return f(self.v)
 
 fn sok() -> str!str:
-    return Ok("hello")
+    return ?"hello"
 
 fn serr() -> str!str:
     return !"boom"
 
 fn bok() -> Box!MyErr:
-    return Ok(Box(10))
+    return ?Box(10)
 
 fn berr() -> Box!MyErr:
     return !MyErr(3)
 
 fn bok_s() -> Box!str:
-    return Ok(Box(10))
+    return ?Box(10)
 
 # ---- 1/2: the gap's own repro, both paths, against the spaced spelling ----
 
 fn len_dot() -> int!str:
-    return Ok(sok()?.len())
+    return ?(sok()?.len())
 
 fn len_spaced() -> int!str:
-    return Ok(sok()? .len())
+    return ?(sok()? .len())
 
 fn len_dot_err() -> int!str:
-    return Ok(serr()?.len())
+    return ?(serr()?.len())
 
 fn len_spaced_err() -> int!str:
-    return Ok(serr()? .len())
+    return ?(serr()? .len())
 
 test fn result_carrier_ok_path_equals_the_spaced_spelling():
     match len_dot():
@@ -74,29 +74,29 @@ test fn result_carrier_ok_path_equals_the_spaced_spelling():
     assert "{len_dot()}" == "{len_spaced()}", "`?.` and `? .` must agree"
 
 test fn result_carrier_err_path_equals_the_spaced_spelling():
-    # The Err is propagated by the `?`, so the CALLER binds it (a bare top-level Err exits).
+    # The error is propagated by the `?`, so the CALLER binds it (a bare top-level an error exits).
     r := len_dot_err()
     match r:
         !e: assert e == "boom"
         _: assert false, "wrong shape"
     assert "{r}" == "{len_spaced_err()}", "`?.` and `? .` must agree on the Err path"
     match r:
-        Ok(_): assert false, "expected Err"
-        Err(e): assert e == "boom", "payload must survive verbatim, got {e}"
+        ?_: assert false, "expected Err"
+        !e: assert e == "boom", "payload must survive verbatim, got {e}"
 
 # ---- 3: a `?.` method call WITH arguments ----
 
 fn add_dot() -> int!MyErr:
-    return Ok(bok()?.add(5))
+    return ?(bok()?.add(5))
 
 fn add_spaced() -> int!MyErr:
-    return Ok(bok()? .add(5))
+    return ?(bok()? .add(5))
 
 fn add_dot_err() -> int!MyErr:
-    return Ok(berr()?.add(5))
+    return ?(berr()?.add(5))
 
 fn add_spaced_err() -> int!MyErr:
-    return Ok(berr()? .add(5))
+    return ?(berr()? .add(5))
 
 test fn result_carrier_method_call_with_args():
     match add_dot():
@@ -105,26 +105,26 @@ test fn result_carrier_method_call_with_args():
     assert "{add_dot()}" == "{add_spaced()}"
     assert "{add_dot_err()}" == "{add_spaced_err()}"
     match add_dot_err():
-        Ok(_): assert false, "expected Err"
-        Err(e): assert e.message() == "err 3", "got {e.message()}"
+        ?_: assert false, "expected Err"
+        !e: assert e.message() == "err 3", "got {e.message()}"
 
-# ---- 4: NAMED args + an OMITTED default, on a Result AND on an Option ----
+# ---- 4: NAMED args + an OMITTED default, on a `T!E` value AND on a `T?` value ----
 #
 # The subtlest regression in W7-43: named-arg binding and default filling used to happen only
 # because the lowered carrier WAS a `Call` and fell through the desugar walker's tail. The carrier
 # now survives, so `Checker::bind_call` has to bind it explicitly.
 
 fn tag_dot() -> str!MyErr:
-    return Ok(bok()?.tag(n=5))
+    return ?(bok()?.tag(n=5))
 
 fn tag_spaced() -> str!MyErr:
-    return Ok(bok()? .tag(n=5))
+    return ?(bok()? .tag(n=5))
 
 fn tag_dot_both_named() -> str!MyErr:
-    return Ok(bok()?.tag(n=2, prefix="q"))
+    return ?(bok()?.tag(n=2, prefix="q"))
 
 fn tag_spaced_both_named() -> str!MyErr:
-    return Ok(bok()? .tag(n=2, prefix="q"))
+    return ?(bok()? .tag(n=2, prefix="q"))
 
 test fn result_carrier_named_args_and_omitted_default():
     # `prefix` is omitted → its default "p" is filled; `n` is passed by NAME out of position order.
@@ -139,82 +139,82 @@ test fn result_carrier_named_args_and_omitted_default():
     assert "{tag_dot_both_named()}" == "{tag_spaced_both_named()}"
 
 test fn option_carrier_named_args_and_omitted_default():
-    ob := Some(Box(10))
-    # Option mode: the access is applied to the payload and RE-WRAPPED, so the result is an Option.
+    ob: Box? = Box(10)
+    # a `T?` value mode: the access is applied to the payload and RE-WRAPPED, so the result is a `T?` value.
     match ob?.tag(n=5):
         ?v: assert v == "p15"
         _: assert false, "wrong shape"
     match ob?.tag(n=2, prefix="q"):
         ?v: assert v == "q12"
         _: assert false, "wrong shape"
-    none_box: Option[Box] = None
+    none_box: Box? = None
     assert "{none_box?.tag(n=5)}" == "None"
     # …and the hand-written `match` it means is the same value.
     hand := match ob:
-        Some(b): Some(b.tag(n=5))
+        ?b: ?b.tag(n=5)
         None: None
     assert "{ob?.tag(n=5)}" == "{hand}"
 
-# ---- 5: Option semantics are UNCHANGED ----
+# ---- 5: a `T?` value semantics are UNCHANGED ----
 
 struct Inner:
     c: int
 
 struct Outer:
-    b: Option[Inner]
+    b: Inner?
 
 struct Holder:
-    maybe: Option[int]
+    maybe: int?
 
 test fn option_carrier_some_and_none():
-    ob := Some(Box(4))
+    ob: Box? = Box(4)
     match ob?.v:
         ?v: assert v == 4
         _: assert false, "wrong shape"
     match ob?.get():
         ?v: assert v == 4
         _: assert false, "wrong shape"
-    nb: Option[Box] = None
+    nb: Box? = None
     assert "{nb?.v}" == "None"
     assert "{nb?.get()}" == "None"
 
 test fn option_carrier_chains():
-    o := Some(Outer(Some(Inner(7))))
+    o: Outer? = Outer(Inner(7))
     match o?.b:
         ?(?v): assert v.c == 7
         _: assert false, "wrong shape"
-    empty := Some(Outer(None))
+    empty: Outer? = Outer(None)
     match empty?.b:
         ?None: assert true
         _: assert false, "wrong shape"
 
 test fn option_of_option_is_not_flattened():
-    h := Some(Holder(Some(1)))
-    r: Option[Option[int]] = h?.maybe
+    h: Holder? = Holder(1)
+    r: int?? = h?.maybe
     match r:
         ?(?v): assert v == 1
         _: assert false, "wrong shape"
-    n := Some(Holder(None))
+    n: Holder? = Holder(None)
     match n?.maybe:
         ?None: assert true
         _: assert false, "wrong shape"
 
 test fn null_coalesce_on_option_unwraps_or_falls_back():
-    o := Some(5)
+    o: int? = 5
     assert (o ?? 0) == 5
-    n: Option[int] = None
+    n: int? = None
     assert (n ?? 0) == 0
     # right-associative, and two carriers in one expression get distinct temps
     assert ((n ?? 0) + (o ?? 0)) == 5
 
 fn rq(ok: bool) -> int!str:
     if ok:
-        return Ok(3)
+        return ?3
     return !"boom"
 
-fn ores(v: bool) -> Option[int!str]:
+fn ores(v: bool) -> (int!str)?:
     if v:
-        return Some(Ok(1))
+        return ?(?1)
     return None
 
 test fn null_coalesce_on_a_result_discards_the_error():
@@ -223,13 +223,13 @@ test fn null_coalesce_on_a_result_discards_the_error():
 
 test fn null_coalesce_result_equals_the_hand_written_match():
     m := match rq(false):
-        Ok(v): v
-        Err(_): 0
+        ?v: v
+        !_: 0
     assert (rq(false) ?? 0) == m
 
 test fn nested_coalesce_mixes_option_and_result_modes():
-    fb: int!str = Ok(7)
-    e: int!str = Err("x")
+    fb: int!str = ?7
+    e: int!str = !"x"
     assert ((ores(true) ?? fb) ?? 0) == 1
     assert ((ores(false) ?? fb) ?? 0) == 7
     assert ((ores(false) ?? e) ?? 0) == 0
@@ -240,16 +240,16 @@ fn with_result_default(v: int = rq(false) ?? 42) -> int:
 test fn result_coalesce_in_a_spliced_default():
     assert with_result_default() == 42
 
-# ---- 6: `?.` on a Result inside `recover:` ----
+# ---- 6: `?.` on a `T!E` value inside `recover:` ----
 #
 # Inside a `recover:` block a `?` short-circuits to the BOUNDARY (try-block style), so the block's
-# `Result` carries the propagated error. Its error slot is the `Error` existential → `e.message()`.
+# `T!E` carries the propagated error. Its error slot is the `Error` existential → `e.message()`.
 
 test fn result_carrier_inside_recover_short_circuits_to_the_boundary():
     r := recover: berr()?.add(1)
     match r:
-        Ok(_): assert false, "expected Err from the propagated error"
-        Err(e): assert e.message() == "err 3", "got {e.message()}"
+        ?_: assert false, "expected Err from the propagated error"
+        !e: assert e.message() == "err 3", "got {e.message()}"
     spaced := recover: berr()? .add(1)
     assert "{r}" == "{spaced}", "`?.` and `? .` must agree inside recover:"
     good := recover: bok()?.add(1)
@@ -259,9 +259,9 @@ test fn result_carrier_inside_recover_short_circuits_to_the_boundary():
         _: assert false, "wrong shape"
     assert "{good}" == "{good_spaced}"
 
-# ---- 7: `?.` on a Result inside `defer:` — observable side effects ----
+# ---- 7: `?.` on a `T!E` value inside `defer:` — observable side effects ----
 #
-# In a defer body a fired `Err` is DISCARDED at the block boundary: it short-circuits the rest of
+# In a defer body a fired `!e` is DISCARDED at the block boundary: it short-circuits the rest of
 # the cleanup. Assert that through a Shared accumulator, never through print order.
 
 fn run_defer_dot(log: Shared[str], good: bool):
@@ -280,7 +280,7 @@ fn run_defer_spaced(log: Shared[str], good: bool):
 
 fn pick(good: bool) -> str!str:
     if good:
-        return Ok("hello")
+        return ?"hello"
     return !"boom"
 
 test fn result_carrier_inside_defer_matches_the_spaced_spelling():
@@ -295,23 +295,23 @@ test fn result_carrier_inside_defer_matches_the_spaced_spelling():
     run_defer_dot(err_dot, false)
     err_spaced := Shared("")
     run_defer_spaced(err_spaced, false)
-    # the Err short-circuits the cleanup: everything after the `?.` is skipped, and it is DROPPED
+    # the error short-circuits the cleanup: everything after the `?.` is skipped, and it is DROPPED
     assert err_dot.get() == "A", "got {err_dot.get()}"
     assert err_dot.get() == err_spaced.get()
 
-# ---- 8: inside a closure with its own `-> Result`, and inside a nested `fn` ----
+# ---- 8: inside a closure with its own `-> a `T!E` value`, and inside a nested `fn` ----
 
 fn closure_and_nested_dot() -> int!str:
-    g := fn() -> int!str: Ok(sok()?.len())
+    g := fn() -> int!str: ?(sok()?.len())
     fn nested() -> int!str:
-        return Ok(sok()?.len() + 1)
-    return Ok(g()? + nested()?)
+        return ?(sok()?.len() + 1)
+    return ?(g()? + nested()?)
 
 fn closure_and_nested_spaced() -> int!str:
-    g := fn() -> int!str: Ok(sok()? .len())
+    g := fn() -> int!str: ?(sok()? .len())
     fn nested() -> int!str:
-        return Ok(sok()? .len() + 1)
-    return Ok(g()? + nested()?)
+        return ?(sok()? .len() + 1)
+    return ?(g()? + nested()?)
 
 test fn result_carrier_in_a_closure_and_a_nested_fn():
     match closure_and_nested_dot():
@@ -335,7 +335,7 @@ fn nursery_dot() -> int!str:
         m := bok_s()?.add(5)
         spawn:
             total.update(fn(v: int) -> int: v + m)
-    return Ok(total.get())
+    return ?total.get()
 
 fn nursery_spaced() -> int!str:
     total := Shared(0)
@@ -346,7 +346,7 @@ fn nursery_spaced() -> int!str:
         m := bok_s()? .add(5)
         spawn:
             total.update(fn(v: int) -> int: v + m)
-    return Ok(total.get())
+    return ?total.get()
 
 test fn result_carrier_inside_parallel_and_spawn():
     match nursery_dot():
@@ -356,7 +356,7 @@ test fn result_carrier_inside_parallel_and_spawn():
 
 # ---- 10: the MIXED chain — the key-uniqueness case ----
 #
-# `a?.b?.c` where `a` is a Result and `a.b` is an Option: the two links take DIFFERENT lowerings.
+# `a?.b?.c` where `a` is a `T!E` value and `a.b` is a `T?` value: the two links take DIFFERENT lowerings.
 # Both links share one node span (`parse_postfix` takes the primary's span once), so keying the
 # mode table on the node span would alias them, the later insert would win, and the compiler would
 # emit the wrong lowering for the other link — a silent WRONG VALUE under a green `chezzi check`.
@@ -364,14 +364,14 @@ test fn result_carrier_inside_parallel_and_spawn():
 
 fn mkouter(has: bool) -> Outer!str:
     if has:
-        return Ok(Outer(Some(Inner(7))))
-    return Ok(Outer(None))
+        return ?Outer(?Inner(7))
+    return ?Outer(None)
 
-fn mixed_dot(has: bool) -> Result[Option[int], str]:
-    return Ok(mkouter(has)?.b?.c)
+fn mixed_dot(has: bool) -> int?!str:
+    return ?(mkouter(has)?.b?.c)
 
-fn mixed_spaced(has: bool) -> Result[Option[int], str]:
-    return Ok(mkouter(has)? .b?.c)
+fn mixed_spaced(has: bool) -> int?!str:
+    return ?(mkouter(has)? .b?.c)
 
 test fn mixed_result_then_option_chain():
     match mixed_dot(true):
@@ -384,35 +384,35 @@ test fn mixed_result_then_option_chain():
     assert "{mixed_dot(false)}" == "{mixed_spaced(false)}"
 
 struct Outer2:
-    b: Result[Inner, str]
+    b: Inner!str
 
 test fn mixed_option_then_result_chain():
-    # The reverse mix: `a` is an Option, `a.b` is a Result. The single `?.` link is Option-mode, so
-    # the Result is re-wrapped, NOT unwrapped — `Option[Result[…]]`, consistent with "no flattening".
-    o := Some(Outer2(Ok(Inner(3))))
+    # The reverse mix: `a` is a `T?` value, `a.b` is a `T!E` value. The single `?.` link is a `T?` value-mode, so
+    # the `T!E` value is re-wrapped, NOT unwrapped — `(…!)?`, consistent with "no flattening".
+    o: Outer2? = Outer2(Inner(3))
     match o?.b:
         ?(?v): assert v.c == 3
         _: assert false, "wrong shape"
-    bad := Some(Outer2(Err("nope")))
+    bad: Outer2? = Outer2(!"nope")
     match bad?.b:
         ?(!e): assert e == "nope"
         _: assert false, "wrong shape"
-    none_o: Option[Outer2] = None
+    none_o: Outer2? = None
     assert "{none_o?.b}" == "None"
 
 # ---- 11: inside string interpolation (fragment-ordinal keying) ----
 
 fn interp_dot() -> str!str:
-    return Ok("len={sok()?.len()}")
+    return ?"len={sok()?.len()}"
 
 fn interp_spaced() -> str!str:
-    return Ok("len={sok()? .len()}")
+    return ?"len={sok()? .len()}"
 
 fn interp_two_frags_dot() -> str!MyErr:
-    return Ok("{bok()?.add(1)}|{bok()?.add(2)}")
+    return ?"{bok()?.add(1)}|{bok()?.add(2)}"
 
 fn interp_two_frags_spaced() -> str!MyErr:
-    return Ok("{bok()? .add(1)}|{bok()? .add(2)}")
+    return ?"{bok()? .add(1)}|{bok()? .add(2)}"
 
 test fn result_carrier_inside_interpolation():
     match interp_dot():
@@ -429,11 +429,11 @@ test fn two_result_carrier_fragments_in_one_literal():
     assert "{interp_two_frags_dot()}" == "{interp_two_frags_spaced()}"
 
 test fn option_carrier_inside_interpolation():
-    o := Some("abc")
+    o: str? = "abc"
     match o?.len():
         ?v: assert v == 3
         _: assert false, "wrong shape"
-    n: Option[str] = None
+    n: str? = None
     assert "{n?.len()}" == "None"
     assert "{o?.len()}/{n?.len()}" == "3/None"
 
@@ -444,16 +444,16 @@ test fn option_carrier_inside_interpolation():
 # surviving desugar. A closure argument is what makes them do real work (capture analysis).
 
 fn closure_arg_dot() -> int!MyErr:
-    return Ok(bok()?.apply(fn(n: int) -> int: n * 2))
+    return ?(bok()?.apply(fn(n: int) -> int: n * 2))
 
 fn closure_arg_spaced() -> int!MyErr:
-    return Ok(bok()? .apply(fn(n: int) -> int: n * 2))
+    return ?(bok()? .apply(fn(n: int) -> int: n * 2))
 
 fn capturing_closure_arg_dot(k: int) -> int!MyErr:
-    return Ok(bok()?.apply(fn(n: int) -> int: n * k))
+    return ?(bok()?.apply(fn(n: int) -> int: n * k))
 
 fn capturing_closure_arg_spaced(k: int) -> int!MyErr:
-    return Ok(bok()? .apply(fn(n: int) -> int: n * k))
+    return ?(bok()? .apply(fn(n: int) -> int: n * k))
 
 test fn result_carrier_method_argument_is_a_closure():
     match closure_arg_dot():
@@ -467,20 +467,20 @@ test fn result_carrier_method_argument_is_a_closure():
     assert "{capturing_closure_arg_dot(3)}" == "{capturing_closure_arg_spaced(3)}"
 
 test fn option_carrier_method_argument_is_a_capturing_closure():
-    ob := Some(Box(10))
+    ob: Box? = Box(10)
     k := 4
     match ob?.apply(fn(n: int) -> int: n * k):
         ?v: assert v == 40
         _: assert false, "wrong shape"
-    nb: Option[Box] = None
+    nb: Box? = None
     assert "{nb?.apply(fn(n: int) -> int: n * k)}" == "None"
 
 # ---- 13: a carrier inside a function DEFAULT expression (the two-pass splice path) ----
 
-fn dflt_box() -> Option[Box]:
-    return Some(Box(4))
+fn dflt_box() -> Box?:
+    return ?Box(4)
 
-fn dflt_none() -> Option[Box]:
+fn dflt_none() -> Box?:
     return None
 
 fn with_optchain_default(v: int = dflt_box()?.v ?? 0) -> int:
@@ -513,31 +513,31 @@ test fn carrier_in_a_function_default_expression():
 # of these — a fully green suite shipped it, and only adversarial review caught it. These two run.
 
 fn w749_inner():
-    return Some("xy")
+    return ?"xy"
 
 fn w749_outer():
     return w749_inner()?.len()
 
 test fn a_carrier_typed_before_its_operand_is_known_still_lowers():
-    # (a) two unannotated helpers — the pre-pass records Unknown, the settled walk records Option
-    assert w749_outer() == Some(2), "got {w749_outer()}"
+    # (a) two unannotated helpers — the pre-pass records Unknown, the settled walk records a `T?` value
+    assert w749_outer() == ?2, "got {w749_outer()}"
 
 test fn a_carrier_inside_a_closure_argument_still_lowers():
     # (b) the closure param is Unknown during the generic-arg pre-pass
-    xs := [Some("ab"), Some("cde")]
-    assert xs.map(fn(a): a?.len()) == [Some(2), Some(3)], "got {xs.map(fn(a): a?.len())}"
+    xs: List[str?] = ["ab", "cde"]
+    assert xs.map(fn(a): a?.len()) == [?2, ?3], "got {xs.map(fn(a): a?.len())}"
 
 # ---- 15: TICKET-064 — a write after the first constraining use pins the payload ----
 #
 # A write REPINS the binding to the concrete payload type it wrote, so a later `match` arm binds a
-# concrete payload instead of `Option[Unknown]`. This file runs the SHAPE; the checker verdict lives
+# concrete payload instead of `Unknown?`. This file runs the SHAPE; the checker verdict lives
 # in `src/checker/tests.rs::a_carrier_write_repins_the_binding_for_later_reads`.
 
 test fn a_written_none_carries_its_payload_type():
     x := None
-    x = Some(1)
+    x = ?1
     match x:
-        Some(v):
+        ?v:
             assert v + 1 == 2, "got {v}"
         None:
             assert false, "x was written to Some(1)"

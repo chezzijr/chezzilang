@@ -10,10 +10,10 @@
 # `dedup`/`unique`, and the recursive container arms) lives in `eq_protocol_containers_test.chz`.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
-fn msg_of[T](r: Result[T, Error], where_: str) -> str:
+fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
-        Ok(_): assert false, where_ + " must fault"
-        Err(e): return e.message()
+        ?_: assert false, where_ + " must fault"
+        !e: return e.message()
     return ""
 
 # ---- the acceptance program: `<`, `>`, `==` must agree on ONE identity ----
@@ -217,7 +217,7 @@ test fn an_int_warmed_eq_site_still_dispatches_user_eq():
 # M23 adversarial review, CRITICAL 2. `cas` holds the box's value mutex across the compare, so
 # re-entering user code there can block on that same `Atomic` and hang with no deadlock report. The
 # only stated safety argument was the checker gate — which keyed on the payload's OWN `eq` and so
-# missed `Atomic[List[P]]`, `Atomic[Option[P]]`, tuples, maps, struct fields and enum payloads
+# missed `Atomic[List[P]]`, `Atomic[P?]`, tuples, maps, struct fields and enum payloads
 # (those are now rejected: `checker::tests::atomic_payload_reaching_a_nested_eq_rejected`). A
 # `Protocol` existential payload is a hole NO checker walk can close — the witness is unknown — so
 # the property is enforced in the VM: the `eq` hook is switched OFF for the window.
@@ -258,7 +258,7 @@ fn eq_bound[T: Eq](a: T, b: T) -> bool:
 #
 # Task 1 granted `Ty::Func`, Task 2 `Ty::Protocol`, and this task's D1 walk grants the rest — but
 # nothing in the suite ran the SAME erased `[T: Eq]` bound (`eq_bound`, above) across all of them
-# together. `int`/`List`/`tuple`/`Option` are the scalar/container join points; `Ver` (declared at
+# together. `int`/`List`/`tuple`/`T?` are the scalar/container join points; `Ver` (declared at
 # the top of this file) is the struct join point, via its HOOK `eq` (compares `maj` only, so this
 # also proves the hook actually dispatches through the erased body, not a structural fallback);
 # `double` is the function-value join point (Task 1).
@@ -273,8 +273,8 @@ test fn one_eq_bound_covers_every_join_point():
     assert eq_bound([1, 2], [1, 3]) == false
     assert eq_bound((1, "a"), (1, "a")) == true
     assert eq_bound((1, "a"), (1, "b")) == false
-    assert eq_bound(Some(1), Some(1)) == true
-    assert eq_bound(Some(1), Some(2)) == false
+    assert eq_bound(?1, ?1) == true
+    assert eq_bound(?1, ?2) == false
     assert eq_bound(Ver(1, "alpha"), Ver(1, "beta")) == true, "Ver's hook compares maj only"
     assert eq_bound(Ver(1, "alpha"), Ver(2, "alpha")) == false
     assert eq_bound(double, double) == true
@@ -309,7 +309,7 @@ test fn a_cross_instantiation_eq_faults_recoverably():
 # ---- D1 — the `Eq` grant now covers every type whose `==` is the structural derive, and an erased
 # ---- `[T: Eq]` body must be able to CALL `.eq()` on each of them (the W6-3 check-OK/run-fault class)
 #
-# `Option`/`Result` and a plain `enum` are all one runtime shape (`Obj::Enum`), and that dispatch arm
+# `T?`/`T!E` and a plain `enum` are all one runtime shape (`Obj::Enum`), and that dispatch arm
 # was the ONE of six with no `intrinsic_proto_method` fallback — so this pins the VM arm, not the
 # checker. The `.eq()` spelling is the point: `==` would never reach the method-dispatch path.
 
@@ -326,9 +326,9 @@ fn eqm[T: Eq](a: T, b: T) -> bool:
 test fn an_erased_eq_bound_can_call_eq_on_every_granted_receiver():
     assert eqm(En.A, En.B) == false, "a plain enum"
     assert eqm(En.A, En.A) == true
-    assert eqm(Some(1), Some(1)) == true, "Option is an Obj::Enum at runtime"
-    assert eqm(Some(1), Some(2)) == false
-    assert eqm(Ok(1), Ok(1)) == true, "Result is an Obj::Enum at runtime"
+    assert eqm(?1, ?1) == true, "Option is an Obj::Enum at runtime"
+    assert eqm(?1, ?2) == false
+    assert eqm(?1, ?1) == true, "Result is an Obj::Enum at runtime"
     assert eqm([1, 2], [1, 2]) == true
     assert eqm((1, 2), (1, 3)) == false
     assert eqm({"k": 1}, {"k": 1}) == true
@@ -337,9 +337,9 @@ test fn an_erased_eq_bound_can_call_eq_on_every_granted_receiver():
     assert eqm(D1Pt(1), D1Pt(2)) == false, "a struct with no `eq` of its own"
 
 test fn the_method_and_the_operator_agree_on_every_granted_receiver():
-    assert eqm(Some(1), Some(1)) == (Some(1) == Some(1))
+    assert eqm(?1, ?1) == (?1 == ?1)
     assert eqm(En.A, En.B) == (En.A == En.B)
-    assert eqm(Ok(1), Ok(2)) == (Ok(1) == Ok(2))
+    assert eqm(?1, ?2) == (?1 == ?2)
 
 # ---- W7-41: a CONDITIONAL `eq` runs where its `where` bound holds ----
 #
@@ -367,4 +367,4 @@ test fn a_satisfied_conditional_eq_still_dispatches():
     assert (Cond(1) == Cond(2)) == false
     assert (Cond(1) != Cond(2)) == true
     assert ([Cond("a")] == [Cond("a")]) == true, "and through the structural walk"
-    assert (Some(Cond(1)) == Some(Cond(2))) == false
+    assert (?Cond(1) == ?Cond(2)) == false

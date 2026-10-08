@@ -69,18 +69,18 @@ fn cell(bad: List[str], name: str, ok: bool):
     if not ok:
         bad.push(name)
 
-fn ran(bad: List[str], name: str, r: Result[None]):
+fn ran(bad: List[str], name: str, r: None!):
     match r:
-        Ok(_):
+        ?_:
             pass
-        Err(e):
+        !e:
             bad.push(name + ": " + e.message())
 
-fn isok[T](r: Result[T]) -> bool:
+fn isok[T](r: T!) -> bool:
     match r:
-        Ok(_):
+        ?_:
             return true
-        Err(_):
+        !_:
             return false
 
 fn via[A, R](f: fn(A) -> R, a: A, out: Channel[R]):
@@ -100,7 +100,7 @@ test fn grid_call():
     cell(bad, "variant fn", payload(c(4)) == 4)
     cell(bad, "T.m", tm[N]()(N("x")) == "x")
     d := json.decode[int]
-    cell(bad, "json.decode[T]", d("5") == Ok(5))
+    cell(bad, "json.decode[T]", d("5") == ?5)
     k := 1
     cl := fn(n: int) -> int: n + k
     cell(bad, "closure", cl(1) == 2)
@@ -142,7 +142,7 @@ test fn grid_spawn_argument():
     cp := Channel[P](1)
     ce := Channel[E](1)
     cs := Channel[str](2)
-    cd := Channel[Result[int]](1)
+    cd := Channel[int!](1)
     cf := Channel[float](2)
     k := 1
     parallel:
@@ -161,7 +161,7 @@ test fn grid_spawn_argument():
     cell(bad, "method path", cp.recv().n == 3)
     cell(bad, "variant fn", payload(ce.recv()) == 4)
     cell(bad, "T.m", cs.recv() == "x")
-    cell(bad, "json.decode[T]", cd.recv() == Ok(5))
+    cell(bad, "json.decode[T]", cd.recv() == ?5)
     floats := [cf.recv(), cf.recv()]
     floats.sort()
     cell(bad, "native, extern", floats == [1.0, 3.0])
@@ -186,9 +186,9 @@ test fn grid_submit_result():
     bad: List[str] = []
     ex := Executor()
     k := 1
-    cell(bad, "plain", ex.submit_result(plain0).recv() == Ok(7))
-    cell(bad, "method path", ex.submit_result(P.zero).recv() == Ok(0))
-    cell(bad, "closure", ex.submit_result(fn() -> int: k).recv() == Ok(1))
+    cell(bad, "plain", ex.submit_result(plain0).recv() == ?7)
+    cell(bad, "method path", ex.submit_result(P.zero).recv() == ?0)
+    cell(bad, "closure", ex.submit_result(fn() -> int: k).recv() == ?1)
     cell(bad, "native", isok(ex.submit_result(time.now_ms).recv()))
     cell(bad, "extern", isok(ex.submit_result(getpid).recv()))
     ex.shutdown()
@@ -209,7 +209,7 @@ test fn grid_channel_round_trip():
     c4 := Channel[fn(N) -> str](1)
     c4.send(t)
     cell(bad, "T.m", c4.recv() == t)
-    c5 := Channel[fn(str) -> Result[int]](1)
+    c5 := Channel[fn(str) -> int!](1)
     c5.send(json.decode[int])
     cell(bad, "json.decode[T]", c5.recv() == json.decode[int])
     c6 := Channel[fn(float) -> float](1)
@@ -267,7 +267,7 @@ test fn grid_eq_across_a_spawn():
     c1 := Channel[fn(int) -> int](1)
     c2 := Channel[fn(int) -> P](1)
     c3 := Channel[fn(int) -> E](1)
-    c5 := Channel[fn(str) -> Result[int]](1)
+    c5 := Channel[fn(str) -> int!](1)
     c6 := Channel[fn(float) -> float](2)
     c7 := Channel[fn(str) -> int](1)
     parallel:

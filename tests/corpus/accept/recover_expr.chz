@@ -3,6 +3,6 @@ fn main():
     r := recover:
         [1, 2][9]
     match r:
-        Ok(v): print(v)
-        Err(e): print(e.message())
+        ?v: print(v)
+        !e: print(e.message())
 main()

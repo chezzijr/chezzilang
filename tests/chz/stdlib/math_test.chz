@@ -23,70 +23,70 @@ test fn float_fns_and_constants():
 
 test fn factorial():
     match math.factorial(0):
-        Ok(v): assert v == 1
-        Err(_): assert false, "0! = 1"
+        ?v: assert v == 1
+        !_: assert false, "0! = 1"
     match math.factorial(20):
-        Ok(v): assert v == 2432902008176640000
-        Err(_): assert false, "20! fits in i64"
+        ?v: assert v == 2432902008176640000
+        !_: assert false, "20! fits in i64"
     match math.factorial(21):
-        Ok(_): assert false, "21! overflows i64"
-        Err(_): assert true
+        ?_: assert false, "21! overflows i64"
+        !_: assert true
     match math.factorial(-1):
-        Ok(_): assert false, "factorial of negative is an error"
-        Err(_): assert true
+        ?_: assert false, "factorial of negative is an error"
+        !_: assert true
 
 test fn comb_perm():
     match math.comb(5, 2):
-        Ok(v): assert v == 10
-        Err(_): assert false, "C(5,2)"
+        ?v: assert v == 10
+        !_: assert false, "C(5,2)"
     match math.comb(5, 6):
-        Ok(v): assert v == 0, "k > n -> 0"
-        Err(_): assert false, "C(5,6) = 0, not an error"
+        ?v: assert v == 0, "k > n -> 0"
+        !_: assert false, "C(5,6) = 0, not an error"
     match math.comb(200, 100):
-        Ok(_): assert false, "C(200,100) overflows i64"
-        Err(_): assert true
+        ?_: assert false, "C(200,100) overflows i64"
+        !_: assert true
     match math.perm(5, 2):
-        Ok(v): assert v == 20
-        Err(_): assert false, "P(5,2)"
+        ?v: assert v == 20
+        !_: assert false, "P(5,2)"
 
 test fn parse_int_base():
     match math.parse_int_base("ff", 16):
-        Ok(v): assert v == 255
-        Err(_): assert false, "hex ff"
+        ?v: assert v == 255
+        !_: assert false, "hex ff"
     match math.parse_int_base("0b101", 0):
-        Ok(v): assert v == 5, "base 0 auto-detects the 0b prefix"
-        Err(_): assert false, "0b101"
+        ?v: assert v == 5, "base 0 auto-detects the 0b prefix"
+        !_: assert false, "0b101"
     match math.parse_int_base("zz", 16):
-        Ok(_): assert false, "zz is not base-16"
-        Err(_): assert true
+        ?_: assert false, "zz is not base-16"
+        !_: assert true
     match math.parse_int_base("-9223372036854775808", 10):
-        Ok(v): assert v == -9223372036854775808, "i64::MIN parses"
-        Err(_): assert false, "i64::MIN"
+        ?v: assert v == -9223372036854775808, "i64::MIN parses"
+        !_: assert false, "i64::MIN"
 
 test fn parse_int_base_agrees_with_to_int_on_underscores_and_whitespace():
     match math.parse_int_base("1_0", 10):
-        Ok(v): assert v == 10, "underscore between digits at base 10"
-        Err(_): assert false, "1_0"
+        ?v: assert v == 10, "underscore between digits at base 10"
+        !_: assert false, "1_0"
     match math.parse_int_base(" 10 ", 10):
-        Ok(v): assert v == 10, "surrounding whitespace at base 10"
-        Err(_): assert false, " 10 "
+        ?v: assert v == 10, "surrounding whitespace at base 10"
+        !_: assert false, " 10 "
     match math.parse_int_base("ff_ff", 16):
-        Ok(v): assert v == 65535, "underscore between digits at base 16"
-        Err(_): assert false, "ff_ff"
+        ?v: assert v == 65535, "underscore between digits at base 16"
+        !_: assert false, "ff_ff"
     match math.parse_int_base("1__0", 10):
-        Ok(_): assert false, "a double underscore must not parse"
-        Err(_): assert true
+        ?_: assert false, "a double underscore must not parse"
+        !_: assert true
     match math.parse_int_base("_10", 10):
-        Ok(_): assert false, "a leading underscore must not parse"
-        Err(_): assert true
+        ?_: assert false, "a leading underscore must not parse"
+        !_: assert true
     match math.parse_int_base("10_", 10):
-        Ok(_): assert false, "a trailing underscore must not parse"
-        Err(_): assert true
+        ?_: assert false, "a trailing underscore must not parse"
+        !_: assert true
 
 test fn parse_int_base_overflow_says_overflow_not_malformed():
     match math.parse_int_base("8000000000000000", 16):
-        Ok(_): assert false, "8000000000000000 base 16 overflows i64"
-        Err(e): assert e.message().contains("overflows i64") and not e.message().contains("cannot parse"), e.message()
+        ?_: assert false, "8000000000000000 base 16 overflows i64"
+        !e: assert e.message().contains("overflows i64") and not e.message().contains("cannot parse"), e.message()
 
 # M24-5 — a native module FUNCTION is an ordinary `defer` target and really runs. Its neighbour, a
 # native CONSTRUCTOR reached the same way (`concurrency.Shared(0)`, `time.timer(10)`), is refused by

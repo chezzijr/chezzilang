@@ -20,7 +20,7 @@ fn main():
     r := recover:
         p("boom")
     match r:
-        Ok(v): print("no panic")
-        Err(e): print("recovered: {e.message()}")
+        ?v: print("no panic")
+        !e: print("recovered: {e.message()}")
 
 main()

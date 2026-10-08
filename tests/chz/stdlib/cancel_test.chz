@@ -83,7 +83,7 @@ test fn derive_races_cancel():
             spawn cancel_root(root)
         while true:
             match out.try_recv():
-                Some(t):
+                ?t:
                     if not t.cancelled():
                         bad = bad + 1
                 None:
@@ -98,12 +98,12 @@ test fn late_derive_from_a_cancelled_parent():
     assert c.cancelled(), "a child derived from an already-cancelled parent starts cancelled"
     why := ""
     match c.reason():
-        Some(s): why = s
+        ?s: why = s
         None:    why = "none"
     assert why == "cancelled", "reason must be the nearest cause: {why}"
     ready := false
     match c.done().try_recv():
-        Some(v): ready = v
+        ?v: ready = v
         None:    ready = false
     assert ready, "a late-derived child's done() must already be ready"
 
@@ -152,7 +152,7 @@ test fn cascaded_done_implies_cancelled():
 test fn reason_latches_the_first_cause():
     # A manual cancel of a parent whose deadline is still in the future pushes "cancelled" into the
     # child's own flag, and it LATCHES there — even after that deadline passes. Go 1.26 agrees:
-    # ctx.Err() is context.Canceled in both halves.
+    # Go's context error is context.Canceled in both halves.
     # The wall-clock budget here is NOT the sleep (sleep_ms cannot return early) — it is the window
     # between `timeout(200)` and the cascade reaching the child. Blow that and `_mark`'s guard skips
     # the flag and the FIRST assert reads "timeout" instead. Measured worst case 5.7 ms under 3x
@@ -160,15 +160,15 @@ test fn reason_latches_the_first_cause():
     p := cancel.timeout(200)
     c := p.derive()
     p.cancel()
-    assert c.reason() == Some("cancelled"), "a manual ancestor cancel before the deadline reads cancelled"
+    assert c.reason() == ?"cancelled", "a manual ancestor cancel before the deadline reads cancelled"
     time.sleep_ms(240)
-    assert c.reason() == Some("cancelled"), "the first cause latches — the elapsed deadline must not win"
+    assert c.reason() == ?"cancelled", "the first cause latches — the elapsed deadline must not win"
     # The other direction: when the cascade reaches a token whose OWN deadline has already elapsed,
     # `_mark`'s guard skips the flag, so its own "timeout" stays the cause (Go: DeadlineExceeded).
     q := cancel.timeout(0)
     k := q.derive()
     q.cancel()
-    assert k.reason() == Some("timeout"), "an own already-elapsed deadline stays the cause under a cascade"
+    assert k.reason() == ?"timeout", "an own already-elapsed deadline stays the cause under a cascade"
     # And the SAME rule for a token's OWN cause, which the two halves above only covered for a
     # DESCENDANT reached by the cascade. `cancel()` used to set self's flag unconditionally, so a
     # timed-out token that was then cancelled reported "cancelled"; Go 1.26 on the paired program
@@ -176,12 +176,12 @@ test fn reason_latches_the_first_cause():
     # Routing self through `_mark` — it is the cancel() work-list's first pop — is what latches it.
     own := cancel.timeout(0)
     own.cancel()
-    assert own.reason() == Some("timeout"), "cancel() must not overwrite a token's OWN elapsed deadline"
+    assert own.reason() == ?"timeout", "cancel() must not overwrite a token's OWN elapsed deadline"
     assert own.cancelled(), "an elapsed-deadline token is still cancelled after cancel()"
     # The unelapsed direction must keep working: cancel() on a live deadline reads "cancelled".
     live := cancel.timeout(60000)
     live.cancel()
-    assert live.reason() == Some("cancelled"), "cancel() before the deadline reads cancelled"
+    assert live.reason() == ?"cancelled", "cancel() before the deadline reads cancelled"
 
 # --- A1: an INTERRUPTED cascade must not lose a subtree ---------------------------------------------
 # `cancel()`'s work-list pops children out of `kids` with `try_recv()`, which REMOVES them from the
@@ -220,8 +220,8 @@ test fn an_interrupted_cascade_still_reports_cancelled():
             spawn abort_the_nursery()
     aborted := false
     match r:
-        Ok(_):  aborted = false
-        Err(_): aborted = true
+        ?_:  aborted = false
+        !_: aborted = true
     assert aborted, "the sibling fault must abort the nursery"
     assert leaf.cancelled(), "the leaf of a 500-deep chain must stay cancelled after an interrupted cascade"
     live := 0

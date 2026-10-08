@@ -1,10 +1,10 @@
 # TICKET-179 -- edges of the fresh spawn operand rule (D4). A fresh operand crosses with its ROOT
 # unmarked; everything else, including a fresh literal's children, stays a task copy.
 
-fn t179e_outcome(res: Result[int]) -> str:
+fn t179e_outcome(res: int!) -> str:
     match res:
-        Ok(_): return "ok"
-        Err(_): return "fault"
+        ?_: return "ok"
+        !_: return "fault"
 
 fn t179e_nested(ys: List[List[int]], out: Channel[str]):
     a := recover:
@@ -67,7 +67,7 @@ test fn started_generator_captured_by_a_spawn_block_runs():
                 n += v
             out.send(n)
     assert out.recv() == 5
-    assert g.next() == Some(2)
+    assert g.next() == ?2
 
 struct T179eSink:
     tag: int
@@ -79,8 +79,8 @@ struct T179eSink:
                 n += v
             n
         match res:
-            Ok(n): out.send("{n}")
-            Err(_): out.send("fault")
+            ?n: out.send("{n}")
+            !_: out.send("fault")
 
 test fn started_generator_arg_of_a_method_spawn_runs():
     g := t179e_gen()

@@ -1,6 +1,6 @@
 # The Executor handle contract: a job submitted through `submit_task` never ends the run by its
-# fault. Its `Task.get()` returns `Err(message)`, `shutdown()` raises nothing for it, and every
-# sibling runs (CPython `Future.result()`, with a `Result` in place of a raise). Results are read
+# fault. Its `Task.get()` returns `!message`, `shutdown()` raises nothing for it, and every
+# sibling runs (CPython `Future.result()`, with a `T!E` in place of a raise). Results are read
 # back through the handles in submission order, so the printed order is fixed however the jobs
 # interleave. A fire-and-forget `ex.submit(f)` fault is different: it ends the run at once (Go).
 # Run with: chezzi run examples/executor_results.chz
@@ -25,7 +25,7 @@ fn main():
 
     for i in 0..rows.len():
         match handles[i].get():
-            Ok(v):  print("{rows[i]} -> {v}")
-            Err(e): print("{rows[i]} -> fault: {e.message()}")
+            ?v:  print("{rows[i]} -> {v}")
+            !e: print("{rows[i]} -> fault: {e.message()}")
 
 main()

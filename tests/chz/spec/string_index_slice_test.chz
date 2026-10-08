@@ -27,8 +27,8 @@ test fn non_ascii_slice_is_by_codepoint():
 test fn index_out_of_bounds_faults():
     r := recover: "abc"[5]
     match r:
-        Ok(_): assert false, "expected a fault"
-        Err(e): assert e.message() == "index 5 out of bounds (len 3)"
+        ?_: assert false, "expected a fault"
+        !e: assert e.message() == "index 5 out of bounds (len 3)"
 
 test fn str_methods_count_codepoints_not_bytes():
     assert "héllo".len() == 5

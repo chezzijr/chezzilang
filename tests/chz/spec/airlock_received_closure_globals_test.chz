@@ -21,8 +21,8 @@ fn alias_case(fr: Channel[str]) -> str:
             res := recover:
                 write_g(g)
             match res:
-                Ok(_): fr.send("no-fault")
-                Err(e): fr.send(e.message())
+                ?_: fr.send("no-fault")
+                !e: fr.send(e.message())
             c.send(fn() -> str: "{g}")
     f := c.recv()
     before := "{f()} {a}"
@@ -65,8 +65,8 @@ fn w_case(fr: Channel[str]) -> str:
             res := recover:
                 write_w(w)
             match res:
-                Ok(_): fr.send("no-fault")
-                Err(e): fr.send(e.message())
+                ?_: fr.send("no-fault")
+                !e: fr.send(e.message())
             c.send(fn() -> str: "{w}")
     f := c.recv()
     return "{f()} {w}"

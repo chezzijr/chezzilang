@@ -29,5 +29,5 @@ test fn non_ascii_text_and_separator():
 test fn empty_separator_faults():
     r := recover: string.rsplit("abc", "")
     match r:
-        Ok(_): assert false
-        Err(e): assert e.message().contains("rsplit: sep must not be empty")
+        ?_: assert false
+        !e: assert e.message().contains("rsplit: sep must not be empty")

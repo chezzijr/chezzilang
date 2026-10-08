@@ -218,7 +218,7 @@ fn to_string(dt: DateTime) -> str:
 # right-padded with zeros, digits past the third are truncated — as CPython `fromisoformat`); and an optional trailing 'Z', '+HH:MM'/'-HH:MM', or the colonless
 # '+HHMM'/'-HHMM' offset (normalized to UTC, per RFC-3339 / Go time.Parse). Date and time may be
 # separated by 'T' (to_iso8601) or ' ' (to_string). A malformed / out-of-range string is a clean
-# Err — never a fault/abort. Round-trips: parse_iso8601(to_iso8601(dt)) == dt (weekday included,
+# an error — never a fault/abort. Round-trips: parse_iso8601(to_iso8601(dt)) == dt (weekday included,
 # rebuilt via from_epoch).
 #
 # This is a SUBSET of CPython 3.14.7's `datetime.fromisoformat`, not a match. Measured forms
@@ -244,13 +244,13 @@ fn to_uint(x: str) -> int:
         n = n * 10 + (ord(c) - 48)
     return n
 
-# Exactly-2-ASCII-digit field -> int, else Err (guards every fixed-width ISO field before conversion).
-fn field2(x: str) -> Result[int]:
+# Exactly-2-ASCII-digit field -> int, else an error (guards every fixed-width ISO field before conversion).
+fn field2(x: str) -> int!:
     if x.len() != 2 or not all_digits(x):
         return !("invalid 2-digit field '" + x + "'")
-    return Ok(to_uint(x))
+    return ?to_uint(x)
 
-fn parse_iso8601(input: str) -> Result[DateTime]:
+fn parse_iso8601(input: str) -> DateTime!:
     # 1. split date from time on the first 'T' (to_iso8601) or ' ' (to_string); no separator = date-only
     date_part := input
     time_part := ""
@@ -287,7 +287,7 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
     if dc[0].len() < 4:
         return !("year must be 4+ digits, got '" + dc[0] + "'")
     # Bound the year before conversion: an oversized all-digit year would overflow i64 in `to_uint`
-    # or downstream `to_epoch` (days * 86400) — a fault, not the clean Err the contract requires.
+    # or downstream `to_epoch` (days * 86400) — a fault, not the clean an error the contract requires.
     # <=9 digits (max 999_999_999) can never overflow to_epoch; every realistic/padded year fits.
     if dc[0].len() > 9:
         return !("year out of range '" + dc[0] + "'")
@@ -331,7 +331,7 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
                     return !"offset field out of range"
                 off = sign * (oh * 3600 + om * 60)
         # 3b. peel fractional seconds into `milli`: first 3 digits, right-padded, the rest truncated.
-        #     Never to_uint the whole fraction — a long one would overflow i64 (a fault, not an Err).
+        #     Never to_uint the whole fraction — a long one would overflow i64 (a fault, not an error).
         fc := tp.split(".")
         if fc.len() == 2:
             if not all_digits(fc[1]):
@@ -374,7 +374,7 @@ fn parse_iso8601(input: str) -> Result[DateTime]:
     epoch := to_epoch(DateTime(y, m, d, hh, mm, ss, 0)) - off
     out := from_epoch(epoch)
     out.milli = milli
-    return Ok(out)
+    return ?out
 
 # ---- duration arithmetic (epoch ints, seconds) ----
 

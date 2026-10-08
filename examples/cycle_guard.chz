@@ -17,8 +17,8 @@ pr := recover:
     print(a)
     "printed"
 match pr:
-    Ok(v):  print("print ok: {v}")
-    Err(e): print("print caught: {e.message()}")
+    ?v:  print("print ok: {v}")
+    !e: print("print caught: {e.message()}")
 
 # == of two distinct-but-equal cycles is now catchable.
 c := Node(1, [])
@@ -28,8 +28,8 @@ d.next.push(c)
 eq := recover:
     a == c
 match eq:
-    Ok(v):  print("eq ok")
-    Err(e): print("eq caught: {e.message()}")
+    ?v:  print("eq ok")
+    !e: print("eq caught: {e.message()}")
 
 # A cyclic value compared to ITSELF short-circuits via identity (no deep walk) → true, no fault.
 print(a == a)                # true (identity fast-path)
@@ -38,8 +38,8 @@ print(a == a)                # true (identity fast-path)
 ct := recover:
     a.next.contains(a)       # a.next = [b]; b != a structurally → walks the cycle → guarded
 match ct:
-    Ok(v):  print("contains ok: {v}")
-    Err(e): print("contains caught: {e.message()}")
+    ?v:  print("contains ok: {v}")
+    !e: print("contains caught: {e.message()}")
 
 # A deep-but-ACYCLIC structure still prints fine (the guard doesn't false-trip on legit data):
 # a chain of 50 Nodes, each pointing forward to the next (no back-edge → no cycle).
@@ -50,5 +50,5 @@ ok := recover:
     print(chain.val)         # walks/holds a 50-deep acyclic graph; no fault
     "walked"
 match ok:
-    Ok(v):  print("deep ok: {v}")
-    Err(e): print("deep caught: {e.message()}")
+    ?v:  print("deep ok: {v}")
+    !e: print("deep caught: {e.message()}")

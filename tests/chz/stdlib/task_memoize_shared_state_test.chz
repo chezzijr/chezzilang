@@ -12,11 +12,11 @@
 import std.concurrency
 import submit_task, Task from std.concurrency.task
 
-# A handle carries a `Result`; these tests read a job that did not fault.
-fn must[T](r: Result[T]) -> T:
+# A handle carries a `T!E`; these tests read a job that did not fault.
+fn must[T](r: T!) -> T:
     match r:
-        Ok(v): return v
-        Err(e): panic(e.message())
+        ?v: return v
+        !e: panic(e.message())
 
 fn forty_two() -> int:
     return 42
@@ -39,8 +39,8 @@ fn gated_boom(gate: Channel[int]) -> int:
 fn show(t: Task[int]) -> str:
     r := recover: must(t.get())
     match r:
-        Ok(v): return str(v)
-        Err(e): return e.message()
+        ?v: return str(v)
+        !e: return e.message()
 
 fn child_show(t: Task[int], out: Channel[str]):
     out.send(show(t))
@@ -51,21 +51,21 @@ fn child_done3(p: Task[int], ok: Task[int], bad: Task[int], out: Channel[str]):
 fn _child_get(t: Task[int], ch: Channel[str]):
     r := recover: must(t.get())
     match r:
-        Ok(v): ch.send(str(v))
-        Err(e): ch.send(e.message())
+        ?v: ch.send(str(v))
+        !e: ch.send(e.message())
 
 fn child_mutate(t: Task[List[int]], out: Channel[str]):
     r := recover: _mutate_then_get(t)
     match r:
-        Ok(s): out.send(s)
-        Err(e): out.send(e.message())
+        ?s: out.send(s)
+        !e: out.send(e.message())
 
 fn _mutate_then_get(t: Task[List[int]]) -> str:
     a := must(t.get())
     r := recover: a.push(9)
     match r:
-        Ok(_): return "push ok {must(t.get())}"
-        Err(e): return "{must(t.get())} {e.message()}"
+        ?_: return "push ok {must(t.get())}"
+        !e: return "{must(t.get())} {e.message()}"
 
 test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
     ex := Executor()
@@ -78,8 +78,8 @@ test fn task_get_in_spawned_task_then_parent_get_sees_same_result():
     assert child == "42", child
     r := recover: must(t.get())
     match r:
-        Ok(v): assert v == 42, "parent get() after child get()"
-        Err(e): assert false, e.message()
+        ?v: assert v == 42, "parent get() after child get()"
+        !e: assert false, e.message()
 
 test fn task_pending_parent_get_waits():
     ex := Executor()

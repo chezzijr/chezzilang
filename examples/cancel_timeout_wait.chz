@@ -7,7 +7,7 @@ fn main():
     t := cancel.timeout(0)
     print("expired? {t.cancelled()}")
     match t.reason():
-        Some(r): print("reason: {r}")
+        ?r: print("reason: {r}")
         None:    print("reason: none")
 
     # 2. `wait:` racing real work vs the token's done(). The work channel is pre-loaded, so the work

@@ -4,6 +4,6 @@ fn classify(n: int) -> str:
         1 | 2 | 3: return "low"
         Red | Green | Blue: return "color"
         (1 | 2, x): return "pair"
-        Some(a | b): return "opt"
-        Some(None): return "nested"
+        ?(a | b): return "opt"
+        ?None: return "nested"
         _: return "other"

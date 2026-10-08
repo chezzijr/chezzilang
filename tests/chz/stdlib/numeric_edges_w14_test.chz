@@ -20,20 +20,20 @@ test fn signed_zero_orders_as_equal_and_sort_is_stable():
 test fn parse_int_base_accepts_underscore_after_prefix():
     r := math.parse_int_base("0x_ff", 0)
     match r:
-        Ok(v): assert v == 255
-        Err(e): assert false, e.message()
+        ?v: assert v == 255
+        !e: assert false, e.message()
 
 test fn with_ext_on_empty_name_is_an_error():
     r := recover: path.with_ext("", "txt")
     match r:
-        Ok(v): assert false, "with_ext on empty name returned {v}"
-        Err(_): assert true
+        ?v: assert false, "with_ext on empty name returned {v}"
+        !_: assert true
 
 test fn from_epoch_near_i64_min_does_not_overflow():
     r := recover: datetime.from_epoch(-9223372036854775807)
     match r:
-        Ok(_): assert true
-        Err(e): assert false, e.message()
+        ?_: assert true
+        !e: assert false, e.message()
 
 # ---- rows added for the rest of W14-34 / W14-24 (each judged against a RUN CPython 3.14 / Go twin) ----
 struct H:
@@ -64,28 +64,28 @@ test fn upper_format_specs_upper_case_non_finite():
 test fn signed_zero_min_max_sort():
     m := [0.0, -0.0].min()
     match m:
-        Some(v): assert str(v) == "0.0", str(v)
+        ?v: assert str(v) == "0.0", str(v)
         None: assert false
     x := [-0.0, 0.0].max()
     match x:
-        Some(v): assert str(v) == "-0.0", str(v)
+        ?v: assert str(v) == "-0.0", str(v)
         None: assert false
     xs := [0.0, -0.0, 1.0, -0.0]
     xs.sort()
     assert str(xs) == "[0.0, -0.0, -0.0, 1.0]", str(xs)
 
-fn pib(s: str, base: int) -> Result[int]:
+fn pib(s: str, base: int) -> int!:
     return math.parse_int_base(s, base)
 
 fn errs(s: str, base: int) -> bool:
     match math.parse_int_base(s, base):
-        Ok(_): return false
-        Err(_): return true
+        ?_: return false
+        !_: return true
 
 test fn parse_int_base_underscore_after_prefix_table():
-    assert pib("0b_1", 0) == Ok(1)
-    assert pib("0x_ff", 16) == Ok(255)
-    assert pib("-0x_ff", 0) == Ok(-255)
+    assert pib("0b_1", 0) == ?1
+    assert pib("0x_ff", 16) == ?255
+    assert pib("-0x_ff", 0) == ?(-255)
     assert errs("0x__ff", 0)
     assert errs("0x_", 0)
     assert errs("_ff", 16)
@@ -103,8 +103,8 @@ test fn with_ext_empty_name_faults_like_pathlib():
     for p in ["", "/", "//", ".", "./", "/."]:
         r := recover: we(p)
         match r:
-            Ok(v): assert false, "with_ext('{p}') returned {v}"
-            Err(e): assert e.message().starts_with("with_ext: path has an empty name"), e.message()
+            ?v: assert false, "with_ext('{p}') returned {v}"
+            !e: assert e.message().starts_with("with_ext: path has an empty name"), e.message()
 
 test fn with_ext_trims_trailing_slashes_like_pathlib():
     assert we("a/") == "a.txt"
@@ -126,24 +126,24 @@ test fn datetime_epoch_roundtrips_at_the_i64_edge():
 test fn days_from_civil_rejects_invalid_dates():
     r := recover: datetime.days_from_civil(2023, 13, 1)
     match r:
-        Ok(v): assert false, "month 13 returned {v}"
-        Err(e): assert e.message() == "days_from_civil: month out of range: 13", e.message()
+        ?v: assert false, "month 13 returned {v}"
+        !e: assert e.message() == "days_from_civil: month out of range: 13", e.message()
     r0 := recover: datetime.days_from_civil(2023, 0, 1)
     match r0:
-        Ok(v): assert false, "month 0 returned {v}"
-        Err(_): assert true
+        ?v: assert false, "month 0 returned {v}"
+        !_: assert true
     rd := recover: datetime.days_from_civil(2023, 2, 29)
     match rd:
-        Ok(v): assert false, "Feb 29 2023 returned {v}"
-        Err(e): assert e.message() == "days_from_civil: day out of range: 29", e.message()
+        ?v: assert false, "Feb 29 2023 returned {v}"
+        !e: assert e.message() == "days_from_civil: day out of range: 29", e.message()
     assert datetime.days_from_civil(2024, 2, 29) == 19782
 
 test fn atomic_cas_faults_on_a_fn_payload_the_checker_cannot_see():
     a := Atomic[fn() -> int](one)
     r := recover: try_cas(a, one)
     match r:
-        Ok(v): assert false, "cas on a fn payload returned {v}"
-        Err(e): assert e.message() == "Atomic.cas: the payload holds a function value, which cas cannot compare", e.message()
+        ?v: assert false, "cas on a fn payload returned {v}"
+        !e: assert e.message() == "Atomic.cas: the payload holds a function value, which cas cannot compare", e.message()
     b := Atomic[int](3)
     assert try_cas(b, 4) == true
     assert b.load() == 4
@@ -163,7 +163,7 @@ test fn atomic_cas_faults_on_a_std_native_fn_payload_too():
     a := Atomic(math.sqrt)
     r := recover: try_cas(a, math.sqrt)
     match r:
-        Ok(v): assert false, "cas on a native fn payload returned {v}"
-        Err(e): assert e.message() == "Atomic.cas: the payload holds a function value, which cas cannot compare", e.message()
+        ?v: assert false, "cas on a native fn payload returned {v}"
+        !e: assert e.message() == "Atomic.cas: the payload holds a function value, which cas cannot compare", e.message()
     o := Atomic(ord)
     assert try_cas(o, ord) == true

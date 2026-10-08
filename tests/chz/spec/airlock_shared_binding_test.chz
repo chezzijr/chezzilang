@@ -137,8 +137,8 @@ test fn channel_send_to_a_different_task_faults():
             res := recover:
                 d.inc()
             match res:
-                Ok(_): done.send("no-fault")
-                Err(e): done.send(e.message())
+                ?_: done.send("no-fault")
+                !e: done.send(e.message())
         ch.send(c)
     msg := done.recv()
     assert msg.starts_with("this value is this task's copy:"), msg
@@ -153,8 +153,8 @@ test fn spawn_named_args_keep_one_binding():
         res := recover:
             i()
         match res:
-            Ok(_): out.send("no-fault")
-            Err(e): out.send(e.message())
+            ?_: out.send("no-fault")
+            !e: out.send(e.message())
     parallel:
         spawn work(c.inc, c.get, r)
     got := r.recv()
@@ -171,8 +171,8 @@ test fn spawn_block_two_captures_keeps_one_binding():
             res := recover:
                 gi()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -185,8 +185,8 @@ test fn module_global_snapshot_keeps_one_binding():
             res := recover:
                 _w74i()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
 
@@ -228,8 +228,8 @@ test fn separate_tasks_each_get_their_own_binding():
             res := recover:
                 c.inc()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
     parallel:
         spawn:
             r2.send(c.get())
@@ -255,8 +255,8 @@ test fn module_global_plus_local_capture_shares_its_binding():
             res := recover:
                 _w74i()
             match res:
-                Ok(_): r.send("no-fault")
-                Err(e): r.send(e.message())
+                ?_: r.send("no-fault")
+                !e: r.send(e.message())
             r.send("{gg()}")
     got := r.recv()
     assert got.starts_with("this value is this task's copy:"), got
@@ -286,9 +286,9 @@ test fn rwshared_views_over_sibling_closures():
     both := s.get()          # whole container, one crossing → one binding
     both[0]()
     assert both[1]() == 1
-    # per-element view → its own copy of the binding (`at` is the SAFE index: `Option[E]`)
+    # per-element view → its own copy of the binding (`at` is the SAFE index: `E?`)
     match s.at(1):
-        Some(f): assert f() == 0
+        ?f: assert f() == 0
         None: assert false, "at(1) on a 2-element list must be Some"
     sl := s.slice(0, 2)      # one call, one container → shared within the slice
     sl[0]()
@@ -304,7 +304,7 @@ test fn rwshared_views_over_sibling_closures():
     m := RwShared({"i": inc, "g": get})
     assert m.has("i")
     match m.get_key("g"):
-        Some(f): assert f() == 0
+        ?f: assert f() == 0
         None: assert false
     m.for_each_entry(fn(k: str, f: fn() -> int): f())
     assert m.fold_entries(0, fn(a: int, k: str, f: fn() -> int) -> int: a + 1) == 2
@@ -321,8 +321,8 @@ test fn data_dag_alias_across_spawn_args_faults():
         res := recover:
             a.push(2)
         match res:
-            Ok(_): out.send("no-fault")
-            Err(e): out.send(e.message())
+            ?_: out.send("no-fault")
+            !e: out.send(e.message())
     parallel:
         spawn work(xs, xs, r)
     got := r.recv()
@@ -356,7 +356,7 @@ test fn rwshared_view_survives_a_concurrent_writer():
             hits := 0
             for i in range(0, 20000):
                 match s.at(1):
-                    Some(f): hits = hits + f()
+                    ?f: hits = hits + f()
                     None: assert false, "the writer always stores a 2-element list"
             d.send(2)
     assert d.recv() + d.recv() == 3
@@ -379,5 +379,5 @@ test fn spawn_serializes_args_before_the_callee():
         parallel:
             spawn callee(d)
     match r:
-        Ok(_): assert false
-        Err(e): assert e.message() == "maximum structural depth (10000) exceeded (cyclic data structure?)"
+        ?_: assert false
+        !e: assert e.message() == "maximum structural depth (10000) exceeded (cyclic data structure?)"

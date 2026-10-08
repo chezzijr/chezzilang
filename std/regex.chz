@@ -21,9 +21,9 @@ native struct Match:
     end: int
     groups: List[str]
 
-native fn is_match(pat: str, s: str) -> Result[bool]
-native fn find(pat: str, s: str) -> Result[Option[Match]]
-native fn find_all(pat: str, s: str) -> Result[List[Match]]
-native fn find_all_text(pat: str, s: str) -> Result[List[str]]
-native fn replace_all(pat: str, s: str, repl: str) -> Result[str]
-native fn split(pat: str, s: str) -> Result[List[str]]
+native fn is_match(pat: str, s: str) -> bool!
+native fn find(pat: str, s: str) -> Match?!
+native fn find_all(pat: str, s: str) -> List[Match]!
+native fn find_all_text(pat: str, s: str) -> List[str]!
+native fn replace_all(pat: str, s: str, repl: str) -> str!
+native fn split(pat: str, s: str) -> List[str]!

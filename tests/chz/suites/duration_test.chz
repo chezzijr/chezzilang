@@ -8,17 +8,17 @@ import std.time
 test fn t_roundtrip():
     for ms in [0, 5, 50, 250, 500, 1000, 1500, 90000, 3600000, 5400000, 3661000, -1500, -250, -5400000]:
         match duration.parse(duration.millis(ms).to_string()):
-            Ok(g):
+            ?g:
                 assert g.as_millis() == ms, "roundtrip failed for " + str(ms)
-            Err(_e):
+            !_e:
                 assert false, "parse errored for " + str(ms)
 
-# Parse-or-sentinel helper (test fn returns None, so no `?`; a parse Err surfaces as -1 and fails the eq).
+# Parse-or-sentinel helper (test fn returns None, so no `?`; a parse an error surfaces as -1 and fails the eq).
 fn pm(text: str) -> int:
     match duration.parse(text):
-        Ok(g):
+        ?g:
             return g.as_millis()
-        Err(_e):
+        !_e:
             return -1
 
 # canonical (string, ms) pairs: parse yields the ms; the canonical-output forms also to_string back.
@@ -51,14 +51,14 @@ test fn t_canonical():
     assert duration.millis(1050).to_string() == "1.05s"
     assert duration.millis(1500).to_string() == "1.5s"
 
-# malformed input -> clean Err (never a fault; esp. the overflow case).
+# malformed input -> clean an error (never a fault; esp. the overflow case).
 test fn t_malformed():
     bad := ["", "abc", "1", "1x", "1.2.3s", "1us", "1ns", "1h30", "-", "+", "1.s", "s", ".5", "1..5s", "99999999999999h", "1h30mZ", "µs", "1µs"]
     for b in bad:
         match duration.parse(b):
-            Ok(_g):
+            ?_g:
                 assert false, "expected Err for '" + b + "'"
-            Err(_e):
+            !_e:
                 assert true
 
 test fn t_accessors_arith():

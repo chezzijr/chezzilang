@@ -4,8 +4,8 @@
 # builtin `list`/`map`, deterministic at every worker count on the sole M:N engine.
 #
 # ===== EMPTY SEMANTICS (load-bearing, consistent across all three types) =====
-# Every removal/peek returns Option[T] — Heap.pop/peek, Deque.pop_front/pop_back/peek_front/peek_back.
-# An empty container yields `None` (never a fault), matching the builtin `list.pop() -> Option[T]`.
+# Every removal/peek returns T? — Heap.pop/peek, Deque.pop_front/pop_back/peek_front/peek_back.
+# An empty container yields `None` (never a fault), matching the builtin `list.pop() -> T?`.
 #
 # ===== ORDERED MAP: intentionally NOT provided =====
 # The builtin `map` is ALREADY insertion-ordered (map.keys()/values()/`for k,v in m` all iterate in
@@ -42,8 +42,8 @@ struct Heap[T]:
             else:
                 break
 
-    # Remove and return the extremum (`Some(top)`), or `None` if empty. O(log n). Sift-down.
-    fn pop(self) -> Option[T]:
+    # Remove and return the extremum (`?top`), or `None` if empty. O(log n). Sift-down.
+    fn pop(self) -> T?:
         n := self.data.len()
         if n == 0:
             return None
@@ -68,13 +68,13 @@ struct Heap[T]:
                 self.data[i] = self.data[best]
                 self.data[best] = tmp
                 i = best
-        return Some(top)
+        return ?top
 
-    # The extremum without removing it (`Some(top)`), or `None` if empty. O(1), non-mutating.
-    fn peek(self) -> Option[T]:
+    # The extremum without removing it (`?top`), or `None` if empty. O(1), non-mutating.
+    fn peek(self) -> T?:
         if self.data.len() == 0:
             return None
-        return Some(self.data[0])
+        return ?self.data[0]
 
     # Number of elements. O(1).
     fn len(self) -> int:
@@ -123,40 +123,40 @@ struct Deque[T]:
     fn push_back(self, x: T):
         self.back.push(x)
 
-    # Remove and return the head (`Some`), or `None` if empty. Amortized O(1).
-    fn pop_front(self) -> Option[T]:
+    # Remove and return the head (`?v`), or `None` if empty. Amortized O(1).
+    fn pop_front(self) -> T?:
         if self.front.len() == 0:
             while self.back.len() > 0:
                 match self.back.pop():
-                    Some(v): self.front.push(v)
+                    ?v: self.front.push(v)
                     None: break
         return self.front.pop()
 
-    # Remove and return the tail (`Some`), or `None` if empty. Amortized O(1).
-    fn pop_back(self) -> Option[T]:
+    # Remove and return the tail (`?v`), or `None` if empty. Amortized O(1).
+    fn pop_back(self) -> T?:
         if self.back.len() == 0:
             while self.front.len() > 0:
                 match self.front.pop():
-                    Some(v): self.back.push(v)
+                    ?v: self.back.push(v)
                     None: break
         return self.back.pop()
 
-    # The head without removing it (`Some`), or `None` if empty. O(1). When the near (`front`) stack
+    # The head without removing it (`?v`), or `None` if empty. O(1). When the near (`front`) stack
     # is empty the head lives at the FAR stack's index 0.
-    fn peek_front(self) -> Option[T]:
+    fn peek_front(self) -> T?:
         if self.front.len() > 0:
-            return Some(self.front[self.front.len() - 1])
+            return ?self.front[self.front.len() - 1]
         if self.back.len() > 0:
-            return Some(self.back[0])
+            return ?self.back[0]
         return None
 
-    # The tail without removing it (`Some`), or `None` if empty. O(1). When the near (`back`) stack
+    # The tail without removing it (`?v`), or `None` if empty. O(1). When the near (`back`) stack
     # is empty the tail lives at the FAR stack's index 0.
-    fn peek_back(self) -> Option[T]:
+    fn peek_back(self) -> T?:
         if self.back.len() > 0:
-            return Some(self.back[self.back.len() - 1])
+            return ?self.back[self.back.len() - 1]
         if self.front.len() > 0:
-            return Some(self.front[0])
+            return ?self.front[0]
         return None
 
     # Number of elements. O(1).
@@ -188,13 +188,13 @@ struct Counter[T: Hashable + Eq]:
     # Increment the count of `x` by `n` (may be negative; the entry is created if absent). O(1).
     fn add_n(self, x: T, n: int):
         match self.data.get(x):
-            Some(c): self.data[x] = c + n
+            ?c: self.data[x] = c + n
             None: self.data[x] = n
 
     # The count of `x`, or 0 if `x` was never added. O(1).
     fn count(self, x: T) -> int:
         match self.data.get(x):
-            Some(c): return c
+            ?c: return c
             None: return 0
 
     # The sum of all counts. O(n).

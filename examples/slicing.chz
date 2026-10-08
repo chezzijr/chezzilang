@@ -38,13 +38,13 @@ struct Ring:
         self.data[k % self.data.len()] = v
     fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         match (start, end, step):
-            (Some(s), Some(e), Some(c)): return self.data[s:e:c]
-            (Some(s), Some(e), None): return self.data[s:e]
-            (Some(s), None, Some(c)): return self.data[s::c]
-            (Some(s), None, None): return self.data[s:]
-            (None, Some(e), Some(c)): return self.data[:e:c]
-            (None, Some(e), None): return self.data[:e]
-            (None, None, Some(c)): return self.data[::c]
+            (?s, ?e, ?c): return self.data[s:e:c]
+            (?s, ?e, None): return self.data[s:e]
+            (?s, None, ?c): return self.data[s::c]
+            (?s, None, None): return self.data[s:]
+            (None, ?e, ?c): return self.data[:e:c]
+            (None, ?e, None): return self.data[:e]
+            (None, None, ?c): return self.data[::c]
             (None, None, None): return self.data[:]
             _: return self.data[:]
 

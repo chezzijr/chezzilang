@@ -1135,7 +1135,7 @@ test fn a_cross_module_concrete_forward_keeps_every_position():
 
 # ===== M24-2 — a nested body's witness capture must see through a SHADOWED module bind =====
 #
-# The free-name walk records `math.make[T](x)` as `(Some("math"), "make")` whether `math` is the
+# The free-name walk records `math.make[T](x)` as `(?"math", "make")` whether `math` is the
 # imported std module or a PARAMETER that shadows it — its `bound` set holds only the names bound
 # INSIDE the nested body. A capture predicate that reads that pair as a module qualification looks
 # `make` up as a module-level fn of `std.math`, misses, drops `$w:T`, and the program dies with

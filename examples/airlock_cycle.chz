@@ -29,8 +29,8 @@ spawn_r := recover:
         spawn use_it(a)
     "done"
 match spawn_r:
-    Ok(v):  print("spawn ok: {v}")
-    Err(e): print("spawn caught: {e.message()}")
+    ?v:  print("spawn ok: {v}")
+    !e: print("spawn caught: {e.message()}")
 
 # 2) the same cycle handed to `Channel.send` now crosses.
 chan_r := recover:
@@ -42,8 +42,8 @@ chan_r := recover:
     ch.send(a)
     "done"
 match chan_r:
-    Ok(v):  print("channel ok: {v}")
-    Err(e): print("channel caught: {e.message()}")
+    ?v:  print("channel ok: {v}")
+    !e: print("channel caught: {e.message()}")
 
 # 3) the same cycle wrapped in `Shared(...)` now crosses.
 shared_r := recover:
@@ -54,8 +54,8 @@ shared_r := recover:
     s := Shared(a)
     "done"
 match shared_r:
-    Ok(v):  print("shared ok: {v}")
-    Err(e): print("shared caught: {e.message()}")
+    ?v:  print("shared ok: {v}")
+    !e: print("shared caught: {e.message()}")
 
 # 4) a wide, ACYCLIC sendable (100k shallow siblings, structural depth ~2) still crosses fine — the
 # 10_000 depth cap counts nesting LEVELS, not siblings, so large-but-shallow data never false-trips.
@@ -67,5 +67,5 @@ wide := recover:
         spawn use_wide(xs)
     "crossed"
 match wide:
-    Ok(v):  print("wide ok: {v}")
-    Err(e): print("wide caught: {e.message()}")
+    ?v:  print("wide ok: {v}")
+    !e: print("wide caught: {e.message()}")

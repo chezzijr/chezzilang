@@ -1,5 +1,5 @@
 # W8-21: implicit success-coercion at a declared `T?`/`T!E` return sink (TICKET-025). A bare success
-# value coerces to `Some(v)`/`Ok(v)` — proves the VALUE, not just the checker's acceptance.
+# value coerces to `?v`/`?v` — proves the VALUE, not just the checker's acceptance.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 fn opt() -> int?:
     return 1
@@ -7,7 +7,7 @@ fn opt() -> int?:
 fn res() -> int!:
     return 1
 
-fn resnil() -> Result[None, str]:
+fn resnil() -> None!str:
     return
 
 fn inline_opt() -> str?: "hi"
@@ -45,10 +45,10 @@ test fn bare_value_coerces_at_a_closure_sink():
         _: assert false, "wrong shape"
 
 # TICKET-107 (W12-13): a MIXED if/match-expression at a T?/T!E return sink — some branches already
-# wrapped (`None`/`Err`), some bare — success-coerces only its bare branches.
+# wrapped (`None`/`!e`), some bare — success-coerces only its bare branches.
 fn opt_mixed(n: int) -> int?: (if n > 0: n else: None)
 
-fn res_mixed(n: int) -> int!: (if n > 0: n else: Err("neg"))
+fn res_mixed(n: int) -> int!: (if n > 0: n else: !"neg")
 
 enum S:
     C(int)
@@ -76,8 +76,8 @@ test fn if_expr_mixed_branches_coerce_at_a_result_sink():
         ?v: assert v == 2
         _: assert false, "wrong shape"
     assert match res_mixed(-1):
-        Ok(_): false
-        Err(_): true
+        ?_: false
+        !_: true
 
 test fn match_expr_mixed_branches_coerce_the_bare_ones():
     match match_mixed(S.C(7)):
@@ -95,13 +95,13 @@ test fn elif_chain_mixed_branches_coerce_the_bare_ones():
         _: assert false, "wrong shape"
 
 test fn a_coalesce_owned_branch_is_never_double_wrapped():
-    match nested_coalesce(Some(5), true):
+    match nested_coalesce(?5, true):
         ?v: assert v == 5
         _: assert false, "wrong shape"
     match nested_coalesce(None, true):
         ?v: assert v == 0
         _: assert false, "wrong shape"
-    assert str(nested_coalesce(Some(5), false)) == "None"
+    assert str(nested_coalesce(?5, false)) == "None"
 
 test fn closure_if_expr_mixed_branches_coerce_the_bare_ones():
     g := fn(n: int) -> int?: if n > 0: n else: None
@@ -111,10 +111,10 @@ test fn closure_if_expr_mixed_branches_coerce_the_bare_ones():
     assert str(g(-3)) == "None"
 
 fn elif_tail_mixed(n: int) -> int?:
-    return if n > 0: Some(n) elif n == 0: 0 else: 0 - n
+    return if n > 0: ?n elif n == 0: 0 else: 0 - n
 
 fn else_nested_mixed(n: int) -> int!:
-    return if n > 0: Ok(n) else: (if n == 0: 0 else: 0 - n)
+    return if n > 0: ?n else: (if n == 0: 0 else: 0 - n)
 
 test fn an_all_bare_elif_tail_coerces_as_one_branch():
     match elif_tail_mixed(2):

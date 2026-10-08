@@ -13,12 +13,12 @@ fn main():
     p.cancel()
     print("child after parent cancel: {c.cancelled()}")
     match c.reason():
-        Some(r): print("child reason: {r}")
+        ?r: print("child reason: {r}")
         None:    print("child reason: none")
 
     # 2. A manual ancestor cancel makes the child's done() ready (the downward cascade trips it).
     match c.done().try_recv():
-        Some(v): print("child done ready: {v}")
+        ?v: print("child done ready: {v}")
         None:    print("child done not ready")
 
     # 3. Cancelling a child is one-directional — the parent stays live.
@@ -28,7 +28,7 @@ fn main():
     print("child2 cancelled: {c2.cancelled()}")
     print("parent2 cancelled: {p2.cancelled()}")
     match p2.reason():
-        Some(r): print("parent2 reason: {r}")
+        ?r: print("parent2 reason: {r}")
         None:    print("parent2 reason: none")
 
     # 4. Transitive: cancelling the root cancels a grandchild.
@@ -38,12 +38,12 @@ fn main():
     root.cancel()
     print("grandchild cancelled: {leaf.cancelled()}")
     match leaf.reason():
-        Some(r): print("grandchild reason: {r}")
+        ?r: print("grandchild reason: {r}")
         None:    print("grandchild reason: none")
     # done() cascades TRANSITIVELY: the root's cancel drains its kids, marks each, and recurses, so
     # the grandchild's done() is tripped too and a task parked in `wait: leaf.done()` wakes.
     match leaf.done().try_recv():
-        Some(v): print("grandchild done ready: {v}")
+        ?v: print("grandchild done ready: {v}")
         None:    print("grandchild done not ready")
 
     # 5. An already-elapsed-timeout parent: a derived child inherits the tightest deadline, so it is
@@ -52,10 +52,10 @@ fn main():
     tc := tp.derive()
     print("timeout-child cancelled: {tc.cancelled()}")
     match tc.reason():
-        Some(r): print("timeout-child reason: {r}")
+        ?r: print("timeout-child reason: {r}")
         None:    print("timeout-child reason: none")
     match tc.done().try_recv():
-        Some(v): print("timeout-child done ready: {v}")
+        ?v: print("timeout-child done ready: {v}")
         None:    print("timeout-child done not ready")
     print("inherited deadline: {tc.deadline_at() == tp.deadline_at()}")
 

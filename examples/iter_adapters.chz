@@ -1,7 +1,7 @@
 # Lazy iterator adapters — the Rust model, NO `yield` in the language.
 #
 # Each adapter is a struct that holds an inner iterator (bounded `I: Iterator[T]`) plus some state,
-# and implements `next(self) -> Option[...]`. Composing adapters builds a lazy pipeline: the `for`
+# and implements `next(self) -> ...?`. Composing adapters builds a lazy pipeline: the `for`
 # loop drives the outermost `next()`, which pulls one element from the one below it, on demand.
 #
 # This is exactly how Rust's `std::iter::Map` / `Take` work — hand-written structs over a protocol,
@@ -10,16 +10,16 @@
 # An INFINITE source: 0, 1, 2, 3, ...
 struct Count:
     n: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         v := self.n
         self.n = self.n + 1
-        return Some(v)
+        return ?v
 
 # `take` adapter: yield at most `left` elements from the inner iterator, then stop.
 struct Take[I: Iterator[T], T]:
     inner: I
     left: int
-    fn next(self) -> Option[T]:
+    fn next(self) -> T?:
         if self.left <= 0:
             return None
         self.left = self.left - 1
@@ -29,10 +29,10 @@ struct Take[I: Iterator[T], T]:
 struct Mapped[I: Iterator[T], T, U]:
     inner: I
     f: fn(T) -> U
-    fn next(self) -> Option[U]:
+    fn next(self) -> U?:
         match self.inner.next():
-            Some(x):
-                return Some(self.f(x))   # call the fn-typed field directly
+            ?x:
+                return ?self.f(x)   # call the fn-typed field directly
             None:
                 return None
 

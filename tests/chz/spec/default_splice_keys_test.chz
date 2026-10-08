@@ -25,17 +25,17 @@ fn ab(a: int, b: int) -> int:
 
 g := ab
 
-fn geto() -> Option[str]:
-    return Some("abc")
+fn geto() -> str?:
+    return ?"abc"
 
 # A keyword call INSIDE a default (one `CallPlanTable` entry, in the default's provider), and a `?.`
 # carrier inside a default over BOTH carrier kinds (two `CarrierTable` entries, one per mode).
 fn kw_default(x: int = g(a=7, b=9)) -> int:
     return x
 
-fn opt_default(x: Option[int] = geto()?.len()) -> int:
+fn opt_default(x: int? = geto()?.len()) -> int:
     match x:
-        Some(n): return n
+        ?n: return n
         None: return -1
 
 test fn the_same_default_omitted_at_two_call_sites():
@@ -55,15 +55,15 @@ test fn a_keyword_call_inside_a_default_binds_by_label_not_position():
     assert r == 709, "reversed labels must still fill a=7, b=9 — got {r}"
 
 test fn a_carrier_inside_a_default_over_both_kinds():
-    # Option mode: `geto()?.len()` is `Some(3)`.
+    # a `T?` value mode: `geto()?.len()` is `?3`.
     assert opt_default() == 3, "got {opt_default()}"
-    assert opt_default(Some(9)) == 9, "an explicit argument bypasses the splice"
+    assert opt_default(?9) == 9, "an explicit argument bypasses the splice"
     assert opt_default(None) == -1, "got {opt_default(None)}"
-    # W7-51 — the Result-MODE carrier that used to sit here (`x: int = getr()?.len()`, omitted from
+    # W7-51 — the `T!E` value-MODE carrier that used to sit here (`x: int = getr()?.len()`, omitted from
     # an `int!str` caller so the `?` early-returned out of the CALLER) is now a compile error: a
     # default is compiled once, in its defining module, which has no caller frame to propagate into.
     # The rejection is pinned in `src/checker/tests.rs`
-    # (`a_try_inside_a_default_is_rejected_with_the_defining_module_reason`); the Option-mode carrier
+    # (`a_try_inside_a_default_is_rejected_with_the_defining_module_reason`); the `T?` value-mode carrier
     # above is unaffected, which is the whole distinction.
 
 test fn print_keyword_arguments_still_compile():

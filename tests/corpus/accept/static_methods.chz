@@ -15,7 +15,7 @@ struct Box[T]:
 
 enum Color:
     Red
-    fn from_str(s: str) -> Option[Color]:
+    fn from_str(s: str) -> Color?:
         return None
 
 r := Rect.square(5)

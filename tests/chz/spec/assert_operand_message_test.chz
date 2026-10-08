@@ -1,9 +1,9 @@
 # W8-13: a failing comparison `assert` renders both operand values around the operator.
 
-fn fault_msg[T](r: Result[T, Error]) -> str:
+fn fault_msg[T](r: T!Error) -> str:
     match r:
-        Ok(_): return "NO FAULT"
-        Err(e): return e.message()
+        ?_: return "NO FAULT"
+        !e: return e.message()
     return ""
 
 test fn comparison_assert_shows_operands():

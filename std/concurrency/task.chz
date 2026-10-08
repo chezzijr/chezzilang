@@ -1,5 +1,5 @@
 # std.concurrency.task — result handles for `Executor`-submitted work. Pure Chezzi over existing
-# primitives (the sealed cap-1 `Channel[Result[T]]` `submit_result` returns) plus two natives: the
+# primitives (the sealed cap-1 `Channel[T!]` `submit_result` returns) plus two natives: the
 # airlock query `concurrency.is_task_copy` and the seal query `concurrency.is_settled`.
 #
 # WHY: `Executor.submit(f)` is fire-and-forget — it returns nothing, so the only way to get a value
@@ -13,7 +13,7 @@
 # parity. Await your tasks in the order you submitted them (or any fixed order) and both engines agree.
 #
 # MODEL (TICKET-219): the handle's channel is the one record of the outcome. It is written once by a
-# seal: the job body seals the value of `recover: f()`, or the job transition seals the cancel `Err`
+# seal: the job body seals the value of `recover: f()`, or the job transition seals the cancel `!e`
 # when it drops or cuts the job. A sealed channel's receive copies the outcome and takes nothing, so
 # `get()` is `ch.recv()` and every copy of the handle (the parent's, a spawned task's, an Executor
 # job's) and every second waiter reads the same outcome: one future, many readers (CPython `Future`).
@@ -38,23 +38,23 @@ import std.concurrency
 # A future handle. `ch` is the sealed channel that holds the outcome; `cached` holds the owner's
 # outcome object; a copy carries it as of the crossing.
 struct Task[T]:
-    ch: Channel[Result[T]]
-    cached: Option[Result[T]]
+    ch: Channel[T!]
+    cached: (T!)?
 
-    # Block until the outcome is available, then return it: `Ok(value)`, or `Err(message)` when
-    # the job faulted or `shutdown_now()` cancelled it (CPython `Future.result()`; a `Result` in
+    # Block until the outcome is available, then return it: `?value`, or `!message` when
+    # the job faulted or `shutdown_now()` cancelled it (CPython `Future.result()`; a `T!E` in
     # place of a raise). Idempotent. `cached` answers first in every task: the owner's alias, or in
     # a copy that alias as it was at the crossing. Only the owner fills it, so a copy whose owner had
     # not called `get()` before the crossing reads a fresh copy from the channel on each call,
     # rebuilt as the task's copy (`concurrency.task_copy_of`).
-    fn get(self) -> Result[T]:
+    fn get(self) -> T!:
         match self.cached:
-            Some(r): return r
+            ?r: return r
             None: pass
         r := self.ch.recv()
         if concurrency.is_task_copy(self):
             return concurrency.task_copy_of(r)
-        self.cached = Some(r)
+        self.cached = ?r
         return r
 
     # True once the job has finished, faulted or cancelled. Never blocks, and never reads false
@@ -64,7 +64,7 @@ struct Task[T]:
 
 # Submit `f` to `ex` for detached execution and return a `Task[T]` handle for its outcome. The work
 # starts at the submit and is waited for by `shutdown()` (or exit); `task.get()` then yields
-# `Ok(f())`, or `Err(message)` for the job's fault. Await the handles in a fixed (e.g. submission)
+# `?f()`, or `!message` for the job's fault. Await the handles in a fixed (e.g. submission)
 # order to keep the output deterministic.
 fn submit_task[T](ex: Executor, f: fn() -> T) -> Task[T]:
     return Task(ch=ex.submit_result(f), cached=None)

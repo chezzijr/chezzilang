@@ -8,8 +8,8 @@ fn t179_work(acc: List[int], out: Channel[str]):
         acc.push(2)
         acc.len()
     match res:
-        Ok(k): out.send("{k}")
-        Err(e): out.send(e.message())
+        ?k: out.send("{k}")
+        !e: out.send(e.message())
 
 test fn fresh_list_literal_spawn_arg_is_writable():
     out := Channel[str](1)
@@ -26,8 +26,8 @@ test fn map_merge_inside_spawn_is_not_a_write():
                 n := m.merge({"b": 2})
                 n.len()
             match res:
-                Ok(k): r.send("{k}")
-                Err(e): r.send(e.message())
+                ?k: r.send("{k}")
+                !e: r.send(e.message())
     assert r.recv() == "2"
 
 fn t179_gen() -> Iterator[int]:
@@ -48,6 +48,6 @@ test fn started_generator_drained_in_spawn_runs():
                     total += v
                 total
             match res:
-                Ok(t): r.send("{t}")
-                Err(e): r.send(e.message())
+                ?t: r.send("{t}")
+                !e: r.send(e.message())
     assert r.recv() == "5"

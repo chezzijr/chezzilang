@@ -1,6 +1,6 @@
 import std.net
 import std.time
-fn main() -> Result[None]:
+fn main() -> None!:
     ln := net.listen("127.0.0.1:0")?
     parallel:
         spawn:
@@ -10,5 +10,5 @@ fn main() -> Result[None]:
             time.sleep_ms(200)
             print("closing listener")
             ln.close()
-    return Ok()
+    return
 main()?

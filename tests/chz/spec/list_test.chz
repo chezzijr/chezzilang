@@ -15,10 +15,10 @@ import std.time
 test fn first_last_reversed():
     xs := [3, 1, 2]
     match xs.first():
-        Some(v): assert v == 3
+        ?v: assert v == 3
         None: assert false, "first of non-empty"
     match xs.last():
-        Some(v): assert v == 2
+        ?v: assert v == 2
         None: assert false, "last of non-empty"
     assert xs.reversed() == [2, 1, 3]
     assert xs == [3, 1, 2], "reversed() does not mutate"
@@ -26,10 +26,10 @@ test fn first_last_reversed():
 test fn first_last_empty_none():
     empty: List[int] = []
     match empty.first():
-        Some(_): assert false, "empty first must be None"
+        ?_: assert false, "empty first must be None"
         None: assert true
     match empty.last():
-        Some(_): assert false, "empty last must be None"
+        ?_: assert false, "empty last must be None"
         None: assert true
 
 # ---- insert / remove_at (Python-clamp / Python-relative) ----
@@ -52,12 +52,12 @@ test fn insert_remove_at():
 # ---- min / max ----
 
 test fn min_max_scalar():
-    assert [3, 1, 2].min() == Some(1)
-    assert [3, 1, 2].max() == Some(3)
-    assert [1.5, 0.5, 2.5].min() == Some(0.5)
-    assert [1.5, 0.5, 2.5].max() == Some(2.5)
-    assert ["pear", "apple", "kiwi"].min() == Some("apple")
-    assert ["pear", "apple", "kiwi"].max() == Some("pear")
+    assert [3, 1, 2].min() == ?1
+    assert [3, 1, 2].max() == ?3
+    assert [1.5, 0.5, 2.5].min() == ?0.5
+    assert [1.5, 0.5, 2.5].max() == ?2.5
+    assert ["pear", "apple", "kiwi"].min() == ?"apple"
+    assert ["pear", "apple", "kiwi"].max() == ?"pear"
 
 # Empty is `None`, NOT a fault — the whole family (`min`/`max`/`min_by`/`max_by`) matches its
 # `first`/`last`/`pop` siblings (Rust's `Iterator::min`), so no `recover:` is needed.
@@ -77,15 +77,15 @@ test fn min_max_empty_is_none():
     assert (xs.min() ?? -1) == -1
     assert (xs.max_by(fn(x: int) -> int: x) ?? -2) == -2
 
-# `min_by`/`max_by` return the ELEMENT whose key is extremal, wrapped in `Some`; first-seen ties.
+# `min_by`/`max_by` return the ELEMENT whose key is extremal, wrapped in `?v`; first-seen ties.
 test fn min_max_by_scalar():
     xs := [3, 1, 2]
-    assert xs.min_by(fn(x: int) -> int: -x) == Some(3)
-    assert xs.max_by(fn(x: int) -> int: -x) == Some(1)
+    assert xs.min_by(fn(x: int) -> int: -x) == ?3
+    assert xs.max_by(fn(x: int) -> int: -x) == ?1
     # equal keys never displace the earlier element
     ys := ["bb", "aa", "cc"]
-    assert ys.min_by(fn(s: str) -> int: s.len()) == Some("bb")
-    assert ys.max_by(fn(s: str) -> int: s.len()) == Some("bb")
+    assert ys.min_by(fn(s: str) -> int: s.len()) == ?"bb"
+    assert ys.max_by(fn(s: str) -> int: s.len()) == ?"bb"
 
 struct P:
     k: int
@@ -99,10 +99,10 @@ test fn min_max_comparable_struct():
     # first-seen tie-break for equal minima (P(1,"b") before P(1,"c"))
     xs := [P(2, "a"), P(1, "b"), P(1, "c"), P(3, "d")]
     match xs.min():
-        Some(p): assert p.tag == "b"
+        ?p: assert p.tag == "b"
         None: assert false, "min of a non-empty list is Some"
     match xs.max():
-        Some(p): assert p.tag == "d"
+        ?p: assert p.tag == "d"
         None: assert false, "max of a non-empty list is Some"
     # …and a Comparable-struct element list that IS empty still answers None, no fault
     es: List[P] = []
@@ -131,10 +131,10 @@ test fn sort_min_max_comparable_enum():
     xs.sort()
     assert xs == [Rank.Low, Rank.Mid, Rank.High], "sort() must use the enum's compare()"
     match [Rank.High, Rank.Low, Rank.Mid].min():
-        Some(r): assert r == Rank.Low
+        ?r: assert r == Rank.Low
         None: assert false, "min of a non-empty list is Some"
     match [Rank.High, Rank.Low, Rank.Mid].max():
-        Some(r): assert r == Rank.High
+        ?r: assert r == Rank.High
         None: assert false, "max of a non-empty list is Some"
 
 # TICKET-104 / DEC-015: an enum sort re-enters user code too, so a mutating compare must fault.
@@ -152,8 +152,8 @@ enum Rank104M:
 test fn sort_rejects_mutation_from_an_enum_compare():
     r := recover: w104_es.sort()
     match r:
-        Ok(_): assert false, "enum sort with a mutating compare did not fault"
-        Err(e): assert e.message().contains("list modified during 'sort'"), e.message()
+        ?_: assert false, "enum sort with a mutating compare did not fault"
+        !e: assert e.message().contains("list modified during 'sort'"), e.message()
 
 # ---- unique / dedup ----
 
@@ -204,10 +204,10 @@ test fn count_position():
     assert [1, 2, 3, 2, 1].count(is2) == 2
     assert [1, 2, 3].count(fn(x: int) -> bool: false) == 0
     match [1, 2, 3, 2].position(is2):
-        Some(i): assert i == 1, "position is first-hit-wins"
+        ?i: assert i == 1, "position is first-hit-wins"
         None: assert false, "should find a match"
     match [1, 3].position(is2):
-        Some(_): assert false, "no match must be None"
+        ?_: assert false, "no match must be None"
         None: assert true
 
 # ---- pop / contains / index_of / sum / reverse ----
@@ -215,13 +215,13 @@ test fn count_position():
 test fn pop():
     xs := [1, 2, 3]
     match xs.pop():
-        Some(v): assert v == 3
+        ?v: assert v == 3
         None: assert false, "pop non-empty"
     assert xs.len() == 2
     ys := [1]
     _ := ys.pop()
     match ys.pop():
-        Some(_): assert false, "pop empty must be None"
+        ?_: assert false, "pop empty must be None"
         None: assert true
 
 test fn contains_index_of_sum():
@@ -414,8 +414,8 @@ test fn sort_by_key_rejects_mutation_during_sort():
         return x
     r := recover: w.sort_by_key(bump)
     match r:
-        Ok(_): assert false, "sort_by_key silently dropped a mutation during sort instead of faulting"
-        Err(_): assert true
+        ?_: assert false, "sort_by_key silently dropped a mutation during sort instead of faulting"
+        !_: assert true
 
 # ---- W8-27 / W8-4 follow-up coverage: += through more alias shapes, and sort faulting on
 # both a plain element write and a struct's compare re-entering a mutation ----
@@ -468,14 +468,14 @@ test fn sort_by_rejects_an_element_write_during_sort():
         return a - b
     r := recover: xs.sort_by(cmp)
     match r:
-        Ok(_): assert false, "element write during sort_by did not fault"
-        Err(e): assert e.message().contains("list modified during 'sort_by'"), e.message()
+        ?_: assert false, "element write during sort_by did not fault"
+        !e: assert e.message().contains("list modified during 'sort_by'"), e.message()
 
 test fn sort_rejects_mutation_from_a_struct_compare():
     r := recover: w84_ns.sort()
     match r:
-        Ok(_): assert false, "struct sort with a mutating compare did not fault"
-        Err(e): assert e.message().contains("list modified during 'sort'"), e.message()
+        ?_: assert false, "struct sort with a mutating compare did not fault"
+        !e: assert e.message().contains("list modified during 'sort'"), e.message()
 
 # TICKET-107 (W12-14): `List += List` extends in place (DEC-015), so it never rebinds the name —
 # it must pass through a loop variable and a `const` binding, unlike every other compound form.
@@ -524,5 +524,5 @@ test fn non_empty_list_repeat_contract_unchanged():
     assert ([1, 2] * -5).len() == 0
     r := recover: [1] * 100000000000
     match r:
-        Ok(_): assert false, "expected a capacity fault"
-        Err(e): assert e.message() == "list repeat capacity overflow"
+        ?_: assert false, "expected a capacity fault"
+        !e: assert e.message() == "list repeat capacity overflow"

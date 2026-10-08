@@ -12,10 +12,10 @@
 # ever scan the buckets of `hash(key)`, so an `eq` COARSER than its type's `hash` is unreachable,
 # not merely wrong — exactly as in Rust and Python. Every type here keeps `hash` and `eq` agreeing.
 
-fn msg_of[T](r: Result[T, Error], where_: str) -> str:
+fn msg_of[T](r: T!Error, where_: str) -> str:
     match r:
-        Ok(_): assert false, where_ + " must fault"
-        Err(e): return e.message()
+        ?_: assert false, where_ + " must fault"
+        !e: return e.message()
     return ""
 
 # ---- the acceptance program: `==`, `in` and `m[k]` must give ONE answer ----
@@ -250,10 +250,10 @@ fn mut_reset(n: int):
 test fn a_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
     # two entries: pre-fix this was `index out of bounds` (VM panic) on both engines
     mut_reset(2)
-    assert mut_map.get(Mut(1)) == Some(11), "the surviving entry's own value, not a stale slot"
-    # four entries: pre-fix this silently answered `Some(22)` — the NEXT entry's value
+    assert mut_map.get(Mut(1)) == ?11, "the surviving entry's own value, not a stale slot"
+    # four entries: pre-fix this silently answered `?22` — the NEXT entry's value
     mut_reset(4)
-    assert mut_map.get(Mut(1)) == Some(11)
+    assert mut_map.get(Mut(1)) == ?11
     # the same position hazard through every other Map caller
     mut_reset(4)
     assert mut_map[Mut(1)] == 11
@@ -265,7 +265,7 @@ test fn a_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
     mut_map[Mut(1)] = 99
     assert mut_map[Mut(1)] == 99, "the insert overwrote the key it matched, not a shifted neighbour"
     mut_reset(4)
-    assert mut_map.remove(Mut(1)) == Some(11)
+    assert mut_map.remove(Mut(1)) == ?11
     assert mut_map.has(Mut(1)) == false
 
 test fn a_set_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
@@ -368,9 +368,9 @@ struct DeepNode:
     leaf: DeepLeaf?
 
 fn deep_chain(k: int, l: DeepLeaf) -> DeepNode:
-    n := DeepNode(None, Some(l))
+    n := DeepNode(None, ?l)
     for _ in 0..k:
-        n = DeepNode(Some(n), None)
+        n = DeepNode(?n, None)
     return n
 
 test fn nested_eq_hooks_share_one_structural_depth_budget():
@@ -378,8 +378,8 @@ test fn nested_eq_hooks_share_one_structural_depth_budget():
     y := deep_chain(100, DeepLeaf(200))
     r := recover: x == y
     match r:
-        Ok(_): assert false, "shared structural budget did not fire"
-        Err(e): assert e.message().contains("maximum structural depth"), e.message()
+        ?_: assert false, "shared structural budget did not fire"
+        !e: assert e.message().contains("maximum structural depth"), e.message()
     assert true, "still alive"
 
 struct PlainNode:
@@ -388,20 +388,20 @@ struct PlainNode:
 fn plain_chain(k: int) -> PlainNode:
     n := PlainNode(None)
     for _ in 0..k:
-        n = PlainNode(Some(n))
+        n = PlainNode(?n)
     return n
 
 test fn a_single_deep_walk_still_fits_the_whole_budget():
     # Two independently-built ~9 000-level-deep nested values, no protocol hook anywhere, so
     # `walk_base == 0` for the whole walk — the shared budget must not have SHRUNK a single
     # un-nested walk. 4 500 links, and a link costs 2 structural levels (the struct and its
-    # `Option`), so ~9 000 < 10 000; measured, 5 000 links faults and 4 900 does not. (GC is safe at
+    # `T?`), so ~9 000 < 10 000; measured, 5 000 links faults and 4 900 does not. (GC is safe at
     # this depth: `Heap::mark` is worklist-based, not recursive.)
     assert plain_chain(4500) == plain_chain(4500)
 
 test fn legal_hook_nesting_still_returns_a_value():
     # Nesting per se is NOT banned — only nesting x depth past the shared budget is. A `DeepNode`
-    # link costs 2 structural levels (the struct and its `Option`) and each hook level re-walks a
+    # link costs 2 structural levels (the struct and its `T?`) and each hook level re-walks a
     # whole chain, so 3 levels over N links spends ~6N of the 10 000. Measured on this build: 1 240
     # links passes and 1 260 faults, so the ceiling here is ~1 250. 500 links is HALF that — a 2.5x
     # margin, deliberately chosen so this positive control fails loudly on a real regression rather
@@ -448,7 +448,7 @@ struct KeyLink:
 fn key_chain(d: int) -> KeyLink:
     n := KeyLink(next=None, leaf=KeyBox(inner=KeyProbe(n=0)))
     for _ in 0..d:
-        n = KeyLink(next=Some(n), leaf=KeyBox(inner=KeyProbe(n=0)))
+        n = KeyLink(next=?n, leaf=KeyBox(inner=KeyProbe(n=0)))
     return n
 
 test fn key_inserted_from_a_deep_eq_hook_is_still_snapshotted():
