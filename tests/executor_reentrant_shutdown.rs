@@ -96,3 +96,38 @@ fn executor_reentrant_shutdown_now_during_drain() {
          {stdout:?}"
     );
 }
+
+/// TICKET-232 symptom 1: the unbounded `Executor` dispatches job C at `submit`, so `shutdown_now`
+/// from job B must not cancel it (CPython `ThreadPoolExecutor`: 0/100 runs drop C, measured).
+/// Chezzi at `CHEZZI_THREADS=0` dropped C in 6/100 and 9/100 runs on `1d766428`, so 200 runs.
+#[test]
+fn executor_shutdown_now_never_cancels_a_dispatched_job() {
+    let dir = std::env::temp_dir().join(format!("chz-executor-dispatched-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.chz");
+    std::fs::write(
+        &path,
+        "import std.concurrency\nfn stop(e: Executor):\n    e.shutdown_now()\nfn main():\n    ex := Executor()\n    ex.submit(fn(): print(\"A\"))\n    ex.submit(fn(): stop(ex))\n    ex.submit(fn(): print(\"C\"))\n    ex.shutdown()\n    print(\"end\")\nmain()\n",
+    )
+    .expect("write program");
+    let mut dropped = 0;
+    for _ in 0..200 {
+        let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .env("CHEZZI_THREADS", "0")
+            .arg("run")
+            .arg(&path)
+            .output()
+            .expect("run chezzi");
+        if !String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l == "C")
+        {
+            dropped += 1;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        dropped, 0,
+        "dispatched job C dropped by shutdown_now in {dropped}/200 runs"
+    );
+}
