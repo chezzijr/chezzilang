@@ -1,0 +1,32 @@
+import std.concurrency
+import std.time
+
+fn leaf() -> int:
+    time.sleep_ms(1)
+    return 1
+
+fn reader(inner: Executor, out: Channel[int]):
+    r := recover: inner.submit_result(fn() -> int: leaf())
+    match r:
+        ?ch:
+            match ch.recv():
+                ?v: out.send(v)
+                !e: out.send(-1)
+        !e: out.send(-2)
+
+fn stopper(inner: Executor, ms: int):
+    time.sleep_ms(ms)
+    inner.shutdown_now()
+
+fn main():
+    for rn in 0..300:
+        inner := Executor(1)
+        out := Channel[int](1)
+        parallel:
+            spawn reader(inner, out)
+            spawn stopper(inner, rn % 3)
+            v := out.recv()
+            print("round {rn} delay {rn % 3} -> {v}")
+
+main()
+print("end")
