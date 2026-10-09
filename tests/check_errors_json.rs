@@ -766,12 +766,13 @@ fn end_range_pins_the_exact_word_end_column() {
 /// **The doubled-prefix bug.** A parse error used to stutter its own position: JSON's `message`
 /// embedded `ParseError`'s OWN `parse error (line N, col M): ` prefix (`e.to_string()`, not
 /// `e.message`), and plain text showed the position twice (`resolve error (line 1, col 4): parse
-/// error (line 1, col 4): ...`). `fn (): pass` triggers "expected identifier, found '('" at the
-/// anonymous function's missing name (`f`1 `n`2 ` `3 `(`4 — col 4).
+/// error (line 1, col 4): ...`). `fn : pass` triggers "expected identifier, found ':'" at the
+/// function's missing name (`f`1 `n`2 ` `3 `:`4 — col 4). (`fn (` is a closure literal since
+/// TICKET-241, so the input has no parameter list.)
 #[test]
 fn parse_error_message_is_not_doubled() {
     let t = TmpDir::new();
-    let p = t.write("p.chz", "fn (): pass\n");
+    let p = t.write("p.chz", "fn : pass\n");
 
     let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .args(["check", p.to_str().unwrap(), "--errors=json"])
@@ -780,7 +781,7 @@ fn parse_error_message_is_not_doubled() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stdout = stdout.trim();
     assert!(
-        stdout.contains("\"message\":\"expected identifier, found '('\""),
+        stdout.contains("\"message\":\"expected identifier, found ':'\""),
         "JSON message must be the clean parser message with no embedded `parse error (...)` prefix, \
          got: {stdout}"
     );
@@ -792,7 +793,7 @@ fn parse_error_message_is_not_doubled() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stderr = stderr.trim_end();
     let expected = format!(
-        "resolve error ({}:1:4): expected identifier, found '('",
+        "resolve error ({}:1:4): expected identifier, found ':'",
         p.display()
     );
     let first_line = stderr.lines().next().unwrap_or_default();
@@ -801,7 +802,7 @@ fn parse_error_message_is_not_doubled() {
         "plain text must render the position exactly once, got: {stderr}"
     );
     assert!(
-        stderr.lines().any(|l| l == "1 | fn (): pass"),
+        stderr.lines().any(|l| l == "1 | fn : pass"),
         "plain text must render the caret gutter's source echo, got: {stderr}"
     );
 }
