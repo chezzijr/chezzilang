@@ -39,7 +39,7 @@
 | Mechanism | Rust `fn` compiled **into** the `chezzi` binary, registered in `native_members` | `dlopen`+`dlsym`+`libffi` at module init |
 | Lives in | `src/native/` (`Host`/`NativeRet`/`NativeFn`) | `src/native/cffi.rs` |
 | Used by | `std.math`/`io`/`os`/`fs`/`time`/`regex`/`request`/`net` | user `extern "lib":` blocks |
-| Crosses the airlock | `NativeRet`/`NativeArg` (primitives, list, struct, map, Result/Option) | scalars (int↔long, fixed-width int8..uint64, float↔double, bool↔`_Bool` 1 byte, str→`char*`, opaque `ptr`↔void*) + a flat-scalar struct by value |
+| Crosses the airlock | `NativeRet`/`NativeArg` (primitives, list, struct, map, `T!E` / `T?`) | scalars (int↔long, fixed-width int8..uint64, float↔double, bool↔`_Bool` 1 byte, str→`char*`, opaque `ptr`↔void*) + a flat-scalar struct by value |
 | State | **none** — `NativeFn` is a bare `fn` pointer, no captured state | **none** |
 | Recompile to add? | **yes** — statically linked | **no** — dlopen at runtime |
 
@@ -309,7 +309,7 @@ Stateful APIs (model/device/optimizer) need no extra mechanism — each is just 
 
 ## 4. Types: enrich the *library*, never the *language*
 
-The language keeps its simple types (scalars + list/map/set/tuple/struct/enum + Result/Option +
+The language keeps its simple types (scalars + list/map/set/tuple/struct/enum + `T!E` / `T?` +
 Iterator). Libraries add **nominal opaque types** via the seeding mechanism above — names with methods,
 no structural complexity, **no new type-system features** (no const-generics, no typeclasses, no
 dependent types).
@@ -319,7 +319,7 @@ float/int/bool kind. Chezzi can't express that. Two options:
 
 | | Approach | Result |
 |---|---|---|
-| **A. Monomorphize at the boundary** *(recommended)* | one opaque `Tensor`; backend fixed in the Rust adapter; dtype + shape are **runtime** facts | numpy/CPython model — `ndarray` is one type, dtype/shape are runtime attrs. Shape mismatch → `Result[Err]`, not a compile error |
+| **A. Monomorphize at the boundary** *(recommended)* | one opaque `Tensor`; backend fixed in the Rust adapter; dtype + shape are **runtime** facts | numpy/CPython model — `ndarray` is one type, dtype/shape are runtime attrs. Shape mismatch → an error, not a compile error |
 | **B. Phantom nominal variants** | `FloatTensor`/`IntTensor` as separate seeded types | a little more static safety, more boilerplate, still no shape checking |
 
 Pick **A**. It matches the lang's own precedent (`std.json`'s `Json` is a dynamic enum, richness
@@ -327,7 +327,7 @@ validated at runtime), matches every successful dynamic-lang ML binding, and ref
 errors are data-dependent — uncheckable without dependent types.
 
 > **Rule of thumb:** language stays simple (scalars + containers + opaque handles). All library richness
-> — backends, dtypes, shapes, broadcasting — lives as **runtime behavior inside the handle + `Result`
+> — backends, dtypes, shapes, broadcasting — lives as **runtime behavior inside the handle + `T!E`
 > at the boundary**, never as new static types. A library introduces *type names* (opaque), never
 > *type-system features*.
 

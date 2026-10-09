@@ -31,7 +31,7 @@ fn main():
   been removed.)
 - **Types:** static with local inference — explicit function signatures, inferred locals (`x := 5`).
 - **Syntax:** indentation blocks (Python-feel).
-- **Errors:** `Result`/`Option` + `?` — errors as values, no hidden control flow.
+- **Errors:** `T!E`/`T?` + `?` — errors as values, no hidden control flow.
 
 ## Build
 

@@ -313,3 +313,23 @@ fn cli_text_names_no_removed_spelling() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The `chezzi docs` bundle teaches the surface, so it holds none of the five words, English
+/// uses included.
+#[test]
+fn docs_bundle_names_no_removed_spelling() {
+    let out = chezzi(&["docs"], &root());
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let red: Vec<String> = stdout
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| removed_word(l).is_some())
+        .map(|(n, l)| format!("{}: {l}", n + 1))
+        .collect();
+    assert!(
+        red.is_empty(),
+        "{} bundle lines:\n{}",
+        red.len(),
+        red.join("\n")
+    );
+}

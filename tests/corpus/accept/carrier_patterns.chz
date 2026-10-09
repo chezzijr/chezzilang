@@ -1,0 +1,38 @@
+# Carrier patterns: `?v` (present / success), `!e` (error), `None` (absent), nested.
+struct IoErr:
+    code: int
+    fn message(self) -> str:
+        return "io {self.code}"
+
+fn show(o: int?) -> str:
+    match o:
+        ?v: return "some {v}"
+        None: return "none"
+
+fn deep(o: int??) -> str:
+    match o:
+        ?(?v): return "some some {v}"
+        ?None: return "some none"
+        None: return "none"
+
+fn pair(o: (int, int)?) -> int:
+    match o:
+        ?(a, b): return a + b
+        None: return 0
+
+fn code(r: int!IoErr) -> int:
+    match r:
+        ?v: return v
+        !IoErr(c): return c
+
+fn first(r: int!str) -> str:
+    match r:
+        ?0: return "zero"
+        ?_: return "more"
+        !e: return e
+
+print(show(5), show(None))
+print(deep(?(?1)), deep(?None), deep(None))
+print(pair(?(1, 2)), pair(None))
+print(code(7), code(!IoErr(3)))
+print(first(0), first(4), first(!"bad"))

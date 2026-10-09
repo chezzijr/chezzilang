@@ -143,7 +143,7 @@ written.
 `src/difftest/generate.rs` is **correct-by-construction over a deliberately small surface**: straight-line
 code + simple non-recursive functions over `int`/`List`/`Map`/`str`/`tuple`/slicing, with conservative
 bounds (it *avoids* overflow, deep nesting, aliasing). It emits **no** generics, structs, enums, `match`,
-closures/HOF, protocols, `Result`/`Option`/`?`, recursion, or modules. So every bug in those features is
+closures/HOF, protocols, `T!E`/`T?`/`?`, recursion, or modules. So every bug in those features is
 invisible to it. (Historically, the two-VM **parity** oracle was blind here too: both engines were the
 same `Vm` running identical bytecode for this sequential code, so they shared bugs rather than
 diverging — parity caught *divergence*, never *shared wrongness*; that oracle is gone with `--serial`,
@@ -210,7 +210,7 @@ Every finding so far falls into one of these (use as a "what am I hunting" check
 | Domain | High-value angles (start here) |
 |---|---|
 | **Generics** | turbofish at decl vs use site; nested (`Map[str,List[int]]`); return-only param inference (`empty[T]()`); generic methods/static methods; protocol bounds + calling a bound method on a type param; recursive generic enums; arity/mismatch → clean error not panic |
-| **`match`/enums** | exhaustiveness with **guards** (`A if c` must NOT close A) and **refutable payloads** (`Some(0)`, `Pair(0,y)` must NOT close); nested single-variant *is* irrefutable; or-patterns binding consistency; redundant/duplicate arms; range patterns; match-as-expression divergent arms |
+| **`match`/enums** | exhaustiveness with **guards** (`A if c` must NOT close A) and **refutable payloads** (`?0`, `Pair(0,y)` must NOT close); nested single-variant *is* irrefutable; or-patterns binding consistency; redundant/duplicate arms; range patterns; match-as-expression divergent arms |
 | **Closures/defer/recover** | loop-variable capture (**fresh cell per iteration** — must NOT be late-binding); uniform by-reference capture (local/global all share the live binding — a closure write is visible outside); a plain capture into a `spawn` is an isolated per-task copy (F1 divergence); escaping closures; `defer` block shares by reference (sees latest) vs `defer f(x)` eager args; `recover` catching overflow/index/div0; re-panic in `recover` |
 | **Namespace/import gating** | redeclare a builtin type (`struct int`/`List`/`Socket`/`range`) → must be `reserved (builtin)`, never silently shadowed; bare std type without `import` → import hint; `import X from M` for a pure type runs at all (the `bind_import` skip); reserved-name shadowing by var/param/type-param/field |
 | **Import/path resolution** | cwd-sensitivity; nested `chezzi.toml` (entry-root vs import-root must agree); dotted paths; dir/file name collision; diamond re-import (top-level runs once?); a local module shadowing a `std.*` name; entrypoint `:fn` suffix forms; transitive-error attribution |
@@ -296,7 +296,7 @@ they produce random bytes, sample the token alphabet, and mutate the corpus — 
 specific grammar production*. So a crash that needs, say, ~10 000 levels of one nested construct is
 statistically unreachable (the token sampler would have to emit thousands of the *same* opening token
 consecutively by chance). The **2026-07-12 manual hunt found exactly such a bug the fuzzer missed**: a
-deeply-nested `match` **pattern** (`Some(Some(…Some(0)…))` / nested tuples) overflowed the host stack
+deeply-nested `match` **pattern** (`?(?(…?0…))` / nested tuples) overflowed the host stack
 (SIGABRT, exit 134) because `parse_pattern_impl` was the one recursive-descent entry point with no
 `MAX_DEPTH` guard (fixed — `dcde045`). Lesson: crash-safety over *depth* per grammar production is a
 distinct axis from the byte/token fuzzing here — either add a grammar-aware generator that recursively
@@ -720,7 +720,7 @@ a CI repro, not for finding races unseeded fuzzing can't already reach. Widening
 mean perturbation at more or different sync points; not attempted here.
 
 **What it already found on `main`:** W15-3 (`docs/gaps.md`) — a `write` parked on a `Socket` that
-another task then `close()`s can return `Ok` instead of TICKET-166's error, at `CHEZZI_THREADS=1`,
+another task then `close()`s can return `?v` instead of TICKET-166's error, at `CHEZZI_THREADS=1`,
 12/16 seeds in the first sweep, 0/10 unseeded at the same worker count. The socket write path was not
 covered by TICKET-166's listener-accept fix.
 

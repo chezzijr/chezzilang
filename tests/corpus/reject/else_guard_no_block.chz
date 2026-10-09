@@ -1,0 +1,7 @@
+# rule: elseGuard
+# expect: expected ':'
+fn parse(s: str) -> int!str:
+    return s.len()
+
+n := parse("a") else e
+print(n)

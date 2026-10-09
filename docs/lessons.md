@@ -20,7 +20,7 @@
 |---|---|---|
 | syntax, scripting feel, `Executor` ergonomics | Python | indentation, interpolation, slicing, truthiness |
 | interfaces + concurrency | Go | structural `protocol`s, `spawn`/`parallel:` nursery, `Channel`, cancellation points, `defer` |
-| types, errors, control flow | Rust | `enum` + exhaustive `match`, `Result`/`Option` + `?`, `panic`/`recover` |
+| types, errors, control flow | Rust | `enum` + exhaustive `match`, `T!E`/`T?` + `?`, `panic`/`recover` |
 
 - **Correctness outranks engine agreement.** There is one engine now, so "both engines agree" is not
   even available as a defense. The defense is the ancestor's *measured* output: write the Go/Python/
@@ -182,7 +182,7 @@ the freeze.
   is true). `fill_ret` must be exhaustive over every `Ty` variant that carries an inner type — no
   catch-all — so a future variant fails to compile instead of re-opening the leak. The first cut's
   `other => other.clone()` missed `Shared`/`Channel`/`Atomic`/`Func`.
-- **Defaulting a slot to a protocol without checking satisfaction launders.** The inferred `Result`
+- **Defaulting a slot to a protocol without checking satisfaction launders.** The inferred `T!E`
   E-slot defaults to `Error` only if `Unknown` or the payload *satisfies* `Error`; the unconditional
   first cut let `e.message()` type-check on a payload with no `message`, then fault at runtime.
 - **A hoisted declaration's guard must be symmetric in source position.** A top-level `fn` is defined

@@ -36,18 +36,18 @@ that needs uncontended pool workers must have its own process. So `cargo test` �
 
 ## What stays in Rust (not portable)
 
-**Fault paths DO port.** `recover:` catches a fault into a `Result`, so a fault's *message* is
+**Fault paths DO port.** `recover:` catches a fault into a `T!E`, so a fault's *message* is
 assertable in Chezzi (OOB indexing, overflow, bad chunk size):
 
 ```chezzi
 r := recover: [1, 2].chunk(0)
 match r:
-    Ok(_):  assert false, "expected a fault"
-    Err(e): assert e.message().contains("chunk")
+    ?_:  assert false, "expected a fault"
+    !e: assert e.message().contains("chunk")
 ```
 
 (Not every empty-collection case is a fault: `min`/`max`/`min_by`/`max_by`, like `first`/`last`/`pop`,
-return `Option[T]` and answer `None` — assert that directly, no `recover:`.)
+return `T?` and answer `None` — assert that directly, no `recover:`.)
 
 What genuinely can't port: compile-time checker tests (`rejects`/`ok`), parser/lexer (AST/token
 shapes), compiler/bytecode/GC internals, and concurrency timing/scheduler parity. Value/collection

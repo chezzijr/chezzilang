@@ -115,7 +115,7 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 - Keep modules small and single-purpose.
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global
   reserved namespace.** The global surface stays minimal: scalars, `tuple`, `range`, `Channel`,
-  `Result`/`Option`/`Iterator`, structural protocols. (`timer(ms)` moved to `import std.time`; `Shared`/
+  `T!E`/`T?`/`Iterator`, structural protocols. (`timer(ms)` moved to `import std.time`; `Shared`/
   `RwShared`/`Atomic`/`Executor` to `import std.concurrency` — all stay reserved names.) Register in the
   module's `.chz` (`native type` / `native struct`; no Rust-side module sig exists) and gate the bare name behind `import` via the per-module licensing set
   (mirror FFI `imported_ffi_types` / `imported_concurrency` / `imported_time`); keep runtime ctor/opcode
@@ -149,7 +149,7 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   and is gated by the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.rs`, its own process —
   `vm::pool` is one process-wide `OnceLock`), which runs the whole suite and asserts every test
   passes; `tests/chezzi_threads_cli.rs` then runs it again at `CHEZZI_THREADS=2`. Prefer this: it dogfoods the language and shrinks the Rust test surface. **Fault-path IS
-  Chezzi-able** — `r := recover: <faulting expr>` then `assert r` is `Err` and check `e.message()`
+  Chezzi-able** — `r := recover: <faulting expr>` then `assert r` is `!e` and check `e.message()`
   (don't reach for Rust just because a test expects a panic). **Fall back to Rust `#[cfg(test)]` ONLY
   for what `assert` genuinely can't express:** compile-time checker diagnostics (`rejects`/`ok`),
   token/AST/bytecode/GC internals, gc-stress rooting (`run_capture_stress`), and concurrency
@@ -199,14 +199,14 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
 ## Where things stand
 
 Core language is **implemented through M24 (and still evolving; M19 perf in progress)** (scalars, `List`/`Map`/`Set`/`tuple`,
-generic structs + enums, `Result`/`Option` + `?`, generics + structural protocols,
+generic structs + enums, `T!E`/`T?` + `?`, generics + structural protocols,
 exhaustive `match` + guards, closures/HOF, modules (incl. Python full paths `a.b.X`, TICKET-175),
 GC, interpolation, pipe, `defer`, `recover:`, `Iterator[T]`, slicing/indexing protocols,
 user-overloadable `==` via `Eq`, static protocol requirements via witness passing). **Concurrency** has
 landed through **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
 OS-thread M:N engine, netpoller + `std.net`). The checker has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
-four rules — a discarded `Result`/`Option`, a mutating call on a `Shared`/`RwShared`/`Atomic` read
+four rules — a discarded `T!E`/`T?`, a mutating call on a `Shared`/`RwShared`/`Atomic` read
 temporary, an unreachable `match` arm, an unread local (TICKET-090). Test totals move with every ticket;
 read the live counts from `cargo test` / `chezzi test tests/chz`, never from prose.
 

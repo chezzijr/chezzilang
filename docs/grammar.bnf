@@ -326,7 +326,7 @@
 # `native enum` — the ENUM analog of `native struct` (phase 5b). A body-less `native enum NAME[T…]:`
 # declares a RESERVED builtin enum's variant SHAPE (variant names + payload types) in Chezzi; it maps
 # ADDITIVELY onto an EXISTING reserved type (`Ty::Option`/`Ty::Result`), never a fresh nominal enum, and
-# the `?` operator / exhaustive `match` / top-level error propagation / `Ok`/`Err`/`Some`/`None`
+# the `?` operator / exhaustive `match` / top-level error propagation / `?x`/`!e`/`None`
 # construction all stay Rust-wired (the decl is a drift-guarded shape MIRROR). PRELUDE/STD-ONLY (the
 # checker rejects it in a user module) and TOP-LEVEL-only. The body is its variants (`<variant>` — an
 # IDENT with an optional `(typeList)` payload), optionally followed by body-less `native fn` methods
@@ -405,7 +405,7 @@
 # A top-level arm pattern: one-or-more primaries joined by "|" (BITOR) — an or-pattern matches if
 # ANY alternative matches (first match wins). A single primary parses unchanged. Every alternative
 # must bind the same variables (checker-enforced). A primary: a bare "IDENT" is a BINDING (or, for the
-# built-in Ok/Err/Some/None, a variant); a QUALIFIED "IDENT" "DOT" "IDENT" names a user variant
+# carrier pattern head, a variant); a QUALIFIED "IDENT" "DOT" "IDENT" names a user variant
 # (nullary, or with "LPAREN" a payload-carrying one); "(" … ")" a tuple pattern; an int/str/bool
 # literal; or a half-open integer range "INT" ".." "INT" (matches `start <= v < end`). Sub-patterns
 # nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>. The SAME
@@ -419,7 +419,7 @@
 # A leading "IDENT" "DOT" "IDENT" is a QUALIFIED variant `Enum.Variant`. User variants are scoped
 # under their enum (two enums may share a variant name) and MUST be written qualified; the checker
 # rejects a bare user-variant name. Resolution keys on the `(enum, variant)` pair. (Built-in
-# Result/Option variants Ok/Err/Some/None stay bare.) An OPTIONAL leading module qualifier
+# The carrier patterns `?v` / `!e` / `None` are <carrierPattern>.) An OPTIONAL leading module qualifier
 # `module.Enum.Variant` ("IDENT" "DOT" "IDENT" "DOT" "IDENT") mirrors module-qualified construction
 # (`geo.Color.Red`): the module binder is the bound module name (last path segment or `as` alias),
 # validated by the checker (module bound, owns the enum) then dropped — runtime keys on the same
@@ -449,7 +449,7 @@
                 | "INT" "DOTDOT" "MINUS" "INT"
 # A sub-pattern (nested position) is itself an or-alternation of primaries. A bare "IDENT" here is a
 # binding name OR — when it names a nullary variant of the matched type — a refutable variant match
-# (checker-promoted; e.g. the `None` in `Some(None)`). Same surface grammar either way.
+# (checker-promoted; e.g. the `None` in `?None`). Same surface grammar either way.
 <subpattern>  ::= <subpatternPrimary>
                 | <subpatternPrimary> "BITOR" <subpattern>
 <subpatternPrimary> ::= "IDENT"
@@ -475,7 +475,7 @@
                 | "QUESTIONQUESTION" <subpatternPrimary>
 
 # ===== types =====
-# Postfix sugar on a base type: `T?` = Option[T], `T!` = Result[T, Error], `T!E` = Result[T, E]
+# Postfix sugar on a base type: `T?` = an optional T, `T!` = T or an `Error`, `T!E` = T or an E
 # (stacks left-to-right). A parenthesized type is grouping when it has one element (`(T)` ⇒ `T`)
 # and a tuple type when it has two or more (`(T1, T2, …)`).
 # A `IDENT.IDENT` (optionally with `[typeList]`) is a MODULE-QUALIFIED type (`geo.Point`,
@@ -504,7 +504,7 @@
 # parses — the type list by the real type grammar (`Map[str, int]`, `(int, str)`, `fn(int) -> int`,
 # `lib.Bx[int]`, `int?`; only on an IDENT or non-tuple field head) and the subscript by the
 # expression grammar. The parser never chooses: the checker picks a type application when the head
-# names a generic item or a type (`idt[(int, str)]`, `Result[int, str].Ok(5)`, `Bx[int].make`),
+# names a generic item or a type (`idt[(int, str)]`, `Pair[int, str].Both(5)`, `Bx[int].make`),
 # else the index (`xs[i]`, `K := 1; fs[K](10)`). A type-only bracket on a value is rejected (`a
 # subscript takes an expression, found the type '…'`, or `… one index, found N`).
 <bracket> ::= <typeList> | <subscript>
@@ -550,9 +550,9 @@
              | <mulExpr> "STAR" <coalesceExpr> | <mulExpr> "SLASH" <coalesceExpr> | <mulExpr> "PERCENT" <coalesceExpr>
 # null-coalescing `??` (gap): binds tighter than every binary operator and looser than unary `-`
 # and the postfix chain. RIGHT-associative (`a ?? b ?? c` = `a ?? (b ?? c)`) — modeled by
-# right-recursion. `??` takes an `Option` OR a `Result` (TICKET-039); it SURVIVES desugar and the
+# right-recursion. `??` takes a `T?` OR a `T!E` (TICKET-039); it SURVIVES desugar and the
 # CHECKER picks `lower_carrier_option` or `lower_carrier_result_coalesce` from the operand's type
-# (the `Result` form discards the error, like Rust's `unwrap_or`).
+# (the `T!E` form discards the error, like Rust's `unwrap_or`).
 <coalesceExpr> ::= <unary> | <unary> "QUESTIONQUESTION" <coalesceExpr>
 <unary>    ::= <postfix> | "MINUS" <unary> | "BANG" <unary> | "QUESTION" <unary> | "QUESTIONQUESTION" <unary>
 
@@ -626,8 +626,8 @@
             | <postfix> "QUESTION"
             # optional chaining `?.` (gap): field, tuple-element, or method call through a CARRIER.
             # Parsed identically for either carrier — the node survives desugar and the CHECKER picks
-            # the lowering by the operand's TYPE: an `Option` lowers to a `match` (short-circuit +
-            # re-wrap), a `Result` lowers to `?` then `.` (identical to the spaced `x? .name`).
+            # the lowering by the operand's TYPE: a `T?` lowers to a `match` (short-circuit +
+            # re-wrap), a `T!E` lowers to `?` then `.` (identical to the spaced `x? .name`).
             | <postfix> "QUESTIONDOT" "IDENT"
             | <postfix> "QUESTIONDOT" "INT"
             | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" "RPAREN"
@@ -719,7 +719,7 @@
                 | <pattern> "IF" <expr> "COLON" <expr> "NEWLINE"
 <ifExpr>    ::= "IF" <expr> "COLON" <expr> <ifExprTail>
 <ifExprTail> ::= "ELSE" "COLON" <expr> | "ELIF" <expr> "COLON" <expr> <ifExprTail>
-# Panic-recovery boundary: runs a block, yields `Result[T, Error]` (Ok = trailing value, Err = a
+# Panic-recovery boundary: runs a block, yields `T!Error` (success = trailing value, error = a
 # caught runtime fault). Reuses <block> (inline or indented).
 <recoverExpr> ::= "RECOVER" <block>
 

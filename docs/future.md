@@ -7,7 +7,7 @@
 > inline); §4 (optimizations) is the live M19 backlog.
 
 The language **core** is broadly implemented and still evolving (scalars, `list`/`map`/`set`/`tuple`, generic structs +
-enums, `Result`/`Option` + `?`, generics + structural protocols, exhaustive `match`, closures/HOF,
+enums, `T!E`/`T?` + `?`, generics + structural protocols, exhaustive `match`, closures/HOF,
 modules, GC, interpolation, pipe, panic recovery via `recover:`, the `Iterator[T]`
 protocol bound). What follows is the gap between "core implemented" and "language you reach for to write
 real scripts."
@@ -837,9 +837,9 @@ only one engine**, so nothing here constrains the remaining steps 1–4.
 6. ~~**Optional chaining + null-coalescing**~~ — **DONE.** `x?.field`/`x?.method()` + right-assoc
    `a ?? b`. Originally lowered to a `match` by the desugar pass (zero checker/engine code); **W7-43
    (2026-08-11) moved that decision to the checker** — the carriers now survive desugar, the checker
-   picks the lowering by operand type (`Option` → `match`; `Result` → `?` then `.`, identical to the
+   picks the lowering by operand type (`T?` → `match`; `T!E` → `?` then `.`, identical to the
    spaced `x? .f`) and records it in a `CarrierTable` the compiler reads. **TICKET-039 (2026-09-02)
-   widened `??` to a `Result`**: it discards the error via an `Ok`/`Err(_)` match, Rust's
+   widened `??` to a `T!E`**: it discards the error via an `?v`/`!_` match, Rust's
    `unwrap_or`. Still zero new VM code: both paths lower to ops the engine already runs.
    `examples/optchain.chz`.
 7. ~~**Tuple-destructuring `for` (+ `enumerate` / `zip`)**~~ — **DONE.** `for a, b in List[(A,B)]`
@@ -905,7 +905,7 @@ only one engine**, so nothing here constrains the remaining steps 1–4.
     `tests/chz/spec/static_witness_test.chz`, `examples/static_witness.chz`. The two rejected 2026-06-24
     attempts (`auto-task/protocol-static-req`, `…-v2`) are superseded and discardable.
 
-14. **`cast[T](val: Any) -> Option[T]` — ⛔ NO CONSUMER (2026-08-09).** The owner ruled against
+14. **`cast[T](val: Any) -> T?` — ⛔ NO CONSUMER (2026-08-09).** The owner ruled against
     leaning on `Any` ("we vouch for statically typed; `Any` is Go's `interface{}`"), and `cast` only pays
     off through `Any` — so this is closed unless that reverses. Its erasure analysis stays valuable and
     is summarised in §3a1 "What stays impossible". Original entry: **a checked downcast off the `Any`
@@ -914,12 +914,12 @@ only one engine**, so nothing here constrains the remaining steps 1–4.
     lets a value of any type into a universal slot, but there is currently **no way back out** — you can
     hold and display an `Any` but not recover its concrete type. The companion is a **checked downcast**:
     ```chezzi
-    cast[int](x)          # -> Option[int]: Some(n) if x is really an int, else None
+    cast[int](x)          # -> int?: n if x is really an int, else None
     match cast[Point](v):
-        Some(p): print(p.x)
+        ?p: print(p.x)
         None:    print("not a Point")
     ```
-    Returning `Option[T]` (not a raw `T`) makes it fit `?` / `match` and keeps it total (no faulting
+    Returning `T?` (not a raw `T`) makes it fit `?` / `match` and keeps it total (no faulting
     downcast). **Why deferred — the runtime ERASES generics, so `cast` can only *honestly* witness what
     a runtime `Value` still carries:**
     - `Value` is `Int`/`Float`/`Bool`/`Nil`/`Obj` (`src/vm/value.rs`) — scalars and `str` witness fine.
@@ -955,13 +955,13 @@ only one engine**, so nothing here constrains the remaining steps 1–4.
       reserved consumer of it (`fn make[T: Convert[int]](seed: T, n: int) -> T: return T.convert(n)`).
       Direct `Type.convert(x)` still needs no protocol and is still the right spelling when the type is
       known. A fallible conversion is `convert(x: S) ->
-      Result[Self, E]` — **no separate `TryFrom`** needed. **Skip `Into`** (needs expected-type threading;
+      Self!E` — **no separate `TryFrom`** needed. **Skip `Into`** (needs expected-type threading;
       Chezzi infers bottom-up). **Multi-source (Phase 2) also DEFERRED** — needs argument-type overloading
       (banned invariant) for thin payoff; distinct-named static ctors cover it today.
     - **Cheap scalar fills — ✅ LANDED** (additive, low risk, landed independently ahead of the
       `From` protocol): `bool(x)` truthiness cast (int/float/bool/str, never faults on a scalar) +
-      the `Result`-returning `s.parse_int() -> Result[int, str]` / `s.parse_float() -> Result[float,
-      str]` siblings of the `Option`-returning `to_int`/`to_float`.
+      the `T!E`-returning `s.parse_int() -> int!str` / `s.parse_float() -> float!str`
+      siblings of the `T?`-returning `to_int`/`to_float`.
     Variance/soundness note: a `from`-based conversion is a value-producing call, not a subtype
     relation — no covariance holes. This is a language feature (own milestone), not a perf lever.
 
@@ -1338,7 +1338,7 @@ render ERROR too (whole file, before any test runs), counted separately as `file
      `chezzi test`'s USAGE + the `run_tests_opts` doc-comment. **Default (no-flag) output is unchanged.**
 
 **Migration note (corrects an earlier claim):** fault-path tests **are** portable in-language via
-`recover:` — `r := recover: <faulting expr>` yields `Err(e)` and `e.message()` gives the fault text, so
+`recover:` — `r := recover: <faulting expr>` yields `!e` and `e.message()` gives the fault text, so
 `assert e.message().contains(...)` tests a fault without Rust (proven end-to-end). The runner keeps
 its *own* fault tests in Rust only because IT needs the fault `span` for `file:line`. So the "stays in
 Rust" set for the `tests/chz/` migration is just: gc-stress rooting (`run_capture_stress`), checker

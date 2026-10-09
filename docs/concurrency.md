@@ -191,7 +191,7 @@ They are **not** the same channel, and the difference is Go's, not an accident:
 
 | what the spawned callee does | what the nursery does |
 |---|---|
-| **returns a value** — including an `Err(e)` from a `-> T!` callee | **discarded.** `spawn f(x)` is a statement; there is no place for a return value to go, exactly like Go's `go f(x)`. |
+| **returns a value** — including an `!e` from a `-> T!` callee | **discarded.** `spawn f(x)` is a statement; there is no place for a return value to go, exactly like Go's `go f(x)`. |
 | **faults** (a runtime error, an uncaught `panic(...)`) | **aborts the nursery** and the program, rc=1 — as a panicking goroutine takes down a Go process. |
 
 Measured Go 1.26.5, the ancestor that owns this seam:
@@ -228,7 +228,7 @@ parallel:
 print(served.load())                   # the nursery has joined — the count is final and real
 ```
 
-`examples/echo_server.chz` is the worked version. A `Result` returned by a spawned callee and never
+`examples/echo_server.chz` is the worked version. A `T!E` returned by a spawned callee and never
 collected is silently gone, so **never conclude "it worked" from a nursery that merely finished** —
 count what actually happened.
 
@@ -240,7 +240,7 @@ count what actually happened.
 deadlock) and **unstructured** (a goroutine's lifetime isn't tied to any scope, so it can outlive the
 function that spawned it). The nursery *is* the join — no counter to mismanage — and a task **cannot
 outlive its `parallel:` block**, so leaks are structurally impossible and a *fault* has an obvious home
-(the join surfaces it). A **returned `Err` still does not** — the nursery discards it, exactly like Go;
+(the join surfaces it). A **returned `!e` still does not** — the nursery discards it, exactly like Go;
 see "A spawned task's two error channels" above and collect it yourself.
 This is **structured concurrency**, the modern consensus that postdates Go: Python `trio` /
 `asyncio.TaskGroup`, Kotlin `coroutineScope`, Swift `TaskGroup`, Java `StructuredTaskScope`.
@@ -396,13 +396,13 @@ A `Channel[T]` is **not** an object in any task's heap. It is a separate runtime
 the airlock, never live in two heaps at once.
 
 ```chezzi
-ch := Channel[str]()       # construct; capitalized like Shared[T] / Option[T]. Unbounded FIFO.
+ch := Channel[str]()       # construct; capitalized like Shared[T] / T?. Unbounded FIFO.
 rch := Channel[int](0)     # RENDEZVOUS: send blocks until a receiver is already waiting (Go's make(chan T)),
                             # but a parked sender's value is visible to try_recv/wait: polls, not just recv
 bch := Channel[int](2)     # BOUNDED: holds ≤2 queued messages; a 3rd `send` blocks until a `recv` frees a slot
 ch.send(x)                 # x moved/copied OUT of the sender's heap → channel queue
 v := ch.recv()             # value reconstructed IN the receiver's heap
-opt := ch.try_recv()       # non-blocking poll: Some(v) if queued, None if empty
+opt := ch.try_recv()       # non-blocking poll: v if queued, None if empty
 n := ch.len()              # current queued count
 c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0); -1 for an unbounded Channel[T]()
 ```
@@ -412,7 +412,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
 | `send` | `send(self, v: T) -> None` | enqueue (move/copy at the airlock); the sender MAY keep using the value — the crossing copies, so its later writes are simply not seen by the receiver. On a **bounded** channel a `send` **blocks/parks** while the queue is at capacity (backpressure), resuming once a `recv` frees a slot — the send-side mirror of a blocking `recv`. On a **rendezvous** channel (`cap == 0`) a `send` blocks until a receiver is already waiting, exactly like a bounded `send` at capacity 0 conceptually would, except capacity 0 is otherwise inexpressible as `queue.len() < cap` — a blocked sender (rendezvous or full bounded) publishes its value as an OFFER, so a poll can take it, and `send` returns only once a receiver took it; `len()` does not count it |
 | `try_send` | `try_send(self, v: T) -> bool` | **non-blocking** send: `true` once queued, `false` if the send can't proceed — the channel is **closed**, a **bounded** channel is **full**, or a **rendezvous** channel has no receiver already waiting. Never blocks/parks |
 | `recv` | `recv(self) -> T` | dequeue (FIFO); blocking surface (see below) |
-| `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `Some(v)` if queued, `None` if empty, or a value handed over by a parked rendezvous sender — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
+| `try_recv` | `try_recv(self) -> T?` | **non-blocking** poll (A1): `?v` if queued, `None` if empty, or a value handed over by a parked rendezvous sender — never blocks, never faults, never suspends a fiber. Drain a mailbox without guarding on `len()` |
 | `len`  | `len(self) -> int` | queued count — use to guard a `recv` |
 | `cap`  | `cap(self) -> int` | capacity: `-1` for an unbounded `Channel[T]()`, `0` for a rendezvous `Channel[T](0)`, or the bound passed to `Channel[T](cap)` |
 
@@ -426,7 +426,7 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   argument as a blocking `recv`. A full/rendezvous `send` with no possible consumer (top level, no
   nursery, or inside a native callback) is a **deadlock fault**, not a silent over-fill or hang.
   As with `try_recv`, `try_send`'s full-vs-not decision under multi-sender contention is nondeterministic
-  — the same class as `try_recv`'s `None`-vs-`Some` under contention; it is not "fixed".
+  — the same class as `try_recv`'s `None`-vs-`?v` under contention; it is not "fixed".
 - **One hand-off protocol (TICKET-185, Go's `hchan` model).** A value is delivered at exactly one
   commit point: a CAS on the blocked party's `Pending`, under the channel lock. A blocked sender (plain
   `send` or a `wait:` send arm, in any context, on a rendezvous or FULL bounded channel) publishes an
@@ -545,14 +545,14 @@ into each task by value. See `docs/stdlib.md` for signatures.
 ### 5b. `std.concurrency.task` — result handles for `Executor` work
 
 Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. The result-returning primitive is
-`Executor.submit_result[T](f: fn() -> T) -> Channel[Result[T]]`: submit `f` and get a cap-1 channel you
-`.recv()` for its outcome (`Ok(value)` or `Err(message)`, TICKET-208; the `Task.get() -> T` raise
-described below is now `Task.get() -> Result[T]`). That channel is **sealed** (TICKET-219): its
+`Executor.submit_result[T](f: fn() -> T) -> Channel[T!]`: submit `f` and get a cap-1 channel you
+`.recv()` for its outcome (`?value` or `!message`, TICKET-208; the `Task.get() -> T` raise
+described below is now `Task.get() -> T!`). That channel is **sealed** (TICKET-219): its
 outcome is written once, and every `recv` returns a copy of it and takes nothing, so `len()` stays
 `1` and every reader sees the same outcome. Do not iterate it with `for` (it never ends); to collect
 several outcomes keep a list of `submit_result` channels. Two writers can seal it, and the first
 wins: the job body seals the value of `recover: f()`, and the job transition seals
-`Err("task cancelled: shutdown_now() stopped it before it finished")` when it drops a held job or a
+`!"task cancelled: shutdown_now() stopped it before it finished"` when it drops a held job or a
 job ends cut (see "Job states" below). `std.concurrency.task` wraps that channel in a future-style
 handle (every copy of the handle, in any task, reads the same channel):
 
@@ -1223,7 +1223,7 @@ fn serve(tok: Token, io: Channel[str]):
 >   *sooner* of its own deadline and the run's, and the wake re-checks. The **netpoller** half is
 >   **W7-18** (fixed 2026-08-05), same recipe: an `accept`/`read`/`write`/`connect` park registers with
 >   the sooner of the op's own `timeout_ms` and the run deadline, and the resumed op re-reads the clock
->   to tell the two apart — the op's own deadline stays a catchable `Err("timeout")`, the run's is a
+>   to tell the two apart — the op's own deadline stays a catchable `!"timeout"`, the run's is a
 >   hard abort. A socket op's `timeout_ms` is unaffected when the cap is off or unexpired.
 > - **`--max-heap` reaches a sleeper only through the cancel arm** — i.e. when the over-allocating task
 >   is a nursery/`Executor` sibling sharing its cancel scope (measured 365 ms). A sleeping top-level
@@ -1583,13 +1583,13 @@ Compare a line SET, or make the program deterministic by construction, before ca
 > on the main goroutine blocks until a client arrives; TICKET-181 widened it to the callback and
 > `defer:` shapes, where CPython and Go block and read) — and an M:N worker inside a native callback
 > (which spins a replacement worker first).
-> Everywhere else — an eager `Executor` job — it returns `Err("<op> would block: an Executor job
+> Everywhere else — an eager `Executor` job — it returns the error `<op> would block: an Executor job
 > doesn't own its thread — blocking here would starve every other job and `parallel:` nursery
 > sharing the pool. Do this socket op inside `spawn:` or a `parallel:` nursery instead, where it
-> parks rather than blocking a shared thread.")`. TICKET-052 gave the job pool a yield bracket (a
+> parks rather than blocking a shared thread.`. TICKET-052 gave the job pool a yield bracket (a
 > blocked job now hands its thread to a replacement), so this refusal no longer rests on starvation
 > — it survives because widening it would change what these ops RETURN on a would-block fd (a hang
-> instead of this `Err`), which is deliberate rather than an unfinished corner. **The op set is
+> instead of this `!e`), which is deliberate rather than an unfinished corner. **The op set is
 > `accept`/`read`/`read_bytes`/
 > `write`; `connect` joins it ONLY inside an eager `Executor` job** — those four wait on a Chezzi peer
 > fiber that can only run on the very thread they would block, whereas a `connect` handshake is
@@ -1616,14 +1616,14 @@ Compare a line SET, or make the program deterministic by construction, before ca
 >   `accept` job plus a later `connect` job = hang). **TICKET-052 closed that starvation** — a blocked
 >   job now hands its pool thread to a replacement worker (`pool::yield_slot`) — but `accept`/`read`/
 >   `write` still refuse rather than block: widening them would change what they RETURN on a
->   would-block fd (a hang instead of the `Err` below), a separate behaviour change TICKET-052 does
+>   would-block fd (a hang instead of the `!e` below), a separate behaviour change TICKET-052 does
 >   not make. This is the one context where **`connect` refuses too** (`W7-59`) —
 >   before that it spun in place for up to 10 s, pinning a pool worker with no cancel or `--timeout`
 >   escape (measured: an outer `shutdown_now()` at 200 ms took **10 009 ms** to end the run, now
 >   **209 ms**). Use `spawn`/`parallel:` for socket work, which parks instead of blocking.
 >
 > **Closing a `Socket`/`Listener` from another task while a sibling is parked on it (W15-1) wakes the
-> parked op with an `Err`** naming the closed resource (`"<op> on a closed listener|socket"`), Go's
+> parked op with an `!e`** naming the closed resource (`"<op> on a closed listener|socket"`), Go's
 > `Close` cancelling a blocked `Accept`/`Read` — it never hangs or crashes the netpoller.
 
 ---
@@ -1702,7 +1702,7 @@ case — the one that motivated this milestone — still broken.
 ### Semantics to pin before writing code
 
 - **A killed child surfaces as the CANCELLATION, not as a command failure.** If it returns
-  `Err("exited with signal 15")` a `recover:` swallows it and the task keeps running, which defeats the
+  `!"exited with signal 15"` a `recover:` swallows it and the task keeps running, which defeats the
   feature. It must carry the cancel/exit marker the surrounding halt already uses, so the existing
   precedence (`Exit` > hard fault > fault > deadlock) applies unchanged.
 - **`defer` interaction.** A `defer:` body that itself shells out must not be truncated mid-cleanup —
@@ -1796,7 +1796,7 @@ new list or veto.
 1. A timed `wait:` in a Demote context is `inflight` (C1, E1-E4). It faulted `deadlock` at every
    worker count; Go's `select` with `time.After` in a goroutine callback returns.
 2. A socket op on a thread that owns itself blocks in a callback or `defer:` (X2). It returned
-   `Err("read would block: an Executor job doesn't own its thread …")`; CPython and Go block and
+   `!"read would block: an Executor job doesn't own its thread …"`; CPython and Go block and
    read.
 3. An Executor join (`ex.shutdown()`) in a fiber demotes (X1). It held the only runner and hung at
    T=1; Go and CPython complete.
@@ -1809,7 +1809,7 @@ new list or veto.
 
 **Deliberate differences from Go**, each a `R` or hang cell of the table:
 
-- A socket op in an Executor job returns the "doesn't own its thread" `Err`; `connect` there too.
+- A socket op in an Executor job returns the "doesn't own its thread" `!e`; `connect` there too.
 - An unjudged context (`main` inside a real callback, a job inside a callback) with nothing that
   can satisfy it HANGS, where Go faults: the verdict declines rather than risk a false fault
   (DEC-136; `docs/lessons.md` §4). The grid pins it (`recv/main_cb/Nothing` hangs,
@@ -2090,7 +2090,7 @@ either.
   never a silent duplicate. (The depth cap stays as a *separate* backstop for a genuinely-unbounded
   **acyclic** nest.)
 - **Protocol existentials ARE sendable (Task 2, Go `chan interface` parity).** `Channel[Drawable]`,
-  a protocol-typed spawn arg / struct field / `Ok`/`Err` payload / return all type-check — the erased
+  a protocol-typed spawn arg / struct field / `?v`/`!e` payload / return all type-check — the erased
   witness crosses by deep value copy like any other value. The concrete witness's own sendability is
   checked at each widening site; a witness that genuinely can't serialize (one carrying a live host
   resource, or a module handle) is rejected at the **runtime airlock** (`ensure_crossable`), recoverably
@@ -2263,12 +2263,12 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > 1. after an `os.exit`: drop every held job and settle no handle. No `defer` runs after an exit
 >    and no reader returns, so nothing runs or prints after it (CPython `os._exit`, Go `os.Exit`).
 > 2. after a fire-and-forget job fault, or under a cancel: drop every held job and settle each
->    handle job it drops or cuts with `Err("task cancelled: shutdown_now() stopped it before it
->    finished")` (CPython `shutdown(cancel_futures=True)`). A `defer` still runs after a job fault,
+>    handle job it drops or cuts with the error `task cancelled: shutdown_now() stopped it before it
+>    finished` (CPython `shutdown(cancel_futures=True)`). A `defer` still runs after a job fault,
 >    and it may read a handle.
 > 3. else: release held jobs while fewer than `n` run.
 >
-> The cancel `Err` is sealed inside the transition, in the lock hold that ends the job
+> The cancel `!e` is sealed inside the transition, in the lock hold that ends the job
 > (`SchedCore::settle_job`, TICKET-232); only the wake of its readers runs after the unlock. A
 > join returns on the job's slot, so a seal written after the unlock left a reader on an empty
 > channel with no counted party, and `h.get()` reported a false deadlock at `task.chz` (measured
@@ -2290,13 +2290,13 @@ supervised tasks) — Go's float-free `go` is the model both ecosystems *rejecte
 > So no held job starts after an exit, a job fault, `shutdown_now()` or a creator cancel. A job
 > fault's cell is stored before any sched's cancel flag trips, so the halt read closes that window.
 > One shape stays accepted: a non-`defer` reader already waiting on a handle when a job fault lands
-> may take the cancel `Err` and run to its next wait or back-edge, the shape DEC-194 accepts for a
+> may take the cancel `!e` and run to its next wait or back-edge, the shape DEC-194 accepts for a
 > guard the halt freed. The deadlock verdict still reaps a parked job without settling its handle;
 > making the verdict a run halt is its own ticket (CHAN4).
 >
 > **The drain contract (TICKET-208).** A fire-and-forget job's fault ends the run at once: no
 > `recover:` catches it, and the first fault is the report. A handle job (`submit_result`,
-> `submit_task`) never faults by itself: its fault is its handle's `Err`, and `shutdown()` raises no
+> `submit_task`) never faults by itself: its fault is its handle's `!e`, and `shutdown()` raises no
 > job fault. Paragraphs below that describe `shutdown()` raising the lowest-index fault predate that
 > rule.
 > **The usage shape that keeps you out of a race: read or assert after `shutdown()`, never between it
@@ -2523,7 +2523,7 @@ Ships join semantics with side-effecting tasks (e.g. `print`). No channels yet.
   sendability/airlock checks on the receiver + args still apply.
 - **Interp** `src/interp/mod.rs`: `Interp.nurseries: Vec<Vec<Task>>`; `Task = Call { callee, args } |
   Block { body, scope }`. `Parallel` → push a list, run the body, pop, run tasks FIFO (reuse the
-  re-entrant call path), first `Err` stops siblings + propagates. `Spawn` → eval callee+args (form 1)
+  re-entrant call path), first `!e` stops siblings + propagates. `Spawn` → eval callee+args (form 1)
   or snapshot the captured scope (form 2) **through `deep_clone`**, push the task. Add
   `deep_clone(&Value)`: scalars/str trivial; list/map/set/struct/enum recursively cloned (fresh
   `Rc<RefCell>`); `Channel`/`Shared` pass by handle; closures/native → error (not sendable).
@@ -2584,7 +2584,7 @@ and shippable now; Group B is gated on **B1**. The surface of `spawn` / `paralle
 |---|------|--------|
 | **A2** | `Executor` **program-exit join** — wait for any executor never explicitly `shutdown`-ed at a clean exit (creation order; `os.exit` skips it; a faulting program is not joined). Covers an executor created inside a task (W7-5b). | ✅ **done** (see [§8](#the-escape-hatch-c5-executor--a-separately-owned-work-queue)) |
 | **A3a** | Reject a non-sendable **read through a nested closure** inside a `spawn:` block. | ✅ **enforced for a non-sendable local** — emergent from the persistent `capture_floors` + the `infer_ident` read gate. **Updated (B3.3 / Task 2a):** a plain **closure** read through a nested closure is now *accepted* (closures cross by value), so the pin is `read_captured_capturefree_closure_through_nested_closure_in_spawn_block_ok`. |
-| **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`Some(v)`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done** (it never suspends, so it is schedule-independent — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
+| **A1** | `Channel.try_recv() -> T?` — a **non-blocking poll** (`?v`/`None`, never blocks/faults/suspends). Originally deferred (its motivating mid-flight-producer scenario needed the engine), un-deferred once B1/B2 landed. | ✅ **done** (it never suspends, so it is schedule-independent — see [§5](#5-channelt--a-mailbox-outside-every-heap)). |
 
 > *Dropped from Group A, shipped in B3.6:* **A3b** (`Executor.submit` capture sendability gate). The
 > submitted closure now crosses **by value** (`wire_callable` → `to_wire`), so a

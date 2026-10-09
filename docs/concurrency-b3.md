@@ -192,7 +192,7 @@ B3.4, B3.5, B3.6. **B3 epic complete.**
 
 **B3.0 / B3.1.** `WireValue` + `to_wire`/`from_wire` (`src/vm/wire.rs`) replace the `deep_clone` round-trip;
 `to_wire` is total/statically-infallible at B3.0 (by-reference set crosses as `WireValue::Handle(GcRef)`,
-same heap; the non-crossable `Err` arms arrive at B3.3). B3.1 moves the cores to `src/vm/core.rs`
+same heap; the non-crossable `!e` arms arrive at B3.3). B3.1 moves the cores to `src/vm/core.rs`
 (`ChannelCore`/`SharedCore`/`ExecutorCore`, each a `Mutex`, condvar/cancel deferred); the airlock now
 serializes *at the core boundary* and `from_wire` allocs a **fresh** handle onto the **same** `Arc` (shared,
 not copied). **`children()` arms REWRITTEN, not dropped** (decision E). Key gotcha: **never hold a

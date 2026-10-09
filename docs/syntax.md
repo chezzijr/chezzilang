@@ -107,7 +107,7 @@ prefix `rb"..."`, and Rust-style `r#"..."#` hash delimiters — the triple form 
 `bytearray([ints])` (each element 0–255). Operations: `ba[i]` → `int` 0–255, **`ba[i] = x`** mutates
 in place (`IndexSet`; the value must be 0–255 and the index in range, else a recoverable panic — the
 new capability `bytes` lacks), `ba[a:b:c]` → a NEW `bytearray` (mutable copy, byte offsets),
-`for x in ba` yields `int`, `ba.len()`, `.push(int)` (append one byte 0–255), `.pop() -> Option[int]`,
+`for x in ba` yields `int`, `ba.len()`, `.push(int)` (append one byte 0–255), `.pop() -> int?`,
 `.extend(bytes | bytearray | List[int])` (append in place). `==`/`!=` are structural; cross-type
 `b"a" == bytearray([97])` is **content-equal** (Python parity). `bytearray` is **NOT `Hashable`**
 (mutable ⇒ not a `map`/`set` key, like `list`/`set`/`map`). `str(ba)` / `print(ba)` / interpolation
@@ -118,7 +118,7 @@ the `--parallel` airlock by value (deep copy — a fresh independent buffer, lik
 
 **Built-in conversions.** Two conversion surfaces bridge the core types — see the table below.
 
-| Conversion | Form | Result | Notes |
+| Conversion | Form | Gives | Notes |
 | --- | --- | --- | --- |
 | str → bytes (UTF-8) | `s.encode()` | `bytes` | method on `str`; always succeeds (str is UTF-8 internally) |
 | bytes → str (UTF-8) | `b.decode()` | `str` | method on `bytes`; **recoverable** fault on invalid UTF-8 |
@@ -133,7 +133,7 @@ char; `b"\xff\xfe".decode()` faults **recoverably** (catchable by `recover:`), n
 
 `List(it)` / `Set(it)` / `Map(it)` accept **any for-iterable** — exactly what `for x in it` accepts:
 `list`, `set`, `str` (per-char `str`), `bytes`/`bytearray` (per-byte `int`), `map` (its keys),
-`range`, and a user struct with `next(self) -> Option[T]`. They do **not** require a formal
+`range`, and a user struct with `next(self) -> T?`. They do **not** require a formal
 `Iterable[T]` bound — they reuse the same internal iterable union as the `for` loop. The empty
 **container constructors** are first-class: `List[T]()` / `Map[K, V]()` / `Set[T]()` take a
 **turbofish** that pins the element/key/value type, and the bare `List()` / `Map()` / `Set()`
@@ -305,13 +305,13 @@ ANSWER += 1                   # ✗ every compound form is caught too
 
 `_` is Go's blank identifier in `:=`, `=` and destructuring, at **every** scope (TICKET-142):
 `_ := e` and `_ = e` evaluate `e` and discard it, any number of times, with any types — so the
-discarded-`Result` warning's own escape (`_ := f()`, then `_ := g()`) works at module top level too.
+discarded-`T!E` warning's own escape (`_ := f()`, then `_ := g()`) works at module top level too.
 A `_` element of a multi-target `=` discards its element too: `a, _ = (1, 2)` and `_, b[0] = t`
 (Python and Go accept both).
 `_` is never declared, so it has no type to freeze and no global slot, and reading it is an error
 (`cannot use '_' as a value`; Go: `cannot use _ as value or type`). `_ := 5; print(_)` printed `5`
 before. A loop variable, parameter or match pattern named `_` still binds as before. `_ := f()`
-stays a `let`, not an expression statement, so it does not fire the discarded-`Result` warning.
+stays a `let`, not an expression statement, so it does not fire the discarded-`T!E` warning.
 
 #### Unused locals warn (TICKET-090)
 
@@ -389,8 +389,8 @@ fn f():
   - A body above an un-annotated global whose type is not yet known there (an empty collection
     `xs := []`) is rejected with "annotate its declaration".
   - An `import` below a body that uses it stays rejected (`'pi' is used before its import`, Go's rule).
-  - A body above the first let refines the global's type (TICKET-186): with `fn w(): z = Some("ab")`
-    above `z := None`, `z` is an `Option[str]`, so `fn r() -> int: return z ?? 0` is
+  - A body above the first let refines the global's type (TICKET-186): with `fn w(): z = ?"ab"`
+    above `z := None`, `z` is an `str?`, so `fn r() -> int: return z ?? 0` is
     `branches have incompatible types: str and int`.
   - A module-level `return` is an error: `return` then `x := 5` at top level is
     `'return' outside a function` (CPython's `SyntaxError`). A `return` belongs in a fn body.
@@ -419,7 +419,7 @@ fn f():
   binding inside a top-level `if:`/`for:`/`while:` body: those are inner scopes, not the module scope.
 - **A refinement is not a retype.** The carve-out is one-sided: the new type is allowed only when it
   *fills in* what the old one left open, so `x := []` then `x := [1]`, `y := {}` then `y := {"a": 1}`,
-  and `z := None` then `z := Some(1)` all stay legal. Going the other way is a retype and is rejected —
+  and `z := None` then `z := ?1` all stay legal. Going the other way is a retype and is rejected —
   `x := []` then `x := 42`, and `x := 1` then `x := None`, both fire (the second would hand a `None` out
   of a closure declared `-> int`).
 - **Narrowing counts as a change too** — `v: Any = 1` then `v := "s"`, or `s: Shape = Circle(1)` then
@@ -647,8 +647,8 @@ what each call head means and the backend reads that record, so the local wins a
 | `Map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
 | `Set[T]` | `{1, 2, 3}` | deduped, insertion-ordered hash set; `T` any `Hashable` type; empty is `Set()` |
 | `tuple` | `(1, "a")` | fixed-arity, immutable |
-| `Result[T, E]` | `Ok(x)` / `Ok()` / `Err(e)` | §9; shorthand `T!E`, or `T!` (E = `Error`); `Ok()` (zero-arg) is `Result[None, E]`'s success value |
-| `Option[T]` | `Some(x)` / `None` | §9; shorthand `T?` |
+| `T!E` | `x` / `?x` / `!e` | §9; `T!` means `T!Error`; a `None!E` fn succeeds by falling off the end or by a bare `return` |
+| `T?` | `?x` / `None` | §9; shorthand `T?` |
 
 Diagnostics print a type in this shorthand: `int?`, `str!IoErr`, `int!` (E = `Error`), `!E`.
 The prefix type `!E` is `None!E` (and a bare `!` is `None!`): a fallible call with no value, as in
@@ -662,18 +662,18 @@ As a type, `None` means "returns nothing". It is legal only as a return type (`-
 > type/ctor names. (Literal syntax is unchanged: `[…]`, `{k: v}`, `{a, b}`.) `tuple` is deliberately
 > left lowercase for now — a possible later follow-up.
 
-**Type shorthand.** In any type position, `T?` is sugar for `Option[T]`; `T!E` for `Result[T, E]`;
-and `T!` for `Result[T, Error]` (E defaults to the built-in `Error` protocol). Examples: `int?`,
-`List[int]?`, `int!` (= `Result[int, Error]`), `int!DbErr` (= `Result[int, DbErr]`). Pure spelling —
-`Some`/`None`/`Ok`/`Err`, `match`, and `?` behave exactly as on the long forms.
+**Type shorthand.** In any type position, `T?` is sugar for `T?`; `T!E` for `T!E`;
+and `T!` for `T!Error` (E defaults to the built-in `Error` protocol). Examples: `int?`,
+`List[int]?`, `int!` (= `int!Error`), `int!DbErr` (= `int!DbErr`). Pure spelling —
+`?v`/`None`/`?v`/`!e`, `match`, and `?` behave exactly as on the long forms.
 
 **Success-coercion (implicit wrap, TICKET-227).** At EVERY typed slot — a typed binding, an
 assignment target, an argument, a field, a collection or tuple element, a conversion or box ctor
 element, a comprehension element, `return`, `yield`, an inline or closure body, a parameter or field
-default — a plain success value implicitly wraps: `T -> T?` gives `Some(v)`, `T -> T!E` gives `Ok(v)` —
-and a bare `return` (or falling off the end) at a `Result[None, E]` (`None!E`) fn gives `Ok()`. `None`
-and error values (`!e`, `Err(e)`) stay explicit; a value that is ALREADY an `Option`/`Result` is never
-re-wrapped (`Option[Option[int]]: return Some(1)` still needs `Some(Some(1))`); the wrap never chains
+default — a plain success value implicitly wraps: `T -> T?` gives a present value, `T -> T!E` gives a success value —
+and a bare `return` (or falling off the end) at a `None!E` fn gives its success value. `None`
+and error values (`!e`) stay explicit; a value that is ALREADY a `T?`/`T!E` is never
+re-wrapped (`int??: return ?1` still needs `?(?1)`); the wrap never chains
 onto the int→float rule (`float?: return 1` is still an error, D3); and it declines at a slot
 mentioning a type parameter. An operator operand is not a slot, nor is the return of a fn with no `->`.
 Each branch of an **if/match expression** at a slot wraps on its own (see §8): `x: int? = if c: n else:
@@ -719,7 +719,7 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 1 | `f(x)` `a.b` `a[i]` `a?.b` | call, field access, index, optional chaining |
 | 2 | `?` | error propagation (postfix, §9) |
 | 3 | `-` (unary) | |
-| 4 | `??` | null-coalescing, RIGHT-associative, Option or Result (see below) |
+| 4 | `??` | null-coalescing, RIGHT-associative, `T?` or `T!E` (see below) |
 | 5 | `*` `/` `%` | `*` also list repeat: `[0] * 3` (and `3 * [0]`, commutative) |
 | 6 | `+` `-` | `+` also list concat: `[1,2] + [3,4]`; `-` also set difference: `a - b` |
 | 7 | `..` | range (end-exclusive) |
@@ -767,7 +767,7 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 >   `n` raises a recoverable `list repeat capacity overflow`, never a process abort. An empty source
 >   repeats to `[]` in constant time for any `n`.
 > - `Set[T] | Set[T]` → union (= `.union`), `& ` → intersection (= `.intersection`), `-` → difference
->   (= `.difference`), `^` → symmetric-difference (no method form). Result preserves insertion order.
+>   (= `.difference`), `^` → symmetric-difference (no method form). The result preserves insertion order.
 >
 > The compound-assign forms work too, but `+=` is the odd one out: `xs += ys` EXTENDS the receiver
 > **in place** and every alias sees it, matching CPython's `list.__iadd__` — it does not rebind the
@@ -919,8 +919,8 @@ struct W:
     fn take[R, T: Popper[R]](self, x: T) -> R:
         return x.pop()
 
-v := W().take([1, 2, 3])        # Some(3) — inferred
-v2: int? = W().take([1, 2, 3])  # Some(3) — or pinned by the annotation
+v := W().take([1, 2, 3])        # 3 — inferred
+v2: int? = W().take([1, 2, 3])  # 3 — or pinned by the annotation
 ```
 
 A method that could not conform for *any* instantiation (wrong arity, wrong parameter type, missing
@@ -982,7 +982,7 @@ Pinning does not yet reach every use: a call in an `if`/`match` **value arm**, a
 the element type open. Annotate the binding when you need certainty — `docs/gaps.md` W8-45 records
 the measured cases.
 
-**Inline-expr body implicitly returns (Option A, inline-only).** A named function written in the
+**Inline-expr body implicitly returns (choice A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
 **bare expression** implicitly **returns that expression's value** — exactly like a closure
 `fn(x): expr`. This is the only place a function body returns implicitly:
@@ -1189,11 +1189,11 @@ consequences are worth writing down, because each is a rule you can hit:
    error: *"a default expression cannot propagate with `?` — defaults are evaluated in their defining
    module, which has no caller to propagate to; use `??` or produce a `T?` value"*. An error escaping into
    the *caller* from an expression owned by the *definer* is exactly the coupling this design removes.
-   It also **widens**: a `Result`-typed parameter whose default propagates *inside* its own scope now
-   works, where it used to be rejected — `fn f(x: int!str = Ok(getr()?.len()))` compiles, and returns
-   `4` on the `Ok` path and the `Err` unchanged on the other. Option-mode `?.` and `??` never
-   propagated, so both are unaffected (`x: Option[int] = geto()?.len()`, `x: int = geto() ?? 0`).
-   `??` on a `Result` also never propagates — it DISCARDS the error, so a default containing
+   It also **widens**: a `T!E`-typed parameter whose default propagates *inside* its own scope now
+   works, where it used to be rejected — `fn f(x: int!str = ?(getr()?.len()))` compiles, and returns
+   `4` on the `?v` path and the `!e` unchanged on the other. `T?`-mode `?.` and `??` never
+   propagated, so both are unaffected (`x: int? = geto()?.len()`, `x: int = geto() ?? 0`).
+   `??` on a `T!E` also never propagates — it DISCARDS the error, so a default containing
    `getr() ?? 0` is still legal where `getr()?` is not.
 2. **A default always resolves in the module that DECLARES it — including where the caller cannot
    name that module.** Because a method call is resolved by *name* before types are known, a method
@@ -1410,7 +1410,7 @@ module-qualified. An alias head pins its own type arguments; one that fixes them
 (`type BI = Bx[int]`: `BI[str].make`, `x: BI[str]` → *already fixes its type arguments*). A call
 through a path is the path's value applied (`P.get(p)`, `(Bx[int].get)(b)`), and a caller's type
 parameter pins a generic fn value like a concrete type: inside `fn o[U]`, `h: fn(U) -> U = ident`,
-`ap(Bx.get, b)`, `Some(ident)` at `Option[fn(U) -> U]` and a default `f: fn(U) -> U = ident` all
+`ap(Bx.get, b)`, `?ident` at `(fn(U) -> U)?` and a default `f: fn(U) -> U = ident` all
 accept, whatever `ident`'s own parameter is spelled (TICKET-210).
 
 ```chezzi
@@ -1444,7 +1444,7 @@ A **bare, un-pinned** generic fn value — `g := ident`, with no turbofish and n
 one **type variable** per type parameter (TICKET-225, Rust's model: `let k = g; k(5)` compiles). Any
 later use in the same fn body pins them: a call (`g(5)`), an argument, an assignment, a `return`, or
 a **join** with a sibling — `if`/`elif`/`match` branches, `??`, a list/map literal, `==`, `in`, list
-`+` / `+=`, a `recover:` tail. `(o ?? g)(5)` with `o: Option[fn(int) -> int]` pins `T = int`, and so
+`+` / `+=`, a `recover:` tail. `(o ?? g)(5)` with `o: (fn(int) -> int)?` pins `T = int`, and so
 does `if c: inc else: g`. A frame is **one fn body, or one top-level statement**: a top-level
 `f := g` is not pinned by a later top-level `print(f(5))` (module globals are typed before any body is
 walked). If a variable is still unpinned when its frame closes, the read is rejected at its own span
@@ -1510,13 +1510,13 @@ caller, so inside `fn pick[T](a: T, b: T)`, `f := cmp.max; f(a, b)` is that erro
 merges the caller's `T` with `max`'s.
 
 **`?` inside a closure.** A closure body may use `?` (§9) — but only when the closure carries an
-**explicit `-> Result[…]`/`-> Option[…]`** return type. The `?` propagates to *that closure's*
-return, not the enclosing function. A closure with an inferred or non-`Result`/`Option` return type
+**explicit `-> …!`/`-> …?`** return type. The `?` propagates to *that closure's*
+return, not the enclosing function. A closure with an inferred or non-`T!E`/`T?` return type
 that uses `?` is a type error.
 
 ```chezzi
 fn parse(s: str) -> int!: ...
-rs := ["2"].map(fn(s: str) -> int!: Ok(parse(s)? * 2))   # ? lands in the closure's own Result
+rs := ["2"].map(fn(s: str) -> int!: ?(parse(s)? * 2))   # ? lands in the closure's own return type
 ```
 
 ## 6. Control flow  (M3)
@@ -1577,17 +1577,17 @@ for k in m.keys():         # runs ONCE. Chezzi: 1 visit, m.len() ends at 2, rc=0
 # (`xs[2] = 30`, `m["b"] = 99`) is likewise invisible to this loop, while mutating a struct element
 # in place (`ps[1].v = 20`) IS visible. CPython and Go both read `xs[i]` live here (W10-19).
 
-# A user struct is iterable too: give it `next(self) -> Option[T]` and `for` drives it lazily,
+# A user struct is iterable too: give it `next(self) -> T?` and `for` drives it lazily,
 # calling next() each step until it returns None (so an infinite iterator + `break` terminates).
 struct Counter:
     n: int
     limit: int
-    fn next(self) -> Option[int]:
+    fn next(self) -> int?:
         if self.n >= self.limit:
             return None
         v := self.n
         self.n = self.n + 1
-        return Some(v)
+        return ?v
 
 for x in Counter(0, 5):    # x binds the element type (int); a next() yielding a tuple destructures (for a, b in …)
     print(x)
@@ -1613,14 +1613,14 @@ total([1, 2, 3])           # 6   (a set, a map's keys, a cursor or a generator w
 # examples/iter_adapters.chz for Take/Mapped) — the parity-clean, recommended form.
 
 # `Iterable[T]` + `.iter()` — "can produce a cursor". Every collection now has `.iter()`, returning a
-# COMPOSABLE cursor typed as the existing `Iterator[T]` existential, with `.next() -> Option[T]`
-# (Some… then idempotent None). This lets a PLAIN collection flow into the same adapter pipeline as a
+# COMPOSABLE cursor typed as the existing `Iterator[T]` existential, with `.next() -> T?`
+# (a value… then idempotent None). This lets a PLAIN collection flow into the same adapter pipeline as a
 # hand-written struct iterator (you can't call `.next()` on a `list` directly — `.iter()` bridges it):
 pipe := Mapped(Take([10, 20, 30, 40].iter(), 2), fn(x): x * 2)   # a list → Take → Mapped
 for v in pipe:             # 20, 40
     print(v)
 it := {1: "a", 2: "b"}.iter()   # map iterates KEYS; str → 1-char str; bytes/bytearray → int 0..=255
-print(it.next())           # Some(1)
+print(it.next())           # 1
 # `Iterable` is the LOOSER sibling of `Iterator`: an `Iterable` only promises `iter()`; an `Iterator`
 # also has `next`. So every `Iterator` IS `Iterable` — `iter()` on a cursor / generator / `next`-struct
 # returns SELF (idempotent), and all three flow into an `[S: Iterable[T]]` bound. A user struct with
@@ -1658,10 +1658,10 @@ fn count_up2(n: int) -> Iterator[int]:
         i = i + 1
 # A generator can also be a struct method (`fn m(self)`, annotation optional), and a generator value
 # is a real `Iterator[T]`: drive it by `for`, pass it to an `[S: Iterator[T], T]` bound, or call
-# `.next()` explicitly — it returns `Some(v)` per yield, then `None` once exhausted:
+# `.next()` explicitly — it returns `v` per yield, then `None` once exhausted:
 g := count_up(2)
-match g.next():            # Some(0)
-    Some(v): print(v)
+match g.next():            # 0
+    ?v: print(v)
     None: print(-1)
 # `return` (bare only) stops a generator early; `defer`/`spawn`/`parallel:`/`wait:` are not allowed
 # inside a generator. Inference REJECTS an un-inferable element (`yield []` alone, or an int-then-float
@@ -1758,7 +1758,7 @@ bounds (len N)`), while a slice bound `xs[-100:]` **clamps** to the start (never
 `List[T]` slices to `List[T]`, `str` to `str`. Indexing and slicing are **protocols**, so custom
 types opt in — see `Index`/`IndexSet`/`Slice` in §7b. A user `Slice` impl gets the full Python
 surface via default parameters: `slice(self, start: int? = None, end: int? = None, step: int? = None)
--> R` (each component arrives as `None` when omitted, `Some(n)` otherwise).
+-> R` (each component arrives as `None` when omitted, `?n` otherwise).
 
 ## 6c. Comprehensions  (M16)
 
@@ -1857,8 +1857,8 @@ A reserved native handle's method is not (`io.Reader.close()` → *call it on a 
 is **not** callable as `value.method` (it errors clearly, pointing at the other form).
 
 Static methods are **additive** — the positional all-fields constructor `Name(...)` still works. They
-unlock **named / alternative** constructors and **validating** constructors (returning `Result` /
-`Option`) that the positional ctor cannot express:
+unlock **named / alternative** constructors and **validating** constructors (returning `T!E` /
+`T?`) that the positional ctor cannot express:
 
 ```chezzi
 struct Rect:
@@ -1871,16 +1871,16 @@ struct Rect:
 
 struct Email:
     addr: str
-    fn parse(s: str) -> Result[Email, str]:   # validating ctor
+    fn parse(s: str) -> Email!str:   # validating ctor
         if "@" in s:
-            return Ok(Email(s))
+            return ?Email(s)
         return !"missing @"
 
 r := Rect.square(5)        # Type.method(args) — static call
 print(r.area())            # 25
 match Email.parse("a@b"):
-    Ok(e): print(e.addr)
-    Err(m): print(m)
+    ?e: print(e.addr)
+    !m: print(m)
 ```
 
 **A module-level `fn` named after a struct in the same module replaces its positional
@@ -1906,7 +1906,7 @@ never its functions, so the bare spelling there still calls the field ctor (`imp
 (see the v1 limits above) — only a **module-level** fn can win, because it is hoisted into a global
 slot the backend can dispatch through.
 
-**Enums** get static methods too (e.g. a `from_str(s) -> Option[Color]`). For an enum, a **variant**
+**Enums** get static methods too (e.g. a `from_str(s) -> Color?`). For an enum, a **variant**
 name **always wins** over a static-method name on `Enum.x` — so a variant and a static method may
 **not** share a name (a collision is a declaration-time error). This keeps `Color.Red` always the
 variant.
@@ -1924,7 +1924,7 @@ b := Box[int].empty()      # turbofish on the TYPE: Box[int].empty()
 ```
 
 The type-level turbofish takes **one or more** type args — multi-param types use the comma form
-(`Pair[K, V].empty()`, `Result[int, str].Ok(5)`).
+(`Pair[K, V].empty()`).
 
 A **module-qualified** base takes the **single-arg** type-level turbofish too:
 `shapes.Tree[int].Leaf(9)` (qualified enum-variant ctor) and `shapes.Box[int].make(5)` (qualified
@@ -2107,7 +2107,7 @@ A protocol must be imported to be used in another module -- `import Drawable fro
 **bound** — a protocol the instantiating type must satisfy. Type arguments are normally **inferred**
 from the call, but may be **given explicitly** at the call site: `id[int](42)` and the struct form
 `Pair[int, str](1, "one")`. For a generic **enum** the args go on the **type** (the declaration-site
-rule), not the variant — `Box[int].Full(9)`, `Result[int, str].Ok(5)` (see §8). Explicit args pin the
+rule), not the variant — `Box[int].Full(9)` (see §8). Explicit args pin the
 type; inference fills any that are left off.
 
 ```chezzi
@@ -2198,7 +2198,7 @@ Box[Tag] == Box[Tag]  →  type error: cannot compare Box[Tag] and Box[Tag] for 
 
 while `Box(1) == Box(2)` still runs and prints `false`. Rust agrees (`impl<T: Ord> PartialEq for
 Boxy<T>` leaves `Boxy<Tag> == Boxy<Tag>` un-callable, `error[E0369]`). The same rule covers `!=`,
-containers and payloads (`[a] == [b]`, `Some(a) == Some(b)`, tuples, map values, struct fields),
+containers and payloads (`[a] == [b]`, `?a == ?b`, tuples, map values, struct fields),
 `x in xs`, and the builtins whose runtime is `values_equal` —
 `list.contains`/`index_of`/`dedup`/`unique`, and every map-key / set-element position, each with its
 own message naming the site (*contains() compares List[Box[Tag]] elements for equality — …*,
@@ -2206,7 +2206,7 @@ own message naming the site (*contains() compares List[Box[Tag]] elements for eq
 
 **An UNMET `eq` `where` bound is refused where the value is ERASED into the protocol slot, not at the
 comparison — TICKET-053.** Chezzi can see the concrete witness at the point it is assigned into a
-protocol-typed slot (a `let`, a field, a `List`/`Option`/`Result` element, a return), so a witness
+protocol-typed slot (a `let`, a field, a `List`/`T?`/`T!E` element, a return), so a witness
 whose own `eq` cannot be satisfied for this instantiation is rejected THERE, at compile time, naming
 the bound:
 
@@ -2328,11 +2328,11 @@ The prebuilt **`Comparable`** protocol (`compare(self, other: Self) -> int`) is 
 the **ordering** operators. For any `Comparable` value — including a bare `T: Comparable` —
 `< <= > >=` dispatch to `compare` (a negative/zero/positive result means less/equal/greater).
 `int`, `float`, and `str` satisfy `Comparable` intrinsically. So does a **tuple**, a **`List[T]`** and an
-**`Option[T]`** whenever every element type is `Comparable`: they order lexicographically (first unequal
-element decides, a shorter prefix sorts first, `None < Some(_)` — Rust's order), so
+**`T?`** whenever every element type is `Comparable`: they order lexicographically (first unequal
+element decides, a shorter prefix sorts first, `None < ?_` — Rust's order), so
 `print((1, 2) < (1, 3))  # true`, `[(2, "b"), (1, "z")].sort()` gives `[(1, "z"), (2, "b")]`, and `min`/`max`,
 `sort_by_key` with a tuple key and `std.cmp` all work. A tuple holding a non-`Comparable` element is still
-rejected. A **struct gets no default ordering** (W7-41): write its own `compare`. `Map`, `Set` and `Result`
+rejected. A **struct gets no default ordering** (W7-41): write its own `compare`. `Map`, `Set` and `T!E`
 stay unordered. Operators on a `NaN` element pair are all `false`; `sort`/`min`/`max` use the same total
 order as bare floats. (It is not the only operator-wired
 protocol: `Eq` owns `==`/`!=` below, and `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` own the arithmetic
@@ -2353,7 +2353,7 @@ defines **no** `eq` keeps the structural (field-by-field) equality it always had
 **`Eq` satisfaction is exactly "`==` works on it"**, and writing an `eq` is not what earns it — the
 language's structural `==` is an automatic derive, and since 2026-08-11 it tells the protocol system so
 (`docs/gaps.md` **W7-41**). So `where T: Eq` is writable over `int`/`float`/`bool`/`str`, `bytes`,
-tuples, `List`/`Map`/`Set`, `Option`/`Result`, any struct or enum, a **function value**
+tuples, `List`/`Map`/`Set`, `T?`/`T!E`, any struct or enum, a **function value**
 (a user closure/free fn, or a first-class universe builtin like `ord`/`chr`/`panic`/`print`), and a
 **protocol-typed (existential) value** — the same set `==` accepts. Go gives structs `==`
 automatically, Rust spells it `#[derive(PartialEq, Eq)]`, Python `@dataclass(eq=True)`; Chezzi's is
@@ -2413,13 +2413,13 @@ shares the name (Rust allows an inherent `eq` beside `PartialEq`; Python namespa
 
 ```chezzi
 enum Opt[T]:
-    Some(T)
-    None
+    Has(T)
+    Empty
     fn eq(self, x: T) -> bool:               # an ordinary method, NOT the Eq hook
         return true
 
-print(Opt[int].Some(1).eq(7))                # true  — the method still works
-print(Opt[int].Some(1) == Opt[int].Some(2))  # false — `==` stays structural
+print(Opt[int].Has(1).eq(7))                 # true  — the method still works
+print(Opt[int].Has(1) == Opt[int].Has(2))    # false — `==` stays structural
 ```
 
 **Through a protocol bound, `.eq()` is the protocol's equality — never the same-named ordinary
@@ -2561,7 +2561,7 @@ everything the runtime can genuinely compare stays legal:
   pair is inhabited;
 * an existential **nested inside a container, generic struct, or concurrency handle** — `List[Error]`
   vs `List[MyErr]`, `Map[str, Error]` vs `Map[str, MyErr]`, `Box[Error]` vs `Box[MyErr]`,
-  `Option[Error]` vs `Option[MyErr]`, `(Error, int)` vs `(MyErr, int)`, `Shared[Error]` vs
+  `Error?` vs `MyErr?`, `(Error, int)` vs `(MyErr, int)`, `Shared[Error]` vs
   `Shared[MyErr]`. (Note these same pairs are *not* mutually **assignable** — a mutable container's
   type argument is invariant — but they can still hold equal values, which is all `==` asks.)
 * any comparison involving an **erased type parameter**, bare or nested at any depth (`a == 1` and
@@ -2788,13 +2788,13 @@ The prebuilt **`Iterable[T]`** and **`Iterator[T]`** are parameterized bounds wi
 **recover** `T` from the iterand's element (by unifying it), rather than requiring it written out. `T`
 then flows into the body's loop variable and the return type. (User protocols take their args
 explicitly; only these two recover them.) Recovery unifies **structurally**, so `Iterable[(A, B)]`,
-`Iterable[Option[A]]` and `Index[int, (A, B)]` recover every type param they mention, not just a bare
+`Iterable[A?]` and `Index[int, (A, B)]` recover every type param they mention, not just a bare
 `Iterable[T]`. The two differ in WHAT they accept — the same split as Rust's
 `IntoIterator` vs `Iterator`, or Go's `range` vs an iterator value:
 
 * `[S: Iterable[T], T]` — **anything you can iterate.** Built-in `list`/`set`/`map`/`str`/`bytes`/
   `bytearray` (str → str, map → its keys) intrinsically, plus a `.iter()` cursor, a generator's
-  `Iterator[T]`, and any struct with `next(self) -> Option[T]`. Use this whenever the body just does
+  `Iterator[T]`, and any struct with `next(self) -> T?`. Use this whenever the body just does
   `for x in xs`. **This is the one you want by default.** (A struct with ONLY `iter` satisfies the
   protocol but does not get `T` recovered — see the mechanics below.)
 * `[S: Iterator[T], T]` — **a cursor**: something that HOLDS a position, so the body may call
@@ -2821,7 +2821,7 @@ existential — there is no new value type.
 
 **`next` wins by NAME.** A struct that declares a `next` at all is iterated through `next`, never
 through `iter` — that is how the runtime picks, so it is how the type-checker picks. A struct that
-declares a MALFORMED `next` (extra params, or a return that isn't `Option[E]`) is therefore **not
+declares a MALFORMED `next` (extra params, or a return that isn't `E?`) is therefore **not
 iterable at all**; it does not silently fall back to its `iter`. Drop the bad `next`, or fix it.
 
 `Iterable[T]` also works in **TYPE position**, not only as a bound: `fn f(xs: Iterable[int])` takes any
@@ -2926,7 +2926,7 @@ may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/
 `int`/`str`/`bytes`/`bool`/a zero-field struct, and `c.index(k)`/`c.set_index(k, v)`/`c.slice(s, e, st)`
 on `list`/`map`/`str`/`bytes`/`bytearray`. Each is **defined as** the operator form — `a.add(b)` ≡
 `a + b` (same overflow / divide-by-zero fault), `c.index(k)` ≡ `c[k]` (negative indexing and the same
-out-of-bounds message), `c.slice(Some(0), Some(2), None)` ≡ `c[0:2]` (the three components are `int?`),
+out-of-bounds message), `c.slice(?0, ?2, None)` ≡ `c[0:2]` (the three components are `int?`),
 `x.hash()` is exactly the hash `x` gets as a map/set key. A type that defines the method itself always
 gets its own.
 
@@ -3154,7 +3154,7 @@ explicitly at the **declaration site** — the type args go **on the TYPE**, not
 `Tree[int].Node(1, Tree.Leaf, Tree.Leaf)`. This is the declaration-site rule (§7b): a generic
 declared on the type (`enum/struct [T]`) is pinned on the type (`Tree[int].Node`), and a
 generic declared on the member is pinned on the member. Multi-param enums use the comma form —
-`Result[int, str].Ok(5)`, `Result[int, str].Err("e")`. The same type-level turbofish supplies args
+`Pair[int, str].Both(1, "a")`. The same type-level turbofish supplies args
 the payload can't bind (a nullary variant: `Box[int].Empty`) and drives a generic **static** method
 (`Box[int].empty()`). (The old gliding form `Tree.Node[int](…)` — type args on the variant — is no
 longer accepted; the checker redirects you to `Tree[int].Node(…)`.)
@@ -3196,7 +3196,7 @@ everywhere they're used: as a value (`Shape.Point`), a constructor (`Shape.Circl
 the enum so you can fix it). Because variants are per-enum, **two enums may share a variant name**
 (`Color.Red` and `Light.Red` are distinct values). A real binding named like the enum wins, so
 qualified access only resolves when the name on the left isn't a local/parameter. (The built-in
-`Ok`/`Err`/`Some`/`None` for Result/Option stay **bare** — see below.)
+`?x`/`!e`/`None` for `T!E` / `T?` stay **bare** — see below.)
 
 ```chezzi
 p: Shape = Shape.Point          # qualified value
@@ -3231,12 +3231,12 @@ validates that the module is bound and owns the named enum, then it's dropped �
 same `(enum, variant)` identity as the bare/named-import form, so output is byte-identical. (A
 plain `module.Variant` — dropping the enum name — is **not** accepted; the enum name is mandatory.)
 
-`match` also works on `Result`/`Option` (they're enums under the hood):
+`match` also works on `T!E`/`T?` (they're enums under the hood):
 
 ```chezzi
 match safe_div(10, 2):
-    Ok(v):  print("got {v}")
-    Err(e): print("failed: {e}")
+    ?v:  print("got {v}")
+    !e: print("failed: {e}")
 ```
 
 A **string pattern** is decoded exactly like the same literal in an expression: `{{` and `}}` are
@@ -3250,7 +3250,7 @@ A scrutinee can also be an **int/str** (literal arms, always needing a `_` wildc
 warns as unreachable), a **tuple**, or a **struct** (destructured positionally — see below). Patterns
 **nest**: a variant payload, tuple
 element, or struct field may itself be a binding, a literal, a wildcard, a tuple, a struct, or another
-variant — including a **nested nullary variant** like the `None` in `Some(None)` (a refutable variant
+variant — including a **nested nullary variant** like the `None` in `?None` (a refutable variant
 match, not a binding). A tuple match is exhaustive once its arms cover the cartesian product of the constituent
 domains, with no `_` needed; adding a variant to any constituent enum makes it non-exhaustive again.
 
@@ -3260,13 +3260,13 @@ match point:                  # tuple scrutinee
     (0, y):  "on the y axis"
     (x, y):  "at {x},{y}"     # an all-binding tuple arm is irrefutable (exhaustive)
 
-match maybe_pair:             # nested: a tuple inside Some(...)
+match maybe_pair:             # nested: a tuple inside ...
     None:         print("none")
-    Some((a, b)): print(a + b)
+    ?((a, b)): print(a + b)
 
 match nested:                 # nested nullary variant — the bare `None` MATCHES (not binds)
-    Some(None):    "inner none"
-    Some(Some(v)): "value {v}"
+    ?None:    "inner none"
+    ?(?v): "value {v}"
     None:          "outer none"
 ```
 
@@ -3292,7 +3292,7 @@ match p:
     rest:        "at {rest.x},{rest.y}"   # a bare name binds the WHOLE struct value (catch-all)
 ```
 
-A bare non-variant name is the same whole-value catch-all on an enum, `Option`, `Result` or
+A bare non-variant name is the same whole-value catch-all on an enum, `T?`, `T!E` or
 **tuple** scrutinee (`rest:` binds the whole `E`, or the whole tuple: `match (1, 2): (0, y): ..;
 rest: print(rest)` prints `(1, 2)`). A **guarded** one (`x if c:`) closes nothing, and a bare
 **variant** name (`None`, or an unqualified user variant) is never a binding — it stays a variant
@@ -3308,7 +3308,7 @@ runtime panic. (`let`-destructuring of a struct — `let Point(x, y) = p` — an
 **fn params** are not yet supported; use a `match`.)
 
 **Or-patterns** (`p1 | p2 | ...`) match when **any** alternative matches (first match wins). They
-work at the top of an arm and in sub-positions (`(1 | 2, x)`, `Some(1 | 2)`). Every alternative must
+work at the top of an arm and in sub-positions (`(1 | 2, x)`, `?(1 | 2)`). Every alternative must
 bind the **same** variables with unifiable types, so the body sees them regardless of which hit:
 
 ```chezzi
@@ -3325,7 +3325,7 @@ the int/str/bool literal domains are always open).
 binds *and* the guard (which sees the pattern's bindings) is true; otherwise the next arm is tried.
 A guarded arm is never irrefutable, so it can't satisfy exhaustiveness on its own — keep a `_`.
 Likewise a variant arm whose payload contains a *refutable* sub-pattern (a literal, range, or nested
-variant — e.g. `Some(0)`, `Pair(0, y)`) covers only part of that variant's domain, so it does **not**
+variant — e.g. `?0`, `Pair(0, y)`) covers only part of that variant's domain, so it does **not**
 close the variant; only an unguarded arm whose payload is all wildcards/plain bindings does. (A guarded
 variant arm may therefore be followed by an unguarded fallback on the *same* variant — `E.A(n) if c`
 then `E.A(n)` — without a "duplicate arm" error.) An exact-duplicate **literal** arm (`1:` twice,
@@ -3343,8 +3343,8 @@ so arms after it stay live; range subsumption (`0..10:` then `5:`) is not yet fl
 concrete type from its context (see "Closure-parameter inference" above), so `fn(x): match x: E.A: …;
 E.B: …` resolves `x: E` and is checked like any typed scrutinee — the call site is enforced
 (`g(5)` → error) and exhaustiveness is the ordinary enum/literal rule (cover all variants, or `_`; a
-literal match needs a `_`). A **structural** pattern (an enum variant, a tuple, or a variant/`Ok`/
-`Err`/`Some`/`None` payload) over a value whose type genuinely *can't* be inferred — a residual
+literal match needs a `_`). A **structural** pattern (an enum variant, a tuple, or a variant/`?v`/
+`!e`/`?v`/`None` payload) over a value whose type genuinely *can't* be inferred — a residual
 `Unknown`, e.g. a tuple-element binding `a` in `match x: (a, b): match a: E.A: …` where `x` itself was
 only shape-pinned — is **rejected** (`cannot match a <tuple|variant> pattern on a value of un-inferable
 type; annotate it`): matching a shape/tag on an un-typed value would trap at runtime, and a trailing
@@ -3385,6 +3385,38 @@ match temp:
     _:        "warm"
 ```
 
+### Patterns compare the tag and bind inside it
+
+One rule decides compare-vs-bind: a pattern **compares** the outer tag and **binds** only inside it.
+
+| Pattern | Matches | Binds |
+|---|---|---|
+| `?v` | a present `T?`, a successful `T!E` | `v`, the payload |
+| `!e` | the error of a `T!E` | `e`, the error |
+| `None` | an absent `T?` | nothing |
+| `?(?v)`, `?None` | a nested `T??`, layer by layer | `v` |
+| `?(a, b)` | a present tuple payload | `a`, `b` |
+| `!IoErr(code)` | an error that is the struct `IoErr` | `code` |
+| `Color.Red`, `Shape.Circle(r)` | that enum variant | `r` |
+| `3`, `"a"`, `1..5`, `(x, 0)` | that literal, range or tuple shape | `x` |
+| `name` (a bare lowercase name) | anything: the default arm | the whole value |
+| `_` | anything: the default arm | nothing |
+
+`?v` + `None` covers a `T?`; `?v` + `!e` covers a `T!E`. A missing pattern is reported in this syntax
+(``pattern `?None` is not covered``, ``pattern `!_` is not covered``), and a repeated arm as
+`duplicate match arm '?_'`.
+
+A bare name is always a binder, never a comparison, so a **bare constant in a pattern is rejected**
+(it would silently bind and take the arm): `` `LIMIT` is a constant; to compare write `x if x == LIMIT`, to bind use a new name ``.
+A bare variant stays rejected unless it is imported (§12 "Variant import"): write `Color.Red`.
+
+```chezzi
+LIMIT: const int = 3
+match n:
+    x if x == LIMIT: print("at the limit")   # compare with a guard
+    other: print(other)                       # a new name binds the whole value
+```
+
 ### `match` and `if` as expressions
 
 Both branch forms can also be used as **expressions** that produce a value — handy for
@@ -3414,34 +3446,34 @@ expected type the branches must still agree, so `x := if true: Sq(2) else: Tr(9)
 incompatible types: Sq and Tr`. The expected type is matched with plain assignability, so it never
 licenses an int-to-float widen — `x: float = if c: 1 else: 2` is an error (write `1.0`). At a typed
 `T?`/`T!E` **slot** the branches may also MIX bare success values with already-wrapped ones
-(`x: int? = if n > 0: n else: None`); each bare branch wraps on its own (`Some(n)`), the others are
+(`x: int? = if n > 0: n else: None`); each bare branch wraps on its own (`?n`), the others are
 left alone, and the same declines named under **Success-coercion** below apply (a generic slot, a
-declared `Option[Option[int]]`). This is a
+declared `int??`). This is a
 property of the if/match EXPRESSION and is distinct from multi-`return` inference (which still conflicts
-on `int`/`float` — annotate `-> float`). When every branch is an `Ok(…)` (no `Err`
-branch pins the error type), an **unannotated** `if`/`match`-expression's `Result` error slot defaults
-to the built-in `Error` protocol — `x := if c: Ok(1) else: Ok(2)` is `Result[int, Error]`, matching the
-`T!`/`Result[T]` shorthand and return-type inference (it does not leak an un-pinned error type onto a
-later `?`). An explicit annotation (`x: Result[int, DbErr] = …`) still wins. The statement forms — `match s:` /
+on `int`/`float` — annotate `-> float`). When every branch is an `?…` (no `!e`
+branch pins the error type), an **unannotated** `if`/`match`-expression's `T!E` error slot defaults
+to the built-in `Error` protocol — `x := if c: ?1 else: ?2` is `int!Error`, matching the
+`T!`/`T!` shorthand and return-type inference (it does not leak an un-pinned error type onto a
+later `?`). An explicit annotation (`x: int!DbErr = …`) still wins. The statement forms — `match s:` /
 `if c:` with indented blocks and `return`/assignments inside — are unchanged; loops and
 **multiline** function bodies are statement sequences (they return via explicit `return`). The one
 exception is the **inline-expr function body** (`fn a(): <expr>`, §5), whose single bare expression is
 an implicit return — exactly like a closure.
 
-## 9. Errors — Result / Option + `?`  (M3)
+## 9. Errors — `T!E` / `T?` + `?`  (M3)
 
 Errors are **values**, not exceptions. No hidden control flow.
 
 ```chezzi
-fn safe_div(a: int, b: int) -> int!:        # int! == Result[int, Error]
+fn safe_div(a: int, b: int) -> int!:        # int! == int!Error
     if b == 0:
         return !"divide by zero"             # a str IS an Error (see below)
-    return Ok(a / b)
+    return ?(a / b)
 
-fn calc() -> Result[int]:
-    x := safe_div(10, 2)?     # '?' unwraps Ok, or returns the Err from THIS function
-    y := safe_div(x, 0)?      # if Err, calc() returns that Err immediately
-    return Ok(x + y)
+fn calc() -> int!:
+    x := safe_div(10, 2)?     # '?' unwraps a success, or returns the error from THIS function
+    y := safe_div(x, 0)?      # on an error, calc() returns it immediately
+    return ?(x + y)
 ```
 
 **Types and values (TICKET-227).** The carriers have short spellings, and a plain value wraps into
@@ -3449,26 +3481,26 @@ the carrier its slot expects:
 
 | type | means | values |
 |---|---|---|
-| `T?` | `T` or absent (`Option[T]`) | a plain `T`, `None`, `?x` |
-| `T!E` / `T!` | `T` or an error `E` (`Result[T, E]`; `T!` = `T!Error`) | a plain `T`, `!e`, `?x` |
+| `T?` | `T` or absent (`T?`) | a plain `T`, `None`, `?x` |
+| `T!E` / `T!` | `T` or an error `E` (`T!E`; `T!` = `T!Error`) | a plain `T`, `!e`, `?x` |
 | `None` | returns nothing (an annotation only: `fn log(m: str) -> None`) | — |
-| `None!E` | nothing, or an error (`Result[None, E]`) | `!e`; a bare `return` or falling off the end is success |
-| `T??` | nested optional (`Option[Option[T]]`) | `None` is the OUTER absent, `?None` the inner one |
+| `None!E` | nothing, or an error (also written `!E`) | `!e`; a bare `return` or falling off the end is success |
+| `T??` | nested optional (`T??`) | `None` is the OUTER absent, `?None` the inner one |
 
 ```chezzi
 fn save(path: str) -> None!str:
     if path == "":
         return !"empty path"     # prefix `!` builds an error value; there is no `fail` keyword
-    write(path)                  # falling off the end returns Ok(None)
+    write(path)                  # falling off the end returns None
 
 fn find(xs: List[int], k: int) -> int?:
     for x in xs:
         if x == k:
-            return x             # wraps: Some(x)
+            return x             # wraps: x
     return None
 
-x: int? = 5                      # Some(5)
-rs: List[int!str] = [1, !"disk", 3]   # [Ok(1), Err('disk'), Ok(3)]
+x: int? = 5                      # 5
+rs: List[int!str] = [1, !"disk", 3]   # [1, !disk, 3]
 ```
 
 - **`!e` builds an error value.** Its operand must satisfy the `Error` protocol (`!5` is the error
@@ -3478,34 +3510,35 @@ rs: List[int!str] = [1, !"disk", 3]   # [Ok(1), Err('disk'), Ok(3)]
   assignment target (`x = 5`, `s.f = 5`, `xs[i] = 5`, `x, y = 5, 0`), a call or method argument, a
   struct field or variant payload, a list/map/tuple element, a `List[T](...)` / `Map[K, V](...)` /
   `Shared[T](...)` element, a comprehension element, `return`, `yield`, an inline or closure body, a
-  parameter or field default — a plain `T` becomes `Some(v)` at `T?` and `Ok(v)` at `T!E`. Each
+  parameter or field default — a plain `T` becomes `?v` at `T?` and `?v` at `T!E`. Each
   branch of an `if`/`match` value at such a slot wraps on its own (`x: int? = if c: 5 else: None`).
-  Three rules: a carrier is never re-wrapped (`x: int?? = Some(5)` stays an error); there is no
+  Three rules: a carrier is never re-wrapped (`x: int?? = ?5` stays an error); there is no
   int→float step (`fn f() -> float?: return 1` is an error); a slot that mentions an unpinned type
   parameter (`-> T?`) does not wrap. An operator operand is not a slot (`x: int? = 1 + 2` wraps the
-  sum, `Some(3)`), and neither is the return of a fn with no `->` annotation.
+  sum, `?3`), and neither is the return of a fn with no `->` annotation.
 - **`?x` builds a present/success value**, its carrier taken from the expected type: `?5` is
-  `Some(5)` at `int?` and `Ok(5)` at `int!E`; `x: int?? = ?None` is `Some(None)`.
+  `?5` at `int?` and `?5` at `int!E`; `x: int?? = ?None` is `?None`.
 - **No expected type.** Inside a fn, a later use pins the carrier: `y := ?5` alone is `int?`;
-  `z := ?5` then `take(z)` with `take(r: int!str)` makes it `Ok(5)`. `w := !"disk"` needs its success
+  `z := ?5` then `take(z)` with `take(r: int!str)` makes it `?5`. `w := !"disk"` needs its success
   type pinned the same way (`return w` in an `int!` fn); unpinned it is the error
   ``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``. At top level `?5` is `int?` at once and
   `!e` must be annotated.
 - **Set elements and map keys** never wrap in effect: no carrier is `Hashable`.
 
-**`Result[None, E]`'s success value.** A `Result` with no payload (`None!E`) is constructed with
-zero-arg `Ok()`. It prints `Ok(None)`, as Python prints its void value:
+**`None!E`'s success value.** A fn that returns `None!E` (also written `!E`) has no payload: it
+succeeds by falling off the end or by a bare `return`. That value prints `None`, as Python prints
+its void value:
 
 ```chezzi
-fn f() -> Result[None, str]:
-    return Ok()
+fn f() -> None!str:
+    return
 
 fn main():
-    print(f())      # Ok(None)
+    print(f())      # None
 ```
 
 **The `Error` type (Go-style).** `E` defaults to the built-in `Error` protocol — one method,
-`message(self) -> str`. `str` conforms to it intrinsically (its message is itself), so `Err("…")`
+`message(self) -> str`. `str` conforms to it intrinsically (its message is itself), so `!"…"`
 works everywhere with no wrapper. For a *structured* error, define a struct with `message` and
 name it explicitly with `T!E`:
 
@@ -3518,58 +3551,58 @@ struct DbErr:
     fn message(self) -> str:
         return "db error {self.code}"
 
-fn query() -> Row!DbErr:        # Result[Row, DbErr]
+fn query() -> Row!DbErr:        # Row!DbErr
     return !DbErr(503)
 
 match query():
-    Ok(row): use(row)
-    Err(e):  print(e.message())   # message() is declared by DbErr itself
+    ?row: use(row)
+    !e:  print(e.message())   # message() is declared by DbErr itself
 # `line()` / `col()` / `file()` are the bare `Error` existential's origin accessors (see `recover:`
 # below) — they are NOT available on a user error type like `DbErr`, which carries only what it
-# declares. Spell the sink `Row!` (i.e. `Result[Row, Error]`) to get them.
+# declares. Spell the sink `Row!` (i.e. `Row!Error`) to get them.
 ```
 
-`Option[T]` (shorthand `T?`) is the same shape for "maybe absent": `Some(v)` / `None`, also usable with `?`.
-`?` must match the enclosing function's return **kind**: a `Result`-`?` needs a `Result`-returning fn (and its
-propagated error type must fit the function's error type), an `Option`-`?` needs an `Option`-returning fn. **A
-function must return `Result`/`Option` to use `?`** — there is **no `fn main`/entrypoint exception**; a
-None-returning fn (named or nested) that uses `?` is a compile error (the propagated `Err`/`None` would be
+`T?` (shorthand `T?`) is the same shape for "maybe absent": `?v` / `None`, also usable with `?`.
+`?` must match the enclosing function's return **kind**: a `T!E`-`?` needs a `T!E`-returning fn (and its
+propagated error type must fit the function's error type), a `T?`-`?` needs a `T?`-returning fn. **A
+function must return `T!E`/`T?` to use `?`** — there is **no `fn main`/entrypoint exception**; a
+None-returning fn (named or nested) that uses `?` is a compile error (the propagated `!e`/`None` would be
 silently swallowed). Only **module top-level** code (outside any fn) accepts either kind — the runtime unwinds
-the unhandled `Err`/`None` at the program boundary and exits (rc=1). A manifest `module:function` entrypoint may
-therefore legitimately be `-> T!` and use `?`; if that entry fn returns `Err`/`None`, `chezzi run` surfaces it
-as `unhandled error: <msg>` (rc=1), just like an unhandled top-level `Err`. Mixing kinds — e.g. a `Result`-`?`
-inside an `Option`-returning fn — is a compile error. The **`?.` operator below is this same `?`** when
-its operand is a `Result`, so every rule in this paragraph applies to it verbatim.
+the unhandled `!e`/`None` at the program boundary and exits (rc=1). A manifest `module:function` entrypoint may
+therefore legitimately be `-> T!` and use `?`; if that entry fn returns `!e`/`None`, `chezzi run` surfaces it
+as `unhandled error: <msg>` (rc=1), just like an unhandled top-level `!e`. Mixing kinds — e.g. a `T!E`-`?`
+inside a `T?`-returning fn — is a compile error. The **`?.` operator below is this same `?`** when
+its operand is a `T!E`, so every rule in this paragraph applies to it verbatim.
 
 **Optional chaining `?.`** works on **both** carriers; the lowering is chosen by the operand's type:
 
 ```chezzi
-name := user?.profile?.name ?? "anon"   # Option: None anywhere short-circuits, then ?? defaults
-n    := fetch()?.len()                  # Result: propagate the Err (`?`), then `.len()` the value
+name := user?.profile?.name ?? "anon"   # T?: None anywhere short-circuits, then ?? defaults
+n    := fetch()?.len()                  # T!E: propagate the error (`?`), then `.len()` the value
 ```
 
-**On an `Option[T]`** — `x?.field` / `x?.method(args)`: `None` short-circuits to `None`, `Some(v)`
-applies the access to `v` and re-wraps, so the result is always an `Option` (a field that is itself
-`Option` is **not** flattened: `Option[Option[U]]`).
+**On a `T?`** — `x?.field` / `x?.method(args)`: `None` short-circuits to `None`, `?v`
+applies the access to `v` and re-wraps, so the result is always a `T?` (a field that is itself
+`T?` is **not** flattened: `U??`).
 
-**On a `Result[T, E]`** — `x?.field` / `x?.method(args)` means **`?` then `.`**: propagate the `Err`
+**On a `T!E`** — `x?.field` / `x?.method(args)` means **`?` then `.`**: propagate the `!e`
 out of the enclosing function, then apply the access to the unwrapped `T`. It is identical to the
 spaced spelling `x? .field` — same value, same bytecode, same diagnostics — and is therefore subject
-to the **same enclosing-function return-kind rule as `?`**: a `Result`-`?.` needs a `Result`-returning
+to the **same enclosing-function return-kind rule as `?`**: a `T!E`-`?.` needs a `T!E`-returning
 fn (module top-level accepts either kind). Every other rule `?` carries — how it behaves inside
 `defer:` and under `recover:`, and that it is rejected inside a `spawn:` block — applies to it
 unchanged, because it *is* a `?`. `f()?.len()` is Rust's
 own idiom and compiles here for the same reason. There is no longer a whitespace cliff: `f()?.len()`
 and `f()? .len()` are the same program.
 
-Because the `Result` form is try-then-**dot**, not a chain of tries, it does **not** auto-try through
-a nested carrier: with `a: Option[X]` and `a.b: Result[Y, E]`, `a?.b?.c` is an `Option[Result[Y, E]]`
-followed by a field access on a `Result` — an error, and correctly so.
+Because the `T!E` form is try-then-**dot**, not a chain of tries, it does **not** auto-try through
+a nested carrier: with `a: X?` and `a.b: Y!E`, `a?.b?.c` is an `(Y!E)?`
+followed by a field access on a `T!E` — an error, and correctly so.
 
-**Null-coalescing `??` takes an `Option` or a `Result` (TICKET-039).** `a ?? b` yields `a`'s inner
-value if `Some(v)`/`Ok(v)`, else `b`; it is **right-associative** (`a ?? b ?? c` = `a ?? (b ?? c)`).
-On a `Result`, the `Err` payload is **discarded** — exactly Rust's `Result::unwrap_or` — never
-propagated: `?.` on a `Result` still propagates with `?`, `??` discards. The discard does **not**
+**Null-coalescing `??` takes a `T?` or a `T!E` (TICKET-039).** `a ?? b` yields `a`'s inner
+value if `?v`, else `b`; it is **right-associative** (`a ?? b ?? c` = `a ?? (b ?? c)`).
+On a `T!E`, the `!e` payload is **discarded** — exactly Rust's `unwrap_or` on its error carrier — never
+propagated: `?.` on a `T!E` still propagates with `?`, `??` discards. The discard does **not**
 warn: `??` is itself the acknowledgement, and the W8-2 discarded-carrier rule already excludes `?`,
 `??` and `?.` because they yield the unwrapped payload, not the carrier. Nothing is required of the
 error type `E` — Chezzi is GC'd and runs no destructor on the dropped value. The remaining
@@ -3579,26 +3612,26 @@ diagnostic is on a non-carrier operand:
 '??' applies to a `T?` or `T!E` value, found int
 ```
 
-`f()?.len() ?? 0` on a `Result` is still an error on the **`??`**: `f()?.len()` is already an `int`,
+`f()?.len() ?? 0` on a `T!E` is still an error on the **`??`**: `f()?.len()` is already an `int`,
 not a carrier, regardless of the widening.
 
 Both operators require the two chars **adjacent** (`x?.f`, `a ?? b`); on a **non-carrier** operand
 `?.` is one error, `'?.' applies to a `T?` or `T!E` value, found int`.
 
 **Unhandled errors only exit the program at a `?` or a manifest entrypoint's return.** A top-level `?`
-that hits an `Err`/`None` terminates the program with `unhandled error: <detail>` and a non-zero exit
-code; so does a manifest `module:function` entrypoint whose entry fn *returns* `Err`/`None`. A **bare**
-top-level expression statement that evaluates to `Err`/`None` (e.g. `compute()` whose result is `Err`)
+that hits an `!e`/`None` terminates the program with `unhandled error: <detail>` and a non-zero exit
+code; so does a manifest `module:function` entrypoint whose entry fn *returns* `!e`/`None`. A **bare**
+top-level expression statement that evaluates to `!e`/`None` (e.g. `compute()` whose result is `!e`)
 does **not** exit — the value is discarded, same as inside a function. *Binding* the value handles it
 too (`r := compute()` keeps running; inspect `r`).
 
-**A discarded `Result`/`Option` is silently swallowed at runtime, in every position** — closed as
+**A discarded `T!E`/`T?` is silently swallowed at runtime, in every position** — closed as
 `docs/gaps.md` **W8-2**. There is no runtime check on a drop anywhere, so the value vanishes without a
 trace, and that is exactly where `chezzi check` **warns**, following Rust (which marks both carriers
 `#[must_use]` and warns on the drop):
 
 ```chezzi
-fn g() -> Result[int, Error]: return !"E"
+fn g() -> int!Error: return !"E"
 g()                    # warning … the `int!` value returned by 'g' is discarded, and rc stays 0
 fn f():
     g()                # warning … the `int!` value returned by 'g' is discarded, and rc stays 0
@@ -3632,10 +3665,10 @@ The warning fires wherever the statement's own type is a carrier, so it also ski
 a bare carrier expression isn't a drop at all: an inline-expr body (`fn f() -> T!: g()`, an implicit
 return), the trailing expression of a `recover:` block or a value-`match`/value-`if` (that expression
 *is* the block's value), and `g()?` / `x ?? d` (which yield the unwrapped payload). `o()?.len()` *does*
-warn — optional chaining re-wraps, so the result is still an `Option`.
+warn — optional chaining re-wraps, so the result is still a `T?`.
 
 **`defer` is deliberately excluded.** `defer f.close()` never warns even though `close` returns a
-`Result`: `defer f.Close()` is Go's canonical unchecked idiom and the ancestor for the statement. Bind
+`T!E`: `defer f.Close()` is Go's canonical unchecked idiom and the ancestor for the statement. Bind
 it inside a wrapper function if you do want the error. The **call form** of `spawn` (`spawn g()`) is
 excluded for the same reason — a spawned task's return value is discarded by construction. Both are
 real silent swallows; both stay silent on purpose. (The **block** forms — `defer:` / `spawn:` — do
@@ -3645,10 +3678,10 @@ warn: their bodies are ordinary statements, not the fire-and-forget call.)
 *statement's own type*, so a generic that swallows its argument is invisible to it:
 
 ```chezzi
-fn g() -> Result[int, Error]: return !"E"
+fn g() -> int!Error: return !"E"
 fn drop_it[T](x: T):
     x                  # type is `T`, not a carrier — NO warning
-drop_it(g())           # prints "after", rc=0; the Err is gone
+drop_it(g())           # prints "after", rc=0; the error is gone
 print("after")
 ```
 
@@ -3657,54 +3690,54 @@ there too. It is a known limit of the rule, not a defect.
 
 ### `recover:` — the panic-recovery boundary
 
-`Result`/`?` handle *expected* errors. A **runtime fault** — index-out-of-bounds, divide-by-zero,
+`T!E`/`?` handle *expected* errors. A **runtime fault** — index-out-of-bounds, divide-by-zero,
 integer overflow, a missing map key — is a *panic*: by default it terminates the program. A
 `recover:` block is a boundary that **catches any panic occurring transitively beneath it** (no need
-to pre-mark risky code) and yields a `Result[T, Error]`:
+to pre-mark risky code) and yields a `T!Error`:
 
 ```chezzi
 r := recover:
     rows := parse(file)       # may panic deep inside
     rows[0] / rows[1]         # OOB / divide-by-zero is caught here
 match r:
-    Ok(v):  print(v)          # Ok wraps the block's trailing-expression value
-    Err(e): print("recovered: {e.message()}")   # a fault becomes Err(message)
+    ?v:  print(v)          # success wraps the block's trailing-expression value
+    !e: print("recovered: {e.message()}")   # a fault becomes !message
 ```
 
 The block's value is its **trailing expression**. A trailing statement-form `match`/`if` counts too:
 when every arm/branch produces a value (a total `match`; an `if` with an `else`, every branch ending
-in a value), the whole construct is the block's value expression and `Ok` wraps its unified arm/branch
-type — so `recover: … ; match x: 3: 100; _: 200` is `Result[int]`, not `Result[None]`. A tail that
-does *not* uniformly produce a value has no single value type, so the block falls back to `Result[None]`
-(value dropped, consumed only via `Ok(_)`) — never an error. This covers a trailing `let`, a non-total
+in a value), the whole construct is the block's value expression and `?v` wraps its unified arm/branch
+type — so `recover: … ; match x: 3: 100; _: 200` is `int!`, not `None!`. A tail that
+does *not* uniformly produce a value has no single value type, so the block falls back to `None!`
+(value dropped, consumed only via `?_`) — never an error. This covers a trailing `let`, a non-total
 `match`, an `else`-less `if`, **and** a `match`/`if` whose arms produce genuinely *different* types (a
 `str` arm next to an `int` arm, or a void `print(...)` arm mixed with a value arm). (A tail that provably
 *diverges* — every arm `panic`s — is bottom, matching a direct `recover: panic(…)`.)
 
-It behaves like a **try-block**: a `?` inside the block short-circuits to the boundary (the `Err`
-lands in `r`), so one `recover:` handles *both* panics and propagated `Result` errors. Because `?`
+It behaves like a **try-block**: a `?` inside the block short-circuits to the boundary (the `!e`
+lands in `r`), so one `recover:` handles *both* panics and propagated `T!E` errors. Because `?`
 targets the boundary rather than the function, it is allowed even when the enclosing function does
-not return a `Result`.
+not return a `T!E`.
 
 ```chezzi
-fn run() -> str:                       # not a Result-returning function
+fn run() -> str:                       # not a `T!E`-returning function
     r := recover:
-        n := parse_int(input)?         # an Err here lands in `r`, not propagated out of run()
+        n := parse_int(input)?         # an error here lands in `r`, not propagated out of run()
         n * 2
     match r:
-        Ok(v):  return "got {v}"
-        Err(e): return "failed: {e.message()}"
+        ?v:  return "got {v}"
+        !e: return "failed: {e.message()}"
 ```
 
 Rules: `recover:` is a value (not a control-flow target) — `return`/`break`/`continue` that would
-escape it are rejected; a `?` on an `Option` inside it is rejected (its result is `Result`-typed —
+escape it are rejected; a `?` on a `T?` inside it is rejected (its result is `T!E`-typed —
 use `match`). Reach for `recover:` at boundaries (a request, a REPL line, a plugin, a test), not as
-everyday error handling — `Result`/`?` remain the tool for expected failures.
+everyday error handling — `T!E`/`?` remain the tool for expected failures.
 
 **`panic(msg: str)` — raise a panic yourself.** The faults above (OOB, divide-by-zero, overflow) are
 raised by the runtime; `panic(msg)` raises the *same* recoverable fault from your own code. It
 **unwinds** — it does not return a value (it is **not** sugar for `return !e`, which already
-exists for *expected* errors). The nearest enclosing `recover:` catches it as `Err(e)` with
+exists for *expected* errors). The nearest enclosing `recover:` catches it as `!e` with
 `e.message() == msg`; uncaught, it terminates the program with that message and a non-zero exit code,
 exactly like an integer overflow. `defer`s run as it unwinds, like any panic — and if one of those
 `defer`s **itself** panics while the unwind is in flight, the newer panic **replaces** the one in
@@ -3718,13 +3751,13 @@ takes `v`'s type).
 r := recover:
     panic("boom")                 # raised here, caught at the boundary
 match r:
-    Ok(v):  print(v)
-    Err(e): print("recovered: {e.message()}")   # → recovered: boom
+    ?v:  print(v)
+    !e: print("recovered: {e.message()}")   # → recovered: boom
 ```
 
 **A fault caught by `recover:` carries its origin.** `e.line() -> int?`, `e.col() -> int?` and
 `e.file() -> str?` read where the fault was raised — the same coordinate an uncaught fault prints
-(`runtime error (file:line:col): message`). A user-constructed `Err("...")` reached as a plain value
+(`runtime error (file:line:col): message`). A user-constructed `!"..."` reached as a plain value
 (not via `recover:`) carries none of these — `line()`/`col()`/`file()` are all `None` on it, and so are
 they on any error still in flight through a `?` propagation, since only `recover:` (and a `defer`-fault
 boundary) stamps the origin. `panic(e.message())` **re-raises at the origin `e` carries**, not at the
@@ -3753,7 +3786,7 @@ fn process(path: str) -> int!:
     f := open(path)
     defer f.close()           # runs however `process` exits
     n := f.read_int()?        # if this short-circuits, f.close() still runs
-    return Ok(n * 2)
+    return ?(n * 2)
 
 for path in paths:
     f := open(path)
@@ -3816,7 +3849,7 @@ their **latest** values when it runs at scope exit — `x := 1; defer: print(x);
 and **reassigning** an enclosing local inside the block mutates the shared binding. (This differs from
 the call form `defer f(x)`, whose *arguments* are still evaluated eagerly at the `defer` point.) One
 rule remains: a `?` short-circuit inside the block is **discarded** (a cleanup body has no
-error-return contract, like a deferred call whose `Err` result is dropped). A **`return` inside a
+error-return contract, like a deferred call whose `!e` result is dropped). A **`return` inside a
 `defer:` block is a compile error** (`'return' is not allowed inside a defer block`) — the block is
 its own closure and Chezzi has no named return values, so it could never affect the enclosing
 function's result. This covers a `return` anywhere in the block, including inside an `if`/`for`/
@@ -3833,6 +3866,49 @@ fn handle(conn: Conn):
         log("x = {x}")            # prints "x = 2" — captured by reference, read at exit
     x = 2
 ```
+
+### Handling a `T?` / `T!E` value: `?`, `??`, `?.`, `else`, `match`
+
+| Form | Does | Leaves the fn? |
+|---|---|---|
+| `x := f()?` | unwraps; on `None` / an error returns it from THIS fn | on failure |
+| `x := f() ?? d` | unwraps; on `None` / an error takes `d` (the error is discarded) | never |
+| `f()?.name` | applies `.name` to the value; `None` stays `None`, an error propagates | on an error |
+| `x := f() else e: <block>` | unwraps; on failure runs the block, which must leave | on failure |
+| `match f(): ?v: … !e: …` | handles every outcome by pattern, and may produce a value | no |
+
+**`else` = handle and leave.** `v := f() else e: <block>` binds `v` on success. On failure the block
+runs with the error bound to `e`, and it MUST leave: `return` (including `return !e`), `break`,
+`continue`, `panic(...)`, `os.exit(n)`, or an `if` / `match` whose every branch leaves. It never
+produces a value; a default comes from `??`, a computed value from `match`.
+
+```chezzi
+fn load(path: str) -> Config!str:
+    text := read(path) else e:
+        log("cannot read {path}: {e}")
+        return !e
+    port := text.to_int() else:        # `else:` — the `T?` form; it may also ignore an error
+        return !"not a number"
+    save(path) else e:                 # a `None!E` call: the statement form (or `_ := … else e:`)
+        return !e
+    return Config(port)
+```
+
+- A block that can fall through is `else block must leave (return, break, continue, panic)`.
+- `else e:` on a `T?` is an error (absent has no payload): `` `else e:` needs an error to bind, and int? has none; write `else:` ``.
+- On an `int?!E` value `else` handles the outer error, and `v` is the `int?`.
+- At module top level there is no `return`: leave with `panic`, `os.exit`, `break` / `continue` in a
+  loop, or use `?`. Inside a nested fn or a generator `return` leaves that fn.
+- A `spawn:` block and a `defer:` block reject it, as they reject `?`: a spawned task has no caller
+  to leave to, and a defer cannot leave.
+
+**How a carrier prints.** `print`, `str()`, interpolation, a container element, an `assert` message and
+a fault text show a carrier as the user writes it: a present or success value prints as its payload
+(`5`), an absent one as `None`, an error as `!` and the error (`!boom`; `!'boom'` inside a list), and a
+`None!E` success as `None`. A `?` is printed only in front of an absent payload, so a present `None`
+of an `int??` prints `?None` and stays distinct from `None`. The text does not show the wrap depth
+or the carrier kind (`5` at `int?` and at `int??` both print `5`); a test of those reads the value by
+`match`.
 
 ## 9c. Testing — `assert`, `test fn`, `chezzi test`  (M20)
 
@@ -3900,7 +3976,7 @@ demos). It runs via the `cargo test` gate `chz_suite_passes` (`tests/chz_suite.r
 which runs the whole `tests/chz/` suite and asserts every test passes;
 `tests/chezzi_threads_cli.rs` then runs it again at `CHEZZI_THREADS=2`. A fault's *message*
 **can** be asserted in-language via `recover:` — `r := recover: <expr>` then
-`match r: Err(e): assert e.message().contains(...)` — so fault-path tests port here too; only
+`match r: !e: assert e.message().contains(...)` — so fault-path tests port here too; only
 compile-time checker diagnostics (`rejects`/`ok`) and engine internals (AST/bytecode/GC, scheduler
 timing) stay in Rust.
 
@@ -4163,11 +4239,11 @@ check`** whenever the value's static type is a **concrete scalar** (`int`/`float
 provably-wrong spec/type pairing is a static error, in the spirit of Chezzi's statically-typed model
 (this is a **deliberate divergence from Python**, where such a mismatch is a runtime `ValueError`). A
 **concrete non-scalar** value is checked the same way, against the STRING rules (it renders via the
-runtime's text-form path): a `List`/`Map`/`Set`/tuple/`Option`/`Result` (TICKET-124), and — since
+runtime's text-form path): a `List`/`Map`/`Set`/tuple/`T?`/`T!E` (TICKET-124), and — since
 TICKET-142 — a struct, enum, `bytes`, a fn value, and every native struct (`Shared`, `Channel`,
 `AtomicInt`, `Writer`, …). `xs := [1]; "{xs:d}"`, `n: int? = None; "{n:+}"`, a struct `{p:d}` and an
 enum `{e:d}` are all compile errors naming the type; a width/fill spec (`{o:>12}` on an
-`Option[float]`) still passes, exactly as it would on a `str`.
+`float?`) still passes, exactly as it would on a `str`.
 The **runtime** validation stays as an identical backstop (same wording, single-sourced in
 `spec_valid_for_scalar`): it fires only for a value whose type the checker can't pin to a concrete
 type — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an `Unknown`, or a
@@ -4205,8 +4281,8 @@ s.chars()        # → List[str] of 1-char strings; also `for c in s:` iterates 
 s.replace("a","b")  s.repeat(3)   s.reverse()      s.pad_left(4,"0")  s.pad_right(4," ")
 s.index_of("x")  s.count("x")     s.strip_prefix("p")  s.strip_suffix("s")
 s.split_lines()  # → List[str] split on a newline (LF, CRLF, or lone CR)
-s.to_int()       s.to_float()     # → int? / float? (Some/None — None on bad input)
-s.parse_int()    s.parse_float()  # → Result[int,str] / Result[float,str] (Ok/Err(msg) on bad input)
+s.to_int()       s.to_float()     # → int? / float? (a value / None — None on bad input)
+s.parse_int()    s.parse_float()  # → int!str / float!str (the value / !msg on bad input)
 "a" + "b"        # concatenation
 ```
 
@@ -4243,7 +4319,7 @@ or enum defining `compare`), stable, in place.
 > element position is pinned by the slot it fills — `a: List[List[int]] = [empty()]` on
 > `fn empty[T]() -> List[T]` binds `T = int`. The same holds for a `Map` literal's key and value
 > columns and a `Set` literal's elements, and it reaches through a `T?` / `T!E` sink (where a bare
-> literal coerces to `Some(v)` / `Ok(v)`) onto the carrier's payload. (No int→float widening exists at
+> literal coerces to `?v` / `?v`) onto the carrier's payload. (No int→float widening exists at
 > any of these slots — rule D3, §3 — so `fn f() -> List[float]?: return [1, 2]` and the bare
 > `-> List[float]` sink both reject the ints: write `[1.0, 2.0]`.)
 > (An `= []` empty binding plus later `.push` also works and is equally valid.)
@@ -4327,14 +4403,14 @@ or enum defining `compare`), stable, in place.
 > **Carrier payload typing (`None` and a nullary enum variant).** A never-written `x := None` or
 > `e := Box.Empty` stays permissive across differently-typed READS: `a: Box[int] = e` then
 > `b: Box[str] = e` is still `ok: no type errors`. The first constraining use — an annotated sink, a
-> typed argument, a typed `return`, a `??` with a typed right-hand side, or a `Some(v)`/`Variant(v)`
+> typed argument, a typed `return`, a `??` with a typed right-hand side, or a `?v`/`Variant(v)`
 > write — records a pin. A later WRITE that disagrees with the pin is a type error:
-> `x := None` / `y: Option[str] = x` / `x = Some(1)` is `cannot assign int? to 'x' -- its
-> payload was pinned to Option[str] by an earlier use`. A write also REPINS the binding, so every
+> `x := None` / `y: str? = x` / `x = ?1` is `cannot assign int? to 'x' -- its
+> payload was pinned to str? by an earlier use`. A write also REPINS the binding, so every
 > later read sees the written payload and a `match` arm binds a concrete `v`. The escapes are an
-> annotation at the declaration (`x: Option[int] = None`) or a re-declaration. `Result[T, E]` is
-> deliberately NOT covered: its two slots are routinely filled by different statements (`Ok(1)` then
-> `Err("e")`).
+> annotation at the declaration (`x: int? = None`) or a re-declaration. `T!E` is
+> deliberately NOT covered: its two slots are routinely filled by different statements (`?1` then
+> `!"e"`).
 
 Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
 `m.items()→List[(K, V)]` (insertion order, so `Map(m.items()) == m`) `m.copy()→map` (shallow);
@@ -4435,7 +4511,7 @@ main()
   block.
 - **`?` (and `?.`) inside a `spawn:` block is a compile error** for the same reason (`'?' is not
   allowed inside a spawn block: a spawned task has no caller to propagate to`) — a `?` *is* a return,
-  and the nursery discards a task's `Err` by design, so the propagation would be silently swallowed.
+  and the nursery discards a task's `!e` by design, so the propagation would be silently swallowed.
   This holds whatever the enclosing function returns, and whether or not the `spawn:` sits inside a
   `recover:` or a `defer:` — those boundaries stop at the task. Send the error on a
   `Channel`/`Shared`, or `match` it inside the task. Legal next door: a `?` in a `parallel:` body
@@ -4451,7 +4527,7 @@ fn fetch_all(urls: List[str]):
                               # end-of-function, so print order against them is undefined
 ```
 - **`Channel[T]`** — a mailbox (buffered FIFO): `ch.send(v)`, `ch.recv() -> T`,
-  `ch.try_recv() -> T?` (non-blocking poll — `Some(v)`/`None`, never blocks or faults), `ch.len()`,
+  `ch.try_recv() -> T?` (non-blocking poll — `?v`/`None`, never blocks or faults), `ch.len()`,
   `ch.close()`, `ch.try_send(v) -> bool` (safe `send` — `false` if closed, never faults). After
   `close()`: `send` faults, `recv` drains then faults, `try_send` returns `false`. Drain a channel to
   completion with **`for v in ch:`** — it blocks per value and ends cleanly once closed-and-drained
@@ -4616,13 +4692,10 @@ import Red from Color            # error: 'Red' is already imported (one bind pe
   the same name, or a second import of the name, is `'V' is already imported` (Rust: E0255 / E0252).
 - **Shadowing.** A local or a top-level `x := …` binding of the same name shadows the variant, as it
   shadows a from-imported fn.
-- **`Option` and `Result` are prelude enums.** The prelude declares them and imports their four
-  variants (`import Some, None from Option`, `import Ok, Err from Result`), so `Some(1)`, `None`,
-  `Ok(1)`, `Err(e)` are bare in every module, and the qualified and type-applied spellings work
-  like a user enum's: `Option.Some(1)`, `Option[int].None`, `Result[int, str].Ok(5)`, `f := Some`,
-  `[1, 2].map(Some)`, `type F = Option[int]` then `F.Some(1)`. A user `fn`, global or local named
-  like one of the four shadows it. An explicit `import Some from Mine` is rejected (`'Some' is
-  already imported from Option by the prelude`).
+- **`T?` and `T!E` are prelude enums.** The prelude declares the two carrier enums and keeps
+  their names to itself. User code writes the types `T?` and `T!E`, the values `x`, `?x`, `!e`
+  and `None`, and the patterns `?v`, `!e` and `None`. The enums cannot be named, qualified or
+  type-applied, and an alias of one (`type F = int?`) is a type spelling, never a variant head.
 
 **Resolution:** walk up from the file for `chezzi.toml`; found → that's the project root, else the
 script's own dir is root. `std.*` is reserved (stdlib). `a.b.c` → `<root>/a/b/c.chz`. No `./` relative imports.
@@ -4638,7 +4711,7 @@ name in expression position. So a reserved bound name is **rejected**:
 
 ```chezzi
 import lib.int              # error: module name 'int' is reserved (builtin) — alias it: import lib.int as ints
-import lib.geo as Ok        # error: import alias 'Ok' is reserved (builtin)
+import lib.geo as List      # error: import alias 'List' is reserved (builtin)
 import lib.int as ints      # ok — and `int("5")` keeps working
 ```
 
@@ -4652,7 +4725,7 @@ import Shared from std.concurrency   # ok — a reserved TYPE member licensing t
 ```
 
 The reserved set is the builtin callables + reserved type names (`None` included) + the builtin
-variant ctors (`Ok`/`Err`/`Some`/`None`). (The std string module is `std.string` for exactly this reason: `str` is a
+variant ctors (`?x`/`!e`/`None`). (The std string module is `std.string` for exactly this reason: `str` is a
 reserved scalar/ctor name.) A collision with a *user-declared* top-level `fn` or type is the next rule.
 
 **The named-import form is `import X from M`, not Python's `from M import X`** — the module path comes
@@ -4763,8 +4836,8 @@ error** (`unknown type 'Point'; import it from geo`). Two modules may declare th
 no collision; each is importable. Under the hood every user type has ONE canonical, always-qualified
 **identity key** (`<module-key>::Name`) used as the runtime tag + every layout lookup, while its **bare
 name** is what prints — so output stays byte-identical regardless of module and two colliding `Point`s
-both render `Point(...)` (the module is never shown). Reserved/native types (`Result`/`Option`/`Some`/
-`Ok`, `Iterator`, the std type surface on `import std.*`, FFI widths) stay global/bare always. An
+both render `Point(...)` (the module is never shown). Reserved/native types (`T!E`/`T?`/`?v`/
+`?v`, `Iterator`, the std type surface on `import std.*`, FFI widths) stay global/bare always. An
 imported `type` alias is transparent (its body resolves in the defining module's scope, carrying any
 FFI-width license).
 
@@ -5072,8 +5145,8 @@ forms (no `import`, no grammar change — both are recognized only inside an `ex
 - **`owned_str`** — the C function transfers ownership of a `malloc`'d `char*` (e.g. `strdup`). Chezzi
   copies it into a `str` **and then frees** the buffer with libc `free`, so it does **not** leak. To
   your program it is a plain `str`. A `NULL` still faults (use `owned_str?` for nullable).
-- **`str?`** (sugar for `Option[str]`) — the C function legitimately returns `NULL` (e.g. `getenv` of an
-  unset variable). `NULL` becomes `None`, a non-null pointer becomes `Some(str)` (still borrowed, not
+- **`str?`** (sugar for `str?`) — the C function legitimately returns `NULL` (e.g. `getenv` of an
+  unset variable). `NULL` becomes `None`, a non-null pointer becomes `?str` (still borrowed, not
   freed). This is the only way to make a `NULL` `char*` return non-fatal.
 - **`owned_str?`** composes both: nullable **and** freed (`NULL` → `None` and frees nothing).
 
@@ -5089,7 +5162,7 @@ extern "libc":
 
 print(strdup("hi"))                  # hi   (the C buffer is freed after the copy)
 match getenv("HOME"):
-    Some(v): print(v)
+    ?v: print(v)
     None: print("unset")
 ```
 
@@ -5159,7 +5232,7 @@ for i8`):
   **compile error** wherever the slot is a width: extern/fn/method params, struct fields, enum
   payloads, annotated locals, assignments and `op=`, returns, defaults, closure bodies, `yield`, map
   keys (`m[300] = "a"` on a `Map[int8, str]`), type arguments (`List[int8] = [300]`,
-  `Option[int8] = Some(300)`, `b: Bx[int8] = Bx(300)`), a generic return pinned by the expected type
+  `int8? = ?300`, `b: Bx[int8] = Bx(300)`), a generic return pinned by the expected type
   (`y: int8 = id(300)`), the branches of `if`/`match` and the right side of `??`:
   `constant 300 does not fit int8 (-128..127)`, `constant 256 does not fit int8 (-128..127)` for
   `1 << 8`. The check reads through a carrier: `o: int8? = 300` and `o: int8? = ?300` are rejected
@@ -5213,10 +5286,10 @@ An `extern "lib":` block is a **top-level declaration only** — it is bound at 
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
 (`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
 (`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), any of your `struct`/
-enum-variant names, or a **builtin variant ctor** (`Ok`/`Err`/`Some`/`None`) — those resolve to a special op before a
+enum-variant names, or a **builtin variant ctor** (`?x`/`!e`/`None`) — those resolve to a special op before a
 plain call, so the extern would be silently shadowed; the checker rejects the collision (*'…' is a
 builtin/reserved name*), in either declaration order and reported exactly **once**. A **type** name is
-*not* a collision and is accepted: an `enum`'s own name, `Result`/`Option`, and a std-module layout name
+*not* a collision and is accepted: an `enum`'s own name, `T!E`/`T?`, and a std-module layout name
 whose module you never imported (`Match`) are not callable, so nothing shadows the extern.
 
 **Known v1 limits (see `docs/spec.md` for detail):**
@@ -5310,12 +5383,12 @@ native struct Match:              # regex.Match's SIGNATURE (fields-only)
     end: int
     groups: List[str]
 
-native fn find(pat: str, s: str) -> Result[Option[Match]]   # a native MODULE MEMBER
+native fn find(pat: str, s: str) -> Match?!   # a native MODULE MEMBER
 ```
 
 - A `native struct` body may declare **fields** and/or bodyless **`native fn` methods** (phase 4c-net):
   a `native fn` inside the body is an **instance method** and — like a user-struct method — declares a
-  leading bare `self` as its first parameter (`native fn read(self, n: int) -> Result[str]`); it is
+  leading bare `self` as its first parameter (`native fn read(self, n: int) -> str!`); it is
   harvested into the type's method table (harvest **strips** the `self` receiver, so the recorded sig is
   the call-arg shape) and checked via the normal method-resolution path (this is how `std.net`'s
   `Socket`/`Listener` declare `read`/`write`/`accept`/`close`). A `native fn` inside the body **without**
@@ -5333,7 +5406,7 @@ bodied fn is harvested as a real member (callable qualified or via `import NAME 
 type-checked, and it is bound at runtime by running the module toplevel, so Rust-backed and Chezzi-backed
 members coexist in one namespace. A native file is still a real `.chz`, so it may itself `import` other
 modules and use them from a bodied fn (e.g. `import std.string`). A `test` method or a field `= default` inside the body
-  is still a parse error. **Asymmetry (deliberate, for now):** a **`native enum`** (`Option`/`Result`)
+  is still a parse error. **Asymmetry (deliberate, for now):** a **`native enum`** (`T?`/`T!E`)
   still rejects a bodied method (`native enum methods are not supported`) — extending bodied methods to
   native enums is a symmetric follow-up, not yet wired (no native enum needs one today).
 - A `native struct` may be **generic** (`native struct Shared[T]:`, phase 4c-concurrency): its method
@@ -5386,27 +5459,22 @@ EXISTING reserved type** — it never mints a fresh nominal `Ty::Enum`. The only
 most deeply-wired builtins, declared in the always-linked universe prelude (`std/prelude.chz`):
 
 ```chezzi
-native enum Option[T]:            # reserved Ty::Option — Some(T) / None
-    Some(T)
-    None
-
-native enum Result[T, E]:         # reserved Ty::Result — Ok(T) / Err(E)
-    Ok(T)
-    Err(E)
+native enum Carrier[T]:    # the shape of a declaration; the prelude's two are the enums
+    Present(T)             # behind `T?` (a value / None) and `T!E` (a value / an error)
+    Absent
 ```
 
 - The body is its **variants** (an identifier with an optional `(typeList)` payload — reusing the
   ordinary `enum` variant grammar), optionally followed by bodyless **`native fn` methods** with a
   leading bare `self` (harvested into the enum's method table like native-struct methods; variants must
-  precede methods, a self-less or plain-`fn` method is a parse error). `Option`/`Result` carry **no**
+  precede methods, a self-less or plain-`fn` method is a parse error). The two carrier enums carry **no**
   methods. Generics use the same `[T…]` params as an ordinary enum (a param may carry a bound).
 - **SHAPE-only, not the wiring.** The variant shape is file-backed as a **drift-guarded MIRROR**; the
-  `?` operator, exhaustive `match`, top-level error propagation, and `Ok`/`Err`/`Some`/`None`
-  **construction** all stay **Rust-wired** (the identity stays `Ty::Option`/`Ty::Result` via
+  `?` operator, exhaustive `match`, top-level error propagation, and `?x`/`!e`/`None`
+  **construction** all stay **Rust-wired** (the identity stays the checker's two carrier types via
   `resolve_type`; the variant set is synthesized inline from that `Ty` shape). The checker harvests the
   decl and asserts its variant set byte-matches the inline shape, so the `.chz` source-of-truth can
-  never silently drift from the Rust wiring. `Result` is spelled in its faithful two-slot form
-  `Result[T, E]` with `Err(E)`; the surface `Result[T]` → `E = Error`-protocol default is injected by
+  never silently drift from the Rust wiring. The error carrier is declared in its two-slot form; the surface `T!` → `E = Error`-protocol default is injected by
   `resolve_type`, not encoded in the variant.
 - **Prelude/std-only:** a `native enum` in an ordinary user `.chz` is a **checker error** (*native enum
   declarations are only allowed in standard-library modules*); nesting is a parse error.
@@ -5431,7 +5499,7 @@ A few cross-cutting notes (full detail in `stdlib.md`):
 - `min`/`max`/`clamp` live in **`std.cmp`** as generic `[T: Comparable]` functions (int/float/str and
   any struct/enum with a `compare` method — `Comparable` embeds `Eq`, and a struct/enum satisfies `Eq`
   structurally, so no `eq` is required); `list.sort()` is likewise Comparable.
-- **`std.json`** parses/stringifies a dynamic `Json` enum, and `json.decode[T](s) -> Result[T]`
+- **`std.json`** parses/stringifies a dynamic `Json` enum, and `json.decode[T](s) -> T!`
   deserializes straight into a known shape. A JSON *literal in source* needs a raw string
   (`r"""{"k": 1}"""`) or doubled braces — a bare `{…}` in a normal string is interpolation.
 - **`std.os.exit(code)`** is a hard, uncatchable exit (does not run `defer`s). **`std.process.cmd`**
@@ -5462,10 +5530,10 @@ struct Point:
     fn dist(self) -> float:
         return sqrt(float(self.x*self.x + self.y*self.y))
 
-fn safe_div(a: int, b: int) -> Result[int]:
+fn safe_div(a: int, b: int) -> int!:
     if b == 0:
         return !"divide by zero"
-    return Ok(a / b)
+    return ?(a / b)
 
 fn main():
     p := Point(3, 4)
@@ -5478,8 +5546,8 @@ fn main():
     print("even sum: {total}")
 
     match safe_div(10, 2):
-        Ok(v):  print("div: {v}")
-        Err(e): print("err: {e}")
+        ?v:  print("div: {v}")
+        !e: print("err: {e}")
 
 main()   # no automatic entry point — call it yourself
 ```

@@ -35,7 +35,7 @@ q.y = 8                       # points[0].y remains 2
 points[0] = q                # replace the packed element
 ```
 
-V1 operations: `len`, `push`, `pop -> Option[T]`, indexed read and replacement, and iteration. Reads and `pop` materialize a fresh ordinary `T`; insertion and replacement copy its fields. `points[i].x = ...` is rejected by the checker because it would mutate a temporary; read, modify, and assign back instead. An ordinary `List[T]` does not convert implicitly to or from `PackedList[T]`.
+V1 operations: `len`, `push`, `pop -> T?`, indexed read and replacement, and iteration. Reads and `pop` materialize a fresh ordinary `T`; insertion and replacement copy its fields. `points[i].x = ...` is rejected by the checker because it would mutate a temporary; read, modify, and assign back instead. An ordinary `List[T]` does not convert implicitly to or from `PackedList[T]`.
 
 The compiler must carry the concrete `T` layout to construction; generic type arguments are currently erased. The VM stores a struct type ID, length, and a growable fixed-stride field buffer. A two-int `Point` takes 16 bytes per element in that buffer, with no per-element GC slot. The v1 scalar-only payload needs no GC child tracing. At a task or channel boundary, serialize the logical elements and reconstruct an independent packed sequence, following existing airlock copy rules.
 

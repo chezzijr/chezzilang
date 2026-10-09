@@ -316,7 +316,7 @@ race was closed by serializing register/deregister/`drain_sched`/fire under the 
 
 **Landed (D6c — per-socket timeouts):** an optional trailing `timeout_ms` on `read`/`write`/`accept`
 parks on the netpoller with a deadline (`Parked.deadline`); `fire_due_socket_timeouts` re-injects the
-fiber with `poll_timed_out` set so the rewound op returns `Err("timeout")`; readiness wins ties
+fiber with `poll_timed_out` set so the rewound op returns `!"timeout"`; readiness wins ties
 (`examples/socket_timeout.chz`).
 
 **Per-connection `spawn` LANDED (eager injectable nursery, `--parallel` ≥2 cores).** A nested

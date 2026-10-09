@@ -1,6 +1,6 @@
 # Design — generics on Rust's model, and `T?` / `T!E` without Rust's names (draft, 2026-10-07)
 
-Status: **draft, owner decisions recorded below; nothing filed yet.** Motivation: sweeps #5 and #6
+Status: **D4-D6 done, design complete (TICKET-228, 2026-10-09).** History: draft, owner decisions recorded below. Motivation: sweeps #5 and #6
 (`docs/root-causes-w20.md`, `docs/root-causes-w21.md`) kept finding generic/path bugs (2 P0 each wave).
 Each came from a fact decided in several places. This doc fixes the architecture once, and at the same
 time settles the surface syntax of optional and error values.
@@ -342,7 +342,7 @@ They exist only inside the compiler (R3). Every spelling has a replacement:
    - D4 `else` guard;
    - D5 `?v` / `!e` patterns, bare-constant reject;
    - D6 remove the long names (last: after every corpus use is migrated).
-   - Status: D2 and D3 shipped (TICKET-227).
+   - Status: D2 and D3 shipped (TICKET-227); D4, D5 and D6 shipped (TICKET-228).
 5. Docs: rewrite the error-handling chapter of `docs/syntax.md` around the Part 2 table; `docs/spec.md`
    and `docs/grammar.bnf`; a migration note listing every old spelling and its new one.
 

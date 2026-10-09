@@ -26,7 +26,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 | Execution model | **Bytecode stack VM** (a tree-walk interpreter was the historical bootstrap, since removed) |
 | Type system | **Static, local inference** (explicit param and return types; inferred locals; an inline expression body takes its expression's type) |
 | Surface syntax | **Indentation blocks** (Python-feel; lexer emits INDENT/DEDENT) |
-| Errors | **Result/Option + `?`** (errors as values, no hidden control flow) |
+| Errors | **`T!E` / `T?` + `?`** (errors as values, no hidden control flow) |
 | Code organization | **Composition, not inheritance** — structs + methods + interfaces (structural `protocol`s), like Rust/Go. No classes, no inheritance. |
 | Memory | **Mark-sweep GC** (hand-built; primitives unboxed) |
 | Name / ext / binary | **Chezzi** / `.chz` / `chezzi run foo.chz` |
@@ -34,18 +34,16 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 ## Language v1 — feature set
 
 **Core:** `int float bool str`, `List[T]`, `Map[K,V]`, `Set[T]`, `tuple`, `fn`, `struct`, `enum`,
-`if/else`, `for/while`, `Result[T, E]` & `Option[T]` + `?`, closures (`fn(x): x*2`), built-in generics
-(`List`/`Map`/`Set`/`Result`). `Option` and `Result` are ordinary enums the prelude declares
-(`native enum Option[T]` / `Result[T, E]`), and the prelude imports their variants as bare names
-(`import Some, None from Option`, `import Ok, Err from Result`), so paths, patterns and
-exhaustiveness treat them like a user enum (`Option[int].None`, `Result[int, str].Ok(5)`,
-`f := Some`); any module can do the same for its own enum with `import Red, Green from Color`
-([`syntax.md` §12 "Variant import"](syntax.md)). `Result[T, E]` is two-param: `T!` = `Result[T, Error]`, `T!E` =
-`Result[T, E]`, `T?` = `Option[T]`, `T??` = `Option[Option[T]]` (E defaults to the built-in `Error`
-protocol); diagnostics print types in this sugar (`int?`, `str!IoErr`, `int!`, `None!E`);
-`None` as a type means "returns nothing" and `None!E` = `Result[None, E]`, whose bare `return`
-or fall-off is `Ok()`. A plain success value at ANY typed slot (binding, assignment, argument, field,
-element, return, yield, default) implicitly wraps to `Some(v)`/`Ok(v)` (`docs/syntax.md` §9); prefix
+`if/else`, `for/while`, `T!E` & `T?` + `?`, closures (`fn(x): x*2`), built-in generics
+(`List`/`Map`/`Set`/`T!E`). `T?` and `T!E` are ordinary enums the prelude declares and
+keeps the names of: user code writes the types `T?` / `T!E`, the values `x`, `?x`, `!e`, `None` and
+the patterns `?v`, `!e`, `None`, so patterns and exhaustiveness treat them like a user enum; any
+module can import the variants of its own enum with `import Red, Green from Color`
+([`syntax.md` §12 "Variant import"](syntax.md)). `T!E` is two-param and `T!` = `T!Error` (E
+defaults to the built-in `Error` protocol); diagnostics print types in this sugar (`int?`,
+`str!IoErr`, `int!`, `None!E`); `None` as a type means "returns nothing", and a `None!E` fn (also
+written `!E`) succeeds by a bare `return` or by falling off the end. A plain success value at ANY typed slot (binding, assignment, argument, field,
+element, return, yield, default) implicitly wraps (`docs/syntax.md` §9); prefix
 `!e` builds an error value (`return !e`; `e` must satisfy `Error`) and prefix `?x` a present/success
 value of the expected carrier. A value already a carrier is never re-wrapped, there is no int→float
 step, and a slot mentioning an unpinned type parameter does not wrap.
@@ -57,13 +55,13 @@ step, and a slot mentioning an unpinned type parameter does not wrap.
   (A module-level `fn` named after the struct **replaces** that positional constructor at every call
   site where the fn is in scope, TICKET-029 — `docs/syntax.md` §7a; a `match` pattern still
   destructures the struct's fields directly, never through the fn.)
-  Nested patterns (incl. nested nullary variants like `Some(None)`) + **or-patterns** (`p1 | p2`; every
+  Nested patterns (incl. nested nullary variants like `?None`) + **or-patterns** (`p1 | p2`; every
   alternative must bind the same variables; a full enum or-pattern is exhaustive without `_`, and so is
   `true | false` on a bool scrutinee — the open int/str domains still require a `_`). User-enum variants are
   **scoped under their enum** and must be written **qualified** as `Enum.Variant` (value, constructor,
   or `match` arm); a bare user-variant name is a compile error. Because variants are per-enum, two
-  enums may share a variant name (`Color.Red` / `Light.Red`). The built-in `Ok`/`Err`/`Some`/`None`
-  (Result/Option) stay bare.
+  enums may share a variant name (`Color.Red` / `Light.Red`). The built-in `?x`/`!e`/`None`
+  (`T!E` / `T?`) stay bare.
 - **String interpolation** — `"hi {name}, sum {a+b}"`. First-class; string ops are a UX priority.
   Supports Python-style **format specifiers** after a `:` — `{expr:[[fill]align][sign][z][#][0][width][.precision][type]}`,
   e.g. `{name:>10}` (right-align width 10), `{f:.2f}` (2 decimals), `{n:04d}` (zero-pad), `{pct:.1%}`
@@ -82,16 +80,16 @@ step, and a slot mentioning an unpinned type parameter does not wrap.
 - **Tuples** — `(1, "a")`, fixed-arity, immutable; nestable in patterns.
 - **Transparent type aliases** — `type UserId = int` (M10).
 - **Bitwise ops** — `& | ^ << >>` (int-only, M8/M11).
-- **`recover:` block** — panic-recovery boundary → `Result[T, Error]` catching any runtime fault beneath it (M11).
-- **`panic(msg: str)`** — user-raised recoverable fault (bottom-typed; unwinds, runs `defer`s, caught by `recover:` as `Err`, else aborts) (M11).
+- **`recover:` block** — panic-recovery boundary → `T!Error` catching any runtime fault beneath it (M11).
+- **`panic(msg: str)`** — user-raised recoverable fault (bottom-typed; unwinds, runs `defer`s, caught by `recover:` as `!e`, else aborts) (M11).
 
 **Shipped post-v1 (M7–M18):**
 - **M7** — user-defined generics + structural protocols (generic fns/structs, `Comparable`; `std.cmp`).
 - **M8** — tier-1 stdlib (`std.json`/`process`/`fs`/`time`), the `set` type, iterable strings (`s.chars()`).
 - **M9** — tier-2 stdlib (`std.regex`, `std.request`) — first runtime crate deps.
 - **M10** — type-system depth: `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics (`T: Add + Mul`), any-`Hashable` map/set keys.
-- **M11** — panic recovery (`recover:`) + user-raised `panic(msg: str)` (bottom-typed, unwinds, caught by `recover:` as `Err` else aborts) + Go-style `Result[T, E]` with the built-in `Error` protocol (`message(self) -> str`).
-- **M12** — iterator protocol (structs with `next(self) -> Option[T]` iterable in `for`), match guards + range patterns.
+- **M11** — panic recovery (`recover:`) + user-raised `panic(msg: str)` (bottom-typed, unwinds, caught by `recover:` as `!e` else aborts) + Go-style `T!E` with the built-in `Error` protocol (`message(self) -> str`).
+- **M12** — iterator protocol (structs with `next(self) -> T?` iterable in `for`), match guards + range patterns.
 - **M13** — the first **parameterized** protocol bounds, with element-type recovery: `[S: Iterable[T], T]` accepts any iterable, `[S: Iterator[T], T]` a cursor you may call `.next()` on (Rust's `IntoIterator` vs `Iterator`); lazy adapter structs replace `yield`.
 - **M14** — method-level type params (`fn map_to[U](self, …)`) + **user-defined parameterized protocols** (`protocol Container[T]`, concrete-arg bounds `[X: Container[int]]`, and first-class **value/annotation types** `c: Container[int]` — statically witnessed at the store/pass boundary, runtime-erased, strictly invariant, with method-return element recovery) — generalizing the special-cased `Iterator[T]`.
 - **M15** — slicing + indexing protocols (Python-style `xs[a:b:c]` + negative indexing; `Index`/`IndexSet`/`Slice` structural protocols, built-ins intrinsic + user structs via `index`/`set_index`/`slice`).
@@ -117,7 +115,7 @@ slot (`print(...args: Any)`); it is not dynamic typing (it carries no methods). 
 **general** accept-all top type now that they are expressible (`protocol Name:` with a lone `pass`
 body — see the `pass` keyword below): `Any` is defined that way in the prelude and any user empty
 protocol behaves identically (the accept-all behaviour is structural, not keyed on the name `Any`). A checked downcast off
-`Any` — `cast[T](val: Any) -> Option[T]` — is a **deferred** companion (design + runtime-erasure policy
+`Any` — `cast[T](val: Any) -> T?` — is a **deferred** companion (design + runtime-erasure policy
 in `docs/future.md`; parameterized targets like `cast[List[int]]` stay unsound until runtime type tags
 exist). Default + named
 arguments still cover most ergonomic cases. Named arguments also work through a first-class **function
@@ -228,7 +226,7 @@ adapter-struct model remains the recommended way to write lazy sequences. Live s
 `Iterator[T]` additionally promises `.next()`, so every `Iterator` IS `Iterable` (its `iter()` returns
 self). Every built-in collection (`list`/`set`/`map`→keys/`str`→char/`bytes`/`bytearray`→int) now
 exposes `.iter()`, returning a cursor — a frozen snapshot of the collection plus a read position,
-typed as the existing `Iterator[T]` existential (no new value type), with `.next() -> Option[T]` (Some,
+typed as the existing `Iterator[T]` existential (no new value type), with `.next() -> T?` (a present value,
 then idempotent None). This lets a plain `list` flow into the same Take/Mapped adapter pipeline as a
 hand-written struct iterator (`examples/iterable.chz`). A generator, a user `next`-struct, and a struct
 with only `iter(self) -> Iterator[E]` (driven by a one-time `.iter()`) all satisfy `[S: Iterable[T]]`.
@@ -248,7 +246,7 @@ The reject shapes stay: a genuinely non-sendable parked slot (a `Module` handle,
 >depth-cap acyclic nest), a value cycle threaded through the generator, and the three HARD-ARM parked
 shapes (mid-`recover:` is now sendable; pending `defer` and multi-frame are checker-unreachable defensive
 guards) all reject cleanly with a graceful, catchable `... cannot be sent across tasks` error, **never** a
-panic, identically. (The earlier **Option-B reach-gate + poison→`None`** model for
+panic, identically. (The earlier **choice-B reach-gate + poison→`None`** model for
 module-global generators is retired — safety is now provided by the by-value deep copy, which rebuilds a
 fresh generator on the receiving heap and never shares a cross-heap handle, not by an inert `None` leaf.)
 
@@ -315,22 +313,22 @@ fn area(s: Shape) -> float:
         Circle(r): return 3.14 * r * r
         Square(n): return float(n * n)
 
-fn safe_div(a: int, b: int) -> Result[int]:
+fn safe_div(a: int, b: int) -> int!:
     if b == 0:
         return !"divide by zero"
-    return Ok(a / b)
+    return ?(a / b)
 
-fn main() -> int!:                     # must return Result/Option to use `?` — no `fn main` exception
-    r := safe_div(10, 2)?              # ? propagates Err to main's Result
+fn main() -> int!:                     # must return `T!E` or `T?` to use `?` — no `fn main` exception
+    r := safe_div(10, 2)?              # ? propagates the error to main's return
     nums := [1, 2, 3, 4]
         |> iter.filter(fn(x: int) -> bool: x % 2 == 0)   # pipe (needs: import std.iter);
                                                          #   a leading `|>` continues the line
         |> iter.map(fn(x: int) -> int: x * 10)
     print(nums)
-    return Ok(0)
+    return ?0
 
 main()                                 # no auto-entry — `main` is a normal fn you call yourself
-                                       #   (its returned Err would auto-raise at top level, rc=1)
+                                       #   (its returned error would auto-raise at top level, rc=1)
 ```
 
 **`pass` — the no-op keyword.** `pass` is a reserved keyword that does nothing. As a **statement** it
@@ -353,22 +351,22 @@ an error. `(x)` is grouping; `(x,)` is a one-element tuple. (See [`syntax.md` §
 collection/`<params>`/`<argList>` productions in [`grammar.bnf`](grammar.bnf).)
 
 **Entry model.** Programs run top-to-bottom; there is no automatic `main`. Only a top-level `?` that
-hits an `Err`/`None`, or a manifest `module:function` entrypoint whose entry fn *returns* `Err`/`None`,
-exits the program with `unhandled error: …` and a non-zero code. **A bare discarded `Result`/`Option` —
+hits an `!e`/`None`, or a manifest `module:function` entrypoint whose entry fn *returns* `!e`/`None`,
+exits the program with `unhandled error: …` and a non-zero code. **A bare discarded `T!E`/`T?` —
 at module top level, inside a function, or inside a `spawn:`/`defer:` block — is silently thrown away**
 at run time, in every position alike. Those are exactly the positions `chezzi check` **warns** on
 (`docs/gaps.md` **W8-2**, following Rust's `unused_must_use`, with `r := …` / `_ := …` as the escapes).
 See [`syntax.md` §9](syntax.md) for the position-by-position table. `?` is valid at module top-level (the runtime unwinds the
-propagated `Err`/`None` at the program boundary) and inside a `Result`/`Option`-returning fn — but a
+propagated `!e`/`None` at the program boundary) and inside a `T!E`/`T?`-returning fn — but a
 **None-returning fn (including a `main` you write) may not use `?`**: it would silently swallow the
-error (there is no `fn main`/entrypoint exception — a fn must return `Result`/`Option`). A bare
+error (there is no `fn main`/entrypoint exception — a fn must return `T!E`/`T?`). A bare
 `chezzi run` (no file argument) runs the project manifest's `[project] entrypoint` — a **dotted module
 path**, optionally suffixed with **`:function`** (e.g. `"src.main:main"`). The module runs
 top-to-bottom like any other file; with a `:function` suffix the entry function is then **called**, so
 the source needs no trailing call. The function part must be one name; a name the entry module never
 binds is rejected by `chezzi check` and bare `chezzi run` before any code runs (an error naming
 `chezzi.toml`), and a name bound to a non-function is a run-time error. An entry function
-may legitimately be `-> T!` and use `?`; if it returns `Err`/`None`, `chezzi run` surfaces it as
+may legitimately be `-> T!` and use `?`; if it returns `!e`/`None`, `chezzi run` surfaces it as
 `unhandled error: …` (rc=1), symmetric with the unhandled-top-level rule. The fault names the entry
 function's own declaration — the entry file for an ordinary `fn`, or wherever a module-global alias
 (`main := helper`) points if `helper` is declared elsewhere — rather than a bare `line 1, col 1`; an
@@ -497,7 +495,7 @@ normal output). Exception, compile-time only: a type diagnostic naming two DIFFE
 same bare name qualifies both by module (`expected a.Col, found b.Col`; the full dotted path when
 the last segments also match, and bare again if that is still ambiguous). Runtime output never
 changes. JSON *encode* likewise emits the bare field/type naming (no `module::` leaks into the
-wire). Reserved/native types (`Result`/`Option`/`Some`/`Ok`/…, `Iterator`, the std library type
+wire). Reserved/native types (`T!E`/`T?`/…, `Iterator`, the std library type
 surface on `import std.*`, and the FFI width names like `int32`) are **not** module-keyed — they keep
 their bare name globally. An imported `type` alias is **transparent**: its body is resolved in the
 *defining* module's scope, so a cross-module `import Len from sizes` where `type Len = int32` carries
@@ -580,14 +578,14 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `docs/syntax.md` §3 for the full sink list. The same rule governs
   **un-annotated multi-branch return inference**: sibling `return` branches merge with a join. It does
   **not** widen `int`→`float` across branches, so mixed `if c: return 1 else: return 2.0`
-  **conflicts**; write `2.0` in both. `return Ok(1)` / `return Ok(2.0)` likewise conflict (no
-  widening inside a merged type-arg slot — the `float! = Ok(3)` error above). The `Result` **error
+  **conflicts**; write `2.0` in both. `return ?1` / `return ?2.0` likewise conflict (no
+  widening inside a merged type-arg slot — the `float! = ?3` error above). The `T!E` **error
   slot** defaults to the built-in `Error` protocol when it is un-pinned or its payload **satisfies
-  `Error`** (`return !"a"` + `return Ok("h")` infers `Result[str, Error]`, not `Result[str, str]`,
+  `Error`** (`return !"a"` + `return ?"h"` infers `str!Error`, not `str!str`,
   because `str` satisfies `Error`; two distinct **sendable** `Error`-satisfying payloads across branches
   unify to `Error` rather than conflicting). A concrete payload that does **not** satisfy `Error` — **or
   satisfies it but is not sendable** — is preserved (not laundered into the `Error` existential); a
-  deliberate concrete error type is spelled explicitly (`-> Result[str, str]` / `-> int!DbErr`). The
+  deliberate concrete error type is spelled explicitly (`-> str!str` / `-> int!DbErr`). The
   **every** protocol existential is **sendable** (Go `chan interface` parity, Task 2): `Channel[Error]`,
   `Channel[int!]`, and `Channel[Drawable]` over any user protocol all type-check — the erased witness
   crosses the airlock by deep value copy, and the concrete witness's own sendability is checked at each
@@ -603,7 +601,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `bytearray` model), **shipped**: constructor-only (`bytearray()` empty, `bytearray(N)` N zero bytes,
   `bytearray(b)`/`bytearray([ints])` from a bytes/List[int]) — no `ba"..."` literal. `ba[i]` -> `int`,
   `ba[i] = x` mutates in place (`IndexSet`; value 0–255), `ba[a:b:c]` -> a new `bytearray`,
-  `for x in ba` yields `int`, `len`, `.push(int)` / `.pop() -> Option[int]` / `.extend(bytes|bytearray|
+  `for x in ba` yields `int`, `len`, `.push(int)` / `.pop() -> int?` / `.extend(bytes|bytearray|
   List[int])`, `==` structural (incl. cross-type `bytes == bytearray` content-equal, Python parity).
   `bytearray` is **NOT** `Hashable` (mutable ⇒ not a map/set key, like `list`); its repr is
   `bytearray(b'...')`. The conversion bridge moves between the forms: `bytes(ba)` snapshots,
@@ -615,7 +613,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   and base64/hex/sha (a separate `std.*` gap), and byte-sequence methods beyond the tables + Display.
 - **Std modules — M8 (shipped):** `std.json` (pure-Chezzi `Json` enum + `parse`/`stringify`/
   accessors **and** type-directed `json.decode[T](s)` into a struct/map/list/scalar);
-  `std.process` (`cmd(s) -> Result[str]`); `std.fs` (`list_dir`/`exists`/`is_file`/`is_dir`/
+  `std.process` (`cmd(s) -> str!`); `std.fs` (`list_dir`/`exists`/`is_file`/`is_dir`/
   `size`/`glob` — since W7-8 every path argument is a **`PathLike`** and every path result a
   **`path.Path`** over the raw OS bytes, so a non-UTF-8 filename round-trips instead of coming back
   `U+FFFD`-substituted); `std.time` (`now`/`monotonic`/`sleep_ms`/`format`). Plus the **`set`** type
@@ -624,7 +622,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `find_all`/`find_all_text`/`replace_all`/`split`, returning a `Match` struct `{text, start, end, groups}` — spans
   are codepoint offsets, so `subject[m.start:m.end] == m.text`); `std.request` (blocking HTTP/HTTPS via `ureq`+rustls; `get(url)` /
   `post(url, body)` returning a `Response` struct `{status, body, headers: Map[str,str]}`, where a
-  ≥400 status is a normal `Response`, not an `Err`). These are Chezzi's **first runtime
+  ≥400 status is a normal `Response`, not an `!e`). These are Chezzi's **first runtime
   dependencies**. Both are **synchronous/blocking** (the language is single-threaded — see below).
   `Match`/`Response` (and `ProcResult` from `std.process`) are **module-owned** struct types, not
   program-global reserved names: reading their fields off a returned value works import-free, but
@@ -654,7 +652,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `c[a:b:c]` and `x.hash()` is exactly the hash `x` gets as a map/set key — same values, same faults.
   The checker↔runtime pairing is machine-checked per **(protocol × receiver type)**
   (`checker::proto::INTRINSIC_PROTO_METHODS` + `vm::tests::intrinsic_grants_all_have_vm_arms`, which
-  sweeps the whole cross product), and a bare `return Ok(())` grant no longer compiles — so neither a
+  sweeps the whole cross product), and a bare `return ?(())` grant no longer compiles — so neither a
   new grant nor a WIDENED one can ship without its arm. One documented exception: `Iterator`'s
   stateful `next` on a *raw* collection (no cursor position, W6-3b). On a **NaN** operand `compare` is total, but by `sort()`'s total order rather than
   the operators' IEEE rule — one order, one divergence (see the `Comparable` note below).
@@ -692,8 +690,8 @@ struct Meters:
 > struct/enum method whose first parameter is **not** `self` (or which has no parameters) is a
 > **static** method, called `Type.method(args)` instead of `value.method(args)` (the Rust `fn new`
 > ergonomic). Additive — the positional `Name(...)` ctor is unchanged; static methods enable named /
-> alternative ctors (`Rect.square(5)`) and validating ctors returning `Result` / `Option`
-> (`Email.parse(s) -> Result[Email, str]`, `Color.from_str(s) -> Option[Color]`). An instance method
+> alternative ctors (`Rect.square(5)`) and validating ctors returning `T!E` / `T?`
+> (`Email.parse(s) -> Email!str`, `Color.from_str(s) -> Color?`). An instance method
 > and a static method are different call shapes — neither is invocable as the other. For enums a
 > **variant** wins over a static-method name on `Enum.x` (variant/static names must be disjoint —
 > enforced at declaration time). Generic statics use the **type-level** turbofish `Box[int].empty()`
@@ -713,8 +711,8 @@ struct Meters:
 > are pinned **at the site the generic is DECLARED**: declared on the type (`enum/struct [T]`)
 > → pinned on the type (`Box[int]`); declared on a member (`fn m[U]`) → pinned on the member. For a
 > generic TYPE the args go on the TYPE, uniformly for enum **variant constructors** and **static
-> methods**: `Box[int].Has(5)`, `Result[int, str].Ok(5)`, nullary `Box[int].Empty`, generic static
-> `Box[int].empty()`. Multi-param types use the comma form (`Result[int, str].Ok`). The old **gliding**
+> methods**: `Box[int].Has(5)`, nullary `Box[int].Empty`, generic static
+> `Box[int].empty()`. Multi-param types use the comma form (`Pair[int, str].Both`). The old **gliding**
 > form `Enum.Variant[T](args)` (type args on the variant) is **removed** — the checker redirects to the
 > type-side form. Inference is unchanged: `Box.Has(5)` (no turbofish) still infers `Box[int]`; the
 > turbofish is needed only when args can't bind the params (`Box[int].Empty`, multi-param enums). The
@@ -825,7 +823,7 @@ struct Meters:
 >   **imported per-name from `std.ffi`** (Chezzi's first type imports), not global builtins.
 >   **`char*` ownership + nullable returns shipped:** a plain `str` return is borrowed (copied,
 >   never freed); declare it **`owned_str`** (a return-only marshalling type) to copy **and** free a
->   `malloc`'d buffer with libc `free` (no leak), or **`str?`** (`Option[str]`) to make a `NULL` return
+>   `malloc`'d buffer with libc `free` (no leak), or **`str?`** (`str?`) to make a `NULL` return
 >   `None` instead of a fault (`owned_str?` composes both). See `examples/ffi_str.chz`. **Opaque `void*`
 >   handles shipped:** declare `ptr` (an opaque type imported from `std.ffi`, ↔ C `void*`) to hold a C handle
 >   (`FILE*`/`sqlite3*`/…) across calls — `Obj::Ptr(usize)` / `Value::Ptr(usize)`, a GC leaf, sendable
@@ -896,8 +894,8 @@ struct Meters:
 >     See `src/native/cffi.rs` (`CType::OwnedStr`) + `examples/ffi_str.chz`.
 >   - **Nullable `str?` returns (RESOLVED, opt-in):** a plain `str` return that comes back `NULL` is a
 >     recoverable **fault** (it would break the static non-null `str` guarantee). To opt into a legitimate
->     `NULL` (e.g. `getenv` of an unset var), declare the return **`str?`** (`Option[str]`): `NULL` →
->     `None`, non-null → `Some(str)`. Composes with ownership: `owned_str?` is nullable **and** freed.
+>     `NULL` (e.g. `getenv` of an unset var), declare the return **`str?`** (`str?`): `NULL` →
+>     `None`, non-null → `?str`. Composes with ownership: `owned_str?` is nullable **and** freed.
 >     `str?` is **return-only** (a `str?` parameter is *not C-marshallable*). See `CType::OptStr`.
 >   - **No `--parallel` serialization / non-reentrant C (FFI-7):** `extern` calls are **NOT** serialized
 >     under `--parallel` — two OS-thread workers can be inside C code at the same time. Calling a
@@ -958,15 +956,15 @@ coercion, so a conversion is always visible in the source.
 | `str(x)` | **anything** → `str` | never fails — the `Stringable` display cast (`print`/interpolation use the same path) |
 | `ord(s)` / `chr(n)` | `str` ↔ codepoint `int` | narrow, single-purpose |
 
-`int()`/`float()`/`bool()` **reject** a `List`/`Map`/`Set`/tuple/struct/enum/function/`Option`/
-`Result`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/
+`int()`/`float()`/`bool()` **reject** a `List`/`Map`/`Set`/tuple/struct/enum/function/`T?`/
+`T!E`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/
 `Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time — outside the domain above, and the runtime
 always faults, so the checker catches it early.
 
-**Safe (non-faulting) string parse** — return `Option` instead of faulting: `s.to_int() -> int?`,
+**Safe (non-faulting) string parse** — return `T?` instead of faulting: `s.to_int() -> int?`,
 `s.to_float() -> float?` (`None` on bad input). Their error-message-carrying siblings return a
-`Result` instead: `s.parse_int() -> Result[int, str]`, `s.parse_float() -> Result[float, str]`
-(`Ok(n)` or `Err(msg)` with a human-readable parse-error message). Use these over `int()`/`float()`
+`T!E` instead: `s.parse_int() -> int!str`, `s.parse_float() -> float!str`
+(`?n` or `!msg` with a human-readable parse-error message). Use these over `int()`/`float()`
 when the input is untrusted.
 
 **No implicit `int` → `float` conversion at a slot** (rule D3, TICKET-138). An `int`-typed expression,
@@ -992,7 +990,7 @@ CONCRETE receiver: **through a protocol bound `a.eq(b)` is always the protocol's
 `≡ a == b` above holds unconditionally there**, matching how rustc resolves `a.eq(b)` under `T: Eq` to
 `<T as PartialEq>::eq` rather than to an inherent same-named method, `docs/gaps.md` **W7-53** I1′),
 `c.index(k)` ≡ `c[k]`, `c.set_index(k, v)` ≡ `c[k] = v` (returns
-`None`), `c.slice(s, e, st)` ≡ `c[s:e:st]` (its three components are `int?`, i.e. `Option[int]`), and
+`None`), `c.slice(s, e, st)` ≡ `c[s:e:st]` (its three components are `int?`, i.e. `int?`), and
 `x.hash()` is exactly the hash `x` gets as a map/set key. `hash()`'s numeric value itself is
 **unspecified** (a build-dependent 64-bit hash, possibly negative) — only its consistency is
 guaranteed: equal values hash equally, and it agrees with container membership.
@@ -1039,7 +1037,7 @@ pair compares Equal by the method and by `sort()`/`min`/`max` alike (`float_orde
   protocol (see below); a value-position conversion mechanism (`c: Convert[int]` as an annotation) is
   deliberately rejected, since a value cannot invoke a static ctor. `T.convert(x)` **through** the
   bound landed in M24.
-- `cast[T](val: Any) -> Option[T]` (a checked downcast off the `Any` top type) is **deferred** — it
+- `cast[T](val: Any) -> T?` (a checked downcast off the `Any` top type) is **deferred** — it
   needs runtime type tags, since generics are erased (`docs/future.md`).
 
 **`Convert[S]` — bound-only conversion protocol.** A structural, target-keyed conversion
@@ -1048,7 +1046,7 @@ protocol `Convert[S]` exists as a reserved builtin. A type **witnesses** `Conver
 like `Comparable`/`Add`, but `is_static`-aware (an instance `convert(self, …)` does NOT witness it). It
 is usable **only as a generic bound** `[T: Convert[S]]`; because a static ctor cannot be invoked on a
 value, `Convert[S]` is **rejected as a value-annotation type** (param/field/return/binding, including
-nested `List[Convert[int]]`/`Option[…]`/tuple, a same- or cross-module type alias, and a protocol that
+nested `List[Convert[int]]`/`…?`/tuple, a same- or cross-module type alias, and a protocol that
 *embeds* a static-ctor protocol) — bound-only by the same static-slot rule that applies to any
 static-ctor protocol. **Calling `T.convert(x)` through the bound LANDED in M24** — the last deferred
 slice — by **witness passing**: a type parameter whose bound carries a static requirement, and whose
@@ -1061,7 +1059,7 @@ witness-taking fn read as a function VALUE, an undetermined `T`; the `spawn`/`de
 is an ordinary call site since M24-5, fixed 2026-08-14):
 `docs/syntax.md §7a`. Direct `Type.convert(x)` (which needs no protocol) still works and is still the
 right spelling when the type is known. The cheap scalar fills (`bool(x)` truthiness cast +
-`Result`-returning `parse_int`/`parse_float`) have **landed**. Recorded in `docs/future.md §3`.
+`T!E`-returning `parse_int`/`parse_float`) have **landed**. Recorded in `docs/future.md §3`.
 
 ## Architecture — pipeline
 
@@ -1110,7 +1108,7 @@ tests/          # Rust unit + golden tests
 |---|-------------|----------------|
 | ✅ **M1** | Indent-aware lexer | `chezzi tokens foo.chz` prints token stream incl. INDENT/DEDENT |
 | ✅ **M2** | Parser → AST + pretty-printer | `chezzi ast foo.chz` round-trips source |
-| ✅ **M3** | Tree-walk interpreter | Working language: arithmetic, fns, if/for/while, structs, enums, match, interpolation, Result+`?` run single-file |
+| ✅ **M3** | Tree-walk interpreter | Working language: arithmetic, fns, if/for/while, structs, enums, match, interpolation, `T!E` + `?` run single-file |
 | ✅ **M4** | Type checker (local inference) | Type errors caught pre-run with clear messages; `--errors=json` mode |
 | ✅ **M4.5** | Modules / imports + resolver | Multi-file program runs; `chezzi.toml` root detection works |
 | ✅ **M5** | Bytecode compiler + stack VM + mark-sweep GC | Runs on VM (default); ~4–6.5× over the since-removed tree-walker; golden-tested |
@@ -1119,8 +1117,8 @@ tests/          # Rust unit + golden tests
 | ✅ **M8** | Tier-1 stdlib | `std.json` (+ type-directed `decode[T]`), `std.process`, `std.fs`, `std.time`; the `set` type, iterable strings (`s.chars()`) |
 | ✅ **M9** | Tier-2 stdlib | `std.regex` + `std.request` (first runtime crate deps; blocking); `Match`/`Response` structs |
 | ✅ **M10** | Type-system depth | `Stringable`/`Hashable` + operator protocols (`Add`/`Sub`/`Mul`), generic enums, type aliases, multi-bound generics, any-`Hashable` **concrete** map/set key (a generic `[T: Hashable]` needs `+ Eq` too — `docs/gaps.md` **W7-53**) |
-| ✅ **M11** | Panic recovery + Go-style errors | Phase A ✅ `Result[T, E]` + `Error` protocol; Phase B ✅ `recover:` boundary with try-block semantics. Golden-tested |
-| ✅ **M12** | Tier-3 ergonomics (part) | **Iterator protocol** (user structs with `next(self) -> Option[T]` iterable in `for`, lazy); **match guards** (`pattern if cond:`) + int **range patterns** (`1..10:`). Golden-tested |
+| ✅ **M11** | Panic recovery + Go-style errors | Phase A ✅ `T!E` + `Error` protocol; Phase B ✅ `recover:` boundary with try-block semantics. Golden-tested |
+| ✅ **M12** | Tier-3 ergonomics (part) | **Iterator protocol** (user structs with `next(self) -> T?` iterable in `for`, lazy); **match guards** (`pattern if cond:`) + int **range patterns** (`1..10:`). Golden-tested |
 | ✅ **M13** | `Iterable[T]` / `Iterator[T]` protocols | The language's first **parameterized** protocol bounds, both recovering element type `T`: `[S: Iterable[T], T]` accepts any iterable (built-in collections, a `.iter()` cursor, a generator, a struct with `next`; an `iter`-only struct satisfies the protocol but does **not** get `T` recovered — bound that one concretely), `[S: Iterator[T], T]` only a **cursor** — something holding a position, so the body may call `.next()` (a raw collection holds none; W6-3b). Lazy adapters (Take/Mapped) were the original answer to `yield` (then a non-goal; `yield`/generators have since shipped VM-only — see above). Checker/parser/grammar only; golden-tested |
 | ✅ **M14** | Generics depth | **Method-level type params** (a method's own `[U]`, inferred at call) + **user-defined parameterized protocols** (`protocol Container[T]`, structural conformance with concrete-arg bounds `[X: Container[int]]`, and first-class **value/annotation types** `c: Container[int]` — statically witnessed at every store/pass boundary, runtime-erased, strictly invariant `Container[int]` ≠ `Container[str]` ≠ bare `Container`, method-return element recovery) — the special-cased `Iterator[T]` generalized. Checker/parser/grammar only; golden-tested |
 | ✅ **M15** | Slicing + indexing protocols | Python-style `xs[a:b:c]` / `s[0:2]` / `xs[::-1]` (open bounds, step, reverse, bounds-clamped) + negative indexing `xs[-1]` (plain index faults out of range, slice bounds clamp — Python's asymmetry); the `..` operator stays the for-loop/match range (and a slice receiver — a range is **not a value** in any other position, and the checker now enforces that; use `range(a, b)` to materialize a `List[int]`). Prebuilt **`Index[K, V]` + `IndexSet[K, V]` + `Slice[R]`** structural protocols — built-in `list`/`map`/`str` conform intrinsically, user structs via `index`/`set_index`/`slice(self, start: int?=None, end: int?=None, step: int?=None)`, so `custom[k]`/`custom[k]=v`/`custom[a:b:c]` work and a generic can be bounded by `Index[int, V]`. Golden-tested |
@@ -1129,7 +1127,7 @@ tests/          # Rust unit + golden tests
 | ✅ **M20** | In-language tests | `assert <cond>[, "<msg>"]` (a statement primitive, faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side VM-only runner over `*_test.chz` files (`PASS/FAIL name (file:line:col) msg`, non-zero exit on failure). Surface in [`docs/syntax.md §9c`](syntax.md) |
 | ~~M21~~ | Nominal `newtype` — **removed (TICKET-216)** | A one-field `struct` with methods is the distinct-type idiom; see the "Removed (TICKET-216)" note above. |
 | ✅ **M22** | Operator protocols + protocol embedding | New per-operator protocols **`Div`/`Mod`/`Neg`** (methods `div`/`mod`/`neg`, powering `/`/`%`/unary `-`; `int`/`float` intrinsic, structs/enums via the method, wired exactly like `Add`/`Sub`/`Mul`. **Protocol embedding** — a protocol body may list embed lines (`Add + Sub`, order-free, interleaved with `fn` sigs); a type satisfies it iff it satisfies every embed (transitively) AND every own method, flattened at every use site — a bound AND an interface value alike (a protocol value also satisfies the protocols it embeds, Go's interface-to-interface assignment). **Object safety** bounds the value form: since a protocol value erases which witness it holds, a method TAKING `Self` is unusable wherever two witnesses could meet — `a.add(b)` on a value, the operator forms (`+ - * / % <`, all `(self, Self) -> Self`), and a protocol value witnessing a generic type param whose bound needs one. Assignability and embed-satisfaction are unaffected, and `Self` in the RETURN widens to the protocol and stays callable. Collision rules: own-fn-vs-embed = error, same-sig embed diamond dedups, differing-sig embed = error, cyclic embed = error. Builtin **`Arithmetic`** bundle = `Add + Sub + Mul + Div`. Builtin **`Num`** (TICKET-214) = `Arithmetic + Mod + Neg + Comparable`, sealed to `int`/`float`; `math.abs`/`math.sign` are `[T: Num]`. Checker/parser/grammar + operator dispatch; golden-tested. Surface in [`docs/syntax.md`](syntax.md) |
-| ✅ **M23** | The `Eq` protocol — user-overloadable `==` | Prebuilt reserved **`Eq`** (`eq(self, other: Self) -> bool`): a struct/enum defining `eq` **owns its `==`/`!=`**, closing the hole where a type could define `compare` (so `<` was yours) but never `==`. All four scalars satisfy it intrinsically (**`bool` included**, unlike `Comparable`). **`Comparable` embeds `Eq`** (Rust's `Ord: Eq`). **Superseded 2026-08-11 (`docs/gaps.md` W7-41), on two counts:** (a) `Eq` satisfaction is no longer a four-scalar grant — it is exactly what `==` accepts, so `bytes`, tuples, `List`/`Map`/`Set`, `Option`/`Result` and every struct/enum satisfy it, and `where T: Eq` is writable over all of them (measured: all ten were *does not satisfy Eq* before and are accepted now); and (b) the "a struct/enum with `compare` must also define `eq`" rule is **DROPPED** — its premise was falsified in both directions by measurement, and Rust permits manual `Ord` beside a derived `Eq`. What replaced it is the enforcement M23 lacked: a conditional `eq` (`where T: Comparable`) is now honoured by `==`/`!=`, by `in`, by `contains`/`index_of`/`dedup`/`unique`, and by every map-key / set-element position, closing a check-OK-then-runtime-fault hole (W7-41 + W7-45). Dispatch is by the operands' **runtime type** and reaches **every** equality site, not just the operator: `in`, `list.contains`/`index_of`/`dedup`/`unique`, `Map`/`Set` key probes, set algebra, and the recursive element/field/entry compares — so `x == y`, `y in xs` and `m[y]` can no longer give three answers. `!=` is the same dispatch negated (no separate hook); `match` never dispatches `eq`; `Atomic[T].cas` stays structural — a payload that REACHES a user `eq` (its own or one nested in an element/entry/field/payload) is a check-time error, and the VM switches the hook off for the compare so the property does not rest on that walk. The hook is gated on its **exact** signature at the declaration, so a method merely sharing the name (a *generic* operand, `Opt[T].eq(self, x: T)`) stays an ordinary method. **Through a protocol bound, though, `.eq()` is the protocol's equality, never that same-named ordinary method** (`docs/gaps.md` **W7-53** I1′, fixed 2026-08-12): a protocol-dispatched `.eq(x)` lowers to the very opcode `==` emits, so the two spellings are one dispatch by construction — a CONCRETE receiver keeps calling the ordinary method, exactly as rustc's inherent-wins rule does, while `fn f[T: Eq](a: T, b: T): a.eq(b)` resolves like `<T as PartialEq>::eq`. Also closes **`docs/gaps.md` §B2**: `==`/`!=` between provably-disjoint types is now a compile error, decided by co-inhabitability (`Checker::may_be_equal`), with the `Any` existential as the escape hatch — a deliberate divergence from Python's runtime `False`, matching Go, Rust and mypy `--strict-equality`. Cost: `map` +4.1%, everything else flat ([`benchmarks.md`](benchmarks.md)). **Comparing two protocol-typed (existential) values defers the witness's `eq` bound check to runtime, as in Go's own interface `==`** — the checker cannot see which concrete type inhabits a protocol at a given site, so it compiles the comparison and it faults cleanly, at the point it runs, if that witness cannot satisfy the bound (`docs/gaps.md` **W7-52**, resolved 2026-08-12 as ancestor-correct, not a checker gap). **A `[T: Eq]` bound over a protocol-typed value now agrees with that operator** (same-day review found the bound was still rejecting it, disagreeing with the `==` that had just been ruled correct — a genuine drift, fixed rather than filed, `docs/gaps.md` **W7-52**): `Ty::Protocol` is now a classified `Eq`-grant receiver kind, matching Go 1.20+'s `comparable`, which likewise admits an interface type and panics at the comparison for an uncomparable witness. `Eq` is the only protocol this applies to — `Eq`-satisfaction is exactly what `==` accepts, and `==` already accepted a protocol-typed operand; every other protocol still requires the witness to structurally provide it. Surface in [`docs/syntax.md §7b`](syntax.md) |
+| ✅ **M23** | The `Eq` protocol — user-overloadable `==` | Prebuilt reserved **`Eq`** (`eq(self, other: Self) -> bool`): a struct/enum defining `eq` **owns its `==`/`!=`**, closing the hole where a type could define `compare` (so `<` was yours) but never `==`. All four scalars satisfy it intrinsically (**`bool` included**, unlike `Comparable`). **`Comparable` embeds `Eq`** (Rust's `Ord: Eq`). **Superseded 2026-08-11 (`docs/gaps.md` W7-41), on two counts:** (a) `Eq` satisfaction is no longer a four-scalar grant — it is exactly what `==` accepts, so `bytes`, tuples, `List`/`Map`/`Set`, `T?`/`T!E` and every struct/enum satisfy it, and `where T: Eq` is writable over all of them (measured: all ten were *does not satisfy Eq* before and are accepted now); and (b) the "a struct/enum with `compare` must also define `eq`" rule is **DROPPED** — its premise was falsified in both directions by measurement, and Rust permits manual `Ord` beside a derived `Eq`. What replaced it is the enforcement M23 lacked: a conditional `eq` (`where T: Comparable`) is now honoured by `==`/`!=`, by `in`, by `contains`/`index_of`/`dedup`/`unique`, and by every map-key / set-element position, closing a check-OK-then-runtime-fault hole (W7-41 + W7-45). Dispatch is by the operands' **runtime type** and reaches **every** equality site, not just the operator: `in`, `list.contains`/`index_of`/`dedup`/`unique`, `Map`/`Set` key probes, set algebra, and the recursive element/field/entry compares — so `x == y`, `y in xs` and `m[y]` can no longer give three answers. `!=` is the same dispatch negated (no separate hook); `match` never dispatches `eq`; `Atomic[T].cas` stays structural — a payload that REACHES a user `eq` (its own or one nested in an element/entry/field/payload) is a check-time error, and the VM switches the hook off for the compare so the property does not rest on that walk. The hook is gated on its **exact** signature at the declaration, so a method merely sharing the name (a *generic* operand, `Opt[T].eq(self, x: T)`) stays an ordinary method. **Through a protocol bound, though, `.eq()` is the protocol's equality, never that same-named ordinary method** (`docs/gaps.md` **W7-53** I1′, fixed 2026-08-12): a protocol-dispatched `.eq(x)` lowers to the very opcode `==` emits, so the two spellings are one dispatch by construction — a CONCRETE receiver keeps calling the ordinary method, exactly as rustc's inherent-wins rule does, while `fn f[T: Eq](a: T, b: T): a.eq(b)` resolves like `<T as PartialEq>::eq`. Also closes **`docs/gaps.md` §B2**: `==`/`!=` between provably-disjoint types is now a compile error, decided by co-inhabitability (`Checker::may_be_equal`), with the `Any` existential as the escape hatch — a deliberate divergence from Python's runtime `False`, matching Go, Rust and mypy `--strict-equality`. Cost: `map` +4.1%, everything else flat ([`benchmarks.md`](benchmarks.md)). **Comparing two protocol-typed (existential) values defers the witness's `eq` bound check to runtime, as in Go's own interface `==`** — the checker cannot see which concrete type inhabits a protocol at a given site, so it compiles the comparison and it faults cleanly, at the point it runs, if that witness cannot satisfy the bound (`docs/gaps.md` **W7-52**, resolved 2026-08-12 as ancestor-correct, not a checker gap). **A `[T: Eq]` bound over a protocol-typed value now agrees with that operator** (same-day review found the bound was still rejecting it, disagreeing with the `==` that had just been ruled correct — a genuine drift, fixed rather than filed, `docs/gaps.md` **W7-52**): `Ty::Protocol` is now a classified `Eq`-grant receiver kind, matching Go 1.20+'s `comparable`, which likewise admits an interface type and panics at the comparison for an uncomparable witness. `Eq` is the only protocol this applies to — `Eq`-satisfaction is exactly what `==` accepts, and `==` already accepted a protocol-typed operand; every other protocol still requires the witness to structurally provide it. Surface in [`docs/syntax.md §7b`](syntax.md) |
 | ✅ **M24** | Static protocol requirements through a bound — **witness passing** | A protocol may require a **static** (no-`self`) method, and a generic bounded by it may **call it through the type parameter**: `fn reset[T: Default](old: T) -> T: return T.default()`. Generics stay **erased** — a type param whose bound carries a static requirement AND whose body needs it gets a **hidden trailing parameter** holding the concrete type's runtime identity key; `T.method(...)` lowers to a new `Op::CallStaticDyn` that pops that key and runs the same dispatch as `Type.method(...)`. Nothing is monomorphized and no type argument reaches the VM. Charged **only** to a body that uses one, so a generic that merely has a static-carrying bound keeps every position it had. Covers struct + enum hosts, same- and cross-module calls in every import spelling, `T` inferred / turbofish-pinned / annotation-pinned, transitive + recursive + mutual **forwarding** of a still-abstract `T`, a type param declared by a **MEMBER** (instance or static, plain or generic host), and the call inside a closure (incl. an escaping one), a nested `fn`, a `defer:` block and a `spawn:`/`parallel:` block (the witness crosses the airlock by value). Closes `Convert[S]`'s last slice — `fn make[T: Convert[int]](…): return T.convert(n)`. Permanent walls (each a clear diagnostic naming the workaround): a type param of the enclosing **TYPE**, a witness-taking fn read as a **function value** (a `fn` value erases its declaration), an undetermined `T`, a scalar witness, and a witness-taking manifest entrypoint; a `spawn`/`defer` **statement target** is an ordinary call site — M24-5, fixed 2026-08-14. A type parameter **shadows** a same-named type in static-call position, as in Rust and Go. Bench-neutral (measured). Surface in [`docs/syntax.md §7a`](syntax.md); the strategy ruling in [`docs/future.md §3a1`](future.md) |
 | 📋 **M25** | Killable subprocesses — cancellation that actually reaches a child process | **SPEC written, not implemented** — design in [`docs/concurrency.md` §6h](concurrency.md). Today a nursery task in `process.cmd("sleep 5")` ignores a sibling fault (5013 ms), `os.exit` (5015 ms) and `chezzi test --timeout=500` (5008 ms) — a `Kind::Blocking` native is offloaded so it never pins a worker, and a thread inside the libc call has no checkpoint until it returns. For a subprocess we own the PID, so we can end what is being waited on — Go's `exec.CommandContext` answer. Scope is **`std.process` only**: `std.request` wants a client-side timeout instead, and `std.fs`/`std.io` stay uninterruptible *because Go does not cancel those either* (`os.ReadFile` ignores `context`). Three measured traps: kill the process **GROUP** (a `sh -c '… \| cat'` grandchild survives a PID kill **and keeps the stdout pipe open**, so the parent stays blocked), replace `.output()` with `.spawn()` + a retained `Child`, and `TERM`→grace→`KILL` rather than bare `KILL`. One deliberate divergence from Go: cancellation is **ambient by default** (the nursery *is* the context, where Go has no structured scope to inherit) with an explicit `Token` override — ambient is what makes `--timeout`/`os.exit`/a sibling fault reach `sh` at all |
 | **Stretch** | Cranelift AOT/JIT backend | Near-Go native speed (optional; a late-stage endeavor once the language has matured) |
