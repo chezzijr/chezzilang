@@ -1,0 +1,110 @@
+# tests/chz/spec/syntax_gaps_w22_test.chz — TICKET-241: three parser gaps over the new syntax.
+# 1. An inline body is one simple statement: a closure literal and `spawn <call>` are legal there.
+# 2. `T!= v` lexes `!=` as one token and means `T! = v`.
+# 3. The `else` guard on a destructuring binding takes the call's own error.
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+fn adder(n: int) -> fn(int) -> int: fn(x: int) -> int: x + n
+
+struct Scale:
+    k: int
+
+    fn by(self) -> fn(int) -> int: fn(x: int) -> int: x * self.k
+
+fn pick(n: int) -> fn(int) -> int:
+    match n:
+        0: return fn(x: int) -> int: x
+        _: return fn(x: int) -> int: x + n
+
+test fn expr_body_fn_returns_a_closure_literal():
+    assert adder(1)(2) == 3
+
+test fn expr_body_method_returns_a_closure_literal():
+    assert Scale(k=3).by()(2) == 6
+
+test fn match_arm_holds_a_closure_literal():
+    assert pick(0)(5) == 5
+    assert pick(4)(1) == 5
+
+struct Fused:
+    a: int!= 5
+
+fn fused_default(a: int!=5) -> int!: a
+
+test fn fused_bang_eq_after_a_let_type():
+    y: int!= 6
+    match y:
+        ?v: assert v == 6
+        !e: assert false, "y is an error: {e.message()}"
+    same: bool!= 1 != 2
+    match same:
+        ?v: assert v
+        !e: assert false, "same is an error: {e.message()}"
+
+test fn fused_bang_eq_after_a_param_type():
+    match fused_default():
+        ?v: assert v == 5
+        !e: assert false, "default is an error: {e.message()}"
+
+test fn fused_bang_eq_after_a_field_type():
+    match Fused().a:
+        ?v: assert v == 5
+        !e: assert false, "field is an error: {e.message()}"
+
+fn r2(n: int) -> (int, int)!str:
+    if n < 0:
+        return !"bad"
+    return (n, n + 1)
+
+fn o2(n: int) -> (int, int)?:
+    if n < 0:
+        return None
+    return (n, n + 1)
+
+fn sum_r(n: int) -> int:
+    a, b := r2(n) else e:
+        assert e == "bad"
+        return -1
+    return a + b
+
+fn sum_o(n: int) -> int:
+    a, b := o2(n) else:
+        return -1
+    return a + b
+
+test fn else_guard_on_a_destructuring_of_a_result():
+    assert sum_r(1) == 3
+    assert sum_r(-1) == -1
+
+test fn else_guard_on_a_destructuring_of_an_optional():
+    assert sum_o(1) == 3
+    assert sum_o(-1) == -1
+
+fn put(c: Channel[int], n: int): c.send(n)
+
+test fn inline_spawn_call_inside_parallel():
+    c := Channel[int](3)
+    on := true
+    parallel:
+        if on: spawn put(c, 1)
+        for i in range(2): spawn put(c, i + 2)
+    assert c.recv() + c.recv() + c.recv() == 6
+
+test fn inline_spawn_call_in_a_match_arm():
+    c := Channel[int](1)
+    parallel:
+        match 1:
+            1: spawn put(c, 7)
+            _: pass
+    assert c.recv() == 7
+
+test fn inline_spawn_call_outside_parallel():
+    c := Channel[int](1)
+    on := true
+    if on: spawn put(c, 9)
+    assert c.recv() == 9
+
+test fn inline_parallel_body_is_a_spawn_call():
+    c := Channel[int](1)
+    parallel: spawn put(c, 4)
+    assert c.recv() == 4

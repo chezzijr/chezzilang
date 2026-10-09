@@ -215,3 +215,196 @@ fn else_guard_grid() {
     ];
     run_grid("else-guard", &cells);
 }
+
+/// The tuple carriers of the destructuring rows, appended to [`LIB`].
+const LIB2: &str = "fn o2(n: int) -> (int, int)?:
+    if n > 0:
+        return (n, n + 1)
+    return None
+fn r2(n: int) -> (int, int)!str:
+    if n > 0:
+        return (n, n + 1)
+    return !\"bad\"
+";
+
+const NO_VALUE: &str = "expression returns no value (None) and cannot be used as a value";
+const WALRUS_NAME: &str = "left side of ':=' must be a name";
+const GUARD_PLACE: &str =
+    "an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return`";
+
+/// TICKET-241: binding form x carrier. The guard exists on a let (one name or a destructuring)
+/// and on a bare call; an assignment and `return` refuse it with one text. Every accept cell
+/// runs the success path and the failure path.
+#[test]
+fn else_guard_binding_form_grid() {
+    // What a cell does: run and print `ok` then `-1`, or reject with a fragment.
+    enum Want {
+        Runs(&'static str),
+        Rejects(&'static str),
+    }
+    use Want::{Rejects, Runs};
+    // (carrier, one-value call, pair call, guard head)
+    let carriers = [
+        ("T?", "o(n)", "o2(n)", "else:"),
+        ("T!E", "r(n)", "r2(n)", "else e:"),
+        ("None!E", "save(n)", "save(n)", "else e:"),
+    ];
+    // (form, setup line, statement head, takes the pair call, value returned on success,
+    //  verdict per carrier in the order above)
+    let forms: [(&str, &str, &str, bool, &str, [Want; 3]); 13] = [
+        (
+            "x :=",
+            "",
+            "x := ",
+            false,
+            "x",
+            [Runs("3"), Runs("3"), Rejects(NO_VALUE)],
+        ),
+        (
+            "x: T =",
+            "",
+            "x: int = ",
+            false,
+            "x",
+            [Runs("3"), Runs("3"), Rejects(NO_VALUE)],
+        ),
+        (
+            "x: const T =",
+            "",
+            "x: const int = ",
+            false,
+            "x",
+            [Runs("3"), Runs("3"), Rejects(NO_VALUE)],
+        ),
+        (
+            "_ :=",
+            "",
+            "_ := ",
+            false,
+            "1",
+            [Runs("1"), Runs("1"), Runs("1")],
+        ),
+        (
+            "bare call",
+            "",
+            "",
+            false,
+            "1",
+            [Runs("1"), Runs("1"), Runs("1")],
+        ),
+        (
+            "a, b :=",
+            "",
+            "a, b := ",
+            true,
+            "a + b",
+            [Runs("7"), Runs("7"), Rejects(NO_VALUE)],
+        ),
+        (
+            "(a, b) :=",
+            "",
+            "(a, b) := ",
+            true,
+            "1",
+            [
+                Rejects(WALRUS_NAME),
+                Rejects(WALRUS_NAME),
+                Rejects(WALRUS_NAME),
+            ],
+        ),
+        (
+            "x =",
+            "    x := 0\n",
+            "x = ",
+            false,
+            "x",
+            [
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+            ],
+        ),
+        (
+            "x +=",
+            "    x := 0\n",
+            "x += ",
+            false,
+            "x",
+            [
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+            ],
+        ),
+        (
+            "a, b =",
+            "    a := 0\n    b := 0\n",
+            "a, b = ",
+            true,
+            "a + b",
+            [
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+            ],
+        ),
+        (
+            "self.f =",
+            "",
+            "self.f = ",
+            false,
+            "1",
+            [
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+            ],
+        ),
+        (
+            "xs[i] =",
+            "    xs := [0]\n",
+            "xs[0] = ",
+            false,
+            "xs[0]",
+            [
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+            ],
+        ),
+        (
+            "return",
+            "",
+            "return ",
+            false,
+            "1",
+            [
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+                Rejects(GUARD_PLACE),
+            ],
+        ),
+    ];
+    let mut cells = Vec::new();
+    for (form, setup, head, pair, result, wants) in forms {
+        for ((carrier, one, two, guard), want) in carriers.iter().zip(wants) {
+            let call = if pair { two } else { one };
+            // The typed-let rows declare the carrier's own success type.
+            let head = if *carrier == "None!E" {
+                head.replace("int", "None")
+            } else {
+                head.to_string()
+            };
+            let body = format!(
+                "{LIB2}fn f(n: int) -> int:\n{setup}    {head}{call} {guard}\n        return -1\n    return {result}\nprint(f(3))\nprint(f(0))"
+            );
+            let name = format!("{form} x {carrier}");
+            cells.push(match want {
+                Runs(ok) => prints(&name, &body, &format!("{ok}\n-1")),
+                Rejects(frag) => rejects(&name, &body, frag),
+            });
+        }
+    }
+    assert_eq!(cells.len(), 39);
+    run_grid("else-guard-binding-form", &cells);
+}

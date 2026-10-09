@@ -667,6 +667,12 @@ and `T!` for `T!Error` (E defaults to the built-in `Error` protocol). Examples: 
 `List[int]?`, `int!` (= `int!Error`), `int!DbErr` (= `int!DbErr`). Pure spelling —
 `?v`/`None`/`?v`/`!e`, `match`, and `?` behave exactly as on the long forms.
 
+**`T!= v` is `T! = v`.** The lexer reads an adjacent `!=` as one token. After a type it is the
+type's `!` and then `=`: `y: int!= 6`, `y: const int!= 6`, a parameter `a: int!=5` and a field
+`a: int!= 5` mean the spaced form. The `!` binds where the spaced form binds it, so
+`g: fn() -> int!= one` has the type `fn() -> int!`. `!=` between two expressions is unchanged
+(`x: bool!= a != b`), and `y: int!== 6` is a parse error.
+
 **Success-coercion (implicit wrap, TICKET-227).** At EVERY typed slot — a typed binding, an
 assignment target, an argument, a field, a collection or tuple element, a conversion or box ctor
 element, a comprehension element, `return`, `yield`, an inline or closure body, a parameter or field
@@ -1021,6 +1027,20 @@ a statement-`if`) still needs an indented block:
 ```chezzi
 fn pick(n: int) -> int: if n > 0: 1 else: 2     # pick(5) == 1, pick(-5) == 2
 ```
+
+An inline body may be a **closure literal**: `fn (` opens a closure, `fn name` a declaration.
+
+```chezzi
+fn adder(n: int) -> fn(int) -> int: fn(x: int) -> int: x + n    # adder(1)(2) == 3
+```
+
+**An inline body is exactly one simple statement.** This holds after every `:` that opens a block
+(a fn, a method, `if`, `for`, `while`, a `match` arm, `parallel:`, an `else` guard). A simple
+statement is a let, an assignment, `return`, `yield`, `break`, `continue`, `pass`, `assert`, an
+expression (a closure literal included) or `spawn f()`. So `if c: spawn f()` is legal: the call
+form of `spawn` is a simple statement. A statement that opens its own block needs an indented line:
+`if`, `for`, `while`, `match`, `fn name`, `parallel:`, `wait:`, `spawn:` and both `defer` forms.
+Written inline, each one is `a nested block must be indented, not written inline after ':'`.
 
 Only a *bare expression* inline body returns implicitly. An inline **non-expression** statement does
 not: `fn a(): x = 5` (an assignment) returns `None`, and `fn a(): return 10` is an explicit return as
@@ -3810,6 +3830,10 @@ evaluated **at the `defer` statement** (Go semantics); only the call itself is d
 Every indented block is a defer scope: the function body, a loop body, an `if`/`elif`/`else` branch,
 a `recover:` block, a statement-form `match` arm, and the module top level.
 
+A `defer` is never an inline body: `if c: defer f()` is a parse error (`a nested block must be
+indented, not written inline after ':'`). The inline body would be the defer's whole block, so `f`
+would run at once. Write the `defer` on its own indented line.
+
 ```chezzi
 fn process(path: str) -> int!:
     f := open(path)
@@ -3923,7 +3947,23 @@ fn load(path: str) -> Config!str:
     return Config(port)
 ```
 
+A destructuring binding takes the guard too. The error is the call's own: splitting a tuple cannot
+fail. For a `T?` the form is `else:`.
+
+```chezzi
+fn span(path: str) -> int!str:
+    lo, hi := bounds(path) else e:     # bounds() -> (int, int)!str
+        return !e
+    a, b := find(path) else:           # find() -> (int, int)?
+        return 0
+    return hi - lo + a + b
+```
+
 - A block that can fall through is `else block must leave (return, break, continue, panic)`.
+- The guard exists on a `:=` or typed binding and on a bare call. An assignment (`x = f() else e:`,
+  `a, b = …`, `self.f = …`, `xs[i] = …`, `x += …`) and `return f() else e:` are parse errors:
+  ``an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return` ``.
+  A value list (`a, b := 1, 2`) takes no guard either: a tuple literal cannot fail.
 - `else e:` on a `T?` is an error (absent has no payload): `` `else e:` needs an error to bind, and int? has none; write `else:` ``.
 - On an `int?!E` value `else` handles the outer error, and `v` is the `int?`.
 - At module top level there is no `return`: leave with `panic`, `os.exit`, `break` / `continue` in a
