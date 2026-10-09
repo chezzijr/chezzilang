@@ -4,6 +4,10 @@
 use super::*;
 use crate::{lexer, parser};
 
+/// The text of `tyvar::ERR_VALUE_NEEDS_TYPE`, as a literal: this file must also compile against a
+/// base checker that has no such const (the pipeline gate runs the repro test there).
+const ERR_VALUE_NEEDS_TYPE_TEXT: &str = "a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e`";
+
 /// Type-check a source string, returning the collected errors (empty = clean).
 fn check_src(src: &str) -> Vec<CheckError> {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
@@ -38515,11 +38519,7 @@ fn named_fn_return_grid() {
             &format!("{NO_RET}; add '-> int!str' to 'f'"),
         );
         let m = msgs(&p(&[("f", "n: int", "return !\"bad\"", false)], ""));
-        assert_eq!(
-            m,
-            vec![super::tyvar::ERR_VALUE_NEEDS_TYPE.to_string()],
-            "{h:?}"
-        );
+        assert_eq!(m, vec![ERR_VALUE_NEEDS_TYPE_TEXT.to_string()], "{h:?}");
         let rec = p(
             &[(
                 "f",
@@ -38569,11 +38569,7 @@ fn named_fn_return_grid() {
             "cannot assign int!str to variable of type str",
         );
         let m = msgs(&p(&[("f", "n: int", "!\"bad\"", true)], ""));
-        assert_eq!(
-            m,
-            vec![super::tyvar::ERR_VALUE_NEEDS_TYPE.to_string()],
-            "{h:?}"
-        );
+        assert_eq!(m, vec![ERR_VALUE_NEEDS_TYPE_TEXT.to_string()], "{h:?}");
         one(
             &p(
                 &[("f", "n: int", "if n < 2: 1 else: n * @f(n - 1)", true)],
@@ -38666,10 +38662,7 @@ fn err_value_type_grid() {
     ];
     for src in untyped {
         let m: Vec<String> = check_src(src).into_iter().map(|e| e.message).collect();
-        let hits = m
-            .iter()
-            .filter(|e| *e == super::tyvar::ERR_VALUE_NEEDS_TYPE)
-            .count();
+        let hits = m.iter().filter(|e| *e == ERR_VALUE_NEEDS_TYPE_TEXT).count();
         assert_eq!(hits, 1, "want the `!` text exactly once, got {m:?}\n{src}");
         assert!(
             !m.iter().any(|e| e.contains("?!") || e.contains("_!")),
