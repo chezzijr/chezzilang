@@ -7982,12 +7982,11 @@ mod tests {
 
     #[test]
     fn or_pattern_in_payload() {
-        // `Some(a | b)` -> Variant{Some, [Or([Ident a, Ident b])]}.
-        match first_arm_pattern("match o:\n    Some(a | b): print(a)\n    _: print(0)\n") {
-            Pattern::Variant { name, bindings, .. } => {
-                assert_eq!(name, "Some");
-                assert_eq!(bindings.len(), 1);
-                match &bindings[0] {
+        // `?(a | b)` -> Carrier{Present, Or([Ident a, Ident b])}.
+        match first_arm_pattern("match o:\n    ?(a | b): print(a)\n    _: print(0)\n") {
+            Pattern::Carrier { tag, inner, .. } => {
+                assert_eq!(tag, CarrierTag::Present);
+                match &*inner {
                     Pattern::Or(alts) => {
                         assert_eq!(alts.len(), 2);
                         assert!(matches!(&alts[0], Pattern::Ident(n, _, _) if n == "a"));
@@ -8011,12 +8010,11 @@ mod tests {
 
     #[test]
     fn nested_nullary_parses() {
-        // `Some(None)` -> Variant{Some, [Ident("None")]} (parser is type-blind; checker promotes).
-        match first_arm_pattern("match o:\n    Some(None): print(0)\n    _: print(1)\n") {
-            Pattern::Variant { name, bindings, .. } => {
-                assert_eq!(name, "Some");
-                assert_eq!(bindings.len(), 1);
-                assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "None"));
+        // `?None` -> Carrier{Present, Ident("None")} (parser is type-blind; checker promotes).
+        match first_arm_pattern("match o:\n    ?None: print(0)\n    _: print(1)\n") {
+            Pattern::Carrier { tag, inner, .. } => {
+                assert_eq!(tag, CarrierTag::Present);
+                assert!(matches!(&*inner, Pattern::Ident(n, _, _) if n == "None"));
             }
             other => panic!("{other:?}"),
         }
@@ -8024,14 +8022,14 @@ mod tests {
 
     #[test]
     fn nested_nullary_in_result_parses() {
-        // `Ok(Err(e))` -> Variant{Ok, [Variant{Err, [Ident e]}]}.
-        match first_arm_pattern("match r:\n    Ok(Err(e)): print(e)\n    _: print(0)\n") {
-            Pattern::Variant { name, bindings, .. } => {
-                assert_eq!(name, "Ok");
-                match &bindings[0] {
-                    Pattern::Variant { name, bindings, .. } => {
-                        assert_eq!(name, "Err");
-                        assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "e"));
+        // `?(!e)` -> Carrier{Present, Carrier{Error, Ident e}}.
+        match first_arm_pattern("match r:\n    ?(!e): print(e)\n    _: print(0)\n") {
+            Pattern::Carrier { tag, inner, .. } => {
+                assert_eq!(tag, CarrierTag::Present);
+                match &*inner {
+                    Pattern::Carrier { tag, inner, .. } => {
+                        assert_eq!(*tag, CarrierTag::Error);
+                        assert!(matches!(&**inner, Pattern::Ident(n, _, _) if n == "e"));
                     }
                     other => panic!("{other:?}"),
                 }

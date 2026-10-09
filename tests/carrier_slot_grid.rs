@@ -334,10 +334,17 @@ enum Out {
     Rejects(&'static str),
 }
 
+const HAVE_OPT: &str = "fn have(n: int) -> int?:\n    return n\n";
+const HAVE_RES: &str = "fn have(n: int) -> int!str:\n    return n\n";
+const HAVE_VOID: &str = "fn have() -> None!str:\n    return\n";
+
 struct Carrier {
     ty: &'static str,
     /// The `fn show(x: C)` every accept cell of this carrier is read through.
     show: &'static str,
+    /// A helper that returns an EXISTING carrier: `have(5)` for the value rows, `have()` for the
+    /// void success. For `int??` it returns `int?`, one layer short of the slot.
+    have: &'static str,
     seed: &'static str,
     /// `ALT` of the branch values: the other branch's carrier-shaped value.
     alt: &'static str,
@@ -353,6 +360,7 @@ const CARRIERS: &[Carrier] = &[
     Carrier {
         ty: "int?",
         show: SHOW_OPT,
+        have: HAVE_OPT,
         seed: "None",
         alt: "None",
         values: [
@@ -360,37 +368,39 @@ const CARRIERS: &[Carrier] = &[
             ("None", Out::Prints("none")),
             ("?5", Out::Prints("some 5")),
             ("!\"e\"", Out::SlotRejects),
-            ("Some(5)", Out::Prints("some 5")),
+            ("have(5)", Out::Prints("some 5")),
             ("BR", Out::Prints("some 5")),
         ],
-        shapes: Some(("Some(6)", "some 5")),
+        shapes: Some(("have(6)", "some 5")),
     },
     Carrier {
         ty: "int!str",
         show: SHOW_RES,
-        seed: "Err(\"s\")",
+        have: HAVE_RES,
+        seed: "!\"s\"",
         alt: "!\"e\"",
         values: [
             ("5", Out::Prints("ok 5")),
             ("None", Out::SlotRejects),
             ("?5", Out::Prints("ok 5")),
             ("!\"e\"", Out::Prints("err E")),
-            ("Ok(5)", Out::Prints("ok 5")),
+            ("have(5)", Out::Prints("ok 5")),
             ("BR", Out::Prints("ok 5")),
         ],
-        shapes: Some(("Ok(6)", "ok 5")),
+        shapes: Some(("have(6)", "ok 5")),
     },
     Carrier {
         ty: "None!str",
         show: SHOW_VOID,
-        seed: "Ok()",
+        have: HAVE_VOID,
+        seed: "have()",
         alt: "!\"e\"",
         values: [
             ("5", Out::SlotRejects),
             ("None", Out::SlotRejects),
             ("?5", Out::Rejects("'?' value: expected")),
             ("!\"e\"", Out::Prints("err E")),
-            ("Ok()", Out::Prints("ok")),
+            ("have()", Out::Prints("ok")),
             ("BR", BR_INCOMPATIBLE),
         ],
         shapes: None,
@@ -398,6 +408,7 @@ const CARRIERS: &[Carrier] = &[
     Carrier {
         ty: "int??",
         show: SHOW_OPT2,
+        have: HAVE_OPT,
         seed: "None",
         alt: "None",
         values: [
@@ -405,7 +416,7 @@ const CARRIERS: &[Carrier] = &[
             ("None", Out::Prints("none")),
             ("?5", Out::Prints("some some 5")),
             ("!\"e\"", Out::SlotRejects),
-            ("Some(5)", Out::SlotRejects),
+            ("have(5)", Out::SlotRejects),
             ("BR", BR_INCOMPATIBLE),
         ],
         shapes: None,
@@ -438,8 +449,8 @@ fn program(slot: &Slot, c: &Carrier, v: &str, flags: (bool, bool)) -> String {
         .join("\n");
     let decls = fill(slot.decls, c, v);
     format!(
-        "c := {}\nd := {}\n{}{decls}\nfn main():\n{body}\nmain()\n",
-        flags.0, flags.1, c.show
+        "c := {}\nd := {}\n{}{}{decls}\nfn main():\n{body}\nmain()\n",
+        flags.0, flags.1, c.show, c.have
     )
 }
 
@@ -531,7 +542,7 @@ fn hashable_cells(cells: &mut Vec<Cell>) {
         "s: Set[{C}] = {{v} for i in [0]}",
     ];
     for c in &CARRIERS[..2] {
-        for v in ["5", c.values[4].0] {
+        for v in ["5", "?5"] {
             for (i, shape) in shapes.iter().enumerate() {
                 let body = shape
                     .replace("{{v}", &format!("{{{v}"))
@@ -569,7 +580,6 @@ fn extra_cells(cells: &mut Vec<Cell>) {
         m("generic_slot_declines", "fn f[T](x: T) -> T?:\n    return x\nprint(f(1))", r("expected return type")),
         m("no_int_float", "fn f() -> float?:\n    return 1\nprint(f())", r("expected return type")),
         ms("operands_never_wrap", SHOW_OPT, "x: int? = 1 + 2\nshow(x)", prints("some 3")),
-        m("carrier_payload_is_seed", "x: Option[Option[int]] = Some(5)\nprint(x)", r("cannot assign")),
         ms("default_list", SHOW_OPT, "fn f(xs: List[int?] = [5]):\n    show(xs[0])\nf()", prints("some 5")),
         ms("default_provider_param", SHOW_OPT, "fn g() -> int:\n    return 5\nfn f(x: int? = g()):\n    show(x)\nf()", prints("some 5")),
         ms("default_provider_field", SHOW_OPT, "fn g() -> int:\n    return 5\nstruct S:\n    n: int? = g()\nshow(S().n)", prints("some 5")),
@@ -577,8 +587,8 @@ fn extra_cells(cells: &mut Vec<Cell>) {
         ms("default_bang", SHOW_RES, "fn f(x: int!str = !\"e\"):\n    show(x)\nf()", prints("err E")),
         m("interp_arg", "fn t(x: int?) -> str:\n    match x:\n        ?v:\n            return \"some {v + 0}\"\n        None:\n            return \"none\"\nprint(\"{t(5)}\")", prints("some 5")),
         m("pipe_arg", "fn t(x: int?) -> str:\n    match x:\n        ?v:\n            return \"some {v + 0}\"\n        None:\n            return \"none\"\nprint(5 |> t())", prints("some 5")),
-        ms("coalesce_option", SHOW_OPT, "o: int? = Some(5)\nx: int? = o ?? 0\nshow(x)", prints("some 5")),
-        ms("coalesce_result", SHOW_RES, "o: int? = Some(5)\nx: int!str = o ?? 0\nshow(x)", prints("ok 5")),
+        ms("coalesce_option", SHOW_OPT, "o: int? = 5\nx: int? = o ?? 0\nshow(x)", prints("some 5")),
+        ms("coalesce_result", SHOW_RES, "o: int? = 5\nx: int!str = o ?? 0\nshow(x)", prints("ok 5")),
         m("coalesce_none_arm", "fn f(o: int?) -> int?:\n    return o ?? None\nprint(f(None))", r("branches have incompatible types")),
         m("comprehension_barrier", "ys: List[int] = [y for xs in [[1, 2], [3]] for y in xs]\nprint(ys)", prints("[1, 2, 3]")),
         m("inferred_return_not_a_slot", "fn f(c: bool): if c: 1 else: None\nprint(f(true))", r("branches have incompatible types")),
