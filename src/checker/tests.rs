@@ -21964,10 +21964,10 @@ fn refine_erroring_index_key_reports_once() {
 
 #[test]
 fn empty_list_of_none_then_conflicting_some_rejected() {
-    // [None] is List[Option[Unknown]]; push(Some(5)) refines to List[Option[int]];
-    // push(Some("hi")) then conflicts (nested-typeparam + native None producer).
+    // `[None]` is a list of an open `T?`; `push(?5)` pins `List[int?]`; `push(?"hi")` then
+    // conflicts (`'?' value: expected int, found str`).
     rejects(
-        "fn main():\n xs := [None]\n xs.push(Some(5))\n xs.push(Some(\"hi\"))\nmain()",
+        "fn main():\n xs := [None]\n xs.push(?5)\n xs.push(?\"hi\")\nmain()",
         "expected",
     );
 }
@@ -24436,15 +24436,15 @@ fn ffi_width_constant_grid() {
         "l: List[{w}] = []\nl.push({k})\n",
         "m: Map[str, {w}] = {\"a\": {k}}\n",
         "t: ({w}, int) = ({k}, 1)\n",
-        "o: Option[{w}] = Some({k})\n",
-        "r: Result[{w}, str] = Ok({k})\n",
+        "o: {w}? = ?({k})\n",
+        "r: {w}!str = ?({k})\n",
         "struct Box[T]:\n    v: T\nb := Box[{w}]({k})\n",
         "l := List[{w}]([{k}])\n",
         "m := Map[str, {w}]([(\"a\", {k})])\n",
         "c := true\nx: {w} = if c: {k} else: 0\n",
         "c := true\nx: {w} = if c: 0 else: {k}\n",
         "n := 1\nx: {w} = match n:\n    1: {k}\n    _: 0\n",
-        "o: Option[int] = None\nx: {w} = o ?? {k}\n",
+        "o: int? = None\nx: {w} = o ?? {k}\n",
         "ffi.store_{w}(ffi.null(), {k})\n",
     ];
     // Integer-only: compound assignment and `Set` (a float is not Hashable).
@@ -24499,7 +24499,7 @@ fn ffi_width_constant_grid() {
                         .replace("_: 0\n", "_: 0.0\n")
                         .replace("[0]\n", "[0.0]\n")
                         .replace("S(0)\n", "S(0.0)\n")
-                        .replace("Option[int]", "Option[float]")
+                        .replace("int?", "float?")
                 } else {
                     body
                 };
@@ -34243,8 +34243,14 @@ fn comparable_tuple_list_option_non_comparable_element_rejected() {
         "cannot compare",
     );
     rejects("print([true] < [false])\n", "cannot compare");
-    rejects("print(Some(true) < Some(false))\n", "cannot compare");
-    rejects("print(Ok(1) < Ok(2))\n", "cannot compare");
+    rejects(
+        "a: bool? = true\nb: bool? = false\nprint(a < b)\n",
+        "cannot compare",
+    );
+    rejects(
+        "a: int!str = 1\nb: int!str = 2\nprint(a < b)\n",
+        "cannot compare",
+    );
     rejects("print({1: 2} < {1: 3})\n", "cannot compare");
     rejects("print(Set([1]) < Set([2]))\n", "cannot compare");
     rejects(
@@ -35718,6 +35724,9 @@ fn t186_option_refined_by_body_above_let_rejected() {
     t186_rejected(
         "fn have() -> str?:\n    return \"ab\"\nfn w():\n    z = have()\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r() + r())\n",
     );
+    t186_rejected(
+        "fn w():\n    z = ?\"ab\"\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r() + r())\n",
+    );
 }
 
 #[test]
@@ -35781,6 +35790,9 @@ fn t186_module_global_record_grid() {
         ("c01", "fn have() -> str?:\n    return \"ab\"\nfn w():\n    z = have()\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
         ("c02", "z := None\nfn have() -> str?:\n    return \"ab\"\nfn w():\n    z = have()\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
         ("c03", "z := None\nfn have() -> str?:\n    return \"ab\"\nfn w():\n    z = have()\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
+        ("c01q", "fn w():\n    z = ?\"ab\"\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
+        ("c02q", "z := None\nfn w():\n    z = ?\"ab\"\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
+        ("c03q", "z := None\nfn w():\n    z = ?\"ab\"\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
         ("c04", "fn w():\n    xs = [\"a\"]\nxs := []\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
         ("c05", "xs := []\nfn w():\n    xs = [\"a\"]\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
         ("c06", "xs := []\nfn w():\n    xs = [\"a\"]\nxs := []\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
@@ -37699,7 +37711,7 @@ fn untyped_constant_width_grid() {
         ("m: Map[{W}, str] = {}\nm[{K}] = \"a\"\nprint(m)\n", true),
         ("m: Map[{W}, str] = {}\nprint(m[{K}])\n", true),
         ("l: List[{W}] = [{K}]\nprint(l)\n", false),
-        ("o: Option[{W}] = Some({K})\nprint(o)\n", false),
+        ("o: {W}? = ?({K})\nprint(o)\n", false),
         ("c := true\nx: {W} = if c: {K} else: 0\nprint(x)\n", false),
     ];
     // (constant text, its folded value)
@@ -39062,4 +39074,18 @@ fn carrier_wrap_check_grid() {
     ] {
         assert_eq!(crate::vm::run_capture(src).unwrap(), out, "{src}");
     }
+}
+
+/// TICKET-228 — a carrier or variant pattern on a non-enum scrutinee is a checker error. (The VM
+/// fault an older test asserted was reachable only through a helper that ignores checker errors.)
+#[test]
+fn variant_pattern_on_a_non_enum_scrutinee_is_rejected() {
+    rejects(
+        "fn main():\n    match 5:\n        ?x: print(x)\nmain()\n",
+        "`?v` matches a present `T?` or a successful `T!E`, found int",
+    );
+    rejects(
+        "enum E:\n    A(int)\n    B\nfn main():\n    match 5:\n        E.A(x): print(x)\n        _: print(0)\nmain()\n",
+        "cannot match a variant against int",
+    );
 }

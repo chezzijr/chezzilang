@@ -11253,18 +11253,6 @@ main()";
 }
 
 #[test]
-fn match_on_non_enum_is_error() {
-    // A *payload* variant pattern unambiguously needs an enum scrutinee; matching it on an int is
-    // a clean runtime error (the `EnsureEnum` guard) rather than a panic.
-    let src = "\
-fn main():
-    match 5:
-        Some(x): print(x)
-main()";
-    assert!(run_err(src).contains("cannot match on int"));
-}
-
-#[test]
 fn match_bare_ident_on_non_enum_binds_value() {
     // A bare top-level identifier against a non-enum value is a binding capturing the whole
     // value (the checker permits this only for literal scrutinees) — not an enum-match error.

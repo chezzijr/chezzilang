@@ -211,3 +211,40 @@ fn carrier_pattern_on_uninferable_scrutinee_is_rejected() {
     }];
     run_grid("carrier-pattern-unknown", &cells);
 }
+
+/// A carrier or variant pattern on an `int` scrutinee is a checker error on `chezzi run` too: the
+/// program never reaches the compiler, so no `internal:` text can appear.
+#[test]
+fn variant_pattern_on_int_is_a_type_error_on_run() {
+    let root = std::env::temp_dir().join(format!("chezzi-pattern-int-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let progs = [
+        (
+            "fn main():\n    match 5:\n        ?x: print(x)\nmain()\n",
+            "`?v` matches a present `T?` or a successful `T!E`, found int",
+        ),
+        (
+            "enum E:\n    A(int)\n    B\nfn main():\n    match 5:\n        E.A(x): print(x)\n        _: print(0)\nmain()\n",
+            "cannot match a variant against int",
+        ),
+    ];
+    for (i, (src, want)) in progs.iter().enumerate() {
+        let file = root.join(format!("p{i}.chz"));
+        std::fs::write(&file, src).unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("spawn chezzi");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.status.success(), "must exit non-zero: {text}");
+        assert!(text.contains(want), "want {want:?} in: {text}");
+        assert!(!text.contains("internal:"), "no internal error: {text}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
