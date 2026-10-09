@@ -11,6 +11,28 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-236 — the verdict's epoch, base vs branch (2026-10-10)
+
+Base `c3e2ffcd` (`target/t236/chezzi-base`; `src/vm` is unchanged between it and the branch base
+`22cd38bc`), branch `ticket/236`, both `cargo build --release`. Every way out of the counts a
+deadlock verdict reads now adds one `fetch_add` on the run's epoch, inside a lock hold the
+scheduler already takes (`docs/concurrency.md`, TICKET-236).
+
+`benches/sched/ab_pair.py`, n=7, interleaved (median (spread) / max RSS MiB; `ok` = branch median
+at most base median plus base spread). `uptime` before: `load average: 3.43, 3.64, 3.89`; after:
+`load average: 2.83, 3.24, 3.69`.
+
+| prog | threads | base | branch | branch/base | |
+|---|---|---|---|---|---|
+| trips.chz | 0 | 111 (16) / 15 | 106 (14) / 15 | 0.96x | ok |
+| rendezvous_pingpong.chz | 2 | 3518 (2011) / 15 | 3651 (2338) / 15 | 1.04x | ok |
+| send_one_channel.chz | 4 | 1065 (128) / 15 | 1092 (154) / 15 | 1.03x | ok |
+| two_executors.chz | 2 | 3542 (97) / 15 | 3581 (130) / 15 | 1.01x | ok |
+| executor_and_parallel.chz | 2 | 3452 (111) / 15 | 3485 (89) / 15 | 1.01x | ok |
+
+**No row moves outside its base spread.** The four channel rows read 1% to 4% slower; each
+difference is smaller than that row's own spread, so this run does not show a cost.
+
 ## TICKET-235 — every spawned task starts in a frame (2026-10-09)
 
 Base `edfb5d3c` (`target/chezzi-base`), branch `ticket/235` at `0c0921a8`, both `cargo build --release`.

@@ -509,6 +509,71 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   whichever it reads first, and the two are now one text. A wait registers as a blocked party
   before it marks its body blocked, so a judge never sees a blocked body with no party.
 
+  **Every blocked thing is asked, and a verdict stands only inside one epoch (TICKET-236).** Two
+  windows let a verdict fault a healthy program. Both are closed by derivation, not by a retry.
+
+  *The cut window.* `shutdown_now()` cuts a job: the job leaves the counts, its handle is sealed,
+  the scheduler lock drops, and only then the reader of the handle is requeued. A parked reader
+  was only counted (`parked_n`), never asked about its channel, so a judge in that window read
+  "all parked". A nursery task reading a cut job's handle faulted `deadlock: every task in this
+  parallel: block is blocked …` in 10 of 10 runs at `CHEZZI_THREADS=2` and 9 of 10 at the default
+  count (300 rounds, release). Now one pair of answers, `recv_satisfiable` and `wait_satisfiable`
+  (`src/vm/quiesce.rs`), serves a blocked party, a demoted waiter and a parked task
+  (`ParkedEntry::satisfiable`): a channel that is ready, closed or sealed vetoes the verdict.
+  `parked_n` still says "a victim is in view" (DEC-101); it is no longer evidence of "stuck".
+
+  *The read order.* A judge reads schedulers one lock at a time. A job can send and finish between
+  two reads: the judge saw the reader blocked on an empty channel, then saw the job done. Each
+  read is true and the pair describes no instant. This needs no `shutdown_now()`: a reader inside
+  a `map` callback faulted in 3 to 5 of 60 runs (100 rounds) on the base binary. Now the run has
+  one epoch (`QuiesceState::left`). Every way a waker leaves the counts a verdict reads moves it,
+  and each verdict entry (`QuiesceState::decide_since`, `MnSched::latch_own_verdict`, the nursery
+  owner's judge in `take_runnable`) reads it before its walk and declines if it moved. In a real
+  deadlock nothing leaves, so the next walk stands.
+
+  The rule for a bump: it FOLLOWS the leaver's last channel effect (a send, a seal, a close, a
+  cancel trip) and PRECEDES the release of the lock that publishes the count, or the atomic change
+  itself. `SchedCore::settle_job` seals a cut job's handle inside the lock hold that ends the job,
+  so it bumps as its last statement. The fields `quiesced_core_given` reads, and what each write
+  toward "stuck" goes through:
+
+  | field | way out | moves the epoch through |
+  |---|---|---|
+  | `running` | a park, a yield, a finish, a demote, an offload | `SchedCore::leave_running` |
+  | scope `done` | a task ends, is reaped or is dropped | `SchedCore::task_done` |
+  | scope table | a finished scope is retired | `SchedCore::scope_retired` |
+  | `blocked_owners`, `cross_sched_blocked_owners` | an owner blocks at a nested join | `SchedCore::owner_blocked` |
+  | scope `body_open` | the body reached its join | `SchedCore::body_closed` |
+  | scope `body_blocked`, `awaiting_builder` | `set_body_wait` (block and unblock) | `SchedCore::body_wait` |
+  | scope `awaiting_builder` | the builder reached the scope's join | `SchedCore::builder_joined` |
+  | `inflight` | an offload, a timer or a poll completes | `MnSched::leave_inflight` (bump first: the count is read under no lock) |
+  | `parties` | a party blocks | `QuiesceState::block_shared` |
+  | a job handle's seal | a job is cut | `SchedCore::settle_job` (bump last) |
+
+  A transfer between two counts inside ONE lock hold needs no bump: `runnable` down beside
+  `running` up (a pick), `joins_blocked` down beside `runnable` up or `blocked_owners` down,
+  `cross_sched_blocked_owners` down beside `blocked_owners` down, a cancel drain of `parked`
+  beside `runnable` up, a waiter unregistered beside `running` up. `parked_n` and a demoted
+  waiter are added in the lock hold of a `leave_running`. Splitting a transfer across two lock
+  holds reopens the window. A new term in `quiesced_core_given` needs a row here: its writers by
+  grep, and for each either a method with a row in
+  `vm::tests::every_way_out_of_the_counts_moves_the_epoch` or the count it transfers into. The
+  epoch is per run: `MnSched::join_run` is the one place that pairs a scheduler with its run's
+  state.
+
+  *The licence comes before the latch.* A latch never un-latches. `latch_own_verdict(licence)`
+  first checks the verdict and the caller's licence to cut (`victims_proven` or
+  `may_fault_unproven` for the idle judge) under the scheduler lock, then latches, then checks
+  both again. Before, it latched first and kept the latch when the licence declined. A declined
+  judge takes its timed wait and re-judges.
+
+  A real deadlock is still reported: a job cut before it sends on a PLAIN channel leaves its
+  reader with no waker, and the run faults at every worker count
+  (`a_cut_plain_channel_feeder_is_still_a_deadlock`). The grid is `tests/executor_reader_grid.rs`:
+  reader (main, nursery task, task in a callback, task in a `defer`, job of another Executor, job
+  of the same Executor) x wait (`recv`, `Task.get`, plain channel) x job end x cutter x worker
+  count. One cell stays open as `docs/gaps.md` W22-1.
+
   A deadlock message raised inside
   a native callback that cannot park at all is an ordinary recoverable fault and still runs
   `defer`s. A `defer` that blocks forever is not that case: it is a counted party, so it reaches the verdict
