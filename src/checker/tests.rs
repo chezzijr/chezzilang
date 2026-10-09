@@ -13851,7 +13851,7 @@ fn regex_fn_sigs_exact() {
     );
     for (name, params, ret) in &expected {
         let fs = sig
-            .certain_fn(*name)
+            .certain_fn(name)
             .unwrap_or_else(|| panic!("std.regex ModuleSig missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -13995,7 +13995,7 @@ fn process_fn_sigs_exact() {
     assert_eq!(sig.fns().count(), expected.len(), "std.process fn count");
     for (name, params, ret, minp) in &expected {
         let fs = sig
-            .certain_fn(*name)
+            .certain_fn(name)
             .unwrap_or_else(|| panic!("std.process missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -14058,7 +14058,7 @@ fn request_fn_sigs_exact() {
     assert_eq!(sig.fns().count(), expected.len(), "std.request fn count");
     for (name, params, ret, minp) in &expected {
         let fs = sig
-            .certain_fn(*name)
+            .certain_fn(name)
             .unwrap_or_else(|| panic!("std.request missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -14774,7 +14774,7 @@ fn enc_fn_sigs_exact() {
     assert_eq!(sig.fns().count(), expected.len(), "std.encoding fn count");
     for (name, params, ret) in &expected {
         let fs = sig
-            .certain_fn(*name)
+            .certain_fn(name)
             .unwrap_or_else(|| panic!("std.encoding missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -15044,7 +15044,7 @@ fn crypto_fn_sigs_exact() {
     assert_eq!(sig.fns().count(), expected.len(), "std.crypto fn count");
     for (name, params, ret) in &expected {
         let fs = sig
-            .certain_fn(*name)
+            .certain_fn(name)
             .unwrap_or_else(|| panic!("std.crypto missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -15061,7 +15061,7 @@ fn uuid_fn_sigs_exact() {
     assert_eq!(sig.fns().count(), expected.len(), "std.uuid fn count");
     for (name, params, ret) in &expected {
         let fs = sig
-            .certain_fn(*name)
+            .certain_fn(name)
             .unwrap_or_else(|| panic!("std.uuid missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -15090,7 +15090,7 @@ fn time_fn_sigs_exact() {
     );
     for (name, params, ret) in &expected {
         let fs = sig
-            .certain_fn(*name)
+            .certain_fn(name)
             .unwrap_or_else(|| panic!("std.time missing fn '{name}'"));
         assert_eq!(&fs.params, params, "fn '{name}' params drifted");
         assert_eq!(&fs.ret, ret, "fn '{name}' return drifted");
@@ -25138,7 +25138,7 @@ fn module_fn_docs_all_resolve() {
         let bare = module.strip_prefix("std.").unwrap_or(module);
         let sig = native_module_sig_via_graph(bare);
         for (fname, doc) in *docs {
-            let f = sig.certain_fn(*fname).unwrap_or_else(|| {
+            let f = sig.certain_fn(fname).unwrap_or_else(|| {
                 panic!("{module} doc slice lists fn '{fname}' but the module has no such function")
             });
             assert_eq!(
@@ -26906,10 +26906,9 @@ fn bare_unpinned_generic_fn_value_stays_error() {
 fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
     // TICKET-225: a later call pins the binding (Rust: `let g = ident; g(5)` compiles).
     ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n");
-    for src in [
-        // …never called: nothing in the frame pins it, so the read is rejected when it closes.
-        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(1)\n",
-    ] {
+    {
+        let src =
+            "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(1)\n";
         let errs = check_src(src);
         let joined = errs
             .iter()
@@ -34183,9 +34182,7 @@ fn question_op_in_unknown_return_fn_does_not_print_bare_question_mark_type() {
 #[test]
 fn inline_if_without_else_in_fn_body_is_rejected() {
     let tokens = lexer::tokenize("fn a(n: int): if n > 0: 1\n").expect("lex should succeed");
-    let err = parser::parse(tokens)
-        .err()
-        .expect("else-less inline if must not parse");
+    let err = parser::parse(tokens).expect_err("else-less inline if must not parse");
     assert!(
         err.message.contains("expected 'else'"),
         "wrong message: {err:?}"
@@ -34196,9 +34193,7 @@ fn inline_if_without_else_in_fn_body_is_rejected() {
 fn inline_nested_if_statement_block_is_still_rejected() {
     let tokens = lexer::tokenize("fn main():\n    if true: if false: print(1)\n")
         .expect("lex should succeed");
-    let err = parser::parse(tokens)
-        .err()
-        .expect("nested inline block must not parse");
+    let err = parser::parse(tokens).expect_err("nested inline block must not parse");
     assert!(
         err.message
             .contains("a nested block must be indented, not written inline after ':'"),
@@ -36798,6 +36793,7 @@ fn bound_type_arg_grid() {
     );
     // The bound reaches `Conv` only through a protocol embed line.
     let need = "fn need[S, B: Conv[S]](u: B, s: S) -> S:\n    return u.conv()\n";
+    #[allow(clippy::type_complexity)]
     let embed_rows: [(&str, &str, &[(&str, &str, bool)]); 3] = [
         (
             "embed_param",

@@ -336,6 +336,7 @@ fn cancel_reaches_every_party() {
     let mut misses = Vec::new();
     for p in &PARTIES {
         // (cutter, body, end, mode, required stderr-or-stdout text, required exit code)
+        #[allow(clippy::type_complexity)]
         let mut cells: Vec<(&str, Vec<&str>, &str, Mode, &str, Option<i32>)> = vec![
             (
                 "sibling-fault",

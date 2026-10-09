@@ -1208,6 +1208,7 @@ mod tests {
     #[test]
     fn a_request_dropped_on_a_reused_connection_is_retried_iff_go_would_retry_it() {
         // (method, body, headers, retried) — Go's `Request.isReplayable`.
+        #[allow(clippy::type_complexity)]
         let cases: &[(&str, &str, &[(&str, &str)], bool)] = &[
             ("GET", "", &[], true),
             ("HEAD", "", &[], true),
