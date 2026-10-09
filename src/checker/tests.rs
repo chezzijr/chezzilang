@@ -1767,11 +1767,11 @@ fn bare_value_coerces_at_a_closure_sink() {
 #[test]
 fn success_coercion_never_rewraps_a_carrier() {
     rejects(
-        "fn f() -> Option[Option[int]]:\n    return Some(1)\n",
+        "fn have(n: int) -> int?:\n    return n\nfn f() -> int??:\n    return have(1)\n",
         "expected return type",
     );
     rejects(
-        "fn f() -> Result[Option[int], str]:\n    return None\n",
+        "fn f() -> int?!str:\n    return None\n",
         "expected return type",
     );
 }
@@ -3500,18 +3500,18 @@ fn a_write_after_the_first_constraining_use_pins_the_payload() {
 
     // (a) the primary repro.
     rejects(
-        "x := None\ny: Option[str] = x\nx = Some(1)\nz: Option[str] = x\nprint(z)\n",
+        "x := None\ny: str? = x\nx = ?1\nz: str? = x\nprint(z)\n",
         "cannot assign int? to 'x'",
     );
     // (b) the `??` fault twin.
     rejects(
-        "x := None\na: str = x ?? \"s\"\nx = Some(1)\nb: str = x ?? \"t\"\nprint(b.len())\n",
+        "x := None\na: str = x ?? \"s\"\nx = ?1\nb: str = x ?? \"t\"\nprint(b.len())\n",
         "cannot assign int? to 'x'",
     );
     // (c) write-then-write, no annotated sink between them.
     rejects(
-        "x := None\nx = Some(1)\nx = Some(\"s\")\nprint(x)\n",
-        "cannot assign str? to int?",
+        "x := None\nx = ?1\nx = ?\"s\"\nprint(x)\n",
+        "'?' value: expected int, found str",
     );
     // (d) the Box twin.
     rejects(
@@ -3527,7 +3527,7 @@ fn a_write_after_the_first_constraining_use_pins_the_payload() {
     );
     // (f) the typed-argument sink.
     rejects(
-        "fn f(o: Option[str]) -> int:\n    return 1\nx := None\nn := f(x)\nx = Some(1)\nprint(n)\n",
+        "fn f(o: str?) -> int:\n    return 1\nx := None\nn := f(x)\nx = ?1\nprint(n)\n",
         "cannot assign int? to 'x'",
     );
 }
@@ -6534,7 +6534,7 @@ fn disjoint_types_equality_rejected() {
         "cannot compare",
     );
     entry_rejects(
-        "fn main():\n    o := Some(1)\n    print(o == 1)\nmain()\n",
+        "fn main():\n    o: int? = 1\n    print(o == 1)\nmain()\n",
         "cannot compare",
     );
     // The two shapes the shipped examples used to spell directly (`examples/empty_struct.chz`,
@@ -6545,7 +6545,7 @@ fn disjoint_types_equality_rejected() {
         "cannot compare S and T for equality",
     );
     entry_rejects(
-        "enum Shadow:\n    A\n    B\nfn main():\n    o: Option[int] = Some(1)\n    print(o == Shadow.A)\nmain()\n",
+        "enum Shadow:\n    A\n    B\nfn main():\n    o: int? = ?1\n    print(o == Shadow.A)\nmain()\n",
         "cannot compare int? and Shadow for equality",
     );
     // A protocol existential is NOT a free pass: a concrete that does NOT conform stays disjoint.
@@ -6561,7 +6561,7 @@ fn disjoint_types_equality_rejected() {
         "cannot compare List[Shape] and List[str] for equality",
     );
     entry_rejects(
-        "fn cmp(a: Option[int], b: Option[str]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "fn cmp(a: int?, b: str?) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
         "cannot compare int? and str? for equality",
     );
     entry_rejects(
@@ -8274,7 +8274,7 @@ fn inferred_return_recursive() {
 #[test]
 fn inferred_result_return() {
     rejects(
-        "fn d(a: int, b: int):\n    if b == 0:\n        return Err(\"divide by zero\")\n    return Ok(a / b)\nmatch d(10, 2):\n    Ok(v): print(\"got {v}\")\n    Err(e): print(e)\n",
+        "fn d(a: int, b: int):\n    if b == 0:\n        return !(\"divide by zero\")\n    return ?(a / b)\nmatch d(10, 2):\n    ?v: print(\"got {v}\")\n    !e: print(e)\n",
         "declares no return type, so it returns nothing",
     );
 }
@@ -8355,7 +8355,7 @@ fn infer_ok_err_branches_merge_slotwise() {
     // → Result[str, Error] (the E-slot is NOT pinned from the Err payload — an inferred error slot
     // always defaults to `Error`). So `res()?` is str and `y: int = x` must ERROR.
     entry_rejects(
-        "fn res() -> str!:\n    if false:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn caller() -> str!:\n    x := res()?\n    y: int = x\n    return Ok(x)\nfn main():\n    pass\n",
+        "fn res() -> str!:\n    if false:\n        return !\"a\"\n    return ?\"h\"\nfn caller() -> str!:\n    x := res()?\n    y: int = x\n    return ?x\nfn main():\n    pass\n",
         "cannot assign str to variable of type int",
     );
 }
@@ -8367,7 +8367,7 @@ fn infer_ok_only_defaults_error_e() {
     // (Error vs DbErr) exactly like the annotated `-> int!` version. Today ok() leaks
     // Result[int, Unknown] so `?` launders into DbErr with no error.
     entry_rejects(
-        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn ok() -> int!:\n    return Ok(5)\nfn caller() -> int!DbErr:\n    x := ok()?\n    return Ok(x)\nfn main():\n    pass\n",
+        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn ok() -> int!:\n    return ?5\nfn caller() -> int!DbErr:\n    x := ok()?\n    return ?x\nfn main():\n    pass\n",
         "propagates error Error",
     );
 }
@@ -8394,7 +8394,7 @@ fn infer_concurrency_box_with_inferable_element_ok() {
 fn multibranch_return_ok_err_no_error() {
     // A block fn with no `->` returns nothing: no `T!E` type is joined from its `return`s.
     entry_rejects(
-        "fn f(c: bool):\n    if c:\n        return Ok(5)\n    return Err(\"x\")\nfn main():\n    match f(true):\n        Ok(v): print(v)\n        Err(e): print(e)\n",
+        "fn f(c: bool):\n    if c:\n        return ?5\n    return !\"x\"\nfn main():\n    match f(true):\n        ?v: print(v)\n        !e: print(e)\n",
         "declares no return type, so it returns nothing",
     );
 }
@@ -8419,7 +8419,7 @@ fn infer_ok_err_mixed_defaults_e_to_error() {
     // Error-vs-DbErr mismatch exactly like the annotated `-> str!` version would.
     entry_rejects(
         &format!(
-            "{DBERR}fn res(c: bool) -> str!:\n    if c:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn caller() -> str!DbErr:\n    x := res(true)?\n    return Ok(x)\nfn main():\n    pass\n"
+            "{DBERR}fn res(c: bool) -> str!:\n    if c:\n        return !\"a\"\n    return ?\"h\"\nfn caller() -> str!DbErr:\n    x := res(true)?\n    return ?x\nfn main():\n    pass\n"
         ),
         "propagates error Error",
     );
@@ -8430,7 +8430,7 @@ fn infer_distinct_err_payloads_no_conflict() {
     // Two branches with DIFFERENT Err payload types no longer conflict on the E-slot (both finalize
     // to `Error`); the Ok branch pins T=int. `e` binds as `Error` → `e.message()` is available.
     entry_ok(
-        "struct EA:\n    a: int\n    fn message(self) -> str:\n        return \"EA\"\nstruct EB:\n    b: int\n    fn message(self) -> str:\n        return \"EB\"\nfn f(k: int) -> int!:\n    if k == 0:\n        return Err(EA(1))\n    if k == 1:\n        return Err(EB(2))\n    return Ok(5)\nfn main():\n    match f(2):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+        "struct EA:\n    a: int\n    fn message(self) -> str:\n        return \"EA\"\nstruct EB:\n    b: int\n    fn message(self) -> str:\n        return \"EB\"\nfn f(k: int) -> int!:\n    if k == 0:\n        return !EA(1)\n    if k == 1:\n        return !EB(2)\n    return ?5\nfn main():\n    match f(2):\n        ?v: print(v)\n        !e: print(e.message())\n",
     );
 }
 
@@ -8479,21 +8479,6 @@ fn caught_error_has_no_location_accessor() {
 }
 
 #[test]
-fn infer_return_non_error_payload_preserved_no_over_reject() {
-    // NO OVER-REJECTION (adversarial-review): forwarding a `Result` whose E does NOT satisfy `Error`
-    // must still type-check — the inferred E is kept concrete (`MyErr`), not forced to `Error` (which
-    // pass-2 would then reject as `Result[int, Error]` vs the actual `Result[int, MyErr]`).
-    entry_ok(
-        "struct MyErr:\n    code: int\nfn foo(c: bool) -> Result[int, MyErr]:\n    if c:\n        return Err(MyErr(1))\n    return Ok(5)\nfn wrap(c: bool) -> int!MyErr:\n    return foo(c)\nfn main():\n    match wrap(true):\n        Ok(v): print(v)\n        Err(e): print(e.code)\n",
-    );
-    // …but calling an Error-only method on that preserved concrete `MyErr` is still rejected (sound).
-    entry_rejects(
-        "struct MyErr:\n    code: int\nfn foo(c: bool) -> Result[int, MyErr]:\n    if c:\n        return Err(MyErr(1))\n    return Ok(5)\nfn wrap(c: bool) -> int!MyErr:\n    return foo(c)\nfn main():\n    match wrap(true):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
-        "no method 'message'",
-    );
-}
-
-#[test]
 fn explicit_return_result_keeps_concrete_e() {
     // REGRESSION GUARD: the E-default is inference-ONLY. An EXPLICIT `-> Result[str, str]` annotation
     // (resolved by `resolve_type`, bypassing inference) keeps the concrete `str` error slot — so
@@ -8515,7 +8500,7 @@ fn if_expr_all_ok_defaults_result_e_to_error() {
     // a leaked `Unknown` (compatible with anything) would silently pass.
     entry_rejects(
         &format!(
-            "{DBERR}fn g() -> int!DbErr:\n    x := if true: Ok(1) else: Ok(2)\n    return x?\nfn main():\n    pass\n"
+            "{DBERR}fn g() -> int!DbErr:\n    x: int! = if true: 1 else: 2\n    return x?\nfn main():\n    pass\n"
         ),
         "propagates error Error",
     );
@@ -8526,7 +8511,7 @@ fn match_expr_all_ok_defaults_result_e_to_error() {
     // Same E-default on the match-EXPRESSION surface.
     entry_rejects(
         &format!(
-            "{DBERR}fn g() -> int!DbErr:\n    k := 1\n    x := match k:\n        1: Ok(1)\n        _: Ok(2)\n    return x?\nfn main():\n    pass\n"
+            "{DBERR}fn g() -> int!DbErr:\n    k := 1\n    x: int! = match k:\n        1: 1\n        _: 2\n    return x?\nfn main():\n    pass\n"
         ),
         "propagates error Error",
     );
@@ -8587,7 +8572,7 @@ fn closure_free_uninferable_errors() {
 fn closure_free_ok_defaults_error_e() {
     // CLOSURE: a free lambda writes its `T!E` type; `-> int!` has the error type `Error`.
     entry_ok(
-        "fn main():\n    f := fn() -> int!: Ok(5)\n    x := f()\n    match x:\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+        "fn main():\n    f := fn() -> int!: ?5\n    x := f()\n    match x:\n        ?v: print(v)\n        !e: print(e.message())\n",
     );
 }
 
@@ -10032,8 +10017,8 @@ fn try_option_in_option_ok() {
 #[test]
 fn result_ok_payload_must_match_return() {
     rejects(
-        "fn f() -> Result[int]:\n    return Ok(\"s\")\n",
-        "expected return type int!, found str!",
+        "fn f() -> int!:\n    return ?\"s\"\n",
+        "'?' value: expected int, found str",
     );
 }
 
@@ -16527,7 +16512,7 @@ fn null_coalesce_result_type() {
 #[test]
 fn null_coalesce_lhs_may_be_a_result() {
     // OLD expectation (pre-TICKET-039): `r ?? 0` on a `Result` was one error,
-    // "'??' applies to an Option, found Result[int]". TICKET-039 widened `??` to accept a `Result`,
+    // "'??' applies to an Option, found int!". TICKET-039 widened `??` to accept a `Result`,
     // discarding the error like Rust's `unwrap_or`.
     ok_desugared("r := ?5\nx := r ?? 0\n");
 }
@@ -16535,7 +16520,7 @@ fn null_coalesce_lhs_may_be_a_result() {
 #[test]
 fn null_coalesce_on_result_one_error() {
     // OLD expectation (pre-TICKET-039): the full W7-43 message, "'??' applies to an Option, found
-    // Result[str, str] — a Result carries an error that must be handled: use a match with Ok/Err
+    // str!str — a Result carries an error that must be handled: use a match with Ok/Err
     // arms". TICKET-039's `Result` arm now type-checks `f() ?? "d"` against `f()`'s `Ok` payload —
     // this is the branch-compatibility check the old uniform rejection MASKED.
     let errs = check_desugared("fn f() -> int!str:\n    return ?5\nx := f() ?? \"d\"\n");
@@ -21710,11 +21695,11 @@ fn scalar_cast_rejects_option_result_bytes_bytearray_shared_arg() {
     // `Ty` variants (not `Ty::Enum`), so TICKET-017's enum arm doesn't catch them. Same shape as
     // struct/enum/fn: check-OK today, then a runtime fault (`{cast}() cannot convert {kind}`).
     rejects(
-        "fn main():\n    x := Some(1)\n    print(int(x))\nmain()\n",
+        "fn main():\n    x: int? = 1\n    print(int(x))\nmain()\n",
         "int() cannot convert enum",
     );
     rejects(
-        "fn main():\n    r: Result[int, str] = Ok(1)\n    print(int(r))\nmain()\n",
+        "fn main():\n    r: int!str = ?1\n    print(int(r))\nmain()\n",
         "int() cannot convert enum",
     );
     rejects(
@@ -21784,9 +21769,9 @@ fn scalar_cast_rejects_handle_family_arg() {
 fn scalar_cast_still_accepts_the_payload_of_a_rejected_kind() {
     // TICKET-020: the rule is "the CONTAINER type is outside the cast domain" — its payload must
     // stay inside it, or the reject fires on the wrong thing.
-    ok("fn main():\n    x := Some(1)\n    print(str(x))\n    print(int(x ?? 0))\nmain()\n");
+    ok("fn main():\n    x: int? = 1\n    print(str(x))\n    print(int(x ?? 0))\nmain()\n");
     ok(
-        "fn take(r: Result[int, str]) -> int:\n    match r:\n        Ok(v):\n            return int(v)\n        Err(e):\n            return 0\nfn main():\n    r: Result[int, str] = Ok(1)\n    print(take(r))\n    print(str(r))\nmain()\n",
+        "fn take(r: int!str) -> int:\n    match r:\n        ?v:\n            return int(v)\n        !e:\n            return 0\nfn main():\n    r: int!str = ?1\n    print(take(r))\n    print(str(r))\nmain()\n",
     );
     ok("fn main():\n    print(int(b\"ab\"[0]))\n    print(str(b\"ab\"))\nmain()\n");
     ok(
@@ -21816,19 +21801,6 @@ fn ok_nil_cannot_be_spelled() {
     // has no expression form (`infer_value` rejects any `Ty::Nil` operand as "returns no value").
     // Until the zero-arg checker arm lands, `Ok()` fails arity checking instead.
     ok("fn f() -> None!str:\n    return\nfn main():\n    pass\nmain()\n");
-}
-
-#[test]
-fn ok_zero_arg_is_result_nil() {
-    // W8-30: zero-arg `Ok()` constructs `Result[nil, E]`'s success value; a mismatched declared `T`
-    // (here `int`) is still rejected.
-    ok(
-        "fn f() -> Result[None, str]:\n    return Ok()\nfn g() -> Result[None, str]:\n    return Err(\"boom\")\nfn main():\n    print(f())\n    print(g())\nmain()\n",
-    );
-    rejects(
-        "fn f() -> Result[int, str]:\n    return Ok()\nfn main():\n    pass\nmain()\n",
-        "expected return type int!str, found !",
-    );
 }
 
 #[test]
@@ -29242,7 +29214,7 @@ fn explicit_bang_annotation_over_sendable_error_ok() {
 #[test]
 fn generic_fn_sendable_err_instantiation_ok_at_channel_send() {
     entry_ok(
-        "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn wrap[E](e: E) -> int!E:\n    return Err(e)\nc := Channel[int!]()\nc.send(wrap(GErr(Impl())))\nprint(\"x\")\n",
+        "import std.concurrency\nprotocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nfn wrap[E: Error](e: E) -> int!E:\n    return !e\nc := Channel[int!]()\nc.send(wrap(GErr(Impl())))\nprint(\"x\")\n",
     );
 }
 
@@ -29255,7 +29227,7 @@ fn generic_fn_sendable_err_instantiation_ok_at_channel_send() {
 #[test]
 fn three_branch_mixed_error_inference_ok() {
     entry_ok(
-        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nstruct EA:\n    fn message(self) -> str:\n        return \"a\"\nstruct EB:\n    fn message(self) -> str:\n        return \"b\"\nfn f(x: int) -> int!:\n    if x == 0:\n        return Ok(1)\n    elif x == 1:\n        return Err(EA())\n    elif x == 2:\n        return Err(GErr(Impl()))\n    else:\n        return Err(EB())\nprint(\"x\")\n",
+        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nstruct EA:\n    fn message(self) -> str:\n        return \"a\"\nstruct EB:\n    fn message(self) -> str:\n        return \"b\"\nfn f(x: int) -> int!:\n    if x == 0:\n        return ?1\n    elif x == 1:\n        return !EA()\n    elif x == 2:\n        return !GErr(Impl())\n    else:\n        return !EB()\nprint(\"x\")\n",
     );
 }
 
@@ -33110,7 +33082,7 @@ fn ticket_107_mixed_branch_coercion_wraps_at_every_typed_slot() {
         "branches have incompatible types: T and ??",
     );
     rejects(
-        "fn f(c: bool) -> Option[Option[int]]:\n    return if c: Some(1) else: None\n",
+        "fn have(n: int) -> int?:\n    return n\nfn f(c: bool) -> int??:\n    return if c: have(1) else: None\n",
         "expected return type int??, found int?",
     );
 }
@@ -33615,8 +33587,8 @@ fn nested_ctor_hint_keeps_invariance() {
         "cannot assign Bag[A] to variable of type Bag[Named]",
     );
     rejects(
-        "fn main():\n    o: float? = Some(1)\n    print(o)\n",
-        "cannot assign int? to variable of type float?",
+        "fn main():\n    o: float? = ?1\n    print(o)\n",
+        "'?' value: expected float, found int",
     );
 }
 
@@ -34520,7 +34492,7 @@ fn unused_local_warn_table_stays_silent() {
     );
     no_warn("fn f():\n    c := 0\n    c += 1\nf()\n");
     no_warn(
-        "fn f():\n    match Some(1):\n        Some(x):\n            print(\"s\")\n        None:\n            pass\nf()\n",
+        "fn f():\n    o: int? = 1\n    match o:\n        ?x:\n            print(\"s\")\n        None:\n            pass\nf()\n",
     );
     no_warn("struct P:\n    a: int\nfn f():\n    p := P(1)\n    p.a = 2\nf()\n");
     no_warn("fn f():\n    w := 5\n    s := \"x\"\n    print(\"{s:<{w}}\")\nf()\n");
@@ -35725,7 +35697,7 @@ fn t186_rejected(src: &str) {
 fn t186_option_refined_by_body_above_let_rejected() {
     // Runs to `abab` from an `-> int` fn (Go: `var z = nil` does not compile).
     t186_rejected(
-        "fn w():\n    z = Some(\"ab\")\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r() + r())\n",
+        "fn have() -> str?:\n    return \"ab\"\nfn w():\n    z = have()\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r() + r())\n",
     );
 }
 
@@ -37898,7 +37870,7 @@ fn bang_prefix_without_a_pinning_use_is_rejected() {
 #[test]
 fn carrier_variants_resolve_like_user_enums() {
     ok(
-        "fn main():\n    x := Result[int, str].Ok(5)\n    y := Option[int].None\n    z := ?1\n    f := Some\n    print(f(1))\n    w := [1, 2].map(Some)\n",
+        "fn main():\n    x := ?5\n    y := None\n    z := ?1\n    f := Some\n    print(f(1))\n    w := [1, 2].map(Some)\n",
     );
 }
 

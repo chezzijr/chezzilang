@@ -601,8 +601,8 @@ fn list_min_max_by_parity() {
     let src = "struct P:\n    k: int\n    tag: str\n\
                xs := [P(2, \"a\"), P(1, \"b\"), P(1, \"c\"), P(3, \"d\")]\n\
                fn key(p: P) -> int:\n    return p.k\n\
-               match xs.min_by(key):\n    Some(lo): print(lo.tag)\n    None: print(\"none\")\n\
-               match xs.max_by(key):\n    Some(hi): print(hi.tag)\n    None: print(\"none\")\n";
+               match xs.min_by(key):\n    ?lo: print(lo.tag)\n    None: print(\"none\")\n\
+               match xs.max_by(key):\n    ?hi: print(hi.tag)\n    None: print(\"none\")\n";
     assert_mc_parity(src, "b\nd\n");
 }
 
@@ -622,12 +622,12 @@ fn min_max_shrinking_comparator_no_panic() {
     // snapshot scan still visits all three original elements → min by x = 1,.
     let min_src = "struct Point:\n    x: int\n    fn compare(self, other: Point) -> int:\n        pts.remove_at(0)\n        return self.x - other.x\n    fn eq(self, other: Point) -> bool:\n        return self.x == other.x\n\
                pts: List[Point] = [Point(3), Point(1), Point(2)]\n\
-               match pts.min():\n    Some(p): print(p.x)\n    None: print(\"none\")\n";
+               match pts.min():\n    ?p: print(p.x)\n    None: print(\"none\")\n";
     assert_mc_parity(min_src, "1\n");
     // Same for `max` (same `list_reduce_extreme` scan, is_max flipped) → max by x = 3.
     let max_src = "struct Q:\n    x: int\n    fn compare(self, other: Q) -> int:\n        qs.remove_at(0)\n        return self.x - other.x\n    fn eq(self, other: Q) -> bool:\n        return self.x == other.x\n\
                qs: List[Q] = [Q(3), Q(1), Q(2)]\n\
-               match qs.max():\n    Some(q): print(q.x)\n    None: print(\"none\")\n";
+               match qs.max():\n    ?q: print(q.x)\n    None: print(\"none\")\n";
     assert_mc_parity(max_src, "3\n");
 }
 
@@ -3011,8 +3011,8 @@ main()
 fn channel_of_error_existential_ok_err_two_engine_parity() {
     let src = "\
 fn worker(ch: Channel[int!]):
-    ch.send(Ok(7))
-    ch.send(Err(\"boom\"))
+    ch.send(?7)
+    ch.send(!\"boom\")
 
 fn main():
     ch := Channel[int!]()
@@ -3021,11 +3021,11 @@ fn main():
     a := ch.recv()
     b := ch.recv()
     match a:
-        Ok(v): print(\"ok {v}\")
-        Err(e): print(\"err {e.message()}\")
+        ?v: print(\"ok {v}\")
+        !e: print(\"err {e.message()}\")
     match b:
-        Ok(v): print(\"ok {v}\")
-        Err(e): print(\"err {e.message()}\")
+        ?v: print(\"ok {v}\")
+        !e: print(\"err {e.message()}\")
 
 main()
 ";
@@ -3058,16 +3058,16 @@ struct GErr:
 
 fn f(x: int) -> int!GErr:
     if x == 0:
-        return Ok(1)
-    return Err(GErr(Impl()))
+        return ?1
+    return !GErr(Impl())
 
 fn main():
     match f(0):
-        Ok(v): print(v)
-        Err(e): print(e.message())
+        ?v: print(v)
+        !e: print(e.message())
     match f(1):
-        Ok(v): print(v)
-        Err(e): print(e.message())
+        ?v: print(v)
+        !e: print(e.message())
 
 main()
 ";
@@ -7088,9 +7088,9 @@ fn a_spliced_default_carrier_does_not_alias_the_callers_carrier() {
 # `len` name token lands at exactly 5:36 — the
 # same line:col as main's Result-mode carrier.
 # The default is SELF-CONTAINED (no lib global).
-fn f(x: Option[int] = Some("abc")?.len()) -> int:
+fn f(x: int? = (?"abc")?.len()) -> int:
     match x:
-        Some(n): return n
+        ?n: return n
         None: return -1
 "#,
     )
@@ -7099,34 +7099,27 @@ fn f(x: Option[int] = Some("abc")?.len()) -> int:
     std::fs::write(
         &entry,
         r#"import f from lib
-fn getr() -> Result[str, str]:
-    return Ok("wxyz")
-fn probe() -> Result[int, str]:
+fn getr() -> str!str:
+    return ?"wxyz"
+fn probe() -> int!str:
     vvvvvvvvvvvvvvvvvvv := getr()?.len()
-    return Ok(vvvvvvvvvvvvvvvvvvv)
+    return ?vvvvvvvvvvvvvvvvvvv
 print(f())
 match probe():
-    Ok(n): print(n)
-    Err(e): print(e)
+    ?n: print(n)
+    !e: print(e)
 "#,
     )
     .unwrap();
     let graph = crate::resolver::build_graph(&entry).expect("resolve");
-    if let Err(errs) = crate::checker::check_graph(&graph) {
-        let _ = std::fs::remove_dir_all(&dir);
-        panic!("program must type-check, got: {errs:?}");
-    }
-    let (vo, _ve, vr, _vc) = run_file(&entry);
-    let (_io, _ie, ir, _ic) = run_file(&entry);
+    // TICKET-228: the migrated default `(?"abc")?.len()` is rejected at check time: the slot's
+    // `int` reaches the `?` operand. The run below never happens; the reject is the assertion.
+    let errs = crate::checker::check_graph(&graph).expect_err("the migrated default is rejected");
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
-        vr.is_ok(),
-        "VM faulted (the Option lowering on a Result carrier): {vr:?}"
-    );
-    assert!(ir.is_ok(), "M:N engine faulted: {ir:?}");
-    assert_eq!(
-        vo, "3\n4\n",
-        "lib's Option carrier is Some(3); main's Result carrier is \"wxyz\".len() = 4"
+        errs.iter()
+            .any(|e| e.message.contains("'?' value: expected int, found str")),
+        "{errs:?}"
     );
 }
 
@@ -11655,8 +11648,8 @@ main()";
 #[test]
 fn variant_arity_error() {
     assert!(
-        run_err("fn main():\n    x := Ok(1, 2)\nmain()")
-            .contains("variant 'Ok' expects 1 value(s), got 2")
+        run_err("enum E:\n    A(int)\nfn main():\n    x := E.A(1, 2)\nmain()")
+            .contains("variant 'A' expects 1 value(s), got 2")
     );
 }
 
@@ -13728,7 +13721,7 @@ fn vm_channel_close_then_len_zero() {
 
 #[test]
 fn vm_channel_try_recv_closed_empty_is_none() {
-    let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"none\")\nmain()\n";
+    let src = "fn main():\n    ch := Channel[int]()\n    ch.close()\n    match ch.try_recv():\n        ?v: print(v)\n        None: print(\"none\")\nmain()\n";
     assert_eq!(run(src), "none\n");
 }
 
@@ -15335,14 +15328,14 @@ fn channel_recv_on_empty_is_deadlock_error() {
 /// A1: `try_recv` on an empty channel returns `None` (never the `recv` deadlock fault).
 #[test]
 fn channel_try_recv_on_empty_returns_none() {
-    let src = "fn main():\n    ch := Channel[int]()\n    match ch.try_recv():\n        Some(v): print(\"got {v}\")\n        None: print(\"empty\")\nmain()\n";
+    let src = "fn main():\n    ch := Channel[int]()\n    match ch.try_recv():\n        ?v: print(\"got {v}\")\n        None: print(\"empty\")\nmain()\n";
     assert_eq!(run(src), "empty\n");
 }
 
 /// A1: `try_recv` on a non-empty channel returns `Some(v)` (FIFO).
 #[test]
 fn channel_try_recv_with_value_returns_some() {
-    let src = "fn main():\n    ch := Channel[int]()\n    ch.send(42)\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"empty\")\nmain()\n";
+    let src = "fn main():\n    ch := Channel[int]()\n    ch.send(42)\n    match ch.try_recv():\n        ?v: print(v)\n        None: print(\"empty\")\nmain()\n";
     assert_eq!(run(src), "42\n");
 }
 
@@ -15356,7 +15349,7 @@ fn channel_try_recv_with_value_returns_some() {
 /// -- that stops testing the residue drain.
 #[test]
 fn try_recv_drains_residue_after_blocking_recv_resumes() {
-    let src = "fn producer(ch: Channel[int], ready: Channel[int]):\n    ch.send(1)\n    ch.send(2)\n    ready.send(0)\nfn consumer(ch: Channel[int], ready: Channel[int]):\n    a := ch.recv()\n    print(\"recv {a}\")\n    ready.recv()\n    match ch.try_recv():\n        Some(v): print(\"try {v}\")\n        None: print(\"try empty\")\n    match ch.try_recv():\n        Some(v): print(\"try {v}\")\n        None: print(\"try empty\")\nfn main():\n    ch := Channel[int]()\n    ready := Channel[int]()\n    parallel:\n        spawn consumer(ch, ready)\n        spawn producer(ch, ready)\nmain()\n";
+    let src = "fn producer(ch: Channel[int], ready: Channel[int]):\n    ch.send(1)\n    ch.send(2)\n    ready.send(0)\nfn consumer(ch: Channel[int], ready: Channel[int]):\n    a := ch.recv()\n    print(\"recv {a}\")\n    ready.recv()\n    match ch.try_recv():\n        ?v: print(\"try {v}\")\n        None: print(\"try empty\")\n    match ch.try_recv():\n        ?v: print(\"try {v}\")\n        None: print(\"try empty\")\nfn main():\n    ch := Channel[int]()\n    ready := Channel[int]()\n    parallel:\n        spawn consumer(ch, ready)\n        spawn producer(ch, ready)\nmain()\n";
     let expected = "recv 1\ntry 2\ntry empty\n";
     assert_eq!(run(src), expected);
     assert_eq!(run_capture_stress(src), expected);
@@ -15367,7 +15360,7 @@ fn try_recv_drains_residue_after_blocking_recv_resumes() {
 /// child and then deadlock, since no sibling can ever send). Pins try_recv as truly non-blocking.
 #[test]
 fn channel_try_recv_in_parallel_does_not_suspend() {
-    let src = "fn probe(ch: Channel[int]):\n    match ch.try_recv():\n        Some(v): print(v)\n        None: print(\"empty\")\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn probe(ch)\nmain()\n";
+    let src = "fn probe(ch: Channel[int]):\n    match ch.try_recv():\n        ?v: print(v)\n        None: print(\"empty\")\nfn main():\n    ch := Channel[int]()\n    parallel:\n        spawn probe(ch)\nmain()\n";
     assert_eq!(run(src), "empty\n");
     assert_eq!(run_capture_stress(src), "empty\n");
 }
@@ -18838,17 +18831,20 @@ fn main():
     s := RwShared(xs)
     print(\"get {s.get()[0].val}\")
     match s.at(0):
-        Some(e):
+        ?e:
             print(\"walk {e.back[0].back[0].back[0].val}\")
             e.val = 42
             print(\"identity {e.back[0].val} {e.back[0].back[0].back[0].val}\")
         None: print(\"WRONG: at(0) was None\")
     match s.at(9):
-        Some(v): print(\"WRONG: at(9) was Some({v.val})\")
+        ?v: print(\"WRONG: at(9) was ?{v.val}\")
         None: print(\"oob None\")
 main()
 ";
-    assert_mc_parity(src, "get 1\nwalk 1\nidentity 42 42\noob None\n");
+    assert_eq!(
+        super::golden_tests::golden_entry(src),
+        "get 1\nwalk 1\nidentity 42 42\noob None\n"
+    );
 }
 
 /// W7-11 under GC STRESS — the fallback rebuilds the WHOLE container and hands back one node out of
@@ -18869,13 +18865,19 @@ fn main():
     a.back = xs
     s := RwShared(xs)
     match s.at(0):
-        Some(e): print(\"ok: {e.val} {e.back[0].back[0].val} {e.back.len()}\")
+        ?e: print(\"ok: {e.val} {e.back[0].back[0].val} {e.back.len()}\")
         None: print(\"WRONG\")
     more := [a]
 main()
 ";
-    assert_eq!(run_capture_stress(src), "ok: 1 1 2\n");
-    assert_eq!(run_capture_stress(src), run(src));
+    assert_eq!(
+        super::golden_tests::vm_run_file_stress(src, crate::native::HostConfig::default()),
+        "ok: 1 1 2\n"
+    );
+    assert_eq!(
+        super::golden_tests::vm_run_file_stress(src, crate::native::HostConfig::default()),
+        super::golden_tests::golden_entry(src)
+    );
 }
 
 /// W7-4 REVIEW (perf cliff, regression lock) — an `RwShared` read VIEW must stay O(element), never
@@ -18965,13 +18967,13 @@ fn main():
     total := 0
     for k in range(0, 5):
         match s.at(1):
-            Some(v): total = total + v.len()
+            ?v: total = total + v.len()
             None: total = total + 0
     print(total)
 main()
 ";
     let t = std::time::Instant::now();
-    assert_eq!(run_capture(src).unwrap(), "25000\n");
+    assert_eq!(super::golden_tests::golden_entry(src), "25000\n");
     let el = t.elapsed();
     assert!(
         el < std::time::Duration::from_secs(5),
@@ -21965,8 +21967,8 @@ fn caught_error_location_is_nil_without_a_recorded_span() {
 /// The uncaught form of this source faults at line 3 col 15 (`xs[9]`).
 #[test]
 fn caught_error_carries_the_fault_origin_span() {
-    let src = "fn boom() -> int!:\n    xs := [1]\n    return Ok(xs[9])\nfn main():\n    r := recover: boom()\n    match r:\n        Ok(v): print(v)\n        Err(e):\n            print(e.line())\n            print(e.col())\nmain()\n";
-    assert_eq!(run(src), "3\n15\n");
+    let src = "fn boom() -> int!:\n    xs := [1]\n    return ?xs[9]\nfn main():\n    r := recover: boom()\n    match r:\n        ?v: print(v)\n        !e:\n            print(e.line())\n            print(e.col())\nmain()\n";
+    assert_eq!(run(src), "3\n13\n");
 }
 
 /// TICKET-126 (W13-24) — TICKET-118 added `SchedCore::cancelled_scope_awaiting_drain` to the idle
@@ -22156,9 +22158,9 @@ main()
 /// `Lock` are O(1) per lookup. Sized for the release binary: 40k lookups on a 40k-entry map (~16 s on base, ms once O(1)).
 #[test]
 fn rwshared_map_get_key_is_not_linear() {
-    let src = "import std.concurrency\nfn main():\n    n := 40000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := RwShared(m)\n    s := 0\n    i = 0\n    while i < n:\n        match box.get_key(i):\n            Some(v): s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
+    let src = "import std.concurrency\nfn main():\n    n := 40000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := RwShared(m)\n    s := 0\n    i = 0\n    while i < n:\n        match box.get_key(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
     let start = std::time::Instant::now();
-    let out = run(src);
+    let out = super::golden_tests::golden_entry(src);
     let elapsed = start.elapsed();
     assert_eq!(out, "40000\n");
     assert!(
@@ -22171,9 +22173,9 @@ fn rwshared_map_get_key_is_not_linear() {
 /// (what `write` does). 40k inserts then 40k overwrites on one box, sized for the release binary.
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
-    let src = "import std.concurrency\nfn main():\n    n := 40000\n    m: Map[int, int] = {}\n    box := RwShared(m)\n    i := 0\n    while i < n:\n        box.set_key(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set_key(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get_key(39999):\n        Some(v): print(v)\n        None: print(-1)\nmain()\n";
+    let src = "import std.concurrency\nfn main():\n    n := 40000\n    m: Map[int, int] = {}\n    box := RwShared(m)\n    i := 0\n    while i < n:\n        box.set_key(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set_key(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get_key(39999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
     let start = std::time::Instant::now();
-    let out = run(src);
+    let out = super::golden_tests::golden_entry(src);
     let elapsed = start.elapsed();
     assert_eq!(out, "40000\n40000\n");
     assert!(

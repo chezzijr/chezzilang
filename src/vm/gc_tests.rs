@@ -810,10 +810,13 @@ fn main():
     print(make_set().contains(P(2)))
     print(make_map().has(P(1)))
     match make_map().get_key(P(2)):
-        Some(v): print(v)
+        ?v: print(v)
         None: print(\"none\")
 main()";
-    assert_eq!(run_capture_stress(src), "true\ntrue\n20\n");
+    assert_eq!(
+        super::golden_tests::vm_run_file_stress(src, crate::native::HostConfig::default()),
+        "true\ntrue\n20\n"
+    );
 }
 
 /// W6-7 — the GC now SHORT-CIRCUITS a core whose cached summary says its wire payload holds no
@@ -983,7 +986,7 @@ struct P:
 pts: List[P] = [P(str(3), 3), P(str(1), 1), P(str(2), 2)]
 fn main():
     match pts.min():
-        Some(p): print(p.tag)
+        ?p: print(p.tag)
         None: print(\"none\")
 main()";
     assert_eq!(run_capture_stress(min_src), "1\n");
@@ -998,7 +1001,7 @@ fn key(q: Q) -> int:
     return q.k
 fn main():
     match qs.min_by(key):
-        Some(q): print(q.tag)
+        ?q: print(q.tag)
         None: print(\"none\")
 main()";
     assert_eq!(run_capture_stress(by_src), "1\n");
