@@ -57,8 +57,8 @@
 # (`PI: const int = 3`) — the checker rejects any later reassignment of the name. `CONST` is rejected
 # on a <param> type and on a destructuring (<identList>) let.
 <letStmt> ::= "IDENT" "WALRUS" <expr> "NEWLINE"
-            | "IDENT" "COLON" <type> "ASSIGN" <expr> "NEWLINE"
-            | "IDENT" "COLON" "CONST" <type> "ASSIGN" <expr> "NEWLINE"
+            | "IDENT" "COLON" <type> <typeAssign> <expr> "NEWLINE"
+            | "IDENT" "COLON" "CONST" <type> <typeAssign> <expr> "NEWLINE"
             | <identList> "WALRUS" <exprList> "NEWLINE"
             # A block-valued RHS (`r := recover:` …) is terminated by the block's DEDENT, not a
             # trailing NEWLINE (mirrors the parser's `expect_stmt_end`).
@@ -66,8 +66,13 @@
             # The `else` guard (design D4): the block runs when the value is absent or an error,
             # and must leave (`return`, `break`, `continue`, `panic`); it ends the statement.
             | "IDENT" "WALRUS" <expr> <elseGuard>
-            | "IDENT" "COLON" <type> "ASSIGN" <expr> <elseGuard>
-            | "IDENT" "COLON" "CONST" <type> "ASSIGN" <expr> <elseGuard>
+            | "IDENT" "COLON" <type> <typeAssign> <expr> <elseGuard>
+            | "IDENT" "COLON" "CONST" <type> <typeAssign> <expr> <elseGuard>
+            # On a destructuring the guard takes the call's own error (`a, b := f() else e:`):
+            # splitting a tuple cannot fail. A value list (`a, b := 1, 2`) takes no guard.
+            | <identList> "WALRUS" <expr> <elseGuard>
+# The `=` after a type. `T!= v` lexes `!=` as ONE token and means `T! = v`: the type takes the `!`.
+<typeAssign> ::= "ASSIGN" | "NOTEQ"
 # `else:` handles an absent `T?` (or ignores an error); `else e:` binds the error of a `T!E`.
 <elseGuard> ::= "ELSE" <block> | "ELSE" "IDENT" <block>
 <identList> ::= "IDENT" "COMMA" "IDENT" | "IDENT" "COMMA" <identList>
@@ -135,12 +140,16 @@
 <assertStmt> ::= "ASSERT" <expr> "NEWLINE" | "ASSERT" <expr> "COMMA" <expr> "NEWLINE"
 
 # The second form is the `else` guard on a discarded value: `save(p) else e: return !e`.
+# The guard exists on a let and on a bare call only: <assignStmt> and <returnStmt> take none
+# ("an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return`").
 <exprStmt> ::= <expr> "NEWLINE" | <expr> <elseGuard>
 
 # ===== blocks =====
 # Indented block: ':' NEWLINE INDENT stmts DEDENT. Inline block: ':' followed by ONE simple
 # statement on the same line (its NEWLINE terminates the line). Inline bodies exclude compound
 # statements, so `if a: if b: x` cannot parse inline — a trailing `else` would be ambiguous.
+# An inline body is exactly ONE <simpleStmt>: `fn name`, `parallel:`, `wait:`, `spawn:` and both
+# `defer` forms need an indented line. A closure literal (`fn(x): x`) and `spawn f()` are simple.
 # A `<fnDecl>` inline body may still be an `<ifExpr>` (via `<exprStmt>`): `fn f(n): if n > 0: 1 else: 2`;
 # `else` is required there, so it is an expression, not a nested statement block.
 <block> ::= "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
@@ -202,7 +211,7 @@
 # does not model: at most one variadic, it must carry an element type, it may not carry a default, and
 # it is legal only where defaults are (free fns / methods / native decls — not closures / extern).
 <param>  ::= "IDENT" | "IDENT" "COLON" <type>
-           | "IDENT" "ASSIGN" <expr> | "IDENT" "COLON" <type> "ASSIGN" <expr>
+           | "IDENT" "ASSIGN" <expr> | "IDENT" "COLON" <type> <typeAssign> <expr>
            | "DOTDOTDOT" "IDENT" "COLON" <type>
 
 # Generic type parameters on a fn/struct declaration: `[T]`, `[T: Comparable]`, `[A, B]`, or a
@@ -229,7 +238,7 @@
 # parameter default (see <params> above). The "no required field after a default" rule is
 # parser-level.
 <field>         ::= "IDENT" "COLON" <type> "NEWLINE"
-                  | "IDENT" "COLON" <type> "ASSIGN" <expr> "NEWLINE"
+                  | "IDENT" "COLON" <type> <typeAssign> <expr> "NEWLINE"
 
 # A protocol is a Go-style structural interface: a block of body lines, each EITHER a body-less method
 # signature OR an embed line (M22). An embed line is one-or-more protocol refs joined by `+`

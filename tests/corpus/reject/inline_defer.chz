@@ -1,0 +1,4 @@
+# rule: block
+# expect: indented
+fn g(c: bool):
+    if c: defer f()

@@ -1,0 +1,6 @@
+# rule: elseGuard
+# expect: belongs on a
+fn g():
+    x := 0
+    x = f() else e:
+        return

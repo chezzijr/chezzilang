@@ -1,0 +1,4 @@
+# rule: block
+# expect: indented
+fn g(ch: Channel[int]): wait:
+    x := ch.recv(): print(x)

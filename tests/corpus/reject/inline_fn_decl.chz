@@ -1,0 +1,3 @@
+# rule: block
+# expect: indented
+fn outer(): fn inner(): pass

@@ -1,0 +1,27 @@
+# rule: elseGuard, letStmt
+# `else` guard on a destructuring binding: the guard takes the call's own error.
+fn r2(n: int) -> (int, int)!str:
+    if n < 0:
+        return !"bad"
+    return (n, n + 1)
+
+fn o2(n: int) -> (int, int)?:
+    if n < 0:
+        return None
+    return (n, n + 1)
+
+fn sum_r(n: int) -> int:
+    a, b := r2(n) else e:
+        print(e)
+        return -1
+    return a + b
+
+fn sum_o(n: int) -> int:
+    a, b := o2(n) else:
+        return -1
+    return a + b
+
+print(sum_r(1))
+print(sum_r(-1))
+print(sum_o(1))
+print(sum_o(-1))

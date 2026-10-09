@@ -1,0 +1,15 @@
+# rule: type, letStmt
+# `T!= v` lexes `!=` as one token; it is `T! = v`.
+struct P:
+    a: int!= 5
+
+fn f(a: int!=5) -> int!: a
+
+y: int!= 6
+z: const int!= 7
+same: bool!= 1 != 2
+print(y)
+print(z)
+print(same)
+print(f())
+print(P().a)

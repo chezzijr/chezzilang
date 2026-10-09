@@ -1,0 +1,5 @@
+# rule: elseGuard
+# expect: belongs on a
+fn g() -> int!str:
+    return f() else e:
+        return !e

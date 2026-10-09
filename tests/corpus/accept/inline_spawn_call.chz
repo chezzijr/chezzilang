@@ -1,0 +1,11 @@
+# rule: spawnCallStmt, block
+# `spawn <call>` is a simple statement, so it is legal as an inline body.
+fn w():
+    pass
+
+c := true
+parallel:
+    if c: spawn w()
+    for _ in range(2): spawn w()
+if c: spawn w()
+parallel: spawn w()

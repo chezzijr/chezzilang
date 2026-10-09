@@ -1,0 +1,5 @@
+# rule: block
+# expect: indented
+parallel:
+    if true: spawn:
+        w()
