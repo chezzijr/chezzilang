@@ -11,6 +11,53 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-235 — every spawned task starts in a frame (2026-10-09)
+
+Base `edfb5d3c` (`target/chezzi-base`), branch `ticket/235` at `0c0921a8`, both `cargo build --release`.
+A one-line `spawn recv.m(args)` now runs behind an entry thunk: one more frame, one more argument
+(the receiver) and one fn value crossing per spawn. `spawn f(args)` with a Chezzi `f` and the
+block form are unchanged.
+
+`benches/sched/spawn_native_call.chz` (100000 x `spawn a.add(1)` on an `Atomic[int]`), wall ms,
+five runs per side, interleaved, `date +%s%N`:
+
+| run | `CHEZZI_THREADS` | base | branch |
+|---|---|---|---|
+| 1 | 1 | 794 798 804 834 775 | 836 914 885 882 906 |
+| 1 | unset | 1180 1084 1197 1280 1217 | 1262 1295 1218 1148 1202 |
+| 2 | 1 | 753 792 819 859 786 | 927 960 886 875 897 |
+| 2 | unset | 1056 1227 1392 1139 1159 | 1123 1137 1124 1185 1087 |
+
+`uptime`: run 1 `load average: 2.96, 2.60, 2.85` before, `3.06, 2.64, 2.85` after; run 2
+`3.06, 2.64, 2.85` before, `3.09, 2.67, 2.86` after.
+
+**The entry frame costs about 0.9 µs per one-line native spawn at one worker** (medians 798 -> 885
+and 792 -> 897 ms, +11% and +13%). At the default worker count the medians are 1197 -> 1218 and
+1159 -> 1124 ms: within noise.
+
+`benches/sched/ab_pair.py`, n=7, interleaved (median (spread) / max RSS MiB; `ok` = branch median
+at most base median plus base spread), `loadavg 2.51 2.57 2.82` at the start:
+
+| prog | threads | base | branch | branch/base | |
+|---|---|---|---|---|---|
+| spawn_native_call.chz | 1 | 764 (124) / 223 | 841 (120) / 260 | 1.10x | ok |
+| spawn_native_call.chz | 2 | 854 (60) / 41 | 896 (62) / 35 | 1.05x | ok |
+| spawn_native_call.chz | 0 | 1177 (208) / 27 | 1177 (236) / 27 | 1.00x | ok |
+| storm.chz | 1 | 4643 (161) / 40 | 4604 (187) / 39 | 0.99x | ok |
+| storm.chz | 0 | 5780 (238) / 381 | 5797 (122) / 380 | 1.00x | ok |
+| churn8.chz | 0 | 3485 (137) / 21 | 3488 (135) / 21 | 1.00x | ok |
+| fan_open.chz | 0 | 281 (36) / 15 | 272 (57) / 15 | 0.97x | ok |
+| body_and_spawn.chz | 0 | 7262 (105) / 925 | 7205 (168) / 924 | 0.99x | ok |
+
+Max RSS of `spawn_native_call.chz` at one worker rose 223 -> 260 MiB: 100000 queued tasks each
+hold one more value.
+
+`benches/run.chz` times `./target/release/chezzi` whichever binary runs it, so it cannot compare
+two binaries; its eleven `benches/chz/*.chz` programs were run through `ab_pair.py` instead (n=5,
+default worker count, `loadavg 4.62 6.73 4.78` at the start). No row moved by more than its
+run-to-run spread: all eleven are `ok`, branch/base 0.90x to 1.15x (`str` 265 (48) -> 304 (52),
+`map` 254 (41) -> 286 (44), `fib` 564 (60) -> 508 (54)). None of the eleven spawns a task.
+
 ## TICKET-225 — type variables and untyped constants, base vs branch (2026-10-07)
 
 Base `main` (`af9db901`), branch `ticket/225` at `9bdb82ea`. Both `cargo build --release --bin chezzi`
