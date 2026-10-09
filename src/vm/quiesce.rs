@@ -153,13 +153,7 @@ impl PartyWait {
             // `Vm::block_recv` settles on a queued value, a `trip()` latch, or `closed` (which
             // returns `ClosedEmpty` — the `for v in ch:` ends, a bare `recv` faults; either is
             // progress).
-            PartyWait::Recv(core, me) => {
-                let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                g.recv_ready_for(me.as_ref())
-                    || g.closed
-                    || core.done_latch.load(Ordering::Relaxed)
-                    || me.as_ref().is_some_and(|p| !p.is_queued())
-            }
+            PartyWait::Recv(core, me) => recv_satisfiable(core, me.as_ref()),
             // The blocking `send` settles once its offer does — taken by a receiver, or closed by
             // `close()` (it faults `CLOSED_SEND`).
             PartyWait::Send(p) => !p.is_queued(),
@@ -172,21 +166,7 @@ impl PartyWait {
             // DEC-176 — the poll skips ONE closed recv arm, but a `wait:` whose EVERY arm is a closed
             // recv arm settles (`wait: all channels closed`), so the group is judged as a whole.
             PartyWait::Wait(arms, me) => {
-                me.as_ref().is_some_and(|p| !p.is_queued())
-                    || arms.iter().any(|(core, is_send)| {
-                        let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
-                        if *is_send {
-                            me.is_none() && (g.send_ready_for(core.cap, None) || g.closed)
-                        } else {
-                            g.recv_ready_for(me.as_ref())
-                                || core.done_latch.load(Ordering::Relaxed)
-                                || core.timer.is_some()
-                        }
-                    })
-                    || (!arms.is_empty()
-                        && arms.iter().all(|(core, is_send)| {
-                            !is_send && core.q.lock().unwrap_or_else(|e| e.into_inner()).closed
-                        }))
+                wait_satisfiable(arms.iter().map(|(c, s)| (&**c, *s)), me.as_ref())
             }
             // A join is over exactly when the executor owes nothing BUT this joiner's own job. See
             // the variant's doc: answering a flat `false` here faulted an already-drained
@@ -221,6 +201,40 @@ impl PartyWait {
             PartyWait::Guard(key, me) => super::core::guard_wait_satisfiable(*key, *me),
         }
     }
+}
+
+/// TICKET-236 — could a blocked `recv` on `core` already resume? The one answer for a blocked
+/// party, a demoted waiter and a parked fiber. `me` is the receiver's own `Pending`, if it has
+/// one. Takes `core.q`, so the caller holds no channel lock.
+pub(super) fn recv_satisfiable(core: &ChannelCore, me: Option<&Arc<Pending>>) -> bool {
+    let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+    g.recv_ready_for(me)
+        || g.closed
+        || core.done_latch.load(Ordering::Relaxed)
+        || me.is_some_and(|p| !p.is_queued())
+}
+
+/// TICKET-236 — could a blocked `wait:` over `arms` (`(core, is_send)`) already resume? The one
+/// answer for a blocked party, a demoted waiter and a parked fiber. Takes each arm's `core.q`.
+pub(super) fn wait_satisfiable<'a>(
+    arms: impl Iterator<Item = (&'a ChannelCore, bool)> + Clone,
+    me: Option<&Arc<Pending>>,
+) -> bool {
+    me.is_some_and(|p| !p.is_queued())
+        || arms.clone().any(|(core, is_send)| {
+            let g = core.q.lock().unwrap_or_else(|e| e.into_inner());
+            if is_send {
+                me.is_none() && (g.send_ready_for(core.cap, None) || g.closed)
+            } else {
+                g.recv_ready_for(me)
+                    || core.done_latch.load(Ordering::Relaxed)
+                    || core.timer.is_some()
+            }
+        })
+        || (arms.clone().next().is_some()
+            && arms.clone().all(|(core, is_send)| {
+                !is_send && core.q.lock().unwrap_or_else(|e| e.into_inner()).closed
+            }))
 }
 
 /// TICKET-188 — one registered blocked party: what it waits for, and the wake set that may cut it.

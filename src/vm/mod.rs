@@ -2347,6 +2347,36 @@ enum ParkedEntry {
     Send(Fiber),
 }
 
+impl ParkedEntry {
+    /// TICKET-236 — could this parked fiber already resume? Asks the channels its `PendingOp`
+    /// names through the one pair of answers every blocked thing uses
+    /// ([`quiesce::recv_satisfiable`], [`quiesce::wait_satisfiable`]). A fiber with nothing to
+    /// ask (no `pending`, no channel, already claimed) answers `true`, which only declines the
+    /// verdict. Borrows each core: a cloned `Arc` would change [`SchedCore::provable`] (DEC-129).
+    fn satisfiable(&self) -> bool {
+        match self {
+            ParkedEntry::Recv(f) => f.pending.as_ref().is_none_or(|op| {
+                op.at
+                    .first()
+                    .is_none_or(|(core, _, _)| quiesce::recv_satisfiable(core, Some(&op.p)))
+            }),
+            ParkedEntry::Send(f) => f.pending.as_ref().is_none_or(|op| !op.p.is_queued()),
+            ParkedEntry::Wait(wp) => {
+                let g = wp.fiber.lock().unwrap_or_else(|e| e.into_inner());
+                g.as_ref()
+                    .and_then(|f| f.pending.as_ref())
+                    .is_none_or(|op| {
+                        op.at.is_empty()
+                            || quiesce::wait_satisfiable(
+                                op.at.iter().map(|(c, _, s)| (&**c, *s)),
+                                Some(&op.p),
+                            )
+                    })
+            }
+        }
+    }
+}
+
 struct MnSched {
     core: Mutex<SchedCore>,
     cv: Condvar,
@@ -2977,13 +3007,13 @@ impl SchedCore {
         self.waiters.remove(&tok);
     }
 
-    /// TICKET-181 — the ONE waiter veto: could any registered waiter already be satisfied? Runs
-    /// under A and takes only Q and the guard registry G (a leaf), the order `send_wake` uses.
+    /// TICKET-181, TICKET-236 — the ONE veto of every blocked thing: could any registered waiter
+    /// or any parked fiber ([`ParkedEntry::satisfiable`]) already resume? Runs under A and takes only Q and the guard registry G (a leaf), the order `send_wake` uses.
     /// `me` is the sched this core belongs to. A `Join` waiter is answered here, never through
     /// [`quiesce::PartyWait::satisfiable`], which would lock a sched core under this one: a join of
     /// `me` reads `self`, and a join of another sched uses `try_lock` (a busy core answers `true`,
     /// which only declines the verdict).
-    fn any_waiter_satisfiable(&self, me: &MnSched) -> bool {
+    fn any_blocked_satisfiable(&self, me: &MnSched) -> bool {
         self.waiters.values().any(|w| match &*w.wait {
             quiesce::PartyWait::Join(s, slack) => {
                 if w.cancel.iter().any(|f| f.load(Ordering::Relaxed)) {
@@ -3002,7 +3032,7 @@ impl SchedCore {
                 }
             }
             _ => w.satisfiable(),
-        })
+        }) || self.parked.values().flatten().any(ParkedEntry::satisfiable)
     }
 
     /// Tasks registered and not yet finished, over every scope.
@@ -5563,7 +5593,7 @@ impl MnSched {
         //   cancel trip and its `cancel_drain` are two core-lock acquisitions apart (three seams), and
         //   an idle worker landing in that gap sees the pre-drain quiesce. `cancel_drain` is about to
         //   requeue those fibers so they unwind their `defer`s;
-        // * a DEMOTED fiber whose cancel flag is tripped (`any_waiter_satisfiable`): it is
+        // * a DEMOTED fiber whose cancel flag is tripped (`any_blocked_satisfiable`): it is
         //   a registered waiter, not `parked`, so the first scan cannot see it — but `demote_recv_block`
         //   ranks `halt_requested()` above `terminate`/self-detect, so it resumes within one
         //   `DEMOTE_POLL_BACKOFF`, unwinds and runs its `defer`s (which can `send`).
@@ -5580,15 +5610,18 @@ impl MnSched {
         if awaiting_drain.unwrap_or_else(|| c.any_cancelled_scope_awaiting_drain(self)) {
             return false;
         }
-        // TICKET-181 — the ONE waiter veto. A registered waiter the counters cannot see (a demoted
-        // recv or `wait:`, an M:N guard wait, a blocked body of this thread) that could already be
-        // satisfied is about to resume: a value, a latch or a close landed on its channels (DEC-176:
-        // a `wait:` settles on a close of EVERY arm), its guard came free, or a cancel it would
-        // honour tripped (N4: it unwinds and runs its `defer`s, which can `send`). Declaring
-        // deadlock would drop every parked fiber without its `defer`s and latch `terminate`.
-        // Each vetoing state makes the waiter return on its next poll and unregister, so the veto
-        // cannot pin a hang. Lock order A → Q, A → G (a leaf), as `send_wake`.
-        if c.any_waiter_satisfiable(self) {
+        // TICKET-181, TICKET-236 — the ONE veto of every blocked thing. Each registered waiter (a
+        // demoted recv or `wait:`, an M:N guard wait, a blocked body of this thread) and each
+        // parked fiber is asked whether it could already resume: a value, a latch, a close or a
+        // seal landed on its channels (DEC-176: a `wait:` settles on a close of EVERY arm), its
+        // guard came free, or a cancel it would honour tripped (N4: it unwinds and runs its
+        // `defer`s, which can `send`). A parked fiber stays in `parked_n` until its wake runs, and
+        // that wake follows the waker's effect, so the count alone says nothing about its
+        // channel. Declaring deadlock would drop every parked fiber without its `defer`s and
+        // latch `terminate`. Each vetoing state resumes the asked thing (a waiter on its next
+        // poll, a parked fiber on the wake that follows the effect), so the veto cannot pin a
+        // hang. Lock order A → Q, A → G (a leaf), as `send_wake`.
+        if c.any_blocked_satisfiable(self) {
             return false;
         }
         true

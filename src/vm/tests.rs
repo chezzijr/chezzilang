@@ -3955,9 +3955,15 @@ fn mn_wait_park_close_wake_claims_and_sweeps() {
 fn mn_wait_park_lone_fiber_is_deadlock() {
     let sched = mk_sched(1);
     sched.seed(vec![mk_fiber(0)]);
-    let f0 = take_run(&sched);
+    use crate::vm::core::{Pending, PendingOp};
+    let mut f0 = take_run(&sched);
     let c1 = empty_core();
     let c2 = empty_core();
+    // TICKET-236: the verdict asks a parked fiber through its `PendingOp`, as production sets it.
+    f0.pending = Some(PendingOp::new(
+        Pending::new(),
+        vec![(Arc::clone(&c1), 0, false), (Arc::clone(&c2), 1, false)],
+    ));
     sched.park_wait(
         vec![
             (core_key(&c1), Arc::clone(&c1), false),
@@ -4017,10 +4023,19 @@ fn mn_park_wait_all_recv_arms_closed_requeues_instead_of_parking() {
 fn mn_park_wait_one_closed_one_live_still_parks_and_is_deadlock() {
     let sched = mk_sched(1);
     sched.seed(vec![mk_fiber(0)]);
-    let f0 = take_run(&sched);
+    use crate::vm::core::{Pending, PendingOp};
+    let mut f0 = take_run(&sched);
     let closed = empty_core();
     closed.q.lock().unwrap().closed = true;
     let live = empty_core();
+    // TICKET-236: the verdict asks a parked fiber through its `PendingOp`, as production sets it.
+    f0.pending = Some(PendingOp::new(
+        Pending::new(),
+        vec![
+            (Arc::clone(&closed), 0, false),
+            (Arc::clone(&live), 1, false),
+        ],
+    ));
     sched.park_wait(
         vec![
             (core_key(&closed), Arc::clone(&closed), false),
@@ -4033,6 +4048,27 @@ fn mn_park_wait_one_closed_one_live_still_parks_and_is_deadlock() {
     assert!(
         sched.is_deadlocked(&c),
         "a lone wait-parked fiber with no possible waker is still a deadlock"
+    );
+}
+
+/// TICKET-236 — a parked fiber is asked about its channel, as a demoted waiter and a blocked
+/// party are. A close that landed after the park (its wake has not run yet) makes the fiber
+/// resumable, so the sched is not deadlocked.
+#[test]
+fn a_parked_recv_whose_channel_closed_is_not_judged_stuck() {
+    let sched = mk_sched(1);
+    sched.seed(vec![mk_fiber(0)]);
+    let f0 = take_run(&sched);
+    let c1 = empty_core();
+    sched.park(core_key(&c1), Arc::clone(&c1), f0);
+    assert!(
+        sched.is_deadlocked(&sched.lock()),
+        "a lone parked fiber on an open, empty channel is a deadlock"
+    );
+    c1.q.lock().unwrap().closed = true;
+    assert!(
+        !sched.is_deadlocked(&sched.lock()),
+        "the channel closed: the parked fiber can resume"
     );
 }
 
