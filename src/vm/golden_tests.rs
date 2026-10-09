@@ -225,14 +225,14 @@ fn golden_file_entry(files: &[(&str, &str)], entry: &str) -> String {
 }
 
 /// Convenience: a single entry file (the common std-module case).
-fn golden_entry(src: &str) -> String {
+pub(super) fn golden_entry(src: &str) -> String {
     golden_file_entry(&[("main.chz", src)], "main.chz")
 }
 
 /// Like [`golden_entry`], but for a program that must FAULT: runs the graph path on the M:N engine
 /// and returns the fault message so the caller can assert its content.
 #[cfg(test)]
-fn golden_entry_fault(src: &str) -> String {
+pub(super) fn golden_entry_fault(src: &str) -> String {
     let t = TmpDir::new();
     let p = t.write("main.chz", src);
     let (_out, _err, result, _code) = run_file(&p);
@@ -5510,7 +5510,7 @@ fn parity_std_os_getcwd_ok() {
 /// Run a single-file (importing std) program on the VM with GC stress on (collect before every
 /// instruction) and the given config — surfaces any native-return value the collector might free
 /// while still reachable.
-fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> String {
+pub(super) fn vm_run_file_stress(src: &str, cfg: crate::native::HostConfig) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
     let graph = crate::resolver::build_graph(&entry).unwrap();

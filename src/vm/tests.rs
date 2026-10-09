@@ -22670,3 +22670,27 @@ fn no_arm_text_prints_pattern_syntax() {
     // A user variant keeps its name: the function answers nothing for it.
     assert_eq!(Vm::carrier_pattern_text(VID_NONE_VARIANT + 1), None);
 }
+
+/// TICKET-228 — the standalone test path (`run_capture`) and the real-graph path type a prelude
+/// method result the same way, so a carrier pattern on it lowers on both.
+#[test]
+fn standalone_path_lowers_carrier_patterns_like_the_graph_path() {
+    let cells = [
+        (
+            "ch := Channel[int]()\nmatch ch.try_recv():\n    ?v:\n        print(\"got {v}\")\n    None:\n        print(\"empty\")\n",
+            "empty\n",
+        ),
+        (
+            "xs := [1]\nmatch xs.pop():\n    ?v:\n        print(v + 0)\n    None:\n        print(-1)\n",
+            "1\n",
+        ),
+        (
+            "match \"7\".parse_int():\n    ?v:\n        print(v + 0)\n    !e:\n        print(e)\n",
+            "7\n",
+        ),
+    ];
+    for (src, want) in cells {
+        assert_eq!(run_capture(src).unwrap(), want, "standalone: {src}");
+        assert_eq!(super::golden_tests::golden_entry(src), want, "graph: {src}");
+    }
+}
