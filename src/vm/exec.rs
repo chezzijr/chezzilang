@@ -1211,6 +1211,17 @@ impl Vm {
         Ok(self.stack.pop().unwrap_or(Value::nil()))
     }
 
+    /// Re-run the current op when this task resumes. Every running task has a frame:
+    /// `Vm::task_entry` gives a task whose head pushes none an entry thunk, and `start_task`
+    /// refuses any other (TICKET-235).
+    #[inline]
+    pub(super) fn rewind_op(&mut self) {
+        self.frames
+            .last_mut()
+            .expect("a running task has a frame")
+            .ip -= 1;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_frame(
         &mut self,

@@ -673,7 +673,7 @@ impl Vm {
             cancel_fiber_owned_family(scope);
             if !scope.sched.lock().family_done(scope.scope) {
                 let origin = scope.scope;
-                self.frames.last_mut().unwrap().ip -= 1;
+                self.rewind_op();
                 self.join_suspend = Some(origin);
                 return true;
             }
@@ -722,8 +722,8 @@ impl Vm {
             && scope.fiber_owned
             && !scope.sched.lock().family_done(scope.scope)
         {
-            self.frames.last_mut().unwrap().ip -= 1;
             self.join_suspend = Some(scope.scope);
+            self.rewind_op();
             return Ok(());
         }
         // Consume this nursery's tasks (FIFO). Popping the entry now (as the old drain did at the

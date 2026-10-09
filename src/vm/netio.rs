@@ -1591,7 +1591,7 @@ impl Vm {
             for &a in args {
                 self.push(a); // its args, in order, back on top
             }
-            self.frames.last_mut().unwrap().ip -= 1;
+            self.rewind_op();
             // W7-18 — wake at the SOONER of the op's own D6c budget and the run's `--timeout`
             // deadline, so a park with no `timeout_ms` at all (`deadline: None` — the shape that
             // HUNG: a nursery `l.accept()` nobody connects to) is still reached by the wall clock.
@@ -1942,7 +1942,7 @@ impl Vm {
     pub(super) fn park_send(&mut self, h: GcRef, value: Value, cap: Option<usize>, span: Span) {
         self.push(Value::obj(h)); // receiver (deeper on the stack)
         self.push(value); // its one arg, back on top
-        self.frames.last_mut().unwrap().ip -= 1;
+        self.rewind_op();
         self.send_suspend = Some(h);
         self.park_site = Some((send_deadlock_msg(cap), span));
     }
@@ -2147,7 +2147,7 @@ impl Vm {
     /// wait set; a sibling `send`/`close` wakes it.
     pub(super) fn park_recv(&mut self, h: GcRef, span: Span) {
         self.push(Value::obj(h));
-        self.frames.last_mut().unwrap().ip -= 1;
+        self.rewind_op();
         self.suspend = Some(h);
         self.park_site = Some((EMPTY_RECV_DEADLOCK, span));
     }
@@ -2794,7 +2794,7 @@ impl Vm {
             return self
                 .wait_settled(settled, base, meta, span)
                 .unwrap_or_else(|| {
-                    self.frames.last_mut().unwrap().ip -= 1; // re-run this WaitPoll: it polls again
+                    self.rewind_op(); // re-run this WaitPoll: it polls again
                     Ok(())
                 });
         }
@@ -2863,7 +2863,7 @@ impl Vm {
                 }
             }
             self.pending = Some(op);
-            self.frames.last_mut().unwrap().ip -= 1; // re-run this WaitPoll on resume
+            self.rewind_op(); // re-run this WaitPoll on resume
             let msg = if has_send {
                 FULL_SEND_DEADLOCK
             } else {
@@ -2890,7 +2890,7 @@ impl Vm {
                     .unwrap_or(Err(e));
             }
             self.pending = Some(op);
-            self.frames.last_mut().unwrap().ip -= 1;
+            self.rewind_op();
             return Ok(());
         }
         // **W7-14 — a live timer arm must not swallow the siblings, and this pair of gates is the
@@ -2981,7 +2981,7 @@ impl Vm {
             });
             drop(party);
             self.pending = Some(op);
-            self.frames.last_mut().unwrap().ip -= 1;
+            self.rewind_op();
             return Ok(());
         }
         // Inside a native callback: the host stack cannot be unwound to park and there is no thread
