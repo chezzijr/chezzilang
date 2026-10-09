@@ -39223,3 +39223,15 @@ fn plain_value_meets_open_none_carrier_slot() {
         "plain value must meet an open None carrier; rejected cells: {failed:?}"
     );
 }
+
+#[test]
+fn none_cannot_be_rebound_by_a_binder() {
+    for src in [
+        "fn find() -> int?:\n    return None\nNone := 5\nprint(find())\n",
+        "fn f(None: int) -> int?:\n    return None\n",
+        "for None in [1, 2]:\n    print(None)\n",
+        "None: int = 4\n",
+    ] {
+        rejects(src, "keyword");
+    }
+}
