@@ -171,7 +171,7 @@ impl PartyWait {
             // A join is over exactly when the executor owes nothing BUT this joiner's own job. See
             // the variant's doc: answering a flat `false` here faulted an already-drained
             // `shutdown()`, and ignoring `slack` faulted a job that shut down its own executor.
-            PartyWait::Join(sched, slack) => sched.lock().undone_tasks() <= *slack,
+            PartyWait::Join(sched, slack) => sched.lock().join_over(*slack),
             // W7-58 — a nursery join is over exactly when the nursery can still move: the sched's OWN
             // deadlock predicate, minus its W7-56 outstanding-job veto.
             //
@@ -195,7 +195,8 @@ impl PartyWait {
                 // TICKET-125 — a sched whose every counted fiber is an owner blocked at a nested
                 // join has no parked victim to demand either (same DEC-112 bullet-3 relaxation as
                 // `live_eager_bodies` above).
-                !sched.quiesced_core(&c, !c.only_blocked_owners())
+                // A finished nursery answers "satisfiable": its join is about to return.
+                !c.any_scope_incomplete() || sched.can_still_move(&c, !c.only_blocked_owners())
             }
             // TICKET-063 — mirrors `SchedCore::waiters`' veto in `local_quiesced`.
             PartyWait::Guard(key, me) => super::core::guard_wait_satisfiable(*key, *me),
@@ -726,8 +727,7 @@ impl QuiesceState {
         live.iter()
             .filter(|s| {
                 let c = s.lock();
-                c.any_scope_incomplete()
-                    && !s.quiesced_core(&c, !(s.body_is_fiber || c.only_blocked_owners()))
+                s.can_still_move(&c, !(s.body_is_fiber || c.only_blocked_owners()))
             })
             .count()
     }

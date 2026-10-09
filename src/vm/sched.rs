@@ -1307,8 +1307,8 @@ impl Vm {
         // TICKET-112 — NESTED eager nurseries are registered too, not just OUTERMOST ones: a NESTED
         // sched's fibers are also live senders the process-wide verdict must count (`recursive`
         // false-faulted past the granted-slot path at the default worker count without this). Sound
-        // only together with `MnSched::body_is_fiber` and `live_eager_bodies`' `quiesced_core(c,
-        // false)` read below — see `## Decisions` bullet 3.
+        // only together with `MnSched::body_is_fiber` and `live_eager_bodies`' `can_still_move`
+        // read with `require_parked` false — see `## Decisions` bullet 3.
         self.quiesce.register_eager_body(&sched);
         Some(EagerScope {
             sched,
@@ -5332,7 +5332,7 @@ impl Vm {
         };
         let party = self.block_party_guard(PartyWait::Join(Arc::clone(&sched), slack), None);
         let leave = loop {
-            if sched.lock().undone_tasks() <= slack {
+            if sched.lock().join_over(slack) {
                 break None;
             }
             if let Err(e) = self.block_halts(span) {

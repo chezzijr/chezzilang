@@ -3095,12 +3095,12 @@ impl SchedCore {
                     return true;
                 }
                 if std::ptr::eq(Arc::as_ptr(s), me) {
-                    self.undone_tasks() <= *slack
+                    self.join_over(*slack)
                 } else {
                     match s.core.try_lock() {
-                        Ok(c) => c.undone_tasks() <= *slack,
+                        Ok(c) => c.join_over(*slack),
                         Err(std::sync::TryLockError::Poisoned(e)) => {
-                            e.into_inner().undone_tasks() <= *slack
+                            e.into_inner().join_over(*slack)
                         }
                         Err(std::sync::TryLockError::WouldBlock) => true,
                     }
@@ -3108,6 +3108,12 @@ impl SchedCore {
             }
             _ => w.satisfiable(),
         }) || self.parked.values().flatten().any(ParkedEntry::satisfiable)
+    }
+
+    /// TICKET-236 — THE Join predicate: a join of this sched is over when it owes nothing but
+    /// the joiner's own `slack` tasks. The join loops and every verdict's Join question read it.
+    pub(super) fn join_over(&self, slack: usize) -> bool {
+        self.undone_tasks() <= slack
     }
 
     /// Tasks registered and not yet finished, over every scope.
@@ -3777,12 +3783,7 @@ impl MnSched {
     /// are undone, for at most `tick`.
     fn join_tick(&self, slack: usize, tick: std::time::Duration) {
         let c = self.lock();
-        let undone: usize = c
-            .scopes
-            .values()
-            .map(|s| s.total.saturating_sub(s.done))
-            .sum();
-        if undone > slack {
+        if !c.join_over(slack) {
             drop(
                 self.cv
                     .wait_timeout(c, tick)
@@ -4478,7 +4479,7 @@ impl MnSched {
     /// 2. no incomplete scope but an OPEN body — a finished-looking peer whose body is still open is
     ///    NOT that window; treating it as a veto hung `j2.chz` at every run. Skip it (matches
     ///    [`MnSched::peer_can_move`]'s own first clause).
-    /// 3. `!quiesced_core(&c, false)` — the peer still has live work and may yet feed this sched's
+    /// 3. [`MnSched::can_still_move`] — the peer still has live work and may yet feed this sched's
     ///    candidate: decline.
     /// 4. the peer's own state is ALREADY a provable genuine deadlock
     ///    (`cross_sched_blocked_owners == 0 && !body_held_by_fiber && local_quiesced && victims_proven`):
@@ -4508,7 +4509,7 @@ impl MnSched {
                 }
                 continue; // clause 2 — finished-looking but body open: not that window
             }
-            if !s.quiesced_core(&c, false) {
+            if s.can_still_move(&c, false) {
                 return false; // clause 3 — peer may still move
             }
             if c.cross_sched_blocked_owners == 0
@@ -5549,28 +5550,10 @@ impl MnSched {
     /// `cancelled_scope_awaiting_drain` read (see [`MnSched::quiesced_core_given`]). `None` reads
     /// live, matching `is_deadlocked`'s old behaviour exactly.
     fn is_deadlocked_given(&self, c: &SchedCore, awaiting_drain: Option<bool>) -> bool {
-        // W7-56 — an eager `Executor` job outstanding anywhere in this RUN is a live sender the
-        // counters below cannot see: it runs on the shared pool with no fiber of this sched, so it
-        // bumps neither `running`/`runnable` nor `inflight`, and a nursery task parked on the channel
-        // that job is about to feed reads as an all-parked quiesce. This is exactly the veto
-        // `quiesce::QuiesceState::quiesced` already applies process-wide (`parties.len() < live`,
-        // where `live` counts the same `outstanding`), for the same reason: an UNCOUNTED sender must
-        // veto. `outstanding` is bumped at `reserve()` (at `submit`, before dispatch) and dropped at
-        // `finish()`, so a job still queued behind a saturated pool already counts.
-        //
-        // The veto EXPIRES: `spawn_into`'s completion closure pokes every live sched after
-        // `finish()`, so a job that ends without ever sending lets an idle worker re-evaluate and
-        // report the genuine deadlock (the idle wait is untimed — without that poke this veto would
-        // be a permanent silent hang instead of a fault).
-        //
-        // **It stays FIRST and it stays UNCHANGED (W7-58).** W7-58 is the case where the outstanding
-        // job is itself stuck; the fix is to make the *process-wide* verdict able to see a nursery
-        // owner ([`quiesce::PartyWait::Nursery`]), NOT to weaken this veto — removing it re-opens
-        // W7-56 (a live program declared deadlocked).
-        //
-        // Lock order: this holds `SchedCore` (A) and takes `exec_registry` → one `ExecutorCore::eager`
-        // beneath it, matching the waiter veto's A-then-`q`. Nothing acquires a sched core
-        // lock while holding either, so no cycle.
+        // A detached sched (an `Executor`'s, TICKET-208) declines: it never judges itself. Every
+        // other sched answers [`MnSched::is_deadlocked_ignoring_jobs_given`]. No outstanding-job
+        // veto stands here any more; a peer sched that can still move declines the verdict
+        // inside that function (`any_peer_can_move`).
         if self.detached.is_some() {
             return false;
         }
@@ -5769,7 +5752,15 @@ impl MnSched {
             Err(std::sync::TryLockError::WouldBlock) => return true,
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
         };
-        c.any_scope_incomplete() && !self.quiesced_core(&c, false)
+        self.can_still_move(&c, false)
+    }
+
+    /// TICKET-236 — THE "undone and able to move" read of one sched, under its core lock `c`:
+    /// it still holds an unfinished task and its own counts do not read as quiesced. Every
+    /// caller that asks whether a sched is still a waker reads this; `require_parked` is each
+    /// caller's own DEC-101 choice.
+    pub(super) fn can_still_move(&self, c: &SchedCore, require_parked: bool) -> bool {
+        c.any_scope_incomplete() && !self.quiesced_core(c, require_parked)
     }
 
     /// TICKET-099 — "can ANY OTHER live sched of this run still move?" `try_lock`s the registry too
