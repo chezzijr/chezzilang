@@ -1,0 +1,42 @@
+# `ConcurrentMap[K, V].new()` / `ConcurrentCounter[K].new()`: the static constructors.
+import std.concurrency
+import ConcurrentMap, ConcurrentCounter from std.concurrency.collection
+
+test fn map_new_with_type_arguments_is_empty_and_typed():
+    m := ConcurrentMap[str, int].new()
+    assert m.len() == 0
+    m.set("a", 1)
+    assert m.get("a") == ?1
+    assert m.get("zz") == None
+    snap := m.snapshot()
+    assert snap == {"a": 1}
+
+test fn map_new_takes_its_type_from_the_annotation():
+    m: ConcurrentMap[int, str] = ConcurrentMap.new()
+    m.set(1, "x")
+    assert m.get_or_insert(2, "y") == "y"
+    assert m.len() == 2
+
+test fn counter_new_counts_exactly_across_tasks():
+    hits := ConcurrentCounter[str].new()
+    table := ConcurrentMap[int, int].new()
+    parallel:
+        for i in 0..200:
+            spawn:
+                hits.increment("jobs")
+                table.set(i, i * i)
+    assert hits.count("jobs") == 200
+    assert hits.total() == 200
+    assert table.len() == 200
+    assert table.get(9) == ?81
+
+test fn two_new_calls_are_independent():
+    a := ConcurrentMap[str, int].new()
+    b := ConcurrentMap[str, int].new()
+    a.set("k", 1)
+    assert b.len() == 0
+
+test fn the_field_constructor_still_works():
+    m: ConcurrentMap[str, int] = ConcurrentMap(RwShared({}))
+    m.set("a", 1)
+    assert m.len() == 1

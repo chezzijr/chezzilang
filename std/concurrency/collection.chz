@@ -41,6 +41,10 @@ import std.concurrency
 struct ConcurrentMap[K: Hashable + Eq, V]:
     inner: RwShared[Map[K, V]]
 
+    # An empty map: `ConcurrentMap[str, int].new()`, or `m: ConcurrentMap[str, int] = ConcurrentMap.new()`.
+    fn new() -> ConcurrentMap[K, V]:
+        return ConcurrentMap(RwShared({}))
+
     # Look up `key`. CONCURRENT READ. Returns ?value or None.
     fn get(self, key: K) -> V?:
         return self.inner.get_key(key)
@@ -82,6 +86,10 @@ struct ConcurrentMap[K: Hashable + Eq, V]:
 # EXACT final count (no lost updates). This is the classic race-free concurrent counter.
 struct ConcurrentCounter[K: Hashable + Eq]:
     inner: RwShared[Map[K, int]]
+
+    # An empty counter: `ConcurrentCounter[str].new()`.
+    fn new() -> ConcurrentCounter[K]:
+        return ConcurrentCounter(RwShared({}))
 
     # Increment `key`'s count by 1 (created at 1 if absent). EXCLUSIVE WRITE, atomic RMW.
     fn increment(self, key: K):

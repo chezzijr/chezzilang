@@ -1725,14 +1725,12 @@ wrappers bake the correct single-lock idiom in.
 task makes is visible to the parent after the join. (`RwShared` is sendable and shares; a struct of
 all-sendable fields is too.)
 
-**Construction (no factory):** there is **no** `new_Map()`/`new_counter()` — a no-argument generic
-factory cannot bind `K`/`V` (turbofish does not propagate into the inner `RwShared({})`). Construct
-**directly** at the use site: **`ConcurrentMap(RwShared({}))`** / **`ConcurrentCounter(RwShared({}))`**;
-`K`/`V` are deferred from the empty `{}` and stay `Unknown` on the wrapper (the methods operate on the
-`ConcurrentMap`, they do not pin the inner map type). That is fine for the wrapper itself, but a value
-*derived* from it whose type surfaces the map — e.g. `snap := m.snapshot()` (`-> Map[K, V]`) — lands an
-unpinned `Map[Unknown, Unknown]` local, which the empty-collection rule flags; annotate it
-(`snap: Map[str, int] = m.snapshot()`). Note the use-site `RwShared({})` means user code also needs **`import std.concurrency`**
+**Construction:** call the static `new()` with the type arguments, **`ConcurrentMap[str, int].new()`**
+/ **`ConcurrentCounter[str].new()`**, or let an annotation give them
+(`m: ConcurrentMap[str, int] = ConcurrentMap.new()`). The field constructor still works:
+`ConcurrentMap(RwShared({}))`. With it and no annotation, `K`/`V` are deferred from the empty `{}` and
+stay unknown on the wrapper, so a value derived from it (`snap := m.snapshot()`, `m.get(k) == ...`)
+has an unknown type and needs an annotation; prefer `new()`. Note a use-site `RwShared({})` means user code also needs **`import std.concurrency`**
 in addition to `import std.concurrency.collection` (the latter, a len-3 submodule, does **not** license
 the bare `RwShared` ctor — only the whole-module `import std.concurrency` does).
 
