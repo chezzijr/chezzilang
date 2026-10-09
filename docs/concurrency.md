@@ -546,8 +546,7 @@ into each task by value. See `docs/stdlib.md` for signatures.
 
 Bare `Executor.submit(f)` is fire-and-forget — nothing comes back. The result-returning primitive is
 `Executor.submit_result[T](f: fn() -> T) -> Channel[T!]`: submit `f` and get a cap-1 channel you
-`.recv()` for its outcome (`?value` or `!message`, TICKET-208; the `Task.get() -> T` raise
-described below is now `Task.get() -> T!`). That channel is **sealed** (TICKET-219): its
+`.recv()` for its outcome (`?value` or `!message`, TICKET-208). That channel is **sealed** (TICKET-219): its
 outcome is written once, and every `recv` returns a copy of it and takes nothing, so `len()` stays
 `1` and every reader sees the same outcome. Do not iterate it with `for` (it never ends); to collect
 several outcomes keep a list of `submit_result` channels. Two writers can seal it, and the first
@@ -559,14 +558,15 @@ handle (every copy of the handle, in any task, reads the same channel):
 - `submit_task[T](ex, f) -> Task[T]` — submit `f` detached, get a handle (builds over
   `ex.submit_result(f)`). The work starts at the `submit` and is waited for by
   `shutdown()` (or the program-exit join). Read the result AFTER that call.
-- `Task.get() -> T` — block until the result lands, then return it; idempotent, and the same answer in every task (the outcome is the sealed channel's value; the task holding the original handle gets the same object back each call, a task holding a copy gets the value as of the crossing, or a fresh copy when the owner had not called `get()` before it). If
-  the job faulted, `.get()` re-raises the job's own error message (CPython's `Future.result()`
-  shape, measured: `result raised: RuntimeError job failed` / `done= True`) — `shutdown()` still
-  raises the job's fault too, and its error keeps the job's own origin (`e.file()`/`line()`/`col()`
-  point at the user's `panic` site). `.get()`'s re-raised error crosses a task airlock, so it
-  answers `None` for `file()`/`line()`/`col()` instead. A task `shutdown_now()` cancelled raises
-  `task cancelled: shutdown_now() stopped it before it finished` at once, never hangs
-  (CPython: `CancelledError`), and `done()` is `true`.
+- `Task.get() -> T!` — block until the outcome lands, then return it as a value; idempotent, and the same answer in every task (the outcome is the sealed channel's value; the task holding the original handle gets the same object back each call, a task holding a copy gets the value as of the crossing, or a fresh copy when the owner had not called `get()` before it). `get()` never
+  faults: a job that returned `v` gives `?v`, and a job that faulted gives `!message` with the job's
+  own fault text (CPython's `Future.result()`, with a `T!` in place of a raise) — handle it with
+  `match`, `else e:` or `?`. A job run through `submit_task` keeps its fault inside the handle, so
+  `shutdown()` returns normally for it (measured: `shutdown ok`, then `get()` gives `!boom`); only a
+  fire-and-forget `submit` job's fault ends the run. A task `shutdown_now()` cancelled gives
+  `!"task cancelled: shutdown_now() stopped it before it finished"` at once, never hangs (CPython:
+  `CancelledError`), and `done()` is `true`. When `f` itself returns a `T!E`, `get()` is `(T!E)!`:
+  the outer layer says whether the job faulted, the inner one is the job's own result.
 - `Task.done() -> bool` — non-blocking readiness poll; `true` once the job has finished, faulted or
   not. It reads `concurrency.is_settled(ch)`, so it never reads `false` after `true` (TICKET-219;
   before, a reader racing `get()` saw `false` after `true` 618 times in one run).
