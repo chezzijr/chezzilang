@@ -2518,8 +2518,8 @@ Ships join semantics with side-effecting tasks (e.g. `print`). No channels yet.
 - **AST** `src/ast/mod.rs` (`StmtKind`): `Parallel { body: Block }`, `Spawn(SpawnTarget)` where
   `SpawnTarget = Call(Expr) | Block(Block)`.
 - **Parser** `src/parser/mod.rs`: dispatch in `parse_stmt`; `parse_parallel` (reuse `parse_block`);
-  `parse_spawn` — `spawn:` → block form, else a call expr (reject a non-call form-1 with a clear
-  message, mirror `defer`).
+  `parse_spawn` — `spawn:` → block form (compound); `parse_spawn_call` — a call expr (a simple
+  statement since TICKET-241, legal as an inline body; reject a non-call with a clear message).
 - **Checker** `src/checker/mod.rs` (`check_stmt`): `Spawn` is legal anywhere (M-C) — the implicit
   function/module nursery always provides a binding target; form-1 target must be a call, and the
   sendability/airlock checks on the receiver + args still apply.
