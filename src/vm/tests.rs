@@ -21223,7 +21223,7 @@ fn module_global_fn_value_call_runs_both_engines() {
 }
 
 /// M24-5b — a receiver-less member call (a STATIC method) IS an ordinary `spawn`/`defer` target.
-/// `Op::SpawnMethod`/`DeferMethod` record a RECEIVER value plus a name and a static has none, so the
+/// `Op::SpawnRecv`/`DeferMethod` record a RECEIVER value plus a name and a static has none, so the
 /// compiler used to load the TYPE NAME as a value and panic in `global_slot` ("global 'Holder' has
 /// no slot") on a program `chezzi check` had just called clean. The inconsistency was internal —
 /// `print(H.build(3))` and `defer print(H.build(3))` both worked while `defer H.build(3)` did not —

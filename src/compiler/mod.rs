@@ -4283,8 +4283,8 @@ impl Compiler {
             // `defer xs.sum()` over a `List[float]` needs the same hidden `0.0` seed the eager
             // `Op::CallMethod` emit pushes — `Op::DeferMethod` lands in the very same
             // `Vm::do_method_call`, so without it an empty list sums to `0`, not `0.0`. Method
-            // dispatch has exactly three opcodes
-            // (`CallMethod`/`DeferMethod`/`SpawnMethod`); all three consult the seed.
+            // dispatch has exactly three emit sites (`CallMethod`, `DeferMethod`, and the spawn
+            // member arm, whose entry thunk runs a `CallMethod`); all three consult the seed.
             if let Some(seed) = self.sum_seed(name, args, *name_span) {
                 self.compile_expr(fc, obj)?;
                 self.emit_sum_seed(fc, &seed, call.span);
@@ -4523,7 +4523,7 @@ impl Compiler {
     }
 
     /// M24-5b — does this `spawn`/`defer` call target have a TYPE, rather than a value, at its head?
-    /// `Op::SpawnMethod`/`DeferMethod` record a RECEIVER value plus a member name, and
+    /// `Op::SpawnRecv`/`DeferMethod` record a RECEIVER value plus a member name, and
     /// `Type.static_method(..)` has no receiver: compiling the head as a value panicked in
     /// [`Self::global_slot`] (a bare type name has no global slot) or — for a `from`-imported type,
     /// whose slot exists and holds `Nil` — faulted with `type nil has no method`. Both are answered
@@ -4533,7 +4533,7 @@ impl Compiler {
     /// rather than a value — not "which of [`Self::compile_call`]'s receiverless arms matches": one
     /// stable question rather than a second copy of that arm list to drift out of sync with. A head
     /// that is a local/capture (including one SHADOWING a type or module name) or any other value
-    /// never answers yes, so every genuine receiver shape keeps its `SpawnMethod`/`DeferMethod`
+    /// never answers yes, so every genuine receiver shape keeps its `SpawnRecv`/`DeferMethod`
     /// lowering.
     fn receiverless_call_head(&self, callee: &Expr) -> Result<bool, CompileError> {
         // A tuple slot (`t.0`) is a value, never a name (`compile_call` skips it the same way).

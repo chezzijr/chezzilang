@@ -864,9 +864,8 @@ impl Heap {
     /// (so cap-off pacing is untouched), and consumed at the task's first instruction boundary in
     /// `run_until` — the first point where every live value is properly rooted.
     ///
-    /// This is the guard for the [`ReadyWorker::invoke`] door (eager `Executor` jobs); the `spawn` /
-    /// `parallel:` fiber door is sampled before dispatch by `Vm::sample_mem_cap` instead. Neither
-    /// subsumes the other — see the two-door note in `Vm::spawn_worker`.
+    /// Every task (`spawn`, `parallel:`, an `Executor` job) is also sampled before dispatch by
+    /// `Vm::sample_mem_cap` in `Vm::start_task` — see the note in `Vm::spawn_worker`.
     pub fn request_collect(&mut self) {
         self.force_collect = true;
     }

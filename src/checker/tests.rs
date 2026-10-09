@@ -18542,7 +18542,7 @@ fn spawn_on_non_sendable_receiver_still_rejected() {
         "module 'math' is not a value",
     );
     // …and so is a local BOUND to the module (`m := math`): the type is `Ty::Module`, but the head
-    // is a value, not a namespace, so the compiler lowers a `SpawnMethod` on the module HANDLE and
+    // is a value, not a namespace, so the compiler lowers a `SpawnRecv` on the module HANDLE and
     // the airlock refuses it at run time. Keying the skip on the type alone let this one through
     // `chezzi check` and fault at run time instead.
     entry_rejects(
@@ -30397,7 +30397,7 @@ fn witness_member_as_value_rejected() {
     );
 }
 
-/// M24-5 — `spawn`/`defer` lower a member call at `Op::SpawnMethod`/`DeferMethod`, which now push
+/// M24-5 — `spawn`/`defer` lower a member call at `Op::SpawnRecv`/`DeferMethod`, which now push
 /// the hidden witness on top of the declared args, so a witness-taking INSTANCE method is an
 /// ordinary target. An ARGUMENT that is itself a witness call stays legal: it is evaluated eagerly
 /// in this frame. (A STATIC-method target — `Holder.build(c)` — is an ordinary target too, by an

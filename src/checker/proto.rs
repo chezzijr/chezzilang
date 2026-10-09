@@ -4513,7 +4513,7 @@ impl Checker {
     /// boundary inside its `ModuleSig`. So a `from`-imported callee (`reset(c)`) and a qualified one
     /// (`lib.reset(c)`) record exactly like a local one. M24-5 — a `defer`/`spawn` STATEMENT TARGET
     /// records here too: `compile_defer`/`compile_spawn` thread the witness at their own emit sites,
-    /// widening `Op::DeferCall`/`DeferMethod`/`SpawnCall`/`SpawnMethod`'s `argc` exactly as a plain
+    /// widening `Op::DeferCall`/`DeferMethod`/`SpawnCall`/`SpawnRecv`'s `argc` exactly as a plain
     /// call widens `Op::Call`'s.
     ///
     /// `key_span` is the [`crate::checker::witness_key_span`] of this call site (the member-name

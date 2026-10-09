@@ -2127,9 +2127,11 @@ struct Suite:
     ///
     /// `over_cap` is assigned only in `Heap::sweep()`; `sweep()` runs only when `should_collect()`
     /// fires; and `should_collect()`'s only non-test caller is the top of `run_until`'s dispatch
-    /// loop, guarded by `self.frames.len() > base_level`. `spawn xs.len()` pushes NO frame
-    /// (`Op::SpawnMethod` → `PendingCall::Method` → `start_task` → `do_method_call` → `invoke_native`),
-    /// so it never enters that loop and its heap is never looked at.
+    /// loop, guarded by `self.frames.len() > base_level`. `spawn xs.len()` pushed NO frame then (a
+    /// method task ran its native call straight from `start_task`), so it never entered that loop
+    /// and its heap was never looked at. That chain is history: since TICKET-235 the call runs
+    /// behind an entry thunk (`Vm::task_entry`), and this test pins that the sample covers a native
+    /// call behind its thunk.
     ///
     /// The pair below is the whole proof: byte-identical programs, same payload, same peak RSS —
     /// pre-fix the verdict flipped on **who runs bytecode**, not on who holds bytes. Measured on the
@@ -2230,8 +2232,8 @@ struct Suite:
         };
         let d = TmpDir::new();
         let d2 = TmpDir::new();
-        // The shape that used to PASS: the task body is one native method call, so no frame is ever
-        // pushed and no boundary is ever reached.
+        // The shape that used to PASS: the task body is one native method call, which pushed no
+        // frame and reached no boundary before TICKET-235 gave it an entry thunk.
         let nat = d.write("nat_test.chz", &src("nat", "xs.len()"));
         // Control: byte-identical but for the body — `use` is a user fn, so it pushes a frame and
         // `run_until` samples. It tripped pre-fix, which is what pins that ONLY the body differs.
