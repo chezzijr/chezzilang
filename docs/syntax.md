@@ -679,6 +679,27 @@ mentioning a type parameter. An operator operand is not a slot, nor is the retur
 Each branch of an **if/match expression** at a slot wraps on its own (see §8): `x: int? = if c: n else:
 None` wraps only the bare `n`, leaving the already-wrapped `None` alone. Full table: §9.
 
+**A plain value pins an open `None` (TICKET-234).** `z := None` has no payload type yet. The first
+value written to it decides: `z = 7` makes `z` an `int?` and stores `?7`, exactly as `z = ?7` does. A
+value that is already a carrier fills the payload and is never re-wrapped (`w: int? = 5`, `z = w`
+gives `int?`, not `int??`). The depth is the smallest that fits: an extra `?` layer comes only from an
+annotation or an explicit `?`. The same rule holds at every site a value meets the open slot:
+`xs := [None]` then `xs.push(7)` / `xs.insert(0, 7)` / `xs.extend([7])` / `xs[0] = 7`, `m["b"] = 7`
+on `{"a": None}`, a tuple element, a field (`b := Box(None)`, `b.v = 7`), a method argument typed by
+the receiver's type parameter (`b.set(7)`, `s.set(7)` on a `Shared(None)`), and a closure argument
+(`s.update(fn(x): 7)`). A literal `None` **beside** a value joins to that value's optional:
+`[None, 7]` is a `List[int?]`, `{"a": None, "b": 7}` a `Map[str, int?]`, `if c: None else: 7` and a
+`match` with a `None` arm are `int?`, and so is the inline body `fn pick(c: bool): if c: None else: 7`.
+`[None, w]` joins to `w`'s own type. A later value of another payload type is rejected (`z = 7` then
+`z = "hi"`: `cannot assign str to 'z' -- its payload was pinned to int? by an earlier use`). Declines
+that stay: only the LITERAL `None` joins (`n := None`, `[n, 7]` is rejected, and so are `[w, 7]` and
+`[[None], [7]]`); `z := None` / `z = []` supplies no payload; `xs += [7]` on a `[None]` list never
+wraps (`+=` does not wrap, write `xs += [?7]`); a generic call argument pins but never wraps, so
+`put(b, 7)` with `fn put[T](b: Box[T], x: T)` is rejected like its typed twin; a set element is never
+a carrier; and an open `!e` is not inferred this way. A type that is still open prints as
+`<unknown>?`, and the message carries one note: ``(`<unknown>?` is a None whose type is not known
+yet: annotate the binding, e.g. `z: int?`, or assign it a value first)``.
+
 **No `int`→`float` widening at any slot (rule D3, TICKET-138).** An `int`-typed expression — a literal
 or not — is **never** accepted where a `float` is expected: not at a typed binding, a reassignment /
 index-assign / field-assign, a call / method / constructor / enum-payload argument, a `return` (a
@@ -3523,6 +3544,15 @@ rs: List[int!str] = [1, !"disk", 3]   # [1, !disk, 3]
   type pinned the same way (`return w` in an `int!` fn); unpinned it is the error
   ``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``. At top level `?5` is `int?` at once and
   `!e` must be annotated.
+- **An open `None` is pinned by the first value it meets** (TICKET-234). `z := None` then `z = 7`
+  makes `z` an `int?`; `?7` and an existing `int?` value do the same, and a carrier is never
+  re-wrapped. The rule holds at an assignment (a field, an index, a tuple or destructuring target
+  too), `push`/`insert`/`extend`, a map set, a method or closure argument typed by the receiver's
+  type parameter, and a module global written from a fn. A literal `None` beside a value joins to
+  that value's optional in a list or map literal, an `if`/`match` expression, an inline body and a
+  `recover:` tail: `[None, 7]` is `List[int?]`. A later value of another payload type is rejected
+  with `its payload was pinned to int? by an earlier use`. A `None` nothing pins stays open and
+  prints as `<unknown>?` in a message.
 - **Set elements and map keys** never wrap in effect: no carrier is `Hashable`.
 
 **`None!E`'s success value.** A fn that returns `None!E` (also written `!E`) has no payload: it
@@ -3707,7 +3737,10 @@ match r:
 The block's value is its **trailing expression**. A trailing statement-form `match`/`if` counts too:
 when every arm/branch produces a value (a total `match`; an `if` with an `else`, every branch ending
 in a value), the whole construct is the block's value expression and `?v` wraps its unified arm/branch
-type — so `recover: … ; match x: 3: 100; _: 200` is `int!`, not `None!`. A tail that
+type — so `recover: … ; match x: 3: 100; _: 200` is `int!`, not `None!`. A literal `None`
+branch beside a value joins as it does in an `if`/`match` expression: a tail `if c:` / `None` / `else:`
+/ `7` makes the block an `int?!` (TICKET-234); a tail whose branches still do not join keeps the
+fallback below. A tail that
 does *not* uniformly produce a value has no single value type, so the block falls back to `None!`
 (value dropped, consumed only via `?_`) — never an error. This covers a trailing `let`, a non-total
 `match`, an `else`-less `if`, **and** a `match`/`if` whose arms produce genuinely *different* types (a
@@ -4359,9 +4392,16 @@ or enum defining `compare`), stable, in place.
 > sound zero-trip over-approximation: `xs := []; for i in []: xs.push(1); xs.push("s")` rejects even
 > though the loop body never runs. **if-EXPRESSION / match-EXPRESSION value arms pin persistently too**,
 > on the same rule: `y := if c: f(xs) else: g(xs)` with `f` taking `List[str]` and `g` taking `List[int]`
-> is rejected, because one binding cannot be both. Limitations: refinement fires only on a
-> **simple-variable** receiver (`obj.field.push(…)` / `xss[0].push(…)` are not refined — annotate
-> those). An **un-annotated alias** (`c := b`, or a whole-binding `c = b` where both sides are still
+> is rejected, because one binding cannot be both. A write through a field or an index pins the **root
+> binding** (TICKET-234): `b.v.push(1)`, `xss[0].push(1)`, `b.v = [1]` and `o.b.v = 7` pin `b`, `xss`,
+> `o`, so a later conflicting write through the same place is rejected. Any method argument typed by
+> the receiver's type parameter pins it, a read too: `b.set(7)` on a `Box(None)`, `s.set(7)` on a
+> `Shared(None)`, `xs.contains(1)` on an empty list (a later `xs.push("a")` is rejected), and a
+> closure argument (`s.update(fn(x): 7)`, `xs.sort_by(fn(a: int, b: int): a - b)`). An enum receiver
+> is not pinned. An argument of a generic call pins but never wraps, so `put(b, 7)` on an open
+> `Box(None)` is rejected like its typed twin `b: Box[int?]`. Limitation: a receiver with no root
+> binding (`f().push(…)`) is not refined, and an alias taken through a projection (`c := b.v`,
+> `c := xss[0]`) is not linked to its owner. An **un-annotated alias** (`c := b`, or a whole-binding `c = b` where both sides are still
 > unrefined) has no concrete sink to pin from, so the requirement moves to `c` and the two names join a
 > **pin group**: pinning either name reaches both, because Python owns aliasing here and Chezzi follows
 > its measured behavior — `b = []; c = b; c.append(1)` prints `[1] [1] True` for `b, c, b is c`, and
@@ -4407,7 +4447,13 @@ or enum defining `compare`), stable, in place.
 > write — records a pin. A later WRITE that disagrees with the pin is a type error:
 > `x := None` / `y: str? = x` / `x = ?1` is `cannot assign int? to 'x' -- its
 > payload was pinned to str? by an earlier use`. A write also REPINS the binding, so every
-> later read sees the written payload and a `match` arm binds a concrete `v`. The escapes are an
+> later read sees the written payload and a `match` arm binds a concrete `v`. A PLAIN value pins
+> and repins the same way (TICKET-234): `x := None` / `x = 7` makes `x` an `int?`, and `x = "hi"`
+> after it is `cannot assign str to 'x' -- its payload was pinned to int? by an earlier use` (the
+> same text for `x = ?"hi"` and for a `str?` value). An alias `c := b` of an open collection or
+> struct (`[None]`, `Box(None)`) is pinned with its partner; `y := z` of an open `None` is a copy and
+> is not. An open payload prints as `<unknown>?`, with a note that names both fixes (annotate the
+> binding, or assign it a value first). The escapes are an
 > annotation at the declaration (`x: int? = None`) or a re-declaration. `T!E` is
 > deliberately NOT covered: its two slots are routinely filled by different statements (`?1` then
 > `!"e"`).

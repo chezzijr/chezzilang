@@ -3375,6 +3375,8 @@ fn contains_unknown_in_slot(t: &Ty) -> bool {
 /// compounds (List/Set/Option/Channel/Shared/Atomic ×1, Map/Result ×2, Tuple ×n, Struct/Enum by
 /// NAME + arity) it recurses pairwise. On a shape-NAME or arity mismatch (e.g. pushing a different
 /// generic enum) it leaves `a` unchanged — no refine — so the normal `check_args` mismatch fires.
+/// One lift (TICKET-234): an open optional beside a present value is that value's optional, so
+/// `Option(Unknown)` beside `int` is `int?`. This is the rule every pin writer shares.
 pub(crate) fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
     use Ty::*;
     if shape.is_unknown() {
@@ -3419,6 +3421,16 @@ pub(crate) fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
                 .map(|(x, y)| merge_unknown(x, y))
                 .collect(),
         ),
+        // TICKET-234 -- an open optional beside a present value is that value's optional. A
+        // carrier value takes the arm above and is never re-wrapped; `Option`-only, because only a
+        // `T?` has a wrap that needs no second type.
+        (Option(ae), s)
+            if ae.is_unknown()
+                && !matches!(s, Option(_) | Result(..) | Nil)
+                && ty_fully_concrete(s) =>
+        {
+            Option(Box::new(s.clone()))
+        }
         // Shape/name/arity mismatch: leave `a` unchanged (no refine — normal mismatch fires later).
         _ => a.clone(),
     }
@@ -3731,6 +3743,14 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         (Ty::Param(n), a) => {
             if !a.is_unknown() && !map.contains_key(n) {
                 map.insert(n.clone(), a.clone());
+            } else if let Some(old) = map.get(n)
+                && contains_unknown_in_slot(old)
+            {
+                // TICKET-234 -- a parameter first bound to a type with an open slot is filled by
+                // a later argument instead of keeping the first binding (`put(b, 7)` on an open
+                // `Box`). Argument loops call `Checker::unify_arg`, which reads a `?x` first.
+                let merged = merge_unknown(old, a);
+                map.insert(n.clone(), merged);
             } else if let Ty::Width(_) = a
                 && map.get(n) == Some(a.scalar())
             {

@@ -2358,6 +2358,17 @@ const TWINS_ROWS: &[Row] = &[
 "#,
         R(r#"not known yet: annotate the binding, e.g. `z: int?`, or assign it a value first"#),
     ),
+    one(
+        "twins/open_note_warning",
+        r#"fn g(c: bool): if c: None else: None
+"#,
+        r#"
+    g(true)
+"#,
+        R(
+            r#"returned by 'g' is discarded — bind it (`r := …`), or discard it explicitly (`_ := …`) (`<unknown>?` is a None whose type is not known yet"#,
+        ),
+    ),
 ];
 
 // Places: a write through a field, `+=`, a nested fn, a `spawn:` body.

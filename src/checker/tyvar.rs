@@ -541,6 +541,13 @@ impl Checker {
         }
         ok
     }
+
+    /// The one join of two sibling value types: `None` when they do not join, else the first with
+    /// its open slots filled from the second (`merge_unknown`). Every fold over branch or element
+    /// types calls this, so no fold keeps the first sibling's open type.
+    pub(super) fn join_fill(&self, a: &Ty, b: &Ty) -> Option<Ty> {
+        self.join_ty(a, b).then(|| super::merge_unknown(a, b))
+    }
 }
 
 /// Whether `t` mentions var `id` (the occurs check).

@@ -899,6 +899,7 @@ impl Ty {
                 }
                 Ok(())
             }
+            Ty::Option(t) if t.is_unknown() => write!(f, "{OPEN_NONE}"),
             Ty::Option(t) => write!(f, "{}?", Operand(t, names)),
             Ty::Channel(t) => write!(f, "Channel[{}]", Named(t, names)),
             Ty::Shared(t) => write!(f, "Shared[{}]", Named(t, names)),
@@ -1199,3 +1200,8 @@ pub enum ArgFill {
 /// from the plan: the callee's prologue fills it. Written in every main walk: the error-gate pass
 /// reads it too (layer A's `bound_slots`, TICKET-189).
 pub type CallPlanTable = HashMap<(usize, u32), Vec<ArgFill>>;
+
+/// How an optional whose payload nothing pinned yet is printed (`z := None`). The one renderer
+/// arm writes it, and `Checker::error_help` / `Checker::warn` append the note that explains it; no
+/// message formats the open type by hand (TICKET-234).
+pub(crate) const OPEN_NONE: &str = "<unknown>?";

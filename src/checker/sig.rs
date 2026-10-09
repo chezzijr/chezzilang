@@ -2600,7 +2600,7 @@ impl Checker {
                 // BELOW `declare`: `declare`'s own untaint would otherwise delete a link recorded
                 // above it.
                 let alias_src = if let ExprKind::Ident(src) = &value.kind
-                    && Self::is_unrefined_empty_coll(&declared)
+                    && Self::is_open_coll(&declared)
                 {
                     Some(src.clone())
                 } else {
@@ -2701,7 +2701,16 @@ impl Checker {
                     let mark = self.diag_mark();
                     let target_ty = self.assign_slot_ty(target);
                     self.diag_rollback(mark);
-                    if ty_concrete_but(&target_ty, &|n| self.rigid_param(n, &[])) {
+                    // TICKET-234 -- a target whose payload is still open is pinned from the
+                    // value first, so the value then meets a concrete slot and wraps like any
+                    // typed slot. A value that misses an earlier pin is inferred with no hint, so
+                    // `check_assign` reports the pin.
+                    let target_ty = self.pin_open_slot(&target_ty, value);
+                    let misses = match &target.kind {
+                        ExprKind::Ident(n) => self.misses_pin(n, &target_ty, value),
+                        _ => false,
+                    };
+                    if !misses && ty_concrete_but(&target_ty, &|n| self.rigid_param(n, &[])) {
                         self.infer_arg(value, Some(&target_ty))
                     } else {
                         self.infer_value(value)
@@ -2786,12 +2795,8 @@ impl Checker {
                 if *op == AssignOp::Eq
                     && let ExprKind::Ident(n) = &target.kind
                     && let ExprKind::Ident(src) = &value.kind
-                    && self
-                        .lookup(n)
-                        .is_some_and(|t| Self::is_unrefined_empty_coll(&t))
-                    && self
-                        .lookup(src)
-                        .is_some_and(|t| Self::is_unrefined_empty_coll(&t))
+                    && self.lookup(n).is_some_and(|t| Self::is_open_coll(&t))
+                    && self.lookup(src).is_some_and(|t| Self::is_open_coll(&t))
                     && let Some(sc) = self.owning_scope(n)
                 {
                     self.link_empty_alias(sc, n, src);
@@ -4093,7 +4098,18 @@ impl Checker {
                 // the let-binding/for-binding `Local` hover. Simple-Ident lvalue only (Index/Field
                 // targets are handled in their own arms below, where the receiver IS inferred).
                 self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
-                self.check_assign_value(&var_ty, op, &val_ty, value, target.span);
+                // TICKET-234 -- a whole-binding write that misses the type an earlier use pinned
+                // reports the pin, for every spelling of the value.
+                if op == AssignOp::Eq
+                    && !val_ty.is_unknown()
+                    && let Some(pin) = self.carrier_pin(name)
+                    && pin == var_ty
+                    && !self.assignable(&var_ty, &val_ty)
+                {
+                    self.report_pin_miss(name, &val_ty, &pin, target.span);
+                } else {
+                    self.check_assign_value(&var_ty, op, &val_ty, value, target.span);
+                }
                 // TICKET-032 A1 — a whole-binding (re)assignment rebinds `name` to a DIFFERENT runtime
                 // object, breaking any alias pair naming it. `+=` on a `List` is the one exception
                 // (DEC-015): it extends IN PLACE and yields the SAME handle, so the pair survives.
@@ -4122,13 +4138,7 @@ impl Checker {
                     if let Some(pin) = self.carrier_pin(name)
                         && !self.assignable(&pin, &val_ty)
                     {
-                        let [val_s, pin_s] = Ty::render_distinct([&val_ty, &pin]);
-                        self.error(
-                            target.span,
-                            format!(
-                                "cannot assign {val_s} to '{name}' -- its payload was pinned to {pin_s} by an earlier use"
-                            ),
-                        );
+                        self.report_pin_miss(name, &val_ty, &pin, target.span);
                     } else {
                         self.pin_carrier_use(name, &val_ty);
                         self.repin(name, val_ty.clone());
@@ -4143,6 +4153,15 @@ impl Checker {
                 // from that value too: leaving the stored type permissive was not
                 // behavior-preserving, it was the hole — measured check-clean at rc=0, `b := []` /
                 // `b = [1, 2]` / `b.push("a")` printed `[1, 2, 'a']`.
+                // TICKET-234 -- the write also pins the shapes neither block above covers (a tuple
+                // with an open element, a `[None]` list under `+=`).
+                if op_supplies_slot(op, &var_ty)
+                    && contains_unknown_in_slot(&var_ty)
+                    && !Self::is_unpinned_carrier(&var_ty)
+                    && ty_fully_concrete(&val_ty)
+                {
+                    self.repin_place(target, &merge_unknown(&var_ty, &val_ty));
+                }
                 if !contains_unknown_in_slot(&val_ty) {
                     self.drop_empty_site(name, Some(&val_ty));
                 }
@@ -4158,8 +4177,14 @@ impl Checker {
                 // type has an `Unknown` key/value/element slot (an empty `{}`/`[]`), the supplied
                 // (idx_ty, val_ty) makes the slot concrete — re-pin the binding so a later conflicting
                 // assign is a normal mismatch. The match below then re-reads the refined type from
-                // scope. (Same simple-variable-only limitation as `refine_receiver`.)
+                // scope. A target through a place is pinned by `repin_place` below.
                 self.refine_index_receiver(obj, index, &val_ty);
+                if op == AssignOp::Eq
+                    && !matches!(obj.kind, ExprKind::Ident(_))
+                    && ty_fully_concrete(&val_ty)
+                {
+                    self.repin_place(target, &val_ty);
+                }
                 match self.infer(obj) {
                     Ty::Map(k, v) => {
                         let idx_ty = self.infer_arg(index, Some(&k));
@@ -4295,7 +4320,14 @@ impl Checker {
                         });
                         match field_ty {
                             Some(ty) => {
-                                self.check_assign_value(&ty, op, &val_ty, value, target.span)
+                                self.check_assign_value(&ty, op, &val_ty, value, target.span);
+                                // TICKET-234 -- a write through a field pins the root binding.
+                                if op_supplies_slot(op, &ty)
+                                    && contains_unknown_in_slot(&ty)
+                                    && ty_fully_concrete(&val_ty)
+                                {
+                                    self.repin_place(target, &merge_unknown(&ty, &val_ty));
+                                }
                             }
                             None => {
                                 let names = self.field_names(sname);
@@ -4367,6 +4399,18 @@ impl Checker {
                 "invalid assignment target (only variables can be assigned)",
             ),
         }
+    }
+
+    /// The one owner of the pin-miss text: a write of `val_ty` to `name`, whose payload an earlier
+    /// use pinned to `pin`.
+    fn report_pin_miss(&mut self, name: &str, val_ty: &Ty, pin: &Ty, span: Span) {
+        let [val_s, pin_s] = Ty::render_distinct([val_ty, pin]);
+        self.error(
+            span,
+            format!(
+                "cannot assign {val_s} to '{name}' -- its payload was pinned to {pin_s} by an earlier use"
+            ),
+        );
     }
 
     pub(super) fn check_assign_value(
@@ -6146,4 +6190,10 @@ fn turbofish_charges(
             .filter(|t| type_args.iter().any(|ty| ty_mentions(ty, t)))
             .cloned(),
     );
+}
+
+/// True when an assignment with `op` supplies the type of the slot it writes: `=`, or `+=` on a
+/// `List` (which extends in place, DEC-015).
+fn op_supplies_slot(op: AssignOp, slot: &Ty) -> bool {
+    op == AssignOp::Eq || (op == AssignOp::PlusEq && matches!(slot, Ty::List(_)))
 }

@@ -221,6 +221,7 @@ whole function pins it, not just the line:
 |---|---|---|---|
 | `y := ?5` | the value type `int` | which carrier | default `int?` (complete; like Go's untyped `5` → `int`) |
 | `w := !"disk"` | the error | the success type `T` | a later use may pin it (`return w` in an `int!` fn); never pinned → error: `cannot infer the success type; write w: int! = !"disk"` |
+| `z := None` | that it is optional | the payload type `T` | the first value it meets pins it, plain or `?x`: `z = 7` → `int?` (TICKET-234, owner decision 2026-10-09); a literal `None` beside a value joins the same way (`[None, 7]` → `List[int?]`); never pinned → stays open, printed `<unknown>?` |
 
 ```
 z := ?5
@@ -366,6 +367,7 @@ None at the moment. Resolved on 2026-10-07: "nothing, or an error" is `None!E`; 
 | 2026-10-07 | `None` as a type is an annotation only (no value); "nothing or an error" is `None!E` (Zig `E!void`) |
 | 2026-10-07 | prefix `?x` builds a present/success value; `?None` is the inner absent of `int??` |
 | 2026-10-07 | no expected type anywhere: `?x` defaults to `T?`; `!e` needs `T` pinned by a later use, else an error |
+| 2026-10-09 | a plain value pins an open `None`: `z := None` / `z = 7` makes `z` an `int?` ("`int?` means an int or None, with automatic wrap"); the depth is the smallest that fits; this replaces "an implicit wrap pins nothing" (TICKET-234) |
 | 2026-10-07 | the names `Option`, `Result`, `Some`, `Ok`, `Err` are removed from the surface (D6) |
 | 2026-10-07 | design B: `else` must leave; values only from `??` / `match` |
 | 2026-10-07 | match patterns `?v` / `!e` / `None`; a bare constant in a pattern is rejected |

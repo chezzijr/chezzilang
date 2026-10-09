@@ -1036,26 +1036,28 @@ impl Checker {
     /// native nullary `None` types its element/key/value/type-arg slot as `Ty::Unknown`, which is
     /// permissive in both directions — so junk would flow into a check-blessed program and fault at
     /// runtime, and the float-key/Hashable ban would be bypassed. This hook fires at the top of
-    /// `infer_method_call`, when a mutating method (`push`/`add`/`insert`/`extend`) on a
-    /// **simple-variable** receiver supplies a CONCRETE type at an `Unknown` slot: it structurally
+    /// `infer_method_call`, when a method argument typed by the receiver's type
+    /// parameter supplies a CONCRETE type at an `Unknown` slot: it structurally
     /// merges the supplied shape into the binding, re-pins it in its owning scope, and runs the
     /// Hashable check on a newly-concrete set element. A later op supplying an incompatible concrete
     /// type then fails as a normal `check_args` mismatch against the now-pinned element — and the
     /// mismatch diagnostic is enriched (in `check_args`) to hint at annotating for a mixed/protocol
     /// collection.
     ///
-    /// RESIDUAL HOLE (documented, not fixed here): refine only fires when the receiver is a simple
-    /// `Ident` in scope. `obj.field.push(...)` / `f().push(...)` / `xss[0].push(...)` (non-Ident
-    /// receivers) stay unrefined — struct fields are explicitly typed anyway, so the impact is low.
+    /// TICKET-234 -- what an argument supplies is read from the method's own declaration
+    /// (`Checker::receiver_decl`), never from a list of method names, and the pin is stored through
+    /// the receiver's place (`Checker::repin_place`): `b.v.push(..)` and `xss[0].push(..)` pin the
+    /// root binding. A receiver with no root binding (`f().push(..)`) pins nothing.
     pub(super) fn refine_receiver(&mut self, obj: &Expr, obj_ty: &Ty, method: &str, args: &[Expr]) {
-        // (a) simple-variable receiver only (the documented limitation).
-        let ExprKind::Ident(name) = &obj.kind else {
+        // (a) the receiver is a place rooted in a binding.
+        let Some(name) = Self::place_root(obj) else {
             return;
         };
         // Must be a real in-scope binding (not a function/global-type name).
         if self.lookup(name).is_none() {
             return;
         }
+        let is_ident = matches!(obj.kind, ExprKind::Ident(_));
         // PART A: a slot-supplying mutator (`push`/`add`/`insert`/`extend` with an arg) constrains
         // this binding's element type, so clear any pending empty-collection annotation requirement.
         // Done BEFORE the `is_captured` early-return below so a `spawn:`/`Executor.submit` body that
@@ -1066,12 +1068,12 @@ impl Checker {
         // erroring argument, the receiver-shape match, and the `Set` Hashable ban) — the drop must
         // run FIRST for the captured-binding reason just stated, so the two halves cannot be one
         // call here.
-        if matches!(method, "push" | "add" | "insert" | "extend") && !args.is_empty() {
+        if is_ident && matches!(method, "push" | "add" | "insert" | "extend") && !args.is_empty() {
             self.drop_empty_site(name, None);
         }
         // Skip captured bindings: mirror the airlock reassignment ban — refine is a checker-side
         // narrowing, but skipping it here keeps behavior aligned and avoids a confusing diagnostic.
-        if self.is_captured(name) {
+        if self.is_captured(name) && !Self::is_shared_handle(obj_ty) {
             return;
         }
         // (b) the binding must have an Unknown in a SLOT position (not a bare top-level Unknown —
@@ -1087,32 +1089,50 @@ impl Checker {
         // the mark and the rollback, so a later exit path can't be added that forgets one. (It used
         // to end at the shape match below, whose `_` arm leaked: `m := {}` + `m.insert(undefined_v)`
         // reported `unknown name` twice.)
-        let mark = self.diag_mark();
-        let elem = match method {
-            "push" | "add" | "insert" => args.first().map(|a| self.infer_value(a)),
-            "extend" => args.first().map(|a| match self.infer_value(a) {
-                Ty::List(e) | Ty::Set(e) => *e,
-                other => other,
-            }),
-            _ => None,
+        let Some((generic, params)) = self.receiver_decl(obj_ty, method) else {
+            return;
         };
-        let elem = elem.map(|t| self.pinning_value_ty(&t));
+        // What each argument supplies comes from the declared parameter types: `map` collects the
+        // receiver's type parameters as the arguments bind them, `cur` holds the receiver's present
+        // type arguments (the hint a closure argument is inferred against).
+        let mark = self.diag_mark();
+        let mut map: HashMap<String, Ty> = HashMap::new();
+        let mut cur: HashMap<String, Ty> = HashMap::new();
+        unify(&generic, obj_ty, &mut cur);
+        let mut open = Vec::new();
+        ty_collect_params(&generic, None, &mut open);
+        for p in &open {
+            cur.entry(p.clone()).or_insert(Ty::Unknown);
+        }
+        for (decl, a) in params.iter().zip(args) {
+            let mut mentioned = Vec::new();
+            ty_collect_params(decl, None, &mut mentioned);
+            // A parameter that names no type parameter of the receiver supplies nothing.
+            if !mentioned.iter().any(|m| open.contains(m)) {
+                continue;
+            }
+            // A closure is inferred against the declared `fn` type, so its return and its
+            // annotated parameters pin; an unannotated parameter takes the receiver's type.
+            let t = if matches!(decl, Ty::Func { .. }) {
+                let hint = subst(decl, &cur);
+                self.infer_arg(a, Some(&hint))
+            } else {
+                self.infer_value(a)
+            };
+            let t = self.pinning_value_ty(&t);
+            unify(decl, &t, &mut map);
+        }
         let arg_erred = self.errors.len() != mark.errors;
         self.diag_rollback(mark);
         // (d) cascade invariant: if inferring the arg itself reported an error, don't refine (the
         // real dispatch path reports it, exactly once).
-        if arg_erred {
+        if arg_erred || map.is_empty() {
             return;
         }
-        let Some(elem) = elem else { return };
-        // Wrap the element into a RECEIVER-SHAPED value so the structural merge lines up the slot:
-        // a list receiver merges with `list[elem]`, a set receiver with `set[elem]`. Any other
-        // receiver kind isn't a push/add/extend target, so nothing to refine.
-        let shape = match obj_ty {
-            Ty::List(_) => Ty::list(elem),
-            Ty::Set(_) => Ty::set(elem),
-            _ => return,
-        };
+        for p in open {
+            map.entry(p).or_insert(Ty::Unknown);
+        }
+        let shape = subst(&generic, &map);
         // A shape that is itself Unknown supplies nothing concrete; merge is a no-op, bail early.
         if shape.is_unknown() {
             return;
@@ -1129,7 +1149,7 @@ impl Checker {
         {
             self.error(obj.span, format!("set element type {why}"));
         }
-        self.repin(name, merged);
+        self.repin_place(obj, &merged);
     }
 
     /// Refine-on-first-use for an index-assign `m[k]=v` / `xs[i]=v` (the assignment-statement
@@ -4761,7 +4781,7 @@ impl Checker {
             ) {
                 unify(decl, &mask_closure_ret(actual), &mut subst_map);
             } else {
-                unify(decl, actual, &mut subst_map);
+                self.unify_arg(decl, &actual.clone(), &mut subst_map);
             }
         }
         // Bug 1 recovery (free-fn path only): after the masked pass-1 above has let every VALUE and
@@ -5149,7 +5169,7 @@ impl Checker {
             ) {
                 unify(decl, &mask_closure_ret(actual), &mut mmap);
             } else {
-                unify(decl, actual, &mut mmap);
+                self.unify_arg(decl, &actual.clone(), &mut mmap);
             }
         }
         // Second pass for the deferred bare generic-fn args: every value argument has now bound what
@@ -5424,7 +5444,7 @@ impl Checker {
             // return-only `[U]`, a SIBLING closure binding the SAME `[U]` to a CONFLICTING type sees `want`
             // now CONCRETE and is REJECTED by the soundness check above, instead of being silently dropped
             // by only-bind-unbound `unify` (adversarial-review bug 2: `two(fn(x): x*2, fn(x): str(x))`).
-            unify(decl, &refined, map);
+            self.unify_arg(decl, &refined, map);
         }
         // Enforce bounds for params NEWLY bound by the loop-back only (pass-1-bound params were already
         // enforced by the caller — each enforced exactly once avoids a double-report). So a

@@ -1245,7 +1245,7 @@ impl Checker {
         let msub = self.seed_targs(method, &sig.type_params, mtargs, span);
         sub.extend(msub);
         for (decl, actual) in sig.params.iter().zip(&arg_tys) {
-            unify(decl, actual, &mut sub);
+            self.unify_arg(decl, actual, &mut sub);
         }
         self.recover_iter_elems(&tps, &mut sub, span);
         self.recover_iter_elems(&sig.type_params, &mut sub, span);
@@ -1376,7 +1376,7 @@ impl Checker {
         }
         let mut sub = self.seed_targs(name, &tps, targs, span);
         for (decl, actual) in v.payload.iter().zip(&arg_tys) {
-            unify(decl, actual, &mut sub);
+            self.unify_arg(decl, actual, &mut sub);
         }
         self.recover_iter_elems(&tps, &mut sub, span);
         // Expected-type checking-mode: an annotation (`let`/return/param `Enum[int]`) seeds any type
@@ -1495,7 +1495,7 @@ impl Checker {
         );
         let mut sub = self.seed_targs(name, &tps, targs, span);
         for (decl, actual) in field_tys.iter().zip(&arg_tys) {
-            unify(decl, actual, &mut sub);
+            self.unify_arg(decl, actual, &mut sub);
         }
         self.recover_iter_elems(&tps, &mut sub, span);
         // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds any type
@@ -2257,7 +2257,7 @@ impl Checker {
         self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
         let mut sub = self.seed_targs(name, &tps, targs, span);
         for (decl, actual) in field_tys.iter().zip(&arg_tys) {
-            unify(decl, actual, &mut sub);
+            self.unify_arg(decl, actual, &mut sub);
         }
         self.recover_iter_elems(&tps, &mut sub, span);
         // Expected-type checking-mode: a `let`/return/param annotation (`Heap[int]`) seeds
@@ -2655,6 +2655,14 @@ impl Checker {
         self.refine_receiver(obj, &obj_ty, method, args);
         let obj_ty = match &obj.kind {
             ExprKind::Ident(name) => self.lookup(name).unwrap_or(obj_ty),
+            // TICKET-234 -- a receiver through a place (`b.v`, `xss[0]`) was pinned through its
+            // root binding, so its type is read again.
+            _ if contains_unknown_in_slot(&obj_ty) && Self::place_root(obj).is_some() => {
+                let mark = self.diag_mark();
+                let t = self.infer(obj);
+                self.diag_rollback(mark);
+                t
+            }
             _ => obj_ty,
         };
         // Task 1 — a captured module-global aggregate mutated in a task (`xs.push(v)`, …) is no longer
@@ -4167,6 +4175,8 @@ impl Checker {
                 ),
             );
         }
+        // The one place a generic path pins an argument binding (TICKET-234).
+        self.constrain_empty_arg(arg, expected);
         refined
     }
 
@@ -4377,6 +4387,21 @@ impl Checker {
     /// called `move_first(["x"], xs)` then `xs.push(1)` printed `['x', 1]`, check-clean at rc=0.
     pub(super) fn constrain_empty_arg(&mut self, arg: &Expr, pt: &Ty) {
         let ExprKind::Ident(name) = &arg.kind else {
+            // TICKET-234 -- an open collection, struct or handle passed through a place
+            // (`takes(o.b)`) pins its root binding.
+            if let Some(root) = Self::place_root(arg)
+                && ty_fully_concrete(pt)
+                && self
+                    .lookup(root)
+                    .is_some_and(|rt| contains_unknown_in_slot(&rt))
+            {
+                let mark = self.diag_mark();
+                let at = self.infer(arg);
+                self.diag_rollback(mark);
+                if Self::is_open_coll(&at) && self.assignable(pt, &at) {
+                    self.repin_place(arg, pt);
+                }
+            }
             return;
         };
         let pt = &self.pin_shape(name, pt);
@@ -4396,6 +4421,12 @@ impl Checker {
             return;
         }
         self.drop_empty_site(name, Some(pt));
+        // TICKET-234 -- the callee can write through a struct or a handle, so the argument's
+        // binding takes the parameter's type. An `Option` or an enum argument is a value and is
+        // not pinned (DEC-064).
+        if Self::is_open_coll(&bt) {
+            self.repin_place(arg, pt);
+        }
     }
 
     fn check_args_range_decl(

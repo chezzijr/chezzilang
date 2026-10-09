@@ -3524,7 +3524,7 @@ fn a_write_after_the_first_constraining_use_pins_the_payload() {
     // (c) write-then-write, no annotated sink between them.
     rejects(
         "x := None\nx = ?1\nx = ?\"s\"\nprint(x)\n",
-        "'?' value: expected int, found str",
+        "cannot assign str? to 'x' -- its payload was pinned to int? by an earlier use",
     );
     // (d) the Box twin.
     rejects(
@@ -3536,7 +3536,7 @@ fn a_write_after_the_first_constraining_use_pins_the_payload() {
     // (e) the Box write-then-write.
     rejects(
         &format!("{BOX}e := Box.Empty\ne = Box.Full(1)\ne = Box.Full(\"s\")\nprint(e)\n"),
-        "cannot assign Box[str] to Box[int]",
+        "cannot assign Box[str] to 'e' -- its payload was pinned to Box[int] by an earlier use",
     );
     // (f) the typed-argument sink.
     rejects(
@@ -12348,12 +12348,18 @@ fn module_scope_redeclare_unknown_carve_out_is_one_sided() {
     //   `x := []` / `f := fn() -> List[int]: x` / `x := 42`      → printed `42`
     //   `x := None` / `f := fn() -> Option[int]: x` / `x := 42`  → printed `42`
     //   `x := 1` / `f := fn() -> int: x` / `x := []` / `x.push(3)` → `Add to List and int` at runtime
-    rejects("x := 1\nf := fn() -> int: x\nx := None\n", "int -> ??");
+    rejects(
+        "x := 1\nf := fn() -> int: x\nx := None\n",
+        "int -> <unknown>?",
+    );
     rejects(
         "x := []\nf := fn() -> List[int]: x\nx := 42\n",
         "List[?] -> int",
     );
-    rejects("x := None\nf := fn() -> int?: x\nx := 42\n", "?? -> int");
+    rejects(
+        "x := None\nf := fn() -> int?: x\nx := 42\n",
+        "<unknown>? -> int",
+    );
     rejects(
         "x := 1\nf := fn() -> int: x\nx := []\nx.push(3)\n",
         "int -> List[?]",
@@ -22447,10 +22453,13 @@ fn annotated_heterogeneous_list_ok() {
 }
 
 #[test]
-fn nonident_receiver_not_refined_documented_hole() {
-    // Residual hole: refine only fires on a simple-variable receiver. A non-Ident receiver
-    // (Index expr xss[0]) is never refined — the mixed push stays accepted (documented).
-    ok("fn main():\n xss := [[]]\n xss[0].push(1)\n xss[0].push(\"s\")\nmain()");
+fn nonident_receiver_is_refined_through_its_root() {
+    // A receiver that is a place (Index expr xss[0]) pins its root binding `xss`, so the mixed
+    // push is rejected like the simple-variable one (TICKET-234).
+    rejects(
+        "fn main():\n xss := [[]]\n xss[0].push(1)\n xss[0].push(\"s\")\nmain()",
+        "argument 1 of 'push': expected int, found str",
+    );
 }
 
 // ---- step 7: golden-test checker-bypass fix — every shipped example type-checks ----
@@ -33069,22 +33078,19 @@ fn ticket_107_elif_chain_success_coerces_at_option_sink() {
 fn ticket_107_mixed_branch_coercion_wraps_at_every_typed_slot() {
     ok("fn main():\n    x: int? = if true: 1 else: None\n");
     ok("fn t(x: int?) -> int:\n    return 0\n\nfn main():\n    print(t(if true: 1 else: None))\n");
-    // An inline body's inferred type is not a slot.
-    rejects(
-        "fn f(c: bool): if c: 1 else: None\n",
-        "branches have incompatible types",
-    );
+    // A literal `None` beside a value gives the inline body an `int?` (TICKET-234).
+    ok("fn f(c: bool): if c: 1 else: None\n");
     rejects(
         "fn f(c: bool) -> float?:\n    return if c: 1 else: None\n",
-        "branches have incompatible types: int and ??",
+        "branches have incompatible types: int and <unknown>?",
     );
     rejects(
         "fn f(o: int?) -> int?:\n    return o ?? None\n",
-        "branches have incompatible types: int and ??",
+        "branches have incompatible types: int and <unknown>?",
     );
     rejects(
         "fn f[T](x: T, c: bool) -> T?:\n    return if c: x else: None\n",
-        "branches have incompatible types: T and ??",
+        "branches have incompatible types: T and <unknown>?",
     );
     rejects(
         "fn have(n: int) -> int?:\n    return n\nfn f(c: bool) -> int??:\n    return if c: have(1) else: None\n",
@@ -38741,37 +38747,41 @@ fn carrier_wrap_check_grid() {
 
     // Payload pin: the first constraining use decides, a later conflicting write is rejected.
     let pin = "'?' value: expected int, found str";
-    for lines in [
-        &["xs := [None]", "xs.push(?5)", "xs.push(?\"hi\")"][..],
-        &["z := None", "z = ?5", "z = ?\"ab\""],
-        &["m := {\"a\": None}", "m[\"b\"] = ?5", "m[\"c\"] = ?\"x\""],
-        &["xs := [None]", "xs[0] = ?5", "xs[0] = ?\"x\""],
-        &["z := None", "z = ?(?5)", "z = ?(?\"a\")"],
+    // A whole-binding write that misses the pin names the pin (TICKET-234); an element site keeps
+    // its typed text.
+    let whole = "cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use";
+    let whole2 = "cannot assign str?? to 'z' -- its payload was pinned to int?? by an earlier use";
+    for (lines, want) in [
+        (
+            &["xs := [None]", "xs.push(?5)", "xs.push(?\"hi\")"][..],
+            pin,
+        ),
+        (&["z := None", "z = ?5", "z = ?\"ab\""], whole),
+        (
+            &["m := {\"a\": None}", "m[\"b\"] = ?5", "m[\"c\"] = ?\"x\""],
+            pin,
+        ),
+        (&["xs := [None]", "xs[0] = ?5", "xs[0] = ?\"x\""], pin),
+        (&["z := None", "z = ?(?5)", "z = ?(?\"a\")"], whole2),
     ] {
-        cells.push((body(lines), one(pin)));
+        cells.push((body(lines), one(want)));
     }
     cells.push((
         body(&["xs := [None]", "xs.push(?5)", "y: List[str?] = xs"]),
         one("cannot assign List[int?] to variable of type List[str?]"),
     ));
-    cells.push(("z := None\nz = ?5\nz = ?\"ab\"\n".to_string(), one(pin)));
+    cells.push(("z := None\nz = ?5\nz = ?\"ab\"\n".to_string(), one(whole)));
     cells.push((
         "fn f():\n    z = ?\"ab\"\nz := None\nz = ?5\n".to_string(),
-        one("'?' value: expected str, found int"),
+        one("cannot assign int? to 'z' -- its payload was pinned to str? by an earlier use"),
     ));
     cells.push((
         "fn f():\n    z = ?\"ab\"\nz := None\nw: int? = z\n".to_string(),
         one("cannot assign str? to variable of type int?"),
     ));
-    // An implicit wrap pins nothing: an open payload has no depth to wrap to.
-    cells.push((
-        body(&["xs := [None]", "xs.push(5)"]),
-        Has("expected ??, found int".to_string()),
-    ));
-    cells.push((
-        body(&["xs := [None]", "xs.extend([5])"]),
-        Has("list element: expected ??, found int".to_string()),
-    ));
+    // A plain value pins an open payload (TICKET-234).
+    cells.push((body(&["xs := [None]", "xs.push(5)"]), Clean));
+    cells.push((body(&["xs := [None]", "xs.extend([5])"]), Clean));
 
     // Pin matrix: writer x wrap position x {conflict, agree}.
     type Tpl<'a> = &'a dyn Fn(&str) -> String;
@@ -38801,20 +38811,29 @@ fn carrier_wrap_check_grid() {
             }
         }
     }
-    for lines in [
-        &["xs := None", "xs = ?5", "xs = ?\"a\""][..],
-        &["xs := None", "xs = ?(?5)", "xs = ?(?\"a\")"],
-        &[
-            "a := None",
-            "c := None",
-            "a, c = ?5, ?6",
-            "a, c = ?\"x\", ?7",
-        ],
-        &["xs := []", "xs.push(?5)", "xs.push(?\"a\")"],
-        &["xs := []", "xs.extend([?5])", "xs.extend([?\"a\"])"],
-        &["m := {}", "m[\"a\"] = ?5", "m[\"b\"] = ?\"a\""],
+    for (lines, want) in [
+        (
+            &["xs := None", "xs = ?5", "xs = ?\"a\""][..],
+            "cannot assign str? to 'xs' -- its payload was pinned to int? by an earlier use",
+        ),
+        (
+            &["xs := None", "xs = ?(?5)", "xs = ?(?\"a\")"],
+            "cannot assign str?? to 'xs' -- its payload was pinned to int?? by an earlier use",
+        ),
+        (
+            &[
+                "a := None",
+                "c := None",
+                "a, c = ?5, ?6",
+                "a, c = ?\"x\", ?7",
+            ],
+            pin,
+        ),
+        (&["xs := []", "xs.push(?5)", "xs.push(?\"a\")"], pin),
+        (&["xs := []", "xs.extend([?5])", "xs.extend([?\"a\"])"], pin),
+        (&["m := {}", "m[\"a\"] = ?5", "m[\"b\"] = ?\"a\""], pin),
     ] {
-        cells.push((body(lines), one(pin)));
+        cells.push((body(lines), one(want)));
     }
     let bound = "'?' builds an optional or success value, found int?";
     cells.push((
@@ -38951,7 +38970,7 @@ fn carrier_wrap_check_grid() {
     ));
     cells.push((
         "fn f(c: bool):\n    z := None\n    z = if c: ?5 else: ?6\n    z = ?\"a\"\n".to_string(),
-        one(pin),
+        one(whole),
     ));
     cells.push((
         body(&[

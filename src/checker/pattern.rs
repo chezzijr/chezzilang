@@ -1418,8 +1418,9 @@ impl Checker {
         // is equally the value, and `infer_call` drains the single take()-once slot, so without
         // re-installing per arm only the first-inferred arm would get the hint (branch-order bug).
         let hint = self.expected_hint.take();
-        let had_hint = hint.is_some();
         let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
+        let beside = hint.is_none() && arms.iter().any(|a| Self::is_none_lit(&a.body));
+        let mut sib: Option<Ty> = None;
         let kind = self.match_kind(scrutinee, &pats);
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
@@ -1447,7 +1448,10 @@ impl Checker {
             has_wildcard |= self.exh_add(&mut exh, &arm.pattern, arm.guard.is_some());
             match &hint {
                 Some(h) => self.install_hint(&arm.body, h.clone(), owned),
-                None => self.expected_hint = None,
+                None => match self.branch_slot(beside, &mut sib, &arm.body) {
+                    Some(s) => self.install_hint(&arm.body, s, true),
+                    None => self.expected_hint = None,
+                },
             }
             let t = self.infer(&arm.body);
             self.pop_scope();
@@ -1455,6 +1459,8 @@ impl Checker {
         }
         self.expected_hint = None;
         self.hint_owner = None;
+        let hint = hint.or(sib);
+        let had_hint = hint.is_some();
         let mut result = None;
         for (sp, t) in arm_tys {
             result = Some(self.unify_branch(result, t, sp, hint.as_ref()));
@@ -1491,6 +1497,25 @@ impl Checker {
         // re-installing it the second-inferred branch would lose the hint and a generic ctor there
         // would deadlock (acceptance would depend on branch order).
         let hint = self.expected_hint.take();
+        let (hint, owned) = match hint {
+            None => {
+                let mut leaves = vec![then];
+                let mut tail = els;
+                while let ExprKind::IfElse {
+                    then: t2, els: e2, ..
+                } = &tail.kind
+                {
+                    leaves.push(t2);
+                    tail = e2;
+                }
+                leaves.push(tail);
+                match self.none_sibling_slot(&leaves) {
+                    Some(s) => (Some(s), true),
+                    None => (None, owned),
+                }
+            }
+            h => (h, owned),
+        };
         let had_hint = hint.is_some();
         self.expect_bool(cond, "if condition");
         // No refine-on-first-use barrier here: a pin made in a branch VALUE persists, exactly like
@@ -1584,8 +1609,8 @@ impl Checker {
                     prev
                 } else if super::tyvar::open_err(&t) {
                     t
-                } else if self.join_ty(&prev, &t) {
-                    if prev.is_unknown() { t } else { prev }
+                } else if let Some(m) = self.join_fill(&prev, &t) {
+                    m
                 } else if let Some(h) = hint
                     && ty_fully_concrete(h)
                     && self.assignable(h, &prev)
@@ -2464,16 +2489,29 @@ impl Checker {
     /// `nil`-typed `Ok(v)` binding UNUSABLE in every value context (interpolation, list literal, call
     /// arg, arithmetic). So the heterogeneous runtime payload can never be observed — observationally
     /// identical to the pre-feature `Result[nil]` value-drop, with no checker/runtime divergence.
+    /// Is the block's trailing statement the literal `None`?
+    fn tail_is_none_lit(block: &Block) -> bool {
+        matches!(block.last().map(|s| &s.kind), Some(StmtKind::Expr(e)) if Self::is_none_lit(e))
+    }
+
+    /// Infer one statement-form branch tail under the sibling slot (`Checker::branch_slot`).
+    fn infer_branch_tail(&mut self, beside: bool, sib: &mut Option<Ty>, e: &Expr) -> Ty {
+        match self.branch_slot(beside, sib, e) {
+            Some(s) => {
+                self.install_hint(e, s, true);
+                let t = self.infer(e);
+                self.expected_hint = None;
+                self.hint_owner = None;
+                t
+            }
+            None => self.infer(e),
+        }
+    }
+
     fn fold_recover_tail(&self, acc: Option<Ty>, t: Ty) -> Option<Ty> {
         match acc {
             None => Some(t),
-            Some(prev) => {
-                if self.join_ty(&prev, &t) {
-                    Some(if prev.is_unknown() { t } else { prev })
-                } else {
-                    None
-                }
-            }
+            Some(prev) => self.join_fill(&prev, &t),
         }
     }
 
@@ -2495,6 +2533,8 @@ impl Checker {
         let mut arm_pattern_error = false;
         let mut result: Option<Ty> = None;
         let mut uniform = true;
+        let beside = arms.iter().any(|a| Self::tail_is_none_lit(&a.body));
+        let mut sib: Option<Ty> = None;
         for arm in arms {
             self.warn_unreachable_arm(
                 has_wildcard,
@@ -2526,7 +2566,7 @@ impl Checker {
             // Always infer every arm's trailing expr (surfaces intra-arm errors); only the CROSS-arm
             // fold is gated on `uniform` so heterogeneous arms fall back to nil instead of erroring.
             let t = match &last.kind {
-                StmtKind::Expr(e) => self.infer(e),
+                StmtKind::Expr(e) => self.infer_branch_tail(beside, &mut sib, e),
                 _ => {
                     self.check_stmt(last);
                     Ty::Nil
@@ -2565,9 +2605,15 @@ impl Checker {
     ) -> Ty {
         let mut result: Option<Ty> = None;
         let mut uniform = true;
+        let beside = branches
+            .iter()
+            .map(|(_, b)| b)
+            .chain(else_block)
+            .any(Self::tail_is_none_lit);
+        let mut sib: Option<Ty> = None;
         for (cond, body) in branches {
             self.expect_bool(cond, "if condition");
-            let (t, _span) = self.infer_recover_tail_block(body);
+            let (t, _span) = self.infer_recover_tail_block(body, beside, &mut sib);
             if uniform {
                 match self.fold_recover_tail(result.take(), t) {
                     Some(u) => result = Some(u),
@@ -2577,7 +2623,7 @@ impl Checker {
         }
         // `if_tail_is_value` guarantees `else_block.is_some()`.
         if let Some(body) = else_block {
-            let (t, _span) = self.infer_recover_tail_block(body);
+            let (t, _span) = self.infer_recover_tail_block(body, beside, &mut sib);
             if uniform {
                 match self.fold_recover_tail(result.take(), t) {
                     Some(u) => result = Some(u),
@@ -2596,14 +2642,19 @@ impl Checker {
     /// the trailing expression's span (for `unify_branch` diagnostics). Mirrors `check_block`'s
     /// push/pop PERSISTENT refine; init statements are checked for effects, the trailing `Expr` is
     /// the value (`nil` if the block does not end in one — the caller's predicate rules that out).
-    fn infer_recover_tail_block(&mut self, block: &Block) -> (Ty, Span) {
+    fn infer_recover_tail_block(
+        &mut self,
+        block: &Block,
+        beside: bool,
+        sib: &mut Option<Ty>,
+    ) -> (Ty, Span) {
         self.push_scope();
         let out = if let Some((last, init)) = block.split_last() {
             for stmt in init {
                 self.check_stmt(stmt);
             }
             match &last.kind {
-                StmtKind::Expr(e) => (self.infer(e), last.span),
+                StmtKind::Expr(e) => (self.infer_branch_tail(beside, sib, e), last.span),
                 _ => {
                     self.check_stmt(last);
                     (Ty::Nil, last.span)
@@ -3647,6 +3698,13 @@ impl Checker {
     }
 
     pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>) -> Ty {
+        let sib = match expected {
+            Some(Ty::List(e)) if !e.is_unknown() => None,
+            _ => self
+                .none_sibling_slot(&items.iter().collect::<Vec<_>>())
+                .map(Ty::list),
+        };
+        let expected = sib.as_ref().or(expected);
         // EXPECTED-TYPE-DIRECTED path: when the slot type is a concrete `List[E]` (an annotated
         // `let xs: List[Any] = …`, a `List[E]` call arg — INCLUDING the synthesized variadic list
         // for `...xs: E` — or a `List[E]` return), drive `E` down onto each element instead of
@@ -3718,7 +3776,10 @@ impl Checker {
         for (t, item) in tys.iter().zip(items) {
             if elem.is_unknown() {
                 elem = t.clone();
-            } else if !t.is_unknown() && !self.join_ty(&elem, t) {
+            } else if t.is_unknown() {
+            } else if let Some(m) = self.join_fill(&elem, t) {
+                elem = m;
+            } else {
                 let [elem_s, t_s] = Ty::render_distinct([&elem, t]);
                 self.error(
                     item.span,
@@ -3735,6 +3796,13 @@ impl Checker {
     /// Infer the type of a map literal `{k: v, …}`. Keys must share one (hashable) type, values
     /// another; heterogeneity and non-hashable keys are errors. Empty `{}` → `map[?, ?]`.
     pub(super) fn infer_set(&mut self, elems: &[Expr], expected: Option<&Ty>) -> Ty {
+        let sib = match expected {
+            Some(Ty::Set(e)) if !e.is_unknown() => None,
+            _ => self
+                .none_sibling_slot(&elems.iter().collect::<Vec<_>>())
+                .map(Ty::set),
+        };
+        let expected = sib.as_ref().or(expected);
         // Drive the declared ELEMENT type onto each item, exactly as `infer_list` does.
         let elem_expected = match expected {
             Some(Ty::Set(e)) if !e.is_unknown() => Some((**e).clone()),
@@ -3765,7 +3833,10 @@ impl Checker {
                 None => {
                     if elem.is_unknown() {
                         elem = et;
-                    } else if !et.is_unknown() && !self.join_ty(&elem, &et) {
+                    } else if et.is_unknown() {
+                    } else if let Some(m) = self.join_fill(&elem, &et) {
+                        elem = m;
+                    } else {
                         let [elem_s, et_s] = Ty::render_distinct([&elem, &et]);
                         self.error(e.span, format!("set elements differ: {elem_s} vs {et_s}"));
                     }
@@ -3776,6 +3847,19 @@ impl Checker {
     }
 
     pub(super) fn infer_map(&mut self, entries: &[(Expr, Expr)], expected: Option<&Ty>) -> Ty {
+        let sib = match expected {
+            Some(Ty::Map(_, v)) if !v.is_unknown() => None,
+            _ => self
+                .none_sibling_slot(&entries.iter().map(|(_, v)| v).collect::<Vec<_>>())
+                .map(|s| {
+                    let k = match expected {
+                        Some(Ty::Map(k, _)) => (**k).clone(),
+                        _ => Ty::Unknown,
+                    };
+                    Ty::map(k, s)
+                }),
+        };
+        let expected = sib.as_ref().or(expected);
         // Drive the declared KEY and VALUE types onto each entry, exactly as `infer_list` does — and
         // for the same reason: an `Unknown`-carrying value laundered the whole literal. Measured
         // before, `m: Map[str, List[int]] = {"k": empty(), "j": ["x"]}` was check-clean at rc=0 and
@@ -3837,7 +3921,10 @@ impl Checker {
                 None => {
                     if key.is_unknown() {
                         key = kt.clone();
-                    } else if !kt.is_unknown() && !self.join_ty(&key, &kt) {
+                    } else if kt.is_unknown() {
+                    } else if let Some(m) = self.join_fill(&key, &kt) {
+                        key = m;
+                    } else {
                         let [key_s, kt_s] = Ty::render_distinct([&key, &kt]);
                         self.error(k_expr.span, format!("map keys differ: {key_s} vs {kt_s}"));
                     }
@@ -3859,7 +3946,10 @@ impl Checker {
                 None => {
                     if value.is_unknown() {
                         value = vt.clone();
-                    } else if !vt.is_unknown() && !self.join_ty(&value, &vt) {
+                    } else if vt.is_unknown() {
+                    } else if let Some(m) = self.join_fill(&value, &vt) {
+                        value = m;
+                    } else {
                         let [value_s, vt_s] = Ty::render_distinct([&value, &vt]);
                         self.error(
                             v_expr.span,
@@ -4117,8 +4207,8 @@ impl Checker {
                     // List concat (gap #3): `[1,2] + [3,4]` → `list[T]`, identical to `.concat`.
                     // Element types must be compatible; an empty `[]` side (Unknown elem) is
                     // joined by `merge_unknown` so `[] + [1]` infers `list[int]`.
-                    if self.join_ty(le, re) {
-                        Ty::List(Box::new(merge_unknown(le, re)))
+                    if let Some(m) = self.join_fill(le, re) {
+                        Ty::List(Box::new(m))
                     } else {
                         let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                         self.error(
@@ -4163,8 +4253,8 @@ impl Checker {
                     && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
                 {
                     // Set difference (gap #3): `a - b` → `set[T]`, identical to `.difference`.
-                    if self.join_ty(le, re) {
-                        Ty::Set(Box::new(merge_unknown(le, re)))
+                    if let Some(m) = self.join_fill(le, re) {
+                        Ty::Set(Box::new(m))
                     } else {
                         let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                         self.error(
@@ -4231,8 +4321,8 @@ impl Checker {
                 {
                     // Set `|`→union, `&`→intersection, `^`→symmetric-difference → `set[T]`,
                     // identical to the `.union`/`.intersection` methods (`^` has no method form).
-                    if self.join_ty(le, re) {
-                        Ty::Set(Box::new(merge_unknown(le, re)))
+                    if let Some(m) = self.join_fill(le, re) {
+                        Ty::Set(Box::new(m))
                     } else {
                         let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                         self.error(

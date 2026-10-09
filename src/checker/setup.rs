@@ -1,6 +1,7 @@
 // checker::setup — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Checker construction; stdlib/struct/enum seeding; signature harvesting.
 
+use super::ty::OPEN_NONE;
 use super::*;
 
 /// A snapshot of the lengths of BOTH diagnostic channels, taken by [`Checker::diag_mark`] and undone
@@ -1419,6 +1420,18 @@ impl Checker {
         self.error_help(span, message, None);
     }
 
+    /// TICKET-234 -- a message that prints an optional whose payload nothing pinned yet
+    /// ([`OPEN_NONE`]) gets one note that explains the token and names both fixes. The note does
+    /// not claim to be the cause of the error it is attached to.
+    fn open_none_note(mut message: String) -> String {
+        if message.contains(OPEN_NONE) {
+            message.push_str(&format!(
+                " (`{OPEN_NONE}` is a None whose type is not known yet: annotate the binding, e.g. `z: int?`, or assign it a value first)"
+            ));
+        }
+        message
+    }
+
     /// Like `error`, plus a near-miss suggestion for a "did you mean" `help` line. `help` is never
     /// module-attributed — only `message` passes through `attribute`.
     pub(super) fn error_help(
@@ -1427,7 +1440,7 @@ impl Checker {
         message: impl Into<String>,
         help: Option<String>,
     ) {
-        let message = self.attribute(message);
+        let message = Self::open_none_note(self.attribute(message));
         let mut e = CheckError::error(message, span);
         e.help = help;
         self.errors.push(e);
@@ -1437,7 +1450,7 @@ impl Checker {
     /// code is unchanged. Shares `error`'s module attribution — a warning raised while checking an
     /// imported module must name it, exactly like an error from the same position.
     pub(super) fn warn(&mut self, span: Span, message: impl Into<String>) {
-        let message = self.attribute(message);
+        let message = Self::open_none_note(self.attribute(message));
         self.warnings.push(CheckError::warning(message, span));
     }
 
@@ -2848,7 +2861,7 @@ impl Checker {
                     continue;
                 }
                 if let Some(partner_ty) = self.scopes[p.0].get(&p.1)
-                    && Self::is_unrefined_empty_coll(partner_ty)
+                    && Self::is_open_coll(partner_ty)
                 {
                     let merged = merge_unknown(partner_ty, ty);
                     self.scopes[p.0].insert(p.1.clone(), merged);
@@ -2900,13 +2913,188 @@ impl Checker {
             _ => false,
         }
     }
+    /// TICKET-234 -- the one reader of "a value meets a carrier slot whose payload is still open".
+    /// When `slot` holds an `Option(Unknown)` at any depth, the value is read with no hint and the
+    /// slot's open payloads are filled from its type (`merge_unknown`); any other slot is returned
+    /// unchanged. The same call serves a plain value, a `?x` and an existing carrier. The caller
+    /// then infers the value against the returned slot, so the wrap itself is still decided by
+    /// `meet_slot` against a concrete slot (DEC-227). The open test runs first: the read costs a
+    /// `diag_mark`.
+    pub(super) fn pin_open_slot(&mut self, slot: &Ty, value: &Expr) -> Ty {
+        let mut open = false;
+        let _ = super::tyvar::map_ty(slot, &mut |x| {
+            open |= matches!(x, Ty::Option(p) if p.is_unknown());
+            None
+        });
+        if !open {
+            return slot.clone();
+        }
+        match self.unhinted_value_ty(value) {
+            Some(t) => merge_unknown(slot, &t),
+            None => slot.clone(),
+        }
+    }
+    /// The type `value` has with no expected type, read as a pinning use, or `None` when it errs
+    /// or is unknown. Speculative: every diagnostic and side table is rolled back, and
+    /// `pinning_value_ty` runs inside that window because the rollback drops a pending carrier
+    /// (DEC-228).
+    pub(super) fn unhinted_value_ty(&mut self, value: &Expr) -> Option<Ty> {
+        let hint = self.expected_hint.take();
+        let owner = self.hint_owner.take();
+        let mark = self.diag_mark();
+        let t = self.infer_value(value);
+        let t = self.pinning_value_ty(&t);
+        let erred = self.errors.len() != mark.errors;
+        self.diag_rollback(mark);
+        self.expected_hint = hint;
+        self.hint_owner = owner;
+        (!erred && !t.is_unknown()).then_some(t)
+    }
+    /// True when `slot` is the type an earlier use pinned `name` to and `value` fits it neither
+    /// as it is nor under one `?`. The assignment then infers the value with no hint, so the
+    /// write reports the pin text and not the hinted `'?' value: ...` text.
+    pub(super) fn misses_pin(&mut self, name: &str, slot: &Ty, value: &Expr) -> bool {
+        if self.carrier_pin(name).as_ref() != Some(slot) {
+            return false;
+        }
+        let Some(t) = self.unhinted_value_ty(value) else {
+            return false;
+        };
+        let lifted = merge_unknown(&Ty::Option(Box::new(Ty::Unknown)), &t);
+        !self.assignable(slot, &t) && !self.assignable(slot, &lifted)
+    }
+    /// The literal `None`, the same test `is_inline_default` uses in `desugar`.
+    pub(super) fn is_none_lit(e: &Expr) -> bool {
+        matches!(&e.kind, ExprKind::Ident(n) if n == "None")
+    }
+    /// The slot a literal `None` shares with the sibling `value`: `value`'s type under one `?`, or
+    /// `value`'s own type when it is already a carrier. `None` when that type is not concrete.
+    pub(super) fn none_slot_from(&mut self, value: &Expr) -> Option<Ty> {
+        let slot = self.pin_open_slot(&Ty::Option(Box::new(Ty::Unknown)), value);
+        ty_fully_concrete(&slot).then_some(slot)
+    }
+    /// The slot of a literal or an `if` chain that holds a literal `None` beside other values, read
+    /// from the first sibling that is not `None`. The syntax test runs first because the read costs
+    /// a `diag_mark`. A site whose branches have binders calls [`Checker::branch_slot`] instead.
+    pub(super) fn none_sibling_slot(&mut self, vals: &[&Expr]) -> Option<Ty> {
+        if !vals.iter().any(|e| Self::is_none_lit(e)) {
+            return None;
+        }
+        let first = vals.iter().find(|e| !Self::is_none_lit(e))?;
+        self.none_slot_from(first)
+    }
+    /// [`Checker::none_sibling_slot`] for a site whose branches bring their own binders (a `match`
+    /// arm's pattern, a `recover:` tail branch's statements): called inside each branch, after its
+    /// binders are in scope. The first branch that is not `None` decides `slot`.
+    pub(super) fn branch_slot(
+        &mut self,
+        beside: bool,
+        slot: &mut Option<Ty>,
+        value: &Expr,
+    ) -> Option<Ty> {
+        if beside && slot.is_none() && !Self::is_none_lit(value) {
+            *slot = self.none_slot_from(value);
+        }
+        slot.clone()
+    }
+    /// `unify` for a call argument: a `?x` that meets a parameter whose solved type is still open
+    /// is read as the pinning use it is, so `unify`'s fill arm never lifts an unpinned `?x` by a
+    /// second layer. The open test reads a `fn` type's parameters and return itself, because
+    /// `contains_unknown_in_slot` does not descend into a `Ty::Func`.
+    pub(super) fn unify_arg(&mut self, decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
+        let open = match super::subst(decl, map) {
+            Ty::Func { params, ret, .. } => {
+                contains_unknown_in_slot(&ret) || params.iter().any(contains_unknown_in_slot)
+            }
+            want => contains_unknown_in_slot(&want),
+        };
+        if open {
+            let actual = self.pinning_value_ty(actual);
+            super::unify(decl, &actual, map);
+        } else {
+            super::unify(decl, actual, map);
+        }
+    }
+    /// A handle a task shares with its parent instead of copying, so a captured one is still pinned
+    /// from inside a `spawn:` body.
+    pub(super) fn is_shared_handle(t: &Ty) -> bool {
+        matches!(
+            t,
+            Ty::Shared(_) | Ty::RwShared(_) | Ty::Atomic(_) | Ty::Channel(_)
+        )
+    }
+    /// The binding a place is rooted in: `b` for `b`, `b.v`, `b.v[0]`.
+    pub(super) fn place_root(place: &Expr) -> Option<&str> {
+        match &place.kind {
+            ExprKind::Ident(n) => Some(n),
+            ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => Self::place_root(obj),
+            _ => None,
+        }
+    }
+    /// The one writer of "this place now holds `ty`". An `Ident` merges `ty` into its binding and
+    /// ends in `repin` (DEC-032). A `Field` or an `Index` builds its owner's shape around `ty` and
+    /// recurses to the root binding. Each level costs a `diag_mark`, so a caller tests the written
+    /// slot for an open payload first.
+    pub(super) fn repin_place(&mut self, place: &Expr, ty: &Ty) {
+        let obj = match &place.kind {
+            ExprKind::Ident(name) => {
+                let Some(cur) = self.lookup(name) else { return };
+                if (self.is_captured(name) && !Self::is_shared_handle(&cur))
+                    || !contains_unknown_in_slot(&cur)
+                {
+                    return;
+                }
+                let merged = merge_unknown(&cur, ty);
+                if merged != cur {
+                    self.repin(name, merged);
+                }
+                return;
+            }
+            ExprKind::Field { obj, .. }
+            | ExprKind::Index {
+                obj,
+                index: Some(_),
+                ..
+            } => obj,
+            _ => return,
+        };
+        let mark = self.diag_mark();
+        let obj_ty = self.infer(obj);
+        self.diag_rollback(mark);
+        let shape = match (&place.kind, &obj_ty) {
+            (ExprKind::Index { .. }, Ty::List(_)) => Ty::list(ty.clone()),
+            (ExprKind::Index { .. }, Ty::Map(k, _)) => Ty::map((**k).clone(), ty.clone()),
+            (ExprKind::Field { name, .. }, Ty::Struct(sname, targs)) => {
+                let Some(info) = self.struct_shape(sname) else {
+                    return;
+                };
+                let Some((_, decl)) = info.fields.iter().find(|(f, _)| f == name) else {
+                    return;
+                };
+                let mut map = HashMap::new();
+                super::unify(decl, ty, &mut map);
+                let targs = info
+                    .type_params
+                    .iter()
+                    .zip(targs)
+                    .map(|(tp, old)| {
+                        map.get(&tp.name)
+                            .map_or(old.clone(), |n| merge_unknown(old, n))
+                    })
+                    .collect();
+                Ty::Struct(sname.clone(), targs)
+            }
+            _ => return,
+        };
+        self.repin_place(obj, &shape);
+    }
     /// The type a use pins `name` to: `shape` read through [`Checker::pinning_value_ty`] when `name`
     /// is a binding a use can still pin (an unrefined empty collection or an unpinned carrier), and
     /// `shape` unchanged otherwise, so a use of any other binding decides nothing about a `?x`.
     pub(super) fn pin_shape(&mut self, name: &str, shape: &Ty) -> Ty {
         let open = self
             .lookup(name)
-            .is_some_and(|bt| Self::is_unrefined_empty_coll(&bt) || Self::is_unpinned_carrier(&bt));
+            .is_some_and(|bt| Self::is_open_coll(&bt) || Self::is_unpinned_carrier(&bt));
         if open {
             self.pinning_value_ty(shape)
         } else {
@@ -2936,6 +3124,65 @@ impl Checker {
             .iter()
             .find(|(k, _)| *k == key)
             .map(|(_, t)| t.clone())
+    }
+    /// A type a second name can mutate (a collection, a struct or a shared handle) that still has
+    /// an open slot. The alias gates and the argument pins read this; the annotation requirement
+    /// reads [`Checker::is_unrefined_empty_coll`]. An `Option`, an enum and a tuple are values and
+    /// are never in it.
+    pub(super) fn is_open_coll(t: &Ty) -> bool {
+        matches!(
+            t,
+            Ty::List(_)
+                | Ty::Set(_)
+                | Ty::Map(..)
+                | Ty::Struct(..)
+                | Ty::Shared(_)
+                | Ty::RwShared(_)
+                | Ty::Atomic(_)
+                | Ty::Channel(_)
+        ) && contains_unknown_in_slot(t)
+    }
+    /// The receiver's generic form (`List[T]`, `Box[T]`, `Shared[T]`) and `method`'s declared
+    /// parameter types, both spelled with the owner's type parameters. `refine_receiver` reads what
+    /// an argument supplies from this, never from a list of method names. `None` for an enum or any
+    /// other receiver: an enum value cannot store an argument (DEC-064).
+    pub(super) fn receiver_decl(&self, recv: &Ty, method: &str) -> Option<(Ty, Vec<Ty>)> {
+        let key = match recv {
+            Ty::List(_) => "List",
+            Ty::Set(_) => "Set",
+            Ty::Map(..) => "Map",
+            Ty::Shared(_) => "Shared",
+            Ty::RwShared(_) => "RwShared",
+            Ty::Atomic(_) => "Atomic",
+            Ty::Channel(_) => "Channel",
+            Ty::Struct(k, _) => k.as_str(),
+            _ => return None,
+        };
+        let info = self.structs.get(key).or_else(|| self.struct_shape(key))?;
+        let sig = info.methods.get(method)?;
+        let p = |i: usize| Box::new(Ty::Param(info.type_params[i].name.clone()));
+        let arity = match recv {
+            Ty::Map(..) => 2,
+            Ty::Struct(_, a) => a.len(),
+            _ => 1,
+        };
+        if info.type_params.len() != arity {
+            return None;
+        }
+        let generic = match recv {
+            Ty::List(_) => Ty::List(p(0)),
+            Ty::Set(_) => Ty::Set(p(0)),
+            Ty::Map(..) => Ty::Map(p(0), p(1)),
+            Ty::Shared(_) => Ty::Shared(p(0)),
+            Ty::RwShared(_) => Ty::RwShared(p(0)),
+            Ty::Atomic(_) => Ty::Atomic(p(0)),
+            Ty::Channel(_) => Ty::Channel(p(0)),
+            Ty::Struct(k, _) => Ty::Struct(k.clone(), (0..arity).map(|i| *p(i)).collect()),
+            _ => return None,
+        };
+        // A user struct's method keeps `self` as its first parameter; a native one has none.
+        let skip = usize::from(matches!(recv, Ty::Struct(..)) && !sig.is_static);
+        Some((generic, sig.params.iter().skip(skip).cloned().collect()))
     }
     pub(super) fn is_unrefined_empty_coll(t: &Ty) -> bool {
         match t {

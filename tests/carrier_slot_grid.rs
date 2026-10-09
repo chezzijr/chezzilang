@@ -591,7 +591,7 @@ fn extra_cells(cells: &mut Vec<Cell>) {
         ms("coalesce_result", SHOW_RES, "o: int? = 5\nx: int!str = o ?? 0\nshow(x)", prints("ok 5")),
         m("coalesce_none_arm", "fn f(o: int?) -> int?:\n    return o ?? None\nprint(f(None))", r("branches have incompatible types")),
         m("comprehension_barrier", "ys: List[int] = [y for xs in [[1, 2], [3]] for y in xs]\nprint(ys)", prints("[1, 2, 3]")),
-        m("inferred_return_not_a_slot", "fn f(c: bool): if c: 1 else: None\nprint(f(true))", r("branches have incompatible types")),
+        m("inferred_return_not_a_slot", "fn f(c: bool): if c: 1 else: None\nprint(f(true))", prints("1")),
         m("tuple_call_does_not_split", "fn g() -> (int, int):\n    return (5, 0)\nx: int? = None\ny := 0\nx, y = g()\nprint(x)", r("cannot assign")),
     ]);
     // A default compiles as the declaration's node: called across a module boundary too.
