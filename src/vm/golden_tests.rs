@@ -5942,12 +5942,12 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // ----- entry model: no auto-main; a top-level `?` exits, a bare discarded Err/None does not -----
     ("fn main():\n    print(\"hi\")", Ok("")), // main defined but never called → no output
-    ("Err(\"boom\")", Ok("")), // bare top-level Err → discarded, W8-2 warns, no exit
+    ("fn bad() -> int!:\n    return !\"boom\"\nbad()", Ok("")), // bare top-level error → discarded, W8-2 warns, no exit
     (
         "x := (!\"oops\")?",
         Err("runtime error (line 1, col 7): unhandled error: oops"),
     ), // top-level `?` Err → unhandled error
-    ("fn g() -> int?:\n    return None\ng()", Ok("")), // bare None → discarded, no exit
+    ("fn g() -> int?:\n    return None\ng()", Ok("")),          // bare None → discarded, no exit
     (
         "fn f() -> int!:\n    return !\"x\"\nr := f()\nprint(\"handled\")",
         Ok("handled\n"),
@@ -5967,11 +5967,11 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ), // f() -> int is not a carrier type: no runtime check, no W8-2 warning either
     // unhandled top-level error INSIDE a top-level block (interp: call_depth 0, VM: is_toplevel)
     (
-        "if true:\n    Err(\"boom\")\nprint(\"after\")",
+        "fn bad() -> int!:\n    return !\"boom\"\nif true:\n    bad()\nprint(\"after\")",
         Ok("after\n"),
     ), // bare Err in `if` → discarded, no exit
     (
-        "for i in 0..1:\n    Err(\"x\")\nprint(\"after\")",
+        "fn bad() -> int!:\n    return !\"boom\"\nfor i in 0..1:\n    bad()\nprint(\"after\")",
         Ok("after\n"),
     ), // bare Err in `for` → discarded, no exit
     (

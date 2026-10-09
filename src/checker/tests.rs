@@ -1813,8 +1813,11 @@ fn success_coercion_wraps_at_every_typed_slot() {
     );
     // Operands never own the slot: the sum wraps once, the operands never.
     ok("fn main():\n    x: int? = 1 + 2\n    print(x)\n");
-    // A carrier payload is a seed only.
-    rejects("x: Option[Option[int]] = Some(5)\n", "cannot assign");
+    // An existing carrier is never re-wrapped into a deeper slot.
+    rejects(
+        "fn have(n: int) -> int?:\n    return n\nx: int?? = have(5)\n",
+        "cannot assign int? to variable of type int??",
+    );
 }
 
 /// TICKET-227 (DEC-025 superseded) — a default provider is a typed slot like any other: both halves
@@ -1876,8 +1879,14 @@ fn widen_compound_float_positions_rejected() {
         "xs: List[Map[str, float]] = [{\"a\": 1}]\nprint(xs)\n",
         "map value: expected float, found int",
     );
-    rejects("o: float? = Some(3)\nprint(o)\n", "cannot assign");
-    rejects("r: float! = Ok(3)\nprint(r)\n", "cannot assign");
+    rejects(
+        "o: float? = ?3\nprint(o)\n",
+        "'?' value: expected float, found int",
+    );
+    rejects(
+        "r: float! = ?3\nprint(r)\n",
+        "'?' value: expected float, found int",
+    );
     // A non-literal RHS (a fn returning List[int]) into List[float]: no literal to coerce → reject.
     rejects(
         "fn f() -> List[int]:\n    return [1]\nxs: List[float] = f()\nprint(xs)\n",
@@ -4770,8 +4779,8 @@ fn eq_is_satisfied_by_every_type_whose_equality_is_structural() {
     for (prelude, lit) in [
         ("", "[1]"),
         ("", "(1, 2)"),
-        ("", "Some(1)"),
-        ("", "Ok(1)"),
+        ("fn ho() -> int?:\n    return 1\n", "ho()"),
+        ("fn hr() -> int!str:\n    return 1\n", "hr()"),
         ("", "b\"ab\""),
         ("", "bytearray(b\"ab\")"),
         ("", "{\"k\": 1}"),
@@ -5143,9 +5152,11 @@ struct Box[T]:
         return true
 fn g(x: int) -> int:
     return x
+fn ho() -> int?:
+    return 1
 ";
     for payload in [
-        "[1,2]", "(1,2)", "P(1)", "b\"ab\"", "Some(1)",
+        "[1,2]", "(1,2)", "P(1)", "b\"ab\"", "ho()",
         // W7-54 — a function value now satisfies `Eq` (identity, not structural), so `Box[fn]` is
         // satisfiable again. **rustc 1.97.0, measured:** `Boxy(f) == Boxy(f)` for `f: fn(i32) -> i32`
         // COMPILES — fn pointers implement `PartialEq`. This spelling printed `true` before W7-41,
@@ -5267,11 +5278,11 @@ struct Box[T]:
     // (c) erasure into an Option payload. `protocol_note` only unwraps a DIRECT `Ty::Protocol`
     // expected type (its existing scope, untouched here — see the 15 sites
     // `protocol_note_reaches_every_value_slot` enumerates, none of them nested); the outer var-decl's
-    // `expected` here is `Option[Tagged]`, not `Tagged`, so the em-dash clause does not surface. The
+    // `expected` here is `Tagged?`, not `Tagged`, so the em-dash clause does not surface. The
     // erasure is still refused, which is the property this row proves.
     entry_rejects(
-        &format!("{SRC}o: Option[Tagged] = Some(Box(Tag(1)))\n"),
-        "cannot assign Box[Tag]? to variable of type Tagged?",
+        &format!("{SRC}o: Tagged? = ?Box(Tag(1))\n"),
+        "'?' value: expected Tagged, found Box[Tag]",
     );
     // (d) erasure through a struct field.
     entry_rejects(
@@ -5308,16 +5319,13 @@ struct MyErr[T]:
     fn eq(self, other: MyErr[T]) -> bool where T: Comparable:
         return true
 ";
-    // Same nested-container note gap as row (c): `protocol_note`'s expected here is `Result[int,
-    // Protocol("Error")]`, not the inner `Protocol` directly, so the em-dash clause does not surface;
-    // the erasure is still refused, which is what this row proves.
+    // The `!e` operand is checked against `Error` itself, so the erasure is refused at the error
+    // value; the em-dash clause does not surface.
     entry_rejects(
-        &format!("{ERR_SRC}fn f() -> int!:\n    return Err(MyErr(Tag(1)))\n"),
-        "expected return type int!",
+        &format!("{ERR_SRC}fn f() -> int!:\n    return !MyErr(Tag(1))\n"),
+        "error value: expected Error, found MyErr[Tag]",
     );
-    entry_ok(&format!(
-        "{ERR_SRC}fn f() -> int!:\n    return Err(MyErr(7))\n"
-    ));
+    entry_ok(&format!("{ERR_SRC}fn f() -> int!:\n    return !MyErr(7)\n"));
 
     // TICKET-053 step 8: the three shapes `tests/chz/spec/eq_protocol_existential_test.chz` used to
     // pin as RUNTIME faults (`recover:` + a message check) no longer compile at all, since
@@ -16633,7 +16641,7 @@ fn opt_chain_check_time_is_linear_in_chain_length() {
     // is that this finishes AT ALL — at 60 links the doubling shape is ~2^38 × the 22-link cost.
     let mut src = String::from(
         "struct A:\n    v: str\n    fn m(self) -> A!str:\n        return ?self\n\
-         fn f() -> A!str:\n    return ?A(\"x\")\nfn g() -> str!str:\n    return Ok(f()",
+         fn f() -> A!str:\n    return ?A(\"x\")\nfn g() -> str!str:\n    return ?(f()",
     );
     for _ in 0..60 {
         src.push_str("?.m()");
@@ -33843,8 +33851,6 @@ fn int_never_widens_at_every_sink() {
         "fn f() -> float: 3\n".into(),
         "fn f() -> float:\n    return 3\n".into(),
         "fn main():\n    x: float? = 1\n    print(x)\n".into(),
-        "fn main():\n    x: float? = Some(1)\n    print(x)\n".into(),
-        "fn main():\n    r: Result[float, str] = Ok(1)\n    print(r)\n".into(),
         "fn main():\n    x := if true: 1 else: 2.5\n    print(x)\n".into(),
         "fn main():\n    x := match 1:\n        1: 2\n        _: 2.5\n    print(x)\n".into(),
         "fn main():\n    x := [1, 2.5]\n    print(x)\n".into(),
@@ -33864,6 +33870,15 @@ fn int_never_widens_at_every_sink() {
             "expected a `write 1.0` error for:\n{src}\ngot: {errs:?}"
         );
     }
+    // An explicit `?1` names its payload: the mismatch is reported on the `?` value.
+    rejects(
+        "fn main():\n    x: float? = ?1\n    print(x)\n",
+        "'?' value: expected float, found int",
+    );
+    rejects(
+        "fn main():\n    r: float!str = ?1\n    print(r)\n",
+        "'?' value: expected float, found int",
+    );
     // The native std types resolve only through the module graph.
     entry_rejects(
         "import std.math\n\nfn main():\n    print(math.sqrt(16))\n",
@@ -35759,9 +35774,9 @@ fn t186_module_global_record_grid() {
     let l1 = "f := fn(a: int, b: int) -> int: a * 10 + b\n";
     let l2 = "f := fn(b: int, a: int) -> int: a * 10 + b\n";
     let cells: Vec<(&str, String, Option<&str>)> = vec![
-        ("c01", "fn w():\n    z = Some(\"ab\")\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
-        ("c02", "z := None\nfn w():\n    z = Some(\"ab\")\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
-        ("c03", "z := None\nfn w():\n    z = Some(\"ab\")\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
+        ("c01", "fn have() -> str?:\n    return \"ab\"\nfn w():\n    z = have()\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
+        ("c02", "z := None\nfn have() -> str?:\n    return \"ab\"\nfn w():\n    z = have()\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
+        ("c03", "z := None\nfn have() -> str?:\n    return \"ab\"\nfn w():\n    z = have()\nz := None\nw()\nfn r() -> int:\n    return z ?? 0\nprint(r())\n".into(), Some("")),
         ("c04", "fn w():\n    xs = [\"a\"]\nxs := []\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
         ("c05", "xs := []\nfn w():\n    xs = [\"a\"]\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),
         ("c06", "xs := []\nfn w():\n    xs = [\"a\"]\nxs := []\nw()\nfn r() -> int:\n    return xs[0]\nprint(r())\n".into(), Some("")),

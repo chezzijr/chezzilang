@@ -14111,7 +14111,7 @@ fn parallel_try_escape_leaves_clean_nursery_stack() {
     // what keeps the program faulting.
     let src = "fn noop():\n    0\n\
                    fn boom() -> int!:\n    return !\"x\"\n\
-                   fn main() -> int!:\n    parallel:\n        spawn noop()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()?\n";
+                   fn main() -> int!:\n    parallel:\n        spawn noop()\n        y := boom()?\n        print(y)\n    return 0\nmain()?\n";
     let (vm_out, nursery_depth) = run_capture_nursery_len(src);
     assert!(vm_out.is_err(), "the uncaught ? faults the program");
     assert_eq!(
@@ -14217,7 +14217,7 @@ fn parallel_try_escape_cancels_pending_silently() {
     // what keeps the program faulting.
     let src = "fn side():\n    0\n\
                    fn boom() -> int!:\n    return !\"x\"\n\
-                   fn main() -> int!:\n    parallel:\n        spawn side()\n        y := boom()?\n        print(y)\n    Ok(0)\nmain()?\n";
+                   fn main() -> int!:\n    parallel:\n        spawn side()\n        y := boom()?\n        print(y)\n    return 0\nmain()?\n";
     let (vm_out, depth) = run_capture_nursery_len(src);
     assert!(vm_out.is_err(), "the uncaught ? faults the program");
     assert_eq!(
@@ -20388,10 +20388,10 @@ fn convert_witness_runs_two_engine() {
 
 #[test]
 fn legal_deep_nested_pattern_type_checks_and_runs() {
-    // VERIFY (guards against over-rejection): a legally-nested `Some(...)` value and a matching deep
+    // VERIFY (guards against over-rejection): a legally-nested `?(...)` value and a matching deep
     // pattern must NOT be rejected by the new pattern-depth guard — it still type-checks, and the
     // checker's exhaustiveness + type walk and the VM matcher stay safe recursing to that depth.
-    // Depth is capped by the VALUE expression itself: each `Some(` nesting costs ~2 of the shared
+    // Depth is capped by the VALUE expression itself: each `?(` nesting costs ~2 of the shared
     // `parser::MAX_DEPTH` budget in expression position (parse_expr_bp + parse_unary), so a nested
     // ctor value maxes out near MAX_DEPTH/2 — the pattern side (1 depth/level) is the looser
     // constraint. THIS `n` IS CALIBRATED TO `parser::MAX_DEPTH` and must move with it: 30 at the
@@ -20399,8 +20399,8 @@ fn legal_deep_nested_pattern_type_checks_and_runs() {
     // is now 12 bytes, the cap is 64 again, so 30 is restored.) 30 is deep enough to prove the
     // pattern walk is safe and shallow enough to stay legal on both axes.
     let n = 30;
-    let value = format!("{}0{}", "Some(".repeat(n), ")".repeat(n));
-    let pattern = format!("{}x{}", "Some(".repeat(n), ")".repeat(n));
+    let value = format!("{}0{}", "?(".repeat(n), ")".repeat(n));
+    let pattern = format!("{}x{}", "?(".repeat(n), ")".repeat(n));
     let src = format!("o := {value}\nr := match o:\n    {pattern}: x\n    _: -1\nprint(r)\n");
     assert_eq!(run_capture(&src).unwrap().trim(), "0");
 }
@@ -20850,8 +20850,28 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
             "-",
         ),
-        r("option", "", "Some(1)", "-", "-", "-", "-", "-", "-"),
-        r("result", "", "Ok(1)", "-", "-", "-", "-", "-", "-"),
+        r(
+            "option",
+            "fn ho() -> int?:\n    return 1\n",
+            "ho()",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ),
+        r(
+            "result",
+            "fn hr() -> int!str:\n    return 1\n",
+            "hr()",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ),
         // W7-54 — a function value's `Eq` grant. Only the `eq` template applies; it uses no other
         // column.
         r(
