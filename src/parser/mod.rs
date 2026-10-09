@@ -228,6 +228,11 @@ pub const REMOVED_NAMES: [(&str, &str, &str, Option<&str>); 5] = [
     ),
 ];
 
+/// TICKET-241 -- the one text for an `else` guard written where none exists (an assignment, a
+/// compound assignment, `return`). [`Parser::reject_else_guard`] is its only user.
+const ELSE_GUARD_PLACE: &str =
+    "an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return`";
+
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
@@ -838,7 +843,9 @@ impl Parser {
                     values.push(self.parse_expr()?);
                 }
                 let value = if values.len() == 1 {
-                    values.into_iter().next().unwrap()
+                    // `a, b := f() else e:` -- the guard takes the call's own error; a value
+                    // list is a tuple literal, which cannot fail, so it takes none.
+                    self.parse_else_guard(values.into_iter().next().unwrap())?
                 } else {
                     if values.len() != targets.len() {
                         return Err(ParseError {
@@ -909,6 +916,7 @@ impl Parser {
             while self.eat(&Token::Comma) {
                 values.push(self.parse_expr()?);
             }
+            self.reject_else_guard()?;
             let value_span = values[0].span;
             // A single RHS expression with multiple targets (`a, b = f()`) destructures a
             // tuple-valued expression at runtime — the value is passed through as-is (the checker
@@ -986,6 +994,7 @@ impl Parser {
         }
         self.advance(); // the assignment operator
         let value = self.parse_expr()?;
+        self.reject_else_guard()?;
         Ok(StmtKind::Assign {
             target: expr,
             op,
@@ -2065,6 +2074,14 @@ impl Parser {
         })
     }
 
+    /// An `else` after the value of an assignment or a `return`: no guard exists there.
+    fn reject_else_guard(&self) -> PResult<()> {
+        if self.check(&Token::Else) {
+            return Err(self.err(ELSE_GUARD_PLACE.to_string()));
+        }
+        Ok(())
+    }
+
     /// Expression-position `recover:` (keyword already consumed): `recover:` then an inline or
     /// indented block. Reuses `parse_block`; the block's trailing expression is its `Ok` value.
     fn parse_recover_expr(&mut self, span: Span) -> PResult<Expr> {
@@ -2307,7 +2324,9 @@ impl Parser {
         if matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
             Ok(StmtKind::Return(None))
         } else {
-            Ok(StmtKind::Return(Some(self.parse_expr()?)))
+            let value = self.parse_expr()?;
+            self.reject_else_guard()?;
+            Ok(StmtKind::Return(Some(value)))
         }
     }
 
@@ -8560,6 +8579,47 @@ print(adder(1)(2))
             "y: int!= 6
 ",
         );
+    }
+
+    /// TICKET-241 -- the `else` guard is the value of a let (one name or a destructuring) or of a
+    /// bare call. Assignment, compound assignment and `return` refuse it with one text.
+    #[test]
+    fn else_guard_binds_only_on_a_let_or_a_bare_call() {
+        let StmtKind::Fn(g) = only("fn g():\n    a, b := f() else e:\n        return\n") else {
+            panic!("expected a fn");
+        };
+        match &g.body[0].kind {
+            StmtKind::Let { names, value, .. } => {
+                assert_eq!(names.len(), 2);
+                assert!(matches!(value.kind, ExprKind::ElseGuard { .. }));
+            }
+            other => panic!("expected a let, got {other:?}"),
+        }
+        let mut bad = Vec::new();
+        let mut expect = |stmt: &str, want: &str| {
+            let src = format!("fn g():\n    {stmt}\n        return\n");
+            match parse(lexer::tokenize(&src).unwrap()) {
+                Ok(_) => bad.push(format!("{stmt:?} must be rejected, parsed")),
+                Err(e) if e.message != want => {
+                    bad.push(format!("{stmt:?} must give {want:?}: {}", e.message))
+                }
+                Err(_) => {}
+            }
+        };
+        for stmt in [
+            "x = f() else e:",
+            "x += f() else e:",
+            "a, b = f() else e:",
+            "self.f = f() else e:",
+            "xs[0] = f() else e:",
+            "return f() else e:",
+        ] {
+            expect(stmt, ELSE_GUARD_PLACE);
+        }
+        expect("a, b := 1, 2 else:", "expected end of line, found 'else'");
+        expect("(a, b) := f() else e:", "left side of ':=' must be a name");
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+        parse_ok("fn g(n: int) -> int:\n    return if n > 0: 1 else: 2\n");
     }
 
     #[test]
