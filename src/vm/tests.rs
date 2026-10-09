@@ -22731,3 +22731,9 @@ fn runtime_text_names_no_removed_spelling() {
         assert!(!text.is_empty(), "{src}");
     }
 }
+
+#[test]
+fn spawn_one_line_native_call_that_waits_does_not_panic() {
+    let src = "fn main():\n    ch := Channel[int](1)\n    n := 0\n    parallel:\n        for _ in 0..50:\n            spawn ch.send(1)\n        for _ in 0..50:\n            n += ch.recv()\n    print(n)\nmain()\n";
+    assert_eq!(run_capture(src).expect("spawn ch.send"), "50\n");
+}
