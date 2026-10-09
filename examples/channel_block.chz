@@ -1,15 +1,18 @@
-# B1 + B2 (VM engine): blocking `recv`. The consumer is spawned first; it blocks on the empty
-# channel, the producer sends, and the consumer then RESUMES exactly where it parked and receives.
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
+# B1 + B2 (VM engine): blocking `recv`. The consumer blocks on the empty channel, the producer
+# sends, and the consumer then RESUMES exactly where it parked and receives.
 # This is the canonical mid-flight producer/consumer that a sequential executor could not express.
 #
 # NOTE: needs suspendable execution (a blocking `recv` that parks mid-flight). The LINE SET below
-# is guaranteed by the program's logic, and running this file for real (`chezzi run`, the streaming
-# stdout sink, line-atomic per print) gives the interleaved order shown above, deterministically.
-# `golden_channel_block_chz_matches_expected` still compares order-insensitively: it runs through
-# the Rust suite's in-process BUFFERED capture, where each spawned task's whole output is merged in
-# at the join by spawn order rather than print order (`Vm::reduce_task_slots`), so what that harness
-# actually observes is "consumer: waiting/got/got" as one block ahead of "producer: send/send" — a
-# property of the test capture path, not a race in the engine.
+# is guaranteed by the program's logic; the ORDER across the two tasks is not. `Channel[int]()` is
+# unbounded, so a `send` never waits for the consumer: no hand-off orders `consumer: waiting`
+# against `producer: send 1`, or `producer: send 2` against `consumer: got 1`. What IS forced: each
+# task's own lines keep their order, `got N` follows `send N`, and `done` is last (the join).
+# `.expected` records one valid `chezzi run` order; the Go twin (two goroutines, a cap-2 channel)
+# prints four different orders. The Rust suite's in-process BUFFERED capture merges each task's
+# whole output at the join by spawn order (`Vm::reduce_task_slots`), so
+# `golden_channel_block_chz_matches_expected` sees "consumer: waiting/got/got" as one block ahead
+# of "producer: send/send". See concurrency.md §"Output ordering".
 
 fn consumer(ch: Channel[int]):
     print("consumer: waiting")
@@ -27,8 +30,8 @@ fn producer(ch: Channel[int]):
 fn main():
     ch := Channel[int]()
     parallel:
-        spawn consumer(ch)       # spawned first ⇒ runs first ⇒ blocks on the empty channel
-        spawn producer(ch)       # the scheduler switches here; its sends wake the consumer
+        spawn consumer(ch)       # parks on the empty channel unless a value is already queued
+        spawn producer(ch)       # its sends never wait; each one wakes a parked consumer
     print("done")
 
 main()

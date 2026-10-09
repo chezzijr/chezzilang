@@ -1,7 +1,10 @@
+# golden: unordered (concurrent prints; tests/examples_golden.rs compares the sorted line sets)
 # The correct pattern for mutually-dependent blocking tasks: SIBLINGS in ONE nursery.
 # (Counter-example to examples/parallel_deadlock.chz — see docs/cross-nursery-flat-scheduler.md.)
 # Nesting them — an inner `parallel:` or a function that `spawn`s — would deadlock; running one
 # inline on the owner would block sequentially. Keep them as siblings at the same level.
+# `b.send(x)` never waits (`Channel[int]()` is unbounded), so `O got 1` and `I got 1` print in either
+# order; `.expected` records one valid `chezzi run` order. See concurrency.md §"Output ordering".
 fn main():
     a := Channel[int]()
     b := Channel[int]()
