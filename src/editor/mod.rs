@@ -544,7 +544,7 @@ fn overlay_mark(
 fn overlay_type(ty: &crate::ast::Type, map: &mut std::collections::HashMap<(usize, usize), u32>) {
     use crate::ast::Type;
     match ty {
-        Type::Named { span, .. } => overlay_mark(map, *span, TYPE),
+        Type::Named { span, .. } | Type::Nil(span) => overlay_mark(map, *span, TYPE),
         Type::Qualified { args, .. } | Type::Generic(_, args, ..) => {
             for a in args {
                 overlay_type(a, map);
@@ -815,6 +815,7 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::NoneLit
         | ExprKind::Pass
         | ExprKind::Ident(_) => {}
         // Interpolation fragments are ordinary expressions — color them like any other child.

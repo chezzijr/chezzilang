@@ -103,6 +103,14 @@ impl Checker {
     pub(super) fn classify_path(&self, e: &Expr, pos: PathPos) -> Option<Resolution> {
         match &e.kind {
             ExprKind::Ident(n) => self.classify_ident(e, n, pos),
+            ExprKind::NoneLit => {
+                self.imported_variants
+                    .get(crate::lexer::NONE)
+                    .map(|iv| Resolution::Variant {
+                        enum_key: iv.head.key.clone(),
+                        variant: iv.variant.clone(),
+                    })
+            }
             ExprKind::Field { obj, name, .. } if !crate::ast::is_tuple_index(name) => {
                 self.classify_field(obj, name)
             }

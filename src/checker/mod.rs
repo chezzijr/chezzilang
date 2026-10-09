@@ -217,7 +217,6 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "str"
         || name == "bytes"
         || name == "bytearray"
-        || name == "None"
         // Builtin container/collection type names — recognized by `resolve_type`'s generic arms
         // (`List[T]`/`Set[T]`/`Map[K,V]`/`Channel[T]`) and `range` (a reserved callable whose ctor a
         // `struct range` would silently shadow). (List/Map/Set/range's `CallBuiltin` DISPATCH is
@@ -410,7 +409,7 @@ fn is_reserved_alias_target(name: &str) -> bool {
 /// (a user may deliberately shadow them at a DECL site — see that fn's doc), so they need their own
 /// predicate for the places that must recognize them as builtin ctors.
 pub(super) fn is_builtin_variant(name: &str) -> bool {
-    matches!(name, "Ok" | "Err" | "Some" | "None")
+    matches!(name, "Ok" | "Err" | "Some")
 }
 
 /// True iff `name` may NOT be the bound name of a module import — ALIASED (`import lib.geo as Ok`)
@@ -3556,6 +3555,7 @@ fn instantiate_method(sig: &FnSig, recv_map: &HashMap<String, Ty>) -> FnSig {
 /// read-only resolver cannot re-spell — see `validate_protocol_embeds`.
 pub(crate) fn type_mentions_any(t: &Type, names: &[String]) -> bool {
     match t {
+        Type::Nil(_) => false,
         Type::Named { name, .. } => names.contains(name),
         Type::Qualified { args, .. } => args.iter().any(|a| type_mentions_any(a, names)),
         Type::Generic(head, args, _) => {
@@ -3576,6 +3576,7 @@ fn first_unresolvable_name(
     known: &dyn Fn(&str) -> bool,
 ) -> Option<String> {
     match t {
+        Type::Nil(_) => None,
         Type::Named { name, .. } => (!names.contains(name) && !known(name)).then(|| name.clone()),
         Type::Qualified { args, .. } | Type::Generic(_, args, _) => args
             .iter()

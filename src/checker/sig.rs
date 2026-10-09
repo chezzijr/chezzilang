@@ -1620,25 +1620,26 @@ impl Checker {
     /// container or annotation site rejects `None` with no edit.
     pub(super) fn resolve_type_at(&mut self, t: &Type, span: Span, pos: TypePos) -> Ty {
         match t {
+            // The one arm that resolves the type `None`: it is no value type, so every value
+            // position rejects it here.
+            Type::Nil(_) => {
+                if pos == TypePos::Value {
+                    self.error(
+                        span,
+                        "'None' is not a value type: None means \"returns nothing\" and is \
+                         legal only as a return type or as the success side of `None!E`",
+                    );
+                    Ty::Unknown
+                } else {
+                    Ty::Nil
+                }
+            }
             Type::Named {
                 name: n,
                 span: name_span,
             } => {
                 let resolved = match n.as_str() {
-                    // The one arm that resolves the name `None`: it is no value type, so every
-                    // value position rejects it here.
-                    s if let Some(t) = Self::scalar_bound_ty(s) => {
-                        if t == Ty::Nil && pos == TypePos::Value {
-                            self.error(
-                                span,
-                                "'None' is not a value type: None means \"returns nothing\" and is \
-                                 legal only as a return type or as the success side of `None!E`",
-                            );
-                            Ty::Unknown
-                        } else {
-                            t
-                        }
-                    }
+                    s if let Some(t) = Self::scalar_bound_ty(s) => t,
                     // A generic type parameter (`T`) or `Self`, in scope while checking a generic fn
                     // signature/body or a protocol method. Resolved BEFORE every reserved/module name
                     // below (ptr / owned_str / Executor / Shared|RwShared|Atomic / Socket / Listener)
@@ -6163,6 +6164,7 @@ fn fn_min_arity_grew(prev: &Ty, declared: &Ty) -> bool {
 /// member call's TYPE ARGUMENTS as well as of a parameter's annotation.
 fn ty_mentions(ty: &crate::ast::Type, t: &str) -> bool {
     match ty {
+        crate::ast::Type::Nil(_) => false,
         crate::ast::Type::Named { name, .. } => name == t,
         crate::ast::Type::Qualified { args, .. } => args.iter().any(|a| ty_mentions(a, t)),
         crate::ast::Type::Generic(head, args, _) => {

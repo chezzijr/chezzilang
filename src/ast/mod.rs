@@ -904,6 +904,8 @@ pub enum Type {
     },
     /// `(T1, T2, …)` — a tuple type (always ≥2 elements; a 1-element `(T)` unwraps to `T`).
     Tuple(Vec<Type>),
+    /// `None` — the void type: a return type, or the success side of `None!E` (also spelled `!E`).
+    Nil(Span),
 }
 
 impl Type {
@@ -951,6 +953,7 @@ impl PartialEq for Type {
                 },
             ) => p1 == p2 && r1 == r2,
             (Type::Tuple(t1), Type::Tuple(t2)) => t1 == t2,
+            (Type::Nil(_), Type::Nil(_)) => true,
             _ => false,
         }
     }
@@ -1017,6 +1020,8 @@ pub enum ExprKind {
     /// variant only so the runtime bypasses the `{expr}` interpolation pass entirely (correct by construction).
     RawStr(String),
     Bool(bool),
+    /// `None` — the absent value. A keyword, so no binding can change what it means.
+    NoneLit,
     /// `fn(): pass` — the no-op closure body. Produced ONLY by `Parser::parse_closure`; `pass`
     /// stays statement-only everywhere else (`StmtKind::Pass`). Types as `Ty::Nil`, lowers to
     /// `Op::Nil` — a leaf, byte-identical at runtime to any other nil-valued expression.
@@ -1313,6 +1318,7 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::NoneLit
         | ExprKind::Pass
         | ExprKind::Ident(_) => {}
         // An interpolation fragment is an ordinary expression, so walk it like any other child.
@@ -1714,6 +1720,7 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::NoneLit
         | ExprKind::Pass
         | ExprKind::Ident(_) => {}
         ExprKind::Interp(chunks) => {

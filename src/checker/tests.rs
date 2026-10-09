@@ -58,6 +58,19 @@ fn rejects(src: &str, needle: &str) {
     );
 }
 
+/// Assert the source fails to PARSE with a message containing `needle`.
+fn parse_rejects(src: &str, needle: &str) {
+    let tokens = lexer::tokenize(src).expect("lex should succeed");
+    let errs: Vec<String> = match parser::parse(tokens) {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![e.message],
+    };
+    assert!(
+        errs.iter().any(|m| m.contains(needle)),
+        "expected an error containing {needle:?}, got: {errs:?}"
+    );
+}
+
 /// Like `rejects`, plus asserting the SAME error's `help` contains `help_needle`.
 fn rejects_help(src: &str, msg_needle: &str, help_needle: &str) {
     let errs = check_src(src);
@@ -5137,7 +5150,7 @@ b := Box(Tag(2))
     // (a `where` naming the method's own `[U]` merges into `type_params`). Rejecting these is what
     // got the 2026-08-10 attempt reverted.
     entry_ok(
-        "enum Opt2[T]:\n    Some(T)\n    None\n    fn eq(self, x: T) -> bool:\n        return true\nstruct Holder[T]:\n    v: T\n    fn eq[U](self, o: U) -> bool:\n        return true\na := Opt2[int].Some(1)\nprint(a == Opt2[int].Some(2))\nprint(Holder(1) == Holder(1))\n",
+        "enum Opt2[T]:\n    Some(T)\n    Nothing\n    fn eq(self, x: T) -> bool:\n        return true\nstruct Holder[T]:\n    v: T\n    fn eq[U](self, o: U) -> bool:\n        return true\na := Opt2[int].Some(1)\nprint(a == Opt2[int].Some(2))\nprint(Holder(1) == Holder(1))\n",
     );
     // A hook-shaped `eq` whose `where` names its OWN `[U]`: the receiver's type arg must not be
     // substituted into `U`, so the bound is not this rule's business.
@@ -6381,7 +6394,7 @@ fn struct_with_eq_satisfies_eq() {
     // `Eq`. `a.eq(b)` dispatches by NAME to the escape-hatch method regardless (unchanged), so the
     // call itself still runs; only the BOUND obligation is what changed.
     entry_ok(
-        "enum Opt2[T]:\n    Some(T)\n    None\n    fn eq(self, x: T) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Opt2[int].Some(1), Opt2[int].Some(2)))\n",
+        "enum Opt2[T]:\n    Some(T)\n    Nothing\n    fn eq(self, x: T) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(Opt2[int].Some(1), Opt2[int].Some(2)))\n",
     );
     // …but the grant above must NOT skip the escape hatch's own `where` bounds — C1' (the mirror of
     // C1, found by re-review). The first cut of the C1 fix short-circuited `eq_where_unsatisfied`
@@ -6491,7 +6504,7 @@ fn malformed_eq_rejected_at_decl() {
 fn generic_operand_eq_stays_an_ordinary_method() {
     // the in-tree shape this rule exists to preserve (see `widen_generic_method_param_at_float_rejected`)
     entry_ok(
-        "enum Opt[T]:\n    Some(T)\n    None\n\n    fn eq(self, x: T) -> bool:\n        return true\n\no := Opt[int].Some(1)\nprint(o.eq(1))\n",
+        "enum Opt[T]:\n    Some(T)\n    Nothing\n\n    fn eq(self, x: T) -> bool:\n        return true\n\no := Opt[int].Some(1)\nprint(o.eq(1))\n",
     );
     // a METHOD's own type param is equally not `Self`
     entry_ok(
@@ -7726,7 +7739,7 @@ fn conditional_method_enum_where_receiver_param() {
     ok("\
 enum Opt[T]:
     Some(T)
-    None
+    Nothing
     fn peek(self) -> int where T: Comparable:
         return 1
 o := Opt.Some(5)
@@ -7738,7 +7751,7 @@ struct Q:
     n: int
 enum Opt[T]:
     Some(T)
-    None
+    Nothing
     fn peek(self) -> int where T: Comparable:
         return 1
 o := Opt.Some(Q(1))
@@ -7853,7 +7866,7 @@ fn conditional_static_enum_method_rejects_non_comparable() {
     ok("\
 enum Opt[T]:
     Some(T)
-    None
+    Nothing
     fn build(x: T) -> Opt[T] where T: Comparable:
         return Opt.Some(x)
 o := Opt.build(5)
@@ -7864,7 +7877,7 @@ struct Q:
     n: int
 enum Opt[T]:
     Some(T)
-    None
+    Nothing
     fn build(x: T) -> Opt[T] where T: Comparable:
         return Opt.Some(x)
 o := Opt.build(Q(1))
@@ -9587,7 +9600,7 @@ fn unrelated_method_name_suggests_nothing() {
 #[test]
 fn enum_method_typo_suggests_near_miss() {
     rejects_help(
-        "enum Opt[T]:\n    Some(T)\n    None\n    fn peek(self) -> int:\n        return 1\no := Opt.Some(5)\no.pek()\n",
+        "enum Opt[T]:\n    Some(T)\n    Nothing\n    fn peek(self) -> int:\n        return 1\no := Opt.Some(5)\no.pek()\n",
         "has no method 'pek'",
         "did you mean 'peek'",
     );
@@ -10966,10 +10979,7 @@ fn module_bind_named_nil_is_an_ordinary_name() {
     files_ok(&[m, ("main.chz", "import lib.nil\nprint(nil.f())\n")]);
     let geo = ("lib/geo.chz", "struct Point:\n    x: int\n");
     files_ok(&[geo, ("main.chz", "import lib.geo as nil\nprint(1)\n")]);
-    files_reject(
-        &[geo, ("main.chz", "import lib.geo as None\nprint(1)\n")],
-        "reserved (builtin)",
-    );
+    parse_rejects("import lib.geo as None\nprint(1)\n", "reserved keyword");
 }
 
 /// Bug 3 — a module-qualified GENERIC fn whose type param appears only in the return type: the
@@ -18289,7 +18299,6 @@ fn reserved_builtin_type_names_rejected_at_decl() {
         "str",
         "bytes",
         "bytearray",
-        "None",
         "List",
         "Set",
         "Map",
@@ -18315,6 +18324,9 @@ fn reserved_builtin_type_names_rejected_at_decl() {
             "enum {name} must be rejected as reserved, got: {errs:?}"
         );
     }
+    // `None` is a keyword (TICKET-237), so the parser rejects it as a type name.
+    parse_rejects("struct None:\n    x: int\n", "reserved keyword");
+    parse_rejects("enum None:\n    A\n", "reserved keyword");
     // An FFI fixed-width type name (`int32`) is reserved too (via native::ffi::is_width) — `struct int32` / `enum
     // int32` must be rejected, matching the TypeAlias guard.
     for src in [
@@ -18343,7 +18355,6 @@ fn protocol_named_reserved_type_rejected_at_decl() {
         "str",
         "bytes",
         "bytearray",
-        "None",
         "List",
         "Set",
         "Map",
@@ -18366,6 +18377,11 @@ fn protocol_named_reserved_type_rejected_at_decl() {
             "protocol {name} must be rejected as reserved, got: {errs:?}"
         );
     }
+    // `None` is a keyword (TICKET-237), so the parser rejects it as a protocol name.
+    parse_rejects(
+        "protocol None:\n    fn foo(self) -> int\n",
+        "reserved keyword",
+    );
     // Boundary #2 — a NON-reserved protocol name still type-checks clean (guard is not over-broad).
     entry_ok("protocol Drawable:\n    fn draw(self)\nfn main():\n    print(1)\nmain()\n");
     entry_ok("protocol Eqz:\n    fn eqz(self) -> bool\nfn main():\n    print(1)\nmain()\n");
@@ -18889,10 +18905,10 @@ fn or_pattern_with_wildcard_is_exhaustive() {
 
 #[test]
 fn nested_nullary_wrong_type_rejected() {
-    // `Some(None)` where the inner type is `int` — `None` is not a variant of int.
+    // `?None` where the inner type is `int` — `None` is the variant pattern, and int has none.
     rejects(
         "o := ?5\nmatch o:\n    ?None: print(0)\n    _: print(1)\n",
-        "not a variant of int",
+        "variant pattern 'None' cannot match a value of type int",
     );
 }
 
@@ -20350,12 +20366,17 @@ fn extern_named_after_builtin_variant_rejected() {
     // (their identity stays in `resolve_type`), so the sweep missed them. Probe that filed it:
     // `extern fn Ok(x: float) -> float` then `y: float = Ok(2.0)` → "cannot assign Result[float] to
     // variable of type float" — i.e. the call site resolves to the VARIANT, the extern is dead.
-    for v in ["Ok", "Err", "Some", "None"] {
+    for v in ["Ok", "Err", "Some"] {
         rejects(
             &format!("extern \"libm.so.6\":\n    fn {v}(x: float) -> float\n"),
             "builtin/reserved name",
         );
     }
+    // `None` is a keyword (TICKET-237): the parser rejects the name before the checker sees it.
+    parse_rejects(
+        "extern \"libm.so.6\":\n    fn None(x: float) -> float\n",
+        "reserved keyword",
+    );
     entry_rejects(
         "extern \"libm.so.6\":\n    fn Ok(x: float) -> float\n",
         "builtin/reserved name",
@@ -28583,7 +28604,7 @@ fn widen_generic_method_param_at_float_rejected() {
     );
     // enum method, same shape
     entry_rejects(
-        "enum Opt[T]:\n    Some(T)\n    None\n\n    fn eq(self, x: T) -> bool:\n        return true\n\no := Opt[float].Some(1.0)\nprint(o.eq(1))\n",
+        "enum Opt[T]:\n    Some(T)\n    Nothing\n\n    fn eq(self, x: T) -> bool:\n        return true\n\no := Opt[float].Some(1.0)\nprint(o.eq(1))\n",
         "expected float, found int",
     );
 }
@@ -37986,7 +38007,7 @@ mod ticket_231_none_word {
         const LOG: &str = "fn log(m: str) -> None:\n    print(m)\n";
         let log_call = format!("{LOG}log(\"a\")\n");
         let log_bound = format!("{LOG}x := log(\"a\")\n");
-        let cells: [(&str, Option<&str>); 12] = [
+        let cells: [(&str, Option<&str>); 11] = [
             (&log_call, None),
             (&log_bound, Some("returns no value (None)")),
             ("x: None? = 5\n", Some("'None?' is not a type")),
@@ -37995,14 +38016,12 @@ mod ticket_231_none_word {
             ("nil := 5\nprint(nil)\n", None),
             ("fn nil() -> int:\n    return 1\nprint(nil())\n", None),
             ("fn f() -> nil:\n    pass\n", Some("unknown type 'nil'")),
-            (
-                "struct None:\n    a: int\n",
-                Some("type 'None' is reserved (builtin)"),
-            ),
             ("fn f() -> None!str:\n    return\nprint(f())\n", None),
             ("fn f() -> None!str:\n    return\nprint(f())\n", None),
             ("x: int? = None\nprint(x)\n", None),
         ];
+        // `None` is a keyword (TICKET-237): `struct None` no longer reaches the checker.
+        parse_rejects("struct None:\n    a: int\n", "reserved keyword");
         let mut red = Vec::new();
         for (src, want) in cells {
             let errs = check_src(src);
@@ -39139,7 +39158,7 @@ fn carrier_alias_is_not_a_variant_head() {
         &format!("{o}x := O.{some}(1)\nprint(x)\n"),
         "unknown name 'O'",
     );
-    rejects(&format!("{o}x: O = O.None\nprint(x)\n"), "unknown name 'O'");
+    parse_rejects(&format!("{o}x: O = O.None\nprint(x)\n"), "reserved keyword");
     rejects(
         &format!("{r}x := R.{errv}(\"a\")\nprint(x)\n"),
         "unknown name 'R'",
@@ -39232,6 +39251,85 @@ fn none_cannot_be_rebound_by_a_binder() {
         "for None in [1, 2]:\n    print(None)\n",
         "None: int = 4\n",
     ] {
-        rejects(src, "keyword");
+        parse_rejects(src, "keyword");
     }
+}
+
+/// TICKET-237 — must still pass: `None` as a value, a default, a pattern, a return type and the
+/// success side of `None!E`. Red if the keyword stops parsing in any of those positions.
+#[test]
+fn none_keyword_stays_legal_where_it_was() {
+    let src = "x: int? = None
+print(x)
+print(x == None)
+print(x ?? 4)
+fn f(a: int, b: int? = None) -> int:
+    return a + (b ?? 10)
+print(f(1))
+fn v() -> None:
+    print(\"v\")
+v()
+fn e() -> None!str:
+    return !\"bad\"
+fn e2() -> !str:
+    return
+match e():
+    !m: print(m)
+    ?_: print(\"ok\")
+print(e2())
+match x:
+    None: print(\"none arm\")
+    ?k: print(k)
+z: int?? = ?x
+match z:
+    ?None: print(\"some none\")
+    _: print(\"other\")
+print(\"{None}\")
+print([None, ?1])
+";
+    ok(src);
+    let out = crate::vm::run_capture(src);
+    assert_eq!(
+        out.as_deref().ok(),
+        Some("None\ntrue\n4\n11\nv\nbad\nNone\nnone arm\nsome none\nNone\n[None, 1]\n")
+    );
+}
+
+/// TICKET-237 — an ASSIGNMENT to a keyword is not a binding and keeps its own text. Red on
+/// `None = 5` if `None` is an assignable name again.
+#[test]
+fn assigning_to_a_keyword_is_an_invalid_target() {
+    for src in ["None = 5\n", "a := 1\nNone, a = 1, 2\n", "true = 5\n"] {
+        parse_rejects(src, "invalid assignment target");
+    }
+}
+
+/// TICKET-237 — boundary: only the exact word is the keyword. Red on `Nonee := 5` if the lexer
+/// matches the keyword by prefix or without case.
+#[test]
+fn a_name_that_only_resembles_none_is_an_identifier() {
+    ok("Nonee := 5\nnone := 1\n_None := 2\nNONE := 3\nprint(Nonee + none + _None + NONE)\n");
+}
+
+/// TICKET-237 — the parser reads the keyword as a NAME only where the prelude declares the
+/// variant. Red on `enum E: None` if a user enum, a user import or a member access takes it.
+#[test]
+fn a_user_file_cannot_name_none() {
+    for src in [
+        "enum E:\n    None\n    B\n",
+        "enum E:\n    A\n    B\nimport None from E\n",
+        "enum E:\n    A\n    B\nimport A as None from E\n",
+        "struct S:\n    x: int\ns := S(1)\nprint(s.None)\n",
+    ] {
+        parse_rejects(src, "reserved keyword 'None'");
+    }
+}
+
+/// TICKET-237 — the prelude-variant clash names no enum: the user cannot write `Option`. Red if
+/// the text is `'Some' is already imported from Option by the prelude` again.
+#[test]
+fn prelude_variant_clash_names_no_enum() {
+    let errs = check_entry("enum E:\n    A\n    B\nimport A as Some from E\nprint(1)\n");
+    let texts: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(texts, ["'Some' is already imported by the prelude"]);
 }

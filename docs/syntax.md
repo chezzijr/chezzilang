@@ -1199,11 +1199,7 @@ defaults are rejected.)
 **Where a default is compiled, and the five rules that follow from it.** A non-literal default is
 compiled **once**, as a hidden zero-arg function in the module that declares it; an omitting call site
 calls that function. (A self-contained literal — `= 1`, `= -1`, `= 1 + 2`, `= None`, `= []`, a
-brace-free string — is still copied inline. That costs no call and behaves identically in every
-program that does not *shadow* the name: a local
-binding called `None` in the caller does reach the copy — `fn f(x: int? = None)` called from a body
-containing `None := 5` reports `argument 1 of 'f': expected int?, found int` at the
-declaration. That corner predates this design and is unchanged by it.) Five
+brace-free string — is still copied inline.) Five
 consequences are worth writing down, because each is a rule you can hit:
 
 1. **`?` cannot propagate *out of* a default.** `fn f(x: int = getr()?.len()) -> int` is a compile
@@ -4770,9 +4766,26 @@ import str as s from lib.sh     # ok — and `str(5)` keeps working
 import Shared from std.concurrency   # ok — a reserved TYPE member licensing the builtin itself
 ```
 
-The reserved set is the builtin callables + reserved type names (`None` included) + the builtin
-variant ctors (`?x`/`!e`/`None`). (The std string module is `std.string` for exactly this reason: `str` is a
-reserved scalar/ctor name.) A collision with a *user-declared* top-level `fn` or type is the next rule.
+The reserved set is the builtin callables + reserved type names. (The std string module is
+`std.string` for exactly this reason: `str` is a reserved scalar/ctor name.) A collision with a
+*user-declared* top-level `fn` or type is the next rule.
+
+**A keyword cannot be bound, by any form.** `None`, `true`, `false` and every other keyword are
+rejected by the parser wherever a name is declared — a `:=` or typed binding, a destructuring
+target, a parameter, a loop or comprehension variable, an `else` or `wait`-arm binder, a fn, type,
+field, variant or generic-parameter name, an import alias — with one message:
+
+```
+None := 5              # error: expected identifier, found reserved keyword 'None' (a keyword cannot be used as a name)
+for true in [1, 2]:    # error: expected identifier, found reserved keyword 'true' (a keyword cannot be used as a name)
+```
+
+So `None` always means the absent value (or, as a type, "returns nothing"), and an enum cannot
+declare a variant named `None`. Only keywords are protected this way. A local, a parameter or a loop
+variable **may** shadow a builtin function or type name, as in Python and Go: `print := 5`,
+`fn f(int: int)`, `for len in xs:` are legal, and a later call of the shadowed name reports
+`int is not callable`. (`self` is not a keyword either: `self := 5` in a method rebinds it for the
+rest of that body.)
 
 **The named-import form is `import X from M`, not Python's `from M import X`** — the module path comes
 *last*, so every import statement starts with the `import` keyword (`from` at statement start is a

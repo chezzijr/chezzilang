@@ -125,7 +125,7 @@
                | "IMPORT" <dottedPath> "AS" "IDENT" "NEWLINE"
                | "IMPORT" <importNames> "FROM" <dottedPath> "NEWLINE"
 <importNames> ::= <importName> | <importName> "COMMA" <importNames>
-<importName>  ::= "IDENT" | "IDENT" "AS" "IDENT"
+<importName>  ::= "IDENT" | "NONEKW" | "IDENT" "AS" "IDENT"
 <dottedPath>  ::= "IDENT" | "IDENT" "DOT" <dottedPath>
 
 # `assert <cond>` faults with its source span when `cond` is false; the optional second operand is
@@ -337,7 +337,9 @@
 # `<typeParams>`.
 <nativeEnumDecl> ::= "NATIVE" "ENUM" "IDENT" "COLON" "NEWLINE" "INDENT" <nativeEnumMembers> "DEDENT"
                    | "NATIVE" "ENUM" "IDENT" <typeParams> "COLON" "NEWLINE" "INDENT" <nativeEnumMembers> "DEDENT"
-<nativeEnumMembers> ::= <variants> | <variants> <nativeEnumMethods>
+<nativeEnumMembers> ::= <nativeVariants> | <nativeVariants> <nativeEnumMethods>
+<nativeVariants> ::= <nativeVariant> | <nativeVariant> <nativeVariants>
+<nativeVariant> ::= <variant> | "NONEKW" "NEWLINE"
 <nativeEnumMethods> ::= <nativeMethodDecl> | <nativeMethodDecl> <nativeEnumMethods>
 
 # A `native type` decl (TICKET-218) — a bodyless type export of a std module. PRELUDE/STD-ONLY (the
@@ -437,7 +439,7 @@
                 | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | <carrierPattern>
-                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE"
+                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
                 | "INT" "DOTDOT" "INT"
 # A leading "MINUS" makes the int literal / range bound negative (int-only — there is no float
 # pattern, so a "MINUS" before a float is a parse error, exactly like a bare float). Either range
@@ -449,7 +451,8 @@
                 | "INT" "DOTDOT" "MINUS" "INT"
 # A sub-pattern (nested position) is itself an or-alternation of primaries. A bare "IDENT" here is a
 # binding name OR — when it names a nullary variant of the matched type — a refutable variant match
-# (checker-promoted; e.g. the `None` in `?None`). Same surface grammar either way.
+# (checker-promoted; e.g. the `Red` in `?Red`). Same surface grammar either way. The `None` in
+# `?None` is the keyword "NONEKW", never a binding: the parser builds the variant pattern itself.
 <subpattern>  ::= <subpatternPrimary>
                 | <subpatternPrimary> "BITOR" <subpattern>
 <subpatternPrimary> ::= "IDENT"
@@ -463,7 +466,7 @@
                 | "IDENT" "DOT" "IDENT" "DOT" <dottedPath> "LPAREN" <subpatterns> "RPAREN"
                 | <tuplePattern>
                 | <carrierPattern>
-                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE"
+                | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
                 | "INT" "DOTDOT" "INT"
 <subpatterns> ::= <subpattern> | <subpattern> "COMMA" <subpatterns>
 <tuplePattern> ::= "LPAREN" <subpatterns> "RPAREN"
@@ -484,7 +487,7 @@
 # reachable elsewhere only via import (qualified `m.Type` or bare after `import Type from m`). A
 # longer path (`pkg.deep.Point`) names the module by its full path: the last segment is the type,
 # and the rest must be a module imported un-aliased in this file (`import pkg.deep`, TICKET-175).
-<type>     ::= "IDENT" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
+<type>     ::= "IDENT" | "NONEKW" | "IDENT" "LBRACKET" <typeList> "RBRACKET"
              | "IDENT" "DOT" <dottedPath> | "IDENT" "DOT" <dottedPath> "LBRACKET" <typeList> "RBRACKET"
              | "FN" "LPAREN" "RPAREN" "ARROW" <type>
              | "FN" "LPAREN" <fnParamList> "RPAREN" "ARROW" <type>
@@ -671,7 +674,7 @@
 # NO escape processing (`\n` is backslash-n, `\` is a literal backslash) and NO `{expr}` interpolation
 # (braces are literal) — so the post-lexer interpolation pass never sees it. Its type is plain `str`.
 # The short form cannot contain its closing quote; the triple form embeds lone quotes (e.g. JSON).
-<primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "RAWSTR" | "TRUE" | "FALSE" | "IDENT"
+<primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW" | "IDENT"
             | "LPAREN" <expr> "RPAREN"
             | "LPAREN" <expr> "COMMA" "RPAREN"
             | "LPAREN" <expr> "COMMA" <exprList> "RPAREN"

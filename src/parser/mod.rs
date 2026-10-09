@@ -409,6 +409,16 @@ impl Parser {
         None
     }
 
+    /// `expect_ident`, but the `None` keyword is a name too. Only for the two prelude-only
+    /// productions that DECLARE the variant (a `native enum` variant, an import member in a file
+    /// that declares a native enum) and for a pattern head.
+    fn expect_ident_or_none(&mut self) -> PResult<String> {
+        if self.eat(&Token::NoneKw) {
+            return Ok(crate::lexer::NONE.to_string());
+        }
+        self.expect_ident()
+    }
+
     /// Consume an identifier, returning its name.
     fn expect_ident(&mut self) -> PResult<String> {
         match self.peek() {
@@ -419,11 +429,38 @@ impl Parser {
                     unreachable!()
                 }
             }
-            _ => Err(self.err(format!(
-                "expected identifier, found {}",
-                describe(self.peek())
-            ))),
+            t => Err(self.keyword_name_error(t).unwrap_or_else(|| {
+                self.err(format!(
+                    "expected identifier, found {}",
+                    describe(self.peek())
+                ))
+            })),
         }
+    }
+
+    /// The one error for a keyword in a name position; `None` when `t` is not a keyword.
+    fn keyword_name_error(&self, t: &Token) -> Option<ParseError> {
+        let (w, _) = crate::lexer::KEYWORDS.iter().find(|(_, k)| k == t)?;
+        Some(self.err(format!(
+            "expected identifier, found reserved keyword '{w}' (a keyword cannot be used as a name)"
+        )))
+    }
+
+    /// The name a `:=` target binds: an identifier, the one keyword-name error for a literal
+    /// keyword (`None`, `true`, `false`), or `otherwise` for any other expression.
+    fn binder_name(&self, target: Expr, otherwise: &str) -> PResult<String> {
+        let kw = match target.kind {
+            ExprKind::Ident(n) => return Ok(n),
+            ExprKind::NoneLit => Some(Token::NoneKw),
+            ExprKind::Bool(true) => Some(Token::True),
+            ExprKind::Bool(false) => Some(Token::False),
+            _ => None,
+        };
+        let mut e = kw
+            .and_then(|t| self.keyword_name_error(&t))
+            .unwrap_or_else(|| self.err(otherwise.to_string()));
+        e.span = target.span;
+        Err(e)
     }
 
     /// Expect an integer literal (used for the `end` of a range pattern `start..end`).
@@ -654,9 +691,9 @@ impl Parser {
                     self.peek_at(1),
                     Token::Walrus | Token::Assign | Token::Colon
                 ) {
-                    return Err(self.err(
-                        "'pass' is a reserved keyword and cannot be used as a name".to_string(),
-                    ));
+                    return Err(self
+                        .keyword_name_error(&Token::Pass)
+                        .expect("pass is a keyword"));
                 }
                 self.advance();
                 self.expect_stmt_end()?;
@@ -678,7 +715,11 @@ impl Parser {
         // (Computed for every simple-stmt; only consumed by the `Let` arms below.)
         let stmt_doc = self.doc_above(self.cur_span().line);
         // typed let: `name: Type = value`
-        if matches!(self.peek(), Token::Ident(_)) && self.peek_at(1) == &Token::Colon {
+        if matches!(
+            self.peek(),
+            Token::Ident(_) | Token::True | Token::False | Token::NoneKw
+        ) && self.peek_at(1) == &Token::Colon
+        {
             // Capture the binding-name token span (parallel to `names`) for decl-site hover.
             let name_span = self.cur_span();
             let name = self.expect_ident()?;
@@ -762,18 +803,11 @@ impl Parser {
                 // Each target ident's span (parallel to `names`) for per-binding decl-site hover.
                 let mut name_spans = Vec::with_capacity(targets.len());
                 for t in targets {
-                    match t.kind {
-                        ExprKind::Ident(n) => {
-                            names.push(n);
-                            name_spans.push(t.span);
-                        }
-                        _ => {
-                            return Err(ParseError {
-                                message: "expected an identifier on the left of ':=' (destructuring binds names)".to_string(),
-                                span: t.span,
-                            })
-                        }
-                    }
+                    name_spans.push(t.span);
+                    names.push(self.binder_name(
+                        t,
+                        "expected an identifier on the left of ':=' (destructuring binds names)",
+                    )?);
                 }
                 return Ok(StmtKind::Let {
                     names,
@@ -857,19 +891,12 @@ impl Parser {
                 self.advance();
                 let value = self.parse_expr()?;
                 let value = self.parse_else_guard(value)?;
-                let name = match expr.kind {
-                    ExprKind::Ident(n) => n,
-                    _ => {
-                        return Err(ParseError {
-                            message: "left side of ':=' must be a name".to_string(),
-                            span: expr.span,
-                        });
-                    }
-                };
+                let name_span = expr.span;
+                let name = self.binder_name(expr, "left side of ':=' must be a name")?;
                 return Ok(StmtKind::Let {
                     names: vec![name],
                     // The lvalue ident's span IS the binding-name span (single `:=`).
-                    name_spans: vec![expr.span],
+                    name_spans: vec![name_span],
                     ty: None,
                     value,
                     is_const: false,
@@ -1421,7 +1448,7 @@ impl Parser {
                 return Err(self.err("enum variants must be declared before methods".to_string()));
             }
             let vname_span = self.cur_span();
-            let vname = self.expect_ident()?;
+            let vname = self.expect_ident_or_none()?;
             let mut payload = Vec::new();
             if self.eat(&Token::LParen) {
                 if !self.check(&Token::RParen) {
@@ -1961,7 +1988,12 @@ impl Parser {
                 let name_span = self.cur_span();
                 Some((self.expect_ident()?, name_span))
             }
-            _ => None,
+            Token::Colon => None,
+            t => {
+                return Err(self
+                    .keyword_name_error(t)
+                    .unwrap_or_else(|| self.err("expected ':'".to_string())));
+            }
         };
         let body = self.parse_block()?;
         Ok(Expr {
@@ -2131,7 +2163,8 @@ impl Parser {
         // Span of the binding-name token (used only when this resolves to a bare-ident binding,
         // below) for the decl-site hover. A qualified/variant pattern ignores it.
         let name_span = self.cur_span();
-        let name = self.expect_ident()?;
+        let none_kw = self.check(&Token::NoneKw);
+        let name = self.expect_ident_or_none()?;
         self.reject_removed_name(&name, name_span)?;
         // `Enum.Variant` — a qualified variant pattern. The first ident is the enum qualifier; the
         // ident after `.` is the variant. A qualified pattern is always a variant (never a binding),
@@ -2181,7 +2214,7 @@ impl Parser {
         }
         // A bare identifier: a nullary variant at the top of an arm, or a binding in a sub-position.
         // A qualified `Enum.Variant` is unambiguously a nullary variant in either position.
-        if top || enum_name.is_some() {
+        if top || none_kw || enum_name.is_some() {
             Ok(Pattern::Variant {
                 id: crate::ast::NodeId::fresh(),
                 name,
@@ -2310,15 +2343,12 @@ impl Parser {
             // node (it can wrap into a carrier target like any assignment).
             let mut assign_first: Option<Stmt> = None;
             let kind = if self.eat(&Token::Walrus) {
-                let target = match lhs.kind {
-                    ExprKind::Ident(n) if n == "_" => WaitTarget::Discard,
-                    ExprKind::Ident(n) => WaitTarget::Bind(n),
-                    _ => {
-                        return Err(ParseError {
-                            message: "left side of ':=' in a wait arm must be a name".to_string(),
-                            span: lhs_span,
-                        });
-                    }
+                let name =
+                    self.binder_name(lhs, "left side of ':=' in a wait arm must be a name")?;
+                let target = if name == "_" {
+                    WaitTarget::Discard
+                } else {
+                    WaitTarget::Bind(name)
                 };
                 WaitArmKind::Recv {
                     target,
@@ -2420,7 +2450,11 @@ impl Parser {
             let mut name_spans = Vec::new();
             loop {
                 let member_span = self.cur_span();
-                let name = self.expect_ident()?;
+                let name = if self.native_enums.is_empty() {
+                    self.expect_ident()?
+                } else {
+                    self.expect_ident_or_none()?
+                };
                 self.reject_removed_name(&name, member_span)?;
                 let (alias, bound_span) = if self.eat(&Token::As) {
                     let alias_span = self.cur_span();
@@ -2614,10 +2648,12 @@ impl Parser {
         // Prefix `!E` (and a bare `!`): `None!E`, the type of a fallible call with no value. The
         // `!` is left for `parse_type_postfix`, so both spellings are one production.
         if self.check(&Token::Bang) {
-            let ty = Type::Named {
-                name: "None".to_string(),
-                span: self.cur_span(),
-            };
+            let ty = Type::Nil(self.cur_span());
+            return self.parse_type_postfix(ty);
+        }
+        if self.check(&Token::NoneKw) {
+            let ty = Type::Nil(self.cur_span());
+            self.advance();
             return self.parse_type_postfix(ty);
         }
         let name_span = self.cur_span();
@@ -2691,7 +2727,10 @@ impl Parser {
                 chain += 1;
                 // An explicit error type follows only if the next token can start one; otherwise
                 // `T!` defaults the error type to `Error` (resolved later by the checker).
-                if matches!(self.peek(), Token::Ident(_) | Token::LParen | Token::Fn) {
+                if matches!(
+                    self.peek(),
+                    Token::Ident(_) | Token::LParen | Token::Fn | Token::NoneKw
+                ) {
                     let err = self.parse_type()?;
                     ty = Type::Generic("Result".to_string(), vec![ty, err], Span::default());
                 } else {
@@ -3335,6 +3374,7 @@ impl Parser {
             Token::RawStr(s) => ExprKind::RawStr(s),
             Token::True => ExprKind::Bool(true),
             Token::False => ExprKind::Bool(false),
+            Token::NoneKw => ExprKind::NoneLit,
             Token::Ident(name) => {
                 self.reject_removed_name(&name, span)?;
                 ExprKind::Ident(name)
@@ -8081,11 +8121,14 @@ mod tests {
 
     #[test]
     fn nested_nullary_parses() {
-        // `?None` -> Carrier{Present, Ident("None")} (parser is type-blind; checker promotes).
+        // `?None` -> Carrier{Present, Variant("None")}: `None` is a keyword, never a binding.
         match first_arm_pattern("match o:\n    ?None: print(0)\n    _: print(1)\n") {
             Pattern::Carrier { tag, inner, .. } => {
                 assert_eq!(tag, CarrierTag::Present);
-                assert!(matches!(&*inner, Pattern::Ident(n, _, _) if n == "None"));
+                assert!(matches!(
+                    &*inner,
+                    Pattern::Variant { name, bindings, .. } if name == "None" && bindings.is_empty()
+                ));
             }
             other => panic!("{other:?}"),
         }

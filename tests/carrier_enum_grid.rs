@@ -479,12 +479,12 @@ fn carrier_enum_grid() {
     );
     only(
         c,
-        "V11 a global and a local shadow a prelude variant",
+        "V11 nothing shadows None",
         &[(
             "main.chz",
             "None := 5\nprint(None)\nfn main():\n    None := 3\n    print(None)\nmain()\n",
         )],
-        Prints("5\n3"),
+        Rejects("reserved keyword"),
     );
     only(
         c,

@@ -1636,6 +1636,7 @@ impl Checker {
             return Ty::Unknown;
         }
         match t {
+            Type::Nil(_) => Ty::Nil,
             Type::Named { name: n, .. } => match n.as_str() {
                 s if let Some(t) = Self::scalar_bound_ty(s) => t,
                 "AtomicInt" => Ty::AtomicInt,
@@ -1977,7 +1978,6 @@ impl Checker {
             "str" => Ty::Str,
             "bytes" => Ty::Bytes,
             "bytearray" => Ty::ByteArray,
-            "None" => Ty::Nil,
             _ => return None,
         })
     }

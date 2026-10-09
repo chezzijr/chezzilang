@@ -20,7 +20,7 @@ struct Box[T]:
 # A generic enum whose `peek()` is conditional on `T: Comparable`.
 enum Opt[T]:
     Some(T)
-    None
+    Nothing
     fn peek(self) -> int where T: Comparable:
         return 1
 

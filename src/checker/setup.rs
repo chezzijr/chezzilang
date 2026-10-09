@@ -592,7 +592,7 @@ impl Checker {
                     "str",
                     "bytes",
                     "bytearray",
-                    "None",
+                    crate::lexer::NONE,
                     "tuple",
                     "range",
                     "List",
@@ -1720,11 +1720,7 @@ impl Checker {
                 && iv.prelude
             {
                 if iv.head.name != en || iv.variant != variant {
-                    let owner = iv.head.name.clone();
-                    self.error(
-                        span,
-                        format!("'{bind}' is already imported from {owner} by the prelude"),
-                    );
+                    self.error(span, format!("'{bind}' is already imported by the prelude"));
                 }
                 continue;
             }
@@ -2965,7 +2961,7 @@ impl Checker {
     }
     /// The literal `None`, the same test `is_inline_default` uses in `desugar`.
     pub(super) fn is_none_lit(e: &Expr) -> bool {
-        matches!(&e.kind, ExprKind::Ident(n) if n == "None")
+        matches!(&e.kind, ExprKind::NoneLit)
     }
     /// The slot a literal `None` shares with the sibling `value`: `value`'s type under one `?`, or
     /// `value`'s own type when it is already a carrier. `None` when that type is not concrete.
@@ -4018,6 +4014,7 @@ impl Checker {
     /// to license a width-alias only when its defining module imported all the widths it embeds.
     pub(super) fn collect_width_names(ty: &Type, out: &mut Vec<String>) {
         match ty {
+            Type::Nil(_) => {}
             Type::Named { name: n, .. } => {
                 if crate::native::ffi::is_width(n) {
                     out.push(n.clone());

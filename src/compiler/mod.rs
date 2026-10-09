@@ -3502,6 +3502,11 @@ impl Compiler {
             ExprKind::Float(x) => fc.emit(Op::ConstFloat(*x), expr.span),
             ExprKind::Bool(b) => fc.emit(if *b { Op::True } else { Op::False }, expr.span),
             ExprKind::Pass => fc.emit(Op::Nil, expr.span),
+            ExprKind::NoneLit => {
+                if let Resolution::Variant { enum_key, variant } = self.resolution(expr)?.clone() {
+                    self.emit_new_enum(fc, &enum_key, &variant, 0, expr.span);
+                }
+            }
             ExprKind::Str(raw) => self.compile_str(fc, raw, expr.span)?,
             // The desugared form: fragments are already-parsed, already-normalized children.
             ExprKind::Interp(chunks) => self.compile_interp(fc, chunks, expr.span)?,
@@ -6156,6 +6161,7 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::NoneLit
         | ExprKind::Pass
         | ExprKind::Ident(_) => {}
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
@@ -6452,6 +6458,7 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
         ExprKind::Int(_)
         | ExprKind::Float(_)
         | ExprKind::Bool(_)
+        | ExprKind::NoneLit
         | ExprKind::Pass
         | ExprKind::Str(_)
         | ExprKind::RawStr(_)
@@ -6678,6 +6685,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::NoneLit
         | ExprKind::Pass => {}
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
             es.iter().for_each(|x| free_names_expr(x, bound, out))
@@ -6839,6 +6847,7 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::NoneLit
         | ExprKind::Pass
         | ExprKind::Ident(_) => {}
         ExprKind::List(es, _) | ExprKind::Tuple(es) | ExprKind::Set(es) => {
@@ -6996,6 +7005,7 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::NoneLit
         | ExprKind::Pass
         | ExprKind::Ident(_) => false,
         ExprKind::Interp(chunks) => chunk_exprs(chunks).into_iter().any(expr_has_bare_spawn),

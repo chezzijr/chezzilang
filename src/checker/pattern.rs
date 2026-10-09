@@ -1968,6 +1968,7 @@ impl Checker {
             ExprKind::RawStr(_) => Ty::Str, // verbatim `str`, no interpolation to check
             ExprKind::Bytes(_) => Ty::Bytes,
             ExprKind::Bool(_) => Ty::Bool,
+            ExprKind::NoneLit => self.infer_ident(expr, crate::lexer::NONE, expr.span),
             ExprKind::Pass => Ty::Nil,
             ExprKind::Ident(name) => self.infer_ident(expr, name, expr.span),
             ExprKind::List(items, _) => {
@@ -2265,7 +2266,7 @@ impl Checker {
             | ExprKind::Interp(_)
             | ExprKind::RawStr(_)
             | ExprKind::Bytes(_)
-            | ExprKind::Bool(_) => self.hover_record_at(expr.span, ty, HoverKind::Literal, None),
+            | ExprKind::Bool(_) | ExprKind::NoneLit => self.hover_record_at(expr.span, ty, HoverKind::Literal, None),
             ExprKind::Ident(name) => {
                 // doc source mirrors the resolution: a `let`-bound local/global → `name_docs`; a free
                 // fn → its `FnSig::doc`; a bare type/ctor name used as a value → `name_docs`. All keyed

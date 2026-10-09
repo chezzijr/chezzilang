@@ -228,6 +228,7 @@ impl UseWalk<'_> {
             | ExprKind::Bytes(_)
             | ExprKind::RawStr(_)
             | ExprKind::Bool(_)
+            | ExprKind::NoneLit
             | ExprKind::Pass => {}
             ExprKind::List(items, _) | ExprKind::Tuple(items) | ExprKind::Set(items) => {
                 for item in items {

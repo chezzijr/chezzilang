@@ -156,13 +156,11 @@ fn is_inline_default(e: &Expr) -> bool {
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_) => true,
+        // `None` is a keyword, so the caller's clone means the same value in every scope. Do not
+        // move it to a provider: a callee-filled `b: T? = None` then breaks every call that fills
+        // a later parameter.
+        ExprKind::NoneLit => true,
         ExprKind::Str(s) => !s.contains('{') && !s.contains('}'),
-        // `None` is the only identifier inlined. `None` means `Option.None` in every
-        // module because no import may rebind a prelude variant name
-        // (`note_variant_import_binds`); a local, a global or a user fn named `None` can still
-        // capture the caller's clone, a pre-existing corner. Do not move `None` to a provider: a
-        // callee-filled `b: T? = None` then breaks every call that fills a later parameter.
-        ExprKind::Ident(n) => n == "None",
         ExprKind::Unary { expr, .. } => is_inline_default(expr),
         ExprKind::Binary { lhs, rhs, .. } => is_inline_default(lhs) && is_inline_default(rhs),
         ExprKind::Range { start, end } => is_inline_default(start) && is_inline_default(end),
@@ -276,7 +274,7 @@ fn subst_self_ty(t: &Type, self_ty: Option<&str>) -> Type {
             name: owner.to_string(),
             span: *span,
         },
-        Type::Named { .. } => t.clone(),
+        Type::Named { .. } | Type::Nil(_) => t.clone(),
         Type::Qualified { module, name, args } => Type::Qualified {
             module: module.clone(),
             name: name.clone(),
@@ -764,6 +762,7 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
+        | ExprKind::NoneLit
         | ExprKind::Pass => {}
         // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Reached once
         // `desugar` has rewritten the literal; before that the raw-`Str` arm above parses it.
@@ -1521,6 +1520,7 @@ impl Walker<'_> {
             | ExprKind::Bytes(_)
             | ExprKind::RawStr(_)
             | ExprKind::Bool(_)
+            | ExprKind::NoneLit
             | ExprKind::Pass => {}
         }
         Ok(())
@@ -1604,7 +1604,7 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                     },
                     MatchExprArm {
                         span: arm_span,
-                        pattern: variant_pat(nid(), "None", vec![]),
+                        pattern: variant_pat(nid(), crate::lexer::NONE, vec![]),
                         guard: None,
                         body: *rhs,
                     },
@@ -1675,9 +1675,13 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                     },
                     MatchExprArm {
                         span: arm_span,
-                        pattern: variant_pat(nid(), "None", vec![]),
+                        pattern: variant_pat(nid(), crate::lexer::NONE, vec![]),
                         guard: None,
-                        body: ident_expr_at(nid(), "None", span),
+                        body: Expr {
+                            id: nid(),
+                            kind: ExprKind::NoneLit,
+                            span,
+                        },
                     },
                 ],
             }

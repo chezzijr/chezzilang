@@ -71,6 +71,7 @@ fn symbol(tok: &Token) -> &'static str {
         Token::Not => "NOT",
         Token::True => "TRUE",
         Token::False => "FALSE",
+        Token::NoneKw => "NONEKW",
         Token::Where => "WHERE",
         Token::Plus => "PLUS",
         Token::Minus => "MINUS",

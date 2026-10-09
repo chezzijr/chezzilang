@@ -120,7 +120,7 @@ test fn two_different_types_behind_one_protocol_stay_structural():
 
 enum Opt2[T]:
     Some(T)
-    None
+    Nothing
     fn eq(self, x: T) -> bool:
         return true
 

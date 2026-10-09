@@ -77,6 +77,8 @@ pub enum Token {
     Not,
     True,
     False,
+    /// `None`. Named `NoneKw`: a variant `None` would shadow `Option::None` under `use Token::*`.
+    NoneKw,
     /// `where` — the generic-bound clause keyword (`fn f[T]() where T: Comparable`). A full keyword
     /// (corpus-safe: no `.chz` uses `where` as a bare identifier). Introduces a comma-separated list
     /// of `IDENT (: bound (+ bound)*)` entries after a fn/native-fn signature; the checker merges
@@ -469,6 +471,11 @@ impl fmt::Display for LexError {
     }
 }
 
+/// The spelling of the `None` keyword: the absent value, the void type, and the name of the
+/// prelude variant it denotes. Its `KEYWORDS` row is the one owner of that fact; later phases read
+/// the node the parser builds from the token and never test this spelling.
+pub const NONE: &str = "None";
+
 /// The single source of truth for the language's keyword surface: every reserved word paired with
 /// the [`Token`] it lexes to. `keyword()` looks itself up here, and the editor tooling (the VSCode
 /// TextMate grammar generator and the LSP semantic-token lengths) derives the keyword set from this
@@ -509,6 +516,7 @@ pub const KEYWORDS: &[(&str, Token)] = &[
     ("not", Token::Not),
     ("true", Token::True),
     ("false", Token::False),
+    (NONE, Token::NoneKw),
     ("where", Token::Where),
 ];
 
@@ -3119,7 +3127,7 @@ mod tests {
             "fn", "return", "if", "else", "elif", "for", "while", "in", "break", "continue",
             "pass", "struct", "enum", "protocol", "type", "match", "recover", "defer", "assert",
             "test", "spawn", "parallel", "wait", "yield", "import", "extern", "from", "as", "and",
-            "or", "not", "true", "false",
+            "or", "not", "true", "false", "None",
         ] {
             assert!(
                 KEYWORDS.iter().any(|(k, _)| *k == w),
