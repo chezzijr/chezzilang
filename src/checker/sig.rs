@@ -1936,6 +1936,7 @@ impl Checker {
                                 Some("did you mean 'None'?".to_string())
                             } else {
                                 suggest::did_you_mean(n, &self.type_names())
+                                    .or_else(|| suggest::removed_type_hint(n))
                             };
                             self.error_help(at, msg, help);
                         }

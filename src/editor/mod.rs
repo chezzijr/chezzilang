@@ -2566,4 +2566,44 @@ mod tests {
         );
         assert_eq!(a.message, e.message);
     }
+
+    /// TICKET-228 (D6) — the prelude still spells the long names in its code; every reader of it
+    /// must keep parsing it, this one from source text alone.
+    #[test]
+    fn prelude_source_gets_a_semantic_overlay() {
+        let src = crate::resolver::std_embed::lookup("prelude.chz").unwrap();
+        assert!(!semantic_overlay(src).is_empty());
+    }
+
+    /// TICKET-228 (D6) — hover and diagnostics print a carrier as the user writes it.
+    #[test]
+    fn hover_and_diagnostics_name_no_removed_spelling() {
+        fn clean(text: &str) {
+            let hit = text
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .find(|w| ["Option", "Result", "Some", "Ok", "Err"].contains(w));
+            assert_eq!(hit, None, "{text}");
+        }
+        let cells = [
+            ("xs := [1]\ny := xs.pop()\n", 1, 8, "fn() -> int?"),
+            ("xs := [1]\ny := xs.pop()\n", 1, 0, "int?"),
+            (
+                "fn f() -> int!str:\n    return 1\nz := f()\n",
+                2,
+                5,
+                "fn() -> int!str",
+            ),
+            ("p := \"1\".parse_int()\n", 0, 9, "fn() -> int!str"),
+        ];
+        for (src, line, ch, want) in cells {
+            let h = hov(src, line, ch).unwrap_or_else(|| panic!("no hover: {src}"));
+            assert_eq!(h.display, want, "{src}");
+            clean(&h.display);
+            clean(h.doc.as_deref().unwrap_or(""));
+        }
+        let ds = diag("x: option = 1\n");
+        assert_eq!(ds.len(), 1, "{ds:?}");
+        assert!(ds[0].message.contains("`T?`"), "{}", ds[0].message);
+        clean(&ds[0].message);
+    }
 }

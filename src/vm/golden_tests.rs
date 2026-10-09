@@ -5958,7 +5958,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ), // `?` inside main, main() itself is a bare discarded drop → no exit
     // a user enum shadowing `Err` is a normal value: bare one must NOT exit, `?` must reject it
     (
-        "enum Signal:\n    Err(int)\n    Quiet\nErr(5)\nprint(\"made it\")",
+        "enum Signal:\n    Err(int)\n    Quiet\nSignal.Err(5)\nprint(\"made it\")",
         Ok("made it\n"),
     ),
     (

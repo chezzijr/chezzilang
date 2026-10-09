@@ -192,6 +192,42 @@ pub fn parse_expr(tokens: Vec<Tok>) -> PResult<Expr> {
 /// Parses one `<item>`: the parser [`Parser::item_keyword`] pairs with an item keyword.
 type ItemParser = fn(&mut Parser) -> PResult<StmtKind>;
 
+/// TICKET-228 (D6) — the long carrier spellings removed from the surface: (name, the prelude enum
+/// that owns it, the message a bare use gets, the near-miss hint of a TYPE name). The enums stay
+/// inside the compiler; [`Parser::reject_removed_name`] is the one place a bare use is rejected.
+pub const REMOVED_NAMES: [(&str, &str, &str, Option<&str>); 5] = [
+    (
+        "Option",
+        "Option",
+        "`Option` is removed; write `T?` for the type and `None` for the absent value",
+        Some("an optional type is written `T?`"),
+    ),
+    (
+        "Result",
+        "Result",
+        "`Result[T, E]` is removed; write `T!E` (`None!E` when there is no value)",
+        Some("a fallible type is written `T!E`"),
+    ),
+    (
+        "Some",
+        "Option",
+        "`Some(x)` is removed; write `x` or `?x` (pattern `?v`)",
+        None,
+    ),
+    (
+        "Ok",
+        "Result",
+        "`Ok(x)` is removed; write `x` or `?x` (pattern `?v`); for `Ok()` fall off the end or write a bare `return`",
+        None,
+    ),
+    (
+        "Err",
+        "Result",
+        "`Err(e)` is removed; write `!e` (pattern `!e`)",
+        None,
+    ),
+];
+
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
@@ -211,16 +247,41 @@ struct Parser {
     /// Empty for `parse` (so every existing caller gets `doc = None`); populated by `parse_with_docs`
     /// from the lexer side-channel. Consulted by `doc_above` at each declaration's keyword line.
     docs: std::collections::HashMap<usize, String>,
+    /// The enums this module declares as a `native enum`. A module that declares the owner of a
+    /// removed name may still spell it; that is how `std/prelude.chz` parses for every reader. It
+    /// is no user escape: the checker rejects a `native enum` outside the standard library.
+    native_enums: Vec<String>,
 }
 
 impl Parser {
     fn new(toks: Vec<Tok>) -> Self {
+        let native_enums = toks
+            .windows(3)
+            .filter_map(|w| match (&w[0].kind, &w[1].kind, &w[2].kind) {
+                (Token::Native, Token::Enum, Token::Ident(n)) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
         Parser {
             toks,
             pos: 0,
             depth: 0,
             fold_depth: 0,
             docs: std::collections::HashMap::new(),
+            native_enums,
+        }
+    }
+
+    /// TICKET-228 (D6) — reject a removed long carrier name read as a BARE name (expression
+    /// primary, type head, pattern head, import). A name after `.`, a declaration name, a field
+    /// and a keyword-argument label never reach here, so a user variant `Shadow.Some` stays legal.
+    fn reject_removed_name(&self, name: &str, span: Span) -> PResult<()> {
+        match REMOVED_NAMES.iter().find(|row| row.0 == name) {
+            Some(row) if !self.native_enums.iter().any(|n| n == row.1) => Err(ParseError {
+                message: row.2.to_string(),
+                span,
+            }),
+            _ => Ok(()),
         }
     }
 
@@ -2071,6 +2132,7 @@ impl Parser {
         // below) for the decl-site hover. A qualified/variant pattern ignores it.
         let name_span = self.cur_span();
         let name = self.expect_ident()?;
+        self.reject_removed_name(&name, name_span)?;
         // `Enum.Variant` — a qualified variant pattern. The first ident is the enum qualifier; the
         // ident after `.` is the variant. A qualified pattern is always a variant (never a binding),
         // even in a sub-position. A THIRD ident after a second `.` (`module.Enum.Variant`) shifts the
@@ -2359,6 +2421,7 @@ impl Parser {
             loop {
                 let member_span = self.cur_span();
                 let name = self.expect_ident()?;
+                self.reject_removed_name(&name, member_span)?;
                 let (alias, bound_span) = if self.eat(&Token::As) {
                     let alias_span = self.cur_span();
                     (Some(self.expect_ident()?), alias_span)
@@ -2372,7 +2435,11 @@ impl Parser {
                 }
             }
             self.expect(&Token::From)?;
+            let from_span = self.cur_span();
             let path = self.parse_dotted_path()?;
+            if let Some(first) = path.first() {
+                self.reject_removed_name(first, from_span)?;
+            }
             Ok(Import::From {
                 path,
                 names,
@@ -2555,6 +2622,7 @@ impl Parser {
         }
         let name_span = self.cur_span();
         let name = self.expect_ident()?;
+        self.reject_removed_name(&name, name_span)?;
         // A module-qualified type `module.Type` (mirrors how `module.func()` is reached): after the
         // first ident, a `.` introduces the type's name in the bound module. A longer path
         // (`pkg.deep.Point`) is the full path of an imported module (TICKET-175): the LAST segment is
@@ -3267,7 +3335,10 @@ impl Parser {
             Token::RawStr(s) => ExprKind::RawStr(s),
             Token::True => ExprKind::Bool(true),
             Token::False => ExprKind::Bool(false),
-            Token::Ident(name) => ExprKind::Ident(name),
+            Token::Ident(name) => {
+                self.reject_removed_name(&name, span)?;
+                ExprKind::Ident(name)
+            }
             Token::LParen => {
                 // `()` stays unchanged (no inner expr → falls through to the error path below);
                 // `(e)` is grouping; `(e1, e2, …)` is a tuple; `(e,)` is a parse error.
@@ -5940,9 +6011,9 @@ mod tests {
 
     #[test]
     fn type_apply_turbofish_at_type() {
-        // Multi-type-arg turbofish on the TYPE: `Result[int, str].Ok(5)` parses as a Call whose
+        // Multi-type-arg turbofish on the TYPE: `Pair[int, str].Mk(5)` parses as a Call whose
         // callee is a Field over a type-only `Index` carrying the parsed types.
-        let StmtKind::Expr(e) = only("Result[int, str].Ok(5)\n") else {
+        let StmtKind::Expr(e) = only("Pair[int, str].Mk(5)\n") else {
             panic!()
         };
         let ExprKind::Call { callee, args, .. } = e.kind else {
@@ -5952,7 +6023,7 @@ mod tests {
         let ExprKind::Field { obj, name, .. } = callee.kind else {
             panic!("expected Field callee, got {:?}", callee.kind)
         };
-        assert_eq!(name, "Ok");
+        assert_eq!(name, "Mk");
         let ExprKind::Index {
             obj: head,
             index: None,
@@ -5961,7 +6032,7 @@ mod tests {
         else {
             panic!("expected a type-only Index obj, got {:?}", obj.kind)
         };
-        assert!(matches!(&head.kind, ExprKind::Ident(n) if n == "Result"));
+        assert!(matches!(&head.kind, ExprKind::Ident(n) if n == "Pair"));
         assert_eq!(args.len(), 2);
 
         // Single-type-arg in CALL position stays on the Index path (no comma to disambiguate):
@@ -6788,12 +6859,12 @@ mod tests {
         );
 
         // Deeply nested match-arm patterns (the un-guarded fifth entry point): deep VARIANT
-        // payload nesting `Some(Some(...))` and deep TUPLE nesting `((( ... )))`, both inside a
+        // payload nesting `E.S(E.S(...))` and deep TUPLE nesting `((( ... )))`, both inside a
         // `match` scrutinee context (a bare `(((...)))` would route through parse_bp — the wrong
         // guard). Before the guard these overflow the native stack (SIGABRT); after, a clean error.
         let variant_pat = format!(
             "x := match o:\n    {}0{}: 1\n    _: 0\n",
-            "Some(".repeat(n),
+            "E.S(".repeat(n),
             ")".repeat(n)
         );
         assert!(
@@ -7117,7 +7188,7 @@ mod tests {
                 Box::new(|n| {
                     format!(
                         "x := match o:\n    {}0{}: 1\n    _: 0\n",
-                        "Some(".repeat(n),
+                        "E.S(".repeat(n),
                         ")".repeat(n)
                     )
                 }),

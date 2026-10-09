@@ -22704,3 +22704,30 @@ fn standalone_path_lowers_carrier_patterns_like_the_graph_path() {
         assert_eq!(super::golden_tests::golden_entry(src), want, "graph: {src}");
     }
 }
+
+/// TICKET-228 (D6) — no runtime text (print, str, interpolation, a container element, an assert
+/// or fault message, `recover:` text) names a removed spelling.
+#[test]
+fn runtime_text_names_no_removed_spelling() {
+    let show = "print(x)\nprint(\"{x}\")\nprint(str(x))\nprint([x])\nprint({\"k\": x})\n";
+    let progs = [
+        format!("x: int? = 1\n{show}"),
+        format!("x: int? = None\n{show}"),
+        format!("x: int!str = !\"bad\"\n{show}"),
+        format!("x: int!str = 2\n{show}"),
+        "x: int? = 1\nassert x == None\n".to_string(),
+        "x := recover: panic(\"p\")\nprint(x)\nprint([x])\n".to_string(),
+        "fn f() -> int!str:\n    return !\"bad\"\nv := f()?\nprint(v)\n".to_string(),
+    ];
+    for src in &progs {
+        let text = match run_capture(src) {
+            Ok(out) => out,
+            Err(e) => e.message,
+        };
+        let hit = text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .find(|w| ["Option", "Result", "Some", "Ok", "Err"].contains(w));
+        assert_eq!(hit, None, "{src}\n-> {text}");
+        assert!(!text.is_empty(), "{src}");
+    }
+}

@@ -51,6 +51,15 @@ pub(super) fn score(lookup: &str, cand: &str, limit: usize) -> Option<usize> {
     edit_distance(lookup, cand, limit)
 }
 
+/// TICKET-228 (D6) — the help for a near miss of a removed TYPE name (`option`, `Resul`): the
+/// replacement spelling, never the removed word. Reads the parser's one table of removed names.
+pub(super) fn removed_type_hint(lookup: &str) -> Option<String> {
+    crate::parser::REMOVED_NAMES.iter().find_map(|row| {
+        let hint = row.3?;
+        did_you_mean(lookup, &[row.0.to_string()]).map(|_| hint.to_string())
+    })
+}
+
 /// Find the best-scoring candidate for `lookup` among `candidates`, in the given order, or an
 /// exact case-insensitive match. Ties break on candidate order — callers that want a
 /// deterministic result over a `HashMap`-backed table must sort `candidates` first.

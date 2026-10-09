@@ -1,9 +1,11 @@
-//! TICKET-229 (R3, R3b): `Option` / `Result` are the prelude's ordinary enums, and an enum variant
-//! is a bare name exactly where an `import V from Enum` binds it. Every C cell runs twice: once
+//! TICKET-229 (R3, R3b): the optional / error carriers are the prelude's ordinary enums, and an
+//! enum variant is a bare name exactly where an `import V from Enum` binds it. Every C cell runs
 //! over two user enums shaped like the carriers (`Opt1[T]`, `Res2[T, E]`, with the same two variant
-//! imports the prelude declares), and once over the carriers, by whole-word substitution of the
-//! program AND its expectation. The user twin is the oracle the carrier twin must equal. The V
-//! cells pin variant import itself. One generated program per cell, run through the built `chezzi`
+//! imports the prelude declares). A C cell whose fact has a spelling on the carrier surface (`T?`,
+//! `T!E`, `?x`, `!e`, patterns `?v` / `!e` / `None`) runs a second time in that spelling; the user
+//! twin is the oracle the carrier twin must equal. A cell whose subject is a long name (a qualified
+//! or type-applied constructor, a constructor as a fn value, an alias head) has no carrier twin
+//! since TICKET-228 removed those names. The V cells pin variant import itself. One generated program per cell, run through the built `chezzi`
 //! binary.
 
 #[path = "support/grid_cell.rs"]
@@ -84,22 +86,24 @@ fn expect_of(w: &Want, carrier: bool) -> Expect {
     }
 }
 
-/// A twin cell: `main` after the preamble (user twin) or alone (carrier twin).
-fn twin(cells: &mut Vec<Cell>, name: &str, main: &str, want: Want) {
+/// A twin cell: `main` after the preamble (user twin), and `carrier`, the same fact in the carrier
+/// surface, alone (carrier twin). `None` when the fact has no spelling there.
+fn twin(cells: &mut Vec<Cell>, name: &str, main: &str, carrier: Option<&str>, want: Want) {
     cells.push(Cell {
         name: format!("{name} user"),
         files: vec![("main.chz".to_string(), format!("{ENUMS}{IMPORTS}{main}"))],
         expect: expect_of(&want, false),
     });
-    cells.push(Cell {
-        name: format!("{name} carrier"),
-        files: vec![("main.chz".to_string(), to_carrier(main))],
-        expect: expect_of(&want, true),
-    });
+    if let Some(src) = carrier {
+        cells.push(Cell {
+            name: format!("{name} carrier"),
+            files: vec![("main.chz".to_string(), src.to_string())],
+            expect: expect_of(&want, true),
+        });
+    }
 }
 
-/// A twin cell whose enum lives behind `lib.chz`: the user twin's lib declares the two enums, the
-/// carrier twin's lib holds only `lib_tail`. The main file has no preamble in either twin.
+/// A user cell whose enum lives behind `lib.chz`, which declares the two enums and `lib_tail`.
 fn twin_lib(cells: &mut Vec<Cell>, name: &str, lib_tail: &str, main: &str, want: Want) {
     cells.push(Cell {
         name: format!("{name} user"),
@@ -108,14 +112,6 @@ fn twin_lib(cells: &mut Vec<Cell>, name: &str, lib_tail: &str, main: &str, want:
             ("lib.chz".to_string(), format!("{ENUMS}{lib_tail}")),
         ],
         expect: expect_of(&want, false),
-    });
-    cells.push(Cell {
-        name: format!("{name} carrier"),
-        files: vec![
-            ("main.chz".to_string(), to_carrier(main)),
-            ("lib.chz".to_string(), to_carrier(lib_tail)),
-        ],
-        expect: expect_of(&want, true),
     });
 }
 
@@ -141,30 +137,37 @@ fn carrier_enum_grid() {
         c,
         "C1 qualified call",
         "print(Opt1.Som(5), Res2.Okk(5), Res2.Errr(\"x\"))\n",
+        None,
         PrintsAs("Som(5) Okk(5) Errr('x')", "5 5 !x"),
     );
     twin(
         c,
         "C2 qualified nullary",
         "print(Opt1.Non)\n",
+        None,
         Prints("Non"),
     );
     twin(
         c,
         "C3 type-applied",
         "print(Opt1[int].Som(5), Opt1[int].Non, Res2[int, str].Okk(5), Res2[int, str].Errr(\"x\"))\n",
+        None,
         PrintsAs("Som(5) Non Okk(5) Errr('x')", "5 None 5 !x"),
     );
     twin(
         c,
         "C4 bare imported",
         "print(Som(5), Non, Okk(5), Errr(\"x\"))\n",
+        Some(
+            "a: int? = ?5\nb: int? = None\nc: int!str = ?5\nd: int!str = !\"x\"\nprint(a, b, c, d)\n",
+        ),
         PrintsAs("Som(5) Non Okk(5) Errr('x')", "5 None 5 !x"),
     );
     twin(
         c,
         "C5 HOF",
         "print([1, 2].map(Som), [1, 2].map(Opt1.Som), [1, 2].map(Opt1[int].Som))\n",
+        None,
         PrintsAs(
             "[Som(1), Som(2)] [Som(1), Som(2)] [Som(1), Som(2)]",
             "[1, 2] [1, 2] [1, 2]",
@@ -174,18 +177,21 @@ fn carrier_enum_grid() {
         c,
         "C6 annotated value",
         "f: fn(int) -> Opt1[int] = Som\nprint(f(3))\n",
+        None,
         PrintsAs("Som(3)", "3"),
     );
     twin(
         c,
         "C7 pinned by a later use",
         "fn main():\n    f := Som\n    print(f(3))\nmain()\n",
+        None,
         PrintsAs("Som(3)", "3"),
     );
     twin(
         c,
         "C8 unpinned value",
         "fn main():\n    f := Som\n    print(1)\nmain()\n",
+        None,
         Rejects("is generic and T is not determined here"),
     );
 
@@ -194,24 +200,28 @@ fn carrier_enum_grid() {
         c,
         "C9 bare pattern",
         "v: Opt1[int] = Som(3)\nmatch v:\n    Som(n): print(n)\n    Non: print(0)\n",
+        Some("v: int? = ?3\nmatch v:\n    ?n: print(n)\n    None: print(0)\n"),
         Prints("3"),
     );
     twin(
         c,
         "C10 qualified pattern",
         "v: Opt1[int] = Som(3)\nmatch v:\n    Opt1.Som(n): print(n)\n    Opt1.Non: print(0)\n",
+        None,
         Prints("3"),
     );
     twin(
         c,
         "C11 two-parameter pattern",
         "r: Res2[int, str] = Errr(\"e\")\nmatch r:\n    Okk(n): print(n)\n    Errr(e): print(e)\n",
+        Some("r: int!str = !\"e\"\nmatch r:\n    ?n: print(n)\n    !e: print(e)\n"),
         Prints("e"),
     );
     twin(
         c,
         "C12 exhaustiveness",
         "v: Opt1[int] = Som(3)\nmatch v:\n    Som(n): print(n)\n",
+        Some("v: int? = ?3\nmatch v:\n    ?n: print(n)\n"),
         RejectsAs(
             "non-exhaustive match on Opt1: missing Non",
             "non-exhaustive match on int?: missing None",
@@ -221,6 +231,7 @@ fn carrier_enum_grid() {
         c,
         "C13 exhaustiveness, two parameters",
         "r: Res2[int, str] = Okk(1)\nmatch r:\n    Okk(n): print(n)\n",
+        Some("r: int!str = ?1\nmatch r:\n    ?n: print(n)\n"),
         RejectsAs(
             "non-exhaustive match on Res2: missing Errr",
             "non-exhaustive match on int!str: missing !_",
@@ -230,6 +241,9 @@ fn carrier_enum_grid() {
         c,
         "C14 nested",
         "w: Opt1[Opt1[int]] = Som(Non)\nmatch w:\n    Som(Non): print(1)\n    Som(Som(n)): print(n)\n    Non: print(0)\n",
+        Some(
+            "w: int?? = ?None\nmatch w:\n    ?None: print(1)\n    ?(?n): print(n)\n    None: print(0)\n",
+        ),
         Prints("1"),
     );
 
@@ -238,27 +252,31 @@ fn carrier_enum_grid() {
         c,
         "C15 no int-to-float payload",
         "x: Opt1[float] = Som(1)\n",
+        Some("x: float? = ?1\n"),
         Rejects("write 1.0"),
     );
     twin(
         c,
         "C16 arity",
         "print(Som(1, 2))\n",
+        None,
         Rejects("Som() expects 1 argument(s), got 2"),
     );
     twin(
         c,
         "C17 payload mismatch",
         "x: Opt1[int] = Som(\"s\")\n",
+        Some("x: int? = ?\"s\"\n"),
         RejectsAs(
             "cannot assign Opt1[str] to variable of type Opt1[int]",
-            "cannot assign str? to variable of type int?",
+            "'?' value: expected int, found str",
         ),
     );
     twin(
         c,
         "C18 the payload hint is a seed only",
         "x: Opt1[Opt1[int]] = Som(5)\n",
+        Some("fn have(n: int) -> int?:\n    return n\nx: int?? = have(5)\n"),
         RejectsAs(
             "cannot assign Opt1[int] to variable of type Opt1[Opt1[int]]",
             "cannot assign int? to variable of type int??",
@@ -269,12 +287,14 @@ fn carrier_enum_grid() {
         c,
         "C30 a nullary variant is not callable",
         "x: Opt1[int] = Non(1)\n",
+        Some("x: int? = None(1)\n"),
         Rejects("is not callable"),
     );
     twin(
         c,
         "C19 nested witness",
         "w: Opt1[Opt1[int]] = Som(Non)\nmatch w:\n    Som(Som(n)): print(n)\n    Non: print(0)\n",
+        Some("w: int?? = ?None\nmatch w:\n    ?(?n): print(n)\n    None: print(0)\n"),
         RejectsAs(
             "pattern `Som(Non)` is not covered",
             "pattern `?None` is not covered",
@@ -284,6 +304,7 @@ fn carrier_enum_grid() {
         c,
         "C20 nested witness, two parameters",
         "r: Res2[Res2[int, str], str] = Okk(Errr(\"x\"))\nmatch r:\n    Okk(Okk(n)): print(n)\n    Errr(e): print(e)\n",
+        Some("r: (int!str)!str = ?(!\"x\")\nmatch r:\n    ?(?n): print(n)\n    !e: print(e)\n"),
         RejectsAs(
             "pattern `Okk(Errr(_))` is not covered",
             "pattern `?(!_)` is not covered",
@@ -295,36 +316,42 @@ fn carrier_enum_grid() {
         c,
         "C21 alias value",
         "type F = Opt1[int]\nprint(F.Som(1))\n",
+        None,
         PrintsAs("Som(1)", "1"),
     );
     twin(
         c,
         "C22 alias nullary",
         "type F = Opt1[int]\nprint(F.Non)\n",
+        None,
         Prints("Non"),
     );
     twin(
         c,
         "C23 alias pattern",
         "type F = Opt1[int]\nv: F = Opt1.Som(3)\nmatch v:\n    F.Som(n): print(n)\n    F.Non: print(0)\n",
+        None,
         Prints("3"),
     );
     twin(
         c,
         "C24 alias of a two-parameter enum",
         "type G = Res2[int, str]\nprint(G.Okk(1), G.Errr(\"x\"))\n",
+        None,
         PrintsAs("Okk(1) Errr('x')", "1 !x"),
     );
     twin(
         c,
         "C25 an alias pins its type argument",
         "type F = Opt1[int]\nx: F = F.Som(\"s\")\n",
+        None,
         Rejects("has type str, expected int"),
     );
     twin(
         c,
         "C26 alias variant as a fn value",
         "type F = Opt1[int]\nprint([1, 2].map(F.Som))\nf := F.Som\nprint(f(3))\n",
+        None,
         PrintsAs("[Som(1), Som(2)]\nSom(3)", "[1, 2]\n3"),
     );
     twin_lib(
@@ -345,6 +372,9 @@ fn carrier_enum_grid() {
         c,
         "C29 a protocol-bound miss reads the method table",
         "protocol Default:\n    fn default() -> Self\nfn mk[T: Default]() -> T:\n    return T.default()\nx := mk[Opt1[int]]()\n",
+        Some(
+            "protocol Default:\n    fn default() -> Self\nfn mk[T: Default]() -> T:\n    return T.default()\nx := mk[int?]()\n",
+        ),
         Rejects("does not satisfy Default (missing method 'default')"),
     );
 
@@ -431,7 +461,7 @@ fn carrier_enum_grid() {
         &[
             (
                 "main.chz",
-                "print(Some(1), None, Ok(2), Err(\"x\"))\nv: Option[int] = Some(3)\nmatch v:\n    Some(n): print(n)\n    None: print(0)\n",
+                "a: int? = 1\nb: int? = None\nc: int!str = 2\nd: int!str = !\"x\"\nprint(a, b, c, d)\nv: int? = ?3\nmatch v:\n    ?n: print(n)\n    None: print(0)\n",
             ),
             ("Option.chz", "fn helper() -> int:\n    return 7\n"),
             ("Result.chz", "fn helper() -> int:\n    return 8\n"),
@@ -440,19 +470,19 @@ fn carrier_enum_grid() {
     );
     only(
         c,
-        "V10 a user fn shadows a prelude variant",
+        "V10 a user fn named like a removed name cannot be called bare",
         &[(
             "main.chz",
             "fn Some(x: int) -> int:\n    return x + 1\nprint(Some(1))\n",
         )],
-        Prints("2"),
+        Rejects("`Some(x)` is removed; write `x` or `?x`"),
     );
     only(
         c,
         "V11 a global and a local shadow a prelude variant",
         &[(
             "main.chz",
-            "None := 5\nprint(None)\nfn main():\n    Ok := 3\n    print(Ok)\nmain()\n",
+            "None := 5\nprint(None)\nfn main():\n    None := 3\n    print(None)\nmain()\n",
         )],
         Prints("5\n3"),
     );
@@ -461,18 +491,18 @@ fn carrier_enum_grid() {
         "V12 a user variant named like a carrier variant stays qualified",
         &[(
             "main.chz",
-            "enum E:\n    Some(int)\n    Other\nprint(E.Some(1))\nv: Option[int] = Some(2)\nprint(v)\n",
+            "enum E:\n    Some(int)\n    Other\nprint(E.Some(1))\nv: int? = ?2\nprint(v)\n",
         )],
         Prints("Some(1)\n2"),
     );
     only(
         c,
-        "V13 an explicit import may not rebind a prelude variant name",
+        "V13 an explicit import may not bind a removed name",
         &[(
             "main.chz",
             "enum Mine:\n    Some(int)\n    Nada\nimport Some, Nada from Mine\n",
         )],
-        Rejects("'Some' is already imported from Option by the prelude"),
+        Rejects("`Some(x)` is removed; write `x` or `?x`"),
     );
     only(
         c,

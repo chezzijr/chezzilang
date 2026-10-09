@@ -8703,12 +8703,14 @@ fn nested_fn_shadows_struct_ctor_accepted() {
     );
 }
 
-/// A nested fn named after a BUILTIN variant ctor (`Ok`/`Err`/`Some`/`None`) is accepted as a local.
+/// TICKET-228 (D6) — a nested fn may still be DECLARED with a removed carrier name, but the name is
+/// reserved in bare-use position, so calling it bare gets the removal message.
 #[test]
-fn nested_fn_shadows_builtin_variant_accepted() {
-    entry_ok(
-        "fn outer() -> int:\n    fn Ok() -> int:\n        return 99\n    return Ok()\nprint(outer())\n",
-    );
+fn nested_fn_named_after_a_removed_name_cannot_be_called_bare() {
+    let src = "fn outer() -> int:\n    fn Ok() -> int:\n        return 99\n    return Ok()\nprint(outer())\n";
+    let err = parser::parse(lexer::tokenize(src).unwrap()).unwrap_err();
+    assert_eq!(err.span.line, 4, "{err}");
+    assert!(err.message.contains("`Ok(x)` is removed"), "{err}");
 }
 
 // SOUNDNESS: an inferred (un-annotated) struct method return must FLOW to call sites through the
@@ -10815,8 +10817,8 @@ fn reserved_module_bind_alias_escape_hatch() {
 /// reserved builtin (`import Shared from std.concurrency`) are untouched.
 #[test]
 fn reserved_from_import_member_rejected() {
-    let sh = ("lib/sh.chz", "str := 5\nOk := 7\nint := 9\n");
-    for member in ["str", "Ok", "int"] {
+    let sh = ("lib/sh.chz", "str := 5\nint := 9\n");
+    for member in ["str", "int"] {
         files_reject(
             &[
                 sh,
@@ -10828,21 +10830,16 @@ fn reserved_from_import_member_rejected() {
             "reserved (builtin)",
         );
     }
-    // a FUNCTION member with a reserved-variant name (`fn Ok` is legal at its decl site) is the same
-    // hazard — today the builtin ctor silently wins and the import is dead code.
-    files_reject(
-        &[
-            ("lib/fo.chz", "fn Ok(x: int) -> int:\n    return x\n"),
-            ("main.chz", "import Ok from lib.fo\nprint(Ok(5))\n"),
-        ],
-        "reserved (builtin)",
-    );
+    // A member named by a removed carrier name (`fn Ok` is legal at its decl site) cannot be
+    // imported: the parser rejects the bare name (TICKET-228, `tests/removed_names_grid.rs`).
+    let err = parser::parse(lexer::tokenize("import Ok from lib.fo\n").unwrap()).unwrap_err();
+    assert!(err.message.contains("`Ok(x)` is removed"), "{err}");
     // escape hatch + no over-rejection: alias it, and the builtins it would have shadowed still work.
     files_ok(&[
         sh,
         (
             "main.chz",
-            "import str as s, Ok as k from lib.sh\nprint(s + k)\nprint(str(5))\nr: Result[int, str] = Ok(1)\nprint(r)\n",
+            "import str as s, int as k from lib.sh\nprint(s + k)\nprint(str(5))\nr: int!str = int(\"1\")\nprint(r)\n",
         ),
     ]);
     // the reserved TYPE members that LICENSE a builtin still import un-aliased.
@@ -16090,20 +16087,20 @@ fn iterator_bound_unknown_element_type_rejected() {
 
 #[test]
 fn iterator_adapter_element_mismatch_rejected() {
-    // `self.inner.next()` is `T?`; returning a literal `Some(\"x\")` (str) where the declared return
-    // is `T?` is caught once `T` is pinned — guards the element typing of `.next()`.
+    // `self.inner.next()` is `T?`; returning a literal `?\"x\"` (str) where the declared return
+    // is `T?` is caught — guards the element typing of `.next()`.
     let src = "\
 struct Bad[I: Iterator[T], T]:
     inner: I
     fn next(self) -> T?:
-        return Some(\"x\")
+        return ?\"x\"
 fn main():
     b := Bad([1, 2, 3].iter())
     for x in b:
         print(x)
 main()
 ";
-    rejects(src, "expected return type T?, found str?");
+    rejects(src, "'?' value: expected T, found str");
 }
 
 // ===== slicing + Index/IndexSet/Slice protocols =====
@@ -18895,10 +18892,10 @@ fn nested_nullary_wrong_type_rejected() {
 
 #[test]
 fn non_nullary_variant_without_payload_rejected() {
-    // A nested non-nullary variant used without its payload — `Some` requires `Some(...)`.
+    // A nested non-nullary variant used without its payload — `E.A` requires `E.A(...)`.
     rejects(
-        "oo: int?? = ?(?3)\nmatch oo:\n    ?Some: print(0)\n    _: print(1)\n",
-        "requires its payload",
+        "enum E:\n    A(int)\n    B\noo: E? = ?E.B\nmatch oo:\n    ?E.A: print(0)\n    _: print(1)\n",
+        "variant 'A' binds 1 value(s), but 0 given",
     );
 }
 
@@ -33035,10 +33032,6 @@ fn ticket_107_bare_variant_names_stay_rejected_on_enum_scrutinees() {
         "'None' is not a variant of E",
     );
     rejects(
-        "fn f(o: int?) -> int:\n    match o:\n        Ok: return 1\n        _: return 2\n",
-        "'Ok' is not a variant of int?",
-    );
-    rejects(
         "enum E:\n    A\n    B\n\nfn f(e: E) -> int:\n    match e:\n        A: return 1\n        _: return 2\n",
         "'A' is a variant of enum 'E'; write it qualified as 'E.A'",
     );
@@ -37901,15 +37894,7 @@ fn bang_prefix_without_a_pinning_use_is_rejected() {
 #[test]
 fn carrier_variants_resolve_like_user_enums() {
     ok(
-        "fn main():\n    x := ?5\n    y := None\n    z := ?1\n    f := Some\n    print(f(1))\n    w := [1, 2].map(Some)\n",
-    );
-}
-
-#[test]
-fn an_unpinned_carrier_variant_value_is_rejected_like_a_user_one() {
-    rejects(
-        "fn main():\n    f := Some\n    print(1)\n",
-        "is generic and T is not determined here",
+        "fn main():\n    x := ?5\n    y := None\n    z := ?1\n    print(x)\n    print(y)\n    print(z)\n",
     );
 }
 
@@ -39088,4 +39073,88 @@ fn variant_pattern_on_a_non_enum_scrutinee_is_rejected() {
         "enum E:\n    A(int)\n    B\nfn main():\n    match 5:\n        E.A(x): print(x)\n        _: print(0)\nmain()\n",
         "cannot match a variant against int",
     );
+}
+
+/// TICKET-228 (D6) — no near-miss help offers a removed name. A near miss of a removed TYPE name
+/// names the replacement; a near miss of a removed value name gets no help.
+#[test]
+fn near_miss_offers_no_removed_spelling() {
+    let help_of = |src: &str, msg: &str| -> Option<String> {
+        let errs = check_src(src);
+        assert_eq!(errs.len(), 1, "{src}: {errs:?}");
+        assert!(errs[0].message.contains(msg), "{src}: {errs:?}");
+        errs[0].help.clone()
+    };
+    let opt = Some("an optional type is written `T?`".to_string());
+    assert_eq!(help_of("x: option = 1\n", "unknown type 'option'"), opt);
+    assert_eq!(help_of("x: Optoin = 1\n", "unknown type 'Optoin'"), opt);
+    assert_eq!(
+        help_of(
+            "fn f(x: Resul) -> int:\n    return 1\n",
+            "unknown type 'Resul'"
+        ),
+        Some("a fallible type is written `T!E`".to_string())
+    );
+    assert_eq!(
+        help_of("x: Eror = 3\n", "unknown type 'Eror'"),
+        Some("did you mean 'Error'?".to_string())
+    );
+    for src in ["x := some(1)\n", "x := Som(1)\n", "y := Er(\"x\")\n"] {
+        assert_eq!(help_of(src, "unknown name"), None, "{src}");
+    }
+    assert_eq!(
+        help_of(
+            "type O = int?\nfn f(x: int?) -> int:\n    match x:\n        O.Som(v): return v\n        _: return 0\n",
+            "enum 'O' has no variant 'Som'"
+        ),
+        None
+    );
+}
+
+/// TICKET-228 (D6) — a carrier alias is a type spelling, never a variant head.
+#[test]
+fn carrier_alias_is_not_a_variant_head() {
+    let o = "type O = int?\n";
+    let r = "type R = int!str\n";
+    let (some, okv, errv) = ("Some", "Ok", "Err");
+    rejects(
+        &format!("{o}x := O.{some}(1)\nprint(x)\n"),
+        "unknown name 'O'",
+    );
+    rejects(&format!("{o}x: O = O.None\nprint(x)\n"), "unknown name 'O'");
+    rejects(
+        &format!("{r}x := R.{errv}(\"a\")\nprint(x)\n"),
+        "unknown name 'R'",
+    );
+    rejects(
+        &format!(
+            "{o}fn f(x: int?) -> int:\n    match x:\n        O.{some}(v): return v\n        _: return 0\n"
+        ),
+        "enum 'O' has no variant 'Some'",
+    );
+    rejects(
+        &format!(
+            "{r}fn f(x: int!str) -> int:\n    match x:\n        R.{okv}(v): return v\n        _: return 0\n"
+        ),
+        "enum 'R' has no variant 'Ok'",
+    );
+    ok(&format!("{o}x: O = 1\nprint(x)\n"));
+    ok(&format!("{r}fn f() -> R:\n    return 1\n"));
+    // A user-enum alias is still a head.
+    ok(
+        "enum E:\n    A(int)\n    B\ntype F = E\nx := F.A(1)\nmatch x:\n    F.A(v): print(v)\n    F.B: print(0)\n",
+    );
+}
+
+/// TICKET-228 (D6) — hover prints these docs; none names a removed spelling.
+#[test]
+fn module_fn_docs_name_no_removed_spelling() {
+    for (module, docs) in super::MODULE_FN_DOCS {
+        for (name, doc) in *docs {
+            let hit = doc
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .find(|w| ["Option", "Result", "Some", "Ok", "Err"].contains(w));
+            assert_eq!(hit, None, "{module}.{name}: {doc}");
+        }
+    }
 }

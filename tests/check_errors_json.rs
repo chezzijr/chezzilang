@@ -1183,3 +1183,20 @@ fn errors_json_prints_carrier_sugar() {
     assert!(stdout.contains("variable of type int??"), "stdout={stdout}");
     assert!(!stdout.contains("Option["), "stdout={stdout}");
 }
+
+/// TICKET-228 (D6) — the near-miss help of a removed type name names the replacement, in the
+/// machine channel too.
+#[test]
+fn near_miss_help_names_no_removed_spelling() {
+    let t = TmpDir::new();
+    let path = t.write("opt.chz", "x: option = 1\n");
+    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .args(["check", path.to_str().unwrap(), "--errors=json"])
+        .output()
+        .expect("run chezzi check --errors=json");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"help\":\"an optional type is written `T?`\""),
+        "got: {stdout}"
+    );
+}

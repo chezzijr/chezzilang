@@ -268,13 +268,13 @@ impl Checker {
 
     /// `ty` when it names a struct/enum whose shape this module can reach (local table or
     /// the owning module's sig), else `None` — a scalar, protocol or container alias body is a type
-    /// spelling, never a constructor head.
+    /// spelling, never a constructor head. A carrier (`T?`, `T!E`) alias body is a type spelling
+    /// too: its variants have no name the user can write.
     fn nominal_alias_target(&self, ty: &Ty) -> Option<Ty> {
         let known = match ty {
             Ty::Struct(k, _) => self.struct_shape(k).is_some(),
-            _ => ty.as_enum().is_some_and(|(k, _)| {
-                self.enums.contains_key(k) || self.owning_enum_def(k).is_some()
-            }),
+            Ty::Enum(k, _) => self.enums.contains_key(k) || self.owning_enum_def(k).is_some(),
+            _ => false,
         };
         known.then(|| ty.clone())
     }
@@ -595,8 +595,6 @@ impl Checker {
                     "List",
                     "Map",
                     "Set",
-                    "Result",
-                    "Option",
                     "Iterator",
                     "Channel",
                     "Error",
