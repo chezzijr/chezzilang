@@ -22810,6 +22810,27 @@ fn the_sched_idle_judge_latches_the_verdict_before_it_flags_a_leaf() {
     assert_eq!(sched.quiesce.run_halt(), RunHalt::Deadlock);
 }
 
+/// TICKET-236 — the latch is set only by a verdict its own licence accepts. A latch never
+/// un-latches (DEC-232), so a verdict latched before a licence that then declines the cut is
+/// irrevocable: the run halts on a deadlock no victim was faulted for.
+#[test]
+fn a_declined_licence_latches_nothing() {
+    let sched = mk_sched(1);
+    let core = empty_core();
+    sched.seed(vec![mk_fiber(0)]);
+    let f0 = take_run(&sched);
+    sched.park(core_key(&core), Arc::clone(&core), f0);
+    let _party = sched.quiesce.block_shared(
+        Arc::new(quiesce::PartyWait::Send(crate::vm::core::Pending::new())),
+        crate::vm::block::WakeSet::default(),
+        Some(("x", Span::RUNTIME)),
+    );
+    assert!(sched.latch_own_verdict(|_| false).is_none());
+    assert_eq!(sched.quiesce.run_halt(), RunHalt::Running);
+    assert!(sched.latch_own_verdict(|_| true).is_some());
+    assert_eq!(sched.quiesce.run_halt(), RunHalt::Deadlock);
+}
+
 /// TICKET-228 — the `no match arm` fault names a carrier by the pattern that matches it.
 #[test]
 fn no_arm_text_prints_pattern_syntax() {

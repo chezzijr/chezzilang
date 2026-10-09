@@ -4194,8 +4194,18 @@ impl MnSched {
             if self.is_deadlocked_given(&c, awaiting_drain) {
                 // TICKET-232 — latch the verdict before any leaf is flagged; the lock is dropped
                 // for it, so the verdict is re-derived under the new hold.
+                // TICKET-236 — the licence is the one `flag_leaves_and_wake` cuts under. `None`
+                // is a declined licence or a moved epoch: wait (timed), never spin on it.
                 drop(c);
-                let Some(relocked) = self.latch_own_verdict() else {
+                let Some(relocked) =
+                    self.latch_own_verdict(|c| c.victims_proven() || self.may_fault_unproven())
+                else {
+                    let (guard, _) = self
+                        .cv
+                        .wait_timeout(self.lock(), DEMOTE_POLL_BACKOFF)
+                        .unwrap_or_else(|e| e.into_inner());
+                    drop(guard);
+                    judged = false;
                     continue;
                 };
                 c = relocked;
@@ -5486,21 +5496,41 @@ impl MnSched {
 
     /// TICKET-232 — THE entry for this sched's own deadlock verdict. Every site that saw
     /// [`MnSched::is_deadlocked`] calls it with NO sched lock held (`parties` is taken before
-    /// `SchedCore`). It calls [`quiesce::QuiesceState::decide`] first, with this sched's own
-    /// report, so the verdict is a run halt before any victim is cut: a flagged leaf unwinds and
-    /// frees what it holds, and a party that then takes it (a ready wait outranks a halt,
-    /// DEC-194) is stopped by the halt. It then re-derives the verdict under a fresh lock and
-    /// hands the guard back when it still holds.
+    /// `SchedCore`). `licence` is the caller's own condition for cutting a victim.
     ///
-    /// The answer of `decide` is not read: a party inside a callback is never registered
+    /// TICKET-236 — the order, inside ONE epoch bracket (`e0`):
+    /// 1. the verdict and its licence, under the sched lock. If either fails, or a waker left
+    ///    the counts since `e0`, nothing is latched. A latch never un-latches (DEC-232), so a
+    ///    verdict latched ahead of a licence that then declined halted a healthy run.
+    /// 2. [`quiesce::QuiesceState::decide_since`], with this sched's own report: the verdict is
+    ///    a run halt before any victim is cut (DEC-232). A flagged leaf unwinds and frees what it
+    ///    holds, and a party that then takes it (a ready wait outranks a halt, DEC-194) is
+    ///    stopped by the halt.
+    /// 3. the verdict, the licence and the epoch again under a fresh lock; the guard is handed
+    ///    back when all three still hold.
+    ///
+    /// The answer of `decide_since` is not read: a party inside a callback is never registered
     /// (`BlockCtx::judged`), so a strict judge would hang its deadlock.
-    fn latch_own_verdict(&self) -> Option<std::sync::MutexGuard<'_, SchedCore>> {
-        self.quiesce.decide(
+    fn latch_own_verdict(
+        &self,
+        licence: impl Fn(&SchedCore) -> bool,
+    ) -> Option<std::sync::MutexGuard<'_, SchedCore>> {
+        let e0 = self.quiesce.left();
+        let holds =
+            |c: &SchedCore| self.is_deadlocked(c) && licence(c) && self.quiesce.left() == e0;
+        {
+            let c = self.lock();
+            if !holds(&c) {
+                return None;
+            }
+        }
+        self.quiesce.decide_since(
+            e0,
             crate::vm::quiesce::Judge::Sched,
             Some((&self.deadlock_err.message, self.deadlock_err.span)),
         );
         let c = self.lock();
-        self.is_deadlocked(&c).then_some(c)
+        holds(&c).then_some(c)
     }
 
     /// TICKET-232 — a wait that detects this sched's deadlock in place: latch the verdict
@@ -5508,7 +5538,7 @@ impl MnSched {
     /// lock, and its next pass returns through the run halt or `terminate`. A new self-detecting
     /// wait calls this, never `SchedCore::flag_deadlock`.
     pub(super) fn fault_own_deadlock(&self) {
-        if let Some(mut c) = self.latch_own_verdict() {
+        if let Some(mut c) = self.latch_own_verdict(|_| true) {
             c.flag_deadlock(&self.deadlock_err);
             drop(c);
             self.notify_waiters();
