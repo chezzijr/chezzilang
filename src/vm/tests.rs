@@ -22732,3 +22732,43 @@ fn spawn_one_line_native_call_that_waits_does_not_panic() {
     let src = "fn main():\n    ch := Channel[int](1)\n    n := 0\n    parallel:\n        for _ in 0..50:\n            spawn ch.send(1)\n        for _ in 0..50:\n            n += ch.recv()\n    print(n)\nmain()\n";
     assert_eq!(run_capture(src).expect("spawn ch.send"), "50\n");
 }
+
+/// TICKET-235 — the receiver and the arguments of a one-line `spawn` are evaluated in the parent,
+/// at the `spawn` (Go's `go f(x)`); only the call runs in the task. Goes red when an operand is
+/// evaluated inside the entry thunk: `body` then prints before `pick`, and the second program
+/// stops reporting the deadlock.
+#[test]
+fn spawn_call_operands_are_evaluated_in_the_parent() {
+    assert_eq!(
+        run_capture("fn pick(c: Channel[int]) -> Channel[int]:\n    print(\"pick\")\n    return c\nfn val() -> int:\n    print(\"val\")\n    return 7\nfn main():\n    ch := Channel[int](1)\n    parallel:\n        spawn pick(ch).send(val())\n        print(\"body\")\n        print(ch.recv())\nmain()\n").unwrap(),
+        "pick\nval\nbody\n7\n"
+    );
+    let e = run_capture("fn main():\n    a := Channel[int](1)\n    parallel:\n        spawn print(a.recv())\n        a.send(1)\nmain()\n")
+        .expect_err("the parent's recv has no sender yet");
+    assert!(
+        e.message.contains("recv on an empty channel: deadlock"),
+        "{}",
+        e.message
+    );
+}
+
+/// TICKET-235 — a fault inside a one-line native spawn names the user's `spawn` line, in the
+/// fault position and in the one trace frame the entry thunk adds. Before the fix the trace was
+/// empty.
+#[test]
+fn a_fault_in_a_one_line_native_spawn_names_the_spawn_line() {
+    let src = "fn main():\n    ch := Channel[int](1)\n    ch.close()\n    parallel:\n        spawn ch.send(1)\n    print(\"ok\")\nmain()\n";
+    let entry = write_temp_chz("t235_trace", src);
+    let (_out, _err, res, _code) = run_file(&entry);
+    let _ = std::fs::remove_file(&entry);
+    let e = res.expect_err("expected a fault");
+    assert!(
+        e.message.contains("send on a closed channel"),
+        "got: {}",
+        e.message
+    );
+    assert_eq!(e.span.line, 5);
+    let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
+    assert_eq!(names, ["<spawned task>"]);
+    assert_eq!(e.trace[0].span.line, 5);
+}
