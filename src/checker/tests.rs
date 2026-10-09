@@ -39333,3 +39333,12 @@ fn prelude_variant_clash_names_no_enum() {
     let texts: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
     assert_eq!(texts, ["'Some' is already imported by the prelude"]);
 }
+
+#[test]
+fn open_binding_is_rejected_on_its_own_line() {
+    // TICKET-238: the type of a value is known on the statement that creates it.
+    rejects(
+        "fn main():\n    xs := [None]\n    ys := [xs]\n    ys[0].push(\"s\")\n    xs.push(7)\nmain()\n",
+        "cannot infer the element type",
+    );
+}
