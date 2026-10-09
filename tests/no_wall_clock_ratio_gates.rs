@@ -300,7 +300,7 @@ fn sleep_synchronised_tests() -> BTreeSet<String> {
 /// rejected it (the walk returns 68). Obtain it by compiling once with an empty array and copying
 /// the "sleeps but is not listed" list `no_new_rust_test_sleeps_to_order_two_events` reports,
 /// verbatim, the same way `stack_trace_reports_call_chain`'s golden was obtained.
-const SLEEP_SYNCHRONISED_TESTS: [&str; 111] = [
+const SLEEP_SYNCHRONISED_TESTS: [&str; 112] = [
     "cousin_fed_recovered_deadlock_is_fatal_not_a_hang_at_two_and_four_workers",
     // TICKET-208, `tests/executor_task_grid.rs`. Every `time.sleep_ms` of these five is inside a
     // fixture .chz program's SOURCE STRING: a job's long work (3 s, 6 s) that a cut must end, or a
@@ -483,6 +483,11 @@ const SLEEP_SYNCHRONISED_TESTS: [&str; 111] = [
     "cut_owner_defer_fault_ranks_below_the_child_fault",
     "cut_owner_trace_is_the_childs_trace",
     "outside_executor_job_survives_owner_cut_in_shutdown",
+    // TICKET-236. Its 50ms sleep is a window the epoch must NOT move across while `settle_job` is
+    // blocked at the seal: a wait for something that must not happen has no event to receive. A
+    // `try_lock` handshake orders the two threads; the sleep can only let a wrong order pass on a
+    // stalled box, never fail the right one.
+    "a_cut_job_seal_moves_the_epoch_after_the_seal",
 ];
 
 #[test]
