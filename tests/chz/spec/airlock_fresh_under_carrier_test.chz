@@ -1,0 +1,17 @@
+# TICKET-240 — a fresh value spawned under an optional carrier is falsely marked "this task's
+# copy": no parent binding can reach it, so a write to it must run.
+fn opt_push(r: Channel[str], acc: List[int]?):
+    match acc:
+        ?a:
+            res := recover:
+                a.push(1)
+            match res:
+                ?_: r.send("ok")
+                !e: r.send(e.message())
+        None: r.send("none")
+
+test fn fresh_list_under_optional_param_is_writable():
+    r := Channel[str](1)
+    parallel:
+        spawn opt_push(r, [])
+    assert r.recv() == "ok"
