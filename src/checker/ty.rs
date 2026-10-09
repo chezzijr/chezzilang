@@ -511,6 +511,14 @@ impl Ty {
         Ty::Struct(name.into(), Vec::new())
     }
 
+    /// The payload slot a plain value fills when it wraps into this carrier (`T` of `T?` / `T!E`).
+    pub fn carrier_payload(&self) -> Option<&Ty> {
+        match self {
+            Ty::Option(p) | Ty::Result(p, _) => Some(p),
+            _ => None,
+        }
+    }
+
     /// The C width a slot type carries (`Ty::Width`), if any.
     pub fn width(&self) -> Option<&crate::native::cffi::CType> {
         match self {

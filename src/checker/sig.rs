@@ -4009,6 +4009,7 @@ impl Checker {
         if op == AssignOp::Eq && target.is_blank() {
             return;
         }
+        let val_ty = self.pinning_value_ty(&val_ty);
         self.note_assign_root(target);
         match &target.kind {
             ExprKind::Ident(name) => {

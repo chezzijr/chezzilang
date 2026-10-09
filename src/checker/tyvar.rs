@@ -493,6 +493,34 @@ impl Checker {
         }
     }
 
+    /// A value type as a use that pins a binding reads it: every unpinned `?x` inside it, at any
+    /// depth, is its default, `T?`, from here on (the first constraining use decides).
+    pub(super) fn pinning_value_ty(&mut self, t: &Ty) -> Ty {
+        loop {
+            let z = self.zonk(t);
+            let mut hit: Option<(u32, Ty)> = None;
+            {
+                let s = self.tyvars.borrow();
+                let _ =
+                    map_ty(&z, &mut |x| {
+                        if let Ty::Var(v) = x
+                            && hit.is_none()
+                        {
+                            hit = s.carriers.iter().find(|c| c.var == *v).and_then(|c| {
+                                match &c.kind {
+                                    CarrierKind::Present(p) => Some((*v, p.clone())),
+                                    CarrierKind::Error => None,
+                                }
+                            });
+                        }
+                        None
+                    });
+            }
+            let Some((v, p)) = hit else { return z };
+            self.tyvars.borrow_mut().bind(v, Ty::Option(Box::new(p)));
+        }
+    }
+
     /// `t` with its bound vars substituted.
     pub(super) fn zonk(&self, t: &Ty) -> Ty {
         self.tyvars.borrow().zonk(t)

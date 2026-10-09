@@ -1831,9 +1831,14 @@ impl Checker {
     /// `MAX_AST_DEPTH` chain. Must not touch `hint_owned` (the inner fn takes it first).
     /// A walk with `inferring_ret` set rolls back its diagnostics and `const_overflow_seen`, so it
     /// skips the scan and the real walk reports each overflow once (TICKET-183).
+    /// A prefix `?x` / `!e` is not arithmetic: its operand starts its own tree and meets its own slot.
     pub(super) fn infer_kind(&mut self, expr: &Expr) -> Ty {
         let covered = self.arith_parent;
-        let is_arith = matches!(expr.kind, ExprKind::Unary { .. } | ExprKind::Binary { .. });
+        let is_arith = match &expr.kind {
+            ExprKind::Unary { op, .. } => matches!(op, UnaryOp::Neg | UnaryOp::Not),
+            ExprKind::Binary { .. } => true,
+            _ => false,
+        };
         if is_arith
             && !covered
             && !self.inferring_ret
@@ -1868,6 +1873,8 @@ impl Checker {
     /// `None` from `infer_kind`, which reads `expected_hint`; an assignment passes its target type,
     /// which no hint carries (`infer` reads an lvalue as its scalar). Skipped while inferring a
     /// return (DEC-183) or in the generic-arg prepass; one report per span.
+    /// A constant that wraps into a carrier slot (`o: int8? = 300`) meets the payload's width; one
+    /// layer, as `wrap_mode` wraps one layer.
     pub(super) fn const_meets_slot(&mut self, expr: &Expr, slot: Option<&Ty>) {
         use crate::ast::consteval::{Const, Fold};
         if self.inferring_ret
@@ -1884,7 +1891,10 @@ impl Checker {
         }
         let Some(w) = slot
             .or(self.expected_hint.as_ref())
-            .and_then(|h| h.width())
+            .and_then(|h| {
+                h.width()
+                    .or_else(|| h.carrier_payload().and_then(|p| p.width()))
+            })
             .cloned()
         else {
             return;
@@ -4026,6 +4036,8 @@ impl Checker {
     /// expected type: `T?` -> `Some(x)`, `T!E` -> `Ok(x)`. The operand owns `T` as its slot (so
     /// `?5` at `int??` is `Some(Some(5))`). With no expected carrier the value takes a frame type
     /// variable in a fn body (an unpinned one defaults to `T?`); elsewhere it is `T?` at once.
+    /// Under an expected carrier whose payload is open (`z := None`, then `z = ?5`) the value is the
+    /// carrier over its operand's type, so the use can pin the binding.
     fn infer_wrap_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
         let hint = self.expected_hint.take();
         let (payload, w) = match &hint {
@@ -4045,10 +4057,20 @@ impl Checker {
         if !t.is_unknown() && !self.assignable(&payload, &t) {
             self.error(
                 inner.span,
-                format!("'?' value: expected {payload}, found {t}"),
+                format!(
+                    "'?' value: expected {payload}, found {t}{}",
+                    crate::checker::float_fix_note(&payload, &t)
+                ),
             );
         }
         self.record_wrap(node.id, w, node.span);
+        if !crate::checker::ty_fully_concrete(&payload) && !t.is_unknown() {
+            return match hint {
+                Some(Ty::Option(_)) => Ty::Option(Box::new(t)),
+                Some(Ty::Result(_, e)) => Ty::Result(Box::new(t), e),
+                _ => Ty::Unknown,
+            };
+        }
         hint.unwrap_or(Ty::Unknown)
     }
 
@@ -5273,6 +5295,10 @@ impl Checker {
                 crate::desugar::lower_carrier_option(&mut c, tmp);
                 let r = self.infer(&c);
                 self.pop_scope();
+                let r = match &lhs.kind {
+                    ExprKind::Ident(n) => self.pin_shape(n, &r),
+                    _ => r,
+                };
                 // TICKET-064 — `??`'s typed right-hand side is a constraining use of `lhs`, but it
                 // never reaches the `drop_empty_site` funnel (only the annotated/argument/return
                 // sinks do), so it needs its own carrier-pin record. Must sit AFTER `pop_scope` so

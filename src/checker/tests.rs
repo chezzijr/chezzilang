@@ -1885,11 +1885,11 @@ fn widen_compound_float_positions_rejected() {
     );
     rejects(
         "o: float? = ?3\nprint(o)\n",
-        "'?' value: expected float, found int",
+        "'?' value: expected float, found int — write 1.0",
     );
     rejects(
         "r: float! = ?3\nprint(r)\n",
-        "'?' value: expected float, found int",
+        "'?' value: expected float, found int — write 1.0",
     );
     // A non-literal RHS (a fn returning List[int]) into List[float]: no literal to coerce → reject.
     rejects(
@@ -33877,11 +33877,11 @@ fn int_never_widens_at_every_sink() {
     // An explicit `?1` names its payload: the mismatch is reported on the `?` value.
     rejects(
         "fn main():\n    x: float? = ?1\n    print(x)\n",
-        "'?' value: expected float, found int",
+        "'?' value: expected float, found int — write 1.0",
     );
     rejects(
         "fn main():\n    r: float!str = ?1\n    print(r)\n",
-        "'?' value: expected float, found int",
+        "'?' value: expected float, found int — write 1.0",
     );
     // The native std types resolve only through the module graph.
     entry_rejects(
@@ -38668,5 +38668,398 @@ fn err_value_type_grid() {
             !m.iter().any(|e| e.contains("?!") || e.contains("_!")),
             "{m:?}\n{src}"
         );
+    }
+}
+
+/// TICKET-228 — a value that wraps into a carrier slot meets the payload's checks, whichever way
+/// the wrap is spelled (`?x`, implicit wrap): constant width, payload pin, the int-into-float note,
+/// comparability and the `Error` bound of `!e`. Rust, for the width cell: a literal `300` in an
+/// `i8` payload is `literal out of range for `i8``.
+#[test]
+fn carrier_wrap_check_grid() {
+    enum Want {
+        Clean,
+        /// Exactly one error, and it contains the text.
+        One(String),
+        /// Some error contains the text.
+        Has(String),
+    }
+    use Want::*;
+    let one = |s: &str| One(s.to_string());
+    let mut cells: Vec<(String, Want)> = Vec::new();
+    let body = |lines: &[&str]| -> String {
+        let mut s = String::from("fn f():\n");
+        for l in lines {
+            s.push_str("    ");
+            s.push_str(l);
+            s.push('\n');
+        }
+        s
+    };
+
+    // Width: the reference slot and every wrap site.
+    const W: &str = "import std.ffi\nimport int8 from std.ffi\nimport float32 from std.ffi\n";
+    let fit = "constant 300 does not fit int8 (-128..127)";
+    for prog in [
+        "o: int8 = 300\n",
+        "o: int8? = ?300\n",
+        "o: int8? = 300\n",
+        "o: int8?? = ?300\n",
+        "o: int8!str = 300\n",
+        "o: int8!str = ?300\n",
+        "fn r() -> int8?:\n    return 300\n",
+        "fn r() -> int8?:\n    return ?300\n",
+        "fn g(x: int8? = 300) -> None:\n    pass\n",
+        "fn g(x: int8? = ?300) -> None:\n    pass\n",
+        "l: List[int8?] = [300]\n",
+        "l: List[int8?] = [?300]\n",
+        "m: Map[str, int8?] = {\"a\": 300}\n",
+        "m: Map[str, int8?] = {\"a\": ?300}\n",
+        "fn g(x: int8?) -> None:\n    pass\ng(300)\n",
+        "fn g(x: int8?) -> None:\n    pass\ng(?300)\n",
+        "o: int8? = None\no = 300\n",
+        "o: int8? = None\no = ?300\n",
+        "struct S:\n    v: int8?\ns := S(300)\n",
+        "struct S:\n    v: int8?\ns := S(?300)\n",
+        "o: int8? = 100 + 200\n",
+    ] {
+        cells.push((format!("{W}{prog}"), one(fit)));
+    }
+    let lo = "constant -129 does not fit int8 (-128..127)";
+    cells.push((format!("{W}o: int8? = -129\n"), one(lo)));
+    cells.push((format!("{W}o: int8? = ?(-129)\n"), one(lo)));
+    cells.push((
+        format!("{W}o: float32? = ?1e39\n"),
+        one("constant 1e39 does not fit float32"),
+    ));
+    cells.push((
+        format!("{W}o: int8?? = 300\n"),
+        one("cannot assign int to variable of type int8??"),
+    ));
+    cells.push((format!("{W}o: int8? = 127\nprint(o)\n"), Clean));
+    cells.push((format!("{W}o: int8? = ?127\nprint(o)\n"), Clean));
+
+    // Payload pin: the first constraining use decides, a later conflicting write is rejected.
+    let pin = "'?' value: expected int, found str";
+    for lines in [
+        &["xs := [None]", "xs.push(?5)", "xs.push(?\"hi\")"][..],
+        &["z := None", "z = ?5", "z = ?\"ab\""],
+        &["m := {\"a\": None}", "m[\"b\"] = ?5", "m[\"c\"] = ?\"x\""],
+        &["xs := [None]", "xs[0] = ?5", "xs[0] = ?\"x\""],
+        &["z := None", "z = ?(?5)", "z = ?(?\"a\")"],
+    ] {
+        cells.push((body(lines), one(pin)));
+    }
+    cells.push((
+        body(&["xs := [None]", "xs.push(?5)", "y: List[str?] = xs"]),
+        one("cannot assign List[int?] to variable of type List[str?]"),
+    ));
+    cells.push(("z := None\nz = ?5\nz = ?\"ab\"\n".to_string(), one(pin)));
+    cells.push((
+        "fn f():\n    z = ?\"ab\"\nz := None\nz = ?5\n".to_string(),
+        one("'?' value: expected str, found int"),
+    ));
+    cells.push((
+        "fn f():\n    z = ?\"ab\"\nz := None\nw: int? = z\n".to_string(),
+        one("cannot assign str? to variable of type int?"),
+    ));
+    // An implicit wrap pins nothing: an open payload has no depth to wrap to.
+    cells.push((
+        body(&["xs := [None]", "xs.push(5)"]),
+        Has("expected ??, found int".to_string()),
+    ));
+    cells.push((
+        body(&["xs := [None]", "xs.extend([5])"]),
+        Has("list element: expected ??, found int".to_string()),
+    ));
+
+    // Pin matrix: writer x wrap position x {conflict, agree}.
+    type Tpl<'a> = &'a dyn Fn(&str) -> String;
+    let positions: [(&str, Tpl); 5] = [
+        ("None", &|p| format!("?{p}")),
+        ("[None]", &|p| format!("[?{p}]")),
+        ("{\"k\": None}", &|p| format!("{{\"k\": ?{p}}}")),
+        ("None", &|p| format!("?(?{p})")),
+        ("(1, None)", &|p| format!("(1, ?{p})")),
+    ];
+    let writers: [(bool, Tpl); 4] = [
+        (false, &|v| format!("xs.push({v})")),
+        (false, &|v| format!("xs.extend([{v}])")),
+        (true, &|v| format!("xs[\"b\"] = {v}")),
+        (false, &|v| format!("xs[0] = {v}")),
+    ];
+    for (is_map, write) in writers {
+        for (seed, wrap) in positions {
+            let decl = if is_map {
+                format!("xs := {{\"a\": {seed}}}")
+            } else {
+                format!("xs := [{seed}]")
+            };
+            for (second, want) in [("\"a\"", one(pin)), ("6", Clean)] {
+                let (a, b) = (write(&wrap("5")), write(&wrap(second)));
+                cells.push((body(&[&decl, &a, &b]), want));
+            }
+        }
+    }
+    for lines in [
+        &["xs := None", "xs = ?5", "xs = ?\"a\""][..],
+        &["xs := None", "xs = ?(?5)", "xs = ?(?\"a\")"],
+        &[
+            "a := None",
+            "c := None",
+            "a, c = ?5, ?6",
+            "a, c = ?\"x\", ?7",
+        ],
+        &["xs := []", "xs.push(?5)", "xs.push(?\"a\")"],
+        &["xs := []", "xs.extend([?5])", "xs.extend([?\"a\"])"],
+        &["m := {}", "m[\"a\"] = ?5", "m[\"b\"] = ?\"a\""],
+    ] {
+        cells.push((body(lines), one(pin)));
+    }
+    let bound = "'?' builds an optional or success value, found int?";
+    cells.push((
+        body(&[
+            "xs := [None]",
+            "ys := [?5]",
+            "xs.extend(ys)",
+            "zs := [?\"a\"]",
+            "xs.extend(zs)",
+        ]),
+        one(bound),
+    ));
+    cells.push((
+        body(&[
+            "xs := [None]",
+            "y := ?5",
+            "xs.push(y)",
+            "z := ?\"a\"",
+            "xs.push(z)",
+        ]),
+        one(bound),
+    ));
+    cells.push((
+        body(&["s := Set()", "s.add(?5)"]),
+        Has("found int?".to_string()),
+    ));
+    // The accepted cost: a `?x` bound to a name is `T?` from its first pinning use on.
+    cells.push((
+        "fn f() -> int!str:\n    xs := []\n    x := ?5\n    xs.push(x)\n    return x\n".to_string(),
+        Has("expected return type int!str, found int?".to_string()),
+    ));
+    cells.push((
+        "fn f() -> int!str:\n    xs: List[int!str] = []\n    x := ?5\n    xs.push(x)\n    return x\n"
+            .to_string(),
+        Clean,
+    ));
+
+    // Readers that hold a binding name: `??`, a generic sibling argument, an assignment escape.
+    let pinned = |a: &str, b: &str| {
+        one(&format!(
+            "cannot assign {a} to 'z' -- its payload was pinned to {b} by an earlier use"
+        ))
+    };
+    for (v, write, want) in [
+        ("5", "z = ?\"a\"", pinned("str?", "int?")),
+        ("?5", "z = ?(?\"a\")", pinned("str??", "int??")),
+        (
+            "[?5]",
+            "z = ?([?\"a\"])",
+            pinned("List[str?]?", "List[int?]?"),
+        ),
+        (
+            "{\"k\": ?5}",
+            "z = ?({\"k\": ?\"a\"})",
+            pinned("Map[str, str?]?", "Map[str, int?]?"),
+        ),
+        (
+            "(1, ?5)",
+            "z = ?((1, ?\"a\"))",
+            pinned("(int, str?)?", "(int, int?)?"),
+        ),
+        ("?5", "z = ?(?6)", Clean),
+        ("[?5]", "z = ?([?6])", Clean),
+    ] {
+        let a = format!("a := z ?? {v}");
+        cells.push((body(&["z := None", &a, write, "print(a)"]), want));
+    }
+    cells.push((
+        body(&["z := None", "a := z ?? ?5", "b: str? = a", "print(b)"]),
+        one("cannot assign int? to variable of type str?"),
+    ));
+    const G: &str = "fn mv[T](a: List[T], b: List[T]) -> None:\n    pass\nfn same[T](a: T, b: T) -> None:\n    pass\nstruct H:\n    n: int\n    fn mv[T](self, a: List[T], b: List[T]) -> None:\n        pass\n    fn same[T](self, a: T, b: T) -> None:\n        pass\n";
+    for (lines, want) in [
+        (
+            &["xs := []", "mv([?5], xs)", "xs.push(?\"a\")"][..],
+            one(pin),
+        ),
+        (&["xs := []", "mv(xs, [?5])", "xs.push(?\"a\")"], one(pin)),
+        (
+            &["h := H(1)", "xs := []", "h.mv([?5], xs)", "xs.push(?\"a\")"],
+            one(pin),
+        ),
+        (
+            &["z := None", "same(?5, z)", "z = ?\"a\""],
+            pinned("str?", "int?"),
+        ),
+        (
+            &["h := H(1)", "z := None", "h.same(?5, z)", "z = ?\"a\""],
+            pinned("str?", "int?"),
+        ),
+        (&["xs := []", "mv([?5], xs)", "xs.push(?6)"], Clean),
+        (&["z := None", "same(?5, z)", "z = ?6"], Clean),
+        (&["r: int!str = 1", "same(?5, r)"], Clean),
+        (&["ys: List[int!str] = []", "mv([?5], ys)"], Clean),
+    ] {
+        cells.push((format!("{G}{}", body(lines)), want));
+    }
+    cells.push((
+        body(&["c := [[?5]]", "b := []", "c = [b]", "b.push(?\"a\")"]),
+        one(pin),
+    ));
+    cells.push((
+        body(&["c := [[?5]]", "b := []", "c = [b]", "b.push(?6)"]),
+        Clean,
+    ));
+    cells.push((
+        body(&["b := []", "c := b", "c.push(?5)", "b.push(?\"a\")"]),
+        one(pin),
+    ));
+    cells.push((
+        "fn f() -> int!str:\n    z := None\n    x := ?5\n    a := z ?? x\n    print(a)\n    return x\n"
+            .to_string(),
+        Has("expected return type int!str, found int?".to_string()),
+    ));
+    cells.push((
+        "fn f() -> int!str:\n    zs := [None]\n    x := ?5\n    a := zs[0] ?? x\n    print(a)\n    return x\n"
+            .to_string(),
+        Clean,
+    ));
+    // Plan-validation's three probes: a generic struct ctor, a branch join, a loop variable.
+    cells.push((
+        format!(
+            "struct P[T]:\n    a: List[T]\n    b: List[T]\n{}",
+            body(&[
+                "xs := []",
+                "p := P([?5], xs)",
+                "print(p)",
+                "xs.push(?\"a\")"
+            ])
+        ),
+        // A generic struct ctor pins no empty argument, for any spelling of the element (measured:
+        // the long-name twin ran too), so this is a guard, not a member of the class.
+        Clean,
+    ));
+    cells.push((
+        "fn f(c: bool):\n    z := None\n    z = if c: ?5 else: ?6\n    z = ?\"a\"\n".to_string(),
+        one(pin),
+    ));
+    cells.push((
+        body(&[
+            "xs := []",
+            "for v in [?5]:",
+            "    xs.push(v)",
+            "xs.push(?\"a\")",
+        ]),
+        one(pin),
+    ));
+
+    // Int where a float is expected: every sink message carries the fix note.
+    let note = " — write 1.0 (or float(x))";
+    for prog in [
+        "x: float? = ?1\n",
+        "x: float?? = ?1\n",
+        "fn r() -> float?:\n    return ?1\n",
+        "fn g(x: float? = ?1) -> None:\n    pass\n",
+        "l: List[float?] = [?1]\n",
+        "m: Map[str, float?] = {\"a\": ?1}\n",
+        "x: float!str = ?1\n",
+    ] {
+        let slot = if prog.contains("float??") {
+            "float?"
+        } else {
+            "float"
+        };
+        cells.push((
+            prog.to_string(),
+            Has(format!("'?' value: expected {slot}, found int{note}")),
+        ));
+        if !prog.contains("float??") {
+            cells.push((prog.replace("?1", "1"), Has(note.to_string())));
+        }
+    }
+    cells.push(("x: float? = ?1.0\nprint(x)\n".to_string(), Clean));
+
+    // Comparability: `T?` orders when `T` does, `None` first; `T!E` does not order.
+    cells.push((
+        "a: int? = 1\nb: int? = 2\nprint(a < b)\n".to_string(),
+        Clean,
+    ));
+    cells.push((
+        "a: bool? = true\nb: bool? = false\nprint(a < b)\n".to_string(),
+        Has("cannot compare bool? and bool?".to_string()),
+    ));
+    cells.push((
+        "a: int!str = 1\nb: int!str = 2\nprint(a < b)\n".to_string(),
+        Has("cannot compare int!str and int!str".to_string()),
+    ));
+    // The `Error` bound of `!e`.
+    const S: &str = "struct S:\n    n: int\n";
+    for prog in [
+        "fn r() -> int!S:\n    return !S(1)\n",
+        "fn g(x: int!S = !S(1)) -> None:\n    pass\n",
+        "l: List[int!S] = [!S(1)]\n",
+    ] {
+        cells.push((
+            format!("{S}{prog}"),
+            Has("S does not satisfy Error".to_string()),
+        ));
+    }
+
+    let mut red: Vec<String> = Vec::new();
+    for (src, want) in &cells {
+        let m: Vec<String> = check_entry(src).into_iter().map(|e| e.message).collect();
+        let good = match want {
+            Clean => m.is_empty(),
+            One(t) => m.len() == 1 && m[0].contains(t.as_str()),
+            Has(t) => m.iter().any(|e| e.contains(t.as_str())),
+        };
+        if !good {
+            let w = match want {
+                Clean => "clean".to_string(),
+                One(t) => format!("exactly one error holding {t:?}"),
+                Has(t) => format!("an error holding {t:?}"),
+            };
+            red.push(format!("{src}  want {w}, got {m:?}"));
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "{} of {} carrier-wrap cells failed:\n{}",
+        red.len(),
+        cells.len(),
+        red.join("\n")
+    );
+
+    // Every accept program also RUNS.
+    for (src, out) in [
+        (
+            "fn f():\n    xs := [None]\n    xs.push(?5)\n    xs.push(?6)\n    z := None\n    z = ?5\n    z = ?7\n    print(xs)\n    print(z)\nf()\n",
+            "[None, 5, 6]\n7\n",
+        ),
+        (
+            "fn f():\n    xs := [None]\n    xs.extend([?5])\n    xs.extend([?6])\n    z := [None]\n    z = [?7]\n    m := {\"a\": [None]}\n    m[\"b\"] = [?8]\n    print(xs)\n    print(z)\n    print(m[\"b\"])\nf()\n",
+            "[None, 5, 6]\n[7]\n[8]\n",
+        ),
+        (
+            "fn f() -> int!str:\n    x := ?5\n    return x\nprint(f())\n",
+            "5\n",
+        ),
+        ("x: float? = ?1.0\nprint(x)\n", "1.0\n"),
+        (
+            "a: int? = None\nb: int? = 2\nprint(a < b)\nprint(b < a)\n",
+            "true\nfalse\n",
+        ),
+    ] {
+        assert_eq!(crate::vm::run_capture(src).unwrap(), out, "{src}");
     }
 }

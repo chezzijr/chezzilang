@@ -1096,6 +1096,7 @@ impl Checker {
             }),
             _ => None,
         };
+        let elem = elem.map(|t| self.pinning_value_ty(&t));
         let arg_erred = self.errors.len() != mark.errors;
         self.diag_rollback(mark);
         // (d) cascade invariant: if inferring the arg itself reported an error, don't refine (the
@@ -5370,6 +5371,14 @@ impl Checker {
         span: Span,
         degrade_unbound_param_pos: bool,
     ) {
+        // A bare binding a use can still pin, passed into a slot a SIBLING argument typed: read the
+        // slot through `pin_shape` before the per-argument compare below, which would bind an
+        // unpinned `?x` to the binding's own open slot.
+        for (arg, decl) in args.iter().zip(arg_decls) {
+            if let ExprKind::Ident(n) = &arg.kind {
+                let _ = self.pin_shape(n, &subst(decl, map));
+            }
+        }
         // Snapshot the params bound after pass 1, so the loop-back below only re-enforces bounds on
         // params NEWLY bound from a refined arg (pass-1 bounds are enforced by the caller).
         let bound_after_pass1: std::collections::HashSet<String> = map.keys().cloned().collect();

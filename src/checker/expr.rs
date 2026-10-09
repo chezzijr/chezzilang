@@ -4379,6 +4379,7 @@ impl Checker {
         let ExprKind::Ident(name) = &arg.kind else {
             return;
         };
+        let pt = &self.pin_shape(name, pt);
         // FULLY concrete — no `Ty::Unknown` AND no `Ty::Param`, nested too. The weaker
         // `!contains_unknown_in_slot` was enough while only `check_args_range_decl` called this (a
         // non-generic callee's params carry no `Ty::Param`), but the generic paths hand over a

@@ -5162,7 +5162,8 @@ for i8`):
   `Option[int8] = Some(300)`, `b: Bx[int8] = Bx(300)`), a generic return pinned by the expected type
   (`y: int8 = id(300)`), the branches of `if`/`match` and the right side of `??`:
   `constant 300 does not fit int8 (-128..127)`, `constant 256 does not fit int8 (-128..127)` for
-  `1 << 8`. A non-constant int (`[300].len()`, a call returning `int`) is not checked.
+  `1 << 8`. The check reads through a carrier: `o: int8? = 300` and `o: int8? = ?300` are rejected
+  with the same text. A non-constant int (`[300].len()`, a call returning `int`) is not checked.
 - A **runtime value** is range-checked only where it crosses into C. Out of range is a recoverable
   fault, catchable by `recover:`: `value 300 does not fit int8 (-128..127)`. A Chezzi local of a width
   type holds any int until then.

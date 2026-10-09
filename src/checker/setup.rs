@@ -2900,6 +2900,19 @@ impl Checker {
             _ => false,
         }
     }
+    /// The type a use pins `name` to: `shape` read through [`Checker::pinning_value_ty`] when `name`
+    /// is a binding a use can still pin (an unrefined empty collection or an unpinned carrier), and
+    /// `shape` unchanged otherwise, so a use of any other binding decides nothing about a `?x`.
+    pub(super) fn pin_shape(&mut self, name: &str, shape: &Ty) -> Ty {
+        let open = self
+            .lookup(name)
+            .is_some_and(|bt| Self::is_unrefined_empty_coll(&bt) || Self::is_unpinned_carrier(&bt));
+        if open {
+            self.pinning_value_ty(shape)
+        } else {
+            shape.clone()
+        }
+    }
     /// TICKET-064 — record that `name`'s carrier payload was pinned to `ty` by a constraining use.
     /// First constraining use wins: an existing entry for `name`'s owning scope is never overwritten,
     /// because `drop_empty_site`'s doc comment states this fn must never REPIN a carrier binding (a
@@ -2942,6 +2955,8 @@ impl Checker {
     /// carrier binding (only `check_assign`'s write path does that) — W8-46 measured that as a false
     /// rejection of the read-only shape (`e := Box.Empty` / `a: Box[int] = e` / `b: Box[str] = e`).
     pub(super) fn drop_empty_site(&mut self, name: &str, shape: Option<&Ty>) {
+        let shape = shape.map(|s| self.pin_shape(name, s));
+        let shape = shape.as_ref();
         let owner = self.owning_scope(name);
         if let Some(owner) = owner {
             self.empty_coll_sites
