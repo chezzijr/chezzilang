@@ -1,4 +1,4 @@
 # rule: fnDecl
 # expect: identifier
-fn ():
+fn :
     return

@@ -47,7 +47,7 @@
 <compoundStmt> ::= <fnDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
-<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <passStmt> | <assertStmt> | <exprStmt>
+<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <passStmt> | <assertStmt> | <spawnCallStmt> | <exprStmt>
 
 # ===== simple statements =====
 # The third form is a destructuring binding: `a, b, … := expr` binds a tuple's elements positionally.
@@ -104,7 +104,9 @@
 
 # `defer <call>` (form 1) — the call-only restriction is enforced by the checker
 # (context-sensitive), not the grammar. `defer:` (form 2) takes an indented block whose body runs
-# top-to-bottom at scope exit; it is block-ending (terminated by the block's DEDENT), hence compound.
+# top-to-bottom at scope exit. BOTH forms are compound, so neither is legal as an inline body:
+# `defer` is block-scoped, and an inline body would be the defer's whole block (`if c: defer f()`
+# would run `f` at once).
 <deferStmt> ::= "DEFER" <expr> "NEWLINE" | "DEFER" <block>
 
 # `break` / `continue` are bare line-oriented statements; "inside a loop" is enforced by the
@@ -377,11 +379,13 @@
 <whileStmt> ::= "WHILE" <expr> <block>
 
 # Concurrency (C1): a `parallel:` nursery and the two `spawn` forms. `parallel:` and the block form
-# of `spawn` are block-ending (no trailing NEWLINE); the call form of `spawn` is line-oriented and
-# consumes its NEWLINE, like `defer`. The call-only restriction on the form-1 expression and the
-# "spawn only inside a parallel:" rule are enforced by the parser/checker, not the grammar.
+# of `spawn` are block-ending (no trailing NEWLINE), hence compound. The call form of `spawn` is a
+# simple statement (it consumes its NEWLINE), so it is legal as an inline body: `if c: spawn f()`.
+# The call-only restriction on the call form's expression and the "spawn only inside a parallel:"
+# rule are enforced by the parser/checker, not the grammar.
 <parallelStmt> ::= "PARALLEL" <block>
-<spawnStmt>    ::= "SPAWN" <expr> "NEWLINE" | "SPAWN" <block>
+<spawnStmt>    ::= "SPAWN" <block>
+<spawnCallStmt> ::= "SPAWN" <expr> "NEWLINE"
 
 # Concurrency (C6d): `wait:` — Chezzi's `select`, racing channel `recv`s AND `send`s. A recv-arm is
 # `<target> (":=" | "=") <chanExpr> ".recv()" <block>`; a SEND-arm is a bare `<chanExpr> ".send(" v ")"

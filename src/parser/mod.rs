@@ -636,7 +636,34 @@ impl Parser {
 
     // ----- statements -----
 
+    /// THE list of `<compoundStmt>` starts (`docs/grammar.bnf`): the parser of each statement that
+    /// owns a block and ends at its `Dedent`. [`Self::parse_stmt_in`] dispatches through it, and
+    /// refuses every start on it as an inline body. `next` is the token after `tok`: `fn (` opens a
+    /// closure literal (an expression) and `spawn <call>` is a simple statement, so neither is here.
+    /// Both `defer` forms are: `defer` is block-scoped, so an inline body would be its whole block.
+    fn compound_keyword(tok: &Token, next: &Token) -> Option<ItemParser> {
+        let parse: ItemParser = match tok {
+            Token::Fn if next != &Token::LParen => |p| Ok(StmtKind::Fn(p.parse_fn(true)?)),
+            Token::If => Parser::parse_if,
+            Token::For => Parser::parse_for,
+            Token::While => Parser::parse_while,
+            Token::Match => Parser::parse_match,
+            Token::Parallel => Parser::parse_parallel,
+            Token::Wait => Parser::parse_wait,
+            Token::Defer => Parser::parse_defer,
+            Token::Spawn if next == &Token::Colon => Parser::parse_spawn,
+            _ => return None,
+        };
+        Some(parse)
+    }
+
     fn parse_stmt(&mut self) -> PResult<Stmt> {
+        self.parse_stmt_in(false)
+    }
+
+    /// `<stmt>`, or with `inline` the one statement written on the line of its block's `:`, which
+    /// is exactly a `<simpleStmt>`.
+    fn parse_stmt_in(&mut self, inline: bool) -> PResult<Stmt> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             return Err(self.err("statement nested too deeply".to_string()));
@@ -648,15 +675,25 @@ impl Parser {
         let span = self.cur_span();
         // Compound statements own a block and end at its `Dedent`; line-oriented statements
         // (let/assign/expr/return) must be followed by a line terminator.
+        let kind = match Self::compound_keyword(self.peek(), self.peek_at(1)) {
+            // `if a: if b: x` would make a trailing `else` ambiguous (which `if`?), and a nested
+            // block has no indentation to end at. Force such nesting to use an indented block.
+            Some(_) if inline => {
+                return Err(self.err(
+                    "a nested block must be indented, not written inline after ':'".to_string(),
+                ));
+            }
+            Some(parse) => parse(self)?,
+            None => self.parse_line_stmt()?,
+        };
+        self.depth -= 1;
+        Ok(Stmt { kind, span })
+    }
+
+    /// `<simpleStmt>`: a line-oriented statement, followed by a line terminator.
+    fn parse_line_stmt(&mut self) -> PResult<StmtKind> {
         let kind = match self.peek() {
-            Token::Fn => StmtKind::Fn(self.parse_fn(true)?),
-            Token::If => self.parse_if()?,
-            Token::For => self.parse_for()?,
-            Token::While => self.parse_while()?,
-            Token::Match => self.parse_match()?,
-            Token::Parallel => self.parse_parallel()?,
-            Token::Spawn => self.parse_spawn()?,
-            Token::Wait => self.parse_wait()?,
+            Token::Spawn => self.parse_spawn_call()?,
             Token::Return => {
                 let k = self.parse_return()?;
                 self.expect_stmt_end()?;
@@ -667,7 +704,6 @@ impl Parser {
                 self.expect_stmt_end()?;
                 k
             }
-            Token::Defer => self.parse_defer()?,
             Token::Assert => {
                 let k = self.parse_assert()?;
                 self.expect_stmt_end()?;
@@ -705,8 +741,7 @@ impl Parser {
                 k
             }
         };
-        self.depth -= 1;
-        Ok(Stmt { kind, span })
+        Ok(kind)
     }
 
     /// `let` (`:=` or typed `name: T = …`), assignment (`= += -=`), or a bare expression statement.
@@ -2293,15 +2328,17 @@ impl Parser {
         Ok(StmtKind::Parallel { body })
     }
 
-    /// `spawn:` block (form 2) or `spawn <call>` (form 1). Form 1 must be a call expression (mirrors
-    /// `defer`); a non-call is rejected with a clear message. Form 1 is line-oriented (terminated
-    /// here); form 2 is compound (its block ends at its own `Dedent`).
+    /// `spawn:` block. Compound: its block ends at its own `Dedent`.
     fn parse_spawn(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Spawn)?;
-        if self.check(&Token::Colon) {
-            let body = self.parse_block()?;
-            return Ok(StmtKind::Spawn(SpawnTarget::Block(body)));
-        }
+        let body = self.parse_block()?;
+        Ok(StmtKind::Spawn(SpawnTarget::Block(body)))
+    }
+
+    /// `spawn <call>`. A simple statement, terminated here; a non-call is rejected with a clear
+    /// message.
+    fn parse_spawn_call(&mut self) -> PResult<StmtKind> {
+        self.expect(&Token::Spawn)?;
         let expr = self.parse_expr()?;
         if !matches!(expr.kind, ExprKind::Call { .. }) {
             return Err(self.err(
@@ -2540,18 +2577,8 @@ impl Parser {
             self.expect(&Token::Dedent)?;
             Ok(stmts)
         } else {
-            // inline single statement (e.g. a one-line `match` arm). A compound statement that
-            // opens its own block is not allowed inline — `if a: if b: x` would make a trailing
-            // `else` ambiguous (which `if`?). Force such nesting to use an indented block.
-            if matches!(
-                self.peek(),
-                Token::If | Token::For | Token::While | Token::Match
-            ) {
-                return Err(self.err(
-                    "a nested block must be indented, not written inline after ':'".to_string(),
-                ));
-            }
-            Ok(vec![self.parse_stmt()?])
+            // inline single statement (e.g. a one-line `match` arm): one `<simpleStmt>`.
+            Ok(vec![self.parse_stmt_in(true)?])
         }
     }
 
@@ -6364,8 +6391,8 @@ mod tests {
 
     #[test]
     fn reports_error_with_location() {
-        // `fn (` — missing function name
-        let err = parse(lexer::tokenize("fn (\n").unwrap()).unwrap_err();
+        // `fn :` — missing function name (`fn (` opens a closure literal)
+        let err = parse(lexer::tokenize("fn :\n").unwrap()).unwrap_err();
         assert!(err.message.contains("identifier"), "{}", err.message);
         assert_eq!(err.span.line, 1);
     }
@@ -8379,6 +8406,68 @@ mod tests {
         assert!(matches!(bracket("x := f[int, str](1)\n"), (2, None)));
         assert!(matches!(bracket("x := f[fn(int) -> int](1)\n"), (1, None)));
         assert!(matches!(bracket("x := t.0[k](1)\n"), (_, None)));
+    }
+
+    /// TICKET-241 -- the inline body after `:` is exactly `<simpleStmt>`: every simple statement
+    /// (a closure literal and `spawn <call>` included) is legal, every compound start is refused.
+    #[test]
+    fn inline_body_is_exactly_a_simple_stmt() {
+        const NESTED: &str = "a nested block must be indented, not written inline after ':'";
+        let mut bad = Vec::new();
+        for src in [
+            "fn a(): return\n",
+            "fn b(): pass\n",
+            "fn c(n: int): assert n > 0\n",
+            "fn d(): x = 1\n",
+            "fn e(): x := 1\n",
+            "fn g(): yield 1\n",
+            "fn h(): f()\n",
+            "if true: spawn w()\n",
+            "parallel: spawn w()\n",
+            "for i in xs: spawn w(i)\n",
+            "for i in xs: continue\n",
+            "while true: break\n",
+            "fn m(): fn(x: int) -> int: x\n",
+            "if true: fn(x: int) -> int: x\n",
+            "fn(x: int) -> int: x\n",
+            "match 1:\n    1: fn(x: int) -> int: x\n    2: spawn w()\n    _: pass\n",
+        ] {
+            if let Err(e) = parse(lexer::tokenize(src).unwrap()) {
+                bad.push(format!("{src:?} must parse: {}", e.message));
+            }
+        }
+        for src in [
+            "fn outer(): fn inner(): pass\n",
+            "fn o(): parallel: spawn w()\n",
+            "fn outer(): defer print(1)\n",
+            "if true: spawn:\n    w()\n",
+            "if true: defer print(1)\n",
+            "fn g(ch: Channel[int]): wait:\n    x := ch.recv(): print(x)\n",
+            "parallel: spawn:\n    print(1)\n",
+            "if a: if b: x = 1\n",
+            "if a: for i in xs: pass\n",
+            "if a: while b: pass\n",
+            "if a: match b:\n    _: pass\n",
+        ] {
+            match parse(lexer::tokenize(src).unwrap()) {
+                Ok(_) => bad.push(format!("{src:?} must be rejected, parsed")),
+                Err(e) if e.message != NESTED => bad.push(format!(
+                    "{src:?} must give the nested-block text: {}",
+                    e.message
+                )),
+                Err(_) => {}
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+        assert_eq!(
+            parse_err("fn g(): struct A:\n    x: int\n").message,
+            "struct must be a top-level declaration"
+        );
+        let spawn = parse_err("parallel:\n    spawn 1\n").message;
+        assert!(
+            spawn.starts_with("spawn requires a function or method call"),
+            "{spawn}"
+        );
     }
 
     #[test]

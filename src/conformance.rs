@@ -347,6 +347,7 @@ fn parser_rules_match_fns() {
         ("testFnDecl", "parse_test_fn"),
         ("parallelStmt", "parse_parallel"),
         ("spawnStmt", "parse_spawn"),
+        ("spawnCallStmt", "parse_spawn_call"),
         ("waitStmt", "parse_wait"),
         ("importStmt", "parse_import"),
         ("dottedPath", "parse_dotted_path"),
@@ -360,6 +361,10 @@ fn parser_rules_match_fns() {
     // parser fns with no 1:1 grammar rule: the Pratt cascade + structural helpers + test helpers.
     let helper_fns: BTreeSet<&str> = [
         "parse_simple_stmt",
+        // `parse_stmt_in` is `parse_stmt` with the inline-body flag; `parse_line_stmt` is the
+        // `<simpleStmt>` dispatch, and each alternative it reaches has its own rule.
+        "parse_stmt_in",
+        "parse_line_stmt",
         // `parse_native_decl` is the `native …` DISPATCH helper (out-of-lined so its StmtKind-sized
         // call slots stay off the recursive `parse_stmt` frame); it routes to `parse_native` /
         // `parse_native_struct` / `parse_native_enum`, each with its own grammar rule — it has none.
