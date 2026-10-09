@@ -16,8 +16,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-const OK: &str = "got Ok(7)";
-const CANCELLED: &str = "got Err('task cancelled: shutdown_now() stopped it before it finished')";
+const OK: &str = "got 7";
+const CANCELLED: &str = "got !task cancelled: shutdown_now() stopped it before it finished";
 const SUBMIT_FAULT: &str = "submit on a shut-down Executor (it no longer accepts work)";
 
 /// One finished run. `code` is `None` when the harness killed the child at ten seconds.
@@ -114,7 +114,7 @@ enum State {
     Running,
     ParkedSleep,
     ParkedChannel,
-    /// Its handle already read `Ok(7)`.
+    /// Its handle already read `7`.
     Done,
 }
 
