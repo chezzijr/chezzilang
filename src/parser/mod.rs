@@ -251,6 +251,11 @@ struct Parser {
     /// removed name may still spell it; that is how `std/prelude.chz` parses for every reader. It
     /// is no user escape: the checker rejects a `native enum` outside the standard library.
     native_enums: Vec<String>,
+    /// Position of a `!=` whose `!` the type before it has taken: the lexer fuses `T!= v`, and
+    /// [`Parser::parse_type_postfix`] reads it as `T! = v` without consuming or rewriting the token
+    /// (a failed speculative type parse restores `pos` only). [`Parser::eat_type_assign`] is the
+    /// only reader.
+    bang_eq: Option<usize>,
 }
 
 impl Parser {
@@ -269,6 +274,7 @@ impl Parser {
             fold_depth: 0,
             docs: std::collections::HashMap::new(),
             native_enums,
+            bang_eq: None,
         }
     }
 
@@ -347,6 +353,21 @@ impl Parser {
     /// Consume the current token if it matches `kind`; report whether it did.
     fn eat(&mut self, kind: &Token) -> bool {
         if self.check(kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// At the `=` that follows a type: a plain `=`, or the `!=` whose `!` that type has taken.
+    fn at_type_assign(&self) -> bool {
+        self.check(&Token::Assign) || (self.check(&Token::NotEq) && self.bang_eq == Some(self.pos))
+    }
+
+    /// Consume the `=` that follows a type (see [`Self::at_type_assign`]); report whether it did.
+    fn eat_type_assign(&mut self) -> bool {
+        if self.at_type_assign() {
             self.advance();
             true
         } else {
@@ -764,7 +785,9 @@ impl Parser {
             // type position.
             let is_const = self.eat(&Token::Const);
             let ty = self.parse_type()?;
-            self.expect(&Token::Assign)?;
+            if !self.eat_type_assign() {
+                self.expect(&Token::Assign)?;
+            }
             let value = self.parse_expr()?;
             let value = self.parse_else_guard(value)?;
             return Ok(StmtKind::Let {
@@ -1406,7 +1429,7 @@ impl Parser {
             let fname = self.expect_ident()?;
             self.expect(&Token::Colon)?;
             let ty = self.parse_type()?;
-            if self.check(&Token::Assign) {
+            if self.at_type_assign() {
                 return Err(self.err(
                     "native struct fields cannot have default values (the layout is native)"
                         .to_string(),
@@ -1617,7 +1640,7 @@ impl Parser {
                         "variadic parameter '{name}' must declare an element type (`...{name}: T`)"
                     )));
                 }
-                let default = if self.eat(&Token::Assign) {
+                let default = if self.eat_type_assign() {
                     if !allow_defaults {
                         return Err(
                             self.err("default arguments are not supported here".to_string())
@@ -1707,7 +1730,7 @@ impl Parser {
                 let fname = self.expect_ident()?;
                 self.expect(&Token::Colon)?;
                 let ty = self.parse_type()?;
-                let default = if self.eat(&Token::Assign) {
+                let default = if self.eat_type_assign() {
                     // Any expression is allowed; the desugar pass rejects one that references another
                     // field (it is cloned into the caller's scope at the constructor call site).
                     let e = self.parse_expr()?;
@@ -2763,6 +2786,13 @@ impl Parser {
                 } else {
                     ty = Type::Generic("Result".to_string(), vec![ty], Span::default());
                 }
+            } else if self.check(&Token::NotEq) && self.bang_eq != Some(self.pos) {
+                // Adjacent `!=` lexes as ONE token: `int!= 6` is `int! = 6`. The token stays; the
+                // position test stops an outer postfix loop wrapping a second time.
+                chain += 1;
+                self.bang_eq = Some(self.pos);
+                ty = Type::Generic("Result".to_string(), vec![ty], Span::default());
+                break;
             } else if self.eat(&Token::QuestionQuestion) {
                 // Adjacent `??` lexes as ONE token: `int??` is `Option[Option[int]]`.
                 chain += 2;
@@ -8477,6 +8507,51 @@ mod tests {
 print(adder(1)(2))
 ",
         );
+    }
+
+    /// TICKET-241 -- the lexer fuses `!=`; after a type it is the type's `!` and then `=`. The `!`
+    /// binds where the spaced form binds it, and `!=` in an expression is unchanged.
+    #[test]
+    fn fused_bang_eq_is_bang_then_assign() {
+        fn is_result(ty: &Type) -> bool {
+            matches!(ty, Type::Generic(n, args, _) if n == "Result" && args.len() == 1)
+        }
+        match only("y: int!= 6\n") {
+            StmtKind::Let { ty: Some(ty), .. } => assert!(is_result(&ty), "{ty:?}"),
+            other => panic!("expected a typed let, got {other:?}"),
+        }
+        match only("g: fn() -> int!= one\n") {
+            StmtKind::Let {
+                ty: Some(Type::Func { ret, .. }),
+                ..
+            } => assert!(is_result(&ret), "{ret:?}"),
+            other => panic!("expected a let of fn type, got {other:?}"),
+        }
+        let mut bad = Vec::new();
+        for src in [
+            "y: const int!= 6\n",
+            "fn f(a: int!=5): a\n",
+            "struct P:\n    a: int!= 5\n",
+            "x: bool!= a != b\n",
+            "x: bool! = a != b\n",
+            "print(xs[a != b])\n",
+            "print(f[int](1) != 2)\n",
+        ] {
+            if let Err(e) = parse(lexer::tokenize(src).unwrap()) {
+                bad.push(format!("{src:?} must parse: {}", e.message));
+            }
+        }
+        for (src, want) in [
+            ("y: int!== 6\n", "unexpected '=' in expression"),
+            ("fn f() -> int!= 5\n", "expected ':', found '!='"),
+            ("type X = int!= 5\n", "expected end of line, found '!='"),
+        ] {
+            let got = parse_err(src).message;
+            if !got.contains(want) {
+                bad.push(format!("{src:?} must give {want:?}: {got}"));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
     #[test]
