@@ -137,6 +137,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
         });
     }
     c.program.field_ic_sites = c.field_ic_next;
+    c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
     c.program.rebuild_struct_names();
     c.build_eq_hooks();
@@ -208,6 +209,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
         file: 0,
     });
     c.program.field_ic_sites = c.field_ic_next;
+    c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
     c.program.rebuild_struct_names();
     c.build_provider_table()?;
@@ -536,6 +538,7 @@ impl Compiler {
             modules: Vec::new(),
             field_ic_sites: 0,
             method_ic_sites: 0,
+            task_entry: 0,
             cffi_defs: Vec::new(),
             tests: Vec::new(),
             suites: Vec::new(),
@@ -1960,10 +1963,50 @@ impl Compiler {
         Ok(())
     }
 
+    /// TICKET-235 — the entry thunk of one `spawn <call>` site: a proto that takes the head and its
+    /// `k` operands as parameters and replays the call (`Op::CallMethod` for `Some(method)`,
+    /// `Op::Call` otherwise). The operands are evaluated in the parent, by the spawn site; the thunk
+    /// only gives the call a frame to run and park in. `Vm::task_entry` decides whether a task
+    /// enters through it.
+    fn spawn_entry_proto(
+        &mut self,
+        name: &str,
+        method: Option<&str>,
+        k: usize,
+        span: Span,
+    ) -> ProtoId {
+        let mut child = FnComp::new(name.to_string(), k + 1, false);
+        for i in 0..=k {
+            child.add_local(format!("$t{i}"));
+        }
+        for i in 0..=k {
+            child.emit(Op::GetLocal(i), span);
+        }
+        match method {
+            Some(name) => {
+                let ic = self.next_method_ic();
+                child.emit(
+                    Op::CallMethod {
+                        name: name.to_string(),
+                        argc: k,
+                        ic,
+                    },
+                    span,
+                );
+            }
+            None => child.emit(Op::Call(k), span),
+        }
+        child.emit(Op::Return, span);
+        self.finish(child)
+    }
+
     /// `spawn` — register a task on the innermost nursery. Form 1 (`spawn f(args)` / `spawn
-    /// recv.m(args)`) evaluates the callee/receiver + args here and emits `SpawnCall`/`SpawnMethod`
-    /// (mirrors `compile_defer`). Form 2 (`spawn:` block) compiles the block as a synthetic zero-arg
-    /// proto and emits `SpawnBlock`, capturing the enclosing bindings (like a closure).
+    /// recv.m(args)`) evaluates the callee/receiver + args here, in the parent, and emits
+    /// `SpawnCall`/`SpawnRecv` carrying the site's entry thunk ([`Self::spawn_entry_proto`]): a
+    /// head that pushes no frame by itself (a receiver, a native fn value) runs as argument 0 of
+    /// that thunk, so every task starts in a frame (TICKET-235). Form 2 (`spawn:` block) compiles
+    /// the block as a synthetic zero-arg proto and emits `SpawnBlock`, capturing the enclosing
+    /// bindings (like a closure).
     fn compile_spawn(
         &mut self,
         fc: &mut FnComp,
@@ -1994,18 +2037,25 @@ impl Compiler {
                     call.span,
                 )? {
                     let n = self.compile_call_args(fc, call.id, callee, args, named, call.span)?;
-                    fc.emit(Op::SpawnCall(n, self.crossing_mask(call.id)), call.span);
+                    let entry = self.spawn_entry_proto("<spawned task>", None, n, call.span);
+                    fc.emit(
+                        Op::SpawnCall(n, self.crossing_mask(call.id), Some(entry)),
+                        call.span,
+                    );
                     return Ok(());
                 }
                 // M24-5b — `spawn Type.m(..)`: no receiver value to hold, so it rides the eager-args
-                // wrapper instead of `Op::SpawnMethod`.
+                // wrapper instead of `Op::SpawnRecv`.
                 if self.receiverless_call_head(callee)? {
                     let n = self.compile_receiverless_target(
                         fc,
                         (call.id, callee, args, named),
                         call.span,
                     )?;
-                    fc.emit(Op::SpawnCall(n, self.crossing_mask(call.id)), call.span);
+                    fc.emit(
+                        Op::SpawnCall(n, self.crossing_mask(call.id), None),
+                        call.span,
+                    );
                     return Ok(());
                 }
                 if let ExprKind::Field {
@@ -2015,16 +2065,18 @@ impl Compiler {
                 } = &callee.kind
                     && !crate::ast::is_tuple_index(name)
                 {
-                    // Same hidden `0.0` seed the eager `Op::CallMethod` emit pushes: a spawned
-                    // member call runs through the identical `Vm::do_method_call`, so a missing seed
-                    // changes an empty `List[float].sum()`'s answer. The seed is a plain scalar, so
-                    // it crosses `do_spawn`'s `deep_clone_all` airlock exactly like any other
-                    // spawned argument.
+                    // Same hidden `0.0` seed the eager `Op::CallMethod` emit pushes: the entry
+                    // thunk's `Op::CallMethod` consumes it, so a missing seed changes an empty
+                    // `List[float].sum()`'s answer. The seed is a plain scalar, so it crosses
+                    // `do_spawn`'s `deep_clone_all` airlock exactly like any other spawned
+                    // argument.
                     if let Some(seed) = self.sum_seed(name, args, *name_span) {
                         self.compile_expr(fc, obj)?;
                         self.emit_sum_seed(fc, &seed, call.span);
                         let fresh = self.crossing_mask(call.id);
-                        fc.emit(Op::SpawnMethod(name.clone(), 1, fresh), call.span);
+                        let entry =
+                            self.spawn_entry_proto("<spawned task>", Some(name), 1, call.span);
+                        fc.emit(Op::SpawnRecv(1, fresh, entry), call.span);
                         return Ok(());
                     }
                     self.compile_expr(fc, obj)?;
@@ -2034,7 +2086,9 @@ impl Compiler {
                     let w =
                         self.emit_member_witness_args(fc, callee, name, *name_span, call.span)?;
                     let fresh = self.crossing_mask(call.id);
-                    fc.emit(Op::SpawnMethod(name.clone(), n + w, fresh), call.span);
+                    let entry =
+                        self.spawn_entry_proto("<spawned task>", Some(name), n + w, call.span);
+                    fc.emit(Op::SpawnRecv(n + w, fresh, entry), call.span);
                 } else {
                     // A spawned value call: its arguments -- default fills included -- are
                     // evaluated here, at the statement, in the checker's slot plan when it bound
@@ -2044,7 +2098,8 @@ impl Compiler {
                     // M24-5: TRAILING — after the arguments, never in source order.
                     let w = self.emit_indirect_witness_args(fc, callee, call.span)?;
                     let fresh = self.crossing_mask(call.id);
-                    fc.emit(Op::SpawnCall(n + w, fresh), call.span);
+                    let entry = self.spawn_entry_proto("<spawned task>", None, n + w, call.span);
+                    fc.emit(Op::SpawnCall(n + w, fresh, Some(entry)), call.span);
                 }
                 Ok(())
             }

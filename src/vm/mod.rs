@@ -754,27 +754,21 @@ impl Deferred {
 #[derive(Clone)]
 enum PendingCall {
     /// `spawn f(args)` (or a `spawn:` block, lowered to a zero-arg closure) — invoke the callable.
+    /// `spawn recv.m(args)` is this shape too: its callee is the site's entry thunk and the
+    /// receiver is argument 0 (TICKET-235, `Vm::task_entry`).
     Call {
         callee: Value,
-        args: Vec<Value>,
-        span: Span,
-    },
-    /// `spawn recv.name(args)` — dispatch the named method on the receiver.
-    Method {
-        recv: Value,
-        name: String,
         args: Vec<Value>,
         span: Span,
     },
 }
 
 impl PendingCall {
-    /// The GcRefs this pending task keeps alive (callee/receiver + arguments).
+    /// The GcRefs this pending task keeps alive (callee + arguments).
     fn roots(&self) -> impl Iterator<Item = GcRef> + '_ {
-        let (head, args) = match self {
-            PendingCall::Call { callee, args, .. } => (callee, args),
-            PendingCall::Method { recv, args, .. } => (recv, args),
-        };
+        let PendingCall::Call {
+            callee: head, args, ..
+        } = self;
         // `child_gcref` roots BOTH true `Obj`s and boxed floats (Float tag) — a deferred/spawn arg may
         // be a boxed float and must stay alive until the call runs.
         std::iter::once(head)
@@ -1845,14 +1839,6 @@ enum Lowered {
     /// Never add a per-kind arm beside this one.
     Value {
         callee: WireValue,
-        args: Vec<WireValue>,
-        span: Span,
-    },
-    /// `spawn recv.m(args)` (B3.3d) — the receiver + args cross by wire; dispatch resolves the method
-    /// against the worker's reconstructed `module_objs` (struct methods index `module_objs[module_idx]`).
-    Method {
-        recv: WireValue,
-        name: String,
         args: Vec<WireValue>,
         span: Span,
     },
@@ -6472,12 +6458,6 @@ struct ReadyWorker {
 enum ReadyCall {
     /// A `spawn f(x)` / `spawn:` block — invoke the rebuilt callable with its rebuilt args.
     Invoke { callee: Value, args: Vec<Value> },
-    /// A `spawn recv.m(args)` method task — dispatch `name` on the rebuilt receiver/args (B3.3d).
-    Method {
-        recv: Value,
-        name: String,
-        args: Vec<Value>,
-    },
 }
 
 impl ReadyWorker {
@@ -6508,21 +6488,6 @@ impl ReadyWorker {
     fn invoke(worker: &mut Vm, call: ReadyCall, span: Span) -> Result<Value, RuntimeError> {
         match call {
             ReadyCall::Invoke { callee, args } => worker.invoke_value(callee, args, span),
-            ReadyCall::Method { recv, name, args } => {
-                let argc = args.len();
-                worker.push(recv);
-                for a in args {
-                    worker.push(a);
-                }
-                worker.do_method_call(&name, argc, NO_IC, span)?;
-                if worker.suspend.is_some() {
-                    return Err(worker.err(
-                        "spawn: a method task blocked on recv in an isolated worker (no scheduler until B3.3-threads)".to_string(),
-                        span,
-                    ));
-                }
-                Ok(worker.pop())
-            }
         }
     }
 
@@ -6535,12 +6500,6 @@ impl ReadyWorker {
         let ReadyWorker { worker, call, span } = self;
         let task = match call {
             ReadyCall::Invoke { callee, args } => PendingCall::Call { callee, args, span },
-            ReadyCall::Method { recv, name, args } => PendingCall::Method {
-                recv,
-                name,
-                args,
-                span,
-            },
         };
         let ctx = FiberCtx {
             heap: Some(worker.heap),

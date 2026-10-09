@@ -1,0 +1,10 @@
+import std.concurrency
+
+fn main():
+    a := Atomic[int](0)
+    parallel:
+        for _ in 0..100000:
+            spawn a.add(1)
+    print(a.load())
+
+main()

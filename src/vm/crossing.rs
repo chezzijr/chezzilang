@@ -40,6 +40,13 @@ impl Crossing {
         }
     }
 
+    /// The head rides as argument 0 behind an entry thunk: bit 0 is the thunk and is never set, the
+    /// receiver or callee moves to bit 1, bound slot `j` to bit `j + 2`; a slot shifted past the top
+    /// bit reads `Copy`.
+    pub fn behind_entry(mask: u32) -> u32 {
+        mask << 1
+    }
+
     /// TICKET-190: encode a generator frame: bit `k` = frame slot `k` is `Move` (private, the
     /// parent cannot reach its root). A slot at 64 or above stays `Copy` (a false fault, never a
     /// lost write).
@@ -130,6 +137,12 @@ mod tests {
         wide.push(Move);
         assert_eq!(Crossing::from_mask(Crossing::mask(None, &wide), 32), Copy);
         assert_eq!(Crossing::from_mask(u32::MAX, 32), Copy);
+        // TICKET-235: behind an entry thunk every operand sits one bit higher.
+        let m = Crossing::behind_entry(Crossing::mask(Some(Move), &[Copy, Move]));
+        assert_eq!(Crossing::from_mask(m, 0), Copy);
+        assert_eq!(Crossing::from_mask(m, 1), Move);
+        assert_eq!(Crossing::from_mask(m, 2), Copy);
+        assert_eq!(Crossing::from_mask(m, 3), Move);
         // TICKET-190: a generator frame mask, one bit per frame slot.
         let slots = [Move, Copy, Move];
         let fm = Crossing::frame_mask(&slots);

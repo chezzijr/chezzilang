@@ -163,6 +163,8 @@ spawn:                     # form 2: spawn an anonymous indented block (a statem
     ch.send(x)
 ```
 
+A one-line `spawn f(args)` and the block form run the same way: the receiver and the arguments are evaluated in the parent at the `spawn`, the call runs in the task, and a call that waits (`spawn ch.send(v)`, `spawn ch.recv()`, `spawn l.accept()`) parks like any other.
+
 Both are only legal **inside a `parallel:` nursery**, which joins all children at the dedent:
 
 ```chezzi

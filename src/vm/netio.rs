@@ -4269,7 +4269,7 @@ impl Vm {
         };
         self.spawn_into(
             crate::vm::sched::SpawnTarget::Scope { sched, settle },
-            None,
+            crate::vm::sched::SpawnHead::Callee(Some(self.program.task_entry)),
             f,
             Vec::new(),
             0,

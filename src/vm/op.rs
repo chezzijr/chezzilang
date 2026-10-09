@@ -523,12 +523,19 @@ pub enum Op {
     /// TICKET-189), laid out by `vm::crossing::Crossing::mask`: bit `j + 1` set = bound slot `j`
     /// (default fills and packs included) is `Move`, so its root is rebuilt unmarked. Bit 0 is the
     /// callee or the receiverless wrapper closure and is never set.
-    SpawnCall(usize, u32),
+    ///
+    /// TICKET-235: the `ProtoId` is the site's entry thunk. The head is a callee and enters through
+    /// the thunk only when `Vm::enters_frame` says the callee pushes no frame (a native fn value, a
+    /// builtin, a ctor, a generator fn). `None` = the head is the receiverless wrapper closure,
+    /// which always pushes its own.
+    SpawnCall(usize, u32, Option<ProtoId>),
     /// `spawn recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1`, deep-copies the receiver
-    /// AND the args across the airlock, and registers the method task. Mirrors `DeferMethod`.
-    /// The `u32` is the crossing bitmask (`vm::crossing`): bit 0 = the receiver, bit `j + 1` = bound
-    /// slot `j`.
-    SpawnMethod(String, usize, u32),
+    /// AND the args across the airlock, and registers the task. The `u32` is the crossing bitmask
+    /// (`vm::crossing`): bit 0 = the receiver, bit `j + 1` = bound slot `j`.
+    ///
+    /// TICKET-235: the head is a receiver and always enters through the site's entry thunk (the
+    /// `ProtoId`), whose body is the `Op::CallMethod` the block form runs.
+    SpawnRecv(usize, u32, ProtoId),
     /// `spawn:` block — snapshot each `CapEntry`'s value from the enclosing frame (like
     /// `MakeClosure`), deep-copy the captured values across the airlock, build a zero-arg closure
     /// over `ProtoId`, and register it as a `Call` task. (Form 2; the block was compiled to a
@@ -751,6 +758,10 @@ pub struct Program {
     /// into `CallMethod` ops). The VM pre-sizes its per-`Vm` `method_ic` vector to this length. Holds
     /// proto ids + module indices, not `GcRef`s, so it carries no heap state (never snapshotted/swapped).
     pub method_ic_sites: u32,
+    /// TICKET-235 — the program-wide entry thunk (`<task entry>`, one parameter, body `Call(0)`)
+    /// behind `Executor.submit(f)` when `f` pushes no frame by itself (a native fn value). `submit`
+    /// is a runtime call, so no per-site thunk exists for it. See `Vm::task_entry`.
+    pub task_entry: ProtoId,
     /// C-ABI FFI — one entry per `extern "lib":` function, referenced by `Op::MakeCffi(id)`. The
     /// resolved symbol address is *not* stored here (it is per-process, resolved at `MakeCffi` via
     /// `dlopen`+`dlsym`); only the library path, name, and marshalling signature are.

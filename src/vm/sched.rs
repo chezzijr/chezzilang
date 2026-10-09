@@ -220,15 +220,26 @@ impl Vm {
     }
 }
 
+/// What the head of a one-line `spawn <call>` (or of `Executor.submit(f)`) is, and the entry thunk
+/// its site compiled (TICKET-235). Read by [`Vm::task_entry`] only.
+#[derive(Clone, Copy)]
+pub(super) enum SpawnHead {
+    /// A callee value. The thunk is used only when the callee pushes no frame by itself; `None` =
+    /// the receiverless wrapper closure, which always does.
+    Callee(Option<ProtoId>),
+    /// A receiver: the thunk's `Op::CallMethod` dispatches the member on it.
+    Receiver(ProtoId),
+}
+
 impl Vm {
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
     /// the method form, the receiver) across the airlock, and register the task on the innermost
     /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. `fresh` is
-    /// the checker's freshness bitmask (see [`super::op::Op::SpawnMethod`]), carried to
+    /// the checker's freshness bitmask (see [`super::op::Op::SpawnRecv`]), carried to
     /// [`Vm::rebuild_ready`].
     pub(super) fn do_spawn(
         &mut self,
-        method: Option<String>,
+        kind: SpawnHead,
         argc: usize,
         fresh: u32,
         span: Span,
@@ -240,7 +251,50 @@ impl Vm {
         if self.nurseries.is_empty() {
             return Err(self.err("spawn must be inside a parallel: block".to_string(), span));
         }
-        self.spawn_into(SpawnTarget::Nursery, method, head, raw_args, fresh, span)
+        self.spawn_into(SpawnTarget::Nursery, kind, head, raw_args, fresh, span)
+    }
+
+    /// TICKET-235 — does calling `v` push a Chezzi frame that the task then runs in? True for a
+    /// non-generator fn or closure. A native fn, a builtin, a ctor and a generator fn push none:
+    /// a park inside one would have no `ip` to rewind ([`Vm::rewind_op`]).
+    pub(super) fn enters_frame(&self, v: Value) -> bool {
+        matches!(
+            self.callable(v),
+            Some(Callee::Func { proto, .. } | Callee::Closure { proto, .. })
+                if !self.program.protos[proto].is_generator
+        )
+    }
+
+    /// TICKET-235 — THE decision of how a spawned call becomes a task body; every task it yields
+    /// starts in a frame. A head that pushes its own frame runs directly, unchanged. Any other
+    /// head (a receiver, a native fn value, a builtin, a ctor, a generator fn) becomes argument 0
+    /// of the site's entry thunk, and `fresh` moves one bit ([`Crossing::behind_entry`]). A
+    /// non-callable callee passes through, so `lower_task` reports it as it always did.
+    fn task_entry(
+        &mut self,
+        kind: SpawnHead,
+        head: Value,
+        mut args: Vec<Value>,
+        fresh: u32,
+        span: Span,
+    ) -> Result<(Value, Vec<Value>, u32), RuntimeError> {
+        let proto = match kind {
+            SpawnHead::Callee(_) if self.enters_frame(head) || self.callable(head).is_none() => {
+                return Ok((head, args, fresh));
+            }
+            SpawnHead::Callee(None) => {
+                return Err(self.err(
+                    "internal error: a spawned call has no entry thunk".to_string(),
+                    span,
+                ));
+            }
+            SpawnHead::Callee(Some(p)) | SpawnHead::Receiver(p) => p,
+        };
+        // The thunk value is built on the PARENT side, the way `Op::MakeFunc` builds any fn value.
+        let home = self.frames.last().expect("a spawn runs in a frame").home;
+        let entry = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
+        args.insert(0, head);
+        Ok((entry, args, Crossing::behind_entry(fresh)))
     }
 
     /// Start one task: the ONE function behind `spawn` and `Executor.submit` (TICKET-208). It pins
@@ -250,12 +304,13 @@ impl Vm {
     pub(super) fn spawn_into(
         &mut self,
         target: SpawnTarget,
-        method: Option<String>,
+        kind: SpawnHead,
         head: Value,
         raw_args: Vec<Value>,
         fresh: u32,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        let (head, raw_args, fresh) = self.task_entry(kind, head, raw_args, fresh, span)?;
         // W7-4: everything that crosses here crosses in ONE serialization, so two sibling closures
         // over the SAME captured local (`spawn work(c.inc, c.get)`) still share their one binding on
         // the far side. Root-by-root `deep_clone` gave each its own [`WireMemo`] → one cell per
@@ -263,10 +318,12 @@ impl Vm {
         // the cheap shared handle (see [`spawn_callee_crosses_deep`](Vm::spawn_callee_crosses_deep)),
         // so it stays out of the batch.
         //
-        // ARGS FIRST, receiver/callee LAST — the pre-batch order (every arg was `deep_clone`d, then the
-        // receiver / `cross_spawn_callee`). Serialization order is observable when two of them are
+        // ARGS FIRST, callee LAST — the pre-batch order (every arg was `deep_clone`d, then
+        // `cross_spawn_callee`). Serialization order is observable when two of them are
         // non-crossable in DIFFERENT ways (a depth-cap arg vs a reference-cycle callee): the first
         // failure is the reported fault. `lower_task` keeps the same args-before-captures order.
+        // A head behind an entry thunk is argument 0 (TICKET-235), so a receiver is serialized
+        // before the arguments.
         //
         // W7-4c — PIN THE SNAPSHOT FIRST. The clone below mints fresh cells, and they can only be tied
         // to the module snapshot's ids if those ids already exist; pinning inside `register_task`
@@ -274,7 +331,7 @@ impl Vm {
         // so the pinned VALUES are identical — only which fault wins changes when BOTH the snapshot
         // build and the crossing are non-viable, and the snapshot's fault is the more fundamental one.
         let pin = self.fresh_view(span);
-        let cross_head = method.is_some() || self.spawn_callee_crosses_deep(head);
+        let cross_head = self.spawn_callee_crosses_deep(head);
         let mut batch = raw_args;
         if cross_head {
             batch.push(head);
@@ -286,18 +343,10 @@ impl Vm {
             head
         };
         let args = crossed;
-        let task = match method {
-            Some(name) => PendingCall::Method {
-                recv: head,
-                name,
-                args,
-                span,
-            },
-            None => PendingCall::Call {
-                callee: head,
-                args,
-                span,
-            },
+        let task = PendingCall::Call {
+            callee: head,
+            args,
+            span,
         };
         match target {
             SpawnTarget::Nursery => self.register_task(task, span, pin, cell_ids, fresh),
@@ -3379,10 +3428,9 @@ impl Vm {
         Ok(())
     }
 
-    /// Launch a fiber's initial task in the (already swapped-in) child context. Mirrors the old
-    /// `run_pending`, but a blocking `recv` may park the fiber mid-flight: the `do_method_call` /
-    /// `invoke_value` paths leave `self.suspend` set and the frames live, so the discard-pop is
-    /// skipped (there is no result yet) and the scheduler resumes the fiber later.
+    /// Launch a fiber's initial task in the (already swapped-in) child context: push the callee's
+    /// frame and return; the scheduler then runs it. The callee always pushes a frame (TICKET-235,
+    /// [`Vm::task_entry`]), so a call that waits inside the task has an `ip` to rewind.
     pub(super) fn start_task(&mut self, task: PendingCall) -> Result<(), RuntimeError> {
         match task {
             PendingCall::Call { callee, args, span } => {
@@ -3402,28 +3450,16 @@ impl Vm {
                 } else {
                     (callee, args)
                 };
+                // TICKET-235: `Vm::task_entry` gave every callable head that pushes no frame an
+                // entry thunk. A task queued any other way stops here, not at a park's rewind.
+                // (A non-callable callee falls through to `invoke_value`'s own fault.)
+                if self.callable(callee).is_some() && !self.enters_frame(callee) {
+                    return Err(self.err(
+                        "internal error: a task must start in a Chezzi frame".to_string(),
+                        span,
+                    ));
+                }
                 self.invoke_value(callee, args, span)?;
-                Ok(())
-            }
-            PendingCall::Method {
-                recv,
-                name,
-                args,
-                span,
-            } => {
-                let argc = args.len();
-                self.push(recv);
-                for a in args {
-                    self.push(a);
-                }
-                // Receiver + args are already on the operand stack, i.e. rooted — sample here.
-                if self.heap.mem_cap() != 0 {
-                    self.sample_mem_cap(span)?;
-                }
-                self.do_method_call(&name, argc, NO_IC, span)?;
-                if !self.paused() {
-                    self.pop(); // discard the completed task's result (none pending if paused/yielded)
-                }
                 Ok(())
             }
         }
@@ -4986,7 +5022,7 @@ impl Vm {
         &mut self,
         task: PendingCall,
     ) -> Result<WorkerResult, RuntimeError> {
-        let (PendingCall::Call { span, .. } | PendingCall::Method { span, .. }) = &task;
+        let PendingCall::Call { span, .. } = &task;
         let snap = self.fresh_view(*span)?;
         self.prepare_worker(task, snap, &[], 0)?.run()
     }
@@ -5149,25 +5185,6 @@ impl Vm {
                     }
                 }
             }
-            // B3.3d: the receiver + args cross by wire; dispatch resolves against the worker's
-            // reconstructed `module_objs` (built below). `ensure_crossable` keeps a non-sendable
-            // receiver (e.g. a closure) from silently dangling.
-            PendingCall::Method {
-                recv,
-                name,
-                args,
-                span,
-            } => {
-                let wrecv = self.to_wire_memo_at(recv, span, &mut memo)?;
-                self.ensure_crossable(&wrecv, span)?;
-                let wargs = self.wire_args(&args, span, &mut memo)?;
-                Lowered::Method {
-                    recv: wrecv,
-                    name,
-                    args: wargs,
-                    span,
-                }
-            }
         };
         Ok(lowered)
     }
@@ -5179,13 +5196,13 @@ impl Vm {
     ///
     /// W7-4: ONE rebuild map spans the whole `Lowered`, mirroring `lower_task`'s single [`WireMemo`]
     /// and reconstructing in the SAME order it serialized (a `Call`'s args before the callee's
-    /// captures; a `Method`'s receiver before its args), so a cell shared between an arg and a capture
-    /// is rebuilt once and both references tie to it — and no `Backref` is ever reached before the
-    /// `WireValue::Cell` that defines it.
+    /// captures), so a cell shared between an arg and a capture is rebuilt once and both references
+    /// tie to it — and no `Backref` is ever reached before the `WireValue::Cell` that defines it.
     ///
-    /// D4 (TICKET-179): `fresh` is the checker's freshness bitmask (bit 0 = the receiver, bit `i + 1` =
-    /// arg `i`). A fresh operand's ROOT is unmarked after the rebuild; its children stay marked
-    /// (`copy()` is shallow, DEC-160).
+    /// D4 (TICKET-179): `fresh` is the checker's freshness bitmask (bit `i + 1` = arg `i`; bit 0 is
+    /// the callee and never set — a receiver is arg 0 of its entry thunk, TICKET-235). A fresh
+    /// operand's ROOT is unmarked after the rebuild; its children stay marked (`copy()` is shallow,
+    /// DEC-160).
     pub(super) fn rebuild_ready(
         &mut self,
         lowered: Lowered,
@@ -5242,32 +5259,14 @@ impl Vm {
                 let callee = self.from_wire_memo(callee, rb);
                 (ReadyCall::Invoke { callee, args }, span)
             }
-            Lowered::Method {
-                recv,
-                name,
-                args,
-                span,
-            } => {
-                let recv = self.from_wire_memo(recv, rb);
-                let args = self.rebuild_items(args, rb, |w| w);
-                (ReadyCall::Method { recv, name, args }, span)
-            }
         };
         self.copy_mark = saved_copy_mark;
-        let (recv, args) = match &out.0 {
-            ReadyCall::Invoke { args, .. } => (None, args),
-            ReadyCall::Method { recv, args, .. } => (Some(*recv), args),
-        };
-        let fresh_roots = recv
-            .filter(|_| Crossing::from_mask(fresh, 0) == Crossing::Move)
-            .into_iter()
-            .chain(
-                args.iter()
-                    .enumerate()
-                    .filter(|&(i, _)| Crossing::from_mask(fresh, i + 1) == Crossing::Move)
-                    .map(|(_, &v)| v),
-            )
-            .filter_map(|v| v.as_obj())
+        let ReadyCall::Invoke { args, .. } = &out.0;
+        let fresh_roots = args
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| Crossing::from_mask(fresh, i + 1) == Crossing::Move)
+            .filter_map(|(_, &v)| v.as_obj())
             .collect::<Vec<_>>();
         for h in fresh_roots {
             self.heap.unset_copied(h);

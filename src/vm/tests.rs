@@ -1776,6 +1776,7 @@ pub(crate) fn empty_program() -> Program {
         modules: vec![],
         field_ic_sites: 0,
         method_ic_sites: 0,
+        task_entry: 0,
         cffi_defs: vec![],
         tests: vec![],
         suites: vec![],
@@ -10631,42 +10632,36 @@ fn worker_calls_imported_fn() {
 
 // ----- B3.3d: method tasks (`spawn recv.m()`) -----
 
-/// A method task on a primitive receiver — `"hello".len()` dispatches in the worker (B3.3d,
-/// replaces the B3.2 reject). Core-type methods need no module graph, but exercise the new path.
+/// TICKET-235 — a task queued past `Vm::task_entry` with a callee that pushes no frame is refused
+/// at `start_task`, not run frameless. Goes red when the refusal is removed: the builtin then runs
+/// with `self.frames` empty.
 #[test]
-fn worker_runs_method_task() {
+fn start_task_refuses_a_callee_that_enters_no_frame() {
     let mut vm = Vm::new(Arc::new(empty_program()));
-    let recv = vm.heap.alloc(Obj::Str("hello".into()));
-    let task = PendingCall::Method {
-        recv: Value::obj(recv),
-        name: "len".into(),
+    let callee = Value::obj(vm.heap.alloc(Obj::Builtin("print".into())));
+    let r = vm.start_task(PendingCall::Call {
+        callee,
         args: Vec::new(),
         span: sp(),
-    };
-    let res = vm
-        .run_task_isolated(task)
-        .expect("method task now runs in a worker");
-    assert_eq!(vm.from_wire(res.value), Value::int(5));
+    });
+    let e = r.expect_err("a builtin callee enters no frame");
+    assert!(
+        e.message.contains("a task must start in a Chezzi frame"),
+        "{}",
+        e.message
+    );
 }
 
 /// A struct method resolved through reconstructed `module_objs` — and its body **reads a module
 /// global** (`scale`), so dispatch must resolve through the rebuilt home *contents*, not merely
-/// index an in-bounds placeholder. `(3 + 4) * 10 == 70`.
+/// index an in-bounds placeholder. `(3 + 4) * 10 == 70`. TICKET-235: a method task is a `Call`
+/// task whose callee is the site's entry thunk, so this runs the program end to end.
 #[test]
 fn worker_method_on_struct() {
-    let mut vm = ran_standalone(
-        "scale := 10\nstruct Point:\n    x: int\n    y: int\n    fn weighted(self) -> int:\n        return (self.x + self.y) * scale\np := Point(3, 4)\n",
+    assert_eq!(
+        run_capture("scale := 10\nstruct Point:\n    x: int\n    y: int\n    fn weighted(self, out: Channel[int]):\n        out.send((self.x + self.y) * scale)\np := Point(3, 4)\nch := Channel[int](1)\nparallel:\n    spawn p.weighted(ch)\nprint(ch.recv())\n").unwrap(),
+        "70\n"
     );
-    let task = PendingCall::Method {
-        recv: entry_global(&vm, "p"),
-        name: "weighted".into(),
-        args: Vec::new(),
-        span: sp(),
-    };
-    let res = vm
-        .run_task_isolated(task)
-        .expect("struct method task dispatches in its worker");
-    assert_eq!(vm.from_wire(res.value), Value::int(70));
 }
 
 /// Cross-heap safety: a module global that is a **container of callables** (`[fn …]`) must have its
