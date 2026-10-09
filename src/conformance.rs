@@ -533,3 +533,322 @@ fn reject_messages_are_specific() {
         );
     }
 }
+
+// ----- alternative coverage: every grammar alternative, in every statement-level rule -----
+
+/// One symbol of a grammar alternative: a terminal name or a nonterminal name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Sym {
+    T(String),
+    N(String),
+}
+
+/// `docs/grammar.bnf` as data: nonterminal -> its alternatives, read from the normalized text.
+fn parse_rules(grammar: &str) -> BTreeMap<String, Vec<Vec<Sym>>> {
+    let mut rules = BTreeMap::new();
+    for line in grammar.lines() {
+        let (lhs, rhs) = line.split_once("::=").expect("a normalized rule line");
+        let name = lhs.trim().trim_start_matches('<').trim_end_matches('>');
+        let alts = rhs
+            .split('|')
+            .map(|alt| {
+                alt.split_whitespace()
+                    .map(|s| match s.strip_prefix('"') {
+                        Some(t) => Sym::T(t.trim_end_matches('"').to_string()),
+                        None => Sym::N(s.trim_start_matches('<').trim_end_matches('>').to_string()),
+                    })
+                    .collect()
+            })
+            .collect();
+        rules.insert(name.to_string(), alts);
+    }
+    rules
+}
+
+/// The shortest sentence (terminal names) each nonterminal derives: a fixpoint over the rules.
+fn min_sentences(rules: &BTreeMap<String, Vec<Vec<Sym>>>) -> BTreeMap<String, Vec<String>> {
+    let mut min: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    loop {
+        let mut changed = false;
+        for (name, alts) in rules {
+            for alt in alts {
+                let Some(sentence) = expand(alt, &min) else {
+                    continue;
+                };
+                if min.get(name).is_none_or(|old| sentence.len() < old.len()) {
+                    min.insert(name.clone(), sentence);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return min;
+        }
+    }
+}
+
+/// `syms` with every nonterminal replaced by its shortest sentence; `None` while one has none yet.
+fn expand(syms: &[Sym], min: &BTreeMap<String, Vec<String>>) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for s in syms {
+        match s {
+            Sym::T(t) => out.push(t.clone()),
+            Sym::N(n) => out.extend(min.get(n)?.iter().cloned()),
+        }
+    }
+    Some(out)
+}
+
+/// The token for terminal `name` at position `k`. A fixed token comes from the lexer's own
+/// `KEYWORDS` / `PUNCTUATION` lists; identifiers are distinct per position, so a sentence never
+/// trips a duplicate-name rule the grammar cannot state. Panics on a terminal with no token.
+fn sample_token(name: &str, k: usize) -> Token {
+    use crate::lexer::{KEYWORDS, PUNCTUATION};
+    match name {
+        "NEWLINE" => Token::Newline,
+        "INDENT" => Token::Indent,
+        "DEDENT" => Token::Dedent,
+        "EOF" => Token::Eof,
+        "IDENT" => Token::Ident(format!("v{k}")),
+        "INT" => Token::Int(1),
+        "FLOAT" => Token::Float(1.5),
+        "STR" => Token::Str("s".into()),
+        "BYTES" => Token::Bytes(b"s".to_vec()),
+        "RAWSTR" => Token::RawStr("s".into()),
+        _ => KEYWORDS
+            .iter()
+            .map(|(_, t)| t)
+            .chain(PUNCTUATION)
+            .find(|t| symbol(t) == name)
+            .unwrap_or_else(|| panic!("no sample token for terminal {name}"))
+            .clone(),
+    }
+}
+
+fn sample_tokens(names: &[String]) -> Vec<crate::lexer::Tok> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(k, name)| crate::lexer::Tok {
+            kind: sample_token(name, k),
+            span: crate::lexer::Span {
+                line: 1,
+                col: k as u32 + 1,
+                file: 0,
+            },
+        })
+        .collect()
+}
+
+/// A `prefix X suffix` context per nonterminal, as terminal names.
+type Frames = BTreeMap<String, (Vec<String>, Vec<String>)>;
+
+/// For each nonterminal reachable from `root`, the cheapest context whose minimal sentence the
+/// hand parser accepts. Cheapest-first, so the frame of a nonterminal is the shortest accepted one.
+fn frames(
+    root: &str,
+    rules: &BTreeMap<String, Vec<Vec<Sym>>>,
+    min: &BTreeMap<String, Vec<String>>,
+) -> Frames {
+    let mut framed = Frames::new();
+    let mut queue: BTreeSet<(usize, String, Vec<String>, Vec<String>)> = BTreeSet::new();
+    queue.insert((min[root].len(), root.to_string(), Vec::new(), Vec::new()));
+    while let Some((_, name, prefix, suffix)) = queue.pop_first() {
+        if framed.contains_key(&name) {
+            continue;
+        }
+        let mut sentence = prefix.clone();
+        sentence.extend(min[&name].iter().cloned());
+        sentence.extend(suffix.iter().cloned());
+        sentence.push("EOF".to_string());
+        if parse(sample_tokens(&sentence)).is_err() {
+            continue;
+        }
+        for alt in &rules[&name] {
+            for (i, sym) in alt.iter().enumerate() {
+                let Sym::N(child) = sym else { continue };
+                if framed.contains_key(child) || child == &name {
+                    continue;
+                }
+                let mut p = prefix.clone();
+                p.extend(expand(&alt[..i], min).expect("every rule derives a sentence"));
+                let mut s = expand(&alt[i + 1..], min).expect("every rule derives a sentence");
+                s.extend(suffix.iter().cloned());
+                queue.insert((p.len() + min[child].len() + s.len(), child.clone(), p, s));
+            }
+        }
+        framed.insert(name, (prefix, suffix));
+    }
+    framed
+}
+
+/// Where `docs/grammar.bnf` derives a sentence the hand parser refuses: `(nonterminal whose
+/// alternative the sentence enumerates, fragment of the parser's message, reason)`. A context rule
+/// the BNF cannot state stays here; a real divergence is listed with its finding id in TICKET-241
+/// and is a bug to fix. Every entry must still be hit, so a fixed divergence forces its entry out.
+/// Do not add an entry for a new rejection without deciding whether the parser or the grammar is
+/// wrong.
+const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
+    // ----- context rules the BNF cannot state -----
+    (
+        "param",
+        "default arguments are not supported here",
+        "context: a closure, extern or protocol param takes no default",
+    ),
+    (
+        "param",
+        "variadic parameters are not supported here",
+        "context: a closure, extern or protocol param is never variadic",
+    ),
+    (
+        "simpleStmt",
+        "spawn requires a function or method call",
+        "context: the call form of `spawn` takes a call, the BNF says <expr>",
+    ),
+    (
+        "compoundStmt",
+        "`wait` needs at least one `recv` arm",
+        "context: a `wait:` of one `else:` arm has nothing to race",
+    ),
+    (
+        "nativeStructMember",
+        "native instance method must declare `self`",
+        "context: the first param of a native method is `self`",
+    ),
+    (
+        "nativeEnumMembers",
+        "native instance method must declare `self`",
+        "context: the first param of a native method is `self`",
+    ),
+    (
+        "nativeHead",
+        "expected 'fn' or 'ctor' after 'native'",
+        "context: the BNF shares <nativeHead> with the contextual `ctor` spelled as IDENT",
+    ),
+    // ----- real divergences, listed in TICKET-241 and not fixed there -----
+    (
+        "fnDecl",
+        "expected identifier, found reserved keyword 'return'",
+        "F1: a `where` entry with no bound before the body colon (`fn f[T]() where T: return`)",
+    ),
+    (
+        "type",
+        "unexpected ']' in expression",
+        "F2: a type in brackets on a non-name head (`1[!]`)",
+    ),
+    (
+        "type",
+        "expected ']', found '!'",
+        "F2: a type in brackets on a non-name head (`1[T!]`)",
+    ),
+    (
+        "type",
+        "expected ':', found ']'",
+        "F2: a type in brackets on a non-name head (`1[fn(T) -> U]`)",
+    ),
+    (
+        "typeList",
+        "expected ']', found ','",
+        "F2: a type list in brackets on a non-name head (`1[T, U]`)",
+    ),
+    (
+        "primary",
+        "a nested block must be indented",
+        "F3: an inline `match` expression body (`fn f(): match 1:`); DEC-145 keeps it rejected",
+    ),
+    (
+        "primary",
+        "expected ':', found end of line",
+        "F4: an inline `recover:` block inside a block header's expression",
+    ),
+    (
+        "primary",
+        "expected ')', found end of line",
+        "F4: an inline `recover:` block inside parentheses",
+    ),
+    (
+        "ifExprTail",
+        "expected end of line, found 'elif'",
+        "F5: a statement-initial if-expression with `elif` on one line",
+    ),
+    (
+        "importName",
+        "found reserved keyword 'None'",
+        "F6: <importName> lists NONEKW, the parser rejects `import None from m`",
+    ),
+];
+
+/// TICKET-241 -- `grammar_and_parser_agree` runs only the hand-written corpus, so a grammar
+/// alternative no corpus file spells is unchecked (an inline closure-literal body was). This
+/// enumerates instead: for each statement-level rule and each nonterminal reachable from it, one
+/// sentence per alternative, every other symbol minimally expanded. The grammar engine must accept
+/// each one, and so must the hand parser, except where [`GRAMMAR_LOOSER`] says why not.
+#[test]
+fn grammar_alternatives_parse() {
+    let rules = parse_rules(&normalize_grammar(&read("docs/grammar.bnf")));
+    let min = min_sentences(&rules);
+    let chars = symbol_chars();
+    let engine_grammar = engine_grammar(&chars);
+    let engine = engine_grammar.build_parser().expect("build Earley parser");
+
+    // sentence -> (root, nonterminal) of the first alternative that derives it
+    let mut sentences: BTreeMap<Vec<String>, (String, String)> = BTreeMap::new();
+    for stmt_rule in ["simpleStmt", "compoundStmt", "item"] {
+        for alt in &rules[stmt_rule] {
+            let [Sym::N(root)] = alt.as_slice() else {
+                panic!("<{stmt_rule}> alternative is not one nonterminal: {alt:?}");
+            };
+            for (name, (prefix, suffix)) in frames(root, &rules, &min) {
+                for alt in &rules[&name] {
+                    let mut sentence = prefix.clone();
+                    sentence.extend(expand(alt, &min).expect("every rule derives a sentence"));
+                    sentence.extend(suffix.iter().cloned());
+                    sentence.push("EOF".to_string());
+                    sentences
+                        .entry(sentence)
+                        .or_insert_with(|| (root.clone(), name.clone()));
+                }
+            }
+        }
+    }
+
+    let mut hit = vec![false; GRAMMAR_LOOSER.len()];
+    let mut failures = Vec::new();
+    for (sentence, (root, name)) in &sentences {
+        let encoded: String = sentence.iter().map(|t| chars[t.as_str()]).collect();
+        if engine.parse_input(&encoded).next().is_none() {
+            failures.push(format!(
+                "[{root}/{name}] the grammar engine rejects its own sentence :: {}",
+                sentence.join(" ")
+            ));
+        }
+        let Err(e) = parse(sample_tokens(sentence)) else {
+            continue;
+        };
+        match GRAMMAR_LOOSER
+            .iter()
+            .position(|(n, frag, _)| n == name && e.message.contains(frag))
+        {
+            Some(i) => hit[i] = true,
+            None => failures.push(format!(
+                "[{root}/{name}] {} :: {}",
+                e.message,
+                sentence.join(" ")
+            )),
+        }
+    }
+    for (i, (name, frag, _)) in GRAMMAR_LOOSER.iter().enumerate() {
+        if !hit[i] {
+            failures.push(format!(
+                "GRAMMAR_LOOSER entry ({name}, {frag:?}) matched no sentence: remove it"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} sentences disagree:\n{}",
+        failures.len(),
+        sentences.len(),
+        failures.join("\n")
+    );
+}
