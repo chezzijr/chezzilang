@@ -24,7 +24,7 @@ Closest existing cousins (read, don't copy): **Crystal**, **Nim**.
 |----------|--------|
 | Implementation host | **Rust** |
 | Execution model | **Bytecode stack VM** (a tree-walk interpreter was the historical bootstrap, since removed) |
-| Type system | **Static, local inference** (explicit param types; inferred locals *and* fn return types) |
+| Type system | **Static, local inference** (explicit param and return types; inferred locals; an inline expression body takes its expression's type) |
 | Surface syntax | **Indentation blocks** (Python-feel; lexer emits INDENT/DEDENT) |
 | Errors | **Result/Option + `?`** (errors as values, no hidden control flow) |
 | Code organization | **Composition, not inheritance** — structs + methods + interfaces (structural `protocol`s), like Rust/Go. No classes, no inheritance. |
@@ -201,14 +201,11 @@ pip/wheels) is captured in [`docs/ffi-and-packaging.md`](ffi-and-packaging.md).
 structs over `Iterator[T]`, Rust's `Map`/`Take` model). They are now a **complete, VM-only**
 feature: any `fn` that uses `yield` is a generator; calling it returns a
 suspendable generator usable anywhere an `Iterator[T]` is (`for` loops, `Iterator[T]` bounds). The
-`-> Iterator[T]` return annotation is **optional** — with no return type the element type `T` is
-**inferred from the first `yield`** (strict-first-yield, just like late list `[]` element inference);
-every later `yield` must be assignable to that `T`. Two cases are rejected at check time rather than
-silently laundered: an **un-inferable** element (`yield []` with nothing pinning it, or a generator
-that reaches no `yield`) errors `cannot infer generator element type; annotate the return type as
-Iterator[T]`; and a **numeric mix** (`yield 1` then `yield 2.0`) is rejected — there is no `int`→`float`
-coercion at a `yield`, so the second yield conflicts with the pinned `int` (annotate `-> Iterator[float]`
-to opt in). An explicit `-> Iterator[T]` still overrides inference and validates every yield against `T`.
+`-> Iterator[T]` return annotation is **required**: the element type `T` is written, and
+every `yield` must be assignable to it. A generator with no `->` errors
+``a generator function (one that uses `yield`) must declare a return type of `Iterator[T]` ``. A **numeric mix**
+under a written `Iterator[float]` (`yield 1`) is rejected — there is no `int`→`float`
+coercion at a `yield`.
 A **live** generator held
 in a frame **local** is now **sendable across a task airlock BY VALUE** (F3 path C): it is serialized —
 its `proto`, backing closure, and parked operand-stack/args — and rebuilt as an **independent deep copy**
@@ -596,7 +593,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   crosses the airlock by deep value copy, and the concrete witness's own sendability is checked at each
   widening site (a non-sendable witness is rejected there, not laundered). A witness that genuinely
   can't serialize (one carrying a `Module` handle — native/FFI *fn values* now cross by value) is
-  rejected at the **runtime airlock**, not at construction. See [`docs/syntax.md`](syntax.md) "Return type inference".
+  rejected at the **runtime airlock**, not at construction. See [`docs/syntax.md`](syntax.md) "Return types".
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
   `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte

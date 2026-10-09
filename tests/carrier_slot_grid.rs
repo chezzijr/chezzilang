@@ -559,8 +559,8 @@ fn extra_cells(cells: &mut Vec<Cell>) {
         ms("q_var_bound_unknown", SHOW_OPT, "fn main():\n    y := ?5\n    ys := [y]\n    ys = []\n    show(y)\n    print(ys)\nmain()", prints("some 5\n[]")),
         ms("q_pinned_by_result", SHOW_RES, "fn take(r: int!str):\n    show(r)\nfn main():\n    z := ?5\n    take(z)\nmain()", prints("ok 5")),
         m("bang_pinned_by_return", "fn f() -> int!:\n    e := !\"disk\"\n    return e\nmatch f():\n    ?v:\n        print(\"ok {v + 0}\")\n    !e:\n        print(\"err {e.message()}\")", prints("err disk")),
-        m("bang_unpinned_fn", "fn main():\n    w := !\"disk\"\n    print(w)\nmain()", r("cannot infer the success type")),
-        m("bang_unpinned_top", "w := !\"disk\"\nprint(w)", r("cannot infer the success type")),
+        m("bang_unpinned_fn", "fn main():\n    w := !\"disk\"\n    print(w)\nmain()", r("a `!` value needs its type from an annotation")),
+        m("bang_unpinned_top", "w := !\"disk\"\nprint(w)", r("a `!` value needs its type from an annotation")),
         m("bang_not_error", "fn f() -> int!:\n    return !5\nprint(f())", r("int does not satisfy Error")),
         ms("bang_whole_operand", SHOW_RES, "fn wrap(s: str) -> str:\n    return s + \"!\"\nfn f() -> int!str:\n    return !wrap(\"x\")\nshow(f())", prints("err X!")),
         ms("bang_in_list", SHOW_RES, "rs: List[int!str] = [1, !\"disk\", 3]\nfor r in rs:\n    show(r)", prints("ok 1\nerr DISK\nok 3")),
@@ -581,7 +581,7 @@ fn extra_cells(cells: &mut Vec<Cell>) {
         ms("coalesce_result", SHOW_RES, "o: int? = Some(5)\nx: int!str = o ?? 0\nshow(x)", prints("ok 5")),
         m("coalesce_none_arm", "fn f(o: int?) -> int?:\n    return o ?? None\nprint(f(None))", r("branches have incompatible types")),
         m("comprehension_barrier", "ys: List[int] = [y for xs in [[1, 2], [3]] for y in xs]\nprint(ys)", prints("[1, 2, 3]")),
-        m("inferred_return_not_a_slot", "fn f(c: bool):\n    if c:\n        return Some(2)\n    return if c: 1 else: None\nprint(f(true))", r("branches have incompatible types")),
+        m("inferred_return_not_a_slot", "fn f(c: bool): if c: 1 else: None\nprint(f(true))", r("branches have incompatible types")),
         m("tuple_call_does_not_split", "fn g() -> (int, int):\n    return (5, 0)\nx: int? = None\ny := 0\nx, y = g()\nprint(x)", r("cannot assign")),
     ]);
     // A default compiles as the declaration's node: called across a module boundary too.

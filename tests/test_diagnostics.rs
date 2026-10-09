@@ -49,7 +49,7 @@ fn test_fault_carries_frames_and_col() {
     let t = TmpDir::new();
     let entry = t.write(
         "f37_test.chz",
-        "fn boom(xs: List[int]):\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
+        "fn boom(xs: List[int]) -> int:\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
     );
     let (stdout, _stderr) = run_test(&[entry.to_str().unwrap()]);
     assert!(
@@ -96,7 +96,10 @@ fn test_warning_names_its_file() {
 #[test]
 fn imported_module_fault_names_the_library_file() {
     let t = TmpDir::new();
-    t.write("lib.chz", "fn boom(xs: List[int]):\n    return xs[9]\n");
+    t.write(
+        "lib.chz",
+        "fn boom(xs: List[int]) -> int:\n    return xs[9]\n",
+    );
     let entry = t.write(
         "imp_test.chz",
         "import lib\n\ntest fn t():\n    lib.boom([1])\n",
@@ -111,7 +114,7 @@ fn json_document_is_unchanged_by_the_coordinate_fix() {
     let t = TmpDir::new();
     let entry = t.write(
         "f37_test.chz",
-        "fn boom(xs: List[int]):\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
+        "fn boom(xs: List[int]) -> int:\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
     );
     let (stdout, _stderr) = run_test(&["--errors=json", entry.to_str().unwrap()]);
     assert!(stdout.contains("\"line\":2"), "stdout: {stdout}");

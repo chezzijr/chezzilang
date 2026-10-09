@@ -622,7 +622,7 @@ main()
 level 1, and each `fn` declared in its body adds one. The 101st level is a resolve error at its name —
 `fn 'f100' is nested 101 deep; fn declarations nest at most 100 deep (declare it at an outer level)` —
 the same bound as CPython's indentation limit (`IndentationError: too many levels of indentation`).
-The checker memoizes an un-annotated nested fn's return inference, so depth is not exponential (a
+The checker memoizes an un-annotated inline nested fn's body type, so depth is not exponential (a
 30-deep chain checks in 0.04 s; see `docs/benchmarks.md`). A nested
 fn may **not** be generic (`fn id[T](x: T)` inside a body is rejected — declare
 it at the top level), and **mutual recursion** between two sibling nested fns is unsupported: a nested
@@ -803,10 +803,9 @@ directs the check; the element/key/`str` types must match the left operand.
 fn add(a: int, b: int) -> int:     # param types REQUIRED; '-> T' optional
     return a + b
 
-fn double(x: int):                 # no '-> T' → return type inferred from the body (here: int)
-    return x * 2
+fn double(x: int): x * 2           # inline expression body, no '-> T' → the expression's type (int)
 
-fn log(msg: str):                  # body returns no value → inferred 'None' (returns nothing)
+fn log(msg: str):                  # block body, no '-> T' → returns nothing ('None')
     print(msg)
 
 # closures / anonymous functions — body after ':'
@@ -1015,53 +1014,41 @@ inline expr against `-> None`, e.g. a bare void call, stays legal).
 1-statement one — does **not** implicitly return: `fn a():\n    10` evaluates `10` and falls through to
 `None`. Multiline functions return via an explicit `return`.
 
-**Return type inference.** Omitting `-> T` infers the return type: for an inline-expr body it is the
-expression's type (`fn ten(): 10` infers `-> int`); otherwise **all** the body's `return` branches
-(plus an implicit trailing/inline expression) are typed and **merged** with a join. A body with no
-value-returning `return` infers `None`. Param types stay required. The join `J(a, b)` is: (1) equal
-types → that type; (2) mixed `{int, float}` branches **conflict** — no `int` ever widens into a
-`float` (rule D3, §3), so write `1.0`; (3) the **same** type-constructor (`Result`/`Option`/`List`/`Map`/
-`Set`, or the same generic struct/enum) with differing type-args → **merge slot-wise** (each slot: one
-side `?`/un-inferred fills from the other; two concrete slots must be **equal**, no widening inside
-payloads — `Result[int]` and `Result[float]` **conflict**). The `Result` **error slot** is special:
-two *different* `Err` payload types that **both satisfy the `Error` protocol** (`return !"s"` vs
-`return !myErr`) do **not** conflict — they unify to the built-in `Error` protocol (see below); a
-payload that does **not** satisfy `Error` keeps the strict equal-or-conflict rule. (4) otherwise → a
-**conflict** error
-`cannot infer return type: conflicting branches (X vs Y); add a -> annotation`. There is **no
-common-supertype / protocol / `Any` search** for the T-slot: two distinct concrete types (e.g. two
-structs that both have a `speak()` method) *conflict* — a protocol return must be spelled explicitly
-(`-> Shape`).
+**Return types.** A named function's return type is **written**. It is never inferred from `return`
+statements. Param types stay required. With no `-> T` the body shape decides:
 
-So `fn res(): if …: return !"a"` then `return Ok("h")` infers `Result[str, Error]` (the `Ok`
-branch pins `T=str`; the error slot defaults to `Error` because the `Err` payload `str` **satisfies**
-`Error`). A concrete error type is honored as-is only when written explicitly (`-> Result[str, str]` /
-`-> int!DbErr`). Slots that stay un-inferable after the merge are resolved at a **finalize** step: the
-`Result` **error slot** becomes the built-in `Error` protocol when it is un-pinned or its payload
-**satisfies `Error`** (so `fn ok(): return Ok(5)` is `Result[int, Error]`, matching the `T!`
-shorthand); a concrete payload that does **not** satisfy `Error` (e.g. a struct without `message`) is
-**preserved** so a bogus `.message()` on it is still rejected. **Any other**
-residual un-inferable slot — a `Result`/`Option` value slot, a `List`/`Map`/`Set` element — is an error
-`cannot infer return type of '<name>'; add a -> annotation`. Hence `fn err(): return !"x"`,
-`fn none(): return None`, and `fn f(): return []` are each rejected (the value type is un-inferable, the
-return-position analogue of the empty-collection diagnostic) — annotate them (`-> str!`, `-> int?`,
-`-> List[int]`).
+| Body | No `-> T` means | Example |
+|---|---|---|
+| **block** (statements) | returns nothing (`None`) | `fn log(m: str):` + `print(m)` |
+| **inline expression** | the type of that one expression, as for a lambda | `fn ten(): 10` is `-> int` |
 
-A function whose **sole body is a diverging call** — `fn boom(): panic("msg")` (or `exit(...)`) — is
-**not** un-inferable: it never returns a value normally, so its return type defaults to `None` (like a
-void body), and callers type-check. (An annotated diverging body — `fn b() -> int: panic(...)` — is
-already valid: bottom fits any return position.)
+- A block body with no `-> T` that returns a value is an error at the returned expression, and the
+  message prints the annotation to add:
+  `'f' declares no return type, so it returns nothing; add '-> int' to 'f'`
+  (`add a '->' return type to 'f'` when the value's type is not fully known).
+- An inline body is typed only from a walk in which **every call had a type**. A callee declared
+  below its caller is fine (`fn c(): d() + 1` above `fn d(): 2`). A recursive or mutually recursive
+  inline function never gets a type and must write it:
+  `cannot infer return type of 'fact': a call in its body has no known type yet (return types that depend on each other are not inferred); add a -> annotation`.
+  A function that only calls such a function reports the same text.
+- An inline body whose type has an open slot (`fn f(): []`) reports
+  `cannot infer return type of 'f'; add a -> annotation`.
+- A function whose **sole body is a diverging call** (`fn boom(): panic("msg")`, `os.exit(...)`) is
+  `None`, for a named function and for a lambda alike. An annotated diverging body
+  (`fn b() -> int: panic(...)`) is valid: bottom fits any return position.
+- A generator writes `-> Iterator[T]`; see generators below.
+- An inline body that forwards a call has that call's exact declared type: `fn f(): g()` with
+  `g() -> int!str` is `-> int!str`.
 
-Inference is **order-independent**: a recursive call contributes no type mid-analysis (it is absorbed,
-the concrete branches decide), and forward references / mutual recursion resolve via a fixpoint — so a
-callee defined *after* the caller still yields the caller's precise inferred type. A function that is
-genuinely un-inferable (pure self- or mutual recursion with **no concrete base case anywhere**) leaves a
-residual un-inferable return and is rejected the same way; annotate it with an explicit `-> T`. This all
-applies uniformly to **struct/enum methods** *and* **closures** (a free `f := fn(): Ok(5)` gets
-`Result[int, Error]`; a free `fn(): Err("x")` is rejected) as well as free functions: an inferred method
-return flows to call sites (`P(3).val()` is typed by the inferred return, not `Unknown`) and to
-**protocol satisfaction** (an inferred `compare(self, o)` yielding `bool` fails `Comparable`, which
-requires `-> int`, exactly as an explicit `-> bool` would).
+**A `!e` value takes its type from an annotation or an expected type.** A `T!E` type is never built
+from sibling `return`s or branches. `fn f(c: bool) -> int!str:` returning `1` and `!"bad"`,
+`x: int!str = if c: 1 else: !"bad"`, and an argument `take(!"bad")` are typed by the written type.
+With neither, the `!e` reports, once:
+``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``.
+
+The same rules apply to **struct/enum methods**. A method's return type flows to call sites and to
+**protocol satisfaction** (a `compare(self, o)` returning `bool` fails `Comparable`, which requires
+`-> int`).
 
 **Returns on every path (enforced).** A **multiline** function with a **declared non-void return
 type** (`-> int`, `-> str`, …) must return a value on *every* control-flow path. The checker rejects a
@@ -1655,9 +1642,8 @@ List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/
 # `yield` / generators (run on the sole M:N VM engine; a live frame-local generator IS sendable across a task airlock — it crosses by value as an independent deep copy of its execution state, incl. one suspended mid-`recover:`; a module-GLOBAL generator crosses by value too — the earlier reach-gate + poison-snapshot model was RETIRED 2026-07-21. D4, TICKET-179: at a `spawn` crossing each frame value is a task copy only when the parent can still reach it — a frame-local list the parent never saw stays writable in the task, a list the generator yielded and the parent still holds faults on write). Any fn that
 # uses `yield` is a generator: calling it returns a suspendable iterator, not a value. It runs lazily,
 # suspending at each `yield` and resuming on the next `.next()`. The `-> Iterator[T]` annotation is
-# OPTIONAL — with no return type the element type `T` is inferred from the FIRST `yield`
-# (strict-first-yield); every later `yield` must be assignable to that `T`, else a clear error.
-fn count_up(n: int):       # no `-> Iterator[T]`: `T = int` inferred from the first `yield`
+# REQUIRED: the element type `T` is written, and every `yield` must be assignable to it.
+fn count_up(n: int) -> Iterator[int]:
     i := 0
     while i < n:
         yield i            # produce a value, suspend until the next .next()
@@ -3502,8 +3488,8 @@ rs: List[int!str] = [1, !"disk", 3]   # [Ok(1), Err('disk'), Ok(3)]
   `Some(5)` at `int?` and `Ok(5)` at `int!E`; `x: int?? = ?None` is `Some(None)`.
 - **No expected type.** Inside a fn, a later use pins the carrier: `y := ?5` alone is `int?`;
   `z := ?5` then `take(z)` with `take(r: int!str)` makes it `Ok(5)`. `w := !"disk"` needs its success
-  type pinned the same way (`return w` in an `int!` fn); unpinned it is the error `cannot infer the
-  success type; annotate the binding, e.g. w: int! = !e`. At top level `?5` is `int?` at once and
+  type pinned the same way (`return w` in an `int!` fn); unpinned it is the error
+  ``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``. At top level `?5` is `int?` at once and
   `!e` must be annotated.
 - **Set elements and map keys** never wrap in effect: no carrier is `Hashable`.
 

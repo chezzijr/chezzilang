@@ -3,7 +3,7 @@
 //!
 //! 1. missing-return (`check_fn_body_inner`: an annotated non-nil fn whose body falls through),
 //! 2. the `recover:` tail (`infer_recover`: a tail that cannot fall through is bottom-typed),
-//! 3. inline-body inference (`infer_fn_ret`, via [`super::Checker::call_diverges`]),
+//! 3. inline-body inference (`infer_inline_fn_ret`, via [`super::Checker::call_diverges`]),
 //! 4. the escape checks of `recover:` / `defer:` / `spawn:` blocks,
 //! 5. fn_writes' "left" (a write after a possible early exit is not definite).
 //!

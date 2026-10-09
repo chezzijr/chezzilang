@@ -1326,7 +1326,7 @@ mod tests {
         let d = TmpDir::new();
         let f = d.write(
             "f37_test.chz",
-            "fn boom(xs: List[int]):\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
+            "fn boom(xs: List[int]) -> int:\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
         );
         let report = run_tests(&f);
         assert!(!report.passed, "report:\n{}", report.text);
@@ -1345,7 +1345,7 @@ mod tests {
         let d = TmpDir::new();
         let f = d.write(
             "f37_test.chz",
-            "fn boom(xs: List[int]):\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
+            "fn boom(xs: List[int]) -> int:\n    return xs[9]\n\ntest fn t():\n    xs := [1]\n    boom(xs)\n",
         );
         let report = run_tests(&f);
         assert!(!report.passed, "report:\n{}", report.text);

@@ -1,9 +1,7 @@
-# Generators without an explicit `-> Iterator[T]` annotation.
-# The element type is inferred from the FIRST `yield` (strict-first-yield):
-# `count_to` infers `Iterator[int]`, `Doubler.stream` likewise — no `Iterator[T]` spelled anywhere.
-# A later `yield` must be assignable to that inferred element type.
+# Generators declare their element type: `-> Iterator[T]` is written, never inferred from a
+# `yield`. Every `yield` must be assignable to that element type.
 
-fn count_to(n: int):
+fn count_to(n: int) -> Iterator[int]:
     i := 0
     while i < n:
         yield i
@@ -12,7 +10,7 @@ fn count_to(n: int):
 struct Doubler:
     n: int
     # A generator METHOD, also annotation-free.
-    fn stream(self):
+    fn stream(self) -> Iterator[int]:
         i := 1
         while i <= self.n:
             yield i * 2

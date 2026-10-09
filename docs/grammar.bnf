@@ -98,8 +98,8 @@
 <returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
 
 # `yield <expr>` (generators) — always carries a value. Legal only inside a generator
-# function (one that uses `yield`; the `-> Iterator[T]` return type is optional — inferred from the
-# first yield when omitted). Checker-enforced, not grammar. Suspends the generator.
+# function (one that uses `yield`; the `-> Iterator[T]` return type is required).
+# Checker-enforced, not grammar. Suspends the generator.
 <yieldStmt> ::= "YIELD" <expr> "NEWLINE"
 
 # `defer <call>` (form 1) — the call-only restriction is enforced by the checker
@@ -145,8 +145,8 @@
           | "COLON" <simpleStmt>
 
 # ===== declarations =====
-# An omitted "ARROW" <type> is not "returns nothing": the checker infers the return type from
-# the body. Param types remain required.
+# An omitted "ARROW" <type> means "returns nothing" for a block body, and "the type of the one
+# expression" for an inline expression body. Param types remain required.
 # A MULTILINE body is a sequence of STATEMENTS: its return type comes from the body's `return`s
 # (None when no value is returned), and a DECLARED non-void "ARROW" <type> whose multiline body can
 # fall off the end without a value `return` is rejected (add a `return`).

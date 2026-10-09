@@ -3056,7 +3056,7 @@ struct GErr:
     fn message(self) -> str:
         return \"x\"
 
-fn f(x: int):
+fn f(x: int) -> int!GErr:
     if x == 0:
         return Ok(1)
     return Err(GErr(Impl()))
@@ -6098,7 +6098,7 @@ main()
 #[test]
 fn w10_1_main_recv_in_generator_resume_with_live_sender_does_not_deadlock() {
     let src = "\
-fn g(ch: Channel[int]):
+fn g(ch: Channel[int]) -> Iterator[int]:
     while true:
         v := ch.recv()
         if v < 0:
@@ -11051,7 +11051,7 @@ fn closure_shares_captured_binding() {
     // after the closure was created IS visible when the closure later runs (`n = 20` → `x + 20`).
     // (Under the old value-semantics rule this snapshotted `n = 10` and printed `15`.)
     let src = "\
-fn make():
+fn make() -> fn(int) -> int:
     n := 10
     f := fn(x: int) -> int: x + n
     n = 20
@@ -11066,7 +11066,7 @@ main()";
 #[test]
 fn closure_captures_distinct_environments() {
     let src = "\
-fn adder(n: int):
+fn adder(n: int) -> fn(int) -> int:
     return fn(x: int) -> int: x + n
 fn main():
     add10 := adder(10)
@@ -11766,7 +11766,7 @@ fn vm_generator_never_yields() {
 /// — drives a `for` loop and RUNS identically on BOTH engines (serial + M:N), not just type-checks.
 #[test]
 fn vm_generator_inferred_no_annotation() {
-    let src = "fn count():\n    yield 1\n    yield 2\n    yield 3\nfn main():\n    for x in count():\n        print(x)\nmain()\n";
+    let src = "fn count() -> Iterator[int]:\n    yield 1\n    yield 2\n    yield 3\nfn main():\n    for x in count():\n        print(x)\nmain()\n";
     assert_eq!(run(src), "1\n2\n3\n");
     assert_eq!(run_capture(src).unwrap(), "1\n2\n3\n");
 }
@@ -11775,7 +11775,7 @@ fn vm_generator_inferred_no_annotation() {
 /// `each` generator method infers `Iterator[int]` and drives a `for`.
 #[test]
 fn vm_generator_inferred_struct_method() {
-    let src = "struct Box:\n    n: int\n    fn each(self):\n        i := 0\n        while i < self.n:\n            yield i\n            i = i + 1\nfn main():\n    b := Box(3)\n    for x in b.each():\n        print(x)\nmain()\n";
+    let src = "struct Box:\n    n: int\n    fn each(self) -> Iterator[int]:\n        i := 0\n        while i < self.n:\n            yield i\n            i = i + 1\nfn main():\n    b := Box(3)\n    for x in b.each():\n        print(x)\nmain()\n";
     assert_eq!(run(src), "0\n1\n2\n");
     assert_eq!(run_capture(src).unwrap(), "0\n1\n2\n");
 }
@@ -20268,7 +20268,7 @@ fn str_hook_used_when_it_returns_str_annotated_inferred_or_aliased() {
     assert_mc_parity(annotated, "A5\n");
     // Inferred str (un-annotated) — a syntactic `-> str` gate would wrongly drop this; the
     // returned-value check keeps it working.
-    let inferred = "struct S:\n    n: int\n    fn str(self):\n        return \"custom<{self.n}>\"\nfn main(): print(S(5))\nmain()\n";
+    let inferred = "struct S:\n    n: int\n    fn str(self) -> str:\n        return \"custom<{self.n}>\"\nfn main(): print(S(5))\nmain()\n";
     assert_mc_parity(inferred, "custom<5>\n");
     // A str type-alias return also conforms.
     let aliased = "type MyStr = str\nstruct S:\n    n: int\n    fn str(self) -> MyStr:\n        return \"hi{self.n}\"\nfn main(): print(S(5))\nmain()\n";

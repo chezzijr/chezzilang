@@ -175,10 +175,10 @@ the freeze.
 - **An int never widens into a `float` slot (rule D3, the Rust model).** `x: float = 1` is an error,
   literal or not, at every sink — write `1.0` or `float(x)`. There is no `Op::CoerceFloat`: nothing
   coerces at runtime, so the checker alone keeps an `int` out of a `float` slot. Do **not** join
-  `int`/`float` in an inferred return either — `x / 2` would do integer division under a `float` type.
+  `int`/`float` in an inferred inline-body type either — `x / 2` would do integer division under a `float` type.
   Close a future int-under-float bug in the checker; never re-add a runtime coercion that hides it.
   Mixed arithmetic on values (`2 * 1.5`, `i < f`) is unchanged: the VM promotes by runtime tag.
-- **An un-inferable `Unknown` in an inferred return is a type-check bypass** (`compatible(Unknown, _)`
+- **An un-inferable `Unknown` in an inferred inline-body type is a type-check bypass** (`compatible(Unknown, _)`
   is true). `fill_ret` must be exhaustive over every `Ty` variant that carries an inner type — no
   catch-all — so a future variant fails to compile instead of re-opening the leak. The first cut's
   `other => other.clone()` missed `Shared`/`Channel`/`Atomic`/`Func`.

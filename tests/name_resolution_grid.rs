@@ -600,6 +600,8 @@ struct OrderHead {
     tag: &'static str,
     binding: &'static str,
     body: &'static [&'static str],
+    /// The same head as one expression, for the inline body whose type is inferred.
+    inline: &'static str,
     ret: &'static str,
     out: &'static str,
     /// The typed-use cell's `y: <wrong> = g()` and the rejection it expects.
@@ -614,21 +616,21 @@ const STR_AS_INT: &str = "cannot assign str to variable of type int";
 
 #[rustfmt::skip]
 const ORDER_HEADS: &[OrderHead] = &[
-    OrderHead { tag: "ord_call", binding: ORD_BIND, body: &["return ord(\"a\")"], ret: "int", out: "1000", wrong: "str", rejects: INT_AS_STR },
-    OrderHead { tag: "ord_read", binding: ORD_BIND, body: &["h := ord", "return h(\"a\")"], ret: "int", out: "1000", wrong: "str", rejects: INT_AS_STR },
-    OrderHead { tag: "P_call", binding: P_BIND, body: &["return P(4)"], ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
-    OrderHead { tag: "P_read", binding: P_BIND, body: &["h := P", "return h(4)"], ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
-    OrderHead { tag: "E_field", binding: "E := V(4)\n", body: &["return E.A"], ret: "int", out: "4", wrong: "str", rejects: INT_AS_STR },
-    OrderHead { tag: "x_read", binding: "x := 5\n", body: &["return x"], ret: "int", out: "5", wrong: "str", rejects: INT_AS_STR },
+    OrderHead { tag: "ord_call", binding: ORD_BIND, body: &["return ord(\"a\")"], inline: "ord(\"a\")", ret: "int", out: "1000", wrong: "str", rejects: INT_AS_STR },
+    OrderHead { tag: "ord_read", binding: ORD_BIND, body: &["h := ord", "return h(\"a\")"], inline: "[ord][0](\"a\")", ret: "int", out: "1000", wrong: "str", rejects: INT_AS_STR },
+    OrderHead { tag: "P_call", binding: P_BIND, body: &["return P(4)"], inline: "P(4)", ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
+    OrderHead { tag: "P_read", binding: P_BIND, body: &["h := P", "return h(4)"], inline: "[P][0](4)", ret: "str", out: "v4", wrong: "int", rejects: STR_AS_INT },
+    OrderHead { tag: "E_field", binding: "E := V(4)\n", body: &["return E.A"], inline: "E.A", ret: "int", out: "4", wrong: "str", rejects: INT_AS_STR },
+    OrderHead { tag: "x_read", binding: "x := 5\n", body: &["return x"], inline: "x", ret: "int", out: "5", wrong: "str", rejects: INT_AS_STR },
 ];
 
-/// `fn g` over the head's body, with an inferred or an annotated return.
+/// `fn g` over the head: an inline expression body, whose type is inferred, or an annotated block
+/// body.
 fn order_fn(h: &OrderHead, annotated: bool) -> String {
-    let sig = if annotated {
-        format!("fn g() -> {}:\n", h.ret)
-    } else {
-        "fn g():\n".into()
-    };
+    if !annotated {
+        return format!("fn g(): {}\n", h.inline);
+    }
+    let sig = format!("fn g() -> {}:\n", h.ret);
     let body: String = h.body.iter().map(|l| format!("    {l}\n")).collect();
     format!("{sig}{body}")
 }
@@ -660,9 +662,9 @@ fn order_cells() -> Vec<Cell> {
     }
     let p = "struct P:\n    x: int\n";
     let fn_p = "fn P(n: int) -> str:\n    return \"B{n}\"\n";
-    let g_p = "fn g():\n    return P(4)\n";
+    let g_p = "fn g(): P(4)\n";
     let e = "enum E:\n    A\n";
-    let g_e = "fn g():\n    return E.A\n";
+    let g_e = "fn g(): E.A\n";
     let imp = "import lib as E\n";
     let raw = [
         (
@@ -709,7 +711,7 @@ fn order_cells() -> Vec<Cell> {
         ),
         (
             "order/inferred_return_type_of_a_global",
-            "x := \"s\"\nfn f():\n    return x\ny: int = f()\nprint(y)\n".into(),
+            "x := \"s\"\nfn f(): x\ny: int = f()\nprint(y)\n".into(),
             Expect::Rejects(STR_AS_INT),
         ),
     ];

@@ -1824,16 +1824,6 @@ fn success_coercion_wraps_in_a_default_provider() {
     ok("fn g() -> int:\n    return 5\nfn f(x: int? = g()) -> int:\n    return 0\nf()\n");
 }
 
-/// W8-21 exclusion — the coercion never decides an un-annotated return-type inference: two branches
-/// of conflicting shape (`Option[?]` vs `int`) still fail to infer.
-#[test]
-fn success_coercion_never_decides_an_inference() {
-    rejects(
-        "fn f():\n    if true:\n        return None\n    return 1\nf()\n",
-        "cannot infer return type",
-    );
-}
-
 /// W8-21 regression — a nested ANNOTATED fn inside an un-annotated one is body-checked on every
 /// speculative `infer_returns` pass (`check_fn_body`'s comment at the `inferring_ret` reset), and a
 /// forward-declared callee is `Unknown` on an early pass, concrete once its own sig resolves. Without
@@ -4386,7 +4376,7 @@ fn non_hashable_annotation_in_a_re_walked_body_reports_exactly_once() {
     // DEC-033). Neither re-walk should add another copy of the diagnostic.
     let sources = [
         "fn g[T](x: T):\n    m: Map[float, str] = {}\n\ng(1)\n",
-        "fn h():\n    m: Map[float, str] = {}\n    return 1\n\nprint(h())\n",
+        "fn h() -> int:\n    m: Map[float, str] = {}\n    return 1\n\nprint(h())\n",
     ];
     for src in sources {
         let errs = check_src(src);
@@ -8237,12 +8227,15 @@ fn return_matches_signature_ok() {
 #[test]
 fn inferred_return_type_used_as_int() {
     // No `-> T`: the body's `return 5` makes f infer `int`, so `x + 1` type-checks.
-    ok("fn f():\n    return 5\nx := f()\ny := x + 1\n");
+    ok("fn f() -> int:\n    return 5\nx := f()\ny := x + 1\n");
 }
 
 #[test]
 fn inferred_return_from_expression() {
-    ok("fn add(a: int, b: int):\n    return a + b\nx := add(1, 2)\ny := x + 1\n");
+    rejects(
+        "fn add(a: int, b: int):\n    return a + b\nx := add(1, 2)\ny := x + 1\n",
+        "declares no return type, so it returns nothing",
+    );
 }
 
 #[test]
@@ -8257,37 +8250,32 @@ fn void_preserved_when_no_value_return() {
 
 #[test]
 fn inferred_return_in_if_branch() {
-    ok("fn f(c: bool):\n    if c:\n        return 1\n    return 2\nx := f(true)\ny := x + 1\n");
+    rejects(
+        "fn f(c: bool):\n    if c:\n        return 1\n    return 2\nx := f(true)\ny := x + 1\n",
+        "declares no return type, so it returns nothing",
+    );
 }
 
 #[test]
 fn inferred_return_from_accumulator_local() {
     ok(
-        "fn sum(xs: List[int]):\n    total := 0\n    for x in xs:\n        total += x\n    return total\nn := sum([1, 2, 3])\nm := n + 1\n",
+        "fn sum(xs: List[int]) -> int:\n    total := 0\n    for x in xs:\n        total += x\n    return total\nn := sum([1, 2, 3])\nm := n + 1\n",
     );
 }
 
 #[test]
 fn inferred_return_recursive() {
-    ok(
-        "fn fib(n: int):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\nx := fib(10)\ny := x + 1\n",
-    );
-}
-
-#[test]
-fn inferred_return_conflict_rejected() {
-    // Multi-branch JOIN: int and str do not merge (no common-supertype search) → a CONFLICT that
-    // names both branches, rather than the old first-branch-wins `expected int, found str`.
     rejects(
-        "fn f(c: bool):\n    if c:\n        return 1\n    return \"x\"\n",
-        "conflicting branches (int vs str)",
+        "fn fib(n: int): if n < 2: n else: fib(n - 1) + fib(n - 2)\nx := fib(10)\ny := x + 1\n",
+        "a call in its body has no known type yet",
     );
 }
 
 #[test]
 fn inferred_result_return() {
-    ok(
+    rejects(
         "fn d(a: int, b: int):\n    if b == 0:\n        return Err(\"divide by zero\")\n    return Ok(a / b)\nmatch d(10, 2):\n    Ok(v): print(\"got {v}\")\n    Err(e): print(e)\n",
+        "declares no return type, so it returns nothing",
     );
 }
 
@@ -8295,46 +8283,24 @@ fn inferred_result_return() {
 fn inferred_return_feeds_typed_let_mismatch() {
     // The inferred `int` return is checked against an explicit `let` annotation.
     rejects(
-        "fn f():\n    return 5\nx: str = f()\n",
+        "fn f() -> int:\n    return 5\nx: str = f()\n",
         "cannot assign int to variable of type str",
     );
 }
 
 #[test]
 fn inferred_list_return() {
-    ok("fn mk():\n    return [1, 2, 3]\nxs := mk()\ny := xs[0] + 1\n");
+    rejects(
+        "fn mk():\n    return [1, 2, 3]\nxs := mk()\ny := xs[0] + 1\n",
+        "declares no return type, so it returns nothing",
+    );
 }
 
 #[test]
 fn inferred_struct_return() {
-    ok("struct P:\n    x: int\nfn mk():\n    return P(1)\np := mk()\nq := p.x + 1\n");
-}
-
-#[test]
-fn inferred_forward_ref_callee_first_is_precise() {
-    // Callee defined before the caller: the caller infers the precise `int`.
-    ok(
-        "fn g(n: int):\n    return n * 2\nfn f(n: int):\n    return g(n) + 1\nx := f(3)\ny := x + 1\n",
-    );
-}
-
-#[test]
-fn inferred_forward_ref_callee_later_is_permissive() {
-    // Callee defined *after* the caller (both un-annotated): no fixpoint, so the caller infers
-    // `Unknown` and stays permissive — crucially NOT a spurious "returns nothing" error.
-    ok(
-        "fn f(n: int):\n    return g(n) + 1\nfn g(n: int):\n    return n * 2\nx := f(3)\ny := x + 1\n",
-    );
-}
-
-#[test]
-fn inferred_recursion_only_rejected() {
-    // A body whose only return is a self-recursive call has NO concrete base, so its return type is
-    // genuinely un-inferable: the fixpoint leaves it `Unknown`, and the FINALIZE pass now REJECTS
-    // that residual (the leak-fix: `Unknown` must not leak permissively out of a return). Annotate it.
     rejects(
-        "fn loopy(n: int):\n    return loopy(n - 1)\n",
-        "cannot infer return type of 'loopy'",
+        "struct P:\n    x: int\nfn mk():\n    return P(1)\np := mk()\nq := p.x + 1\n",
+        "declares no return type, so it returns nothing",
     );
 }
 
@@ -8346,48 +8312,15 @@ fn inferred_recursion_only_with_annotation_ok() {
 }
 
 #[test]
-fn inferred_forward_ref_recursive_rejects_wrong_slot() {
-    // o2.chz: `rec` forward-references `base` (defined AFTER) and self-recurses. Order-independent
-    // fixpoint inference resolves `base -> str`, then `rec -> str`, so feeding `rec(2)` into an
-    // `int` slot is correctly rejected (was wrongly accepted under single-pass source-order infer).
-    rejects(
-        "fn rec(n: int):\n    if n <= 0:\n        return base(0)\n    return rec(n - 1)\nfn base(n: int):\n    return \"hello\"\nv: int = rec(2)\n",
-        "cannot assign str to variable of type int",
-    );
-}
-
-#[test]
-fn inferred_mutual_recursion_with_base_resolves() {
-    // Mutual recursion with a concrete base: `a` has base `return 1` (int) but also forward+mutual
-    // calls `b`; `b` returns `a(...)`. Only the fixpoint resolves `a -> int` then `b -> int`, so
-    // `v: str = b(5)` is rejected.
-    rejects(
-        "fn a(n: int):\n    if n <= 0:\n        return 1\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\nv: str = b(5)\n",
-        "cannot assign int to variable of type str",
-    );
-}
-
-#[test]
-fn inferred_pure_mutual_recursion_rejected() {
-    // Pure mutual recursion with NO concrete base anywhere: both returns stay `Unknown` after the
-    // fixpoint, and the FINALIZE pass now REJECTS each residual (the leak-fix — same policy as the
-    // self-recursive-only case above). Both need a `-> T` annotation.
-    rejects(
-        "fn a(n: int):\n    return b(n - 1)\nfn b(n: int):\n    return a(n - 1)\n",
-        "cannot infer return type",
-    );
-}
-
-#[test]
 fn non_recursive_unknown_return_not_falsely_rejected() {
     // Regression: a NON-recursive un-annotated fn whose return infers `Unknown` for a reason
     // unrelated to recursion must NOT be rejected by the recursive-return inference. PART A now
     // requires the empty `x := []` to be annotated, so the annotated form drives this: `x[0]` is a
     // concrete `int`, the return infers `int`, and the recursive-return fixpoint must not regress.
-    ok("fn f():\n    x: List[int] = []\n    return x[0]\nprint(\"ok\")\n");
+    ok("fn f() -> int:\n    x: List[int] = []\n    return x[0]\nprint(\"ok\")\n");
     // The un-annotated empty itself is the sibling producer's domain — it is now its own error.
     rejects(
-        "fn f():\n    x := []\n    return x[0]\nf()\n",
+        "fn f() -> int:\n    x := []\n    return x[0]\nf()\n",
         "empty collection",
     );
 }
@@ -8396,7 +8329,7 @@ fn non_recursive_unknown_return_not_falsely_rejected() {
 fn errored_body_unknown_return_reports_once() {
     // Regression: a fn whose body has a real error (undefined name) infers `Unknown`; the fixpoint
     // change must not pile a spurious "cannot infer return type" on top of the genuine error.
-    let errs = check_src("fn f():\n    return undefined_fn()\n");
+    let errs = check_src("fn f() -> int:\n    return undefined_fn()\n");
     assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
     assert!(
         errs[0].message.contains("unknown name"),
@@ -8407,11 +8340,10 @@ fn errored_body_unknown_return_reports_once() {
 
 #[test]
 fn fact_still_infers_int() {
-    // Regression guard: a self-recursive function with a CONCRETE literal base case already infers
-    // correctly today (base case `int` wins; the self-call's `Unknown` is ignored). The fixpoint
-    // must not perturb this.
-    ok(
-        "fn fact(n: int):\n    if n <= 1:\n        return 1\n    return n * fact(n - 1)\nx := fact(5)\ny := x + 1\n",
+    // A self-recursive inline body is never typed from its own call: it asks for `->`.
+    rejects(
+        "fn fact(n: int): if n <= 1: 1 else: n * fact(n - 1)\nx := fact(5)\ny := x + 1\n",
+        "a call in its body has no known type yet",
     );
 }
 
@@ -8423,7 +8355,7 @@ fn infer_ok_err_branches_merge_slotwise() {
     // → Result[str, Error] (the E-slot is NOT pinned from the Err payload — an inferred error slot
     // always defaults to `Error`). So `res()?` is str and `y: int = x` must ERROR.
     entry_rejects(
-        "fn res():\n    if false:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn caller() -> str!:\n    x := res()?\n    y: int = x\n    return Ok(x)\nfn main():\n    pass\n",
+        "fn res() -> str!:\n    if false:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn caller() -> str!:\n    x := res()?\n    y: int = x\n    return Ok(x)\nfn main():\n    pass\n",
         "cannot assign str to variable of type int",
     );
 }
@@ -8435,60 +8367,17 @@ fn infer_ok_only_defaults_error_e() {
     // (Error vs DbErr) exactly like the annotated `-> int!` version. Today ok() leaks
     // Result[int, Unknown] so `?` launders into DbErr with no error.
     entry_rejects(
-        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn ok():\n    return Ok(5)\nfn caller() -> int!DbErr:\n    x := ok()?\n    return Ok(x)\nfn main():\n    pass\n",
+        "struct DbErr:\n    code: int\n    fn message(self) -> str:\n        return \"db\"\nfn ok() -> int!:\n    return Ok(5)\nfn caller() -> int!DbErr:\n    x := ok()?\n    return Ok(x)\nfn main():\n    pass\n",
         "propagates error Error",
     );
 }
 
 #[test]
 fn infer_err_only_uninferable_errors() {
-    // (c) `fn err(): return Err("x")` — T is un-inferable (no default for the value slot), so it
-    // must ERROR like the empty-collection diagnostic. Today it leaks Result[Unknown, str].
+    // (c) a block fn with no `->` returning only `!"x"`: the `!` value has no type to take.
     entry_rejects(
         "fn err():\n    return !\"x\"\nfn main():\n    pass\n",
-        "cannot infer return type of 'err'",
-    );
-}
-
-#[test]
-fn infer_none_only_uninferable_errors() {
-    // (d) `fn none(): return None` — T un-inferable → ERROR (return position is stricter than the
-    // binding-position `x := None`, which stays legal).
-    entry_rejects(
-        "fn none():\n    return None\nfn main():\n    pass\n",
-        "cannot infer return type",
-    );
-}
-
-#[test]
-fn infer_empty_list_return_uninferable_errors() {
-    // (e) `fn f(): return []` — element un-inferable → ERROR. Today leaks List[Unknown] (the
-    // empty-collection error is binding-scoped and never fires at a return position).
-    entry_rejects(
-        "fn f():\n    return []\nfn main():\n    pass\n",
-        "cannot infer return type",
-    );
-}
-
-#[test]
-fn infer_uninferable_unknown_in_concurrency_box_errors() {
-    // REGRESSION (adversarial review parity-perf-0): a residual `Unknown` nested inside a
-    // concurrency box (Shared/Atomic/RwShared/Channel) or a function type must ALSO be rejected —
-    // `fill_ret`'s original catch-all skipped these containers, so `return Shared([])` laundered a
-    // `Shared[List[Unknown]]` past the rejector (`.get()` then assignable to both List[int] and
-    // List[str]). Each un-inferable box now errors like `return []` does.
-    for box_ctor in ["Shared([])", "Atomic([])", "RwShared([])"] {
-        entry_rejects(
-            &format!(
-                "import std.concurrency\nfn f():\n    return {box_ctor}\nfn main():\n    pass\n"
-            ),
-            "cannot infer return type",
-        );
-    }
-    // the full laundering the leak enabled — both incompatible assignments off one `.get()`.
-    entry_rejects(
-        "import std.concurrency\nfn f():\n    return Shared([])\nfn main():\n    s := f()\n    a: List[int] = s.get()\n    b: List[str] = s.get()\n",
-        "cannot infer return type",
+        "a `!` value needs its type from an annotation",
     );
 }
 
@@ -8497,25 +8386,16 @@ fn infer_concurrency_box_with_inferable_element_ok() {
     // NEIGHBOR: a box whose element IS inferable from the constructor value stays legal (the fix
     // only flags a residual Unknown, never a resolved element).
     entry_ok(
-        "import std.concurrency\nfn f():\n    return Shared([1])\nfn main():\n    s := f()\n    a: List[int] = s.get()\n    print(a)\n",
+        "import std.concurrency\nfn f() -> Shared[List[int]]:\n    return Shared([1])\nfn main():\n    s := f()\n    a: List[int] = s.get()\n    print(a)\n",
     );
 }
 
 #[test]
 fn multibranch_return_ok_err_no_error() {
-    // NEIGHBOR: Ok(5) + Err("x") → Result[int, Error] (T fills from the Ok branch; the E-slot
-    // always defaults to `Error`, not the Err payload's `str`). No error; `e` binds as `Error` and
-    // `print(e)` accepts it.
-    entry_ok(
+    // A block fn with no `->` returns nothing: no `T!E` type is joined from its `return`s.
+    entry_rejects(
         "fn f(c: bool):\n    if c:\n        return Ok(5)\n    return Err(\"x\")\nfn main():\n    match f(true):\n        Ok(v): print(v)\n        Err(e): print(e)\n",
-    );
-}
-
-#[test]
-fn multibranch_return_some_none_no_error() {
-    // NEIGHBOR: Some(5) + None → Option[int], no error (T filled from the Some branch).
-    entry_ok(
-        "fn f(c: bool):\n    if c:\n        return ?5\n    return None\nfn main():\n    match f(true):\n        ?v: print(v)\n        None: print(\"none\")\n",
+        "declares no return type, so it returns nothing",
     );
 }
 
@@ -8523,7 +8403,7 @@ fn multibranch_return_some_none_no_error() {
 fn multibranch_return_empty_and_nonempty_list_no_error() {
     // NEIGHBOR: [] + [1, 2] → List[int], no error (empty element filled from the non-empty sibling).
     entry_ok(
-        "fn f(c: bool):\n    if c:\n        return []\n    return [1, 2]\nfn main():\n    xs := f(true)\n    print(xs)\n",
+        "fn f(c: bool) -> List[int]:\n    if c:\n        return []\n    return [1, 2]\nfn main():\n    xs := f(true)\n    print(xs)\n",
     );
 }
 
@@ -8534,44 +8414,12 @@ fn multibranch_void_stays_nil_no_error() {
 }
 
 #[test]
-fn multibranch_int_float_conflicts_not_inferred() {
-    // Mixed int/float sibling branches CONFLICT. Inferring `float` here would leave a runtime int
-    // under a float type — `x / 2` would do integer division. D3: no int ever widens into a float.
-    entry_rejects(
-        "fn f(c: bool):\n    if c:\n        return 1\n    return 2.0\nfn main():\n    pass\n",
-        "conflicting branches",
-    );
-    // …and an explicit `-> float` annotation does not widen either (D3): `return 1` is rejected.
-    entry_rejects(
-        "fn f(c: bool) -> float:\n    if c:\n        return 1\n    return 2.0\nfn main():\n    x := f(true)\n    print(x / 2)\n",
-        "write 1.0",
-    );
-}
-
-#[test]
-fn multibranch_generic_identity_preserves_param() {
-    // NEIGHBOR: generic `fn id[T](x: T): return x` → T (Ty::Param preserved, no finalize error).
-    entry_ok("fn id[T](x: T):\n    return x\nfn main():\n    print(id(5))\n    print(id(\"h\"))\n");
-}
-
-#[test]
-fn multibranch_two_structs_conflict() {
-    // NEIGHBOR (must ERROR): two distinct concrete structs across branches CONFLICT — never join to
-    // a shared protocol or Any. A protocol return must be spelled explicitly.
-    entry_rejects(
-        "struct A:\n    x: int\n    fn speak(self) -> str:\n        return \"a\"\nstruct B:\n    y: int\n    fn speak(self) -> str:\n        return \"b\"\nfn f(c: bool):\n    if c:\n        return A(1)\n    return B(2)\nfn main():\n    pass\n",
-        "conflicting branches",
-    );
-}
-
-#[test]
 fn infer_ok_err_mixed_defaults_e_to_error() {
-    // The Err-branch payload does NOT pin E: `Ok("h")` + `Err("a")` infers `Result[str, Error]`,
-    // not `Result[str, str]`. Proof: propagating `res()?` into a `-> str!DbErr` fn hits the
+    // A declared `-> str!` has the error type `Error`, whatever the `!e` payload. Proof: propagating `res()?` into a `-> str!DbErr` fn hits the
     // Error-vs-DbErr mismatch exactly like the annotated `-> str!` version would.
     entry_rejects(
         &format!(
-            "{DBERR}fn res(c: bool):\n    if c:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn caller() -> str!DbErr:\n    x := res(true)?\n    return Ok(x)\nfn main():\n    pass\n"
+            "{DBERR}fn res(c: bool) -> str!:\n    if c:\n        return Err(\"a\")\n    return Ok(\"h\")\nfn caller() -> str!DbErr:\n    x := res(true)?\n    return Ok(x)\nfn main():\n    pass\n"
         ),
         "propagates error Error",
     );
@@ -8582,7 +8430,7 @@ fn infer_distinct_err_payloads_no_conflict() {
     // Two branches with DIFFERENT Err payload types no longer conflict on the E-slot (both finalize
     // to `Error`); the Ok branch pins T=int. `e` binds as `Error` → `e.message()` is available.
     entry_ok(
-        "struct EA:\n    a: int\n    fn message(self) -> str:\n        return \"EA\"\nstruct EB:\n    b: int\n    fn message(self) -> str:\n        return \"EB\"\nfn f(k: int):\n    if k == 0:\n        return Err(EA(1))\n    if k == 1:\n        return Err(EB(2))\n    return Ok(5)\nfn main():\n    match f(2):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+        "struct EA:\n    a: int\n    fn message(self) -> str:\n        return \"EA\"\nstruct EB:\n    b: int\n    fn message(self) -> str:\n        return \"EB\"\nfn f(k: int) -> int!:\n    if k == 0:\n        return Err(EA(1))\n    if k == 1:\n        return Err(EB(2))\n    return Ok(5)\nfn main():\n    match f(2):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
     );
 }
 
@@ -8636,11 +8484,11 @@ fn infer_return_non_error_payload_preserved_no_over_reject() {
     // must still type-check — the inferred E is kept concrete (`MyErr`), not forced to `Error` (which
     // pass-2 would then reject as `Result[int, Error]` vs the actual `Result[int, MyErr]`).
     entry_ok(
-        "struct MyErr:\n    code: int\nfn foo(c: bool) -> Result[int, MyErr]:\n    if c:\n        return Err(MyErr(1))\n    return Ok(5)\nfn wrap(c: bool):\n    return foo(c)\nfn main():\n    match wrap(true):\n        Ok(v): print(v)\n        Err(e): print(e.code)\n",
+        "struct MyErr:\n    code: int\nfn foo(c: bool) -> Result[int, MyErr]:\n    if c:\n        return Err(MyErr(1))\n    return Ok(5)\nfn wrap(c: bool) -> int!MyErr:\n    return foo(c)\nfn main():\n    match wrap(true):\n        Ok(v): print(v)\n        Err(e): print(e.code)\n",
     );
     // …but calling an Error-only method on that preserved concrete `MyErr` is still rejected (sound).
     entry_rejects(
-        "struct MyErr:\n    code: int\nfn foo(c: bool) -> Result[int, MyErr]:\n    if c:\n        return Err(MyErr(1))\n    return Ok(5)\nfn wrap(c: bool):\n    return foo(c)\nfn main():\n    match wrap(true):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+        "struct MyErr:\n    code: int\nfn foo(c: bool) -> Result[int, MyErr]:\n    if c:\n        return Err(MyErr(1))\n    return Ok(5)\nfn wrap(c: bool) -> int!MyErr:\n    return foo(c)\nfn main():\n    match wrap(true):\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
         "no method 'message'",
     );
 }
@@ -8691,7 +8539,7 @@ fn if_expr_edefault_does_not_over_reject_error_str_merge() {
     // `Error` protocol, and `unify_branch`'s `compatible`-based fold is left untouched by the
     // E-default (which only fills a top-level `Unknown` E-slot, never re-checks branch acceptance).
     entry_ok(
-        "fn get_err() -> int!:\n    return !\"boom\"\nfn main():\n    c := true\n    x := if c: get_err() else: !\"other\"\n    print(\"ok\")\n",
+        "fn get_err() -> int!:\n    return !\"boom\"\nfn main():\n    c := true\n    x: int! = if c: get_err() else: !\"other\"\n    print(\"ok\")\n",
     );
 }
 
@@ -8731,15 +8579,15 @@ fn closure_free_uninferable_errors() {
     // CLOSURE: a genuinely-free closure literal whose body is un-inferable errors on finalize.
     entry_rejects(
         "fn main():\n    f := fn(): !\"x\"\n    print(f)\n",
-        "cannot infer return type",
+        "a `!` value needs its type from an annotation",
     );
 }
 
 #[test]
 fn closure_free_ok_defaults_error_e() {
-    // CLOSURE: a free `fn(): Ok(5)` finalizes to Result[int, Error] (E default), no leak error.
+    // CLOSURE: a free lambda writes its `T!E` type; `-> int!` has the error type `Error`.
     entry_ok(
-        "fn main():\n    f := fn(): Ok(5)\n    x := f()\n    match x:\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
+        "fn main():\n    f := fn() -> int!: Ok(5)\n    x := f()\n    match x:\n        Ok(v): print(v)\n        Err(e): print(e.message())\n",
     );
 }
 
@@ -8758,7 +8606,7 @@ fn inferred_nested_fn_does_not_pollute_outer() {
     // A nested fn whose name collides with a top-level fn must not feed the outer inference:
     // `outer` infers `int` from its OWN `return 42`, so `x + 1` type-checks.
     ok(
-        "fn helper() -> str:\n    return \"top\"\nfn outer(c: bool):\n    fn helper() -> str:\n        return \"nested\"\n    return 42\nx := outer(true)\ny := x + 1\n",
+        "fn helper() -> str:\n    return \"top\"\nfn outer(c: bool) -> int:\n    fn helper() -> str:\n        return \"nested\"\n    return 42\nx := outer(true)\ny := x + 1\n",
     );
 }
 
@@ -8866,16 +8714,6 @@ fn nested_fn_shadows_builtin_variant_accepted() {
     );
 }
 
-#[test]
-fn inferred_method_return() {
-    // The un-annotated method infers from `return self.v` (int) and `return "x"` (str); the two
-    // branches CONFLICT under the multi-branch JOIN. The conflict proves inference ran on the body.
-    rejects(
-        "struct Box:\n    v: int\n    fn get(self):\n        if true:\n            return self.v\n        return \"x\"\n",
-        "conflicting branches (int vs str)",
-    );
-}
-
 // SOUNDNESS: an inferred (un-annotated) struct method return must FLOW to call sites through the
 // build_graph/check_graph path (module-prefixed keys), not just the single-module bare-key path.
 // Pre-fix the single-module `inferred_method_return` above passes while the CLI/entry path silently
@@ -8883,7 +8721,7 @@ fn inferred_method_return() {
 #[test]
 fn inferred_struct_method_return_flows_to_callsite() {
     entry_rejects(
-        "struct P:\n    x: int\n    fn val(self):\n        return 5\nfn main():\n    s: str = P(3).val()\n    print(s)\nmain()\n",
+        "struct P:\n    x: int\n    fn val(self) -> int:\n        return 5\nfn main():\n    s: str = P(3).val()\n    print(s)\nmain()\n",
         "cannot assign int to variable of type str",
     );
 }
@@ -8892,7 +8730,7 @@ fn inferred_struct_method_return_flows_to_callsite() {
 fn inferred_struct_method_return_correct_site_ok() {
     // BOUNDARY: an inferred method return used at a correctly-typed site must still compile.
     entry_ok(
-        "struct P:\n    x: int\n    fn val(self):\n        return 5\nfn main():\n    n: int = P(3).val()\n    print(n)\nmain()\n",
+        "struct P:\n    x: int\n    fn val(self) -> int:\n        return 5\nfn main():\n    n: int = P(3).val()\n    print(n)\nmain()\n",
     );
 }
 
@@ -8929,7 +8767,7 @@ fn inferred_struct_compare_rejected_for_comparable() {
     // An inferred `compare(self,o)` body yielding bool must be REJECTED where Comparable (needs
     // `-> int`) is required (the `<` operator), exactly like an explicit `-> bool`.
     entry_rejects(
-        "struct P:\n    x: int\n    fn compare(self, other: P):\n        return self.x < other.x\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn main():\n    a := P(1)\n    b := P(2)\n    c := a < b\n    print(c)\nmain()\n",
+        "struct P:\n    x: int\n    fn compare(self, other: P) -> bool:\n        return self.x < other.x\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn main():\n    a := P(1)\n    b := P(2)\n    c := a < b\n    print(c)\nmain()\n",
         "compare",
     );
 }
@@ -8939,17 +8777,17 @@ fn inferred_compare_generic_bound_rejected() {
     // A generic bound `[T: Comparable]` over a struct whose `compare` infers bool must reject at
     // check, not fault later.
     entry_rejects(
-        "struct P:\n    x: int\n    fn compare(self, other: P):\n        return self.x < other.x\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nfn main():\n    print(cmp(P(1), P(2)))\nmain()\n",
+        "struct P:\n    x: int\n    fn compare(self, other: P) -> bool:\n        return self.x < other.x\n    fn eq(self, other: P) -> bool:\n        return self.x == other.x\nfn cmp[T: Comparable](a: T, b: T) -> int:\n    return a.compare(b)\nfn main():\n    print(cmp(P(1), P(2)))\nmain()\n",
         "Comparable",
     );
 }
 
 #[test]
 fn inferred_enum_method_return_flows_to_callsite() {
-    // Enum methods have the same hole: an un-annotated `fn val(self): return 5` returns int, which
+    // Enum methods have the same hole: an un-annotated `fn val(self) -> int: return 5` returns int, which
     // must not be silently assignable to a str slot.
     entry_rejects(
-        "enum Color:\n    Red\n    Blue\n    fn val(self):\n        return 5\nfn main():\n    s: str = Color.Red.val()\n    print(s)\nmain()\n",
+        "enum Color:\n    Red\n    Blue\n    fn val(self) -> int:\n        return 5\nfn main():\n    s: str = Color.Red.val()\n    print(s)\nmain()\n",
         "cannot assign int to variable of type str",
     );
 }
@@ -8957,7 +8795,7 @@ fn inferred_enum_method_return_flows_to_callsite() {
 #[test]
 fn inferred_enum_method_return_correct_site_ok() {
     entry_ok(
-        "enum Color:\n    Red\n    Blue\n    fn val(self):\n        return 5\nfn main():\n    n: int = Color.Red.val()\n    print(n)\nmain()\n",
+        "enum Color:\n    Red\n    Blue\n    fn val(self) -> int:\n        return 5\nfn main():\n    n: int = Color.Red.val()\n    print(n)\nmain()\n",
     );
 }
 
@@ -8966,7 +8804,7 @@ fn recursive_inferred_struct_method_no_spurious_error() {
     // BOUNDARY: a recursive un-annotated method must still infer `int` via the fixpoint and not
     // start spuriously erroring.
     entry_ok(
-        "struct P:\n    x: int\n    fn f(self, c: bool):\n        if c:\n            return self.f(false)\n        return 0\nfn main():\n    n: int = P(1).f(true)\n    print(n)\nmain()\n",
+        "struct P:\n    x: int\n    fn f(self, c: bool) -> int:\n        if c:\n            return self.f(false)\n        return 0\nfn main():\n    n: int = P(1).f(true)\n    print(n)\nmain()\n",
     );
 }
 
@@ -12558,8 +12396,8 @@ fn module_scope_redeclare_const_keeps_const_message() {
 fn module_scope_redeclare_inferred_return_no_double_fire() {
     // Return inference truncates errors and re-walks a body inside one open scope, so the rule is
     // gated on `!inferring_ret` — it must neither false-fire nor double-fire around an inferred fn.
-    ok("x := 1\nfn g():\n    return x\nx := 2\nprint(g())\n");
-    let errs = check_src("x := 1\nfn g():\n    return x\nx := \"s\"\nprint(g())\n");
+    ok("x := 1\nfn g() -> int:\n    return x\nx := 2\nprint(g())\n");
+    let errs = check_src("x := 1\nfn g() -> int:\n    return x\nx := \"s\"\nprint(g())\n");
     assert_eq!(
         errs.iter()
             .filter(|e| e.message.contains("module-level binding"))
@@ -12941,8 +12779,8 @@ fn destructuring_module_scope_redeclare_boundaries_ok() {
 fn destructuring_module_scope_redeclare_inferred_return_no_double_fire() {
     // The `!inferring_ret` gate must come through the extraction: return inference truncates errors
     // and re-walks the body inside one open scope, so the rule must fire exactly once.
-    ok("x := 1\nfn g():\n    return x\nx, y := (2, 3)\nprint(g())\n");
-    let errs = check_src("x := 1\nfn g():\n    return x\nx, y := (\"s\", 2)\nprint(g())\n");
+    ok("x := 1\nfn g() -> int:\n    return x\nx, y := (2, 3)\nprint(g())\n");
+    let errs = check_src("x := 1\nfn g() -> int:\n    return x\nx, y := (\"s\", 2)\nprint(g())\n");
     assert_eq!(
         errs.iter()
             .filter(|e| e.message.contains("module-level binding"))
@@ -13207,7 +13045,7 @@ fn module_scope_redeclare_of_a_fn_keys_on_the_readers_not_the_declaration() {
     // `helper`'s signature, so the let breaks it. Measured pre-change: "ok: no type errors", then
     // "runtime error (line 4, col 12): 'int' is not callable" (CPython: TypeError, same shape).
     rejects(
-        "fn helper() -> int:\n    return 7\nfn g():\n    return helper()\nhelper := 3\nprint(g())\n",
+        "fn helper() -> int:\n    return 7\nfn g() -> int:\n    return helper()\nhelper := 3\nprint(g())\n",
         "cannot re-declare module-level binding 'helper'",
     );
     // …but only a read the IN-ORDER walk makes counts. `infer_returns` walks every un-annotated
@@ -13217,7 +13055,7 @@ fn module_scope_redeclare_of_a_fn_keys_on_the_readers_not_the_declaration() {
     // print `100`), and every `test fn` in the chz suite is un-annotated by definition, so the whole
     // fixture file tripped it. Hence `record_fn_read` skips while `inferring_ret`.
     ok(
-        "fn f(a: int, b: int = 2) -> int:\n    return a + b\nf := fn(a: int) -> int: a * 100\nfn g():\n    return f(1)\nprint(g())\n",
+        "fn f(a: int, b: int = 2) -> int:\n    return a + b\nf := fn(a: int) -> int: a * 100\nfn g() -> int:\n    return f(1)\nprint(g())\n",
     );
     // No reader at all → nothing to break, and the program runs (measured pre-change: prints `3`).
     ok("helper := 3\nfn helper() -> int:\n    return 7\nprint(helper)\n");
@@ -20599,10 +20437,10 @@ fn generator_missing_iterator_return_rejected() {
 
 #[test]
 fn generator_infers_element_type_no_annotation() {
-    // No `-> Iterator[T]`: the element type is inferred from the first yield (strict-first-yield),
-    // and callers see it — `for x in count()` binds `x: int`, so `s + x` type-checks.
-    ok(
+    // No `-> Iterator[T]`: a generator writes its element type; it is not inferred from a yield.
+    rejects(
         "fn count():\n    yield 1\n    yield 2\nfn use() -> int:\n    s := 0\n    for x in count():\n        s = s + x\n    return s\n",
+        "must declare a return type of `Iterator[T]`",
     );
 }
 
@@ -20611,43 +20449,17 @@ fn generator_inferred_element_recovered_not_unknown() {
     // The inferred element is the CONCRETE first-yield type (int), NOT a permissive `Unknown`:
     // `x + "a"` (int + str) must be rejected — proves inference pins a real type.
     rejects(
-        "fn count():\n    yield 1\nfn use():\n    for x in count():\n        print(x + \"a\")\n",
+        "fn count() -> Iterator[int]:\n    yield 1\nfn use():\n    for x in count():\n        print(x + \"a\")\n",
         "",
     );
 }
 
 #[test]
-fn generator_inferred_int_then_float_rejected() {
-    // CONSTRAINT 1: strict-first-yield pins `T = int` from the first yield; a later `yield 2.0`
-    // (float) must be REJECTED at check time, NOT silently coerced to float. Nothing coerces at a
-    // `yield`, so a silent int->float join would leave a runtime int under a float
-    // type. This program is check-REJECTED, so there is deliberately no runtime arm — accepting it
-    // (the bug) is exactly what this test forbids. Checked via the full module-graph entry path.
-    let errs = check_entry("fn count():\n    yield 1\n    yield 2.0\nfn main():\n    pass\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("expected yield type int, found float")),
-        "expected int-vs-float yield rejection, got: {errs:?}"
-    );
-}
-
-#[test]
-fn generator_uninferable_element_rejected() {
-    // CONSTRAINT 2: a generator whose only yield is an un-inferable empty `[]` leaves `T`
-    // un-inferable (List[Unknown]). It MUST be a clear error, NOT a silent `Iterator[List[Unknown]]`
-    // leak (the residual-Unknown type-check-bypass class, cf. commit 29513bd).
-    rejects(
-        "fn g():\n    yield []\n",
-        "cannot infer generator element type",
-    );
-}
-
-#[test]
 fn generator_inferred_struct_method_no_annotation() {
-    // The struct/enum-method arm of `infer_returns` also infers a generator's element type: an
-    // un-annotated `each` yields `int`, so `for x in b.each()` binds `x: int`.
-    ok(
+    // The same rule for a method: an un-annotated generator `each` is rejected.
+    rejects(
         "struct Box:\n    n: int\n    fn each(self):\n        i := 0\n        while i < self.n:\n            yield i\n            i = i + 1\nfn use() -> int:\n    b := Box(3)\n    s := 0\n    for x in b.each():\n        s = s + x\n    return s\n",
+        "must declare a return type of `Iterator[T]`",
     );
 }
 
@@ -21568,21 +21380,6 @@ fn non_void_fn_while_true_with_break_still_rejected() {
     rejects(
         "fn a() -> int:\n    while true:\n        break\nfn main():\n    print(a())\nmain()\n",
         "fall off the end",
-    );
-}
-
-#[test]
-fn non_void_fn_unannotated_conditional_return_not_rejected() {
-    // REGRESSION: Option B must fire only for a DECLARED (`-> T`) non-void return. An UN-annotated
-    // fn that returns a value on *some* path (the common early-return / `find` idiom) infers a
-    // non-nil `sig.ret`, but the user declared no annotation, so it must stay legal.
-    // (a) conditional value-return, no `-> T` annotation.
-    ok(
-        "fn a(x: bool):\n    if x:\n        return helper()\nfn helper() -> int:\n    return 5\nfn main():\n    a(true)\nmain()\n",
-    );
-    // (b) `find`-style early-return-in-loop, no annotation.
-    ok(
-        "fn find(xs: List[int], t: int):\n    for x in xs:\n        if x == t:\n            return x\nfn main():\n    find([1, 2, 3], 2)\nmain()\n",
     );
 }
 
@@ -26111,9 +25908,10 @@ fn free_closure_pinned_by_member_in_interpolation() {
 fn return_void_call_single_diagnostic() {
     let errs = check_entry("fn f():\n    return print(\"x\")\nfn main(): f()\n");
     assert!(
-        errs.iter()
-            .any(|e| e.message.contains("function returns nothing")),
-        "expected the 'function returns nothing' error, got: {errs:?}"
+        errs.iter().any(|e| e
+            .message
+            .contains("declares no return type, so it returns nothing")),
+        "expected the 'declares no return type' error, got: {errs:?}"
     );
     assert!(
         !errs
@@ -27251,8 +27049,8 @@ fn uninstantiated_generic_fn_value_as_a_generic_ctor_arg_rejected() {
 #[test]
 fn uninstantiated_generic_fn_value_through_an_inferred_return_rejected() {
     rejects(
-        "fn ident[T](x: T) -> T:\n    return x\n\nfn get():\n    return ident\n\nfn main():\n    g := get()\n    print(g(1))\n",
-        "'ident' is generic and T is not determined here",
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn get(): ident\n\nfn main():\n    g := get()\n    print(g(1))\n",
+        "cannot infer return type of 'get'; add a -> annotation",
     );
     // …and a return-only type param, which no argument can ever bind either. Pre-change this printed
     // `[]` — an accepted `List[T]` value with T undetermined.
@@ -29457,7 +29255,7 @@ fn generic_fn_sendable_err_instantiation_ok_at_channel_send() {
 #[test]
 fn three_branch_mixed_error_inference_ok() {
     entry_ok(
-        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nstruct EA:\n    fn message(self) -> str:\n        return \"a\"\nstruct EB:\n    fn message(self) -> str:\n        return \"b\"\nfn f(x: int):\n    if x == 0:\n        return Ok(1)\n    elif x == 1:\n        return Err(EA())\n    elif x == 2:\n        return Err(GErr(Impl()))\n    else:\n        return Err(EB())\nprint(\"x\")\n",
+        "protocol Odd:\n    fn tag(self) -> int\nstruct Impl:\n    fn tag(self) -> int:\n        return 1\nstruct GErr:\n    w: Odd\n    fn message(self) -> str:\n        return \"x\"\nstruct EA:\n    fn message(self) -> str:\n        return \"a\"\nstruct EB:\n    fn message(self) -> str:\n        return \"b\"\nfn f(x: int) -> int!:\n    if x == 0:\n        return Ok(1)\n    elif x == 1:\n        return Err(EA())\n    elif x == 2:\n        return Err(GErr(Impl()))\n    else:\n        return Err(EB())\nprint(\"x\")\n",
     );
 }
 
@@ -33294,9 +33092,9 @@ fn ticket_107_elif_chain_success_coerces_at_option_sink() {
 fn ticket_107_mixed_branch_coercion_wraps_at_every_typed_slot() {
     ok("fn main():\n    x: int? = if true: 1 else: None\n");
     ok("fn t(x: int?) -> int:\n    return 0\n\nfn main():\n    print(t(if true: 1 else: None))\n");
-    // An inferred return is not a slot.
+    // An inline body's inferred type is not a slot.
     rejects(
-        "fn f(c: bool):\n    if c:\n        return Some(2)\n    return if c: 1 else: None\n",
+        "fn f(c: bool): if c: 1 else: None\n",
         "branches have incompatible types",
     );
     rejects(
@@ -33451,28 +33249,6 @@ fn nested_fn_decl_check_is_not_exponential() {
     );
 }
 
-/// TICKET-157 -- the TICKET-109 canary. The nested `g` returns a captured empty list on one branch,
-/// and the enclosing inference walk READS the pin `g`'s body walk puts on `zs` (`drop_empty_site`)
-/// at `return zs[0]`. Skipping the nested `check_fn_body` under `inferring_ret` (design (a), rejected)
-/// moves this to `expected return type int, found str` at 9:16; the memo must not.
-#[test]
-fn a_nested_fn_returning_a_captured_empty_list_reports_the_outer_conflict() {
-    let src = "fn outer(c: bool):\n    zs := []\n    fn g(d: bool):\n        if d:\n            return [\"a\"]\n        return zs\n    g(c)\n    if c:\n        return zs[0]\n    return 1\nprint(outer(true))\n";
-    let errs = check_src(src);
-    assert_eq!(errs.len(), 1, "got: {errs:?}");
-    assert!(
-        errs[0]
-            .message
-            .contains("cannot infer return type: conflicting branches (str vs int)"),
-        "got: {errs:?}"
-    );
-    assert_eq!(
-        (errs[0].span.line, errs[0].span.col),
-        (1, 4),
-        "got: {errs:?}"
-    );
-}
-
 /// A HashMap's entries as sorted `key => value` Debug lines, so two runs compare deterministically.
 fn sorted_debug<K: std::fmt::Debug, V: std::fmt::Debug>(m: &HashMap<K, V>) -> Vec<String> {
     let mut v: Vec<String> = m.iter().map(|(k, x)| format!("{k:?} => {x:?}")).collect();
@@ -33491,7 +33267,7 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
     let programs: [(&str, &str); 11] = [
         (
             "p1 canary",
-            "fn outer(c: bool):\n    zs := []\n    fn g(d: bool):\n        if d:\n            return [\"a\"]\n        return zs\n    g(c)\n    if c:\n        return zs[0]\n    return 1\nprint(outer(true))\n",
+            "fn outer(c: bool):\n    zs := []\n    fn g(d: bool) -> List[str]:\n        if d:\n            return [\"a\"]\n        return zs\n    g(c)\n    if c:\n        return zs[0]\n    return 1\nprint(outer(true))\n",
         ),
         (
             "clean 6-deep chain",
@@ -33499,11 +33275,11 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
         ),
         (
             "reads an enclosing local",
-            "fn outer():\n    x := 5\n    fn a():\n        fn b():\n            return x + 1\n        return b()\n    return a()\nprint(outer())\n",
+            "fn outer() -> int:\n    x := 5\n    fn b(): x + 1\n    fn a(): b()\n    return a()\nprint(outer())\n",
         ),
         (
             "reads a module global",
-            "G := 3\nfn outer():\n    fn a():\n        fn b():\n            return G\n        return b()\n    return a()\nprint(outer())\n",
+            "G := 3\nfn outer() -> int:\n    fn b(): G\n    fn a(): b()\n    return a()\nprint(outer())\n",
         ),
         (
             "self-recursive nested fn",
@@ -33531,7 +33307,7 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
         ),
         (
             "finalize-pass shape",
-            "fn f(c: bool):\n    if c:\n        return ?1\n    return !\"bad\"\nfn h():\n    fn g():\n        return f(true)\n    return g()\nx: int!int = h()\nprint(x)\n",
+            "fn f(c: bool):\n    if c:\n        return ?1\n    return !\"bad\"\nfn h():\n    fn g() -> List[str]:\n        return f(true)\n    return g()\nx: int!int = h()\nprint(x)\n",
         ),
     ];
     for (name, src) in programs {
@@ -35134,7 +34910,7 @@ fn fn_body_reads_global_declared_below() {
 #[test]
 fn inferred_return_of_global_is_typed() {
     rejects(
-        "x := \"s\"\nfn f():\n    return x\ny: int = f()\nprint(y)\n",
+        "x := \"s\"\nfn f() -> str:\n    return x\ny: int = f()\nprint(y)\n",
         "str",
     );
 }
@@ -35142,10 +34918,7 @@ fn inferred_return_of_global_is_typed() {
 // TICKET-183: `x := f()` where `f` returns `x` has no type to start from -- a named cycle.
 #[test]
 fn module_global_initialization_cycle_is_named() {
-    rejects(
-        "x := f()\nfn f():\n    return x\nprint(x)\n",
-        "initialization cycle",
-    );
+    rejects("x := f()\nfn f(): x\nprint(x)\n", "initialization cycle");
 }
 
 // The cycle is reported ONCE, as the cause: `f`'s derived "cannot infer return type" error (its
@@ -35153,8 +34926,8 @@ fn module_global_initialization_cycle_is_named() {
 #[test]
 fn module_global_initialization_cycle_is_the_only_error() {
     for src in [
-        "x := f()\nfn f():\n    return x\nprint(x)\n",
-        "fn f():\n    return x\nx := f()\nprint(x)\n",
+        "x := f()\nfn f(): x\nprint(x)\n",
+        "fn f(): x\nx := f()\nprint(x)\n",
     ] {
         let errs = check_src(src);
         assert_eq!(errs.len(), 1, "{src:?}: {errs:?}");
@@ -35171,20 +34944,10 @@ fn top_level_only_refined_empty_globals_check_clean() {
     ok("m := {}\nm[\"a\"] = 2\nv := m[\"a\"]\nprint(v + 1)\n");
 }
 
-// TICKET-183 review: a body BELOW such a global that returns it still cannot hide the `Unknown`:
-// return inference rejects it, so dropping the plain "annotate it" report opens no type hole.
-#[test]
-fn inferred_return_of_refined_empty_global_stays_rejected() {
-    rejects(
-        "xs := []\nxs.push(1)\ny := xs[0]\nfn f():\n    return y\nz: str = f()\n",
-        "cannot infer return type of 'f'",
-    );
-}
-
 // TICKET-183: an annotation breaks the typing cycle; the read faults at run time instead.
 #[test]
 fn annotated_initialization_cycle_checks_clean() {
-    ok("x: int = f()\nfn f():\n    return x\n");
+    ok("x: int = f()\nfn f() -> int:\n    return x\n");
 }
 
 // TICKET-183: an empty-collection global's element type is pinned by walk-order code a body
@@ -35220,7 +34983,10 @@ fn top_level_write_above_global_stays_undeclared() {
 // TICKET-183: an inferred return that reads a typed global carries the annotation's type.
 #[test]
 fn typed_global_return_is_typed() {
-    rejects("x: int = 5\nfn f():\n    return x\ny: str = f()\n", "int");
+    rejects(
+        "x: int = 5\nfn f() -> int:\n    return x\ny: str = f()\n",
+        "int",
+    );
 }
 
 // TICKET-183: closure and method bodies see a global declared below them.
@@ -35321,10 +35087,10 @@ fn resolution_records_the_raw_ctor_inside_fn_named_like_its_struct() {
 fn a_fn_body_resolves_a_type_named_global_in_both_orders() {
     const P_BIND: &str = "P := fn(n: int) -> str: \"v{n}\"\n";
     const ORD_BIND: &str = "ord := fn(s: str) -> int: 1000\n";
-    const G_ORD: &str = "fn g():\n    h := ord\n    return h(\"a\")\n";
+    const G_ORD: &str = "fn g() -> int:\n    h := ord\n    return h(\"a\")\n";
     // (1) an inferred body above the let returns the global's `str`, not the struct.
     rejects(
-        &format!("struct P:\n    x: int\nfn g():\n    return P(4)\n{P_BIND}y: int = g()\n"),
+        &format!("struct P:\n    x: int\nfn g(): P(4)\n{P_BIND}y: int = g()\n"),
         "cannot assign str to variable of type int",
     );
     // (2) an annotated body above the let calls the global.
@@ -38121,11 +37887,11 @@ fn bang_prefix_is_pinned_by_a_later_return() {
 fn bang_prefix_without_a_pinning_use_is_rejected() {
     rejects(
         "fn main():\n    w := !\"disk\"\n    print(w)\n",
-        "cannot infer the success type",
+        "a `!` value needs its type from an annotation",
     );
     rejects(
         "w := !\"disk\"\nprint(w)\n",
-        "cannot infer the success type",
+        "a `!` value needs its type from an annotation",
     );
 }
 
@@ -38664,4 +38430,263 @@ fn unknown_return_type_reports_once() {
         Some("did you mean 'Error'?"),
         "{errs:?}"
     );
+}
+
+/// TICKET-228 (step 13) — where a grid fn lives. `@name(` in a body or a use line is the call of a
+/// sibling grid fn, spelled for the holder.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RetHolder {
+    Top,
+    Nested,
+    Method,
+    Static,
+}
+
+/// One grid fn: (name, params, body, inline). A block body is a list of lines split on `\n`.
+type RetFn<'a> = (&'a str, &'a str, &'a str, bool);
+
+fn ret_grid_program(h: RetHolder, fns: &[RetFn], uses: &str) -> String {
+    let (pad, body_call, use_call) = match h {
+        RetHolder::Top => ("", "", ""),
+        RetHolder::Nested => ("    ", "", ""),
+        RetHolder::Method => ("    ", "self.", "S(1)."),
+        RetHolder::Static => ("    ", "S.", "S."),
+    };
+    let mut out = String::from("fn g() -> int!str:\n    return 1\n");
+    match h {
+        RetHolder::Top => {}
+        RetHolder::Nested => out.push_str("fn outer():\n"),
+        RetHolder::Method | RetHolder::Static => out.push_str("struct S:\n    v: int\n"),
+    }
+    for (name, params, body, inline) in fns {
+        let params = match (h, params.is_empty()) {
+            (RetHolder::Method, true) => "self".to_string(),
+            (RetHolder::Method, false) => format!("self, {params}"),
+            _ => params.to_string(),
+        };
+        let body = body.replace('@', body_call);
+        if *inline {
+            out.push_str(&format!("{pad}fn {name}({params}): {body}\n"));
+        } else {
+            out.push_str(&format!("{pad}fn {name}({params}):\n"));
+            for line in body.split('\n') {
+                out.push_str(&format!("{pad}    {line}\n"));
+            }
+        }
+    }
+    let use_pad = if h == RetHolder::Nested { "    " } else { "" };
+    for line in uses.split('\n').filter(|l| !l.is_empty()) {
+        out.push_str(&format!("{use_pad}{}\n", line.replace('@', use_call)));
+    }
+    if h == RetHolder::Nested {
+        out.push_str("outer()\n");
+    }
+    out
+}
+
+/// TICKET-228 (owner, 2026-10-09) — a named fn's return type is written. A BLOCK body with no `->`
+/// returns nothing, and a value `return` in it is an error that prints the `->` to add. An INLINE
+/// expression body takes the type of its one expression, as a lambda does, and only from a walk in
+/// which every call had a type: a recursive inline fn asks for `->`. Nothing is joined over
+/// `return` statements. Every accept cell also RUNS.
+#[test]
+fn named_fn_return_grid() {
+    const NO_RET: &str = "declares no return type, so it returns nothing";
+    const CYCLE: &str = "a call in its body has no known type yet";
+    let msgs =
+        |src: &str| -> Vec<String> { check_src(src).into_iter().map(|e| e.message).collect() };
+    let one = |src: &str, needle: &str| {
+        let m = msgs(src);
+        assert!(
+            m.len() == 1 && m[0].contains(needle),
+            "want one error holding {needle:?}, got {m:?}\n{src}"
+        );
+    };
+    let runs = |src: &str, want: &str| {
+        ok(src);
+        assert_eq!(
+            crate::vm::run_capture(src).expect("accept cell runs"),
+            want,
+            "{src}"
+        );
+    };
+    for h in [
+        RetHolder::Top,
+        RetHolder::Nested,
+        RetHolder::Method,
+        RetHolder::Static,
+    ] {
+        let p = |fns: &[RetFn], uses: &str| ret_grid_program(h, fns, uses);
+        // ---- block bodies ----
+        one(
+            &p(&[("f", "n: int", "return n * 2", false)], ""),
+            &format!("{NO_RET}; add '-> int' to 'f'"),
+        );
+        runs(&p(&[("f", "n: int", "print(n)", false)], "@f(3)"), "3\n");
+        one(
+            &p(&[("f", "n: int", "return g()", false)], ""),
+            &format!("{NO_RET}; add '-> int!str' to 'f'"),
+        );
+        let m = msgs(&p(&[("f", "n: int", "return !\"bad\"", false)], ""));
+        assert_eq!(
+            m,
+            vec![super::tyvar::ERR_VALUE_NEEDS_TYPE.to_string()],
+            "{h:?}"
+        );
+        let rec = p(
+            &[(
+                "f",
+                "n: int",
+                "if n < 1:\n    return 0\nreturn @f(n - 1)",
+                false,
+            )],
+            "",
+        );
+        let m = msgs(&rec);
+        assert!(
+            !m.is_empty() && m.iter().all(|e| e.contains(NO_RET)),
+            "{m:?}\n{rec}"
+        );
+        if h != RetHolder::Nested {
+            // A nested fn does not see a nested fn declared below it, so it has no mutual cell.
+            let mutual = p(
+                &[
+                    (
+                        "a",
+                        "n: int",
+                        "if n < 1:\n    return 0\nreturn @b(n - 1)",
+                        false,
+                    ),
+                    ("b", "n: int", "return @a(n)", false),
+                ],
+                "",
+            );
+            let m = msgs(&mutual);
+            assert!(
+                !m.is_empty() && m.iter().all(|e| e.contains(NO_RET)),
+                "{m:?}\n{mutual}"
+            );
+        }
+        // ---- inline expression bodies ----
+        runs(&p(&[("f", "n: int", "n * 2", true)], "print(@f(2))"), "4\n");
+        one(
+            &p(
+                &[("f", "n: int", "n * 2", true)],
+                "x: str = @f(1)\nprint(x)",
+            ),
+            "cannot assign int to variable of type str",
+        );
+        runs(&p(&[("f", "n: int", "print(n)", true)], "@f(3)"), "3\n");
+        one(
+            &p(&[("f", "n: int", "g()", true)], "x: str = @f(1)\nprint(x)"),
+            "cannot assign int!str to variable of type str",
+        );
+        let m = msgs(&p(&[("f", "n: int", "!\"bad\"", true)], ""));
+        assert_eq!(
+            m,
+            vec![super::tyvar::ERR_VALUE_NEEDS_TYPE.to_string()],
+            "{h:?}"
+        );
+        one(
+            &p(
+                &[("f", "n: int", "if n < 2: 1 else: n * @f(n - 1)", true)],
+                "",
+            ),
+            CYCLE,
+        );
+        if h != RetHolder::Nested {
+            let mutual = p(
+                &[
+                    ("a", "n: int", "if n < 1: 0 else: @b(n - 1)", true),
+                    ("b", "n: int", "@a(n)", true),
+                ],
+                "",
+            );
+            let m = msgs(&mutual);
+            assert!(
+                m.len() == 2 && m.iter().all(|e| e.contains(CYCLE)),
+                "{m:?}\n{mutual}"
+            );
+            assert!(
+                m.iter().any(|e| e.contains("'a'")) && m.iter().any(|e| e.contains("'b'")),
+                "{m:?}"
+            );
+        }
+    }
+    // A sole diverging call is `None`; an empty list has no element type to give.
+    runs("fn boom(): panic(\"x\")\nprint(1)\n", "1\n");
+    one(
+        "fn f(): []\n",
+        "cannot infer return type of 'f'; add a -> annotation",
+    );
+    // A forward reference with no cycle only orders the walks.
+    runs("fn c(): d() + 1\nfn d(): 2\nprint(c())\n", "3\n");
+    // ---- generators: the element type is written ----
+    const GEN: &str = "must declare a return type of `Iterator[T]`";
+    one("fn count(n: int):\n    yield n\n", GEN);
+    one(
+        "struct S:\n    v: int\n    fn each(self):\n        yield self.v\n",
+        GEN,
+    );
+    runs(
+        "fn count(n: int) -> Iterator[int]:\n    yield n\nfor x in count(4):\n    print(x)\n",
+        "4\n",
+    );
+    // ---- lambdas: unchanged, and typed by the same `inline_body_ty` ----
+    // (A block-body lambda is a parse error, so it has no cell.)
+    runs("g := fn(x: int): x * 2\nprint(g(2))\n", "4\n");
+    one(
+        "fn g() -> int!str:\n    return 1\nh := fn(): g()\nx: str = h()\nprint(x)\n",
+        "cannot assign int!str to variable of type str",
+    );
+    ok("g := fn(): panic(\"x\")\n");
+    one(
+        "g := fn(n: int): g(n)\n",
+        "cannot infer return type of '<closure>'; add a -> annotation",
+    );
+}
+
+/// TICKET-228 (owner, 2026-10-09) — a `T!E` type is never inferred from returns or branches. An
+/// error value `!e` takes its type from an annotation or an expected type; with neither it reports
+/// the one `!` text, exactly once, and no site adds a message of its own beside it.
+#[test]
+fn err_value_type_grid() {
+    let typed = [
+        "fn f(c: bool) -> int!str:\n    if c:\n        return 1\n    return !\"bad\"\n",
+        "g := fn(c: bool) -> int!str: if c: 1 else: !\"bad\"\n",
+        "fn f(c: bool):\n    x: int!str = if c: 1 else: !\"bad\"\n    print(x)\n",
+        "fn f(c: bool):\n    x: int!str = match c:\n        true: 1\n        false: !\"bad\"\n    print(x)\n",
+        "x: int!str = !\"e\"\nprint(x)\n",
+        // expected type
+        "fn take(r: int!str):\n    print(r)\ntake(!\"bad\")\n",
+        "fn take(r: int!str):\n    print(r)\ntake(if true: 1 else: !\"bad\")\n",
+        "fn run(f: fn(bool) -> int!str):\n    print(f(true))\nrun(fn(c: bool): if c: 1 else: !\"bad\")\n",
+    ];
+    for src in typed {
+        ok(src);
+    }
+    let untyped = [
+        "g := fn(): !\"bad\"\n",
+        "g := fn(c: bool): if c: 1 else: !\"bad\"\n",
+        "fn f(c: bool):\n    x := if c: 1 else: !\"bad\"\n    print(x)\n",
+        "c := true\nx := if c: 1 else: !\"bad\"\nprint(x)\n",
+        "fn f(c: bool):\n    x := match c:\n        true: 1\n        false: !\"bad\"\n    print(x)\n",
+        "c := true\nx := match c:\n    true: 1\n    false: !\"bad\"\nprint(x)\n",
+        "fn f():\n    x := !\"e\"\n    print(x)\n",
+        "x := !\"e\"\nprint(x)\n",
+        "fn f(c: bool): if c: 1 else: !\"bad\"\n",
+        "fn f(c: bool):\n    if c:\n        return 1\n    return !\"bad\"\n",
+    ];
+    for src in untyped {
+        let m: Vec<String> = check_src(src).into_iter().map(|e| e.message).collect();
+        let hits = m
+            .iter()
+            .filter(|e| *e == super::tyvar::ERR_VALUE_NEEDS_TYPE)
+            .count();
+        assert_eq!(hits, 1, "want the `!` text exactly once, got {m:?}\n{src}");
+        assert!(
+            !m.iter().any(|e| e.contains("?!") || e.contains("_!")),
+            "{m:?}\n{src}"
+        );
+    }
 }

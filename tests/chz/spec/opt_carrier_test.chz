@@ -512,10 +512,10 @@ test fn carrier_in_a_function_default_expression():
 # Treating that provisional value as a settled decision made the W7-49 conflict backstop reject both
 # of these — a fully green suite shipped it, and only adversarial review caught it. These two run.
 
-fn w749_inner():
+fn w749_inner() -> str?:
     return ?"xy"
 
-fn w749_outer():
+fn w749_outer() -> int?:
     return w749_inner()?.len()
 
 test fn a_carrier_typed_before_its_operand_is_known_still_lowers():

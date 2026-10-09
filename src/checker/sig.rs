@@ -153,15 +153,17 @@ impl Checker {
                 }
             })
             .collect();
-        // No `-> T`: leave the return as `Unknown` for now — `infer_returns` (run after `hoist`)
-        // walks the body and replaces it with the inferred type. `Unknown` is the safe placeholder
-        // any *other* function's inference sees in the meantime (forward refs degrade silently
-        // rather than to a confidently-wrong `Nil`).
+        // No `-> T`: a block body returns nothing. An inline expression body takes the type of its
+        // one expression, which `infer_returns` writes. This is the one place that decides it.
         let ret = decl
             .ret
             .as_ref()
             .map(|t| self.resolve_ret_type(t, span))
-            .unwrap_or(Ty::Unknown);
+            .unwrap_or(if decl.inline_expr_body {
+                Ty::Unknown
+            } else {
+                Ty::Nil
+            });
         // TICKET-202: bounds resolve HERE, in the declaration's scope (the receiver's params are
         // entered by the type hoist), and never again at a use site.
         let type_params = self.resolve_bounds(&merged, span);
@@ -241,35 +243,22 @@ impl Checker {
         crate::desugar::param_slots(decl, file, &owner, self_ty, &host_tps)
     }
 
-    /// Pass-1.5: for every function/method that omitted `-> T`, infer its return type from the
-    /// body and overwrite the provisional `Unknown` left by `fn_sig`. Runs after `hoist`, so all
-    /// type names, variants, and (provisional) function sigs are already visible to the inference.
+    /// Pass-1.5: type the module globals and every INLINE EXPRESSION body that omitted `-> T`, in
+    /// dependency order, and overwrite the pending `Unknown` `fn_sig` left for such a body. A block
+    /// body is not walked here: `fn_sig` already wrote `None` for it. Runs after `hoist`, so all
+    /// type names, variants and function sigs are visible.
     ///
-    /// Inference is ORDER-INDEPENDENT: a single source-order pass would bail to `Unknown` whenever
-    /// the deciding return is a call to a not-yet-inferred function (a forward reference or mutual
-    /// recursion), leaking an unsound permissive `Unknown` into a typed slot. Instead this runs the
-    /// per-pass walk (`infer_returns_pass`) repeatedly to a FIXPOINT: each pass re-infers every
-    /// un-annotated fn/method, and because a callee's resolved `FnSig.ret` is written back
-    /// immediately, a later pass sees the earlier pass's resolutions. The iteration is MONOTONE — a
-    /// pass only ever turns an `Unknown` ret into a concrete one (or detects a conflict via pass-2),
-    /// and a concrete ret is never reverted to `Unknown` — so it converges. The cap
-    /// (`un-annotated count + 1`) bounds the longest forward-ref resolution chain and guarantees
-    /// termination on genuinely un-inferable cases (pure recursion / mutual recursion with no
-    /// concrete base, where the ret stays `Unknown` forever). Such a residual `Unknown` stays
-    /// permissive (same as the pre-fixpoint behavior) — it is NOT rejected here: a blanket
-    /// "leftover Unknown ⇒ require annotation" check over-reaches, because a bare `Unknown` ret is
-    /// also produced by non-recursive paths (e.g. `return x[0]` of an empty-collection literal) and
-    /// by already-errored bodies. Rejecting the genuinely-un-inferable recursive case soundly needs
-    /// call-graph cycle detection; tracked as a follow-up gap.
+    /// The loop only ORDERS the walks (a callee below its caller, a global below its reader,
+    /// TICKET-183): each pass re-walks the bodies still pending, and a type a clean walk wrote is
+    /// visible to the next pass. A body is typed only from a walk in which every call had a type
+    /// (`untyped_call`), so nothing is joined and nothing a clean walk wrote is revised. A recursive
+    /// or mutually recursive inline fn therefore never gets a type; the finalize pass reports it
+    /// and asks for `->`.
     ///
-    /// TICKET-183 — the fixpoint is JOINT with the module globals: a body may read a top-level
-    /// `let` declared anywhere in the module, so every let-only global is typed here, before any
-    /// body is walked, and in dependency order (a global typed from a call waits on that callee's
-    /// return, which may itself read another global). `seed_module_globals` writes four facts into
-    /// scope 0 — type, `const`, keyword certainty (`kw_certain`) and closure writes
-    /// (`written_captures`) — and `type_globals_pass` refines the type alongside each return pass.
-    /// A global left `Unknown` because its callee returns it is reported by
-    /// `report_untyped_globals` as a named initialization cycle.
+    /// `seed_module_globals` writes four facts into scope 0 (type, `const`, keyword certainty
+    /// `kw_certain`, closure writes `written_captures`) and `type_globals_pass` refines the type
+    /// alongside each return pass. A global left `Unknown` because its callee returns it is
+    /// reported by `report_untyped_globals` as a named initialization cycle.
     pub(super) fn infer_returns(&mut self, stmts: &[Stmt]) {
         // The main walk records every Resolution; this pre-pass records none (TICKET-180).
         // `inferring_ret` cannot gate it: `check_fn_body` clears that for a nested fn.
@@ -287,12 +276,8 @@ impl Checker {
                 break;
             }
         }
-        // FINALIZE: one last pass that folds ALL return branches (a top-level `Unknown` from a
-        // forward-ref/recursive sibling is absorbed by `join_ret`), fills the `Result` E-slot default
-        // (`Error`), and ERRORS on any residual un-inferable `Unknown` (an `Err`-only / `None`-only /
-        // empty-`[]` return, or a genuinely baseless recursion). Kept SEPARATE from the fixpoint so
-        // the passes above stay permissive: a callee's ret must be free to be `Unknown` mid-fixpoint
-        // (it resolves on a later pass) without being prematurely rejected or E-defaulted.
+        // FINALIZE: one last pass that reports every inline body still without a type (a call cycle,
+        // an empty `[]`), kept separate so the passes above stay silent while a callee is pending.
         self.infer_returns_pass(stmts, true);
         // Global types read the finalized returns.
         self.type_globals_pass(stmts);
@@ -537,7 +522,7 @@ impl Checker {
             let probe = format!("${x}");
             self.scopes[0].insert(x.to_string(), Ty::Param(probe.clone()));
             let mark = self.diag_mark();
-            let r = self.infer_fn_ret(decl, None, &sig, false);
+            let r = self.infer_inline_fn_ret(decl, None, &sig, false);
             self.diag_rollback(mark);
             self.scopes[0].insert(x.to_string(), Ty::Unknown);
             let dependent = subst(&r, &HashMap::from([(probe, Ty::Nil)])) != r;
@@ -653,9 +638,12 @@ impl Checker {
         let mut n = 0;
         for s in stmts {
             match &s.kind {
-                StmtKind::Fn(decl) if decl.ret.is_none() => n += 1,
+                StmtKind::Fn(decl) if decl.ret.is_none() && decl.inline_expr_body => n += 1,
                 StmtKind::Struct { methods, .. } | StmtKind::Enum { methods, .. } => {
-                    n += methods.iter().filter(|m| m.ret.is_none()).count();
+                    n += methods
+                        .iter()
+                        .filter(|m| m.ret.is_none() && m.inline_expr_body)
+                        .count();
                 }
                 _ => {}
             }
@@ -664,18 +652,18 @@ impl Checker {
     }
 
     /// One inference pass over every un-annotated fn/method. Re-infers each from the body (idempotent
-    /// per the truncate-errors model in `infer_fn_ret`) and writes the result back into the stored
+    /// per the truncate-errors model in `infer_inline_fn_ret`) and writes the result back into the stored
     /// `FnSig.ret` immediately, so a callee resolved earlier in THIS pass is already visible to a
     /// caller later in the pass. Returns `true` iff any stored ret changed (drives the fixpoint).
     pub(super) fn infer_returns_pass(&mut self, stmts: &[Stmt], finalize: bool) -> bool {
         let mut changed = false;
         for s in stmts {
             match &s.kind {
-                StmtKind::Fn(decl) if decl.ret.is_none() => {
+                StmtKind::Fn(decl) if decl.ret.is_none() && decl.inline_expr_body => {
                     let Some(sig) = self.functions.get(&decl.name).cloned() else {
                         continue;
                     };
-                    let ret = self.infer_fn_ret(decl, None, &sig, finalize);
+                    let ret = self.infer_inline_fn_ret(decl, None, &sig, finalize);
                     if let Some(sig) = self.functions.get_mut(&decl.name)
                         && sig.ret != ret
                     {
@@ -696,7 +684,7 @@ impl Checker {
                     let key = self.bare_key(name);
                     let saved = self.enter_type_params(type_params);
                     for m in methods {
-                        if m.ret.is_some() {
+                        if m.ret.is_some() || !m.inline_expr_body {
                             continue;
                         }
                         let Some(sig) = self
@@ -707,7 +695,8 @@ impl Checker {
                         else {
                             continue;
                         };
-                        let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig, finalize);
+                        let ret =
+                            self.infer_inline_fn_ret(m, Some(self_ty.clone()), &sig, finalize);
                         if let Some(ms) = self
                             .structs
                             .get_mut(&key)
@@ -732,7 +721,7 @@ impl Checker {
                     let key = self.bare_key(name);
                     let saved = self.enter_type_params(type_params);
                     for m in methods {
-                        if m.ret.is_some() {
+                        if m.ret.is_some() || !m.inline_expr_body {
                             continue;
                         }
                         let Some(sig) = self
@@ -743,7 +732,8 @@ impl Checker {
                         else {
                             continue;
                         };
-                        let ret = self.infer_fn_ret(m, Some(self_ty.clone()), &sig, finalize);
+                        let ret =
+                            self.infer_inline_fn_ret(m, Some(self_ty.clone()), &sig, finalize);
                         if let Some(ms) = self
                             .enum_methods
                             .get_mut(&key)
@@ -765,7 +755,7 @@ impl Checker {
     /// TICKET-157 (W12-12) — the speculative return inference a nested un-annotated `fn` runs, once
     /// per decl span per outermost fn walk (`Checker::ret_memo`). Without it each enclosing
     /// speculative walk repeats this inference AND the nested `check_fn_body`, which doubles per
-    /// nesting level. A hit replays the type plus the diagnostics `infer_fn_ret` emits AFTER its own
+    /// nesting level. A hit replays the type plus the diagnostics `infer_inline_fn_ret` emits AFTER its own
     /// rollback; everything it did before that was erased by the rollback (`DiagMark`).
     /// `check_fn_body` is deliberately not memoized — see `ret_memo`.
     fn infer_nested_fn_ret(&mut self, decl: &FnDecl, sig: &FnSig) -> Ty {
@@ -784,7 +774,7 @@ impl Checker {
             return ty;
         }
         let (e0, w0) = (self.errors.len(), self.warnings.len());
-        let ty = self.infer_fn_ret(decl, None, sig, true);
+        let ty = self.infer_inline_fn_ret(decl, None, sig, true);
         if self.memo_enabled {
             self.ret_memo.insert(
                 decl.name_span,
@@ -810,7 +800,7 @@ impl Checker {
         self.memo_verifying = true;
         let vmark = self.diag_mark();
         let (e0, w0) = (self.errors.len(), self.warnings.len());
-        let ty = self.infer_fn_ret(decl, None, sig, true);
+        let ty = self.infer_inline_fn_ret(decl, None, sig, true);
         let recomputed = (ty, self.errors[e0..].to_vec(), self.warnings[w0..].to_vec());
         self.diag_rollback(vmark);
         self.memo_verifying = false;
@@ -822,23 +812,13 @@ impl Checker {
         }
     }
 
-    /// Infer one function's return type by walking its body in inference mode: every `return`'s
-    /// type is collected by `check_return` (with errors suppressed — pass 2 re-reports for real).
-    /// The pick rule, in order:
-    /// - first concrete non-`nil` return wins (pass 2 then validates the rest against it);
-    /// - else, if any value-return was uncertain (`Unknown` — a forward ref to a not-yet-inferred
-    ///   function, or a self-recursive call) → `Unknown` for THIS pass, so the function stays
-    ///   permissive instead of producing spurious errors; the enclosing fixpoint (`infer_returns`)
-    ///   then re-infers it on a later pass once the callee resolves;
-    /// - else (only bare `return`s / no returns at all) → `nil` (void preserved).
-    ///
-    /// One pass is order-dependent (a call to a not-yet-inferred function yields `Unknown`), but
-    /// `infer_returns` iterates this to a FIXPOINT, so the FINAL stored ret is order-independent: a
-    /// forward-ref / mutually-recursive callee resolves on a later pass. Only a genuinely
-    /// un-inferable function (no concrete base anywhere) stays `Unknown` after convergence — that
-    /// residual stays permissive (not rejected; soundly rejecting it needs call-graph cycle
-    /// detection — a follow-up).
-    pub(super) fn infer_fn_ret(
+    /// Type one INLINE EXPRESSION body (`fn f(): <expr>`): its return type is the type of that one
+    /// expression (`inline_body_ty`, the owner a lambda reads too). The walk is speculative: its
+    /// diagnostics are rolled back and the main walk re-reports them. A walk in which a call had no
+    /// type yet gives NO type, so a recursive or mutually recursive inline fn never gets one and
+    /// asks for `->` on the finalize pass. Nothing is joined: a block body is never walked here
+    /// (`fn_sig` already wrote `None` for it).
+    pub(super) fn infer_inline_fn_ret(
         &mut self,
         decl: &FnDecl,
         self_ty: Option<Ty>,
@@ -880,12 +860,9 @@ impl Checker {
         // not inherit the enclosing frame's W8-3 airlock taint (`enter_own_frame` moves the pair).
         let saved_frame = self.enter_own_frame();
         let saved_flag = std::mem::replace(&mut self.inferring_ret, true);
-        let saved_rets = std::mem::take(&mut self.collected_rets);
-        // A generator body's `yield`s must be legal (`in_generator`) and COLLECTED (`collected_yields`)
-        // during inference; a non-generator resets both so a stray `yield` is diagnosed.
-        let saved_ig = std::mem::replace(&mut self.in_generator, decl.is_generator);
+        // An inline expression body is never a generator: a stray `yield` in it is diagnosed.
+        let saved_ig = std::mem::replace(&mut self.in_generator, false);
         let saved_gf = self.gen_frame.take();
-        let saved_yields = std::mem::take(&mut self.collected_yields);
         // M24 — same rule as `check_fn_body` (a module-level free fn or a member, never a nested fn).
         // Without it an UNANNOTATED `fn reset[T: Default](old: T): return T.default()` would infer
         // its return as `Unknown` here (the pass-1 error is truncated), and that residual Unknown is
@@ -909,9 +886,8 @@ impl Checker {
             };
             self.declare(&param.name, ty);
         }
-        // An inline-expr body (`fn a(): <expr>`) implicitly returns its single expression, so its
-        // type IS the inferred return (mirroring a closure body) — there is no `return` to collect.
-        let inline_ret = if decl.inline_expr_body
+        // Only an inline expression body reaches this walk; anything else returns nothing.
+        let (raw, untyped) = if decl.inline_expr_body
             && let [
                 Stmt {
                     kind: StmtKind::Expr(e),
@@ -919,26 +895,14 @@ impl Checker {
                 },
             ] = decl.body.as_slice()
         {
-            // A sole diverging call (`fn f(): panic(...)`/`exit(...)`) is bottom-typed (`Unknown`),
-            // which would trip the "cannot infer return type" finalizer. It never returns a value
-            // normally, so default it to `Nil` (like a void body) — the caller can't use a value
-            // anyway. Gated on `is_unknown()` so a diverging call that somehow typed concrete is
-            // untouched; `self.infer(e)` still runs so panic's arg checks fire in pass 2.
-            let t = self.infer(e);
-            Some(if t.is_unknown() && self.call_diverges(e) {
-                Ty::Nil
-            } else {
-                t
-            })
+            let saved = self.untyped_call.replace(None);
+            let raw = self.inline_body_ty(e, None);
+            let untyped = std::mem::replace(&mut self.untyped_call, saved).flatten();
+            (raw, untyped)
         } else {
-            for stmt in &decl.body {
-                self.check_stmt(stmt);
-            }
-            None
+            (Ty::Nil, None)
         };
         self.pop_scope();
-        let found = std::mem::replace(&mut self.collected_rets, saved_rets);
-        let found_yields = std::mem::replace(&mut self.collected_yields, saved_yields);
         self.in_generator = saved_ig;
         self.gen_frame = saved_gf;
         self.inferring_ret = saved_flag;
@@ -955,214 +919,39 @@ impl Checker {
         // diagnostic surfaces in pass 2, so a residual `Unknown`/conflict here is a CASCADE, not a
         // genuine un-inferable return — suppress the finalize error to avoid piling on.
         let body_had_err = self.errors.len() > mark.errors;
-        // TICKET-225: an inferred return outlives this walk, so a type variable the walk created
-        // must not reach it — a still-unbound one settles to `Unknown`.
-        let found: Vec<Ty> = found.iter().map(|t| self.settle(t)).collect();
-        let found_yields: Vec<Ty> = found_yields.iter().map(|t| self.settle(t)).collect();
-        let inline_ret = inline_ret.map(|t| self.settle(&t));
         // Discard inference-time diagnostics; pass 2 re-reports them for real. BOTH channels: a
         // warning raised inside this body would otherwise be emitted here AND again in pass 2.
         self.diag_rollback(mark);
-        // A GENERATOR's return type is `Iterator[T]`, `T` inferred by strict-first-yield — NOT the
-        // folded `return` branches (a generator's `return`s are bare, contributing only `Nil`). Route
-        // to the dedicated helper before the value-return fold below.
-        if decl.is_generator {
-            return self.infer_generator_ret(found_yields, decl.name_span, finalize, body_had_err);
-        }
-
-        // Collect every return branch: an inline-expr body's single implicit return, else all the
-        // `return`s (a bare `return` contributed `Nil`; no returns at all ⇒ an empty set ⇒ void).
-        let branches: Vec<Ty> = match inline_ret {
-            Some(t) => vec![t],
-            None => found,
-        };
-        // Fold the branches with the JOIN function `J` (`join_ret`): a==b, the one int→float widen,
-        // or slot-wise merge of a shared type-constructor; a top-level `Unknown` (forward ref /
-        // recursion / cascade) is ABSORBED by the other side, so a recursive fn still resolves to its
-        // concrete base during the fixpoint (matching the old first-concrete-wins timing). An empty
-        // branch set is `Nil` (void). A conflict yields `Err((X, Y))`.
-        let folded: Result<Ty, Box<(Ty, Ty)>> = {
-            let mut iter = branches.into_iter();
-            match iter.next() {
-                None => Ok(Ty::Nil),
-                Some(first) => iter.try_fold(first, |acc, b| self.join_ret(&acc, &b)),
+        // (i) A call in the body had no type yet: this walk gives no type. On the finalize pass that
+        // is a cycle (or a callee that itself has no type), and the fn asks for `->`.
+        if untyped.is_some() {
+            if finalize && !body_had_err {
+                self.error(
+                    decl.name_span,
+                    format!(
+                        "cannot infer return type of '{}': a call in its body has no known type yet (return types that depend on each other are not inferred); add a -> annotation",
+                        decl.name
+                    ),
+                );
             }
-        };
+            return Ty::Unknown;
+        }
+        // (ii) An unpinned `!e`, read BEFORE `settle` erases the open slot: the `!e` node reports in
+        // the main walk, so this site reports nothing.
+        if super::tyvar::open_err(&raw) {
+            return Ty::Unknown;
+        }
+        // TICKET-225: an inferred return outlives this walk, so a type variable the walk created
+        // must not reach it; a still-unbound one settles to `Unknown`.
+        let settled = self.settle(&raw);
         if !finalize {
-            // Fixpoint pass: stay permissive. A conflict collapses to `Unknown` (suppressed; the
-            // FINALIZE pass re-runs the fold and emits the real conflict diagnostic).
-            return folded.unwrap_or(Ty::Unknown);
+            return settled;
         }
-        // FINALIZE pass: emit the conflict diagnostic, else fill the E-default / reject residual
-        // un-inferable `Unknown`.
-        match folded {
-            Err(conflict) => {
-                let (x, y) = *conflict;
-                if !body_had_err {
-                    let [x_s, y_s] = Ty::render_distinct([&x, &y]);
-                    self.error(
-                        decl.name_span,
-                        format!(
-                            "cannot infer return type: conflicting branches ({x_s} vs {y_s}); add a -> annotation"
-                        ),
-                    );
-                }
-                Ty::Unknown
-            }
-            Ok(t) => self.finalize_ret(&t, &decl.name, decl.name_span, body_had_err),
-        }
+        self.finalize_ret(&settled, &decl.name, decl.name_span, body_had_err)
     }
 
-    /// The JOIN function `J` over two RETURN branch types. Pure (no `self`). Returns the merged type,
-    /// or `Err((a, b))` on a genuine conflict (the caller renders `cannot infer return type:
-    /// conflicting branches (a vs b)`). Rules, in order:
-    /// 1. `a == b` → `a`.
-    /// 2. a top-level `Unknown` is absorbed by the other side (a forward-ref / recursive / cascade
-    ///    branch carries no information — it must not drag a concrete sibling to a conflict).
-    /// 3. `{int, float}` → `float` (the ONE numeric widen — BARE SCALARS ONLY; it does NOT recurse
-    ///    into type-arg slots, per `docs/spec.md` `float! = Ok(3)` already being a type error).
-    /// 4. same type-constructor (Result/Option/List/Set/Map, or a same-name-same-arity Struct/Enum)
-    ///    → MERGE SLOT-WISE via [`Self::join_slot`].
-    /// 5. otherwise (incl. Nil-vs-value, two distinct structs) → CONFLICT. There is deliberately NO
-    ///    common-supertype / protocol / `Any` search: a protocol return must be spelled explicitly.
-    fn join_ret(&self, a: &Ty, b: &Ty) -> Result<Ty, Box<(Ty, Ty)>> {
-        use Ty::*;
-        if a == b {
-            return Ok(a.clone());
-        }
-        let conflict = || (a.clone(), b.clone());
-        match (a, b) {
-            (Unknown, other) | (other, Unknown) => Ok(other.clone()),
-            // NOTE: no `(Int, Float) -> Float` widen here (D3, TICKET-138: an int never widens into
-            // a `float` slot, and nothing coerces at runtime). Inferring `float` from mixed
-            // `return 3` / `return 4.0` branches would leave a runtime `int` under a `float` type —
-            // `x / 2` would do integer division. So mixed int/float branches CONFLICT: write `3.0`.
-            // Merge the T-slot (Ok payload) normally; merge the E-slot with `join_err_slot` — two
-            // DIFFERENT `Err` payloads that BOTH satisfy `Error` do NOT conflict (they unify to the
-            // uniform `Error` existential at finalize), but a non-`Error` payload keeps `join_slot`'s
-            // equal-or-conflict semantics so a genuine mismatch is still reported. `fill_ret` decides
-            // the final Error-default per-slot; a concrete E is honored via an explicit annotation.
-            (Result(at, ae), Result(bt, be)) => Ok(Ty::Result(
-                Box::new(Self::join_slot(at, bt).ok_or_else(conflict)?),
-                Box::new(self.join_err_slot(ae, be).ok_or_else(conflict)?),
-            )),
-            (Option(x), Option(y)) => Ok(Ty::Option(Box::new(
-                Self::join_slot(x, y).ok_or_else(conflict)?,
-            ))),
-            (List(x), List(y)) => Ok(Ty::List(Box::new(
-                Self::join_slot(x, y).ok_or_else(conflict)?,
-            ))),
-            (Set(x), Set(y)) => Ok(Ty::Set(Box::new(
-                Self::join_slot(x, y).ok_or_else(conflict)?,
-            ))),
-            (Map(k1, v1), Map(k2, v2)) => Ok(Ty::Map(
-                Box::new(Self::join_slot(k1, k2).ok_or_else(conflict)?),
-                Box::new(Self::join_slot(v1, v2).ok_or_else(conflict)?),
-            )),
-            (Struct(n1, a1), Struct(n2, a2)) if n1 == n2 && a1.len() == a2.len() => Ok(Ty::Struct(
-                n1.clone(),
-                Self::join_slots(a1, a2).ok_or_else(conflict)?,
-            )),
-            (Enum(n1, a1), Enum(n2, a2)) if n1 == n2 && a1.len() == a2.len() => Ok(Ty::Enum(
-                n1.clone(),
-                Self::join_slots(a1, a2).ok_or_else(conflict)?,
-            )),
-            _ => Err(Box::new(conflict())),
-        }
-    }
-
-    /// Slot merge `S` for a single type-arg position INSIDE a shared constructor. `None` = conflict.
-    /// One side `Unknown` → the concrete other (partial `Ok`/`Err`/`Some`/`[]` branches fill each
-    /// other's slots); both `Unknown` → `Unknown` (finalize handles the residual). Both concrete →
-    /// must be EQUAL else conflict: widening does NOT apply inside payloads/elements (`int` vs `float`
-    /// here CONFLICTS), per `docs/spec.md` (`float! = Ok(3)` is already a type error). No recursion —
-    /// a nested same-ctor mismatch (`Some(Ok(5))` vs `Some(Err("x"))`) conflicts rather than merges.
-    fn join_slot(a: &Ty, b: &Ty) -> Option<Ty> {
-        if a.is_unknown() {
-            return Some(b.clone());
-        }
-        if b.is_unknown() {
-            return Some(a.clone());
-        }
-        if a == b { Some(a.clone()) } else { None }
-    }
-
-    /// Merge two inferred `Result` **error slots**. Like [`Self::join_slot`] (equal → keep; one
-    /// `Unknown` → the other), EXCEPT two DIFFERENT concrete payloads that BOTH satisfy the `Error`
-    /// protocol AND ARE BOTH SENDABLE merge to `Unknown` — `fill_ret` then unifies them to the
-    /// uniform `Error` existential, so branches returning distinct *error* types (`Err(EA())` vs
-    /// `Err(EB())`) don't spuriously conflict. A pair where at least one side is a non-`Error`
-    /// concrete, OR satisfies `Error` but is NOT sendable (the `Error` existential is sendable, like
-    /// every protocol, so a non-sendable concrete under it must stay concrete; order-coupled with
-    /// `fill_ret`'s same guard), keeps `join_slot`'s strict
-    /// equal-or-conflict rule (a real type mismatch is still reported; forcing `Error` there would be
-    /// unsound). Equal concretes are kept as-is — `fill_ret` decides Error-defaulting per slot.
-    fn join_err_slot(&self, a: &Ty, b: &Ty) -> Option<Ty> {
-        if a == b {
-            return Some(a.clone());
-        }
-        if a.is_unknown() {
-            return Some(b.clone());
-        }
-        if b.is_unknown() {
-            return Some(a.clone());
-        }
-        if self.assignable(&Ty::error_proto(), a)
-            && self.assignable(&Ty::error_proto(), b)
-            && self.sendable(a)
-            && self.sendable(b)
-        {
-            return Some(Ty::Unknown);
-        }
-        None
-    }
-
-    /// Slot-merge two equal-length type-arg lists position-wise; `None` if any slot conflicts.
-    fn join_slots(a: &[Ty], b: &[Ty]) -> Option<Vec<Ty>> {
-        a.iter()
-            .zip(b)
-            .map(|(x, y)| Self::join_slot(x, y))
-            .collect()
-    }
-
-    /// Infer an un-annotated generator's return type as `Iterator[T]` where `T` is the type of the
-    /// FIRST `yield` (strict-first-yield — chosen over a JOIN so no int->float join is silently
-    /// introduced at a `yield`; pass-2 `check_yield` validates the rest of
-    /// the yields against this `T`). On the FINALIZE pass, a residual un-inferable `Unknown` in the
-    /// element (an empty generator whose only `yield` is `[]`, or one that reached no `yield` at all)
-    /// is a clear ERROR — never a silent `Iterator[Unknown]` leak (the residual-Unknown type-check
-    /// bypass class). A `body_had_err` cascade suppresses that diagnostic (the real error already fired
-    /// in pass 2), mirroring `finalize_ret`.
-    pub(super) fn infer_generator_ret(
-        &mut self,
-        yields: Vec<Ty>,
-        span: Span,
-        finalize: bool,
-        body_had_err: bool,
-    ) -> Ty {
-        let elem = yields.into_iter().next().unwrap_or(Ty::Unknown);
-        if !finalize {
-            // Fixpoint pass: stay permissive — a first yield that is `Unknown` (forward-ref callee /
-            // recursion) resolves on a later pass. Only the finalize pass rejects a residual.
-            return Ty::Struct("Iterator".to_string(), vec![elem]);
-        }
-        let mut bad = false;
-        let filled = self.fill_ret(&elem, &mut bad);
-        if bad && !body_had_err {
-            self.error(
-                span,
-                "cannot infer generator element type; annotate the return type as `Iterator[T]`"
-                    .to_string(),
-            );
-        }
-        Ty::Struct("Iterator".to_string(), vec![filled])
-    }
-
-    /// FINALIZE a folded return type after the fixpoint converges: default the `Result` E-slot to the
-    /// `Error` protocol when it is `Unknown` or its payload satisfies `Error` (matching the `T!` /
-    /// `Result[T]` shorthand — a concrete non-`Error` payload is preserved; a deliberate concrete E
-    /// needs an explicit annotation) and REJECT any OTHER residual `Unknown` (top-level, a `Result`
-    /// T-slot, an `Option` T-slot, a List/Set/Map element/key/value, or a Struct/Enum
+    /// FINALIZE an inline body's type: REJECT any residual `Unknown` (top-level, a `T!E` slot,
+    /// a `T?` slot, a List/Set/Map element/key/value, or a Struct/Enum
     /// type-arg) with `cannot infer return type of '<name>'`. A `Ty::Param`
     /// (generic fns / the proto.rs HOF loop-back) is LEFT UNTOUCHED — not this pass's concern. When
     /// `suppress` is set (the body already emitted a real error) the residual-`Unknown` diagnostic is
@@ -1179,9 +968,7 @@ impl Checker {
         filled
     }
 
-    /// Recursive helper for [`Self::finalize_ret`]: rebuild `t` defaulting a `Result` E-slot to the
-    /// `Error` protocol WHEN it is `Unknown` or its payload satisfies `Error` (a concrete non-`Error`
-    /// payload is preserved — see the `Ty::Result` arm), and flagging (`*bad = true`) every OTHER
+    /// Recursive helper for [`Self::finalize_ret`]: rebuild `t`, flagging (`*bad = true`) every
     /// residual `Unknown`. `Ty::Param` and all leaf types pass through unchanged.
     fn fill_ret(&self, t: &Ty, bad: &mut bool) -> Ty {
         match t {
@@ -1189,29 +976,10 @@ impl Checker {
                 *bad = true;
                 Ty::Unknown
             }
-            // An inferred `Result` E-slot defaults to the `Error` protocol (the `T!` / single-arg
-            // `Result[T]` semantics) when it is un-pinned (`Unknown`) OR the pinned payload actually
-            // SATISFIES `Error` AND IS SENDABLE — so the common `Err("msg")` / custom-error branches
-            // unify to the uniform `Error` existential. A concrete E that does NOT satisfy `Error`
-            // (a struct with no `message`, or `int`), OR satisfies `Error` but is NOT sendable (the
-            // `Error` existential is sendable like every protocol, so widening a non-sendable
-            // concrete into it would launder a value that could never legally cross a `Channel`/
-            // `spawn` boundary), is PRESERVED — forcing it to `Error` would launder a non-Error (or
-            // non-sendable) value into the `Error` existential (the pass-2 return check / a
-            // downstream method-call check then rejects any Error-method use soundly). A deliberate
-            // concrete non-`Error` E needs an explicit `-> Result[T, E]` annotation (resolved by
-            // `resolve_type`, a separate path). The T-slot is an ordinary value slot — a residual
-            // `Unknown` there is un-inferable → `bad` (preserving the `Err`-only / `None`-only / `[]`
-            // leak guards).
+            // No slot is defaulted: a `T!E` type is written or forwarded whole, never invented.
             Ty::Result(a, b) => {
                 let na = self.fill_ret(a, bad);
-                let nb = if b.is_unknown()
-                    || (self.assignable(&Ty::error_proto(), b) && self.sendable(b))
-                {
-                    Ty::error_proto()
-                } else {
-                    self.fill_ret(b, bad)
-                };
+                let nb = self.fill_ret(b, bad);
                 Ty::Result(Box::new(na), Box::new(nb))
             }
             Ty::Option(x) => Ty::Option(Box::new(self.fill_ret(x, bad))),
@@ -3061,11 +2829,10 @@ impl Checker {
                             .scopes
                             .last()
                             .is_some_and(|s| s.contains_key(decl.name.as_str()));
-                    // No `-> T`: infer the return from the body (mirrors the top-level single-fn
-                    // inference). Declare a PROVISIONAL `Ty::Func` first so a self-recursive call
-                    // inside inference resolves as an arity-checked value-call (not a global namesake
-                    // / `unknown name`). A residual `Unknown` for a purely-recursive un-annotated
-                    // nested fn stays permissive — a v1 limit, only its own call sites degrade.
+                    // No `-> T` on an INLINE body (`fn_sig` leaves only that one `Unknown`): type its
+                    // one expression. Declare a PROVISIONAL `Ty::Func` first so a self-recursive call
+                    // resolves as an arity-checked value-call; its untyped result then makes the
+                    // walk decline, and the fn asks for `->`.
                     if decl.ret.is_none() && matches!(sig.ret, Ty::Unknown) {
                         // `sig.ret` is `Unknown` here, so this is the provisional `-> ?` type.
                         self.declare(&decl.name, fn_value_ty(&sig));
@@ -4721,17 +4488,6 @@ impl Checker {
     }
 
     pub(super) fn check_return(&mut self, value: Option<&Expr>, span: Span) {
-        // Pass-1 inference mode: record the return's type, don't diagnose. A bare `return`
-        // contributes `Nil`. (Separate flag + field so we don't borrow `collected_rets` across
-        // the `&mut self` call to `infer`.)
-        if self.inferring_ret {
-            let ty = match value {
-                Some(e) => self.infer(e),
-                None => Ty::Nil,
-            };
-            self.collected_rets.push(ty);
-            return;
-        }
         // Owner decision 2026-09-30 (TICKET-186): a module-level `return` is an error, as in
         // CPython (`SyntaxError: 'return' outside function`). It skipped every later let, whose
         // slot kept the uninit marker. The compiler still lowers it, so `run_file` tests in
@@ -4785,7 +4541,24 @@ impl Checker {
                     self.hint_owner = None;
                     t
                 };
-                if ret == Ty::Nil {
+                if ret == Ty::Nil && !self.ret_declared && self.ret_owner.is_some() {
+                    if super::tyvar::open_err(&ty) {
+                        self.error(e.span, super::tyvar::ERR_VALUE_NEEDS_TYPE.to_string());
+                    } else {
+                        let name = self.ret_owner.clone().unwrap_or_default();
+                        let fix = if ty_fully_concrete(&ty) && ty != Ty::Nil {
+                            format!("add '-> {ty}' to '{name}'")
+                        } else {
+                            format!("add a '->' return type to '{name}'")
+                        };
+                        self.error(
+                            e.span,
+                            format!(
+                                "'{name}' declares no return type, so it returns nothing; {fix}"
+                            ),
+                        );
+                    }
+                } else if ret == Ty::Nil {
                     self.error(e.span, "function returns nothing, cannot return a value");
                 } else if !self.assignable(&ret, &ty) {
                     let note = self.protocol_note(&ret, &ty);
@@ -4891,19 +4664,11 @@ impl Checker {
     /// `yield <expr>` — legal only inside a generator function (one whose return type is
     /// `Iterator[T]`); the operand must be assignable to the element type `T`.
     pub(super) fn check_yield(&mut self, e: &Expr, span: Span) {
-        let slot = self.yield_ty.clone().filter(|_| !self.inferring_ret);
+        let slot = self.yield_ty.clone();
         let ty = self.infer_in_slot(e, slot);
-        // `in_generator` (not `yield_ty.is_some()`) is the in-bounds signal: during return-type
-        // inference the element type is not yet pinned (`yield_ty` is `None`) but a `yield` is still
-        // legal and its type must be COLLECTED to seed the inferred `Iterator[T]`.
+        // `in_generator` (not `yield_ty.is_some()`) is the in-bounds signal.
         if !self.in_generator {
             self.error(span, "`yield` can only appear inside a generator function");
-            return;
-        }
-        // Inference mode: gather every yield's type; the first pins `T` (strict-first-yield), the
-        // rest are validated in pass 2 (below) once `yield_ty` is seeded from the inferred sig.
-        if self.inferring_ret {
-            self.collected_yields.push(ty);
             return;
         }
         // Pass 2: validate each yield against the pinned element type `T`. An `int` yielded under an
@@ -5006,10 +4771,11 @@ impl Checker {
         // W8-21 — is this sink DECLARED? Gates the success-coercion sinks: an un-annotated fn's
         // `sig.ret` is INFERRED from the body, so gating on it would be circular.
         let saved_ret_decl = std::mem::replace(&mut self.ret_declared, decl.ret.is_some());
+        let saved_ret_owner = self.ret_owner.replace(decl.name.clone());
         // Inside a fn body now: a `?` on a `Nil`-returning body must be REJECTED (would swallow the
         // Err/None), unlike module top-level where `Nil` accepts either. Saved/restored beside
         // `current_ret`.
-        // The other outermost fn walk (see `infer_fn_ret`): `infer_returns`' finalize pass settles
+        // The other outermost fn walk (see `infer_inline_fn_ret`): `infer_returns`' finalize pass settles
         // stored rets (the `Result` E-slot among them) before this pass-2 check walk runs, so an
         // entry computed under the earlier sigs must not be served here.
         if !self.in_fn_body {
@@ -5026,7 +4792,7 @@ impl Checker {
         // `Self` in this method body resolves to the enclosing type (`None` for a free fn / nested fn,
         // which resets an enclosing method's binding). Restored below beside `current_ret`.
         let saved_self = std::mem::replace(&mut self.current_self_ty, self_ty.clone());
-        // TICKET-029 — same raw-ctor escape as `infer_fn_ret`, see there.
+        // TICKET-029 — same raw-ctor escape as `infer_inline_fn_ret`, see there.
         let saved_raw = if self_ty.is_none()
             && self.local_fn_names.contains(&decl.name)
             && self.struct_names.contains(&decl.name)
@@ -5035,11 +4801,9 @@ impl Checker {
         } else {
             self.raw_ctor_owner.clone()
         };
-        // A generator (`is_generator`, i.e. its body contains `yield`) has return type `Iterator[T]` —
-        // either declared explicitly (`-> Iterator[T]`) or INFERRED by strict-first-yield (stored back
-        // into `sig.ret` by `infer_generator_ret`). Recover `T` as the per-yield element type. The `_`
-        // arm now fires only for a WRONG EXPLICIT annotation (`-> int`): inference always yields an
-        // `Iterator[T]` sig, so an un-annotated generator can no longer reach it.
+        // A generator (`is_generator`, i.e. its body contains `yield`) declares `-> Iterator[T]`;
+        // `T` is the per-yield element type. The `_` arm fires for a wrong annotation (`-> int`)
+        // and for a generator with no `->`: the element type is written, never inferred.
         let new_yield_ty = if decl.is_generator {
             match &sig.ret {
                 Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
@@ -5072,8 +4836,8 @@ impl Checker {
             &mut self.gen_frame,
             decl.is_generator.then(super::GenFrameAcc::default),
         );
-        // A nested function checked while pass-1 is inferring an *outer* function's return must not
-        // feed the outer `collected_rets` — this body's `return`s are diagnosed, not collected.
+        // A nested function checked inside a speculative walk of an outer inline body is checked
+        // for real: its `return`s are diagnosed.
         let saved_inferring = std::mem::replace(&mut self.inferring_ret, false);
         // A function body opens a fresh loop context: a loop enclosing this fn's *definition* must
         // not make a `break`/`continue` in the body legal.
@@ -5379,6 +5143,7 @@ impl Checker {
         self.finalize_hover_pending();
         self.pop_scope();
         self.current_ret = saved_ret;
+        self.ret_owner = saved_ret_owner;
         self.ret_declared = saved_ret_decl;
         self.in_fn_body = saved_in_fn;
         self.in_default_provider = saved_in_dflt;

@@ -12,7 +12,7 @@ pub(super) struct DiagMark {
     pub(super) errors: usize,
     warnings: usize,
     /// W8-21 — a nested ANNOTATED fn inside an un-annotated one is body-checked for real
-    /// (`check_fn_body:4065`'s comment) on every speculative `infer_fn_ret` pass, and a forward-declared
+    /// (`check_fn_body:4065`'s comment) on every speculative `infer_inline_fn_ret` pass, and a forward-declared
     /// callee can be `Unknown` on an early pass and concrete on a later one — so the SAME return span
     /// can record two different verdicts across passes, which `record_call_table_entry` turns into a
     /// hard `internal:` error on a valid program. `ret_coerce` is DECIDED state exactly like
@@ -137,7 +137,6 @@ impl Checker {
             const_overflow_seen: std::collections::HashSet::new(),
             inferring_ret: false,
             resolving_returns: false,
-            collected_rets: Vec::new(),
             in_generator: false,
             in_fn_body: false,
             in_default_provider: false,
@@ -145,9 +144,10 @@ impl Checker {
             body_facts_pass: false,
             default_binders: Vec::new(),
             ret_declared: false,
+            ret_owner: None,
+            untyped_call: None,
             in_defer_block: false,
             in_spawn_block: false,
-            collected_yields: Vec::new(),
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
             json_module: None,
@@ -1569,7 +1569,6 @@ impl Checker {
         self.in_default_provider = false;
         self.ret_declared = false;
         self.inferring_ret = false;
-        self.collected_rets.clear();
         self.current_module_label = label;
     }
 

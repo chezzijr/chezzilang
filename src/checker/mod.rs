@@ -2124,7 +2124,7 @@ struct Checker {
     /// a method stays `unknown type 'Self'`. A PROTOCOL method keeps `None` here: its `Self` is
     /// already in `type_params` as `Ty::Param("Self")` (resolved by the earlier type-param arm), so
     /// this concrete binding never fires for it. Saved/restored via `mem::replace` at the method-sig
-    /// hoist sites and at `infer_fn_ret`/`check_fn_body` entry (from their `self_ty` argument).
+    /// hoist sites and at `infer_inline_fn_ret`/`check_fn_body` entry (from their `self_ty` argument).
     current_self_ty: Option<Ty>,
     /// `Some(key)` while checking the body of a module-level `fn` whose name equals a struct
     /// declared in the same module (TICKET-029) — `key` is that struct's runtime key. There, and
@@ -2139,17 +2139,15 @@ struct Checker {
     /// function — reset across nested fn/closure boundaries). A `?` here targets the recover
     /// boundary (yielding to `r`), not the enclosing function's return.
     recover_depth: u32,
-    /// True while pass-1 is inferring a function's return type: `check_return` records each
-    /// return's type into `collected_rets` instead of diagnosing against `current_ret`.
+    /// True while a walk is SPECULATIVE (an inline body or a global typed by `infer_returns`): its
+    /// diagnostics are rolled back and the main walk re-reports them.
     inferring_ret: bool,
     /// True for the whole `infer_returns` call (its return fixpoint, `type_globals_pass` and
     /// `report_untyped_globals`). `resolve_path` writes nothing while it is set: the main walk
     /// is the one writer of every NodeId's Resolution (TICKET-180).
     resolving_returns: bool,
-    /// Return types gathered from the body during return-type inference (see `infer_fn_ret`).
-    collected_rets: Vec<Ty>,
     /// True while checking (or inferring the return of) a generator function body — the sole signal
-    /// that a `yield` is in-bounds. Distinct from `yield_ty`: during return inference (`infer_fn_ret`)
+    /// that a `yield` is in-bounds. Distinct from `yield_ty`: during return inference (`infer_inline_fn_ret`)
     /// the element type is not yet pinned (`yield_ty` is `None`), yet a `yield` is still legal and must
     /// be COLLECTED, not diagnosed. Saved/restored across nested fn/closure boundaries; a closure
     /// resets it to `false` so a (hypothetical) closure `yield` cannot seed the enclosing generator.
@@ -2191,6 +2189,13 @@ struct Checker {
     /// `false` at module top level. Saved/restored 1:1 beside `current_ret` at every fn/closure
     /// boundary.
     ret_declared: bool,
+    /// The name of the fn whose body `check_fn_body` is walking, for the "declares no return
+    /// type" text of `check_return`. Saved/restored beside `ret_declared`.
+    ret_owner: Option<String>,
+    /// The untyped-call probe of `infer_inline_fn_ret`: `Some(None)` while an inline body is
+    /// walked, `Some(Some(span))` once a call in it typed to `Unknown`. `Checker::infer` is the
+    /// one writer; no call site knows about it.
+    untyped_call: Option<Option<Span>>,
     /// True while checking statements lexically inside a `defer:` BLOCK (reset across nested
     /// fn/closure boundaries, like `recover_depth`). A `?` here is DISCARDED at the block boundary
     /// (`syntax.md`: "a `?` short-circuit inside the block is discarded — a cleanup body has no
@@ -2211,10 +2216,6 @@ struct Checker {
     /// makes `check_return` emit a second, false "function returns nothing" for a `return` in the
     /// task. See `infer_try` (W7-48).
     in_spawn_block: bool,
-    /// Element types gathered from every `yield` during a generator's return-type inference
-    /// (`infer_fn_ret`, `inferring_ret` mode). The FIRST pins the generator's element `T`
-    /// (strict-first-yield); pass-2 `check_yield` validates the rest against it. Drained per-fn.
-    collected_yields: Vec<Ty>,
     /// Public surfaces of already-checked modules (multi-file programs), keyed by module id.
     module_sigs: HashMap<ModuleId, ModuleSig>,
     /// Names bound to an imported module in the *current* module → which module they refer to.
@@ -2696,7 +2697,7 @@ struct Checker {
     /// (refined) type. The owning-scope index gates the finalize so an intervening inner fn/method seam
     /// can't resolve it prematurely to the still-unrefined type. Probe-gated; behavior-neutral.
     hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
-    /// TICKET-157 (W12-12) — memo of the SPECULATIVE `infer_fn_ret` a nested un-annotated `fn` runs
+    /// TICKET-157 (W12-12) — memo of the SPECULATIVE `infer_inline_fn_ret` a nested un-annotated `fn` runs
     /// (`sig.rs`'s nested-fn arm), keyed by the decl's name span: the inferred return type, then the
     /// errors and warnings that inference emitted AFTER its own `diag_rollback` (the finalize
     /// diagnostic). Everything the walk did before that rollback is erased by it (`DiagMark`), so a

@@ -1580,7 +1580,11 @@ impl Checker {
         match acc {
             None => t,
             Some(prev) => {
-                if self.join_ty(&prev, &t) {
+                if super::tyvar::open_err(&prev) {
+                    prev
+                } else if super::tyvar::open_err(&t) {
+                    t
+                } else if self.join_ty(&prev, &t) {
                     if prev.is_unknown() { t } else { prev }
                 } else if let Some(h) = hint
                     && ty_fully_concrete(h)
@@ -1784,6 +1788,14 @@ impl Checker {
         } else {
             ty
         };
+        if matches!(self.untyped_call, Some(None))
+            && !self.generic_arg_prepass
+            && matches!(expr.kind, ExprKind::Call { .. })
+            && ty.is_unknown()
+            && !self.call_diverges(expr)
+        {
+            self.untyped_call = Some(Some(expr.span));
+        }
         // EDITOR HOVER probe: record this expr's type if its leaf/field anchor is the cursor token.
         // No-op (one `Option` check) unless a probe is armed. Children infer before parents and only
         // LEAF kinds record, so a parent expression never overwrites the smaller symbol's type.
@@ -4003,7 +4015,7 @@ impl Checker {
                 Ty::Result(Box::new(Ty::Var(v)), Box::new(t))
             }
             None | Some(Ty::Var(_)) if !self.resolving_returns => {
-                self.error(node.span, super::tyvar::CANNOT_INFER_SUCCESS.to_string());
+                self.error(node.span, super::tyvar::ERR_VALUE_NEEDS_TYPE.to_string());
                 Ty::Result(Box::new(Ty::Unknown), Box::new(t))
             }
             _ => Ty::Result(Box::new(Ty::Unknown), Box::new(t)),
@@ -5100,7 +5112,7 @@ impl Checker {
     ///
     /// [`CarrierMode::Unknown`] is **provisional, not a decision**: the checker types the same
     /// expression more than once by design — `infer_generic_arg_tys`' prepass walks a closure
-    /// argument with its params still `Unknown` (`src/checker/expr.rs`), and `infer_fn_ret` walks a
+    /// argument with its params still `Unknown` (`src/checker/expr.rs`), and `infer_inline_fn_ret` walks a
     /// body to infer an unannotated return before the callee it calls is known
     /// (`src/checker/sig.rs`) — and on those early walks the operand types `Unknown`. The settled
     /// walk that follows types it properly. So `Unknown` must never conflict with, nor overwrite, a
@@ -5898,6 +5910,19 @@ impl Checker {
         }
     }
 
+    /// The type of an inline expression body, for a named fn (`infer_inline_fn_ret`) and for a
+    /// lambda (`infer_closure`). A sole diverging call (`panic(...)`, `os.exit(...)`) never returns
+    /// a value, so it is `None` and not an un-inferable `Unknown`. This is the one place that
+    /// decides it.
+    pub(super) fn inline_body_ty(&mut self, body: &Expr, slot: Option<Ty>) -> Ty {
+        let t = self.infer_in_slot(body, slot);
+        if t.is_unknown() && self.call_diverges(body) {
+            Ty::Nil
+        } else {
+            t
+        }
+    }
+
     pub(super) fn infer_closure(
         &mut self,
         params: &[Param],
@@ -5955,9 +5980,8 @@ impl Checker {
         // `yield` in the closure is diagnosed as "outside a generator", not bound to the enclosing
         // one. (Closure bodies are single expressions today, so this is a latent-invariant guard.)
         let saved_yield = self.yield_ty.take();
-        // Same for the in-bounds signal: a `yield` inside the closure must be out-of-bounds, and must
-        // not seed the enclosing generator's `collected_yields` during inference. (Defensive — mirrors
-        // `yield_ty.take()`; closures are single-expression so a closure `yield` is unparseable today.)
+        // Same for the in-bounds signal: a `yield` inside the closure must be out-of-bounds.
+        // (Defensive; closures are single-expression so a closure `yield` is unparseable today.)
         let saved_ig = std::mem::replace(&mut self.in_generator, false);
         let saved_gf = self.gen_frame.take();
         // M24 Task 4: the witness scope CARRIES INTO a closure body. `$w:T` is never a free variable
@@ -6049,7 +6073,7 @@ impl Checker {
                 _ => None,
             }
         };
-        let body_ty = self.infer_in_slot(body, slot);
+        let body_ty = self.inline_body_ty(body, slot);
         self.last_closure_writes = self
             .closure_write_frames
             .pop()
@@ -6097,7 +6121,12 @@ impl Checker {
             // resolved later) are excluded. `!body_had_err` avoids piling onto a real body error.
             None => {
                 if expected.is_none() && !self.generic_arg_prepass && !closure_had_err {
-                    self.finalize_ret(&body_ty, "<closure>", body.span, false)
+                    self.finalize_ret(
+                        &body_ty,
+                        "<closure>",
+                        body.span,
+                        super::tyvar::open_err(&body_ty),
+                    )
                 } else {
                     body_ty
                 }

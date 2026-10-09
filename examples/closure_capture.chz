@@ -21,7 +21,7 @@ fn make_combo(a: int, b: int, c: int) -> fn(int) -> int:
     return fn(x: int) -> int: x + a + b + c
 
 # --- nested closure: inner captures the enclosing closure's `base` ---
-fn make_nested(base: int):
+fn make_nested(base: int) -> fn(int) -> fn(int) -> int:
     return fn(a: int): fn(b: int) -> int: base + a + b
 
 fn main():

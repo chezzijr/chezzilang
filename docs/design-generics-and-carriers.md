@@ -193,6 +193,13 @@ x := save("a")?                  # error: save returns nothing on success
 `E!void` with `None` as the void type (D1). Not `!E`: Zig's leading `!` (`!void`) drops the error set,
 the opposite meaning.
 
+**Signatures are written, bodies are inferred (owner decisions 2026-10-09, TICKET-228).** A `T!E` type
+is never inferred from `return`s or branches: a `!e` value takes its type from an annotation or an
+expected type. More generally a named fn's return type is written. A block body with no `->` returns
+`None`; an inline expression body (`fn dbl(x: int): x * 2`) takes the type of its one expression, as a
+lambda does; a generator writes `-> Iterator[T]`. Go and Rust require the written type; Kotlin infers
+only the expression form (`fun dbl(x: Int) = x * 2`), and that is the rule here.
+
 ### D3. Implicit wrap at every typed slot
 
 A plain `T` value wraps into `T?` / `T!E` wherever the expected type is known: a binding, an argument, a

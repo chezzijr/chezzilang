@@ -141,8 +141,12 @@ impl TyVars {
 }
 
 /// TICKET-227 — an error value `!e` whose success type nothing pins.
-pub(super) const CANNOT_INFER_SUCCESS: &str =
-    "cannot infer the success type; annotate the binding, e.g. w: int! = !e";
+pub(super) const ERR_VALUE_NEEDS_TYPE: &str = "a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e`";
+
+/// An error value `!e` whose success type nothing pinned yet: a `T!E` with an open success slot.
+pub(super) fn open_err(t: &Ty) -> bool {
+    matches!(t, Ty::Result(ok, _) if ok.is_unknown() || matches!(**ok, Ty::Var(_)))
+}
 
 /// Whether `t` mentions a `Ty::Var` anywhere.
 pub(super) fn has_var(t: &Ty) -> bool {
@@ -482,7 +486,7 @@ impl Checker {
             },
             CarrierKind::Error => {
                 if let Ty::Var(v) = z {
-                    self.error(c.span, CANNOT_INFER_SUCCESS.to_string());
+                    self.error(c.span, ERR_VALUE_NEEDS_TYPE.to_string());
                     self.tyvars.borrow_mut().bind(v, Ty::Unknown);
                 }
             }

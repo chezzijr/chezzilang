@@ -44,7 +44,7 @@ main()";
 #[test]
 fn value_in_closure_capture_survives() {
     let src = "\
-fn make():
+fn make() -> fn() -> str:
     secret := str(42)
     return fn(): secret
 fn main():

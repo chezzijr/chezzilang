@@ -7733,7 +7733,9 @@ mod capture_layout_tests {
     #[test]
     fn get_captured_carries_a_u32_slot() {
         // A closure reading one captured var emits GetCaptured(0) (a numeric slot, not a string).
-        let prog = compile("fn make(n: int):\n    return fn(x: int) -> int: x + n\nmake(1)\n");
+        let prog = compile(
+            "fn make(n: int) -> fn(int) -> int:\n    return fn(x: int) -> int: x + n\nmake(1)\n",
+        );
         assert_eq!(captured_slots(&prog), vec![0], "single capture → slot 0");
     }
 
@@ -7742,7 +7744,7 @@ mod capture_layout_tests {
         // `a` then `b` referenced; snapshot_entries orders innermost locals first (reverse decl).
         // Whatever the order, the two captures must occupy distinct, stable slots 0 and 1.
         let prog = compile(
-            "fn make(a: int, b: int):\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n",
+            "fn make(a: int, b: int) -> fn(int) -> int:\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n",
         );
         let mut slots = captured_slots(&prog);
         slots.sort_unstable();
@@ -7754,7 +7756,7 @@ mod capture_layout_tests {
         // The closure proto carries the captured names in slot order (cold-path metadata, mirrors
         // StructDef.fields). Slot i of capture_names is the name read by GetCaptured(i).
         let prog = compile(
-            "fn make(a: int, b: int):\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n",
+            "fn make(a: int, b: int) -> fn(int) -> int:\n    return fn(x: int) -> int: x + a + b\nmake(1, 2)\n",
         );
         let clo = prog
             .protos

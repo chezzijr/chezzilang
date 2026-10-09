@@ -1977,7 +1977,7 @@ fn break_in_if_in_loop_parity() {
 fn return_from_loop_parity() {
     // `return` inside a loop still returns the whole function (break/continue don't intercept it).
     assert_golden_out(
-        "fn f():\n    for i in 0..10:\n        if i == 2: return i\n    return -1\nprint(f())\n",
+        "fn f() -> int:\n    for i in 0..10:\n        if i == 2: return i\n    return -1\nprint(f())\n",
         "2\n",
     );
 }
@@ -2315,7 +2315,7 @@ fn generator_reentrant_next_faults() {
     let src = r#"
 holder: List[Iterator[int]] = []
 
-fn gen():
+fn gen() -> Iterator[int]:
     yield 1
     print("reentrant: {holder[0].next()}")
     yield 2
@@ -2352,7 +2352,7 @@ fn generator_reentrancy_fault_is_recoverable() {
     let src = r#"
 holder: List[Iterator[int]] = []
 
-fn gen():
+fn gen() -> Iterator[int]:
     yield 1
     for y in holder[0]:
         print("never: {y}")
@@ -3335,16 +3335,16 @@ fn generator_guard_clears_on_every_unwind_path() {
     //     runs to completion (and the faulted one is closed, like a Python generator: `.next()` → None),
     // (d) a generator driving a DIFFERENT generator (distinct GcRefs) — no over-rejection.
     let src = r#"
-fn count(n: int):
+fn count(n: int) -> Iterator[int]:
     for i in 0..n:
         yield i
 
-fn boom():
+fn boom() -> Iterator[int]:
     yield 1
     print(1 / 0)
     yield 2
 
-fn outer():
+fn outer() -> Iterator[int]:
     for v in count(2):
         yield v * 10
 
@@ -5762,7 +5762,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // closures
     (
-        "fn adder(n: int):\n    return fn(x: int) -> int: x + n\nfn main():\n    f := adder(10)\n    print(f(5))\nmain()",
+        "fn adder(n: int) -> fn(int) -> int:\n    return fn(x: int) -> int: x + n\nfn main():\n    f := adder(10)\n    print(f(5))\nmain()",
         Ok("15\n"),
     ),
     // ? operator (Ok + Err propagation)
@@ -5787,7 +5787,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // inferred return type (no `-> T`): runtime is unaffected
     (
-        "fn add(a: int, b: int):\n    return a + b\nfn classify(n: int):\n    if n == 0:\n        return ?0\n    return None\nfn main():\n    print(add(2, 3))\n    match classify(0):\n        ?v: print(v)\n        None: print(\"none\")\nmain()",
+        "fn add(a: int, b: int) -> int:\n    return a + b\nfn classify(n: int) -> int?:\n    if n == 0:\n        return ?0\n    return None\nfn main():\n    print(add(2, 3))\n    match classify(0):\n        ?v: print(v)\n        None: print(\"none\")\nmain()",
         Ok("5\n0\n"),
     ),
     // expression-valued match (multiline) + if (inline)
@@ -7523,7 +7523,7 @@ fn stack_trace_reports_call_chain() {
 /// while `self.frames` held only the generator's frames drops the driver's frames on the floor.
 #[test]
 fn generator_fault_trace_includes_driver_frames() {
-    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn drive():\n    for x in g():\n        print(x)\nfn main():\n    drive()\nmain()\n";
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn drive():\n    for x in g():\n        print(x)\nfn main():\n    drive()\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("u02.chz");
@@ -7568,7 +7568,7 @@ fn generator_fault_trace_names_the_faulting_drain_site() {
 /// `main` must keep `main`'s own frame instead of losing it to the generator's frames.
 #[test]
 fn generator_fault_trace_keeps_the_driver_when_main_drives() {
-    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn main():\n    for x in g():\n        print(x)\nmain()\n";
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn main():\n    for x in g():\n        print(x)\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("y18.chz");
@@ -7584,7 +7584,7 @@ fn generator_fault_trace_keeps_the_driver_when_main_drives() {
 /// `for`-loop driver path (`src/vm/stmt.rs`).
 #[test]
 fn generator_fault_trace_includes_driver_frames_for_explicit_next() {
-    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn drive():\n    it := g()\n    print(it.next())\nfn main():\n    drive()\nmain()\n";
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn drive():\n    it := g()\n    print(it.next())\nfn main():\n    drive()\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("u09.chz");
@@ -7599,7 +7599,7 @@ fn generator_fault_trace_includes_driver_frames_for_explicit_next() {
 /// W13-20: a generator driving another generator must report every frame in the chain.
 #[test]
 fn nested_generator_fault_trace_lists_every_frame() {
-    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn inner():\n    yield h()\nfn outer():\n    for v in inner():\n        yield v\nfn drive():\n    for x in outer():\n        print(x)\nfn main():\n    drive()\nmain()\n";
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn inner() -> Iterator[int]:\n    yield h()\nfn outer() -> Iterator[int]:\n    for v in inner():\n        yield v\nfn drive():\n    for x in outer():\n        print(x)\nfn main():\n    drive()\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("nested.chz");
@@ -7615,7 +7615,7 @@ fn nested_generator_fault_trace_lists_every_frame() {
 /// prefix behind to decorate a later, unrelated fault.
 #[test]
 fn a_generator_fault_caught_by_the_driver_leaves_no_frames_behind() {
-    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn drive() -> int:\n    r := recover:\n        for x in g():\n            print(x)\n    print(\"caught\")\n    ys: List[int] = []\n    return ys[7]\nfn main():\n    print(drive())\nmain()\n";
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn drive() -> int:\n    r := recover:\n        for x in g():\n            print(x)\n    print(\"caught\")\n    ys: List[int] = []\n    return ys[7]\nfn main():\n    print(drive())\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("caught.chz");
@@ -7634,7 +7634,7 @@ fn a_generator_fault_caught_by_the_driver_leaves_no_frames_behind() {
 /// cleared when the OUTER fault is caught instead.
 #[test]
 fn a_deferred_generator_fault_does_not_leak_its_prefix_to_a_later_fault() {
-    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn f():\n    it := g()\n    defer it.next()\n    ys: List[int] = []\n    print(ys[5])\nfn main():\n    r := recover:\n        f()\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn f():\n    it := g()\n    defer it.next()\n    ys: List[int] = []\n    print(ys[5])\nfn main():\n    r := recover:\n        f()\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("deferred_leak.chz");
@@ -7653,7 +7653,7 @@ fn a_deferred_generator_fault_does_not_leak_its_prefix_to_a_later_fault() {
 /// survived to decorate the next uncaught fault.
 #[test]
 fn a_defer_inside_the_recover_block_does_not_leak_its_prefix_to_a_later_fault() {
-    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn main():\n    it := g()\n    r := recover:\n        defer it.next()\n        ys: List[int] = []\n        print(ys[5])\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn main():\n    it := g()\n    r := recover:\n        defer it.next()\n        ys: List[int] = []\n        print(ys[5])\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("defer_in_recover_leak.chz");
@@ -7670,7 +7670,7 @@ fn a_defer_inside_the_recover_block_does_not_leak_its_prefix_to_a_later_fault() 
 /// all — the same leak shape as the `recover:`-catch path, one level lower.
 #[test]
 fn a_defer_inside_a_recover_scoped_question_mark_does_not_leak_its_prefix() {
-    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g():\n    yield h()\nfn maybe() -> int!str:\n    return !\"boom\"\nfn main():\n    it := g()\n    r := recover:\n        defer it.next()\n        maybe()?\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
+    let src = "fn h() -> int:\n    xs: List[int] = []\n    return xs[3]\nfn g() -> Iterator[int]:\n    yield h()\nfn maybe() -> int!str:\n    return !\"boom\"\nfn main():\n    it := g()\n    r := recover:\n        defer it.next()\n        maybe()?\n    print(\"caught\")\n    zs: List[int] = []\n    print(zs[9])\nmain()\n";
     let dir = std::env::temp_dir().join("chezzi_gen_trace_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("defer_in_question_mark_recover_leak.chz");
@@ -9131,7 +9131,7 @@ fn golden_capture_escape_reader() {
 fn capture_single_var_parity() {
     // 1-var capture: the single slot read via GetCaptured.
     let src = "\
-fn make():
+fn make() -> fn(int) -> int:
     n := 7
     return fn(x: int) -> int: x + n
 fn main():
@@ -9145,7 +9145,7 @@ main()";
 fn capture_multi_var_parity() {
     // Multiple captured vars get distinct slots (snapshot order); all read positionally.
     let src = "\
-fn make():
+fn make() -> fn(int) -> int:
     a := 1
     b := 2
     c := 3
@@ -9162,7 +9162,7 @@ fn capture_nested_closure_parity() {
     // Inner closure captures the ENCLOSING closure's captured var (CapSrc::Captured) —
     // the nested-slot-mapping path. `n` must reach the innermost body positionally.
     let src = "\
-fn make():
+fn make() -> fn(int) -> fn(int) -> int:
     n := 100
     return fn(a: int): fn(b: int) -> int: a + b + n
 fn main():
@@ -9177,7 +9177,7 @@ main()";
 fn capture_deep_nested_three_levels_parity() {
     // Three levels of capture chaining — each level forwards an enclosing capture by slot.
     let src = "\
-fn make():
+fn make() -> fn(int) -> fn(int) -> fn(int) -> int:
     base := 1000
     return fn(a: int): fn(b: int): fn(c: int) -> int: base + a + b + c
 fn main():
@@ -9230,7 +9230,7 @@ main()";
 fn capture_hot_read_loop_parity() {
     // GetCaptured executed many times in a loop (the hot path post-refactor: pure index).
     let src = "\
-fn make():
+fn make() -> fn(int) -> int:
     step := 2
     return fn(x: int) -> int: x + step
 fn main():
@@ -12653,7 +12653,7 @@ fn bare_spawn_in_a_function_body_pins_per_spawn_parity() {
     let src = "\
 import std.concurrency
 g: int = 1
-fn main():
+fn main() -> Shared[int]:
     seen := Shared(0)
     spawn: seen.set(g)
     g = 2
@@ -12934,8 +12934,8 @@ fn module_scope_order_grid() {
         fns: &'static str,
         print: &'static str,
     }
-    let read_fn = "fn f():\n    return X\n";
-    let write_fns = "fn w():\n    X = 7\nfn r():\n    return X\n";
+    let read_fn = "fn f(): X\n";
+    let write_fns = "fn w():\n    X = 7\nfn r() -> int:\n    return X\n";
     let write_print = "w()\nprint(r())\n";
     let match_e = "fn f() -> int:\n    match X:\n        E.A:\n            return 1\n        E.B:\n            return 3\n";
     let kinds = [
@@ -12964,21 +12964,21 @@ fn module_scope_order_grid() {
             label: "call :=",
             prelude: "",
             decl: "X := fn(n: int) -> int: n + 2\n",
-            fns: "fn f():\n    return X(1)\n",
+            fns: "fn f(): X(1)\n",
             print: "print(f())\n",
         },
         Kind {
             label: "field :=",
             prelude: "struct P:\n    v: int\n",
             decl: "X := P(3)\n",
-            fns: "fn f():\n    return X.v\n",
+            fns: "fn f(): X.v\n",
             print: "print(f())\n",
         },
         Kind {
             label: "field typed",
             prelude: "struct P:\n    v: int\n",
             decl: "X: P = P(3)\n",
-            fns: "fn f():\n    return X.v\n",
+            fns: "fn f(): X.v\n",
             print: "print(f())\n",
         },
         Kind {
@@ -12999,7 +12999,7 @@ fn module_scope_order_grid() {
             label: "call fn",
             prelude: "",
             decl: "fn X(n: int) -> int:\n    return n + 2\n",
-            fns: "fn f():\n    return X(1)\n",
+            fns: "fn f(): X(1)\n",
             print: "print(f())\n",
         },
         Kind {
@@ -13084,37 +13084,37 @@ fn module_scope_order_grid() {
     let extras = [
         (
             "swap a,b",
-            "a := 1\nb := 2\nfn f():\n    return a * 10 + b\nprint(f())\n",
+            "a := 1\nb := 2\nfn f(): a * 10 + b\nprint(f())\n",
             "12",
         ),
         (
             "swap b,a",
-            "b := 2\na := 1\nfn f():\n    return a * 10 + b\nprint(f())\n",
+            "b := 2\na := 1\nfn f(): a * 10 + b\nprint(f())\n",
             "12",
         ),
         (
             "swap fn above",
-            "fn f():\n    return a * 10 + b\nb := 2\na := 1\nprint(f())\n",
+            "fn f(): a * 10 + b\nb := 2\na := 1\nprint(f())\n",
             "12",
         ),
         (
             "type hole :=",
-            "x := \"s\"\nfn f():\n    return x\ny: int = f()\nprint(y)\n",
+            "x := \"s\"\nfn f(): x\ny: int = f()\nprint(y)\n",
             "type error: cannot assign str",
         ),
         (
             "type hole typed",
-            "x: int = 5\nfn f():\n    return x\ny: str = f()\nprint(y)\n",
+            "x: int = 5\nfn f(): x\ny: str = f()\nprint(y)\n",
             "type error: cannot assign int",
         ),
         (
             "cycle",
-            "x := f()\nfn f():\n    return x\nprint(x)\n",
+            "x := f()\nfn f(): x\nprint(x)\n",
             "type error: initialization cycle: the type of 'x' comes from 'f()'",
         ),
         (
             "annotated cycle",
-            "x: int = f()\nfn f():\n    return x\nprint(x)\n",
+            "x: int = f()\nfn f(): x\nprint(x)\n",
             "fault: 'x' is read before its initialization at line 1",
         ),
         (
