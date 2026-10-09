@@ -8380,4 +8380,33 @@ mod tests {
         assert!(matches!(bracket("x := f[fn(int) -> int](1)\n"), (1, None)));
         assert!(matches!(bracket("x := t.0[k](1)\n"), (_, None)));
     }
+
+    #[test]
+    fn expr_body_fn_may_be_a_closure_literal() {
+        parse_ok(
+            "fn adder(n: int) -> fn(int) -> int: fn(x: int) -> int: x + n
+print(adder(1)(2))
+",
+        );
+    }
+
+    #[test]
+    fn type_postfix_accepts_fused_bang_eq() {
+        parse_ok(
+            "y: int!= 6
+",
+        );
+    }
+
+    #[test]
+    fn else_guard_on_destructuring_binding() {
+        parse_ok(
+            "fn f() -> (int, int)!str:
+    return (1, 2)
+fn g():
+    a, b := f() else e:
+        return
+",
+        );
+    }
 }
