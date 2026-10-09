@@ -347,7 +347,7 @@ impl DemoteReg {
         match self.tok {
             Some(tok) => c.unregister_waiter(tok),
             None => {
-                sched.inflight.fetch_sub(1, Ordering::Relaxed);
+                sched.leave_inflight();
             }
         }
     }
@@ -373,7 +373,7 @@ impl Vm {
         };
         let reg = {
             let mut c = sched.lock();
-            c.running -= 1;
+            c.leave_running();
             let tok = match wait {
                 Some(w) => Some(c.register_waiter(Waiter {
                     wait: Arc::new(w),

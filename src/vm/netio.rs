@@ -2083,7 +2083,7 @@ impl Vm {
                             } else {
                                 deadline_gap_wake(&sched_job, key, &core_job, &gap_cancel);
                             }
-                            sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
+                            sched_job.leave_inflight();
                         }),
                     );
                     self.park_recv(h, span);
@@ -2857,7 +2857,7 @@ impl Vm {
                             } else {
                                 deadline_gap_wake(&sched_job, key, &core_job, &gap_cancel);
                             }
-                            sched_job.inflight.fetch_sub(1, Ordering::Relaxed);
+                            sched_job.leave_inflight();
                         }),
                     );
                 }

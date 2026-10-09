@@ -29,7 +29,7 @@ use heap::{Fields, Heap, Identity, MapData, ModuleData, Obj, SetData};
 use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use quiesce::RunHalt;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use value::{GcRef, Value, ValueView};
 use wire::{WireCallFrame, WireGenState, WireValue};
@@ -2712,6 +2712,11 @@ struct JobStep {
 }
 
 struct SchedCore {
+    /// TICKET-236 — the run's epoch, the same `Arc` as this sched's
+    /// [`quiesce::QuiesceState::epoch`] ([`MnSched::join_run`] is the one place that pairs them).
+    /// Held here so each way out of the counts moves it inside the lock hold that writes the
+    /// count ([`SchedCore::note_left`]).
+    left: Arc<AtomicU64>,
     /// The global overflow / seed queue. Seed + every coordinator-path requeue (deadlock flag,
     /// cancel drain) land here; per-worker requeues go to a worker's `locals[wid]` (D4c). Drained by
     /// a worker only after its own local is empty, so the global queue is the shared fallback.
@@ -2993,6 +2998,76 @@ impl SchedCore {
         self.running > 0 && self.running == self.blocked_owners && self.parked_n == 0
     }
 
+    /// TICKET-236 — a waker left the counts a verdict reads: move the run's epoch
+    /// ([`quiesce::QuiesceState::note_left`]). Called after the leaver's last channel effect and
+    /// inside the lock hold that publishes the leave, so a judge that saw the waker gone also
+    /// sees the moved epoch and declines. The methods below are the only ways out of those
+    /// counts; a transfer between two counts inside one lock hold needs no bump.
+    fn note_left(&self) {
+        self.left.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// TICKET-236 — THE way off `running` (a park, a yield, a finish, a demote, an offload).
+    pub(super) fn leave_running(&mut self) {
+        self.running -= 1;
+        self.note_left();
+    }
+
+    /// TICKET-236 — THE way a task of scope `sid` becomes done.
+    fn task_done(&mut self, sid: usize) {
+        self.scopes[sid].done += 1;
+        self.note_left();
+    }
+
+    /// TICKET-236 — THE way a scope leaves the table ([`MnSched::retire_scope`]).
+    fn scope_retired(&mut self, sid: usize) {
+        self.note_left();
+        self.scopes.remove(sid);
+    }
+
+    /// TICKET-236 — THE way an owner blocks at a nested join (DEC-095); `cross_sched` when the
+    /// joined sched is not this one.
+    pub(super) fn owner_blocked(&mut self, cross_sched: bool) {
+        self.blocked_owners += 1;
+        if cross_sched {
+            self.cross_sched_blocked_owners += 1;
+        }
+        self.note_left();
+    }
+
+    /// TICKET-236 — THE way scope `sid`'s eager body stops injecting for good.
+    fn body_closed(&mut self, sid: usize) {
+        self.scopes[sid].body_open = false;
+        self.note_left();
+    }
+
+    /// TICKET-236 — THE writer of scope `sid`'s `body_blocked`, and of its `awaiting_builder`
+    /// when `awaiting` is set ([`MnSched::set_body_wait`]). Moves the epoch on block AND on
+    /// unblock, so "every write of these two flags moves the epoch" holds with no condition.
+    ///
+    /// §2c1 — a body parked in a NESTED nursery's join is not merely unable to inject: it WILL
+    /// resume the moment that inner scope completes, and may then `send`/`close` to a sibling.
+    /// That is exactly what `awaiting_builder` already means, so say it rather than invent a
+    /// second flag — `all_incomplete_awaiting_builder` then vetoes when the inner scope is DONE
+    /// (the builder is about to resume and feed) and does NOT veto while the inner scope is
+    /// itself incomplete-and-stuck (a genuine nested deadlock, which must fault). A body blocked
+    /// on a CHANNEL leaves it false: that body resumes only if somebody feeds it, so it is not a
+    /// promise of progress.
+    fn body_wait(&mut self, sid: usize, blocked: bool, awaiting: bool) {
+        self.scopes[sid].body_blocked = blocked;
+        if awaiting {
+            self.scopes[sid].awaiting_builder = blocked;
+        }
+        self.note_left();
+    }
+
+    /// TICKET-236 — THE way scope `sid` stops awaiting its builder: the builder reached the
+    /// scope's join.
+    pub(super) fn builder_joined(&mut self, sid: usize) {
+        self.scopes[sid].awaiting_builder = false;
+        self.note_left();
+    }
+
     /// TICKET-181 — register a blocked waiter; returns its token for [`Self::unregister_waiter`].
     /// Caller holds core lock A.
     pub(super) fn register_waiter(&mut self, w: crate::vm::block::Waiter) -> u64 {
@@ -3077,8 +3152,13 @@ impl MnSched {
         deadlock_err: RuntimeError,
         mem_cap: usize,
     ) -> Self {
+        // gaps.md W7-58 — its own state by default: no parties, so the judge below never fires.
+        // TICKET-236 — a sched that belongs to a run takes the run's state through
+        // [`MnSched::join_run`], which also re-pairs the core's epoch handle.
+        let quiesce: Arc<quiesce::QuiesceState> = Default::default();
         MnSched {
             core: Mutex::new(SchedCore {
+                left: quiesce.epoch(),
                 global: std::collections::VecDeque::new(),
                 parked: std::collections::HashMap::new(),
                 slots: (0..total).map(|_| None).collect(),
@@ -3140,9 +3220,7 @@ impl MnSched {
             // gaps.md W7-56 — empty by default; both `MnSched` construction sites assign the run's
             // registry. An empty one is today's behaviour (no veto).
             exec_registry: Default::default(),
-            // gaps.md W7-58 — empty by default; both `MnSched` construction sites assign the run's
-            // state. An empty one has no parties, so the judge below never fires.
-            quiesce: Default::default(),
+            quiesce,
             idle_cv: Condvar::new(),
             idle_sleepers: AtomicUsize::new(0),
             spinning: AtomicUsize::new(0),
@@ -3153,6 +3231,21 @@ impl MnSched {
             #[cfg(test)]
             recv_side_wakes: AtomicUsize::new(0),
         }
+    }
+
+    /// TICKET-236 — make this sched part of the run whose state is `q`: it judges through `q`
+    /// and its core moves `q`'s epoch. The ONE place that pairs the two; never assign
+    /// `MnSched::quiesce` directly, or the core keeps moving an epoch no judge of the run reads.
+    pub(super) fn join_run(&mut self, q: &Arc<quiesce::QuiesceState>) {
+        self.quiesce = Arc::clone(q);
+        self.core.get_mut().unwrap_or_else(|e| e.into_inner()).left = q.epoch();
+    }
+
+    /// TICKET-236 — THE way off `inflight`. Moves the epoch FIRST: `inflight` is read under no
+    /// lock, so a bump after the subtraction could land after a judge's closing read.
+    pub(super) fn leave_inflight(&self) {
+        self.quiesce.note_left();
+        self.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// TICKET-118 (W13-7) — mark this OS thread as the one thread of THIS sched allowed to hand its
@@ -3713,7 +3806,7 @@ impl MnSched {
     fn close_body(&self, scope_id: usize) {
         {
             let mut c = self.lock();
-            c.scopes[scope_id].body_open = false;
+            c.body_closed(scope_id);
             if scope_id == 0 {
                 c.runner_wids[0] = false;
             }
@@ -3738,7 +3831,7 @@ impl MnSched {
             Some(s) if s.done == s.total => {}
             _ => return,
         }
-        c.scopes.remove(scope_id);
+        c.scope_retired(scope_id);
         let end = c.scopes.slot_end();
         c.slots.truncate(end);
     }
@@ -3828,19 +3921,7 @@ impl MnSched {
             // TICKET-199 — a retired `scope_id` has an empty family, so this is a no-op for it.
             let family = c.scope_family(scope_id);
             for i in family {
-                let s = &mut c.scopes[i];
-                s.body_blocked = blocked;
-                // §2c1 — a body parked in a NESTED nursery's join is not merely unable to inject:
-                // it WILL resume the moment that inner scope completes, and may then `send`/`close`
-                // to a sibling. That is exactly what `awaiting_builder` already means, so say it
-                // rather than invent a second flag — `all_incomplete_awaiting_builder` then vetoes
-                // when the inner scope is DONE (the builder is about to resume and feed) and does
-                // NOT veto while the inner scope is itself incomplete-and-stuck (a genuine nested
-                // deadlock, which must fault). A body blocked on a CHANNEL leaves it false: that
-                // body resumes only if somebody feeds it, so it is not a promise of progress.
-                if awaiting {
-                    s.awaiting_builder = blocked;
-                }
+                c.body_wait(i, blocked, awaiting);
             }
             if !blocked
                 && let Some(w) = wait
@@ -4169,9 +4250,15 @@ impl MnSched {
                 drop(c);
                 // TICKET-223 — through the one latch the party judge shares: the verdict is a run
                 // halt BEFORE any victim below is flagged, so a party never runs past it.
-                let verdict = self.quiesce.decide(crate::vm::quiesce::Judge::Sched, None);
+                // TICKET-236 — one epoch bracket over the party walk and the re-read of this
+                // sched: a waker that left inside it declines the verdict, and the timed park
+                // below re-judges.
+                let e0 = self.quiesce.left();
+                let verdict = self
+                    .quiesce
+                    .decide_since(e0, crate::vm::quiesce::Judge::Sched, None);
                 c = self.lock();
-                if verdict && self.is_deadlocked_ignoring_jobs(&c) {
+                if verdict && self.is_deadlocked_ignoring_jobs(&c) && self.quiesce.left() == e0 {
                     // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict
                     // wait as above.
                     let Some(done) = self.flag_leaves_and_wake(&mut c) else {
@@ -4315,7 +4402,7 @@ impl MnSched {
     /// fiber at once, under the same lock `finish` bumps `done` under.
     fn park_join(&self, mut fiber: Fiber, origin: usize) {
         let mut c = self.lock();
-        c.running -= 1;
+        c.leave_running();
         if c.family_done(origin) {
             fiber.state = FiberState::Ready;
             c.global.push_back(fiber);
@@ -4454,7 +4541,7 @@ impl MnSched {
         let p = crate::vm::core::Pending::new();
         let mut op = crate::vm::core::PendingOp::new(Arc::clone(&p), Vec::with_capacity(1));
         let mut c = self.lock();
-        c.running -= 1;
+        c.leave_running();
         // Close the park gap: re-check (under the core lock) whether a message is waiting, the channel
         // was CLOSED (a concurrent `close()` between `recv`'s empty-check and here — the fiber must
         // re-run to observe `closed` and end its `for`/fault, not park forever), or cancel was tripped.
@@ -4504,7 +4591,7 @@ impl MnSched {
     /// [`MnSched::recv_wake`]/[`MnSched::handoff_wake`] (called from every pop).
     fn park_send(&self, key: usize, mut fiber: Fiber) {
         let mut c = self.lock();
-        c.running -= 1;
+        c.leave_running();
         let cancelled = c.scope_cancel_tripped(fiber.scope_id) || fiber.owned_tripped();
         let settled = fiber.pending.as_ref().is_none_or(|op| !op.p.is_queued());
         if settled || cancelled {
@@ -4665,7 +4752,7 @@ impl MnSched {
     /// arm on one channel never see each other.
     fn park_wait(&self, arms: Vec<(usize, Arc<ChannelCore>, bool)>, mut fiber: Fiber) {
         let mut c = self.lock();
-        c.running -= 1;
+        c.leave_running();
         let p = fiber.pending.as_ref().map(|op| Arc::clone(&op.p));
         // Gap re-check for EVERY arm (mirrors `park`'s 1-key re-check). Cross-nursery flat scheduler
         // — read the parking fiber's SCOPE cancel (not the sched's global `cancel`). A SEND arm is
@@ -4833,7 +4920,7 @@ impl MnSched {
     ///     the intended consumer time to arrive on its own first.
     fn yield_fiber(&self, mut fiber: Fiber) {
         let mut c = self.lock();
-        c.running -= 1;
+        c.leave_running();
         fiber.state = FiberState::Ready;
         c.global.push_back(fiber);
         self.runnable.fetch_add(1, Ordering::Relaxed); // running → ready (round-robin requeue)
@@ -5093,7 +5180,8 @@ impl MnSched {
     /// with nobody to wake them.
     fn finish(&self, task_index: usize, scope_id: usize, outcome: TaskOutcome) -> bool {
         let mut c = self.lock();
-        c.running -= 1;
+        debug_assert!(Arc::ptr_eq(&c.left, &self.quiesce.epoch()));
+        c.leave_running();
         // DEC-205 — a task's submit-time bytes stay charged until it FINISHES.
         if let Some(charge) = c.slot_charge.remove(&task_index) {
             c.unfinished_bytes -= charge;
@@ -5125,7 +5213,7 @@ impl MnSched {
         );
         let done = matches!(outcome, TaskOutcome::Done(_));
         c.slots[task_index] = Some(outcome);
-        c.scopes[scope_id].done += 1;
+        c.task_done(scope_id);
         // TICKET-219 — only an Executor's sched (`leaf_site`) holds jobs, so a nursery's finish
         // reads no halt cell.
         let halt = if c.leaf_site {
@@ -5725,7 +5813,7 @@ impl MnSched {
     fn offload(self: &Arc<Self>, fiber: Fiber, req: OffloadReq) {
         {
             let mut c = self.lock();
-            c.running -= 1;
+            c.leave_running();
             self.inflight.fetch_add(1, Ordering::Relaxed); // running → inflight
         }
         let sched = Arc::clone(self);
@@ -5790,7 +5878,7 @@ impl MnSched {
         // forever.
         let cancel = {
             let mut c = self.lock();
-            c.running -= 1;
+            c.leave_running();
             self.inflight.fetch_add(1, Ordering::Relaxed); // running → inflight
             c.scope_cancel(fiber.scope_id)
         };
@@ -5824,7 +5912,7 @@ impl MnSched {
     /// `resume_native` — the fiber's stays `None`).
     fn complete_offload(&self, mut fiber: Fiber) {
         let mut c = self.lock();
-        self.inflight.fetch_sub(1, Ordering::Relaxed); // inflight → runnable
+        self.leave_inflight(); // inflight → runnable
         fiber.state = FiberState::Ready;
         c.global.push_back(fiber);
         self.runnable.fetch_add(1, Ordering::Relaxed);
@@ -6008,7 +6096,7 @@ impl SchedCore {
             out: f.ctx.out,
             stderr: f.ctx.stderr,
         });
-        self.scopes[sid].done += 1;
+        self.task_done(sid);
         self.job_event(
             JobEvent::Reaped {
                 task_index: ti,
@@ -6129,7 +6217,7 @@ impl SchedCore {
             out: Vec::new(),
             stderr: Vec::new(),
         });
-        self.scopes[f.scope_id].done += 1;
+        self.task_done(f.scope_id);
         self.settle_job(f.task_index, settle, step);
     }
 
@@ -6155,6 +6243,10 @@ impl SchedCore {
         if sealed {
             step.sealed.push(s.ch);
         }
+        // TICKET-236 — LAST: the seal above is this leaver's final channel effect, and the caller
+        // still holds the lock that ends the job. Moved above the seal, a judge could open its
+        // bracket after the bump, read the unsealed handle, then read the finished sched.
+        self.note_left();
     }
 
     /// TICKET-103 — every scope sharing `scope_id`'s cancel token: a nursery's origin scope plus its

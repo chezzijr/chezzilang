@@ -54,7 +54,7 @@
 //! runs many programs concurrently in ONE process, and a process-global registry would let one run's
 //! blocked parties be counted against another run's.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::block::{Halt, WakeSet};
@@ -296,6 +296,13 @@ fn pinned_away(judge: Judge, has_site: bool) -> bool {
 #[derive(Default)]
 pub(super) struct QuiesceState {
     parties: Mutex<Vec<Party>>,
+    /// TICKET-236 — the run's epoch: the one owner of "a waker left the counts a verdict reads".
+    /// A judge reads scheds one lock at a time, so a job can send and finish between two of its
+    /// reads: each read is true and the pair describes no instant. Every way out of those counts
+    /// moves this ([`Self::note_left`]), and a verdict stands only if it did not move across the
+    /// judge's whole walk ([`Self::decide_since`]). Each `SchedCore` of the run holds the same
+    /// `Arc` (`MnSched::join_run`), so a sched moves it inside its own lock hold.
+    left: Arc<AtomicU64>,
     /// §2c1 — every eager nursery alive in this run, by `Weak` (like [`super::SchedRegistry`]) —
     /// every eager nursery (nested ones since TICKET-112, which is sound only with
     /// `MnSched::body_is_fiber`).
@@ -403,6 +410,22 @@ impl RunHalt {
 }
 
 impl QuiesceState {
+    /// TICKET-236 — the epoch handle a `SchedCore` of this run holds.
+    pub(super) fn epoch(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.left)
+    }
+
+    /// TICKET-236 — a waker left the counts. The caller made its last channel effect already and
+    /// has not yet released the lock (or made the atomic change) that publishes the leave.
+    pub(super) fn note_left(&self) {
+        self.left.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// TICKET-236 — the epoch now; a judge reads it before its walk and compares after.
+    pub(super) fn left(&self) -> u64 {
+        self.left.load(Ordering::SeqCst)
+    }
+
     /// Publish an `os.exit`. First writer wins, exactly like Go: whichever `os.Exit` runs first sets
     /// the status, and a later one cannot rewrite it.
     pub(super) fn request_exit(&self, code: i32) {
@@ -527,6 +550,8 @@ impl QuiesceState {
         wake: WakeSet,
         site: Option<(&'static str, Span)>,
     ) -> PartyGuard {
+        // TICKET-236 — a party that blocks leaves the "somebody is still running" count.
+        self.note_left();
         self.parties
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -586,6 +611,14 @@ impl QuiesceState {
     /// latched report equals the fault that sched writes into its victims' slots: a party dies
     /// with either, whichever it reads first (DEC-063). It never stands in for a missing site.
     pub(super) fn decide(&self, judge: Judge, own: Option<(&str, Span)>) -> bool {
+        self.decide_since(self.left(), judge, own)
+    }
+
+    /// TICKET-236 — [`Self::decide`] for a judge whose walk began at epoch `e0`, before this
+    /// call. The verdict is declined when the epoch moved since `e0`: a waker left the counts
+    /// inside the bracket, so the reads describe no single instant. A declined judge re-enters
+    /// with a fresh epoch; in a true deadlock nothing leaves, so the next bracket stands.
+    pub(super) fn decide_since(&self, e0: u64, judge: Judge, own: Option<(&str, Span)>) -> bool {
         let parties = self.parties.lock().unwrap_or_else(|e| e.into_inner());
         if self
             .deadlock
@@ -596,7 +629,7 @@ impl QuiesceState {
             return true;
         }
         let site = parties.iter().find_map(|p| p.site);
-        if !self.verdict_on(&parties) || pinned_away(judge, site.is_some()) {
+        if !self.verdict_on(&parties) || pinned_away(judge, site.is_some()) || self.left() != e0 {
             return false;
         }
         let mut cell = self.deadlock.lock().unwrap_or_else(|e| e.into_inner());
@@ -750,6 +783,24 @@ mod tests {
         assert!(q.take_deadlock_report().is_some());
         q.clear_exit();
         assert_eq!(q.run_halt(), RunHalt::Running);
+    }
+
+    /// TICKET-236 — a waker that left the counts inside a judge's bracket declines the verdict:
+    /// the judge's reads describe no single instant. The next bracket stands.
+    #[test]
+    fn a_task_leaving_inside_the_bracket_declines_the_verdict() {
+        let q = Arc::new(QuiesceState::default());
+        let _g = q.block_shared(
+            Arc::new(PartyWait::Send(Pending::new())),
+            WakeSet::default(),
+            Some(("x", crate::ast::Span::default())),
+        );
+        let e0 = q.left();
+        q.note_left();
+        assert!(!q.decide_since(e0, Judge::Sched, None));
+        assert_eq!(q.run_halt(), RunHalt::Running);
+        assert!(q.decide_since(q.left(), Judge::Sched, None));
+        assert_eq!(q.run_halt(), RunHalt::Deadlock);
     }
 
     /// TICKET-232 — a sched that judges its own deadlock passes its own report, and the latch

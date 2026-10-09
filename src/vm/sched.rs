@@ -877,7 +877,7 @@ impl Vm {
         inner.exec_registry = Arc::clone(&self.exec_registry);
         // gaps.md W7-58 — so an idle worker of this sched can JUDGE the process-wide verdict on
         // behalf of a nursery owner, which never reaches `block_halt_check`.
-        inner.quiesce = Arc::clone(&self.quiesce);
+        inner.join_run(&self.quiesce);
         let sched = Arc::new(inner);
         sched.mark_all_runners_claimed();
         // W7-56 — publish the sched so an eager job's `send`/`close` (which runs with no sched of its
@@ -1067,7 +1067,7 @@ impl Vm {
         // The builder has reached THIS scope's join — it is no longer feeding it from body code, it is now
         // blocked draining it. Clear `awaiting_builder` so a genuine post-body deadlock (this scope parked
         // with no live sender) faults instead of being vetoed. (Cross-nursery flat scheduler — #1/#2.)
-        sched.lock().scopes[scope_id].awaiting_builder = false;
+        sched.lock().builder_joined(scope_id);
         let cancel = Arc::clone(&sched.lock().scopes[scope_id].cancel);
         let wid = self.wid;
         // W6-2 — a shell needs no snapshot of its own: it runs no code, and every fiber it schedules in
@@ -1110,7 +1110,7 @@ impl Vm {
         sched.trip_scope_cancel(scope_id);
         let cancel = {
             let mut c = sched.lock();
-            c.scopes[scope_id].awaiting_builder = false;
+            c.builder_joined(scope_id);
             Arc::clone(&c.scopes[scope_id].cancel)
         };
         sched.drain_family(scope_id);
@@ -1254,7 +1254,7 @@ impl Vm {
         inner.exec_registry = Arc::clone(&self.exec_registry);
         // gaps.md W7-58 — so an idle worker of this sched can JUDGE the process-wide verdict on
         // behalf of a nursery owner, which never reaches `block_halt_check`.
-        inner.quiesce = Arc::clone(&self.quiesce);
+        inner.join_run(&self.quiesce);
         inner.detached = detached.map(Arc::downgrade);
         if detached.is_some() {
             inner.body_is_fiber = false; // no body at all: its submitters are other parties
@@ -3355,10 +3355,7 @@ impl Vm {
         };
         {
             let mut c = owner.lock();
-            c.blocked_owners += 1;
-            if cross_sched {
-                c.cross_sched_blocked_owners += 1;
-            }
+            c.owner_blocked(cross_sched);
             if let Some(s) = self.fiber_scope {
                 c.scopes[s].owners_blocked += 1;
             }
