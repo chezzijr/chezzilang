@@ -127,33 +127,33 @@ empty-collection refine is a second hole mechanism ... moving it onto the var st
 **Wrong assumption:** a hole in a type belongs to the binding name that first held it, so pinning means
 "find the name and overwrite its scope entry", and a site that finds no name can safely do nothing.
 
-**Single source:** every open literal or instantiation mints one `Ty::Var` at its AST node. The variable
-travels inside the type of every expression that reaches the value, so aliases, holders, projections,
-generic calls and joins share it. Pinning is `solve`, which already runs in `assignable` and `join_ty`.
-The structural consumers (`??`, `?.`, `match`, `else`, index, `for`, method lookup) unify the operand
-with `Option[fresh]` / `List[fresh]` instead of matching on the `Ty`. A variable still unbound when its
-frame closes is an error or a documented default.
+**Owner decision (2026-10-10): prune the feature.** Every other inference in Chezzi reads the line it is
+on; this one reads a later line, which is why the checker has to follow a value through aliases, holders,
+closures and globals. The type of a value must be known on the statement that creates it.
 
-**It deletes:** the three name tables and their `DiagMark` fields; about 23 functions (every pin writer
-listed above, plus `none_slot_from`, `none_sibling_slot`, `branch_slot`, `unify_arg`,
-`finalize_empty_coll_sites`); the five predicates; `merge_unknown`; the leaked-`Param` branch.
-`Ty::Unknown` remains only as the error-cascade sentinel. Rough size: 110 call sites, 93 predicate uses,
-and a classification of the `Ty::Unknown` producers (444 lines mention it).
+| Write | Verdict |
+|---|---|
+| `xs := []`, `m := {}`, `s := Set()`, `z := None`, `h := [None]`, `c := Cell(None)`, `v := Box.new()`, `e := Box.Empty` | error on that line; the message names both fixes (`xs: List[int] = []`, `List[int]()`) |
+| `xs: List[int] = []`, `xs := List[int]()`, `z: int? = None`, `Box[int].new()`, `f([])` into a typed parameter, `return []` in a typed fn | accepted: the same statement supplies the type |
+| `xs := [1, 2]`, `[None, 7]`, `if c: None else: 7`, `x := 5`, lambdas, expression-body fns, `id(5)` | accepted, unchanged: same-line inference |
+| `print(None)`, `[] == []`, `for x in []:` | accepted: the hole is consumed, never stored |
 
-**Owner decisions this needs:**
-1. A read of an open value at two types. `e := Box.Empty` (or `z := None`), then `a: Box[int] = e` and
-   `b: Box[str] = e`. DEC-064 keeps this legal today. With one variable per value it is an error, unless
-   an immutable nullary value is given a fresh variable at each read.
-2. A `None` or `[]` that nothing ever pins. The design's D3 table says a never-pinned `None` "stays
-   open"; `xs := []` never used is already an error.
-3. An open module global pinned from a fn body (`g := None` at top level, `g = 7` inside a fn). A frame
-   is one fn body or one top-level statement (DEC-183, DEC-225), so this needs a module-level solve, or
-   the rule "an open global must be annotated".
+Go, Kotlin and Swift all require the type here (`var xs []int`, `mutableListOf<Int>()`,
+`var xs: [Int] = []`); only Rust infers it from a later line, with full unification. Measured cost: 58 of
+4105 untyped bindings in `tests/chz`, `examples`, `std`, `playground` and `benches` are open
+(`[]` 51, `{}` 5, `None` 1, `Set()` 1), plus the Rust-embedded test snippets.
 
-**Constraints the plan must carry:** speculative walks and rollback retire variables (DEC-157), so
-minting needs the per-node memo the two existing cases use; a `spawn` capture is a deep copy and must not
-share the parent's variable; a rebind breaks the pin group (DEC-032); TICKET-225 measured 1-5% on two
-benches with variables in use.
+**Single source:** one rule, checked at one place: when a statement is done, no binding, field, element,
+capture or generic instantiation it produced may have a type with a hole. There is nothing to pin later,
+so there is no pin machinery.
+
+**It deletes:** the three name tables and their `DiagMark` fields; every pin writer listed above, plus
+`none_slot_from`'s open-binding half, `unify_arg`, `finalize_empty_coll_sites`; the open predicates;
+`merge_unknown`'s lift arm for a later write; the leaked-`Param` branch; the later-pin half of TICKET-234
+(`z := None` then `z = 7`), whose same-line half (`[None, 7]`, branch joins) stays. `Ty::Unknown` remains
+only as the error-cascade sentinel. DEC-064, DEC-032, DEC-225's "second hole mechanism" clause and the D3
+row "a never-pinned `None` stays open" are superseded. A7 closes because `z := ?5` is `int?` on its own
+line; A8 closes because `Box.new()` with nothing to give `T` is an error at the call.
 
 ## Family B — a parked reader is judged without reading its channel (B1)
 
@@ -244,9 +244,8 @@ shadowable prelude name.
 guards; the lists collapse into it. `None` becomes a lexer keyword, which retires the three spelling
 tests and the unhygienic lowering at once. A binder x name grid test pins it.
 
-**Owner decision:** which names a local, a param or a loop variable may not take. `None` (and `self`
-outside a method) is forced by C1. For the builtin callables and types (`print`, `int`, `len`, `List`)
-CPython allows the shadow (`print = 5` is legal Python) and Go allows it too (`len := 5`).
+**Owner decision (2026-10-10):** only keywords cannot be bound, and `None` becomes one. A local, a param
+or a loop variable may still shadow a function or a builtin name (`print := 5`), as in Python and Go.
 
 ## Family D — freshness is decided for the root object only (D1, D1b)
 
@@ -337,9 +336,9 @@ arguments first and gives every argument whose substituted slot is concrete the 
 `default_expr_result_e` is deleted. With Family A's variables, the annotation-only generic cells
 (`c: Box[int?] = Box(5)`, `b: int8? = id(300)`) become "infer, then solve".
 
-**Owner decision:** does `T?` beside a plain `T` join without a written `None` (`[w, 3]`,
-`if c: w else: 5`)? The design sanctions only "a literal `None` beside a value". The smallest-depth rule
-decided for TICKET-234 would give `List[int?]`.
+**Owner decision (2026-10-10):** `T?` beside a plain `T` does not join by itself. `[w, 3]` and
+`if c: w else: 5` stay errors, and the message names the fix (`xs: List[int?] = [w, 3]`). A value wraps
+only into a type that is written, or beside a written `None`.
 
 ## Family F — parser, three independent sites (F1, F2, F3)
 
@@ -353,8 +352,9 @@ decided for TICKET-234 would give `List[int?]`.
   an `=` behind.
 - F3: `parse_else_guard` (`parser/mod.rs:1953`) has three callers (typed binding, bare expression
   statement, single-name `:=`). A destructuring `:=`, an assignment, a compound assignment and a `return`
-  do not call it, and the grammar agrees. Where the guard is legal is an owner decision; the destructuring
-  `:=` has a Rust twin (`let Ok((a, b)) = f() else { .. }`).
+  do not call it, and the grammar agrees. Owner decision (2026-10-10): the destructuring `:=` gains the
+  guard (`a, b := f() else e:`, Rust `let Ok((a, b)) = f() else { .. }`); `e` is the call's own error,
+  because splitting a tuple cannot fail. Assignment and `return` do not gain it.
 
 These share no mechanism. Each is a small fix at one site. The conformance gap is the only structural
 item: the harness should sample the grammar.
@@ -369,13 +369,11 @@ is an error-cascade value and should not be printed as a type); the other two ar
 
 ## Plan
 
-One structural ticket per family, each with a whole-grid test, in this order:
+One ticket per family, each with a whole-grid test:
 
-1. **Family B** (false deadlock). A regression on `main`, 10/10 at two workers. Smallest structural change.
-2. **Family C** (`None` keyword and one binding predicate). Small; removes a silent wrong value.
-3. **Family A** (open slots become type variables). The largest; needs the three owner decisions above
-   before planning.
-4. **Family E** (one channel for the expected type). Plan after A, because the generic rows reuse A's
-   variables. E1 (`default_expr_result_e`) and E6 can land first as deletions.
-5. **Family D** (freshness of the value graph).
-6. **Family F** and the two wording fixes: in place.
+1. **Family B** (false deadlock): TICKET-236. A regression on `main`, 10/10 at two workers.
+2. **Family C** (`None` is a keyword; one binding predicate): TICKET-237.
+3. **Family A** (prune later-line inference): TICKET-238, after 237.
+4. **Family E** (one channel for the expected type): TICKET-239, after 238.
+5. **Family D** (freshness of the value graph): TICKET-240, after 236.
+6. **Family F** (three parser sites): TICKET-241, after 237.
