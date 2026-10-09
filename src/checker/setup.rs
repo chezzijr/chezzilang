@@ -4513,8 +4513,8 @@ impl Checker {
         self.native_prelude_sigs.insert(decl.name.clone(), sig);
     }
 
-    /// The parsed `std/prelude.chz`, for the two test-only paths that check a program with no
-    /// prelude module in a graph (`seed_native_prelude_sigs`, `seed_carriers_without_prelude`).
+    /// The parsed `std/prelude.chz`, for the test-only paths that check a program with no prelude
+    /// module in a graph; `seed_native_prelude_sigs` is their one seed.
     /// Same source chain as the resolver ($CHEZZI_STD → embedded) — no reader bypasses it.
     #[cfg(test)]
     fn parse_prelude_source() -> Option<crate::ast::Module> {
@@ -4524,15 +4524,6 @@ impl Checker {
         // A std file never probes the project root (as `Resolver::parse` classifies it).
         crate::ast::classify_variant_imports(&mut module, &|_| false);
         Some(module)
-    }
-
-    /// A test-only graph with no prelude module (`standalone_graph`) still needs the carrier enums:
-    /// harvest them from the prelude source, so `begin_module` seeds them like on every other path.
-    #[cfg(test)]
-    pub(super) fn seed_carriers_without_prelude(&mut self) {
-        if let Some(module) = Self::parse_prelude_source() {
-            self.carrier_seeds = self.harvest_native_enums(&module);
-        }
     }
 
     /// Populate [`Checker::native_prelude_sigs`] from the always-linked `std/prelude.chz` on the
@@ -4568,6 +4559,9 @@ impl Checker {
         // a direct insert survives to `check_module`.
         for tn in ["List", "Map", "Set", "Channel", "str", "bytes", "bytearray"] {
             if let Some(info) = self.harvest_native_struct_table(&module, tn) {
+                // `begin_module` re-seeds from `container_seeds`, so the test-only graph with no
+                // prelude module (`standalone_graph`) keeps these tables too.
+                self.container_seeds.insert(tn.to_string(), info.clone());
                 self.structs.insert(tn.to_string(), info);
             }
         }

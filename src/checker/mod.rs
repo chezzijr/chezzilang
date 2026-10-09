@@ -1484,7 +1484,7 @@ impl Checker {
         let c = self;
         #[cfg(test)]
         if !graph.modules.iter().any(|m| m.dotted == ["std", "prelude"]) {
-            c.seed_carriers_without_prelude();
+            c.seed_native_prelude_sigs();
         }
         // Every file's index is known before any body is checked.
         for (idx, lm) in graph.modules.iter().enumerate() {
