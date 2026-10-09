@@ -1023,7 +1023,18 @@ pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
 /// [`check_graph_diags`]. Warnings never affect the `Result`.
 #[cfg(test)]
 pub fn check_diags(module: &crate::ast::Module) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
-    check_diags_with(module, true)
+    let (res, warnings, _) = check_diags_with(module, true);
+    (res, warnings)
+}
+
+/// [`check`], plus the number of fn bodies the pass checked (TICKET-233;
+/// `Checker::fn_body_checks`).
+#[cfg(test)]
+pub fn check_counting_fn_body_checks(
+    module: &crate::ast::Module,
+) -> (Result<(), Vec<CheckError>>, usize) {
+    let (res, _, checks) = check_diags_with(module, true);
+    (res, checks)
 }
 
 /// [`check_diags`] with the nested-fn return memo off (`Checker::ret_memo`), for the twin comparison
@@ -1032,7 +1043,8 @@ pub fn check_diags(module: &crate::ast::Module) -> (Result<(), Vec<CheckError>>,
 pub fn check_diags_no_memo(
     module: &crate::ast::Module,
 ) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
-    check_diags_with(module, false)
+    let (res, warnings, _) = check_diags_with(module, false);
+    (res, warnings)
 }
 
 impl Checker {
@@ -1066,7 +1078,7 @@ impl Checker {
 fn check_diags_with(
     module: &crate::ast::Module,
     memo_enabled: bool,
-) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
+) -> (Result<(), Vec<CheckError>>, Vec<CheckError>, usize) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
         c.memo_enabled = memo_enabled;
@@ -1076,7 +1088,8 @@ fn check_diags_with(
         c.seed_native_prelude_sigs();
         c.check_module(&module.stmts, None, &[]);
         c.check_provider_cycles();
-        c.finish_diags()
+        let (res, warnings) = c.finish_diags();
+        (res, warnings, c.fn_body_checks)
     })
 }
 
@@ -2713,6 +2726,10 @@ struct Checker {
     /// Re-entrancy guard for `memo_verify`: while set, the recompute's own nested lookups are served
     /// from the memo, so verification costs one extra walk per hit, not a second exponential tree.
     memo_verifying: bool,
+    /// TICKET-233 — `check_fn_body` entries of this pass. A cost counted, not timed, so CPU load
+    /// cannot move it; read by [`check_counting_fn_body_checks`].
+    #[cfg(test)]
+    fn_body_checks: usize,
 }
 
 /// TICKET-165 — one constant segment of a projected lvalue chain (`xs[i].f` -> `[Dynamic,

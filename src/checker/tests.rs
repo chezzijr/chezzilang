@@ -6009,13 +6009,13 @@ fn a_shared_field_type_graph_is_walked_once_per_type() {
     src.push_str(
         "fn needs[U: Eq](p: U, q: U) -> bool:\n    return p == q\nfn use_it(p: B24, q: B24) -> bool:\n    return needs(p, q)\n",
     );
-    let start = std::time::Instant::now();
-    entry_ok(&src);
-    let elapsed = start.elapsed();
+    let (errs, entries) = eq_obligations_for(&src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    let want = 24..=8 * 24;
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "the shared-field walk is exponential again: B24 took {elapsed:?} (memoized: well under 1s; \
-         path-guard-only: ~9.5s release / far worse in debug)"
+        want.contains(&entries),
+        "the shared-field walk is exponential again: B24 entered {entries} Eq obligations (want \
+         {want:?}; path-guard-only: 33554431)"
     );
 }
 
@@ -6042,13 +6042,13 @@ fn a_cyclic_shared_field_type_graph_is_also_walked_once_per_type() {
     src.push_str(
         "fn needs[U: Eq](p: U, q: U) -> bool:\n    return p == q\nfn use_it(p: Root, q: Root) -> bool:\n    return needs(p, q)\n",
     );
-    let start = std::time::Instant::now();
-    entry_ok(&src);
-    let elapsed = start.elapsed();
+    let (errs, entries) = eq_obligations_for(&src);
+    assert!(errs.is_empty(), "expected no type errors, got: {errs:?}");
+    let want = 22..=8 * 22;
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "the CYCLIC shared-field walk is exponential again: took {elapsed:?} (memoized: well under \
-         1s; assumption-poisoned memo: ~6.4s release at this size, 26s at N=24)"
+        want.contains(&entries),
+        "the CYCLIC shared-field walk is exponential again: entered {entries} Eq obligations (want \
+         {want:?}; assumption-poisoned memo: 16777215)"
     );
 }
 
@@ -33196,11 +33196,13 @@ fn a_bound_naming_a_generic_protocol_alias_is_refused_by_name() {
 /// `check_fn_body`), and every enclosing inference walk repeats both. TICKET-157 memoizes the
 /// speculative `infer_fn_ret` per nested-fn decl span, so the body is walked once per encounter.
 /// Before the memo N=20 took 42.790s in the dev profile and N=24 never finished; with it N=30 is
-/// 0.089s. This test drives the production order (`resolver::build_graph`: desugar, then check) at
-/// N=30 and requires a clean verdict inside the 2s ceiling.
+/// 0.089s. TICKET-228 then stopped the speculative walk of a block body. This test drives the
+/// production order (`resolver::build_graph`: desugar, then check) at N=16 and requires a clean
+/// verdict and a COUNT (TICKET-233): each body is checked once, where a walk repeated per enclosing
+/// fn checks 2^N.
 #[test]
 fn nested_fn_decl_check_is_not_exponential() {
-    const N: usize = 30;
+    const N: usize = 16;
     let mut src = String::new();
     for i in 0..N {
         src.push_str(&"    ".repeat(i));
@@ -33211,18 +33213,18 @@ fn nested_fn_decl_check_is_not_exponential() {
 
     let tokens = lexer::tokenize(&src).expect("lex should succeed");
     let mut module = parser::parse(tokens).expect("parse should succeed");
-    let start = std::time::Instant::now();
-    let verdict = crate::desugar::run_standalone(&mut module).map(|()| check(&module));
-    let elapsed = start.elapsed();
+    let verdict = crate::desugar::run_standalone(&mut module)
+        .map(|()| check_counting_fn_body_checks(&module));
 
-    match verdict {
-        Ok(Ok(())) => {}
+    let checks = match verdict {
+        Ok((Ok(()), checks)) => checks,
         other => panic!("{N} nested fn declarations must check clean, got: {other:?}"),
-    }
+    };
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "checking {N} nested fn declarations took {elapsed:?} (>2s ceiling) -- exponential \
-         checker cost in nested-fn-declaration depth (TICKET-109 / W12-12)"
+        (N..=2 * N).contains(&checks),
+        "checking {N} nested fn declarations checked {checks} fn bodies (want {N}..={}) -- \
+         exponential checker cost in nested-fn-declaration depth (TICKET-109 / W12-12)",
+        2 * N
     );
 }
 
@@ -33351,8 +33353,8 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
 }
 
 /// TICKET-157 / W12-12 -- the fn-nesting cap is a guard, not a fix: a 24-deep chain of nested `fn`
-/// declarations must CHECK (CPython compiles 50 deep in 0.02s), and fast. Before the fix the cap
-/// refuses it at 16.
+/// declarations must CHECK (CPython compiles 50 deep in 0.02s), and cheaply: each body is checked
+/// once (a count, TICKET-233). Before the fix the cap refuses it at 16.
 #[test]
 fn deep_nested_fn_decl_chain_checks_clean_and_fast() {
     const N: usize = 24;
@@ -33366,16 +33368,17 @@ fn deep_nested_fn_decl_chain_checks_clean_and_fast() {
 
     let tokens = lexer::tokenize(&src).expect("lex should succeed");
     let mut module = parser::parse(tokens).expect("parse should succeed");
-    let start = std::time::Instant::now();
-    let verdict = crate::desugar::run_standalone(&mut module).map(|()| check(&module));
-    let elapsed = start.elapsed();
+    let verdict = crate::desugar::run_standalone(&mut module)
+        .map(|()| check_counting_fn_body_checks(&module));
 
-    if let Err(err) = &verdict {
-        panic!("24 nested fn declarations were refused: {}", err.message);
-    }
+    let checks = match verdict {
+        Ok((_, checks)) => checks,
+        Err(err) => panic!("24 nested fn declarations were refused: {}", err.message),
+    };
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "checking {N} nested fn declarations took {elapsed:?} (>2s ceiling)"
+        (N..=2 * N).contains(&checks),
+        "checking {N} nested fn declarations checked {checks} fn bodies (want {N}..={})",
+        2 * N
     );
 }
 

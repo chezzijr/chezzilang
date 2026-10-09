@@ -887,11 +887,15 @@ impl Vm {
                 let (c, n) = match s.ascii_bytes() {
                     Some(b) => {
                         let n = b.len();
+                        #[cfg(test)]
+                        super::STR_INDEX_CHARS.with(|c| c.set(c.get() + 1));
                         (crate::slice::norm_index(idx, n).map(|i| b[i] as char), n)
                     }
                     None => {
                         let chars: Vec<char> = s.chars().collect();
                         let n = chars.len();
+                        #[cfg(test)]
+                        super::STR_INDEX_CHARS.with(|c| c.set(c.get() + n));
                         (crate::slice::norm_index(idx, n).map(|i| chars[i]), n)
                     }
                 };

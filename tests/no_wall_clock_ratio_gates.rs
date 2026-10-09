@@ -72,47 +72,20 @@ fn no_chz_test_divides_two_wall_clock_samples() {
 /// A name may join the list, but only deliberately, in the commit that adds the clock, with the
 /// reason in that commit message. A test converted to a counted measure must be DELETED from the
 /// list in the same commit that converts it.
-const CLOCK_READING_TESTS: [&str; 33] = [
+const CLOCK_READING_TESTS: [&str; 17] = [
     "a_chezzi_hang_python_survives_is_a_finding",
-    "a_cyclic_shared_field_type_graph_is_also_walked_once_per_type",
-    "a_shared_field_type_graph_is_walked_once_per_type",
     "a_sleeping_nursery_task_is_cancelled_mid_flight_by_a_sibling_fault",
     "a_slow_but_healthy_job_at_the_exit_drain_is_untouched",
-    // TICKET-119 (W13-9): `to_snap_depth`'s speculative fast path re-walks the whole remaining
-    // subtree from every node before falling to the slow arm, an O(depth^2) cost the VM counts
-    // nowhere; the bound is one absolute ceiling, same shape as `unique_is_not_quadratic`.
-    "airlock_deep_module_global_depth_fault_is_not_quadratic",
-    "airlock_deep_module_global_of_nested_closures_is_not_quadratic",
-    "airlock_deep_module_global_with_a_payload_at_every_level_is_not_quadratic",
     // TICKET-114's repro: its `.elapsed()` is an outer HANG bound around a `systemd-run` child (a
     // hung child never exits, so there is nothing to count); it asserts the child's exit status.
     "d3_thousands_of_fibers_does_not_hang_under_a_narrow_cpu_quota",
     "d5_blocking_sleeps_run_concurrently_not_serialized",
     "d5_owe3_path_c_sleep_in_callback_demotes_frees_worker",
     "deadline_past_fires_immediately",
-    // TICKET-157 (W12-12): the repro for the exponential nested-fn declaration walk. Its bound is
-    // one absolute ceiling over `desugar::run_standalone` + `check`, the same shape and the same
-    // walk as `nested_fn_decl_check_is_not_exponential` below, which is already listed. The cost
-    // is checker re-walking that nothing counts, so there is no counted measure to use.
-    "deep_nested_fn_decl_chain_checks_clean_and_fast",
     // TICKET-205. The grid bounds how long a victim waits behind a spinner; a starved victim never
     // acts, so there is no event to count. One absolute bound with 20x headroom (0.1 s vs 2 s).
     "every_victim_acts_while_the_spinner_runs",
-    "nested_fn_decl_check_is_not_exponential",
-    "parallel_many_spawns_cheap_and_correct",
     "parity_blocking_native_is_an_entry_cancellation_checkpoint_on_both_engines",
-    // TICKET-154 (W11-15): `at(1)` on an aliased RwShared store pays the whole-root fallback once
-    // per call; the cost is a Rust-side rebuild the VM counts nowhere, so one absolute ceiling.
-    "rwshared_at_over_an_aliased_store_stays_under_its_ceiling",
-    // TICKET-154: the container twin of the cell cliff below -- same defect, a shared list.
-    "rwshared_for_each_over_a_dag_alias_is_not_quadratic",
-    // TICKET-192: `RwShared[Map].get_key` scans the wire entry vector, so n lookups are O(n^2). The
-    // cost is a Rust-side scan the VM counts nowhere; the bound is one absolute ceiling.
-    "rwshared_map_get_key_is_not_linear",
-    // TICKET-192: the single-entry writer twin -- `set_key` re-encoding the whole map is O(n) per
-    // write; same Rust-side cost, same one absolute ceiling.
-    "rwshared_map_set_key_is_not_linear",
-    "rwshared_view_over_shared_bindings_is_not_quadratic",
     // TICKET-151 (W14-40): the bound is a LIVENESS deadline, not a cost measure -- the test
     // withholds stdin and asks whether a runnable sibling printed before the read returned.
     // "The sibling never ran" has no counted measure; the clock is the outer bound on how
@@ -121,15 +94,6 @@ const CLOCK_READING_TESTS: [&str; 33] = [
     // TICKET-151: the same liveness deadline for a DIRECT `io.input` (no callback, no spin); the
     // clock starts at spawn because the fixture prints nothing before the read.
     "sibling_runs_while_a_direct_stdin_read_blocks",
-    // TICKET-072: `core_method`'s `Obj::Str` arm used to clone the whole receiver `String` before
-    // dispatching any method, so a borrow-only method like `starts_with` cost O(len(s)) per call.
-    // The cost is a Rust-side `String` clone the VM counts nowhere, so there is no counted measure.
-    "str_method_dispatch_does_not_clone_the_receiver",
-    // TICKET-072: `s[i]` collects a fresh `Vec<char>` of the whole string per subscript, so an
-    // index loop is O(n^2). The cost is a per-operation allocation the VM counts nowhere, so there
-    // is no counted measure to use; the bound is one absolute ceiling, the same shape
-    // `unique_is_not_quadratic` above already uses for the same class of defect.
-    "string_index_loop_is_not_quadratic",
     // threads_one_serializes_cpu_bound_parallel_tasks / _nested_eager_parallel_tasks (TICKET-059):
     // both now read the clock in tests/support/child_rusage.rs, not in their own bodies -- same
     // precedent as many_idle_workers_do_not_thundering_herd_on_yield, never listed here.
@@ -139,7 +103,6 @@ const CLOCK_READING_TESTS: [&str; 33] = [
     "timeout_aborts_a_sleeping_test_everywhere",
     "timer_fires_after_its_deadline",
     "timer_many_all_fire_on_one_thread",
-    "unique_is_not_quadratic",
 ];
 
 /// This file's own name, for the whole-file scans below to skip. Every gate in this file holds the

@@ -877,6 +877,8 @@ impl Vm {
         // run_capture_counting_picks).
         #[cfg(test)]
         super::RUN_PICKS.with(|p| p.set(p.get() + sched.picks.load(Ordering::Relaxed)));
+        #[cfg(test)]
+        self.publish_module_replays();
         let slots = sched.take_scope_slots(0);
         if self.mn_enlisted == 0 {
             self.mn_enlist_sched = None;
@@ -1412,6 +1414,8 @@ impl Vm {
         // run_capture_counting_picks).
         #[cfg(test)]
         super::RUN_PICKS.with(|p| p.set(p.get() + sched.picks.load(Ordering::Relaxed)));
+        #[cfg(test)]
+        self.publish_module_replays();
         let slots = sched.take_slots();
         self.reduce_task_slots(slots)
     }
@@ -3658,6 +3662,8 @@ impl Vm {
         depth: usize,
         memo: &mut WireMemo,
     ) -> Result<WireValue, RuntimeError> {
+        #[cfg(test)]
+        super::WIRE_ENCODE_NODES.with(|c| c.set(c.get() + 1));
         if !memo.speculating {
             return self.to_wire_depth_inner(v, depth, memo);
         }
@@ -4398,6 +4404,8 @@ impl Vm {
         w: WireValue,
         rebuild: &mut super::fxhash::FxHashMap<u32, GcRef>,
     ) -> Value {
+        #[cfg(test)]
+        super::WIRE_DECODE_NODES.with(|c| c.set(c.get() + 1));
         match w {
             // Re-create on the DESTINATION heap: `make_int` re-inlines or re-boxes (wide) and
             // `box_float` re-boxes, so the airlock round-trip is representation-stable.
@@ -5625,6 +5633,8 @@ impl Vm {
                 modules,
                 reusable,
                 view: (self.heap.id(), self.heap.view_epoch()),
+                #[cfg(test)]
+                replays: std::sync::atomic::AtomicUsize::new(0),
             },
             Arc::new(memo.cells),
             Arc::new(nodes),
@@ -6085,6 +6095,15 @@ impl Vm {
         })
     }
 
+    /// TICKET-233 -- drain the snapshot's replay count into [`super::MODULE_REPLAYS`].
+    #[cfg(test)]
+    fn publish_module_replays(&self) {
+        if let Some(s) = &self.snapshot_memo {
+            let n = s.replays.swap(0, Ordering::Relaxed);
+            super::MODULE_REPLAYS.with(|c| c.set(c.get() + n));
+        }
+    }
+
     /// D1 — install a shared [`ModuleSnapshot`] into a freshly-built worker: pre-alloc one **empty**
     /// `Module` per snapshot entry (index order preserved so a callable's home index lines up), seed
     /// the per-module faulted flags, and keep the `Arc` so each module's globals fault in lazily on
@@ -6139,6 +6158,8 @@ impl Vm {
                 .as_ref()
                 .expect("worker has a snapshot"),
         );
+        #[cfg(test)]
+        snap.replays.fetch_add(1, Ordering::Relaxed);
         let module = self.module_objs[idx];
         // W6-2 — a replay REPRODUCES the snapshot, it does not mutate the view, so its `module_define`s
         // must not drop the cache this view was seeded with (`install_snapshot`).

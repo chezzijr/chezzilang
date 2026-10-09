@@ -3056,6 +3056,8 @@ impl Vm {
                     }
                     _ => {}
                 }
+                #[cfg(test)]
+                super::STR_RECV_CLONED_BYTES.with(|c| c.set(c.get() + s.len()));
                 let s = s.to_string();
                 match method {
                     "upper" => {

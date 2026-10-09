@@ -13878,80 +13878,84 @@ main()
 
 /// D1 (lazy module snapshot): many trivial `--parallel` spawns no longer pay a full
 /// per-task module-graph rebuild. Correctness gate — every one of N tasks reaches the same
-/// `Shared` box, so the serialised count is exactly N. A *loose* wall-clock ceiling is a smoke
-/// guard that the per-task O(graph) reconstruction is gone (kept generous to avoid CI flake; the
-/// real perf delta is shown via `primes_parallel` timing in the milestone verification).
+/// `Shared` box, so the serialised count is exactly N. The cost is a COUNT, not a clock
+/// (TICKET-233): a task that reads no module global replays no module, where the eager per-task
+/// rebuild replayed every module for every task.
 #[test]
 fn parallel_many_spawns_cheap_and_correct() {
     const N: usize = 2000;
-    let mut src = String::from(
-        "fn bump(s: Shared[int]):\n    s.update(fn(x): x + 1)\nfn main():\n    s := Shared(0)\n    parallel:\n",
+    let program = |n: usize, step: &str| {
+        let mut src = format!(
+            "step: int = 1\nfn bump(s: Shared[int]):\n    s.update(fn(x): x + {step})\nfn main():\n    s := Shared(0)\n    parallel:\n"
+        );
+        for _ in 0..n {
+            src.push_str("        spawn bump(s)\n");
+        }
+        src.push_str("    print(s.get())\nmain()\n");
+        src
+    };
+    let (out, replays) = run_capture_counting(&program(N, "1"), &MODULE_REPLAYS);
+    assert_eq!(out.expect("parallel run"), format!("{N}\n"));
+    assert_eq!(
+        replays, 0,
+        "{N} spawns that read no module global replayed {replays} modules (want 0) -- a task is \
+         rebuilding a module it never reads"
     );
-    for _ in 0..N {
-        src.push_str("        spawn bump(s)\n");
-    }
-    src.push_str("    print(s.get())\nmain()\n");
-    let start = std::time::Instant::now();
-    let out = run_capture(&src).expect("parallel run");
-    let elapsed = start.elapsed();
-    assert_eq!(out, format!("{N}\n"));
-    assert!(
-        elapsed < std::time::Duration::from_secs(30),
-        "{N} spawns took {elapsed:?} (>30s ceiling)"
+    // The control: a task that reads one module global replays that one module, so the count is live.
+    let (out, replays) = run_capture_counting(&program(50, "step"), &MODULE_REPLAYS);
+    assert_eq!(out.expect("parallel run"), "50\n");
+    assert_eq!(
+        replays, 50,
+        "50 spawns that each read one module global replayed {replays} modules (want 50)"
     );
 }
 
 /// W8-34: `List.unique()` is O(N^2) (`seq_slot` linear-scans `out` per element) — 80k ints /
 /// 40k distinct took 8.47s wall on the release binary vs CPython's `dict.fromkeys` at 2.1ms
-/// on the same box. A *loose* wall-clock ceiling on a scaled-down input is a smoke guard that
-/// the algorithm is hash-set-backed (O(N)), not a precise perf assertion.
+/// on the same box. Pinned with a COUNT of element comparisons (TICKET-233): the hash index
+/// compares each element with its own bucket only, the scan with every kept element.
 #[test]
 fn unique_is_not_quadratic() {
-    let src = "fn main():\n    xs := List[int]()\n    i := 0\n    while i < 20000:\n        xs.push(i % 10000)\n        i = i + 1\n    ys := xs.unique()\n    print(ys.len())\nmain()\n";
-    let start = std::time::Instant::now();
-    let out = run(src);
-    let elapsed = start.elapsed();
-    assert_eq!(out, "10000\n");
+    let src = "fn main():\n    xs := List[int]()\n    i := 0\n    while i < 4000:\n        xs.push(i % 2000)\n        i = i + 1\n    ys := xs.unique()\n    print(ys.len())\nmain()\n";
+    let (out, compares) = run_capture_counting(src, &ELEM_COMPARES);
+    let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
+    assert_eq!(out, "2000\n");
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "unique() on 20000 ints (10000 distinct) took {elapsed:?} (>2s ceiling) -- O(N^2) regression"
+        (2000..=8000).contains(&compares),
+        "unique() on 4000 ints (2000 distinct) made {compares} element comparisons (want 2000..=8000) -- O(N^2) regression"
     );
 }
 
 /// TICKET-072: `s[i]` collects a fresh `Vec<char>` of the WHOLE string per subscript
 /// (`src/vm/stmt.rs:665`), so an index loop over a string is O(n^2) instead of O(n). Measured on
 /// the release binary at 86eb23dd: n=10000 took 0.142s vs CPython's 0.0019s, n=40000 took 1.678s
-/// (220x CPython) -- a clean 4x-per-doubling signature, not CPython's 2x. This debug-build repro
-/// uses a smaller n so it stays fast once fixed; a loose wall-clock ceiling is a smoke guard that
-/// the per-index cost stopped scaling with `len(s)`, not a precise perf assertion.
+/// (220x CPython) -- a clean 4x-per-doubling signature, not CPython's 2x. Pinned with a COUNT of
+/// the characters each subscript read (TICKET-233): one on the ASCII arm, `len(s)` on the scan.
 #[test]
 fn string_index_loop_is_not_quadratic() {
     let src = "fn main():\n    n := 8000\n    s := \"a\".repeat(n)\n    c := 0\n    i := 0\n    while i < n:\n        if s[i] == \"a\": c = c + 1\n        i = i + 1\n    print(c)\nmain()\n";
-    let start = std::time::Instant::now();
-    let out = run(src);
-    let elapsed = start.elapsed();
+    let (out, chars) = run_capture_counting(src, &STR_INDEX_CHARS);
+    let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
     assert_eq!(out, "8000\n");
-    assert!(
-        elapsed < std::time::Duration::from_millis(800),
-        "indexing an 8000-char string 8000 times took {elapsed:?} (>800ms ceiling) -- O(n^2) regression"
+    assert_eq!(
+        chars, 8000,
+        "indexing an 8000-char string 8000 times read {chars} characters (want 8000) -- O(n^2) regression"
     );
 }
 
 /// TICKET-072: `core_method`'s `Obj::Str` arm used to `to_string()` (clone) the whole receiver
 /// before dispatching ANY method, so a borrow-only method like `starts_with` cost O(len(s)) per
-/// call. The cost is a Rust-side `String` clone the VM counts nowhere, so there is no counted
-/// measure to gate on instead of a wall clock (see `CLOCK_READING_TESTS` in
-/// `tests/no_wall_clock_ratio_gates.rs`).
+/// call. Pinned with a COUNT of the receiver bytes that clone copied (TICKET-233): zero for each
+/// of the five borrow-only methods, the whole receiver for `upper`, which proves the count is live.
 #[test]
 fn str_method_dispatch_does_not_clone_the_receiver() {
-    let src = "fn main():\n    s := \"a\".repeat(1000000)\n    c := 0\n    i := 0\n    while i < 60000:\n        if s.starts_with(\"a\"): c = c + 1\n        i = i + 1\n    print(c)\nmain()\n";
-    let start = std::time::Instant::now();
-    let out = run(src);
-    let elapsed = start.elapsed();
-    assert_eq!(out, "60000\n");
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "60000 starts_with calls on a 1MB string took {elapsed:?} (>2s ceiling) -- the receiver is still being cloned per call"
+    let src = "fn main():\n    s := \"a\".repeat(1000000)\n    c := 0\n    i := 0\n    while i < 200:\n        if s.starts_with(\"a\"): c = c + 1\n        if s.ends_with(\"a\"): c = c + 1\n        if s.contains(\"a\"): c = c + 1\n        c = c + s.index_of(\"a\") + s.len()\n        i = i + 1\n    print(c)\n    print(s.upper().len())\nmain()\n";
+    let (out, cloned) = run_capture_counting(src, &STR_RECV_CLONED_BYTES);
+    let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
+    assert_eq!(out, "200000600\n1000000\n");
+    assert_eq!(
+        cloned, 1_000_001,
+        "1000 borrow-only method calls on a 1MB string cloned {cloned} receiver bytes (want 1000001: one for `\"a\".repeat`, 1000000 for the one `upper`) -- the receiver is still being cloned per call"
     );
 }
 
@@ -18874,8 +18878,8 @@ main()
 /// sharing one binding went quadratic (measured on the pre-fix release binary: n=4000 → 3.7s, n=12000
 /// → 34s, versus 0.02s before W7-4). Since TICKET-154 the looping views share ONE rebuild map over an
 /// aliased store (`rwshared_snapshot_pieces`), so no looping view re-materializes the whole per
-/// element. A coarse CLIFF detector, not a benchmark: the budget is ~50× the actual
-/// debug-build cost and the pre-fix code blew it (measured: 10.5s debug, versus 0.03s fixed).
+/// element. Pinned with a COUNT of the wire nodes the view rebuilt (TICKET-233): about one per
+/// element when the walk shares one map, about n per element when it does not.
 #[test]
 fn rwshared_view_over_shared_bindings_is_not_quadratic() {
     let src = "\
@@ -18896,12 +18900,12 @@ fn main():
     print(c)
 main()
 ";
-    let t = std::time::Instant::now();
-    assert_eq!(run_capture(src).unwrap(), "3001\n");
-    let el = t.elapsed();
+    let (out, nodes) = run_capture_counting(src, &WIRE_DECODE_NODES);
+    assert_eq!(out.unwrap(), "3001\n");
+    let want = 3001..=4 * 3001;
     assert!(
-        el < std::time::Duration::from_secs(5),
-        "RwShared.for_each over 3001 sibling-binding closures took {el:?} — the view is materializing \
+        want.contains(&nodes),
+        "RwShared.for_each over 3001 sibling-binding closures rebuilt {nodes} wire nodes (want {want:?}) — the view is materializing \
          the whole container per element again"
     );
 }
@@ -18909,8 +18913,7 @@ main()
 /// TICKET-154 (W11-15) -- the CONTAINER twin of the cell test above. One `inner` list pushed three
 /// thousand times into the stored list is an aliased store, so every element after the first is a
 /// bare back-ref. `for_each` must take ONE shared rebuild map for the whole walk; if it fell back
-/// to a whole-root rebuild per element this goes quadratic. Coarse cliff detector, one absolute
-/// ceiling, same shape as its sibling.
+/// to a whole-root rebuild per element this goes quadratic. Same counted measure as its sibling.
 #[test]
 fn rwshared_for_each_over_a_dag_alias_is_not_quadratic() {
     let src = "\
@@ -18928,20 +18931,20 @@ fn main():
     print(c)
 main()
 ";
-    let t = std::time::Instant::now();
-    assert_eq!(run_capture(src).unwrap(), "3001\n");
-    let el = t.elapsed();
+    let (out, nodes) = run_capture_counting(src, &WIRE_DECODE_NODES);
+    assert_eq!(out.unwrap(), "3001\n");
+    let want = 3001..=4 * 3001;
     assert!(
-        el < std::time::Duration::from_secs(5),
-        "RwShared.for_each over 3001 aliases of one list took {el:?} -- the view is materializing \
+        want.contains(&nodes),
+        "RwShared.for_each over 3001 aliases of one list rebuilt {nodes} wire nodes (want {want:?}) -- the view is materializing \
          the whole container per element again"
     );
 }
 
 /// TICKET-154 (W11-15) -- the widened single-piece cost. On an aliased store `at(1)` is a bare
 /// back-ref, so it takes `from_wire_piece`'s whole-root fallback: the ROOT once per CALL instead of
-/// the element. This bounds that at an absolute ceiling (measured ~0.19s debug at the time of the
-/// change) so it cannot become the root per ELEMENT.
+/// the element. This bounds the wire nodes rebuilt (TICKET-233; the root is 45011 nodes, so five
+/// calls rebuild 225055) so it cannot become the root twice per call, or per ELEMENT.
 #[test]
 fn rwshared_at_over_an_aliased_store_stays_under_its_ceiling() {
     let src = "\
@@ -18960,12 +18963,12 @@ fn main():
     print(total)
 main()
 ";
-    let t = std::time::Instant::now();
-    assert_eq!(super::golden_tests::golden_entry(src), "25000\n");
-    let el = t.elapsed();
+    let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    assert_eq!(out, "25000\n");
+    let want = 5 * 5000..=5 * 60000;
     assert!(
-        el < std::time::Duration::from_secs(5),
-        "RwShared.at(1) over an aliased store took {el:?} -- the whole-root fallback is running per \
+        want.contains(&nodes),
+        "5 RwShared.at(1) calls over an aliased store rebuilt {nodes} wire nodes (want {want:?}) -- the whole-root fallback is running per \
          element instead of per call"
     );
 }
@@ -19003,16 +19006,16 @@ fn main():
         !e: print(\"err: {e.message()}\")
 main()
 ";
-    let t = std::time::Instant::now();
-    let out = run(src);
-    let el = t.elapsed();
+    let (out, nodes) = run_capture_counting(src, &WIRE_ENCODE_NODES);
+    let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
     assert_eq!(
         out,
         "err: maximum structural depth (10000) exceeded (cyclic data structure?)\n"
     );
+    let want = 10000..=100000;
     assert!(
-        el < std::time::Duration::from_secs(5),
-        "a 5000-deep module global took {el:?} to reach the depth fault (>5s ceiling) -- \
+        want.contains(&nodes),
+        "a 5000-deep module global visited {nodes} wire nodes to reach the depth fault (want {want:?}) -- \
          O(depth^2) regression in the module-snapshot failure path"
     );
 }
@@ -19046,17 +19049,17 @@ fn main():
         !e: print(\"err: {e.message()}\")
 main()
 ";
-    let t = std::time::Instant::now();
-    let out = run(src);
-    let el = t.elapsed();
+    let (out, nodes) = run_capture_counting(src, &WIRE_ENCODE_NODES);
+    let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
     assert_eq!(
         out,
         "err: maximum structural depth (10000) exceeded (cyclic data structure?)\n"
     );
+    let want = 10000..=100000;
     assert!(
-        el < std::time::Duration::from_secs(5),
-        "a 5000-deep module global carrying a payload at every level took {el:?} to reach the depth \
-         fault (>5s ceiling) -- O(depth^2) regression in the module-snapshot failure path"
+        want.contains(&nodes),
+        "a 5000-deep module global carrying a payload at every level visited {nodes} wire nodes to reach \
+         the depth fault (want {want:?}) -- O(depth^2) regression in the module-snapshot failure path"
     );
 }
 
@@ -19084,17 +19087,17 @@ fn main():
         !e: print(\"err: {e.message()}\")
 main()
 ";
-    let t = std::time::Instant::now();
-    let out = run(src);
-    let el = t.elapsed();
+    let (out, nodes) = run_capture_counting(src, &WIRE_ENCODE_NODES);
+    let out = out.unwrap_or_else(|e| panic!("unexpected runtime error: {e}"));
     assert_eq!(
         out,
         "err: maximum structural depth (10000) exceeded (cyclic data structure?)\n"
     );
+    let want = 10000..=100000;
     assert!(
-        el < std::time::Duration::from_secs(5),
-        "a 6000-deep nested-closure module global took {el:?} to reach the depth fault (>5s ceiling) \
-         -- O(depth^2) regression in the module-snapshot failure path"
+        want.contains(&nodes),
+        "a 6000-deep nested-closure module global visited {nodes} wire nodes to reach the depth fault \
+         (want {want:?}) -- O(depth^2) regression in the module-snapshot failure path"
     );
 }
 
@@ -22163,32 +22166,29 @@ main()
 
 /// TICKET-192: `RwShared[Map].get_key` scans the flat `WireValue::Map` entry vector, so one lookup is
 /// O(n) and n lookups on an n-entry shared map are O(n^2). Go `sync.Map` / a CPython `dict` behind a
-/// `Lock` are O(1) per lookup. Sized for the release binary: 40k lookups on a 40k-entry map (~16 s on base, ms once O(1)).
+/// `Lock` are O(1) per lookup. Pinned with a COUNT of the wire nodes rebuilt (TICKET-233): a key and
+/// a value per lookup, against every stored entry per lookup for a scan.
 #[test]
 fn rwshared_map_get_key_is_not_linear() {
-    let src = "import std.concurrency\nfn main():\n    n := 40000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := RwShared(m)\n    s := 0\n    i = 0\n    while i < n:\n        match box.get_key(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
-    let start = std::time::Instant::now();
-    let out = super::golden_tests::golden_entry(src);
-    let elapsed = start.elapsed();
-    assert_eq!(out, "40000\n");
+    let src = "import std.concurrency\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := RwShared(m)\n    s := 0\n    i = 0\n    while i < n:\n        match box.get_key(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
+    let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    assert_eq!(out, "2000\n");
     assert!(
-        elapsed < std::time::Duration::from_secs(1),
-        "40k RwShared.get_key on a 40k-entry map took {elapsed:?} (>1s ceiling) -- O(n) per lookup"
+        (2000..=4000).contains(&touches),
+        "2000 RwShared.get_key on a 2000-entry map rebuilt {touches} wire nodes (want 2000..=4000) -- O(n) per lookup"
     );
 }
 
 /// TICKET-192: `RwShared[Map].set_key` writes one entry in place instead of re-encoding the whole map
-/// (what `write` does). 40k inserts then 40k overwrites on one box, sized for the release binary.
+/// (what `write` does). 2000 inserts then 2000 overwrites on one box, pinned with the same count.
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
-    let src = "import std.concurrency\nfn main():\n    n := 40000\n    m: Map[int, int] = {}\n    box := RwShared(m)\n    i := 0\n    while i < n:\n        box.set_key(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set_key(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get_key(39999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
-    let start = std::time::Instant::now();
-    let out = super::golden_tests::golden_entry(src);
-    let elapsed = start.elapsed();
-    assert_eq!(out, "40000\n40000\n");
+    let src = "import std.concurrency\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := RwShared(m)\n    i := 0\n    while i < n:\n        box.set_key(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set_key(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get_key(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
+    let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    assert_eq!(out, "2000\n2000\n");
     assert!(
-        elapsed < std::time::Duration::from_secs(1),
-        "40k RwShared.set_key inserts + 40k overwrites took {elapsed:?} (>1s ceiling) -- O(n) per write"
+        (2000..=4000).contains(&touches),
+        "2000 RwShared.set_key inserts + 2000 overwrites rebuilt {touches} wire nodes (want 2000..=4000) -- O(n) per write"
     );
 }
 

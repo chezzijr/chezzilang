@@ -4728,6 +4728,10 @@ impl Checker {
     }
 
     pub(super) fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
+        #[cfg(test)]
+        {
+            self.fn_body_checks += 1;
+        }
         let provider = decl
             .name
             .starts_with(crate::desugar::PROVIDER_PREFIX)

@@ -1885,6 +1885,10 @@ struct ModuleSnapshot {
     /// epoch at any in-place mutation of a marked object, and another heap (a worker seeded with its
     /// starter's snapshot) never matches the id.
     view: (u64, u64),
+    /// TICKET-233 — module replays every worker made from this snapshot; drained into
+    /// [`MODULE_REPLAYS`] at the outermost nursery join.
+    #[cfg(test)]
+    replays: std::sync::atomic::AtomicUsize,
 }
 
 /// D1 — one module in a [`ModuleSnapshot`]: its name plus its top-level globals as heap-independent
@@ -7385,6 +7389,24 @@ thread_local! {
     /// nursery join (`sched::run_mn_nursery_outermost` / `sched::join_eager_nursery`) on the VM's own
     /// thread, then read here by [`run_capture_counting_picks`].
     pub(crate) static RUN_PICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// TICKET-233 — costs of the current test's own run, counted instead of timed so CPU load
+    /// cannot move them. Each is read by [`run_capture_counting`] and counts only work done on the
+    /// thread that runs the program's top level, except [`MODULE_REPLAYS`].
+    ///
+    /// Wire nodes `Vm::to_wire_depth` visited (every airlock serialize, speculative ones included).
+    pub(crate) static WIRE_ENCODE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Wire nodes `Vm::from_wire_memo` rebuilt (every airlock deserialize).
+    pub(crate) static WIRE_DECODE_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// `Vm::elem_equal` calls (every element comparison a collection method makes).
+    pub(crate) static ELEM_COMPARES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Characters a `str` subscript read to find its one character.
+    pub(crate) static STR_INDEX_CHARS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Receiver bytes `Vm::core_method` cloned before dispatching a `str` method.
+    pub(crate) static STR_RECV_CLONED_BYTES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// Module replays (`Vm::fault_module` past its guard) by every task of the run, summed from
+    /// `ModuleSnapshot::replays` at the outermost nursery join.
+    pub(crate) static MODULE_REPLAYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// TICKET-211 — `(peak runner threads, runner slot denials, runner thread spawns, peak runner
     /// permit holders)` of the current test's own run, set by `run_file_inner` from the run's
     /// `QuiesceState`; read by [`run_file_counting_runners`]. The fourth is TICKET-230's.
@@ -7396,13 +7418,23 @@ thread_local! {
 /// thread like [`run_program_bytes`], since [`RUN_PICKS`] is thread-local to the VM's own thread.
 #[cfg(test)]
 pub fn run_capture_counting_picks(src: &str) -> (Result<String, RuntimeError>, usize) {
+    run_capture_counting(src, &RUN_PICKS)
+}
+
+/// [`run_capture`], plus the value `counter` reached during the run (TICKET-233). Runs on its own
+/// thread like [`run_program_bytes`], since every counter is thread-local to the VM's own thread.
+#[cfg(test)]
+pub fn run_capture_counting(
+    src: &str,
+    counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
+) -> (Result<String, RuntimeError>, usize) {
     let src = src.to_string();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
-            RUN_PICKS.with(|p| p.set(0));
+            counter.with(|c| c.set(0));
             let (out, result) = run_program_inner(&src);
-            (result.map(|()| captured(out)), RUN_PICKS.with(|p| p.get()))
+            (result.map(|()| captured(out)), counter.with(|c| c.get()))
         })
         .expect("failed to spawn VM thread")
         .join()
@@ -7432,6 +7464,33 @@ pub fn run_file_counting_runners(
             ));
             let (peak, denials, spawns, permits) = RUN_PEAK_RUNNERS.with(|p| p.get());
             (out, peak, denials, spawns, permits)
+        })
+        .expect("failed to spawn VM thread")
+        .join()
+        .expect("VM thread panicked")
+}
+
+/// [`run_file`], plus the value `counter` reached during the run (TICKET-233). The graph-path twin
+/// of [`run_capture_counting`], for a program that needs its `std` imports resolved.
+#[cfg(test)]
+pub fn run_file_counting(
+    entry: &std::path::Path,
+    counter: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
+) -> (RunOutput, usize) {
+    let entry = entry.to_path_buf();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            counter.with(|c| c.set(0));
+            let out = to_str_output(run_file_inner(
+                &entry,
+                crate::native::HostConfig::default(),
+                None,
+                None,
+                false,
+                None,
+            ));
+            (out, counter.with(|c| c.get()))
         })
         .expect("failed to spawn VM thread")
         .join()

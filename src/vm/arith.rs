@@ -1829,6 +1829,8 @@ impl Vm {
         depth: usize,
         span: Span,
     ) -> Result<bool, RuntimeError> {
+        #[cfg(test)]
+        super::ELEM_COMPARES.with(|c| c.set(c.get() + 1));
         if l == r {
             return Ok(true);
         }
