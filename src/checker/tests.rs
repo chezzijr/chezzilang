@@ -39161,3 +39161,50 @@ fn module_fn_docs_name_no_removed_spelling() {
         }
     }
 }
+
+#[test]
+fn plain_value_meets_open_none_carrier_slot() {
+    let cells = [
+        (
+            "assign",
+            "fn main():\n    z := None\n    z = 7\n    print(z)\n",
+        ),
+        ("push", "fn main():\n    xs := [None]\n    xs.push(7)\n"),
+        (
+            "map set",
+            "fn main():\n    m := {\"a\": None}\n    m[\"b\"] = 7\n",
+        ),
+        (
+            "list literal",
+            "fn main():\n    xs := [None, 7]\n    print(xs)\n",
+        ),
+        (
+            "if expression",
+            "fn main():\n    c := true\n    z := if c: None else: 7\n    print(z)\n",
+        ),
+        (
+            "after ??",
+            "fn main():\n    z := None\n    a := z ?? 5\n    z = 7\n    print(a)\n",
+        ),
+        (
+            "module global",
+            "z := None\nfn f():\n    z = 7\nfn main():\n    f()\n",
+        ),
+    ];
+    let failed: Vec<String> = cells
+        .iter()
+        .filter_map(|(name, src)| {
+            let errs = check_src(src);
+            (!errs.is_empty()).then(|| {
+                format!(
+                    "{name}: {:?}",
+                    errs.iter().map(|e| &e.message).collect::<Vec<_>>()
+                )
+            })
+        })
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "plain value must meet an open None carrier; rejected cells: {failed:?}"
+    );
+}
