@@ -6,8 +6,8 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-#[test]
-fn nursery_reader_of_cut_job_is_not_a_false_deadlock() {
+/// One run of the fixture at `threads` workers; `Err` carries the run's stderr.
+fn run_fixture(threads: &str) -> Result<(), String> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/executor_false_deadlock.chz"
@@ -15,7 +15,7 @@ fn nursery_reader_of_cut_job_is_not_a_false_deadlock() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
         .arg("run")
         .arg(path)
-        .env("CHEZZI_THREADS", "2")
+        .env("CHEZZI_THREADS", threads)
         .env_remove("CHEZZI_SCHED_SEED")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -41,5 +41,25 @@ fn nursery_reader_of_cut_job_is_not_a_false_deadlock() {
         std::thread::sleep(Duration::from_millis(5));
     };
     let err = reader.join().expect("stderr reader");
-    assert!(status.is_some_and(|s| s.success()), "run failed: {err}");
+    if status.is_some_and(|s| s.success()) {
+        Ok(())
+    } else {
+        Err(err)
+    }
+}
+
+/// The false verdict is a race: on the debug binary one run ends clean in 7 of 120 runs, and 16
+/// more blame main's `out.recv()` instead of the `parallel:` block. Six runs over three worker
+/// counts (`0` is the default count), every failure reported, leave neither outcome to chance.
+#[test]
+fn nursery_reader_of_cut_job_is_not_a_false_deadlock() {
+    let failed: Vec<String> = ["2", "4", "0", "2", "4", "0"]
+        .into_iter()
+        .filter_map(|threads| run_fixture(threads).err())
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "run failed: {}",
+        failed.join("\nrun failed: ")
+    );
 }
