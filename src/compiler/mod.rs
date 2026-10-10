@@ -3786,7 +3786,9 @@ impl Compiler {
                     Some(
                         crate::checker::CarrierMode::Option | crate::checker::CarrierMode::Unknown,
                     ) => crate::desugar::lower_carrier_option(&mut c, self.next_opt_tmp()),
-                    Some(crate::checker::CarrierMode::Try) => {
+                    Some(
+                        crate::checker::CarrierMode::Try | crate::checker::CarrierMode::OptionVoid,
+                    ) => {
                         return Err(CompileError {
                             message: "internal: a '?.' lowering was recorded for a '??' — the \
                                       type-checker and the backend disagree about this expression"
@@ -3821,6 +3823,9 @@ impl Compiler {
                 match self.carriers.get(&key) {
                     Some(crate::checker::CarrierMode::Try) => {
                         crate::desugar::lower_carrier_try(&mut c)
+                    }
+                    Some(crate::checker::CarrierMode::OptionVoid) => {
+                        crate::desugar::lower_carrier_option_void(&mut c, self.next_opt_tmp())
                     }
                     Some(
                         crate::checker::CarrierMode::Option | crate::checker::CarrierMode::Unknown,

@@ -1577,6 +1577,21 @@ fn variant_pat(id: crate::ast::NodeId, name: &str, bindings: Vec<Pattern>) -> Pa
 /// function, so the synthesized spans (and therefore the `WitnessKey`s derived from
 /// them) cannot drift between consumers.
 pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
+    lower_carrier_option_as(expr, tmp, false)
+}
+
+/// TICKET-239 — the `?.` lowering for a CALL that returns nothing (`CarrierMode::OptionVoid`):
+///   `x?.m(args)` → `match x: Some(__optN): __optN.m(args); None: pass`
+/// The call runs when the value is present and the expression has no value. Same builder as
+/// [`lower_carrier_option`], so both forms give every shared node the same id.
+pub fn lower_carrier_option_void(expr: &mut Expr, tmp: usize) {
+    lower_carrier_option_as(expr, tmp, true)
+}
+
+/// The one builder behind [`lower_carrier_option`] and [`lower_carrier_option_void`]. Both forms
+/// draw node ids in the SAME order: the checker infers the void form speculatively and then, on a
+/// miss, the value form of the same carrier, and the resolve table is not rolled back between.
+fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
     let span = expr.span;
     let (base, k) = (expr.id, std::cell::Cell::new(0));
     let nid = || {
@@ -1648,16 +1663,22 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                     span,
                 },
             };
-            let some_body = Expr {
-                id: nid(),
-                kind: ExprKind::Call {
-                    callee: Box::new(ident_expr_at(nid(), "Some", span)),
-                    args: vec![access],
-                    named: vec![],
-                    type_args: vec![],
-                    bracket: None,
-                },
-                span,
+            // Drawn before the branch, so the void form skips no id.
+            let (wrap_id, some_id) = (nid(), nid());
+            let some_body = if void {
+                access
+            } else {
+                Expr {
+                    id: wrap_id,
+                    kind: ExprKind::Call {
+                        callee: Box::new(ident_expr_at(some_id, "Some", span)),
+                        args: vec![access],
+                        named: vec![],
+                        type_args: vec![],
+                        bracket: None,
+                    },
+                    span,
+                }
             };
             let arm_span = obj.span;
             ExprKind::Match {
@@ -1679,7 +1700,11 @@ pub fn lower_carrier_option(expr: &mut Expr, tmp: usize) {
                         guard: None,
                         body: Expr {
                             id: nid(),
-                            kind: ExprKind::NoneLit,
+                            kind: if void {
+                                ExprKind::Pass
+                            } else {
+                                ExprKind::NoneLit
+                            },
                             span,
                         },
                     },

@@ -38685,3 +38685,41 @@ fn coalesce_mismatch_names_the_operator() {
         "branches have incompatible types: int and str",
     );
 }
+
+/// TICKET-239: `x?.m()` on a method that returns nothing has no value. It is legal wherever a
+/// plain call that returns nothing is legal (`infer` against `infer_value` decides, no statement
+/// flag), and an error wherever a value is needed.
+#[test]
+fn optional_chain_void_call_has_no_value() {
+    let c = "struct C:\n    n: int\n    fn bump(self):\n        self.n += 1\n    fn get(self) -> int:\n        return self.n\n";
+    let each = "fn each[T](xs: List[T], f: fn(T) -> None):\n    for x in xs:\n        f(x)\n";
+    for prog in [
+        "c: C? = C(0)\nc?.bump()\n",
+        "fn main():\n    c: C? = C(0)\n    c?.bump()\n",
+        "fn poke(c: C?): c?.bump()\n",
+        "c: C? = C(0)\nf := fn(): c?.bump()\nf()\n",
+        "c: C? = C(0)\nif true: c?.bump()\n",
+        "c: C? = C(0)\nmatch 1:\n    1: c?.bump()\n    _: pass\n",
+    ] {
+        ok(&format!("{c}{prog}"));
+        no_warn(&format!("{c}{prog}"));
+    }
+    let gen_closure = format!("{c}{each}xs: List[C?] = [C(0)]\neach(xs, fn(a): a?.bump())\n");
+    ok(&gen_closure);
+    no_warn(&gen_closure);
+    for value_use in ["x := c?.bump()", "print(c?.bump())", "xs := [c?.bump()]"] {
+        rejects(
+            &format!("{c}c: C? = C(0)\n{value_use}\n"),
+            "expression returns no value",
+        );
+    }
+    // A call that returns a value keeps the value lowering and its discarded-value warning.
+    warns(
+        &format!("{c}c: C? = C(0)\nc?.get()\n"),
+        "value here is discarded",
+    );
+    ok(&format!("{c}c: C? = C(0)\nv := c?.get()\nw: int? = v\n"));
+    ok(&format!(
+        "{c}xs: List[C?] = [C(0)]\nys: List[int?] = xs.map(fn(a): a?.get())\n"
+    ));
+}

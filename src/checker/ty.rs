@@ -100,6 +100,9 @@ pub type CarrierKey = (usize, Span, usize, Span);
 pub enum CarrierMode {
     /// Operand is an `Option[T]` — the `match x: Some(__optN): Some(…); None: None` lowering.
     Option,
+    /// Operand is an `Option[T]` and the call returns nothing — the
+    /// `match x: Some(__optN): __optN.m(..); None: pass` lowering. The expression has no value.
+    OptionVoid,
     /// Operand is a `Result[T, E]` — `?` then `.`, byte-identical to the spaced `x? .f` spelling.
     Try,
     /// `??` operand is a `Result[T, E]` — `match x: Ok(__optN): __optN; Err(_): rhs`, discarding the
