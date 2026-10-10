@@ -4014,19 +4014,12 @@ impl Checker {
         }
     }
 
-    /// Infer a single call argument in *checking mode*: if the argument is a closure literal and the
-    /// expected slot type is a `fn(..)`, infer the closure WITH that expected type (source #1 — so its
-    /// unannotated params bind to the expected param types and call sites are checked); otherwise it is
-    /// the ordinary bottom-up [`Checker::infer_value`]. The single seam every `fn`-typed slot routes
-    /// through, so closure-detection lives in one place.
+    /// Infer a single call argument in *checking mode*: the argument owns `expected` as its slot
+    /// (a closure literal binds its unannotated params from it, a generic call pre-seeds its type
+    /// params, a plain `T` wraps into a `T?`/`T!E`); with no expected type it is the ordinary
+    /// bottom-up [`Checker::infer_value`].
     pub(super) fn infer_arg(&mut self, arg: &Expr, expected: Option<&Ty>) -> Ty {
-        if let ExprKind::Closure { params, ret, body } = &arg.kind {
-            if matches!(expected, Some(Ty::Func { .. })) {
-                return self.infer_closure(params, ret.as_ref(), body, expected);
-            }
-            return self.infer_value(arg);
-        }
-        // Non-closure arg: thread the declared parameter type as an expected-type hint so a generic
+        // Thread the declared parameter type as an expected-type hint so a generic
         // ctor / generic fn-call passed directly as a call argument pre-seeds its type params —
         // `take(Heap([], fn(x, y): x < y))` with `fn take(h: Heap[int])` pins `T=int`. `infer_call`
         // consumes the hint; pair set+clear so a non-call arg never leaks it into a sibling arg.
@@ -4041,12 +4034,6 @@ impl Checker {
     /// type params from it) but never wraps the arg. For a hint that is not the arg's own slot type
     /// (the `Some`/`Ok`/`Err` payload, the TICKET-124 ctor hint into a bare `T` slot).
     pub(super) fn infer_arg_seeded(&mut self, arg: &Expr, hint: &Ty) -> Ty {
-        if let ExprKind::Closure { params, ret, body } = &arg.kind {
-            if matches!(hint, Ty::Func { .. }) {
-                return self.infer_closure(params, ret.as_ref(), body, Some(hint));
-            }
-            return self.infer_value(arg);
-        }
         self.install_hint(arg, hint.clone(), false);
         let t = self.infer_value(arg);
         self.expected_hint = None;

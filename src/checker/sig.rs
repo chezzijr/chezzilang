@@ -565,14 +565,6 @@ impl Checker {
         // Otherwise ordinary bottom-up inference.
         let let_mark = self.tyvar_mark();
         let val_ty = match &annotated {
-            Some(expected) if matches!(value.kind, ExprKind::Closure { .. }) => {
-                if matches!(expected, Ty::Func { .. }) {
-                    let expected = expected.clone();
-                    self.infer_arg(value, Some(&expected))
-                } else {
-                    self.infer_value(value)
-                }
-            }
             // Expected-type checking-mode for a NON-closure value bound to an annotation:
             // thread the annotation as a hint into the value's inference so a generic
             // ctor / generic fn-call pre-seeds its type params from it — `a: Heap[int] =
@@ -2623,36 +2615,19 @@ impl Checker {
                     self.infer_value(value);
                     return;
                 }
-                // Checking-mode: a closure assigned to a `fn`-typed lvalue (a struct fn-field or a
-                // fn-typed variable) binds its unannotated params from the target's type (source #1).
-                let val_ty = if matches!(value.kind, ExprKind::Closure { .. }) {
-                    // Discover the target's type for checking-mode WITHOUT diagnosing it: inferring
-                    // an lvalue as an rvalue would run read-side gates (non-sendable-captured-binding
-                    // read) and double-infer a Field/Index receiver. `check_assign` below is the sole
-                    // validator of the target, so snapshot+truncate any errors this probe produces
-                    // (mirrors the generic-arg recovery idiom).
-                    let mark = self.diag_mark();
-                    let target_ty = self.infer(target);
-                    self.diag_rollback(mark);
-                    if matches!(target_ty, Ty::Func { .. }) {
-                        self.infer_arg(value, Some(&target_ty))
-                    } else {
-                        self.infer_value(value)
-                    }
-                } else if *op == AssignOp::Eq
+                let val_ty = if *op == AssignOp::Eq
                     && matches!(
                         target.kind,
                         ExprKind::Ident(_)
                             | ExprKind::Index { .. }
                             | ExprKind::Field { .. }
                             | ExprKind::Tuple(_)
-                    )
-                {
+                    ) {
                     // TICKET-124 (W13-14): the hint that seeds a FRESH literal/call value used to
                     // exist only at DECLARATION (an annotated `let`, a call argument, a return) —
                     // reassignment, index-assign and field-assign have a statically known target
-                    // type too. Probe it speculatively (mark/rollback, same idiom as the closure
-                    // branch above) so an lvalue read never double-diagnoses.
+                    // type too. Probe it speculatively (mark/rollback) so an lvalue read never
+                    // double-diagnoses.
                     // TICKET-227: the target type is the value's slot, for every value kind, so a
                     // plain value wraps into a carrier target; a tuple literal splits per element
                     // (`x, y = 5, 0`). Only `=` reaches here: `+=` never wraps (DEC-107).
@@ -4380,14 +4355,10 @@ impl Checker {
         let ret = self.current_ret.clone();
         match value {
             Some(e) => {
-                // Checking-mode: a closure returned into a `fn`-typed return slot binds its
-                // unannotated params from the declared return type (source #1). A NON-closure return
-                // keeps plain `infer` (NOT `infer_value`): returning `nil` just makes a void fn — it
+                // A return keeps plain `infer` (NOT `infer_value`): returning `nil` just makes a void fn — it
                 // is not "using nil as a value", so it must not get `infer_value`'s nil-rejection on
                 // top of check_return's own `function returns nothing` diagnostic.
-                let ty = if matches!(e.kind, ExprKind::Closure { .. }) {
-                    self.infer_arg(e, Some(&ret))
-                } else {
+                let ty = {
                     // Expected-type checking-mode: thread the declared return type as a hint so a
                     // returned generic ctor / generic fn-call pre-seeds its type params from it —
                     // `fn mk() -> Heap[int]: return Heap([], fn(x, y): x < y)` pins `T=int`. `unify`

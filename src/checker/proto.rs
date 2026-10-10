@@ -1262,9 +1262,8 @@ impl Checker {
         if !crate::checker::ty_fully_concrete(ret) {
             return None;
         }
-        match ret {
-            Ty::Option(inner) if self.assignable(inner, ty) => Some(crate::checker::Wrap::Some),
-            Ty::Result(t, _) if self.assignable(t, ty) => Some(crate::checker::Wrap::Ok),
+        match ret.carrier_parts() {
+            Some((w, payload, _)) if self.assignable(payload, ty) => Some(w),
             _ => None,
         }
     }

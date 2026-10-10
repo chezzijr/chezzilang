@@ -38508,3 +38508,24 @@ fn closure_literal_wraps_into_an_optional_fn_slot() {
         "fn take(cb: (fn(int) -> int)?) -> int:\n    f := cb else: return 0\n    return f(4)\nprint(take(fn(a: int) -> int: a + 1))\n",
     );
 }
+
+/// TICKET-239: a closure literal reads its expected type in the `Closure` arm of `infer`, through
+/// one carrier layer, so every slot kind gives it the same verdict.
+#[test]
+fn closure_literal_reads_its_slot_through_one_carrier_layer() {
+    for c in ["fn(a): a + 1", "fn(a: int) -> int: a + 1"] {
+        ok(&format!("f: (fn(int) -> int)? = {c}\n"));
+        ok(&format!(
+            "fn take(cb: (fn(int) -> int)?) -> int:\n    f := cb else: return 0\n    return f(4)\nprint(take({c}))\n"
+        ));
+        ok(&format!(
+            "struct S:\n    f: (fn(int) -> int)?\ns := S(None)\ns.f = {c}\n"
+        ));
+        ok(&format!("fn mk() -> (fn(int) -> int)?:\n    return {c}\n"));
+    }
+    ok("xs: List[fn(int) -> int] = [fn(a): a + 1]\n");
+    rejects(
+        "f: (fn(int) -> int)? = fn(a: str) -> int: 1\n",
+        "cannot assign",
+    );
+}

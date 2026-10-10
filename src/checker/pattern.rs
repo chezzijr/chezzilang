@@ -1907,10 +1907,7 @@ impl Checker {
         }
         let Some(w) = slot
             .or(self.expected_hint.as_ref())
-            .and_then(|h| {
-                h.width()
-                    .or_else(|| h.carrier_payload().and_then(|p| p.width()))
-            })
+            .and_then(|h| h.width().or_else(|| h.slot_payload().width()))
             .cloned()
         else {
             return;
@@ -1967,10 +1964,7 @@ impl Checker {
                 // arg, a return position — or the synthesized variadic list). `take()` so the
                 // hint drives THIS literal's element type and never leaks into a nested element
                 // call. `None` keeps the ordinary bottom-up inference.
-                let hint = self
-                    .expected_hint
-                    .take()
-                    .map(|t| Self::sink_payload(&t).clone());
+                let hint = self.expected_hint.take().map(|t| t.slot_payload().clone());
                 self.infer_list(items, hint.as_ref())
             }
             ExprKind::Tuple(items) => {
@@ -1999,17 +1993,11 @@ impl Checker {
             // OUTER `Map[str, List[int]]` stayed in the slot and was consumed — wasted — by the first
             // entry's own inference.
             ExprKind::Map(entries) => {
-                let hint = self
-                    .expected_hint
-                    .take()
-                    .map(|t| Self::sink_payload(&t).clone());
+                let hint = self.expected_hint.take().map(|t| t.slot_payload().clone());
                 self.infer_map(entries, hint.as_ref())
             }
             ExprKind::Set(elems) => {
-                let hint = self
-                    .expected_hint
-                    .take()
-                    .map(|t| Self::sink_payload(&t).clone());
+                let hint = self.expected_hint.take().map(|t| t.slot_payload().clone());
                 self.infer_set(elems, hint.as_ref())
             }
             ExprKind::Comprehension {
@@ -2087,9 +2075,16 @@ impl Checker {
                 self.infer_null_coalesce(expr, lhs, *op_span)
             }
             ExprKind::Closure { params, ret, body } => {
-                // No expected type at the generic `infer` seam — free-closure inference (sources
-                // #2/#3) and the ambiguity check happen inside `infer_closure`.
-                self.infer_closure(params, ret.as_ref(), body, None)
+                // The closure reads its expected `fn` type from the hint like a list literal
+                // does, through one carrier layer; `meet_slot` wraps it. With no `fn` slot the
+                // free-closure inference (sources #2/#3) and the ambiguity check happen inside
+                // `infer_closure`.
+                let hint = self.expected_hint.take();
+                let exp = hint
+                    .as_ref()
+                    .map(|h| h.slot_payload())
+                    .filter(|h| matches!(h, Ty::Func { .. }));
+                self.infer_closure(params, ret.as_ref(), body, exp)
             }
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms, owned),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els, owned),
@@ -3613,28 +3608,6 @@ impl Checker {
         Ty::Unknown
     }
 
-    /// A bare collection literal at a `T?` / `T!E` sink coerces to `Some(v)` / `Ok(v)` (W8-21), so the
-    /// literal's real expected type is the carrier's PAYLOAD, not the carrier. Without this unwrap the
-    /// element hint stopped at the carrier and nothing reached the items — the same laundering the
-    /// expected-type propagation exists to close, just one sink shape further out. Measured before:
-    /// `fn mk() -> List[List[int]]?: return [empty_list(), ["x"]]` was check-clean at rc=0 and
-    /// `xs[1][0] + 1` faulted at run time, while the identical body at a bare `-> List[List[int]]`
-    /// was correctly rejected. It also un-breaks two FALSE REJECTIONS that predate the propagation:
-    /// `fn opt() -> List[Shape]?: return [C(), S()]` was *list elements differ: C vs S* where the
-    /// bare `-> List[Shape]` accepts it, and `xs: List[float]? = [1, 2]` was *cannot assign
-    /// List[int] to variable of type List[float]?* where the bare annotation widens.
-    ///
-    /// Terminates: every step strictly descends into a smaller type.
-    fn sink_payload(t: &Ty) -> &Ty {
-        let mut cur = t;
-        loop {
-            match cur {
-                Ty::Option(inner) | Ty::Result(inner, _) => cur = inner,
-                _ => return cur,
-            }
-        }
-    }
-
     pub(super) fn infer_list(&mut self, items: &[Expr], expected: Option<&Ty>) -> Ty {
         let sib = match expected {
             Some(Ty::List(e)) if !e.is_unknown() => None,
@@ -4027,9 +4000,9 @@ impl Checker {
     /// satisfy the `Error` protocol.
     fn infer_err_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
         let hint = self.expected_hint.take();
-        let t = match &hint {
-            Some(Ty::Result(_, e)) => {
-                self.expected_hint = Some((**e).clone());
+        let t = match hint.as_ref().and_then(|h| h.carrier_parts()) {
+            Some((_, _, Some(e))) => {
+                self.expected_hint = Some(e.clone());
                 let t = self.infer_value(inner);
                 self.expected_hint = None;
                 t
@@ -4069,10 +4042,9 @@ impl Checker {
     /// the carrier over its operand's type.
     fn infer_wrap_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
         let hint = self.expected_hint.take();
-        let (payload, w) = match &hint {
-            Some(Ty::Option(p)) => ((**p).clone(), crate::checker::Wrap::Some),
-            Some(Ty::Result(p, _)) => ((**p).clone(), crate::checker::Wrap::Ok),
-            _ => {
+        let (payload, w) = match hint.as_ref().and_then(|h| h.carrier_parts()) {
+            Some((w, p, _)) => (p.clone(), w),
+            None => {
                 let t = self.infer_value(inner);
                 if self.in_fn_body && !self.resolving_returns {
                     let v = self.defer_carrier(node, super::tyvar::CarrierKind::Present(t));
@@ -4094,10 +4066,10 @@ impl Checker {
         }
         self.record_wrap(node.id, w, node.span);
         if !crate::checker::ty_fully_concrete(&payload) && !t.is_unknown() {
-            return match hint {
-                Some(Ty::Option(_)) => Ty::Option(Box::new(t)),
-                Some(Ty::Result(_, e)) => Ty::Result(Box::new(t), e),
-                _ => Ty::Unknown,
+            return match hint.as_ref().and_then(|h| h.carrier_parts()) {
+                Some((_, _, Some(e))) => Ty::Result(Box::new(t), Box::new(e.clone())),
+                Some(_) => Ty::Option(Box::new(t)),
+                None => Ty::Unknown,
             };
         }
         hint.unwrap_or(Ty::Unknown)

@@ -516,12 +516,25 @@ impl Ty {
         Ty::Struct(name.into(), Vec::new())
     }
 
-    /// The payload slot a plain value fills when it wraps into this carrier (`T` of `T?` / `T!E`).
-    pub fn carrier_payload(&self) -> Option<&Ty> {
+    /// The one carrier destructure: the wrap that builds this carrier from a plain value, its
+    /// payload, and its error type (`T!E` only). `None` for a type that is not a carrier.
+    pub fn carrier_parts(&self) -> Option<(crate::checker::Wrap, &Ty, Option<&Ty>)> {
         match self {
-            Ty::Option(p) | Ty::Result(p, _) => Some(p),
+            Ty::Option(p) => Some((crate::checker::Wrap::Some, p, None)),
+            Ty::Result(p, e) => Some((crate::checker::Wrap::Ok, p, Some(e))),
             _ => None,
         }
+    }
+
+    /// The payload slot a plain value fills when it wraps into this carrier (`T` of `T?` / `T!E`).
+    pub fn carrier_payload(&self) -> Option<&Ty> {
+        self.carrier_parts().map(|c| c.1)
+    }
+
+    /// The slot a literal reads its expected type from: this type with ONE carrier layer looked
+    /// through (`meet_slot` wraps one layer, so a deeper strip accepts nothing more).
+    pub fn slot_payload(&self) -> &Ty {
+        self.carrier_payload().unwrap_or(self)
     }
 
     /// The C width a slot type carries (`Ty::Width`), if any.
