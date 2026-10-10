@@ -4067,9 +4067,10 @@ impl Checker {
     ///
     /// TICKET-239: `owned` and `seed` are [`Checker::slot_seed`]'s answer, substituted FIRST. An
     /// argument whose slot is concrete under `owned` owns that slot (the same `infer_arg` call a
-    /// non-generic path makes, so it wraps and meets its width); one concrete only under `seed`
-    /// takes it as a seed; only a closure whose slot still depends on a sibling argument is
-    /// prepassed. The returned [`ArgPass`] per argument is the one record of which happened.
+    /// non-generic path makes, so it wraps and meets its width); a closure at a fn-typed slot
+    /// that is not is prepassed, `seed` or no `seed`; any other argument concrete only under
+    /// `seed` takes it as a seed. The returned [`ArgPass`] per argument is the one record of
+    /// which happened.
     pub(super) fn infer_generic_arg_tys(
         &mut self,
         args: &[Expr],
@@ -4093,13 +4094,21 @@ impl Checker {
                 {
                     return (self.infer_arg(a, Some(s)), ArgPass::Checked);
                 }
-                if let Some(s) = slot.as_ref().map(|s| subst(s, seed))
-                    && !seed.is_empty()
-                    && ty_concrete_but(&s, &|n| self.rigid_param(n, &free))
+                let seeded = slot
+                    .as_ref()
+                    .filter(|_| !seed.is_empty())
+                    .map(|s| subst(s, seed))
+                    .filter(|s| ty_concrete_but(s, &|n| self.rigid_param(n, &free)));
+                // A seed is a guess at `T`. A closure at a fn-typed slot (`f: fn(T) -> T`) never
+                // takes it: `r: int? = apply(5, fn(x): x + 1)` solves `T = int` from `5`, and a
+                // closure typed from the guess would never be re-inferred. A closure that IS the
+                // `T` (`x: T`) has no sibling to wait for, so the seed is its only source.
+                let fn_slot = slot
+                    .as_ref()
+                    .is_some_and(|s| matches!(s.slot_payload(), Ty::Func { .. }));
+                if let ExprKind::Closure { ret, .. } = &a.kind
+                    && (fn_slot || seeded.is_none())
                 {
-                    return (self.infer_arg_seeded(a, &s), ArgPass::Checked);
-                }
-                if let ExprKind::Closure { ret, .. } = &a.kind {
                     let mark = self.diag_mark();
                     // Keep the closure's unannotated params `Unknown` in the unification prepass —
                     // the free-body scan (sources #2/#3) must not pin them here (see the field doc).
@@ -4110,6 +4119,9 @@ impl Checker {
                     // An annotated return is a written type, never a prepass guess.
                     let ret_inferred = ret.is_none();
                     return (t, ArgPass::Prepass { ret_inferred });
+                }
+                if let Some(s) = seeded {
+                    return (self.infer_arg_seeded(a, &s), ArgPass::Checked);
                 }
                 (self.infer_value(a), ArgPass::Checked)
             })

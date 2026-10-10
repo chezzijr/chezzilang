@@ -2708,7 +2708,7 @@ fn d3_an_annotation_reaches_through_a_collection_literal() {
     );
 
     // CEILING, second (TICKET-033): the int→float element widen does not reach through a carrier,
-    // because the license is computed from the SINK TYPE before `sink_payload` unwraps it — a
+    // because the license is computed from the SINK TYPE before `slot_payload` unwraps it — a
     // `List[float]?` sink resolves to `Ty::Option(..)`, on which `float_elem_hint_ty` answers `None`
     // by construction, never `Ty::List(Float)`. `docs/spec.md` and `docs/syntax.md` document this as
     // deliberate.
@@ -38590,6 +38590,44 @@ fn an_owned_slot_closure_is_not_return_masked() {
     ok(&format!("{ap}x := ap(fn(a): a + 2)\n"));
     ok(&format!("{two}x := two[int, str](1, fn(a): \"s{{a}}\")\n"));
     ok(&format!("{two}x := two(1, fn(a) -> str: \"t{{a}}\")\n"));
+}
+
+/// TICKET-239: a carrier annotation over a bare-`T` return is a guess at `T`, so it never types
+/// a closure argument's parameters; the closure is prepassed and re-inferred against the `T` its
+/// sibling arguments solve, and the result wraps at the binding.
+#[test]
+fn a_seed_only_slot_never_types_a_closure_argument() {
+    let apply = "fn apply[T](x: T, f: fn(T) -> T) -> T:\n    return f(x)\n";
+    let ap = "fn ap[T](f: fn(T) -> T, x: T) -> T:\n    return f(x)\n";
+    let reduce = "fn reduce[T](xs: List[T], f: fn(T, T) -> T) -> T:\n    return f(xs[0], xs[1])\n";
+    ok(&format!("{apply}r: int? = apply(5, fn(x): x + 1)\n"));
+    ok(&format!("{apply}r: int!str = apply(5, fn(x): x + 1)\n"));
+    ok(&format!(
+        "{apply}r: int? = apply(5, fn(x: int) -> int: x + 1)\n"
+    ));
+    ok(&format!("{ap}r: int? = ap(fn(x): x + 1, 5)\n"));
+    ok(&format!(
+        "{reduce}fn total(xs: List[int]) -> int?:\n    return reduce(xs, fn(a, b): a + b)\n"
+    ));
+    // The seed still reaches a non-closure sibling: `T` is `int?` here, so the closure's `x` is too.
+    ok(&format!("{ap}r: int? = ap(fn(x): x, None)\n"));
+    ok(&format!("{ap}r: int? = ap(fn(x): x, ?5)\n"));
+    rejects(
+        &format!("{ap}r: int? = ap(fn(x): x + 1, ?5)\n"),
+        "cannot apply + to int? and int",
+    );
+    // A closure that IS the `T` has no sibling to wait for: the seed is its only source.
+    let g = "fn g[T](x: T) -> T:\n    return x\n";
+    ok(&format!("{g}r: (fn(int) -> int)? = g(fn(a): a + 1)\n"));
+    rejects(
+        &format!("{g}r: int? = g(fn(a): a + 1)\n"),
+        "cannot infer type of parameter 'a'",
+    );
+    // A prepassed closure still reports its body errors against the solved `T`.
+    rejects(
+        &format!("{apply}r: int? = apply(5, fn(x): x.nope())\n"),
+        "nope",
+    );
 }
 
 /// TICKET-239: an un-annotated `if` / `match` / `??` join of two `T!E` values keeps `T!E`; no
