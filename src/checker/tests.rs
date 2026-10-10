@@ -39361,7 +39361,7 @@ fn std_internal_names_are_hidden_from_user_modules() {
 /// TICKET-246: `Shared[T]` gains `read(f)` (the closure runs inside the box heap, result copied out).
 #[test]
 fn shared_has_a_read_method() {
-    ok(
-        "import std.concurrency\nfn main():\n    s := Shared([1, 2, 3])\n    n := s.read(fn(l): l.len())\n    print(n)\nmain()\n",
+    entry_ok(
+        "import std.concurrency\nfn main():\n    s := Shared([1, 2, 3])\n    n := s.read(fn(l: List[int]) -> int: l.len())\n    print(n)\nmain()\n",
     );
 }
