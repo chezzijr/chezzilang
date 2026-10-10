@@ -39033,3 +39033,124 @@ fn one_line_if_statement_branches_need_not_join() {
         "update",
     );
 }
+
+/// TICKET-243: the container methods leave `RwShared`; the collections in `std.concurrency.collection`
+/// own them. Every removed method is a `no method` error whose help names the collection type.
+#[test]
+fn rwshared_container_methods_are_not_public() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "[1, 2]",
+            "len()",
+            "ConcurrentList",
+            "use ConcurrentList from std.concurrency.collection",
+        ),
+        (
+            "[1, 2]",
+            "at(0)",
+            "ConcurrentList",
+            "use ConcurrentList from std.concurrency.collection",
+        ),
+        (
+            "[1, 2]",
+            "slice(0, 1)",
+            "ConcurrentList",
+            "use ConcurrentList from std.concurrency.collection",
+        ),
+        (
+            "[1, 2]",
+            "for_each(|x| print(x))",
+            "ConcurrentList",
+            "use ConcurrentList from std.concurrency.collection",
+        ),
+        (
+            "[1, 2]",
+            "fold(0, |a, x| a + x)",
+            "ConcurrentList",
+            "use ConcurrentList from std.concurrency.collection",
+        ),
+        (
+            "{\"a\": 1}",
+            "len()",
+            "ConcurrentMap",
+            "use ConcurrentMap from std.concurrency.collection",
+        ),
+        (
+            "{\"a\": 1}",
+            "get_key(\"a\")",
+            "ConcurrentMap",
+            "use ConcurrentMap from std.concurrency.collection",
+        ),
+        (
+            "{\"a\": 1}",
+            "has(\"a\")",
+            "ConcurrentMap",
+            "use ConcurrentMap from std.concurrency.collection",
+        ),
+        (
+            "{\"a\": 1}",
+            "set_key(\"a\", 2)",
+            "ConcurrentMap",
+            "use ConcurrentMap from std.concurrency.collection",
+        ),
+        (
+            "{\"a\": 1}",
+            "remove_key(\"a\")",
+            "ConcurrentMap",
+            "use ConcurrentMap from std.concurrency.collection",
+        ),
+        (
+            "{\"a\": 1}",
+            "for_each_entry(|k, v| print(k))",
+            "ConcurrentMap",
+            "use ConcurrentMap from std.concurrency.collection",
+        ),
+        (
+            "{\"a\": 1}",
+            "fold_entries(0, |a, k, v| a + v)",
+            "ConcurrentMap",
+            "use ConcurrentMap from std.concurrency.collection",
+        ),
+        (
+            "{\"a\": 1}",
+            "get_or_insert(\"b\", || 2)",
+            "ConcurrentMap",
+            "use ConcurrentMap from std.concurrency.collection",
+        ),
+        (
+            "{1, 2}",
+            "len()",
+            "ConcurrentSet",
+            "use ConcurrentSet from std.concurrency.collection",
+        ),
+        (
+            "{1, 2}",
+            "contains(1)",
+            "ConcurrentSet",
+            "use ConcurrentSet from std.concurrency.collection",
+        ),
+        (
+            "{1, 2}",
+            "for_each(|x| print(x))",
+            "ConcurrentSet",
+            "use ConcurrentSet from std.concurrency.collection",
+        ),
+        (
+            "{1, 2}",
+            "fold(0, |a, x| a + x)",
+            "ConcurrentSet",
+            "use ConcurrentSet from std.concurrency.collection",
+        ),
+    ];
+    for (init, call, _ty, help) in cases {
+        let src = format!(
+            "import std.concurrency\nfn main():\n    r := RwShared({init})\n    r.{call}\nmain()\n"
+        );
+        let errs = check_entry(&src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("has no method")
+                && e.help.as_deref().is_some_and(|h| h.contains(help))),
+            "r.{call}: expected `has no method` with help containing {help:?}, got: {errs:?}"
+        );
+    }
+}
