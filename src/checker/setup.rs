@@ -2964,28 +2964,32 @@ impl Checker {
         plan.iter()
             .filter_map(|fill| match fill {
                 crate::checker::ArgFill::Arg(i) => combined(*i).map(fn_writes::SlotSrc::Arg),
-                crate::checker::ArgFill::Pack(_) => Some(fn_writes::SlotSrc::Pack),
-                crate::checker::ArgFill::Inline { expr, .. } => Some(fn_writes::SlotSrc::Default {
-                    literal_container: matches!(
-                        expr.kind,
-                        ExprKind::List(..) | ExprKind::Map(..) | ExprKind::Set(..)
-                    ),
-                }),
-                crate::checker::ArgFill::Provider(_) => Some(fn_writes::SlotSrc::Default {
-                    literal_container: false,
-                }),
+                // A pack with an index the call does not hold has no positional shape.
+                crate::checker::ArgFill::Pack(idx) => Some(
+                    idx.iter()
+                        .map(|i| combined(*i))
+                        .collect::<Option<Vec<_>>>()
+                        .map_or(fn_writes::SlotSrc::Default { inline: false }, |elems| {
+                            fn_writes::SlotSrc::Pack(elems)
+                        }),
+                ),
+                crate::checker::ArgFill::Inline { .. } => {
+                    Some(fn_writes::SlotSrc::Default { inline: true })
+                }
+                crate::checker::ArgFill::Provider(_) => {
+                    Some(fn_writes::SlotSrc::Default { inline: false })
+                }
             })
             .collect()
     }
 
     /// D4 layer A: report a certain write the statically named callee makes to a parent binding.
     /// Parameter `i` reads `slots[i]`; a slot that is not a caller-written expression, or whose
-    /// `crossings` entry is `Move`, reaches no parent binding.
+    /// expression is not a name chain (`fn_writes::chain`), reaches no parent binding.
     pub(super) fn report_named_call_writes(
         &mut self,
         callee: &Expr,
         slots: &[fn_writes::SlotSrc],
-        crossings: Option<&[crate::checker::Crossing]>,
         force_task: bool,
     ) {
         if !force_task && !self.in_spawn_block {
@@ -2998,11 +3002,6 @@ impl Checker {
         for effect in summary.writes {
             let (name, mut path, copied) = match &effect.root {
                 fn_writes::WriteRoot::Param(index) => {
-                    if crossings.and_then(|c| c.get(*index))
-                        == Some(&crate::checker::Crossing::Move)
-                    {
-                        continue;
-                    }
                     let Some(fn_writes::SlotSrc::Arg(arg)) = slots.get(*index) else {
                         continue;
                     };

@@ -38823,3 +38823,143 @@ fn optional_chain_void_call_has_no_value() {
         "{c}xs: List[C?] = [C(0)]\nys: List[int?] = xs.map(fn(a): a?.get())\n"
     ));
 }
+
+/// The `CallCrossing` of the one spawn in `src`.
+fn spawn_crossing(src: &str) -> crate::checker::CallCrossing {
+    let tokens = lexer::tokenize(src).expect("lex should succeed");
+    let mut m = parser::parse(tokens).unwrap_or_else(|e| panic!("parse failed: {e:?}\n{src}"));
+    crate::desugar::run_standalone(&mut m).unwrap_or_else(|e| panic!("desugar failed: {e:?}"));
+    assert_eq!(format!("{:?}", check_diags(&m)), "(Ok(()), [])", "{src}");
+    let table = crate::checker::resolve_call_tables_standalone(&m.stmts).8;
+    assert_eq!(table.len(), 1, "one spawn per program\n{src}");
+    table.into_values().next().unwrap()
+}
+
+/// TICKET-240 Rule S: `Checker::fresh_shape` decides, per node of a spawn operand, whether the
+/// parent can still reach the object. One cell per rule line, as `(param, operand, slot shapes)`.
+#[test]
+fn fresh_shape_grid() {
+    let head = "struct S:\n    a: List[int]\n    b: List[int]\n    fn go(self):\n        pass\nstruct Key:\n    id: int\n    log: List[int]\n    fn hash(self) -> int:\n        return self.id\n    fn eq(self, other: Key) -> bool:\n        return self.id == other.id\nenum E:\n    V(List[int])\nfn mk() -> List[int]:\n    return [0]\n";
+    let main = "fn main():\n    xs := [0]\n    n := 1\n    s := S([], [])\n    k := Key(1, [])\n    ks := [k]\n    msg := str(n)\n    _ := (xs, n, s, k, ks, msg)\n    parallel:\n";
+    let deep = |n: usize| format!("{}0{}", "[".repeat(n), "]".repeat(n));
+    let deep_ty = |n: usize| format!("{}int{}", "List[".repeat(n), "]".repeat(n));
+    let deep17 = format!("[{}Marked{}]", "Node(At([".repeat(16), "]))".repeat(16));
+    let cells: Vec<(String, String, String)> = [
+        // Scalars and literals.
+        ("x: int", "1", "[All]"),
+        ("x: str", "'a'", "[All]"),
+        ("x: List[List[int]]", "[[0], [1]]", "[All]"),
+        ("x: List[List[int]]", "[xs]", "[Node(At([Marked]))]"),
+        (
+            "x: List[List[int]]",
+            "[[], xs]",
+            "[Node(At([All, Marked]))]",
+        ),
+        (
+            "x: (List[int], int)",
+            "(xs, 1)",
+            "[Node(At([Marked, All]))]",
+        ),
+        ("x: Set[int]", "{1, 2}", "[All]"),
+        ("x: Set[int]", "{n}", "[Node(Marked)]"),
+        // A map: a key that is not fresh keeps the map from `All`.
+        ("x: Map[int, List[int]]", "{1: []}", "[All]"),
+        ("x: Map[int, List[int]]", "{1: xs}", "[Node(Marked)]"),
+        ("x: Map[int, List[int]]", "{1: [], 2: xs}", "[Node(Marked)]"),
+        (
+            "x: Map[int, List[List[int]]]",
+            "{1: [[]], 2: [xs]}",
+            "[Node(Each(Node(Marked)))]",
+        ),
+        ("x: Map[Key, List[int]]", "{k: []}", "[Node(Each(All))]"),
+        (
+            "x: Map[Key, List[int]]",
+            "{x: [] for x in ks}",
+            "[Node(Each(All))]",
+        ),
+        (
+            "x: Map[Key, List[int]]",
+            "{x: xs for x in ks}",
+            "[Node(Marked)]",
+        ),
+        // Comprehensions.
+        ("x: List[List[int]]", "[[0] for _i in range(1)]", "[All]"),
+        (
+            "x: List[List[int]]",
+            "[[i] for i in range(1)]",
+            "[Node(Each(Node(At([Marked]))))]",
+        ),
+        (
+            "x: List[List[int]]",
+            "[xs for _i in range(1)]",
+            "[Node(Marked)]",
+        ),
+        ("x: Set[int]", "{1 for _i in range(1)}", "[All]"),
+        ("x: Set[int]", "{i for i in range(1)}", "[Node(Marked)]"),
+        // Carriers: explicit, error value, implicit.
+        ("x: List[int]?", "?[]", "[All]"),
+        ("x: List[int]?", "?xs", "[Node(At([Marked]))]"),
+        ("x: int!str", "!'e'", "[All]"),
+        ("x: int!str", "!msg", "[Node(At([Marked]))]"),
+        ("x: List[int]?", "[]", "[All]"),
+        ("x: List[int]?", "xs", "[Node(At([Marked]))]"),
+        ("x: List[int]!str", "xs", "[Node(At([Marked]))]"),
+        (
+            "x: List[List[int]]?",
+            "[xs]",
+            "[Node(At([Node(At([Marked]))]))]",
+        ),
+        ("x: List[int]??", "??xs", "[Node(At([Node(At([Marked]))]))]"),
+        // `copy()` is shallow, and only a container's.
+        ("x: List[int]", "xs.copy()", "[Node(Marked)]"),
+        ("x: List[int]?", "xs.copy()", "[Node(At([Node(Marked)]))]"),
+        ("x: S", "s.copy()", "[Marked]"),
+        // Constructors: a keyword argument sits at its field's position.
+        ("x: S", "S([], [])", "[All]"),
+        ("x: S", "S([], xs)", "[Node(At([All, Marked]))]"),
+        ("x: S", "S(b=[], a=xs)", "[Node(At([Marked, All]))]"),
+        ("x: E", "E.V([])", "[All]"),
+        ("x: E", "E.V(xs)", "[Node(At([Marked]))]"),
+        // Everything else stays marked.
+        ("x: List[int]", "xs", "[Marked]"),
+        ("x: List[int]", "mk()", "[Marked]"),
+        ("x: List[int]", "s.a", "[Marked]"),
+        ("x: List[int]", "ks[0].log", "[Marked]"),
+        ("x: List[int]", "xs + xs", "[Marked]"),
+        // Slots: a pack is a list built at the call, a default is a literal or a provider call.
+        ("...x: List[int]", "[], xs", "[Node(At([All, Marked]))]"),
+        ("...x: List[int]", "[], []", "[All]"),
+        ("x: List[int]? = []", "", "[All]"),
+        ("x: List[int] = mk()", "", "[Marked]"),
+    ]
+    .iter()
+    .map(|(p, a, w)| (p.to_string(), a.to_string(), w.to_string()))
+    // The depth limit: 16 levels are described. A leaf or a list below them stays `Marked`.
+    .chain([
+        (format!("x: {}", deep_ty(15)), deep(15), "[All]".to_string()),
+        (format!("x: {}", deep_ty(16)), deep(16), deep17.clone()),
+        (format!("x: {}", deep_ty(17)), deep(17), deep17),
+    ])
+    .collect();
+    for (param, arg, want) in cells {
+        let src = format!("{head}fn w({param}):\n    pass\n{main}        spawn w({arg})\nmain()\n");
+        let c = spawn_crossing(&src);
+        assert_eq!(c.recv, None, "{param} <- {arg}");
+        assert_eq!(format!("{:?}", c.args), want, "{param} <- {arg}");
+    }
+    // The deferred wrap: `?x` into a generic param records its carrier at frame end, after the
+    // crossing is computed, so the level comes from the node itself.
+    let c = spawn_crossing(&format!(
+        "{head}fn show[T](x: T):\n    pass\n{main}        spawn show(?[xs])\nmain()\n"
+    ));
+    assert_eq!(format!("{:?}", c.args), "[Node(At([Node(At([Marked]))]))]");
+    // The receiver is entry 0.
+    for (recv, want) in [
+        ("S([], [])", "Some(All)"),
+        ("S(xs, [])", "Some(Node(At([Marked, All])))"),
+        ("s", "Some(Marked)"),
+    ] {
+        let c = spawn_crossing(&format!("{head}{main}        spawn {recv}.go()\nmain()\n"));
+        assert_eq!(format!("{:?}", c.recv), want, "{recv}");
+    }
+}

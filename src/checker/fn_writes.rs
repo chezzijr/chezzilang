@@ -28,14 +28,15 @@ pub(super) struct FnWrite {
 
 /// TICKET-189 — where one declaration slot of a bound call gets its value, read from the checker's
 /// call plan (`Checker::bound_slots`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) enum SlotSrc<'a> {
     /// A caller-written expression, positional or keyword.
     Arg(&'a Expr),
-    /// The variadic slot: a list built at the call site.
-    Pack,
-    /// An omitted slot filled from the declaration's default.
-    Default { literal_container: bool },
+    /// The variadic slot: a list built at the call site from these expressions.
+    Pack(Vec<&'a Expr>),
+    /// An omitted slot filled from the declaration's default: `inline` for the declaration's own
+    /// literal node, else a provider call.
+    Default { inline: bool },
 }
 
 /// A statically named function's summary: its proven writes and, per declared param, whether the

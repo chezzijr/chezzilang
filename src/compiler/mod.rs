@@ -3645,7 +3645,20 @@ impl Compiler {
                     .calls
                     .get(&(self.current_module_idx, expr.id.0))
                 {
-                    let mask = crate::vm::crossing::Crossing::frame_mask(&c.args);
+                    // Step 4 adapter: the old one-bit mask, root-only.
+                    use crate::vm::crossing::Crossing;
+                    let args: Vec<Crossing> = c
+                        .args
+                        .iter()
+                        .map(|f| {
+                            if f.is_marked() {
+                                Crossing::Copy
+                            } else {
+                                Crossing::Move
+                            }
+                        })
+                        .collect();
+                    let mask = Crossing::frame_mask(&args);
                     fc.emit(Op::StampGen(mask), expr.span);
                 }
             }
@@ -4363,7 +4376,19 @@ impl Compiler {
     fn crossing_mask(&self, call_id: crate::ast::NodeId) -> u32 {
         self.crossings
             .get(&(self.current_module_idx, call_id.0))
-            .map_or(0, |c| crate::checker::Crossing::mask(c.recv, &c.args))
+            .map_or(0, |c| {
+                // Step 4 adapter: the old one-bit mask, root-only.
+                use crate::vm::crossing::Crossing;
+                let bit = |f: &crate::checker::Fresh| {
+                    if f.is_marked() {
+                        Crossing::Copy
+                    } else {
+                        Crossing::Move
+                    }
+                };
+                let args: Vec<Crossing> = c.args.iter().map(bit).collect();
+                Crossing::mask(c.recv.as_ref().map(bit), &args)
+            })
     }
 
     /// The seed a `xs.sum()` site needs, per the checker's [`crate::checker::SumSeedTable`] --

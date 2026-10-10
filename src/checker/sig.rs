@@ -2329,18 +2329,89 @@ impl Checker {
         self.pop_scope();
     }
 
-    /// D4 (TICKET-179, TICKET-189): how this `spawn` operand crosses. `Move` for a value no parent
-    /// binding can reach, so a task-side write to it is not a lost write: a list/map/set literal, a
-    /// comprehension, a zero-argument `.copy()` on a List/Map/Set/bytearray, and a resolved struct
-    /// constructor (TICKET-190; shallow, so a named value in a field stays marked). A call result is
-    /// `Copy` (`id(xs)` returns the parent's own list); a struct `.copy()` is too (a known
-    /// false-fault ceiling). The one operand decider: see [`CrossingTable`].
-    fn crossing_of(&mut self, a: &Expr) -> Crossing {
-        let fresh = match &a.kind {
-            ExprKind::List(..)
-            | ExprKind::Map(..)
-            | ExprKind::Set(..)
-            | ExprKind::Comprehension { .. } => true,
+    /// D4 (TICKET-240): what a crossing leaves marked in the value graph `e` builds. The one
+    /// decider of "can the parent still reach this object", recursive over the expression. A
+    /// constructor-like node is fresh and each child is judged by the same rule: a list, tuple,
+    /// set or map literal, a comprehension, a struct or variant constructor, a carrier wrap
+    /// (explicit, or the implicit one `WrapTable` records), and a zero-argument `.copy()` on a
+    /// List/Map/Set/bytearray (its own level only, DEC-160). A name, a field read, an index and
+    /// any other call result stay `Marked` (`id(xs)` returns the parent's own list). A map with a
+    /// key that is not fresh is never `All`: a struct with a mutable field is a legal key. Below
+    /// `MAX_DEPTH` levels a subtree is `Marked`. `live` is false when `e` is read outside the
+    /// scope it was checked in: nothing is inferred then, so a `.copy()` stays `Marked`.
+    pub(super) fn fresh_shape(&mut self, e: &Expr, depth: usize, live: bool) -> Fresh {
+        if depth >= crate::vm::crossing::MAX_DEPTH {
+            return Fresh::Marked;
+        }
+        let d = depth + 1;
+        let shape = match &e.kind {
+            ExprKind::Int(..)
+            | ExprKind::Float(..)
+            | ExprKind::Str(..)
+            | ExprKind::Bytes(..)
+            | ExprKind::RawStr(..)
+            | ExprKind::Bool(..)
+            | ExprKind::NoneLit => Fresh::All,
+            ExprKind::List(items, _) | ExprKind::Tuple(items) => {
+                Fresh::at(items.iter().map(|x| self.fresh_shape(x, d, live)).collect())
+            }
+            ExprKind::Set(items) => {
+                if items.iter().all(|x| self.fresh_shape(x, d, live).is_all()) {
+                    Fresh::All
+                } else {
+                    Fresh::root()
+                }
+            }
+            ExprKind::Map(pairs) => {
+                let keys_fresh = pairs
+                    .iter()
+                    .all(|(k, _)| self.fresh_shape(k, d, live).is_all());
+                let values: Vec<Fresh> = pairs
+                    .iter()
+                    .map(|(_, v)| self.fresh_shape(v, d, live))
+                    .collect();
+                if keys_fresh && values.iter().all(Fresh::is_all) {
+                    Fresh::All
+                } else {
+                    Fresh::values(Fresh::meet(&values))
+                }
+            }
+            ExprKind::Comprehension {
+                kind, key, elem, ..
+            } => {
+                let elem = self.fresh_shape(elem, d, live);
+                match kind {
+                    crate::ast::CompKind::List => Fresh::each(elem),
+                    crate::ast::CompKind::Set if elem.is_all() => Fresh::All,
+                    crate::ast::CompKind::Set => Fresh::root(),
+                    crate::ast::CompKind::Map => {
+                        let key_fresh = key
+                            .as_deref()
+                            .is_some_and(|k| self.fresh_shape(k, d, live).is_all());
+                        if key_fresh && elem.is_all() {
+                            Fresh::All
+                        } else {
+                            Fresh::values(elem)
+                        }
+                    }
+                }
+            }
+            // An explicit `?x` takes its one level from the node: its carrier record can arrive
+            // at frame end, after this runs. The compiler finds no record for a synthesized node.
+            ExprKind::Unary {
+                op: crate::ast::UnaryOp::Wrap,
+                expr,
+            } => {
+                return if e.id.0 == crate::ast::NodeId::SYNTH.0 {
+                    Fresh::Marked
+                } else {
+                    Fresh::at(vec![self.fresh_shape(expr, d, live)])
+                };
+            }
+            ExprKind::Unary {
+                op: crate::ast::UnaryOp::ErrVal,
+                expr,
+            } => Fresh::at(vec![self.fresh_shape(expr, d, live)]),
             ExprKind::Call {
                 callee,
                 args,
@@ -2350,39 +2421,71 @@ impl Checker {
                 ExprKind::Field { obj, name, .. }
                     if name == "copy" && args.is_empty() && named.is_empty() =>
                 {
-                    matches!(
-                        self.infer(obj),
-                        Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray
-                    )
+                    if live
+                        && matches!(
+                            self.infer(obj),
+                            Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray
+                        )
+                    {
+                        Fresh::root()
+                    } else {
+                        Fresh::Marked
+                    }
                 }
-                _ => matches!(
-                    self.resolutions.get(&(self.graph_module_idx, callee.id.0)),
-                    Some(Resolution::StructCtor(_))
-                ),
+                _ => match self
+                    .resolutions
+                    .get(&(self.graph_module_idx, callee.id.0))
+                    .cloned()
+                {
+                    Some(Resolution::StructCtor(key)) => {
+                        let slots = self.bound_slots(e.id, args, named);
+                        if self
+                            .struct_shape(&key)
+                            .is_some_and(|s| s.fields.len() == slots.len())
+                        {
+                            Fresh::at(slots.iter().map(|s| self.slot_fresh(s, d, live)).collect())
+                        } else {
+                            Fresh::root()
+                        }
+                    }
+                    // A payload variant resolves as `VariantFn`; both lower to one `NewEnum`
+                    // over the positional args.
+                    Some(Resolution::Variant { .. } | Resolution::VariantFn { .. })
+                        if named.is_empty() =>
+                    {
+                        Fresh::at(args.iter().map(|x| self.fresh_shape(x, d, live)).collect())
+                    }
+                    Some(Resolution::Variant { .. } | Resolution::VariantFn { .. }) => {
+                        Fresh::root()
+                    }
+                    _ => Fresh::Marked,
+                },
             },
-            _ => false,
+            _ => Fresh::Marked,
         };
-        if fresh {
-            Crossing::Move
+        // The implicit wrap at a typed slot is one more object around the value. The compiler
+        // emits it from this same record.
+        if self.wraps.contains_key(&(self.graph_module_idx, e.id.0)) {
+            Fresh::at(vec![shape])
         } else {
-            Crossing::Copy
+            shape
         }
     }
 
-    /// TICKET-189: how one bound slot of a spawn call crosses. A variadic pack is a list built at the
-    /// call site (its elements stay marked); an all-literal inline default is fresh; a provider
-    /// default is a call result, which may return a global (a known false-fault ceiling).
-    fn slot_crossing(&mut self, s: &super::fn_writes::SlotSrc) -> Crossing {
-        match *s {
-            super::fn_writes::SlotSrc::Arg(e) => self.crossing_of(e),
-            super::fn_writes::SlotSrc::Pack => Crossing::Move,
-            super::fn_writes::SlotSrc::Default { literal_container } => {
-                if literal_container {
-                    Crossing::Move
-                } else {
-                    Crossing::Copy
-                }
-            }
+    /// The shape of one bound slot of a call. A variadic pack is a list built at the call site; an
+    /// inline default is a self-contained literal; a provider default is a call result, which may
+    /// return a global (a known false-fault ceiling).
+    fn slot_fresh(&mut self, s: &super::fn_writes::SlotSrc, depth: usize, live: bool) -> Fresh {
+        match s {
+            super::fn_writes::SlotSrc::Arg(e) => self.fresh_shape(e, depth, live),
+            super::fn_writes::SlotSrc::Pack(elems) => Fresh::at(
+                elems
+                    .iter()
+                    .map(|e| self.fresh_shape(e, depth + 1, live))
+                    .collect(),
+            ),
+            super::fn_writes::SlotSrc::Default { inline: true } => Fresh::All,
+            super::fn_writes::SlotSrc::Default { inline: false } => Fresh::Marked,
         }
     }
 
@@ -2434,8 +2537,8 @@ impl Checker {
         slots: &[super::fn_writes::SlotSrc],
     ) -> CallCrossing {
         CallCrossing {
-            recv: receiver.map(|r| self.crossing_of(r)),
-            args: slots.iter().map(|s| self.slot_crossing(s)).collect(),
+            recv: receiver.map(|r| self.fresh_shape(r, 0, true)),
+            args: slots.iter().map(|s| self.slot_fresh(s, 0, true)).collect(),
         }
     }
 
@@ -2529,7 +2632,7 @@ impl Checker {
                 }
                 // TICKET-190: a frame slot is private only if every binding of it is fresh.
                 if self.gen_frame.is_some() {
-                    let fresh = self.crossing_of(value) == Crossing::Move;
+                    let fresh = !self.fresh_shape(value, 0, true).is_marked();
                     if let Some(acc) = &mut self.gen_frame {
                         let f = acc.fresh.entry(name.clone()).or_insert(true);
                         *f = *f && fresh;
@@ -2648,7 +2751,7 @@ impl Checker {
                     && let ExprKind::Ident(n) = &target.kind
                 {
                     let fresh = if *op == AssignOp::Eq {
-                        self.crossing_of(value) == Crossing::Move
+                        !self.fresh_shape(value, 0, true).is_marked()
                     } else {
                         matches!(
                             self.lookup(n),
@@ -3224,11 +3327,11 @@ impl Checker {
                             // keyword (a value+keyword spawn, `spawn h(f=cb)`, lowers to the same
                             // positional SpawnCall, so a non-sendable value smuggled in by LABEL must
                             // be rejected exactly like the positional form).
-                            // D4 (TICKET-179, TICKET-189): decide, once, how each operand crosses,
-                            // per bound slot (keyword args, default fills and a pack at their
-                            // compiled position). For a `lib.f` / `lib.K.f` head the receiver is the
-                            // namespace expression, which is `Copy`. The compiler encodes it on the
-                            // spawn op; the runtime unmarks each `Move` root.
+                            // D4 (TICKET-189, TICKET-240): decide, once, the shape each operand
+                            // crosses with, per bound slot (keyword args, default fills and a pack
+                            // at their compiled position). For a `lib.f` / `lib.K.f` head the
+                            // receiver is the namespace expression, which is `Marked`. The compiler
+                            // stores the shapes; the runtime walks them.
                             let receiver = match &callee.kind {
                                 ExprKind::Field { obj, .. } => Some(&**obj),
                                 _ => None,
@@ -3258,14 +3361,9 @@ impl Checker {
                             for (sp, msg) in bad {
                                 self.error(sp, msg);
                             }
-                            // D4 layer A: the callee's certain writes, through the same slots and
-                            // crossings the compiler encodes.
-                            self.report_named_call_writes(
-                                callee,
-                                &slots,
-                                Some(&crossing.args),
-                                true,
-                            );
+                            // D4 layer A: the callee's certain writes, through the same slots
+                            // the compiler encodes.
+                            self.report_named_call_writes(callee, &slots, true);
                             // B3.3 (Task 2a): a closure/nested-fn VALUE at the callee or an arg crosses
                             // the airlock by value — reject each of its non-sendable LOCAL captures (a
                             // captured `ref` etc.) at compile time, matching the `spawn:` block form.

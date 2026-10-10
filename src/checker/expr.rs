@@ -68,7 +68,7 @@ impl Checker {
         let t = self.infer_call_dispatch(callee, args, named, type_args, span);
         // D4 layer A inside a `spawn:` body, through the plan the dispatch just bound.
         let slots = self.bound_slots(call_id, args, named);
-        self.report_named_call_writes(callee, &slots, None, false);
+        self.report_named_call_writes(callee, &slots, false);
         // TICKET-190: a call that creates a generator stamps its param slots with how each
         // argument crosses (a fresh argument is private to the new frame). A bare-name callee
         // stamps only through `labels_certain`, settled at its binding's `pop_scope`: a written
@@ -3818,7 +3818,7 @@ impl Checker {
                             self.check_args_range(method, &sig.params, sig.min_params, args, span);
                             self.capture_floors.pop();
                             if let Some(task) = args.first() {
-                                self.report_named_call_writes(task, &[], None, true);
+                                self.report_named_call_writes(task, &[], true);
                                 let mut writes: Vec<String> = match &task.kind {
                                     ExprKind::Closure { body, .. } => self
                                         .closure_literal_writes

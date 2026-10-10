@@ -20,10 +20,10 @@ use std::fmt;
 
 pub use ty::Ty;
 pub use ty::{
-    ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, Crossing,
-    CrossingTable, FallOff, FallOffTable, FnLabels, ForBind, ForBindTable, GenCrossings,
-    ProtoEqTable, Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable,
-    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
+    ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,
+    FallOff, FallOffTable, FnLabels, ForBind, ForBindTable, Fresh, GenCrossings, ProtoEqTable,
+    Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
+    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -669,8 +669,8 @@ struct CallCtx {
 /// TICKET-190 — the facts a generator body's check collects for its frame verdict.
 #[derive(Clone, Debug, Default)]
 struct GenFrameAcc {
-    /// Per name: every single-name `let` and plain assignment of it was fresh (`crossing_of`
-    /// `Move`); `false` once any was not, or once a destructuring `let` bound it.
+    /// Per name: every single-name `let` and plain assignment of it was fresh (`fresh_shape` not
+    /// `Marked`); `false` once any was not, or once a destructuring `let` bound it.
     fresh: HashMap<String, bool>,
     /// Per name: the declared type of each single-name `let` of it.
     tys: HashMap<String, Vec<Ty>>,
