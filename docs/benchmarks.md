@@ -3841,3 +3841,15 @@ Not measured: `benches/run.chz` (the Chezzi-vs-CPython harness) could not run on
 `FAILED [loop]: sh: line 1: hyperfine: command not found`, the same line for every bench.
 The owner accepted (2026-10-10) the seven benches above, run one by one, as the perf record for
 this ticket.
+
+## TICKET-240 — fresh value graphs cross unmarked, base vs branch (2026-10-10)
+
+A spawn-heavy bench that only reads its operands, so it runs on both builds: one `parallel:` block
+spawns 20000 tasks, each given two fresh nested lists and a fresh struct. Release binary, default
+worker count, wall seconds, median of 7 runs timed by the shell. `storm` is the existing 2000-spawn
+bench with a 100000-item module snapshot.
+
+| bench | before (base `9b87cfef`) | `uptime` load before | after | `uptime` load after | delta |
+|---|---:|---|---:|---|---:|
+| `benches/sched/spawn_fresh_graph.chz` | 0.363 | `3.51, 4.70, 4.64` | pending | pending | pending |
+| `benches/sched/storm.chz` | 5.649 | `3.51, 4.70, 4.64` | pending | pending | pending |

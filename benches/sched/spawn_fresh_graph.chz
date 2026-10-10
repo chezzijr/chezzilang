@@ -1,0 +1,8 @@
+struct S:
+    xs: List[int]
+fn work(i: int, xs: List[List[int]], s: S) -> int:
+    return xs[0].len() + s.xs.len()
+parallel:
+    for i in range(20000):
+        spawn work(i, [[i], [i, i]], S([i]))
+print("done")
