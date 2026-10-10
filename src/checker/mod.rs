@@ -336,6 +336,25 @@ pub(crate) fn float_fix_note_join(a: &Ty, b: &Ty) -> &'static str {
     }
 }
 
+/// TICKET-239 (owner, 2026-10-10) — the note for a failed join of a carrier `k` (`T?` or `T!E`,
+/// read through [`Ty::carrier_parts`]) beside exactly its plain payload, in either order: a plain
+/// value wraps only into a type that is written, so the message names the annotation. Empty for
+/// every other pair. It never decides what is accepted.
+pub(crate) fn carrier_join_note(a: &Ty, b: &Ty) -> String {
+    let pair = |k: &Ty, p: &Ty| k.carrier_parts().is_some_and(|c| c.1 == p);
+    let (k, p) = if pair(a, b) {
+        (a, b)
+    } else if pair(b, a) {
+        (b, a)
+    } else {
+        return String::new();
+    };
+    format!(
+        " — a plain {p} joins {k} only under a written type: annotate the binding \
+         (x: {k} = ..., xs: List[{k}] = [...])"
+    )
+}
+
 /// A short, surface-faithful label for a return-only extern `Type` in a marshallability error
 /// (`owned_str`, `str?`, `owned_str?`). Only ever called on the forms `is_return_only_extern_type`
 /// already matched, so non-matching shapes fall back to a generic label.
@@ -2182,6 +2201,9 @@ struct Checker {
     /// the runtime unwinds an unhandled Err/None at the program boundary) vs a nil-returning fn body
     /// (illegal — the propagated Err/None would be silently swallowed). See `infer_try`.
     in_fn_body: bool,
+    /// TICKET-239 — set by `infer_null_coalesce` just before it infers the `match` a `??` lowers
+    /// to, and taken at the entry of `infer_match`, so a side mismatch names `??`, not "branches".
+    coalesce_join: bool,
     /// True while checking the body of a **default-argument provider** — the hidden zero-arg fn
     /// `desugar` synthesizes for a non-inline parameter/field default (`desugar::PROVIDER_PREFIX`).
     /// Its only reader is [`Checker::infer_try`]: a `?` there has no caller to propagate to, and the

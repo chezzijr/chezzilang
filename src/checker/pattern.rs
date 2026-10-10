@@ -1408,6 +1408,8 @@ impl Checker {
         // is equally the value, and `infer_call` drains the single take()-once slot, so without
         // re-installing per arm only the first-inferred arm would get the hint (branch-order bug).
         let hint = self.expected_hint.take();
+        // Set by `infer_null_coalesce` for the `match` it lowers `??` to: a mismatch names `??`.
+        let coalesce = std::mem::take(&mut self.coalesce_join);
         let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
         let beside = hint.is_none() && arms.iter().any(|a| Self::is_none_lit(&a.body));
         let mut sib: Option<Ty> = None;
@@ -1448,21 +1450,15 @@ impl Checker {
         self.expected_hint = None;
         self.hint_owner = None;
         let hint = hint.or(sib);
-        let had_hint = hint.is_some();
         let mut result = None;
         for (sp, t) in arm_tys {
-            result = Some(self.unify_branch(result, t, sp, hint.as_ref()));
+            result = Some(self.unify_branch(result, t, sp, hint.as_ref(), coalesce));
         }
         let help = self.exh_help(&exh);
         if !arm_pattern_error {
             self.check_exhaustive(&kind, &covered, has_wildcard, help, scrutinee.span);
         }
-        let res = result.unwrap_or(Ty::Unknown);
-        if had_hint {
-            res
-        } else {
-            self.default_expr_result_e(res)
-        }
+        result.unwrap_or(Ty::Unknown)
     }
 
     /// Infer an expression-position `if c: a else: b`: condition is bool, the two branches unify.
@@ -1504,7 +1500,6 @@ impl Checker {
             }
             h => (h, owned),
         };
-        let had_hint = hint.is_some();
         self.expect_bool(cond, "if condition");
         // Each branch value owns the hint when this if owns it (TICKET-227): it wraps on its own.
         match &hint {
@@ -1532,46 +1527,8 @@ impl Checker {
         };
         self.expected_hint = None;
         self.hint_owner = None;
-        let acc = self.unify_branch(None, t_then, then.span, hint.as_ref());
-        let res = self.unify_branch(Some(acc), t_els, els.span, hint.as_ref());
-        if had_hint {
-            res
-        } else {
-            self.default_expr_result_e(res)
-        }
-    }
-
-    /// Default an UNANNOTATED if/match-expression's folded `Result` error slot to the built-in
-    /// `Error` protocol — matching the return-inference E-default and the `T!`/`Result[T]` shorthand
-    /// (docs/syntax.md) — WHEN the slot is un-pinned (`Unknown`) or its payload satisfies `Error`. A
-    /// concrete non-`Error` payload is PRESERVED (see the arm below: no post-hoc re-check exists here,
-    /// so laundering it into `Error` would be unsound). E.g. `x := if c: Ok(1) else: Ok(2)` folds to
-    /// `Result[int, Unknown]` (no `Err` branch) and `x := if c: Ok(1) else: Err("e")` folds to
-    /// `Result[int, Unknown]` too (the fold keeps the `Ok` branch's E-`Unknown`) — both normalize to
-    /// an `Error` slot. Applied ONLY without an expected-type hint (an annotated
-    /// `x: Result[str, str] = if …` keeps its declared E) and ONLY to the top-level `Result` — it
-    /// does NOT reject a residual `Unknown` (binding position stays lenient: `x := if c: None else:
-    /// None` is as legal as `x := None`). The T-slot / deeper order-dependent branch merge is
-    /// intentionally out of scope here (`unify_branch` keeps its `compatible`-based fold untouched).
-    fn default_expr_result_e(&self, t: Ty) -> Ty {
-        match t {
-            // An UNANNOTATED if/match-expression's `Result` error slot defaults to the `Error`
-            // protocol when un-pinned (`Unknown`) OR the pinned payload satisfies `Error` AND IS
-            // SENDABLE — matching the return-inference E-default (`sig.rs fill_ret`). A concrete
-            // payload that does NOT satisfy `Error`, OR satisfies `Error` but is NOT sendable (the
-            // `Error` existential is sendable like every protocol), is PRESERVED: unlike the
-            // return path there is no post-hoc assignability re-check here, so forcing `Error` would
-            // launder a non-Error (or non-sendable) value into the `Error` existential (`match x:
-            // Err(e): e.message()` would check-pass then fault at runtime). Fires only on the
-            // no-hint path (an explicit `x: Result[str, str] = if …` keeps its declared E).
-            Ty::Result(v, e)
-                if e.is_unknown()
-                    || (self.assignable(&Ty::error_proto(), &e) && self.sendable(&e)) =>
-            {
-                Ty::Result(v, Box::new(Ty::error_proto()))
-            }
-            other => other,
-        }
+        let acc = self.unify_branch(None, t_then, then.span, hint.as_ref(), false);
+        self.unify_branch(Some(acc), t_els, els.span, hint.as_ref(), false)
     }
 
     /// Fold one branch's type into a match/if expression's running result type. The first concrete
@@ -1587,16 +1544,20 @@ impl Checker {
         t: Ty,
         span: Span,
         hint: Option<&Ty>,
+        coalesce: bool,
     ) -> Ty {
         match acc {
             None => t,
             Some(prev) => {
-                if super::tyvar::open_err(&prev) {
+                // The join runs first: a `T!E` sibling types a bare `!e`. The open-error arms
+                // only keep `if c: 1 else: !"bad"` on the `!e` message, not on a type with a
+                // variable in it.
+                if let Some(m) = self.join_fill(&prev, &t) {
+                    m
+                } else if super::tyvar::open_err(&prev) {
                     prev
                 } else if super::tyvar::open_err(&t) {
                     t
-                } else if let Some(m) = self.join_fill(&prev, &t) {
-                    m
                 } else if let Some(h) = hint
                     && ty_fully_concrete(h)
                     && self.assignable(h, &prev)
@@ -1604,11 +1565,13 @@ impl Checker {
                 {
                     h.clone()
                 } else {
+                    let what = if coalesce { "'??' sides" } else { "branches" };
                     self.error(
                         span,
                         format!(
-                            "branches have incompatible types: {prev} and {t}{}",
-                            float_fix_note_join(&prev, &t)
+                            "{what} have incompatible types: {prev} and {t}{}{}",
+                            float_fix_note_join(&prev, &t),
+                            crate::checker::carrier_join_note(&prev, &t)
                         ),
                     );
                     Ty::Unknown
@@ -3690,8 +3653,9 @@ impl Checker {
                 self.error(
                     item.span,
                     format!(
-                        "list elements differ: {elem_s} vs {t_s}{}",
-                        float_fix_note_join(&elem, t)
+                        "list elements differ: {elem_s} vs {t_s}{}{}",
+                        float_fix_note_join(&elem, t),
+                        crate::checker::carrier_join_note(&elem, t)
                     ),
                 );
             }
@@ -3744,7 +3708,13 @@ impl Checker {
                         elem = m;
                     } else {
                         let [elem_s, et_s] = Ty::render_distinct([&elem, &et]);
-                        self.error(e.span, format!("set elements differ: {elem_s} vs {et_s}"));
+                        self.error(
+                            e.span,
+                            format!(
+                                "set elements differ: {elem_s} vs {et_s}{}",
+                                crate::checker::carrier_join_note(&elem, &et)
+                            ),
+                        );
                     }
                 }
             }
@@ -3860,8 +3830,9 @@ impl Checker {
                         self.error(
                             v_expr.span,
                             format!(
-                                "map values differ: {value_s} vs {vt_s}{}",
-                                float_fix_note_join(&value, &vt)
+                                "map values differ: {value_s} vs {vt_s}{}{}",
+                                float_fix_note_join(&value, &vt),
+                                crate::checker::carrier_join_note(&value, &vt)
                             ),
                         );
                     }
@@ -4007,23 +3978,19 @@ impl Checker {
         if !t.is_unknown() && !self.assignable(&Ty::error_proto(), &t) {
             self.error(inner.span, format!("{t} does not satisfy Error"));
         }
-        match hint {
-            Some(Ty::Result(ok, e)) => {
-                if !t.is_unknown() && !self.assignable(&e, &t) {
-                    self.error(inner.span, format!("error value: expected {e}, found {t}"));
-                }
-                Ty::Result(ok, e)
+        if let Some((_, _, Some(e))) = hint.as_ref().and_then(|h| h.carrier_parts()) {
+            if !t.is_unknown() && !self.assignable(e, &t) {
+                self.error(inner.span, format!("error value: expected {e}, found {t}"));
             }
-            // No expected carrier: in a fn body another operand of the same statement binds the
-            // success type (TICKET-238: the frame is one statement or one bound operand); top
-            // level decides at once; the return-inference walk leaves it open.
-            None | Some(Ty::Var(_)) if self.in_fn_body && !self.resolving_returns => {
+            return hint.unwrap_or(Ty::Unknown);
+        }
+        match hint {
+            // No expected carrier: another operand of the same statement binds the success type
+            // (TICKET-238: the frame is one statement or one bound operand), at module scope as
+            // in a fn body; the return-inference walk leaves it open.
+            None | Some(Ty::Var(_)) if !self.resolving_returns => {
                 let v = self.defer_carrier(node, super::tyvar::CarrierKind::Error);
                 Ty::Result(Box::new(Ty::Var(v)), Box::new(t))
-            }
-            None | Some(Ty::Var(_)) if !self.resolving_returns => {
-                self.error(node.span, super::tyvar::ERR_VALUE_NEEDS_TYPE.to_string());
-                Ty::Result(Box::new(Ty::Unknown), Box::new(t))
             }
             _ => Ty::Result(Box::new(Ty::Unknown), Box::new(t)),
         }
@@ -4032,16 +3999,16 @@ impl Checker {
     /// TICKET-227 (D3) — prefix `?x` builds a present/success value, its carrier taken from the
     /// expected type: `T?` -> `Some(x)`, `T!E` -> `Ok(x)`. The operand owns `T` as its slot (so
     /// `?5` at `int??` is `Some(Some(5))`). With no expected carrier the value takes a frame type
-    /// variable in a fn body (one still unbound when its operand or statement closes is `T?`);
-    /// elsewhere it is `T?` at once. Under an expected carrier whose payload is open the value is
-    /// the carrier over its operand's type.
+    /// variable, at module scope as in a fn body (one still unbound when its operand or statement
+    /// closes is `T?`); the return-inference walk makes it `T?` at once. Under an expected carrier
+    /// whose payload is open the value is the carrier over its operand's type.
     fn infer_wrap_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
         let hint = self.expected_hint.take();
         let (payload, w) = match hint.as_ref().and_then(|h| h.carrier_parts()) {
             Some((w, p, _)) => (p.clone(), w),
             None => {
                 let t = self.infer_value(inner);
-                if self.in_fn_body && !self.resolving_returns {
+                if !self.resolving_returns {
                     let v = self.defer_carrier(node, super::tyvar::CarrierKind::Present(t));
                     return Ty::Var(v);
                 }
@@ -4085,6 +4052,17 @@ impl Checker {
         self.expected_hint = hint;
         let r = self.infer_value(rhs);
         self.expected_hint = None;
+        // TICKET-239: an operand that is a same-statement type variable (`?1 < ?2`) is read here.
+        // A comparison joins its two operands first (`?2 == f()` with `f() -> int!`); arithmetic
+        // does not, so `1 + ?5` stays an error about `int?`.
+        let (l, r) = if self.tyvars.borrow().any() {
+            if matches!(op, Lt | LtEq | Gt | GtEq | Eq | NotEq) {
+                self.join_ty(&l, &r);
+            }
+            (self.pinning_value_ty(&l), self.pinning_value_ty(&r))
+        } else {
+            (l, r)
+        };
         let either_unknown = l.is_unknown() || r.is_unknown();
         match op {
             And | Or => {
@@ -5293,6 +5271,7 @@ impl Checker {
                 let tmp = self.next_opt_tmp;
                 self.next_opt_tmp += 1;
                 crate::desugar::lower_carrier_option(&mut c, tmp);
+                self.coalesce_join = true;
                 let r = self.infer(&c);
                 self.pop_scope();
                 r
@@ -5307,6 +5286,7 @@ impl Checker {
                 let tmp = self.next_opt_tmp;
                 self.next_opt_tmp += 1;
                 crate::desugar::lower_carrier_result_coalesce(&mut c, tmp);
+                self.coalesce_join = true;
                 let r = self.infer(&c);
                 self.pop_scope();
                 r

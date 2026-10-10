@@ -15988,7 +15988,7 @@ fn null_coalesce_on_result_one_error() {
     assert!(
         errs[0]
             .message
-            .contains("branches have incompatible types: int and str"),
+            .contains("'??' sides have incompatible types: int and str"),
         "got: {errs:?}"
     );
 }
@@ -32357,7 +32357,7 @@ fn ticket_107_mixed_branch_coercion_wraps_at_every_typed_slot() {
     );
     rejects(
         "fn f(o: int?) -> int?:\n    return o ?? None\n",
-        "branches have incompatible types: int and None",
+        "'??' sides have incompatible types: int and None",
     );
     rejects(
         "fn f[T](x: T, c: bool) -> T?:\n    return if c: x else: None\n",
@@ -38580,4 +38580,108 @@ fn an_owned_slot_closure_is_not_return_masked() {
     ok(&format!("{ap}x := ap(fn(a): a + 2)\n"));
     ok(&format!("{two}x := two[int, str](1, fn(a): \"s{{a}}\")\n"));
     ok(&format!("{two}x := two(1, fn(a) -> str: \"t{{a}}\")\n"));
+}
+
+/// TICKET-239: an un-annotated `if` / `match` / `??` join of two `T!E` values keeps `T!E`; no
+/// default rewrites the error type.
+#[test]
+fn an_unannotated_join_of_two_results_keeps_the_error_type() {
+    let ab = "fn a() -> int!str: !\"bad\"\nfn b() -> int!str: 5\n";
+    let tail = "    v := x?\n    return v + 1\n";
+    ok(&format!(
+        "{ab}fn pick(c: bool) -> int!str:\n    x := if c: a() else: b()\n{tail}"
+    ));
+    ok(&format!(
+        "{ab}fn pick(c: bool) -> int!str:\n    x := match c:\n        true: a()\n        false: b()\n{tail}"
+    ));
+    ok(&format!(
+        "{ab}fn pick(o: (int!str)?) -> int!str:\n    x := o ?? b()\n{tail}"
+    ));
+}
+
+/// TICKET-239: a `T!E` sibling types a bare `!e` like a written `None` sibling types a plain
+/// value, with one verdict at module scope and in a fn body.
+#[test]
+fn an_err_value_beside_a_result_sibling_takes_its_type_in_both_scopes() {
+    let a = "fn a() -> int!str: !\"bad\"\n";
+    for stmt in [
+        "x := if c: a() else: !\"e\"",
+        "x := match c:\n    true: a()\n    false: !\"e\"",
+        "x := [a(), !\"e\"]",
+        "x := {\"k\": a(), \"j\": !\"e\"}",
+    ] {
+        ok(&format!("{a}c := true\n{stmt}\n"));
+        let body = stmt.replace('\n', "\n    ");
+        ok(&format!("{a}fn main(c: bool):\n    {body}\n"));
+    }
+    rejects(
+        "c := true\nx := if c: 1 else: !\"bad\"\n",
+        "needs its type from an annotation",
+    );
+    rejects(
+        "fn main(c: bool):\n    x := if c: 1 else: !\"bad\"\n",
+        "needs its type from an annotation",
+    );
+}
+
+/// TICKET-239: `?x` operands compare in a fn body as they do at module scope; arithmetic on one
+/// is still an error about the optional.
+#[test]
+fn a_present_value_operand_compares_in_a_fn_body() {
+    ok("fn main(): print(?1 < ?2)\n");
+    ok("print(?1 < ?2)\n");
+    rejects(
+        "fn main(): print(1 + ?5)\n",
+        "cannot apply + to int and int?",
+    );
+    rejects("print(1 + ?5)\n", "cannot apply + to int and int?");
+}
+
+/// TICKET-239 (owner, 2026-10-10): a carrier beside its plain payload does not join by itself;
+/// the error names the annotation that makes it legal.
+#[test]
+fn optional_beside_plain_join_names_the_annotation_fix() {
+    let note = "only under a written type";
+    let w = "w: int? = 5\nc := true\n";
+    let a = "fn a() -> int!str: !\"bad\"\nc := true\n";
+    rejects(&format!("{w}x := [w, 3]\n"), note);
+    rejects(&format!("{w}x := if c: w else: 5\n"), note);
+    rejects(&format!("{w}x := if c: 5 else: w\n"), note);
+    rejects(
+        &format!("{w}x := match c:\n    true: w\n    false: 5\n"),
+        note,
+    );
+    rejects(&format!("{w}x := {{\"k\": w, \"j\": 3}}\n"), note);
+    rejects(&format!("{w}x := {{w, 3}}\n"), note);
+    rejects(&format!("{a}x := if c: a() else: 5\n"), note);
+    rejects(&format!("{a}x := [a(), 5]\n"), note);
+    // A mismatch that no annotation of the carrier fixes carries no note.
+    for src in [
+        "c := true\nx := if c: 1 else: \"s\"\n".to_string(),
+        format!("{w}x := if c: w else: \"s\"\n"),
+    ] {
+        let errs = check_src(&src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("branches have incompatible types")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter().all(|e| !e.message.contains("written type")),
+            "{errs:?}"
+        );
+    }
+}
+
+/// TICKET-239: a `??` mismatch names `??`; a `match` mismatch still names branches.
+#[test]
+fn coalesce_mismatch_names_the_operator() {
+    rejects(
+        "fn f(o: int?) -> int?:\n    return o ?? None\n",
+        "'??' sides have incompatible types",
+    );
+    rejects(
+        "c := true\nx := match c:\n    true: 1\n    false: \"s\"\n",
+        "branches have incompatible types: int and str",
+    );
 }

@@ -140,6 +140,7 @@ impl Checker {
             resolving_returns: false,
             in_generator: false,
             in_fn_body: false,
+            coalesce_join: false,
             in_default_provider: false,
             decl_site_default: false,
             body_facts_pass: false,
