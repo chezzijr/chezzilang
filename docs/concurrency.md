@@ -1864,6 +1864,7 @@ deadline; R refuse (the op's documented error or fault).
 | `parallel:` nursery join | P | D | H¹ | H¹ | I | H¹ | no |
 
 ¹ I when a host frame is under the joiner (a native callback or a defer drain): the joiner only waits (TICKET-245).
+A fiber's nursery join in a Demote context hands its runner slot to a replacement worker and waits; it runs no other fiber on its stack, because that fiber could wait for something only the buried frame can give.
 
 **Accounting derives from `will_return`.** A demoted wait that ends on a deadline or an external
 completion is `inflight` (it vetoes the deadlock verdict); every other one registers a waiter in
