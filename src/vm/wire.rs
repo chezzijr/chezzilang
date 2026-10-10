@@ -449,8 +449,8 @@ pub enum WireValue {
 #[derive(Debug, Clone)]
 pub enum WireGenState {
     /// Created but not yet driven: the not-yet-consumed call args (each wired recursively).
-    /// The `u64` is the generator's private frame mask (TICKET-190, layout
-    /// `crossing::Crossing::frame_mask`). It keeps `WireValue` its old size: the VM's debug-build
+    /// The `u64` is the generator's creation stamp (TICKET-190, TICKET-240, layout
+    /// `crossing::stamp_mask`). It keeps `WireValue` its old size: the VM's debug-build
     /// `step` frame holds several `WireValue` locals on the per-op recursion path, and 8 bytes more
     /// each overflowed `self_referential_stringable_hits_depth_limit`.
     Pending(Vec<WireValue>, u64),
@@ -468,8 +468,8 @@ pub enum WireGenState {
         call_depth: usize,
         cur_base: usize,
         handlers: Vec<super::Handler>,
-        /// The generator's private frame mask (TICKET-190).
-        private: u64,
+        /// The generator's creation stamp (layout `crossing::stamp_mask`).
+        stamp: u64,
     },
     /// Body returned / fell off the end: no parked context at all.
     Done,

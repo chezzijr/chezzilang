@@ -535,15 +535,13 @@ impl Vm {
         closure: Option<GcRef>,
         args: Vec<Value>,
     ) -> Value {
-        let p = &self.program.protos[proto];
-        let private = p.private_slots & !super::crossing::param_bits(p.arity);
         let core = GeneratorCore {
             proto,
             home,
             closure,
             state: GenState::Pending(args),
             ctx: GenCtx::default(),
-            private,
+            stamp: 0,
         };
         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
     }
@@ -2286,7 +2284,8 @@ impl Vm {
                     && matches!(g.state, GenState::Pending(_))
                 {
                     let p = &self.program.protos[g.proto];
-                    g.private |= m & p.private_slots & super::crossing::param_bits(p.arity);
+                    g.stamp |=
+                        m & super::crossing::param_stamp(p.private_slots, p.deep_slots, p.arity);
                 }
             }
             Op::Assert { has_msg, cmp } => {

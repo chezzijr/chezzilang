@@ -2489,10 +2489,11 @@ impl Checker {
         }
     }
 
-    /// TICKET-190: record a generator decl's private frame slot names. A param is private when no
-    /// assignment rebinds it to a non-fresh value and its root cannot escape the body; a local
-    /// when every single-name `let` and assignment of it is fresh and its root cannot escape.
-    /// Main pass only; a second walk of the same decl intersects.
+    /// TICKET-190, TICKET-240: record a generator decl's frame slot verdicts (Rule G). A slot is
+    /// `Root` when every binding of it builds a fresh root and that root cannot escape the body. It
+    /// is `All` when, in addition, every binding is all-fresh and [`Self::deep_private`] holds. A
+    /// param takes its shape from the creating call's stamp unless an assignment rebinds it. Main
+    /// pass only; a second walk of the same decl keeps the lower verdict.
     fn record_gen_frame(&mut self, decl: &FnDecl) {
         let Some(acc) = self.gen_frame.take() else {
             return;
@@ -2500,31 +2501,55 @@ impl Checker {
         if self.generic_arg_prepass || self.resolving_returns || decl.name_span == Span::default() {
             return;
         }
-        let uses = super::fn_writes::scan(decl).uses;
-        let callee = |c: &super::fn_writes::ArgCallee, j: usize| self.arg_escapes(c, j, None);
-        let no_tys = Vec::new();
-        let tys = |n: &str| acc.tys.get(n).unwrap_or(&no_tys);
-        let mut private = std::collections::HashSet::new();
-        for p in &decl.params {
-            if acc.fresh.get(&p.name) != Some(&false)
-                && !self.root_escapes(&uses, &p.name, tys(&p.name), &callee)
-            {
-                private.insert(p.name.clone());
+        let uses = super::fn_writes::frame_uses(decl);
+        let is_param = |n: &str| decl.params.iter().any(|p| p.name == n);
+        let names: Vec<(String, Fresh)> = decl
+            .params
+            .iter()
+            .map(|p| {
+                let shape = acc.fresh.get(&p.name).cloned().unwrap_or(Fresh::All);
+                (p.name.clone(), shape)
+            })
+            .chain(
+                acc.fresh
+                    .iter()
+                    .filter(|(n, _)| !is_param(n))
+                    .map(|(n, f)| (n.clone(), f.clone())),
+            )
+            .collect();
+        // The root test first: it only reads `self`.
+        let stays: Vec<bool> = {
+            let callee = |c: &super::fn_writes::ArgCallee, j: usize| self.arg_escapes(c, j, None);
+            let no_tys = Vec::new();
+            names
+                .iter()
+                .map(|(n, shape)| {
+                    !shape.is_marked()
+                        && !self.root_leaves(&uses, n, acc.tys.get(n).unwrap_or(&no_tys), &callee)
+                })
+                .collect()
+        };
+        let mut slots = HashMap::new();
+        for ((n, shape), stays) in names.into_iter().zip(stays) {
+            if !stays {
+                continue;
             }
-        }
-        for (n, fresh) in &acc.fresh {
-            if *fresh
-                && !decl.params.iter().any(|p| &p.name == n)
-                && !self.root_escapes(&uses, n, tys(n), &callee)
-            {
-                private.insert(n.clone());
+            if shape.is_all() && self.deep_private(&uses, &acc, &n) {
+                slots.insert(n, SlotFresh::All);
+            } else if !uses.matched.contains(&n) {
+                slots.insert(n, SlotFresh::Root);
             }
         }
         let key = (self.graph_module_idx, decl.name_span);
         match self.gen_crossings.frames.get_mut(&key) {
-            Some(prev) => prev.retain(|n| private.contains(n)),
+            Some(prev) => {
+                prev.retain(|n, _| slots.contains_key(n));
+                for (n, v) in prev.iter_mut() {
+                    *v = (*v).min(slots[n]);
+                }
+            }
             None => {
-                self.gen_crossings.frames.insert(key, private);
+                self.gen_crossings.frames.insert(key, slots);
             }
         }
     }
@@ -2598,7 +2623,7 @@ impl Checker {
                     // TICKET-190: a destructured name is never a private frame slot.
                     if let Some(acc) = &mut self.gen_frame {
                         for n in names {
-                            acc.fresh.insert(n.clone(), false);
+                            acc.fresh.insert(n.clone(), Fresh::Marked);
                         }
                     }
                     // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
@@ -2632,10 +2657,9 @@ impl Checker {
                 }
                 // TICKET-190: a frame slot is private only if every binding of it is fresh.
                 if self.gen_frame.is_some() {
-                    let fresh = !self.fresh_shape(value, 0, true).is_marked();
+                    let fresh = self.fresh_shape(value, 0, true);
                     if let Some(acc) = &mut self.gen_frame {
-                        let f = acc.fresh.entry(name.clone()).or_insert(true);
-                        *f = *f && fresh;
+                        acc.bind(name, fresh);
                         acc.tys
                             .entry(name.clone())
                             .or_default()
@@ -2751,26 +2775,27 @@ impl Checker {
                     && let ExprKind::Ident(n) = &target.kind
                 {
                     let fresh = if *op == AssignOp::Eq {
-                        !self.fresh_shape(value, 0, true).is_marked()
-                    } else {
-                        matches!(
-                            self.lookup(n),
-                            Some(
-                                Ty::Int
-                                    | Ty::Float
-                                    | Ty::Bool
-                                    | Ty::Str
-                                    | Ty::Bytes
-                                    | Ty::List(_)
-                                    | Ty::Map(..)
-                                    | Ty::Set(_)
-                                    | Ty::ByteArray
-                            )
+                        self.fresh_shape(value, 0, true)
+                    } else if matches!(
+                        self.lookup(n),
+                        Some(
+                            Ty::Int
+                                | Ty::Float
+                                | Ty::Bool
+                                | Ty::Str
+                                | Ty::Bytes
+                                | Ty::List(_)
+                                | Ty::Map(..)
+                                | Ty::Set(_)
+                                | Ty::ByteArray
                         )
+                    ) {
+                        Fresh::root()
+                    } else {
+                        Fresh::Marked
                     };
                     if let Some(acc) = &mut self.gen_frame {
-                        let f = acc.fresh.entry(n.clone()).or_insert(true);
-                        *f = *f && fresh;
+                        acc.bind(n, fresh);
                     }
                 }
                 self.check_assign(target, *op, val_ty, Some(value), span);

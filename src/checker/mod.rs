@@ -22,8 +22,8 @@ pub use ty::Ty;
 pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,
     FallOff, FallOffTable, FnLabels, ForBind, ForBindTable, Fresh, GenCrossings, ProtoEqTable,
-    Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SumSeed, SumSeedTable, WitnessCallee,
-    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
+    Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SlotFresh, SumSeed, SumSeedTable,
+    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -669,11 +669,26 @@ struct CallCtx {
 /// TICKET-190 — the facts a generator body's check collects for its frame verdict.
 #[derive(Clone, Debug, Default)]
 struct GenFrameAcc {
-    /// Per name: every single-name `let` and plain assignment of it was fresh (`fresh_shape` not
-    /// `Marked`); `false` once any was not, or once a destructuring `let` bound it.
-    fresh: HashMap<String, bool>,
+    /// Per name: the `Fresh::meet` of the shape of every single-name `let` and plain assignment
+    /// of it (`fresh_shape`); `Marked` once a destructuring `let` or an unsafe compound
+    /// assignment bound it.
+    fresh: HashMap<String, Fresh>,
+    /// TICKET-240: the type `Checker::infer` gave each node of the body, by `NodeId`. A missing
+    /// id is unknown, which no deep-privacy rule accepts.
+    expr_tys: HashMap<u32, Ty>,
     /// Per name: the declared type of each single-name `let` of it.
     tys: HashMap<String, Vec<Ty>>,
+}
+
+impl GenFrameAcc {
+    /// One more binding of `name` with `shape`.
+    fn bind(&mut self, name: &str, shape: Fresh) {
+        let met = match self.fresh.get(name) {
+            Some(prev) => Fresh::meet(&[prev.clone(), shape]),
+            None => shape,
+        };
+        self.fresh.insert(name.to_string(), met);
+    }
 }
 
 /// A protocol bound with its type args RESOLVED (`Conv[S]` -> name `Conv`, args `[Ty::Param("S")]`).

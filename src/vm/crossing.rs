@@ -127,7 +127,7 @@ pub fn operand(table: &[Vec<Fresh>], r: u32, arg: usize) -> &Fresh {
 
 /// What a marking crossing unmarks in one generator frame slot. A frame lives on between build
 /// and crossing, so it never gets a positional shape.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SlotFresh {
     Marked,
     /// The slot's root object is private; its children stay marked.
@@ -183,45 +183,15 @@ pub fn frame_slot(private: u64, deep: u64, arity: usize, stamp: u64, k: usize) -
     }
 }
 
-/// The one-bit generator frame verdict (TICKET-190).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Crossing {
-    /// The slot's root is private: rebuilt marked, then unmarked.
-    Move,
-    /// The parent can still observe it: every rebuilt object is marked, so a task write faults.
-    Copy,
-}
-
-impl Crossing {
-    /// TICKET-190: encode a generator frame: bit `k` = frame slot `k` is `Move` (private, the
-    /// parent cannot reach its root). A slot at 64 or above stays `Copy` (a false fault, never a
-    /// lost write).
-    pub fn frame_mask(slots: &[Crossing]) -> u64 {
-        slots
-            .iter()
-            .enumerate()
-            .filter(|&(k, &c)| c == Crossing::Move && k < u64::BITS as usize)
-            .fold(0, |m, (k, _)| m | 1 << k)
-    }
-
-    /// Decode frame slot `k` of a [`frame_mask`](Crossing::frame_mask). A slot at 64 or above is
-    /// `Copy`.
-    pub fn frame_slot(mask: u64, k: usize) -> Crossing {
-        if k < u64::BITS as usize && (mask >> k) & 1 == 1 {
-            Crossing::Move
-        } else {
-            Crossing::Copy
-        }
-    }
-}
-
-/// The frame-mask bits of a proto's `arity` param slots (params are slots `0..arity`).
-pub fn param_bits(arity: usize) -> u64 {
-    if arity >= u64::BITS as usize {
-        u64::MAX
-    } else {
-        (1u64 << arity) - 1
-    }
+/// A proto's frame mask from one claim per slot: bit `k` = slot `k` claims. A slot at 64 or
+/// above never claims (a false fault, never a lost write).
+pub fn slot_bits(claims: &[bool]) -> u64 {
+    claims
+        .iter()
+        .take(u64::BITS as usize)
+        .enumerate()
+        .filter(|&(_, &c)| c)
+        .fold(0, |m, (k, _)| m | 1 << k)
 }
 
 /// A runtime crossing route whose mark does not depend on the operand.
@@ -346,29 +316,17 @@ mod tests {
         );
         assert_eq!(frame_slot(u64::MAX, u64::MAX, 0, 0, 63), SlotFresh::All);
         assert_eq!(frame_slot(u64::MAX, u64::MAX, 0, 0, 64), SlotFresh::Marked);
+        // A proto mask: one bit per slot, and slot 64 cannot claim.
+        assert_eq!(slot_bits(&[true, false, true]), 0b101);
+        let mut claims = vec![false; 64];
+        claims[63] = true;
+        claims.push(true);
+        assert_eq!(slot_bits(&claims), 1 << 63);
+        assert!(SlotFresh::Marked < SlotFresh::Root && SlotFresh::Root < SlotFresh::All);
     }
 
     #[test]
-    fn frame_mask_round_trips_and_every_route_marks_as_documented() {
-        use Crossing::{Copy, Move};
-        // TICKET-190: a generator frame mask, one bit per frame slot.
-        let slots = [Move, Copy, Move];
-        let fm = Crossing::frame_mask(&slots);
-        assert_eq!(fm, 0b101);
-        for (k, &c) in slots.iter().enumerate() {
-            assert_eq!(Crossing::frame_slot(fm, k), c);
-        }
-        let mut frame = vec![Copy; 64];
-        frame[63] = Move;
-        assert_eq!(Crossing::frame_slot(Crossing::frame_mask(&frame), 63), Move);
-        // Slot 64 cannot be encoded, so it stays Copy.
-        frame.push(Move);
-        assert_eq!(Crossing::frame_mask(&frame), 1 << 63);
-        assert_eq!(Crossing::frame_slot(u64::MAX, 64), Copy);
-        assert_eq!(param_bits(0), 0);
-        assert_eq!(param_bits(2), 0b11);
-        assert_eq!(param_bits(64), u64::MAX);
-        assert_eq!(param_bits(70), u64::MAX);
+    fn every_route_marks_as_documented() {
         for enclosing in [false, true] {
             assert!(marks(Route::Spawn, enclosing));
             assert!(marks(Route::ModuleSnapshot, enclosing));

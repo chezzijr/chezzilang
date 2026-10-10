@@ -642,10 +642,10 @@ pub(crate) struct GeneratorCore {
     closure: Option<GcRef>,
     state: GenState,
     ctx: GenCtx,
-    /// TICKET-190: bit `k` = frame slot `k` is private (the creating task cannot reach its root), so
-    /// a marking crossing unmarks that root. Layout `crossing::Crossing::frame_mask`. Locals come
-    /// from `Proto::private_slots`; param bits only from the creating call's `Op::StampGen`.
-    private: u64,
+    /// TICKET-190, TICKET-240: the creating call's verdict for each PARAM slot, two bits per param
+    /// (layout `crossing::stamp_mask`), set only by `Op::StampGen`. A marking crossing reads it
+    /// through `crossing::frame_slot`; a local slot reads the proto's own masks there.
+    stamp: u64,
 }
 
 // Hand-rolled so `CallFrame`/`Handler`/`Deferred` need not derive `Debug` (keeps the hot call

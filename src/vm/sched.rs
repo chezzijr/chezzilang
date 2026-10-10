@@ -4047,8 +4047,8 @@ impl Vm {
                             for a in args {
                                 wargs.push(self.to_wire_depth(*a, depth + 1, memo)?);
                             }
-                            // TICKET-190: the frame mask rides along; the rebuild arm reads it.
-                            WireGenState::Pending(wargs, g.private)
+                            // TICKET-190: the creation stamp rides along; the rebuild arm reads it.
+                            WireGenState::Pending(wargs, g.stamp)
                         }
                         GenState::Done => WireGenState::Done,
                         GenState::Unsendable(m) => WireGenState::Unsendable(m.clone()),
@@ -4109,7 +4109,7 @@ impl Vm {
                                 call_depth: g.ctx.call_depth,
                                 cur_base: g.ctx.cur_base,
                                 handlers: g.ctx.handlers.clone(),
-                                private: g.private,
+                                stamp: g.stamp,
                             }
                         }
                     };
@@ -4477,23 +4477,28 @@ impl Vm {
         }
     }
 
-    /// Rebuild a crossing generator's frame slots (TICKET-190). Every slot takes the route's
-    /// ambient mark; then, on a marking route, the ROOT of each slot `private` names is unmarked.
-    /// Only the root: its children keep the mark (DEC-160 shallow), and unmarking runs after the
-    /// whole frame is rebuilt, so a root also reached from another slot is unmarked once.
+    /// Rebuild a crossing generator's frame slots (TICKET-190, TICKET-240). Every slot takes the
+    /// route's ambient mark; then, on a marking route, each slot is unmarked as far as
+    /// [`crossing::frame_slot`] says for generator `proto` created with `stamp`: its root only, or
+    /// its whole graph. A frame never takes a positional shape (it lives on between build and
+    /// crossing). Unmarking runs after the whole frame is rebuilt, so a root also reached from
+    /// another slot is unmarked once.
     fn rebuild_frame_slots(
         &mut self,
         slots: Vec<WireValue>,
         rebuild: &mut super::fxhash::FxHashMap<u32, GcRef>,
-        private: u64,
+        proto: ProtoId,
+        stamp: u64,
     ) -> Vec<Value> {
         let out = self.rebuild_items(slots, rebuild, |w| w);
         if self.copy_mark {
-            for (k, v) in out.iter().enumerate() {
-                if crossing::Crossing::frame_slot(private, k) == crossing::Crossing::Move
-                    && let Some(h) = v.as_obj()
-                {
-                    self.heap.unset_copied(h);
+            let p = &self.program.protos[proto];
+            let (private, deep, arity) = (p.private_slots, p.deep_slots, p.arity);
+            for (k, &v) in out.iter().enumerate() {
+                match crossing::frame_slot(private, deep, arity, stamp, k) {
+                    crossing::SlotFresh::Marked => {}
+                    crossing::SlotFresh::Root => self.unmark_fresh(v, &Fresh::root()),
+                    crossing::SlotFresh::All => self.unmark_fresh(v, &Fresh::All),
                 }
             }
         }
@@ -4875,13 +4880,13 @@ impl Vm {
                         .expect("a generator's backing closure wire rebuilds to a heap object")
                 });
                 let g = match state {
-                    WireGenState::Pending(wargs, private) => {
-                        let args = self.rebuild_frame_slots(wargs, rebuild, private);
+                    WireGenState::Pending(wargs, stamp) => {
+                        let args = self.rebuild_frame_slots(wargs, rebuild, proto, stamp);
                         let g = self.alloc_generator(proto, home, closure, args);
                         if let Some(h) = g.as_obj()
                             && let Obj::Generator(core) = self.heap.get_mut(h)
                         {
-                            core.private = private;
+                            core.stamp = stamp;
                         }
                         g
                     }
@@ -4896,7 +4901,7 @@ impl Vm {
                             closure,
                             state,
                             ctx: GenCtx::default(),
-                            private: 0,
+                            stamp: 0,
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
                     }
@@ -4906,9 +4911,9 @@ impl Vm {
                         call_depth,
                         cur_base,
                         handlers,
-                        private,
+                        stamp,
                     } => {
-                        let stack = self.rebuild_frame_slots(stack, rebuild, private);
+                        let stack = self.rebuild_frame_slots(stack, rebuild, proto, stamp);
                         let rebuilt = CallFrame {
                             proto: frame.proto,
                             ip: frame.ip,
@@ -4942,7 +4947,7 @@ impl Vm {
                             closure,
                             state: GenState::Suspended,
                             ctx,
-                            private,
+                            stamp,
                         };
                         Value::obj(self.heap.alloc(Obj::Generator(Box::new(core))))
                     }

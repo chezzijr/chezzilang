@@ -1264,7 +1264,7 @@ impl Compiler {
                 .frames
                 .get(&(self.current_module_idx, decl.name_span))
         {
-            fc.gen_private = names.clone();
+            fc.gen_slots = names.clone();
         }
         for p in &decl.params {
             fc.add_frame_local(p.name.clone());
@@ -1433,6 +1433,9 @@ impl Compiler {
     }
 
     fn finish(&mut self, fc: FnComp) -> ProtoId {
+        let claims = |c: &[Option<bool>]| c.iter().map(|&c| c == Some(true)).collect::<Vec<_>>();
+        let private = crate::vm::crossing::slot_bits(&claims(&fc.slot_private));
+        let deep = private & crate::vm::crossing::slot_bits(&claims(&fc.slot_deep));
         let pid = self.program.protos.len();
         // M19: peephole pass — const-fold + superinstruction fusion, with jump relocation.
         let (code, lines) = peephole::optimize(fc.code, fc.lines);
@@ -1449,21 +1452,8 @@ impl Compiler {
             decl_span: fc.decl_span,
             // Lever #3: cold-path capture-name metadata in slot order (empty for non-closures).
             capture_names: fc.captured_names,
-            private_slots: {
-                use crate::vm::crossing::Crossing;
-                let slots: Vec<Crossing> = fc
-                    .slot_private
-                    .iter()
-                    .map(|&c| {
-                        if c == Some(true) {
-                            Crossing::Move
-                        } else {
-                            Crossing::Copy
-                        }
-                    })
-                    .collect();
-                Crossing::frame_mask(&slots)
-            },
+            private_slots: private,
+            deep_slots: deep,
         });
         pid
     }
@@ -3649,20 +3639,7 @@ impl Compiler {
                     .calls
                     .get(&(self.current_module_idx, expr.id.0))
                 {
-                    // Step 4 adapter: the old one-bit mask, root-only.
-                    use crate::vm::crossing::Crossing;
-                    let args: Vec<Crossing> = c
-                        .args
-                        .iter()
-                        .map(|f| {
-                            if f.is_marked() {
-                                Crossing::Copy
-                            } else {
-                                Crossing::Move
-                            }
-                        })
-                        .collect();
-                    let mask = Crossing::frame_mask(&args);
+                    let mask = crate::vm::crossing::stamp_mask(&c.args);
                     fc.emit(Op::StampGen(mask), expr.span);
                 }
             }
@@ -5937,10 +5914,10 @@ fn captured_names_of_body(body: &Block, params: &[crate::ast::Param]) -> HashSet
 }
 
 /// Collect the binding names of a `match`/tuple/variant [`Pattern`] into `out`.
-pub(crate) fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
+pub(crate) fn pattern_binds(p: &Pattern, out: &mut impl Extend<String>) {
     match p {
         Pattern::Ident(n, _, _) => {
-            out.insert(n.clone());
+            out.extend([n.clone()]);
         }
         // TICKET-139/W14-1 + DEC-107: a bare, payload-free, unqualified name (`whole:`) is a
         // whole-value catch-all binding (or a nullary variant — over-collecting that is harmless),
@@ -5953,7 +5930,7 @@ pub(crate) fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
             enum_name: None,
             module_name: None,
         } if bindings.is_empty() => {
-            out.insert(name.clone());
+            out.extend([name.clone()]);
         }
         Pattern::Variant { bindings, .. } => bindings.iter().for_each(|b| pattern_binds(b, out)),
         Pattern::Tuple(ps) | Pattern::Or(ps) => ps.iter().for_each(|b| pattern_binds(b, out)),
@@ -5964,8 +5941,9 @@ pub(crate) fn pattern_binds(p: &Pattern, out: &mut HashSet<String>) {
 
 /// Names bound in THIS frame reachable through `stmts`'s control flow (descends if/for/while/match/
 /// wait/parallel sub-blocks — those share the frame — but STOPS at capture boundaries, whose bodies
-/// are separate frames). Adds let/for/match/wait/nested-fn binding names to `out`.
-pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
+/// are separate frames). Adds let/for/match/wait/nested-fn binding names to `out`: a set for
+/// "is it bound", a `Vec` for one entry per binding site.
+pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>) {
     for s in stmts {
         match &s.kind {
             StmtKind::Let { names, value, .. } => {
@@ -5976,7 +5954,7 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
             }
             // A nested named fn binds its name in this frame (its body is a separate frame).
             StmtKind::Fn(decl) => {
-                out.insert(decl.name.clone());
+                out.extend([decl.name.clone()]);
             }
             StmtKind::If {
                 branches,
@@ -6018,7 +5996,7 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut HashSet<String>) {
                             collect_frame_binds_expr(chan, out);
                             match target {
                                 WaitTarget::Bind(n) => {
-                                    out.insert(n.clone());
+                                    out.extend([n.clone()]);
                                 }
                                 WaitTarget::Discard => {}
                             }
@@ -6863,7 +6841,7 @@ fn captured_names_of_closure(body: &Expr, params: &[crate::ast::Param]) -> HashS
 
 /// Names bound in THIS frame by an EXPRESSION body (`match`/`recover`/comprehension/if-else binds),
 /// descending non-closure sub-expressions but STOPPING at a nested closure (a separate frame).
-fn collect_frame_binds_expr(e: &Expr, out: &mut HashSet<String>) {
+fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) {
     match &e.kind {
         // A nested closure is a separate frame — its binds are not this frame's.
         ExprKind::Closure { .. } => {}
@@ -7316,12 +7294,14 @@ struct FnComp {
     /// This proto is a `test fn` body (free test or suite method). Stamped onto the [`Proto`] in
     /// `finish`; used only by `chezzi test` discovery.
     is_test: bool,
-    /// TICKET-190 — the checker's private frame slot names for this generator body (empty for
-    /// every other body). Read only by [`FnComp::add_frame_local`].
-    gen_private: std::collections::HashSet<String>,
+    /// TICKET-190, TICKET-240 — the checker's verdict per private frame slot name of this
+    /// generator body (empty for every other body). Read only by [`FnComp::add_frame_local`].
+    gen_slots: HashMap<String, crate::vm::crossing::SlotFresh>,
     /// TICKET-190 — per slot, the AND of every binder's privacy claim (`None` = never claimed). A
     /// slot reused by sibling scopes is private only if every binding in it is.
     slot_private: Vec<Option<bool>>,
+    /// TICKET-240 — the same AND for the claim that the slot's whole graph is private.
+    slot_deep: Vec<Option<bool>>,
 }
 
 impl FnComp {
@@ -7352,8 +7332,9 @@ impl FnComp {
             has_implicit_nursery: false,
             is_generator: false,
             is_test: false,
-            gen_private: std::collections::HashSet::new(),
+            gen_slots: HashMap::new(),
             slot_private: Vec::new(),
+            slot_deep: Vec::new(),
         }
     }
 
@@ -7570,23 +7551,32 @@ impl FnComp {
     /// Add a named local, returning its slot. A redeclaration in the same scope shadows by getting
     /// a fresh slot (later lookups find the newest).
     fn add_local(&mut self, name: String) -> usize {
-        self.add_local_claiming(name, false)
+        self.add_local_claiming(name, crate::vm::crossing::SlotFresh::Marked)
     }
 
     /// TICKET-190 — [`Self::add_local`] for a declared param or a single-name `let`: the slot is
     /// private when the checker named `name` private in this generator frame. Every other binder
     /// claims `false`.
     fn add_frame_local(&mut self, name: String) -> usize {
-        let claim = self.gen_private.contains(&name);
+        let claim = self
+            .gen_slots
+            .get(&name)
+            .copied()
+            .unwrap_or(crate::vm::crossing::SlotFresh::Marked);
         self.add_local_claiming(name, claim)
     }
 
-    fn add_local_claiming(&mut self, name: String, claim: bool) -> usize {
+    fn add_local_claiming(&mut self, name: String, claim: crate::vm::crossing::SlotFresh) -> usize {
+        use crate::vm::crossing::SlotFresh;
         let slot = self.slot_count;
         if self.slot_private.len() <= slot {
             self.slot_private.resize(slot + 1, None);
+            self.slot_deep.resize(slot + 1, None);
         }
-        self.slot_private[slot] = Some(self.slot_private[slot].unwrap_or(true) && claim);
+        self.slot_private[slot] =
+            Some(self.slot_private[slot].unwrap_or(true) && claim != SlotFresh::Marked);
+        self.slot_deep[slot] =
+            Some(self.slot_deep[slot].unwrap_or(true) && claim == SlotFresh::All);
         self.locals.push(LocalVar {
             name,
             depth: self.scope_depth,
@@ -8645,7 +8635,12 @@ hesc := fn(xs: List[int]) -> int: hpush(xs)
                 .iter()
                 .find(|p| p.name == name)
                 .unwrap_or_else(|| panic!("no proto {name}"));
-            assert_eq!(p.private_slots, mask, "cell {name}: private_slots");
+            // TICKET-240: a deep slot is private too; no cell loses a private bit.
+            assert_eq!(
+                p.private_slots,
+                mask | p.deep_slots,
+                "cell {name}: private_slots"
+            );
         }
         // The creating call site stamps a generator's param slots: `g1([])` is fresh, `g1(xs)`
         // names a parent value, and `count([1])` makes no generator.
@@ -8665,8 +8660,211 @@ hesc := fn(xs: List[int]) -> int: hpush(xs)
         }
         assert_eq!(
             stamps(&program.protos[main_top].code),
-            vec![1, 0],
+            vec![
+                crate::vm::crossing::stamp_mask(&[crate::vm::crossing::Fresh::All]),
+                crate::vm::crossing::stamp_mask(&[crate::vm::crossing::Fresh::Marked]),
+            ],
             "stamps: main.chz toplevel"
+        );
+    }
+
+    const DEEP: &str = r#"struct N:
+    kids: List[List[int]]
+struct Key:
+    id: int
+    log: List[int]
+    fn hash(self) -> int:
+        return self.id
+    fn eq(self, other: Key) -> bool:
+        return self.id == other.id
+fn count2(xs: List[List[int]]) -> int:
+    return xs.len()
+fn d1() -> Iterator[int]:
+    buf: List[int]? = []
+    match buf:
+        ?a: a.push(1)
+        None: pass
+    yield 0
+fn d2() -> Iterator[int]:
+    buf := [[0]]
+    buf[0].push(1)
+    yield buf[0][0]
+fn d3() -> Iterator[int]:
+    buf := [[0]]
+    for v in buf[0]:
+        yield v
+fn d4() -> Iterator[int]:
+    buf := [[0]]
+    buf.push([])
+    buf[0] = [2]
+    buf.reverse()
+    yield buf.len()
+fn d5() -> Iterator[int]:
+    s := N([[0]])
+    s.kids = [[9]]
+    s.kids[0].push(1)
+    yield 0
+fn d6(p: List[List[int]]) -> Iterator[int]:
+    p[0].push(1)
+    yield 0
+fn n1() -> Iterator[List[int]]:
+    buf := [[0]]
+    yield buf[0]
+fn n2(p: List[int]) -> Iterator[int]:
+    buf := [[0]]
+    buf.push(p)
+    yield 0
+fn n3() -> Iterator[int]:
+    buf := [[0]]
+    x := buf[0]
+    yield x.len()
+fn n4(p: List[int]) -> Iterator[int]:
+    buf := [[0]]
+    buf[0].extend(p)
+    yield 0
+fn n5() -> Iterator[int]:
+    buf: List[int]? = []
+    match buf:
+        ?a: a.push(1)
+        None: pass
+    match buf:
+        ?a: a.push(2)
+        None: pass
+    yield 0
+fn n6() -> Iterator[int]:
+    buf: List[int]? = []
+    match buf:
+        ?a:
+            f := fn() -> int: a.len()
+            yield f()
+        None: pass
+fn n7(p: List[int]) -> Iterator[int]:
+    buf := [p, []]
+    buf.reverse()
+    yield 0
+fn n8(p: Key) -> Iterator[int]:
+    buf: Map[Key, List[int]] = {}
+    buf[p] = []
+    yield 0
+fn n9() -> Iterator[List[int]]:
+    buf: List[int]? = []
+    match buf:
+        ?a:
+            yield a
+        None: pass
+fn n10() -> Iterator[int]:
+    buf := [[0]]
+    n := buf + [[1]]
+    yield n.len()
+fn n11() -> Iterator[int]:
+    buf := [[0]]
+    _ := count2(buf)
+    yield 0
+fn n12() -> Iterator[int]:
+    buf := [[0]]
+    s := buf[0:1]
+    yield s.len()
+fn n13(i: int) -> Iterator[int]:
+    buf := [[i]]
+    buf[0].push(1)
+    yield 0
+fn n15() -> Iterator[int]:
+    buf := [[0] for _i in range(1)]
+    buf[0].push(1)
+    yield 0
+fn n14() -> Iterator[int]:
+    buf: List[int]? = []
+    match buf:
+        ?a:
+            a = [9]
+            a.push(1)
+        None: pass
+    yield 0
+xs := [0]
+ys := [[0]]
+a := d6([[0]])
+b := d6(ys)
+c := d6([xs])
+"#;
+
+    /// TICKET-240 Rule G: a frame slot's whole graph is private (`Proto.deep_slots`) only when
+    /// every binding is all-fresh, no store puts a parent value into the graph and no view of it
+    /// ends in a value that can hold a mark. One generator per rule line, as
+    /// `(name, private_slots, deep_slots)`.
+    #[test]
+    fn generator_deep_privacy_grid() {
+        let t = super::file_id_tests::TmpDir::new();
+        t.write("chezzi.toml", "[project]\nname = \"g\"\n");
+        let entry = t.write("main.chz", DEEP);
+        let graph = crate::resolver::build_graph(&entry).expect("graph should build");
+        if let Err(errs) = crate::checker::check_graph(&graph) {
+            panic!("the grid program must type-check: {errs:?}");
+        }
+        let program = compile_graph(&graph).expect("compile");
+        let want: [(&str, u64, u64); 21] = [
+            // Deep: a carrier's payload through a match binder, a child receiver, a loop over a
+            // child, fresh stores with a permuting method, a struct field store, a param.
+            ("d1", 0b1, 0b1),
+            ("d2", 0b1, 0b1),
+            ("d3", 0b1, 0b1),
+            ("d4", 0b1, 0b1),
+            ("d5", 0b1, 0b1),
+            ("d6", 0b1, 0b1),
+            // Root only: a child leaves through `yield`, a param is pushed in, a child is bound to
+            // a name, a param is extended into a child.
+            ("n1", 0b1, 0),
+            ("n2", 0b10, 0),
+            ("n3", 0b1, 0),
+            ("n4", 0b10, 0),
+            // Marked: the root was matched and its binder is bound twice, captured by a closure,
+            // yielded, or reassigned.
+            ("n5", 0, 0),
+            ("n6", 0, 0),
+            ("n9", 0, 0),
+            ("n14", 0, 0),
+            // Root only: a literal holding a param (a permuting method may move it), a store under
+            // a param key, an operator, a named callee, a slice, a scalar name in the literal.
+            ("n7", 0b10, 0),
+            ("n8", 0b10, 0),
+            ("n10", 0b1, 0),
+            ("n11", 0b1, 0),
+            ("n12", 0b1, 0),
+            ("n13", 0b10, 0),
+            // A ceiling: the checker's verdict is `All`, but the local takes the slot the
+            // comprehension's hidden loop slots left, and a reused slot is the AND of its claims.
+            ("n15", 0, 0),
+        ];
+        for (name, private, deep) in want {
+            let p = program
+                .protos
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("no proto {name}"));
+            assert_eq!(
+                (p.private_slots, p.deep_slots),
+                (private, deep),
+                "cell {name}: (private_slots, deep_slots)"
+            );
+        }
+        // The creating call stamps two bits per param: all-fresh, named, fresh root over a named
+        // child.
+        use crate::vm::crossing::{Fresh, stamp_mask};
+        let main_top = program.modules.last().expect("entry module").toplevel;
+        let stamps: Vec<u64> = program.protos[main_top]
+            .code
+            .iter()
+            .filter_map(|op| match op {
+                Op::StampGen(m) => Some(*m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stamps,
+            vec![
+                stamp_mask(&[Fresh::All]),
+                stamp_mask(&[Fresh::Marked]),
+                stamp_mask(&[Fresh::root()]),
+            ]
         );
     }
 }

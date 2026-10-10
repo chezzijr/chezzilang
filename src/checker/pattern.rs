@@ -1776,10 +1776,17 @@ impl Checker {
         if self.hover_probe.is_some() {
             self.hover_record_expr(expr, &ty);
         }
-        match &slot {
+        let ty = match &slot {
             Some(s) => self.meet_slot(s, expr, ty),
             None => ty,
+        };
+        // TICKET-240: a generator body keeps each node's type for its frame verdict.
+        if self.records_node(expr.id)
+            && let Some(acc) = &mut self.gen_frame
+        {
+            acc.expr_tys.insert(expr.id.0, ty.clone());
         }
+        ty
     }
 
     /// TICKET-227 (D3) — THE one place an implicit wrap is decided: the value `value` of type `ty`

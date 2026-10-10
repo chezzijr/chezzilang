@@ -124,7 +124,7 @@ pub enum Op {
     Nil,
     Pop,
     /// TICKET-190: stamp the Pending generator on the stack top with its call site's param
-    /// crossings (layout `crossing::Crossing::frame_mask`); never pops.
+    /// shapes, two bits per param (layout `crossing::stamp_mask`); never pops.
     StampGen(u64),
     /// The failing tail of `assert cond[, msg]`. The compiler tests `cond` with a preceding
     /// `JumpIfFalse` and only reaches this op when `cond` was false, so it *always* faults: pop
@@ -627,8 +627,11 @@ pub struct Proto {
     /// `GetCaptured` home-global fallback + closure error messages); the hot read is a pure
     /// `captured[slot]` index. Empty for non-closure protos. Mirrors [`StructDef::fields`].
     pub capture_names: Vec<String>,
-    /// TICKET-190: bit `k` = frame slot `k` is private; layout `crossing::Crossing::frame_mask`.
+    /// TICKET-190: bit `k` = the root of frame slot `k` is private; layout `crossing::slot_bits`.
     pub private_slots: u64,
+    /// TICKET-240: bit `k` = the whole graph of frame slot `k` is private. A subset of
+    /// `private_slots`; read through `crossing::frame_slot`.
+    pub deep_slots: u64,
 }
 
 /// A struct type's runtime shape (program-global). `module_idx` identifies the module that defined

@@ -78,12 +78,38 @@ pub(super) enum ArgCallee {
     Module(String, String),
 }
 
+/// TICKET-240 — a use of a VIEW of a frame slot, keyed by the slot's root name in [`Uses::deep`].
+/// A view of name `n` is `n`, an alias of `n` (a `match` binder or loop name over a view), or
+/// `V.f` / `V[i]` with `V` a view. `Checker::deep_private` owns the rules.
+#[derive(Clone, Debug)]
+pub(super) enum DeepUse {
+    /// `V.m(args)`: the receiver and call nodes, and the call's arguments.
+    Recv {
+        recv: crate::ast::NodeId,
+        call: crate::ast::NodeId,
+        args: Vec<Expr>,
+    },
+    /// An assignment through `V.f` (`index` is `None`) or `V[i]`.
+    Store {
+        value: Box<Expr>,
+        index: Option<Box<Expr>>,
+    },
+    /// Any other occurrence of a view: its value may leave the graph.
+    Read { view: crate::ast::NodeId },
+}
+
 /// Every use of every bare name in one function body (TICKET-190). A name in `escaped` was used as
-/// a plain value somewhere; `kept` holds the uses whose verdict depends on the name's type.
+/// a plain value somewhere; `kept` holds the uses whose verdict depends on the name's type. The
+/// last three are filled only by [`frame_uses`] (TICKET-240): `deep` holds every use of a view,
+/// `matched` the roots a `match` statement took apart (their binders are aliases, so the root is
+/// not `escaped`), and `lost` the roots with an alias the walk cannot follow.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Uses {
     pub escaped: HashSet<String>,
     pub kept: Vec<(String, RootUse)>,
+    pub deep: Vec<(String, DeepUse)>,
+    pub matched: HashSet<String>,
+    pub lost: HashSet<String>,
 }
 
 /// Can a native method's declared return type hold its receiver? Only a value with no heap
@@ -119,9 +145,63 @@ pub(super) fn native_receiver(t: &Ty) -> Option<(&'static str, Ty)> {
 struct UseWalk<'a> {
     bound: &'a HashSet<String>,
     uses: Uses,
+    /// TICKET-240: this walk feeds a generator frame verdict, so it follows views.
+    deep: bool,
+    /// Alias name to the root it views.
+    aliases: HashMap<String, String>,
+    /// Every bare name that is an assignment target.
+    assigned: HashSet<String>,
 }
 
 impl UseWalk<'_> {
+    /// The root a view expression reads through, when `e` is a view.
+    fn view_root(&self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Ident(n) => Some(self.aliases.get(n).unwrap_or(n).clone()),
+            ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => self.view_root(obj),
+            _ => None,
+        }
+    }
+
+    /// Record `u()` as a use of the view `view`. A walk that feeds no frame verdict records none.
+    fn deep_use(&mut self, view: &Expr, u: impl FnOnce() -> DeepUse) {
+        if self.deep
+            && let Some(root) = self.view_root(view)
+        {
+            self.uses.deep.push((root, u()));
+        }
+    }
+
+    /// `name` now views `root`. A name that already was an alias loses both roots.
+    fn alias(&mut self, name: &str, root: &str) {
+        if let Some(prev) = self.aliases.insert(name.to_string(), root.to_string()) {
+            self.uses.lost.insert(prev);
+            self.uses.lost.insert(root.to_string());
+        }
+    }
+
+    /// Walk the steps of a `V.f` / `V[i]` chain whose own use the caller recorded: the bare root
+    /// keeps its `Field`/`Index` use, an index expression is a value, an alias keeps nothing.
+    fn path(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Field { obj, name, .. } => match &obj.kind {
+                ExprKind::Ident(n) => self.keep(n, RootUse::Field(name.clone())),
+                _ => self.path(obj),
+            },
+            ExprKind::Index { obj, index, .. } => {
+                match &obj.kind {
+                    ExprKind::Ident(n) => self.keep(n, RootUse::Index),
+                    _ => self.path(obj),
+                }
+                if let Some(index) = index {
+                    self.value(index);
+                }
+            }
+            ExprKind::Ident(n) if self.aliases.contains_key(n) => {}
+            _ => self.value(e),
+        }
+    }
+
     fn escape_free(&mut self, e: &Expr) {
         self.uses
             .escaped
@@ -144,22 +224,20 @@ impl UseWalk<'_> {
             StmtKind::Assign { target, op, value } => {
                 match &target.kind {
                     ExprKind::Ident(n) => {
+                        self.assigned.insert(n.clone());
                         if *op != crate::ast::AssignOp::Eq {
                             self.keep(n, RootUse::Op);
                         }
                     }
-                    ExprKind::Field { obj, name, .. } => match &obj.kind {
-                        ExprKind::Ident(n) => self.keep(n, RootUse::Field(name.clone())),
-                        _ => self.value(obj),
-                    },
-                    ExprKind::Index { obj, index, .. } => {
-                        match &obj.kind {
-                            ExprKind::Ident(n) => self.keep(n, RootUse::Index),
-                            _ => self.value(obj),
-                        }
-                        if let Some(index) = index {
-                            self.value(index);
-                        }
+                    ExprKind::Field { .. } | ExprKind::Index { .. } => {
+                        self.deep_use(target, || DeepUse::Store {
+                            value: Box::new(value.clone()),
+                            index: match &target.kind {
+                                ExprKind::Index { index, .. } => index.clone(),
+                                _ => None,
+                            },
+                        });
+                        self.path(target);
                     }
                     _ => self.escape_free(target),
                 }
@@ -188,16 +266,49 @@ impl UseWalk<'_> {
                 self.value(cond);
                 self.block(body);
             }
-            StmtKind::For { iter, body, .. } => {
+            StmtKind::For {
+                vars, iter, body, ..
+            } => {
+                // TICKET-240: a loop over a view binds views of the same root.
+                if self.deep
+                    && let Some(root) = self.view_root(iter)
+                {
+                    for v in vars {
+                        self.alias(v, &root);
+                    }
+                }
                 match &iter.kind {
                     ExprKind::Ident(n) => self.keep(n, RootUse::Iter),
+                    ExprKind::Field { .. } | ExprKind::Index { .. } => self.path(iter),
                     _ => self.value(iter),
                 }
                 self.block(body);
             }
             StmtKind::Match { scrutinee, arms } => {
-                self.value(scrutinee);
+                // TICKET-240: a `match` over a view binds views of the same root, so the
+                // scrutinee itself is neither an escape nor a read.
+                let root = if self.deep {
+                    self.view_root(scrutinee)
+                } else {
+                    None
+                };
+                match (&root, &scrutinee.kind) {
+                    (Some(_), ExprKind::Ident(n)) => {
+                        if !self.aliases.contains_key(n) {
+                            self.uses.matched.insert(n.clone());
+                        }
+                    }
+                    (Some(_), _) => self.path(scrutinee),
+                    (None, _) => self.value(scrutinee),
+                }
                 for arm in arms {
+                    if let Some(root) = &root {
+                        let mut binders = HashSet::new();
+                        crate::compiler::pattern_binds(&arm.pattern, &mut binders);
+                        for b in binders {
+                            self.alias(&b, root);
+                        }
+                    }
                     if let Some(g) = &arm.guard {
                         self.value(g);
                     }
@@ -220,6 +331,10 @@ impl UseWalk<'_> {
     /// Walk `e` in value position: a bare name here is a plain value, so it escapes.
     fn value(&mut self, e: &Expr) {
         match &e.kind {
+            // TICKET-240: a bare alias is a view of its root, not an escape of its own name.
+            ExprKind::Ident(n) if self.aliases.contains_key(n) => {
+                self.deep_use(e, || DeepUse::Read { view: e.id });
+            }
             ExprKind::Ident(n) => {
                 self.uses.escaped.insert(n.clone());
             }
@@ -282,7 +397,13 @@ impl UseWalk<'_> {
                             Some(ArgCallee::Module(m.clone(), name.clone()))
                         }
                         ExprKind::Ident(n) => {
+                            self.deep_use(obj, || recv_use(obj, e, args, named));
                             self.keep(n, RootUse::Recv(name.clone()));
+                            None
+                        }
+                        ExprKind::Field { .. } | ExprKind::Index { .. } => {
+                            self.deep_use(obj, || recv_use(obj, e, args, named));
+                            self.path(obj);
                             None
                         }
                         _ => {
@@ -297,7 +418,12 @@ impl UseWalk<'_> {
                 };
                 for (j, a) in args.iter().enumerate() {
                     match (&target, &a.kind) {
-                        (Some(c), ExprKind::Ident(n)) => self.keep(n, RootUse::Arg(c.clone(), j)),
+                        (Some(c), ExprKind::Ident(n)) => {
+                            if self.aliases.contains_key(n) {
+                                self.deep_use(a, || DeepUse::Read { view: a.id });
+                            }
+                            self.keep(n, RootUse::Arg(c.clone(), j))
+                        }
                         _ => self.value(a),
                     }
                 }
@@ -305,15 +431,9 @@ impl UseWalk<'_> {
                     self.value(a);
                 }
             }
-            ExprKind::Field { obj, name, .. } => match &obj.kind {
-                ExprKind::Ident(n) => self.keep(n, RootUse::Field(name.clone())),
-                _ => self.value(obj),
-            },
-            ExprKind::Index { obj, index, .. } => {
-                self.indexed(obj);
-                if let Some(index) = index {
-                    self.value(index);
-                }
+            ExprKind::Field { .. } | ExprKind::Index { .. } => {
+                self.deep_use(e, || DeepUse::Read { view: e.id });
+                self.path(e);
             }
             ExprKind::Slice {
                 obj,
@@ -321,6 +441,8 @@ impl UseWalk<'_> {
                 end,
                 step,
             } => {
+                // A slice of a view is a new container over the view's children.
+                self.deep_use(obj, || DeepUse::Read { view: e.id });
                 self.indexed(obj);
                 for b in [start, end, step].into_iter().flatten() {
                     self.value(b);
@@ -352,7 +474,12 @@ impl UseWalk<'_> {
 
     fn operand(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Ident(n) => self.keep(n, RootUse::Op),
+            ExprKind::Ident(n) => {
+                if self.aliases.contains_key(n) {
+                    self.deep_use(e, || DeepUse::Read { view: e.id });
+                }
+                self.keep(n, RootUse::Op)
+            }
             _ => self.value(e),
         }
     }
@@ -365,15 +492,55 @@ impl UseWalk<'_> {
     }
 }
 
+/// The [`DeepUse::Recv`] of call `call` on receiver `recv`.
+fn recv_use(recv: &Expr, call: &Expr, args: &[Expr], named: &[(String, Expr)]) -> DeepUse {
+    DeepUse::Recv {
+        recv: recv.id,
+        call: call.id,
+        args: args
+            .iter()
+            .chain(named.iter().map(|(_, a)| a))
+            .cloned()
+            .collect(),
+    }
+}
+
 /// [`Uses`] of one function body.
 fn uses_of(decl: &FnDecl) -> Uses {
+    walk_uses(decl, false)
+}
+
+/// TICKET-240 — [`Uses`] of a generator body for its frame verdict: `deep`, `matched` and `lost`
+/// are filled too. A root is `lost` when one of its aliases has more than one binding site in
+/// the frame, is an assignment target, or is itself in `escaped` (a closure, a comprehension or
+/// another construct the walk does not enter reads it).
+pub(super) fn frame_uses(decl: &FnDecl) -> Uses {
+    walk_uses(decl, true)
+}
+
+fn walk_uses(decl: &FnDecl, deep: bool) -> Uses {
     let mut bound: HashSet<String> = decl.params.iter().map(|p| p.name.clone()).collect();
     crate::compiler::collect_frame_binds(&decl.body, &mut bound);
     let mut w = UseWalk {
         bound: &bound,
         uses: Uses::default(),
+        deep,
+        aliases: HashMap::new(),
+        assigned: HashSet::new(),
     };
     w.block(&decl.body);
+    if deep {
+        let mut sites: Vec<String> = decl.params.iter().map(|p| p.name.clone()).collect();
+        crate::compiler::collect_frame_binds(&decl.body, &mut sites);
+        for (alias, root) in &w.aliases {
+            if sites.iter().filter(|n| *n == alias).count() > 1
+                || w.assigned.contains(alias)
+                || w.uses.escaped.contains(alias)
+            {
+                w.uses.lost.insert(root.clone());
+            }
+        }
+    }
     w.uses
 }
 
@@ -1024,6 +1191,18 @@ impl Checker {
         tys: &[Ty],
         callee: &dyn Fn(&ArgCallee, usize) -> bool,
     ) -> bool {
+        uses.matched.contains(name) || self.root_leaves(uses, name, tys, callee)
+    }
+
+    /// [`Self::root_escapes`] without the `matched` rule: a frame verdict follows a matched
+    /// root's binders as aliases instead.
+    pub(super) fn root_leaves(
+        &self,
+        uses: &Uses,
+        name: &str,
+        tys: &[Ty],
+        callee: &dyn Fn(&ArgCallee, usize) -> bool,
+    ) -> bool {
         if uses.escaped.contains(name) || tys.is_empty() {
             return true;
         }
@@ -1034,6 +1213,62 @@ impl Checker {
                 RootUse::Arg(c, j) => callee(c, *j),
                 _ => tys.iter().any(|t| !self.use_keeps_root(u, t)),
             })
+    }
+
+    /// TICKET-240 Rule G — is the whole graph of frame slot `name` private? The caller already
+    /// knows every binding of it is all-fresh and its root stays in the frame. This adds: no
+    /// alias was lost, the root is never an operator operand or an argument of a named callee,
+    /// every store into the graph takes a fresh or markless value (and index), every method on a
+    /// view is a native one whose result is markless, and every other view ends in a markless
+    /// value. Dropping one of these turns a false fault into a lost write.
+    pub(super) fn deep_private(
+        &mut self,
+        uses: &Uses,
+        acc: &crate::checker::GenFrameAcc,
+        name: &str,
+    ) -> bool {
+        if uses.lost.contains(name)
+            || uses
+                .kept
+                .iter()
+                .any(|(n, u)| n == name && matches!(u, RootUse::Op | RootUse::Arg(..)))
+        {
+            return false;
+        }
+        let markless = |id: crate::ast::NodeId| {
+            acc.expr_tys
+                .get(&id.0)
+                .is_some_and(|t| !ret_may_hold_receiver(t, &Ty::Unknown))
+        };
+        for (_, u) in uses.deep.iter().filter(|(n, _)| n == name) {
+            let stored: Vec<&Expr> = match u {
+                DeepUse::Read { view } => {
+                    if !markless(*view) {
+                        return false;
+                    }
+                    continue;
+                }
+                DeepUse::Recv { recv, call, args } => {
+                    let native = acc
+                        .expr_tys
+                        .get(&recv.0)
+                        .is_some_and(|t| native_receiver(t.scalar()).is_some());
+                    if !native || !markless(*call) {
+                        return false;
+                    }
+                    args.iter().collect()
+                }
+                DeepUse::Store { value, index } => {
+                    std::iter::once(&**value).chain(index.as_deref()).collect()
+                }
+            };
+            for e in stored {
+                if !markless(e.id) && !self.fresh_shape(e, 0, false).is_all() {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// The type rule of one kept use: its result cannot alias a root of type `t`.

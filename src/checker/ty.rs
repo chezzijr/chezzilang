@@ -5,7 +5,7 @@
 //! doesn't cascade into a storm of follow-on errors.
 
 use crate::lexer::Span;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 
 /// M24 — the [`WitnessTable::calls`] key. `(graph module index, fragment-context span, fragment
@@ -197,7 +197,7 @@ pub enum SumSeed {
 }
 pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 
-pub use crate::vm::crossing::Fresh;
+pub use crate::vm::crossing::{Fresh, SlotFresh};
 
 /// D4 (TICKET-189, TICKET-240) — the shape each operand of one `spawn` call crosses with: which
 /// objects of its value graph no parent binding can reach ([`Fresh`]). `args` is in bound-slot
@@ -215,12 +215,13 @@ pub type CrossingTable = HashMap<(usize, u32), CallCrossing>;
 
 /// TICKET-190 — the generator frame verdicts the compiler encodes. `calls` holds each call that
 /// creates a generator from a statically named fn, keyed like [`CrossingTable`]: its param
-/// crossings become the generator's creation stamp. `frames` holds, per generator decl keyed
-/// `(graph module index, decl name span)`, the names of its private frame slots.
+/// shapes become the generator's creation stamp. `frames` holds, per generator decl keyed
+/// `(graph module index, decl name span)`, the verdict of each private frame slot name: `Root`
+/// or `All` (TICKET-240). A name it does not hold is `Marked`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GenCrossings {
     pub calls: CrossingTable,
-    pub frames: HashMap<(usize, Span), HashSet<String>>,
+    pub frames: HashMap<(usize, Span), HashMap<String, SlotFresh>>,
 }
 
 /// Surface-only parameter labels on a function type (Swift SE-0111 keyword arguments through a
