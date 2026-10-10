@@ -156,7 +156,7 @@ fn prog(spinner: &str, victim: &str, action: &str) -> String {
     };
     if panics && !victim_is_job {
         let inner = main.into_iter().map(|l| format!("    {l}"));
-        main = std::iter::once("r := recover:".to_string())
+        main = std::iter::once("r: None!Error = recover:".to_string())
             .chain(inner)
             .chain(std::iter::once("os.exit(7)".to_string()))
             .collect();
