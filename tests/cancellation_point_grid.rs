@@ -265,7 +265,7 @@ fn run_src(c: &Cell) -> String {
     }
     body += &format!("return {}\n", c.done);
     format!(
-        "import std.concurrency\n\n{DECLS}\n{}\n{extra}\nfn round() -> bool:\n{}\n{main}",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\n\n{DECLS}\n{}\n{extra}\nfn round() -> bool:\n{}\n{main}",
         act_fn(c),
         indent(&body, 4)
     )
@@ -284,7 +284,7 @@ fn timeout_src(c: &Cell) -> String {
     }
     body += &format!("    act(7, {ARGS})\n");
     format!(
-        "import std.concurrency\nimport std.time\n\n{DECLS}\n{}\ntest fn cell():\n{}",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nimport std.time\n\n{DECLS}\n{}\ntest fn cell():\n{}",
         act_fn(c),
         indent(&body, 4)
     )
@@ -442,12 +442,12 @@ fn ops() -> Vec<Op> {
             )),
         },
         Op {
-            name: "RwShared.set_key",
+            name: "ConcurrentMap.set",
             out: "Channel[int](1)",
-            ready: Some(("", "wm.set_key(1, v)", "wm.get().len() == 1")),
+            ready: Some(("", "ConcurrentMap(wm).set(1, v)", "wm.get().len() == 1")),
             wait: Some((
                 "",
-                "_ := held.recv()\nwm.set_key(1, v)",
+                "_ := held.recv()\nConcurrentMap(wm).set(1, v)",
                 "after.load() == 0",
                 Some("hold_m"),
             )),

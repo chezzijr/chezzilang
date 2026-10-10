@@ -9,6 +9,7 @@
 # both a data alias and a cell alias mean the same source object stays one object per crossing.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 import std.concurrency
+import ConcurrentList, ConcurrentMap from std.concurrency.collection
 
 struct Ctr:
     inc: fn() -> None
@@ -282,8 +283,8 @@ test fn rwshared_views_over_sibling_closures():
         return n
     fn get() -> int:
         return n
-    s := RwShared([inc, get])
-    both := s.get()          # whole container, one crossing → one binding
+    s := ConcurrentList(RwShared([inc, get]))
+    both := s.inner.get()          # whole container, one crossing → one binding
     both[0]()
     assert both[1]() == 1
     # per-element view → its own copy of the binding (`at` is the SAFE index: `E?`)
@@ -301,9 +302,9 @@ test fn rwshared_views_over_sibling_closures():
     assert calls == 2
     # one walk, one shared map: the `inc` copy returns 1 and the `get` copy reads the SAME cell -> 1.
     assert s.fold(0, fn(a: int, f: fn() -> int) -> int: a + f()) == 2
-    m := RwShared({"i": inc, "g": get})
-    assert m.has("i")
-    match m.get_key("g"):
+    m := ConcurrentMap(RwShared({"i": inc, "g": get}))
+    assert m.contains("i")
+    match m.get("g"):
         ?f: assert f() == 0
         None: assert false
     m.for_each_entry(fn(k: str, f: fn() -> int): f())
@@ -344,13 +345,13 @@ test fn rwshared_view_survives_a_concurrent_writer():
         return n
     fn zero() -> int:
         return 0
-    s := RwShared([inc, get])
+    s := ConcurrentList(RwShared([inc, get]))
     d := Channel[int](2)
     parallel:
         spawn:
             for i in range(0, 20000):
-                s.set([zero, zero])
-                s.set([inc, get])
+                s.inner.set([zero, zero])
+                s.inner.set([inc, get])
             d.send(1)
         spawn:
             hits := 0

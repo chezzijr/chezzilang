@@ -295,6 +295,7 @@ main()";
 fn rwshared_struct_eq_survives_gc_stress() {
     let src = "\
 import std.concurrency
+import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 struct K:
     n: int
     fn hash(self) -> int:
@@ -306,13 +307,13 @@ fn main():
     # LIST values, not str: a freshly-rebuilt list can never alias an interned program constant,
     # so an unrooted `v` really is collectable while `eq` runs.
     m: Map[K, List[str]] = {K(1): [str(1)], K(2): [str(2), str(3)]}
-    box := RwShared(m)
-    print(box.has(K(1)), box.has(K(9)), box.get_key(K(2)), box.get_key(K(9)))
-    s := RwShared(Set([K(1), K(2)]))
+    box := ConcurrentMap(RwShared(m))
+    print(box.contains(K(1)), box.contains(K(9)), box.get(K(2)), box.get(K(9)))
+    s := ConcurrentSet(RwShared(Set([K(1), K(2)])))
     print(s.contains(K(2)), s.contains(K(7)))
 main()";
     assert_eq!(
-        run_capture_stress(src),
+        super::golden_tests::vm_run_file_stress(src, crate::native::HostConfig::default()),
         "true false ['2', '3'] None\ntrue false\n"
     );
 }
@@ -794,22 +795,23 @@ main()";
 fn rwshared_probe_struct_key_rooted_across_hash() {
     let src = "\
 import std.concurrency
+import ConcurrentMap, ConcurrentSet from std.concurrency.collection
 struct P:
     x: int
     fn hash(self) -> int:
         pad := [self.x, self.x + 1]   # allocate inside hash → GC mid-probe under stress
         return pad[0] * 31
 
-fn make_set() -> RwShared[Set[P]]:
-    return RwShared(Set([P(1), P(2), P(3)]))
+fn make_set() -> ConcurrentSet[P]:
+    return ConcurrentSet(RwShared(Set([P(1), P(2), P(3)])))
 
-fn make_map() -> RwShared[Map[P, int]]:
-    return RwShared({P(1): 10, P(2): 20})
+fn make_map() -> ConcurrentMap[P, int]:
+    return ConcurrentMap(RwShared({P(1): 10, P(2): 20}))
 
 fn main():
     print(make_set().contains(P(2)))
-    print(make_map().has(P(1)))
-    match make_map().get_key(P(2)):
+    print(make_map().contains(P(1)))
+    match make_map().get(P(2)):
         ?v: print(v)
         None: print(\"none\")
 main()";

@@ -110,3 +110,117 @@ test fn get_or_insert_race_no_fault():
     match m.get("k"):
         ?v: assert v == 7
         None: assert true
+
+# ---- TICKET-243: ConcurrentList / ConcurrentSet single-element writers ----------------------------
+
+struct CKey:
+    n: int
+    tags: List[int]
+    fn hash(self) -> int:
+        return self.n % 2
+    fn eq(self, other: CKey) -> bool:
+        return self.n == other.n
+
+# The first push after a whole store re-encodes the list; the later ones splice. Every pushed row
+# lands once, in order, and is a separate object on a whole `snapshot()`. Red when the re-encode
+# path drops its element: `[[1], [2], [4], [5, 6]]`.
+test fn list_push_keeps_nested_elements_apart():
+    c := collection.ConcurrentList(RwShared([[1], [2]]))
+    c.push([3])
+    c.push([4])
+    c.push([5, 6])
+    snap := c.snapshot()
+    assert snap == [[1], [2], [3], [4], [5, 6]]
+    snap[3].push(9)
+    assert snap == [[1], [2], [3], [4, 9], [5, 6]]
+    assert c.at(3) == ?[4]
+    assert c.len() == 5
+
+# A whole `set` / `write` on the box replaces the list; the next push must still land after it.
+test fn list_push_after_a_whole_store():
+    c := collection.ConcurrentList(RwShared([[1]]))
+    c.push([2])
+    c.push([3])
+    c.inner.set([[7], [8]])
+    c.push([9])
+    c.push([10])
+    assert c.snapshot() == [[7], [8], [9], [10]]
+    c.inner.write(fn(xs): xs[0:1])
+    c.push([11])
+    c.push([12])
+    snap := c.snapshot()
+    assert snap == [[7], [11], [12]]
+    snap[1].push(0)
+    assert snap[2] == [12]
+
+# The same object pushed twice is two copies (each push crosses the airlock by value).
+test fn list_push_copies_its_argument():
+    a := [1]
+    c := collection.ConcurrentList[List[int]].new()
+    c.push(a)
+    c.push(a)
+    a.push(2)
+    c.push(a)
+    assert c.snapshot() == [[1], [1], [1, 2]]
+
+test fn list_push_on_empty_and_readers():
+    c := collection.ConcurrentList[str].new()
+    assert c.len() == 0
+    assert c.at(0) == None
+    c.push("a")
+    c.push("b")
+    assert c.at(-1) == ?"b"
+    assert c.slice(0, 5) == ["a", "b"]
+    assert c.fold("", fn(acc: str, x: str) -> str: acc + x) == "ab"
+
+# add is a no-op on a present element and remove on an absent one; colliding user hashes probe by eq.
+test fn set_add_and_remove_single_elements():
+    c := collection.ConcurrentSet[CKey].new()
+    c.add(CKey(1, [1]))
+    c.add(CKey(3, [3]))
+    c.add(CKey(1, [99]))
+    assert c.len() == 2
+    assert c.contains(CKey(3, []))
+    assert not c.contains(CKey(5, []))
+    c.remove(CKey(5, []))
+    assert c.len() == 2
+    c.remove(CKey(1, []))
+    assert c.len() == 1
+    assert not c.contains(CKey(1, []))
+    assert c.contains(CKey(3, []))
+    c.remove(CKey(3, []))
+    assert c.len() == 0
+    c.add(CKey(3, [4]))
+    assert c.fold(0, fn(a: int, k: CKey) -> int: a + k.tags[0]) == 4
+
+# remove, add, remove on a set built from elements that held one shared list (a Set snapshots its
+# elements, so the stored set is flat): the survivors keep their own payload and the hash index
+# stays in step with the entries after each in-place removal.
+test fn set_remove_then_add_then_remove_keeps_the_survivors():
+    shared := [7]
+    c := collection.ConcurrentSet(RwShared({CKey(1, shared), CKey(2, shared), CKey(3, shared)}))
+    c.remove(CKey(1, []))
+    assert c.len() == 2
+    assert c.fold(0, fn(a: int, k: CKey) -> int: a + k.tags[0]) == 14
+    c.add(CKey(4, [1]))
+    c.remove(CKey(2, []))
+    assert c.fold(0, fn(a: int, k: CKey) -> int: a + k.n * 10 + k.tags[0]) == 30 + 7 + 40 + 1
+
+# Writers from spawned tasks are visible to the parent: the collection crosses as a shared handle.
+test fn list_and_set_writes_from_tasks_reach_the_parent():
+    cl := collection.ConcurrentList[List[int]].new()
+    cs := collection.ConcurrentSet[int].new()
+    parallel:
+        for i in range(0, 50):
+            spawn:
+                cl.push([i, i + 1])
+                cs.add(i % 10)
+                cs.add(100 + i)
+                cs.remove(100 + i)
+    assert cl.len() == 50
+    assert cs.len() == 10
+    assert cl.fold(0, fn(a: int, x: List[int]) -> int: a + x[1] - x[0]) == 50
+    total := 0
+    for row in cl.snapshot():
+        total = total + row[0]
+    assert total == 1225

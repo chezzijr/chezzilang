@@ -18847,6 +18847,7 @@ main()
 fn rwshared_view_of_a_container_cycling_element_does_not_abort_the_host() {
     let src = "\
 import std.concurrency
+import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 struct Node:
     val: int
     back: List[Node]
@@ -18854,8 +18855,8 @@ fn main():
     a := Node(1, [])
     xs := [a, Node(2, [])]
     a.back = xs
-    s := RwShared(xs)
-    print(\"get {s.get()[0].val}\")
+    s := ConcurrentList(RwShared(xs))
+    print(\"get {s.inner.get()[0].val}\")
     match s.at(0):
         ?e:
             print(\"walk {e.back[0].back[0].back[0].val}\")
@@ -18881,6 +18882,7 @@ main()
 fn rwshared_cyclic_view_round_trips_under_gc_stress() {
     let src = "\
 import std.concurrency
+import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 struct Node:
     val: int
     back: List[Node]
@@ -18889,7 +18891,7 @@ fn main():
     a := Node(1, [])
     xs := [a, Node(2, [])]
     a.back = xs
-    s := RwShared(xs)
+    s := ConcurrentList(RwShared(xs))
     match s.at(0):
         ?e: print(\"ok: {e.val} {e.back[0].back[0].val} {e.back.len()}\")
         None: print(\"WRONG\")
@@ -18918,6 +18920,7 @@ main()
 fn rwshared_view_over_shared_bindings_is_not_quadratic() {
     let src = "\
 import std.concurrency
+import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 fn main():
     n := 0
     fn inc() -> int:
@@ -18926,7 +18929,7 @@ fn main():
     fs: List[fn() -> int] = [inc]
     for i in range(0, 3000):
         fs.push(inc)
-    s := RwShared(fs)
+    s := ConcurrentList(RwShared(fs))
     c := 0
     fn tick(f: fn() -> int):
         c = c + 1
@@ -18934,8 +18937,8 @@ fn main():
     print(c)
 main()
 ";
-    let (out, nodes) = run_capture_counting(src, &WIRE_DECODE_NODES);
-    assert_eq!(out.unwrap(), "3001\n");
+    let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    assert_eq!(out, "3001\n");
     let want = 3001..=4 * 3001;
     assert!(
         want.contains(&nodes),
@@ -18952,12 +18955,13 @@ main()
 fn rwshared_for_each_over_a_dag_alias_is_not_quadratic() {
     let src = "\
 import std.concurrency
+import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 fn main():
     inner := [1]
     fs: List[List[int]] = [inner]
     for i in range(0, 3000):
         fs.push(inner)
-    s := RwShared(fs)
+    s := ConcurrentList(RwShared(fs))
     c := 0
     fn tick(x: List[int]):
         c = c + 1
@@ -18965,8 +18969,8 @@ fn main():
     print(c)
 main()
 ";
-    let (out, nodes) = run_capture_counting(src, &WIRE_DECODE_NODES);
-    assert_eq!(out.unwrap(), "3001\n");
+    let (out, nodes) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
+    assert_eq!(out, "3001\n");
     let want = 3001..=4 * 3001;
     assert!(
         want.contains(&nodes),
@@ -18983,12 +18987,13 @@ main()
 fn rwshared_at_over_an_aliased_store_stays_under_its_ceiling() {
     let src = "\
 import std.concurrency
+import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 fn main():
     inner := List(range(0, 5000))
     outer: List[List[int]] = [inner, inner]
     for k in range(0, 8):
         outer.push(List(range(0, 5000)))
-    s := RwShared(outer)
+    s := ConcurrentList(RwShared(outer))
     total := 0
     for k in range(0, 5):
         match s.at(1):
@@ -22204,12 +22209,12 @@ main()
 /// a value per lookup, against every stored entry per lookup for a scan.
 #[test]
 fn rwshared_map_get_key_is_not_linear() {
-    let src = "import std.concurrency\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := RwShared(m)\n    s := 0\n    i = 0\n    while i < n:\n        match box.get_key(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
+    let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := ConcurrentMap(RwShared(m))\n    s := 0\n    i = 0\n    while i < n:\n        match box.get(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n");
     assert!(
         (2000..=4000).contains(&touches),
-        "2000 RwShared.get_key on a 2000-entry map rebuilt {touches} wire nodes (want 2000..=4000) -- O(n) per lookup"
+        "2000 ConcurrentMap.get on a 2000-entry map rebuilt {touches} wire nodes (want 2000..=4000) -- O(n) per lookup"
     );
 }
 
@@ -22217,12 +22222,12 @@ fn rwshared_map_get_key_is_not_linear() {
 /// (what `write` does). 2000 inserts then 2000 overwrites on one box, pinned with the same count.
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
-    let src = "import std.concurrency\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := RwShared(m)\n    i := 0\n    while i < n:\n        box.set_key(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set_key(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get_key(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
+    let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(RwShared(m))\n    i := 0\n    while i < n:\n        box.set(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n2000\n");
     assert!(
         (2000..=4000).contains(&touches),
-        "2000 RwShared.set_key inserts + 2000 overwrites rebuilt {touches} wire nodes (want 2000..=4000) -- O(n) per write"
+        "2000 ConcurrentMap.set inserts + 2000 overwrites rebuilt {touches} wire nodes (want 2000..=4000) -- O(n) per write"
     );
 }
 
@@ -22941,4 +22946,31 @@ fn a_fault_in_a_one_line_native_spawn_names_the_spawn_line() {
     let names: Vec<&str> = e.trace.iter().map(|f| f.function.as_str()).collect();
     assert_eq!(names, ["<spawned task>"]);
     assert_eq!(e.trace[0].span.line, 5);
+}
+
+/// TICKET-219, moved from `tests/chz` by TICKET-243: the std internals `_settle` and
+/// `_submit_settled` seal only a channel; any other value faults. No user program can name them
+/// (a `_` name of a std module is hidden), so the two guards are driven from Rust.
+#[test]
+fn the_settle_internals_reject_a_non_channel() {
+    use crate::native::Host;
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    let mut host = VmHost {
+        vm: &mut vm,
+        args: vec![Value::int(5), Value::int(1)],
+    };
+    let e = host
+        .arg_settle_channel(0, 1)
+        .expect_err("_settle(5, 1) must fault");
+    assert!(e.message.contains("Channel"), "{}", e.message);
+    let h = vm.alloc_str("x".to_string()).as_obj().unwrap();
+    let e = vm
+        .executor_method(
+            h,
+            "_submit_settled",
+            &[Value::nil(), Value::int(5)],
+            Span::RUNTIME,
+        )
+        .expect_err("_submit_settled with a non-channel must fault");
+    assert!(e.message.contains("requires a Channel"), "{}", e.message);
 }

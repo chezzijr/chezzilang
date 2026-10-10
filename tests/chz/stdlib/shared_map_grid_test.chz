@@ -6,8 +6,9 @@
 # Executor job). A child's writes must be visible to the parent afterwards. `memoize1` gets the
 # same key kinds and callers: the value is right and `f` runs once per distinct key across tasks.
 #
-# The three `_rw_*` writers are the RwShared single-entry write path: `set_key`/`remove_key`/
-# `get_or_insert`.
+# The three `_rw_*` writers reach a bare `RwShared` box through `ConcurrentMap(b)`: the box has only
+# `get`/`set`/`read`/`write` (TICKET-243), and the wrapper is the single-entry write path.
+
 
 import std.concurrency
 import ConcurrentMap from std.concurrency.collection
@@ -103,19 +104,19 @@ fn _shared_goi[K: Hashable + Eq](s: Shared[Map[K, int]], k: K, v: int) -> int:
 
 # The RwShared single-entry writers (see the header).
 fn _rw_put[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K, v: V):
-    b.set_key(k, v)
+    ConcurrentMap(b).set(k, v)
 
 fn _rw_del[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K):
-    _ := b.remove_key(k)
+    ConcurrentMap(b).remove(k)
 
 fn _rw_goi[K: Hashable + Eq, V](b: RwShared[Map[K, V]], k: K, v: V) -> V:
-    return b.get_or_insert(k, v)
+    return ConcurrentMap(b).get_or_insert(k, v)
 
 fn _rw_ops[K: Hashable + Eq](b: RwShared[Map[K, int]], keys: List[K]) -> str:
-    return _ops(keys, fn(k: K, v: int): _rw_put(b, k, v), fn(k: K): _rw_del(b, k), fn(k: K) -> int?: b.get_key(k), fn(k: K) -> bool: b.has(k), fn() -> int: b.len(), fn(k: K, v: int) -> int: _rw_goi(b, k, v), fn() -> str: _rw_items(b))
+    return _ops(keys, fn(k: K, v: int): _rw_put(b, k, v), fn(k: K): _rw_del(b, k), fn(k: K) -> int?: ConcurrentMap(b).get(k), fn(k: K) -> bool: ConcurrentMap(b).contains(k), fn() -> int: ConcurrentMap(b).len(), fn(k: K, v: int) -> int: _rw_goi(b, k, v), fn() -> str: _rw_items(b))
 
 fn _rw_items[K: Hashable + Eq](b: RwShared[Map[K, int]]) -> str:
-    return b.fold_entries("", fn(a, k, v): a + _show(k, v))
+    return ConcurrentMap(b).fold_entries("", fn(a, k, v): a + _show(k, v))
 
 fn _cm_ops[K: Hashable + Eq](c: ConcurrentMap[K, int], keys: List[K]) -> str:
     return _ops(keys, fn(k: K, v: int): c.set(k, v), fn(k: K): c.remove(k), fn(k: K) -> int?: c.get(k), fn(k: K) -> bool: c.contains(k), fn() -> int: c.len(), fn(k: K, v: int) -> int: c.get_or_insert(k, v), fn() -> str: _map_items(c.snapshot()))
@@ -302,7 +303,7 @@ test fn remove_and_overwrite_keep_a_cross_entry_alias_alive():
     m["c"] = [3]
     b := RwShared(m)
     _rw_del(b, "a")
-    match b.get_key("b"):
+    match ConcurrentMap(b).get("b"):
         ?v: assert v == [1, 2], str(v)
         None: assert false, "b missing after removing a"
     _rw_put(b, "c", [4])
@@ -328,9 +329,9 @@ fn _look(b: RwShared[Map[P, int]], stop: AtomicInt, ch: Channel[int]):
     for _ in range(10000):
         _rw_del(b, P(14))
         _rw_put(b, P(14), 14)
-        if not b.has(P(14)):
+        if not ConcurrentMap(b).contains(P(14)):
             misses = misses + 1
-        match b.get_key(P(14)):
+        match ConcurrentMap(b).get(P(14)):
             ?v:
                 if v != 14:
                     misses = misses + 1

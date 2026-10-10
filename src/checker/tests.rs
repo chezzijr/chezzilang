@@ -13708,8 +13708,8 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     );
     assert_eq!(io.certain_fn("isatty").unwrap().params, Vec::<Ty>::new());
     assert_eq!(io.certain_fn("isatty").unwrap().ret, Ty::Bool);
-    // 20 public fns + the 7 `_`-prefixed internal byte-seam natives (W7-8).
-    assert_eq!(io.fns().count(), 27);
+    // 20 public fns; the 7 `_` byte-seam natives are internal to std and not exported (TICKET-243).
+    assert_eq!(io.fns().count(), 20);
 
     let os = native_module_sig_via_graph("os");
     // W7-8 — `getcwd` hands back a `path.Path` (raw OS bytes), NOT a lossily-decoded `str`.
@@ -13741,8 +13741,8 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     assert_eq!(setenv.params, vec![Ty::Str, Ty::Str]);
     assert_eq!(setenv.ret, Ty::Nil);
     assert_eq!(os.certain_fn("chdir").unwrap().ret, Ty::result(Ty::Nil));
-    // 12 public fns + the 3 `_`-prefixed internal byte-seam natives (W7-8).
-    assert_eq!(os.fns().count(), 15);
+    // 12 public fns; the 3 `_` byte-seam natives are internal to std and not exported (TICKET-243).
+    assert_eq!(os.fns().count(), 12);
 
     let rand = native_module_sig_via_graph("rand");
     let ri = rand.certain_fn("int").expect("rand.int");
@@ -13779,8 +13779,9 @@ fn math_io_os_rand_fs_representative_sigs_exact() {
     );
     // --- fs.stat/fs.walk (gaps §6 metadata READ + recursive walk): 15 + stat + walk = 17.
     // (FileInfo is a native struct, not a function — not counted here.)
-    // 17 public fns + the 17 `_`-prefixed internal byte-seam natives + the `_wrap_many` helper (W7-8).
-    assert_eq!(fs.fns().count(), 35);
+    // 17 public fns; the 17 `_` byte-seam natives and `_wrap_many` are internal to std and not
+    // exported (TICKET-243).
+    assert_eq!(fs.fns().count(), 17);
 }
 
 /// Hybrid native+Chezzi module: a BODIED `fn` (`math.divmod`) declared alongside the bodyless
@@ -16851,11 +16852,11 @@ fn rwshared_list_view_methods_accept_on_list_element() {
     // The zero-copy read-view methods (`len`/`at`/`slice`/`for_each`/`fold`) are valid when the box
     // element is a list. `fold`'s R is inferred from the concrete `init` accumulator.
     entry_ok(
-        "import std.concurrency\nfn main():\n    box := RwShared([1, 2, 3])\n    print(box.len())\n    print(box.at(0))\n    print(box.slice(0, 2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(RwShared([1, 2, 3]))\n    print(box.len())\n    print(box.at(0))\n    print(box.slice(0, 2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
     );
     // R is not pinned to the element type — a str accumulator folds a list of ints to a str.
     entry_ok(
-        "import std.concurrency\nfn main():\n    box := RwShared([1, 2, 3])\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(RwShared([1, 2, 3]))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
     );
 }
 
@@ -16918,23 +16919,23 @@ fn rwshared_map_readview_methods() {
     // Map read-view: len/get_key/has/for_each_entry/fold_entries. K/V arm-recovered from the concrete
     // Map[K,V]; fold_entries's R pins from the concrete init.
     entry_ok(
-        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1, \"b\": 2})\n    print(box.len())\n    print(box.has(\"a\"))\n    box.for_each_entry(fn(k, v): print(k + str(v)))\n    print(box.fold_entries(0, fn(a, k, v): a + v))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1, \"b\": 2}))\n    print(box.len())\n    print(box.contains(\"a\"))\n    box.for_each_entry(fn(k, v): print(k + str(v)))\n    print(box.fold_entries(0, fn(a, k, v): a + v))\nmain()\n",
     );
     // get_key returns Option[V] — matchable, V concrete (no unbound Param escapes).
     entry_ok(
-        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    match box.get_key(\"a\"):\n        ?v: print(v + 1)\n        None: print(-1)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    match box.get(\"a\"):\n        ?v: print(v + 1)\n        None: print(-1)\nmain()\n",
     );
     // Nesting: V = List[int] recovered.
     entry_ok(
-        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": [1, 2]})\n    match box.get_key(\"a\"):\n        ?v: print(v.len())\n        None: print(-1)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": [1, 2]}))\n    match box.get(\"a\"):\n        ?v: print(v.len())\n        None: print(-1)\nmain()\n",
     );
     // fold_entries R is not pinned to V — a str accumulator over a Map[str,int] folds to str.
     entry_ok(
-        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    s := box.fold_entries(\"\", fn(a, k, v): a + k)\n    print(s)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    s := box.fold_entries(\"\", fn(a, k, v): a + k)\n    print(s)\nmain()\n",
     );
     // Wrong key type on get_key/has is rejected (K = str; int arg mismatches).
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    print(box.get_key(3))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    print(box.get(3))\nmain()\n",
         "expected",
     );
 }
@@ -16943,15 +16944,15 @@ fn rwshared_map_readview_methods() {
 fn rwshared_map_write_entry_methods() {
     // TICKET-192: the single-entry writers of a `RwShared[Map[K, V]]`.
     entry_ok(
-        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    box.set_key(\"a\", 2)\n    match box.remove_key(\"a\"):\n        ?v: print(v + 1)\n        None: print(-1)\n    print(box.get_or_insert(\"a\", 3) + 1)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    box.set(\"a\", 2)\n    box.remove(\"a\")\n    print(box.get_or_insert(\"a\", 3) + 1)\nmain()\n",
     );
     // Wrong key type, wrong value type.
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    box.set_key(1, 2)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    box.set(1, 2)\nmain()\n",
         "expected",
     );
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared({\"a\": 1})\n    box.set_key(\"a\", \"x\")\nmain()\n",
+        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    box := ConcurrentMap(RwShared({\"a\": 1}))\n    box.set(\"a\", \"x\")\nmain()\n",
         "expected",
     );
     // A List element has no map writers.
@@ -16965,16 +16966,16 @@ fn rwshared_map_write_entry_methods() {
 fn rwshared_set_readview_methods() {
     // Set read-view: len/contains/for_each/fold. E arm-recovered from the concrete Set[E].
     entry_ok(
-        "import std.concurrency\nfn main():\n    box := RwShared(Set([1, 2, 3]))\n    print(box.len())\n    print(box.contains(2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(RwShared(Set([1, 2, 3])))\n    print(box.len())\n    print(box.contains(2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
     );
     // contains with the wrong element type is rejected (E = int; str arg mismatches).
     entry_rejects(
-        "import std.concurrency\nfn main():\n    box := RwShared(Set([1, 2, 3]))\n    print(box.contains(\"x\"))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(RwShared(Set([1, 2, 3])))\n    print(box.contains(\"x\"))\nmain()\n",
         "expected",
     );
     // Set fold R not pinned to E — str accumulator over Set[int] folds to str.
     entry_ok(
-        "import std.concurrency\nfn main():\n    box := RwShared(Set([1, 2, 3]))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
+        "import std.concurrency\nimport ConcurrentSet from std.concurrency.collection\nfn main():\n    box := ConcurrentSet(RwShared(Set([1, 2, 3])))\n    s := box.fold(\"\", fn(a, x): a + str(x))\n    print(s)\nmain()\n",
     );
 }
 
@@ -26546,7 +26547,7 @@ fn a_generic_fn_argument_pinned_by_anything_stays_ok() {
     ));
     // `std.concurrency`'s slots, including `for_each`'s deliberately-`?` return
     entry_ok(&format!(
-        "import std.concurrency\n{head}fn gi[T](x: T) -> T:\n    return x\nfn gs[T](x: T):\n    print(x)\nfn main():\n    s := Shared(1)\n    s.update(gi)\n    r := RwShared(1)\n    r.write(gi)\n    q := RwShared([1,2,3])\n    q.for_each(gs)\nmain()\n"
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\n{head}fn gi[T](x: T) -> T:\n    return x\nfn gs[T](x: T):\n    print(x)\nfn main():\n    s := Shared(1)\n    s.update(gi)\n    r := RwShared(1)\n    r.write(gi)\n    q := ConcurrentList(RwShared([1,2,3]))\n    q.for_each(gs)\nmain()\n"
     ));
     // an EMPTY receiver leaves the slot's own parameter `Unknown` — the empty-collection sentinel,
     // not evidence the fn is un-instantiable. Both of these print `[]` today and must keep doing so.
@@ -26561,7 +26562,7 @@ fn a_generic_fn_argument_pinned_by_anything_stays_ok() {
         "{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print([].fold(0, add))\n    print([].fold(\"\", pick))\n"
     ));
     entry_ok(&format!(
-        "import std.concurrency\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    s: RwShared[List[int]] = RwShared([])\n    print(s.fold(0, add))\nmain()\n"
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    s: ConcurrentList[int] = ConcurrentList(RwShared([]))\n    print(s.fold(0, add))\nmain()\n"
     ));
 }
 
@@ -28622,15 +28623,17 @@ fn reserved_receiver_nongeneric_method_turbofish_rejected() {
 fn rwshared_readview_fold_turbofish_ok() {
     entry_ok(
         "import std.concurrency\n\
+         import ConcurrentList, ConcurrentMap from std.concurrency.collection\n\
          fn main():\n\
-         \x20   rw := RwShared([1, 2, 3])\n\
+         \x20   rw := ConcurrentList(RwShared([1, 2, 3]))\n\
          \x20   print(rw.fold[int](0, fn(a, x): a + x))\n\
          main()\n",
     );
     entry_ok(
         "import std.concurrency\n\
+         import ConcurrentList, ConcurrentMap from std.concurrency.collection\n\
          fn main():\n\
-         \x20   m := RwShared({\"a\": 1})\n\
+         \x20   m := ConcurrentMap(RwShared({\"a\": 1}))\n\
          \x20   print(m.fold_entries[int](0, fn(a, k, v): a + v))\n\
          main()\n",
     );
@@ -35697,7 +35700,7 @@ fn method_type_param_capture_grid() {
         ),
         (
             "rwshared_fold",
-            "import std.concurrency\nfn g[R](s: RwShared[List[R]]) -> int:\n    return s.fold(0, fn(a: int, x: R) -> int: a + 1)\n",
+            "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn g[R](s: ConcurrentList[R]) -> int:\n    return s.fold(0, fn(a: int, x: R) -> int: a + 1)\n",
             true,
         ),
         (
