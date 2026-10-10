@@ -38986,3 +38986,50 @@ fn inline_if_elif_else_statement_is_accepted() {
 fn inline_recover_in_call_argument_is_accepted() {
     ok("fn main():\n    print(recover: 1)\n");
 }
+
+/// TICKET-242 -- a one-line `if … else` statement discards its value, so its branches need not
+/// join; each branch is checked as a discarded value of its own. Every position that USES the
+/// value keeps the join.
+#[test]
+fn one_line_if_statement_branches_need_not_join() {
+    let fns = "fn pi() -> int:\n    return 1\nfn ps() -> str:\n    return \"s\"\nfn pr() -> int!str:\n    return 1\nfn po() -> int?:\n    return None\n";
+    for src in [
+        "c := false\nif c: 1 else: \"a\"\nprint(\"end\")\n",
+        "c := false\nxs := [1, 2]\nif c: print(1) else: xs.len()\nprint(\"end\")\n",
+        "a := false\nb := true\nif a: 1 elif b: \"s\" else: [1]\n",
+        "a := false\nb := false\nif a: 1 else: if b: \"s\" else: print(0)\n",
+        "c := false\n(if c: print(1) else: 2)\n",
+    ] {
+        ok(src);
+    }
+    for src in [
+        "c := false\nx := if c: 1 else: \"a\"\n",
+        "c := false\nprint(if c: 1 else: \"a\")\n",
+        "fn f(c: bool) -> int: if c: 1 else: \"a\"\n",
+        "fn f(c: bool) -> int:\n    return if c: 1 else: \"a\"\n",
+        "c := false\nn := 1\nx := match n:\n    1: if c: 1 else: \"a\"\n    _: 2\n",
+        "c := false\nr := recover:\n    if c: 1 else: \"a\"\n",
+        "c := false\nf := fn(): if c: pi() else: ps()\n",
+        "fn f(c: bool): if c: 1 else: \"a\"\n",
+        "c := false\n_ := if c: 1 else: \"a\"\n",
+    ] {
+        rejects(&format!("{fns}{src}"), "branches have incompatible types");
+    }
+    rejects("if 1: 2 else: \"a\"\n", "if condition must be bool");
+    rejects(
+        "c := false\nif c: 1 else: undefined_name()\n",
+        "unknown name",
+    );
+    warns(
+        &format!("{fns}c := true\nif c: pr() else: pi()\n"),
+        "returned by 'pr' is discarded",
+    );
+    warns(
+        &format!("{fns}c := false\nif c: pi() else: po()\n"),
+        "returned by 'po' is discarded",
+    );
+    entry_warns(
+        "import std.concurrency\nfn main():\n    c := true\n    s := Shared[List[int]]([])\n    if c: s.get().push(1) else: print(0)\nmain()\n",
+        "update",
+    );
+}

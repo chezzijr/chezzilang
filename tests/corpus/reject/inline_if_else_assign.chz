@@ -1,0 +1,5 @@
+# rule: ifStmt
+# expect: takes an expression in each branch
+c := false
+x := 0
+if c: print(1) else: x = 2

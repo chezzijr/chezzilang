@@ -233,7 +233,15 @@ pub const REMOVED_NAMES: [(&str, &str, &str, Option<&str>); 5] = [
 const ELSE_GUARD_PLACE: &str =
     "an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return`";
 
+const IF_BRANCH: &str = "a one-line `if`/`else` takes an expression in each branch; write a statement branch, or an `else:` guard, on its own indented line";
+const ELIF_LINE: &str = "an `elif` body ends its line; write the next `elif` or `else:` on its own line, and an `else:` guard in an indented body";
+const WHERE_BOUND: &str = "a `where` entry needs a bound (`where T: Proto`)";
+const TYPE_LIST_HEAD: &str = "a type list in brackets needs a name before the '[' (`Name[T, U]`); on any other value '[' takes one index";
+
 struct Parser {
+    /// The inline body of the `if` / `elif` being parsed: the token index where it starts, and the
+    /// `depth` of its one statement.
+    if_line: Option<(usize, usize)>,
     toks: Vec<Tok>,
     pos: usize,
     depth: usize,
@@ -273,6 +281,7 @@ impl Parser {
             })
             .collect();
         Parser {
+            if_line: None,
             toks,
             pos: 0,
             depth: 0,
@@ -541,10 +550,16 @@ impl Parser {
         }
     }
 
+    /// The cursor is where a simple statement's line ends: a layout token, or the bare `else:` /
+    /// `elif` that ends the one statement of an inline `if` body ([`Self::if_line_else`]).
+    fn at_line_end(&self) -> bool {
+        matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) || self.if_line_else()
+    }
+
     /// A simple statement must end the logical line; otherwise trailing tokens are a syntax error
     /// (e.g. `x := 5 y := 6` packed onto one line).
     fn expect_stmt_end(&mut self) -> PResult<()> {
-        if matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
+        if self.at_line_end() {
             return Ok(());
         }
         // A simple statement whose value is a block-valued expression (`x := match s:` with
@@ -808,7 +823,7 @@ impl Parser {
         let expr = self.parse_expr()?;
 
         // `f() else e: <block>` -- the guard in statement form: the success value is discarded.
-        if self.check(&Token::Else) {
+        if self.check(&Token::Else) && !self.if_line_else() {
             let span = expr.span;
             let value = self.parse_else_guard(expr)?;
             return Ok(StmtKind::Let {
@@ -1109,7 +1124,8 @@ impl Parser {
     }
 
     /// Optional `where T: Bound, U: Add + Mul, …` clause after a fn/native-fn signature. Returns an
-    /// empty vec when there's no `where`. Each entry is `IDENT (: bound (+ bound)*)`, comma-separated
+    /// empty vec when there's no `where`. Each entry is `IDENT : bound (+ bound)*`, comma-separated,
+    /// and the bound is required ([`WHERE_BOUND`])
     /// (no surrounding brackets) — the same per-entry shape as one `parse_type_params` entry, reusing
     /// [`parse_bound`]. Purely a bound-list: the checker (`fn_sig`) merges each entry's bounds into the
     /// matching declared type parameter, so a where entry is meaningful only for a `[T]`-declared param.
@@ -1120,11 +1136,14 @@ impl Parser {
                 let name_span = self.cur_span();
                 let name = self.expect_ident()?;
                 let mut bounds = Vec::new();
-                if self.eat(&Token::Colon) {
+                if !self.eat(&Token::Colon)
+                    || !matches!(self.peek(), Token::Ident(_) | Token::NoneKw)
+                {
+                    return Err(self.err(WHERE_BOUND.to_string()));
+                }
+                bounds.push(self.parse_bound()?);
+                while self.eat(&Token::Plus) {
                     bounds.push(self.parse_bound()?);
-                    while self.eat(&Token::Plus) {
-                        bounds.push(self.parse_bound()?);
-                    }
                 }
                 params.push(TypeParam {
                     name,
@@ -1861,10 +1880,42 @@ impl Parser {
         })
     }
 
+    /// The body of an `if` / `elif` (the cursor is on its ':'), and whether a bare `else:` or `elif`
+    /// follows its one statement on the same line.
+    fn if_body(&mut self) -> PResult<(Block, bool)> {
+        // the cursor is on the ':'; `parse_stmt_in` runs the body's one statement one level down
+        let start = self.pos + 1;
+        let outer = self.if_line.replace((start, self.depth + 1));
+        let body = self.parse_block();
+        self.if_line = outer;
+        let body = body?;
+        Ok((body, self.bare_else_on_line(start)))
+    }
+
     fn parse_if(&mut self) -> PResult<StmtKind> {
+        let span = self.cur_span();
         self.expect(&Token::If)?;
         let cond = self.parse_expr()?;
-        let body = self.parse_block()?;
+        let (mut body, on_line) = self.if_body()?;
+        if on_line {
+            // TICKET-242 -- `if c: a() else: b()` on one line is the if-expression with its value
+            // discarded: the body is its first branch, and the expression form's tail reads the rest.
+            let Some(Stmt {
+                kind: StmtKind::Expr(then),
+                ..
+            }) = body.pop()
+            else {
+                return Err(self.err(IF_BRANCH.to_string()));
+            };
+            let expr = self.parse_if_expr_tail(span, cond, then)?;
+            // anything left on the line means the else branch was not an expression
+            // (`else: x = 2`, `else: return 2`)
+            self.expect_stmt_end().map_err(|e| ParseError {
+                message: IF_BRANCH.to_string(),
+                span: e.span,
+            })?;
+            return Ok(StmtKind::Expr(expr));
+        }
         let mut branches = vec![(cond, body)];
         let mut else_block = None;
         loop {
@@ -1875,7 +1926,10 @@ impl Parser {
                 // `elif` → another branch (Python-style single keyword; `else if` no longer parses)
                 self.expect(&Token::Elif)?;
                 let cond = self.parse_expr()?;
-                let body = self.parse_block()?;
+                let (body, on_line) = self.if_body()?;
+                if on_line {
+                    return Err(self.err(ELIF_LINE.to_string()));
+                }
                 branches.push((cond, body));
             } else if self.check(&Token::Else) {
                 self.expect(&Token::Else)?;
@@ -2017,7 +2071,29 @@ impl Parser {
     fn parse_if_expr(&mut self, span: Span) -> PResult<Expr> {
         let cond = self.parse_expr()?;
         self.expect(&Token::Colon)?;
-        let then = self.parse_expr()?;
+        let then = self.if_branch()?;
+        self.parse_if_expr_tail(span, cond, then)
+    }
+
+    /// One branch of an if-expression. A branch that does not start an expression (`return`, `break`)
+    /// reports [`IF_BRANCH`].
+    fn if_branch(&mut self) -> PResult<Expr> {
+        let start = self.pos;
+        self.parse_expr().map_err(|e| {
+            if self.pos <= start + 1 && e.span == self.toks[start].span {
+                ParseError {
+                    message: IF_BRANCH.to_string(),
+                    span: e.span,
+                }
+            } else {
+                e
+            }
+        })
+    }
+
+    /// The `elif` / `else:` tail of an if-expression whose condition and first branch are parsed.
+    /// The one-line statement form ([`Self::parse_if`]) enters here too.
+    fn parse_if_expr_tail(&mut self, span: Span, cond: Expr, then: Expr) -> PResult<Expr> {
         // `elif ...` chains: recurse into another expression-`if` for the else-branch
         // (right-associative nesting), mirroring statement-form `parse_if`. Otherwise the
         // plain `else: <expr>` tail — `else` is mandatory (no optional-else leak).
@@ -2028,7 +2104,7 @@ impl Parser {
         } else {
             self.expect(&Token::Else)?;
             self.expect(&Token::Colon)?;
-            self.parse_expr()?
+            self.if_branch()?
         };
         Ok(Expr {
             id: crate::ast::NodeId::fresh(),
@@ -2041,11 +2117,31 @@ impl Parser {
         })
     }
 
+    /// A bare `else:` or `elif` on the logical line that started at token `start`. The lexer emits no
+    /// layout token inside brackets, so "no `Newline` / `Indent` / `Dedent` since `start`" is "same
+    /// logical line". A body that ends in a block expression (`x := match n:` + arms) ends at a
+    /// `Dedent`, and an indented body starts with a `Newline`; both make it false.
+    fn bare_else_on_line(&self, start: usize) -> bool {
+        (self.check(&Token::Elif) || (self.check(&Token::Else) && self.peek_at(1) == &Token::Colon))
+            && !self.toks[start..self.pos]
+                .iter()
+                .any(|t| matches!(t.kind, Token::Newline | Token::Indent | Token::Dedent))
+    }
+
+    /// TICKET-242 -- a bare `else:` or `elif` that ends the one statement of an inline `if` body: it
+    /// belongs to the `if`. The one test the statement-level `else` readers share. The depth test
+    /// keeps a statement of a nested block (a `recover:` body, a guard body) out: it runs deeper,
+    /// and keeps the `else` reading it has everywhere else.
+    fn if_line_else(&self) -> bool {
+        self.if_line
+            .is_some_and(|(start, depth)| self.depth == depth && self.bare_else_on_line(start))
+    }
+
     /// `<value> else e: <block>` -- the `else` guard, read only after a let's whole value (an if
     /// expression has already taken its own `else` inside `parse_expr`). Returns `value` unchanged
     /// when no `else` follows.
     fn parse_else_guard(&mut self, value: Expr) -> PResult<Expr> {
-        if !self.check(&Token::Else) {
+        if !self.check(&Token::Else) || self.if_line_else() {
             return Ok(value);
         }
         let span = self.cur_span();
@@ -2076,10 +2172,40 @@ impl Parser {
 
     /// An `else` after the value of an assignment or a `return`: no guard exists there.
     fn reject_else_guard(&self) -> PResult<()> {
-        if self.check(&Token::Else) {
+        if self.check(&Token::Else) && !self.if_line_else() {
             return Err(self.err(ELSE_GUARD_PLACE.to_string()));
         }
         Ok(())
+    }
+
+    /// `recover: <expr>` as a whole parenthesized value or a whole call argument (`<recoverInline>`),
+    /// when the next two tokens are `recover` `:`. Layout is off inside brackets, so the body is one
+    /// expression; it builds the one-statement block the inline statement form builds.
+    fn recover_inline(&mut self) -> PResult<Option<Expr>> {
+        if !self.check(&Token::Recover) || self.peek_at(1) != &Token::Colon {
+            return Ok(None);
+        }
+        let span = self.cur_span();
+        self.advance(); // 'recover'
+        self.advance(); // ':'
+        let body_span = self.cur_span();
+        let value = self.parse_expr()?;
+        Ok(Some(Expr {
+            id: crate::ast::NodeId::fresh(),
+            kind: ExprKind::Recover(vec![Stmt {
+                kind: StmtKind::Expr(value),
+                span: body_span,
+            }]),
+            span,
+        }))
+    }
+
+    /// One call argument value (`<arg>`): an expression, or a whole-argument `recover: <expr>`.
+    fn call_arg(&mut self) -> PResult<Expr> {
+        match self.recover_inline()? {
+            Some(e) => Ok(e),
+            None => self.parse_expr(),
+        }
     }
 
     /// Expression-position `recover:` (keyword already consumed): `recover:` then an inline or
@@ -2321,7 +2447,7 @@ impl Parser {
     fn parse_return(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Return)?;
         // a bare `return` ends the line — no value
-        if matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) {
+        if self.at_line_end() {
             Ok(StmtKind::Return(None))
         } else {
             let value = self.parse_expr()?;
@@ -3251,7 +3377,7 @@ impl Parser {
                     let name = name.clone();
                     self.advance(); // ident
                     self.advance(); // '='
-                    let value = self.parse_expr()?;
+                    let value = self.call_arg()?;
                     named.push((name, value));
                 } else {
                     if !named.is_empty() {
@@ -3259,7 +3385,7 @@ impl Parser {
                             self.err("positional argument after named argument".to_string())
                         );
                     }
-                    args.push(self.parse_expr()?);
+                    args.push(self.call_arg()?);
                 }
                 if !self.eat(&Token::Comma) {
                     break;
@@ -3280,6 +3406,8 @@ impl Parser {
     /// `parse_subscript`'s expression grammar, kept only when it ends at the same `]`. A slice is
     /// returned as `parse_subscript` builds it. When no reading parses, `parse_subscript` runs
     /// again non-speculatively so its error surfaces. The parser never chooses; the checker does.
+    /// On any other head the type reading is tried only to name the mistake: a type list that
+    /// parses where the subscript does not (`1[T, U]`) reports [`TYPE_LIST_HEAD`].
     fn parse_bracket(&mut self, obj: Expr, span: Span) -> PResult<Expr> {
         let headed = match &obj.kind {
             ExprKind::Ident(_) => true,
@@ -3298,30 +3426,38 @@ impl Parser {
         };
         let mut types = Vec::new();
         let mut end = None;
-        if headed {
-            self.advance(); // '['
-            loop {
-                match self.parse_type() {
-                    Ok(t) => types.push(t),
-                    Err(_) => {
-                        types.clear();
-                        break;
-                    }
-                }
-                if !self.eat(&Token::Comma) {
+        self.advance(); // '['
+        loop {
+            match self.parse_type() {
+                Ok(t) => types.push(t),
+                Err(_) => {
+                    types.clear();
                     break;
                 }
             }
-            if !types.is_empty() && self.eat(&Token::RBracket) {
-                end = Some(self.pos);
-            } else {
-                types.clear();
+            if !self.eat(&Token::Comma) {
+                break;
             }
-            restore(self, save);
         }
-        let Some(end) = end else {
+        if !types.is_empty() && self.eat(&Token::RBracket) {
+            end = Some(self.pos);
+        } else {
+            types.clear();
+        }
+        restore(self, save);
+        let Some(end) = end.filter(|_| headed) else {
+            let bracket = self.cur_span();
             self.advance(); // '['
-            return self.parse_subscript(obj, span);
+            return self.parse_subscript(obj, span).map_err(|e| {
+                if end.is_some() {
+                    ParseError {
+                        message: TYPE_LIST_HEAD.to_string(),
+                        span: bracket,
+                    }
+                } else {
+                    e
+                }
+            });
         };
         self.advance(); // '['
         let index = match self.parse_subscript(obj.clone(), span) {
@@ -3460,6 +3596,10 @@ impl Parser {
                 // `(e)` is grouping; `(e1, e2, …)` is a tuple; `(e,)` is a parse error.
                 if self.check(&Token::RParen) {
                     return Err(self.err("unexpected ')' in expression".to_string()));
+                }
+                if let Some(value) = self.recover_inline()? {
+                    self.expect(&Token::RParen)?;
+                    return Ok(value);
                 }
                 let first = self.parse_expr()?;
                 if self.eat(&Token::Comma) {
@@ -8632,5 +8772,236 @@ fn g():
         return
 ",
         );
+    }
+
+    /// TICKET-242 -- the one-line `if … else` statement is the if-expression in an expression
+    /// statement. After the one statement of an inline `if` body a bare `else:` or `elif` on the
+    /// line belongs to the `if`; a nested block on the line, and a later line, keep the `else`
+    /// reading they have everywhere else.
+    #[test]
+    fn one_line_if_statement_is_the_if_expression() {
+        /// The value of a let or of an expression statement.
+        fn value_of(s: &Stmt) -> &Expr {
+            match &s.kind {
+                StmtKind::Let { value, .. } | StmtKind::Expr(value) => value,
+                other => panic!("expected a let or an expression statement, got {other:?}"),
+            }
+        }
+        /// `e` is a guard (`<call> else …`) held by a let.
+        fn guard_on_call(s: &Stmt) -> bool {
+            matches!(&s.kind, StmtKind::Let { value, .. }
+                if matches!(&value.kind, ExprKind::ElseGuard { value, .. }
+                    if matches!(value.kind, ExprKind::Call { .. })))
+        }
+        /// `e` is a `recover:` whose first statement is a guarded call.
+        fn guarded_recover(e: &Expr) -> bool {
+            matches!(&e.kind, ExprKind::Recover(block) if guard_on_call(&block[0]))
+        }
+        /// The branches and else block of a statement `if`.
+        fn stmt_if(kind: StmtKind) -> (Vec<(Expr, Block)>, Option<Block>) {
+            match kind {
+                StmtKind::If {
+                    branches,
+                    else_block,
+                } => (branches, else_block),
+                other => panic!("expected a statement `if`, got {other:?}"),
+            }
+        }
+        /// The parts of the if-expression an expression statement holds.
+        fn if_expr(kind: StmtKind) -> (Expr, Expr, Expr) {
+            match kind {
+                StmtKind::Expr(Expr {
+                    kind: ExprKind::IfElse { cond, then, els },
+                    ..
+                }) => (*cond, *then, *els),
+                other => panic!("expected an if-expression statement, got {other:?}"),
+            }
+        }
+
+        // the statement form and the expression form are one node
+        let (cond, then, els) = if_expr(only("if c: print(1) else: print(2)\n"));
+        assert!(matches!(cond.kind, ExprKind::Ident(_)));
+        assert!(matches!(then.kind, ExprKind::Call { .. }));
+        assert!(matches!(els.kind, ExprKind::Call { .. }));
+        let (_, _, els) = if_expr(only("if a: print(1) elif b: print(2) else: print(3)\n"));
+        assert!(matches!(els.kind, ExprKind::IfElse { .. }));
+        let (cond, then, els) = if_expr(only("if c: 1 else: 2\n"));
+        let StmtKind::Let { value, .. } = only("x := if c: 1 else: 2\n") else {
+            panic!("expected a let");
+        };
+        let ExprKind::IfElse {
+            cond: lc,
+            then: lt,
+            els: le,
+        } = value.kind
+        else {
+            panic!("expected an if-expression");
+        };
+        for (stmt, expr) in [(&cond, &*lc), (&then, &*lt), (&els, &*le)] {
+            match (&stmt.kind, &expr.kind) {
+                (ExprKind::Ident(a), ExprKind::Ident(b)) => assert_eq!(a, b),
+                (ExprKind::Int(a), ExprKind::Int(b)) => assert_eq!(a, b),
+                other => panic!("the two forms differ: {other:?}"),
+            }
+        }
+        if_expr(only("if c: print((if c: 1 else: 2)) else: print(3)\n"));
+
+        // a later line is not the `if` line
+        let (branches, else_block) = stmt_if(only("if c: print(1)\nelse: print(2)\n"));
+        assert_eq!(branches.len(), 1);
+        assert!(else_block.is_some());
+        let (branches, else_block) = stmt_if(only("if c: return\nelse: print(2)\n"));
+        assert!(matches!(branches[0].1[0].kind, StmtKind::Return(None)));
+        assert!(else_block.is_some());
+        let (branches, _) = stmt_if(only(
+            "if c: x := match n:\n    1: 10\n    _: 20\nelif d:\n    print(2)\n",
+        ));
+        assert_eq!(branches.len(), 2);
+        let (branches, else_block) = stmt_if(only(
+            "if c: x := match n:\n    1: 10\n    _: 20\nelse:\n    return\n",
+        ));
+        assert_eq!(branches.len(), 1);
+        assert!(else_block.is_none());
+        assert!(matches!(
+            value_of(&branches[0].1[0]).kind,
+            ExprKind::ElseGuard { .. }
+        ));
+
+        // `else e:` stays a guard on the body's statement
+        let (branches, else_block) = stmt_if(only("if c: g() else e: return\n"));
+        assert!(else_block.is_none());
+        assert!(guard_on_call(&branches[0].1[0]));
+
+        // a nested block on the `if` line keeps its own `else`
+        for src in [
+            "if true: r := recover: g() else: return\n",
+            "if true: recover: g() else: return\n",
+            "if true: _ := recover: g() else: panic(\"p\")\n",
+            "if true:\n    r := recover: g() else: panic(\"p\")\n",
+            "if true: r := recover:\n    g() else: panic(\"p\")\nelif true:\n    print(1)\n",
+        ] {
+            let (branches, _) = stmt_if(only(src));
+            assert!(guarded_recover(value_of(&branches[0].1[0])), "{src:?}");
+        }
+        let (branches, _) = stmt_if(only(
+            "if false: print(1)\nelif true: r := recover: g() else: panic(\"p\")\n",
+        ));
+        assert!(guarded_recover(value_of(&branches[1].1[0])));
+        let (branches, _) = stmt_if(only(
+            "if true: v := match n:\n    1: recover: g() else: panic(\"p\")\n    _: recover: 1\n",
+        ));
+        let ExprKind::Match { arms, .. } = &value_of(&branches[0].1[0]).kind else {
+            panic!("expected a match expression");
+        };
+        assert!(guarded_recover(&arms[0].body));
+        let (branches, _) = stmt_if(only("if true: k() else e: g() else: return\n"));
+        let ExprKind::ElseGuard { body, .. } = &value_of(&branches[0].1[0]).kind else {
+            panic!("expected a guard");
+        };
+        assert!(guard_on_call(&body[0]));
+        let (branches, else_block) = stmt_if(only("if c: recover: 1 else: 2\n"));
+        assert!(else_block.is_none());
+        assert!(matches!(
+            value_of(&branches[0].1[0]).kind,
+            ExprKind::Recover(_)
+        ));
+
+        // `recover: <expr>` as a whole parenthesized value or a whole call argument
+        let StmtKind::Expr(call) = only("print(recover: 1)\n") else {
+            panic!("expected a call statement");
+        };
+        let ExprKind::Call { args, .. } = &call.kind else {
+            panic!("expected a call");
+        };
+        let one_expr = |e: &Expr| {
+            matches!(&e.kind, ExprKind::Recover(block)
+                if block.len() == 1 && matches!(block[0].kind, StmtKind::Expr(_)))
+        };
+        assert!(one_expr(&args[0]));
+        let StmtKind::Let { value: paren, .. } = only("x := (recover: 1)\n") else {
+            panic!("expected a let");
+        };
+        assert!(one_expr(&paren));
+
+        let mut bad = Vec::new();
+        let mut expect =
+            |src: &str, want: &str, exact: bool| match parse(lexer::tokenize(src).unwrap()) {
+                Ok(_) => bad.push(format!("{src:?} must be rejected, parsed")),
+                Err(e) if (exact && e.message != want) || !e.message.contains(want) => {
+                    bad.push(format!("{src:?} must give {want:?}: {}", e.message))
+                }
+                Err(_) => {}
+            };
+        for src in [
+            "if c: print(1) else: x = 2\n",
+            "if c: print(1) else: x := 2\n",
+            "if c: print(1) else: return 2\n",
+            "if i == 0: print(1) else: break\n",
+            "if c: print(1) else: print(2) print(3)\n",
+            "if c: print(1) else: print(2) else e: return\n",
+            "if c: return 1 else: return 2\n",
+            "if c: x = 1 else: x = 2\n",
+            "if i == 0: break else: continue\n",
+            "if c: print(1) else: return\n",
+            "if true: g() else: return\n",
+            "if true: v := g() else: return\n",
+            "x := if c: return 1 else: return 2\n",
+            "if true: f := fn(): g() else: return\n",
+            "if c: print(1) elif d: print(2) else: print(3) else: return\n",
+            "fn f(c: bool):\n    if c: return else: print(2)\n",
+            "fn f(c: bool):\n    if c: return else: return\n",
+        ] {
+            expect(src, IF_BRANCH, true);
+        }
+        for src in [
+            "if a:\n    print(0)\nelif b: print(1) else: print(2)\n",
+            "if a: print(0)\nelif b: print(1) else: print(2)\n",
+            "if a: print(0)\nelif b: print(1) elif true: print(2)\n",
+            "if false: print(0)\nelif true: g() else: return\n",
+            "fn f(c: bool):\n    if c: print(1)\n    elif c: return else: return\n",
+        ] {
+            expect(src, ELIF_LINE, true);
+        }
+        for src in [
+            "fn f[T]() where T: return\n",
+            "fn f[T]() where T:\n    pass\n",
+            "fn f[T, U]() where T, U: Eq:\n    pass\n",
+        ] {
+            expect(src, WHERE_BOUND, true);
+        }
+        expect(
+            "fn f[T](x: T) where T: None:\n    pass\n",
+            "reserved keyword 'None'",
+            false,
+        );
+        for src in [
+            "x := 1[T, U]\n",
+            "x := 1[T!]\n",
+            "x := 1[T??]\n",
+            "x := 1[fn() -> T]\n",
+            "x := 1[!]\n",
+            "x := (1, 2)[int, str]\n",
+        ] {
+            expect(src, TYPE_LIST_HEAD, true);
+        }
+        for src in [
+            "print(1 + recover: 1)\n",
+            "x := (?1 == recover: 1)\n",
+            "print(not recover: true)\n",
+            "f(fn(): recover: 1 / 0)\n",
+            "x := (if c: recover: 1 else: 2)\n",
+            "if c: print(if d: recover: 1 else: 2)\n",
+            "if c: x := (if d: recover: 1 else: 2) else: print(3)\n",
+        ] {
+            expect(src, "expected end of line, found ')'", false);
+        }
+        expect("x := (recover: 1, 2)\n", "expected ')', found ','", false);
+        for src in [
+            "if c: y := if d: recover: 1 else: 2\n",
+            "x := if c: recover: 1 else: 2\n",
+        ] {
+            expect(src, "expected 'else', found end of line", false);
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 }

@@ -47,7 +47,8 @@
 <compoundStmt> ::= <fnDecl> | <ifStmt> | <forStmt> | <whileStmt> | <matchStmt> | <parallelStmt> | <spawnStmt> | <waitStmt> | <deferStmt>
 
 # Line-oriented statements each consume their terminating NEWLINE.
-<simpleStmt> ::= <letStmt> | <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <passStmt> | <assertStmt> | <spawnCallStmt> | <exprStmt>
+<simpleStmt> ::= <letStmt> | <plainStmt> | <exprStmt>
+<plainStmt>  ::= <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <passStmt> | <assertStmt> | <spawnCallStmt>
 
 # ===== simple statements =====
 # The third form is a destructuring binding: `a, b, … := expr` binds a tuple's elements positionally.
@@ -56,25 +57,25 @@
 # An optional `CONST` before the typed-let's <type> is the `const T` immutable-binding modifier
 # (`PI: const int = 3`) — the checker rejects any later reassignment of the name. `CONST` is rejected
 # on a <param> type and on a destructuring (<identList>) let.
-<letStmt> ::= "IDENT" "WALRUS" <expr> "NEWLINE"
-            | "IDENT" "COLON" <type> <typeAssign> <expr> "NEWLINE"
-            | "IDENT" "COLON" "CONST" <type> <typeAssign> <expr> "NEWLINE"
-            | <identList> "WALRUS" <exprList> "NEWLINE"
-            # A block-valued RHS (`r := recover:` …) is terminated by the block's DEDENT, not a
-            # trailing NEWLINE (mirrors the parser's `expect_stmt_end`).
-            | "IDENT" "WALRUS" <recoverExpr>
-            # The `else` guard (design D4): the block runs when the value is absent or an error,
-            # and must leave (`return`, `break`, `continue`, `panic`); it ends the statement.
-            | "IDENT" "WALRUS" <expr> <elseGuard>
-            | "IDENT" "COLON" <type> <typeAssign> <expr> <elseGuard>
-            | "IDENT" "COLON" "CONST" <type> <typeAssign> <expr> <elseGuard>
-            # On a destructuring the guard takes the call's own error (`a, b := f() else e:`):
-            # splitting a tuple cannot fail. A value list (`a, b := 1, 2`) takes no guard.
-            | <identList> "WALRUS" <expr> <elseGuard>
+# The `else` guard (design D4) follows the whole value, a line or a block value: its block runs
+# when the value is absent or an error, and must leave (`return`, `break`, `continue`, `panic`).
+<letStmt>  ::= <plainLet> | <letLhs> <expr> <elseGuard> | <letLhs> <blockValue> <elseGuard>
+# A let with no guard ends as every simple statement does (<exprEnd>). A value list
+# (`a, b := 1, 2`) takes no guard.
+<plainLet> ::= <letLhs> <exprEnd>
+             | <identList> "WALRUS" <exprList> "COMMA" <exprEnd>
+# On a destructuring (<identList>) the guard takes the call's own error (`a, b := f() else e:`):
+# splitting a tuple cannot fail.
+<letLhs>   ::= "IDENT" "WALRUS"
+             | "IDENT" "COLON" <type> <typeAssign>
+             | "IDENT" "COLON" "CONST" <type> <typeAssign>
+             | <identList> "WALRUS"
 # The `=` after a type. `T!= v` lexes `!=` as ONE token and means `T! = v`: the type takes the `!`.
 <typeAssign> ::= "ASSIGN" | "NOTEQ"
 # `else:` handles an absent `T?` (or ignores an error); `else e:` binds the error of a `T!E`.
-<elseGuard> ::= "ELSE" <block> | "ELSE" "IDENT" <block>
+<elseGuard> ::= "ELSE" <block> | <errGuard>
+# The guard with a binder. On the line of an inline `if` / `elif` it is the only guard (<ifBlock>).
+<errGuard>  ::= "ELSE" "IDENT" <block>
 <identList> ::= "IDENT" "COMMA" "IDENT" | "IDENT" "COMMA" <identList>
 
 # Assignment target is restricted to a name / field / index (the parser's lvalue guard):
@@ -82,37 +83,38 @@
 # (so `f().x` and `xs[0]` are lvalues, but `f()` and `1` are not). Compound forms `OP=` desugar to
 # `lvalue = lvalue OP expr`. The last two alts are multi-target (tuple) assignment, `=` only:
 # either a same-arity value list (`a, b = b, a`) or a single tuple-valued RHS (`a, b = f()`).
-<assignStmt> ::= <lvalue> "ASSIGN" <expr> "NEWLINE"
-               | <lvalue> "PLUSEQ" <expr> "NEWLINE"
-               | <lvalue> "MINUSEQ" <expr> "NEWLINE"
-               | <lvalue> "STAREQ" <expr> "NEWLINE"
-               | <lvalue> "SLASHEQ" <expr> "NEWLINE"
-               | <lvalue> "PERCENTEQ" <expr> "NEWLINE"
-               | <lvalue> "AMPEQ" <expr> "NEWLINE"
-               | <lvalue> "PIPEEQ" <expr> "NEWLINE"
-               | <lvalue> "CARETEQ" <expr> "NEWLINE"
-               | <lvalue> "SHLEQ" <expr> "NEWLINE"
-               | <lvalue> "SHREQ" <expr> "NEWLINE"
-               | <lvalueList> "ASSIGN" <exprList> "NEWLINE"
+<assignStmt> ::= <lvalue> "ASSIGN" <exprEnd>
+               | <lvalue> "PLUSEQ" <exprEnd>
+               | <lvalue> "MINUSEQ" <exprEnd>
+               | <lvalue> "STAREQ" <exprEnd>
+               | <lvalue> "SLASHEQ" <exprEnd>
+               | <lvalue> "PERCENTEQ" <exprEnd>
+               | <lvalue> "AMPEQ" <exprEnd>
+               | <lvalue> "PIPEEQ" <exprEnd>
+               | <lvalue> "CARETEQ" <exprEnd>
+               | <lvalue> "SHLEQ" <exprEnd>
+               | <lvalue> "SHREQ" <exprEnd>
+               | <lvalueList> "ASSIGN" <exprList> "COMMA" <exprEnd>
+               | <lvalueList> "ASSIGN" <exprEnd>
 <lvalueList> ::= <lvalue> "COMMA" <lvalue> | <lvalue> "COMMA" <lvalueList>
 <lvalue> ::= "IDENT"
            | <postfix> "DOT" "IDENT"
            | <postfix> "LBRACKET" <expr> "RBRACKET"
 
 # A "RETURN" is legal only inside a fn, method or closure body; at module level the checker reports 'return' outside a function (TICKET-186; CPython's SyntaxError).
-<returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <expr> "NEWLINE"
+<returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <exprEnd>
 
 # `yield <expr>` (generators) — always carries a value. Legal only inside a generator
 # function (one that uses `yield`; the `-> Iterator[T]` return type is required).
 # Checker-enforced, not grammar. Suspends the generator.
-<yieldStmt> ::= "YIELD" <expr> "NEWLINE"
+<yieldStmt> ::= "YIELD" <exprEnd>
 
 # `defer <call>` (form 1) — the call-only restriction is enforced by the checker
 # (context-sensitive), not the grammar. `defer:` (form 2) takes an indented block whose body runs
 # top-to-bottom at scope exit. BOTH forms are compound, so neither is legal as an inline body:
 # `defer` is block-scoped, and an inline body would be the defer's whole block (`if c: defer f()`
 # would run `f` at once).
-<deferStmt> ::= "DEFER" <expr> "NEWLINE" | "DEFER" <block>
+<deferStmt> ::= "DEFER" <exprEnd> | "DEFER" <block>
 
 # `break` / `continue` are bare line-oriented statements; "inside a loop" is enforced by the
 # checker (context-sensitive), not the grammar.
@@ -132,17 +134,19 @@
                | "IMPORT" <dottedPath> "AS" "IDENT" "NEWLINE"
                | "IMPORT" <importNames> "FROM" <dottedPath> "NEWLINE"
 <importNames> ::= <importName> | <importName> "COMMA" <importNames>
-<importName>  ::= "IDENT" | "NONEKW" | "IDENT" "AS" "IDENT"
+# `None` is a keyword, not a name: `import None from m` is rejected.
+<importName>  ::= "IDENT" | "IDENT" "AS" "IDENT"
 <dottedPath>  ::= "IDENT" | "IDENT" "DOT" <dottedPath>
 
 # `assert <cond>` faults with its source span when `cond` is false; the optional second operand is
 # a custom str message. `cond` must be bool and `msg` (if given) str — enforced by the checker.
-<assertStmt> ::= "ASSERT" <expr> "NEWLINE" | "ASSERT" <expr> "COMMA" <expr> "NEWLINE"
+<assertStmt> ::= "ASSERT" <exprEnd> | "ASSERT" <expr> "COMMA" <exprEnd>
 
 # The second form is the `else` guard on a discarded value: `save(p) else e: return !e`.
 # The guard exists on a let and on a bare call only: <assignStmt> and <returnStmt> take none
 # ("an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return`").
-<exprStmt> ::= <expr> "NEWLINE" | <expr> <elseGuard>
+# The last two forms end at a block expression's DEDENT (<stmtTail>, <recoverBlock>).
+<exprStmt> ::= <expr> "NEWLINE" | <expr> <elseGuard> | <stmtTail> | <recoverBlock> <elseGuard>
 
 # ===== blocks =====
 # Indented block: ':' NEWLINE INDENT stmts DEDENT. Inline block: ':' followed by ONE simple
@@ -152,6 +156,10 @@
 # `defer` forms need an indented line. A closure literal (`fn(x): x`) and `spawn f()` are simple.
 # A `<fnDecl>` inline body may still be an `<ifExpr>` (via `<exprStmt>`): `fn f(n): if n > 0: 1 else: 2`;
 # `else` is required there, so it is an expression, not a nested statement block.
+# An inline body does not start with `if` or `match` ("a nested block must be indented"), except
+# an inline fn body that is an if-expression, and the one-line `if … else` statement, which is the
+# <ifExpr> in an <exprStmt>. The BNF cannot exclude a leftmost <primary>, so the `if` half of this
+# rule is a context rule the conformance test records.
 <block> ::= "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
           | "COLON" <simpleStmt>
 
@@ -183,14 +191,16 @@
            | "FN" "IDENT" <typeParams> "LPAREN" "RPAREN" "ARROW" <type> <whereClause> <block>
            | "FN" "IDENT" <typeParams> "LPAREN" <params> "RPAREN" "ARROW" <type> <whereClause> <block>
 
-# A `where T: Bound, U: Add + Mul, …` clause: a comma-separated list of `IDENT (: bound (+ bound)*)`
-# entries (each the shape of one <typeParam>), reusing <boundList>. Attaches after a fn/native-fn
+# A `where T: Bound, U: Add + Mul, …` clause: a comma-separated list of `IDENT : bound (+ bound)*`
+# entries, reusing <boundList>. A bound is required: `where T:` and `where T, U: Eq` are rejected
+# ("a `where` entry needs a bound (`where T: Proto`)"). Attaches after a fn/native-fn
 # signature; the checker merges each entry's bounds into the matching declared type parameter.
 # A bound name is normally a protocol; a SCALAR TYPE name (`int`/`float`/`bool`/`str`/`bytes`/
 # `bytearray`/`None`) is instead an EQUALITY constraint — `T` must be exactly that scalar (it takes no
 # type args). Used by `Channel[T].trip()`'s `where T: bool`.
 <whereClause> ::= "WHERE" <whereList>
-<whereList>   ::= <typeParam> | <typeParam> "COMMA" <whereList>
+<whereList>   ::= <whereEntry> | <whereEntry> "COMMA" <whereList>
+<whereEntry>  ::= "IDENT" "COLON" <boundList>
 # A `test` modifier before `fn` marks a test (`chezzi test` discovers it). A free `test fn` is an
 # independent test (no params, returns nothing); a `test fn name(self)` in a struct is a suite test.
 # The no-params/only-self + returns-nothing shape is enforced by the checker, not the grammar.
@@ -376,11 +386,20 @@
 <typeAliasDecl> ::= "TYPE" "IDENT" "ASSIGN" <type> "NEWLINE"
 
 # ===== control flow =====
-<ifStmt> ::= "IF" <expr> <block>
-           | "IF" <expr> <block> <elseChain>
+<ifStmt> ::= "IF" <expr> <ifBlock>
+           | "IF" <expr> <ifBlock> <elseChain>
+# The body of an `if` / `elif`. On the line of an inline body a bare `else:` or `elif` after its
+# one statement belongs to the `if`, so that statement takes no bare-`else:` guard (<ifLineStmt>
+# is <simpleStmt> without it); `else e:` stays a guard (<errGuard>). A nested block on the line
+# (a `recover:` body, a guard body) is a <block> and keeps its own `else:` guard. `if c: a() else:
+# b()` on one line is not an <ifStmt>: it is the <ifExpr> in an <exprStmt>, value discarded, and
+# each branch is an expression. A one-line `elif` body ends its line.
+<ifBlock> ::= "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
+            | "COLON" <ifLineStmt>
+<ifLineStmt> ::= <plainLet> | <letLhs> <expr> <errGuard> | <letLhs> <blockValue> <elseGuard> | <plainStmt> | <expr> "NEWLINE" | <expr> <errGuard> | <stmtTail> | <recoverBlock> <elseGuard>
 # zero+ `elif` branches, optionally a final `else`; at least one clause here.
 <elseChain> ::= <elseIf> | <elseFinal> | <elseIf> <elseChain>
-<elseIf>    ::= "ELIF" <expr> <block>
+<elseIf>    ::= "ELIF" <expr> <ifBlock>
 <elseFinal> ::= "ELSE" <block>
 
 <forStmt>   ::= "FOR" "IDENT" "IN" <expr> <block>
@@ -524,6 +543,9 @@
 # else the index (`xs[i]`, `K := 1; fs[K](10)`). A type-only bracket on a value is rejected (`a
 # subscript takes an expression, found the type '…'`, or `… one index, found N`).
 <bracket> ::= <typeList> | <subscript>
+# A type list needs a name head: on any other head (`1[T, U]`, `(1, 2)[int, str]`) the bracket is
+# a <subscript> only ("a type list in brackets needs a name before the '['").
+<typeHead> ::= "IDENT" | <postfix> "DOT" "IDENT"
 
 # ===== expressions (precedence cascade, loosest -> tightest) =====
 <expr>     ::= <pipeExpr>
@@ -622,9 +644,10 @@
                                                             # NOT in <lvalue>, and `t[0]` is a type error)
             # one bracket: a type application (`pair[str, int]`, `idt[fn(int) -> int]`, a type-level
             # head), a plain index, or a Python slice; its `.member` and `(args)` attach above.
-            | <postfix> "LBRACKET" <bracket> "RBRACKET"
-            | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
-            | <postfix> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
+            | <postfix> "LBRACKET" <subscript> "RBRACKET"
+            | <typeHead> "LBRACKET" <bracket> "RBRACKET"
+            | <typeHead> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
+            | <typeHead> "LBRACKET" <typeList> "RBRACKET" "LPAREN" <argList> "RPAREN"
             # member-side declaration-site turbofish — a method's OWN type args (`xs.map[str](f)`,
             # `s.first[int, str](1, "x")`). The receiver is ANY postfix expression: a bare ident, a call
             # result (`W(1).cast[str]("a")`), a field (`h.w.cast[str](x)`), or an index (`xs[0].cast[U](x)`).
@@ -689,6 +712,7 @@
 # The short form cannot contain its closing quote; the triple form embeds lone quotes (e.g. JSON).
 <primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW" | "IDENT"
             | "LPAREN" <expr> "RPAREN"
+            | "LPAREN" <recoverInline> "RPAREN"
             | "LPAREN" <expr> "COMMA" "RPAREN"
             | "LPAREN" <expr> "COMMA" <exprList> "RPAREN"
             | "LPAREN" <expr> "COMMA" <exprList> "COMMA" "RPAREN"
@@ -704,9 +728,7 @@
             | "LBRACE" <expr> <compClauses> "RBRACE"
             | "LBRACE" <mapEntry> <compClauses> "RBRACE"
             | <closure>
-            | <matchExpr>
             | <ifExpr>
-            | <recoverExpr>
 
 # Brace literals: `{}` is the empty map; `{k: v, …}` (entries with COLON) is a map; `{a, b, …}`
 # (bare exprs, no COLON) is a set. The empty set is `Set()`, since `{}` is taken by the map.
@@ -727,22 +749,53 @@
 # Expression-position `match`/`if` (value-producing, distinct from the statement forms above).
 # `matchExpr` arms are value-expressions (not blocks); it is multiline + exhaustive. A simple
 # statement whose value is a `matchExpr` is terminated by the arm block's DEDENT, not a trailing
-# NEWLINE (see the parser's expect_stmt_end). `ifExpr` is inline and requires `else`; the tail may
+# NEWLINE (<exprEnd>), so it is not a <primary>. `ifExpr` is inline and requires `else`; the tail may
 # chain `elif` (right-associative), so the final `else:` stays mandatory at the end of the chain.
 <matchExpr> ::= "MATCH" <expr> "COLON" "NEWLINE" "INDENT" <exprArms> "DEDENT"
 <exprArms>  ::= <exprArm> | <exprArm> <exprArms>
-<exprArm>   ::= <pattern> "COLON" <expr> "NEWLINE"
-                | <pattern> "IF" <expr> "COLON" <expr> "NEWLINE"
+<exprArm>   ::= <pattern> "COLON" <exprEnd>
+                | <pattern> "IF" <expr> "COLON" <exprEnd>
 <ifExpr>    ::= "IF" <expr> "COLON" <expr> <ifExprTail>
 <ifExprTail> ::= "ELSE" "COLON" <expr> | "ELIF" <expr> "COLON" <expr> <ifExprTail>
 # Panic-recovery boundary: runs a block, yields `T!Error` (success = trailing value, error = a
-# caught runtime fault). Reuses <block> (inline or indented).
+# caught runtime fault). Reuses <block> (inline or indented). Like <matchExpr> it is the last
+# operand of its statement, not a <primary>.
 <recoverExpr> ::= "RECOVER" <block>
+# The end of a simple statement: a NEWLINE, or the DEDENT of a block expression (`match`, or
+# `recover:` with an indented body) that is its LAST operand. The lexer emits no NEWLINE after
+# that DEDENT.
+<exprEnd>     ::= <expr> "NEWLINE" | <tailExpr>
+# A block expression as the whole value of a let or a bare statement, the head of an `else` guard.
+<blockValue>   ::= <matchExpr> | <recoverBlock>
+<recoverBlock> ::= "RECOVER" "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
+# <tailExpr> / <stmtTail> recognize "an expression that ends in a block expression": behind a
+# prefix or binary operator, as the final branch of an if-expression, as a closure body. They are a
+# recognizer, not a precedence cascade: the binary levels are flattened on purpose (<cmpExpr>
+# <binOp> <tailUnary>), and <expr> owns precedence. <stmtTail> is <tailExpr> without a bare
+# `match`, which in statement position is <matchStmt>.
+<tailExpr>    ::= <matchExpr> | <stmtTail>
+<stmtTail>    ::= <recoverExpr> | <tailIf> | <tailClosure>
+                | <prefixOp> <tailUnary>
+                | <cmpExpr> <binOp> <tailUnary>
+                | "NOT" <tailNot>
+                | <orExpr> "OR" <tailNot> | <orExpr> "AND" <tailNot>
+<tailNot>     ::= <tailUnary> | <cmpExpr> <binOp> <tailUnary> | "NOT" <tailNot>
+<tailUnary>   ::= <matchExpr> | <recoverExpr> | <tailIf> | <tailClosure> | <prefixOp> <tailUnary>
+<prefixOp>    ::= "MINUS" | "BANG" | "QUESTION" | "QUESTIONQUESTION"
+<binOp>       ::= <cmpOp> | "BITOR" | "CARET" | "AMP" | "SHL" | "SHR" | "DOTDOT" | "PLUS" | "MINUS" | "STAR" | "SLASH" | "PERCENT" | "QUESTIONQUESTION"
+<tailIf>      ::= "IF" <expr> "COLON" <expr> <tailIfTail>
+<tailIfTail>  ::= "ELSE" "COLON" <tailExpr> | "ELIF" <expr> "COLON" <expr> <tailIfTail>
+<tailClosure> ::= <closureHead> <tailExpr>
+# `recover: <expr>` as a WHOLE parenthesized value or a WHOLE call argument, expression body only
+# (layout is off inside brackets): `print(recover: 1)`, `(recover: 1 / 0)`. Not an operand, a tuple
+# element, a list element or a map entry.
+<recoverInline> ::= "RECOVER" "COLON" <expr>
 
-<closure> ::= "FN" "LPAREN" "RPAREN" "COLON" <closureBody>
-            | "FN" "LPAREN" <params> "RPAREN" "COLON" <closureBody>
-            | "FN" "LPAREN" "RPAREN" "ARROW" <type> "COLON" <closureBody>
-            | "FN" "LPAREN" <params> "RPAREN" "ARROW" <type> "COLON" <closureBody>
+<closure> ::= <closureHead> <closureBody>
+<closureHead> ::= "FN" "LPAREN" "RPAREN" "COLON"
+                | "FN" "LPAREN" <params> "RPAREN" "COLON"
+                | "FN" "LPAREN" "RPAREN" "ARROW" <type> "COLON"
+                | "FN" "LPAREN" <params> "RPAREN" "ARROW" <type> "COLON"
 
 # `PASS` is the no-op closure body (`fn(): pass`) — legal ONLY here, never in statement position
 # inside the closure's own body (which is a single expression, not a block).
@@ -760,6 +813,7 @@
                   | <posArgList> "COMMA"
                   | <namedArgList> "COMMA"
                   | <posArgList> "COMMA" <namedArgList> "COMMA"
-<posArgList>    ::= <expr> | <expr> "COMMA" <posArgList>
+<posArgList>    ::= <arg> | <arg> "COMMA" <posArgList>
+<arg>           ::= <expr> | <recoverInline>
 <namedArgList>  ::= <namedArg> | <namedArg> "COMMA" <namedArgList>
-<namedArg>      ::= "IDENT" "ASSIGN" <expr>
+<namedArg>      ::= "IDENT" "ASSIGN" <arg>

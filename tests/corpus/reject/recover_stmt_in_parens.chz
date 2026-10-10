@@ -1,0 +1,4 @@
+# rule: recoverInline
+# expect: expected ')'
+x := 0
+print(recover: x = 1)

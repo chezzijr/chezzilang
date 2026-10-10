@@ -1,0 +1,6 @@
+# rule: ifExpr
+c := false
+xs := [1, 2]
+if c: print(1) else: xs.len()
+if c: 1 elif not c: "a" else: [1]
+(if c: print(1) else: 2)

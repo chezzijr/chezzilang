@@ -1,0 +1,18 @@
+# rule: blockValue, recoverBlock, elseGuard
+fn o() -> int?:
+    return None
+fn f(n: int) -> int:
+    x := match n:
+        1: o()
+        _: o()
+    else:
+        return 7
+    y := recover:
+        1 / 0
+    else:
+        return 8
+    recover:
+        1 / 0
+    else e:
+        return 9
+    return x + y

@@ -1,0 +1,46 @@
+# rule: exprEnd, assertStmt, yieldStmt, returnStmt, assignStmt, deferStmt
+n := 1
+assert match n:
+    1: true
+    _: false
+assert true, match n:
+    1: "a"
+    _: "b"
+assert ?true == recover: true
+x := 0
+x = match n:
+    1: 10
+    _: 20
+x += match n:
+    1: 10
+    _: 20
+x = 1 + match n:
+    1: 10
+    _: 20
+y: int = 2 * match n:
+    1: 10
+    _: 20
+p, q := 1, match n:
+    1: 10
+    _: 20
+p, q = 2, match n:
+    1: 10
+    _: 20
+fn g(n: int) -> Iterator[int]:
+    yield match n:
+        1: 10
+        _: 20
+    yield 1 + match n:
+        1: 10
+        _: 20
+fn f(n: int) -> int:
+    return 1 + match n:
+        1: 10
+        _: 20
+fn r() -> int!Error:
+    return recover:
+        1 / 0
+fn d(n: int):
+    defer match n:
+        1: f(1)
+        _: f(2)

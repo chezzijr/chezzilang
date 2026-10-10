@@ -1,0 +1,9 @@
+# rule: ifExpr
+c := true
+if c: print(1) else: print(2)
+if c: print(1) elif not c: print(2) else: print(3)
+if c: print(1) else: if c: print(2) else: print(3)
+fn h() -> int!str:
+    return 1
+fn k():
+    if true: h() else e: return

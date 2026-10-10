@@ -1,0 +1,3 @@
+# rule: whereEntry
+# expect: a `where` entry needs a bound
+fn f[T]() where T: return

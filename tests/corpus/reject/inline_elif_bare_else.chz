@@ -1,0 +1,5 @@
+# rule: ifStmt
+# expect: an `elif` body ends its line
+fn f(c: bool):
+    if c: g()
+    elif c: g() else: return

@@ -1,0 +1,9 @@
+# rule: matchExpr
+x := match 1:
+    1: 10
+    _: 20
+print(x)
+fn f(n: int) -> int:
+    return match n:
+        1: 10
+        _: 20

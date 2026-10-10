@@ -1,0 +1,3 @@
+# rule: importName
+# expect: reserved keyword 'None'
+import None from m

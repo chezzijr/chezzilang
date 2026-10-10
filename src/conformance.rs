@@ -341,6 +341,7 @@ fn parser_rules_match_fns() {
         ("tuplePattern", "parse_tuple_pattern"),
         ("returnStmt", "parse_return"),
         ("elseGuard", "parse_else_guard"),
+        ("ifExprTail", "parse_if_expr_tail"),
         ("yieldStmt", "parse_yield"),
         ("deferStmt", "parse_defer"),
         ("assertStmt", "parse_assert"),
@@ -683,9 +684,9 @@ fn frames(
 }
 
 /// Where `docs/grammar.bnf` derives a sentence the hand parser refuses: `(nonterminal whose
-/// alternative the sentence enumerates, fragment of the parser's message, reason)`. A context rule
-/// the BNF cannot state stays here; a real divergence is listed with its finding id in TICKET-241
-/// and is a bug to fix. Every entry must still be hit, so a fixed divergence forces its entry out.
+/// alternative the sentence enumerates, fragment of the parser's message, reason)`. Only a context
+/// rule the BNF cannot state stays here; a real divergence is a bug to fix, not an entry. Every
+/// entry must still be hit, so a fixed divergence forces its entry out.
 /// Do not add an entry for a new rejection without deciding whether the parser or the grammar is
 /// wrong.
 const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
@@ -701,7 +702,7 @@ const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
         "context: a closure, extern or protocol param is never variadic",
     ),
     (
-        "simpleStmt",
+        "plainStmt",
         "spawn requires a function or method call",
         "context: the call form of `spawn` takes a call, the BNF says <expr>",
     ),
@@ -725,58 +726,105 @@ const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
         "expected 'fn' or 'ctor' after 'native'",
         "context: the BNF shares <nativeHead> with the contextual `ctor` spelled as IDENT",
     ),
-    // ----- real divergences, listed in TICKET-241 and not fixed there -----
-    (
-        "fnDecl",
-        "expected identifier, found reserved keyword 'return'",
-        "F1: a `where` entry with no bound before the body colon (`fn f[T]() where T: return`)",
-    ),
-    (
-        "type",
-        "unexpected ']' in expression",
-        "F2: a type in brackets on a non-name head (`1[!]`)",
-    ),
-    (
-        "type",
-        "expected ']', found '!'",
-        "F2: a type in brackets on a non-name head (`1[T!]`)",
-    ),
-    (
-        "type",
-        "expected ':', found ']'",
-        "F2: a type in brackets on a non-name head (`1[fn(T) -> U]`)",
-    ),
-    (
-        "typeList",
-        "expected ']', found ','",
-        "F2: a type list in brackets on a non-name head (`1[T, U]`)",
-    ),
     (
         "primary",
         "a nested block must be indented",
-        "F3: an inline `match` expression body (`fn f(): match 1:`); DEC-145 keeps it rejected",
+        "context: an inline body does not start with `if` (DEC-145); the BNF cannot exclude a leftmost primary without a second expression cascade",
     ),
     (
-        "primary",
-        "expected ':', found end of line",
-        "F4: an inline `recover:` block inside a block header's expression",
-    ),
-    (
-        "primary",
-        "expected ')', found end of line",
-        "F4: an inline `recover:` block inside parentheses",
-    ),
-    (
-        "ifExprTail",
-        "expected end of line, found 'elif'",
-        "F5: a statement-initial if-expression with `elif` on one line",
-    ),
-    (
-        "importName",
-        "found reserved keyword 'None'",
-        "F6: <importName> lists NONEKW, the parser rejects `import None from m`",
+        "stmtTail",
+        "a nested block must be indented",
+        "context: an inline body does not start with `if`",
     ),
 ];
+
+/// Where `docs/grammar.bnf` and the hand parser disagree after a block expression, `(source, does
+/// the grammar derive it, reason)`. A block expression (`match`, `recover:` with an indented body)
+/// ends at its `DEDENT`; the grammar derives it as the LAST operand of its statement (`<tailExpr>`).
+/// The parser also reads the next line as a continuation of that operand, which the BNF cannot
+/// state. The parser's verdict is the opposite of the grammar's on every entry, so an entry that
+/// stops being true forces itself out.
+const BLOCK_EXPR_DRIFT: &[(&str, bool, &str)] = &[
+    (
+        "n := 1\nx := match n:\n    1: 10\n    _: 20\n+ 1\n",
+        false,
+        "a binary operator on the next line continues a block expression",
+    ),
+    (
+        "n := 1\nx := match n:\n    1: 10\n    _: 20\n.abs()\n",
+        false,
+        "a `.` on the next line reads a member of a block expression",
+    ),
+    (
+        "n := 1\nx := match n:\n    1: 10\n    _: 20\n?\n",
+        false,
+        "a `?` on the next line propagates a block expression",
+    ),
+    (
+        "n := 1\nx := match n:\n    1: 10\n    _: 20\n|> inc()\n",
+        false,
+        "a `|>` line continues a block expression",
+    ),
+    (
+        "n := 1\nassert match n:\n    1: true\n    _: false\n, \"m\"\n",
+        false,
+        "a `,` on the next line continues the statement of a block expression",
+    ),
+    (
+        "n := 1\na, b := match n:\n    1: 10\n    _: 20\n, 2\n",
+        false,
+        "a `,` on the next line continues the value list of a block expression",
+    ),
+    (
+        "n := 1\nx := if n == 1: match n:\n    1: 10\n    _: 20\nelse: 2\n",
+        false,
+        "a block expression as the first branch of an if-expression",
+    ),
+    (
+        "n := 1\nif match n:\n    1: true\n    _: false\n: print(1)\n",
+        false,
+        "a block expression as a block header's condition",
+    ),
+    (
+        "fn f(n: int):\n    x := ?match n:\n        1: 10\n        _: 20\n    else:\n        return\n",
+        false,
+        "an `else` guard after a block expression behind an operator",
+    ),
+    (
+        "n := 1\nx := match n:\n    1: 10\n    _: 20\n[1, 2]\n",
+        true,
+        "a `[` on the next line reads a subscript of a block expression, so a list literal there is rejected",
+    ),
+    (
+        "xs := [1]\nx := recover:\n    1\n[i for i in xs]\n",
+        true,
+        "a `[` on the next line reads a subscript of a block expression, so a comprehension there is rejected",
+    ),
+];
+
+/// On each [`BLOCK_EXPR_DRIFT`] entry the grammar and the hand parser still disagree, the way the
+/// entry says.
+#[test]
+fn block_expr_drift_entries_hold() {
+    let chars = symbol_chars();
+    let grammar = engine_grammar(&chars);
+    let engine = grammar.build_parser().expect("build Earley parser");
+    for (src, grammar_derives, why) in BLOCK_EXPR_DRIFT {
+        let hand = tokenize(src)
+            .map_err(|e| e.message)
+            .and_then(|t| parse(t).map_err(|e| e.message));
+        let derived = encode(src, &chars).is_some_and(|s| engine.parse_input(&s).next().is_some());
+        assert_eq!(
+            derived, *grammar_derives,
+            "BLOCK_EXPR_DRIFT ({why}): the grammar's verdict changed: remove the entry"
+        );
+        assert_eq!(
+            hand.is_ok(),
+            !*grammar_derives,
+            "BLOCK_EXPR_DRIFT ({why}): the parser's verdict changed ({hand:?}): remove the entry"
+        );
+    }
+}
 
 /// TICKET-241 -- `grammar_and_parser_agree` runs only the hand-written corpus, so a grammar
 /// alternative no corpus file spells is unchecked (an inline closure-literal body was). This

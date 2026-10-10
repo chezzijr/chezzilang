@@ -1,0 +1,8 @@
+# rule: recoverInline
+print(recover: 1)
+x := (recover: 1 / 0)
+print(x, sep=recover: " ")
+print(recover: (recover: 1))
+print(recover: 1 + 2, recover: 3)
+if (recover: 1) == ?1:
+    print(1)

@@ -3487,80 +3487,7 @@ impl Checker {
             }
             // `pass` — a no-op statement; nothing to check.
             StmtKind::Pass => {}
-            StmtKind::Expr(e) => {
-                // W8-2 — warn on a dropped `Result`/`Option`, in every proto including module top
-                // level. Rust owns both types and marks them `#[must_use]`, with `let _ = …` as the
-                // escape; this is that warning, non-fatal so the exit code is unchanged.
-                //
-                // TICKET-038 reversed the old top-level exemption: the runtime no longer checks a
-                // top-level drop at all (the top-level pop opcode's check is deleted), so this
-                // warning is now the ONLY check on it, type-dependent and firing in every spelling —
-                // strictly wider than the old value-dependent abort, which caught only a bare drop
-                // and was already escaped by both `r := g()` and `_ := g()`.
-                //
-                // Also NOT reached by: `defer f.close()` (its own arm above — Go's canonical
-                // unchecked idiom), a `fn f(): g()` inline-expr body (an implicit return, inferred
-                // off `check_fn_body`), and a value-block's trailing expression (inferred directly
-                // by `infer_recover` / the value-`match`/`if` tails). `?`/`??`/`?.` already yield
-                // the UNWRAPPED payload, so they are not carriers here.
-                let t = self.infer(e);
-                // TICKET-089 — a bare mutating call on a `Shared`/`RwShared`/`Atomic` read temporary
-                // mutates a deep copy and drops it: the write is lost. Returns BEFORE the carrier
-                // match — `s.get().remove(k)` / `.pop()` also return a carrier, and the lost-write
-                // message is the more actionable one, so one statement never carries both.
-                if let ExprKind::Call { callee, .. } = &e.kind
-                    && let ExprKind::Field {
-                        obj, name: method, ..
-                    } = &callee.kind
-                    && let Some((bx, reader, payload, fix)) = self.read_temporary_of_box(obj)
-                    && mutates_receiver(&payload, method)
-                {
-                    self.warn(
-                        e.span,
-                        format!(
-                            "'{method}' mutates the copy returned by '{bx}.{reader}()', so the write \
-                             is discarded — write through '{bx}.{fix}(…)' instead"
-                        ),
-                    );
-                    return;
-                }
-                // `Unknown` lands here too: an already-reported expression must not cascade.
-                if !matches!(t, Ty::Result(..) | Ty::Option(_)) {
-                    return;
-                }
-                // Name the callee when there is one, so the warning points at the culprit rather
-                // than at a line. The hint has to be code the user can actually TYPE, so it spells
-                // the call back only when the call is genuinely reproducible from the callee name
-                // alone — a plain NULLARY `g()`. With arguments, `format!("{name}()")` dropped them
-                // and emitted a hint that does not compile: `takes(1, "a")` suggested `r := takes()`,
-                // which is `'takes' expects 2 argument(s), got 0`. Reconstructing an argument list
-                // (or a METHOD call's receiver) from the AST would be guesswork, so both elide to
-                // `…` — the subject already names the callee, which is what points at the culprit.
-                let (subject, fix) = match &e.kind {
-                    ExprKind::Call { callee, args, .. } => match &callee.kind {
-                        ExprKind::Ident(name) => (
-                            format!("the `{t}` value returned by '{name}'"),
-                            if args.is_empty() {
-                                format!("{name}()")
-                            } else {
-                                "…".to_string()
-                            },
-                        ),
-                        ExprKind::Field { name, .. } => {
-                            (format!("the `{t}` value returned by '{name}'"), "…".into())
-                        }
-                        _ => (format!("the `{t}` value here"), "…".to_string()),
-                    },
-                    _ => (format!("the `{t}` value here"), "…".to_string()),
-                };
-                self.warn(
-                    e.span,
-                    format!(
-                        "{subject} is discarded — bind it (`r := {fix}`), or discard it explicitly \
-                         (`_ := {fix}`)"
-                    ),
-                );
-            }
+            StmtKind::Expr(e) => self.check_discarded(e),
             StmtKind::Assert { cond, msg } => {
                 self.expect_bool(cond, "assert condition");
                 if let Some(m) = msg {
@@ -4694,6 +4621,93 @@ impl Checker {
         self.with_stmt_mark(span, |c| c.check_fn_body_inner(decl, self_ty, sig));
         self.close_tyvar_frame(frame);
         self.current_provider = saved_provider;
+    }
+
+    /// An expression whose value is discarded (an expression statement). The one place that
+    /// decides it: the carrier and lost-write warnings fire here, and a one-line `if`/`else`
+    /// statement checks each branch here instead of joining the branch types.
+    fn check_discarded(&mut self, e: &Expr) {
+        // TICKET-242 — `if c: a() else: b()` as a statement is the if-expression with its value
+        // discarded, so the branches need not join. Each branch is a discarded value of its own
+        // (an `elif` chain is a nested `IfElse` in `els`).
+        if let ExprKind::IfElse { cond, then, els } = &e.kind {
+            self.expect_bool(cond, "if condition");
+            self.check_discarded(then);
+            self.check_discarded(els);
+            return;
+        }
+        // W8-2 — warn on a dropped `Result`/`Option`, in every proto including module top
+        // level. Rust owns both types and marks them `#[must_use]`, with `let _ = …` as the
+        // escape; this is that warning, non-fatal so the exit code is unchanged.
+        //
+        // TICKET-038 reversed the old top-level exemption: the runtime no longer checks a
+        // top-level drop at all (the top-level pop opcode's check is deleted), so this
+        // warning is now the ONLY check on it, type-dependent and firing in every spelling —
+        // strictly wider than the old value-dependent abort, which caught only a bare drop
+        // and was already escaped by both `r := g()` and `_ := g()`.
+        //
+        // Also NOT reached by: `defer f.close()` (its own arm above — Go's canonical
+        // unchecked idiom), a `fn f(): g()` inline-expr body (an implicit return, inferred
+        // off `check_fn_body`), and a value-block's trailing expression (inferred directly
+        // by `infer_recover` / the value-`match`/`if` tails). `?`/`??`/`?.` already yield
+        // the UNWRAPPED payload, so they are not carriers here.
+        let t = self.infer(e);
+        // TICKET-089 — a bare mutating call on a `Shared`/`RwShared`/`Atomic` read temporary
+        // mutates a deep copy and drops it: the write is lost. Returns BEFORE the carrier
+        // match — `s.get().remove(k)` / `.pop()` also return a carrier, and the lost-write
+        // message is the more actionable one, so one statement never carries both.
+        if let ExprKind::Call { callee, .. } = &e.kind
+            && let ExprKind::Field {
+                obj, name: method, ..
+            } = &callee.kind
+            && let Some((bx, reader, payload, fix)) = self.read_temporary_of_box(obj)
+            && mutates_receiver(&payload, method)
+        {
+            self.warn(
+                e.span,
+                format!(
+                    "'{method}' mutates the copy returned by '{bx}.{reader}()', so the write \
+                     is discarded — write through '{bx}.{fix}(…)' instead"
+                ),
+            );
+            return;
+        }
+        // `Unknown` lands here too: an already-reported expression must not cascade.
+        if !matches!(t, Ty::Result(..) | Ty::Option(_)) {
+            return;
+        }
+        // Name the callee when there is one, so the warning points at the culprit rather
+        // than at a line. The hint has to be code the user can actually TYPE, so it spells
+        // the call back only when the call is genuinely reproducible from the callee name
+        // alone — a plain NULLARY `g()`. With arguments, `format!("{name}()")` dropped them
+        // and emitted a hint that does not compile: `takes(1, "a")` suggested `r := takes()`,
+        // which is `'takes' expects 2 argument(s), got 0`. Reconstructing an argument list
+        // (or a METHOD call's receiver) from the AST would be guesswork, so both elide to
+        // `…` — the subject already names the callee, which is what points at the culprit.
+        let (subject, fix) = match &e.kind {
+            ExprKind::Call { callee, args, .. } => match &callee.kind {
+                ExprKind::Ident(name) => (
+                    format!("the `{t}` value returned by '{name}'"),
+                    if args.is_empty() {
+                        format!("{name}()")
+                    } else {
+                        "…".to_string()
+                    },
+                ),
+                ExprKind::Field { name, .. } => {
+                    (format!("the `{t}` value returned by '{name}'"), "…".into())
+                }
+                _ => (format!("the `{t}` value here"), "…".to_string()),
+            },
+            _ => (format!("the `{t}` value here"), "…".to_string()),
+        };
+        self.warn(
+            e.span,
+            format!(
+                "{subject} is discarded — bind it (`r := {fix}`), or discard it explicitly \
+                 (`_ := {fix}`)"
+            ),
+        );
     }
 
     fn check_fn_body_inner(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {

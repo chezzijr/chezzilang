@@ -1,0 +1,5 @@
+# rule: recoverInline
+# expect: expected end of line, found ')'
+fn f(g: fn() -> int!Error):
+    print(g())
+f(fn(): recover: 1 / 0)

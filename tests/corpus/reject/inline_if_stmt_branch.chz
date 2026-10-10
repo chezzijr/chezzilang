@@ -1,0 +1,4 @@
+# rule: ifStmt
+# expect: takes an expression in each branch
+fn f(c: bool) -> int:
+    if c: return 1 else: return 2

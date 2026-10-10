@@ -1,0 +1,5 @@
+# rule: block
+# expect: a nested block must be indented
+fn f(n: int) -> int: match n:
+    1: 10
+    _: 20
