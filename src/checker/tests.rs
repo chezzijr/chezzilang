@@ -38501,3 +38501,10 @@ fn an_unbound_parameter_position_type_param_is_the_uninhabited_sentinel() {
         "fn first[U](xs: List[U]) -> U:\n    return xs[0]\nfn main():\n    x := first([])\n    print(x + 1)\n",
     );
 }
+
+#[test]
+fn closure_literal_wraps_into_an_optional_fn_slot() {
+    ok(
+        "fn take(cb: (fn(int) -> int)?) -> int:\n    f := cb else: return 0\n    return f(4)\nprint(take(fn(a: int) -> int: a + 1))\n",
+    );
+}
