@@ -911,12 +911,13 @@ impl Vm {
                 }));
             }));
         }
-        let mut shell = self.spawn_shell(&sched, &cancel);
         {
             // gaps.md W7-58 — this thread is now blocked in a nursery join; make it visible to the
             // process-wide verdict for exactly that span (RAII, dropped before the reduce).
             let _party = self.nursery_party_guard(&sched);
-            shell.mn_worker_loop(&sched, 0, 0); // owner of scope 0
+            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, 0, JoinCover::None) {
+                shell.mn_worker_loop(&sched, 0, 0); // owner of scope 0
+            }
             // The owner returned on scope 0; reduce scope 0's sub-range. The sched is released only when
             // no early-enlisted outer scope is still pending (else those scopes' slots must survive
             // until their own joins reduce them — `join_enlisted_scope` releases it at the last).
@@ -974,7 +975,6 @@ impl Vm {
                 Some(self.err(DEADLOCK_MSG.to_string(), nursery_span).deadlock());
         }
         let wid = self.wid;
-        let mut shell = self.spawn_shell(sched, &cancel);
         {
             // gaps.md W7-58 — a no-op on the `(Some(sched), _)` path (a fiber's nested nursery runs on
             // a worker shell, `mn.is_some()`); it registers only on the `(None, Some(held))` late-spawn
@@ -991,7 +991,9 @@ impl Vm {
             // recorded as this join's target for `flag_deadlock_leaves`.
             let _owner =
                 self.blocked_owner_guard(sched, self.owns_nested_sched(sched).then_some(scope_id));
-            shell.mn_worker_loop(sched, wid, scope_id);
+            if let Some(mut shell) = self.joiner_shell(sched, &cancel, wid, JoinCover::None) {
+                shell.mn_worker_loop(sched, wid, scope_id);
+            }
             sched.wait_for_scope(scope_id);
         }
         let slots = sched.take_scope_slots(scope_id);
@@ -1072,11 +1074,12 @@ impl Vm {
         let wid = self.wid;
         // W6-2 — a shell needs no snapshot of its own: it runs no code, and every fiber it schedules in
         // carries its own module view + snapshot (`FiberCtx`).
-        let mut shell = self.spawn_shell(&sched, &cancel);
         {
             // gaps.md W7-58 — the enlisted-scope join blocks this (inline builder) thread too.
             let _party = self.nursery_party_guard(&sched);
-            shell.mn_worker_loop(&sched, wid, scope_id);
+            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, wid, JoinCover::None) {
+                shell.mn_worker_loop(&sched, wid, scope_id);
+            }
             sched.wait_for_scope(scope_id);
         }
         let slots = sched.take_scope_slots(scope_id);
@@ -1117,11 +1120,12 @@ impl Vm {
         let wid = self.wid;
         // W6-2 — a shell needs no snapshot (see `join_enlisted_scope`), which also retires the
         // `.expect("no fault possible")` this teardown path used to carry.
-        let mut shell = self.spawn_shell(&sched, &cancel);
         {
             // gaps.md W7-58 — the cancel-teardown drain blocks this thread just as the normal join does.
             let _party = self.nursery_party_guard(&sched);
-            shell.mn_worker_loop(&sched, wid, scope_id);
+            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, wid, JoinCover::None) {
+                shell.mn_worker_loop(&sched, wid, scope_id);
+            }
             sched.wait_for_scope(scope_id);
         }
         let slots = sched.take_scope_slots(scope_id);
@@ -1390,7 +1394,6 @@ impl Vm {
             more_scopes: _,
         } = scope;
         sched.close_body(sid);
-        let mut shell = self.spawn_shell(&sched, &cancel);
         // §2c1 — a NESTED scope shares the owner's sched: run the inline owner SCOPE-SCOPED (it
         // returns the instant ITS scope is done, having drained the GLOBAL queue meanwhile — that
         // drain is what runs a sibling scope's fiber), reduce only its sub-range, and retire it so the
@@ -1418,11 +1421,11 @@ impl Vm {
                 let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
                 // TICKET-211 — the body's block above handed its runner slot to the claim; this
                 // thread runs fibers only if the claim still has a slot for it.
-                let joiner = eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner();
+                let mut shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::Runners);
                 // TICKET-103 — over the nursery's family: its continuation scopes hold the tasks
                 // spawned after a fiber registered a later scope on this sched.
                 for &s in &sids {
-                    if joiner {
+                    if let Some(shell) = shell.as_mut() {
                         shell.mn_worker_loop(&sched, 0, s);
                     }
                     sched.wait_for_scope(s);
@@ -1450,7 +1453,7 @@ impl Vm {
             let _joiner = self.mn.is_none().then(|| sched.pool_joiner_guard());
             // TICKET-211 — `close_body` gave the body's runner slot back; the inline joiner runs
             // fibers only if the claim has a slot left (started runners may already fill it).
-            if eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner() {
+            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, 0, JoinCover::Runners) {
                 shell.mn_worker_loop(&sched, 0, 0);
             }
             sched.wait_for_completion();
@@ -1560,7 +1563,6 @@ impl Vm {
         // §2c1 — family-scoped (`drain_family`): a nested eager nursery shares the enclosing scope's
         // sched, so draining by sched alone would unpark the OUTER scope's socket-parked fibers too.
         sched.drain_family(sid);
-        let mut shell = self.spawn_shell(&sched, &cancel);
         // §2c1 — a NESTED scope settles and reduces only ITSELF, then retires (see
         // `join_eager_nursery`'s nested arm); the owner's drainer and sibling scopes are untouched.
         if drainer.is_none() {
@@ -1569,9 +1571,9 @@ impl Vm {
                 let _party = self.nursery_party_guard(&sched);
                 // T1-fix (W8-8, nested arm) — same gate as `join_eager_nursery`'s nested arm above,
                 // over the same family (TICKET-103).
-                let joiner = eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner();
+                let mut shell = self.joiner_shell(&sched, &cancel, 0, JoinCover::Runners);
                 for &s in &sids {
-                    if joiner {
+                    if let Some(shell) = shell.as_mut() {
                         shell.mn_worker_loop(&sched, 0, s);
                     }
                     sched.wait_for_scope(s);
@@ -1591,7 +1593,7 @@ impl Vm {
             // `main`, which must be a counted party for that span or the process-wide verdict vetoes
             // forever. No-op on a worker shell.
             let _party = self.nursery_party_guard(&sched);
-            if eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner() {
+            if let Some(mut shell) = self.joiner_shell(&sched, &cancel, 0, JoinCover::Runners) {
                 shell.mn_worker_loop(&sched, 0, 0);
             }
             sched.wait_for_completion();
@@ -1612,24 +1614,27 @@ impl Vm {
     /// the family, under `blocked_owner_guard` with the origin scope as its join target. Mirrors
     /// `run_mn_nursery_nested`'s owner arm.
     ///
-    /// The inline loop is NEVER gated on `eager_joiner_runs_fibers`: at `worker_count() == 1` this
-    /// thread is the scope's only runner (the main-thread nested arm differs because a drainer
-    /// exists there). No `nursery_party_guard`: the owner is a fiber, never a counted party. No
+    /// [`Vm::joiner_shell`] decides whether this thread runs the family's fibers (TICKET-245).
+    /// Under `native_reentry > 0` the owner hands its runner slot to its demote replacement and
+    /// only waits; the inline loop remains there only for a refused OS thread. It is not gated on
+    /// `eager_joiner_runs_fibers` (the main-thread nested arm differs because a drainer exists
+    /// there). No `nursery_party_guard`: the owner is a fiber, never a counted party. No
     /// `blocked_bodies_guard`: the body is a counted fiber, and `awaiting_builder` on its scope would
     /// veto a genuine deadlock.
     ///
     /// With `native_reentry == 0` the family is complete here, because `join_nursery` parked the
     /// fiber otherwise. Under `native_reentry > 0` the fiber cannot park (its Rust stack holds the
-    /// native frame, the rule `park_recv`'s caller follows), so the inline loop stays for that shape
-    /// only.
+    /// native frame, the rule `park_recv`'s caller follows), so it waits here in place.
     fn join_fiber_owned_nursery(&mut self, scope: EagerScope) -> Result<(), RuntimeError> {
         let sids = scope.sids();
         if !scope.sched.lock().family_done(scope.scope) {
             let wid = self.wid;
-            let mut shell = self.spawn_shell(&scope.sched, &scope.cancel);
             let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
+            let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid, JoinCover::None);
             for &sid in &sids {
-                shell.mn_worker_loop(&scope.sched, wid, sid);
+                if let Some(shell) = shell.as_mut() {
+                    shell.mn_worker_loop(&scope.sched, wid, sid);
+                }
                 scope.sched.wait_for_scope(sid);
             }
         }
@@ -1653,10 +1658,12 @@ impl Vm {
         cancel_fiber_owned_family(&scope);
         if !scope.sched.lock().family_done(scope.scope) {
             let wid = self.wid;
-            let mut shell = self.spawn_shell(&scope.sched, &scope.cancel);
             let _owner = self.blocked_owner_guard(&scope.sched, Some(scope.scope));
+            let mut shell = self.joiner_shell(&scope.sched, &scope.cancel, wid, JoinCover::None);
             for &sid in &sids {
-                shell.mn_worker_loop(&scope.sched, wid, sid);
+                if let Some(shell) = shell.as_mut() {
+                    shell.mn_worker_loop(&scope.sched, wid, sid);
+                }
                 scope.sched.wait_for_scope(sid);
             }
         }
@@ -2431,14 +2438,11 @@ impl Vm {
         if !fiber_waits && !job_waits && !due {
             return;
         }
+        // A refused replacement thread returns without handing off: the thread keeps running.
         if let Some(sched) = self.mn.clone()
-            && !self.demoted
+            && !self.demote_once(&sched)
         {
-            // A refused replacement thread returns without handing off: the thread keeps running.
-            if !self.spawn_replacement_worker(&sched, self.wid) {
-                return;
-            }
-            self.demoted = true;
+            return;
         }
         self.offer_pool_slot();
         // TICKET-206 — the thread queues its own next turn while it still holds the permit: the
@@ -2499,6 +2503,56 @@ impl Vm {
         if let Some(sched) = self.mn.as_ref().map(Arc::clone) {
             reg.release(&sched, &mut sched.lock());
         }
+    }
+
+    /// TICKET-245 — THE shell an inline nursery joiner runs fibers on, or `None` when the joiner
+    /// only waits. Every join and abort site calls this and decides nothing itself. The decision is
+    /// [`Vm::joiner_helps`] (the `Nursery` row of `block::mode`). A joiner that may not help and
+    /// has no cover hands its runner slot over ([`Vm::hand_joiner_slot`]); it keeps the inline
+    /// loop only when the OS refused that thread. Call it after the site's guards.
+    pub(super) fn joiner_shell(
+        &mut self,
+        sched: &Arc<MnSched>,
+        cancel: &Arc<AtomicBool>,
+        wid: usize,
+        cover: JoinCover,
+    ) -> Option<Vm> {
+        let helps = self.joiner_helps();
+        let runs = match cover {
+            JoinCover::Runners => {
+                helps && eager_joiner_runs_fibers(worker_count()) && sched.claim_joiner()
+            }
+            JoinCover::None => helps || !self.hand_joiner_slot(sched, cancel, wid),
+        };
+        runs.then(|| self.spawn_shell(sched, cancel))
+    }
+
+    /// TICKET-245 — give the joined `sched` one SENTINEL runner in place of a joiner that may not
+    /// run fibers on its own stack: this worker's demote replacement on the fiber's own sched, a
+    /// `chezzi-mn-repl` thread on any other. `false` iff the OS refused the thread.
+    fn hand_joiner_slot(
+        &mut self,
+        sched: &Arc<MnSched>,
+        cancel: &Arc<AtomicBool>,
+        wid: usize,
+    ) -> bool {
+        if self.owns_nested_sched(sched) {
+            return self.demote_once(sched);
+        }
+        let shell = self.spawn_shell(sched, cancel);
+        spawn_worker_thread(shell, sched, "chezzi-mn-repl", wid, SENTINEL_SCOPE).is_ok()
+    }
+
+    /// THE one-time handover of this worker's runner slot: spawn its replacement worker unless it
+    /// already has one. `false` iff the OS refused the thread; the worker is then not demoted.
+    pub(super) fn demote_once(&mut self, sched: &Arc<MnSched>) -> bool {
+        if !self.demoted {
+            if !self.spawn_replacement_worker(sched, self.wid) {
+                return false;
+            }
+            self.demoted = true;
+        }
+        true
     }
 
     /// D5 owe #3 (Path C) — spawn a fresh OS thread running a replacement M:N worker shell over the
@@ -6641,6 +6695,16 @@ impl Drop for NestedDrainerSlot {
     fn drop(&mut self) {
         NESTED_EAGER_DRAINERS.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// TICKET-245 — who else is guaranteed to run a joined sched's fibers while its joiner waits;
+/// [`Vm::joiner_shell`]'s input.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum JoinCover {
+    /// nobody is guaranteed to: a lazy join and a fiber-owned join
+    None,
+    /// the sched's drainer and its started runners: an eager join
+    Runners,
 }
 
 /// W8-8 — the inline joiner runs fibers only when the budget has a slot left after the drainer.

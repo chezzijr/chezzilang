@@ -2196,8 +2196,9 @@ impl Vm {
         // to an open body hung (W13-6). The clause could only go once an escape out of a
         // fiber-owned nursery parked instead of waiting inline (TICKET-132), because the inline
         // wait popped its own ancestor. Do not restore the clause, and do not add a replacement
-        // worker beside the deadlock verdict instead (TICKET-125 and TICKET-127 false-faulted
-        // `i6n2` at T=4). Cost: while the OUTER body is open, these tasks share the outer sched's
+        // worker for a joiner that can park (TICKET-125 and TICKET-127 false-faulted `i6n2` at
+        // T=4); a joiner inside a native callback cannot park and hands its slot over in
+        // `Vm::joiner_shell` (TICKET-245). Cost: while the OUTER body is open, these tasks share the outer sched's
         // runners (`docs/gaps.md` W13-27).
         //
         // A top-level nursery has no outer worker to starve and creates exactly ONE drainer per

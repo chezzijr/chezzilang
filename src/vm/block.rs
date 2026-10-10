@@ -24,7 +24,7 @@ pub(super) enum BlockCtx {
     Demote,
     /// The inline outermost-`parallel:` builder (`mn_enlist_sched`). It has no worker loop to
     /// drive a park.
-    Builder,
+    Builder { reentered: bool },
     /// A thread that owns itself: `main`, a `main` `defer:`, `main` inside a callback.
     OwnThread { judged: bool, reentered: bool },
 }
@@ -115,8 +115,12 @@ pub(super) enum BlockMode {
     Park,
     /// block this worker in place and hand its runner slot to a replacement
     Demote,
-    /// block this thread in place (it runs nothing else)
+    /// block this thread in place: it runs nothing else until the wait ends
     InPlace,
+    /// a nursery join only: wait in place AND run the joined scheduler's fibers on this thread's
+    /// stack. Legal only with no host frame under the joiner: a fiber run there may wait for
+    /// something only a buried frame can give (TICKET-245).
+    Help,
     /// sleep this thread to the op's own deadline
     InlineSleep,
     /// refuse: the op returns its documented error or fault instead of blocking
@@ -127,8 +131,9 @@ pub(super) enum BlockMode {
 /// Changing a cell means changing this, `tests::every_cell_matches_the_table` and the
 /// `docs/concurrency.md` "Blocking-context table" in one commit.
 pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
-    use BlockMode::{Demote, InPlace, InlineSleep, Park, Refuse};
+    use BlockMode::{Demote, Help, InPlace, InlineSleep, Park, Refuse};
     use WaitSpec as W;
+    let join = |reentered: bool| if reentered { InPlace } else { Help };
     match ctx {
         BlockCtx::Park => match spec {
             // DEC-151: stdin is a host wait we do not own; DEC-016: a guard waits in place, then
@@ -138,9 +143,11 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             _ => Park,
         },
         BlockCtx::Demote => match spec {
-            W::Connect | W::Nursery => InPlace,
+            W::Connect => InPlace,
             // TICKET-185: a demoted sender blocks on its published offer, as Go blocks.
+            // TICKET-245: a nursery joiner hands its runner slot over and only waits.
             W::Send
+            | W::Nursery
             | W::Recv
             | W::Timer
             | W::Wait { .. }
@@ -151,7 +158,7 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             | W::Socket
             | W::Guard => Demote,
         },
-        BlockCtx::Builder => match spec {
+        BlockCtx::Builder { reentered } => match spec {
             W::Recv
             | W::Send
             | W::Wait {
@@ -160,19 +167,16 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             | W::Socket => Refuse,
             W::Wait { deadline: true, .. } | W::Timer | W::Sleep => InlineSleep,
             W::Stdin | W::Guard => Demote,
-            W::Connect | W::Offload | W::Join | W::Nursery => InPlace,
+            W::Connect | W::Offload | W::Join => InPlace,
+            W::Nursery => join(reentered),
         },
-        BlockCtx::OwnThread { .. } => match spec {
+        BlockCtx::OwnThread { reentered, .. } => match spec {
             W::Timer | W::Sleep => InlineSleep,
             W::Stdin | W::Guard => Demote,
-            W::Recv
-            | W::Send
-            | W::Wait { .. }
-            | W::Offload
-            | W::Socket
-            | W::Connect
-            | W::Join
-            | W::Nursery => InPlace,
+            W::Recv | W::Send | W::Wait { .. } | W::Offload | W::Socket | W::Connect | W::Join => {
+                InPlace
+            }
+            W::Nursery => join(reentered),
         },
     }
 }
@@ -391,19 +395,16 @@ impl Vm {
             sched.notify_waiters();
             DemoteReg { tok }
         };
-        if !self.demoted {
-            if !self.spawn_replacement_worker(&sched, self.wid) {
-                reg.release(&sched, &mut sched.lock());
-                return Err(self.err(
-                    format!(
-                        "{what} inside a native callback could not demote the worker (OS thread \
-                         limit reached) — reduce concurrent in-callback blocking or raise the \
-                         thread limit"
-                    ),
-                    span,
-                ));
-            }
-            self.demoted = true;
+        if !self.demote_once(&sched) {
+            reg.release(&sched, &mut sched.lock());
+            return Err(self.err(
+                format!(
+                    "{what} inside a native callback could not demote the worker (OS thread \
+                     limit reached) — reduce concurrent in-callback blocking or raise the \
+                     thread limit"
+                ),
+                span,
+            ));
         }
         Ok(reg)
     }
@@ -433,7 +434,7 @@ impl Vm {
             };
         }
         if self.mn_enlist_sched.is_some() {
-            return BlockCtx::Builder;
+            return BlockCtx::Builder { reentered };
         }
         BlockCtx::OwnThread { judged, reentered }
     }
@@ -456,6 +457,16 @@ impl Vm {
     pub(super) fn block_mode(&self, spec: WaitSpec) -> BlockMode {
         mode(self.block_ctx(), spec)
     }
+
+    /// TICKET-245 — THE answer to "may this nursery joiner run fibers on its own stack?", read
+    /// from the `Nursery` row of [`mode`]. Only [`Vm::joiner_shell`] asks it. A `Park` joiner that
+    /// reaches an inline wait (a fault-unwind abort, where no op can rewind) still helps.
+    pub(super) fn joiner_helps(&self) -> bool {
+        matches!(
+            self.block_mode(WaitSpec::Nursery),
+            BlockMode::Park | BlockMode::Help
+        )
+    }
 }
 
 #[cfg(test)]
@@ -464,7 +475,12 @@ mod tests {
 
     /// Every context, in the column order of [`TABLE`].
     fn contexts() -> Vec<BlockCtx> {
-        let mut v = vec![BlockCtx::Park, BlockCtx::Demote, BlockCtx::Builder];
+        let mut v = vec![
+            BlockCtx::Park,
+            BlockCtx::Demote,
+            BlockCtx::Builder { reentered: false },
+            BlockCtx::Builder { reentered: true },
+        ];
         for judged in [false, true] {
             for reentered in [false, true] {
                 v.push(BlockCtx::OwnThread { judged, reentered });
@@ -494,25 +510,26 @@ mod tests {
         v
     }
 
-    /// One row per spec, one letter per context: P Park, D Demote, I InPlace, S InlineSleep,
-    /// R Refuse. Columns: Park, Demote, Builder, then OwnThread as (judged, reentered) =
-    /// (f,f) (f,t) (t,f) (t,t). The last column is `will_return`.
+    /// One row per spec, one letter per context: P Park, D Demote, I InPlace, H Help,
+    /// S InlineSleep, R Refuse. Columns: Park, Demote, Builder as reentered = f, t, then
+    /// OwnThread as (judged, reentered) = (f,f) (f,t) (t,f) (t,t). The last column is
+    /// `will_return`.
     const TABLE: [(&str, &str, bool); 15] = [
-        ("Recv", "PDR IIII", false),
-        ("Timer", "PDS SSSS", true),
-        ("Send", "PDR IIII", false),
-        ("Wait", "PDR IIII", false),
-        ("Wait+send", "PDR IIII", false),
-        ("Wait+deadline", "PDS IIII", true),
-        ("Wait+deadline+send", "PDS IIII", true),
-        ("Sleep", "PDS SSSS", true),
-        ("Offload", "PDI IIII", true),
-        ("Stdin", "DDD DDDD", true),
-        ("Socket", "PDR IIII", true),
-        ("Connect", "PII IIII", true),
-        ("Guard", "DDD DDDD", false),
-        ("Join", "DDI IIII", false),
-        ("Nursery", "PII IIII", false),
+        ("Recv", "PD RR IIII", false),
+        ("Timer", "PD SS SSSS", true),
+        ("Send", "PD RR IIII", false),
+        ("Wait", "PD RR IIII", false),
+        ("Wait+send", "PD RR IIII", false),
+        ("Wait+deadline", "PD SS IIII", true),
+        ("Wait+deadline+send", "PD SS IIII", true),
+        ("Sleep", "PD SS SSSS", true),
+        ("Offload", "PD II IIII", true),
+        ("Stdin", "DD DD DDDD", true),
+        ("Socket", "PD RR IIII", true),
+        ("Connect", "PI II IIII", true),
+        ("Guard", "DD DD DDDD", false),
+        ("Join", "DD II IIII", false),
+        ("Nursery", "PD HI HIHI", false),
     ];
 
     #[test]
@@ -521,6 +538,7 @@ mod tests {
             BlockMode::Park => 'P',
             BlockMode::Demote => 'D',
             BlockMode::InPlace => 'I',
+            BlockMode::Help => 'H',
             BlockMode::InlineSleep => 'S',
             BlockMode::Refuse => 'R',
         };

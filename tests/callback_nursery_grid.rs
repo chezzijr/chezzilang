@@ -211,7 +211,6 @@ fn misses(cells: &[(String, String, String)]) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "TICKET-245: red until the joiner fix lands"]
 fn grid_every_op_in_every_callback_from_every_caller_shape() {
     let mut cells = Vec::new();
     for (op_name, op) in OPS {
@@ -274,7 +273,6 @@ fn p5() -> String {
 }
 
 #[test]
-#[ignore = "TICKET-245: red until the joiner fix lands"]
 fn named_cells_p1b_p3_p5() {
     let cells = vec![
         ("p1b".to_string(), p1b(), "3280".to_string()),

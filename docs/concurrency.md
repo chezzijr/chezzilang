@@ -1841,8 +1841,9 @@ outermost-`parallel:` builder (`job` = it carries an eager `Executor` core); **P
 `Executor` job; **OwnThread** = `main`, a `main` `defer:`, `main` inside a callback.
 
 Modes: P park the fiber on the op's own bucket; D demote (block in place, hand the runner slot to
-a replacement worker); I block this thread in place; S sleep to the op's own deadline; R refuse
-(the op's documented error or fault).
+a replacement worker); I block this thread in place; it runs nothing else; H help (a nursery join
+only): wait in place and run the joined scheduler's fibers on this thread; S sleep to the op's own
+deadline; R refuse (the op's documented error or fault).
 
 | wait (`WaitSpec`) | Park | Demote | Builder | Builder `job` | PoolJob | OwnThread | `will_return` |
 |---|---|---|---|---|---|---|---|
@@ -1860,7 +1861,9 @@ a replacement worker); I block this thread in place; S sleep to the op's own dea
 | `net.connect` handshake | P | I | I | R | R | I | yes |
 | `Shared` update guard | D | D | D | D | D | D | no |
 | `Executor.shutdown()` / join | D | D | I | I | I | I | yes |
-| `parallel:` nursery join | P | I | I | I | I | I | no |
+| `parallel:` nursery join | P | D | H¹ | H¹ | I | H¹ | no |
+
+¹ I when a host frame is under the joiner (a native callback or a defer drain): the joiner only waits (TICKET-245).
 
 **Accounting derives from `will_return`.** A demoted wait that ends on a deadline or an external
 completion is `inflight` (it vetoes the deadlock verdict); every other one registers a waiter in
