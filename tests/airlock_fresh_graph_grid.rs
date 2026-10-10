@@ -531,6 +531,41 @@ fn check_grid(keep: impl Fn(Wrapper, Inner, usize) -> bool) {
 #[test]
 fn fresh_graph_cells_run() {
     check_grid(|w, i, d| !w.handoff() && expect(w, i, d) == "runs");
+    // The fresh sibling of a named value is writable, at either position (the named side is the
+    // `mixed-siblings` cell of `reachable_cells_still_fault`).
+    let src = format!(
+        "{PRELUDE}fn w2(r: Channel[str], tag: str, x: List[List[int]], k: int):
+    res := recover:
+        x[k].push(7)
+    verdict(r, tag, res)
+fn wtup(r: Channel[str], tag: str, t: (List[int], List[int])):
+    res := recover:
+        t.1.push(7)
+    verdict(r, tag, res)
+fn main():
+    xs := [0]
+    r := Channel[str](4)
+    parallel:
+        spawn w2(r, \"list last\", [xs, []], 1)
+        spawn w2(r, \"list first\", [[], xs], 0)
+        spawn wtup(r, \"tuple\", (xs, []))
+    out := [r.recv(), r.recv(), r.recv()]
+    out.sort()
+    print(out, xs)
+main()
+"
+    );
+    for t in THREADS {
+        let (code, out, err) = run("fresh-sibling", &src, t);
+        assert_eq!(
+            (code, out.as_str()),
+            (
+                0,
+                "['list first runs', 'list last runs', 'tuple runs'] [0]\n"
+            ),
+            "at {t:?}: {err}"
+        );
+    }
 }
 
 /// A value the parent can still reach faults at every depth under every marking wrapper, and the
@@ -742,6 +777,68 @@ main()
 "
             ),
             "w faults [[0]]\nw faults [0]\n",
+        ),
+        // A named value beside a fresh sibling stays marked at its position. The fresh side of
+        // the same line is in `fresh_graph_cells_run`.
+        (
+            "mixed-siblings",
+            r#"fn w2(r: Channel[str], tag: str, x: List[List[int]], k: int):
+    res := recover:
+        x[k].push(7)
+    verdict(r, tag, res)
+fn wopt(r: Channel[str], tag: str, x: List[int]?):
+    match x:
+        ?v:
+            res := recover:
+                v.push(7)
+            verdict(r, tag, res)
+        None: r.send(tag + " none")
+fn wmap(r: Channel[str], tag: str, m: Map[str, List[int]], k: str):
+    res := recover:
+        m[k].push(7)
+    verdict(r, tag, res)
+fn wtup(r: Channel[str], tag: str, t: (List[int], List[int]), k: int):
+    res := recover:
+        if k == 0:
+            t.0.push(7)
+        else:
+            t.1.push(7)
+    verdict(r, tag, res)
+fn main():
+    xs := [0]
+    opt: List[int]? = [0]
+    r := Channel[str](32)
+    parallel:
+        spawn w2(r, "a named-first 0", [xs, []], 0)
+        spawn w2(r, "c comp-named 0", [xs for _i in range(2)], 0)
+        spawn w2(r, "d alias-twice 1", [xs, xs], 1)
+        spawn wopt(r, "e named-opt", opt)
+        spawn wopt(r, "f wrap-named", xs)
+        spawn wmap(r, "g map-mixed a", {"a": xs, "b": []}, "a")
+        spawn wmap(r, "h map-mixed b", {"a": xs, "b": []}, "b")
+        spawn wtup(r, "i tuple 0", (xs, []), 0)
+        spawn w2(r, "k copy-child 0", [xs].copy(), 0)
+    out: List[str] = []
+    for _i in range(9):
+        out.push(r.recv())
+    out.sort()
+    for s in out:
+        print(s)
+    print(xs, opt)
+main()
+"#
+            .to_string(),
+            "a named-first 0 faults
+c comp-named 0 faults
+d alias-twice 1 faults
+e named-opt faults
+f wrap-named faults
+g map-mixed a faults
+h map-mixed b faults
+i tuple 0 faults
+k copy-child 0 faults
+[0] [0]
+",
         ),
         (
             "key-literal",

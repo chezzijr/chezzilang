@@ -38953,6 +38953,12 @@ fn fresh_shape_grid() {
         "{head}fn show[T](x: T):\n    pass\n{main}        spawn show(?[xs])\nmain()\n"
     ));
     assert_eq!(format!("{:?}", c.args), "[Node(At([Node(At([Marked]))]))]");
+    // A default that mentions a type parameter is callee-filled (`desugar::dflt_for`): the task
+    // builds it, so it is no operand of the crossing and has no shape.
+    let c = spawn_crossing(&format!(
+        "{head}fn anyl[U]() -> List[U]:\n    return []\nfn gw[T](a: T, x: List[T] = anyl()):\n    pass\n{main}        spawn gw(1)\nmain()\n"
+    ));
+    assert_eq!(format!("{:?}", c.args), "[All]");
     // The receiver is entry 0.
     for (recv, want) in [
         ("S([], [])", "Some(All)"),
