@@ -38529,3 +38529,55 @@ fn closure_literal_reads_its_slot_through_one_carrier_layer() {
         "cannot assign",
     );
 }
+
+/// TICKET-239: a generic call substitutes its explicit type arguments before it reads an
+/// argument, so the argument owns the substituted slot and wraps like at a non-generic slot.
+#[test]
+fn explicit_type_args_give_each_generic_argument_its_owned_slot() {
+    let opt = "fn opt[T](x: T) -> T:\n    return x\n";
+    ok("struct Box[T]:\n    v: T\nb := Box[int?](5)\n");
+    ok(&format!("{opt}c := opt[int?](5)\n"));
+    ok(&format!("{opt}c := opt[List[int]?]([])\n"));
+    ok(&format!("{opt}c := opt[(fn(int) -> int)?](fn(a): a + 1)\n"));
+    ok(
+        "struct B[T]:\n    v: T\n    fn mk(x: T) -> B[T]:\n        return B(x)\nb := B[int?].mk(5)\n",
+    );
+    ok(
+        "struct S:\n    n: int\n    fn gm[U](self, x: U) -> U:\n        return x\ns := S(0)\ny := s.gm[int?](5)\n",
+    );
+    ok(&format!("{opt}x := opt[int!str](!\"e\")\n"));
+}
+
+/// TICKET-239: with no type arguments the annotation gives the slot: the return type is unified
+/// with the expected type before the arguments are read.
+#[test]
+fn annotation_only_generic_call_meets_the_width_and_wraps() {
+    let id = "fn id[T](x: T) -> T:\n    return x\n";
+    // `entry_rejects`: only the graph wire resolves a `std.ffi` import.
+    entry_rejects(
+        &format!("import int8 from std.ffi\n{id}b: int8? = id(300)\n"),
+        "constant 300 does not fit int8",
+    );
+    ok("struct Box[T]:\n    v: T\nc: Box[int?] = Box(5)\n");
+    ok(&format!("{id}r: int? = id(?5)\n"));
+    ok(&format!("{id}r: int? = id(None)\n"));
+    ok(
+        "fn first[T](xs: List[T]) -> T:\n    return xs[0]\nxs: List[int] = [1]\nn: int? = first(xs)\n",
+    );
+}
+
+/// TICKET-239: a closure at a slot the type arguments fix is fully inferred, so its return type
+/// is real and a mismatch is reported; only a prepassed closure has a masked return.
+#[test]
+fn an_owned_slot_closure_is_not_return_masked() {
+    let ap = "fn ap[T](f: fn(int) -> T) -> T:\n    return f(1)\n";
+    let two = "fn two[T, U](x: T, f: fn(T) -> U) -> U:\n    return f(x)\n";
+    rejects(
+        &format!("{ap}x := ap[int](fn(a): \"s\")\n"),
+        "has type fn(int) -> str, expected fn(int) -> int",
+    );
+    ok(&format!("{ap}x := ap[int](fn(a): a + 1)\n"));
+    ok(&format!("{ap}x := ap(fn(a): a + 2)\n"));
+    ok(&format!("{two}x := two[int, str](1, fn(a): \"s{{a}}\")\n"));
+    ok(&format!("{two}x := two(1, fn(a) -> str: \"t{{a}}\")\n"));
+}

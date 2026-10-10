@@ -7,11 +7,6 @@ use super::*;
 use crate::ast::CarrierTag;
 use crate::ast::consteval;
 
-/// TICKET-225: whether `e` folds to a constant (`300`, `1 << 8`, `3e38 + 3e38`).
-pub(super) fn is_const_expr(e: &Expr) -> bool {
-    matches!(consteval::eval(e, &mut 0), consteval::Fold::Value(_))
-}
-
 /// The one diagnostic for a range used where it has no runtime value. It names every legal position
 /// AND the materialization escape hatch — the `range(a, b)` builtin, which really does return a
 /// `List[int]` (so `List(0..3)` is rejected and `Set(range(0, 3))` is the way).

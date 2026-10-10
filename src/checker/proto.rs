@@ -1,6 +1,7 @@
 // checker::proto — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Protocol hoisting/embedding, satisfies, receiver refinement, hashability.
 
+use super::expr::ArgPass;
 use super::setup::HeadBinding;
 use super::*;
 use std::collections::{HashMap, HashSet};
@@ -3612,44 +3613,44 @@ impl Checker {
         sub
     }
 
-    /// TICKET-124 (W13-13): a per-argument expected-type hint for a generic ctor/variant call, so
-    /// the expected type reaches a NESTED ctor argument too (`Box[Box[Named]] = Box(Box(A()))`),
-    /// not only the outermost one. The seed is the turbofish binding when explicit type args were
-    /// given, else the annotation's binding via [`Self::hint_want`]; a decl whose substitution under
-    /// that seed is concrete up to in-scope type params gets that hint, else `None` (an under-determined slot keeps
-    /// its ordinary bottom-up inference).
-    pub(super) fn ctor_arg_hints(
+    /// TICKET-239 — the one pre-argument substitution of a generic call, read by all six generic
+    /// paths through [`Checker::infer_generic_arg_tys`]. Returns `(owned, seed)`. `owned` binds
+    /// what is written before any argument is read: the explicit type arguments (`targs`, from
+    /// [`Self::seed_targs`]) and what the expected type `hint` fixes in the declared result `ret`
+    /// (`c: Box[int?] = Box(5)`), one carrier layer looked through; an argument whose slot is
+    /// concrete under it owns that slot and may wrap. `seed` holds the one case that guides but
+    /// never wraps: a bare-parameter result under a carrier annotation (`r: int? = g(?5)`), where
+    /// the value wraps at the binding. Declines unless the hint is concrete up to in-scope type
+    /// params (`ty_concrete_but` + `rigid_param`), so it never reads a partially-known annotation
+    /// (DEC-054). It changes argument SLOTS only: the caller still solves its substitution from
+    /// the arguments first.
+    pub(super) fn slot_seed(
         &mut self,
+        targs: &HashMap<String, Ty>,
         hint: Option<&Ty>,
-        shape: &Ty,
-        tps: &[TyParam],
-        decls: &[Ty],
-        targs: &[Ty],
-    ) -> Vec<Option<Ty>> {
-        let seed = if !targs.is_empty() {
-            tps.iter()
-                .zip(targs)
-                .map(|(tp, ta)| (tp.name.clone(), ta.clone()))
-                .collect()
-        } else {
-            match self.hint_want(hint, shape) {
-                Some(w) => w,
-                None => return Vec::new(),
+        ret: &Ty,
+    ) -> (HashMap<String, Ty>, HashMap<String, Ty>) {
+        let mut owned = targs.clone();
+        let mut seed = HashMap::new();
+        if let Some(h) = hint
+            && ty_concrete_but(h, &|n| self.rigid_param(n, &[]))
+        {
+            if let Ty::Param(n) = ret
+                && h.carrier_parts().is_some()
+            {
+                if !owned.contains_key(n) {
+                    seed.insert(n.clone(), h.clone());
+                }
+            } else {
+                let h = if ret.carrier_parts().is_some() {
+                    h
+                } else {
+                    h.slot_payload()
+                };
+                unify(ret, h, &mut owned);
             }
-        };
-        // A ctor's own still-unbound param never passes as a caller's same-named param.
-        let free: Vec<String> = tps
-            .iter()
-            .filter(|tp| !seed.contains_key(&tp.name))
-            .map(|tp| tp.name.clone())
-            .collect();
-        decls
-            .iter()
-            .map(|d| {
-                let s = subst(d, &seed);
-                ty_concrete_but(&s, &|n| self.rigid_param(n, &free)).then_some(s)
-            })
-            .collect()
+        }
+        (owned, seed)
     }
 
     /// Recover element types from parameterized `Iterator[T]` / `Iterable[T]` bounds: for each type
@@ -3816,25 +3817,6 @@ impl Checker {
         if !bounds_fail {
             *sub = cand;
         }
-    }
-
-    /// TICKET-124 (W13-12/W13-13): the expected type's binding for a ctor's own type params, used
-    /// to pin a bare-`T` slot the same way a turbofish does. Declines unless the hint is concrete
-    /// up to in-scope type params (`ty_concrete_but` + `rigid_param`): an `Unknown` leaf or a
-    /// non-rigid param still declines, so it never widens against a partially-known annotation
-    /// (DEC-054). Its output only seeds `ctor_arg_hints`.
-    pub(super) fn hint_want(
-        &mut self,
-        hint: Option<&Ty>,
-        shape: &Ty,
-    ) -> Option<HashMap<String, Ty>> {
-        let h = hint?;
-        if !ty_concrete_but(h, &|n| self.rigid_param(n, &[])) {
-            return None;
-        }
-        let mut w = HashMap::new();
-        unify(shape, h, &mut w);
-        Some(w)
     }
 
     /// The parameterized bounds whose type args are recovered by a dedicated extractor above
@@ -4558,13 +4540,15 @@ impl Checker {
         if !(sig.min_params..=sig.params.len()).contains(&args.len()) {
             self.check_arity(name, sig.params.len(), args, span);
         }
-        let mut arg_tys = self.infer_generic_arg_tys(args, &sig.params, &[]);
         // Explicit call-site type arguments (`max[int](…)`) seed the substitution; remaining (or
         // all, when none given) parameters are inferred from positional arguments. `unify` only
         // binds a parameter that isn't already in the map, so explicit args take precedence and a
         // conflicting argument is caught by the per-argument check below.
         let mut subst_map: HashMap<String, Ty> =
             self.seed_targs(name, &sig.type_params, targs, span);
+        let (owned, seed) = self.slot_seed(&subst_map, hint, &sig.ret);
+        let (mut arg_tys, passes) =
+            self.infer_generic_arg_tys(args, &sig.params, &owned, &seed, &sig.type_params);
         // Bare generic-fn args this pass could not pin YET — re-pinned once everything else has had
         // its turn (see the second pass below).
         let mut deferred_fn_args: Vec<usize> = Vec::new();
@@ -4602,10 +4586,7 @@ impl Checker {
             // return-position `[U]` to that leaked param, and the loop-back in
             // `recover_return_only_params` (which only fills params still FREE) could not correct it.
             // Non-closure args unify unchanged. Mirrors `infer_generic_method`.
-            if matches!(
-                args.get(i).map(|a| &a.kind),
-                Some(ExprKind::Closure { ret: None, .. })
-            ) {
+            if passes[i].masks_ret() {
                 unify(decl, &mask_closure_ret(actual), &mut subst_map);
             } else {
                 self.unify_arg(decl, &actual.clone(), &mut subst_map);
@@ -4630,10 +4611,8 @@ impl Checker {
             // return (`fn(): 5` → `int`) still pre-binds here (needed so the `pair(fn(): 5, fn(x): x+1)`
             // ordering resolves); an Unknown/param-cored one defers to the loop-back's refined
             // checking-mode re-inference, which recovers the concrete type.
-            if matches!(
-                args.get(i).map(|a| &a.kind),
-                Some(ExprKind::Closure { ret: None, .. })
-            ) && matches!(actual, Ty::Func { ret, .. } if ty_fully_concrete(ret))
+            if passes.get(i).is_some_and(|p| p.masks_ret())
+                && matches!(actual, Ty::Func { ret, .. } if ty_fully_concrete(ret))
             {
                 unify(decl, actual, &mut subst_map);
             }
@@ -4721,6 +4700,7 @@ impl Checker {
             name,
             &sig.params,
             &arg_tys,
+            &passes,
             args,
             &sig.params,
             &sig.type_params,
@@ -4877,11 +4857,13 @@ impl Checker {
             );
         }
         let dec_args = declared.split_first().map_or(&[][..], |(_, d)| d);
-        let mut arg_tys = self.infer_generic_arg_tys(args, dec_args, &[]);
         // Explicit member-level turbofish seeds the `[U]` params (arity-checked); `unify` only binds
         // a param not already in the map, so an explicit targ wins and a conflicting arg is caught by
         // the per-argument check below.
         let mut mmap: HashMap<String, Ty> = self.seed_targs(method, mtps, targs, span);
+        // This path has no return hint to pre-seed from: the slots come from the type args only.
+        let (owned, seed) = self.slot_seed(&mmap, None, &Ty::Nil);
+        let (mut arg_tys, passes) = self.infer_generic_arg_tys(args, dec_args, &owned, &seed, mtps);
         // Every other param in the instantiated signature is the CALLER's (a receiver arg `Box[B]`
         // inside `fn go[A, B]`), rigid here: pin it to itself so neither an argument nor the hint
         // can bind it (`r: (A, A) = b.pair(a)` must not turn the caller's `B` into `A`).
@@ -4940,10 +4922,7 @@ impl Checker {
             // leaked param, and the loop-back below (which only fills params still FREE) could not
             // correct it. Masking defers `U` to the loop-back's checking-mode re-inference, which
             // recovers it as the CONCRETE return type. Non-closure args unify unchanged.
-            if matches!(
-                args.get(i).map(|a| &a.kind),
-                Some(ExprKind::Closure { ret: None, .. })
-            ) {
+            if passes.get(i).is_some_and(|p| p.masks_ret()) {
                 unify(decl, &mask_closure_ret(actual), &mut mmap);
             } else {
                 self.unify_arg(decl, &actual.clone(), &mut mmap);
@@ -5044,7 +5023,7 @@ impl Checker {
         // unbound param-position param to `Unknown`. `expected` = arg slots (sans receiver); `params` =
         // the full list incl receiver for the param-position degrade.
         self.recover_return_only_params(
-            method, expected, &arg_tys, args, params, mtps, &mut mmap, span,
+            method, expected, &arg_tys, &passes, args, params, mtps, &mut mmap, span,
         );
         // M24 Task 5 — half two of the static-witness contract for a MEMBER-declared type param,
         // recorded LAST for the same reason the free-fn path does it last (`recover_return_only_params`
@@ -5133,6 +5112,7 @@ impl Checker {
         name: &str,
         arg_decls: &[Ty],
         arg_tys: &[Ty],
+        passes: &[ArgPass],
         args: &[Expr],
         all_params: &[Ty],
         tps: &[TyParam],
@@ -5142,7 +5122,9 @@ impl Checker {
         // Snapshot the params bound after pass 1, so the loop-back below only re-enforces bounds on
         // params NEWLY bound from a refined arg (pass-1 bounds are enforced by the caller).
         let bound_after_pass1: std::collections::HashSet<String> = map.keys().cloned().collect();
-        for (decl, (actual, arg)) in arg_decls.iter().zip(arg_tys.iter().zip(args)) {
+        for (decl, ((actual, arg), pass)) in
+            arg_decls.iter().zip(arg_tys.iter().zip(args).zip(passes))
+        {
             let want = subst(decl, map);
             // For a closure whose UNANNOTATED body is a nested free generic call, the prepass return
             // leaks the callee's own `Ty::Param` (`fn(?) -> T`) — not the lenient `Unknown` a direct
@@ -5151,13 +5133,13 @@ impl Checker {
             // closure's fallback return: `check_generic_arg`'s internal check stays on params + arity,
             // and the REAL return contract is enforced below against the REFINED type. Non-closure and
             // annotated-closure args use their prepass type unchanged.
-            let is_bare_closure = matches!(arg.kind, ExprKind::Closure { ret: None, .. });
+            let is_bare_closure = pass.masks_ret();
             let fallback = if is_bare_closure {
                 mask_closure_ret(actual)
             } else {
                 actual.clone()
             };
-            let refined = self.check_generic_arg(name, &want, &fallback, arg);
+            let refined = self.check_generic_arg(name, &want, &fallback, arg, *pass);
             // SOUNDNESS: when the closure's expected return is ALREADY concrete (a return-only `[U]`
             // pinned by a sibling value arg or an explicit slot), enforce it explicitly here against the
             // REFINED return — rejecting a genuinely wrong body while ACCEPTING a nested-generic-call

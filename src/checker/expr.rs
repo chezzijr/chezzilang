@@ -20,6 +20,30 @@ enum NativeHandleMethod {
     Miss,
 }
 
+/// TICKET-239 — how [`Checker::infer_generic_arg_tys`] inferred one generic-call argument. The one
+/// answer to "was this argument prepassed, and is its prepass return a guess": every later reader
+/// (`check_generic_arg`, the return-mask sites) reads this, never the node kind — an owned-slot
+/// closure is a closure node too, and its return type is real.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArgPass {
+    /// Inferred once, against its slot or bottom-up; its type and its diagnostics stand.
+    Checked,
+    /// A closure whose slot depends on a sibling argument: inferred in a rolled-back prepass, to
+    /// be re-inferred against its substituted slot. `ret_inferred` — its return was not written.
+    Prepass { ret_inferred: bool },
+}
+
+impl ArgPass {
+    /// Whether the argument must be re-inferred against its substituted slot.
+    pub(super) fn deferred(self) -> bool {
+        matches!(self, ArgPass::Prepass { .. })
+    }
+    /// Whether the argument's prepass return type is a guess that unification must not read.
+    pub(super) fn masks_ret(self) -> bool {
+        matches!(self, ArgPass::Prepass { ret_inferred: true })
+    }
+}
+
 impl Checker {
     #[allow(clippy::too_many_arguments)] // the call node's parts, its bracket reading, span and id
     pub(super) fn infer_call(
@@ -1235,13 +1259,16 @@ impl Checker {
         // method's own `[U]` params. Seed each from its respective turbofish, then infer the rest by
         // unifying the declared param types (which may carry either set of `Ty::Param`s) against the
         // argument types — exactly like the struct ctor + a generic free fn.
-        let arg_tys = self.infer_generic_arg_tys(args, &sig.params, &[]);
-        if arg_tys.len() != sig.params.len() {
-            self.check_arity(method, sig.params.len(), args, span);
-        }
         let mut sub = self.seed_targs(tname, &tps, targs, span);
         let msub = self.seed_targs(method, &sig.type_params, mtargs, span);
         sub.extend(msub);
+        let all_tps: Vec<TyParam> = tps.iter().chain(sig.type_params.iter()).cloned().collect();
+        let (owned, seed) = self.slot_seed(&sub, hint, &sig.ret);
+        let (arg_tys, passes) =
+            self.infer_generic_arg_tys(args, &sig.params, &owned, &seed, &all_tps);
+        if arg_tys.len() != sig.params.len() {
+            self.check_arity(method, sig.params.len(), args, span);
+        }
         for (decl, actual) in sig.params.iter().zip(&arg_tys) {
             self.unify_arg(decl, actual, &mut sub);
         }
@@ -1256,7 +1283,6 @@ impl Checker {
         // still FREE) and bounds enforce against the hint-pinned concrete type (mirrors the free-fn
         // path, `infer_generic_call`).
         seed_from_hint(hint, &sig.ret, &mut sub);
-        let all_tps: Vec<TyParam> = tps.iter().chain(sig.type_params.iter()).cloned().collect();
         self.widen_targs_from_hint(
             hint,
             &sig.ret,
@@ -1267,9 +1293,11 @@ impl Checker {
             &mut sub,
             span,
         );
-        for (decl, (actual, arg)) in sig.params.iter().zip(arg_tys.iter().zip(args)) {
+        for (i, (decl, (actual, arg))) in
+            sig.params.iter().zip(arg_tys.iter().zip(args)).enumerate()
+        {
             let expected = subst(decl, &sub);
-            self.check_generic_arg(method, &expected, actual, arg);
+            self.check_generic_arg(method, &expected, actual, arg, passes[i]);
         }
         self.enforce_bounds(&tps, &all_tps, &sub, span);
         self.enforce_bounds(&sig.type_params, &all_tps, &sub, span);
@@ -1350,18 +1378,16 @@ impl Checker {
         // given, else are inferred by unifying the variant's declared payload types (which contain
         // the enum's `Ty::Param`s) against the argument types, then check each argument against the
         // substituted payload.
-        let hints = self.ctor_arg_hints(
+        let mut sub = self.seed_targs(name, &tps, targs, span);
+        let (owned, seed) = self.slot_seed(
+            &sub,
             hint,
             &Ty::enum_ty(v.enum_name.clone(), param_shape(&tps)),
-            &tps,
-            &v.payload,
-            targs,
         );
-        let arg_tys = self.infer_generic_arg_tys(args, &v.payload, &hints);
+        let (arg_tys, passes) = self.infer_generic_arg_tys(args, &v.payload, &owned, &seed, &tps);
         if arg_tys.len() != v.payload.len() {
             self.check_arity(name, v.payload.len(), args, span);
         }
-        let mut sub = self.seed_targs(name, &tps, targs, span);
         for (decl, actual) in v.payload.iter().zip(&arg_tys) {
             self.unify_arg(decl, actual, &mut sub);
         }
@@ -1384,9 +1410,10 @@ impl Checker {
             &mut sub,
             span,
         );
-        for (decl, (actual, arg)) in v.payload.iter().zip(arg_tys.iter().zip(args)) {
+        for (i, (decl, (actual, arg))) in v.payload.iter().zip(arg_tys.iter().zip(args)).enumerate()
+        {
             let expected = subst(decl, &sub);
-            self.check_generic_arg(name, &expected, actual, arg);
+            self.check_generic_arg(name, &expected, actual, arg, passes[i]);
         }
         self.enforce_bounds(&tps, &tps, &sub, span);
         let targs_out = tps
@@ -1463,14 +1490,10 @@ impl Checker {
             self.check_args(name, &field_tys, args, span);
             return Ty::strukt(key.to_string());
         }
-        let hints = self.ctor_arg_hints(
-            hint,
-            &Ty::Struct(key.to_string(), param_shape(&tps)),
-            &tps,
-            &field_tys,
-            targs,
-        );
-        let arg_tys = self.infer_generic_arg_tys(args, &field_tys, &hints);
+        let mut sub = self.seed_targs(name, &tps, targs, span);
+        let (owned, seed) =
+            self.slot_seed(&sub, hint, &Ty::Struct(key.to_string(), param_shape(&tps)));
+        let (arg_tys, passes) = self.infer_generic_arg_tys(args, &field_tys, &owned, &seed, &tps);
         self.check_ctor_arity(
             name,
             &tps,
@@ -1480,7 +1503,6 @@ impl Checker {
             args,
             span,
         );
-        let mut sub = self.seed_targs(name, &tps, targs, span);
         for (decl, actual) in field_tys.iter().zip(&arg_tys) {
             self.unify_arg(decl, actual, &mut sub);
         }
@@ -1508,9 +1530,10 @@ impl Checker {
         // params to Unknown BEFORE the per-arg closure body is checked, so it doesn't leak a
         // misleading "cannot compare T and T" from inside the lambda.
         self.report_uninferable_closure_params(name, &tps, &field_tys, args, &mut sub, span);
-        for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
+        for (i, (decl, (actual, arg))) in field_tys.iter().zip(arg_tys.iter().zip(args)).enumerate()
+        {
             let expected = subst(decl, &sub);
-            self.check_generic_arg(name, &expected, actual, arg);
+            self.check_generic_arg(name, &expected, actual, arg, passes[i]);
         }
         self.enforce_bounds(&tps, &tps, &sub, span);
         let targs_out = tps
@@ -2233,16 +2256,10 @@ impl Checker {
         // Generic struct: type arguments come from explicit call-site args (`S[int](…)`)
         // when given, else are inferred by unifying the declared field types (which
         // contain the struct's `Ty::Param`s) against the argument types.
-        let hints = self.ctor_arg_hints(
-            hint,
-            &Ty::Struct(key.clone(), param_shape(&tps)),
-            &tps,
-            &field_tys,
-            targs,
-        );
-        let arg_tys = self.infer_generic_arg_tys(args, &field_tys, &hints);
-        self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
         let mut sub = self.seed_targs(name, &tps, targs, span);
+        let (owned, seed) = self.slot_seed(&sub, hint, &Ty::Struct(key.clone(), param_shape(&tps)));
+        let (arg_tys, passes) = self.infer_generic_arg_tys(args, &field_tys, &owned, &seed, &tps);
+        self.check_ctor_arity(name, &tps, &fields, &defaulted, targs, args, span);
         for (decl, actual) in field_tys.iter().zip(&arg_tys) {
             self.unify_arg(decl, actual, &mut sub);
         }
@@ -2270,7 +2287,7 @@ impl Checker {
         // TICKET-238 -- the same loop-back a generic call runs: a closure argument's body solves a
         // type param on this statement (`M(1, fn(x): x * 2)` is `M[int, int]`).
         self.recover_return_only_params(
-            name, &field_tys, &arg_tys, args, &field_tys, &tps, &mut sub, span,
+            name, &field_tys, &arg_tys, &passes, args, &field_tys, &tps, &mut sub, span,
         );
         let targs = tps
             .iter()
@@ -4032,7 +4049,7 @@ impl Checker {
 
     /// [`Self::infer_arg`] with `hint` as a SEED only: it guides inference (a generic ctor pins its
     /// type params from it) but never wraps the arg. For a hint that is not the arg's own slot type
-    /// (the `Some`/`Ok`/`Err` payload, the TICKET-124 ctor hint into a bare `T` slot).
+    /// (the `Some`/`Ok`/`Err` payload, the `seed` half of [`Checker::slot_seed`]).
     pub(super) fn infer_arg_seeded(&mut self, arg: &Expr, hint: &Ty) -> Ty {
         self.install_hint(arg, hint.clone(), false);
         let t = self.infer_value(arg);
@@ -4047,16 +4064,42 @@ impl Checker {
     /// type and reports cleanly there (mirrors the `RwShared.read` recovery-reinfer idiom). Every
     /// generic ctor/variant/fn/method path uses this pair so closure params are pinned by the field/
     /// param type, not left `Unknown`.
+    ///
+    /// TICKET-239: `owned` and `seed` are [`Checker::slot_seed`]'s answer, substituted FIRST. An
+    /// argument whose slot is concrete under `owned` owns that slot (the same `infer_arg` call a
+    /// non-generic path makes, so it wraps and meets its width); one concrete only under `seed`
+    /// takes it as a seed; only a closure whose slot still depends on a sibling argument is
+    /// prepassed. The returned [`ArgPass`] per argument is the one record of which happened.
     pub(super) fn infer_generic_arg_tys(
         &mut self,
         args: &[Expr],
         declared: &[Ty],
-        arg_hints: &[Option<Ty>],
-    ) -> Vec<Ty> {
+        owned: &HashMap<String, Ty>,
+        seed: &HashMap<String, Ty>,
+        tps: &[TyParam],
+    ) -> (Vec<Ty>, Vec<ArgPass>) {
+        // A callee's own still-unbound param never passes as a caller's same-named param.
+        let free: Vec<String> = tps
+            .iter()
+            .filter(|tp| !owned.contains_key(&tp.name))
+            .map(|tp| tp.name.clone())
+            .collect();
         args.iter()
             .enumerate()
             .map(|(i, a)| {
-                if matches!(a.kind, ExprKind::Closure { .. }) {
+                let slot = declared.get(i).map(|d| subst(d, owned));
+                if let Some(s) = &slot
+                    && ty_concrete_but(s, &|n| self.rigid_param(n, &free))
+                {
+                    return (self.infer_arg(a, Some(s)), ArgPass::Checked);
+                }
+                if let Some(s) = slot.as_ref().map(|s| subst(s, seed))
+                    && !seed.is_empty()
+                    && ty_concrete_but(&s, &|n| self.rigid_param(n, &free))
+                {
+                    return (self.infer_arg_seeded(a, &s), ArgPass::Checked);
+                }
+                if let ExprKind::Closure { ret, .. } = &a.kind {
                     let mark = self.diag_mark();
                     // Keep the closure's unannotated params `Unknown` in the unification prepass —
                     // the free-body scan (sources #2/#3) must not pin them here (see the field doc).
@@ -4064,25 +4107,13 @@ impl Checker {
                     let t = self.infer_value(a);
                     self.generic_arg_prepass = saved;
                     self.diag_rollback(mark);
-                    t
-                } else if let Some(d) = declared.get(i)
-                    && ty_fully_concrete(d)
-                {
-                    // TICKET-094 defect C — a CONCRETE declared slot (never the callee's own type
-                    // variable) keeps the expected-type hint its non-generic twin already threads
-                    // through `infer_arg`.
-                    self.infer_arg(a, Some(d))
-                } else if let Some(Some(h)) = arg_hints.get(i) {
-                    // TICKET-124 (W13-13): the declared slot is a bare/under-determined type
-                    // param, but the CTOR's own expected-type hint pinned this argument's type
-                    // concretely — reach the hint into the nested argument instead of stopping at
-                    // the outermost ctor. A seed only: DEC-025 declines a type-param slot.
-                    self.infer_arg_seeded(a, h)
-                } else {
-                    self.infer_value(a)
+                    // An annotated return is a written type, never a prepass guess.
+                    let ret_inferred = ret.is_none();
+                    return (t, ArgPass::Prepass { ret_inferred });
                 }
+                (self.infer_value(a), ArgPass::Checked)
             })
-            .collect()
+            .unzip()
     }
 
     /// Per-argument check for a generic ctor/call/method. `expected` is the arg's SUBSTITUTED declared
@@ -4103,24 +4134,22 @@ impl Checker {
         expected: &Ty,
         fallback: &Ty,
         arg: &Expr,
+        pass: ArgPass,
     ) -> Ty {
-        // TICKET-225: a constant argument is re-inferred against the substituted slot too, so it
-        // meets the width a hint pinned into `T` (`y: int8 = id(300)`).
-        let refined =
-            if matches!(arg.kind, ExprKind::Closure { .. }) || super::pattern::is_const_expr(arg) {
-                // Re-infer the closure in checking-mode against the substituted expected type: this binds
-                // its unannotated params and re-reports its body errors (which `infer_generic_arg_tys`
-                // suppressed). The assignability check below still uses the first-pass `fallback`
-                // (Unknown-bearing) type — its params/return are leniently assignable, so a type param
-                // bound ONLY from this closure's body (e.g. `Mapped`'s `U`, recovered from the closure's
-                // return) doesn't spuriously fail against an unbound `Ty::Param`. The param binding + body
-                // re-check is the real enforcement; the `fallback` check still catches an arity or
-                // annotated-return mismatch. The re-inferred type (`fn(int) -> int`) is RETURNED for the
-                // caller's loop-back unify.
-                self.infer_arg(arg, Some(expected))
-            } else {
-                fallback.clone()
-            };
+        let refined = if pass.deferred() {
+            // Re-infer the closure in checking-mode against the substituted expected type: this binds
+            // its unannotated params and re-reports its body errors (which `infer_generic_arg_tys`
+            // suppressed). The assignability check below still uses the first-pass `fallback`
+            // (Unknown-bearing) type — its params/return are leniently assignable, so a type param
+            // bound ONLY from this closure's body (e.g. `Mapped`'s `U`, recovered from the closure's
+            // return) doesn't spuriously fail against an unbound `Ty::Param`. The param binding + body
+            // re-check is the real enforcement; the `fallback` check still catches an arity or
+            // annotated-return mismatch. The re-inferred type (`fn(int) -> int`) is RETURNED for the
+            // caller's loop-back unify.
+            self.infer_arg(arg, Some(expected))
+        } else {
+            fallback.clone()
+        };
         if !self.assignable(expected, fallback) {
             let [fallback_s, expected_s] = Ty::render_distinct([fallback, expected]);
             self.error(
