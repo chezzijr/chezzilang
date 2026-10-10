@@ -141,32 +141,62 @@ So D4 detects a write in two layers:
 The mark is not "arrived by snapshot". It answers one question: can the parent still observe this
 value after the join? Two routes decide it, each in one place:
 
-1. **A fresh spawn operand crosses unmarked.** A `spawn f(args)` argument or `spawn recv.m()`
-   receiver that is a list/map/set literal, a comprehension, a List/Map/Set/bytearray `.copy()`, or
-   a struct constructor (TICKET-190) is reachable by no parent binding. The checker decides this
-   once per bound slot (`crossing_of`, TICKET-189, which also counts a literal default fill and a
-   variadic pack); the compiler encodes it
-   as the spawn op's bitmask (`vm::crossing::Crossing::mask`); the runtime unmarks only the ROOT.
-   Children stay marked (`copy()` is shallow), so `spawn f([xs])` may push onto the new list but not
-   onto `xs`, and `spawn T(xs=xs).m()` may write the new struct's own fields but not `xs`. A call
-   result is never fresh (`id(xs)` returns the parent's own list), and a struct `.copy()` is not
-   fresh either: a known ceiling (a false fault, never a lost write). `spawn f([], out)` now runs,
-   as in Go and Python.
-2. **A crossing generator marks only the frame slots the parent can reach (TICKET-190).** A
-   generator crossing into a task stays an independent deep copy (`docs/syntax.md`). Each generator
-   carries one static frame mask (`vm::crossing::Crossing::frame_mask`), and every route reads it:
-   a marking route (spawn forms, Executor jobs through their closure captures, the module snapshot, and a task copy's `Task.get()` / `memoize1` read, `Route::CopyRead`, TICKET-220)
-   rebuilds the frame marked, then unmarks the ROOT of each private slot. A hand-off (Channel,
-   Shared, RwShared, Atomic) marks nothing, so the mask changes nothing there. A local slot is
-   private when every single-name `let` and assignment of it is fresh and its root never escapes
-   (yield, return, store, plain-value use, a callee that keeps its argument); the checker decides
-   it once per generator decl (`root_escapes`, reading the one param-escape summary
-   `FnSummary.escapes`). A param slot is private only when that holds AND the creating call passed
-   a fresh argument (`Op::StampGen`): `g([])` runs, `g(xs)` faults on a write. Private is shallow
-   (children keep the mark). Ceilings, each a false fault: a generator created through a method or
-   a function value gets no stamp; slots 64 and up stay marked; a native method keeps its receiver
-   private only when its declared return type cannot hold the receiver. The cost is O(frame): the
-   old per-crossing heap reach scan (`gen_frame_observable`) is gone.
+1. **A fresh value graph crosses unmarked (TICKET-240).** Freshness is a property of the value
+   graph that crosses, decided once by the checker, recursively over the operand expression
+   (`Checker::fresh_shape`). A constructor-like node is fresh: a list, tuple, set or map literal, a
+   comprehension, a struct or variant constructor, a carrier wrap (an explicit `?x` / `!x`, or the
+   implicit wrap at a typed slot), an inline literal default, a variadic pack, and a
+   List/Map/Set/bytearray `.copy()` for its own level (`copy()` is shallow, DEC-160). Each child is
+   judged by the same rule. A name, a field read, an index and a call result stay marked (`id(xs)`
+   returns the parent's own list). The verdict is a shape (`vm::crossing::Fresh`): `Marked`, `All`,
+   or a fresh node with a shape per child. The compiler stores the shapes of each spawn call in
+   `Program.fresh_calls` and the spawn op names the entry; after the rebuild the runtime unmarks
+   exactly the objects the shape names (`Vm::unmark_fresh`). So `spawn f([])` into
+   `acc: List[int]?` runs, `spawn f(S([]))` then `s.xs.push(1)` runs, `spawn f([xs])` may push onto
+   the new list and faults on `a[0].push(1)`, and `spawn f(xs.copy())` faults on a write to a child
+   that `xs` still holds. `spawn f([], out)` runs, as in Go and Python.
+   A map key is never unmarked by a shape. A map is all-fresh only when every key AND every value
+   is, because a struct with a mutable field is a legal key: `{k: []}` with a named `k` keeps the
+   copy of `k` marked. A positional shape applies only when the object has that many children; on
+   a mismatch nothing below is unmarked.
+   Ceilings, each a false fault and never a lost write: a call result; a struct `.copy()`; a
+   provider default (any default that is not an inline literal); a shape past 16 levels or 64
+   positional children (`MAX_DEPTH`, `MAX_WIDTH`), which is marked or root-only below the limit; a
+   spawn whose table index does not fit 31 bits.
+2. **A crossing generator marks only what the parent can reach in its frame (TICKET-190,
+   TICKET-240).** A generator crossing into a task stays an independent deep copy
+   (`docs/syntax.md`). Each frame slot has one static verdict, `Marked`, `Root` or `All`
+   (`vm::crossing::frame_slot`), and every route reads it: a marking route (spawn forms, Executor
+   jobs through their closure captures, the module snapshot, and a task copy's `Task.get()` /
+   `memoize1` read, `Route::CopyRead`, TICKET-220) rebuilds the frame marked, then unmarks the root
+   of each `Root` slot and the whole graph of each `All` slot. A hand-off (Channel, Shared,
+   RwShared, Atomic) marks nothing, so the verdict changes nothing there. A frame never takes a
+   positional shape: it lives on between build and crossing, so a permuting method (`reverse`,
+   `pop`, `sort`) would move a named child under a fresh position.
+   A local slot is `Root` when every single-name `let` and assignment of it builds a fresh root
+   and that root never escapes (yield, return, store, plain-value use, a callee that keeps its
+   argument); the checker decides it once per generator decl (`root_escapes`, reading the one
+   param-escape summary `FnSummary.escapes`). It is `All` when, in addition
+   (`Checker::deep_private`): every binding is all-fresh; every store into its graph (`V.f = v`,
+   `V[i] = v`, a method argument) takes a fresh literal or a value that cannot hold a mark, the
+   index `i` included; every method called on a view of it is a native container method whose
+   result cannot hold a mark; every other view of it ends in a value that cannot hold a mark; and
+   the root is neither an operator operand nor an argument of a named function. A view is the
+   name, a `match` binder or loop name over a view, or `V.f` / `V[i]`. So `buf: List[int]? = []`
+   then `match buf: ?a: a.push(1)` runs, and `buf := [[0]]` then `buf[0].push(1)` runs, while
+   `yield buf[0]`, `buf.push(p)`, `x := buf[0]` and `buf[p] = []` keep the children marked. A
+   param slot takes its shape from the creating call (`Op::StampGen`, two bits per param): `g([])`
+   runs, `g(xs)` faults on a write.
+   Ceilings, each a false fault: a generator created through a method or a function value gets no
+   stamp; a param at index 32 and up and a local at slot 64 and up stay marked; a scalar NAME
+   inside a frame-local literal (`buf := [[i]]`) keeps the slot at `Root`; a store of a value that
+   is neither a fresh literal nor mark-free keeps it at `Root`; so does a user method on a
+   sub-object; a `match` on the root whose binder is rebound, reassigned, captured by a closure or
+   yielded marks the slot; a frame-local built by a comprehension stays `Marked` (the compiler
+   gives the local the slot the comprehension's hidden loop slots left, and a reused slot is the
+   AND of its claims); a native method keeps its receiver private only when its declared return
+   type cannot hold the receiver. The cost is O(frame) plus the fresh graphs: the old
+   per-crossing heap reach scan (`gen_frame_observable`) is gone.
 
 ## Reference languages
 

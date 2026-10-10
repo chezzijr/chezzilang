@@ -3851,5 +3851,10 @@ bench with a 100000-item module snapshot.
 
 | bench | before (base `9b87cfef`) | `uptime` load before | after | `uptime` load after | delta |
 |---|---:|---|---:|---|---:|
-| `benches/sched/spawn_fresh_graph.chz` | 0.363 | `3.51, 4.70, 4.64` | pending | pending | pending |
-| `benches/sched/storm.chz` | 5.649 | `3.51, 4.70, 4.64` | pending | pending | pending |
+| `benches/sched/spawn_fresh_graph.chz` | 0.363 | `3.51, 4.70, 4.64` | 0.363 | `1.79, 2.05, 2.51` | 0% |
+| `benches/sched/storm.chz` | 5.649 | `3.51, 4.70, 4.64` | 5.608 | `1.97, 2.08, 2.52` | -0.7% |
+
+The after run is branch `f94a5f63`. The base binary, run again beside the after run (load
+`1.79, 2.05, 2.51`), gave 0.357 for the fresh-graph bench: the two builds are within the spread of
+seven runs (0.335 to 0.395). Each spawn with a fresh operand now walks that operand's rebuilt graph
+once to unmark it; the bench's 20000 spawns do not show it.

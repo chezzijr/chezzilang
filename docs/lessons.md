@@ -274,6 +274,15 @@ the freeze.
   un-gated into a garbage cross-heap `GcRef` — genuine UB. Every new cross-heap store goes through
   `to_wire_crossable`, never bare `to_wire_at`. A missed *runtime* guard is UB; a missed checker
   widening is at worst an uglier error.
+- **Freshness is a property of the value graph, not of the operand's root AST kind (TICKET-240).**
+  TICKET-179, 189 and 190 each added one more fresh ROOT shape and kept a root-only unmark, so a
+  fresh value one level down (under an optional param, inside a fresh struct or list) falsely
+  faulted every time. One recursive decider (`Checker::fresh_shape`) and a shape the runtime walks
+  replaced the list of shapes. Before adding one more shape to a rule that enumerates root shapes,
+  ask what the rule says one level down. Two traps met on the way: a tuple and an enum carry no
+  copy mark, so a graph walk that stops at an unmarked object never reaches a carrier's payload;
+  and a map key can be a struct with a mutable field, so "every value is fresh" does not make a
+  map fresh.
 - **D4's "task copy" mark approximates the wrong property, and "is a write" has two owners.** The
   runtime marks everything *rebuilt by the airlock walk* (spawn args, captures, a started generator's
   frame), but D4's claim is about writes *the parent could observe*; a fresh `spawn work([], out)`

@@ -282,9 +282,15 @@ kind.
 operand expression: a constructor-like node (list, map, set, tuple literal, comprehension, struct or
 variant constructor, an implicit or explicit carrier wrap, a literal default, a pack) is fresh, and each
 child is fresh or not by the same rule; a named or call-result child keeps its mark. The runtime unmarks
-exactly the objects fresh nodes built. The one-bit-per-slot mask (`Crossing::mask`, `frame_mask`) cannot
-express "fresh root, marked third child"; replacing it is the structural part. The three other callers
-of `crossing_of` read the same decider.
+exactly the objects fresh nodes built. The one-bit-per-slot mask could not express "fresh root, marked
+third child"; replacing it was the structural part.
+
+**Landed (TICKET-240).** `Checker::fresh_shape` is the decider and `vm::crossing::Fresh` is the shape
+it returns; the compiler stores it (`Program.fresh_calls`) and `Vm::unmark_fresh` walks it. The old
+decider, the `Crossing` enum and both masks are deleted; the slot decider, the generator `let` and
+rebind sites and the generator deep-store test all call `fresh_shape`. A generator frame slot is
+`Marked`, `Root` or `All` (`Checker::deep_private`). Grid: `tests/airlock_fresh_graph_grid.rs`. Rules
+and ceilings: `docs/decision-d4-airlock.md`.
 
 ## Family E — the expected type reaches an expression through three channels (E1..E6)
 

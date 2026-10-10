@@ -593,7 +593,10 @@ fn; it captures the enclosing scope exactly like a closure value:
   lose the write silently (see `docs/concurrency.md`'s ceilings). Share state a task and
   its parent both observe through `Shared`/`RwShared`/`Atomic*`/`Channel` instead. A value no parent
   binding can reach is the task's own: a fresh `spawn` operand (`spawn work([], out)`, a
-  comprehension, `xs.copy()`) crosses with its root unmarked and is writable (TICKET-179). So does a
+  comprehension, `xs.copy()`) crosses unmarked and is writable (TICKET-179), and so is every object
+  its expression builds below the root: `spawn f([[]])`, `spawn f(S([]))`, a `T?` parameter given `[]`
+  (TICKET-240). A NAMED child stays a copy (`spawn f([xs])`), and `xs.copy()` is fresh for its own
+  level only. So does a
   literal default fill (`acc: List[int] = []`) and a variadic pack, through every spawn callee form
   (`f()`, `obj.m()`, `lib.f()`, `lib.K.f()`, a function value); a parameter the callee rebinds
   before writing it (`ys = [1, 2]; ys.push(3)`) is not a task copy (TICKET-189).

@@ -109,9 +109,13 @@ generic/protocol receivers, and `Channel.send` decline to layer C. Reads, task-l
 writes, and parent-side writes stay valid. Layer A reports a write only when every path through the
 function reaches it: a write under `if`/`match`/a loop/a short-circuit right side, or after a possible
 `return`/`break`/`continue`/`?`, is left to layer C (TICKET-179). A task's own values stay writable:
-a fresh `spawn` operand (a list/map/set literal, a comprehension, a List/Map/Set/bytearray `.copy()`)
-crosses with its root unmarked, so `spawn work([], out)` may push onto its list, as in Go and Python.
-The same holds for a literal default fill (`acc: List[int] = []`), a variadic pack (its elements stay
+every object a `spawn` operand's expression builds crosses unmarked, at every depth (TICKET-240): a
+list, tuple, set or map literal, a comprehension, a struct or variant constructor, a `?x` or implicit
+carrier wrap, and a List/Map/Set/bytearray `.copy()` for its own level. So `spawn work([], out)` may
+push onto its list, also when the parameter is `List[int]?`, and `spawn work(S([[]]))` may push onto
+`s.xs[0]`, as in Go and Python. A named value, a field read and a call result inside the operand stay
+copies: `spawn f([xs])` faults on `a[0].push(1)`, and `spawn f(xs.copy())` faults on a child of `xs`.
+The same holds for a literal default fill (`acc: List[int] = []`), a variadic pack (its NAMED elements stay
 copies), and every spawn callee form: `f()`, `obj.m()`, `lib.f()`, `lib.K.f()` and a function value
 (TICKET-189). Layer A maps each parameter through the checker's call plan, so a parameter the callee
 rebinds before writing is not a task copy, and a keyword-bound named argument that an `f()` or
@@ -1942,8 +1946,9 @@ not universal — measured against the release binary, three shapes still lose t
    documented deep-copy semantics, not a lost write: the task's copy is independent, and the
    parent's own `g.next()` after the join returns its own next value (owner ruling 2026-09-28). What
    the resumed generator writes inside its frame IS decided (TICKET-179, TICKET-190): every crossing
-   route reads one static frame mask per generator, so a frame-local list the parent never saw is
-   writable and a list the generator yielded, stored or passed on faults. An Executor job, a spawn,
+   route reads one static verdict per frame slot (TICKET-240: marked, private root, or private whole
+   graph), so a frame-local value the parent never saw is writable at every depth it built itself,
+   and a list the generator yielded, stored or passed on faults. An Executor job, a spawn,
    the module snapshot and a task copy's `Task.get()` / `memoize1` read (`Route::CopyRead`,
    TICKET-220) all apply it; see `docs/decision-d4-airlock.md` rule 2.
 3. **A same-task round-trip is not a crossing.** A closure/value sent on a `Channel` or read back
