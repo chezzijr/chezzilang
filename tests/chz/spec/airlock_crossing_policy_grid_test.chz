@@ -146,7 +146,7 @@ fn t189_pack_elem(out: Channel[str], ...rest: List[int]):
     out.send(t189_try(rest[0]))
 
 test fn grid_policy_r8_fn_variadic_element_named():
-    # The pack list is fresh; its element is the parent's list, so it stays a copy.
+    # The pack list is fresh; its NAMED element is the parent's list, so it stays a copy.
     xs := [1]
     out := Channel[str](4)
     parallel:
@@ -252,7 +252,8 @@ test fn grid_policy_r29_receiver_constructor():
         spawn T189C(n=1).bump(out)
     assert out.recv() == "ok 2"
 
-# A constructor is fresh only at its root (DEC-160 shallow): a named list in a field stays marked.
+# A constructor is fresh, and so is each field it builds (TICKET-240): a NAMED list in a field
+# stays marked.
 struct T190H:
     xs: List[int]
     fn push_inner(self, out: Channel[str]):

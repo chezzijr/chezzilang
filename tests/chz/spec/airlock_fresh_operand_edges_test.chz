@@ -1,5 +1,5 @@
-# TICKET-179 -- edges of the fresh spawn operand rule (D4). A fresh operand crosses with its ROOT
-# unmarked; everything else, including a fresh literal's children, stays a task copy.
+# TICKET-179 -- edges of the fresh spawn operand rule (D4). A fresh operand crosses with every
+# object the call site built unmarked (TICKET-240); a NAMED child, at any depth, stays a task copy.
 
 fn t179e_outcome(res: int!) -> str:
     match res:
