@@ -1487,8 +1487,9 @@ different types — is a future addition; Go and Rust refuse it too.
 
 **Argument position asks the same question.** A bare generic fn handed to a HOF — a user one, or any
 builtin container HOF (`map`, `filter`, `fold`, `sort_by`, `sort_by_key`, `min_by`, `max_by`,
-`take_while`, `drop_while`, `count`, `position`, `for_each`/`fold_entries`, `Shared.update`,
-`RwShared.write`) — is refused with the *same* diagnostic when the slot cannot determine its type
+`take_while`, `drop_while`, `count`, `position`, `Shared.update`,
+`RwShared.write`), or a `std.concurrency.collection` method (`ConcurrentList.for_each`,
+`ConcurrentMap.fold_entries`) — is refused with the *same* diagnostic when the slot cannot determine its type
 parameters: `[1,2,3].filter(pred)` for a `pred[T](n: int) -> bool` whose `T` appears nowhere, and
 `[1,2,3].map(mk)` for a return-only `mk[T](n: int) -> List[T]`, are both errors. Go answers the same
 (`in call to takeBool, cannot infer T`). The check runs at the **end of the call**, once every

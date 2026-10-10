@@ -405,33 +405,24 @@ Constructed
 value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) the element type —
 `RwShared[T](v)` (a mismatch like `RwShared[str](0)` is a type error).
 
-**Zero-copy read-view (container element).** Gated by a constructor-kind `where T: List/Map/Set` bound
-to the element's HEAD constructor (Tuple **excluded** — heterogeneous):
-- `RwShared[List[E]]`: `len() -> int` · `at(i: int) -> E?` (out of range is `None`, never a
-  fault — same as `get_key` below and `std.json.at`; negative index normalizes like `xs[i]`. `RwShared`
-  has no `[]` of its own, so this is its only read accessor) · `slice(lo: int, hi: int) -> List[E]` ·
-  `for_each(f: fn(E) -> _) -> None` · `fold(init: R, f: fn(R, E) -> R) -> R`.
-- `RwShared[Map[K,V]]`: `len() -> int` · `get_key(k: K) -> V?` · `has(k: K) -> bool` ·
-  `for_each_entry(f: fn(K, V) -> _) -> None` · `fold_entries(init: R, f: fn(R, K, V) -> R) -> R`.
-  Single-entry writers (TICKET-192): `set_key(k: K, v: V) -> None` (insert or overwrite; an overwrite
-  keeps the stored key, as `d[k] = v`) · `remove_key(k: K) -> V?` · `get_or_insert(k: K, v: V)
-  -> V` (the stored value, else inserts `v` and returns it). Each takes the box's update guard, the one
-  `set`/`write` take, so a same-box re-entry from a user `eq`/`hash` faults like `write` does.
-  `get_key`/`has`/`contains` and `set_key`/`get_or_insert` are **O(1) expected**: the stored map keeps
-  the heap map's hash index. `remove_key` is O(n), as `Map.remove`.
-- `RwShared[Set[E]]`: `len() -> int` · `contains(e: E) -> bool` · `for_each(f: fn(E) -> _) -> None` ·
-  `fold(init: R, f: fn(R, E) -> R) -> R`.
+**`RwShared[T]` has exactly these four methods, for every `T`** (TICKET-243). It has no container
+methods: `r.len()`, `r.at(i)`, `r.fold(...)` on an `RwShared[List/Map/Set]` is a checker "no method"
+error whose help line names the collection to use (`use ConcurrentList from std.concurrency.collection`).
+A shared container is used through [`std.concurrency.collection`](#stdconcurrencycollection--thread-safe-collections-over-rwshared)
+— `ConcurrentList`, `ConcurrentMap`, `ConcurrentSet`, `ConcurrentCounter` — which owns the
+per-entry readers and the single-entry writers.
 
-(`fold*`'s R is inferred from `init`.) These walk the stored value **entry-at-a-time** and materialize
+How the collections' per-entry readers behave (`at`, `slice`, `for_each`, `fold`, `get`, `contains`,
+`for_each_entry`, `fold_entries`): they walk the stored value **entry-at-a-time** and materialize
 ONE entry at a time, so a worker can scan/reduce a shared large container in **O(1) memory** — instead of
 `get`/`read`, which `from_wire`-copy the WHOLE inner into the caller's heap on every access. Reach for
 `fold*`/`for_each*` to **reduce in place** when fanning a big shared container out to many workers. Every
 walk RE-ACQUIRES the shared read guard **per entry** and drops it before running the callback (and before
-any `has`/`get_key`/`contains` hash+eq probe — never held across user code), so a nested read OR write of
+any `get`/`contains` hash+eq probe — never held across user code), so a nested read OR write of
 the same box — and a GC pass inside the callback — are deadlock-free. Trade-off: the walk is **not one
-atomic snapshot** (a concurrent/in-callback `set`/`write` to the same box may be seen mid-walk; use
-`read`/`get` for a stable snapshot). Reduce into a **different** box (an `AtomicInt`/local) — the real use
-case. On a non-container element (or a Tuple) these methods cleanly report "no method" (checker-gated).
+atomic snapshot** (a concurrent/in-callback write to the same box may be seen mid-walk; use
+`snapshot()` for a stable copy). Reduce into a **different** box (an `AtomicInt`/local) — the real use
+case.
 Second trade-off: each piece is copied out **independently**, so two sibling closures over one captured
 local do NOT share their binding when pulled out one at a time (two `at()` calls are two crossings); a
 whole-container `get()`/`read()`, and `slice` (one call returning a container), are one crossing and do
@@ -491,8 +482,9 @@ TICKET-220). A plain `Shared.get()` or `ch.recv()` result is the receiver's own.
 `is_settled(ch) -> bool` (after `import std.concurrency`). True once the channel `ch` is sealed: a
 `submit_result` channel whose job's outcome has been written (TICKET-219). Never blocks, and never
 reads `false` after `true`. `Task.done()` is this call. A non-channel argument faults.
-`Kind::Inline`. Its writer, `_settle(ch, v)`, and `Executor._submit_settled(f, out)` are std
-internals for `submit_result`; user code calls `submit_result`.
+`Kind::Inline`. Its writer, `_settle`, and `Executor._submit_settled` are std internals for
+`submit_result`: a `_` name a std module declares is hidden from user code (the checker reports
+`has no member` / `has no method`, TICKET-243). User code calls `submit_result`.
 
 ### `Executor` — task pool
 `Executor()` — a pool with no cap on the jobs running at once ·
@@ -941,9 +933,11 @@ bytes**, so a filename that is not valid UTF-8 round-trips (`fs.exists(fs.list_d
 
 > **Internal byte seam.** Each path-taking native is declared once, `_`-prefixed and typed `bytes`
 > (`_exists`, `_list_dir`, `_read_file`, `_getcwd`, …); the public name is a bodied pure-Chezzi
-> wrapper that does `_native(p.as_path())` and re-wraps a returned path into `path.Path`. The `_` is
-> **convention only** — there is no privacy mechanism, so `import _exists from std.fs` works. Call the
-> public name.
+> wrapper that does `_native(p.as_path())` and re-wraps a returned path into `path.Path`. A `_` name
+> a std module declares is **internal to std** (TICKET-243): the checker hides it from user modules,
+> so `import _exists from std.fs` is `module 'std.fs' has no member '_exists'`. The rule covers every
+> std module's `_` members, `_` types and `_` methods; a user module's own `_` names are untouched.
+> Call the public name.
 
 **Queries:** `list_dir(p) -> List[Path]!` (entry names, sorted by raw bytes) ·
 `exists(p) -> bool` ·
@@ -1713,47 +1707,87 @@ on it). Use the builtin `map` directly — there is no `OrderedMap` here (and no
 `popitem` primitive; out of scope).
 
 ### `std.concurrency.collection` — thread-safe collections over `RwShared`
-Pure-Chezzi generic structs wrapping the `RwShared[Map[...]]` runtime cell (many concurrent readers
-**or** one exclusive writer) — no native surface of their own.
-`import std.concurrency.collection` (or `as col`). This is the **first nested std
-module** — the dotted path resolves to `std/concurrency/collection.chz` with no special-casing.
+Pure-Chezzi generic structs, each wrapping one `RwShared` box (many concurrent readers **or** one
+exclusive writer): **`ConcurrentList[E]`**, **`ConcurrentMap[K, V]`**, **`ConcurrentSet[E]`**,
+**`ConcurrentCounter[K]`**. They are the user-facing surface of a shared container (TICKET-243): the box
+itself has only `get`/`set`/`read`/`write`, and the per-entry primitives these methods call are `_`
+names internal to std.
+`import std.concurrency.collection` (or `as col`), or `import ConcurrentList from std.concurrency.collection`.
+This is the **first nested std module** — the dotted path resolves to
+`std/concurrency/collection.chz` with no special-casing.
 
-**Why over raw `RwShared`:** raw `read`/`write` closures are verbose, and the **compound** mutations
-(insert-if-absent, increment a count) MUST happen inside a **single** `write` lock or they race — these
-wrappers bake the correct single-lock idiom in.
+**Why over raw `RwShared`:** `get`/`read` copy the whole container out on every access, raw
+`read`/`write` closures are verbose, and the **compound** mutations (insert-if-absent, increment a
+count) MUST happen inside a **single** `write` lock or they race — the collections read and write ONE
+entry at a time and bake the correct single-lock idiom in.
 
 **Airlock sharing (load-bearing):** a struct whose only field is an `RwShared` crosses the
 `spawn`/`parallel:` airlock as a **shared `Arc` handle, NOT a deep copy** — so a mutation a spawned
 task makes is visible to the parent after the join. (`RwShared` is sendable and shares; a struct of
 all-sendable fields is too.)
 
-**Construction:** call the static `new()` with the type arguments, **`ConcurrentMap[str, int].new()`**
-/ **`ConcurrentCounter[str].new()`**, or let an annotation give them
-(`m: ConcurrentMap[str, int] = ConcurrentMap.new()`). The field constructor still works:
-`ConcurrentMap(RwShared({}))`. With it and no annotation, `K`/`V` are open and the binding is an error
-on that line (``cannot infer the type arguments of `m` ``); prefer `new()`. Note a use-site `RwShared({})` means user code also needs **`import std.concurrency`**
+**Construction:** call the static `new()` with the type arguments — **`ConcurrentList[int].new()`**,
+**`ConcurrentMap[str, int].new()`**, **`ConcurrentSet[int].new()`**, **`ConcurrentCounter[str].new()`**
+— or let an annotation give them (`m: ConcurrentMap[str, int] = ConcurrentMap.new()`). To wrap
+existing data use the field constructor over a box: `ConcurrentList(RwShared(xs))`,
+`ConcurrentMap(RwShared({}))`; `c.inner` is the box, so `c.inner.get()`, `c.inner.set(v)` and
+`c.inner.write(f)` still replace or copy the whole value. With an empty literal and no annotation,
+`K`/`V` are open and the binding is an error on that line (``cannot infer the type arguments of `m` ``);
+prefer `new()`. Note a use-site `RwShared({})` means user code also needs **`import std.concurrency`**
 in addition to `import std.concurrency.collection` (the latter, a len-3 submodule, does **not** license
 the bare `RwShared` ctor — only the whole-module `import std.concurrency` does).
 
 **Reentrancy:** like raw `RwShared`, a `write` closure that re-enters the **same** box's update guard
-FAULTS (TICKET-016 / W8-3), instead of hanging or silently losing the inner write. Every wrapper
-method is flat (no nested locking), so user code hits this only if it calls a wrapper method from
-inside another wrapper's closure over the same box.
+FAULTS (TICKET-016 / W8-3), instead of hanging or silently losing the inner write. Every collection
+method is flat (no nested locking), so user code hits this only if it calls a writer from
+inside another writer's closure over the same box. The looping readers (`for_each`, `fold`,
+`for_each_entry`, `fold_entries`) never hold the lock across the callback, so a callback may read or
+write the same collection; the walk is not one atomic snapshot.
 
-**`ConcurrentMap[K: Hashable + Eq, V]`** — thread-safe map over `RwShared[Map[K, V]]`. Every method is
-one `RwShared` map view call, so none copies the whole map except `snapshot` (TICKET-192).
-`get`/`contains`/`len`/`snapshot` are **concurrent reads**; `set`/`remove`/`get_or_insert` are
-single-entry writers under the box's **one update guard**. Lookups and inserts are O(1) expected.
+**`ConcurrentList[E]`** — thread-safe list over `RwShared[List[E]]`.
 
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
-| `.get(key)` | `(K) -> V?` | **concurrent read** (`get_key`). `?v` / `None`. |
-| `.set(key, val)` | `(K, V) -> None` | **update guard** (`set_key`). Insert or overwrite. |
-| `.remove(key)` | `(K) -> None` | **update guard** (`remove_key`). No-op if absent. |
+| `.push(item)` | `(E) -> None` | **update guard**. Appends one element without copying the list. The first `push` after a whole `inner.set` / `inner.write` (and after construction) re-encodes the list once; later ones splice. |
+| `.len()` | `() -> int` | **concurrent read**. |
+| `.at(i)` | `(int) -> E?` | **concurrent read**, constant time. Out of range is `None`, never a fault; a negative `i` counts from the end, as `xs[i]`. |
+| `.slice(lo, hi)` | `(int, int) -> List[E]` | **concurrent read**; a copy of `[lo, hi)` with `xs[lo:hi]`'s clamping. |
+| `.for_each(f)` | `(fn(E) -> R) -> None` | Calls `f` once per element, in order, one element in the caller's heap at a time. |
+| `.fold(init, f)` | `(R, fn(R, E) -> R) -> R` | Reduces in order; `R` is inferred from `init`. |
+| `.snapshot()` | `() -> List[E]` | **concurrent read** returning a **copy** of the whole list. |
+
+**`ConcurrentMap[K: Hashable + Eq, V]`** — thread-safe map over `RwShared[Map[K, V]]`. No method
+copies the whole map except `snapshot` (TICKET-192).
+`get`/`contains`/`len`/`snapshot` are **concurrent reads**; `set`/`remove`/`get_or_insert` are
+single-entry writers under the box's **one update guard**. Lookups and inserts are O(1) expected: the
+stored map keeps the heap map's hash index. `remove` is O(n), as `Map.remove`.
+
+| member | signature | concurrency / semantics |
+| --- | --- | --- |
+| `.get(key)` | `(K) -> V?` | **concurrent read**. `?v` / `None`. |
+| `.set(key, val)` | `(K, V) -> None` | **update guard**. Insert or overwrite; an overwrite keeps the stored key, as `d[k] = v`. |
+| `.remove(key)` | `(K) -> None` | **update guard**. No-op if absent. |
 | `.contains(key)` | `(K) -> bool` | **concurrent read**. |
 | `.len()` | `() -> int` | **concurrent read**. |
-| `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC** (`RwShared.get_or_insert`): the probe and the insert run under ONE update guard with no user closure, so a concurrent `remove` cannot slip between them. Returns the existing value, or `default` if it was absent. |
+| `.get_or_insert(key, default)` | `(K, V) -> V` | **COMPOUND-ATOMIC**: the probe and the insert run under ONE update guard with no user closure, so a concurrent `remove` cannot slip between them. Returns the existing value, or `default` if it was absent. |
+| `.for_each_entry(f)` | `(fn(K, V) -> R) -> None` | Calls `f` once per entry, one entry in the caller's heap at a time. |
+| `.fold_entries(init, f)` | `(R, fn(R, K, V) -> R) -> R` | Reduces the entries; `R` is inferred from `init`. |
 | `.snapshot()` | `() -> Map[K, V]` | **concurrent read** returning a **copy** independent of later mutations. |
+
+**`ConcurrentSet[E: Hashable + Eq]`** — thread-safe set over `RwShared[Set[E]]`.
+
+| member | signature | concurrency / semantics |
+| --- | --- | --- |
+| `.add(item)` | `(E) -> None` | **update guard**. Inserts one element without copying the set; no-op if present. O(1) expected. |
+| `.remove(item)` | `(E) -> None` | **update guard**. No-op if absent. O(n), as `Set.remove`. |
+| `.contains(item)` | `(E) -> bool` | **concurrent read**, O(1) expected. |
+| `.len()` | `() -> int` | **concurrent read**. |
+| `.for_each(f)` | `(fn(E) -> R) -> None` | Calls `f` once per element, in insertion order. |
+| `.fold(init, f)` | `(R, fn(R, E) -> R) -> R` | Reduces in insertion order; `R` is inferred from `init`. |
+| `.snapshot()` | `() -> Set[E]` | **concurrent read** returning a **copy** of the whole set. |
+
+A writer from a user `hash`/`eq` that re-enters the same box faults like `write` does: each writer
+takes the update guard `set`/`write` take.
 
 **`ConcurrentCounter[K: Hashable + Eq]`** — thread-safe frequency table over `RwShared[Map[K, int]]`.
 `count`/`total` are **concurrent reads**; `increment`/`add` take the **exclusive write lock** and do
@@ -1768,7 +1802,7 @@ their read-modify-write inside **one** closure, so N tasks each incrementing the
 | `.total()` | `() -> int` | **concurrent read**, sum of all counts. |
 
 **Not provided (intentional):** a concurrent **queue** is already `Channel[T]`; an **atomic scalar** is
-already `Atomic`. There is no `ConcurrentList`/`ConcurrentSet`/`ConcurrentQueue`.
+already `Atomic`. There is no `ConcurrentQueue`.
 
 ### `std.concurrency.pmap` — scoped parallel map
 `import pmap from std.concurrency.pmap` (or `import std.concurrency.pmap`). Pure Chezzi over a

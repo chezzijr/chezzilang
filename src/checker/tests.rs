@@ -39315,6 +39315,27 @@ fn std_internal_names_are_hidden_from_user_modules() {
         "struct S:\n    n: int\n    fn _helper(self) -> int:\n        return self.n\nprint(S(1)._helper())\n",
     );
     entry_ok("import pmap from std.concurrency.pmap\nprint(pmap([1], fn(x: int) -> int: x))\n");
+    // The seal is for std only: a USER module's `_` member and `_` type stay importable.
+    let errs = check_files(&[
+        (
+            "lib.chz",
+            "fn _secret() -> int:\n    return 7\nstruct _Hid:\n    n: int\n",
+        ),
+        (
+            "main.chz",
+            "import _secret, _Hid from lib\nimport lib\nprint(_secret(), lib._secret(), _Hid(2).n)\n",
+        ),
+    ]);
+    assert!(errs.is_empty(), "a user module's `_` names: {errs:?}");
+    // A native `_` method is no field either, and witnesses no user protocol.
+    entry_rejects(
+        "import std.concurrency\nr := RwShared([1])\nf := r._len\n",
+        "has no field '_len'",
+    );
+    entry_rejects(
+        "import std.concurrency\nprotocol P:\n    fn _len(self) -> int\nfn f[T: P](x: T) -> int:\n    return x._len()\nprint(f(RwShared([1])))\n",
+        "does not satisfy P",
+    );
 
     // (c) the native `_` method, and the public surface beside every sealed name.
     let errs = check_entry(

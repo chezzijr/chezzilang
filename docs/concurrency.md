@@ -864,38 +864,44 @@ simpler).
 
 `get`/`read` copy the **whole** value out of the lock into the caller's heap. Fanning a 1M-element list
 out to 8 workers, each calling `get()`/`read()`, materializes the entire list eight times — most of the
-memory in the program is redundant copies. When the box element is a **container**, use the **zero-copy
-read-view** instead — gated by a constructor-kind `where T: List/Map/Set` bound to the element's HEAD
-(Tuple **excluded**): a `RwShared[List[E]]` gains `len`/`at`/`slice`/`for_each`/`fold`, a
-`RwShared[Map[K,V]]` gains `len`/`get_key`/`has`/`for_each_entry`/`fold_entries`, and a `RwShared[Set[E]]`
-gains `len`/`contains`/`for_each`/`fold`. They walk the stored container **entry-at-a-time** and
-materialize one entry per step, so each worker scans/reduces in **O(1) memory**. A `RwShared[Map[K,V]]`
-also has the single-entry writers `set_key`/`remove_key`/`get_or_insert` (TICKET-192), which take the
-box's update guard and splice one entry instead of re-encoding the map. The stored map keeps the heap
-map's hash index, so `get_key`/`has`/`contains`, `set_key` and `get_or_insert` are O(1) expected.
+memory in the program is redundant copies. `RwShared[T]` itself has exactly four methods for every
+`T` — `get`, `set`, `read`, `write` — so for a shared **container** use a collection from
+`std.concurrency.collection` instead (TICKET-243): `ConcurrentList[E]` has
+`len`/`at`/`slice`/`for_each`/`fold`/`push`, `ConcurrentMap[K, V]` has
+`get`/`contains`/`len`/`for_each_entry`/`fold_entries`/`set`/`remove`/`get_or_insert`, and
+`ConcurrentSet[E]` has `contains`/`len`/`for_each`/`fold`/`add`/`remove`. The readers walk the stored
+container **entry-at-a-time** and materialize one entry per step, so each worker scans/reduces in
+**O(1) memory**. The writers (`push`, `set`, `remove`, `get_or_insert`, `add`) take the box's update
+guard and splice one entry instead of re-encoding the container. A stored map or set keeps the heap
+container's hash index, so `get`/`contains`, `set`, `get_or_insert` and `add` are O(1) expected.
 
 ```chezzi
-# Each spawned worker reduces its own view of the SAME shared container — no per-worker copy of the inner.
-fn sum_shard(box: RwShared[List[int]]) -> int:
-    return box.fold(0, fn(a, x): a + x)             # O(1) memory; reads one element at a time
+import ConcurrentList, ConcurrentMap from std.concurrency.collection
 
-fn sum_values(box: RwShared[Map[str, int]]) -> int:
-    return box.fold_entries(0, fn(a, k, v): a + v)  # per-entry reduce over a shared map
+# Each spawned worker reduces its own view of the SAME shared container — no per-worker copy of the inner.
+fn sum_shard(xs: ConcurrentList[int]) -> int:
+    return xs.fold(0, fn(a: int, x: int) -> int: a + x)   # O(1) memory; reads one element at a time
+
+fn sum_values(m: ConcurrentMap[str, int]) -> int:
+    return m.fold_entries(0, fn(a: int, k: str, v: int) -> int: a + v)   # per-entry reduce over a shared map
+
+big := ConcurrentList(RwShared(List(range(0, 1000000))))   # wrap existing data; `big.inner` is the box
 ```
 
 Every walk RE-ACQUIRES the shared read guard **per entry** and drops it before running the callback (and
-before any `has`/`get_key`/`contains` hash+eq probe — the guard is never held across user code), so a
-nested read OR write of the same box — and a GC pass triggered inside the callback — are all
+before any `get`/`contains` hash+eq probe — the guard is never held across user code), so a
+nested read OR write of the same collection — and a GC pass triggered inside the callback — are all
 deadlock-free (a guard held for the whole walk would deadlock against the write-preferring `RwLock`).
-Trade-off: the walk is **not one atomic snapshot** — a concurrent (or in-callback) `set`/`write` to the
-same box may be observed mid-walk; use `read`/`get` if you need a consistent snapshot. Reduce into a
+Trade-off: the walk is **not one atomic snapshot** — a concurrent (or in-callback) write to the
+same collection may be observed mid-walk; use `snapshot()` if you need a consistent copy. Reduce into a
 **different** box — an `AtomicInt` counter or a local accumulator — which is the fan-out pattern anyway.
-On a non-container element (or a Tuple) these methods are a checker "no method" error.
+Calling a container method on the box itself (`r.fold(...)`, `r.at(i)`) is a checker "no method"
+error whose help line names the collection (`use ConcurrentMap from std.concurrency.collection`).
 
 > **GC cost of holding a big container in a box (gaps.md W6-7, fixed 2026-07-27).** The stored value
 > lives outside the GC heap as one wire payload, and the collector used to re-walk that whole payload
 > on **every** GC pass — so a traversal that allocates per step paid O(payload) per collection and the
-> read-view came out **quadratic** in the container's size (a 200k-element box: 1.77 s vs 0.18 s for the
+> per-entry walk came out **quadratic** in the container's size (a 200k-element box: 1.77 s vs 0.18 s for the
 > same work on a plain `List`). Each core now caches whether its payload can root a heap object at all;
 > a pure-data payload is **skipped**, so the per-pass cost is O(1) and *holding* a big container in a
 > `Shared`/`RwShared`/`Channel` costs the same per GC pass as holding it in a plain `List`. Memory was,
@@ -906,14 +912,16 @@ On a non-container element (or a Tuple) these methods are a checker "no method" 
 > rebind into a box is *not* as cheap as rebinding a plain `List`. The walk runs **before** the value lock
 > is taken, so it never lengthens the window in which a writer blocks the readers.
 
-**Ergonomic wrappers — `std.concurrency.collection`.** Raw `RwShared[Map[...]]` is the right primitive
+**The collections — `std.concurrency.collection`.** A raw `RwShared[Map[...]]` box is the primitive
 for a shared table, but the `read`/`write` closures are verbose and the *compound* mutations
 (insert-if-absent, increment a count) must be done inside a **single** `write` lock or they race. The
-pure-Chezzi `std.concurrency.collection` module bakes the correct single-lock idiom into two generic
-structs — **`ConcurrentMap[K, V]`** and **`ConcurrentCounter[K]`** — over `RwShared[Map[...]]`. A struct
+pure-Chezzi `std.concurrency.collection` module bakes the correct single-lock idiom into four generic
+structs — **`ConcurrentList[E]`**, **`ConcurrentMap[K, V]`**, **`ConcurrentSet[E]`** and
+**`ConcurrentCounter[K]`** — each over one `RwShared` box (`c.inner`), built with `X.new()` or
+`X(RwShared(data))`. A struct
 of all-sendable fields crosses the airlock as a **shared handle** (same as `RwShared` itself), so the
 wrappers preserve the cross-task sharing; `get`/`len`/`count`/`snapshot` are concurrent reads and
-`set`/`increment`/`get_or_insert` are exclusive writes (the compound ones atomic in one lock). See
+`set`/`push`/`add`/`increment`/`get_or_insert` are exclusive writes (the compound ones atomic in one lock). See
 **[`docs/stdlib.md` §5 → `std.concurrency.collection`]** and `examples/concurrent_collection.chz`.
 
 ---
@@ -2087,9 +2095,9 @@ either.
   `2 2` like CPython. The cliff that forced the old rule is answered on the read side: `for_each`,
   `fold`, `for_each_entry` and `fold_entries` decide ONCE, under ONE read guard, whether the stored
   wire's pieces stand alone, and when they do not they rebuild the whole container once into one map and
-  materialize every piece before dropping the guard — `RwShared.slice`'s discipline, generalized. The
+  materialize every piece before dropping the guard — the discipline of `ConcurrentList.slice`, generalized. The
   trade is that a looping view over an ALIASED store is a snapshot rather than a live walk, and that
-  `at`/`get_key` pay a whole-root rebuild on the second and later occurrences of an alias (measured in
+  `ConcurrentList.at`/`ConcurrentMap.get` pay a whole-root rebuild on the second and later occurrences of an alias (measured in
   `docs/benchmarks.md`).
 - **A captured BINDING keeps its identity across the whole crossing.** The `Cell` that backs a
   by-reference-captured local is memoized for the ENTIRE serialization, not just the current DFS stack, so
@@ -2127,7 +2135,7 @@ either.
   **Known ceilings** — all of the shape "two *independent* serializations reach the same cell", which is
   exactly where identity stops. (A task's OWN two crossings — its captures and the module-global
   snapshot — are no longer one of them: `gaps.md` W7-4c, fixed 2026-08-06.)
-  - **`RwShared` copy-out views.** `at`/`for_each`/`fold`/`get_key`/`has`/`for_each_entry`/
+  - **The per-entry readers of a collection over an `RwShared` box.** `at`/`for_each`/`fold`/`get`/`contains`/`for_each_entry`/
     `fold_entries` rebuild ONE piece of the stored container per step, so each piece is an independent
     copy of the binding — two `at()` calls are two crossings and can never share. A whole-container
     `get()`/`read()`, and `slice` (one call returning a container), are one crossing and DO share.
@@ -2136,7 +2144,7 @@ either.
     rebuild collapses the repeat back to one cell. That is what lets a piece be drained on its own
     without ever re-reading the box.)
     **One shape cannot be made self-contained: an element whose cycle closes through the ROOT
-    container** (`a.back = xs; RwShared(xs).at(0)`) — the node its back-reference needs *is* the
+    container** (`a.back = xs; ConcurrentList(RwShared(xs)).at(0)`) — the node its back-reference needs *is* the
     container. There, and only there, the view rebuilds the **whole** container under the same read
     guard and hands back the piece out of it, so the cycle survives: `at(0)`'s copy is reachable from
     its own back-reference, and mutating it is visible through that cycle. This matches CPython —

@@ -11,6 +11,34 @@ justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap
 > They are kept as the record of what was measured at the time; they are not reproducible on today's
 > binary, and "serial == M:N parity green" in an older section means the gate that existed then.
 
+## TICKET-243 — single-element writers of a shared list and set (2026-10-10)
+
+`ConcurrentList.push` and `ConcurrentSet.add` / `remove` splice one element into the stored wire
+container under the box's update guard. Before, the only way to append to a shared list or add to a
+shared set was a whole-value `RwShared.write`, which decodes and re-encodes the container.
+
+Release binary, a 100k-element container, 200 calls each, one run per row.
+
+| operation | main `95d4e6c0` (`uptime` 1.3-1.9) | branch (`uptime` 2.86) |
+| --- | --- | --- |
+| list: `write` + one push | 1465 ms | (whole `write` of the list, no push: 1275 ms) |
+| list: `ConcurrentList.push` | — | 16 ms |
+| set: `write` + one add | 3547 ms | — |
+| set: `ConcurrentSet.add` | — | 2 ms |
+| set: `ConcurrentSet.remove` | — | 821 ms |
+| map: `set_key` / `ConcurrentMap.set` | 3 ms | 4 ms |
+| list: `at(i)` | 1 ms | 0 ms |
+
+Notes:
+- The 16 ms of `push` is one re-encode of the list plus 199 splices. A stored wire list carries no
+  id ceiling, so the first `push` after a whole store decodes and re-encodes it once.
+- `ConcurrentSet.remove` is O(n): it shifts the tail and rebuilds the hash index, as
+  `ConcurrentMap.remove` and heap `Set.remove` do. It copies no element.
+- `at(i)` is constant time. The ticket's "49 ms per 200 calls" did not reproduce on main or on the
+  branch.
+- Gate: `tests/chz/stdlib/concurrent_collection_perf_test.chz`, one absolute bound of 300 ms per
+  200 calls.
+
 ## TICKET-236 — the verdict's epoch, base vs branch (2026-10-10)
 
 Base `c3e2ffcd` (`target/t236/chezzi-base`; `src/vm` is unchanged between it and the branch base
