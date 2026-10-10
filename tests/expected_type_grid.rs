@@ -9,6 +9,8 @@
 //! 2. `join_grid` — construct x pair of sibling values. An accepted cell is two programs: a type
 //!    probe (`zz: bool = x` names the joined type in its rejection) and a run.
 //! 3. `void_chain_grid` — `x?.m()` where `m` returns nothing, receiver x position.
+//! 4. `sibling_form_grid` — a generic call under an annotation: return shape x annotation x the
+//!    form of the argument that solves `T`. Every accepted cell RUNS and is read by pattern.
 
 #[path = "support/grid_cell.rs"]
 mod grid_cell;
@@ -609,4 +611,400 @@ fn void_chain_grid() {
         ));
     }
     run_grid("expected-type-void-chain", &cells);
+}
+
+// ===== grid IV: return shape x annotation x sibling argument form =====
+
+/// The types the sibling grid writes: `int` under carriers, `List` and `Box`.
+enum Ty {
+    Int,
+    Opt(Box<Ty>),
+    Res(Box<Ty>),
+    List(Box<Ty>),
+    Bx(Box<Ty>),
+}
+
+fn opt(t: Ty) -> Ty {
+    Ty::Opt(Box::new(t))
+}
+fn res(t: Ty) -> Ty {
+    Ty::Res(Box::new(t))
+}
+fn list(t: Ty) -> Ty {
+    Ty::List(Box::new(t))
+}
+fn bx(t: Ty) -> Ty {
+    Ty::Bx(Box::new(t))
+}
+
+impl Ty {
+    fn spell(&self) -> String {
+        match self {
+            Ty::Int => "int".to_string(),
+            Ty::Opt(t) if matches!(**t, Ty::Res(_)) => format!("({})?", t.spell()),
+            Ty::Opt(t) => format!("{}?", t.spell()),
+            Ty::Res(t) => format!("{}!str", t.spell()),
+            Ty::List(t) => format!("List[{}]", t.spell()),
+            Ty::Bx(t) => format!("Box[{}]", t.spell()),
+        }
+    }
+
+    fn tag(&self) -> String {
+        match self {
+            Ty::Int => "i".to_string(),
+            Ty::Opt(t) => format!("o{}", t.tag()),
+            Ty::Res(t) => format!("r{}", t.tag()),
+            Ty::List(t) => format!("l{}", t.tag()),
+            Ty::Bx(t) => format!("b{}", t.tag()),
+        }
+    }
+
+    /// Append one `fn s_<tag>(x: <type>) -> str` per layer to `decls`, innermost first, and
+    /// return the outermost name. Every layer is read BY PATTERN (`?v`, `!e`, `None`, `x[0]`,
+    /// `x.v`, `x + 0`), so a missed or doubled wrap is a type error or a fault, not the same text.
+    fn show(&self, decls: &mut String) -> String {
+        let name = format!("s_{}", self.tag());
+        let body = match self {
+            Ty::Int => "    return \"{x + 0}\"\n".to_string(),
+            Ty::Opt(t) => {
+                let i = t.show(decls);
+                format!(
+                    "    match x:\n        ?v:\n            return \"some {{{i}(v)}}\"\n        None:\n            return \"none\"\n"
+                )
+            }
+            Ty::Res(t) => {
+                let i = t.show(decls);
+                format!(
+                    "    match x:\n        ?v:\n            return \"ok {{{i}(v)}}\"\n        !e:\n            return \"err {{e.upper()}}\"\n"
+                )
+            }
+            Ty::List(t) => {
+                let i = t.show(decls);
+                format!("    return \"list {{{i}(x[0])}}\"\n")
+            }
+            Ty::Bx(t) => {
+                let i = t.show(decls);
+                format!("    return \"box {{{i}(x.v)}}\"\n")
+            }
+        };
+        decls.push_str(&format!("fn {name}(x: {}) -> str:\n{body}", self.spell()));
+        name
+    }
+}
+
+/// One sibling argument form: the generic fn's params, the call's arguments, the body that reads
+/// a `T` named `e` out of them, and a statement the call needs first. The collection forms carry
+/// a second `d: T` argument (`9`), the review's `find([1, 2], 2)` shape; it is also the value an
+/// empty list leaves in `e`.
+struct Form {
+    name: &'static str,
+    params: &'static str,
+    args: &'static str,
+    body: &'static str,
+    prelude: &'static str,
+}
+
+const FROM_LIST: &str = "    e := d\n    if xs.len() > 0:\n        e = xs[0]\n";
+const FROM_X: &str = "    e := x\n";
+
+const FORMS: &[Form] = &[
+    Form {
+        name: "identifier",
+        params: "x: T",
+        args: "n",
+        body: FROM_X,
+        prelude: "n := 7\n",
+    },
+    Form {
+        name: "int_constant",
+        params: "x: T",
+        args: "7",
+        body: FROM_X,
+        prelude: "",
+    },
+    Form {
+        name: "list_literal",
+        params: "xs: List[T], d: T",
+        args: "[7, 8], 9",
+        body: FROM_LIST,
+        prelude: "",
+    },
+    Form {
+        name: "empty_list",
+        params: "xs: List[T], d: T",
+        args: "[], 9",
+        body: FROM_LIST,
+        prelude: "",
+    },
+    Form {
+        name: "map_literal",
+        params: "m: Map[str, T], d: T",
+        args: "{\"k\": 7}, 9",
+        body: "    e := d\n    for k in m.keys():\n        e = m[k]\n",
+        prelude: "",
+    },
+    Form {
+        name: "comprehension",
+        params: "xs: List[T], d: T",
+        args: "[i + 6 for i in [1, 2]], 9",
+        body: FROM_LIST,
+        prelude: "",
+    },
+    Form {
+        name: "call_result",
+        params: "x: T",
+        args: "one()",
+        body: FROM_X,
+        prelude: "",
+    },
+    Form {
+        name: "struct_ctor",
+        params: "b: Box[T]",
+        args: "Box(7)",
+        body: "    e := b.v\n",
+        prelude: "",
+    },
+    Form {
+        name: "closure",
+        params: "x: T, f: fn(T) -> T",
+        args: "6, fn(a): a + 1",
+        body: "    e := f(x)\n",
+        prelude: "",
+    },
+    Form {
+        name: "none",
+        params: "x: T",
+        args: "None",
+        body: FROM_X,
+        prelude: "",
+    },
+    Form {
+        name: "some",
+        params: "x: T",
+        args: "?7",
+        body: FROM_X,
+        prelude: "",
+    },
+];
+
+/// One return shape under one annotation, with its four verdicts. `plain` covers the eight forms
+/// that hand over a plain `int` (`{v}` is `7`, or `9` for the empty list).
+struct SiblingRow {
+    shape: &'static str,
+    ann_name: &'static str,
+    ret: &'static str,
+    wrap: &'static str,
+    ann: Ty,
+    plain: Out,
+    closure: Out,
+    none: Out,
+    some: Out,
+}
+
+const Q_ON_INT: Out = Out::Rejects("'?' builds an optional or success value, found int");
+const PLUS_OPT: Out = Out::Rejects("cannot apply + to int? and int");
+const PLUS_RES: Out = Out::Rejects("cannot apply + to int!str and int");
+
+/// The four return shapes under `R`, `R?`, `R!str` (the carrier around the declared result) and
+/// `R[T?]`, `R[T!str]` (the carrier inside it). For a bare `T` the inside pair is the around
+/// pair, and `T?` with `T = int?` spells the same `int??` as `T??`, so 17 rows, not 20.
+fn sibling_rows() -> Vec<SiblingRow> {
+    let mut rows = vec![
+        SiblingRow {
+            shape: "bare",
+            ann_name: "R",
+            ret: "T",
+            wrap: "e",
+            ann: Ty::Int,
+            plain: Out::Prints("{v}"),
+            closure: Out::Prints("7"),
+            none: Out::Rejects("cannot assign int? to variable of type int"),
+            some: Q_ON_INT,
+        },
+        // The seed rows: `T` is solved from the arguments and the result wraps at the binding.
+        SiblingRow {
+            shape: "bare",
+            ann_name: "R?",
+            ret: "T",
+            wrap: "e",
+            ann: opt(Ty::Int),
+            plain: Out::Prints("some {v}"),
+            closure: Out::Prints("some 7"),
+            none: Out::Prints("none"),
+            some: Out::Prints("some 7"),
+        },
+        SiblingRow {
+            shape: "bare",
+            ann_name: "R!str",
+            ret: "T",
+            wrap: "e",
+            ann: res(Ty::Int),
+            plain: Out::Prints("ok {v}"),
+            closure: Out::Prints("ok 7"),
+            none: Out::Rejects("to variable of type int!str"),
+            some: Out::Prints("ok 7"),
+        },
+        SiblingRow {
+            shape: "opt",
+            ann_name: "R",
+            ret: "T?",
+            wrap: "?e",
+            ann: opt(Ty::Int),
+            plain: Out::Prints("some {v}"),
+            closure: Out::Prints("some 7"),
+            none: Out::Rejects("cannot assign int?? to variable of type int?"),
+            some: Q_ON_INT,
+        },
+        SiblingRow {
+            shape: "opt",
+            ann_name: "R?",
+            ret: "T?",
+            wrap: "?e",
+            ann: opt(opt(Ty::Int)),
+            plain: Out::Prints("some some {v}"),
+            closure: PLUS_OPT,
+            none: Out::Prints("some none"),
+            some: Out::Prints("some some 7"),
+        },
+        // An `int?` value does not wrap into `int?!str` at any slot, generic or not (main too).
+        SiblingRow {
+            shape: "opt",
+            ann_name: "R!str",
+            ret: "T?",
+            wrap: "?e",
+            ann: res(opt(Ty::Int)),
+            plain: Out::Rejects("cannot assign int? to variable of type int?!str"),
+            closure: Out::Rejects("cannot assign int? to variable of type int?!str"),
+            none: Out::Rejects("to variable of type int?!str"),
+            some: Out::Rejects("cannot assign int?? to variable of type int?!str"),
+        },
+        SiblingRow {
+            shape: "opt",
+            ann_name: "R[T!str]",
+            ret: "T?",
+            wrap: "?e",
+            ann: opt(res(Ty::Int)),
+            plain: Out::Prints("some ok {v}"),
+            closure: PLUS_RES,
+            none: Out::Rejects("to variable of type (int!str)?"),
+            some: Out::Prints("some ok 7"),
+        },
+    ];
+    type Mk = fn(Ty) -> Ty;
+    let outer: [(&'static str, &'static str, &'static str, Mk, &str, &str); 2] = [
+        ("list", "List[T]", "[e]", list, "list", "List"),
+        ("box", "Box[T]", "Box(e)", bx, "box", "Box"),
+    ];
+    for (shape, ret, wrap, mk, word, ty) in outer {
+        let p = |s: String| Out::Prints(leak(s));
+        let r = |s: String| Out::Rejects(leak(s));
+        let mut row = |ann_name, ann, plain, closure, none, some| {
+            rows.push(SiblingRow {
+                shape,
+                ann_name,
+                ret,
+                wrap,
+                ann,
+                plain,
+                closure,
+                none,
+                some,
+            })
+        };
+        row(
+            "R",
+            mk(Ty::Int),
+            p(format!("{word} {{v}}")),
+            p(format!("{word} 7")),
+            r(format!(
+                "cannot assign {ty}[int?] to variable of type {ty}[int]"
+            )),
+            Q_ON_INT,
+        );
+        row(
+            "R?",
+            opt(mk(Ty::Int)),
+            p(format!("some {word} {{v}}")),
+            p(format!("some {word} 7")),
+            r(format!("to variable of type {ty}[int]?")),
+            Q_ON_INT,
+        );
+        row(
+            "R!str",
+            res(mk(Ty::Int)),
+            p(format!("ok {word} {{v}}")),
+            p(format!("ok {word} 7")),
+            r(format!("to variable of type {ty}[int]!str")),
+            Q_ON_INT,
+        );
+        // The written `T` is the carrier, so every argument owns a carrier slot and wraps; the
+        // closure's parameter is the carrier too.
+        row(
+            "R[T?]",
+            mk(opt(Ty::Int)),
+            p(format!("{word} some {{v}}")),
+            PLUS_OPT,
+            p(format!("{word} none")),
+            p(format!("{word} some 7")),
+        );
+        row(
+            "R[T!str]",
+            mk(res(Ty::Int)),
+            p(format!("{word} ok {{v}}")),
+            PLUS_RES,
+            r(format!("to variable of type {ty}[int!str]")),
+            p(format!("{word} ok 7")),
+        );
+    }
+    rows
+}
+
+fn sibling_program(row: &SiblingRow, form: &Form) -> String {
+    let mut src = "struct Box[T]:\n    v: T\nfn one() -> int:\n    return 7\n".to_string();
+    let show = row.ann.show(&mut src);
+    src.push_str(&format!(
+        "fn f[T]({}) -> {}:\n{}    return {}\n{}r: {} = f({})\nprint({show}(r))\n",
+        form.params,
+        row.ret,
+        form.body,
+        row.wrap,
+        form.prelude,
+        row.ann.spell(),
+        form.args,
+    ));
+    src
+}
+
+/// A generic call under an annotation: whatever form the argument beside the `T` takes, `T` is
+/// solved from the arguments and the result wraps at the binding. 17 rows x 11 forms. Every cell
+/// main `959cbaf1` accepts prints the same value here; the others are measured on the branch.
+/// Red before the seed rule in the `bare/R?` and `bare/R!str` rows at `list_literal`,
+/// `map_literal` and `comprehension`: the seed was substituted into `List[T]` and owned the
+/// elements (`argument to 'f' has type int, expected int?`).
+#[test]
+fn sibling_form_grid() {
+    let rows = sibling_rows();
+    let mut cells = Vec::new();
+    for row in &rows {
+        for form in FORMS {
+            let out = match form.name {
+                "closure" => &row.closure,
+                "none" => &row.none,
+                "some" => &row.some,
+                _ => &row.plain,
+            };
+            let v = if form.name == "empty_list" { "9" } else { "7" };
+            let expect = match out {
+                Out::Prints(s) => Expect::Prints(s.replace("{v}", v)),
+                Out::Rejects(f) => Expect::Rejects(f),
+            };
+            cells.push(main_only(
+                format!("{}/{}/{}", row.shape, row.ann_name, form.name),
+                sibling_program(row, form),
+                expect,
+            ));
+        }
+    }
+    assert_eq!(cells.len(), 17 * 11);
+    run_grid("expected-type-sibling", &cells);
 }

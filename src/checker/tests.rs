@@ -38630,6 +38630,58 @@ fn a_seed_only_slot_never_types_a_closure_argument() {
     );
 }
 
+/// TICKET-239: a carrier-annotation seed reaches an argument only at the bare `T` slot it guesses.
+/// It is never substituted into a compound slot (`List[T]`, `Map[str, T]`, `fn(T) -> T`), where it
+/// would be an owned slot for the elements and solve `T` to the carrier. Whatever the argument's
+/// form, `T` is solved from the arguments and the result wraps at the binding.
+#[test]
+fn a_carrier_seed_reaches_only_the_bare_parameter_slot() {
+    let reduce = "fn reduce[T](xs: List[T], f: fn(T, T) -> T) -> T:\n    return f(xs[0], xs[1])\n";
+    let find = "fn find[T](xs: List[T], x: T) -> T:\n    return x\n";
+    let val = "fn val[T](m: Map[str, T], x: T) -> T:\n    return x\n";
+    ok(&format!(
+        "{reduce}r: int? = reduce([1, 2], fn(a, b): a + b)\n"
+    ));
+    ok(&format!(
+        "{reduce}r: int!str = reduce([1, 2], fn(a, b): a + b)\n"
+    ));
+    ok(&format!(
+        "{reduce}r: int? = reduce([i for i in [1, 2]], fn(a, b): a + b)\n"
+    ));
+    ok(&format!("{find}r: int? = find([1, 2], 2)\n"));
+    ok(&format!("{find}r: int? = find([], 2)\n"));
+    ok(&format!("{val}r: int? = val({{\"k\": 1}}, 2)\n"));
+    // `T` is `int`, not the seed's `int?`: the closure's parameters are plain.
+    rejects(
+        &format!("{reduce}r: int? = reduce([1, 2], fn(a, b): a ?? b)\n"),
+        "??",
+    );
+    // The bare `T` slot still reads the seed: a `None` or `?v` there is typed by it.
+    ok(&format!("{find}r: int? = find([], None)\n"));
+    ok(&format!("{find}r: int? = find([?1], ?2)\n"));
+    // A sibling that solves `T = int` leaves no room for a carrier at the bare slot.
+    rejects(
+        &format!("{find}r: int? = find([1, 2], None)\n"),
+        "argument to 'find'",
+    );
+}
+
+/// TICKET-239: a `?.` call that returns nothing reports a bad argument ONCE, and nothing else: the
+/// void lowering is kept on its type alone, so no value-form error or discard warning follows.
+#[test]
+fn optional_chain_void_call_reports_an_argument_error_once() {
+    let c = "struct C:\n    n: int\n    fn add(self, k: int):\n        self.n += k\n    fn get(self, k: int) -> int:\n        return self.n + k\n";
+    let (errs, warns) = warn_src(&format!("{c}x: C? = C(0)\nx?.add(undefined_name)\n"));
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].message.contains("unknown name 'undefined_name'"));
+    assert!(warns.is_empty(), "{warns:?}");
+    // The value form re-infers after a missed void attempt: still one error.
+    let (errs, _) = warn_src(&format!("{c}x: C? = C(0)\nv := x?.get(undefined_name)\n"));
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    let (errs, _) = warn_src(&format!("{c}x: C? = C(0)\nv := x?.get(1 + \"s\")\n"));
+    assert_eq!(errs.len(), 1, "{errs:?}");
+}
+
 /// TICKET-239: an un-annotated `if` / `match` / `??` join of two `T!E` values keeps `T!E`; no
 /// default rewrites the error type.
 #[test]

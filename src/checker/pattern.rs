@@ -5194,9 +5194,11 @@ impl Checker {
             }
             Ty::Option(..) => {
                 // TICKET-239: a CALL that returns nothing has no value (a field read always has
-                // one). Try the void lowering and keep it when it types `Nil` with no error;
-                // `infer_value` then rejects it wherever a value is needed. The mode is recorded
-                // only after this attempt decides: `carriers` is not rolled back.
+                // one). Try the void lowering and keep it when it types `Nil`, with whatever
+                // errors its arguments reported: the value form would re-infer them and add a
+                // "returns no value" error. `infer_value` then rejects it wherever a value is
+                // needed. The mode is recorded only after this attempt decides: `carriers` is
+                // not rolled back.
                 if matches!(carrier.kind, ExprKind::OptChain { call: Some(_), .. }) {
                     let mut c = carrier.clone();
                     let scratch = self.scratch_operand(t.clone());
@@ -5207,10 +5209,9 @@ impl Checker {
                     self.next_opt_tmp += 1;
                     crate::desugar::lower_carrier_option_void(&mut c, tmp);
                     let mark = self.diag_mark();
-                    let errs = self.errors.len();
                     let r = self.infer(&c);
                     self.pop_scope();
-                    if r == Ty::Nil && self.errors.len() == errs {
+                    if r == Ty::Nil {
                         self.record_carrier(key, CarrierMode::OptionVoid, span, "?.");
                         return Ty::Nil;
                     }

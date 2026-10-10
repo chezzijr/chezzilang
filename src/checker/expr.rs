@@ -4067,10 +4067,10 @@ impl Checker {
     ///
     /// TICKET-239: `owned` and `seed` are [`Checker::slot_seed`]'s answer, substituted FIRST. An
     /// argument whose slot is concrete under `owned` owns that slot (the same `infer_arg` call a
-    /// non-generic path makes, so it wraps and meets its width); a closure at a fn-typed slot
-    /// that is not is prepassed, `seed` or no `seed`; any other argument concrete only under
-    /// `seed` takes it as a seed. The returned [`ArgPass`] per argument is the one record of
-    /// which happened.
+    /// non-generic path makes, so it wraps and meets its width); an argument whose slot is the
+    /// bare parameter `seed` guesses takes the guess as a seed; any other closure is prepassed.
+    /// `seed` is never substituted into a compound slot. The returned [`ArgPass`] per argument
+    /// is the one record of which happened.
     pub(super) fn infer_generic_arg_tys(
         &mut self,
         args: &[Expr],
@@ -4094,20 +4094,16 @@ impl Checker {
                 {
                     return (self.infer_arg(a, Some(s)), ArgPass::Checked);
                 }
-                let seeded = slot
-                    .as_ref()
-                    .filter(|_| !seed.is_empty())
-                    .map(|s| subst(s, seed))
-                    .filter(|s| ty_concrete_but(s, &|n| self.rigid_param(n, &free)));
-                // A seed is a guess at `T`. A closure at a fn-typed slot (`f: fn(T) -> T`) never
-                // takes it: `r: int? = apply(5, fn(x): x + 1)` solves `T = int` from `5`, and a
-                // closure typed from the guess would never be re-inferred. A closure that IS the
-                // `T` (`x: T`) has no sibling to wait for, so the seed is its only source.
-                let fn_slot = slot
-                    .as_ref()
-                    .is_some_and(|s| matches!(s.slot_payload(), Ty::Func { .. }));
+                // A seed is a guess at `T`, so it reaches an argument only where the slot IS that
+                // `T`, and as a seed: `5` stays `int`, `?5` and `None` read their carrier from it.
+                // Substituted into a compound slot (`List[T]`, `fn(T) -> T`) it would be an owned
+                // slot for the elements, and `r: int? = find([1, 2], 2)` would solve `T = int?`.
+                let seeded = match &slot {
+                    Some(Ty::Param(n)) => seed.get(n),
+                    _ => None,
+                };
                 if let ExprKind::Closure { ret, .. } = &a.kind
-                    && (fn_slot || seeded.is_none())
+                    && seeded.is_none()
                 {
                     let mark = self.diag_mark();
                     // Keep the closure's unannotated params `Unknown` in the unification prepass —
@@ -4121,7 +4117,7 @@ impl Checker {
                     return (t, ArgPass::Prepass { ret_inferred });
                 }
                 if let Some(s) = seeded {
-                    return (self.infer_arg_seeded(a, &s), ArgPass::Checked);
+                    return (self.infer_arg_seeded(a, s), ArgPass::Checked);
                 }
                 (self.infer_value(a), ArgPass::Checked)
             })

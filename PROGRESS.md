@@ -9400,7 +9400,14 @@ the width check and the `!e` type every other slot gets.
   such call is, with no discarded-value warning (`CarrierMode::OptionVoid`); as a value it is the
   existing error.
 - **Grid.** `tests/expected_type_grid.rs`: slot kind x value x scope (418 cells, 107 red before),
-  construct x pair (146 cells, 45 red before), void `?.` (17 cells, 14 red before).
+  construct x pair (146 cells, 45 red before), void `?.` (17 cells, 14 red before), return shape x
+  annotation x sibling argument form (187 cells).
+- **A carrier annotation never changes `T`.** `r: int? = find([1, 2], 2)` and
+  `r: int? = reduce([1, 2], fn(a, b): a + b)` solve `T = int` from the arguments and wrap at the
+  binding, as before this ticket. The annotation's guess reaches an argument only at a bare `T`
+  slot (`id(None)`, `id(?5)`, `id(300)`), never inside `List[T]`, `Map[str, T]` or `fn(T) -> T`.
+- **One error for `x?.m(bad)`.** A void `?.` call with a bad argument reports that argument only
+  (it also printed `expression returns no value` and a discarded-`None` warning).
 
 ### TICKET-238 — a binding's type is known on its own statement (2026-10-10)
 
