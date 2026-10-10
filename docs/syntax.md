@@ -384,12 +384,12 @@ fn f():
   - Global types are computed once, before any body is checked, in dependency order. A typing cycle
     (`x := f()` where `f` returns `x`) is a compile error naming the `initialization cycle`; annotate
     `x` (`x: int = f()`) or give `f` a return type. An annotated cycle checks, and its read faults.
-  - A body above an un-annotated global whose type is not yet known there (an empty collection
-    `xs := []`) is rejected with "annotate its declaration".
+  - An un-annotated global with an open type (`xs := []`, `z := None`) is an error on its own line
+    (see "Inference" in §10). A body above it that reads it reports
+    `'xs' is declared below this function and its type is not known here` as well.
   - An `import` below a body that uses it stays rejected (`'pi' is used before its import`, Go's rule).
-  - A body above the first let refines the global's type (TICKET-186): with `fn w(): z = ?"ab"`
-    above `z := None`, `z` is an `str?`, so `fn r() -> int: return z ?? 0` is
-    `branches have incompatible types: str and int`.
+  - A body never decides a global's type (TICKET-238): with `fn w(): z = ?"ab"` above `z := None`,
+    the error is at `z := None`. Write `z: str? = None`; the body above then checks against `str?`.
   - A module-level `return` is an error: `return` then `x := 5` at top level is
     `'return' outside a function` (CPython's `SyntaxError`). A `return` belongs in a fn body.
   - One name declared both `const` and plain at module scope is an error, in either order:
@@ -415,11 +415,12 @@ fn f():
 - **A fn-local (or block-local) re-declare is a genuinely fresh binding**, so it may change type and a
   closure made earlier keeps the *old* one — the same as Rust's `let` shadowing. This includes a
   binding inside a top-level `if:`/`for:`/`while:` body: those are inner scopes, not the module scope.
-- **A refinement is not a retype.** The carve-out is one-sided: the new type is allowed only when it
-  *fills in* what the old one left open, so `x := []` then `x := [1]`, `y := {}` then `y := {"a": 1}`,
-  and `z := None` then `z := ?1` all stay legal. Going the other way is a retype and is rejected —
-  `x := []` then `x := 42`, and `x := 1` then `x := None`, both fire (the second would hand a `None` out
-  of a closure declared `-> int`).
+- **A re-declaration never fills in a type** (TICKET-238). The first declaration must be complete on
+  its own line: `x := []` then `x := [1]`, `y := {}` then `y := {"a": 1}`, and `z := None` then
+  `z := ?1` are each an error at the FIRST line (``cannot infer the element type of `x` ``); write
+  `x: List[int] = []`. A retype is rejected as before: `x: List[int] = []` then `x := 42`, and
+  `x := 1` then `x := None`, both fire (the second would hand a `None` out of a closure declared
+  `-> int`).
 - **Narrowing counts as a change too** — `v: Any = 1` then `v := "s"`, or `s: Shape = Circle(1)` then
   `s := Circle(2)`, are rejected even though nothing *reads* a lie. The slot's declared type is what is
   frozen, and an earlier writer typed against `Any`/`Shape` can still store a non-`str`/non-`Circle`.
@@ -683,15 +684,11 @@ mentioning a type parameter. An operator operand is not a slot, nor is the retur
 Each branch of an **if/match expression** at a slot wraps on its own (see §8): `x: int? = if c: n else:
 None` wraps only the bare `n`, leaving the already-wrapped `None` alone. Full table: §9.
 
-**A plain value pins an open `None` (TICKET-234).** `z := None` has no payload type yet. The first
-value written to it decides: `z = 7` makes `z` an `int?` and stores `?7`, exactly as `z = ?7` does. A
-value that is already a carrier fills the payload and is never re-wrapped (`w: int? = 5`, `z = w`
-gives `int?`, not `int??`). The depth is the smallest that fits: an extra `?` layer comes only from an
-annotation or an explicit `?`. The same rule holds at every site a value meets the open slot:
-`xs := [None]` then `xs.push(7)` / `xs.insert(0, 7)` / `xs.extend([7])` / `xs[0] = 7`, `m["b"] = 7`
-on `{"a": None}`, a tuple element, a field (`b := Box(None)`, `b.v = 7`), a method argument typed by
-the receiver's type parameter (`b.set(7)`, `s.set(7)` on a `Shared(None)`), and a closure argument
-(`s.update(fn(x): 7)`). A literal `None` **beside** a value joins to that value's optional:
+**A literal `None` joins the value beside it (TICKET-234, same-line half).** A `None` takes its
+payload type from its own statement, never from a later one: `z := None` then `z = 7` is an error at
+`z := None`. With the type written, a plain value wraps at the slot as everywhere else:
+`z: int? = None` then `z = 7` stores `?7`, and `xs: List[int?] = [None]` then `xs.push(7)` /
+`xs[0] = 3` gives `[3, 7]`. A literal `None` **beside** a value joins to that value's optional:
 `[None, 7]` is a `List[int?]`, `{"a": None, "b": 7}` a `Map[str, int?]`, `if c: None else: 7` and a
 `match` with a `None` arm are `int?`, and so is the inline body `fn pick(c: bool): if c: None else: 7`.
 `[None, w]` joins to `w`'s own type. Declines that stay: only the LITERAL `None` joins
@@ -2801,7 +2798,7 @@ explicitly; only these two recover them.) Recovery unifies **structurally**, so 
 
 ```chezzi
 fn to_list[S: Iterable[T], T](xs: S) -> List[T]:
-    out := []
+    out: List[T] = []
     for x in xs:            # x : T
         out.push(x)
     return out
@@ -3754,7 +3751,7 @@ of a branch (no explicit `return` needed), or in an expression (`x := if ok: v e
 takes `v`'s type).
 
 ```chezzi
-r := recover:
+r: int!Error = recover:           # the body yields no value, so the binding names the type
     panic("boom")                 # raised here, caught at the boundary
 match r:
     ?v:  print(v)

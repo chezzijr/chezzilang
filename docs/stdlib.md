@@ -34,7 +34,7 @@ Conventions used below:
 |------|--------|-------|
 | `List[T]()` / `List()` / `List(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` takes its type from the expected type on the same statement, like `Set()`; an untyped `xs := List()` is an error on that line) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T](xs)` checks `xs`'s elements against `T`. |
 | `Map[K, V]()` / `Map()` / `{}` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` takes its type from the expected type on the same statement; an untyped `m := Map()` is an error on that line). Map literal: `{k: v, ...}`. |
-| `Set[T]()` / `Set()` / `Set(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set; a *never*-pinned bare `Set()` errors, annotate it) / set from an iterable. `Set[T](xs)` checks elements against `T`. |
+| `Set[T]()` / `Set()` / `Set(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set; bare `Set()` takes its type from the expected type on the same statement; an untyped `s := Set()` is an error on that line) / set from an iterable. `Set[T](xs)` checks elements against `T`. |
 | `bytes(x)` | `bytes` | Convert a `bytes` / `bytearray` / `List[int]` to `bytes`. To UTF-8 encode a `str`, use `s.encode()` (Python's `bytes(str)` also errors without an encoding). Literal: `b"..."`. |
 | `bytearray()` | `bytearray` | Empty growable byte buffer. |
 
@@ -1678,8 +1678,9 @@ comparator params (`fn(x: int, y: int): …`) work too.
 **`Deque[T]`** — double-ended queue, **amortized O(1) at both ends** via the **two-stack** design
 (`front`/`back` backing lists; a pop whose near stack is empty drains the far stack into it once, so
 each element moves between stacks at most once). `peek` reads the head/tail without rebalancing, so
-peek is worst-case O(1). Construct directly: **`Deque([], [])`** — `T` is inferred from the first
-`push_front`/`push_back`. (No `deque()` factory: a no-argument generic factory cannot bind `T`.)
+peek is worst-case O(1). Construct directly, with the type on the same statement:
+**`d: Deque[int] = Deque([], [])`** or **`Deque[int]([], [])`**; an untyped `d := Deque([], [])` is an
+error on that line. (No `deque()` factory: a no-argument generic factory cannot bind `T`.)
 
 | member | signature | semantics / complexity |
 | --- | --- | --- |
@@ -1690,7 +1691,8 @@ peek is worst-case O(1). Construct directly: **`Deque([], [])`** — `T` is infe
 
 **`Counter[T: Hashable + Eq]`** — a frequency table over `Map[T, int]` (`T` must be `Hashable + Eq`,
 like any map key — `Hashable` alone does not imply `Eq`, `docs/gaps.md` W7-53). Construct directly:
-**`Counter({})`** — `T` is inferred from the first `add`/`count`. (No `counter()` factory, same
+**`c: Counter[str] = Counter({})`** or **`Counter[str]({})`**; an untyped `c := Counter({})` is an
+error on that line. (No `counter()` factory, same
 `T`-binding reason as `Deque`.)
 
 | member | signature | semantics / complexity |
@@ -1728,9 +1730,8 @@ all-sendable fields is too.)
 **Construction:** call the static `new()` with the type arguments, **`ConcurrentMap[str, int].new()`**
 / **`ConcurrentCounter[str].new()`**, or let an annotation give them
 (`m: ConcurrentMap[str, int] = ConcurrentMap.new()`). The field constructor still works:
-`ConcurrentMap(RwShared({}))`. With it and no annotation, `K`/`V` are deferred from the empty `{}` and
-stay unknown on the wrapper, so a value derived from it (`snap := m.snapshot()`, `m.get(k) == ...`)
-has an unknown type and needs an annotation; prefer `new()`. Note a use-site `RwShared({})` means user code also needs **`import std.concurrency`**
+`ConcurrentMap(RwShared({}))`. With it and no annotation, `K`/`V` are open and the binding is an error
+on that line (``cannot infer the type arguments of `m` ``); prefer `new()`. Note a use-site `RwShared({})` means user code also needs **`import std.concurrency`**
 in addition to `import std.concurrency.collection` (the latter, a len-3 submodule, does **not** license
 the bare `RwShared` ctor — only the whole-module `import std.concurrency` does).
 

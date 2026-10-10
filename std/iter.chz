@@ -8,8 +8,8 @@
 # Written entirely in Chezzi: these return `List[(...)]`, so they compose with the
 # tuple-destructuring `for` (`for i, x in iter.enumerate(xs)`) and comprehensions
 # (`[a + b for a, b in iter.zip(xs, ys)]`). No builtin special-casing — ordinary library funcs.
-# The empty accumulator `out := []` recovers its element type from each function's return
-# annotation (`-> List[(int, T)]`), so the first `push` of a tuple type-checks.
+# Each empty accumulator is typed where it is declared (`out: List[(int, T)] = []`), so the
+# `push` of a tuple type-checks against it.
 
 import std.rand
 

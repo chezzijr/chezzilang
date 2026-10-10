@@ -215,8 +215,8 @@ go one level deeper. Nested carriers: `x: int?? = None` is the **outer** `None` 
 `x: int?? = ?None` is the inner one (Rust `Some(None)`). `None`'s own `T` is inferred from where it
 lands, as in Rust, so `?None` works for any `T`.
 
-**No expected type** (owner decision 2026-10-07). With R5, "no expected type" means nothing in the
-whole function pins it, not just the line:
+**No expected type** (owner decision 2026-10-07; narrowed 2026-10-10 by TICKET-238). "No expected
+type" means nothing on the value's own statement gives it one:
 
 | expression | known | unknown | rule |
 |---|---|---|---|
@@ -225,10 +225,9 @@ whole function pins it, not just the line:
 | `z := None` | that it is optional | the payload type `T` | an error on its own line: write `z: int? = None` (TICKET-238, owner decision 2026-10-10, replaces TICKET-234's later pin); a literal `None` beside a value on the same line still joins (`[None, 7]` → `List[int?]`) |
 
 ```
-z := ?5
-take_result(z)          # take_result(r: int!E) pins z → int!E
-e := !"disk"
-return e                # the fn returns int! → e: int!Error
+z := ?5                 # int? on this line
+take_result(z)          # ✗ take_result(r: int!E): z is int?; write `z: int!E = ?5`
+e := !"disk"            # ✗ error on this line; write `e: int! = !"disk"`
 ```
 
 ### D4. `else` = handle and leave (owner decision 2026-10-07: design B)

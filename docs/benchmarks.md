@@ -3839,3 +3839,5 @@ not separate that from noise, and no runtime file changed. Its cause is unknown.
 
 Not measured: `benches/run.chz` (the Chezzi-vs-CPython harness) could not run on this box:
 `FAILED [loop]: sh: line 1: hyperfine: command not found`, the same line for every bench.
+The owner accepted (2026-10-10) the seven benches above, run one by one, as the perf record for
+this ticket.

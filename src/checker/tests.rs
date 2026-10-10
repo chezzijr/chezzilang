@@ -11808,15 +11808,14 @@ fn module_scope_redeclare_unknown_carve_out_is_one_sided() {
         "x := 1\nf := fn() -> int: x\nx := []\nx.push(3)\n",
         "int -> List[?]",
     );
-    // The refinement direction — the whole point of the carve-out — stays legal at every shape.
-    // TICKET-238: an open first declaration is rejected on its own line, so no later
-    // declaration refines it.
+    // TICKET-238: an open first declaration is rejected on its own line at every shape; a later
+    // declaration never fills it in.
     rejects("x := []\nx := [1]\nprint(x)\n", "cannot infer the");
     rejects("y := {}\ny := {\"a\": 1}\nprint(y)\n", "cannot infer the");
     rejects("z := None\nz := ?1\nprint(z)\n", "cannot infer the");
     rejects("s := Set()\ns.add(1)\nprint(s)\n", "cannot infer the");
     ok("w := 1\nw := 2\nprint(w)\n");
-    // A deeper slot refines too (the merge recurses), and a same-shape non-refinement still rejects.
+    // A deeper open slot is rejected the same way, and a same-shape retype still rejects.
     rejects("m := {}\nm := {\"a\": [1]}\nprint(m)\n", "cannot infer the");
     rejects(
         "m := {\"a\": 1}\nm := {\"a\": \"s\"}\n",

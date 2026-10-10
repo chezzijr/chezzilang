@@ -169,8 +169,8 @@ struct Deque[T]:
 
 # NOTE: there is no `deque()` factory — a no-argument generic factory cannot bind T (it would return
 # an uninstantiable `Deque[T]` that will not unify with a `Deque[int]` annotation). Construct directly:
-# `Deque([], [])`; T is inferred from the first `push_front`/`push_back` (the empty backing lists
-# recover their element type from use).
+# `d: Deque[int] = Deque([], [])` or `Deque[int]([], [])`; the statement that creates the deque
+# gives T (an untyped `d := Deque([], [])` is an error on that line).
 
 # ============================================================================
 # Counter[T] — a frequency table over the builtin `Map[T, int]` (T must be Hashable + Eq, W7-53: a
@@ -222,4 +222,4 @@ struct Counter[T: Hashable + Eq]:
         return pairs[0:kk]
 
 # NOTE: there is no `counter()` factory — same reason as Deque: a no-argument generic factory cannot
-# bind T. Construct directly: `Counter({})`; T is inferred from the first `add`/`add_n`/`count` call.
+# bind T. Construct directly: `c: Counter[str] = Counter({})` or `Counter[str]({})`; that statement gives T.
