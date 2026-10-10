@@ -2680,9 +2680,9 @@ struct Checker {
     /// `:=` of a top-level user fn or a closure literal, or a nested `fn`'s own name. Only a
     /// keyword call through such a binding is legal (labels are surface-only, so any other callee
     /// may hold a fn with different parameter names). Keyed `(owning_scope_idx, name)`; drained at
-    /// `pop_scope` (DEC-032: scope indices are reused). TICKET-197: the value lists the keys of the
-    /// bindings this binding's certainty was read from (`w := v` over a nested fn lists `v`), so a
-    /// write to any of them voids it.
+    /// `pop_scope` (the next pushed scope reuses the index). TICKET-197: the value lists the keys of
+    /// the bindings this binding's certainty was read from (`w := v` over a nested fn lists `v`),
+    /// so a write to any of them voids it.
     kw_certain: HashMap<(usize, String), Vec<(usize, String)>>,
     /// TICKET-139 (W14-2) — bindings written after their declaration: a `check_assign` Ident write
     /// or a same-scope re-declaration. Same key and drain as `kw_certain`.

@@ -32982,7 +32982,7 @@ fn collection_method_float_widen_rejects_typed_int() {
 fn collection_method_mismatch_note_does_not_claim_an_earlier_use() {
     rejects(
         "fn main():\n    l: List[float] = [1.5]\n    l.push(\"a\")\n    print(l)\n",
-        "fixed by its annotation or an earlier use",
+        "fixed where the binding is declared",
     );
 }
 
@@ -37984,52 +37984,23 @@ fn carrier_wrap_check_grid() {
     cells.push((format!("{W}o: int8? = 127\nprint(o)\n"), Clean));
     cells.push((format!("{W}o: int8? = ?127\nprint(o)\n"), Clean));
 
-    // Payload pin: the first constraining use decides, a later conflicting write is rejected.
-    let pin = "'?' value: expected int, found str";
-    // A whole-binding write that misses the pin names the pin (TICKET-234); an element site keeps
-    // its typed text.
-    let whole = "cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use";
-    let whole2 = "cannot assign str?? to 'z' -- its payload was pinned to int?? by an earlier use";
-    for (lines, want) in [
-        (
-            &["xs := [None]", "xs.push(?5)", "xs.push(?\"hi\")"][..],
-            pin,
-        ),
-        (&["z := None", "z = ?5", "z = ?\"ab\""], whole),
-        (
-            &["m := {\"a\": None}", "m[\"b\"] = ?5", "m[\"c\"] = ?\"x\""],
-            pin,
-        ),
-        (&["xs := [None]", "xs[0] = ?5", "xs[0] = ?\"x\""], pin),
-        (&["z := None", "z = ?(?5)", "z = ?(?\"a\")"], whole2),
-    ] {
-        cells.push((body(lines), one(want)));
-    }
-    cells.push((
-        body(&["xs := [None]", "xs.push(?5)", "y: List[str?] = xs"]),
-        one("cannot assign List[int?] to variable of type List[str?]"),
-    ));
-    cells.push(("z := None\nz = ?5\nz = ?\"ab\"\n".to_string(), one(whole)));
-    cells.push((
-        "fn f():\n    z = ?\"ab\"\nz := None\nz = ?5\n".to_string(),
-        one("cannot assign int? to 'z' -- its payload was pinned to str? by an earlier use"),
-    ));
-    cells.push((
-        "fn f():\n    z = ?\"ab\"\nz := None\nw: int? = z\n".to_string(),
-        one("cannot assign str? to variable of type int?"),
-    ));
-    // A plain value pins an open payload (TICKET-234).
-    cells.push((body(&["xs := [None]", "xs.push(5)"]), Clean));
-    cells.push((body(&["xs := [None]", "xs.extend([5])"]), Clean));
-
-    // Pin matrix: writer x wrap position x {conflict, agree}.
+    // TICKET-238 -- inference never reads a later statement, so the payload-pin rows were deleted:
+    // their subject was a later use fixing an open payload (first-use pin, pin-miss texts, `??`
+    // and generic-sibling readers, alias and branch-join pins). What stays: an untyped open binder
+    // is rejected on its own line whatever writes follow, and the same writes into a TYPED binder
+    // are judged against its annotation.
+    let hole = "cannot infer the";
+    let slot = "'?' value: expected int, found str";
+    // Slot matrix: writer x wrap position x {untyped binder, typed conflict, typed agree}.
     type Tpl<'a> = &'a dyn Fn(&str) -> String;
-    let positions: [(&str, Tpl); 5] = [
-        ("None", &|p| format!("?{p}")),
-        ("[None]", &|p| format!("[?{p}]")),
-        ("{\"k\": None}", &|p| format!("{{\"k\": ?{p}}}")),
-        ("None", &|p| format!("?(?{p})")),
-        ("(1, None)", &|p| format!("(1, ?{p})")),
+    let positions: [(&str, &str, Tpl); 5] = [
+        ("None", "int?", &|p| format!("?{p}")),
+        ("[None]", "List[int?]", &|p| format!("[?{p}]")),
+        ("{\"k\": None}", "Map[str, int?]", &|p| {
+            format!("{{\"k\": ?{p}}}")
+        }),
+        ("None", "int??", &|p| format!("?(?{p})")),
+        ("(1, None)", "(int, int?)", &|p| format!("(1, ?{p})")),
     ];
     let writers: [(bool, Tpl); 4] = [
         (false, &|v| format!("xs.push({v})")),
@@ -38038,187 +38009,83 @@ fn carrier_wrap_check_grid() {
         (false, &|v| format!("xs[0] = {v}")),
     ];
     for (is_map, write) in writers {
-        for (seed, wrap) in positions {
-            let decl = if is_map {
-                format!("xs := {{\"a\": {seed}}}")
+        for (seed, ty, wrap) in positions {
+            let (open, typed) = if is_map {
+                (
+                    format!("xs := {{\"a\": {seed}}}"),
+                    format!("xs: Map[str, {ty}] = {{\"a\": {seed}}}"),
+                )
             } else {
-                format!("xs := [{seed}]")
+                (
+                    format!("xs := [{seed}]"),
+                    format!("xs: List[{ty}] = [{seed}]"),
+                )
             };
-            for (second, want) in [("\"a\"", one(pin)), ("6", Clean)] {
-                let (a, b) = (write(&wrap("5")), write(&wrap(second)));
-                cells.push((body(&[&decl, &a, &b]), want));
+            let a = write(&wrap("5"));
+            cells.push((body(&[&open, &a]), one(hole)));
+            for (second, want) in [("\"a\"", one(slot)), ("6", Clean)] {
+                let b = write(&wrap(second));
+                cells.push((body(&[&typed, &a, &b]), want));
             }
         }
     }
     for (lines, want) in [
-        (
-            &["xs := None", "xs = ?5", "xs = ?\"a\""][..],
-            "cannot assign str? to 'xs' -- its payload was pinned to int? by an earlier use",
-        ),
-        (
-            &["xs := None", "xs = ?(?5)", "xs = ?(?\"a\")"],
-            "cannot assign str?? to 'xs' -- its payload was pinned to int?? by an earlier use",
-        ),
+        (&["z := None", "z = ?5"][..], hole),
+        (&["xs := []", "xs.push(?5)"], hole),
+        (&["m := {}", "m[\"a\"] = ?5"], hole),
+        (&["s := Set()", "s.add(5)"], hole),
+        (&["z: int? = None", "z = ?5", "z = ?\"ab\""], slot),
+        (&["z: int?? = None", "z = ?(?5)", "z = ?(?\"a\")"], slot),
         (
             &[
-                "a := None",
-                "c := None",
+                "a: int? = None",
+                "c: int? = None",
                 "a, c = ?5, ?6",
                 "a, c = ?\"x\", ?7",
             ],
-            pin,
+            slot,
         ),
-        (&["xs := []", "xs.push(?5)", "xs.push(?\"a\")"], pin),
-        (&["xs := []", "xs.extend([?5])", "xs.extend([?\"a\"])"], pin),
-        (&["m := {}", "m[\"a\"] = ?5", "m[\"b\"] = ?\"a\""], pin),
+        (
+            &[
+                "xs: List[int?] = [None]",
+                "xs.push(?5)",
+                "y: List[str?] = xs",
+            ],
+            "cannot assign List[int?] to variable of type List[str?]",
+        ),
     ] {
         cells.push((body(lines), one(want)));
     }
-    let bound = "'?' builds an optional or success value, found int?";
+    cells.push(("z := None\nz = ?5\n".to_string(), one(hole)));
     cells.push((
-        body(&[
-            "xs := [None]",
-            "ys := [?5]",
-            "xs.extend(ys)",
-            "zs := [?\"a\"]",
-            "xs.extend(zs)",
-        ]),
-        one(bound),
+        "z: int? = None\nz = ?5\nz = ?\"ab\"\n".to_string(),
+        one(slot),
     ));
+    // A plain value wraps into a typed carrier slot.
+    cells.push((body(&["xs: List[int?] = [None]", "xs.push(5)"]), Clean));
+    cells.push((body(&["xs: List[int?] = [None]", "xs.extend([5])"]), Clean));
+    // A `?x` bound to a name is `T?` on its own line; a later `int!str` slot does not re-read it.
     cells.push((
-        body(&[
-            "xs := [None]",
-            "y := ?5",
-            "xs.push(y)",
-            "z := ?\"a\"",
-            "xs.push(z)",
-        ]),
-        one(bound),
-    ));
-    cells.push((
-        body(&["s := Set()", "s.add(?5)"]),
-        Has("found int?".to_string()),
-    ));
-    // The accepted cost: a `?x` bound to a name is `T?` from its first pinning use on.
-    cells.push((
-        "fn f() -> int!str:\n    xs := []\n    x := ?5\n    xs.push(x)\n    return x\n".to_string(),
+        "fn f() -> int!str:\n    x := ?5\n    return x\n".to_string(),
         Has("expected return type int!str, found int?".to_string()),
     ));
-    cells.push((
-        "fn f() -> int!str:\n    xs := []\n    x := ?5\n    xs.push(x)\n    return x\n".to_string(),
-        Clean,
-    ));
-
-    // Readers that hold a binding name: `??`, a generic sibling argument, an assignment escape.
-    let pinned = |a: &str, b: &str| {
-        one(&format!(
-            "cannot assign {a} to 'z' -- its payload was pinned to {b} by an earlier use"
-        ))
-    };
-    for (v, write, want) in [
-        ("5", "z = ?\"a\"", pinned("str?", "int?")),
-        ("?5", "z = ?(?\"a\")", pinned("str??", "int??")),
-        (
-            "[?5]",
-            "z = ?([?\"a\"])",
-            pinned("List[str?]?", "List[int?]?"),
-        ),
-        (
-            "{\"k\": ?5}",
-            "z = ?({\"k\": ?\"a\"})",
-            pinned("Map[str, str?]?", "Map[str, int?]?"),
-        ),
-        (
-            "(1, ?5)",
-            "z = ?((1, ?\"a\"))",
-            pinned("(int, str?)?", "(int, int?)?"),
-        ),
-        ("?5", "z = ?(?6)", Clean),
-        ("[?5]", "z = ?([?6])", Clean),
-    ] {
-        let a = format!("a := z ?? {v}");
-        cells.push((body(&["z := None", &a, write, "print(a)"]), want));
-    }
-    cells.push((
-        body(&["z := None", "a := z ?? ?5", "b: str? = a", "print(b)"]),
-        one("cannot assign int? to variable of type str?"),
-    ));
-    const G: &str = "fn mv[T](a: List[T], b: List[T]) -> None:\n    pass\nfn same[T](a: T, b: T) -> None:\n    pass\nstruct H:\n    n: int\n    fn mv[T](self, a: List[T], b: List[T]) -> None:\n        pass\n    fn same[T](self, a: T, b: T) -> None:\n        pass\n";
+    // A generic sibling argument: the typed side decides on the call's own statement.
+    const G: &str = "fn mv[T](a: List[T], b: List[T]) -> None:\n    pass\nfn same[T](a: T, b: T) -> None:\n    pass\n";
     for (lines, want) in [
+        (&["xs := []", "mv([?5], xs)"][..], one(hole)),
         (
-            &["xs := []", "mv([?5], xs)", "xs.push(?\"a\")"][..],
-            one(pin),
-        ),
-        (&["xs := []", "mv(xs, [?5])", "xs.push(?\"a\")"], one(pin)),
-        (
-            &["h := H(1)", "xs := []", "h.mv([?5], xs)", "xs.push(?\"a\")"],
-            one(pin),
+            &["xs: List[int?] = []", "mv([?5], xs)", "xs.push(?\"a\")"],
+            one(slot),
         ),
         (
-            &["z := None", "same(?5, z)", "z = ?\"a\""],
-            pinned("str?", "int?"),
+            &["xs: List[int?] = []", "mv([?5], xs)", "xs.push(?6)"],
+            Clean,
         ),
-        (
-            &["h := H(1)", "z := None", "h.same(?5, z)", "z = ?\"a\""],
-            pinned("str?", "int?"),
-        ),
-        (&["xs := []", "mv([?5], xs)", "xs.push(?6)"], Clean),
-        (&["z := None", "same(?5, z)", "z = ?6"], Clean),
         (&["r: int!str = 1", "same(?5, r)"], Clean),
         (&["ys: List[int!str] = []", "mv([?5], ys)"], Clean),
     ] {
         cells.push((format!("{G}{}", body(lines)), want));
     }
-    cells.push((
-        body(&["c := [[?5]]", "b := []", "c = [b]", "b.push(?\"a\")"]),
-        one(pin),
-    ));
-    cells.push((
-        body(&["c := [[?5]]", "b := []", "c = [b]", "b.push(?6)"]),
-        Clean,
-    ));
-    cells.push((
-        body(&["b := []", "c := b", "c.push(?5)", "b.push(?\"a\")"]),
-        one(pin),
-    ));
-    cells.push((
-        "fn f() -> int!str:\n    z := None\n    x := ?5\n    a := z ?? x\n    print(a)\n    return x\n"
-            .to_string(),
-        Has("expected return type int!str, found int?".to_string()),
-    ));
-    cells.push((
-        "fn f() -> int!str:\n    zs := [None]\n    x := ?5\n    a := zs[0] ?? x\n    print(a)\n    return x\n"
-            .to_string(),
-        Clean,
-    ));
-    // Plan-validation's three probes: a generic struct ctor, a branch join, a loop variable.
-    cells.push((
-        format!(
-            "struct P[T]:\n    a: List[T]\n    b: List[T]\n{}",
-            body(&[
-                "xs := []",
-                "p := P([?5], xs)",
-                "print(p)",
-                "xs.push(?\"a\")"
-            ])
-        ),
-        // A generic struct ctor pins no empty argument, for any spelling of the element (measured:
-        // the long-name twin ran too), so this is a guard, not a member of the class.
-        Clean,
-    ));
-    cells.push((
-        "fn f(c: bool):\n    z := None\n    z = if c: ?5 else: ?6\n    z = ?\"a\"\n".to_string(),
-        one(whole),
-    ));
-    cells.push((
-        body(&[
-            "xs := []",
-            "for v in [?5]:",
-            "    xs.push(v)",
-            "xs.push(?\"a\")",
-        ]),
-        one(pin),
-    ));
 
     // Int where a float is expected: every sink message carries the fix note.
     let note = " — write 1.0 (or float(x))";
@@ -38275,21 +38142,7 @@ fn carrier_wrap_check_grid() {
     let mut red: Vec<String> = Vec::new();
     for (src, want) in &cells {
         let m: Vec<String> = check_entry(src).into_iter().map(|e| e.message).collect();
-        // TICKET-238 -- a cell whose program binds an untyped open value (`z := None`,
-        // `xs := [None]`, `xs := []`, `m := {}`, `s := Set()`) is rejected on that line, once per
-        // open binding, whatever it went on to do.
-        let open = src
-            .lines()
-            .filter(|l| {
-                l.split_once(" := ").is_some_and(|(_, rhs)| {
-                    !rhs.contains(" ?? ")
-                        && (rhs.contains("None") || ["[]", "{}", "Set()"].contains(&rhs))
-                })
-            })
-            .count();
-        let holes = m.iter().filter(|e| e.contains("cannot infer the")).count();
         let good = match want {
-            _ if open > 0 => holes == open,
             Clean => m.is_empty(),
             One(t) => m.len() == 1 && m[0].contains(t.as_str()),
             Has(t) => m.iter().any(|e| e.contains(t.as_str())),
@@ -38311,26 +38164,25 @@ fn carrier_wrap_check_grid() {
         red.join("\n")
     );
 
-    // Every accept program also RUNS.
+    // Every accept program also RUNS. `run_capture` compiles a module the checker rejected, so
+    // each one is checked clean first.
     for (src, out) in [
         (
-            "fn f():\n    xs := [None]\n    xs.push(?5)\n    xs.push(?6)\n    z := None\n    z = ?5\n    z = ?7\n    print(xs)\n    print(z)\nf()\n",
+            "fn f():\n    xs: List[int?] = [None]\n    xs.push(?5)\n    xs.push(?6)\n    z: int? = None\n    z = ?5\n    z = ?7\n    print(xs)\n    print(z)\nf()\n",
             "[None, 5, 6]\n7\n",
         ),
         (
-            "fn f():\n    xs := [None]\n    xs.extend([?5])\n    xs.extend([?6])\n    z := [None]\n    z = [?7]\n    m := {\"a\": [None]}\n    m[\"b\"] = [?8]\n    print(xs)\n    print(z)\n    print(m[\"b\"])\nf()\n",
+            "fn f():\n    xs: List[int?] = [None]\n    xs.extend([?5])\n    xs.extend([?6])\n    z: List[int?] = [None]\n    z = [?7]\n    m: Map[str, List[int?]] = {\"a\": [None]}\n    m[\"b\"] = [?8]\n    print(xs)\n    print(z)\n    print(m[\"b\"])\nf()\n",
             "[None, 5, 6]\n[7]\n[8]\n",
         ),
-        (
-            "fn f() -> int!str:\n    x := ?5\n    return x\nprint(f())\n",
-            "5\n",
-        ),
+        ("fn f() -> int!str:\n    return ?5\nprint(f())\n", "5\n"),
         ("x: float? = ?1.0\nprint(x)\n", "1.0\n"),
         (
             "a: int? = None\nb: int? = 2\nprint(a < b)\nprint(b < a)\n",
             "true\nfalse\n",
         ),
     ] {
+        ok(src);
         assert_eq!(crate::vm::run_capture(src).unwrap(), out, "{src}");
     }
 }

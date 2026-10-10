@@ -6,9 +6,10 @@
 //! carrier), because printed text is not the oracle: `7` and `?7` print the same. A reject cell
 //! holds a fragment of the message.
 //!
-//! TICKET-238 -- an untyped binder of an open value (`z := None`, `xs := [None]`) is now an error on
-//! its own line, so every cell whose program has one expects that error (`binds_open`). The rows
-//! keep their programs; the cells that still run are the ones with a typed or same-line slot.
+//! TICKET-238 -- an untyped binder of an open value (`z := None`, `xs := [None]`) is an error on
+//! its own line. Each row keeps its program and states the verdict the checker gives it: a cell
+//! whose program has such a binder wants `cannot infer the`, and the cells that still run are the
+//! ones with a typed or same-line slot.
 //!
 //! Row order follows the tables of the ticket: sites, depth, places, aliases, method and call
 //! arguments, closure arguments, `recover:` tails.
@@ -220,9 +221,9 @@ const SITE_ROWS: &[Row] = &[
     print(z)
 "#,
         [
-            R(r#"cannot assign str to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -238,9 +239,9 @@ const SITE_ROWS: &[Row] = &[
     print(z)
 "#,
         [
-            R(r#"cannot assign str to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -253,7 +254,11 @@ const SITE_ROWS: &[Row] = &[
     z = {V}
     show(z)
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "site/s_coalesce",
@@ -268,12 +273,9 @@ const SITE_ROWS: &[Row] = &[
     print(a)
 "#,
         [
-            P(r#"8
-5"#),
-            P(r#"8
-5"#),
-            P(r#"6
-5"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -313,12 +315,9 @@ none"#),
     print(y)
 "#,
         [
-            P(r#"8
-1"#),
-            P(r#"8
-1"#),
-            P(r#"6
-1"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -343,7 +342,11 @@ none"#),
     xs.extend([{V}])
     show(xs[1])
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "site/s_global",
@@ -361,7 +364,11 @@ fn f():
     f()
     show(z)
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "site/s_idx",
@@ -373,7 +380,11 @@ fn f():
     xs[0] = {V}
     show(xs[0])
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "site/s_if",
@@ -419,7 +430,11 @@ none"#),
     xs.insert(0, {V})
     show(xs[0])
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "site/s_listlit",
@@ -497,12 +512,9 @@ none
     show(m["a"])
 "#,
         [
-            P(r#"8
-none"#),
-            P(r#"8
-none"#),
-            P(r#"6
-none"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -546,12 +558,9 @@ none"#),
     show(xs[0])
 "#,
         [
-            P(r#"8
-none"#),
-            P(r#"8
-none"#),
-            P(r#"6
-none"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -573,12 +582,9 @@ fn g(c: bool) -> int?:
     show(g(false))
 "#,
         [
-            P(r#"8
-none"#),
-            P(r#"8
-none"#),
-            P(r#"6
-none"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     one(
@@ -593,8 +599,7 @@ none"#),
     xs := [None, w]
     show(xs[1])
 "#,
-        P(r#"6
-6"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "site/s_rewrap.q",
@@ -608,8 +613,7 @@ none"#),
     xs := [None, w]
     show(xs[1])
 "#,
-        P(r#"6
-6"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "site/s_rewrap.carrier",
@@ -623,8 +627,7 @@ none"#),
     xs := [None, w]
     show(xs[1])
 "#,
-        P(r#"6
-6"#),
+        R(r#"cannot infer the"#),
     ),
     row(
         "site/s_tuple",
@@ -638,7 +641,11 @@ none"#),
         (?v, _): print(v + 1)
         (None, _): print("none")
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "site/s_typed",
@@ -667,7 +674,11 @@ const CELLS_ROWS: &[Row] = &[
     z = {V}
     print(z)
 "#,
-        [P(r#"7"#), P(r#"7"#), P(r#"5"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/c_assign",
@@ -681,9 +692,9 @@ const CELLS_ROWS: &[Row] = &[
     print(z)
 "#,
         [
-            R(r#"cannot assign str to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -698,9 +709,9 @@ const CELLS_ROWS: &[Row] = &[
     print(a)
 "#,
         [
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -715,9 +726,9 @@ const CELLS_ROWS: &[Row] = &[
     print(xs)
 "#,
         [
-            R(r#"list element: expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"list element: expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -734,9 +745,9 @@ fn f():
     print(z)
 "#,
         [
-            R(r#"cannot assign str to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -751,9 +762,9 @@ fn f():
     print(xs)
 "#,
         [
-            R(r#"cannot assign str to int?"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"cannot assign str? to int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -785,9 +796,9 @@ fn f():
     print(xs)
 "#,
         [
-            R(r#"argument 2 of 'insert': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 2 of 'insert': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -802,11 +813,11 @@ fn f():
 "#,
         [
             R(
-                r#"argument 1 of 'push': expected int?, found str (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
+                r#"argument 1 of 'push': expected int?, found str (the collection's element type is int?, fixed where the binding is declared; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
             ),
             R(r#"'?' value: expected int, found str"#),
             R(
-                r#"argument 1 of 'push': expected int?, found str? (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
+                r#"argument 1 of 'push': expected int?, found str? (the collection's element type is int?, fixed where the binding is declared; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
             ),
         ],
     ),
@@ -853,9 +864,9 @@ fn f():
     print(m)
 "#,
         [
-            R(r#"cannot assign str to int?"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"cannot assign str? to int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -889,13 +900,9 @@ fn f():
     print(xs)
 "#,
         [
-            R(
-                r#"argument 1 of 'push': expected int?, found str (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-            ),
-            R(r#"'?' value: expected int, found str"#),
-            R(
-                r#"argument 1 of 'push': expected int?, found str? (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-            ),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -910,9 +917,9 @@ fn f():
     print(t)
 "#,
         [
-            R(r#"cannot assign (str, int) to (int?, int)"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"cannot assign (str?, int) to (int?, int)"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -928,12 +935,9 @@ fn f():
     print(z)
 "#,
         [
-            P(r#"5
-7"#),
-            P(r#"5
-7"#),
-            P(r#"5
-5"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -986,7 +990,11 @@ fn f():
     xs.extend([{V}])
     print(xs)
 "#,
-        [P(r#"[None, 7]"#), P(r#"[None, 7]"#), P(r#"[None, 5]"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/global",
@@ -1000,7 +1008,11 @@ fn f():
     f()
     print(z)
 "#,
-        [P(r#"7"#), P(r#"7"#), P(r#"5"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/idxassign",
@@ -1012,7 +1024,11 @@ fn f():
     xs[0] = {V}
     print(xs)
 "#,
-        [P(r#"[7]"#), P(r#"[7]"#), P(r#"[5]"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/ifexpr",
@@ -1082,7 +1098,11 @@ fn f():
     xs.insert(0, {V})
     print(xs)
 "#,
-        [P(r#"[7, None]"#), P(r#"[7, None]"#), P(r#"[5, None]"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/listlit",
@@ -1155,7 +1175,11 @@ fn f():
     m["b"] = {V}
     print(m["b"])
 "#,
-        [P(r#"7"#), P(r#"7"#), P(r#"5"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/match3",
@@ -1198,7 +1222,11 @@ fn f():
         ?v: print(v + 1)
         None: print("none")
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/push",
@@ -1210,7 +1238,11 @@ fn f():
     xs.push({V})
     print(xs)
 "#,
-        [P(r#"[None, 7]"#), P(r#"[None, 7]"#), P(r#"[None, 5]"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/retdirect",
@@ -1239,7 +1271,11 @@ fn f():
         r#"
     print(g(true))
 "#,
-        [P(r#"7"#), P(r#"7"#), P(r#"5"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/setadd",
@@ -1294,7 +1330,11 @@ fn f():
     t = ({V}, 2)
     print(t)
 "#,
-        [P(r#"(7, 2)"#), P(r#"(7, 2)"#), P(r#"(5, 2)"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "cells/typed",
@@ -1310,7 +1350,7 @@ fn f():
     ),
 ];
 
-// Reads of a pinned binding, and the declines that stay (`[n, 7]`, `[[None], [7]]`, `[w, 7]`).
+// Reads of a carrier binding, and the declines that stay (`[n, 7]`, `[[None], [7]]`, `[w, 7]`).
 const READS_ROWS: &[Row] = &[
     one(
         "reads/assign_none_again",
@@ -1321,7 +1361,7 @@ const READS_ROWS: &[Row] = &[
     z = None
     show(z)
 "#,
-        P(r#"none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/carrier_plain",
@@ -1342,7 +1382,7 @@ const READS_ROWS: &[Row] = &[
     z = 7
     show(f())
 "#,
-        R(r#"cannot infer return type of '<closure>'; add a -> annotation"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/coalesce",
@@ -1354,8 +1394,7 @@ const READS_ROWS: &[Row] = &[
     show(z)
     print(a)
 "#,
-        P(r#"8
-5"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/elif",
@@ -1375,7 +1414,7 @@ const READS_ROWS: &[Row] = &[
     xs.extend([7])
     show(xs[1])
 "#,
-        P(r#"8"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/field",
@@ -1386,7 +1425,7 @@ const READS_ROWS: &[Row] = &[
     z = 8
     show(z)
 "#,
-        P(r#"9"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/global",
@@ -1402,7 +1441,7 @@ fn f():
     f()
     show(z)
 "#,
-        P(r#"8"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/idx",
@@ -1412,7 +1451,7 @@ fn f():
     xs[0] = 7
     show(xs[0])
 "#,
-        P(r#"8"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/inline",
@@ -1432,7 +1471,7 @@ none"#),
     xs.insert(0, 7)
     show(xs[0])
 "#,
-        P(r#"8"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/listlit",
@@ -1455,7 +1494,7 @@ none
     xs := [n, 7]
     print(xs)
 "#,
-        R(r#"list elements differ: None vs int"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/loop",
@@ -1467,7 +1506,7 @@ none
             z = i
     show(z)
 "#,
-        P(r#"2"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/maplit",
@@ -1487,8 +1526,7 @@ none
     show(m["b"])
     show(m["a"])
 "#,
-        P(r#"8
-none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/match3",
@@ -1521,8 +1559,7 @@ none"#),
     show(xs[1])
     show(xs[0])
 "#,
-        P(r#"8
-none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/res_beside",
@@ -1550,8 +1587,7 @@ fn g(c: bool) -> int?:
     show(g(true))
     show(g(false))
 "#,
-        P(r#"8
-none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/rewrap",
@@ -1564,8 +1600,7 @@ none"#),
     xs := [None, w]
     show(xs[1])
 "#,
-        P(r#"6
-6"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/tuple",
@@ -1577,7 +1612,7 @@ none"#),
         (?v, _): print(v + 1)
         (None, _): print("none")
 "#,
-        P(r#"8"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "reads/tuple_show",
@@ -1588,12 +1623,12 @@ none"#),
     a, _ = t
     show(a)
 "#,
-        R(r#"cannot assign to undeclared variable 'a'"#),
+        R(r#"cannot infer the"#),
     ),
 ];
 
 // The owner depth rule: site x partner (`p0` `7`, `p1` `w`, `p2` `ww`, `q0` `?7`, `q1` `?w`,
-// `q2` `?ww`), read by `d1`/`d2`/`d3`; the later-use rows; a `None` nothing pins (`x_*`).
+// `q2` `?ww`), read by `d1`/`d2`/`d3`; the rows that write after the binder (`x_*`).
 const DEPTH_ROWS: &[Row] = &[
     one(
         "depth/assign.p0",
@@ -1605,7 +1640,7 @@ const DEPTH_ROWS: &[Row] = &[
     z = 7
     d1(z)
 "#,
-        P(r#"d1 8"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/assign.p1",
@@ -1617,7 +1652,7 @@ const DEPTH_ROWS: &[Row] = &[
     z = w
     d1(z)
 "#,
-        P(r#"d1 6"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/assign.p2",
@@ -1629,7 +1664,7 @@ const DEPTH_ROWS: &[Row] = &[
     z = ww
     d2(z)
 "#,
-        P(r#"d2 6"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/assign.q0",
@@ -1641,7 +1676,7 @@ const DEPTH_ROWS: &[Row] = &[
     z = ?7
     d1(z)
 "#,
-        P(r#"d1 8"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/assign.q1",
@@ -1653,7 +1688,7 @@ const DEPTH_ROWS: &[Row] = &[
     z = ?w
     d2(z)
 "#,
-        P(r#"d2 6"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/assign.q2",
@@ -1665,7 +1700,7 @@ const DEPTH_ROWS: &[Row] = &[
     z = ?ww
     d3(z)
 "#,
-        P(r#"d3 6"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/if.p0",
@@ -1978,8 +2013,7 @@ d3 none"#),
     d1(xs[1])
     d1(xs[0])
 "#,
-        P(r#"d1 8
-d1 none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/push.p1",
@@ -1992,8 +2026,7 @@ d1 none"#),
     d1(xs[1])
     d1(xs[0])
 "#,
-        P(r#"d1 6
-d1 none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/push.p2",
@@ -2006,8 +2039,7 @@ d1 none"#),
     d2(xs[1])
     d2(xs[0])
 "#,
-        P(r#"d2 6
-d2 none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/push.q0",
@@ -2020,8 +2052,7 @@ d2 none"#),
     d1(xs[1])
     d1(xs[0])
 "#,
-        P(r#"d1 8
-d1 none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/push.q1",
@@ -2034,8 +2065,7 @@ d1 none"#),
     d2(xs[1])
     d2(xs[0])
 "#,
-        P(r#"d2 6
-d2 none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/push.q2",
@@ -2048,8 +2078,7 @@ d2 none"#),
     d3(xs[1])
     d3(xs[0])
 "#,
-        P(r#"d3 6
-d3 none"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_deepen_after_plain",
@@ -2062,7 +2091,7 @@ d3 none"#),
     z = ?w
     d1(z)
 "#,
-        R(r#"cannot assign int?? to 'z' -- its payload was pinned to int? by an earlier use"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_deepen_after_w",
@@ -2075,7 +2104,7 @@ d3 none"#),
     z = ww
     d1(z)
 "#,
-        R(r#"cannot assign int?? to 'z' -- its payload was pinned to int? by an earlier use"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_none_only_if",
@@ -2089,7 +2118,7 @@ d3 none"#),
     _ = w
     _ = ww
 "#,
-        P(r#"None"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_none_only_list",
@@ -2102,7 +2131,7 @@ d3 none"#),
     _ = w
     _ = ww
 "#,
-        P(r#"[None, None]"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_printed",
@@ -2116,8 +2145,7 @@ d3 none"#),
     _ = w
     _ = ww
 "#,
-        P(r#"None
-true"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_push_deepen",
@@ -2130,7 +2158,7 @@ true"#),
     xs.push(?w)
     d1(xs[1])
 "#,
-        R(r#"'?' value: expected int, found int?"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_read_ahead",
@@ -2142,7 +2170,7 @@ true"#),
     d1(z)
     z = ?w
 "#,
-        R(r#"cannot assign int?? to 'z' -- its payload was pinned to int? by an earlier use"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_shallow_after_deep",
@@ -2155,7 +2183,7 @@ true"#),
     z = 7
     d2(z)
 "#,
-        R(r#"cannot assign int to 'z' -- its payload was pinned to int?? by an earlier use"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_unused",
@@ -2167,7 +2195,7 @@ true"#),
     _ = w
     _ = ww
 "#,
-        P(r#""#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "depth/x_w_after_deep",
@@ -2180,11 +2208,11 @@ true"#),
     z = w
     d2(z)
 "#,
-        R(r#"cannot assign int? to 'z' -- its payload was pinned to int?? by an earlier use"#),
+        R(r#"cannot infer the"#),
     ),
 ];
 
-// Typed and empty twins of the site rows, and the uses that need a payload not known yet.
+// Typed and empty twins of the site rows, and the uses of an untyped `None` binder.
 const TWINS_ROWS: &[Row] = &[
     one(
         "twins/emptyl",
@@ -2195,7 +2223,7 @@ const TWINS_ROWS: &[Row] = &[
     z = [1]
     print(z)
 "#,
-        R(r#"cannot assign List[?] to None"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twins/errslot",
@@ -2236,9 +2264,7 @@ const TWINS_ROWS: &[Row] = &[
     z = [1]
     z = ["a"]
 "#,
-        R(
-            r#"cannot assign List[str] to 'z' -- its payload was pinned to List[int]? by an earlier use"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twins/idx",
@@ -2288,7 +2314,7 @@ const TWINS_ROWS: &[Row] = &[
         ?v: print(v + 1)
         None: print("n")
 "#,
-        P(r#"n"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twins/openmethod",
@@ -2297,7 +2323,7 @@ const TWINS_ROWS: &[Row] = &[
     z := None
     print(z.foo())
 "#,
-        R(r#"type None has no method 'foo'"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twins/openprint",
@@ -2308,8 +2334,7 @@ const TWINS_ROWS: &[Row] = &[
     xs := [None]
     print(xs)
 "#,
-        P(r#"None
-[None]"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twins/openread",
@@ -2318,7 +2343,7 @@ const TWINS_ROWS: &[Row] = &[
     z := None
     print(z + 1)
 "#,
-        R(r#"cannot apply + to None and int"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twins/opensink",
@@ -2328,7 +2353,7 @@ const TWINS_ROWS: &[Row] = &[
     x: int = z
     print(x)
 "#,
-        R(r#"cannot assign None to variable of type int"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twins/pushvar",
@@ -2339,9 +2364,7 @@ const TWINS_ROWS: &[Row] = &[
     xs.push(y)
     xs.push("s")
 "#,
-        R(
-            r#"argument 1 of 'push': expected int?, found str (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twins/tuple",
@@ -2360,7 +2383,7 @@ const TWINS_ROWS: &[Row] = &[
     z := None
     print(z + 1)
 "#,
-        R(r#"not known yet: annotate the binding, e.g. `z: int?`, or assign it a value first"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twins/open_note_warning",
@@ -2391,9 +2414,9 @@ const FIELD_ROWS: &[Row] = &[
     print(z)
 "#,
         [
-            R(r#"cannot assign str to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2410,9 +2433,9 @@ const FIELD_ROWS: &[Row] = &[
     f()
 "#,
         [
-            R(r#"cannot assign str to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
-            R(r#"cannot assign str? to 'z' -- its payload was pinned to int? by an earlier use"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2452,9 +2475,9 @@ const FIELD_ROWS: &[Row] = &[
     print(b.v)
 "#,
         [
-            R(r#"cannot assign str to int?"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"cannot assign str? to int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2469,13 +2492,9 @@ const FIELD_ROWS: &[Row] = &[
     print(b.v)
 "#,
         [
-            R(
-                r#"argument 1 of 'push': expected int?, found str (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-            ),
-            R(r#"'?' value: expected int, found str"#),
-            R(
-                r#"argument 1 of 'push': expected int?, found str? (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-            ),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2490,9 +2509,9 @@ const FIELD_ROWS: &[Row] = &[
     print(xs)
 "#,
         [
-            R(r#"cannot apply += to List[None] and List[int]"#),
-            R(r#"cannot apply += to List[int?] and List[str?]"#),
-            R(r#"cannot apply += to List[int?] and List[str?]"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2507,7 +2526,11 @@ const FIELD_ROWS: &[Row] = &[
     f()
     show(z)
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "field/cap_outer",
@@ -2523,12 +2546,9 @@ const FIELD_ROWS: &[Row] = &[
     show(z)
 "#,
         [
-            P(r#"7
-8"#),
-            P(r#"7
-8"#),
-            P(r#"5
-6"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2565,7 +2585,11 @@ const FIELD_ROWS: &[Row] = &[
     b.v = {V}
     show(b.v)
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "field/fieldread",
@@ -2582,12 +2606,9 @@ const FIELD_ROWS: &[Row] = &[
         None: print(0)
 "#,
         [
-            P(r#"8
-8"#),
-            P(r#"8
-8"#),
-            P(r#"6
-6"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2600,7 +2621,11 @@ const FIELD_ROWS: &[Row] = &[
     b.v.push({V})
     show(b.v[1])
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "field/pluseq",
@@ -2613,9 +2638,9 @@ const FIELD_ROWS: &[Row] = &[
     show(xs[1])
 "#,
         [
-            R(r#"cannot apply += to List[None] and List[int]"#),
-            P(r#"8"#),
-            P(r#"6"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
 ];
@@ -2631,7 +2656,7 @@ const TWIN2_ROWS: &[Row] = &[
     b.v = ["a"]
     print(b.v)
 "#,
-        R(r#"list element: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin2/e_nfield",
@@ -2642,9 +2667,7 @@ const TWIN2_ROWS: &[Row] = &[
     b.v.push("a")
     print(b.v)
 "#,
-        R(
-            r#"argument 1 of 'push': expected int, found str (the collection's element type is int, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin2/e_nidx",
@@ -2655,9 +2678,7 @@ const TWIN2_ROWS: &[Row] = &[
     xss[0].push("a")
     print(xss)
 "#,
-        R(
-            r#"argument 1 of 'push': expected int, found str (the collection's element type is int, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin2/n_boxlist",
@@ -2668,7 +2689,7 @@ const TWIN2_ROWS: &[Row] = &[
     bs[0].v = ?"a"
     print(bs[0].v)
 "#,
-        R(r#"'?' value: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin2/n_deep",
@@ -2679,7 +2700,7 @@ const TWIN2_ROWS: &[Row] = &[
     o.b.v = ?"a"
     print(o.b.v)
 "#,
-        R(r#"'?' value: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin2/n_fieldread",
@@ -2695,7 +2716,7 @@ const TWIN2_ROWS: &[Row] = &[
         ?v: print(v + 1)
         None: print(0)
 "#,
-        R(r#"'?' value: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin2/n_global",
@@ -2710,7 +2731,7 @@ g := Box(None)
     g.v = ?"a"
     print(g.v)
 "#,
-        R(r#"'?' value: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin2/n_idx2",
@@ -2721,7 +2742,7 @@ g := Box(None)
     xss[0][0] = ?"a"
     print(xss)
 "#,
-        R(r#"'?' value: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin2/n_nidx",
@@ -2732,7 +2753,7 @@ g := Box(None)
     xss[0].push(?"a")
     print(xss)
 "#,
-        R(r#"'?' value: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
 ];
 
@@ -2749,9 +2770,7 @@ const TWIN3_ROWS: &[Row] = &[
     ys.push("hi")
     print(xs)
 "#,
-        R(
-            r#"argument 1 of 'push': expected int?, found str (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/alias_empty",
@@ -2763,9 +2782,7 @@ const TWIN3_ROWS: &[Row] = &[
     ys.push("hi")
     print(xs)
 "#,
-        R(
-            r#"argument 1 of 'push': expected int, found str (the collection's element type is int, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/alias_field",
@@ -2777,7 +2794,7 @@ const TWIN3_ROWS: &[Row] = &[
     c.v = ?"hi"
     print(b.v)
 "#,
-        R(r#"'?' value: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/alias_none",
@@ -2789,7 +2806,7 @@ const TWIN3_ROWS: &[Row] = &[
     ys.push(?"hi")
     print(xs)
 "#,
-        R(r#"'?' value: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/alias_none_plain",
@@ -2801,9 +2818,7 @@ const TWIN3_ROWS: &[Row] = &[
     ys.push("hi")
     print(xs)
 "#,
-        R(
-            r#"argument 1 of 'push': expected int?, found str (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/alias_proj",
@@ -2815,7 +2830,7 @@ const TWIN3_ROWS: &[Row] = &[
     c.push("hi")
     print(b.v)
 "#,
-        P(r#"[None, 7, 'hi']"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/alias_proj_empty",
@@ -2827,7 +2842,7 @@ const TWIN3_ROWS: &[Row] = &[
     c.push("hi")
     print(xss)
 "#,
-        P(r#"[[7, 'hi']]"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/copy_none",
@@ -2840,8 +2855,7 @@ const TWIN3_ROWS: &[Row] = &[
     print(z)
     print(y)
 "#,
-        P(r#"7
-hi"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/e_pluseq",
@@ -2852,7 +2866,7 @@ hi"#),
     xs += ["a"]
     print(xs)
 "#,
-        R(r#"cannot apply += to List[int] and List[str]"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/f_pluseq",
@@ -2863,7 +2877,7 @@ hi"#),
     b.v += [?"hi"]
     print(b.v)
 "#,
-        R(r#"cannot apply += to List[int?] and List[str?]"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "twin3/t_pluseq",
@@ -2889,7 +2903,11 @@ const METH_ROWS: &[Row] = &[
     s.store({V})
     show(s.load())
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "meth/box_alias_set",
@@ -2904,9 +2922,9 @@ const METH_ROWS: &[Row] = &[
     print(b.v)
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2922,9 +2940,9 @@ const METH_ROWS: &[Row] = &[
     print(b.v)
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2937,7 +2955,11 @@ const METH_ROWS: &[Row] = &[
     b.set({V})
     show(b.v)
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "meth/box_typed",
@@ -2963,9 +2985,9 @@ const METH_ROWS: &[Row] = &[
     print(b.v)
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2980,9 +3002,9 @@ const METH_ROWS: &[Row] = &[
     print(b.v)
 "#,
         [
-            R(r#"argument to 'put' has type int, expected int?"#),
-            R(r#"'?' builds an optional or success value, found int?"#),
-            R(r#"argument to 'put' has type str?, expected int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -2997,9 +3019,9 @@ const METH_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3014,9 +3036,9 @@ const METH_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3031,9 +3053,9 @@ const METH_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"list element: expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"list element: expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3048,9 +3070,9 @@ const METH_ROWS: &[Row] = &[
     print(b.v)
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3065,13 +3087,9 @@ const METH_ROWS: &[Row] = &[
     print(xs)
 "#,
         [
-            R(
-                r#"argument 1 of 'push': expected int?, found str (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-            ),
-            R(r#"'?' value: expected int, found str"#),
-            R(
-                r#"argument 1 of 'push': expected int?, found str? (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-            ),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     one(
@@ -3083,7 +3101,7 @@ const METH_ROWS: &[Row] = &[
     b.set(["a"])
     print(b.v)
 "#,
-        R(r#"list element: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "meth/empty_contains",
@@ -3094,9 +3112,7 @@ const METH_ROWS: &[Row] = &[
     xs.push("a")
     print(xs)
 "#,
-        R(
-            r#"argument 1 of 'push': expected int, found str (the collection's element type is int, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
     one(
         "meth/empty_map_has",
@@ -3107,7 +3123,7 @@ const METH_ROWS: &[Row] = &[
     m[1] = 2
     print(m)
 "#,
-        R(r#"map key must be str, found int"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "meth/empty_shared_set",
@@ -3118,7 +3134,7 @@ const METH_ROWS: &[Row] = &[
     s.set(["a"])
     print(s.get())
 "#,
-        R(r#"list element: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     row(
         "meth/enum_same",
@@ -3131,11 +3147,9 @@ const METH_ROWS: &[Row] = &[
     print(e.same({C}))
 "#,
         [
-            R(r#"argument 1 of 'same': expected None, found int"#),
-            P(r#"true
-true"#),
-            P(r#"true
-true"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3150,11 +3164,9 @@ true"#),
     print(z)
 "#,
         [
-            R(r#"cannot compare None and int for equality"#),
-            P(r#"false
-hi"#),
-            P(r#"false
-s"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3169,9 +3181,9 @@ s"#),
     print(m)
 "#,
         [
-            R(r#"type Map[str, None] has no method 'get_or'"#),
-            R(r#"type Map[str, None] has no method 'get_or'"#),
-            R(r#"type Map[str, None] has no method 'get_or'"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3187,9 +3199,9 @@ s"#),
     print(m)
 "#,
         [
-            R(r#"cannot assign str to int?"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"cannot assign str? to int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3204,9 +3216,9 @@ s"#),
     print(bs[0].v)
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3221,9 +3233,9 @@ s"#),
     print(o.b.v)
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3267,9 +3279,9 @@ s"#),
     show(b.v)
 "#,
         [
-            R(r#"argument to 'put' has type int, expected int?"#),
-            P(r#"8"#),
-            P(r#"6"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3284,9 +3296,9 @@ s"#),
     print(o.b.v)
 "#,
         [
-            R(r#"argument to 'put' has type int, expected int?"#),
-            R(r#"'?' builds an optional or success value, found int?"#),
-            R(r#"argument to 'put' has type str?, expected int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3301,9 +3313,9 @@ s"#),
     print(xs)
 "#,
         [
-            R(r#"type List[None] has no method 'remove'"#),
-            R(r#"type List[None] has no method 'remove'"#),
-            R(r#"type List[None] has no method 'remove'"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3316,7 +3328,11 @@ s"#),
     s.set({V})
     show(s.get())
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "meth/shared",
@@ -3328,7 +3344,11 @@ s"#),
     s.set({V})
     show(s.get())
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "meth/shared_alias",
@@ -3343,9 +3363,9 @@ s"#),
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3358,7 +3378,11 @@ s"#),
     s.set([{V}])
     show(s.get()[0])
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "meth/shared_typed",
@@ -3417,13 +3441,9 @@ s"#),
     print(xs)
 "#,
         [
-            R(
-                r#"argument 1 of 'push': expected int?, found str (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-            ),
-            R(r#"'?' value: expected int, found str"#),
-            R(
-                r#"argument 1 of 'push': expected int?, found str? (the collection's element type is int?, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-            ),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3438,9 +3458,9 @@ s"#),
     print(b.v)
 "#,
         [
-            R(r#"argument to 'Two' has type int, expected int?"#),
-            R(r#"'?' builds an optional or success value, found int?"#),
-            R(r#"argument to 'Two' has type str?, expected int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3470,9 +3490,9 @@ s"#),
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'set': expected int??, found int"#),
-            P(r#"7"#),
-            R(r#"argument 1 of 'set': expected int??, found int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     one(
@@ -3484,7 +3504,7 @@ s"#),
     put(b, ["a"])
     print(b.v)
 "#,
-        R(r#"argument to 'put' has type List[str], expected List[int]"#),
+        R(r#"cannot infer the"#),
     ),
     row(
         "meth/x_map_update",
@@ -3498,9 +3518,9 @@ s"#),
     print(m)
 "#,
         [
-            R(r#"map value: expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"map value: expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3515,9 +3535,9 @@ s"#),
     print(b.v)
 "#,
         [
-            R(r#"argument to 'put2' has type Box[None], expected Box[int]"#),
-            R(r#"'?' builds an optional or success value, found int?"#),
-            R(r#"argument to 'put2' has type Box[int?], expected Box[str?]"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3534,9 +3554,9 @@ s"#),
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3551,7 +3571,11 @@ s"#),
             s.set({V})
     show(s.get())
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "meth/x_static",
@@ -3565,9 +3589,9 @@ s"#),
     print(b.v)
 "#,
         [
-            R(r#"argument to 'fill' has type int, expected int?"#),
-            R(r#"'?' builds an optional or success value, found int?"#),
-            R(r#"argument to 'fill' has type str?, expected int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3582,9 +3606,9 @@ s"#),
     print(b.v)
 "#,
         [
-            R(r#"argument to 'fill' has type int, expected int?"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
 ];
@@ -3601,7 +3625,11 @@ const CLO_ROWS: &[Row] = &[
     b.apply(fn(x): {V})
     show(b.v)
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "clo/box_apply_c",
@@ -3615,9 +3643,9 @@ const CLO_ROWS: &[Row] = &[
     print(b.v)
 "#,
         [
-            R(r#"argument 1 of 'apply': expected fn(int?) -> int?, found fn(int?) -> str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'apply': expected fn(int?) -> int?, found fn(int?) -> str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     one(
@@ -3629,7 +3657,7 @@ const CLO_ROWS: &[Row] = &[
     s.update(fn(xs): ["a"])
     print(s.get())
 "#,
-        R(r#"list element: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     row(
         "clo/ident_upd",
@@ -3644,9 +3672,9 @@ const CLO_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3661,9 +3689,9 @@ const CLO_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"list element: expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"list element: expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3680,9 +3708,9 @@ const CLO_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3696,7 +3724,11 @@ const CLO_ROWS: &[Row] = &[
     s.set({V})
     show(s.get())
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "clo/place_upd_c",
@@ -3710,9 +3742,9 @@ const CLO_ROWS: &[Row] = &[
     print(bs[0].v)
 "#,
         [
-            R(r#"argument 1 of 'apply': expected fn(int?) -> int?, found fn(int?) -> str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'apply': expected fn(int?) -> int?, found fn(int?) -> str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3725,7 +3757,11 @@ const CLO_ROWS: &[Row] = &[
     s.write(fn(x): {V})
     show(s.get())
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "clo/rw_write_c",
@@ -3739,9 +3775,9 @@ const CLO_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'write': expected fn(int?) -> int?, found fn(int?) -> str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'write': expected fn(int?) -> int?, found fn(int?) -> str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3756,9 +3792,9 @@ const CLO_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'update': expected fn(int?) -> int?, found fn(int?) -> str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'update': expected fn(int?) -> int?, found fn(int?) -> str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3771,7 +3807,11 @@ const CLO_ROWS: &[Row] = &[
     s.update(fn(x): {V})
     show(s.get())
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "clo/shared_upd_c",
@@ -3785,9 +3825,9 @@ const CLO_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'update': expected fn(int?) -> int?, found fn(int?) -> str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'update': expected fn(int?) -> int?, found fn(int?) -> str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3804,9 +3844,9 @@ const CLO_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'update': expected fn(int?) -> int?, found fn(int?) -> str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'update': expected fn(int?) -> int?, found fn(int?) -> str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3882,7 +3922,11 @@ const CLO_ROWS: &[Row] = &[
     upd(b, fn(x): {V})
     show(b.v)
 "#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
+        [
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+        ],
     ),
     row(
         "clo/upd_c",
@@ -3896,9 +3940,9 @@ const CLO_ROWS: &[Row] = &[
     print(b.v)
 "#,
         [
-            R(r#"closure argument to 'upd' returns str, expected int?"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"closure argument to 'upd' returns str?, expected int?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
     row(
@@ -3913,9 +3957,9 @@ const CLO_ROWS: &[Row] = &[
     print(s.get())
 "#,
         [
-            R(r#"argument 1 of 'set': expected int?, found str"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"argument 1 of 'set': expected int?, found str?"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
+            R(r#"cannot infer the"#),
         ],
     ),
 ];
@@ -3940,9 +3984,7 @@ const CLO2_ROWS: &[Row] = &[
     xs.push("a")
     print(xs, ys)
 "#,
-        R(
-            r#"argument 1 of 'push': expected int, found str (the collection's element type is int, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
     one(
         "clo2/filter_ann_none",
@@ -3953,7 +3995,7 @@ const CLO2_ROWS: &[Row] = &[
     xs.push(?"a")
     print(xs, ys)
 "#,
-        R(r#"'?' value: expected int, found str"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "clo2/filter_bare_none",
@@ -3965,8 +4007,7 @@ const CLO2_ROWS: &[Row] = &[
     show(xs[1])
     print(ys)
 "#,
-        P(r#"8
-[None]"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "clo2/filter_wrong_ann",
@@ -3977,7 +4018,7 @@ const CLO2_ROWS: &[Row] = &[
     ys := xs.filter(fn(x: str?): true)
     print(ys)
 "#,
-        R(r#"argument 1 of 'filter': expected fn(int?) -> bool, found fn(str?) -> bool"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "clo2/fold_none",
@@ -3989,8 +4030,7 @@ const CLO2_ROWS: &[Row] = &[
     show(xs[1])
     print(n)
 "#,
-        P(r#"8
-1"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "clo2/map_bare_empty",
@@ -4001,7 +4041,7 @@ const CLO2_ROWS: &[Row] = &[
     xs.push(1)
     print(xs, ys)
 "#,
-        R(r#"cannot infer type of parameter 'x'; add a type annotation"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "clo2/map_bare_none",
@@ -4012,7 +4052,7 @@ const CLO2_ROWS: &[Row] = &[
     xs.push(?"a")
     print(xs, ys)
 "#,
-        P(r#"[None, 'a'] [7]"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "clo2/map_nested_generic",
@@ -4023,7 +4063,7 @@ const CLO2_ROWS: &[Row] = &[
     xs.push(1)
     print(xs, ys)
 "#,
-        R(r#"cannot infer type of parameter 'x'; add a type annotation"#),
+        R(r#"cannot infer the"#),
     ),
     one(
         "clo2/sortby_ann_empty",
@@ -4034,9 +4074,7 @@ const CLO2_ROWS: &[Row] = &[
     xs.push("a")
     print(xs)
 "#,
-        R(
-            r#"argument 1 of 'push': expected int, found str (the collection's element type is int, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"#,
-        ),
+        R(r#"cannot infer the"#),
     ),
 ];
 
@@ -4447,50 +4485,11 @@ const REC_ROWS: &[Row] = &[
     ),
 ];
 
-/// TICKET-238 -- the right-hand sides that create a value with an open slot. Inference never
-/// reads a later statement, so a cell whose program binds one with an untyped `:=` is rejected on
-/// that line with the one hole error, whatever want its row holds: that want described a later
-/// pin. Every other cell keeps its want (a same-line sibling such as `[None, 7]` still joins).
-const OPEN_FORMS: [&str; 21] = [
-    "None",
-    "[None]",
-    "[None, None]",
-    "[[None]]",
-    "[]",
-    "[[]]",
-    "{}",
-    "{\"a\": None}",
-    "(None, 1)",
-    "if c: None else: None",
-    "Box(None)",
-    "Box([None])",
-    "Box([])",
-    "[Box(None)]",
-    "Out(Box(None))",
-    "Shared(None)",
-    "Shared([None])",
-    "Shared([])",
-    "RwShared(None)",
-    "Atomic(None)",
-    "E.Wrap(None)",
-];
-
-fn binds_open(src: &str) -> bool {
-    src.lines().any(|l| {
-        l.trim()
-            .split_once(" := ")
-            .is_some_and(|(_, rhs)| OPEN_FORMS.contains(&rhs))
-    })
-}
-
 fn cells_of(rows: &[Row], out: &mut Vec<Cell>) {
     for r in rows {
         let src = format!("{}fn main():\n{}main()\n", r.pre, &r.body[1..]);
         let mut push = |name: String, src: String, w: W| {
             let expect = match w {
-                // A row that does not parse is rejected before any binding is judged.
-                R(s) if s.starts_with("expected ':'") => Expect::Rejects(s),
-                _ if binds_open(&src) => Expect::Rejects("cannot infer the"),
                 P(s) => Expect::Prints(s.to_string()),
                 R(s) => Expect::Rejects(s),
             };

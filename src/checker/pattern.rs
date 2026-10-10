@@ -3921,8 +3921,8 @@ impl Checker {
         // [3]] for y in xs]` false-rejects (the iterand then types as `List[int]` against a
         // `List[List[int]]` value). Measured on a scratch implementation of this fix: with the take,
         // that program is `ok: no type errors`.
-        // TICKET-227: after every clause, the hint's ELEMENT payload (never the whole type,
-        // DEC-032) is the element expression's slot, so a plain element wraps into a carrier.
+        // TICKET-227: after every clause, the hint's ELEMENT payload (never the whole
+        // type) is the element expression's slot, so a plain element wraps into a carrier.
         let outer_hint = self.expected_hint.take().filter(ty_fully_concrete);
         self.push_scope();
         for clause in clauses {

@@ -9379,6 +9379,8 @@ the stored-callback abort net, and `std.net`'s sticky-UTF-8 + `read_bytes` drain
 Owner decision: inference never reads a later statement. `xs := []`, `m := {}`, `z := None`,
 `h := [None]`, `c := Cell(None)`, `v := Box.new()`, `ys := id([])` and `g := ident` are errors on the
 line that creates them. This closes wave 22 Family A (19 repros; `docs/root-causes-w22.md`).
+The collection-mismatch note reads "fixed where the binding is declared" (was "fixed by its
+annotation or an earlier use": no use fixes a type now).
 
 - **Migration.** Write the type on the statement: `xs: List[int] = []` or `xs := List[int]()`;
   `z: int? = None`; `Box[int].new()`; `g := ident[int]`; `r: int! = recover: ...` (or

@@ -4400,7 +4400,7 @@ impl Checker {
                         // TICKET-124 (W13-15): the slot is DECLARED (`l: List[float] = [1.5]`) or
                         // inferred on its own statement (`l := [1.5]`); the text covers both.
                         format!(
-                            " (the collection's element type is {expected}, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
+                            " (the collection's element type is {expected}, fixed where the binding is declared; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
                         )
                     }
                 } else {

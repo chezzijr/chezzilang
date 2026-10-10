@@ -1187,7 +1187,7 @@ impl Checker {
 
     /// Register the prelude's carrier enums (`carrier_seeds`) in the ordinary enum tables of the
     /// current module, under their bare names, and bind the variant names the prelude imports
-    /// from them. A carrier declares no method (DEC-064), so its method table is empty.
+    /// from them. A carrier declares no method, so its method table is empty.
     pub(super) fn seed_carrier_enums(&mut self) {
         let seeds = std::mem::take(&mut self.carrier_seeds);
         self.seed_carrier_enums_from(&seeds);
@@ -2492,8 +2492,8 @@ impl Checker {
         // keyword call through a `kw_certain` binding is legal only if the binding is never written,
         // and a write may come after the call, so the verdict waits for the binding's own scope end.
         // Module scope pops through here too (a module binding written from a fn body). The three
-        // tables are keyed `(scope_idx, name)` and scope indices are reused (DEC-032), so they drain
-        // here.
+        // tables are keyed `(scope_idx, name)` and the next pushed scope reuses this index, so they
+        // drain here.
         let top = self.scopes.len().saturating_sub(1);
         let pending = std::mem::take(&mut self.kw_pending);
         for (mut keys, kw_use) in pending {
