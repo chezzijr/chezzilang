@@ -38528,6 +38528,16 @@ fn closure_literal_reads_its_slot_through_one_carrier_layer() {
         "f: (fn(int) -> int)? = fn(a: str) -> int: 1\n",
         "cannot assign",
     );
+    // Boundary: ONE layer is looked through. A slot two layers deep does not type the closure
+    // (red if the strip loops over every layer, or if a wrap is applied twice).
+    rejects(
+        "f: (fn(int) -> int)?? = fn(a): a + 1\n",
+        "cannot infer type of parameter 'a'",
+    );
+    rejects(
+        "f: (fn(int) -> int)?? = fn(a: int) -> int: a + 1\n",
+        "cannot assign",
+    );
 }
 
 /// TICKET-239: a generic call substitutes its explicit type arguments before it reads an
