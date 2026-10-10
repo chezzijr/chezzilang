@@ -47,29 +47,29 @@ struct ConcurrentMap[K: Hashable + Eq, V]:
 
     # Look up `key`. CONCURRENT READ. Returns ?value or None.
     fn get(self, key: K) -> V?:
-        return self.inner.get_key(key)
+        return self.inner._get_key(key)
 
     # Insert or overwrite `key` -> `val`. One update guard.
     fn set(self, key: K, val: V):
-        self.inner.set_key(key, val)
+        self.inner._set_key(key, val)
 
     # Remove `key` if present (no-op if absent). One update guard.
     fn remove(self, key: K):
-        _ := self.inner.remove_key(key)
+        _ := self.inner._remove_key(key)
 
     # True iff `key` is present. CONCURRENT READ.
     fn contains(self, item: K) -> bool:
-        return self.inner.has(item)
+        return self.inner._has(item)
 
     # Number of entries. CONCURRENT READ.
     fn len(self) -> int:
-        return self.inner.len()
+        return self.inner._len()
 
     # COMPOUND-ATOMIC insert-if-absent: if `key` is present return its value; otherwise insert
     # `default` and return it. The probe and the insert run under ONE update guard with no user
     # closure, so a concurrent `remove` cannot slip between them.
     fn get_or_insert(self, key: K, default: V) -> V:
-        return self.inner.get_or_insert(key, default)
+        return self.inner._get_or_insert(key, default)
 
     # A COPY of the whole map (snapshot). CONCURRENT READ. `read` already copies the value out, so the
     # returned map is independent of later mutations.

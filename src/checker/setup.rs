@@ -1401,6 +1401,9 @@ impl Checker {
         method: &str,
         targs: &[Ty],
     ) -> Option<FnSig> {
+        if self.std_internal_hidden(method) {
+            return None;
+        }
         let info = self.structs.get(ty_name)?;
         let sig = info.methods.get(method)?;
         if targs.is_empty() || info.type_params.is_empty() {
@@ -1413,6 +1416,11 @@ impl Checker {
             summary: fn_writes::FnSummary::default(),
             ..instantiate_method(sig, &map)
         })
+    }
+
+    /// A std-internal name (`is_std_internal_name`) read from a module that is not std.
+    pub(super) fn std_internal_hidden(&self, name: &str) -> bool {
+        crate::checker::is_std_internal_name(name) && !self.current_module_is_stdlib
     }
 
     pub(super) fn error(&mut self, span: Span, message: impl Into<String>) {

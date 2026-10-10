@@ -953,7 +953,33 @@ impl MemberSig {
     }
 }
 
+/// The one spelling rule for a name internal to std (TICKET-243): a `_` name a std module
+/// declares. `Checker::std_internal_hidden` reads it for native methods and
+/// `ModuleSig::seal_std_internals` for a std module's export record.
+pub(crate) fn is_std_internal_name(name: &str) -> bool {
+    name.starts_with('_')
+}
+
 impl ModuleSig {
+    /// Remove every std-internal name from this (std) module's export record: a member, a type,
+    /// and a method of an exported struct or enum. Runs at publication, after the module's own
+    /// bodies are checked, so an importer never sees the name and no reader site needs a check.
+    fn seal_std_internals(&mut self) {
+        let k = |n: &String| !is_std_internal_name(n);
+        self.members.retain(|n, _| k(n));
+        self.types.retain(k);
+        self.struct_defs.retain(|n, _| k(n));
+        self.enum_defs.retain(|n, _| k(n));
+        self.type_aliases.retain(|n, _| k(n));
+        self.protocol_defs.retain(|n, _| k(n));
+        for d in self.struct_defs.values_mut() {
+            d.methods.retain(|n, _| k(n));
+        }
+        for d in self.enum_defs.values_mut() {
+            d.methods.retain(|n, _| k(n));
+        }
+    }
+
     fn member(&self, n: &str) -> Option<&MemberSig> {
         self.members.get(n)
     }
@@ -1609,6 +1635,9 @@ impl Checker {
                 | StmtKind::Enum { name, .. }
                 | StmtKind::TypeAlias { name, .. } = &s.kind
                 {
+                    if lm.is_std() && is_std_internal_name(name) {
+                        continue;
+                    }
                     c.types_by_name
                         .entry(name.clone())
                         .or_default()
@@ -1802,6 +1831,7 @@ impl Checker {
                 if !lm.imports.is_empty() {
                     c.begin_module(None);
                 }
+                sig.seal_std_internals();
                 c.module_sigs.insert(lm.id.clone(), sig);
                 continue;
             }
@@ -1824,7 +1854,7 @@ impl Checker {
             // the SAME module index the backends derive — mirrors the extern-sig keying.
             c.graph_module_idx = idx;
             c.current_module_is_stdlib = lm.is_std();
-            let sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
+            let mut sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
             // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set`/`Channel`
             // native-struct METHOD tables so `seed_stdlib_structs` can re-seed them (bare, method-table
             // only) into `self.structs` for every subsequent module, letting `xs.push(...)`/`m.get(...)`/
@@ -1908,6 +1938,9 @@ impl Checker {
                         ),
                     );
                 }
+            }
+            if lm.is_std() {
+                sig.seal_std_internals();
             }
             c.module_sigs.insert(lm.id.clone(), sig);
         }

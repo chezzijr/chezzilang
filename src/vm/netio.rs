@@ -3169,9 +3169,9 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let (name, key, val) = match op {
-            EntryWrite::Put(k, v) => ("set_key", k, v),
-            EntryWrite::Remove(k) => ("remove_key", k, Value::nil()),
-            EntryWrite::GetOrInsert(k, v) => ("get_or_insert", k, v),
+            EntryWrite::Put(k, v) => ("_set_key", k, v),
+            EntryWrite::Remove(k) => ("_remove_key", k, Value::nil()),
+            EntryWrite::GetOrInsert(k, v) => ("_get_or_insert", k, v),
         };
         // Root the receiver, key and value across a user `hash` (VM re-entry, may GC).
         let qh = self.hash_key_rooted(key, &[Value::obj(h), key, val], span)?;
@@ -3379,16 +3379,16 @@ impl Vm {
                 result
             }
             // TICKET-192: the single-entry writers of a `Map` element (update guard, O(1) expected).
-            "set_key" => {
-                self.arity_err("set_key", args, 2, span)?;
+            "_set_key" => {
+                self.arity_err("_set_key", args, 2, span)?;
                 self.rwshared_map_write_entry(h, EntryWrite::Put(args[0], args[1]), span)
             }
-            "remove_key" => {
-                self.arity_err("remove_key", args, 1, span)?;
+            "_remove_key" => {
+                self.arity_err("_remove_key", args, 1, span)?;
                 self.rwshared_map_write_entry(h, EntryWrite::Remove(args[0]), span)
             }
-            "get_or_insert" => {
-                self.arity_err("get_or_insert", args, 2, span)?;
+            "_get_or_insert" => {
+                self.arity_err("_get_or_insert", args, 2, span)?;
                 self.rwshared_map_write_entry(h, EntryWrite::GetOrInsert(args[0], args[1]), span)
             }
             "write" => {
@@ -3437,8 +3437,8 @@ impl Vm {
             // Holding it across `from_wire*` is safe and is exactly the window `at`/`slice` already
             // held: it allocs and nothing else, and `Heap::alloc` never collects, so no GC can re-lock
             // `core.v` underneath. The guard is still DROPPED before any user code (closure/hash/eq).
-            "len" => {
-                self.arity_err("len", args, 0, span)?;
+            "_len" => {
+                self.arity_err("_len", args, 0, span)?;
                 let core = self.rwshared_core(h);
                 let g = core.v.read().unwrap();
                 let n = match &*g {
@@ -3447,7 +3447,7 @@ impl Vm {
                     WireValue::Set { entries, .. } => entries.len() as i64,
                     _ => {
                         return Err(
-                            self.err("RwShared.len requires a container element".into(), span)
+                            self.err("RwShared._len requires a container element".into(), span)
                         );
                     }
                 };
@@ -3460,8 +3460,8 @@ impl Vm {
             // a user `index()` on — so this is the ONLY read accessor here, and it reports absence
             // rather than faulting.) A wrong container HEAD is still a fault: that is a type error,
             // not a missing element. Negative indexing (`at(-1)`) is unchanged — `norm_index` first.
-            "at" => {
-                self.arity_err("at", args, 1, span)?;
+            "_at" => {
+                self.arity_err("_at", args, 1, span)?;
                 let i = self.int_of(args[0]);
                 let core = self.rwshared_core(h);
                 let g = core.v.read().unwrap();
@@ -3474,15 +3474,15 @@ impl Vm {
                             return Ok(self.alloc_enum("Option", "None", vec![]));
                         }
                     },
-                    _ => return Err(self.err("RwShared.at requires a list element".into(), span)),
+                    _ => return Err(self.err("RwShared._at requires a list element".into(), span)),
                 };
                 let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
                 let v = self.from_wire_piece(&g, ew, &mut rb);
                 drop(g); // the rebuild is done — release before the `Option` wrapper allocs
                 Ok(self.alloc_enum("Option", "Some", vec![v]))
             }
-            "slice" => {
-                self.arity_err("slice", args, 2, span)?;
+            "_slice" => {
+                self.arity_err("_slice", args, 2, span)?;
                 let lo = self.int_of(args[0]);
                 let hi = self.int_of(args[1]);
                 let core = self.rwshared_core(h);
@@ -3493,7 +3493,9 @@ impl Vm {
                             .map_err(|e| self.err(e.to_string(), span))?
                     }
                     _ => {
-                        return Err(self.err("RwShared.slice requires a list element".into(), span));
+                        return Err(
+                            self.err("RwShared._slice requires a list element".into(), span)
+                        );
                     }
                 };
                 // Materialize ONLY [lo:hi] into a fresh list, rooted on the operand stack across the
@@ -3535,8 +3537,8 @@ impl Vm {
                 Ok(Value::obj(res_h))
             }
             // `for_each(f: fn(E) -> _)` on a `List[E]` OR `Set[E]` — a per-element side-effect scan.
-            "for_each" => {
-                self.arity_err("for_each", args, 1, span)?;
+            "_for_each" => {
+                self.arity_err("_for_each", args, 1, span)?;
                 let f = args[0];
                 let core = self.rwshared_core(h);
                 // Snapshot the length under a brief guard (dropped immediately).
@@ -3545,7 +3547,7 @@ impl Vm {
                     WireValue::Set { entries, .. } => entries.len(),
                     _ => {
                         return Err(self.err(
-                            "RwShared.for_each requires a list or set element".into(),
+                            "RwShared._for_each requires a list or set element".into(),
                             span,
                         ));
                     }
@@ -3594,8 +3596,8 @@ impl Vm {
                 Ok(Value::nil())
             }
             // `fold(init, f: fn(R, E) -> R) -> R` on a `List[E]` OR `Set[E]`.
-            "fold" => {
-                self.arity_err("fold", args, 2, span)?;
+            "_fold" => {
+                self.arity_err("_fold", args, 2, span)?;
                 let init = args[0];
                 let f = args[1];
                 let core = self.rwshared_core(h);
@@ -3604,7 +3606,7 @@ impl Vm {
                     WireValue::Set { entries, .. } => entries.len(),
                     _ => {
                         return Err(
-                            self.err("RwShared.fold requires a list or set element".into(), span)
+                            self.err("RwShared._fold requires a list or set element".into(), span)
                         );
                     }
                 };
@@ -3660,8 +3662,8 @@ impl Vm {
             // dispatch a user `hash`/GC), then `rwshared_probe` (TICKET-192): the stored table's
             // `HashIndex` candidates only, each cloned under a guard that is DROPPED before the eq.
             // The guard is NEVER held across hash/eq (same deadlock invariant as `for_each`/`fold`).
-            "contains" => {
-                self.arity_err("contains", args, 1, span)?;
+            "_contains" => {
+                self.arity_err("_contains", args, 1, span)?;
                 let needle = args[0];
                 // Root the receiver `h` AND `needle` across the hash: for a struct/enum
                 // element `hash_value` dispatches the user `hash` (re-enters the VM, may GC), and
@@ -3674,7 +3676,7 @@ impl Vm {
                     WireValue::Set { .. } => {}
                     _ => {
                         return Err(
-                            self.err("RwShared.contains requires a set element".into(), span)
+                            self.err("RwShared._contains requires a set element".into(), span)
                         );
                     }
                 };
@@ -3689,8 +3691,8 @@ impl Vm {
             }
             // Map[K,V].has(k) -> bool — same hash-once + per-probe re-lock discipline as `contains`,
             // comparing the KEY (entry.1 is the key wire, entry.2 the value wire).
-            "has" => {
-                self.arity_err("has", args, 1, span)?;
+            "_has" => {
+                self.arity_err("_has", args, 1, span)?;
                 let key = args[0];
                 // Root receiver `h` AND `key` across the hash — a struct/enum key's `hash`
                 // re-enters the VM and may GC; both are off the operand stack here. Mirrors the
@@ -3699,7 +3701,7 @@ impl Vm {
                 let core = self.rwshared_core(h);
                 match &*core.v.read().unwrap() {
                     WireValue::Map { .. } => {}
-                    _ => return Err(self.err("RwShared.has requires a map element".into(), span)),
+                    _ => return Err(self.err("RwShared._has requires a map element".into(), span)),
                 };
                 self.push(Value::obj(h));
                 self.push(key);
@@ -3710,8 +3712,8 @@ impl Vm {
             }
             // Map[K,V].get_key(k) -> Option[V] — probe as `has`, rebuilding the VALUE wire under the
             // same guard as the key; `Some(v)` on an eq-match, `None` on a miss.
-            "get_key" => {
-                self.arity_err("get_key", args, 1, span)?;
+            "_get_key" => {
+                self.arity_err("_get_key", args, 1, span)?;
                 let key = args[0];
                 // Root receiver `h` AND `key` across the hash — a struct/enum key's `hash`
                 // re-enters the VM and may GC; both are off the operand stack here. Mirrors the
@@ -3722,7 +3724,7 @@ impl Vm {
                     WireValue::Map { .. } => {}
                     _ => {
                         return Err(
-                            self.err("RwShared.get_key requires a map element".into(), span)
+                            self.err("RwShared._get_key requires a map element".into(), span)
                         );
                     }
                 };
@@ -3739,15 +3741,15 @@ impl Vm {
                 })
             }
             // Map[K,V].for_each_entry(f: fn(K, V) -> _) — per-entry side-effect scan (2-arg closure).
-            "for_each_entry" => {
-                self.arity_err("for_each_entry", args, 1, span)?;
+            "_for_each_entry" => {
+                self.arity_err("_for_each_entry", args, 1, span)?;
                 let f = args[0];
                 let core = self.rwshared_core(h);
                 let n = match &*core.v.read().unwrap() {
                     WireValue::Map { entries, .. } => entries.len(),
                     _ => {
                         return Err(self.err(
-                            "RwShared.for_each_entry requires a map element".into(),
+                            "RwShared._for_each_entry requires a map element".into(),
                             span,
                         ));
                     }
@@ -3797,8 +3799,8 @@ impl Vm {
                 Ok(Value::nil())
             }
             // Map[K,V].fold_entries(init, f: fn(R, K, V) -> R) -> R — per-entry reduce (3-arg closure).
-            "fold_entries" => {
-                self.arity_err("fold_entries", args, 2, span)?;
+            "_fold_entries" => {
+                self.arity_err("_fold_entries", args, 2, span)?;
                 let init = args[0];
                 let f = args[1];
                 let core = self.rwshared_core(h);
@@ -3806,7 +3808,7 @@ impl Vm {
                     WireValue::Map { entries, .. } => entries.len(),
                     _ => {
                         return Err(
-                            self.err("RwShared.fold_entries requires a map element".into(), span)
+                            self.err("RwShared._fold_entries requires a map element".into(), span)
                         );
                     }
                 };

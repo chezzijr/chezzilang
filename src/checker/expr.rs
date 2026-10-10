@@ -44,6 +44,37 @@ impl ArgPass {
     }
 }
 
+/// The container primitives of an `RwShared` box (TICKET-243), one row per element head:
+/// `(head, the std.concurrency.collection type that owns the surface, the primitive names)`.
+/// The `Ty::RwShared` arm types exactly these names, and only inside std (`std_internal_hidden`);
+/// a Miss on one names the collection.
+pub(super) const RWSHARED_VIEWS: &[(&str, &str, &[&str])] = &[
+    (
+        "List",
+        "ConcurrentList",
+        &["_len", "_at", "_slice", "_for_each", "_fold", "_push"],
+    ),
+    (
+        "Map",
+        "ConcurrentMap",
+        &[
+            "_len",
+            "_get_key",
+            "_has",
+            "_set_key",
+            "_remove_key",
+            "_get_or_insert",
+            "_for_each_entry",
+            "_fold_entries",
+        ],
+    ),
+    (
+        "Set",
+        "ConcurrentSet",
+        &["_len", "_contains", "_for_each", "_fold", "_add", "_remove"],
+    ),
+];
+
 impl Checker {
     #[allow(clippy::too_many_arguments)] // the call node's parts, its bracket reading, span and id
     pub(super) fn infer_call(
@@ -2435,7 +2466,8 @@ impl Checker {
                 // already route through `infer_generic_method` WITH `type_args` (see `fold_sig`).
                 // A wrong receiver element (`RwShared[int].fold[int]`) still rejects downstream, via
                 // the native handle resolver's "no method".
-                if matches!(recv_ty, Ty::RwShared(_)) && matches!(method, "fold" | "fold_entries") {
+                if matches!(recv_ty, Ty::RwShared(_)) && matches!(method, "_fold" | "_fold_entries")
+                {
                     return true;
                 }
                 let bare = match recv_ty {
@@ -3555,62 +3587,77 @@ impl Checker {
                     ret: Box::new(Ty::Unknown),
                     labels: crate::checker::FnLabels::default(),
                 };
+                let view = RWSHARED_VIEWS.iter().find(|(head, _, _)| {
+                    matches!(
+                        (&elem, *head),
+                        (Ty::List(_), "List") | (Ty::Map(_, _), "Map") | (Ty::Set(_), "Set")
+                    )
+                });
+                let typed = view.is_some_and(|(_, _, names)| names.contains(&method))
+                    && !self.std_internal_hidden(method);
                 match &elem {
+                    _ if !typed => {}
                     Ty::List(e) => {
                         let e = (**e).clone();
                         match method {
-                            "len" => {
-                                self.check_args_range("len", &[], 0, args, span);
+                            "_push" => {
+                                self.check_args_range("_push", &[e], 1, args, span);
+                                return Ty::Nil;
+                            }
+                            "_len" => {
+                                self.check_args_range("_len", &[], 0, args, span);
                                 return Ty::Int;
                             }
                             // `at(i) -> Option[E]`: out of range is `None`, never a fault, matching the
                             // language's other named accessors (`get_key -> Option[V]` below,
                             // `std.json.at -> Option[Json]`). `RwShared` has no `[]` of its own (it
                             // does not satisfy `Index`), so this is its only read accessor.
-                            "at" => {
-                                self.check_args_range("at", &[Ty::Int], 1, args, span);
+                            "_at" => {
+                                self.check_args_range("_at", &[Ty::Int], 1, args, span);
                                 return Ty::option(e);
                             }
-                            "slice" => {
-                                self.check_args_range("slice", &[Ty::Int, Ty::Int], 2, args, span);
+                            "_slice" => {
+                                self.check_args_range("_slice", &[Ty::Int, Ty::Int], 2, args, span);
                                 return Ty::list(e);
                             }
-                            "for_each" => {
-                                self.check_args_range("for_each", &[func(vec![e])], 1, args, span);
+                            "_for_each" => {
+                                self.check_args_range("_for_each", &[func(vec![e])], 1, args, span);
                                 return Ty::Nil;
                             }
-                            "fold" => return fold_sig(self, "fold", vec![e]),
-                            _ => {}
+                            "_fold" => return fold_sig(self, "_fold", vec![e]),
+                            _ => {
+                                unreachable!("RWSHARED_VIEWS lists a method this arm does not type")
+                            }
                         }
                     }
                     Ty::Map(k, v) => {
                         let k = (**k).clone();
                         let v = (**v).clone();
                         match method {
-                            "len" => {
-                                self.check_args_range("len", &[], 0, args, span);
+                            "_len" => {
+                                self.check_args_range("_len", &[], 0, args, span);
                                 return Ty::Int;
                             }
-                            "get_key" => {
-                                self.check_args_range("get_key", &[k], 1, args, span);
+                            "_get_key" => {
+                                self.check_args_range("_get_key", &[k], 1, args, span);
                                 return Ty::option(v);
                             }
-                            "has" => {
-                                self.check_args_range("has", &[k], 1, args, span);
+                            "_has" => {
+                                self.check_args_range("_has", &[k], 1, args, span);
                                 return Ty::Bool;
                             }
                             // TICKET-192: the single-entry writers (update guard, O(1) expected).
-                            "set_key" => {
-                                self.check_args_range("set_key", &[k, v], 2, args, span);
+                            "_set_key" => {
+                                self.check_args_range("_set_key", &[k, v], 2, args, span);
                                 return Ty::Nil;
                             }
-                            "remove_key" => {
-                                self.check_args_range("remove_key", &[k], 1, args, span);
+                            "_remove_key" => {
+                                self.check_args_range("_remove_key", &[k], 1, args, span);
                                 return Ty::option(v);
                             }
-                            "get_or_insert" => {
+                            "_get_or_insert" => {
                                 self.check_args_range(
-                                    "get_or_insert",
+                                    "_get_or_insert",
                                     &[k, v.clone()],
                                     2,
                                     args,
@@ -3618,9 +3665,9 @@ impl Checker {
                                 );
                                 return v;
                             }
-                            "for_each_entry" => {
+                            "_for_each_entry" => {
                                 self.check_args_range(
-                                    "for_each_entry",
+                                    "_for_each_entry",
                                     &[func(vec![k, v])],
                                     1,
                                     args,
@@ -3628,27 +3675,35 @@ impl Checker {
                                 );
                                 return Ty::Nil;
                             }
-                            "fold_entries" => return fold_sig(self, "fold_entries", vec![k, v]),
-                            _ => {}
+                            "_fold_entries" => return fold_sig(self, "_fold_entries", vec![k, v]),
+                            _ => {
+                                unreachable!("RWSHARED_VIEWS lists a method this arm does not type")
+                            }
                         }
                     }
                     Ty::Set(e) => {
                         let e = (**e).clone();
                         match method {
-                            "len" => {
-                                self.check_args_range("len", &[], 0, args, span);
+                            "_len" => {
+                                self.check_args_range("_len", &[], 0, args, span);
                                 return Ty::Int;
                             }
-                            "contains" => {
-                                self.check_args_range("contains", &[e], 1, args, span);
+                            "_contains" => {
+                                self.check_args_range("_contains", &[e], 1, args, span);
                                 return Ty::Bool;
                             }
-                            "for_each" => {
-                                self.check_args_range("for_each", &[func(vec![e])], 1, args, span);
+                            "_add" | "_remove" => {
+                                self.check_args_range(method, &[e], 1, args, span);
                                 return Ty::Nil;
                             }
-                            "fold" => return fold_sig(self, "fold", vec![e]),
-                            _ => {}
+                            "_for_each" => {
+                                self.check_args_range("_for_each", &[func(vec![e])], 1, args, span);
+                                return Ty::Nil;
+                            }
+                            "_fold" => return fold_sig(self, "_fold", vec![e]),
+                            _ => {
+                                unreachable!("RWSHARED_VIEWS lists a method this arm does not type")
+                            }
                         }
                     }
                     _ => {}
@@ -3684,11 +3739,25 @@ impl Checker {
                     }
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let names = self.method_names("RwShared");
+                        // A container primitive (public or `_` spelling) names its collection
+                        // before any near-miss: `set_key` is not a typo of `set`.
+                        let under = format!("_{method}");
+                        let help = match view {
+                            Some((_, coll, names))
+                                if names.contains(&method) || names.contains(&under.as_str()) =>
+                            {
+                                Some(format!("use {coll} from std.concurrency.collection"))
+                            }
+                            _ => {
+                                let mut names = self.method_names("RwShared");
+                                names.retain(|n| !self.std_internal_hidden(n));
+                                suggest::did_you_mean(method, &names)
+                            }
+                        };
                         self.error_help(
                             name_span,
                             format!("type {obj_ty} has no method '{method}'"),
-                            suggest::did_you_mean(method, &names),
+                            help,
                         );
                         Ty::Unknown
                     }
@@ -3846,7 +3915,8 @@ impl Checker {
                     }
                     NativeHandleMethod::Miss => {
                         self.infer_all(args);
-                        let names = self.method_names("Executor");
+                        let mut names = self.method_names("Executor");
+                        names.retain(|n| !self.std_internal_hidden(n));
                         self.error_help(
                             name_span,
                             format!("type {obj_ty} has no method '{method}'"),

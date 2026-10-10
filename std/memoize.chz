@@ -32,7 +32,7 @@ fn _memo_get[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], own: Map[K, V], f
             pass
     if concurrency.is_task_copy(own):
         return _memo_copy_read(shared, f, k)
-    v := match shared.get_key(k):
+    v := match shared._get_key(k):
         ?x: x
         None: _memo_fill(shared, f, k)
     own[k] = v
@@ -44,13 +44,13 @@ fn _memo_get[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], own: Map[K, V], f
 # that would mark what the task owns; a key that never equals itself is not found by the read-back,
 # and the fill's own value is returned unmarked (no recursion: `f` runs once per call, as on base).
 fn _memo_copy_read[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
-    match shared.get_key(k):
+    match shared._get_key(k):
         ?x:
             return concurrency.task_copy_of(x)
         None:
             pass
     v := _memo_fill(shared, f, k)
-    match shared.get_key(k):
+    match shared._get_key(k):
         ?x:
             return concurrency.task_copy_of(x)
         None:
@@ -58,7 +58,7 @@ fn _memo_copy_read[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], f: fn(K) ->
 
 fn _memo_fill[K: Hashable + Eq, V](shared: RwShared[Map[K, V]], f: fn(K) -> V, k: K) -> V:
     v := f(k)
-    shared.set_key(k, v)
+    shared._set_key(k, v)
     return v
 
 # Wrap `f` so each distinct argument is computed once and cached. Returns a fn with the same

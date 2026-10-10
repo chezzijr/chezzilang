@@ -2483,6 +2483,9 @@ impl Checker {
         let native_methods = self.structs.get(key).map(|i| &i.methods);
         let mut table: HashMap<String, FnSig> = HashMap::new();
         for (mname, _) in &pinfo.methods {
+            if self.std_internal_hidden(mname) {
+                continue;
+            }
             let Some(sig) = native_methods.and_then(|m| m.get(mname)) else {
                 continue; // left out of the table -- satisfies_methods reports "(missing method ...)"
             };
