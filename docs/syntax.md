@@ -1004,7 +1004,10 @@ fn answer() -> int: 42     # annotated inline-expr body is valid (the expr is th
 
 An inline body may also be an **if-expression** — the same form a closure or `x := if …` uses. It is
 the implicit return, and `else` is required; every other compound statement (`for`, `while`, `match`,
-a statement-`if`) still needs an indented block:
+a statement-`if`) still needs an indented block. On a line of its own, `if c: a() else: b()` is that
+same if-expression used as a statement (see **if-expression** below); as the inline body of another
+block (`for i in xs: if c: a() else: b()`, a statement `match` arm) it is still
+`a nested block must be indented, not written inline after ':'`:
 
 ```chezzi
 fn pick(n: int) -> int: if n > 0: 1 else: 2     # pick(5) == 1, pick(-5) == 2
@@ -2143,7 +2146,9 @@ print(max("apple", "banana"))        # banana
 A bound may equivalently be written in a **`where` clause** after the return type — an alternative
 spelling of the same bounds, useful to keep a long parameter list readable. Each `where` entry names
 a declared type parameter and lists its protocols (`+`-joined, comma-separated across entries); the
-checker merges them into the matching `[T]` parameter, so the two forms are interchangeable:
+checker merges them into the matching `[T]` parameter, so the two forms are interchangeable. A
+`where` entry needs a bound: `where T:` and `where T, U: Eq` are
+``a `where` entry needs a bound (`where T: Proto`)``:
 
 ```chezzi
 fn max[T](a: T, b: T) -> T where T: Comparable:   # same as `fn max[T: Comparable](a, b)`
@@ -3450,7 +3455,28 @@ label := match shape:
 sign := if n > 0: "pos" else: "neg"
 # chained: `elif` chains without parentheses (the final `else` stays mandatory)
 grade := if s >= 90: "A" elif s >= 80: "B" else: "F"
+# as a statement on one line: the same expression, its value discarded
+if n > 0: print("pos") else: print("neg")
+if s >= 90: print("A") elif s >= 80: print("B") else: print("F")
 ```
+
+**The one-line `if … else` statement is the if-expression** (TICKET-242). `if c: a() else: b()` on
+one line is not a third form: it is `if c: a() else: b()` the expression, used as a statement, and
+its value is discarded. So each branch is an **expression**, as in `x := if …`. A statement in a
+branch (`if c: return 1 else: return 2`, `if c: x = 1 else: x = 2`, `if c: break else: continue`,
+a bare `if c: return else: f()`) is a parse error in both forms; the statement form reports
+``a one-line `if`/`else` takes an expression in each branch; write a statement branch, or an `else:` guard, on its own indented line``.
+Write those with indented blocks. An `if c: a()` line followed by `else:` or `elif` on the NEXT
+line is the statement `if`, unchanged.
+
+Because the statement form discards its value, **its branches may have different types**:
+`if c: print(1) else: xs.len()` and `if c: 1 elif d: "a" else: [1]` type-check and run, and so does
+the parenthesized `(if c: print(1) else: 2)` on its own line. Each branch is checked as a discarded
+value of its own, so a `T?` or `T!E` branch still gets the discarded-value warning (one per
+branch, naming the callee). Wherever the value is USED the branches must still have one type, as
+the next paragraph says: `x := if …`, `_ := if …`, a call argument, a `return` value, an inline fn
+body (`fn f(c: bool): if c: a() else: b()` returns the value), a closure body, a match-expression
+arm, and the trailing expression of a `recover:` block.
 
 All arms (and both `if` branches) must agree on a type — there is NO numeric adaptation (rule D3, §3):
 an `int` branch beside a `float` branch is a type error (`x := if c: 1 else: 2.5` →
@@ -3736,6 +3762,14 @@ match r:
     !e: print("recovered: {e.message()}")   # a fault becomes !message
 ```
 
+**Inside parentheses and call arguments** `recover:` takes one expression (TICKET-242):
+`print(recover: 1 / 0)`, `x := (recover: parse(s))`, `f(a, key=recover: g())`,
+`if (recover: 1) == ?1:`. It must be the WHOLE parenthesized value or the WHOLE argument, and its
+body is an expression (no layout exists inside brackets, so no statement and no block). It is not
+an operand (`print(1 + recover: 1)`), a tuple element (`(recover: 1, 2)`), a list or map element
+(`[recover: 1]`), a closure body or an if-expression branch inside brackets; each of those is a
+parse error. Wrap it in its own parentheses: `print(1 + (recover: 1))` parses.
+
 The block's value is its **trailing expression**. A trailing statement-form `match`/`if` counts too:
 when every arm/branch produces a value (a total `match`; an `if` with an `else`, every branch ending
 in a value), the whole construct is the block's value expression and `?v` wraps its unified arm/branch
@@ -3950,6 +3984,15 @@ fn span(path: str) -> int!str:
   `a, b = …`, `self.f = …`, `xs[i] = …`, `x += …`) and `return f() else e:` are parse errors:
   ``an `else` guard belongs on a `:=` binding or a bare call, not on an assignment or `return` ``.
   A value list (`a, b := 1, 2`) takes no guard either: a tuple literal cannot fail.
+- On the line of an inline `if` or `elif` body, a bare `else:` or `elif` after the body's one
+  statement belongs to the `if` (`if c: f() else: g()` is the if-expression above). `else e:`, with
+  a binder, stays a guard there: `if c: save(p) else e: return`. A bare-`else:` guard on that
+  statement needs the indented form; `if c: f() else: return` is
+  `` a one-line `if`/`else` takes an expression in each branch; … ``. A nested inline block on the
+  line keeps its own `else:` guard: in `if c: r := recover: f() else: panic("p")` the guard is on
+  `f()`, inside the `recover:` body, and the same holds inside an `else e:` guard body. A one-line
+  `elif` takes no `else:` or `elif` after its body:
+  ``an `elif` body ends its line; write the next `elif` or `else:` on its own line, and an `else:` guard in an indented body``.
 - `else e:` on a `T?` is an error (absent has no payload): `` `else e:` needs an error to bind, and int? has none; write `else:` ``.
 - On an `int?!E` value `else` handles the outer error, and `v` is the `int?`.
 - At module top level there is no `return`: leave with `panic`, `os.exit`, `break` / `continue` in a
