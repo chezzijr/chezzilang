@@ -38969,3 +38969,20 @@ fn fresh_shape_grid() {
         assert_eq!(format!("{:?}", c.recv), want, "{recv}");
     }
 }
+
+#[test]
+fn inline_if_else_statement_is_accepted() {
+    ok("fn main():\n    c := true\n    if c: print(1) else: print(2)\n");
+}
+
+#[test]
+fn inline_if_elif_else_statement_is_accepted() {
+    ok(
+        "fn main():\n    a := false\n    b := true\n    if a: print(1) elif b: print(2) else: print(3)\n",
+    );
+}
+
+#[test]
+fn inline_recover_in_call_argument_is_accepted() {
+    ok("fn main():\n    print(recover: 1)\n");
+}
