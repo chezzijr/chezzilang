@@ -3162,7 +3162,7 @@ impl Vm {
     ///    mutate it on the heap and re-encode it (the pre-TICKET-192 cost).
     ///
     /// The summary moves by the spliced pieces' bytes and never turns DIRTY into CLEAN.
-    pub(super) fn rwshared_map_write_entry(
+    pub(super) fn rwshared_write_entry(
         &mut self,
         h: GcRef,
         op: EntryWrite,
@@ -3172,17 +3172,26 @@ impl Vm {
             EntryWrite::Put(k, v) => ("_set_key", k, v),
             EntryWrite::Remove(k) => ("_remove_key", k, Value::nil()),
             EntryWrite::GetOrInsert(k, v) => ("_get_or_insert", k, v),
+            EntryWrite::Add(e) => ("_add", e, Value::nil()),
+            EntryWrite::Discard(e) => ("_remove", e, Value::nil()),
         };
+        let on_set = op.on_set();
         // Root the receiver, key and value across a user `hash` (VM re-entry, may GC).
         let qh = self.hash_key_rooted(key, &[Value::obj(h), key, val], span)?;
         let core = self.rwshared_core(h);
         let _guard =
             self.take_update_guard(Arc::as_ptr(&core) as usize, "a RwShared update guard", span)?;
-        if !matches!(&*core.v.read().unwrap(), WireValue::Map { .. }) {
-            return Err(self.err(format!("RwShared.{name} requires a map element"), span));
+        let kind_ok = match &*core.v.read().unwrap() {
+            WireValue::Map { .. } => !on_set,
+            WireValue::Set { .. } => on_set,
+            _ => false,
+        };
+        if !kind_ok {
+            let want = if on_set { "set" } else { "map" };
+            return Err(self.err(format!("RwShared.{name} requires a {want} element"), span));
         }
         self.with_roots(&[Value::obj(h), key, val], |vm| {
-            let with_value = !matches!(op, EntryWrite::Put(..));
+            let with_value = matches!(op, EntryWrite::Remove(_) | EntryWrite::GetOrInsert(..));
             let probed = vm.rwshared_probe(&core, qh, key, with_value, span)?;
             let pos = match (op, probed) {
                 (EntryWrite::GetOrInsert(..), Some((_, v))) => {
@@ -3190,6 +3199,9 @@ impl Vm {
                 }
                 (EntryWrite::Remove(_), None) => {
                     return Ok(vm.alloc_enum("Option", "None", vec![]));
+                }
+                (EntryWrite::Add(_), Some(_)) | (EntryWrite::Discard(_), None) => {
+                    return Ok(Value::nil());
                 }
                 (_, p) => p,
             };
@@ -3205,24 +3217,24 @@ impl Vm {
                                 .flat()
                                 .unwrap_or_else(|| Vm::wire_pieces_are_self_contained(&g)),
                         ),
-                        _ => unreachable!("the update guard keeps the element a map"),
+                        WireValue::Set { entries, .. } => (
+                            entries.id_ceiling(),
+                            entries
+                                .flat()
+                                .unwrap_or_else(|| Vm::wire_pieces_are_self_contained(&g)),
+                        ),
+                        _ => unreachable!("the update guard keeps the element's kind"),
                     }
                 };
                 if pos.is_some() && !flat {
-                    vm.rwshared_map_write_entry_slow(&core, op, qh, span)?;
+                    vm.rwshared_write_entry_slow(&core, op, qh, span)?;
                 } else {
-                    vm.rwshared_map_splice(
-                        &core,
-                        op,
-                        pos.map(|(i, _)| i),
-                        qh,
-                        ceiling,
-                        flat,
-                        span,
-                    )?;
+                    vm.rwshared_splice(&core, op, pos.map(|(i, _)| i), qh, ceiling, flat, span)?;
                 }
                 Ok(match op {
-                    EntryWrite::Put(..) => Value::nil(),
+                    EntryWrite::Put(..) | EntryWrite::Add(_) | EntryWrite::Discard(_) => {
+                        Value::nil()
+                    }
                     EntryWrite::Remove(_) => vm.alloc_enum("Option", "Some", vec![removed]),
                     EntryWrite::GetOrInsert(_, v) => v,
                 })
@@ -3230,10 +3242,10 @@ impl Vm {
         })
     }
 
-    /// The in-place half of [`rwshared_map_write_entry`](Self::rwshared_map_write_entry): `pos` is the
+    /// The in-place half of [`rwshared_write_entry`](Self::rwshared_write_entry): `pos` is the
     /// probed position (`None` = insert). The caller holds the update guard, so `pos` is stable.
     #[allow(clippy::too_many_arguments)]
-    fn rwshared_map_splice(
+    fn rwshared_splice(
         &mut self,
         core: &Arc<RwSharedCore>,
         op: EntryWrite,
@@ -3256,6 +3268,9 @@ impl Vm {
             (EntryWrite::Put(_, v), Some(_)) => {
                 (None, Some(self.to_wire_crossable_memo(v, span, &mut memo)?))
             }
+            (EntryWrite::Add(e), None) => {
+                (Some(self.to_wire_crossable_memo(e, span, &mut memo)?), None)
+            }
             _ => (None, None),
         };
         let entry_flat = kw
@@ -3267,6 +3282,29 @@ impl Vm {
             (acc.0 + b, acc.1 | d)
         });
         let next_id = memo.next_id();
+        if op.on_set() {
+            core.with_set_mut(|s| {
+                let (add_bytes, sub_bytes) = match (kw, pos) {
+                    (Some(ew), None) => {
+                        s.push((qh, ew));
+                        (add_bytes + std::mem::size_of::<u64>(), 0)
+                    }
+                    (None, Some(i)) => {
+                        let (_, e) = s.remove_at(i);
+                        (
+                            0,
+                            std::mem::size_of::<u64>() + super::core::wire_summary(&e).0,
+                        )
+                    }
+                    _ => unreachable!("splice: op and position disagree"),
+                };
+                s.raise_ceiling(next_id);
+                s.set_flat(flat && entry_flat);
+                core.summary.adjust(add_bytes, add_dirty, sub_bytes);
+            })
+            .expect("the update guard keeps the element a set");
+            return Ok(());
+        }
         core.with_map_mut(|m| {
             let sub_bytes = match (kw, vw, pos) {
                 (Some(kw), Some(vw), None) => {
@@ -3295,11 +3333,60 @@ impl Vm {
         Ok(())
     }
 
+    /// TICKET-243 — `RwShared[List[E]]._push`: append one element under the update guard (DEC-016).
+    /// A stored wire list carries no id ceiling, so the first push after a whole store decodes the
+    /// list, pushes on the heap and re-encodes it with ONE memo, recording that memo's `next_id` in
+    /// [`RwSharedCore::list_ceiling`]. Every later push serializes the element alone, seeded at the
+    /// ceiling, and splices it: its ids never collide with a stored one.
+    fn rwshared_list_push(
+        &mut self,
+        h: GcRef,
+        e: Value,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        use std::sync::atomic::Ordering;
+        let core = self.rwshared_core(h);
+        let _guard =
+            self.take_update_guard(Arc::as_ptr(&core) as usize, "a RwShared update guard", span)?;
+        if !matches!(&*core.v.read().unwrap(), WireValue::List { .. }) {
+            return Err(self.err("RwShared._push requires a list element".into(), span));
+        }
+        self.with_roots(&[Value::obj(h), e], |vm| {
+            let ceiling = core.list_ceiling.load(Ordering::Relaxed);
+            if ceiling == 0 {
+                let w = core.v.read().unwrap().clone();
+                let lv = vm.from_wire(w);
+                let lh = lv.as_obj().expect("a stored list rebuilds as a heap list");
+                return vm.with_roots(&[lv], |vm| {
+                    let Obj::List(items) = vm.heap.get_mut(lh) else {
+                        unreachable!()
+                    };
+                    items.push(e);
+                    let mut memo = super::sched::WireMemo::default();
+                    let stored = vm.to_wire_crossable_memo(lv, span, &mut memo)?;
+                    core.store_list(stored, memo.next_id());
+                    Ok(Value::nil())
+                });
+            }
+            let mut memo = super::sched::WireMemo::seeded(ceiling);
+            let ew = vm.to_wire_crossable_memo(e, span, &mut memo)?;
+            let (bytes, dirty) = super::core::wire_summary(&ew);
+            let next_id = memo.next_id();
+            core.with_list_mut(|items| {
+                items.push(ew);
+                core.list_ceiling.store(next_id, Ordering::Relaxed);
+                core.summary.adjust(bytes, dirty, 0);
+            })
+            .expect("the update guard keeps the element a list");
+            Ok(Value::nil())
+        })
+    }
+
     /// The decode-mutate-re-encode half of
-    /// [`rwshared_map_write_entry`](Self::rwshared_map_write_entry), for a remove or overwrite on a
+    /// [`rwshared_write_entry`](Self::rwshared_write_entry), for a remove or overwrite on a
     /// map whose pieces do not all stand alone. The caller holds the update guard and roots the key
     /// and value.
-    fn rwshared_map_write_entry_slow(
+    fn rwshared_write_entry_slow(
         &mut self,
         core: &Arc<RwSharedCore>,
         op: EntryWrite,
@@ -3308,9 +3395,20 @@ impl Vm {
     ) -> Result<(), RuntimeError> {
         let w = core.v.read().unwrap().clone();
         let mv = self.from_wire(w);
-        let mh = mv.as_obj().expect("a stored map rebuilds as a heap map");
+        let mh = mv
+            .as_obj()
+            .expect("a stored map or set rebuilds on the heap");
         self.with_roots(&[mv], |vm| {
             match op {
+                EntryWrite::Discard(e) => {
+                    if let Some(i) = vm.set_probe(mh, qh, e, span)? {
+                        let Obj::Set(s) = vm.heap.get_mut(mh) else {
+                            unreachable!()
+                        };
+                        s.remove_at(i);
+                    }
+                }
+                EntryWrite::Add(_) => unreachable!("an insert never takes the slow path"),
                 EntryWrite::Put(k, v) => vm.map_upsert_in_heap(mh, qh, k, v, span)?,
                 EntryWrite::Remove(k) => {
                     if let Some(i) = vm.map_probe(mh, qh, k, span)? {
@@ -3381,15 +3479,28 @@ impl Vm {
             // TICKET-192: the single-entry writers of a `Map` element (update guard, O(1) expected).
             "_set_key" => {
                 self.arity_err("_set_key", args, 2, span)?;
-                self.rwshared_map_write_entry(h, EntryWrite::Put(args[0], args[1]), span)
+                self.rwshared_write_entry(h, EntryWrite::Put(args[0], args[1]), span)
             }
             "_remove_key" => {
                 self.arity_err("_remove_key", args, 1, span)?;
-                self.rwshared_map_write_entry(h, EntryWrite::Remove(args[0]), span)
+                self.rwshared_write_entry(h, EntryWrite::Remove(args[0]), span)
             }
             "_get_or_insert" => {
                 self.arity_err("_get_or_insert", args, 2, span)?;
-                self.rwshared_map_write_entry(h, EntryWrite::GetOrInsert(args[0], args[1]), span)
+                self.rwshared_write_entry(h, EntryWrite::GetOrInsert(args[0], args[1]), span)
+            }
+            // TICKET-243: the single-element writers of a `Set` and a `List` element.
+            "_add" => {
+                self.arity_err("_add", args, 1, span)?;
+                self.rwshared_write_entry(h, EntryWrite::Add(args[0]), span)
+            }
+            "_remove" => {
+                self.arity_err("_remove", args, 1, span)?;
+                self.rwshared_write_entry(h, EntryWrite::Discard(args[0]), span)
+            }
+            "_push" => {
+                self.arity_err("_push", args, 1, span)?;
+                self.rwshared_list_push(h, args[0], span)
             }
             "write" => {
                 self.arity_err("write", args, 1, span)?;
@@ -4358,10 +4469,21 @@ impl Vm {
 }
 
 /// TICKET-192 — one single-entry write of a `RwShared[Map[K, V]]` (see
-/// [`Vm::rwshared_map_write_entry`]).
+/// [`Vm::rwshared_write_entry`]).
 #[derive(Debug, Clone, Copy)]
 pub(super) enum EntryWrite {
     Put(Value, Value),
     Remove(Value),
     GetOrInsert(Value, Value),
+    /// TICKET-243 — `RwShared[Set[E]]._add`: no-op on a present element.
+    Add(Value),
+    /// TICKET-243 — `RwShared[Set[E]]._remove`: no-op on an absent element.
+    Discard(Value),
+}
+
+impl EntryWrite {
+    /// The op writes a stored `Set` (the other three write a `Map`).
+    fn on_set(self) -> bool {
+        matches!(self, EntryWrite::Add(_) | EntryWrite::Discard(_))
+    }
 }

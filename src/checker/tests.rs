@@ -39154,3 +39154,182 @@ fn rwshared_container_methods_are_not_public() {
         );
     }
 }
+
+/// Every `.chz` file under the std root except the prelude, as `(dotted module, source)`.
+fn std_module_sources() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, dotted: &str, out: &mut Vec<(String, String)>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        for p in entries {
+            let stem = p.file_stem().unwrap().to_string_lossy().to_string();
+            if p.is_dir() {
+                walk(&p, &format!("{dotted}.{stem}"), out);
+            } else if p.extension().is_some_and(|x| x == "chz") && stem != "prelude" {
+                out.push((
+                    format!("{dotted}.{stem}"),
+                    std::fs::read_to_string(&p).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&crate::resolver::std_root(), "std", &mut out);
+    out
+}
+
+/// The identifier a declaration line starts with, after its keyword prefix.
+fn leading_ident(rest: &str) -> String {
+    rest.chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// TICKET-243: a `_` name a std module declares is internal to std. The grid is every
+/// `RWSHARED_VIEWS` primitive, every top-level `_` name of every std file, and every `_` method of
+/// every std struct or enum, each rejected in a user module; the control cells stay accepted.
+#[test]
+fn std_internal_names_are_hidden_from_user_modules() {
+    // (a) every container primitive: a user module rejects it and names the collection; a std
+    // caller exists.
+    let callers = [
+        include_str!("../../std/concurrency/collection.chz"),
+        include_str!("../../std/memoize.chz"),
+    ];
+    for (head, coll, names) in super::expr::RWSHARED_VIEWS {
+        let init = match *head {
+            "List" => "[1, 2]",
+            "Map" => "{\"a\": 1}",
+            "Set" => "{1, 2}",
+            other => panic!("no initializer for head {other}"),
+        };
+        let help = format!("use {coll} from std.concurrency.collection");
+        for name in *names {
+            let src = format!(
+                "import std.concurrency\nfn main():\n    r := RwShared({init})\n    r.{name}()\nmain()\n"
+            );
+            let errs = check_entry(&src);
+            assert!(
+                errs.iter().any(|e| e.message.contains("has no method")
+                    && e.help.as_deref() == Some(help.as_str())),
+                "{head} r.{name}(): expected `has no method` with help {help:?}, got: {errs:?}"
+            );
+            let call = format!(".{name}(");
+            assert!(
+                callers.iter().any(|c| c.contains(&call)),
+                "RWSHARED_VIEWS lists {name} for {head} but no std caller writes `{call}`"
+            );
+        }
+    }
+
+    // (b) every top-level `_` name and every `_` method of every std file.
+    let mut members: Vec<(String, String)> = Vec::new();
+    let mut methods = std::collections::BTreeSet::new();
+    for (module, src) in std_module_sources() {
+        let mut owner = String::new();
+        for line in src.lines() {
+            let body = line.trim_start();
+            let indented = body.len() != line.len();
+            if !indented {
+                for kw in ["native struct ", "struct ", "enum "] {
+                    if let Some(rest) = line.strip_prefix(kw) {
+                        owner = leading_ident(rest);
+                    }
+                }
+                for kw in [
+                    "native fn _",
+                    "fn _",
+                    "struct _",
+                    "enum _",
+                    "protocol _",
+                    "type _",
+                ] {
+                    if line.starts_with(kw) {
+                        let name = leading_ident(&line[kw.len() - 1..]);
+                        members.push((module.clone(), name));
+                    }
+                }
+            } else {
+                for kw in ["native fn _", "fn _"] {
+                    if body.starts_with(kw) {
+                        let name = leading_ident(&body[kw.len() - 1..]);
+                        methods.insert((module.clone(), owner.clone(), name));
+                    }
+                }
+            }
+        }
+    }
+    for want in [
+        ("std.concurrency", "_settle"),
+        ("std.fs", "_exists"),
+        ("std.concurrency.pmap", "_PmapCell"),
+    ] {
+        assert!(
+            members
+                .iter()
+                .any(|(m, n)| (m.as_str(), n.as_str()) == want),
+            "the std walk did not collect {want:?}"
+        );
+    }
+    for (module, name) in &members {
+        let errs = check_entry(&format!("import {name} from {module}\n"));
+        let miss = format!("has no member '{name}'");
+        assert!(
+            errs.iter().any(|e| e.message.contains(&miss)),
+            "import {name} from {module}: expected {miss:?}, got: {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|e| e.message.contains("import it from")
+                || e.help
+                    .as_deref()
+                    .is_some_and(|h| h.contains("import it from"))),
+            "import {name} from {module}: the hint names a sealed type: {errs:?}"
+        );
+    }
+    entry_rejects(
+        "import std.concurrency\nconcurrency._settle(5, 1)\n",
+        "module 'concurrency' has no member '_settle'",
+    );
+    let want_methods: std::collections::BTreeSet<(String, String, String)> = [
+        ("std.cancel", "Token", "_mark"),
+        ("std.concurrency", "Executor", "_submit_settled"),
+    ]
+    .iter()
+    .map(|(m, o, n)| (m.to_string(), o.to_string(), n.to_string()))
+    .collect();
+    assert_eq!(
+        methods, want_methods,
+        "a std `_` method needs a call cell below before it joins this set"
+    );
+    entry_rejects(
+        "import std.cancel\nt := cancel.manual()\nt._mark()\n",
+        "type Token has no method '_mark'",
+    );
+    entry_ok("import std.cancel\nt := cancel.manual()\nt.cancel()\nassert t.cancelled()\n");
+    entry_ok(
+        "struct S:\n    n: int\n    fn _helper(self) -> int:\n        return self.n\nprint(S(1)._helper())\n",
+    );
+    entry_ok("import pmap from std.concurrency.pmap\nprint(pmap([1], fn(x: int) -> int: x))\n");
+
+    // (c) the native `_` method, and the public surface beside every sealed name.
+    let errs = check_entry(
+        "import std.concurrency\nex := Executor()\nch: Channel[int] = Channel(1)\nex._submit_settled(fn(): pass, ch)\n",
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("has no method '_submit_settled'")),
+        "{errs:?}"
+    );
+    assert!(
+        !errs.iter().any(|e| e
+            .help
+            .as_deref()
+            .is_some_and(|h| h.contains("_submit_settled"))),
+        "the help names the hidden method: {errs:?}"
+    );
+    entry_ok(
+        "import std.fs\nimport std.concurrency\nimport ConcurrentList from std.concurrency.collection\nprint(fs.exists(\"x\"))\nh := Executor().submit_result(fn(): 4)\nprint(h)\nConcurrentList[int].new().push(1)\n",
+    );
+}

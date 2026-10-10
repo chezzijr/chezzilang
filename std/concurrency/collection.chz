@@ -1,6 +1,6 @@
-# std.concurrency.collection — ergonomic, thread-safe collection wrappers over the `RwShared[T]`
-# runtime primitive (many concurrent readers OR one exclusive writer). Pure Chezzi, so every engine
-# (interp oracle, cooperative VM, real-thread `--parallel`) behaves identically.
+# std.concurrency.collection — ergonomic, thread-safe collection wrappers (`ConcurrentList`,
+# `ConcurrentMap`, `ConcurrentSet`, `ConcurrentCounter`) over the `RwShared[T]` runtime primitive
+# (many concurrent readers OR one exclusive writer). Pure Chezzi over std-internal `_` primitives.
 #
 # WHY: `RwShared[Map[...]]` already gives you a shared, lock-guarded map across the spawn/parallel
 # airlock — but raw `read`/`write` closures are verbose, and the COMPOUND mutations (insert-if-absent,
@@ -11,10 +11,15 @@
 # SHARED Arc handle (RwShared is sendable and shares, and a struct of all-sendable fields does too) —
 # NOT a deep copy. So mutations a spawned task makes are visible to the parent after the join.
 #
-# CONSTRUCTION: there is no `new_map()`/`new_counter()` factory — a no-argument generic factory cannot
-# bind K/V (turbofish does not propagate into the inner `RwShared({})`). Construct DIRECTLY at the use
-# site: `ConcurrentMap(RwShared({}))` / `ConcurrentCounter(RwShared({}))`; K/V are deferred from the
-# empty `{}` and inferred from the first method call. (Same idiom as `Counter({})` in std.collections.)
+# THE FOUR COLLECTIONS: `ConcurrentList[E]`, `ConcurrentMap[K, V]`, `ConcurrentSet[E]`,
+# `ConcurrentCounter[K]`. They are the user-facing surface of a shared container (TICKET-243): the
+# box itself has only `get`/`set`/`read`/`write`, and the `_` primitives these methods call are
+# internal to std.
+#
+# CONSTRUCTION: each has a static `new()` — `ConcurrentList[int].new()`,
+# `ConcurrentMap[str, int].new()`. To wrap existing data, construct over a box:
+# `ConcurrentList(RwShared(xs))`, `ConcurrentMap(RwShared({}))` (K/V of an empty `{}` are inferred
+# from the first method call). `c.inner` is the box.
 #
 # REENTRANCY: like raw `RwShared`, a closure passed to `read`/`write` must not re-enter the SAME box.
 # Every method here is flat (no nested locking), so user code is safe as long as it does not call a
@@ -71,10 +76,107 @@ struct ConcurrentMap[K: Hashable + Eq, V]:
     fn get_or_insert(self, key: K, default: V) -> V:
         return self.inner._get_or_insert(key, default)
 
+    # Call `f(key, value)` once per entry, ONE entry in the caller's heap at a time. The walk is not
+    # one atomic snapshot: a concurrent writer may be observed mid-walk; use `snapshot` for that.
+    fn for_each_entry[R](self, f: fn(K, V) -> R):
+        self.inner._for_each_entry(f)
+
+    # Reduce the entries into `init`, ONE entry in the caller's heap at a time (same walk as
+    # `for_each_entry`).
+    fn fold_entries[R](self, init: R, f: fn(R, K, V) -> R) -> R:
+        return self.inner._fold_entries(init, f)
+
     # A COPY of the whole map (snapshot). CONCURRENT READ. `read` already copies the value out, so the
     # returned map is independent of later mutations.
     fn snapshot(self) -> Map[K, V]:
         return self.inner.read(fn(m): m)
+
+# ============================================================================
+# ConcurrentList[E] — a thread-safe list over `RwShared[List[E]]` (TICKET-243).
+# ============================================================================
+#
+# CONCURRENCY: len/at/slice are CONCURRENT READS that copy only what they return; for_each/fold
+# walk the stored list ONE element at a time and never hold the lock across `f`, so a worker scans
+# a large shared list in O(1) memory (the walk is not one atomic snapshot). `push` takes the box's
+# ONE update guard and splices one element; it does not copy the list. The first `push` after a
+# whole `inner.set` / `inner.write` re-encodes the list once.
+struct ConcurrentList[E]:
+    inner: RwShared[List[E]]
+
+    # An empty list: `ConcurrentList[int].new()`.
+    fn new() -> ConcurrentList[E]:
+        return ConcurrentList(RwShared([]))
+
+    # Append `item`. One update guard.
+    fn push(self, item: E):
+        self.inner._push(item)
+
+    # Number of elements. CONCURRENT READ.
+    fn len(self) -> int:
+        return self.inner._len()
+
+    # The element at `i`, or None when `i` is out of range (never a fault). A negative `i` counts
+    # from the end, as `xs[i]` does. CONCURRENT READ.
+    fn at(self, i: int) -> E?:
+        return self.inner._at(i)
+
+    # A COPY of the elements in `[lo, hi)`, with `xs[lo:hi]`'s clamping. CONCURRENT READ.
+    fn slice(self, lo: int, hi: int) -> List[E]:
+        return self.inner._slice(lo, hi)
+
+    # Call `f(element)` once per element, in order.
+    fn for_each[R](self, f: fn(E) -> R):
+        self.inner._for_each(f)
+
+    # Reduce the elements into `init`, in order.
+    fn fold[R](self, init: R, f: fn(R, E) -> R) -> R:
+        return self.inner._fold(init, f)
+
+    # A COPY of the whole list (snapshot). CONCURRENT READ.
+    fn snapshot(self) -> List[E]:
+        return self.inner.read(fn(xs): xs)
+
+# ============================================================================
+# ConcurrentSet[E] — a thread-safe set over `RwShared[Set[E]]` (TICKET-243; E Hashable + Eq).
+# ============================================================================
+#
+# CONCURRENCY: contains/len are CONCURRENT READS (an O(1) expected probe of the stored set's hash
+# index); for_each/fold walk ONE element at a time, as `ConcurrentList` does. add/remove take the
+# box's ONE update guard and splice one element; neither copies the set.
+struct ConcurrentSet[E: Hashable + Eq]:
+    inner: RwShared[Set[E]]
+
+    # An empty set: `ConcurrentSet[int].new()`.
+    fn new() -> ConcurrentSet[E]:
+        return ConcurrentSet(RwShared(Set[E]()))
+
+    # Insert `item` (no-op if present). One update guard.
+    fn add(self, item: E):
+        self.inner._add(item)
+
+    # Remove `item` (no-op if absent). One update guard.
+    fn remove(self, item: E):
+        self.inner._remove(item)
+
+    # True iff `item` is present. CONCURRENT READ.
+    fn contains(self, item: E) -> bool:
+        return self.inner._contains(item)
+
+    # Number of elements. CONCURRENT READ.
+    fn len(self) -> int:
+        return self.inner._len()
+
+    # Call `f(element)` once per element, in insertion order.
+    fn for_each[R](self, f: fn(E) -> R):
+        self.inner._for_each(f)
+
+    # Reduce the elements into `init`, in insertion order.
+    fn fold[R](self, init: R, f: fn(R, E) -> R) -> R:
+        return self.inner._fold(init, f)
+
+    # A COPY of the whole set (snapshot). CONCURRENT READ.
+    fn snapshot(self) -> Set[E]:
+        return self.inner.read(fn(s): s)
 
 # ============================================================================
 # ConcurrentCounter[K] — a thread-safe frequency table over `RwShared[Map[K, int]]` (K Hashable + Eq,

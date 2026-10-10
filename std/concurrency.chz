@@ -28,31 +28,12 @@ native struct Shared[T]:
     native fn set(self, v: T) -> None
     native fn update(self, f: fn(T) -> T) -> None
 
-# A `RwShared[T]` whose element `T` is a CONTAINER ALSO gains ZERO-COPY read-view methods (checker
-# arm-resolved, NOT harvested here — E/K/V are not nameable in the `RwShared[T]` surface). Gated by a
-# constructor-kind `where T: List/Map/Set` bound to the container HEAD (Tuple EXCLUDED — heterogeneous):
-#   `RwShared[List[E]]`: `len(self) -> int`, `at(self, i: int) -> E?` (the SAFE index — out of
-#     range is `None`, never a fault; negative index normalizes like `xs[i]`), `slice(self, lo, hi) -> List[E]`,
-#     `for_each(self, f: fn(E) -> _) -> None`, `fold(self, init: R, f: fn(R, E) -> R) -> R`.
-#   `RwShared[Map[K,V]]`: `len(self) -> int`, `get_key(self, k: K) -> V?`, `has(self, k: K) -> bool`,
-#     `for_each_entry(self, f: fn(K, V) -> _) -> None`, `fold_entries(self, init: R, f: fn(R, K, V) -> R) -> R`,
-#     and the single-entry WRITERS (TICKET-192) `set_key(self, k: K, v: V) -> None`,
-#     `remove_key(self, k: K) -> V?`, `get_or_insert(self, k: K, v: V) -> V`: each takes the box's
-#     update guard (the one `set`/`write` take) and splices one entry, never re-encoding the map. The stored
-#     map keeps the heap map's hash index, so lookups and inserts are O(1) expected; `remove_key` is O(n).
-#   `RwShared[Set[E]]`: `len(self) -> int`, `contains(self, e: E) -> bool`,
-#     `for_each(self, f: fn(E) -> _) -> None`, `fold(self, init: R, f: fn(R, E) -> R) -> R`.
-# (`fold*`'s R is inferred from `init`.) They walk the stored heap-independent wire container and
-# materialize ONE entry at a time, so a worker can scan/reduce a shared large container in O(1) memory
-# instead of `get`/`read` copying the WHOLE inner into the caller's heap. Every walk RE-ACQUIRES the
-# shared read guard PER ENTRY and DROPS it before running the closure (and before any `has`/`get_key`/
-# `contains` hash+eq probe) — never held across user code — so a nested read OR write of the same box,
-# and a GC pass inside the closure, are all deadlock-free (unlike a guard held for the whole walk
-# against a write-preferring RwLock). The trade-off: the walk is NOT one atomic snapshot — a concurrent
-# (or in-closure) `set`/`write` to the same box may be observed mid-walk (entries are read fresh each
-# step); use `read`/`get` if you need a stable snapshot. Reduce into a DIFFERENT box (an `AtomicInt`/
-# local accumulator), the real fan-out use case. On a non-container `T` (or a Tuple) they cleanly report
-# "no method".
+# `RwShared[T]` has exactly four methods for every `T`: `get`, `set`, `read`, `write`. A shared
+# container is used through `std.concurrency.collection` (`ConcurrentList`, `ConcurrentMap`,
+# `ConcurrentSet`, `ConcurrentCounter`), which owns the per-element readers and single-entry writers.
+# A `_` name a std module declares is internal to std: the checker hides it from user modules
+# (TICKET-243). The `_` container primitives of a box (`RWSHARED_VIEWS`, `src/checker/expr.rs`) are
+# such names; only std calls them.
 native struct RwShared[T]:
     native fn get(self) -> T
     native fn set(self, v: T) -> None

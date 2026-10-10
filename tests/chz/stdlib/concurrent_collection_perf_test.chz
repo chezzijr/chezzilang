@@ -1,0 +1,54 @@
+# tests/chz/stdlib/concurrent_collection_perf_test.chz — TICKET-243.
+#
+# `ConcurrentList.push` and `ConcurrentSet.add` splice ONE element into the stored container under
+# the update guard; they do not copy it. Measured on main `95d4e6c0`, release binary, 100k elements,
+# 200 calls: a `push` built on whole-value `write` took 1465 ms and such an `add` 3547 ms. One
+# absolute bound, 300 ms, no ratio of two samples. The first `push` after a whole store re-encodes
+# the list once (24 ms on the debug binary); the other 199 splice.
+
+import std.concurrency
+import std.time
+import ConcurrentList, ConcurrentSet from std.concurrency.collection
+
+test fn push_and_add_on_a_100k_container_do_not_copy_it():
+    xs: List[int] = []
+    st: Set[int] = Set[int]()
+    i := 0
+    while i < 100000:
+        xs.push(i)
+        st.add(i)
+        i = i + 1
+    cl := ConcurrentList(RwShared(xs))
+    cs := ConcurrentSet(RwShared(st))
+
+    t0 := time.now_ms()
+    i = 0
+    while i < 200:
+        cl.push(100000 + i)
+        i = i + 1
+    push_ms := time.now_ms() - t0
+    assert push_ms < 300, "200 push calls on a 100k list took {push_ms} ms; the bound is 300 ms (a whole-value write measured 1465 ms)"
+    assert cl.len() == 100200
+    assert cl.at(100199) == ?100199
+
+    t1 := time.now_ms()
+    i = 0
+    while i < 200:
+        cs.add(100000 + i)
+        i = i + 1
+    add_ms := time.now_ms() - t1
+    assert add_ms < 300, "200 add calls on a 100k set took {add_ms} ms; the bound is 300 ms (a whole-value write measured 3547 ms)"
+    assert cs.len() == 100200
+    assert cs.contains(100199)
+
+    t2 := time.now_ms()
+    i = 0
+    hits := 0
+    while i < 200:
+        match cl.at(i * 400):
+            ?v: hits = hits + v - i * 400 + 1
+            None: pass
+        i = i + 1
+    at_ms := time.now_ms() - t2
+    assert at_ms < 300, "200 at calls on a 100k list took {at_ms} ms; the bound is 300 ms"
+    assert hits == 200

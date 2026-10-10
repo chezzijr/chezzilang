@@ -861,6 +861,11 @@ pub struct RwSharedCore {
     /// missing. It lives on the core, not the table: a whole `set` replaces the table, and a counter
     /// restarting with it could return to an old value.
     pub generation: AtomicU64,
+    /// TICKET-243 — the id ceiling of a stored `List`: every wire id inside it is below this, so
+    /// an element spliced in by `_push` mints its ids from here up (a `WireValue::List` carries no
+    /// ceiling of its own, unlike a `WireTable`). `0` means unknown: every whole
+    /// [`store`](Self::store) resets it, and the next `_push` re-encodes the list once to learn it.
+    pub list_ceiling: AtomicU32,
 }
 
 impl RwSharedCore {
@@ -871,7 +876,43 @@ impl RwSharedCore {
         let mut g = self.v.write().unwrap();
         self.summary.store(sum.0, sum.1);
         self.generation.fetch_add(1, Ordering::Relaxed);
+        self.list_ceiling.store(0, Ordering::Relaxed);
         *g = w;
+    }
+
+    /// [`store`](Self::store) for a list serialized by ONE memo whose `next_id` is `ceiling`:
+    /// records the ceiling under the same write lock, so the next `_push` splices.
+    pub fn store_list(&self, w: WireValue, ceiling: u32) {
+        let sum = wire_summary(&w);
+        let mut g = self.v.write().unwrap();
+        self.summary.store(sum.0, sum.1);
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.list_ceiling.store(ceiling.max(1), Ordering::Relaxed);
+        *g = w;
+    }
+
+    /// TICKET-243 — [`with_map_mut`](Self::with_map_mut) for a stored `List`'s items.
+    pub fn with_list_mut<R>(&self, f: impl FnOnce(&mut Vec<WireValue>) -> R) -> Option<R> {
+        let mut g = self.v.write().unwrap();
+        match &mut *g {
+            WireValue::List { items, .. } => {
+                self.generation.fetch_add(1, Ordering::Relaxed);
+                Some(f(items))
+            }
+            _ => None,
+        }
+    }
+
+    /// TICKET-243 — [`with_map_mut`](Self::with_map_mut) for a stored `Set`.
+    pub fn with_set_mut<R>(&self, f: impl FnOnce(&mut super::wire::WireSet) -> R) -> Option<R> {
+        let mut g = self.v.write().unwrap();
+        match &mut *g {
+            WireValue::Set { entries, .. } => {
+                self.generation.fetch_add(1, Ordering::Relaxed);
+                Some(f(entries))
+            }
+            _ => None,
+        }
     }
 
     /// TICKET-192 — run `f` on the stored map under the write lock, bumping the write generation

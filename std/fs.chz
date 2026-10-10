@@ -33,7 +33,7 @@ native struct FileInfo:
 # literal, a `bytes`, a `bytearray` or a `path.Path` all work with no annotation) and re-wraps a
 # returned path into `path.Path`. Going through bytes is what makes a non-UTF-8 filename survive: it
 # used to be decoded lossily and come back U+FFFD-substituted, naming nothing (W7-8).
-# The `_` is CONVENTION ONLY — there is no privacy mechanism, so `import _exists from std.fs` works.
+# A `_` name is internal to std: the checker hides it from user modules (TICKET-243).
 native fn _list_dir(path: bytes) -> List[bytes]!
 native fn _exists(path: bytes) -> bool
 native fn _is_file(path: bytes) -> bool
