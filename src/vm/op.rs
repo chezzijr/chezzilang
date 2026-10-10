@@ -519,10 +519,12 @@ pub enum Op {
     ReclaimNursery,
     /// `spawn f(args)` — stack `[callee, arg0, …]`; pops `argc + 1`, deep-copies the args across the
     /// airlock (the callee passes by handle, like `defer`), and registers the task on the innermost
-    /// nursery. Mirrors `DeferCall`. The `u32` is the checker's crossing bitmask (D4, TICKET-179,
-    /// TICKET-189), laid out by `vm::crossing::Crossing::mask`: bit `j + 1` set = bound slot `j`
-    /// (default fills and packs included) is `Move`, so its root is rebuilt unmarked. Bit 0 is the
-    /// callee or the receiverless wrapper closure and is never set.
+    /// nursery. Mirrors `DeferCall`. The `u32` names the checker's shapes for this call's operands
+    /// (D4, TICKET-240) in `Program.fresh_calls`, laid out by `vm::crossing::operand_ref`: `0` =
+    /// every operand stays marked. Entry position `j + 1` is bound slot `j` (default fills and
+    /// packs included); position 0 is the callee or the receiverless wrapper closure and is
+    /// always `Marked`. After the rebuild the runtime unmarks what each shape names
+    /// (`Vm::unmark_fresh`).
     ///
     /// TICKET-235: the `ProtoId` is the site's entry thunk. The head is a callee and enters through
     /// the thunk only when `Vm::enters_frame` says the callee pushes no frame (a native fn value, a
@@ -530,8 +532,8 @@ pub enum Op {
     /// which always pushes its own.
     SpawnCall(usize, u32, Option<ProtoId>),
     /// `spawn recv.name(args)` — stack `[recv, arg0, …]`; pops `argc + 1`, deep-copies the receiver
-    /// AND the args across the airlock, and registers the task. The `u32` is the crossing bitmask
-    /// (`vm::crossing`): bit 0 = the receiver, bit `j + 1` = bound slot `j`.
+    /// AND the args across the airlock, and registers the task. The `u32` names the operand shapes
+    /// (`vm::crossing::operand_ref`): entry position 0 = the receiver, `j + 1` = bound slot `j`.
     ///
     /// TICKET-235: the head is a receiver and always enters through the site's entry thunk (the
     /// `ProtoId`), whose body is the `Op::CallMethod` the block form runs.
@@ -724,6 +726,10 @@ pub struct Program {
     /// Native-struct bare name → the index of the module that declared it (home-globals for its bodied
     /// methods), mirroring `enum_home`.
     pub native_home: HashMap<String, usize>,
+    /// TICKET-240: the checker's shape for every operand of each spawn call that has a fresh one,
+    /// `[receiver or Marked] ++ bound slots`. A spawn op's `u32` names its entry
+    /// (`crossing::operand_ref`); the layout lives in `vm::crossing`.
+    pub fresh_calls: Vec<Vec<super::crossing::Fresh>>,
     pub variants: HashMap<(String, String), VariantDef>,
     /// M19 lever #2 — variants indexed by their dense `variant_id` (`variants_by_id[id]` ⇒ that
     /// variant's `VariantDef`, carrying its `enum_name` + `name`). The reverse of `variants`: O(1)

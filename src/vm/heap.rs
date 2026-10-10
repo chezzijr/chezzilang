@@ -732,8 +732,8 @@ impl Heap {
     /// Clear the copied bit for slot `i` (no-op if the word is absent) — a freed or reused slot
     /// must not inherit a stale mark.
     #[inline]
-    /// D4 (TICKET-179): unmark one object — a fresh spawn operand's root, which no parent binding
-    /// can reach.
+    /// D4 (TICKET-240): unmark one object the crossing site built, which no parent binding can
+    /// reach. `Vm::unmark_fresh` decides which objects, from the checker's shape.
     pub fn unset_copied(&mut self, h: GcRef) {
         self.clear_copied(h.0 as usize)
     }

@@ -334,9 +334,11 @@ struct Compiler {
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
     /// pre-fix lowering. See [`crate::checker::SumSeedTable`].
     sum_seeds: crate::checker::SumSeedTable,
-    /// D4 (TICKET-179, TICKET-189) — the checker's per-slot crossing decision for each `spawn` call,
-    /// read by [`Self::crossing_mask`]. See [`crate::checker::CrossingTable`].
+    /// D4 (TICKET-189, TICKET-240) — the checker's per-slot shape for each `spawn` call, read by
+    /// [`Self::crossing_mask`]. See [`crate::checker::CrossingTable`].
     crossings: crate::checker::CrossingTable,
+    /// The index of each distinct entry of `Program.fresh_calls`.
+    fresh_index: HashMap<Vec<crate::checker::Fresh>, usize>,
     /// TICKET-190 — the checker's generator creation stamps and private frame slot names. See
     /// [`crate::checker::GenCrossings`].
     gen_crossings: crate::checker::GenCrossings,
@@ -530,6 +532,7 @@ impl Compiler {
             providers: Vec::new(),
             native_methods: HashMap::new(),
             native_home: HashMap::new(),
+            fresh_calls: Vec::new(),
             variants: HashMap::new(),
             variants_by_id: Vec::new(),
             struct_names: Vec::new(),
@@ -621,6 +624,7 @@ impl Compiler {
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             crossings: crate::checker::CrossingTable::new(),
+            fresh_index: HashMap::new(),
             gen_crossings: crate::checker::GenCrossings::default(),
             resolutions: crate::checker::ResolutionTable::new(),
             fall_off: crate::checker::FallOffTable::new(),
@@ -4370,25 +4374,28 @@ impl Compiler {
             )) == Some(&true)
     }
 
-    /// The spawn op's crossing bitmask (D4, TICKET-179, TICKET-189): the checker's decision for call
-    /// `call_id`, encoded by [`crate::checker::Crossing::mask`], which owns the bit layout. Witness
-    /// args never set a bit. A miss is all `Copy` (a false fault, never a lost write).
-    fn crossing_mask(&self, call_id: crate::ast::NodeId) -> u32 {
-        self.crossings
-            .get(&(self.current_module_idx, call_id.0))
-            .map_or(0, |c| {
-                // Step 4 adapter: the old one-bit mask, root-only.
-                use crate::vm::crossing::Crossing;
-                let bit = |f: &crate::checker::Fresh| {
-                    if f.is_marked() {
-                        Crossing::Copy
-                    } else {
-                        Crossing::Move
-                    }
-                };
-                let args: Vec<Crossing> = c.args.iter().map(bit).collect();
-                Crossing::mask(c.recv.as_ref().map(bit), &args)
-            })
+    /// The spawn op's operand reference (D4, TICKET-240): the checker's shapes for call `call_id`,
+    /// stored once per distinct entry in `Program.fresh_calls` and named through
+    /// [`crate::vm::crossing::operand_ref`], which owns the layout. Witness args sit past the
+    /// entry's end. A miss, or a call with no fresh operand, is `0`: every operand stays marked (a
+    /// false fault, never a lost write).
+    fn crossing_mask(&mut self, call_id: crate::ast::NodeId) -> u32 {
+        let Some(c) = self.crossings.get(&(self.current_module_idx, call_id.0)) else {
+            return 0;
+        };
+        use crate::checker::Fresh;
+        if c.recv.iter().chain(&c.args).all(Fresh::is_marked) {
+            return 0;
+        }
+        let entry: Vec<Fresh> = std::iter::once(c.recv.clone().unwrap_or(Fresh::Marked))
+            .chain(c.args.iter().cloned())
+            .collect();
+        let table = &mut self.program.fresh_calls;
+        let index = *self.fresh_index.entry(entry).or_insert_with_key(|e| {
+            table.push(e.clone());
+            table.len() - 1
+        });
+        crate::vm::crossing::operand_ref(index)
     }
 
     /// The seed a `xs.sum()` site needs, per the checker's [`crate::checker::SumSeedTable`] --

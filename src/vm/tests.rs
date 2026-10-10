@@ -1768,6 +1768,7 @@ pub(crate) fn empty_program() -> Program {
         providers: Default::default(),
         native_methods: Default::default(),
         native_home: Default::default(),
+        fresh_calls: Vec::new(),
         variants: Default::default(),
         variants_by_id: Vec::new(),
         struct_names: Vec::new(),

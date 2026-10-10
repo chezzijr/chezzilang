@@ -183,49 +183,16 @@ pub fn frame_slot(private: u64, deep: u64, arity: usize, stamp: u64, k: usize) -
     }
 }
 
-/// How one spawn operand crosses into its task.
+/// The one-bit generator frame verdict (TICKET-190).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Crossing {
-    /// Built fresh at the call site, so no parent binding reaches it: rebuilt marked, then its ROOT
-    /// is unmarked. Its children stay marked (`copy()` is shallow, DEC-160).
+    /// The slot's root is private: rebuilt marked, then unmarked.
     Move,
     /// The parent can still observe it: every rebuilt object is marked, so a task write faults.
     Copy,
 }
 
 impl Crossing {
-    /// Encode one spawn's operands: bit 0 = the receiver is `Move`, bit `j + 1` = argument slot `j`
-    /// is `Move`. A slot at bit 32 or above stays `Copy` (a false fault, never a lost write).
-    pub fn mask(recv: Option<Crossing>, args: &[Crossing]) -> u32 {
-        let bit = |c: Crossing, b: usize| {
-            if c == Crossing::Move && b < u32::BITS as usize {
-                1 << b
-            } else {
-                0
-            }
-        };
-        let r = recv.map_or(0, |c| bit(c, 0));
-        args.iter()
-            .enumerate()
-            .fold(r, |m, (j, &c)| m | bit(c, j + 1))
-    }
-
-    /// Decode bit `bit` of a [`mask`](Crossing::mask). A bit at 32 or above is `Copy`.
-    pub fn from_mask(mask: u32, bit: usize) -> Crossing {
-        if bit < u32::BITS as usize && (mask >> bit) & 1 == 1 {
-            Crossing::Move
-        } else {
-            Crossing::Copy
-        }
-    }
-
-    /// The head rides as argument 0 behind an entry thunk: bit 0 is the thunk and is never set, the
-    /// receiver or callee moves to bit 1, bound slot `j` to bit `j + 2`; a slot shifted past the top
-    /// bit reads `Copy`.
-    pub fn behind_entry(mask: u32) -> u32 {
-        mask << 1
-    }
-
     /// TICKET-190: encode a generator frame: bit `k` = frame slot `k` is `Move` (private, the
     /// parent cannot reach its root). A slot at 64 or above stays `Copy` (a false fault, never a
     /// lost write).
@@ -261,7 +228,7 @@ pub fn param_bits(arity: usize) -> u64 {
 #[derive(Clone, Copy, Debug)]
 pub enum Route {
     /// A spawn's callee captures, arguments and receiver: the parent keeps its bindings, so every
-    /// rebuilt object is a copy (a `Move` operand is then unmarked by [`Crossing::from_mask`]).
+    /// rebuilt object is a copy (what an operand's [`Fresh`] shape names is then unmarked).
     Spawn,
     /// A crossing closure's captures: a capture is a by-reference binding of its creator. Back in
     /// the heap it came from (a same-task round-trip), it keeps the enclosing mark (W7-4c).
@@ -382,33 +349,8 @@ mod tests {
     }
 
     #[test]
-    fn mask_round_trips_and_every_route_marks_as_documented() {
+    fn frame_mask_round_trips_and_every_route_marks_as_documented() {
         use Crossing::{Copy, Move};
-        assert_eq!(Crossing::mask(Some(Move), &[]), 1);
-        assert_eq!(Crossing::mask(None, &[Copy, Move]), 0b100);
-        assert_eq!(
-            Crossing::from_mask(Crossing::mask(Some(Move), &[]), 0),
-            Move
-        );
-        assert_eq!(
-            Crossing::from_mask(Crossing::mask(Some(Copy), &[Move]), 0),
-            Copy
-        );
-        assert_eq!(Crossing::from_mask(Crossing::mask(None, &[Move]), 1), Move);
-        let mut wide = vec![Copy; 31];
-        wide[30] = Move;
-        assert_eq!(Crossing::from_mask(Crossing::mask(None, &wide), 31), Move);
-        assert_eq!(Crossing::from_mask(Crossing::mask(None, &wide), 30), Copy);
-        // Slot 31 would be bit 32: it cannot be encoded, so it stays Copy.
-        wide.push(Move);
-        assert_eq!(Crossing::from_mask(Crossing::mask(None, &wide), 32), Copy);
-        assert_eq!(Crossing::from_mask(u32::MAX, 32), Copy);
-        // TICKET-235: behind an entry thunk every operand sits one bit higher.
-        let m = Crossing::behind_entry(Crossing::mask(Some(Move), &[Copy, Move]));
-        assert_eq!(Crossing::from_mask(m, 0), Copy);
-        assert_eq!(Crossing::from_mask(m, 1), Move);
-        assert_eq!(Crossing::from_mask(m, 2), Copy);
-        assert_eq!(Crossing::from_mask(m, 3), Move);
         // TICKET-190: a generator frame mask, one bit per frame slot.
         let slots = [Move, Copy, Move];
         let fm = Crossing::frame_mask(&slots);

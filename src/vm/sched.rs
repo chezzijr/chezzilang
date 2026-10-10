@@ -1,7 +1,7 @@
 // vm::sched — split out of vm/mod.rs. `super::*` == the `vm` module.
 // Concurrency: spawn/nursery/fibers, MN scheduler, wire (airlock), module snapshots.
 
-use super::crossing::{self, Crossing, Route};
+use super::crossing::{self, Fresh, Kids, Route};
 use super::wire::{WireMap, WireSet};
 use super::*;
 
@@ -234,8 +234,8 @@ pub(super) enum SpawnHead {
 impl Vm {
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
     /// the method form, the receiver) across the airlock, and register the task on the innermost
-    /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. `fresh` is
-    /// the checker's freshness bitmask (see [`super::op::Op::SpawnRecv`]), carried to
+    /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. `fresh`
+    /// names the checker's operand shapes (see [`super::op::Op::SpawnRecv`]), carried to
     /// [`Vm::rebuild_ready`].
     pub(super) fn do_spawn(
         &mut self,
@@ -268,7 +268,7 @@ impl Vm {
     /// TICKET-235 — THE decision of how a spawned call becomes a task body; every task it yields
     /// starts in a frame. A head that pushes its own frame runs directly, unchanged. Any other
     /// head (a receiver, a native fn value, a builtin, a ctor, a generator fn) becomes argument 0
-    /// of the site's entry thunk, and `fresh` moves one bit ([`Crossing::behind_entry`]). A
+    /// of the site's entry thunk, and `fresh` says so ([`crossing::behind_entry`]). A
     /// non-callable callee passes through, so `lower_task` reports it as it always did.
     fn task_entry(
         &mut self,
@@ -294,7 +294,7 @@ impl Vm {
         let home = self.frames.last().expect("a spawn runs in a frame").home;
         let entry = self.fn_value(FnKey::Proto(proto), || Obj::Func { proto, home });
         args.insert(0, head);
-        Ok((entry, args, Crossing::behind_entry(fresh)))
+        Ok((entry, args, crossing::behind_entry(fresh)))
     }
 
     /// Start one task: the ONE function behind `spawn` and `Executor.submit` (TICKET-208). It pins
@@ -4405,6 +4405,78 @@ impl Vm {
         out
     }
 
+    /// TICKET-240 Rule W: unmark exactly the objects `shape` says the crossing site built, in the
+    /// just-rebuilt value `v`. A positional shape applies only when the object has that many
+    /// children; on any mismatch nothing below is unmarked (a false fault, never a missed mark).
+    /// A `Node` never enters a map key or a set item: only [`Vm::unmark_graph`] does.
+    pub(super) fn unmark_fresh(&mut self, v: Value, shape: &Fresh) {
+        let kids = match shape {
+            Fresh::Marked => return,
+            Fresh::All => return self.unmark_graph(v),
+            Fresh::Node(kids) => kids,
+        };
+        let Some(h) = v.as_obj() else {
+            return;
+        };
+        self.heap.unset_copied(h);
+        let (len, positional) = match self.heap.get(h) {
+            Obj::List(xs) | Obj::Tuple(xs) => (xs.len(), true),
+            Obj::Enum { payload, .. } => (payload.len(), true),
+            Obj::Struct { fields, .. } => (fields.as_slice().len(), true),
+            Obj::Map(m) => (m.entries.len(), false),
+            _ => return,
+        };
+        for i in 0..len {
+            let kid = match kids {
+                Kids::Marked => return,
+                Kids::Each(s) => &**s,
+                Kids::At(shapes) if positional && shapes.len() == len => &shapes[i],
+                Kids::At(_) => return,
+            };
+            let child = match self.heap.get(h) {
+                Obj::List(xs) | Obj::Tuple(xs) => xs.get(i).copied(),
+                Obj::Enum { payload, .. } => payload.get(i).copied(),
+                Obj::Struct { fields, .. } => fields.get(i).copied(),
+                Obj::Map(m) => m.entries.get(i).map(|e| e.2),
+                _ => None,
+            };
+            if let Some(child) = child {
+                self.unmark_fresh(child, kid);
+            }
+        }
+    }
+
+    /// Unmark every data object reachable from `v`: a graph the crossing site built whole. A
+    /// closure, fn, generator, cell, iterator, module or handle stays marked and is not entered.
+    fn unmark_graph(&mut self, v: Value) {
+        let mut stack: Vec<GcRef> = v.as_obj().into_iter().collect();
+        while let Some(h) = stack.pop() {
+            // A tuple and an enum carry no mark and cannot form a cycle on their own, so they
+            // are always entered. Every other data kind is entered once: its mark is the guard.
+            let unmarked_kind = matches!(self.heap.get(h), Obj::Tuple(_) | Obj::Enum { .. });
+            if !unmarked_kind && !self.heap.is_copied(h) {
+                continue;
+            }
+            let objs = |vs: &[Value]| vs.iter().filter_map(|v| v.as_obj()).collect::<Vec<_>>();
+            let kids = match self.heap.get(h) {
+                Obj::List(xs) | Obj::Tuple(xs) => objs(xs),
+                Obj::Enum { payload, .. } => objs(payload),
+                Obj::Struct { fields, .. } => objs(fields.as_slice()),
+                Obj::Set(s) => s.entries.iter().filter_map(|e| e.1.as_obj()).collect(),
+                Obj::Map(m) => m
+                    .entries
+                    .iter()
+                    .flat_map(|e| [e.1.as_obj(), e.2.as_obj()])
+                    .flatten()
+                    .collect(),
+                Obj::ByteArray(_) => Vec::new(),
+                _ => continue,
+            };
+            self.heap.unset_copied(h);
+            stack.extend(kids);
+        }
+    }
+
     /// Rebuild a crossing generator's frame slots (TICKET-190). Every slot takes the route's
     /// ambient mark; then, on a marking route, the ROOT of each slot `private` names is unmarked.
     /// Only the root: its children keep the mark (DEC-160 shallow), and unmarking runs after the
@@ -4418,8 +4490,7 @@ impl Vm {
         let out = self.rebuild_items(slots, rebuild, |w| w);
         if self.copy_mark {
             for (k, v) in out.iter().enumerate() {
-                if super::crossing::Crossing::frame_slot(private, k)
-                    == super::crossing::Crossing::Move
+                if crossing::Crossing::frame_slot(private, k) == crossing::Crossing::Move
                     && let Some(h) = v.as_obj()
                 {
                     self.heap.unset_copied(h);
@@ -5198,10 +5269,10 @@ impl Vm {
     /// captures), so a cell shared between an arg and a capture is rebuilt once and both references
     /// tie to it — and no `Backref` is ever reached before the `WireValue::Cell` that defines it.
     ///
-    /// D4 (TICKET-179): `fresh` is the checker's freshness bitmask (bit `i + 1` = arg `i`; bit 0 is
-    /// the callee and never set — a receiver is arg 0 of its entry thunk, TICKET-235). A fresh
-    /// operand's ROOT is unmarked after the rebuild; its children stay marked (`copy()` is shallow,
-    /// DEC-160).
+    /// D4 (TICKET-240): `fresh` names the checker's shape for each argument
+    /// ([`crossing::operand`]; a receiver is arg 0 of its entry thunk, TICKET-235). After the
+    /// rebuild [`Vm::unmark_fresh`] unmarks exactly the objects each shape says the call site
+    /// built.
     pub(super) fn rebuild_ready(
         &mut self,
         lowered: Lowered,
@@ -5260,15 +5331,12 @@ impl Vm {
             }
         };
         self.copy_mark = saved_copy_mark;
-        let ReadyCall::Invoke { args, .. } = &out.0;
-        let fresh_roots = args
-            .iter()
-            .enumerate()
-            .filter(|&(i, _)| Crossing::from_mask(fresh, i + 1) == Crossing::Move)
-            .filter_map(|(_, &v)| v.as_obj())
-            .collect::<Vec<_>>();
-        for h in fresh_roots {
-            self.heap.unset_copied(h);
+        if fresh != 0 {
+            let program = self.program.clone();
+            let ReadyCall::Invoke { args, .. } = &out.0;
+            for (i, &arg) in args.iter().enumerate() {
+                self.unmark_fresh(arg, crossing::operand(&program.fresh_calls, fresh, i));
+            }
         }
         // TICKET-111 — copy each adopt id's just-rebuilt handle into `snapshot_adopt`, so this task's
         // OWN module-global fault (`fault_module`) can adopt it as the global's object instead of
