@@ -5,7 +5,7 @@
 # where that lever shows). ~6M run_until entries. Prints 501000000.
 
 fn main():
-    xs := []
+    xs: List[int] = []
     i := 0
     while i < 1000:
         xs.push(i)

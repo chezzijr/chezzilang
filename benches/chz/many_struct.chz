@@ -2,7 +2,7 @@ struct P:
     x: int
     y: int
 fn main():
-    xs := []
+    xs: List[P] = []
     i := 0
     while i < 2000000:
         xs.push(P(i, i))

@@ -13,7 +13,7 @@ fn main():
     ex.submit(fn(): out.send(10))
     ex.submit(fn(): out.send(20))
     ex.shutdown()                     # drains the three tasks onto the pool and joins them
-    nums := []
+    nums: List[int] = []
     for _ in 0..3:
         nums.push(out.recv())
     nums.sort_by(fn(a: int, b: int) -> int: a - b)

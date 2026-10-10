@@ -8,7 +8,7 @@ fn read_tokens() -> List[str]:
         match io.read_line():
             ?l: text = text + l + " "
             None:    break
-    toks := []
+    toks: List[str] = []
     for t in text.split(" "):
         s := t.trim()
         if s != "":
@@ -19,12 +19,12 @@ fn main():
     toks := read_tokens()
     n := int(toks[0])
     x := int(toks[1])
-    coins := []
+    coins: List[int] = []
     for i in 0..n:
         coins.push(int(toks[2 + i]))
 
     MOD := 1000000007
-    ways := []
+    ways: List[int] = []
     for s in 0..(x + 1):
         ways.push(0)
     ways[0] = 1

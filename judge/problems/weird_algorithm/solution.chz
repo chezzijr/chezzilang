@@ -7,7 +7,7 @@ fn main():
     match io.read_line():
         ?l: n = int(l)
         None:    return
-    out := []
+    out: List[str] = []
     while n != 1:
         out.push(str(n))
         if n % 2 == 0:

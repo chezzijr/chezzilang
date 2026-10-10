@@ -3806,3 +3806,36 @@ ms as `median (max - min) / max RSS MiB`. `T` 0 is the default worker count (28 
 | executor_and_parallel.chz | 1 | 7 | 6655 (407) / 15 | 6604 (201) / 15 | 0.99x | ok |
 | executor_and_parallel.chz | 2 | 7 | 3566 (123) / 15 | 3528 (86) / 15 | 0.99x | ok |
 | executor_and_parallel.chz | 4 | 7 | 1830 (81) / 15 | 1850 (33) / 15 | 1.01x | ok |
+
+## TICKET-238 — the pin machinery deleted; checker time and run time, base vs branch (2026-10-10)
+
+The change is checker-only: `git diff --stat` touches `src/checker`, tests and `.chz` sources (an
+annotation on each open binding). Base is the wave-22 hunt binary (`~/.cache/hunt7/h1/chezzi`,
+release, main `19b36f77`); branch is `cargo build --release --bin chezzi` of this ticket. Both
+binaries ran the SAME migrated files. Load average `3.81 2.53 2.32` at the start.
+
+`chezzi check <file>`, wall ms, median (min) of 9 runs:
+
+| file | base | branch |
+|---|---:|---:|
+| `tests/chz/spec/static_witness_test.chz` | 35.6 (34.6) | 36.0 (34.8) |
+| `examples/concurrent_jobs.chz` | 13.0 (12.3) | 12.8 (12.7) |
+| `std/iter.chz` | 6.7 (6.6) | 6.7 (6.5) |
+
+`chezzi run benches/chz/<name>.chz`, wall ms, median (min) of 5 runs:
+
+| bench | base | branch |
+|---|---:|---:|
+| `list` | 703 (665) | 705 (671) |
+| `map` | 250 (238) | 267 (252) |
+| `map_str` | 348 (341) | 349 (347) |
+| `str` | 265 (257) | 278 (263) |
+| `hof` | 670 (619) | 653 (625) |
+| `unique` | 127 (113) | 132 (117) |
+| `many_list` | 637 (627) | 651 (619) |
+
+Checker time did not move. `map` is 6% slower on its minimum and `str` 2%; five runs per side do
+not separate that from noise, and no runtime file changed. Its cause is unknown.
+
+Not measured: `benches/run.chz` (the Chezzi-vs-CPython harness) could not run on this box:
+`FAILED [loop]: sh: line 1: hyperfine: command not found`, the same line for every bench.

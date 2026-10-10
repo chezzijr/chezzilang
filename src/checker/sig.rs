@@ -1,7 +1,7 @@
 // checker::sig — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Function signatures and return-type inference passes.
 
-use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
+use super::setup::{BindSite, HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
 /// Where a spelled type sits: `None` ("returns nothing") is a type only in a `Void` position.
@@ -563,6 +563,7 @@ impl Checker {
         // resolve the annotation first so its unannotated params bind to the slot's param
         // types. Only the single-name, `fn`-typed case (destructuring never binds one).
         // Otherwise ordinary bottom-up inference.
+        let let_mark = self.tyvar_mark();
         let val_ty = match &annotated {
             Some(expected) if matches!(value.kind, ExprKind::Closure { .. }) => {
                 if matches!(expected, Ty::Func { .. }) {
@@ -589,6 +590,7 @@ impl Checker {
             }
             None => self.infer_value(value),
         };
+        let val_ty = self.close_operand(let_mark, val_ty);
         (annotated, val_ty)
     }
 
@@ -2328,18 +2330,6 @@ impl Checker {
     // ===== pass 2: check statements =====
 
     pub(super) fn check_block(&mut self, block: &Block) {
-        // PERSISTENT refine-on-first-use (scope-wide first-use pinning): `check_block` runs every
-        // CONDITIONALLY-executed STATEMENT body (an `if`/`elif`/`else` branch, a `while` body, a
-        // `defer:` block). A refine-on-first-use narrowing of an OUTER binding performed inside this
-        // body PERSISTS — the first mutating op that fixes an empty collection's element/key/value
-        // type pins it for the binding's whole scope, even across sibling branches and past the
-        // branch. `repin` writes the pin to the binding's OWNING scope, so it survives `pop_scope`
-        // (which only removes inner-block-declared bindings, not the outer owner). Building a
-        // heterogeneous collection split across branches/arms is therefore now a type error, exactly
-        // like the literal `[1, "s"]`. Lexical scoping is intact: a binding DECLARED in this block is
-        // still removed by `pop_scope`; only an OUTER binding's first-use pin persists. (Expression-
-        // position arms — `infer_if_else`/`infer_match` — keep their snapshot/restore barrier: a pin
-        // in one value-arm must not leak to a sibling value-arm, that being the narrow residual.)
         self.push_scope();
         for stmt in block {
             self.check_stmt(stmt);
@@ -2457,7 +2447,33 @@ impl Checker {
         }
     }
 
+    /// TICKET-238 -- run `f` as one statement: `stmt_mark` records where its errors and poisoned
+    /// reads begin. A nested statement's reads do not count for the statement around it.
+    pub(super) fn with_stmt_mark<R>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = std::mem::replace(
+            &mut self.stmt_mark,
+            super::StmtMark {
+                errors: self.errors.len(),
+                poison: self.poison_reads,
+                span,
+            },
+        );
+        let r = f(self);
+        let inner = self.poison_reads - self.stmt_mark.poison;
+        self.stmt_mark = outer;
+        self.stmt_mark.poison += inner;
+        r
+    }
+
+    /// One statement is one type-variable frame (TICKET-238): nothing it stored stays pending.
     pub(super) fn check_stmt(&mut self, stmt: &Stmt) {
+        self.with_stmt_mark(stmt.span, |c| {
+            let frame = c.tyvar_mark();
+            c.check_stmt_inner(stmt);
+            c.close_tyvar_frame(frame);
+        });
+    }
+    fn check_stmt_inner(&mut self, stmt: &Stmt) {
         self.pending_key_reject = None;
         let span = stmt.span;
         match &stmt.kind {
@@ -2529,57 +2545,10 @@ impl Checker {
                 }
                 // TICKET-186: the first let of a seeded module global refines the seed the bodies
                 // above it typed and pinned; it never wipes it. `declared` is the refined type.
-                let refined = self.refine_first_let(name, declared.clone(), span);
+                let refined = self.refine_first_let(name, declared.clone(), span, BindSite::Let);
                 if refined {
                     declared = self.scopes[0][name].clone();
                 }
-                // PART A: an UN-annotated empty literal (`b := []`/`{}`/`Set()`) whose element/key/value
-                // slot is still `Unknown` records a pending site; if no later op constrains it, the
-                // end-of-scope finalize requires an annotation. Gated on `!inferring_ret` so the
-                // return-inference passes (whose errors are truncated + re-run) don't record duplicates.
-                // The annotated branch never reaches here as an unrefined-empty (a `List[int]`
-                // annotation leaves no `Unknown`-in-slot), and an expression-position literal (`f([])`,
-                // `return []`) binds no local, so the false-positive guards fall out structurally.
-                // …and the literal must actually BE empty. `is_unrefined_empty_coll` is a test on the
-                // TYPE, so a NON-empty literal whose elements all typed `Unknown` — because each one
-                // errored (`xs := [ident]` for a generic fn, `xs := [reset]` for a witness-taking one)
-                // — matched it too, and the finalize then added *"cannot infer element type of empty
-                // collection; add a type annotation"* to a one-element list. Both halves are false:
-                // the collection is not empty, and the annotation does not help (measured on the
-                // pre-existing witness-wall spelling, which produced the identical bogus pair). Ask the
-                // EXPRESSION, which is the thing that knows.
-                let empty_literal = match &value.kind {
-                    ExprKind::List(xs, _) | ExprKind::Set(xs) => xs.is_empty(),
-                    ExprKind::Map(entries) => entries.is_empty(),
-                    _ => true, // `Set()` / `List()` ctor calls and everything else: unchanged
-                };
-                if ty.is_none()
-                    && !self.inferring_ret
-                    && empty_literal
-                    && Self::is_unrefined_empty_coll(&declared)
-                {
-                    self.empty_coll_sites
-                        .push((self.scopes.len() - 1, name.clone(), span));
-                } else if ty.is_some()
-                    && !contains_unknown_in_slot(&declared)
-                    && let ExprKind::Ident(src) = &value.kind
-                {
-                    // PART A: binding a bare empty-collection ident into a CONCRETE-typed annotated
-                    // let (`c: List[int] = b`) constrains `b`'s element type — drop its pending
-                    // requirement AND pin the element from the annotation (the typed-binding
-                    // false-positive guard, one binding away from the direct-literal
-                    // `b: List[int] = []`). Gated on the annotation being fully concrete so
-                    // `c: List[?] = b` does not spuriously satisfy the requirement. Dropping WITHOUT
-                    // pinning was measured check-clean at rc=0: `xs := []` / `ys: List[int] = xs` /
-                    // `xs.push("a")` printed `['a']` through a `List[int]`-typed binding.
-                    self.drop_empty_site(src, Some(&declared));
-                }
-                // An empty binding read as the let VALUE escapes into the new binding (alias `c := b`
-                // or nested `c := [b]`) — drop the source's pending site, pinning from the DECLARED
-                // sink where there is one (an un-annotated `c := b` has nothing concrete, so the
-                // requirement just moves to the alias, which records its own if it stays unrefined).
-                // Runs for every binding kind; only an active site is affected.
-                self.drop_value_escape_sites(value, Some(&declared));
                 // EDITOR HOVER: the let-binding target (`x` in `x := …`) is a NAME, not an `Expr` the
                 // probe visits during `infer`; record it here. The statement span starts at the first
                 // binding name, so it is that token's position (single-name let — the common case).
@@ -2593,27 +2562,15 @@ impl Checker {
                     } else {
                         None
                     };
-                    self.hover_record_binding(span, &declared, name, HoverKind::Local, doc);
+                    self.hover_record_at(span, &declared, HoverKind::Local, doc);
                 }
-                // TICKET-032 A1 — an un-annotated alias (`c := b`) records no concrete sink, so the
-                // pending requirement legitimately MOVES to `c`; link the two names so a later pin on
-                // EITHER reaches both. Computed here (before `declare` moves `declared`) and linked
-                // BELOW `declare`: `declare`'s own untaint would otherwise delete a link recorded
-                // above it.
-                let alias_src = if let ExprKind::Ident(src) = &value.kind
-                    && Self::is_open_coll(&declared)
-                {
-                    Some(src.clone())
-                } else {
-                    None
-                };
                 if !refined {
                     self.reject_redeclare(name, &declared, span);
                 }
                 // Computed BEFORE `declare` so `h := h` cannot see itself.
                 let one_known_fn = self.let_holds_one_known_fn(names, ty, value);
                 if !refined {
-                    self.declare(name, declared);
+                    self.declare_at(name, declared, BindSite::Let);
                 }
                 if let Some(deps) = one_known_fn
                     && let Some(s) = self.owning_scope(name)
@@ -2622,10 +2579,6 @@ impl Checker {
                 }
                 if is_const {
                     self.declare_const(name);
-                }
-                if let Some(src) = alias_src {
-                    let sc = self.scopes.len() - 1;
-                    self.link_empty_alias(sc, name, &src);
                 }
                 // B3.3 (Task 2a): a closure bound to a name records its non-sendable LOCAL captures
                 // keyed by the binding, so a later `spawn <name>()` (or `spawn f(<name>)`) rejects a
@@ -2702,16 +2655,7 @@ impl Checker {
                     let mark = self.diag_mark();
                     let target_ty = self.assign_slot_ty(target);
                     self.diag_rollback(mark);
-                    // TICKET-234 -- a target whose payload is still open is pinned from the
-                    // value first, so the value then meets a concrete slot and wraps like any
-                    // typed slot. A value that misses an earlier pin is inferred with no hint, so
-                    // `check_assign` reports the pin.
-                    let target_ty = self.pin_open_slot(&target_ty, value);
-                    let misses = match &target.kind {
-                        ExprKind::Ident(n) => self.misses_pin(n, &target_ty, value),
-                        _ => false,
-                    };
-                    if !misses && ty_concrete_but(&target_ty, &|n| self.rigid_param(n, &[])) {
+                    if ty_concrete_but(&target_ty, &|n| self.rigid_param(n, &[])) {
                         self.infer_arg(value, Some(&target_ty))
                     } else {
                         self.infer_value(value)
@@ -2747,27 +2691,6 @@ impl Checker {
                         *f = *f && fresh;
                     }
                 }
-                // An empty binding read as the assignment VALUE escapes into the target slot (`c = b`,
-                // `bx.items = b`) — drop the source's pending empty-collection site AND pin from the
-                // TARGET's type, mirroring the typed-binding-value guard for `c: List[int] = b`.
-                // Covers every target shape. The target type is probed speculatively (mark/rollback,
-                // the same idiom the closure branch above uses — inferring an lvalue as an rvalue
-                // would otherwise run read-side gates and double-infer a Field/Index receiver), and
-                // only when THIS statement's value actually reads an unrefined empty binding
-                // (`escapes_unrefined_empty` — a property of this statement alone, never of what some
-                // other binding elsewhere in the file happens to be), so the ordinary assignment path
-                // is untouched.
-                // Dropping WITHOUT pinning was measured check-clean at rc=0: `b := []` /
-                // `bx.items = b` (field `List[int]`) / `b.push("a")` printed `['a']`.
-                let sink = if !self.escapes_unrefined_empty(value) {
-                    None
-                } else {
-                    let mark = self.diag_mark();
-                    let t = self.infer(target);
-                    self.diag_rollback(mark);
-                    Some(t)
-                };
-                self.drop_value_escape_sites(value, sink.as_ref());
                 self.check_assign(target, *op, val_ty, Some(value), span);
                 // TICKET-089 — `b.get().v = 9` / `s.get()[0] = 9` write into the deep copy a box read
                 // returns, so the write is lost. Walk the target down to its innermost base.
@@ -2785,22 +2708,6 @@ impl Checker {
                              discarded — write through '{bx}.{fix}(…)' instead"
                         ),
                     );
-                }
-                // TICKET-032 A1 — `c = b` (both still unrefined empty collections) is a whole-binding
-                // ALIAS, exactly like `c := b`: link the two names so a later pin on either reaches
-                // both. Recorded BELOW `check_assign`, whose funnel unlink (Ident arm) just broke any
-                // pair `c` was previously in — a link recorded above it would be deleted immediately.
-                // Gated on `Eq` and on both sides being a bare `Ident`: the Tuple arm passes each
-                // target its positional `Ty`, not an `Expr`, so `c, d = b, 0` is structurally
-                // unlinkable here and stays a deliberate ceiling (an under-pin, never a false one).
-                if *op == AssignOp::Eq
-                    && let ExprKind::Ident(n) = &target.kind
-                    && let ExprKind::Ident(src) = &value.kind
-                    && self.lookup(n).is_some_and(|t| Self::is_open_coll(&t))
-                    && self.lookup(src).is_some_and(|t| Self::is_open_coll(&t))
-                    && let Some(sc) = self.owning_scope(n)
-                {
-                    self.link_empty_alias(sc, n, src);
                 }
             }
             StmtKind::Fn(decl) => {
@@ -2842,7 +2749,7 @@ impl Checker {
                     // walk decline, and the fn asks for `->`.
                     if decl.ret.is_none() && matches!(sig.ret, Ty::Unknown) {
                         // `sig.ret` is `Unknown` here, so this is the provisional `-> ?` type.
-                        self.declare(&decl.name, fn_value_ty(&sig));
+                        self.declare_unchecked(&decl.name, fn_value_ty(&sig));
                         self.kw_certain.insert(kw_key.clone(), Vec::new());
                         let inferred = self.infer_nested_fn_ret(decl, &sig);
                         sig.ret = inferred;
@@ -2850,7 +2757,7 @@ impl Checker {
                     // Nearest-scope binding: the name resolves to THIS nested fn (not a global
                     // namesake) at every call site, and recursion type-checks. Declared BEFORE
                     // `check_fn_body`.
-                    self.declare(&decl.name, fn_value_ty(&sig));
+                    self.declare_unchecked(&decl.name, fn_value_ty(&sig));
                     self.kw_certain.insert(kw_key.clone(), Vec::new());
                     if !kw_was_written {
                         self.kw_written.remove(&kw_key);
@@ -3114,8 +3021,7 @@ impl Checker {
                 // zero-trip / always-runs over-approximation by design — `xs:=[]; for i in []:
                 // xs.push(1); xs.push("s")` REJECTS even though the body never runs at runtime; a
                 // sound static over-approximation, matching "first statement that fixes the element
-                // type records it". (No snapshot/restore here, so the pin written to the binding's
-                // OWNING scope by `repin` survives `pop_scope`, which only removes the loop vars.)
+                // type records it".
                 self.push_scope();
                 // `bindings` is parallel to `vars` (and thus `var_spans`); zip truncates safely if the
                 // lengths ever diverge (a binding's hover is dropped, never a panic).
@@ -3907,7 +3813,9 @@ impl Checker {
         match val_ty {
             Ty::Unknown => {
                 for name in names {
-                    if name != "_" && !self.refine_first_let(name, Ty::Unknown, stmt_span) {
+                    if name != "_"
+                        && !self.refine_first_let(name, Ty::Unknown, stmt_span, BindSite::Other)
+                    {
                         self.declare(name, Ty::Unknown);
                     }
                 }
@@ -3957,7 +3865,8 @@ impl Checker {
                             .rposition(|n| n == name)
                             .is_some_and(|j| refines[j]);
                     if refined_later
-                        || (refines[i] && self.refine_first_let(name, ty.clone(), stmt_span))
+                        || (refines[i]
+                            && self.refine_first_let(name, ty.clone(), stmt_span, BindSite::Other))
                     {
                         continue;
                     }
@@ -3974,7 +3883,9 @@ impl Checker {
                     ),
                 );
                 for name in names {
-                    if name != "_" && !self.refine_first_let(name, Ty::Unknown, stmt_span) {
+                    if name != "_"
+                        && !self.refine_first_let(name, Ty::Unknown, stmt_span, BindSite::Other)
+                    {
                         self.declare(name, Ty::Unknown);
                     }
                 }
@@ -3985,7 +3896,9 @@ impl Checker {
                     format!("cannot destructure non-tuple value of type {other}"),
                 );
                 for name in names {
-                    if name != "_" && !self.refine_first_let(name, Ty::Unknown, stmt_span) {
+                    if name != "_"
+                        && !self.refine_first_let(name, Ty::Unknown, stmt_span, BindSite::Other)
+                    {
                         self.declare(name, Ty::Unknown);
                     }
                 }
@@ -4099,73 +4012,7 @@ impl Checker {
                 // the let-binding/for-binding `Local` hover. Simple-Ident lvalue only (Index/Field
                 // targets are handled in their own arms below, where the receiver IS inferred).
                 self.hover_record_at(target.span, &var_ty, HoverKind::Local, None);
-                // TICKET-234 -- a whole-binding write that misses the type an earlier use pinned
-                // reports the pin, for every spelling of the value.
-                if op == AssignOp::Eq
-                    && !val_ty.is_unknown()
-                    && let Some(pin) = self.carrier_pin(name)
-                    && pin == var_ty
-                    && !self.assignable(&var_ty, &val_ty)
-                {
-                    self.report_pin_miss(name, &val_ty, &pin, target.span);
-                } else {
-                    self.check_assign_value(&var_ty, op, &val_ty, value, target.span);
-                }
-                // TICKET-032 A1 — a whole-binding (re)assignment rebinds `name` to a DIFFERENT runtime
-                // object, breaking any alias pair naming it. `+=` on a `List` is the one exception
-                // (DEC-015): it extends IN PLACE and yields the SAME handle, so the pair survives.
-                // `*=` and the set compound forms still rebind. Placed here, OUTSIDE the
-                // `!contains_unknown_in_slot` guard below (so `c = []` also breaks the pair) and ABOVE
-                // `drop_empty_site` (so no pin propagates across a pair this statement just broke).
-                // This is the FUNNEL: the Tuple arm recurses into this Ident arm per element with
-                // `AssignOp::Eq`, so this one placement covers every target spelling.
-                if op != AssignOp::PlusEq {
-                    self.unlink_empty_alias(name);
-                }
-                // TICKET-064 — a WRITE to a `None`/nullary-enum carrier is checked against its
-                // first-constraining-use pin. Must run BEFORE `drop_empty_site` below, which would
-                // otherwise record the very pin this statement is checked against — recording it
-                // first would let every write "agree" with itself. A READ is never checked this way
-                // (`## Decisions`); only `=` writes with a fully concrete, same-shape value reach
-                // this. On agreement (or no pin yet) the write also REPINS the binding, which is what
-                // makes a later READ sound (a `match` arm binds a concrete payload) while a
-                // never-written carrier stays permissive.
-                if op == AssignOp::Eq
-                    && Self::is_unpinned_carrier(&var_ty)
-                    && Self::same_carrier_shape(&var_ty, &val_ty)
-                    && ty_fully_concrete(&val_ty)
-                    && !self.is_captured(name)
-                {
-                    if let Some(pin) = self.carrier_pin(name)
-                        && !self.assignable(&pin, &val_ty)
-                    {
-                        self.report_pin_miss(name, &val_ty, &pin, target.span);
-                    } else {
-                        self.pin_carrier_use(name, &val_ty);
-                        self.repin(name, val_ty.clone());
-                    }
-                }
-                // PART A: a whole-binding (re)assignment / compound-assign / tuple-assign element that
-                // supplies a CONCRETE-typed value into an unrefined empty-collection binding constrains
-                // its element type — clear the pending annotation requirement (the binding IS
-                // constrained, just not through the two refine-on-first-use mutator gates). Gated on the
-                // value being fully concrete (`!contains_unknown_in_slot`) so reassigning ANOTHER empty
-                // literal (`b = []`, still `List[Unknown]`) does NOT drop the requirement. It PINS
-                // from that value too: leaving the stored type permissive was not
-                // behavior-preserving, it was the hole — measured check-clean at rc=0, `b := []` /
-                // `b = [1, 2]` / `b.push("a")` printed `[1, 2, 'a']`.
-                // TICKET-234 -- the write also pins the shapes neither block above covers (a tuple
-                // with an open element, a `[None]` list under `+=`).
-                if op_supplies_slot(op, &var_ty)
-                    && contains_unknown_in_slot(&var_ty)
-                    && !Self::is_unpinned_carrier(&var_ty)
-                    && ty_fully_concrete(&val_ty)
-                {
-                    self.repin_place(target, &merge_unknown(&var_ty, &val_ty));
-                }
-                if !contains_unknown_in_slot(&val_ty) {
-                    self.drop_empty_site(name, Some(&val_ty));
-                }
+                self.check_assign_value(&var_ty, op, &val_ty, value, target.span);
             }
             // `xs[i] = v` — only lists are mutable by index. Strings are immutable; other types
             // aren't indexable. (`infer_index` would green-light a str index — handle it here.)
@@ -4174,18 +4021,6 @@ impl Checker {
                 index: Some(index),
                 ..
             } => {
-                // Refine-on-first-use for `m[k]=v` / `xs[i]=v`: when `obj` is a simple variable whose
-                // type has an `Unknown` key/value/element slot (an empty `{}`/`[]`), the supplied
-                // (idx_ty, val_ty) makes the slot concrete — re-pin the binding so a later conflicting
-                // assign is a normal mismatch. The match below then re-reads the refined type from
-                // scope. A target through a place is pinned by `repin_place` below.
-                self.refine_index_receiver(obj, index, &val_ty);
-                if op == AssignOp::Eq
-                    && !matches!(obj.kind, ExprKind::Ident(_))
-                    && ty_fully_concrete(&val_ty)
-                {
-                    self.repin_place(target, &val_ty);
-                }
                 match self.infer(obj) {
                     Ty::Map(k, v) => {
                         let idx_ty = self.infer_arg(index, Some(&k));
@@ -4322,13 +4157,6 @@ impl Checker {
                         match field_ty {
                             Some(ty) => {
                                 self.check_assign_value(&ty, op, &val_ty, value, target.span);
-                                // TICKET-234 -- a write through a field pins the root binding.
-                                if op_supplies_slot(op, &ty)
-                                    && contains_unknown_in_slot(&ty)
-                                    && ty_fully_concrete(&val_ty)
-                                {
-                                    self.repin_place(target, &merge_unknown(&ty, &val_ty));
-                                }
                             }
                             None => {
                                 let names = self.field_names(sname);
@@ -4400,18 +4228,6 @@ impl Checker {
                 "invalid assignment target (only variables can be assigned)",
             ),
         }
-    }
-
-    /// The one owner of the pin-miss text: a write of `val_ty` to `name`, whose payload an earlier
-    /// use pinned to `pin`.
-    fn report_pin_miss(&mut self, name: &str, val_ty: &Ty, pin: &Ty, span: Span) {
-        let [val_s, pin_s] = Ty::render_distinct([val_ty, pin]);
-        self.error(
-            span,
-            format!(
-                "cannot assign {val_s} to '{name}' -- its payload was pinned to {pin_s} by an earlier use"
-            ),
-        );
     }
 
     pub(super) fn check_assign_value(
@@ -4617,17 +4433,6 @@ impl Checker {
                             float_fix_note(&ret, &ty)
                         ),
                     );
-                } else if let ExprKind::Ident(name) = &e.kind
-                    && !contains_unknown_in_slot(&ret)
-                {
-                    // PART A: returning a bare empty-collection binding into a CONCRETE collection
-                    // return type constrains its element type (the typed-return false-positive
-                    // guard, one binding away from the direct-literal `return []`). Drop its
-                    // pending annotation requirement AND pin from the return type — dropping
-                    // alone was measured check-clean at rc=0: `zs := []` /
-                    // `fn give() -> List[str]: return zs` / `s := give()` / `s.push("a")` /
-                    // `zs.push(1)` printed `['a', 1]`.
-                    self.drop_empty_site(name, Some(&ret));
                 }
             }
             None => {
@@ -4789,7 +4594,12 @@ impl Checker {
         let saved_provider = std::mem::replace(&mut self.current_provider, provider);
         // TICKET-225: one fn body is one type-variable frame.
         let frame = self.tyvar_mark();
-        self.check_fn_body_inner(decl, self_ty, sig);
+        let span = decl
+            .body
+            .first()
+            .filter(|_| decl.inline_expr_body)
+            .map_or(decl.name_span, |s| s.span);
+        self.with_stmt_mark(span, |c| c.check_fn_body_inner(decl, self_ty, sig));
         self.close_tyvar_frame(frame);
         self.current_provider = saved_provider;
     }
@@ -5095,7 +4905,10 @@ impl Checker {
             // Editor hover: record the param's declared type at its DECL-site name span (no-op
             // off-probe; covers free fns AND methods, both routed through check_fn_body).
             self.hover_record_at(param.name_span, &ty, HoverKind::Param, None);
-            self.declare(&param.name, ty);
+            // A declared fn's param type is written in its signature. A hole in it is an
+            // annotation the signature already rejected (`x: List[None]`), so it is not judged
+            // again (TICKET-238).
+            self.declare_unchecked(&param.name, ty);
         }
         // An inline-expr body (`fn a() -> T: <expr>`) implicitly returns its single expression,
         // exactly as a `return <expr>` would. We infer that expr ONCE here and validate it against
@@ -5190,8 +5003,6 @@ impl Checker {
             );
         }
         self.record_gen_frame(decl);
-        self.finalize_empty_coll_sites();
-        self.finalize_hover_pending();
         self.pop_scope();
         self.current_ret = saved_ret;
         self.ret_owner = saved_ret_owner;
@@ -5622,7 +5433,9 @@ impl Checker {
             }
             return vec![(vars[0].clone(), Ty::Int)];
         }
+        let m = self.tyvar_mark();
         let it = self.infer(iter);
+        let it = self.close_operand(m, it);
         // DEC-113: a runtime Map can only hide behind a type PARAMETER or a protocol existential, and
         // a tuple is now a legal Map key, so the compiler's runtime `IsMap` test would bind such a
         // Map's (key, value) where this checker destructures the element. Make the choice static.
@@ -5763,7 +5576,9 @@ impl Checker {
     /// would bypass coverage entirely (soundness hole — `match x: E.A: ..` over `enum E{A,B}` checked
     /// ok then trapped at runtime). See `reconstruct_unknown_kind`.
     pub(super) fn match_kind(&mut self, scrutinee: &Expr, patterns: &[&Pattern]) -> MatchKind {
+        let m = self.tyvar_mark();
         let sty = self.infer(scrutinee);
+        let sty = self.close_operand(m, sty);
         // Every enum type, carrier or user, reads its variants from the one table reader.
         if let Some((name, _)) = sty.as_enum() {
             return MatchKind::Variants {
@@ -6192,10 +6007,4 @@ fn turbofish_charges(
             .filter(|t| type_args.iter().any(|ty| ty_mentions(ty, t)))
             .cloned(),
     );
-}
-
-/// True when an assignment with `op` supplies the type of the slot it writes: `=`, or `+=` on a
-/// `List` (which extends in place, DEC-015).
-fn op_supplies_slot(op: AssignOp, slot: &Ty) -> bool {
-    op == AssignOp::Eq || (op == AssignOp::PlusEq && matches!(slot, Ty::List(_)))
 }

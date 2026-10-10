@@ -5,13 +5,13 @@
 # measures hashing and probing rather than string construction. Prints 1000000.
 
 fn main():
-    keys := []
+    keys: List[str] = []
     i := 0
     while i < 1000:
         keys.push("key-" + str(i))
         i += 1
 
-    m := {}
+    m: Map[str, int] = {}
     n := 0
     while n < 1000:
         m[keys[n]] = 0

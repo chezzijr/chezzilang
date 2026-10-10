@@ -24,7 +24,7 @@ test fn recover_inside_defer_of_cancelled_task_catches():
             spawn:
                 defer:
                     log.update(fn(s: str) -> str: s + "A")
-                    r := recover: panic("cleanup step 1 failed")
+                    r: None!Error = recover: panic("cleanup step 1 failed")
                     assert "{r}" == "!cleanup step 1 failed"
                     log.update(fn(s: str) -> str: s + "B")
                 ready.send(1)

@@ -254,7 +254,7 @@ struct Parser:
         if self.depth > MAX_NEST_DEPTH:
             return !"exceeded max depth"
         self.pos += 1                       # consume '['
-        items := []
+        items: List[Json] = []
         self.skip_ws()
         if self.peek() == "]":
             self.pos += 1
@@ -276,7 +276,7 @@ struct Parser:
         if self.depth > MAX_NEST_DEPTH:
             return !"exceeded max depth"
         self.pos += 1                       # consume '{'
-        obj := {}
+        obj: Map[str, Json] = {}
         self.skip_ws()
         if self.peek() == "}}":
             self.pos += 1

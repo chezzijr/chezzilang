@@ -28,7 +28,7 @@ fn count[S: Iterable[T], T](xs: S) -> int:
     return n
 
 fn to_list[S: Iterable[T], T](xs: S) -> List[T]:
-    out := []
+    out: List[T] = []
     for x in xs:
         out.push(x)
     return out

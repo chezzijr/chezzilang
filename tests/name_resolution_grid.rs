@@ -792,18 +792,18 @@ fn t187_cells() -> Vec<Cell> {
         one(
             "t187/generic_value/qualified/same_name",
             pick("T", "cmp.max"),
-            // TICKET-225: the call pins `max`'s `T` to the rigid param, which fails `Comparable` (Rust E0277).
-            Expect::Rejects("does not satisfy Comparable"),
+            // TICKET-238: the read is rejected where it is bound; no later call pins it.
+            Expect::Rejects("is generic and T is not determined here"),
         ),
         one(
             "t187/generic_value/qualified/other_name",
             pick("U", "cmp.max"),
-            Expect::Rejects("does not satisfy Comparable"),
+            Expect::Rejects("is generic and T is not determined here"),
         ),
         one(
             "t187/generic_value/from_import/same_name",
             pick("T", "max").replace("import std.cmp", "import max from std.cmp"),
-            Expect::Rejects("does not satisfy Comparable"),
+            Expect::Rejects("is generic and T is not determined here"),
         ),
         one(
             "t187/generic_value/qualified/pinned",

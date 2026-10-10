@@ -82,23 +82,22 @@ test fn method_and_free_fn_agree():
 fn empty_of[T]() -> List[T]:
     return []
 
-test fn a_generic_empty_producer_is_pinned_by_a_later_use():
-    # `T` cannot be bound AT the call, but the result is `List[Unknown]` — the same type `[]`
-    # produces — so the next statement pins the element, exactly as it does for a bare literal.
-    # Rust infers the identical program from the later use.
-    xs := empty_of()
+test fn a_generic_empty_producer_is_typed_by_its_binding():
+    # TICKET-238: `T` cannot be bound AT the call and no later statement pins it, so the binding's
+    # annotation supplies it on the same statement (`xs := empty_of()` is an error on that line).
+    xs: List[int] = empty_of()
     xs.push(1)
     xs.push(2)
     assert xs == [1, 2]
 
-    ys := empty_of()
+    ys: List[str] = empty_of()
     ys.push("a")
     assert ys == ["a"]
 
 test fn the_generic_producer_matches_the_literal():
-    a := empty_of()
+    a: List[int] = empty_of()
     a.push(7)
-    b := []
+    b: List[int] = []
     b.push(7)
     assert a == b
 
@@ -110,7 +109,7 @@ test fn passing_into_a_concrete_parameter_pins_the_element():
     # exactly as a first `push` would — a later, agreeing push is fine and the list stays homogeneous.
     # NOTE: agreeing uses alone do NOT test the pin (they pass whether or not it happens); the
     # element type is READ BACK below, which is what a missing pin would get wrong.
-    xs := []
+    xs: List[str] = []
     assert take_strs(xs) == 0
     xs.push("a")
     xs.push("b")

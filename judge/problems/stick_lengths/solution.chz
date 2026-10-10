@@ -9,7 +9,7 @@ fn read_tokens() -> List[str]:
         match io.read_line():
             ?l: text = text + l + " "
             None:    break
-    toks := []
+    toks: List[str] = []
     for t in text.split(" "):
         s := t.trim()
         if s != "":
@@ -19,7 +19,7 @@ fn read_tokens() -> List[str]:
 fn main():
     toks := read_tokens()
     n := int(toks[0])
-    p := []
+    p: List[int] = []
     for i in 0..n:
         p.push(int(toks[1 + i]))
     p.sort()

@@ -37,6 +37,10 @@ impl BareName {
     }
 }
 
+/// The name prefix of the scratch binding `scratch_operand` declares for a `?.` / `??` operand.
+/// No user code can name it, and the hole check does not judge it (TICKET-238).
+pub(super) const OPT_RECV_PREFIX: &str = "__optrecv";
+
 impl Checker {
     pub(super) fn bare_pattern_name(&self, name: &str) -> BareName {
         if let Some(iv) = self.imported_variants.get(name) {
@@ -1368,15 +1372,6 @@ impl Checker {
                 has_wildcard,
                 arm.body.first().map_or(scrutinee.span, |s| s.span),
             );
-            // PERSISTENT refine-on-first-use (see `check_block`): a STATEMENT-`match` arm mirrors an
-            // if/else statement body — a refine-on-first-use pin of an OUTER empty collection inside
-            // one arm PERSISTS across sibling arms and past the match (Option B: a cross-arm element-
-            // type conflict is a hard error). No snapshot/restore here, so the pin `repin` wrote to
-            // the binding's OWNING scope survives `pop_scope` (which only removes the arm's binders).
-            // The EXPRESSION-position matcher `infer_match` keeps its barrier — value-arms stay
-            // independent.
-            // The mark spans the arm PATTERN only, never the guard or the body: an unrelated error
-            // inside an arm must not hide a genuinely non-exhaustive match.
             let pat_mark = self.errors.len();
             let irref = self.bind_match_arm(
                 &arm.pattern,
@@ -1429,8 +1424,6 @@ impl Checker {
         let mut arm_tys: Vec<(Span, Ty)> = Vec::new();
         for arm in arms {
             self.warn_unreachable_arm(has_wildcard, arm.body.span);
-            // No refine-on-first-use barrier here: a pin made in a value arm PERSISTS, exactly like
-            // statement position. See the note above `Checker::is_unrefined_empty_coll`.
             let pat_mark = self.errors.len();
             let irref = self.bind_match_arm(
                 &arm.pattern,
@@ -1518,8 +1511,6 @@ impl Checker {
         };
         let had_hint = hint.is_some();
         self.expect_bool(cond, "if condition");
-        // No refine-on-first-use barrier here: a pin made in a branch VALUE persists, exactly like
-        // statement position. See the note above `Checker::is_unrefined_empty_coll`.
         // Each branch value owns the hint when this if owns it (TICKET-227): it wraps on its own.
         match &hint {
             Some(h) => self.install_hint(then, h.clone(), owned),
@@ -2130,65 +2121,6 @@ impl Checker {
         }
     }
 
-    /// PART B — like [`Self::hover_record_at`], but for an occurrence of a NAMED binding. When the
-    /// probe lands on an occurrence whose recorded type still carries an `Unknown`-in-slot (a
-    /// not-yet-refined empty collection), DON'T lock `hover_result` to that provisional type; instead
-    /// stash the binding's `(name, kind, doc)` in `hover_pending`. The end-of-scope finalize then looks
-    /// up the binding's FINAL (refined) type and writes it to `hover_result`, so an earlier occurrence
-    /// of `b` (its `b := []` decl or any use before the refining `b.push(0)`) shows `List[int]`, not
-    /// `List[Unknown]`. A concrete (fully-known) type records immediately like `hover_record_at`.
-    /// Probe-gated; entirely inert off the hover probe → behavior-neutral.
-    pub(super) fn hover_record_binding(
-        &mut self,
-        span: Span,
-        ty: &Ty,
-        name: &str,
-        kind: HoverKind,
-        doc: Option<String>,
-    ) {
-        let Some((pl, pc)) = self.hover_probe else {
-            return;
-        };
-        if self.hover_result.is_some() || self.current_module_id != self.hover_entry {
-            return;
-        }
-        if span.line == pl && span.col == pc {
-            if contains_unknown_in_slot(ty) {
-                // defer: the binding may be refined later; resolve to its final type at the end-of-scope
-                // seam that OWNS it. Record that owning scope (reverse walk, like `repin`/`drop_empty_site`)
-                // so an intervening inner fn/method `check_fn_body` seam doesn't finalize it prematurely
-                // (correctness-0). Fall back to the innermost scope if the binding isn't declared yet
-                // (a decl-site hover recorded before `declare`) — at top level that is the module scope.
-                let owning = self
-                    .owning_scope(name)
-                    .unwrap_or(self.scopes.len().saturating_sub(1));
-                self.hover_pending = Some((owning, name.to_string(), kind, doc));
-            } else {
-                self.hover_result = Some((ty.clone(), kind, doc));
-            }
-        }
-    }
-
-    /// PART B — at end-of-scope (fn body / module, BEFORE `pop_scope`), if the probe deferred onto an
-    /// unrefined-empty binding (`hover_pending` set) and no concrete hover landed elsewhere, resolve
-    /// the binding's FINAL (now-refined) type from its owning scope and commit it to `hover_result`.
-    /// A no-op off the probe (`hover_pending` stays `None`).
-    pub(super) fn finalize_hover_pending(&mut self) {
-        if self.hover_result.is_some() {
-            return; // a concrete hover already landed elsewhere
-        }
-        // Only resolve at the seam that OWNS the pending binding (the scope about to be popped). A
-        // pending binding owned by an ENCLOSING scope (`owning < idx`) is still refinable after this
-        // pop — leave it for that scope's own finalize, else an intervening inner fn/method seam would
-        // lock it to the still-unrefined `List[Unknown]` (correctness-0). Mirrors `finalize_empty_coll_sites`.
-        let idx = self.scopes.len().saturating_sub(1);
-        let owns_here = matches!(&self.hover_pending, Some((owning, ..)) if *owning >= idx);
-        if owns_here && let Some((_owning, name, kind, doc)) = self.hover_pending.take() {
-            let ty = self.lookup(&name).unwrap_or(Ty::Unknown);
-            self.hover_result = Some((ty, kind, doc));
-        }
-    }
-
     /// Editor hover for a `from M import T` user type (struct/enum). Computes the effective
     /// doc — the type's own decl docstring carried across the module boundary, else a `kind (from
     /// module)` fallback — then (1) seeds `name_docs[bind]` so a later bare (`x: T`) / generic-head
@@ -2283,7 +2215,7 @@ impl Checker {
                     };
                     // PART B: a use of a binding whose recorded type is still an unrefined empty
                     // collection defers to the binding's final (refined) type via `hover_record_binding`.
-                    self.hover_record_binding(expr.span, ty, name, HoverKind::Local, doc);
+                    self.hover_record_at(expr.span, ty, HoverKind::Local, doc);
                 } else if let Some(sig) = self.functions.get(name) {
                     self.hover_record_at(expr.span, ty, HoverKind::Func, sig.doc.clone());
                 } else {
@@ -2372,7 +2304,9 @@ impl Checker {
                     .to_string(),
             );
         }
+        let m = self.tyvar_mark();
         let ty = self.infer(value);
+        let ty = self.close_operand(m, ty);
         let (payload, err_ty) = match &ty {
             Ty::Option(t) => ((**t).clone(), None),
             Ty::Result(t, er) => ((**t).clone(), Some((**er).clone())),
@@ -3478,6 +3412,9 @@ impl Checker {
         if let Resolution::Local | Resolution::Global { .. } | Resolution::Module(_) = res
             && let Some(ty) = self.lookup(name)
         {
+            if self.is_poisoned(name) {
+                self.poison_reads += 1;
+            }
             // TICKET-183 — a body reads a module global declared below it through the type
             // `seed_module_globals` gave it. An `Unknown` in that type (an un-annotated empty
             // collection, a value of un-inferable type) is pinned by walk-order code this body cannot
@@ -3486,7 +3423,9 @@ impl Checker {
                 && !self.inferring_ret
                 && self.globals.get(name).is_some_and(|g| g.unreached())
                 && self.owning_scope(name) == Some(0)
-                && (ty.is_unknown() || contains_unknown_in_slot(&ty))
+                // A fn value whose return is still being inferred (`g := fn(n: int): g(n)`) is
+                // not this gate's: the closure's own return rule reports it.
+                && (ty.is_unknown() || (!matches!(ty, Ty::Func { .. }) && ty.has_hole()))
             {
                 if self.globals.get(name).is_some_and(|g| g.cycle) {
                     return Ty::Unknown;
@@ -5208,7 +5147,7 @@ impl Checker {
     fn scratch_operand(&mut self, t: Ty) -> Expr {
         let n = self.next_opt_tmp;
         self.next_opt_tmp += 1;
-        let name = format!("__optrecv{n}");
+        let name = format!("{OPT_RECV_PREFIX}{n}");
         self.push_scope();
         self.declare(&name, t);
         Expr {
@@ -5287,7 +5226,9 @@ impl Checker {
         name_span: Span,
         span: Span,
     ) -> Ty {
+        let m = self.tyvar_mark();
         let t = self.infer_value(obj);
+        let t = self.close_operand(m, t);
         let key = crate::checker::carrier_key(
             self.graph_module_idx,
             self.kw_frag_ctx,
@@ -5366,7 +5307,9 @@ impl Checker {
 
     pub(super) fn infer_null_coalesce(&mut self, carrier: &Expr, lhs: &Expr, op_span: Span) -> Ty {
         // Same operand-scratch shape as `infer_opt_chain`, same reason.
+        let m = self.tyvar_mark();
         let t = self.infer_value(lhs);
+        let t = self.close_operand(m, t);
         let key = crate::checker::carrier_key(
             self.graph_module_idx,
             self.kw_frag_ctx,
@@ -5386,24 +5329,6 @@ impl Checker {
                 crate::desugar::lower_carrier_option(&mut c, tmp);
                 let r = self.infer(&c);
                 self.pop_scope();
-                let r = match &lhs.kind {
-                    ExprKind::Ident(n) => self.pin_shape(n, &r),
-                    _ => r,
-                };
-                // TICKET-064 — `??`'s typed right-hand side is a constraining use of `lhs`, but it
-                // never reaches the `drop_empty_site` funnel (only the annotated/argument/return
-                // sinks do), so it needs its own carrier-pin record. Must sit AFTER `pop_scope` so
-                // `owning_scope` resolves against the real scope stack, not the scratch-operand scope
-                // pushed above.
-                if let ExprKind::Ident(n) = &lhs.kind
-                    && !r.is_unknown()
-                    && ty_fully_concrete(&r)
-                    && self
-                        .lookup(n)
-                        .is_some_and(|bt| Self::is_unpinned_carrier(&bt))
-                {
-                    self.pin_carrier_use(n, &Ty::Option(Box::new(r.clone())));
-                }
                 r
             }
             Ty::Result(..) => {
@@ -5457,7 +5382,9 @@ impl Checker {
     }
 
     pub(super) fn infer_try(&mut self, inner: &Expr, span: Span) -> Ty {
+        let m = self.tyvar_mark();
         let t = self.infer(inner);
+        let t = self.close_operand(m, t);
         // Inside a `recover:` block, `?` short-circuits to the boundary (try-block style), not the
         // enclosing function. The boundary's error type is `Error`, and its result is `Result`-typed,
         // so only a `Result` operand fits — `?` on an `Option` is rejected here.
@@ -6190,6 +6117,7 @@ impl Checker {
                 _ => None,
             }
         };
+        let body_mark = self.tyvar_mark();
         let body_ty = self.inline_body_ty(body, slot);
         self.last_closure_writes = self
             .closure_write_frames
@@ -6238,6 +6166,9 @@ impl Checker {
             // resolved later) are excluded. `!body_had_err` avoids piling onto a real body error.
             None => {
                 if expected.is_none() && !self.generic_arg_prepass && !closure_had_err {
+                    // TICKET-238 -- a free closure's return binds its body: close the body's
+                    // variables first, so `fn(): ?5` is `fn() -> int?`.
+                    let body_ty = self.close_operand(body_mark, body_ty);
                     self.finalize_ret(
                         &body_ty,
                         "<closure>",

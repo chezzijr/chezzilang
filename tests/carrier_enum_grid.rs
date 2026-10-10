@@ -182,10 +182,11 @@ fn carrier_enum_grid() {
     );
     twin(
         c,
-        "C7 pinned by a later use",
+        // TICKET-238: a later call does not pin the read; it is rejected where it is bound.
+        "C7 not pinned by a later use",
         "fn main():\n    f := Som\n    print(f(3))\nmain()\n",
         None,
-        PrintsAs("Som(3)", "3"),
+        Rejects("is generic and T is not determined here"),
     );
     twin(
         c,

@@ -527,14 +527,13 @@ test fn a_carrier_inside_a_closure_argument_still_lowers():
     xs: List[str?] = ["ab", "cde"]
     assert xs.map(fn(a): a?.len()) == [?2, ?3], "got {xs.map(fn(a): a?.len())}"
 
-# ---- 15: TICKET-064 — a write after the first constraining use pins the payload ----
+# ---- 15: a `None` binding carries the payload type its annotation gives it ----
 #
-# A write REPINS the binding to the concrete payload type it wrote, so a later `match` arm binds a
-# concrete payload instead of `Unknown?`. This file runs the SHAPE; the checker verdict lives
-# in `src/checker/tests.rs::a_carrier_write_repins_the_binding_for_later_reads`.
+# TICKET-238: `x := None` is an error on its own line (no later write pins it), so the binding is
+# annotated. This file runs the SHAPE; the checker verdict lives in `tests/open_binding_grid.rs`.
 
 test fn a_written_none_carries_its_payload_type():
-    x := None
+    x: int? = None
     x = ?1
     match x:
         ?v:

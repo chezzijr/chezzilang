@@ -13,7 +13,7 @@ fn main():
                     ex.submit(fn() -> int: job("c{c}k{k}", ch))
                 ex.shutdown()
                 ch.send("joined{c}")
-    out := []
+    out: List[str] = []
     for _ in range(30):
         out.push(ch.recv())
     print(" ".join(out))

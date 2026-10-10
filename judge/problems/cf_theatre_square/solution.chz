@@ -7,7 +7,7 @@ fn main():
     match io.read_line():
         ?l: line = l
         None:    return
-    parts := []
+    parts: List[str] = []
     for t in line.split(" "):
         s := t.trim()
         if s != "":

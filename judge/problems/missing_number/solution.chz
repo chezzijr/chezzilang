@@ -8,7 +8,7 @@ fn read_tokens() -> List[str]:
         match io.read_line():
             ?l: text = text + l + " "
             None:    break
-    toks := []
+    toks: List[str] = []
     for t in text.split(" "):
         s := t.trim()
         if s != "":

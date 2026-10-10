@@ -1,7 +1,6 @@
 // checker::setup — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Checker construction; stdlib/struct/enum seeding; signature harvesting.
 
-use super::ty::OPEN_NONE;
 use super::*;
 
 /// A snapshot of the lengths of BOTH diagnostic channels, taken by [`Checker::diag_mark`] and undone
@@ -39,11 +38,8 @@ pub(super) struct DiagMark {
     fn_reads: std::collections::HashSet<String>,
     /// TICKET-225 — the type-variable store (DEC-157): a walk binds vars and creates them.
     tyvars: super::tyvar::TyVarMark,
-    empty_coll_sites: Vec<(usize, String, Span)>,
-    empty_coll_aliases: Vec<((usize, String), (usize, String))>,
-    carrier_pins: Vec<((usize, String), Ty)>,
     hover_result: Option<(Ty, HoverKind, Option<String>)>,
-    hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
+    poison_reads: usize,
     table_conflicts: Vec<(Span, String)>,
     kw_certain: HashMap<(usize, String), Vec<(usize, String)>>,
     kw_written: std::collections::HashSet<(usize, String)>,
@@ -99,6 +95,7 @@ impl Checker {
             pending_key_reject: None,
             scopes: Vec::new(),
             const_decls: Vec::new(),
+            hole_rejected: Vec::new(),
             loop_vars: Vec::new(),
             capture_table: Vec::new(),
             closure_write_frames: Vec::new(),
@@ -221,13 +218,11 @@ impl Checker {
             hover_entry: None,
             hover_result: None,
             name_docs: HashMap::new(),
-            empty_coll_sites: Vec::new(),
-            empty_coll_aliases: Vec::new(),
-            carrier_pins: Vec::new(),
             kw_certain: HashMap::new(),
             kw_written: std::collections::HashSet::new(),
             kw_pending: Vec::new(),
-            hover_pending: None,
+            stmt_mark: super::StmtMark::default(),
+            poison_reads: 0,
             ret_memo: HashMap::new(),
             memo_enabled: true,
             #[cfg(test)]
@@ -1420,18 +1415,6 @@ impl Checker {
         self.error_help(span, message, None);
     }
 
-    /// TICKET-234 -- a message that prints an optional whose payload nothing pinned yet
-    /// ([`OPEN_NONE`]) gets one note that explains the token and names both fixes. The note does
-    /// not claim to be the cause of the error it is attached to.
-    fn open_none_note(mut message: String) -> String {
-        if message.contains(OPEN_NONE) {
-            message.push_str(&format!(
-                " (`{OPEN_NONE}` is a None whose type is not known yet: annotate the binding, e.g. `z: int?`, or assign it a value first)"
-            ));
-        }
-        message
-    }
-
     /// Like `error`, plus a near-miss suggestion for a "did you mean" `help` line. `help` is never
     /// module-attributed — only `message` passes through `attribute`.
     pub(super) fn error_help(
@@ -1440,7 +1423,12 @@ impl Checker {
         message: impl Into<String>,
         help: Option<String>,
     ) {
-        let message = Self::open_none_note(self.attribute(message));
+        // TICKET-238 -- a use of a rejected binding reports nothing more: one error per open
+        // binding. The silence requires an error already in `errors`.
+        if self.after_hole_error() {
+            return;
+        }
+        let message = self.resolve_var_tokens(self.attribute(message));
         let mut e = CheckError::error(message, span);
         e.help = help;
         self.errors.push(e);
@@ -1450,8 +1438,24 @@ impl Checker {
     /// code is unchanged. Shares `error`'s module attribution — a warning raised while checking an
     /// imported module must name it, exactly like an error from the same position.
     pub(super) fn warn(&mut self, span: Span, message: impl Into<String>) {
-        let message = Self::open_none_note(self.attribute(message));
+        let message = self.resolve_var_tokens(self.attribute(message));
         self.warnings.push(CheckError::warning(message, span));
+    }
+
+    /// TICKET-238 -- replace every pending-variable token `Ty`'s formatter printed with
+    /// `var_text`, until none is left. The two diagnostic funnels call it; a new sink that renders
+    /// a type for a user must zonk first or call this.
+    fn resolve_var_tokens(&self, mut message: String) -> String {
+        use super::ty::{VAR_CLOSE, VAR_OPEN};
+        while let Some(a) = message.find(VAR_OPEN) {
+            let Some(len) = message[a..].find(VAR_CLOSE) else {
+                break;
+            };
+            let digits = &message[a + VAR_OPEN.len_utf8()..a + len];
+            let text = digits.parse().map_or("_".to_string(), |v| self.var_text(v));
+            message.replace_range(a..a + len + VAR_CLOSE.len_utf8(), &text);
+        }
+        message
     }
 
     /// Snapshot BOTH diagnostic channels for the speculative-inference idiom: mark, run a probe
@@ -1470,11 +1474,8 @@ impl Checker {
             const_overflow_seen: self.const_overflow_seen.clone(),
             fn_reads: self.fn_reads.clone(),
             tyvars: self.tyvars.borrow().mark(),
-            empty_coll_sites: self.empty_coll_sites.clone(),
-            empty_coll_aliases: self.empty_coll_aliases.clone(),
-            carrier_pins: self.carrier_pins.clone(),
             hover_result: self.hover_result.clone(),
-            hover_pending: self.hover_pending.clone(),
+            poison_reads: self.poison_reads,
             table_conflicts: self.table_conflicts.clone(),
             kw_certain: self.kw_certain.clone(),
             kw_written: self.kw_written.clone(),
@@ -1494,11 +1495,8 @@ impl Checker {
         self.const_overflow_seen = m.const_overflow_seen;
         self.fn_reads = m.fn_reads;
         self.tyvars.borrow_mut().rollback(m.tyvars);
-        self.empty_coll_sites = m.empty_coll_sites;
-        self.empty_coll_aliases = m.empty_coll_aliases;
-        self.carrier_pins = m.carrier_pins;
         self.hover_result = m.hover_result;
-        self.hover_pending = m.hover_pending;
+        self.poison_reads = m.poison_reads;
         self.table_conflicts = m.table_conflicts;
         self.kw_certain = m.kw_certain;
         self.kw_written = m.kw_written;
@@ -1538,6 +1536,7 @@ impl Checker {
     /// `module_sigs`) and accumulated `errors` are kept.
     pub(super) fn begin_module(&mut self, label: Option<String>) {
         self.scopes.clear();
+        self.hole_rejected.clear();
         // `push_scope` pushes both stacks; index `i` of one is scope `i` of the other (TICKET-190).
         self.fn_write_scopes.clear();
         self.loop_vars.clear();
@@ -1639,11 +1638,7 @@ impl Checker {
         }
         self.infer_returns(stmts);
         for stmt in stmts {
-            // TICKET-225: one top-level statement is one frame (globals are seeded before any body
-            // is walked, DEC-183, so a later statement cannot pin an earlier one).
-            let frame = self.tyvar_mark();
             self.check_stmt(stmt);
-            self.close_tyvar_frame(frame);
         }
         if !self.current_module_is_stdlib {
             for (name, span) in super::unused::unused_locals(stmts) {
@@ -1656,8 +1651,6 @@ impl Checker {
             }
         }
         let sig = self.capture_sig(stmts);
-        self.finalize_empty_coll_sites();
-        self.finalize_hover_pending();
         self.pop_scope();
         sig
     }
@@ -2485,6 +2478,7 @@ impl Checker {
         self.fn_write_scopes.push(HashMap::new());
         self.loop_vars.push(std::collections::HashSet::new());
         self.const_decls.push(std::collections::HashSet::new());
+        self.hole_rejected.push(std::collections::HashSet::new());
         self.capture_table.push(HashMap::new());
         self.written_captures.push(HashMap::new());
     }
@@ -2532,19 +2526,9 @@ impl Checker {
         self.fn_write_scopes.pop();
         self.loop_vars.pop();
         self.const_decls.pop();
+        self.hole_rejected.pop();
         self.capture_table.pop();
         self.written_captures.pop();
-        // TICKET-032 A1 — a pair describes TWO bindings; both are gone once the scope owning either
-        // one is. Scope indices are REUSED (every top-level fn body is index 1, and 21 of 23
-        // `push_scope` sites have no finalize seam), so an undrained pair false-pins a same-named
-        // binding in the next fn body or the next `if` body. `pop_scope` is the drain site, not
-        // `finalize_empty_coll_sites`, because only `pop_scope` runs at all 23 push sites.
-        self.empty_coll_aliases
-            .retain(|(a, b)| a.0 < self.scopes.len() && b.0 < self.scopes.len());
-        // TICKET-064 — `carrier_pins` is a second `(scope_idx, name)`-keyed table (DEC-032's rule):
-        // scope indices are REUSED (module scope is 0, every top-level fn body is index 1), so an
-        // undrained entry would false-pin a same-named binding in the next fn.
-        self.carrier_pins.retain(|(k, _)| k.0 < self.scopes.len());
     }
     /// Record `name` (already declared in the current scope) as a `const T` binding. At module
     /// scope it writes nothing: module const-ness is `GlobalBinding::is_const` (TICKET-186).
@@ -2566,8 +2550,57 @@ impl Checker {
             None => false,
         }
     }
+    /// TICKET-238 -- did the hole check reject the binding `name` resolves to?
+    pub(super) fn is_poisoned(&self, name: &str) -> bool {
+        self.owning_scope(name)
+            .is_some_and(|i| self.hole_rejected[i].contains(name))
+    }
+    /// TICKET-238 -- the statement read a rejected binding and an error exists: every further
+    /// error of this statement is a cascade of that one.
+    pub(super) fn after_hole_error(&self) -> bool {
+        self.poison_reads != self.stmt_mark.poison && !self.errors.is_empty()
+    }
+    /// TICKET-238 -- THE hole check: the type a statement stores for `name` has no hole
+    /// (`Ty::has_hole`). On a hole it reports once per statement and returns the error sentinel;
+    /// the `bool` means "poisoned" (the caller marks the binding in `hole_rejected`). It closes
+    /// no frame: a lambda param is declared while its statement still solves. A desugar temp
+    /// (`OPT_RECV_PREFIX`) holds a consumed operand and is not judged.
+    pub(super) fn closed_binding_ty(&mut self, name: &str, ty: Ty, site: BindSite) -> (Ty, bool) {
+        let t = self.zonk(&ty);
+        if name.starts_with(super::pattern::OPT_RECV_PREFIX) {
+            return (t, false);
+        }
+        if t.has_hole() {
+            if self.errors.len() <= self.stmt_mark.errors {
+                let span = self.stmt_mark.span;
+                self.error(span, open_binding_message(name, &t, site));
+            }
+            return (Ty::Unknown, true);
+        }
+        let poisoned = t.is_unknown() && self.poison_reads != self.stmt_mark.poison;
+        (t, poisoned)
+    }
     pub(super) fn declare(&mut self, name: &str, ty: Ty) {
+        self.declare_at(name, ty, BindSite::Other);
+    }
+    /// Bind `name` in the innermost scope, through the hole check.
+    pub(super) fn declare_at(&mut self, name: &str, ty: Ty, site: BindSite) {
+        let (ty, poisoned) = self.closed_binding_ty(name, ty, site);
+        self.declare_unchecked(name, ty);
+        if poisoned && let Some(set) = self.hole_rejected.last_mut() {
+            set.insert(name.to_string());
+        }
+    }
+    /// `declare` without the hole check: for the nested `fn` statement only, whose return type
+    /// `infer_nested_fn_ret` and `finalize_ret` judge.
+    pub(super) fn declare_unchecked(&mut self, name: &str, ty: Ty) {
+        if let Some(set) = self.hole_rejected.last_mut() {
+            set.remove(name);
+        }
         // TICKET-139 (W14-2) — a same-scope re-declaration can share the runtime slot, so it counts
+        if let Some(s) = self.hole_rejected.last_mut() {
+            s.remove(name);
+        }
         // as a write for the keyword-call gate (`kw_written`).
         if self.scopes.last().is_some_and(|s| s.contains_key(name)) {
             self.kw_written
@@ -2591,21 +2624,6 @@ impl Checker {
         // inserts AFTER its own `declare`, so its entry survives.
         if self.scopes.len() == 1 {
             self.imported_values.remove(name);
-        }
-        // TICKET-032 A1 — a re-declaration (`:=` shadowing a live binding in the same scope) is a
-        // FRESH runtime list, not a mutation: measured, `b := []` / `c := b` / `b := []` / `c.push(1)`
-        // / `b.push("a")` runs printing `['a']` then `[1]` (Python prints `['a'] [1] False` for
-        // `b, c, b is c`). This is the fourth untaint in this same list, alongside `loop_vars` /
-        // `const_decls` / `imported_values`. It must sit HERE, not at the link site: `declare`
-        // resolves the owning scope AFTER its own insert, so a block-scope shadow untaints only the
-        // INNER binding and an outer pair survives.
-        self.unlink_empty_alias(name);
-        // TICKET-064 — a re-declaration of `name` is a FRESH binding: DEC-032's rule that a
-        // `(scope_idx, name)`-keyed table is untainted at `declare` (because scope indices are
-        // reused) applies to `carrier_pins` exactly like it does to `empty_coll_aliases` above.
-        if let Some(scope) = self.owning_scope(name) {
-            let key = (scope, name.to_string());
-            self.carrier_pins.retain(|(k, _)| *k != key);
         }
     }
     pub(super) fn lookup(&self, name: &str) -> Option<Ty> {
@@ -2644,19 +2662,6 @@ impl Checker {
             _ => return None,
         };
         Some((name.clone(), reader, payload, fix))
-    }
-    /// Re-pin `name`'s binding to `ty` **in its OWNING scope** (the same scope `lookup` resolves),
-    /// not the innermost one. Used by refine-on-first-use to narrow an empty-collection's `Unknown`
-    /// element/key/value slot to the concrete type the first mutating op supplies. `declare` always
-    /// writes the last scope — wrong for an outer-scope receiver refined inside an `if`/`for` block
-    /// (it would shadow-create a bogus inner binding that leaks on pop), so we walk innermost-first
-    /// and overwrite the first scope that owns `name`. Returns the scope index written (so the
-    /// flow-sensitivity snapshot/restore barrier can revert THIS scope's binding precisely).
-    pub(super) fn repin(&mut self, name: &str, ty: Ty) -> Option<usize> {
-        let i = self.owning_scope(name)?;
-        self.scopes[i].insert(name.to_string(), ty.clone());
-        self.propagate_alias_pin(i, name, &ty);
-        Some(i)
     }
     /// Does scope `i` hold a binding of `name` visible from here? The ONE raw membership test over
     /// `scopes` (TICKET-183). A module global seeded before any body is walked
@@ -2777,159 +2782,6 @@ impl Checker {
                 && self.qualified_builtin_ty(name, &[]).is_some(),
         })
     }
-    /// TICKET-032 A1 — record that `alias` (in `alias_scope`) and `src` name the SAME runtime
-    /// collection. Self-referential and duplicate pairs are dropped.
-    ///
-    /// TICKET-032 review fix — decline the pair if EITHER name is captured across a `spawn:`/
-    /// `Executor.submit` floor: a task holds its own deep copy of a captured binding
-    /// (`is_captured`), so "same runtime collection" is false at exactly that boundary and the pair
-    /// must never be recorded, not merely left unpropagated. Same guard shape as
-    /// `drop_empty_site`/`refine_receiver`/`refine_index_receiver`.
-    pub(super) fn link_empty_alias(&mut self, alias_scope: usize, alias: &str, src: &str) {
-        if self.is_captured(alias) || self.is_captured(src) {
-            return;
-        }
-        let Some(src_scope) = self.owning_scope(src) else {
-            return;
-        };
-        let a = (alias_scope, alias.to_string());
-        let b = (src_scope, src.to_string());
-        if a == b {
-            return;
-        }
-        if self
-            .empty_coll_aliases
-            .iter()
-            .any(|(x, y)| (x, y) == (&a, &b) || (x, y) == (&b, &a))
-        {
-            return;
-        }
-        self.empty_coll_aliases.push((a, b));
-    }
-    /// TICKET-032 A1 — a whole-binding reassignment or re-declaration of `name` breaks every pair
-    /// naming it: the binding no longer denotes the same runtime object its former partners do.
-    pub(super) fn unlink_empty_alias(&mut self, name: &str) {
-        if self.empty_coll_aliases.is_empty() {
-            return;
-        }
-        let Some(scope) = self.owning_scope(name) else {
-            return;
-        };
-        let key = (scope, name.to_string());
-        self.empty_coll_aliases
-            .retain(|(a, b)| *a != key && *b != key);
-    }
-    /// TICKET-032 A1 — `(scope, name)` was just repinned to `ty`; propagate that pin across every pair
-    /// reachable from it (transitive, via a `seen` list) to every partner still satisfying
-    /// `is_unrefined_empty_coll`. `repin` is the SINGLE funnel every empty-collection pin goes through
-    /// (`drop_empty_site`, `refine_receiver`, `refine_index_receiver`), so this one call site covers
-    /// every route.
-    pub(super) fn propagate_alias_pin(&mut self, scope: usize, name: &str, ty: &Ty) {
-        if self.empty_coll_aliases.is_empty() {
-            return;
-        }
-        let mut seen = vec![(scope, name.to_string())];
-        let mut frontier = vec![(scope, name.to_string())];
-        while let Some(cur) = frontier.pop() {
-            let partners: Vec<(usize, String)> = self
-                .empty_coll_aliases
-                .iter()
-                .filter_map(|(a, b)| {
-                    if *a == cur {
-                        Some(b.clone())
-                    } else if *b == cur {
-                        Some(a.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for p in partners {
-                if seen.contains(&p) {
-                    continue;
-                }
-                seen.push(p.clone());
-                // TICKET-032 review fix — decline a CAPTURED partner, same guard as
-                // `drop_empty_site`/`refine_receiver`/`refine_index_receiver`. A `spawn:`/
-                // `Executor.submit` task holds its own deep copy of a captured binding, so writing a
-                // pin into it here would reject a parent-side use the task's copy can never affect.
-                if self.is_captured(&p.1) {
-                    continue;
-                }
-                if let Some(partner_ty) = self.scopes[p.0].get(&p.1)
-                    && Self::is_open_coll(partner_ty)
-                {
-                    let merged = merge_unknown(partner_ty, ty);
-                    self.scopes[p.0].insert(p.1.clone(), merged);
-                    frontier.push(p);
-                }
-            }
-        }
-    }
-    /// NOTE — there is NO flow-sensitivity barrier around an `if`/`match` VALUE arm any more.
-    /// `snapshot_refinable`/`restore_refinable` used to revert refine-on-first-use pins made inside a
-    /// value arm, on the theory that a pin must not leak to a sibling arm. That was the last hole in
-    /// the pin: a constraining USE in a value arm dropped the binding's annotation requirement (which
-    /// was never snapshotted) while its pin WAS reverted, so a later use pinned a different type —
-    /// measured check-clean at rc=0, `xs := []` / `n := if 1 < 2: addstr(xs) else: 0` (a `List[str]`
-    /// parameter) / `xs.push(1)` / `ys: List[int] = xs` printed `['a', 1]`, while the STATEMENT
-    /// spelling was correctly rejected. Snapshotting BOTH halves does not fix it either — it just
-    /// forgets the constraining use entirely and lets the later push win.
-    ///
-    /// Value arms now pin persistently, exactly like statement position (`docs/syntax.md`'s
-    /// scope-wide first-use rule). `m[k]=v` is a statement and cannot appear in a value arm at all;
-    /// `xs.push(1)` CAN be written there and does reach `refine_receiver`, but it returns nil, so
-    /// such a program is rejected either way (*expression returns no value (None) and cannot be used
-    /// as a value*) — removing the barrier changes which diagnostic it gets, not whether it is
-    /// accepted. The only refinement that can change an ACCEPTED program in a value arm is therefore
-    /// `constrain_empty_arg` (a call taking the binding). The consequence, measured on the pre-fix
-    /// binary and newly rejected: two CONFLICTING concrete uses across sibling value arms
-    /// (`y := if c: f(xs) else: g(xs)` with `f: List[str]`, `g: List[int]`, and the `match` twin),
-    /// which is the same rule two conflicting pushes already followed and which Rust also refuses.
-    /// AGREEING arms, an arm-only use, and an arm followed by a consistent later use all still run.
-    /// PART A — is `t` an empty collection type whose own DIRECT element/key/value slot is still a bare
-    /// `Unknown` (the shape produced by an un-constrained empty literal: `[]`→`List[Unknown]`,
-    /// `{}`→`Map[Unknown,Unknown]`, `Set()`→`Set[Unknown]`)? The slot must be DIRECTLY `Unknown`, not
-    /// merely nested-Unknown: `[[]]` is `List[List[Unknown]]` (a NON-empty list whose element is an
-    /// empty list) — its direct slot is `List[Unknown]`, so it is NOT an empty collection and must not
-    /// be flagged. This also DELIBERATELY excludes `Option[Unknown]` (`x := None`) and nullary-enum
-    /// producers (`Box[Unknown]`): the requirement is scoped to the three literal container kinds.
-    /// TICKET-064 — is `t` an enum type, carrier or user, whose every type argument is `Unknown`
-    /// (`None`, a nullary variant of a generic enum) and so has never been pinned? It needs at least
-    /// one type argument; a PARTLY concrete `Result[int, Unknown]` is excluded (DEC-064).
-    pub(super) fn is_unpinned_carrier(t: &Ty) -> bool {
-        t.as_enum()
-            .is_some_and(|(_, args)| !args.is_empty() && args.iter().all(|a| a.is_unknown()))
-    }
-    /// TICKET-064 — do `a` and `b` name the SAME enum type, carrier or user, with the same number of
-    /// type arguments (so a pin recorded from one is comparable to a write of the other)?
-    pub(super) fn same_carrier_shape(a: &Ty, b: &Ty) -> bool {
-        match (a.as_enum(), b.as_enum()) {
-            (Some((ka, aa)), Some((kb, ab))) => ka == kb && aa.len() == ab.len(),
-            _ => false,
-        }
-    }
-    /// TICKET-234 -- the one reader of "a value meets a carrier slot whose payload is still open".
-    /// When `slot` holds an `Option(Unknown)` at any depth, the value is read with no hint and the
-    /// slot's open payloads are filled from its type (`merge_unknown`); any other slot is returned
-    /// unchanged. The same call serves a plain value, a `?x` and an existing carrier. The caller
-    /// then infers the value against the returned slot, so the wrap itself is still decided by
-    /// `meet_slot` against a concrete slot (DEC-227). The open test runs first: the read costs a
-    /// `diag_mark`.
-    pub(super) fn pin_open_slot(&mut self, slot: &Ty, value: &Expr) -> Ty {
-        let mut open = false;
-        let _ = super::tyvar::map_ty(slot, &mut |x| {
-            open |= matches!(x, Ty::Option(p) if p.is_unknown());
-            None
-        });
-        if !open {
-            return slot.clone();
-        }
-        match self.unhinted_value_ty(value) {
-            Some(t) => merge_unknown(slot, &t),
-            None => slot.clone(),
-        }
-    }
     /// The type `value` has with no expected type, read as a pinning use, or `None` when it errs
     /// or is unknown. Speculative: every diagnostic and side table is rolled back, and
     /// `pinning_value_ty` runs inside that window because the rollback drops a pending carrier
@@ -2946,19 +2798,6 @@ impl Checker {
         self.hint_owner = owner;
         (!erred && !t.is_unknown()).then_some(t)
     }
-    /// True when `slot` is the type an earlier use pinned `name` to and `value` fits it neither
-    /// as it is nor under one `?`. The assignment then infers the value with no hint, so the
-    /// write reports the pin text and not the hinted `'?' value: ...` text.
-    pub(super) fn misses_pin(&mut self, name: &str, slot: &Ty, value: &Expr) -> bool {
-        if self.carrier_pin(name).as_ref() != Some(slot) {
-            return false;
-        }
-        let Some(t) = self.unhinted_value_ty(value) else {
-            return false;
-        };
-        let lifted = merge_unknown(&Ty::Option(Box::new(Ty::Unknown)), &t);
-        !self.assignable(slot, &t) && !self.assignable(slot, &lifted)
-    }
     /// The literal `None`, the same test `is_inline_default` uses in `desugar`.
     pub(super) fn is_none_lit(e: &Expr) -> bool {
         matches!(&e.kind, ExprKind::NoneLit)
@@ -2966,7 +2805,8 @@ impl Checker {
     /// The slot a literal `None` shares with the sibling `value`: `value`'s type under one `?`, or
     /// `value`'s own type when it is already a carrier. `None` when that type is not concrete.
     pub(super) fn none_slot_from(&mut self, value: &Expr) -> Option<Ty> {
-        let slot = self.pin_open_slot(&Ty::Option(Box::new(Ty::Unknown)), value);
+        let t = self.unhinted_value_ty(value)?;
+        let slot = merge_unknown(&Ty::Option(Box::new(Ty::Unknown)), &t);
         ty_fully_concrete(&slot).then_some(slot)
     }
     /// The slot of a literal or an `if` chain that holds a literal `None` beside other values, read
@@ -2995,378 +2835,29 @@ impl Checker {
     }
     /// `unify` for a call argument: a `?x` that meets a parameter whose solved type is still open
     /// is read as the pinning use it is, so `unify`'s fill arm never lifts an unpinned `?x` by a
-    /// second layer. The open test reads a `fn` type's parameters and return itself, because
-    /// `contains_unknown_in_slot` does not descend into a `Ty::Func`.
+    /// second layer. A bare `Unknown` parameter of a `fn` type is not open here.
     pub(super) fn unify_arg(&mut self, decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         let open = match super::subst(decl, map) {
-            Ty::Func { params, ret, .. } => {
-                contains_unknown_in_slot(&ret) || params.iter().any(contains_unknown_in_slot)
-            }
-            want => contains_unknown_in_slot(&want),
+            Ty::Func { params, ret, .. } => ret.has_hole() || params.iter().any(Ty::has_hole),
+            want => want.has_hole(),
         };
         if open {
             let actual = self.pinning_value_ty(actual);
             super::unify(decl, &actual, map);
+        } else if actual.has_hole() {
+            // The mirror case, on the same statement: the parameter was solved to an unpinned `?x`
+            // and this argument is open (`pair(?7, None)`). The open sibling is the pinning use,
+            // so the `?x` takes its default and the `None` then meets a concrete slot.
+            let want = super::subst(decl, map);
+            if super::tyvar::has_var(&want) {
+                let _ = self.pinning_value_ty(&want);
+            }
+            super::unify(decl, actual, map);
         } else {
             super::unify(decl, actual, map);
         }
     }
-    /// A handle a task shares with its parent instead of copying, so a captured one is still pinned
-    /// from inside a `spawn:` body.
-    pub(super) fn is_shared_handle(t: &Ty) -> bool {
-        matches!(
-            t,
-            Ty::Shared(_) | Ty::RwShared(_) | Ty::Atomic(_) | Ty::Channel(_)
-        )
-    }
-    /// The binding a place is rooted in: `b` for `b`, `b.v`, `b.v[0]`.
-    pub(super) fn place_root(place: &Expr) -> Option<&str> {
-        match &place.kind {
-            ExprKind::Ident(n) => Some(n),
-            ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => Self::place_root(obj),
-            _ => None,
-        }
-    }
-    /// The one writer of "this place now holds `ty`". An `Ident` merges `ty` into its binding and
-    /// ends in `repin` (DEC-032). A `Field` or an `Index` builds its owner's shape around `ty` and
-    /// recurses to the root binding. Each level costs a `diag_mark`, so a caller tests the written
-    /// slot for an open payload first.
-    pub(super) fn repin_place(&mut self, place: &Expr, ty: &Ty) {
-        let obj = match &place.kind {
-            ExprKind::Ident(name) => {
-                let Some(cur) = self.lookup(name) else { return };
-                if (self.is_captured(name) && !Self::is_shared_handle(&cur))
-                    || !contains_unknown_in_slot(&cur)
-                {
-                    return;
-                }
-                let merged = merge_unknown(&cur, ty);
-                if merged != cur {
-                    self.repin(name, merged);
-                }
-                return;
-            }
-            ExprKind::Field { obj, .. }
-            | ExprKind::Index {
-                obj,
-                index: Some(_),
-                ..
-            } => obj,
-            _ => return,
-        };
-        let mark = self.diag_mark();
-        let obj_ty = self.infer(obj);
-        self.diag_rollback(mark);
-        let shape = match (&place.kind, &obj_ty) {
-            (ExprKind::Index { .. }, Ty::List(_)) => Ty::list(ty.clone()),
-            (ExprKind::Index { .. }, Ty::Map(k, _)) => Ty::map((**k).clone(), ty.clone()),
-            (ExprKind::Field { name, .. }, Ty::Struct(sname, targs)) => {
-                let Some(info) = self.struct_shape(sname) else {
-                    return;
-                };
-                let Some((_, decl)) = info.fields.iter().find(|(f, _)| f == name) else {
-                    return;
-                };
-                let mut map = HashMap::new();
-                super::unify(decl, ty, &mut map);
-                let targs = info
-                    .type_params
-                    .iter()
-                    .zip(targs)
-                    .map(|(tp, old)| {
-                        map.get(&tp.name)
-                            .map_or(old.clone(), |n| merge_unknown(old, n))
-                    })
-                    .collect();
-                Ty::Struct(sname.clone(), targs)
-            }
-            _ => return,
-        };
-        self.repin_place(obj, &shape);
-    }
-    /// The type a use pins `name` to: `shape` read through [`Checker::pinning_value_ty`] when `name`
-    /// is a binding a use can still pin (an unrefined empty collection or an unpinned carrier), and
-    /// `shape` unchanged otherwise, so a use of any other binding decides nothing about a `?x`.
-    pub(super) fn pin_shape(&mut self, name: &str, shape: &Ty) -> Ty {
-        let open = self
-            .lookup(name)
-            .is_some_and(|bt| Self::is_open_coll(&bt) || Self::is_unpinned_carrier(&bt));
-        if open {
-            self.pinning_value_ty(shape)
-        } else {
-            shape.clone()
-        }
-    }
-    /// TICKET-064 — record that `name`'s carrier payload was pinned to `ty` by a constraining use.
-    /// First constraining use wins: an existing entry for `name`'s owning scope is never overwritten,
-    /// because `drop_empty_site`'s doc comment states this fn must never REPIN a carrier binding (a
-    /// REPIN of the TABLE would re-break the read-only shape `## Decisions` states must stay
-    /// permissive). Declines silently if `name` has no owning scope (already gone).
-    pub(super) fn pin_carrier_use(&mut self, name: &str, ty: &Ty) {
-        let Some(scope) = self.owning_scope(name) else {
-            return;
-        };
-        let key = (scope, name.to_string());
-        if self.carrier_pins.iter().any(|(k, _)| *k == key) {
-            return;
-        }
-        self.carrier_pins.push((key, ty.clone()));
-    }
-    /// TICKET-064 — the payload type `name`'s FIRST constraining use recorded, if any.
-    pub(super) fn carrier_pin(&self, name: &str) -> Option<Ty> {
-        let scope = self.owning_scope(name)?;
-        let key = (scope, name.to_string());
-        self.carrier_pins
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, t)| t.clone())
-    }
-    /// A type a second name can mutate (a collection, a struct or a shared handle) that still has
-    /// an open slot. The alias gates and the argument pins read this; the annotation requirement
-    /// reads [`Checker::is_unrefined_empty_coll`]. An `Option`, an enum and a tuple are values and
-    /// are never in it.
-    pub(super) fn is_open_coll(t: &Ty) -> bool {
-        matches!(
-            t,
-            Ty::List(_)
-                | Ty::Set(_)
-                | Ty::Map(..)
-                | Ty::Struct(..)
-                | Ty::Shared(_)
-                | Ty::RwShared(_)
-                | Ty::Atomic(_)
-                | Ty::Channel(_)
-        ) && contains_unknown_in_slot(t)
-    }
-    /// The receiver's generic form (`List[T]`, `Box[T]`, `Shared[T]`) and `method`'s declared
-    /// parameter types, both spelled with the owner's type parameters. `refine_receiver` reads what
-    /// an argument supplies from this, never from a list of method names. `None` for an enum or any
-    /// other receiver: an enum value cannot store an argument (DEC-064).
-    pub(super) fn receiver_decl(&self, recv: &Ty, method: &str) -> Option<(Ty, Vec<Ty>)> {
-        let key = match recv {
-            Ty::List(_) => "List",
-            Ty::Set(_) => "Set",
-            Ty::Map(..) => "Map",
-            Ty::Shared(_) => "Shared",
-            Ty::RwShared(_) => "RwShared",
-            Ty::Atomic(_) => "Atomic",
-            Ty::Channel(_) => "Channel",
-            Ty::Struct(k, _) => k.as_str(),
-            _ => return None,
-        };
-        let info = self.structs.get(key).or_else(|| self.struct_shape(key))?;
-        let sig = info.methods.get(method)?;
-        let p = |i: usize| Box::new(Ty::Param(info.type_params[i].name.clone()));
-        let arity = match recv {
-            Ty::Map(..) => 2,
-            Ty::Struct(_, a) => a.len(),
-            _ => 1,
-        };
-        if info.type_params.len() != arity {
-            return None;
-        }
-        let generic = match recv {
-            Ty::List(_) => Ty::List(p(0)),
-            Ty::Set(_) => Ty::Set(p(0)),
-            Ty::Map(..) => Ty::Map(p(0), p(1)),
-            Ty::Shared(_) => Ty::Shared(p(0)),
-            Ty::RwShared(_) => Ty::RwShared(p(0)),
-            Ty::Atomic(_) => Ty::Atomic(p(0)),
-            Ty::Channel(_) => Ty::Channel(p(0)),
-            Ty::Struct(k, _) => Ty::Struct(k.clone(), (0..arity).map(|i| *p(i)).collect()),
-            _ => return None,
-        };
-        // A user struct's method keeps `self` as its first parameter; a native one has none.
-        let skip = usize::from(matches!(recv, Ty::Struct(..)) && !sig.is_static);
-        Some((generic, sig.params.iter().skip(skip).cloned().collect()))
-    }
-    pub(super) fn is_unrefined_empty_coll(t: &Ty) -> bool {
-        match t {
-            Ty::List(e) | Ty::Set(e) => e.is_unknown(),
-            Ty::Map(k, v) => k.is_unknown() || v.is_unknown(),
-            _ => false,
-        }
-    }
-    /// PART A — a constraining op (`push`/`add`/`insert`/`extend`, `m[k]=v`) targeted `name`, so clear
-    /// its pending empty-collection requirement. Resolves `name`'s OWNING scope (reverse walk, like
-    /// `repin`) and drops only that binding's site, so an inner-scope shadow of the same name does not
-    /// clear an outer binding's requirement.
-    ///
-    /// TICKET-064 — this is also the constraining-use FUNNEL for the carrier pin: four of its five
-    /// sink shapes (annotated let, typed argument, typed return, value escape) call this fn with the
-    /// sink type in hand, so the pin record below covers them all in one place. It must never REPIN a
-    /// carrier binding (only `check_assign`'s write path does that) — W8-46 measured that as a false
-    /// rejection of the read-only shape (`e := Box.Empty` / `a: Box[int] = e` / `b: Box[str] = e`).
-    pub(super) fn drop_empty_site(&mut self, name: &str, shape: Option<&Ty>) {
-        let shape = shape.map(|s| self.pin_shape(name, s));
-        let shape = shape.as_ref();
-        let owner = self.owning_scope(name);
-        if let Some(owner) = owner {
-            self.empty_coll_sites
-                .retain(|(o, n, _)| !(*o == owner && n == name));
-        }
-        // …and PIN, in the SAME operation. `shape` is REQUIRED (not a second method) so a new site
-        // cannot silently do half of this: dropping the annotation requirement WITHOUT fixing the
-        // element type leaves the binding's `Unknown` slot open for a LATER use to pin something
-        // else, and nothing reports the heterogeneous collection that results. Measured on
-        // `140c7041`, six routes of this one class, each `ok: no type errors` at rc=0 — a value arm
-        // (`['a', 1]`), a sibling-argument generic call (`['x', 1]`), an annotated-let sink
-        // (`['a']`), a `return` sink (`['a', 1]`), a plain reassign (`[1, 2, 'a']`) and an alias
-        // (`[1, 'a']`). `None` means the site genuinely has nothing concrete in hand — the
-        // requirement MOVES to another binding, or the site pins itself below under its own gates;
-        // every `None` call states which.
-        // The BINDING gate is `is_unrefined_empty_coll`, NOT the broader `contains_unknown_in_slot`:
-        // this whole mechanism is scoped to the three empty literal containers, and the wider
-        // predicate also matches `Option[Unknown]` (`o := None`) and a nullary generic enum variant
-        // (`e := Box.Empty`) — values that record no site, ask for no annotation, and are meant to
-        // stay permissive. Pinning them turned correct programs into errors: measured on the wider
-        // gate, `e := Box.Empty` / `a: Box[int] = e` / `b: Box[str] = e` reported *cannot assign
-        // Box[int] to variable of type Box[str]* where it used to run, and the `o := None` twin the
-        // same. Same rule as the W8-45 deferral gate — the hand-off gate must be the shape the
-        // receiving machinery handles, never a superset that merely looks related.
-        if let Some(shape) = shape
-            && !contains_unknown_in_slot(shape)
-            && !self.is_captured(name)
-            && let Some(bt) = self.lookup(name)
-            && Self::is_unrefined_empty_coll(&bt)
-        {
-            let merged = merge_unknown(&bt, shape);
-            if merged != bt {
-                self.repin(name, merged);
-            }
-        }
-        // TICKET-064 — record the carrier pin from this same constraining use, when `name`'s binding
-        // is an unpinned `None`/nullary-enum carrier and `shape` is a fully concrete instance of the
-        // SAME carrier. `pin_carrier_use` itself is first-use-wins, so calling it again on a later
-        // sink is a no-op.
-        if let Some(shape) = shape
-            && ty_fully_concrete(shape)
-            && !self.is_captured(name)
-            && let Some(bt) = self.lookup(name)
-            && Self::is_unpinned_carrier(&bt)
-            && Self::same_carrier_shape(&bt, shape)
-        {
-            self.pin_carrier_use(name, shape);
-        }
-    }
-    /// PART A — an empty-collection binding READ AS A VALUE that ESCAPES into another binding or
-    /// structure (the RHS of `:=`/`=`/field-/index-/tuple-assign, or an element of a list/set/map/tuple
-    /// literal) is no longer provably-unconstrained: drop its pending requirement. Without this,
-    /// `c = b` / `c := b` / `c := [b]` (with `b := []`) spuriously errored on `b` even though the
-    /// program is type-sound (b aliases / flows into a typed-or-later-refined slot) — the drop-guard
-    /// otherwise covers only typed sinks (annotation/param/return) and the LHS target of reassign,
-    /// never the RHS source. Scans the value one level. A bare-ident read that is NOT a value-escape
-    /// (a call arg like `print(b)`) is intentionally NOT covered — that case must still require the
-    /// annotation. The alias binding itself, if left unrefined, records its own site, so the
-    /// requirement moves rather than vanishes (no new false-negative).
-    /// Does `value` read a bare binding that is STILL an unrefined empty collection, in one of the
-    /// positions [`Self::drop_value_escape_sites`] covers? Gates the assignment arm's speculative
-    /// target-type probe. It must be a property of THIS statement and nothing else: gating on
-    /// `empty_coll_sites.is_empty()` instead reads as a perf shortcut but decides SEMANTICS —
-    /// whether the assignment pins its source — so acceptance depended on an unrelated binding
-    /// elsewhere in the file. Measured on that gate, two programs differing only in where an
-    /// unrelated `z.push(1)` sits: with it BEFORE the assignment, rc=0; with it AFTER, *cannot
-    /// assign Option[str] to variable of type Option[int]*, rc=1.
-    pub(super) fn escapes_unrefined_empty(&self, value: &Expr) -> bool {
-        let refinable = |n: &String| {
-            self.lookup(n)
-                .is_some_and(|t| Self::is_unrefined_empty_coll(&t))
-        };
-        match &value.kind {
-            ExprKind::Ident(name) => refinable(name),
-            ExprKind::List(elems, _) | ExprKind::Set(elems) | ExprKind::Tuple(elems) => {
-                elems.iter().any(|e| match &e.kind {
-                    ExprKind::Ident(n) => refinable(n),
-                    _ => false,
-                })
-            }
-            ExprKind::Map(pairs) => pairs.iter().any(|(k, v)| {
-                matches!(&k.kind, ExprKind::Ident(n) if refinable(n))
-                    || matches!(&v.kind, ExprKind::Ident(n) if refinable(n))
-            }),
-            _ => false,
-        }
-    }
 
-    /// `sink` is the type the value flows INTO — the annotated binding's declared type, or the
-    /// assignment target's. It is projected onto each escaping ident (the element type for a
-    /// list/set literal, the positional slot for a tuple, key/value for a map) and pins there, so a
-    /// typed sink cannot drop the requirement and leave the slot open. Measured before that:
-    /// `b := []` / `c: List[List[int]] = [b]` / `b.push("a")` printed `[['a']]`, and
-    /// `bx.items = b` (field of type `List[int]`) then `b.push("a")` printed `['a']` — both
-    /// check-clean at rc=0. `None` (an UN-annotated alias `c := b`) still just moves the requirement.
-    pub(super) fn drop_value_escape_sites(&mut self, value: &Expr, sink: Option<&Ty>) {
-        match &value.kind {
-            ExprKind::Ident(name) => self.drop_empty_site(name, sink),
-            ExprKind::List(elems, _) | ExprKind::Set(elems) => {
-                let elem = match sink {
-                    Some(Ty::List(e) | Ty::Set(e)) => Some((**e).clone()),
-                    _ => None,
-                };
-                for e in elems {
-                    if let ExprKind::Ident(n) = &e.kind {
-                        self.drop_empty_site(n, elem.as_ref());
-                    }
-                }
-            }
-            ExprKind::Tuple(elems) => {
-                for (i, e) in elems.iter().enumerate() {
-                    if let ExprKind::Ident(n) = &e.kind {
-                        let slot = match sink {
-                            Some(Ty::Tuple(ts)) => ts.get(i),
-                            _ => None,
-                        };
-                        self.drop_empty_site(n, slot);
-                    }
-                }
-            }
-            ExprKind::Map(pairs) => {
-                let (kt, vt) = match sink {
-                    Some(Ty::Map(k, v)) => (Some((**k).clone()), Some((**v).clone())),
-                    _ => (None, None),
-                };
-                for (k, v) in pairs {
-                    if let ExprKind::Ident(n) = &k.kind {
-                        self.drop_empty_site(n, kt.as_ref());
-                    }
-                    if let ExprKind::Ident(n) = &v.kind {
-                        self.drop_empty_site(n, vt.as_ref());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    /// PART A — at end-of-scope (the fn-body / module seam, called BEFORE `pop_scope`), error on every
-    /// pending empty-collection site owned by the scope being popped whose binding is STILL an
-    /// unrefined empty collection (never constrained → no element type → require an annotation). Sites
-    /// owned by an enclosing scope (`owning < idx`) are kept for that scope's own finalize; sites whose
-    /// owning scope was already popped (a block/for/match-body residual — `get(owning)` is `None`) are
-    /// silently drained without erroring, matching the refine machinery's block-local limits.
-    pub(super) fn finalize_empty_coll_sites(&mut self) {
-        let idx = self.scopes.len() - 1;
-        let mut to_error: Vec<Span> = Vec::new();
-        self.empty_coll_sites.retain(|(owning, name, span)| {
-            if *owning < idx {
-                return true; // an enclosing scope owns it — its finalize handles it
-            }
-            if self
-                .scopes
-                .get(*owning)
-                .and_then(|s| s.get(name))
-                .is_some_and(Self::is_unrefined_empty_coll)
-            {
-                to_error.push(*span);
-            }
-            false // drained: either errored now, or its scope is already gone
-        });
-        for span in to_error {
-            self.error(
-                span,
-                "cannot infer element type of empty collection; add a type annotation".to_string(),
-            );
-        }
-    }
     /// Mark `name` (already declared in the current scope) as an immutable `for`-loop variable.
     pub(super) fn mark_loop_var(&mut self, name: &str) {
         if let Some(set) = self.loop_vars.last_mut() {
@@ -5122,4 +4613,77 @@ fn alias_type_head(name: &str, spelled: String, body: Ty) -> Option<TypeHead> {
         pinned: Some(args),
         native_handle: false,
     })
+}
+
+/// TICKET-238 -- where a binding is written, for the fix the hole error names.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum BindSite {
+    /// An untyped `name := value`.
+    Let,
+    /// A lambda param, a loop variable, a pattern binding, a destructuring target.
+    Other,
+}
+
+/// The one text for a binding whose type still has a hole when its statement ends. `F` is the
+/// type with every hole shown as `int`, so both fixes are spelled out.
+fn open_binding_message(name: &str, t: &Ty, site: BindSite) -> String {
+    fn filled(t: &Ty) -> Ty {
+        let v = |ts: &[Ty]| ts.iter().map(filled).collect::<Vec<_>>();
+        let b = |x: &Ty| Box::new(filled(x));
+        match t {
+            Ty::Unknown => Ty::Int,
+            Ty::List(x) => Ty::List(b(x)),
+            Ty::Option(x) => Ty::Option(b(x)),
+            Ty::Set(x) => Ty::Set(b(x)),
+            Ty::Channel(x) => Ty::Channel(b(x)),
+            Ty::Shared(x) => Ty::Shared(b(x)),
+            Ty::RwShared(x) => Ty::RwShared(b(x)),
+            Ty::Atomic(x) => Ty::Atomic(b(x)),
+            Ty::Map(k, x) => Ty::Map(b(k), b(x)),
+            Ty::Result(k, x) => Ty::Result(b(k), b(x)),
+            Ty::Struct(n, a) => Ty::Struct(n.clone(), v(a)),
+            Ty::Enum(n, a) => Ty::Enum(n.clone(), v(a)),
+            Ty::Protocol(n, a) => Ty::Protocol(n.clone(), v(a)),
+            Ty::Tuple(ts) => Ty::Tuple(v(ts)),
+            Ty::Func {
+                params,
+                ret,
+                labels,
+            } => Ty::Func {
+                params: v(params),
+                ret: b(ret),
+                labels: labels.clone(),
+            },
+            other => other.clone(),
+        }
+    }
+    let f = filled(t);
+    let head = match t {
+        Ty::List(_)
+        | Ty::Set(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::RwShared(_)
+        | Ty::Atomic(_) => {
+            format!("cannot infer the element type of `{name}`")
+        }
+        Ty::Map(..) => format!("cannot infer the key and value types of `{name}`"),
+        Ty::Option(_) => format!("cannot infer the type of `{name}` from `None`"),
+        Ty::Result(..) => format!("cannot infer the success type of `{name}`"),
+        Ty::Struct(..) | Ty::Enum(..) => format!("cannot infer the type arguments of `{name}`"),
+        _ => format!("cannot infer the type of `{name}`"),
+    };
+    let tail = match (site, t) {
+        (BindSite::Other, _) => {
+            format!("give it a type, e.g. `{name}: {f}`, or type the value it comes from")
+        }
+        (BindSite::Let, Ty::List(_) | Ty::Set(_) | Ty::Map(..)) => {
+            format!("write `{name}: {f} = ...` or `{name} := {f}()`")
+        }
+        (BindSite::Let, Ty::Struct(..) | Ty::Enum(..)) => format!(
+            "write `{name}: {f} = ...` or put them on the constructor, e.g. `{f}(...)`, `{f}.new()` or `{f}.Variant`"
+        ),
+        (BindSite::Let, _) => format!("write `{name}: {f} = ...`"),
+    };
+    format!("{head}: {tail}")
 }

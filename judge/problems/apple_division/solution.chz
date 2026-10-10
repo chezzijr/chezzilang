@@ -9,7 +9,7 @@ fn read_tokens() -> List[str]:
         match io.read_line():
             ?l: text = text + l + " "
             None:    break
-    toks := []
+    toks: List[str] = []
     for t in text.split(" "):
         s := t.trim()
         if s != "":
@@ -29,7 +29,7 @@ fn best_diff(w: List[int], n: int, total: int, i: int, chosen: int) -> int:
 fn main():
     toks := read_tokens()
     n := int(toks[0])
-    w := []
+    w: List[int] = []
     total := 0
     for i in 0..n:
         v := int(toks[1 + i])

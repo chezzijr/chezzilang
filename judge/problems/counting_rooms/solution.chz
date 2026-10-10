@@ -9,7 +9,7 @@ fn read_tokens() -> List[str]:
         match io.read_line():
             ?l: text = text + l + " "
             None:    break
-    toks := []
+    toks: List[str] = []
     for t in text.split(" "):
         s := t.trim()
         if s != "":
@@ -21,13 +21,13 @@ fn main():
     n := int(toks[0])
     m := int(toks[1])
 
-    cells := []
+    cells: List[List[str]] = []
     for r in 0..n:
         cells.push(toks[2 + r].chars())
 
-    visited := []
+    visited: List[List[bool]] = []
     for r in 0..n:
-        row := []
+        row: List[bool] = []
         for c in 0..m:
             row.push(false)
         visited.push(row)
@@ -38,7 +38,7 @@ fn main():
         for sc in 0..m:
             if cells[sr][sc] == "." and not visited[sr][sc]:
                 rooms += 1
-                stack := []
+                stack: List[(int, int)] = []
                 stack.push((sr, sc))
                 visited[sr][sc] = true
                 while stack.len() > 0:

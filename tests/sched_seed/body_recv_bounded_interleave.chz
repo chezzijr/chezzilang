@@ -1,6 +1,6 @@
 fn main():
     ch := Channel[str](1)
-    out := []
+    out: List[str] = []
     parallel:
         for i in range(4):
             spawn:

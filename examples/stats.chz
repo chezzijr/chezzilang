@@ -19,7 +19,7 @@ import std.math
 
 # Merge two already-sorted lists into one sorted list.
 fn merge(a: List[int], b: List[int]) -> List[int]:
-    out := []
+    out: List[int] = []
     i := 0
     j := 0
     while i < a.len() and j < b.len():
@@ -43,8 +43,8 @@ fn sort(xs: List[int]) -> List[int]:
     if n <= 1:
         return xs
     mid := n / 2
-    left := []
-    right := []
+    left: List[int] = []
+    right: List[int] = []
     i := 0
     for x in xs:
         if i < mid:

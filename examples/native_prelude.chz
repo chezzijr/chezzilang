@@ -25,7 +25,7 @@ fn main():
     print(chr(66))           # B
 
     # native fn panic — raised inside a recover: block, unwinds, is caught
-    r := recover:
+    r: None!Error = recover:
         panic("boom")
     match r:
         ?_: print("no panic")

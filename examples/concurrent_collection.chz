@@ -9,7 +9,7 @@ import std.concurrency.collection
 
 fn main():
     # --- ConcurrentCounter: race-free RMW. 100 tasks each increment the same key once -> exactly 100.
-    ctr := collection.ConcurrentCounter(RwShared({}))
+    ctr: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(RwShared({}))
     parallel:
         for i in range(0, 100):
             spawn:
@@ -25,7 +25,7 @@ fn main():
     print(ctr.total())                  # 67
 
     # --- ConcurrentMap: each task writes its OWN key i -> i*i. Order-independent; parent reads all.
-    m := collection.ConcurrentMap(RwShared({}))
+    m: collection.ConcurrentMap[int, int] = collection.ConcurrentMap(RwShared({}))
     parallel:
         for i in range(0, 10):
             spawn:

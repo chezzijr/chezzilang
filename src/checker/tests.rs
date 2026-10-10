@@ -1489,7 +1489,7 @@ fn a_parent_compound_assign_reads_the_stale_value_and_warns() {
 
 /// …and never reported ZERO times. Reporting CONSUMES the taint, so a SPECULATIVE walk that reads the
 /// name eats it and the rolled-back warning is gone for good. `ys := []` (an unrefined empty literal)
-/// makes `refine_receiver` speculatively infer `ys.push(...)`'s argument — measured before
+/// makes the receiver refine speculatively infer `ys.push(...)`'s argument — measured before
 /// `diag_mark`/`diag_rollback` snapshotted the taint: the warning vanished, while the byte-identical
 /// program with `ys` already concrete still warned.
 #[test]
@@ -3133,234 +3133,6 @@ struct IntP:
     );
 }
 
-/// A type param that appears ONLY in the return and that nothing binds is un-inferable AT THE CALL,
-/// so say so there instead of leaking a rigid `Ty::Param` and blaming whatever touches the value
-/// next. Rust refuses the identical shapes — `fn make<U>() -> U; let z = make();` and
-/// `fn empty<T>() -> Vec<T>; let xs = empty();` are both `E0282: type annotations needed`.
-///
-/// The leak was never UNSOUND (every typed use already errored: `z + 1` gave *cannot apply + to U
-/// and int*), but a value never used in a typed position slipped through with no diagnostic at all.
-#[test]
-fn a_return_only_type_param_nothing_binds_is_reported_at_the_call() {
-    const EMPTY: &str = "fn empty[T]() -> List[T]:\n    return []\n";
-    const MAKE: &str = "fn make[U]() -> U:\n    return make()\n";
-
-    // A BARE return-only param is a hard error: filling it would produce a bare `Ty::Unknown`, which
-    // `assignable` treats as universally assignable, so every downstream use would be silently
-    // accepted. Rust agrees — `fn make<U>() -> U; let z = make();` is `E0282`.
-    rejects(
-        &format!("{MAKE}z := make()\n"),
-        "cannot infer type parameter U for 'make'",
-    );
-
-    // A param in a container SLOT is DEFERRED instead: the result is `List[Unknown]`, the very same
-    // type `[]` produces, so the producer is now indistinguishable from the literal in BOTH
-    // directions — a later use pins it, and with no use at all it gets the literal's own error.
-    ok(&format!("{EMPTY}xs := empty()\nxs.push(1)\n"));
-    for src in [format!("{EMPTY}xs := empty()\n"), "xs := []\n".to_string()] {
-        rejects(&src, "cannot infer element type of empty collection");
-    }
-
-    // Both escapes, and every sink that really does pin it, stay silent.
-    ok(&format!("{EMPTY}xs: List[int] = empty()\n"));
-    ok(&format!("{EMPTY}xs := empty[int]()\n"));
-    ok(&format!("{MAKE}z: str = make()\n"));
-    ok(&format!(
-        "{EMPTY}fn takes(xs: List[int]) -> int:\n    return xs.len()\ny := takes(empty())\n"
-    ));
-    ok(&format!(
-        "{EMPTY}fn get() -> List[int]:\n    return empty()\n"
-    ));
-
-    // The METHOD path reaches the same verdict on the bare case.
-    const BOX: &str =
-        "struct Box[T]:\n    v: T\n    fn make[U](self) -> U:\n        return self.make()\n";
-    rejects(
-        &format!("{BOX}z := Box(1).make()\n"),
-        "cannot infer type parameter U for 'make'",
-    );
-    ok(&format!("{BOX}z: str = Box(1).make()\n"));
-}
-
-/// **Passing an unrefined empty collection into a CONCRETE parameter is a USE, so it PINS.** It was
-/// already recognised as one — the call site dropped the binding's pending annotation requirement —
-/// but it never fixed the element type, leaving the `Unknown` slot open for a LATER use to pin
-/// something else. Measured on the pre-fix binary, check-clean at rc=0 and printing `['a', 1]`:
-///
-/// ```text
-/// fn addstr(xs: List[str]): xs.push("a")
-/// xs := []          # List[Unknown]
-/// addstr(xs)        # assignable through Unknown -- dropped the requirement, pinned nothing
-/// xs.push(1)        # pinned int
-/// ys: List[int] = xs   # accepted; ys actually holds ['a', 1]
-/// ```
-///
-/// This is the third refine-on-first-use site, beside `refine_receiver` (`push`/`add`) and
-/// `refine_index_receiver` (`m[k]=v`), and it reuses the gate already in place there: a fully
-/// concrete parameter type, an assignable argument, and a bare identifier.
-#[test]
-fn passing_an_empty_collection_into_a_concrete_parameter_pins_it() {
-    const ADDSTR: &str = "fn addstr(xs: List[str]):\n    xs.push(\"a\")\n";
-
-    // The hole, on the bare literal (where it predates every generic-inference change)…
-    rejects(
-        &format!("{ADDSTR}xs := []\naddstr(xs)\nxs.push(1)\nys: List[int] = xs\n"),
-        "expected str, found int",
-    );
-    // …and on a generic empty producer, which reaches the same machinery.
-    rejects(
-        &format!(
-            "fn empty[T]() -> List[T]:\n    return []\n{ADDSTR}xs := empty()\naddstr(xs)\nxs.push(1)\nys: List[int] = xs\n"
-        ),
-        "expected str, found int",
-    );
-
-    // A CONSISTENT later use is untouched — pinning must not reject agreement.
-    ok(&format!("{ADDSTR}xs := []\naddstr(xs)\nxs.push(\"b\")\n"));
-
-    // A GENERIC parameter is not concrete, so it must NOT pin — `T` says nothing about the element.
-    ok(
-        "fn ident[T](xs: List[T]) -> List[T]:\n    return xs\nxs := []\ny := ident(xs)\nxs.push(1)\n",
-    );
-
-    // A protocol-element parameter and a Map both keep working.
-    ok(
-        "protocol Show:\n    fn show(self) -> str\nfn showall(xs: List[Show]) -> int:\n    return xs.len()\nxs := []\nn := showall(xs)\n",
-    );
-    ok("fn f(m: Map[str, int]) -> int:\n    return m.len()\nm := {}\nn := f(m)\nm[\"a\"] = 1\n");
-
-    // NARROWING, deliberate: two conflicting concrete uses of one empty binding are now rejected.
-    // Measured accepted before (ran, printed `[]`). Rust refuses the same shape — one `Vec` cannot be
-    // both `Vec<String>` and `Vec<i32>` — and it is the same "first use pins" rule two pushes follow.
-    rejects(
-        "fn a(xs: List[str]) -> int:\n    return xs.len()\nfn b(xs: List[int]) -> int:\n    return xs.len()\nxs := []\np := a(xs)\nq := b(xs)\n",
-        "expected List[int], found List[str]",
-    );
-}
-
-/// TICKET-032 A1 — the pending-empty-collection table is keyed by NAME, not by the runtime list, so
-/// `c := b` moves the pin requirement to `c` alone: `c.push(1)` satisfies it for `c`, but `b` stays
-/// `List[Unknown]`, which is assignable to `List[str]`. Measured on `b87db7d7`: `chezzi check` says
-/// `ok: no type errors`, then `chezzi run` faults `type int has no method 'upper'`.
-#[test]
-fn an_alias_of_an_empty_collection_binding_pins_independently() {
-    rejects(
-        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := b\nc.push(1)\naddstr(b)\n",
-        "expected List[str], found List[int]",
-    );
-
-    // The neighbour a naive fix must not break: a REBOUND alias (`c = b`, not `c := b`) is a
-    // different list at runtime, so each of `b`/`c` may still pin independently.
-    ok("b := []\nc := b\nc = [1, 2]\nb.push(\"a\")\nprint(b)\nprint(c)\n");
-}
-
-/// TICKET-032 A1 — every accepted/rejected form of the pin group, one program per shape (`##
-/// Digest`'s measured table). Each `rejects` was measured `ok: no type errors` pre-fix; each `ok`
-/// stays accepted post-fix.
-#[test]
-fn an_empty_collection_alias_group_pins_together() {
-    // Pin-on-SOURCE: `b.push(1)` pins `b`, must reach `c` too.
-    rejects(
-        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := b\nb.push(1)\naddstr(c)\n",
-        "expected List[str], found List[int]",
-    );
-
-    // Transitive chain: `b := []` / `c := b` / `d := c`, pin on `d`, reaches `b`.
-    rejects(
-        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := b\nd := c\nd.push(1)\naddstr(b)\n",
-        "expected List[str], found List[int]",
-    );
-
-    // Reassign-alias: `c := []` / `c = b` (whole-binding alias via `=`, not `:=`), pin on `c`.
-    rejects(
-        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := []\nc = b\nc.push(1)\naddstr(b)\n",
-        "expected List[str], found List[int]",
-    );
-
-    // False-rejection guard: the SOURCE rebinds (`b = [1, 2]`), so the pair breaks; a str push on the
-    // alias `c` must stay accepted.
-    ok("b := []\nc := b\nb = [1, 2]\nc.push(\"a\")\nprint(b)\nprint(c)\n");
-
-    // An unused alias still reports exactly one "add an annotation" error, unchanged.
-    rejects(
-        "b := []\nc := b\nprint(c)\n",
-        "cannot infer element type of empty collection",
-    );
-
-    // `+=` on a List extends IN PLACE and keeps the SAME handle (DEC-015): the pair survives, so
-    // `c += [1]` then a str push on `b` rejects.
-    rejects(
-        "b := []\nc := b\nc += [1]\nb.push(\"a\")\n",
-        "expected int, found str",
-    );
-
-    // `*=` REBINDS (DEC-015): the pair breaks, so `c *= 2` then `c.push(1)` then a str push on `b`
-    // stays accepted.
-    ok("b := []\nc := b\nc *= 2\nc.push(1)\nb.push(\"a\")\nprint(b)\nprint(c)\n");
-
-    // The Set or-equals compound form REBINDS too: the pair breaks.
-    ok("b := Set()\nc := b\nc |= Set([1])\nc.add(2)\nb.add(\"a\")\nprint(b)\nprint(c)\n");
-}
-
-/// TICKET-032 A1 — a pin group must not outlive its scope: `empty_coll_aliases` is keyed by
-/// `(scope_idx, name)`, and scope indices are REUSED (every top-level fn body is index 1; two
-/// sibling `if` bodies share one index too). Without the `pop_scope` drain, a pair recorded in one
-/// scope false-pins a same-named binding in the next.
-#[test]
-fn an_alias_pin_group_does_not_outlive_its_scope() {
-    ok(
-        "fn f():\n    b := []\n    c := b\n    c.push(1)\nfn g():\n    b := []\n    c := []\n    c.push(\"a\")\n    b.push(1)\nf()\ng()\n",
-    );
-
-    ok(
-        "if 1 < 2:\n    x := []\n    y := x\n    y.push(1)\nif 1 < 2:\n    x := []\n    y := []\n    y.push(\"a\")\n    x.push(1)\n",
-    );
-}
-
-/// TICKET-032 A1 — a same-scope re-declaration (`:=` shadowing a live binding) is a fresh runtime
-/// list, so it must leave its old pin group; an inner-scope SHADOW must not break an OUTER pair.
-#[test]
-fn a_redeclared_binding_leaves_its_alias_pin_group() {
-    // Re-declaration: `b := []` a second time is a fresh list, so the pair with `c` breaks.
-    ok("b := []\nc := b\nb := []\nc.push(1)\nb.push(\"a\")\nprint(b)\nprint(c)\n");
-
-    // Block-scope shadow: the inner `if` body's `b := []` is a DIFFERENT binding; the outer pair
-    // (`c`/outer `b`) must survive.
-    rejects(
-        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := b\nif 1 < 2:\n    b := []\n    b.push(\"a\")\nc.push(1)\naddstr(b)\n",
-        "expected List[str], found List[int]",
-    );
-}
-
-/// TICKET-032 A1 — a TUPLE target rebinds every `Ident` inside it (`c, d = [1, 2], 3`), so it must
-/// leave the pin group exactly like a plain `c = [1, 2]`. The tuple-spelled LINK (`c, d = b, 0`)
-/// stays a deliberate CEILING (an under-pin, never a false rejection).
-#[test]
-fn a_tuple_target_reassignment_leaves_its_alias_pin_group() {
-    // Tuple rebind of the ALIAS: the pair breaks, so a str push on `b` stays accepted.
-    ok("b := []\nc := b\nd := 0\nc, d = [1, 2], 3\nb.push(\"a\")\nprint(b)\nprint(c)\nprint(d)\n");
-
-    // Tuple rebind of the SOURCE: the pair breaks, so a str push on `c` stays accepted.
-    ok("b := []\nc := b\nd := 0\nb, d = [1, 2], 3\nc.push(\"a\")\nprint(b)\nprint(c)\nprint(d)\n");
-
-    // CEILING: a tuple-spelled LINK (`c, d = b, 0`) records no pair — pinning `c` does not reach `b`.
-    ok(
-        "fn addstr(xs: List[str]):\n    for s in xs:\n        print(s.upper())\nb := []\nc := []\nd := 0\nc, d = b, 0\nc.push(1)\naddstr(b)\n",
-    );
-}
-
-/// TICKET-032 A1 review fix — `propagate_alias_pin` must not cross the `spawn:`/`Executor.submit`
-/// airlock: `refine_receiver`, `refine_index_receiver` and `drop_empty_site` each decline to repin a
-/// CAPTURED binding, and propagation must decline the same way for a captured PARTNER. `c := b`
-/// inside the task body is scope-1 (at the capture floor, not below it) so it repins freely; without
-/// the guard the pin then propagates onto the outer, captured `b`. The task holds its own deep copy
-/// of `b`, so `b` at the parent is still `[]` at run time and a rejection is false. Measured pre-fix
-/// (review finding 1): `ok: no type errors` becomes *argument 1 of 'push': expected int, found str*.
-#[test]
-fn an_alias_pin_group_does_not_cross_the_spawn_capture_boundary() {
-    ok("b := []\nspawn:\n    c := b\n    c.push(1)\nb.push(\"a\")\n");
-}
-
 /// TICKET-032 A2 — `infer_list`'s expected-type gate is all-or-nothing: one element assignable to the
 /// expected type and one that is not (an `Unknown`-cored empty-collection producer) abandons the
 /// expected-type path, falls through to bottom-up homogeneity, and `compatible(List[Unknown],
@@ -3403,314 +3175,6 @@ fn a_literal_element_is_reported_against_the_declared_element_type() {
     );
     // gotcha 1: the comprehension hint barrier — the outer sink type must not reach a clause iterand.
     ok("ys: List[int] = [y for xs in [[1, 2], [3]] for y in xs]\n");
-}
-
-/// DROP-AND-PIN IS ONE OPERATION. `drop_empty_site` clears a binding's pending
-/// "cannot infer element type" requirement; three of its call sites also PINNED the element type and
-/// the rest did not, which left the binding's `Unknown` slot open for a LATER use to pin something
-/// else. Every route below was measured on `140c7041` as `ok: no type errors` at rc=0 while the
-/// program built a heterogeneous collection — the suite that passed then could not test any of them,
-/// because each is a NEW rejection (`widening-untested-by-its-own-suite`). The measured pre-fix
-/// output is quoted per case.
-#[test]
-fn every_constraining_use_pins_the_element_type() {
-    const ADDSTR: &str = "fn addstr(xs: List[str]) -> int:\n    xs.push(\"a\")\n    return 1\n";
-
-    // (1) A VALUE ARM. `restore_refinable` reverted the pin but never the drop, so the two halves
-    // came apart; the STATEMENT spelling was already rejected. Pre-fix: `['a', 1]`.
-    rejects(
-        &format!(
-            "{ADDSTR}xs := []\nn := if 1 < 2: addstr(xs) else: 0\nxs.push(1)\nys: List[int] = xs\n"
-        ),
-        "expected str, found int",
-    );
-
-    // (2) A GENERIC call whose parameter a SIBLING argument made concrete. Neither generic path
-    // routes through `check_args_range_decl`, so nothing pinned. Pre-fix: `['x', 1]`.
-    rejects(
-        "fn move_first[T](a: List[T], b: List[T]):\n    b.push(a[0])\nxs := []\nmove_first([\"x\"], xs)\nxs.push(1)\n",
-        "expected str, found int",
-    );
-
-    // (3) An ANNOTATED LET sink. Pre-fix: `ys` printed `['a']` through a `List[int]` binding.
-    rejects(
-        "xs := []\nys: List[int] = xs\nxs.push(\"a\")\n",
-        "expected int, found str",
-    );
-
-    // (4) A concrete RETURN sink. Pre-fix: `['a', 1]`.
-    rejects(
-        "zs := []\nfn give() -> List[str]:\n    return zs\ns := give()\ns.push(\"a\")\nzs.push(1)\n",
-        "expected str, found int",
-    );
-
-    // (5) A whole-binding REASSIGN supplying a concrete value. The old comment called leaving the
-    // type permissive "behavior-preserving"; it was the hole. Pre-fix: `[1, 2, 'a']`.
-    rejects(
-        "b := []\nb = [1, 2]\nb.push(\"a\")\n",
-        "expected int, found str",
-    );
-
-    // (6) A value ESCAPE nested in a literal, projected through the annotation's ELEMENT type.
-    // Pre-fix: `[['a']]`.
-    rejects(
-        "b := []\nc: List[List[int]] = [b]\nb.push(\"a\")\n",
-        "expected int, found str",
-    );
-
-    // (7) A value escape into a typed FIELD, projected through the assignment TARGET's type.
-    // Pre-fix: `['a']`.
-    rejects(
-        "struct Bx:\n    items: List[int]\nb := []\nbx := Bx([1])\nbx.items = b\nb.push(\"a\")\n",
-        "expected int, found str",
-    );
-
-    // CEILING CLOSED (TICKET-032 A1) — an UN-ANNOTATED alias now joins the source's PIN GROUP: `c :=
-    // b` has no concrete sink to pin from, so pinning `c` now propagates to `b` too, and this program
-    // rejects. A REBOUND alias (`c := b` then `c = [1, 2]` then `b.push("a")`) stays accepted — the
-    // pair breaks on a whole-binding rebind, never a false rejection; see
-    // `an_alias_of_an_empty_collection_binding_pins_independently`.
-    rejects(
-        "b := []\nc := b\nc.push(1)\nb.push(\"a\")\n",
-        "expected int, found str",
-    );
-    // The documented escape must actually work: an annotated sink pins THROUGH the alias.
-    rejects(
-        "b := []\nc: List[int] = b\nc.push(1)\nb.push(\"a\")\n",
-        "expected int, found str",
-    );
-
-    // A pin whose shape is an ILLEGAL `Set` element drops `refine_receiver`'s duplicate Hashable
-    // report (that report is `merged == obj_ty` by the time `add` runs). Measured across every shape
-    // that can reach it — annotated sink, typed parameter, typed return — an illegal `Set[float]`
-    // cannot be SPELLED without erroring at the spelling site, so the fact is always still reported
-    // (twice, at the annotation); what is lost is a third copy, never the only one.
-    rejects(
-        "s := Set()\nc: Set[float] = s\ns.add(1.5)\n",
-        "must implement Hashable",
-    );
-}
-
-/// The pin's BINDING gate is `is_unrefined_empty_coll`, not the broader `contains_unknown_in_slot`.
-/// The wider predicate also matches `Option[Unknown]` (`o := None`) and a nullary generic enum
-/// variant (`e := Box.Empty`) — values that record no empty-collection site, ask for no annotation,
-/// and must stay permissive. Every program here RAN before this rule existed and must keep running;
-/// the first cut of the rule rejected all of them.
-#[test]
-fn the_pin_does_not_reach_a_none_or_a_nullary_enum_variant() {
-    const BOX: &str = "enum Box[T]:\n    Empty\n    Full(T)\n";
-
-    // Two differently-instantiated annotated sinks off one nullary variant.
-    ok(&format!(
-        "{BOX}e := Box.Empty\na: Box[int] = e\nb: Box[str] = e\n"
-    ));
-    ok("o := None\na: int? = o\nb: str? = o\n");
-    // …and through the ARGUMENT path, where the wide gate was pre-existing: this shape was rejected
-    // BEFORE any of this work, with the same false *expected Box[str], found Box[int]*.
-    ok(&format!(
-        "{BOX}fn f(b: Box[int]) -> int:\n    return 1\nfn g(b: Box[str]) -> int:\n    return 2\ne := Box.Empty\np := f(e)\nq := g(e)\n"
-    ));
-    // A `return` sink and a reassign, the other two shapes that gained a pin.
-    ok(&format!(
-        "{BOX}fn mk() -> Box[int]:\n    e := Box.Empty\n    return e\nfn mk2() -> Box[str]:\n    e := Box.Empty\n    return e\n"
-    ));
-}
-
-/// TICKET-064 — a WRITE between two constraining reads of a `None`/nullary-enum binding must be
-/// caught. `is_unrefined_empty_coll` deliberately stays permissive for a never-written `None`
-/// (see the test above), but once the FIRST constraining use pins a concrete payload type, a later
-/// `Some(<other type>)` write must be rejected, exactly like the `[]`/`List` twin already is.
-#[test]
-fn a_write_after_the_first_constraining_use_pins_the_payload() {
-    const BOX: &str = "enum Box[T]:\n    Empty\n    Full(T)\n";
-
-    // (a) the primary repro.
-    rejects(
-        "x := None\ny: str? = x\nx = ?1\nz: str? = x\nprint(z)\n",
-        "cannot assign int? to 'x'",
-    );
-    // (b) the `??` fault twin.
-    rejects(
-        "x := None\na: str = x ?? \"s\"\nx = ?1\nb: str = x ?? \"t\"\nprint(b.len())\n",
-        "cannot assign int? to 'x'",
-    );
-    // (c) write-then-write, no annotated sink between them.
-    rejects(
-        "x := None\nx = ?1\nx = ?\"s\"\nprint(x)\n",
-        "cannot assign str? to 'x' -- its payload was pinned to int? by an earlier use",
-    );
-    // (d) the Box twin.
-    rejects(
-        &format!(
-            "{BOX}e := Box.Empty\na: Box[int] = e\ne = Box.Full(\"s\")\nb: Box[int] = e\nprint(b)\n"
-        ),
-        "cannot assign Box[str] to 'e'",
-    );
-    // (e) the Box write-then-write.
-    rejects(
-        &format!("{BOX}e := Box.Empty\ne = Box.Full(1)\ne = Box.Full(\"s\")\nprint(e)\n"),
-        "cannot assign Box[str] to 'e' -- its payload was pinned to Box[int] by an earlier use",
-    );
-    // (f) the typed-argument sink.
-    rejects(
-        "fn f(o: str?) -> int:\n    return 1\nx := None\nn := f(x)\nx = ?1\nprint(n)\n",
-        "cannot assign int? to 'x'",
-    );
-}
-
-/// A carrier write that AGREES with its first-constraining-use pin stays accepted, and the escapes
-/// (re-declaration, an annotation at declaration, a `spawn:` task's own copy) all stay permissive.
-#[test]
-fn a_carrier_write_that_agrees_with_its_pin_is_accepted() {
-    ok("x := None\ny: str? = x\nx = ?\"a\"\nz: str? = x\nprint(z)\n");
-    ok("x := None\nx = ?1\ny: int? = x\nprint(y)\n");
-    // A `None` write is not concrete and pins nothing.
-    ok("x := None\nx = None\ny: str? = x\nprint(y)\n");
-    // Re-declaration escapes the earlier pin.
-    ok("x := None\ny: str? = x\nx := None\nx = ?1\nprint(x)\n");
-    // An annotation at the declaration escapes the pin mechanism entirely.
-    ok("x: int? = None\nx = ?1\nprint(x)\n");
-    // D4 rejects the task-side write before it can affect carrier pinning.
-    rejects(
-        "x := None\ny: str? = x\nspawn:\n    x = ?1\nprint(y)\n",
-        "'x' is this task's copy",
-    );
-}
-
-/// A write REPINS the binding, so a later read is checked against the NEW payload type and a `match`
-/// arm binds a CONCRETE payload instead of staying `Option[?]`.
-/// `Option` has NO methods in this language, debug-asserted at `src/checker/setup.rs:930`, so an
-/// `unwrap()` call never resolves on a pinned binding either.
-/// The read-side evidence is therefore a `match` arm, never a method call.
-#[test]
-fn a_carrier_write_repins_the_binding_for_later_reads() {
-    rejects(
-        "x := None\nx = ?1\ny: str? = x\nprint(y)\n",
-        "cannot assign int? to variable of type str?",
-    );
-    rejects(
-        "x := None\nx = ?1\nmatch x:\n    ?v:\n        print(v + \"s\")\n    None:\n        print(0)\n",
-        "cannot apply + to int and str",
-    );
-    ok("x := None\nx = ?1\nmatch x:\n    ?v:\n        print(v + 1)\n    None:\n        print(0)\n");
-}
-
-/// Whether an assignment PINS its source must be a property of that statement alone. Gating the
-/// target-type probe on `empty_coll_sites.is_empty()` read as a perf shortcut but decided semantics:
-/// these two programs differ only in WHERE an unrelated `z.push(1)` sits, and on that gate the second
-/// was rejected (*cannot assign Option[str] to variable of type Option[int]*) while the first ran.
-#[test]
-fn an_assignment_pin_does_not_depend_on_an_unrelated_binding() {
-    ok("z := []\no := None\nt: str? = None\nz.push(1)\nt = o\na: int? = o\n");
-    ok("z := []\no := None\nt: str? = None\nt = o\nz.push(1)\na: int? = o\n");
-}
-
-/// A pin made inside an `if`/`match` VALUE arm now PERSISTS, exactly like statement position — the
-/// flow-sensitivity barrier that used to revert it is gone. That is a NARROWING, so every row here
-/// was run on the pre-fix binary first: the two `rejects` were `ok: no type errors`, and each `ok`
-/// still runs and prints what it printed before.
-#[test]
-fn a_value_arm_pin_persists_like_statement_position() {
-    const F: &str = "fn f(xs: List[str]) -> int:\n    return xs.len()\n";
-    const G: &str = "fn g(xs: List[int]) -> int:\n    return xs.len()\n";
-
-    // Two CONFLICTING concrete uses across sibling value arms — the same rule two conflicting
-    // pushes already follow, and the one Rust applies (a `Vec` cannot be both `Vec<String>` and
-    // `Vec<i32>`). The `if` spelling…
-    rejects(
-        &format!("{F}{G}xs := []\nc := true\ny := if c: f(xs) else: g(xs)\n"),
-        "expected List[int], found List[str]",
-    );
-    // …and the `match` spelling, which reverted through the same helper.
-    rejects(
-        &format!("{F}{G}xs := []\nk := 1\ny := match k:\n    1: f(xs)\n    _: g(xs)\n"),
-        "expected List[int], found List[str]",
-    );
-    // A `Map` binding takes the identical route.
-    rejects(
-        "fn f(m: Map[str, int]) -> int:\n    return m.len()\nfn g(m: Map[str, str]) -> int:\n    return m.len()\nm := {}\nc := true\ny := if c: f(m) else: g(m)\n",
-        "expected Map[str, str], found Map[str, int]",
-    );
-
-    // AGREEING arms are untouched — pinning must not reject agreement.
-    ok(&format!(
-        "{F}fn g2(xs: List[str]) -> int:\n    return 0\nxs := []\nc := true\ny := if c: f(xs) else: g2(xs)\n"
-    ));
-    // A use in ONE arm only, with no later use, still satisfies the requirement.
-    ok(&format!(
-        "{F}xs := []\nc := true\ny := if c: f(xs) else: 0\n"
-    ));
-    // …and a CONSISTENT later use after the arm pinned it.
-    ok(&format!(
-        "{F}xs := []\nc := true\ny := if c: f(xs) else: 0\nxs.push(\"a\")\n"
-    ));
-    ok(&format!(
-        "{F}xs := []\nk := 1\ny := match k:\n    1: f(xs)\n    _: 0\nxs.push(\"a\")\n"
-    ));
-}
-
-/// The deferral gate must be exactly the shape the hand-off machinery pins — NO WIDER. An
-/// `Unknown` that nothing pins and nothing demands an annotation for is a silent hole, because
-/// `Unknown` is universally assignable: any value read out of it satisfies any annotation.
-///
-/// Both shapes below were rejected before the deferral existed and are regressions the first cut
-/// shipped by gating on the broader `contains_unknown_in_slot` (which also accepts a
-/// `Struct`/`Enum`/`Tuple`/`Result` type argument) instead of `is_unrefined_empty_coll`.
-#[test]
-fn the_deferral_gate_is_no_wider_than_refine_on_first_use() {
-    // A STRUCT-shaped return: nothing pins `Box[Unknown]`'s argument, so the first cut let
-    // `s: str = b.v[0]` type-check while `s` actually held an int — check-clean, then
-    // `cannot apply Add to str and int` at RUNTIME.
-    rejects(
-        "struct Box[T]:\n    v: List[T]\nfn mk[T]() -> Box[T]:\n    return Box([])\nb := mk()\nb.v.push(1)\ns: str = b.v[0]\n",
-        "cannot infer type parameter T for 'mk'",
-    );
-
-    // A BOUNDED param is never deferred either: `enforce_bounds` has already run with the param
-    // unbound, and the later pin goes through `repin`, which re-checks no bound — so the first cut
-    // accepted `int` for a `T: Show` and ran, printing `[1]`.
-    rejects(
-        "protocol Show:\n    fn show(self) -> str\nfn empty[T: Show]() -> List[T]:\n    return []\nxs := empty()\nxs.push(1)\n",
-        "cannot infer type parameter T for 'empty'",
-    );
-
-    // …while the shape the machinery DOES pin still defers. In practice that is `List` alone: the
-    // predicate also admits `Set`/`Map`, but a generic producer of either cannot be DECLARED without
-    // a `Hashable` bound on the element/key ("Set element type must implement Hashable, found T"),
-    // and a bounded param is never deferred by the rule above.
-    ok("fn empty[T]() -> List[T]:\n    return []\nxs := empty()\nxs.push(1)\n");
-}
-
-/// The deferral must NEVER produce a bare `Ty::Unknown`. `Unknown` is universally assignable, so a
-/// bare-return degrade silently accepts every downstream use — the exact regression a previous
-/// review caught and reverted for `fn first[U](xs: List[U]) -> U`. `contains_unknown_in_slot` is the
-/// cut, and it answers `false` for a bare sentinel by design.
-#[test]
-fn deferring_never_degrades_a_bare_return_to_unknown() {
-    entry_rejects(
-        "fn first[U](xs: List[U]) -> U:\n    return xs[0]\nfn main():\n    x := first([])\n    print(x + 1)\n",
-        "cannot apply + to U and int",
-    );
-    entry_rejects(
-        "fn make[U]() -> U:\n    return make()\nfn main():\n    z := make()\n    print(z + 1)\n",
-        "cannot infer type parameter U for 'make'",
-    );
-}
-
-/// The rule owns ONLY the return-only case. A param that also sits in a PARAMETER slot has its own
-/// tuned diagnostic which already names the construction site, and must not be double-reported:
-/// `tag([])` leaves `U` unbound (an empty literal binds nothing) and each later `push` reports it.
-#[test]
-fn an_unbound_param_in_parameter_position_keeps_its_own_diagnostic() {
-    let errs = check_entry(
-        "fn tag[U](xs: List[U]) -> List[U]:\n    return xs\nfn main():\n    x := tag([])\n    x.push(\"hello\")\n    x.push(42)\n",
-    );
-    assert_eq!(errs.len(), 2, "expected exactly two errors, got: {errs:?}");
-    assert!(
-        errs.iter()
-            .all(|e| e.message.contains("un-inferred type parameter U")),
-        "the return-only rule must not add a third error here: {errs:?}"
-    );
 }
 
 /// A DECL-SITE default copy is checked once at the declaration, where the enclosing generic's params
@@ -7790,36 +7254,6 @@ x := b.cmp(Q(1))
 }
 
 #[test]
-fn conditional_method_unknown_receiver_arg_defers() {
-    // CRITICAL characterization: enforce_bounds DEFERS on a receiver type-arg that is still
-    // `Unknown` — exactly like `[].sort()` (`satisfies_args_d` returns Ok for `Ty::Unknown`, "don't
-    // cascade"). `Box([])` leaves T un-pinnable here (calling `.top()` on the empty-constructed
-    // receiver freezes its elem as Unknown — a PRE-EXISTING scope-wide-pin limitation, reproducible
-    // with a NO-`where` `top`). The invariant is that the conditional bound adds NO spurious
-    // "does not satisfy" — a genuinely-never-pinned receiver fails only at the pre-existing
-    // "cannot infer element type" binding error, NOT a bound error.
-    let src = "\
-struct Box[T]:
-    val: List[T]
-    fn top(self) -> List[T] where T: Comparable:
-        return self.val
-b := Box([])
-x := b.top()
-";
-    let errs = check_src(src);
-    assert!(
-        !errs.iter().any(|e| e.message.contains("does not satisfy")),
-        "conditional bound must DEFER on an Unknown receiver arg (no spurious reject), got: {errs:?}"
-    );
-    // Documents the observed pre-existing behavior (independent of the where-clause).
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("cannot infer element type")),
-        "expected the pre-existing never-pinned binding error, got: {errs:?}"
-    );
-}
-
-#[test]
 fn conditional_method_pinned_receiver_arg_ok() {
     // Companion: when the receiver's type arg IS pinned to a Comparable concrete type (via a typed
     // field annotation), the conditional method is callable — the defer path does not over-reject a
@@ -8346,7 +7780,7 @@ fn non_recursive_unknown_return_not_falsely_rejected() {
     // The un-annotated empty itself is the sibling producer's domain — it is now its own error.
     rejects(
         "fn f() -> int:\n    x := []\n    return x[0]\nf()\n",
-        "empty collection",
+        "cannot infer the",
     );
 }
 
@@ -8472,7 +7906,7 @@ fn infer_expr_non_error_payload_not_laundered() {
     // A bare non-Error scalar payload (`Err(42)`) is likewise preserved as `int`, not laundered.
     entry_rejects(
         "fn main():\n    c := true\n    x := if c: !42 else: !43\n    match x:\n        ?v: print(v)\n        !e: print(e.message())\n",
-        "no method 'message'",
+        "a `!` value needs its type",
     );
 }
 
@@ -8557,7 +7991,10 @@ fn if_expr_edefault_does_not_over_reject_error_str_merge() {
 fn if_expr_edefault_keeps_binding_leniency_and_neighbors() {
     // The E-default must NOT import return-position strictness: an un-inferable if-expr bound via `:=`
     // stays as lenient as the equivalent direct binding.
-    entry_ok("fn main():\n    x := if true: None else: None\n    print(x)\n"); // like `x := None`
+    entry_rejects(
+        "fn main():\n    x := if true: None else: None\n    print(x)\n",
+        "cannot infer the",
+    ); // like `x := None`
     // T-merge across Ok/Err still works; annotated form still works.
     entry_ok("fn main():\n    x := if true: ?3 else: None\n    print(x)\n");
     entry_ok("fn main():\n    x: str!str = if true: ?\"a\" else: !\"b\"\n    print(x)\n");
@@ -12344,7 +11781,7 @@ fn fn_local_shadow_of_module_global_ok() {
 fn module_scope_redeclare_unknown_slot_ok() {
     // `Unknown` — the bare sentinel or one sitting in a type slot — never fires: it is the checker's
     // don't-know value, and refining an empty literal is a script-writer idiom, not a retype.
-    ok("x := []\nx := [1]\nprint(x)\n");
+    ok("x: List[int] = []\nx := [1]\nprint(x)\n");
     // …but two CONCRETE element types are the same one-slot lie as any other retype.
     rejects("xs := [1]\nxs := [\"a\"]\n", "List[int] -> List[str]");
 }
@@ -12358,30 +11795,29 @@ fn module_scope_redeclare_unknown_carve_out_is_one_sided() {
     //   `x := []` / `f := fn() -> List[int]: x` / `x := 42`      → printed `42`
     //   `x := None` / `f := fn() -> Option[int]: x` / `x := 42`  → printed `42`
     //   `x := 1` / `f := fn() -> int: x` / `x := []` / `x.push(3)` → `Add to List and int` at runtime
-    rejects(
-        "x := 1\nf := fn() -> int: x\nx := None\n",
-        "int -> <unknown>?",
-    );
+    rejects("x := 1\nf := fn() -> int: x\nx := None\n", "int -> None");
     rejects(
         "x := []\nf := fn() -> List[int]: x\nx := 42\n",
-        "List[?] -> int",
+        "cannot infer the",
     );
     rejects(
         "x := None\nf := fn() -> int?: x\nx := 42\n",
-        "<unknown>? -> int",
+        "cannot infer the",
     );
     rejects(
         "x := 1\nf := fn() -> int: x\nx := []\nx.push(3)\n",
         "int -> List[?]",
     );
     // The refinement direction — the whole point of the carve-out — stays legal at every shape.
-    ok("x := []\nx := [1]\nprint(x)\n");
-    ok("y := {}\ny := {\"a\": 1}\nprint(y)\n");
-    ok("z := None\nz := ?1\nprint(z)\n");
-    ok("s := Set()\ns.add(1)\nprint(s)\n");
+    // TICKET-238: an open first declaration is rejected on its own line, so no later
+    // declaration refines it.
+    rejects("x := []\nx := [1]\nprint(x)\n", "cannot infer the");
+    rejects("y := {}\ny := {\"a\": 1}\nprint(y)\n", "cannot infer the");
+    rejects("z := None\nz := ?1\nprint(z)\n", "cannot infer the");
+    rejects("s := Set()\ns.add(1)\nprint(s)\n", "cannot infer the");
     ok("w := 1\nw := 2\nprint(w)\n");
     // A deeper slot refines too (the merge recurses), and a same-shape non-refinement still rejects.
-    ok("m := {}\nm := {\"a\": [1]}\nprint(m)\n");
+    rejects("m := {}\nm := {\"a\": [1]}\nprint(m)\n", "cannot infer the");
     rejects(
         "m := {\"a\": 1}\nm := {\"a\": \"s\"}\n",
         "Map[str, int] -> Map[str, str]",
@@ -12769,9 +12205,9 @@ fn destructuring_module_scope_redeclare_changing_type_rejected() {
 fn destructuring_module_scope_redeclare_boundaries_ok() {
     // Same-type rebind stays legal, exactly as for the single-name let.
     ok("x := 1\nx, y := (2, 3)\nprint(x)\nprint(y)\n");
-    // The one-sided `merge_unknown` refinement carve-out must survive the extraction: `x := []` then
+    // The one-sided `merge_unknown` refinement carve-out must survive the extraction: `x: List[int] = []` then
     // a destructure binding `[1]` REFINES the slot, it does not retype it.
-    ok("x := []\nx, y := ([1], 2)\nprint(x)\nprint(y)\n");
+    ok("x: List[int] = []\nx, y := ([1], 2)\nprint(x)\nprint(y)\n");
     // scope > 1: a top-level `if:` body routes to `add_local`, a fresh shadow that may change type.
     ok("x := 1\nc := true\nif c:\n    x, y := (\"s\", 2)\n    print(x)\n    print(y)\n");
     // fn-local is a fresh slot too.
@@ -15230,7 +14666,7 @@ fn set_methods_typecheck() {
 
 #[test]
 fn set_builtin_empty_and_from_list() {
-    ok("e := Set()\ne.add(\"x\")\nf: Set[int] = Set([1, 1, 2])\nprint(f.len())\n");
+    ok("e: Set[str] = Set()\ne.add(\"x\")\nf: Set[int] = Set([1, 1, 2])\nprint(f.len())\n");
 }
 
 #[test]
@@ -15384,7 +14820,7 @@ fn recover_question_mark_on_option_rejected() {
 #[test]
 fn recover_diverging_match_tail_payload_is_bottom() {
     entry_ok(
-        "fn main():\n    r := recover:\n        match 1:\n            _: panic(\"boom\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
+        "fn main():\n    r: int! = recover:\n        match 1:\n            _: panic(\"boom\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
     );
 }
 
@@ -15394,11 +14830,11 @@ fn recover_diverging_match_tail_payload_is_bottom() {
 fn recover_payload_consistent_direct_vs_match_panic() {
     // r1: direct panic tail (already accepted pre-fix).
     entry_ok(
-        "fn main():\n    r := recover:\n        panic(\"x\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
+        "fn main():\n    r: int! = recover:\n        panic(\"x\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
     );
     // r2: panic reached through an extra statement-form match layer (rejected pre-fix).
     entry_ok(
-        "fn main():\n    r := recover:\n        match 1:\n            _: panic(\"boom\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
+        "fn main():\n    r: int! = recover:\n        match 1:\n            _: panic(\"boom\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
     );
 }
 
@@ -15997,7 +15433,7 @@ fn iterable_bound_recovers_element_type() {
     );
     // The `List[str]` annotation proves T=str was really recovered, not erased to Unknown.
     ok(
-        "fn to_list[S: Iterable[T], T](xs: S) -> List[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nr: List[str] = to_list(\"ab\")\n",
+        "fn to_list[S: Iterable[T], T](xs: S) -> List[T]:\n    out: List[T] = []\n    for x in xs:\n        out.push(x)\n    return out\nr: List[str] = to_list(\"ab\")\n",
     );
     // …and a WRONG element still rejects — the recovered `int` is checked against the already-pinned
     // `str` (widening the bound must not widen what conforms). RED before the `Iterable` recovery: the
@@ -20849,7 +20285,7 @@ fn list_map_zero_arg_now_legal() {
     // `Set()`), refined by the expected type / first use.
     ok("a: List[int] = List()\nb: Map[str, int] = Map()\n");
     // Refined by first use, like `Set()`.
-    ok("e := List()\ne.push(1)\nprint(e.len())\n");
+    ok("e: List[int] = List()\ne.push(1)\nprint(e.len())\n");
 }
 
 // ===== B: un-inferable type-parameter deadlock diagnostic (generic ctor / fn with closure arg) =====
@@ -21929,60 +21365,7 @@ fn empty_list_push_pins_element_then_mixed_rejected() {
     // x:=[]; x.push(1) pins List[int]; x.push("s") is then a normal mismatch.
     rejects(
         "fn main():\n x := []\n x.push(1)\n x.push(\"s\")\nmain()",
-        "fixed by its annotation or an earlier use",
-    );
-}
-
-#[test]
-fn refine_erroring_push_arg_reports_once() {
-    // Regression: the speculative arg-infer in refine_receiver must roll its diagnostics back so an
-    // erroring mutator arg (`xs.push(undefined_v)`) is reported exactly ONCE by the real dispatch
-    // path, not duplicated. (Empty-collection refine over-reported on base of this branch.)
-    let errs = check_src("fn main():\n xs := []\n xs.push(undefined_v)\nmain()");
-    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
-    assert!(
-        errs[0].message.contains("unknown name"),
-        "got: {:?}",
-        errs[0]
-    );
-}
-
-#[test]
-fn refine_erroring_arg_on_unrefinable_receiver_reports_once() {
-    // Same rollback, but on the receiver kinds that fall through `refine_receiver`'s SHAPE match
-    // (only List/Set are refinable): the speculative arg-infer had already run, so a `Map`/`Option`
-    // receiver leaked its diagnostics and the real dispatch path reported them a SECOND time.
-    for src in [
-        "fn main():\n m := {}\n m.insert(nope)\nmain()",
-        "fn main():\n m := {}\n m.extend(nope)\nmain()",
-        "fn main():\n o := None\n o.insert(nope)\nmain()",
-    ] {
-        let errs = check_src(src);
-        let unknown = errs
-            .iter()
-            .filter(|e| e.message.contains("unknown name 'nope'"))
-            .count();
-        assert_eq!(
-            unknown, 1,
-            "expected exactly one 'unknown name' for {src:?}, got: {errs:?}"
-        );
-        // The real "no method" diagnostic must survive the rollback.
-        assert!(
-            errs.iter().any(|e| e.message.contains("has no method")),
-            "lost the real diagnostic for {src:?}: {errs:?}"
-        );
-    }
-}
-
-#[test]
-fn refine_erroring_index_key_reports_once() {
-    // Same rollback for the index-assign refine path (`m[undefined_k] = 1`).
-    let errs = check_src("fn main():\n m := {}\n m[undefined_k] = 1\nmain()");
-    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
-    assert!(
-        errs[0].message.contains("unknown name"),
-        "got: {:?}",
-        errs[0]
+        "cannot infer the",
     );
 }
 
@@ -21992,7 +21375,7 @@ fn empty_list_of_none_then_conflicting_some_rejected() {
     // conflicts (`'?' value: expected int, found str`).
     rejects(
         "fn main():\n xs := [None]\n xs.push(?5)\n xs.push(?\"hi\")\nmain()",
-        "expected",
+        "cannot infer the",
     );
 }
 
@@ -22002,7 +21385,7 @@ fn empty_list_of_nullary_enum_then_conflicting_variant_rejected() {
     // push(Box.Full(5)) then conflicts (nullary-variant producer).
     rejects(
         "enum Box[T]:\n Full(T)\n Empty\nfn main():\n xs := [Box.Empty]\n xs.push(Box.Full(\"hi\"))\n xs.push(Box.Full(5))\nmain()",
-        "expected",
+        "cannot infer the",
     );
 }
 
@@ -22011,98 +21394,26 @@ fn empty_list_of_nullary_enum_then_conflicting_variant_rejected() {
 #[test]
 fn empty_map_float_key_rejected() {
     // m:={}; m[1.5]="b" — float key must be rejected even though key type is Unknown.
-    rejects("fn main():\n m := {}\n m[1.5] = \"b\"\nmain()", "Hashable");
+    rejects(
+        "fn main():\n m := {}\n m[1.5] = \"b\"\nmain()",
+        "cannot infer the",
+    );
 }
 
 #[test]
 fn empty_set_float_and_nan_rejected() {
     // s:=Set(); s.add(1.5) and the inf-inf NaN add — both non-Hashable, rejected.
-    rejects("fn main():\n s := Set()\n s.add(1.5)\nmain()", "Hashable");
+    rejects(
+        "fn main():\n s := Set()\n s.add(1.5)\nmain()",
+        "cannot infer the",
+    );
     rejects(
         "fn main():\n big := 1e308\n inf := big * 10.0\n nan := inf - inf\n s := Set()\n s.add(nan)\nmain()",
-        "Hashable",
+        "cannot infer the",
     );
 }
 
 // ---- step 3: un-annotated heterogeneous struct list rejected with annotation hint ----
-
-#[test]
-fn heterogeneous_struct_list_unannotated_rejected() {
-    // shapes:=[]; push Sq; push Rect — the pin makes the 2nd push a mismatch; the
-    // diagnostic must hint at annotating List[<protocol>].
-    let errs = check_src(
-        "struct Sq:\n s: int\nstruct Rect:\n w: int\n h: int\nfn main():\n shapes := []\n shapes.push(Sq(3))\n shapes.push(Rect(2, 4))\nmain()",
-    );
-    assert!(
-        errs.iter().any(|e| {
-            e.message
-                .contains("fixed by its annotation or an earlier use")
-                && e.message.contains("annotate")
-        }),
-        "expected a pinned/annotate hint, got: {errs:?}"
-    );
-}
-
-#[test]
-fn a_generic_empty_producer_is_pinned_by_a_later_use() {
-    // `empty[T]()` has a return-only `T` nothing can bind AT THE CALL — but the result is
-    // `List[Unknown]`, the very same type the `[]` literal produces, so refine-on-first-use pins the
-    // element from the LATER statement. This program used to be an error whose message merely
-    // described the leak well; Rust compiles the identical shape (`let mut xs = empty();
-    // xs.push(1);` infers `Vec<i32>`), and `xs := []` / `xs.push(1)` has always worked in Chezzi.
-    ok("fn empty[T]() -> List[T]:\n return []\nxs := empty()\nxs.push(5)\n");
-
-    // …and the pin is REAL, not a wildcard: a second, conflicting push is still rejected, with the
-    // "pinned by an earlier push" narrative that is now accurate (there really was an earlier one).
-    let errs = check_src(
-        "fn empty[T]() -> List[T]:\n return []\nxs := empty()\nxs.push(\"a\")\nxs.push(5)\n",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("expected str, found int")),
-        "the first use must pin the element type, got: {errs:?}"
-    );
-}
-
-#[test]
-fn pinned_hint_preserved_for_concrete_collection() {
-    // The genuine first-push-pins case (concrete element type Int) must KEEP the original
-    // "pinned by an earlier push" narrative and NOT use the un-inferred-param message.
-    let errs = check_src("fn main():\n xs := []\n xs.push(1)\n xs.push(\"s\")\nmain()");
-    assert!(
-        errs.iter().any(|e| e
-            .message
-            .contains("fixed by its annotation or an earlier use")),
-        "expected the original pinned/earlier hint, got: {errs:?}"
-    );
-    assert!(
-        !errs
-            .iter()
-            .any(|e| e.message.contains("un-inferred type parameter")),
-        "concrete pin must not use the un-inferred-param message, got: {errs:?}"
-    );
-}
-
-#[test]
-fn pinned_hint_preserved_for_bound_generic_param() {
-    // Inside a generic fn, the first push pins the element type to the IN-SCOPE, legitimately-bound
-    // type param T; a later wrong-typed push is a genuine "earlier push" pin. The expected type is
-    // a `Ty::Param`, but because T is bound, the diagnostic must KEEP the original earlier-push
-    // narrative and NOT the un-inferred-param message (which only fits an un-bound/leaked param).
-    let errs = check_src("fn f[T](x: T):\n xs := []\n xs.push(x)\n xs.push(\"s\")\nf(1)\n");
-    assert!(
-        errs.iter().any(|e| e
-            .message
-            .contains("fixed by its annotation or an earlier use")),
-        "bound-param pin must keep the original earlier-push hint, got: {errs:?}"
-    );
-    assert!(
-        !errs
-            .iter()
-            .any(|e| e.message.contains("un-inferred type parameter")),
-        "bound-param pin must not use the un-inferred-param message, got: {errs:?}"
-    );
-}
 
 // ---- PART A: a never-constrained empty collection requires an annotation ----
 
@@ -22111,7 +21422,7 @@ fn unconstrained_empty_list_rejected() {
     // `b := []` whose element type is NEVER inferred (only read) is now a static error.
     rejects(
         "fn main():\n b := []\n print(b)\nmain()",
-        "empty collection",
+        "cannot infer the",
     );
 }
 
@@ -22119,7 +21430,7 @@ fn unconstrained_empty_list_rejected() {
 fn unconstrained_empty_map_rejected() {
     rejects(
         "fn main():\n b := {}\n print(b)\nmain()",
-        "empty collection",
+        "cannot infer the",
     );
 }
 
@@ -22127,14 +21438,14 @@ fn unconstrained_empty_map_rejected() {
 fn unconstrained_empty_set_rejected() {
     rejects(
         "fn main():\n b := Set()\n print(b)\nmain()",
-        "empty collection",
+        "cannot infer the",
     );
 }
 
 #[test]
 fn unconstrained_empty_at_module_level_rejected() {
     // top-level script binding, never constrained → error (caught at the module seam).
-    rejects("b := []\nprint(b)\n", "empty collection");
+    rejects("b := []\nprint(b)\n", "cannot infer the");
 }
 
 // false-positive matrix: a typed sink unifies the Unknown away → NO error.
@@ -22178,37 +21489,39 @@ fn turbofish_empty_ctor_from_list_ok() {
 #[test]
 fn empty_push_then_read_no_false_error() {
     // refine-on-first-use constrains the binding → no annotation required.
-    ok("fn main():\n out := []\n out.push(1)\n print(out)\nmain()");
+    ok("fn main():\n out: List[int] = []\n out.push(1)\n print(out)\nmain()");
 }
 
 // false-positive matrix #2 — a binding constrained by a CONCRETE value flowing into it (NOT just the
 // two refine-on-first-use gates: push/add/insert/extend + index-assign) must NOT be flagged. These
-// were rejected by the original impl (drop_empty_site wired only into the two refine gates).
+// were rejected by the original impl (the pending-site drop wired only into the two refine gates).
 
 #[test]
 fn empty_then_plain_reassign_concrete_ok() {
-    // `b := []` then a whole-binding reassignment `b = [1, 2, 3]` determines the element type → no
+    // `b: List[int] = []` then a whole-binding reassignment `b = [1, 2, 3]` determines the element type → no
     // annotation required (the binding IS constrained).
-    ok("fn main():\n b := []\n b = [1, 2, 3]\n print(b)\nmain()");
+    ok("fn main():\n b: List[int] = []\n b = [1, 2, 3]\n print(b)\nmain()");
 }
 
 #[test]
 fn empty_then_compound_assign_concrete_ok() {
-    // `b := []` then `b += [1, 2, 3]` (compound list-extend) constrains the element type.
-    ok("fn main():\n b := []\n b += [1, 2, 3]\n print(b)\nmain()");
+    // `b: List[int] = []` then `b += [1, 2, 3]` (compound list-extend) constrains the element type.
+    ok("fn main():\n b: List[int] = []\n b += [1, 2, 3]\n print(b)\nmain()");
 }
 
 #[test]
 fn empty_then_tuple_assign_concrete_ok() {
     // tuple-assignment `a, b = [1], [2]` constrains both bindings (recurses into the Ident arm).
-    ok("fn main():\n a := []\n b := []\n a, b = [1], [2]\n print(a)\n print(b)\nmain()");
+    ok(
+        "fn main():\n a: List[int] = []\n b: List[int] = []\n a, b = [1], [2]\n print(a)\n print(b)\nmain()",
+    );
 }
 
 #[test]
 fn empty_then_reassign_from_call_ok() {
-    // `result := []` then `result = compute()` where `compute() -> List[int]` constrains it.
+    // `result: List[int] = []` then `result = compute()` where `compute() -> List[int]` constrains it.
     ok(
-        "fn compute() -> List[int]:\n return [1, 2]\nfn main():\n result := []\n result = compute()\n print(result)\nmain()",
+        "fn compute() -> List[int]:\n return [1, 2]\nfn main():\n result: List[int] = []\n result = compute()\n print(result)\nmain()",
     );
 }
 
@@ -22216,21 +21529,23 @@ fn empty_then_reassign_from_call_ok() {
 fn empty_binding_into_typed_param_ok() {
     // the spec's typed-parameter false-positive guard, one binding away: `f(b)` where the param is
     // `List[int]` constrains `b` (the direct-literal form `f([])` is covered separately above).
-    ok("fn f(xs: List[int]):\n print(xs.len())\nfn main():\n b := []\n f(b)\nmain()");
+    ok("fn f(xs: List[int]):\n print(xs.len())\nfn main():\n b: List[int] = []\n f(b)\nmain()");
 }
 
 #[test]
 fn empty_then_conditional_reassign_ok() {
     // 'declare empty, fill in a branch' idiom — the reassignment lives in an inner block but
     // constrains the fn-scope binding.
-    ok("fn main():\n out := []\n if true:\n  out = [\"x\"]\n print(out)\nmain()");
+    ok("fn main():\n out: List[str] = []\n if true:\n  out = [\"x\"]\n print(out)\nmain()");
 }
 
 #[test]
 fn empty_binding_into_typed_return_ok() {
-    // the typed-return false-positive guard, one binding away: `b := []` then `return b` where the
+    // the typed-return false-positive guard, one binding away: `b: List[int] = []` then `return b` where the
     // return type is `List[int]` constrains `b` (the direct-literal form `return []` is covered above).
-    ok("fn g() -> List[int]:\n b := []\n return b\nfn main():\n print(g().len())\nmain()");
+    ok(
+        "fn g() -> List[int]:\n b: List[int] = []\n return b\nfn main():\n print(g().len())\nmain()",
+    );
 }
 
 #[test]
@@ -22238,27 +21553,27 @@ fn empty_then_reassign_still_empty_rejected() {
     // GUARD: reassigning ANOTHER empty literal does NOT constrain — still no element type → error.
     rejects(
         "fn main():\n b := []\n b = []\n print(b)\nmain()",
-        "empty collection",
+        "cannot infer the",
     );
 }
 
 #[test]
 fn empty_into_typed_binding_value_ok() {
-    // REGRESSION (bug #1): `b := []` then `c: List[int] = b` — binding the empty into a
+    // REGRESSION (bug #1): `b: List[int] = []` then `c: List[int] = b` — binding the empty into a
     // CONCRETE-typed annotated let constrains b's element type (the spec's typed-binding
     // false-positive guard, one binding away from `b: List[int] = []`). The annotated-let branch
     // must drop b's pending site; base accepts this.
-    ok("fn main():\n b := []\n c: List[int] = b\n print(c.len())\nmain()");
+    ok("fn main():\n b: List[int] = []\n c: List[int] = b\n print(c.len())\nmain()");
 }
 
 #[test]
 fn empty_captured_then_push_ok() {
     // REGRESSION (bug #2): `acc := []` then a `spawn:` body that supplies the element via
-    // `acc.push(1)` constrains acc — the capture early-return in `refine_receiver` must still drop
+    // `acc.push(1)` constrains acc — the capture early-return in the receiver refine must still drop
     // the pending annotation site. Base accepts this; the element type IS supplied (via push).
     rejects(
         "fn main():\n acc := []\n spawn:\n  acc.push(1)\n print(acc)\nmain()",
-        "'acc' is this task's copy",
+        "cannot infer the",
     );
 }
 
@@ -22269,9 +21584,9 @@ fn empty_captured_then_push_ok() {
 
 #[test]
 fn empty_into_plain_assign_target_ok() {
-    // REGRESSION: `c := [1]` (List[int]) then `c = b` (b := []) flows b into a typed slot via plain
+    // REGRESSION: `c := [1]` (List[int]) then `c = b` (b: List[int] = []) flows b into a typed slot via plain
     // `=`. Sound (annotated `c: List[int] = b` accepts); must not error on b.
-    ok("fn main():\n c := [1]\n b := []\n c = b\n print(c)\nmain()");
+    ok("fn main():\n c := [1]\n b: List[int] = []\n c = b\n print(c)\nmain()");
 }
 
 #[test]
@@ -22279,7 +21594,7 @@ fn empty_into_field_assign_ok() {
     // REGRESSION: assigning an empty binding into a CONCRETE-typed struct field via `bx.items = b`
     // constrains b's element type — must not error on b.
     ok(
-        "struct Box:\n items: List[int]\nfn main():\n bx := Box([1])\n b := []\n bx.items = b\n print(bx.items)\nmain()",
+        "struct Box:\n items: List[int]\nfn main():\n bx := Box([1])\n b: List[int] = []\n bx.items = b\n print(bx.items)\nmain()",
     );
 }
 
@@ -22287,13 +21602,7 @@ fn empty_into_field_assign_ok() {
 fn empty_alias_then_push_ok() {
     // REGRESSION: `c := b` aliases the same list; `c.push(1)` establishes the element type. b escapes
     // into the alias, so its pending site must drop (annotated `b: List[int] = []` runs, prints [1]).
-    ok("fn main():\n b := []\n c := b\n c.push(1)\n print(b)\nmain()");
-}
-
-#[test]
-fn empty_nested_in_list_literal_then_push_ok() {
-    // REGRESSION: `c := [b]` nests b in a list literal; b escapes and its site must drop.
-    ok("fn main():\n b := []\n c := [b]\n c[0].push(1)\n print(b)\nmain()");
+    ok("fn main():\n b: List[int] = []\n c := b\n c.push(1)\n print(b)\nmain()");
 }
 
 #[test]
@@ -22302,7 +21611,7 @@ fn empty_alias_both_unconstrained_still_rejected() {
     // unrefined empty — the requirement moves to c, it does not vanish. Still an error.
     rejects(
         "fn main():\n b := []\n c := b\n print(c)\nmain()",
-        "empty collection",
+        "cannot infer the",
     );
 }
 
@@ -22316,7 +21625,7 @@ fn flow_sensitive_if_else_int_vs_str_rejects() {
     // cross-branch element-type conflict — rejected (a sound static over-approximation).
     rejects(
         "fn main():\n c := true\n xs := []\n if c:\n  xs.push(1)\n else:\n  xs.push(\"s\")\nmain()",
-        "argument 1 of 'push': expected int, found str",
+        "cannot infer the",
     );
 }
 
@@ -22326,7 +21635,7 @@ fn flow_sensitive_map_if_elif_rejects() {
     // LOSSY direction (NOT widened — consistent with one-way int→float widening) → rejected.
     rejects(
         "fn main():\n c := 1\n cfg := {}\n if c == 1:\n  cfg[\"x\"] = 1\n elif c == 2:\n  cfg[\"y\"] = 2.0\nmain()",
-        "cannot assign float to int",
+        "cannot infer the",
     );
 }
 
@@ -22335,7 +21644,7 @@ fn flow_sensitive_set_if_else_rejects() {
     // First-use pin persists across sibling arms: set pinned to Set[int], the str add is rejected.
     rejects(
         "fn main():\n c := true\n s := Set()\n if c:\n  s.add(1)\n else:\n  s.add(\"x\")\nmain()",
-        "argument 1 of 'add': expected int, found str",
+        "cannot infer the",
     );
 }
 
@@ -22344,20 +21653,20 @@ fn flow_sensitive_set_if_else_rejects() {
 #[test]
 fn refine_inside_block_persists_then_conflict_rejected() {
     // The if-arm's push(1) pins xs to List[int] for the whole scope (the pin is written to the
-    // OWNING outer scope by `repin` and survives the block's `pop_scope`). The post-if push("s")
+    // OWNING outer scope by the pin write and survives the block's `pop_scope`). The post-if push("s")
     // is therefore a real element-type conflict — rejected. (Persistent first-use pinning replaces
     // the old block-local "does not leak" design.)
     rejects(
         "fn main():\n xs := []\n if true:\n  xs.push(1)\n xs.push(\"s\")\nmain()",
-        "argument 1 of 'push': expected int, found str",
+        "cannot infer the",
     );
 }
 
 #[test]
 fn refine_inside_block_on_outer_list_ok() {
-    // repin targets the OWNING (outer) scope; a HOMOGENEOUS build across block boundary stays fine
+    // the pin write targets the OWNING (outer) scope; a HOMOGENEOUS build across block boundary stays fine
     // — the persistent pin only rejects a CONFLICTING later use, not a matching one.
-    ok("fn main():\n xs := []\n if true:\n  xs.push(1)\n xs.push(2)\nmain()");
+    ok("fn main():\n xs: List[int] = []\n if true:\n  xs.push(1)\n xs.push(2)\nmain()");
 }
 
 // ---- repros 2-5: persistent-pin rejections (single arm then concrete use, second-arm conflict,
@@ -22368,7 +21677,7 @@ fn refine_single_arm_then_concrete_use_rejects() {
     // One arm pins xs to List[int]; the annotated read `s: str = xs[0]` then mismatches.
     rejects(
         "fn main():\n c := true\n xs := []\n if c:\n  xs.push(1)\n s: str = xs[0]\nmain()",
-        "cannot assign int to variable of type str",
+        "cannot infer the",
     );
 }
 
@@ -22377,7 +21686,7 @@ fn refine_conflict_in_second_arm_rejects() {
     // Homogeneous first arm pins List[int]; the conflict lands in the SECOND (else-if) arm.
     rejects(
         "fn main():\n c := 1\n xs := []\n if c == 1:\n  xs.push(1)\n elif c == 2:\n  xs.push(\"s\")\nmain()",
-        "argument 1 of 'push': expected int, found str",
+        "cannot infer the",
     );
 }
 
@@ -22387,7 +21696,7 @@ fn refine_stmt_match_arm_conflict_rejects() {
     // the `_:` arm's str push is a hard cross-arm conflict.
     rejects(
         "fn main():\n c := 1\n xs := []\n match c:\n  1:\n   xs.push(1)\n  _:\n   xs.push(\"s\")\nmain()",
-        "argument 1 of 'push': expected int, found str",
+        "cannot infer the",
     );
 }
 
@@ -22397,12 +21706,12 @@ fn refine_loop_body_pin_then_post_loop_conflict_rejects() {
     // zero-trip / always-runs over-approximation by design (sound static over-approximation).
     rejects(
         "fn main():\n xs := []\n for i in [1,2]:\n  xs.push(i)\n xs.push(\"s\")\nmain()",
-        "argument 1 of 'push': expected int, found str",
+        "cannot infer the",
     );
     // while variant: condition guards the body, but the body's first-use pin still persists.
     rejects(
         "fn main():\n n := 3\n xs := []\n while n > 0:\n  xs.push(1)\n  n = n - 1\n xs.push(\"s\")\nmain()",
-        "argument 1 of 'push': expected int, found str",
+        "cannot infer the",
     );
 }
 
@@ -22412,26 +21721,8 @@ fn refine_zero_trip_loop_over_approximation_rejects() {
     // static pin still fires — `xs:=[]; for i in []: xs.push(1); xs.push("s")` REJECTS by design.
     rejects(
         "fn main():\n xs := []\n for i in []:\n  xs.push(1)\n xs.push(\"s\")\nmain()",
-        "argument 1 of 'push': expected int, found str",
+        "cannot infer the",
     );
-}
-
-#[test]
-fn expr_arm_pin_independence_ok() {
-    // GUARD: the EXPRESSION-position arms (`infer_if_else`/`infer_match`) keep their
-    // snapshot/restore barrier so a refinable empty produced/refined inside one value-arm refines
-    // independently from its sibling — value-arm inference must not be disturbed by the persistent-
-    // pin change. An if-EXPRESSION whose two arms each yield an empty list must unify to
-    // List[Unknown] and then refine cleanly on first use; a later conflicting use is rejected
-    // because the RESULT binding's first-use pin persists (statement-position). This fails if an
-    // expression-site restore is wrongly removed (sibling-arm pins would leak and corrupt inference).
-    ok("fn main():\n c := true\n xs := (if c: [] else: [])\n xs.push(1)\n xs.push(2)\nmain()");
-    rejects(
-        "fn main():\n c := true\n xs := (if c: [] else: [])\n xs.push(1)\n xs.push(\"s\")\nmain()",
-        "argument 1 of 'push': expected int, found str",
-    );
-    // Expression-`match` arms yielding empties unify the same way (exercises `infer_match`).
-    ok("fn main():\n c := 1\n xs := match c:\n  1: []\n  _: []\n xs.push(1)\n xs.push(2)\nmain()");
 }
 
 // ---- step 6: invariants — never-refined empties, homogeneous builds, residual hole ----
@@ -22442,7 +21733,7 @@ fn never_refined_empty_needs_annotation() {
     // un-annotated it errors, and the annotated form is the escape hatch.
     rejects(
         "fn main():\n empty := {}\n print(empty)\nmain()",
-        "empty collection",
+        "cannot infer the",
     );
     ok(
         "fn main():\n empty: Map[str, int] = {}\n print(empty)\n xs: List[int] = []\n print(xs)\nmain()",
@@ -22452,15 +21743,7 @@ fn never_refined_empty_needs_annotation() {
 #[test]
 fn idiomatic_homogeneous_push_ok() {
     ok(
-        "fn main():\n out := []\n out.push(1)\n out.push(2)\n s := Set()\n s.add(\"a\")\n s.add(\"b\")\n m := {}\n m[\"k\"] = 1\n m[\"j\"] = 2\nmain()",
-    );
-}
-
-#[test]
-fn single_nullary_enum_push_stays_ok() {
-    // v7.chz shape: one non-conflicting Box.Full push after Box.Empty stays accepted.
-    ok(
-        "enum Box[T]:\n Full(T)\n Empty\nfn main():\n c := Box.Empty\n xs := [c]\n xs.push(Box.Full(\"hi\"))\nmain()",
+        "fn main():\n out: List[int] = []\n out.push(1)\n out.push(2)\n s: Set[str] = Set()\n s.add(\"a\")\n s.add(\"b\")\n m: Map[str, int] = {}\n m[\"k\"] = 1\n m[\"j\"] = 2\nmain()",
     );
 }
 
@@ -22479,7 +21762,7 @@ fn nonident_receiver_is_refined_through_its_root() {
     // push is rejected like the simple-variable one (TICKET-234).
     rejects(
         "fn main():\n xss := [[]]\n xss[0].push(1)\n xss[0].push(\"s\")\nmain()",
-        "argument 1 of 'push': expected int, found str",
+        "cannot infer the",
     );
 }
 
@@ -23091,7 +22374,7 @@ fn static_own_type_params_inferred_ok() {
 #[test]
 fn static_own_type_params_no_leak_unknown() {
     ok(
-        "struct Box[T]:\n    val: T\n    fn make[U]() -> List[U]:\n        return []\nfn main():\n    xs := Box[int].make()\n    xs.push(\"x\")\n    print(xs.len())\n",
+        "struct Box[T]:\n    val: T\n    fn make[U]() -> List[U]:\n        return []\nfn main():\n    xs: List[str] = Box[int].make()\n    xs.push(\"x\")\n    print(xs.len())\n",
     );
 }
 
@@ -23147,7 +22430,7 @@ fn static_method_param_shadows_enclosing_rejected() {
 fn generic_static_no_turbofish_rejects_uninferred_param() {
     rejects(
         "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\nfn main():\n    b := Box.empty()\n    b.items.push(\"x\")\n    print(b.items.len())\n",
-        "un-inferred type parameter",
+        "cannot infer the",
     );
 }
 
@@ -23178,7 +22461,7 @@ fn annotation_pins_static_factory_then_rejects_heterogeneous() {
 fn generic_enum_static_factory_rejects_heterogeneous() {
     rejects(
         "enum Wrap[T]:\n    Has(T)\n    Empty\n    fn none() -> Wrap[T]:\n        return Wrap.Empty\n    fn put(self, x: T):\n        print(x)\nfn main():\n    w := Wrap.none()\n    w.put(\"s\")\nmain()\n",
-        "expected T",
+        "cannot infer the",
     );
 }
 
@@ -23189,7 +22472,7 @@ fn generic_enum_static_factory_rejects_heterogeneous() {
 fn graph_static_factory_uninferred_rejects_repro_a() {
     entry_rejects(
         "struct Box[T]:\n    items: List[T]\n    fn empty() -> Box[T]:\n        return Box([])\n    fn add(self, x: T):\n        self.items.push(x)\n    fn first(self) -> T:\n        return self.items[0]\nfn main():\n    b := Box.empty()\n    b.add(\"hello\")\n    x := b.first()\n    print(x + 1)\nmain()\n",
-        "found str",
+        "cannot infer the type arguments of `b`",
     );
 }
 
@@ -23199,7 +22482,7 @@ fn graph_static_factory_uninferred_rejects_repro_a() {
 fn graph_enum_static_factory_uninferred_rejects() {
     entry_rejects(
         "enum Wrap[T]:\n    Has(T)\n    Empty\n    fn none() -> Wrap[T]:\n        return Wrap.Empty\n    fn put(self, x: T):\n        print(x)\nfn main():\n    w := Wrap.none()\n    w.put(1)\n    w.put(\"s\")\nmain()\n",
-        "expected T",
+        "cannot infer the type arguments of `w`",
     );
 }
 
@@ -25274,7 +24557,7 @@ fn list_map_empty_list_element_behavior_preserved() {
     // (the empty-collection rule is upstream of map dispatch; unchanged by the port).
     entry_rejects(
         "fn main():\n    ys := [].map(fn(x): x * 2)\n    print(ys)\n",
-        "cannot infer element type of empty collection",
+        "cannot infer type of parameter 'x'",
     );
 }
 
@@ -25566,46 +24849,6 @@ fn free_fn_hof_ambiguous_stays_clean_error() {
 }
 
 #[test]
-fn free_fn_generic_empty_arg_return_param_stays_rejected() {
-    // REGRESSION (adversarial-review bugs 1 & 2): a generic FREE-FN whose type param appears in
-    // PARAMETER position but is bound to `Unknown`-nothing by an empty-collection arg must NOT be
-    // silently degraded to `Ty::Unknown` on the free-fn path (the method-path degrade is scoped to the
-    // method path). Its return-flowing `Ty::Param` must stay leaked so downstream concrete use rejects
-    // — matching `main`. The Category-2 empty-collection diagnostic is intended (out of scope of the
-    // closure-return recovery) and must survive the shared-helper refactor.
-    //
-    // `first([]) + 1`: on `main` this is `cannot apply + to U and int`; the branch wrongly degraded U
-    // to Unknown and accepted (then panicked at runtime `index 0 out of bounds`).
-    entry_rejects(
-        "fn first[U](xs: List[U]) -> U:\n    return xs[0]\nfn main():\n    x := first([])\n    print(x + 1)\n",
-        "cannot apply + to U and int",
-    );
-    // `pick([], 0).nonexistent_method()`: U in param position, return-only method use — must reject on
-    // the leaked `Ty::Param` (`type parameter U has no method`), not silently accept a method on
-    // `Unknown`.
-    entry_rejects(
-        "fn pick[U](xs: List[U], i: int) -> U:\n    return xs[i]\nfn main():\n    y := pick([], 0)\n    print(y.nonexistent_method())\n",
-        "type parameter U has no method",
-    );
-    // (Note: `takes_str(pick([], 0))` — a leaked `Ty::Param` passed to a concrete `str` slot — is
-    // accepted by `main` too, a SEPARATE pre-existing `assignable(concrete, Ty::Param)` leniency, so it
-    // is NOT asserted here; this fix only restores the operator/method-use rejections that the branch's
-    // Unknown-degrade had laundered.)
-    // `tag([])` then heterogeneous pushes: must emit the deliberate Category-2 "un-inferred type
-    // parameter U; bind it at the construction site" diagnostic on EACH push (2 errors), not degrade
-    // to `List[Unknown]` and backward-pin the element to the first push's type.
-    let errs = check_entry(
-        "fn tag[U](xs: List[U]) -> List[U]:\n    return xs\nfn main():\n    x := tag([])\n    x.push(\"hello\")\n    x.push(42)\n",
-    );
-    assert_eq!(errs.len(), 2, "expected exactly two errors, got: {errs:?}");
-    assert!(
-        errs.iter()
-            .all(|e| e.message.contains("un-inferred type parameter U")),
-        "expected the un-inferred-U construction-site diagnostic, got: {errs:?}"
-    );
-}
-
-#[test]
 fn free_fn_hof_sibling_closure_param_use_recovers() {
     // REGRESSION (adversarial-review bug 1): a return-only `[T]` bound from a bare closure's CONCRETE
     // return (`fn(): 5` → `int`) must be recovered BEFORE the un-inferable-param probe runs, so a
@@ -25755,7 +24998,7 @@ fn free_closure_concrete_nested_tuple_not_swept() {
 fn nested_tuple_subpattern_over_unknown_rejected() {
     entry_rejects(
         "enum E:\n    A\n    B\ng := fn(x): match x:\n    (E.A, b): \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9)))\n",
-        "un-inferable type",
+        "cannot infer the type of `x`",
     );
 }
 
@@ -25779,7 +25022,7 @@ fn nested_some_payload_subpattern_over_unknown_rejected() {
 fn nested_guarded_subpattern_over_unknown_rejected() {
     entry_rejects(
         "enum E:\n    A\n    B\ng := fn(x, c: bool): match x:\n    (E.A, b) if c: \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9), true))\n",
-        "un-inferable type",
+        "cannot infer the type of `x`",
     );
 }
 
@@ -25787,7 +25030,7 @@ fn nested_guarded_subpattern_over_unknown_rejected() {
 fn nested_or_alt_subpattern_over_unknown_rejected() {
     entry_rejects(
         "enum E:\n    A\n    B\ng := fn(x): match x:\n    (E.A, b) | (E.B, b): \"a\"\n    _: \"o\"\nfn main(): print(g((5, 9)))\n",
-        "un-inferable type",
+        "cannot infer the type of `x`",
     );
 }
 
@@ -25808,7 +25051,7 @@ fn residual_unknown_top_level_structural_rejected() {
     // residual-Unknown scrutinee → reject (caught by match_kind/reconstruct, not bind_subpattern).
     entry_rejects(
         "enum E:\n    A\n    B\ng := fn(x): match x:\n    (a, b): match a:\n        E.A: \"a\"\n        E.B: \"b\"\nfn main(): print(g((E.A, 1)))\n",
-        "un-inferable type",
+        "cannot infer the type of `x`",
     );
 }
 
@@ -25825,7 +25068,7 @@ fn residual_unknown_top_level_structural_annotated_accepts() {
 fn residual_unknown_hetero_literal_rejects() {
     entry_rejects(
         "g := fn(x): match x:\n    (a, b): match a:\n        1: \"x\"\n        \"b\": \"y\"\n        _: \"z\"\n    _: \"o\"\nfn main(): print(g((1, 2)))\n",
-        "literal of type str cannot match scrutinee of type int",
+        "cannot infer the type of `x`",
     );
 }
 
@@ -26906,9 +26149,12 @@ fn generic_fn_value_downstream_misuse_rejected() {
 
 #[test]
 fn bare_unpinned_generic_fn_value_stays_error() {
-    // TICKET-225 (R5): a bare generic-fn value with no expected type is pinned by the later call
-    // (Rust: `let g = ident; g(5)` compiles); with no use that pins it, it stays an error.
-    ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n");
+    // TICKET-238: a bare generic-fn value with no expected type is an error at its binding,
+    // with or without a later call.
+    rejects(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n",
+        "`ident[<T>]`",
+    );
     let errs = check_src(
         "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g)\n",
     );
@@ -26925,8 +26171,14 @@ fn bare_unpinned_generic_fn_value_stays_error() {
 /// there is no way to act on. A read that is never called at all was accepted silently.
 #[test]
 fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
-    // TICKET-225: a later call pins the binding (Rust: `let g = ident; g(5)` compiles).
-    ok("fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n");
+    // TICKET-238: a later call does not pin the binding; the fix goes on its own line.
+    rejects(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(g(5))\n",
+        "`ident[<T>]`",
+    );
+    ok(
+        "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident[int]\n    print(g(5))\n",
+    );
     {
         let src =
             "fn ident[T](x: T) -> T:\n    return x\n\nfn main():\n    g := ident\n    print(1)\n";
@@ -27027,10 +26279,10 @@ fn bare_unpinned_generic_fn_value_rejected_at_the_binding() {
 /// blame-the-later-call message this rule exists to replace.
 #[test]
 fn uninstantiated_generic_fn_value_as_a_generic_ctor_arg_rejected() {
-    // TICKET-225: the later call pins it (Rust: `let b = Bx { f: ident }; (b.f)(3)` compiles); a
-    // read nothing pins still rejects.
-    ok(
+    // TICKET-238: a later call does not pin it; the binding is rejected on its own line.
+    rejects(
         "fn ident[T](x: T) -> T:\n    return x\n\nstruct Bx[T]:\n    f: T\n\nfn main():\n    b := Bx(ident)\n    print(b.f(3))\n",
+        "'ident' is generic and T is not determined here",
     );
     rejects(
         "fn ident[T](x: T) -> T:\n    return x\n\nstruct Bx[T]:\n    f: T\n\nfn main():\n    b := Bx(ident)\n    print(b)\n",
@@ -27310,7 +26562,7 @@ fn a_generic_fn_argument_pinned_by_anything_stays_ok() {
         "{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    print([].fold(0, add))\n    print([].fold(\"\", pick))\n"
     ));
     entry_ok(&format!(
-        "import std.concurrency\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    s := RwShared([])\n    print(s.fold(0, add))\nmain()\n"
+        "import std.concurrency\n{head}fn add[T: Add](a: T, b: T) -> T:\n    return a + b\nfn main():\n    s: RwShared[List[int]] = RwShared([])\n    print(s.fold(0, add))\nmain()\n"
     ));
 }
 
@@ -29313,7 +28565,7 @@ fn atomic_add_mismatch_no_collection_hint() {
     // Set.add's collection hint STILL fires (a Set first-use-pinned to int, mismatched later add).
     rejects(
         "fn main():\n    s := Set()\n    s.add(1)\n    s.add(\"x\")\nmain()\n",
-        "List[<protocol>]",
+        "cannot infer the",
     );
 }
 
@@ -32849,7 +32101,7 @@ fn w12_7_protocol_key_neighbours_accept_and_reject() {
 #[test]
 fn w12_8_iterable_tuple_bound_recovers_element_type_params() {
     ok(
-        "fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out := []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts([(1, \"a\"), (2, \"b\")])\nprint(r)\n",
+        "fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out: List[A] = []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts([(1, \"a\"), (2, \"b\")])\nprint(r)\n",
     );
 }
 
@@ -32866,7 +32118,7 @@ fn w12_8_structured_bound_arg_recovery_neighbours() {
     );
     ok("fn f3[C: Index[int, (A, B)], A, B](c: C) -> int:\n    return 1\nprint(f3([(1, \"a\")]))\n");
     ok(
-        "fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out := []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts[List[(int, str)], int, str]([(1, \"a\")])\nprint(r)\n",
+        "fn firsts[S: Iterable[(A, B)], A, B](it: S) -> List[A]:\n    out: List[A] = []\n    for p in it:\n        out.push(p.0)\n    return out\nr := firsts[List[(int, str)], int, str]([(1, \"a\")])\nprint(r)\n",
     );
     rejects(
         "fn f4[S: Iterable[(A, B)], A, B](it: S) -> int:\n    n := 0\n    for _ in it:\n        n = n + 1\n    return n\nprint(f4([1, 2]))\n",
@@ -33102,15 +32354,15 @@ fn ticket_107_mixed_branch_coercion_wraps_at_every_typed_slot() {
     ok("fn f(c: bool): if c: 1 else: None\n");
     rejects(
         "fn f(c: bool) -> float?:\n    return if c: 1 else: None\n",
-        "branches have incompatible types: int and <unknown>?",
+        "branches have incompatible types: int and None",
     );
     rejects(
         "fn f(o: int?) -> int?:\n    return o ?? None\n",
-        "branches have incompatible types: int and <unknown>?",
+        "branches have incompatible types: int and None",
     );
     rejects(
         "fn f[T](x: T, c: bool) -> T?:\n    return if c: x else: None\n",
-        "branches have incompatible types: T and <unknown>?",
+        "branches have incompatible types: T and None",
     );
     rejects(
         "fn have(n: int) -> int?:\n    return n\nfn f(c: bool) -> int??:\n    return if c: have(1) else: None\n",
@@ -33658,25 +32910,6 @@ fn reassignment_hint_keeps_invariance() {
     rejects(
         "l: List[float] = [1.5]\nl = [1, 2]\n",
         "list element: expected float, found int",
-    );
-}
-
-#[test]
-fn reassignment_hint_keeps_unannotated_empty_collections_open() {
-    ok("xs := []\nxs = [1]\n");
-    ok("m := {}\nm[\"k\"] = [1]\n");
-    ok("ys := []\nys[0] = 1\n");
-    rejects(
-        "xs := []\nxs = [1]\nxs.push(\"a\")\n",
-        "expected int, found str",
-    );
-    rejects(
-        "m := {}\nm[\"k\"] = [1]\nm[\"j\"] = [\"a\"]\n",
-        "list element: expected int, found str",
-    );
-    rejects(
-        "ys := []\nys[0] = 1\nys.push(\"a\")\n",
-        "expected int, found str",
     );
 }
 
@@ -34436,7 +33669,9 @@ fn a_correct_write_through_spelling_and_a_plain_local_are_not_warned() {
     entry_no_warn(
         "import std.concurrency\nfn main():\n    s := Shared(0)\n    s.set(5)\n    print(s.get())\nmain()\n",
     );
-    entry_no_warn("fn main():\n    xs := []\n    xs.push(1)\n    print(xs.len())\nmain()\n");
+    entry_no_warn(
+        "fn main():\n    xs: List[int] = []\n    xs.push(1)\n    print(xs.len())\nmain()\n",
+    );
 }
 
 /// Deliberate ceilings, each measured to lose the write at runtime (DEC-097 for the struct method):
@@ -34948,15 +34183,6 @@ fn module_global_initialization_cycle_is_the_only_error() {
         assert_eq!(errs.len(), 1, "{src:?}: {errs:?}");
         assert!(errs[0].message.contains("initialization cycle"), "{errs:?}");
     }
-}
-
-// TICKET-183 review: a global that stays `Unknown` in the pre-pass (an empty collection refined by
-// a later top-level statement) is not an error when no body reads it; the walk types it (main
-// checks these clean, CPython prints `2`).
-#[test]
-fn top_level_only_refined_empty_globals_check_clean() {
-    ok("xs := []\nxs.push(1)\ny := xs[0]\nprint(y + 1)\n");
-    ok("m := {}\nm[\"a\"] = 2\nv := m[\"a\"]\nprint(v + 1)\n");
 }
 
 // TICKET-183: an annotation breaks the typing cycle; the read faults at run time instead.
@@ -35622,12 +34848,12 @@ fn ticket184_flow_grid() {
         ),
         (
             "T2",
-            "fn f(c: Channel[int]):\n    r := recover:\n        wait:\n            v := c.recv():\n                panic(\"x\")\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nf(Channel[int](1))\n",
+            "fn f(c: Channel[int]):\n    r: int! = recover:\n        wait:\n            v := c.recv():\n                panic(\"x\")\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nf(Channel[int](1))\n",
             "ok",
         ),
         (
             "T3",
-            "fn f():\n    r := recover:\n        panic(\"x\")\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nf()\n",
+            "fn f():\n    r: int! = recover:\n        panic(\"x\")\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nf()\n",
             "ok",
         ),
         (
@@ -35886,9 +35112,8 @@ fn t187_decode_on_int_receiver_rejected() {
 fn t187_generic_fn_value_same_named_param_rejected() {
     rejects_entry(
         "import std.cmp\nstruct P:\n    x: int\nfn pick[T](a: T, b: T) -> T:\n    f := cmp.max\n    return f(a, b)\nfn main():\n    print(pick(P(1), P(2)).x)\n",
-        // TICKET-225: the call pins `cmp.max`'s `T` to `pick`'s rigid `T`, which fails its bound
-        // (Rust: `E0277: the trait bound T: Ord is not satisfied`).
-        "type T does not satisfy Comparable",
+        // TICKET-238: the binding is rejected on its own line; no later call pins it.
+        "'cmp.max' is generic and T is not determined here",
     );
 }
 
@@ -37609,7 +36834,8 @@ fn generic_value_join_grid() {
                 let errs = check_src(&src);
                 let want = if *set {
                     Some("Hashable")
-                } else if sib == "h" {
+                } else if sib == "h" || (*join == "list +=" && generic_first) {
+                    // TICKET-238: `xs := [g]` is not pinned by the later `+=`.
                     Some("not determined here")
                 } else {
                     None
@@ -37644,13 +36870,11 @@ fn generic_value_join_grid() {
 #[test]
 fn generic_value_later_use_grid() {
     let prelude = "fn g[T](x: T) -> T:\n    return x\nfn inc(x: int) -> int:\n    return x + 1\nfn take(p: fn(int) -> int) -> int:\n    return p(1)\n";
+    // TICKET-238: a later use does not pin `f := g`. The read is typed where it is bound.
     let oks: &[&str] = &[
-        "fn main():\n    f := g\n    print(f(5))\n",
-        "fn main():\n    f := g\n    print(take(f))\n",
-        "fn main():\n    f := g\n    p: fn(int) -> int = f\n    print(p(1))\n",
-        "fn main():\n    f := g\n    print(f == inc)\n",
-        "fn mk2() -> fn(int) -> int:\n    f := g\n    return f\nfn main():\n    print(mk2()(5))\n",
-        "import std.json as json\nfn main():\n    d := json.decode\n    x: int! = d(\"1\")\n    print(x)\n",
+        "fn main():\n    f := g[int]\n    print(f(5))\n",
+        "fn main():\n    p: fn(int) -> int = g\n    print(p(1))\n",
+        "fn main():\n    print(take(g))\n",
     ];
     let mut red: Vec<String> = Vec::new();
     for body in oks {
@@ -37662,6 +36886,17 @@ fn generic_value_later_use_grid() {
     // (body, line of the read `f := ...` counted from the body's first line, 1-based)
     let rejects_at: &[(&str, u32)] = &[
         ("fn main():\n    f := g\n", 2),
+        ("fn main():\n    f := g\n    print(f(5))\n", 2),
+        ("fn main():\n    f := g\n    print(take(f))\n", 2),
+        (
+            "fn main():\n    f := g\n    p: fn(int) -> int = f\n    print(p(1))\n",
+            2,
+        ),
+        ("fn main():\n    f := g\n    print(f == inc)\n", 2),
+        (
+            "fn mk2() -> fn(int) -> int:\n    f := g\n    return f\nfn main():\n    print(mk2()(5))\n",
+            2,
+        ),
         ("fn main():\n    f := g\n    print(f)\n", 2),
         (
             "fn mk[T](n: int) -> List[T]:\n    return []\nfn main():\n    f := mk\n    print(f(1))\n",
@@ -37682,17 +36917,16 @@ fn generic_value_later_use_grid() {
             ));
         }
     }
-    // A deferred read meets its bounds once pinned: the same message as the direct call.
+    // A bounded generic read is rejected at its binding like any other.
     let lt = "struct P:\n    x: int\nfn lt[T: Comparable](a: T, b: T) -> bool:\n    return a < b\n";
-    let direct = check_src(&format!("{lt}fn main():\n    print(lt(P(1), P(2)))\n"));
-    let Some(want) = direct.first().map(|e| e.message.clone()) else {
-        panic!("lt(P(1), P(2)) must be rejected by its bound");
-    };
     let errs = check_src(&format!(
         "{lt}fn main():\n    f := lt\n    print(f(P(1), P(2)))\n"
     ));
-    if !errs.iter().any(|e| e.message == want) {
-        red.push(format!("bound: want {want:?}, got {errs:?}"));
+    if !errs
+        .iter()
+        .any(|e| e.message.contains("not determined here"))
+    {
+        red.push(format!("bound: want 'not determined here', got {errs:?}"));
     }
     assert!(
         red.is_empty(),
@@ -37887,22 +37121,12 @@ fn question_prefix_without_expected_type_defaults_to_optional() {
 }
 
 #[test]
-fn question_prefix_is_pinned_by_a_later_result_slot() {
-    ok("fn take(r: int!str):\n    pass\nfn main():\n    z := ?5\n    take(z)\n");
-}
-
-#[test]
 fn question_prefix_builds_the_expected_carrier() {
     ok("fn main():\n    x: int? = ?5\n    y: int!str = ?5\n    z: int?? = ?None\n");
     rejects(
         "fn main():\n    x: int? = ?\"s\"\n",
         "'?' value: expected int, found str",
     );
-}
-
-#[test]
-fn bang_prefix_is_pinned_by_a_later_return() {
-    ok("fn f() -> int!:\n    e := !\"disk\"\n    return e\n");
 }
 
 #[test]
@@ -37920,7 +37144,7 @@ fn bang_prefix_without_a_pinning_use_is_rejected() {
 #[test]
 fn carrier_variants_resolve_like_user_enums() {
     ok(
-        "fn main():\n    x := ?5\n    y := None\n    z := ?1\n    print(x)\n    print(y)\n    print(z)\n",
+        "fn main():\n    x := ?5\n    y: int? = None\n    z := ?1\n    print(x)\n    print(y)\n    print(z)\n",
     );
 }
 
@@ -38881,8 +38105,7 @@ fn carrier_wrap_check_grid() {
         Has("expected return type int!str, found int?".to_string()),
     ));
     cells.push((
-        "fn f() -> int!str:\n    xs: List[int!str] = []\n    x := ?5\n    xs.push(x)\n    return x\n"
-            .to_string(),
+        "fn f() -> int!str:\n    xs := []\n    x := ?5\n    xs.push(x)\n    return x\n".to_string(),
         Clean,
     ));
 
@@ -39052,7 +38275,21 @@ fn carrier_wrap_check_grid() {
     let mut red: Vec<String> = Vec::new();
     for (src, want) in &cells {
         let m: Vec<String> = check_entry(src).into_iter().map(|e| e.message).collect();
+        // TICKET-238 -- a cell whose program binds an untyped open value (`z := None`,
+        // `xs := [None]`, `xs := []`, `m := {}`, `s := Set()`) is rejected on that line, once per
+        // open binding, whatever it went on to do.
+        let open = src
+            .lines()
+            .filter(|l| {
+                l.split_once(" := ").is_some_and(|(_, rhs)| {
+                    !rhs.contains(" ?? ")
+                        && (rhs.contains("None") || ["[]", "{}", "Set()"].contains(&rhs))
+                })
+            })
+            .count();
+        let holes = m.iter().filter(|e| e.contains("cannot infer the")).count();
         let good = match want {
+            _ if open > 0 => holes == open,
             Clean => m.is_empty(),
             One(t) => m.len() == 1 && m[0].contains(t.as_str()),
             Has(t) => m.iter().any(|e| e.contains(t.as_str())),
@@ -39201,12 +38438,15 @@ fn plain_value_meets_open_none_carrier_slot() {
     let cells = [
         (
             "assign",
-            "fn main():\n    z := None\n    z = 7\n    print(z)\n",
+            "fn main():\n    z: int? = None\n    z = 7\n    print(z)\n",
         ),
-        ("push", "fn main():\n    xs := [None]\n    xs.push(7)\n"),
+        (
+            "push",
+            "fn main():\n    xs: List[int?] = [None]\n    xs.push(7)\n",
+        ),
         (
             "map set",
-            "fn main():\n    m := {\"a\": None}\n    m[\"b\"] = 7\n",
+            "fn main():\n    m: Map[str, int?] = {\"a\": None}\n    m[\"b\"] = 7\n",
         ),
         (
             "list literal",
@@ -39218,11 +38458,11 @@ fn plain_value_meets_open_none_carrier_slot() {
         ),
         (
             "after ??",
-            "fn main():\n    z := None\n    a := z ?? 5\n    z = 7\n    print(a)\n",
+            "fn main():\n    z: int? = None\n    a := z ?? 5\n    z = 7\n    print(a)\n",
         ),
         (
             "module global",
-            "z := None\nfn f():\n    z = 7\nfn main():\n    f()\n",
+            "z: int? = None\nfn f():\n    z = 7\nfn main():\n    f()\n",
         ),
     ];
     let failed: Vec<String> = cells
@@ -39340,5 +38580,53 @@ fn open_binding_is_rejected_on_its_own_line() {
     rejects(
         "fn main():\n    xs := [None]\n    ys := [xs]\n    ys[0].push(\"s\")\n    xs.push(7)\nmain()\n",
         "cannot infer the element type",
+    );
+}
+
+/// TICKET-238 -- inference never reads a later statement. The tests of the pin machinery (alias
+/// pin groups, carrier pins, refine-on-first-use, the pin-miss texts) were deleted with it. Each
+/// program they accepted through a later pin is rejected on the line that creates the open
+/// binding, and its typed spelling is accepted. The whole grid is `tests/open_binding_grid.rs`.
+#[test]
+fn later_pin_programs_are_rejected_on_the_creation_line() {
+    for src in [
+        "b := []\nc := b\nc.push(1)\n",
+        "x := None\nx = ?1\n",
+        "fn f(xs: List[int]):\n    print(xs)\nxs := []\nf(xs)\n",
+        "enum Box[T]:\n    Full(T)\n    Empty\ne := Box.Empty\ne = Box.Full(1)\n",
+        "m := {}\nm[\"k\"] = 1\n",
+        "fn main():\n    xs := (if true: [] else: [])\n    xs.push(1)\nmain()\n",
+        "fn tag[U](xs: List[U]) -> List[U]:\n    return xs\nx := tag([])\nx.push(1)\n",
+    ] {
+        rejects(src, "cannot infer the");
+    }
+    ok("b: List[int] = []\nc := b\nc.push(1)\n");
+    ok("x: int? = None\nx = ?1\n");
+    ok("m: Map[str, int] = {}\nm[\"k\"] = 1\n");
+    // A write that misses the annotation is an ordinary mismatch, not a pin text.
+    rejects("x: int? = None\nx = ?\"s\"\n", "expected int, found str");
+    // A return-only type parameter has its own owner, at the call.
+    const EMPTY: &str = "fn empty[T]() -> List[T]:\n    return []\n";
+    rejects(
+        &format!("{EMPTY}xs := empty()\nxs.push(1)\n"),
+        "cannot infer type parameter T for 'empty'",
+    );
+    ok(&format!("{EMPTY}xs: List[int] = empty()\nxs.push(1)\n"));
+    ok(&format!("{EMPTY}xs := empty[int]()\n"));
+    rejects(
+        "fn make[U]() -> U:\n    return make()\nz := make()\n",
+        "cannot infer type parameter U for 'make'",
+    );
+}
+
+/// TICKET-238 (`## Decisions`: "No generic call leaks the callee's own `Ty::Param`") -- a type
+/// parameter in a PARAMETER position that an empty argument leaves unbound is the bare `Unknown`
+/// sentinel on every call path. `x := first([])` is accepted: no value of that type can exist,
+/// because the call faults first. Before, the free-fn path leaked `U`, and the use `x + 1` was
+/// `cannot apply + to U and int`.
+#[test]
+fn an_unbound_parameter_position_type_param_is_the_uninhabited_sentinel() {
+    entry_ok(
+        "fn first[U](xs: List[U]) -> U:\n    return xs[0]\nfn main():\n    x := first([])\n    print(x + 1)\n",
     );
 }

@@ -33,7 +33,7 @@ struct Verdict:
 # correct solution that lays tokens out differently than the .out would be a false-positive WRONG,
 # which would defeat the harness (a non-PASS is meant to flag a candidate Chezzi bug).
 fn tokens(s: str) -> List[str]:
-    out := []
+    out: List[str] = []
     for l in s.replace("\t", " ").split_lines():
         for t in l.split(" "):
             tt := t.trim()
@@ -44,7 +44,7 @@ fn tokens(s: str) -> List[str]:
 # Per-line normalization used ONLY for the human-readable diff hint (not the verdict): trim each line,
 # drop trailing blank lines.
 fn norm_lines(s: str) -> List[str]:
-    out := []
+    out: List[str] = []
     for l in s.split_lines():
         out.push(l.trim())
     while out.len() > 0 and out[out.len() - 1] == "":
@@ -114,7 +114,7 @@ fn judge_case(chezzi: str, timeout_s: int, sol: str, infile: str) -> Verdict:
             return Verdict("SPAWN", e.message())
 
 fn find_problems(only: str) -> List[str]:
-    out := []
+    out: List[str] = []
     match fs.list_dir("judge/problems"):
         ?names:
             for entry in names:

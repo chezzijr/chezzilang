@@ -34,7 +34,7 @@ print(order.trim())               # red green blue
 
 # A tiny "unique words" count.
 fn count_unique(text: str) -> int:
-    seen := Set()
+    seen: Set[str] = Set()
     for w in text.split(" "):
         seen.add(w)
     return seen.len()

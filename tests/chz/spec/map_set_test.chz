@@ -73,7 +73,7 @@ test fn remove():
 
 test fn keys_iteration():
     m := {"a": 1, "b": 2, "c": 3}
-    out := []
+    out: List[str] = []
     for k in m.keys():
         out.push(k)
     assert out == ["a", "b", "c"], "insertion order"

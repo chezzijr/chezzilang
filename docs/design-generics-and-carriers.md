@@ -91,8 +91,9 @@ allocator of every bare fn kind. `Vm::callable` (an exhaustive `match`, no `_` a
 `Lowered::Value`. Grid: `tests/chz/spec/fn_value_grid_test.chz`.
 
 **R5. Type variables, solved across the body.** **Status: done (TICKET-225, 2026-10-07).** A generic value read without a pin gets a type variable,
-not an immediate reject. Joins (`if`/`match`/`??`/list/map/set/`==`), call arguments and later uses pin
-it; it is rejected only if still unpinned at the end. This is the general form of today's call-argument
+not an immediate reject. Joins (`if`/`match`/`??`/list/map/set/`==`) and call arguments on the SAME
+statement pin it; it is rejected if still unpinned when its statement ends. **Narrowed by TICKET-238
+(owner decision 2026-10-10): the frame is one statement, not one fn body. No later statement pins.** This is the general form of today's call-argument
 deferral, which becomes one case of it.
 - An integer or float literal is an **untyped constant** (Go's model) until it meets a slot. A width slot
   (`int8` ...) checks representability inside the one assignability relation, so the hand-placed
@@ -220,8 +221,8 @@ whole function pins it, not just the line:
 | expression | known | unknown | rule |
 |---|---|---|---|
 | `y := ?5` | the value type `int` | which carrier | default `int?` (complete; like Go's untyped `5` → `int`) |
-| `w := !"disk"` | the error | the success type `T` | a later use may pin it (`return w` in an `int!` fn); never pinned → error: `cannot infer the success type; write w: int! = !"disk"` |
-| `z := None` | that it is optional | the payload type `T` | the first value it meets pins it, plain or `?x`: `z = 7` → `int?` (TICKET-234, owner decision 2026-10-09); a literal `None` beside a value joins the same way (`[None, 7]` → `List[int?]`); never pinned → stays open, printed `<unknown>?` |
+| `w := !"disk"` | the error | the success type `T` | nothing on a later line pins it (TICKET-238) → error on its own line: annotate the binding, `w: int!str = !"disk"` |
+| `z := None` | that it is optional | the payload type `T` | an error on its own line: write `z: int? = None` (TICKET-238, owner decision 2026-10-10, replaces TICKET-234's later pin); a literal `None` beside a value on the same line still joins (`[None, 7]` → `List[int?]`) |
 
 ```
 z := ?5
@@ -367,6 +368,7 @@ None at the moment. Resolved on 2026-10-07: "nothing, or an error" is `None!E`; 
 | 2026-10-07 | `None` as a type is an annotation only (no value); "nothing or an error" is `None!E` (Zig `E!void`) |
 | 2026-10-07 | prefix `?x` builds a present/success value; `?None` is the inner absent of `int??` |
 | 2026-10-07 | no expected type anywhere: `?x` defaults to `T?`; `!e` needs `T` pinned by a later use, else an error |
+| 2026-10-10 | TICKET-238: inference never reads a later statement. `z := None`, `xs := []`, `g := ident` and `w := !e` are errors on their own line; the pin tables are deleted |
 | 2026-10-09 | a plain value pins an open `None`: `z := None` / `z = 7` makes `z` an `int?` ("`int?` means an int or None, with automatic wrap"); the depth is the smallest that fits; this replaces "an implicit wrap pins nothing" (TICKET-234) |
 | 2026-10-07 | the names `Option`, `Result`, `Some`, `Ok`, `Err` are removed from the surface (D6) |
 | 2026-10-07 | design B: `else` must leave; values only from `??` / `match` |

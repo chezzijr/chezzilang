@@ -5,7 +5,7 @@ fn work() -> str:
             spawn:
                 for j in range(3):
                     ch.send("t{i}.{j}")
-    out := []
+    out: List[str] = []
     for _ in range(12):
         out.push(ch.recv())
     return " ".join(out)

@@ -996,7 +996,7 @@ impl Checker {
     ///
     /// Every map-key and set-element position that is SPELLED funnels through here (literal,
     /// comprehension, `Set(list)` construction, annotation, `m[k]` read and write,
-    /// `refine_receiver`'s late-concrete element, and thereby every `Map`/`Set`/`RwShared` method).
+    /// and thereby every `Map`/`Set`/`RwShared` method).
     ///
     /// **W7-53.** NOT erased any more: a free `Ty::Param` reaching the second conjunct
     /// (`eq_bounds_unsatisfied`, not `_erased`) is judged directly, so `fn mk[T: Hashable](x: T) ->
@@ -1029,178 +1029,6 @@ impl Checker {
             Ty::Tuple(_) => self.unhashable_tuple_elem(e),
             _ => self.satisfies(e, "Hashable").is_err().then(|| e.clone()),
         })
-    }
-
-    /// Refine-on-first-use (empty-slot half of the `Ty::Unknown` soundness family). A bare empty
-    /// collection literal (`[]`/`{}`/`set()`), a nullary user-enum variant (`Box.Empty`), or the
-    /// native nullary `None` types its element/key/value/type-arg slot as `Ty::Unknown`, which is
-    /// permissive in both directions — so junk would flow into a check-blessed program and fault at
-    /// runtime, and the float-key/Hashable ban would be bypassed. This hook fires at the top of
-    /// `infer_method_call`, when a method argument typed by the receiver's type
-    /// parameter supplies a CONCRETE type at an `Unknown` slot: it structurally
-    /// merges the supplied shape into the binding, re-pins it in its owning scope, and runs the
-    /// Hashable check on a newly-concrete set element. A later op supplying an incompatible concrete
-    /// type then fails as a normal `check_args` mismatch against the now-pinned element — and the
-    /// mismatch diagnostic is enriched (in `check_args`) to hint at annotating for a mixed/protocol
-    /// collection.
-    ///
-    /// TICKET-234 -- what an argument supplies is read from the method's own declaration
-    /// (`Checker::receiver_decl`), never from a list of method names, and the pin is stored through
-    /// the receiver's place (`Checker::repin_place`): `b.v.push(..)` and `xss[0].push(..)` pin the
-    /// root binding. A receiver with no root binding (`f().push(..)`) pins nothing.
-    pub(super) fn refine_receiver(&mut self, obj: &Expr, obj_ty: &Ty, method: &str, args: &[Expr]) {
-        // (a) the receiver is a place rooted in a binding.
-        let Some(name) = Self::place_root(obj) else {
-            return;
-        };
-        // Must be a real in-scope binding (not a function/global-type name).
-        if self.lookup(name).is_none() {
-            return;
-        }
-        let is_ident = matches!(obj.kind, ExprKind::Ident(_));
-        // PART A: a slot-supplying mutator (`push`/`add`/`insert`/`extend` with an arg) constrains
-        // this binding's element type, so clear any pending empty-collection annotation requirement.
-        // Done BEFORE the `is_captured` early-return below so a `spawn:`/`Executor.submit` body that
-        // supplies the element only via a mutator (`acc := []` outside, `acc.push(1)` captured) still
-        // drops the site — the element WAS supplied, so requiring an annotation would be wrong. A
-        // no-op when no site exists (`drop_empty_site` only removes a matching `(owner, name)`).
-        // `None`: this site pins ITSELF below, after its own gates (the cascade guard on an
-        // erroring argument, the receiver-shape match, and the `Set` Hashable ban) — the drop must
-        // run FIRST for the captured-binding reason just stated, so the two halves cannot be one
-        // call here.
-        if is_ident && matches!(method, "push" | "add" | "insert" | "extend") && !args.is_empty() {
-            self.drop_empty_site(name, None);
-        }
-        // Skip captured bindings: mirror the airlock reassignment ban — refine is a checker-side
-        // narrowing, but skipping it here keeps behavior aligned and avoids a confusing diagnostic.
-        if self.is_captured(name) && !Self::is_shared_handle(obj_ty) {
-            return;
-        }
-        // (b) the binding must have an Unknown in a SLOT position (not a bare top-level Unknown —
-        // that's the cascade-suppression sentinel and must stay permissive).
-        if !contains_unknown_in_slot(obj_ty) {
-            return;
-        }
-        // (c) determine the supplied ELEMENT type from a slot-supplying mutator's args.
-        // `push(x)`/`add(x)`/`insert(x)` supply the element directly; `extend(xs)` supplies a
-        // list/set whose element refines ours.
-        // This inference is SPECULATIVE: the real dispatch path re-infers the same args, so every
-        // diagnostic emitted here is a duplicate. Roll back UNCONDITIONALLY — no `return` between
-        // the mark and the rollback, so a later exit path can't be added that forgets one. (It used
-        // to end at the shape match below, whose `_` arm leaked: `m := {}` + `m.insert(undefined_v)`
-        // reported `unknown name` twice.)
-        let Some((generic, params)) = self.receiver_decl(obj_ty, method) else {
-            return;
-        };
-        // What each argument supplies comes from the declared parameter types: `map` collects the
-        // receiver's type parameters as the arguments bind them, `cur` holds the receiver's present
-        // type arguments (the hint a closure argument is inferred against).
-        let mark = self.diag_mark();
-        let mut map: HashMap<String, Ty> = HashMap::new();
-        let mut cur: HashMap<String, Ty> = HashMap::new();
-        unify(&generic, obj_ty, &mut cur);
-        let mut open = Vec::new();
-        ty_collect_params(&generic, None, &mut open);
-        for p in &open {
-            cur.entry(p.clone()).or_insert(Ty::Unknown);
-        }
-        for (decl, a) in params.iter().zip(args) {
-            let mut mentioned = Vec::new();
-            ty_collect_params(decl, None, &mut mentioned);
-            // A parameter that names no type parameter of the receiver supplies nothing.
-            if !mentioned.iter().any(|m| open.contains(m)) {
-                continue;
-            }
-            // A closure is inferred against the declared `fn` type, so its return and its
-            // annotated parameters pin; an unannotated parameter takes the receiver's type.
-            let t = if matches!(decl, Ty::Func { .. }) {
-                let hint = subst(decl, &cur);
-                self.infer_arg(a, Some(&hint))
-            } else {
-                self.infer_value(a)
-            };
-            let t = self.pinning_value_ty(&t);
-            unify(decl, &t, &mut map);
-        }
-        let arg_erred = self.errors.len() != mark.errors;
-        self.diag_rollback(mark);
-        // (d) cascade invariant: if inferring the arg itself reported an error, don't refine (the
-        // real dispatch path reports it, exactly once).
-        if arg_erred || map.is_empty() {
-            return;
-        }
-        for p in open {
-            map.entry(p).or_insert(Ty::Unknown);
-        }
-        let shape = subst(&generic, &map);
-        // A shape that is itself Unknown supplies nothing concrete; merge is a no-op, bail early.
-        if shape.is_unknown() {
-            return;
-        }
-        let merged = merge_unknown(obj_ty, &shape);
-        if merged == *obj_ty {
-            return; // nothing newly concrete
-        }
-        // Run the Hashable / float-key ban at the moment a SET element becomes concrete (the sig
-        // tables don't). Map keys are handled in the `m[k]=v` index-assign refine path.
-        if let Ty::Set(e) = &merged
-            && !e.is_unknown()
-            && let Some(why) = self.key_ty_reject(e)
-        {
-            self.error(obj.span, format!("set element type {why}"));
-        }
-        self.repin_place(obj, &merged);
-    }
-
-    /// Refine-on-first-use for an index-assign `m[k]=v` / `xs[i]=v` (the assignment-statement
-    /// sibling of [`Self::refine_receiver`]). When the receiver is a simple variable whose type has
-    /// an `Unknown` key/value/element slot, merge the supplied (index type, value type) shape into
-    /// the binding, re-pin it, and run the Hashable / float-key ban on a newly-concrete MAP key.
-    /// `val_ty` is already inferred by the caller; we infer the index type here only when the
-    /// receiver is actually refinable (so we don't double-report on the common already-typed path).
-    pub(super) fn refine_index_receiver(&mut self, obj: &Expr, index: &Expr, val_ty: &Ty) {
-        let ExprKind::Ident(name) = &obj.kind else {
-            return;
-        };
-        let Some(obj_ty) = self.lookup(name) else {
-            return;
-        };
-        if self.is_captured(name) || !contains_unknown_in_slot(&obj_ty) {
-            return;
-        }
-        // PART A: an index-assign (`m[k]=v` / `xs[i]=v`) constrains this binding — clear any pending
-        // empty-collection annotation requirement (BEFORE the speculative-index-infer truncate-return,
-        // mirroring `refine_receiver`, so an erroring key like `m[undefined_k]=1` still drops the site).
-        // `None` for the same reason as `refine_receiver`: this site pins itself below, after the
-        // speculative index-infer's cascade guard.
-        self.drop_empty_site(name, None);
-        if val_ty.is_unknown() {
-            return;
-        }
-        // The supplied shape mirrors the receiver kind: `Map(idx, val)` for a map, `List(val)` for a
-        // list (index type is the int position, irrelevant to the element slot).
-        // Speculative, same contract as `refine_receiver`: the real index-assign path re-infers the
-        // index and reports its diagnostics, so roll back unconditionally with no exit in between.
-        let mark = self.diag_mark();
-        let shape = match &obj_ty {
-            Ty::Map(..) => Some(Ty::map(self.infer(index), val_ty.clone())),
-            Ty::List(..) => Some(Ty::list(val_ty.clone())),
-            _ => None,
-        };
-        let index_erred = self.errors.len() != mark.errors;
-        self.diag_rollback(mark);
-        if index_erred {
-            return;
-        }
-        let Some(shape) = shape else { return };
-        let merged = merge_unknown(&obj_ty, &shape);
-        if merged == obj_ty {
-            return;
-        }
-        // NOTE: the map-key Hashable / float-key ban is NOT run here — it is the direct
-        // insertion-site check in `check_assign`'s Index branch (so it fires even while the key type
-        // is still `Unknown`, e.g. `m:={}; m[1.5]=..`), keeping a single owner and no double-report.
-        self.repin(name, merged);
     }
 
     /// Assignability with protocol-existential awareness. Like the free [`compatible`], but a
@@ -4899,22 +4727,7 @@ impl Checker {
             &sig.type_params,
             &mut subst_map,
             span,
-            false,
         );
-        // PART A — the empty-collection pin, at the LAST moment the substitution can still change.
-        // Neither generic path routes through `check_args_range_decl`, so a bare empty binding passed
-        // into a parameter that a SIBLING argument made concrete used to pin nothing: measured
-        // check-clean at rc=0, `fn move_first[T](a: List[T], b: List[T])` called
-        // `move_first(["x"], xs)` then `xs.push(1)` printed `['x', 1]`. Running it here — after every
-        // recovery — is what makes the sibling-argument case work; `constrain_empty_arg` is a no-op
-        // on a slot still carrying a `Ty::Param` or an `Unknown`, so a genuinely generic parameter
-        // (`fn ident[T](xs: List[T])`) still pins nothing.
-        for (i, arg) in args.iter().enumerate() {
-            if let Some(decl) = sig.params.get(i) {
-                let want = subst(decl, &subst_map);
-                self.constrain_empty_arg(arg, &want);
-            }
-        }
         // M24 — half two of the static-witness contract, recorded LAST: `recover_return_only_params`
         // above can still bind a param that `enforce_bounds` never saw, so anything earlier would
         // read a param as un-determined that the call actually pins.
@@ -4988,41 +4801,6 @@ impl Checker {
             })
             .collect();
         if unbound.is_empty() {
-            return;
-        }
-
-        // DEFER instead of rejecting when the result is a REFINABLE shape — the param sits in a
-        // container SLOT, so filling it with `Unknown` produces exactly what an empty literal
-        // produces (`fn empty[T]() -> List[T]` ⇒ `List[Unknown]`, the same type as `[]`), and the
-        // existing refine-on-first-use pinning then lets a LATER statement fix the element type:
-        // `xs := empty()` / `xs.push(1)` now infers `List[int]`, matching both Rust (which infers
-        // from the later use) and Chezzi's own `xs := []` / `xs.push(1)`.
-        //
-        // **The gate must be exactly the shape the hand-off machinery pins — no wider.**
-        // `Ty::Unknown` is universally assignable, so an `Unknown` that nothing ever pins and
-        // nothing ever demands an annotation for is a silent hole: any value read out of it
-        // type-checks against any annotation. Refine-on-first-use pins, and `empty_coll_sites`
-        // requires an annotation for, exactly `Checker::is_unrefined_empty_coll` — a `List`/`Set`
-        // with a DIRECT `Unknown` element, or a `Map` with a direct `Unknown` key/value.
-        //
-        // The first cut used the broader `contains_unknown_in_slot`, which also accepts a
-        // `Struct`/`Enum`/`Tuple`/`Result` type argument. Nothing pins those, so
-        // `struct Box[T]: v: List[T]` / `fn mk[T]() -> Box[T]` / `b := mk()` / `b.v.push(1)` let
-        // `s: str = b.v[0]` type-check while `s` held an int — check-clean, then
-        // `cannot apply Add to str and int` at runtime. Measured rejected before this rule existed.
-        //
-        // A param carrying a declared BOUND is never deferred either: `enforce_bounds` has already
-        // run by this point with the param unbound, and the later pin goes through `repin`, which
-        // re-checks no bound — so `fn empty[T: Show]() -> List[T]` / `xs := empty()` / `xs.push(1)`
-        // would accept `int` for a `T: Show`. Also measured rejected before.
-        let mut probe = sub.clone();
-        for tp in &unbound {
-            probe.insert(tp.name.clone(), Ty::Unknown);
-        }
-        if unbound.iter().all(|tp| tp.bounds.is_empty())
-            && Self::is_unrefined_empty_coll(&subst(ret, &probe))
-        {
-            *sub = probe;
             return;
         }
 
@@ -5267,22 +5045,8 @@ impl Checker {
         // unbound param-position param to `Unknown`. `expected` = arg slots (sans receiver); `params` =
         // the full list incl receiver for the param-position degrade.
         self.recover_return_only_params(
-            method, expected, &arg_tys, args, params, mtps, &mut mmap, span, true,
+            method, expected, &arg_tys, args, params, mtps, &mut mmap, span,
         );
-        // PART A — the empty-collection pin, at the LAST moment the substitution can still change.
-        // Neither generic path routes through `check_args_range_decl`, so a bare empty binding passed
-        // into a parameter that a SIBLING argument made concrete used to pin nothing: measured
-        // check-clean at rc=0, `fn move_first[T](a: List[T], b: List[T])` called
-        // `move_first(["x"], xs)` then `xs.push(1)` printed `['x', 1]`. Running it here — after every
-        // recovery — is what makes the sibling-argument case work; `constrain_empty_arg` is a no-op
-        // on a slot still carrying a `Ty::Param` or an `Unknown`, so a genuinely generic parameter
-        // (`fn ident[T](xs: List[T])`) still pins nothing.
-        for (i, arg) in args.iter().enumerate() {
-            if let Some(decl) = expected.get(i) {
-                let want = subst(decl, &mmap);
-                self.constrain_empty_arg(arg, &want);
-            }
-        }
         // M24 Task 5 — half two of the static-witness contract for a MEMBER-declared type param,
         // recorded LAST for the same reason the free-fn path does it last (`recover_return_only_params`
         // can still bind a param nothing else saw). The caller passes an `instantiate_method` result,
@@ -5355,30 +5119,16 @@ impl Checker {
     ///     free after pass 1 (recovered from an inferable closure/fn body) so it no longer leaks a
     ///     `Ty::Param` into the return;
     ///  4. re-enforces bounds on params NEWLY bound by the loop-back only (each enforced exactly once);
-    ///  5. (METHOD PATH ONLY, `degrade_unbound_param_pos`) degrades a still-unbound PARAMETER-position
-    ///     param to the refinable `Unknown` (the empty-collection case, `[].map(fn(x): x*2)` → `List[?]`,
-    ///     matching the retired `infer_list_hof`), while leaving a genuinely un-inferable RETURN-ONLY
-    ///     param as a leaked `Ty::Param` so `assignable` still rejects a concrete assignment.
+    ///  5. degrades a still-unbound PARAMETER-position param to `Unknown` (`[].map(fn(x): x*2)` is
+    ///     `List[?]`, `tag([])` is `List[?]`) on every path, so no call leaks the callee's own
+    ///     `Ty::Param` and the hole check judges the result (TICKET-238). A RETURN-ONLY param
+    ///     stays a leaked `Ty::Param` here; the caller reports it.
     ///
     /// `arg_decls` are the per-argument declared slot types (method: params sans receiver; free-fn: all
     /// params) — parallel to `arg_tys`/`args`. `all_params` is the full param list used only for the
     /// param-position degrade scan (method: params INCL receiver; free-fn: all params).
     ///
-    /// `degrade_unbound_param_pos` gates step 5. It is `true` ONLY on the generic-METHOD path, whose
-    /// receiver-collection HOFs (`[].map(...)`) intentionally degrade an empty-collection element param
-    /// to `List[?]`. It is `false` on the generic FREE-FN path: `infer_generic_call` never degraded, so
-    /// a still-unbound param-position free-fn type param (`first([])` — `U` from an empty `List[U]` arg
-    /// that flows to the return) must stay a leaked `Ty::Param` that downstream concrete use REJECTS,
-    /// and the deliberate Category-2 "un-inferred type parameter; bind at the construction site"
-    /// diagnostic must survive. Degrading it there silently laundered a compile error into a runtime
-    /// panic (adversarial-review bugs 1 & 2). Free-fn CLOSURE-param type params left un-inferable by an
-    /// empty arg are already bound to `Unknown` by the caller's `report_uninferable_closure_params`, so
-    /// omitting the degrade there is behavior-preserving.
-    ///
-    /// The caller must complete pass-1 state (turbofish/arg-unify/iter+index recovery, and for the
-    /// free-fn path its `report_uninferable_closure_params` + pass-1 `enforce_bounds`) BEFORE this call,
-    /// so `bound_after_pass1` is correct and pass-1 bounds are enforced exactly once.
-    #[allow(clippy::too_many_arguments)] // arg decls + arity + span + flag
+    #[allow(clippy::too_many_arguments)] // arg decls + arity + span
     pub(super) fn recover_return_only_params(
         &mut self,
         name: &str,
@@ -5389,16 +5139,7 @@ impl Checker {
         tps: &[TyParam],
         map: &mut HashMap<String, Ty>,
         span: Span,
-        degrade_unbound_param_pos: bool,
     ) {
-        // A bare binding a use can still pin, passed into a slot a SIBLING argument typed: read the
-        // slot through `pin_shape` before the per-argument compare below, which would bind an
-        // unpinned `?x` to the binding's own open slot.
-        for (arg, decl) in args.iter().zip(arg_decls) {
-            if let ExprKind::Ident(n) = &arg.kind {
-                let _ = self.pin_shape(n, &subst(decl, map));
-            }
-        }
         // Snapshot the params bound after pass 1, so the loop-back below only re-enforces bounds on
         // params NEWLY bound from a refined arg (pass-1 bounds are enforced by the caller).
         let bound_after_pass1: std::collections::HashSet<String> = map.keys().cloned().collect();
@@ -5455,19 +5196,9 @@ impl Checker {
             .cloned()
             .collect();
         self.enforce_bounds(&newly_bound, tps, map, span);
-        // Degrade a STILL-unbound type param to `Unknown` ONLY when it appears in a PARAMETER position —
-        // and ONLY on the method path (`degrade_unbound_param_pos`). It was in principle recoverable
-        // from an argument, but that argument's relevant type was itself `Unknown` (the empty-collection
-        // case, `[].map(fn(x): x*2)`), so degrading yields `List[?]` rather than a leaked `List[U]`. A
-        // param appearing ONLY in the RETURN position and in NO parameter is genuinely un-inferable
-        // (`fn make[U]() -> U`); it must stay a leaked `Ty::Param` so `assignable` rejects a concrete
-        // assignment. On the FREE-FN path the whole degrade is skipped: `infer_generic_call` never
-        // degraded, so a param-position free-fn type param left unbound by an empty-collection arg
-        // (`first([])`) must stay a leaked `Ty::Param` too — degrading it laundered a clean compile
-        // error into a runtime panic and silently suppressed the Category-2 construction-site diagnostic.
-        if !degrade_unbound_param_pos {
-            return;
-        }
+        // Degrade a STILL-unbound type param to `Unknown` when it appears in a PARAMETER position:
+        // it was recoverable from an argument whose type was itself open (`[].map(fn(x): x*2)`).
+        // A param ONLY in the RETURN position (`fn make[U]() -> U`) stays a leaked `Ty::Param`.
         let wanted: std::collections::HashSet<String> =
             tps.iter().map(|tp| tp.name.clone()).collect();
         let mut in_param_pos: Vec<String> = Vec::new();

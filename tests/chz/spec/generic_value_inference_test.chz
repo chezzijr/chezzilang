@@ -29,8 +29,10 @@ test fn list_and_map_joins_pin_the_generic_element():
     assert xs[1](5) == 5
     assert {"a": inc, "b": g}["b"](5) == 5
 
-test fn a_later_call_pins_a_let_bound_read():
-    f := g
+# TICKET-238: a later call no longer pins `f := g` (rejected on its own line; the checker verdict
+# lives in `tests/open_binding_grid.rs`). The read is instantiated where it is bound.
+test fn a_let_bound_read_is_instantiated_on_its_own_line():
+    f := g[int]
     assert f(5) == 5
 
 test fn equality_join_pins_and_compares_identity():

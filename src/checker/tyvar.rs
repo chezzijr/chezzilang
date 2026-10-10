@@ -382,6 +382,14 @@ impl Checker {
         var
     }
 
+    /// TICKET-238 -- close the variables of ONE operand, inferred since `m`, and resolve its type.
+    /// Every site that binds or destructures an operand calls it (`let`, `match`, `for`, `?.`,
+    /// `??`, `?`, `else`), so a direct `?x` operand reaches the reader as `T?`.
+    pub(super) fn close_operand(&mut self, m: TyVarMark, t: Ty) -> Ty {
+        self.close_tyvar_frame(m);
+        self.zonk(&t)
+    }
+
     /// The frame verdict, over every read and bound recorded since `start`. A read whose vars are
     /// all bound meets its bounds (and a decode read writes its record, DEC-214). A read with a var
     /// still unbound is rejected with today's instantiate hint, and the var is bound to `Unknown`.
@@ -490,6 +498,30 @@ impl Checker {
                     self.tyvars.borrow_mut().bind(v, Ty::Unknown);
                 }
             }
+        }
+    }
+
+    /// The text of variable `v` in a message: its bound type, its `T?` default when it is a
+    /// pending `?x`, else `_`.
+    pub(super) fn var_text(&self, v: u32) -> String {
+        match self.zonk(&Ty::Var(v)) {
+            Ty::Var(v) => {
+                let s = self.tyvars.borrow();
+                let present = s
+                    .carriers
+                    .iter()
+                    .find(|c| c.var == v)
+                    .and_then(|c| match &c.kind {
+                        CarrierKind::Present(p) => Some(p.clone()),
+                        CarrierKind::Error => None,
+                    });
+                drop(s);
+                match present {
+                    Some(p) => Ty::Option(Box::new(self.zonk(&p))).to_string(),
+                    None => "_".to_string(),
+                }
+            }
+            t => t.to_string(),
         }
     }
 

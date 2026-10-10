@@ -14,7 +14,7 @@ fn main():
                 _got := [0, 1, 2].map(fn(k: int) -> int: work("c{c}k{k}:", ch))
                 res.send("done{c}")
         spawn:
-            out := []
+            out: List[str] = []
             for _ in range(81):
                 out.push(ch.recv())
             print(" ".join(out))

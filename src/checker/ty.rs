@@ -447,6 +447,11 @@ pub enum Ty {
     Var(u32),
 }
 
+/// The private-use brackets of a pending type variable in rendered text (TICKET-238): a
+/// `Ty::Var` never reaches a message as `_`.
+pub(crate) const VAR_OPEN: char = '\u{E000}';
+pub(crate) const VAR_CLOSE: char = '\u{E001}';
+
 impl Ty {
     pub fn list(inner: Ty) -> Ty {
         Ty::List(Box::new(inner))
@@ -546,6 +551,30 @@ impl Ty {
 
     pub fn is_unknown(&self) -> bool {
         matches!(self, Ty::Unknown)
+    }
+
+    /// TICKET-238 -- does this type have a hole: a `Ty::Unknown` BELOW the top level. A bare
+    /// top-level `Unknown` is the error sentinel, not a hole. A `Ty::Var` is pending, not a hole:
+    /// `close_tyvar_frame` owns its verdict. The one predicate `Checker::closed_binding_ty` reads.
+    pub fn has_hole(&self) -> bool {
+        fn open(t: &Ty) -> bool {
+            match t {
+                Ty::Unknown => true,
+                Ty::List(x)
+                | Ty::Option(x)
+                | Ty::Set(x)
+                | Ty::Channel(x)
+                | Ty::Shared(x)
+                | Ty::RwShared(x)
+                | Ty::Atomic(x) => open(x),
+                Ty::Map(k, v) | Ty::Result(k, v) => open(k) || open(v),
+                Ty::Struct(_, a) | Ty::Enum(_, a) | Ty::Protocol(_, a) => a.iter().any(open),
+                Ty::Tuple(ts) => ts.iter().any(open),
+                Ty::Func { params, ret, .. } => params.iter().any(open) || open(ret),
+                _ => false,
+            }
+        }
+        !self.is_unknown() && open(self)
     }
 
     /// The parameter and return types of any function value: a user [`Ty::Func`] or a builtin
@@ -890,7 +919,7 @@ impl Ty {
             // The sugar: `T!` when the error is the default `Error` or unconstrained, else `T!E`.
             // A fallible call with no value prints the prefix form the parser reads: `!E`, `!`.
             Ty::Result(t, e) => {
-                if **t != Ty::Nil {
+                if **t != Ty::Nil && !t.is_unknown() {
                     write!(f, "{}", Operand(t, names))?;
                 }
                 write!(f, "!")?;
@@ -899,7 +928,7 @@ impl Ty {
                 }
                 Ok(())
             }
-            Ty::Option(t) if t.is_unknown() => write!(f, "{OPEN_NONE}"),
+            Ty::Option(t) if t.is_unknown() => write!(f, "None"),
             Ty::Option(t) => write!(f, "{}?", Operand(t, names)),
             Ty::Channel(t) => write!(f, "Channel[{}]", Named(t, names)),
             Ty::Shared(t) => write!(f, "Shared[{}]", Named(t, names)),
@@ -960,7 +989,9 @@ impl Ty {
                 write!(f, ")")
             }
             Ty::Unknown => write!(f, "?"),
-            Ty::Var(_) => write!(f, "_"),
+            // A pending variable prints a token; the two diagnostic funnels replace it with the
+            // variable's bound type or its `T?` default (`Checker::resolve_var_tokens`).
+            Ty::Var(v) => write!(f, "{VAR_OPEN}{v}{VAR_CLOSE}"),
         }
     }
 }
@@ -1200,8 +1231,3 @@ pub enum ArgFill {
 /// from the plan: the callee's prologue fills it. Written in every main walk: the error-gate pass
 /// reads it too (layer A's `bound_slots`, TICKET-189).
 pub type CallPlanTable = HashMap<(usize, u32), Vec<ArgFill>>;
-
-/// How an optional whose payload nothing pinned yet is printed (`z := None`). The one renderer
-/// arm writes it, and `Checker::error_help` / `Checker::warn` append the note that explains it; no
-/// message formats the open type by hand (TICKET-234).
-pub(crate) const OPEN_NONE: &str = "<unknown>?";

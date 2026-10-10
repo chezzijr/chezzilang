@@ -137,11 +137,9 @@ char; `b"\xff\xfe".decode()` faults **recoverably** (catchable by `recover:`), n
 `Iterable[T]` bound — they reuse the same internal iterable union as the `for` loop. The empty
 **container constructors** are first-class: `List[T]()` / `Map[K, V]()` / `Set[T]()` take a
 **turbofish** that pins the element/key/value type, and the bare `List()` / `Map()` / `Set()`
-zero-arg forms produce an empty container whose type is refined from the expected type or first use
-(e.g. `xs: List[int] = List()`, then `xs.push(1)`) — exactly the inference that already served `Set()`
-and the `[]` / `{}` literals. (As with those literals, a bare `List()`/`Map()`/`Set()` that is *never*
-pinned — neither annotated nor constrained by a later op — is a static error requiring an annotation;
-see "Empty-collection element typing" below.) (The `[]` / `{}` literals remain the idiomatic empty forms; the
+zero-arg forms take their type from the expected type on the same statement
+(`xs: List[int] = List()`), exactly like the `[]` / `{}` literals. (An untyped `xs := List()` is an
+error on that line; see "Inference" in §10.) (The `[]` / `{}` literals remain the idiomatic empty forms; the
 constructors are there for when a literal is awkward, e.g. binding a type parameter.) A turbofish with
 an iterable argument checks the elements against the type arg: `List[int]([1, 2])` is fine,
 `List[int](["a"])` is a static error. `Map(it)`'s element must be **exactly a 2-tuple** `(K, V)` — a
@@ -696,15 +694,12 @@ the receiver's type parameter (`b.set(7)`, `s.set(7)` on a `Shared(None)`), and 
 (`s.update(fn(x): 7)`). A literal `None` **beside** a value joins to that value's optional:
 `[None, 7]` is a `List[int?]`, `{"a": None, "b": 7}` a `Map[str, int?]`, `if c: None else: 7` and a
 `match` with a `None` arm are `int?`, and so is the inline body `fn pick(c: bool): if c: None else: 7`.
-`[None, w]` joins to `w`'s own type. A later value of another payload type is rejected (`z = 7` then
-`z = "hi"`: `cannot assign str to 'z' -- its payload was pinned to int? by an earlier use`). Declines
-that stay: only the LITERAL `None` joins (`n := None`, `[n, 7]` is rejected, and so are `[w, 7]` and
-`[[None], [7]]`); `z := None` / `z = []` supplies no payload; `xs += [7]` on a `[None]` list never
-wraps (`+=` does not wrap, write `xs += [?7]`); a generic call argument pins but never wraps, so
-`put(b, 7)` with `fn put[T](b: Box[T], x: T)` is rejected like its typed twin; a set element is never
-a carrier; and an open `!e` is not inferred this way. A type that is still open prints as
-`<unknown>?`, and the message carries one note: ``(`<unknown>?` is a None whose type is not known
-yet: annotate the binding, e.g. `z: int?`, or assign it a value first)``.
+`[None, w]` joins to `w`'s own type. Declines that stay: only the LITERAL `None` joins
+(`n: int? = None`, `[n, 7]` is rejected, and so are `[w, 7]` and `[[None], [7]]`); `xs += [7]` on a
+`List[int?]` never wraps (`+=` does not wrap, write `xs += [?7]`); a generic call argument never
+wraps, so `put(b, 7)` with `fn put[T](b: Box[T], x: T)` and `b: Box[int?]` is rejected; a set
+element is never a carrier; and an open `!e` is not inferred this way. A `None` with no value
+beside it and no annotation (`z := None`) is an error on its own line: see "Inference" in §10.
 
 **No `int`→`float` widening at any slot (rule D3, TICKET-138).** An `int`-typed expression — a literal
 or not — is **never** accepted where a `float` is expected: not at a typed binding, a reassignment /
@@ -969,45 +964,13 @@ xs: List[int] = empty()    # ok
 xs := empty[int]()         # ok
 ```
 
-Any sink that really does pin it counts, not just a `let` annotation — an argument slot
-(`takes(empty())`), a declared return (`return empty()`), a `match` arm, and a struct field at
-construction all pin it. The rule is *return-only*: a parameter that also appears in a value
-parameter has its own diagnostic (`tag([])` reports at each later `push`, naming the construction
-site). A parameter default is exempt where it is declared — it is re-checked where it is spliced.
-
-The example above is the **bare** case — `List[T]` is a container, so it is deferred instead, and a
-**later statement** can pin it exactly as it can for an empty literal:
-
-```
-xs := empty()      # List[Unknown] so far — same as `xs := []`
-xs.push(1)         # pins it: List[int]
-```
-
-A generic empty producer is indistinguishable from the literal in both directions: a conflicting
-second `push` is rejected, and with no pinning use at all you get the literal's own error
-(`cannot infer element type of empty collection`). Only a parameter that IS the whole return type
-(`fn make[U]() -> U`) is refused at the call — there is no slot to defer into. A producer whose
-parameter carries a bound is refused too: the bound is checked before the element type could be
-pinned, and nothing re-checks it afterwards.
-
-**What counts as the pinning use.** A `push`/`add`/`insert`, an `m[k] = v`, *and* passing the
-binding into a fully concrete parameter — all three pin it:
-
-```
-fn addstr(xs: List[str]):
-    xs.push("a")
-
-xs := []
-addstr(xs)      # pins List[str]
-xs.push(1)      # rejected: expected str, found int
-```
-
-A generic parameter (`fn ident[T](xs: List[T])`) pins nothing — `T` says nothing about the element.
-
-Pinning does not yet reach every use: a call in an `if`/`match` **value arm**, an argument to a
-**generic** function, and assignment into an annotated binding (`ys: List[int] = xs`) all still leave
-the element type open. Annotate the binding when you need certainty — `docs/gaps.md` W8-45 records
-the measured cases.
+Any sink on the same statement that supplies the type counts, not just a `let` annotation — an
+argument slot (`takes(empty())`), a declared return (`return empty()`), a `match` arm, and a struct
+field at construction. The rule is *return-only*: a parameter that also appears in a value
+parameter is the open-binding error instead (`x := tag([])` is rejected on that line, see
+"Inference" in §10). A parameter default is exempt where it is declared — it is re-checked where
+it is spliced. No later statement supplies the type: `xs := empty()` then `xs.push(1)` is still the
+error above.
 
 **Inline-expr body implicitly returns (choice A, inline-only).** A named function written in the
 **inline** form (`fn a(): <stmt>` — the body on the *same line* after `:`) whose single statement is a
@@ -1477,15 +1440,13 @@ closure-taking container methods) pins its `[T]` from the element type — `[1,2
 The runtime is generic-**erased** — the value *is* the underlying function — so an indirect call
 adds no overhead and behaves identically.
 
-A **bare, un-pinned** generic fn value — `g := ident`, with no turbofish and no expected type — takes
-one **type variable** per type parameter (TICKET-225, Rust's model: `let k = g; k(5)` compiles). Any
-later use in the same fn body pins them: a call (`g(5)`), an argument, an assignment, a `return`, or
-a **join** with a sibling — `if`/`elif`/`match` branches, `??`, a list/map literal, `==`, `in`, list
-`+` / `+=`, a `recover:` tail. `(o ?? g)(5)` with `o: (fn(int) -> int)?` pins `T = int`, and so
-does `if c: inc else: g`. A frame is **one fn body, or one top-level statement**: a top-level
-`f := g` is not pinned by a later top-level `print(f(5))` (module globals are typed before any body is
-walked). If a variable is still unpinned when its frame closes, the read is rejected at its own span
-with the instantiate hint:
+A **bare** generic fn value — `g := ident`, with no turbofish and no expected type — is an error
+where it is bound (TICKET-238): inference never reads a later statement, so a later `g(5)` does not
+pin it. Inside ONE statement the value still solves: an argument (`apply(ident, 5)`), a typed
+binding (`f: fn(int) -> int = ident`), or a **join** with a sibling — `if`/`elif`/`match` branches,
+`??`, a list/map literal, `==`, `in`, list `+`, a `recover:` tail. `(o ?? g)(5)` with
+`o: (fn(int) -> int)?` pins `T = int`, and so does `if c: inc else: g`. The read is rejected at its
+own span with the instantiate hint:
 
 ```chezzi
 fn main():
@@ -1495,8 +1456,8 @@ fn main():
 ```
 
 The same holds inside a `[...]`/`{...}` literal, in a `return` from a fn with an **inferred** return
-type, and in a generic **constructor** / generic **free fn** argument (`Bx(ident)` is pinned by a later
-`b.f(3)`; `print(take(ident))` on `fn take[U](f: U) -> int` is not). Two unpinned generics joined
+type, and in a generic **constructor** / generic **free fn** argument (`b := Bx(ident)` is rejected on that line, and so is
+`print(take(ident))` on `fn take[U](f: U) -> int`). Two unpinned generics joined
 together (`if c: g else: h`, `g == h`) pin nothing and stay rejected. A generic with
 **two or more** type parameters takes them all in one turbofish (`pair[str, int]`, Go's
 `pair[string, int]`), and the diagnostic offers `pair[<A>, <B>]`. First-class (rank-N) polymorphism — one binding used at two
@@ -3555,20 +3516,16 @@ rs: List[int!str] = [1, !"disk", 3]   # [1, !disk, 3]
   sum, `?3`), and neither is the return of a fn with no `->` annotation.
 - **`?x` builds a present/success value**, its carrier taken from the expected type: `?5` is
   `?5` at `int?` and `?5` at `int!E`; `x: int?? = ?None` is `?None`.
-- **No expected type.** Inside a fn, a later use pins the carrier: `y := ?5` alone is `int?`;
-  `z := ?5` then `take(z)` with `take(r: int!str)` makes it `?5`. `w := !"disk"` needs its success
-  type pinned the same way (`return w` in an `int!` fn); unpinned it is the error
-  ``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``. At top level `?5` is `int?` at once and
-  `!e` must be annotated.
-- **An open `None` is pinned by the first value it meets** (TICKET-234). `z := None` then `z = 7`
-  makes `z` an `int?`; `?7` and an existing `int?` value do the same, and a carrier is never
-  re-wrapped. The rule holds at an assignment (a field, an index, a tuple or destructuring target
-  too), `push`/`insert`/`extend`, a map set, a method or closure argument typed by the receiver's
-  type parameter, and a module global written from a fn. A literal `None` beside a value joins to
-  that value's optional in a list or map literal, an `if`/`match` expression, an inline body and a
-  `recover:` tail: `[None, 7]` is `List[int?]`. A later value of another payload type is rejected
-  with `its payload was pinned to int? by an earlier use`. A `None` nothing pins stays open and
-  prints as `<unknown>?` in a message.
+- **No expected type.** `y := ?5` is `int?` on its own line, in a fn and at top level; no later use
+  re-reads it (`take(y)` with `take(r: int!str)` is a mismatch: write `y: int!str = ?5`). Inside one
+  statement a `?x` still meets its sibling: `r == ?2` beside an `int!` compares as `int!`.
+  `w := !"disk"` has no success type, so it is the error
+  ``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``.
+- **A `None` needs its type on its own statement** (TICKET-238). `z := None` is an error on that
+  line: write `z: int? = None`. A literal `None` beside a value joins to that value's optional in a
+  list or map literal, an `if`/`match` expression, an inline body and a `recover:` tail:
+  `[None, 7]` is `List[int?]`. No message prints an open type: `a: int = None` reads
+  `cannot assign None to variable of type int`.
 - **Set elements and map keys** never wrap in effect: no carrier is `Hashable`.
 
 **`None!E`'s success value.** A fn that returns `None!E` (also written `!E`) has no payload: it
@@ -4369,130 +4326,35 @@ List methods (built in): `xs.push(x)` `xs.pop()` `xs.len()` `xs.reverse()` `xs.c
 and `xs.sort_by_key(fn(x) -> K)` — sort by a derived key (`K` Comparable: int/float/str, or a struct
 or enum defining `compare`), stable, in place.
 
-> **Empty-collection element typing (refine-on-first-use).** An un-annotated empty `[]` / `{}` /
-> `Set()` has no element/key type yet; the **first** mutating op on the binding — `.push`/`.add`/
-> `.insert`/`.extend`, or `m[k]=v` — **pins** the element/key/value type, and later ops are checked
-> against that pinned type. So `out := []; out.push(1)` is `List[int]` and a later `out.push("s")` is a
-> type error (it would read as `List[int]`). A **heterogeneous / protocol** collection therefore needs
-> an explicit annotation — `shapes: List[Shape] = [circle, square]` (or `shapes: List[Any] = [1, "a",
-> true]` for the top type). The annotation is **expected-type-directed**: the declared element type is
-> driven onto each element, so a literal whose elements have differing concrete types is accepted as long
-> as **every** element is assignable to the declared element type (each satisfies the protocol / `Any`);
-> an element that does *not* fit is reported against the declared element type directly: `list element: expected T, found U` (a `Map` literal's columns report `map key: expected K, found L` / `map value: expected V, found W`).
-> This holds even through a chained method call the hint never itself resolves through
-> (`a: List[List[int]] = [empty().reversed(), ["x"]]` reports `list element: expected List[int], found
-> List[str]`; TICKET-032 closed this — the diagnostic MOVES from the assignment to the offending
-> element, the same shape rustc's E0308 takes on `let a: Vec<Vec<i32>> = vec![Vec::new(), vec!["x"]];`,
-> which carets the element with `expected i32, found &str`). It reaches each element as that element's
-> **own** expected type, so a generic call in
-> element position is pinned by the slot it fills — `a: List[List[int]] = [empty()]` on
-> `fn empty[T]() -> List[T]` binds `T = int`. The same holds for a `Map` literal's key and value
-> columns and a `Set` literal's elements, and it reaches through a `T?` / `T!E` sink (where a bare
-> literal coerces to `?v` / `?v`) onto the carrier's payload. (No int→float widening exists at
-> any of these slots — rule D3, §3 — so `fn f() -> List[float]?: return [1, 2]` and the bare
-> `-> List[float]` sink both reject the ints: write `[1.0, 2.0]`.)
-> (An `= []` empty binding plus later `.push` also works and is equally valid.)
-> A **never-constrained** empty — one that nothing ever pins or constrains (e.g. `b := []` that is only
-> *read* into an untyped sink: `print(b)`, `b.len()`) — is a **static error**: `cannot infer element type
-> of empty collection; add a type annotation`. Annotate it (`b: List[int] = []`, `m: Map[str,int] = {}`,
-> `s: Set[int] = Set()`) or pin it with a turbofish constructor (`List[int]()`). Besides the mutating
-> first-use ops above, a binding is also **constrained** (so it does *not* error) when a concrete-typed
-> value flows into it: a whole-binding reassignment / compound-assign / tuple-assignment (`b = [1, 2]`,
-> `b += [1]`, `a, b = [1], [2]`), or passing/returning it into a concrete collection sink — a typed
-> binding, a typed function parameter (`f(b)` where the param is `List[int]`), or a typed `return`. The
-> direct-literal forms (`f([])`, `return []`, `c: List[int] = []`) likewise leave no un-inferred slot, so
-> those never error. **Every constraining use with a CONCRETE sink also PINS the element type**, exactly
-> like the first `push` — for those, being constrained and being pinned are one operation. (An
-> un-annotated alias has no concrete sink to pin from, so the requirement instead MOVES, and joins a pin
-> group with the source binding — see below.) So
-> `b := []` / `f(b)` (param `List[str]`) / `b.push(1)` is a type error, and so are the reassign
-> (`b = [1, 2]` then `b.push("a")`), the typed sink (`c: List[int] = b` then `b.push("a")`), the typed
-> `return`, and the same shapes reached through a **generic** call whose parameter a sibling argument
-> made concrete (`move_first(["x"], b)` on `fn move_first[T](a: List[T], b: List[T])`). A *generic* sink
-> pins nothing — `fn ident[T](xs: List[T])` says nothing about the element — and neither does one whose
-> own element type is still un-inferred.
-> A binding is *also* considered constrained — so it does not error — once it **escapes
-> as a value** into another binding or structure: an alias (`c := b`), a plain or field assignment
-> (`c = b`, `bx.items = b`), or nesting in a collection literal (`c := [b]`); the requirement then moves
-> to the new binding (which records its own if *it* stays unrefined) rather than firing a false positive.
-> Where that sink is **typed**, the escape pins through it too: `bx.items = b` with a `List[int]` field,
-> and `c: List[List[int]] = [b]` through the annotation's element type.
-> (Reassigning *another* empty — `b = []` — does not constrain it; the requirement
-> stands. A terminal read that does not escape — `print(b)`, `b.len()` — likewise does not constrain it.) The
-> `Hashable` key/element ban applies the moment the type is concrete (and a non-Hashable key/element
-> like a `float` is rejected at the insertion site even on an empty `{}`/`Set()`). The pin is
-> **persistent** (scope-wide first-use pinning): the first mutating op fixes the element type for the
-> binding's whole scope, even across sibling `if`/`else`/`match` arms and a loop body — so
-> building a heterogeneous collection split across branches/arms is a type error, exactly like the
-> literal `[1, "s"]`. `xs := []; if c: xs.push(1) else: xs.push("s")` is **rejected**. This accepts a
-> sound zero-trip over-approximation: `xs := []; for i in []: xs.push(1); xs.push("s")` rejects even
-> though the loop body never runs. **if-EXPRESSION / match-EXPRESSION value arms pin persistently too**,
-> on the same rule: `y := if c: f(xs) else: g(xs)` with `f` taking `List[str]` and `g` taking `List[int]`
-> is rejected, because one binding cannot be both. A write through a field or an index pins the **root
-> binding** (TICKET-234): `b.v.push(1)`, `xss[0].push(1)`, `b.v = [1]` and `o.b.v = 7` pin `b`, `xss`,
-> `o`, so a later conflicting write through the same place is rejected. Any method argument typed by
-> the receiver's type parameter pins it, a read too: `b.set(7)` on a `Box(None)`, `s.set(7)` on a
-> `Shared(None)`, `xs.contains(1)` on an empty list (a later `xs.push("a")` is rejected), and a
-> closure argument (`s.update(fn(x): 7)`, `xs.sort_by(fn(a: int, b: int): a - b)`). An enum receiver
-> is not pinned. An argument of a generic call pins but never wraps, so `put(b, 7)` on an open
-> `Box(None)` is rejected like its typed twin `b: Box[int?]`. Limitation: a receiver with no root
-> binding (`f().push(…)`) is not refined, and an alias taken through a projection (`c := b.v`,
-> `c := xss[0]`) is not linked to its owner. An **un-annotated alias** (`c := b`, or a whole-binding `c = b` where both sides are still
-> unrefined) has no concrete sink to pin from, so the requirement moves to `c` and the two names join a
-> **pin group**: pinning either name reaches both, because Python owns aliasing here and Chezzi follows
-> its measured behavior — `b = []; c = b; c.append(1)` prints `[1] [1] True` for `b, c, b is c`, and
-> the checker's pin group IS that `b is c`.
+> **Inference: signatures are written, bodies are inferred from the line they are on** (TICKET-238).
+> The type of a value is known on the statement that creates it. Inference never reads a later
+> statement: no later `push`, assignment, call or `return` fills in a type an earlier line left open.
 >
-> ```
-> fn addstr(xs: List[str]) -> str:
->     return xs[0].upper()
-> b := []
-> c := b            # alias: joins b's pin group
-> c.push(1)         # pins c to List[int] — b is pinned too
-> print(addstr(b))  # type error: argument 1 of 'addstr': expected List[str], found List[int]
-> ```
+> | You write | Verdict |
+> |---|---|
+> | `xs := []`, `m := {}`, `s := Set()`, `z := None`, `h := [None]`, `t := ([], 1)`, `c := Cell(None)`, `v := Box.new()`, `e := Bx.Empty`, `ys := id([])` | error on that line |
+> | `xs: List[int] = []`, `xs := List[int]()`, `z: int? = None`, `Box[int].new()`, `Bx[int].Empty`, `f([])` into a typed parameter, `return []` in a typed fn, a typed field or element slot | accepted: the same statement supplies the type |
+> | `xs := [1, 2]`, `[None, 7]` (`List[int?]`), `if c: None else: 7`, `z := ?5` (`int?`), lambdas, `id(5)` | accepted: same-line inference |
+> | `print(None)`, `print([])`, `[] == []`, `for x in []:`, `[].len()` | accepted: the open value is consumed, never stored |
 >
-> A **whole-binding reassignment or re-declaration** of either name breaks the pair — the binding no
-> longer names the same runtime object its former partner does — exactly like a rebind breaks Python's
-> `is` identity: `b = []; c = b; c = [1, 2]; b.append("a")` prints `[1, 'a'] [1, 2] False` for
-> `b, c, b is c`, and Chezzi's twin (`b := []` / `c := b` / `c = [1, 2]` / `b.push("a")`) stays
-> `ok: no type errors`, printing `['a']` then `[1, 2]`. The same holds for a **re-declaration**
-> (`b := []` / `c := b` / `b := []` / `c.push(1)` / `b.push("a")` — the second `b := []` is a fresh
-> list, so it stays `ok: no type errors`, printing `['a']` then `[1]`; Python prints `['a'] [1] False`
-> for the twin), and for a **tuple-target** rebind (`c, d = [1, 2], 3` breaks `c`'s pair, same as
-> `c = [1, 2]`). `+=` on a `List` is the one exception: it extends in place and keeps the same handle,
-> so the pair survives `c += [1]`; `*=` and the set compound forms (e.g. `|=`) rebind and break it, like
-> any other reassignment. A tuple-**spelled** link (`c, d = b, 0`) is a known ceiling: it
-> records no pair, so pinning `c` does not reach `b` there.
+> The error names the binding and both fixes:
+> ``cannot infer the element type of `xs`: write `xs: List[int] = ...` or `xs := List[int]()` ``.
+> (The type in the message is an example; write the one you mean.) The other heads are
+> ``cannot infer the key and value types of `m` ``, ``cannot infer the type of `z` from `None` ``,
+> ``cannot infer the success type of `r` `` (`r: int! = recover: ...`) and
+> ``cannot infer the type arguments of `c` ``. One error is reported per open binding: later uses
+> of a rejected binding report nothing more.
 >
-> Because the pin is **scope-wide** (not source-order forward), a **non-pinning** use of the binding
-> that appears *before* the pinning op still sees the resolved element type — the checker resolves the
-> binding's element type from the whole scope, then checks each use against it. So `a := []; a.sort();
-> a.push(1)` type-checks (`a` is `List[int]`: the later `push` pins it, and the earlier `sort` is
-> checked against that pinned `int`). This is what makes **bound-checked methods** compose with
-> refinement: `sort`'s `where T: Comparable` and `sum`'s `where T: Add` — and a user **conditional
-> method**'s `where` on the receiver type param — enforce against the *resolved* element/type
-> argument, never a transient `Unknown`. A genuinely never-pinned empty still fails at the binding
-> with `cannot infer element type of empty collection` (above) — not with a spurious `does not satisfy
-> Comparable`/`Add`.
-
-> **Carrier payload typing (`None` and a nullary enum variant).** A never-written `x := None` or
-> `e := Box.Empty` stays permissive across differently-typed READS: `a: Box[int] = e` then
-> `b: Box[str] = e` is still `ok: no type errors`. The first constraining use — an annotated sink, a
-> typed argument, a typed `return`, a `??` with a typed right-hand side, or a `?v`/`Variant(v)`
-> write — records a pin. A later WRITE that disagrees with the pin is a type error:
-> `x := None` / `y: str? = x` / `x = ?1` is `cannot assign int? to 'x' -- its
-> payload was pinned to str? by an earlier use`. A write also REPINS the binding, so every
-> later read sees the written payload and a `match` arm binds a concrete `v`. A PLAIN value pins
-> and repins the same way (TICKET-234): `x := None` / `x = 7` makes `x` an `int?`, and `x = "hi"`
-> after it is `cannot assign str to 'x' -- its payload was pinned to int? by an earlier use` (the
-> same text for `x = ?"hi"` and for a `str?` value). An alias `c := b` of an open collection or
-> struct (`[None]`, `Box(None)`) is pinned with its partner; `y := z` of an open `None` is a copy and
-> is not. An open payload prints as `<unknown>?`, with a note that names both fixes (annotate the
-> binding, or assign it a value first). The escapes are an
-> annotation at the declaration (`x: int? = None`) or a re-declaration. `T!E` is
-> deliberately NOT covered: its two slots are routinely filled by different statements (`?1` then
-> `!"e"`).
+> The same rule covers three neighbours. A generic fn VALUE read without type arguments is an error
+> where it is bound (`g := ident`; write `g := ident[int]` or `g: fn(int) -> int = ident`). An
+> unannotated closure parameter typed by an open argument is an error naming the parameter
+> (`fold(xs, [], fn(acc, x): acc + [x])`; bind the result to a typed name, or pass `List[int]()`).
+> A free closure whose body is open keeps its own message
+> (`g := fn(): []` is `cannot infer return type of '<closure>'; add a -> annotation`).
+>
+> A collection's element type is fixed by its annotation, so a conflicting `push` is the ordinary
+> mismatch (`argument 1 of 'push': expected int, found str`). For a mixed or protocol collection,
+> annotate with the protocol: `shapes: List[Shape] = []`.
 
 Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
 `m.items()→List[(K, V)]` (insertion order, so `Map(m.items()) == m`) `m.copy()→map` (shallow);

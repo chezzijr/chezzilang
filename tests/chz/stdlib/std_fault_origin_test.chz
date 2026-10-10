@@ -50,7 +50,7 @@ test fn a_std_panic_stays_unstamped():
             assert e.col() == None, "a std panic names no col"
 
 test fn a_first_class_panic_called_inside_std_stays_unstamped():
-    r := recover: iter.map(["boom"], panic)
+    r: List[int]!Error = recover: iter.map(["boom"], panic)
     match r:
         ?_: assert false, "a panic callback must fault"
         !e:

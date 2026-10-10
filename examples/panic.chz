@@ -16,7 +16,7 @@ fn risky():
 
 fn main():
     # Caught by `recover:` → an error whose `.message()` is the panic string.
-    a := recover:
+    a: None!Error = recover:
         panic("boom")
     match a:
         ?_: print("ok")

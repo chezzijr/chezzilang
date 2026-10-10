@@ -370,7 +370,7 @@ test fn cyclic_generator_element_rebuilds_against_the_whole_container():
     xs.push(g())
     match RwShared(xs).at(0):
         ?it:
-            got := []
+            got: List[int] = []
             for v in it:
                 got.push(v)
             assert got == [1, 99], str(got)

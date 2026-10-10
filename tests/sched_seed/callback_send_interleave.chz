@@ -1,6 +1,6 @@
 fn main():
     ch := Channel[str]()
-    out := []
+    out: List[str] = []
     fn put(i: int, j: int) -> int:
         ch.send("t{i}.{j}")
         return j

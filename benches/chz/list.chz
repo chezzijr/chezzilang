@@ -2,7 +2,7 @@
 # for-loop. Stresses list growth/allocation and iteration. Prints 1999999000000.
 
 fn main():
-    xs := []
+    xs: List[int] = []
     i := 0
     while i < 2000000:
         xs.push(i)

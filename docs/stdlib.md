@@ -32,8 +32,8 @@ Conventions used below:
 
 | Form | Gives | Notes |
 |------|--------|-------|
-| `List[T]()` / `List()` / `List(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` is refined from the expected type / first use, like `Set()` — but a *never*-pinned empty is a static error: annotate it) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T](xs)` checks `xs`'s elements against `T`. |
-| `Map[K, V]()` / `Map()` / `{}` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` is refined from the expected type / first use — a *never*-pinned empty errors, annotate it). Map literal: `{k: v, ...}`. |
+| `List[T]()` / `List()` / `List(xs)` | `List[T]` | Empty list (`List[T]()` pins the element type; bare `List()` takes its type from the expected type on the same statement, like `Set()`; an untyped `xs := List()` is an error on that line) / convert an iterable to a list. List literal: `[a, b, c]`. `List[T](xs)` checks `xs`'s elements against `T`. |
+| `Map[K, V]()` / `Map()` / `{}` | `Map[K, V]` | Empty map (`Map[K, V]()` pins the key/value types; bare `Map()` takes its type from the expected type on the same statement; an untyped `m := Map()` is an error on that line). Map literal: `{k: v, ...}`. |
 | `Set[T]()` / `Set()` / `Set(xs)` | `Set[T]` | Empty set (`Set[T]()` pins the element type; `{}` is the empty **map**, not a set; a *never*-pinned bare `Set()` errors, annotate it) / set from an iterable. `Set[T](xs)` checks elements against `T`. |
 | `bytes(x)` | `bytes` | Convert a `bytes` / `bytearray` / `List[int]` to `bytes`. To UTF-8 encode a `str`, use `s.encode()` (Python's `bytes(str)` also errors without an encoding). Literal: `b"..."`. |
 | `bytearray()` | `bytearray` | Empty growable byte buffer. |

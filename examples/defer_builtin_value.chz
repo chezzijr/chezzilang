@@ -17,7 +17,7 @@ fn main():
 
     # panic-as-value: `p := panic` must raise the recoverable error (not return None)
     p := panic
-    r := recover:
+    r: None!Error = recover:
         p("boom")
     match r:
         ?v: print("no panic")

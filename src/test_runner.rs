@@ -1586,7 +1586,7 @@ struct Suite:
         // trigger a sweep and so never trip the cap (the documented GC-granularity limit).
         let f = d.write(
             "boom_test.chz",
-            "test fn boom():\n    xs := []\n    for i in range(1000000):\n        xs.push([i])\n",
+            "test fn boom():\n    xs: List[List[int]] = []\n    for i in range(1000000):\n        xs.push([i])\n",
         );
         {
             let report = run_tests_capped(&f, 1_000_000);
@@ -1635,8 +1635,8 @@ struct Suite:
         let parked = d2.write(
             "parked_test.chz",
             "import std.concurrency\n\ntest fn parked():\n    s := Shared([0])\n    \
-             xs := []\n    for i in range(150000):\n        xs.push(i)\n    s.set(xs)\n    \
-             zs := []\n    for i in range(2000):\n        zs = [i]\n",
+             xs: List[int] = []\n    for i in range(150000):\n        xs.push(i)\n    s.set(xs)\n    \
+             zs: List[int] = []\n    for i in range(2000):\n        zs = [i]\n",
         );
         for (label, f) in [("backlog", &backlog), ("parked", &parked)] {
             {
@@ -2386,11 +2386,11 @@ struct Suite:
         // ~1 MB parked off-heap, 50 live reconstructed handles to that ONE core, 8 MB cap.
         let f = d.write(
             "alias_test.chz",
-            "import std.concurrency\n\ntest fn alias():\n    xs := []\n    \
+            "import std.concurrency\n\ntest fn alias():\n    xs: List[int] = []\n    \
              for i in range(20000):\n        xs.push(i)\n    s := Shared(xs)\n    \
              ch := Channel[Shared[List[int]]](100)\n    for i in range(50):\n        ch.send(s)\n    \
-             hs := []\n    for i in range(50):\n        hs.push(ch.recv())\n    \
-             junk := []\n    for i in range(5000):\n        junk = [i]\n    \
+             hs: List[Shared[List[int]]] = []\n    for i in range(50):\n        hs.push(ch.recv())\n    \
+             junk: List[int] = []\n    for i in range(5000):\n        junk = [i]\n    \
              assert hs.len() == 50\n",
         );
         {
@@ -2463,7 +2463,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "rectimeout_test.chz",
-            "test fn t():\n    r := recover:\n        while true:\n            pass\n    assert false\n",
+            "test fn t():\n    r: int! = recover:\n        while true:\n            pass\n    assert false\n",
         );
         let report = run_tests_timed(&f, 0, 50);
         assert!(!report.passed, "report:\n{}", report.text);
@@ -2488,7 +2488,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "recdefertimeout_test.chz",
-            "test fn t():\n    defer:\n        r := recover:\n            while true:\n                pass\n        assert false, \"SWALLOWED-{r}\"\n    while true:\n        pass\n",
+            "test fn t():\n    defer:\n        r: int! = recover:\n            while true:\n                pass\n        assert false, \"SWALLOWED-{r}\"\n    while true:\n        pass\n",
         );
         let report = run_tests_timed(&f, 0, 50);
         assert!(!report.passed, "report:\n{}", report.text);
@@ -3345,7 +3345,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "ctl_test.chz",
-            "test fn small():\n    xs := []\n    for i in range(100):\n        xs.push(i)\n    assert xs.len() == 100\n",
+            "test fn small():\n    xs: List[int] = []\n    for i in range(100):\n        xs.push(i)\n    assert xs.len() == 100\n",
         );
         let report = run_tests_capped(&f, 100_000_000);
         assert!(report.passed, "report:\n{}", report.text);
@@ -3363,7 +3363,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "rec_test.chz",
-            "fn boom() -> int:\n    xs := []\n    for i in range(1000000):\n        xs.push([i])\n    return 0\ntest fn t():\n    r := recover: boom()\n    assert true\n",
+            "fn boom() -> int:\n    xs: List[List[int]] = []\n    for i in range(1000000):\n        xs.push([i])\n    return 0\ntest fn t():\n    r := recover: boom()\n    assert true\n",
         );
         let report = run_tests_capped(&f, 1_000_000);
         assert!(!report.passed, "report:\n{}", report.text);
@@ -3383,7 +3383,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "recnat_test.chz",
-            "fn grow(x: int) -> int:\n    ys := []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    r := recover: [1].map(grow)\n    assert true\n",
+            "fn grow(x: int) -> int:\n    ys: List[List[int]] = []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    r := recover: [1].map(grow)\n    assert true\n",
         );
         {
             let report = run_tests_capped(&f, 1_000_000);
@@ -3404,7 +3404,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "spawnmem_test.chz",
-            "fn runaway() -> int:\n    ys := []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    parallel:\n        spawn runaway()\n",
+            "fn runaway() -> int:\n    ys: List[List[int]] = []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    parallel:\n        spawn runaway()\n",
         );
         {
             let report = run_tests_capped(&f, 1_000_000);
@@ -3427,7 +3427,7 @@ struct Suite:
         let f = d.write(
             "concpass_test.chz",
             "fn work() -> int:\n\
-            \x20   ys := []\n\
+            \x20   ys: List[List[int]] = []\n\
             \x20   for j in range(2000):\n\
             \x20       ys.push([j])\n\
             \x20   return ys.len()\n\
@@ -3462,11 +3462,11 @@ struct Suite:
             "sentinel := [0]\n\
              fn leak():\n\
             \x20   defer:\n\
-            \x20       junk := []\n\
+            \x20       junk: List[List[int]] = []\n\
             \x20       for j in range(200000):\n\
             \x20           junk.push([j])\n\
             \x20       sentinel.push(1)\n\
-            \x20   xs := []\n\
+            \x20   xs: List[List[int]] = []\n\
             \x20   for i in range(1000000):\n\
             \x20       xs.push([i])\n\
              test fn trip():\n\

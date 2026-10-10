@@ -17,7 +17,7 @@ fn main():
     rows := ["alpha", "", "beta", "gamma"]
     ex := Executor()
 
-    handles := []
+    handles: List[Task[int]] = []
     for r in rows:
         handles.push(task.submit_task(ex, fn() -> int: score(r)))
 

@@ -257,7 +257,7 @@ struct FlagSet:
 
     # A Go-`PrintDefaults`-style help block: one line per registered flag, in registration order.
     fn usage(self) -> str:
-        lines := []
+        lines: List[str] = []
         for name in self.names:
             kind := ""
             match self.kind.get(name):

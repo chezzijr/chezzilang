@@ -2908,11 +2908,12 @@ fn pmap_limited_bounds_in_flight_both_engines() {
 fn task_submit_get_submission_order_both_engines() {
     let src = "import std.concurrency\n\
                import submit_task from std.concurrency.task\n\
+               import Task from std.concurrency.task\n\
                fn work(n: int) -> int:\n\
                \x20   return n * n\n\
                fn main():\n\
                \x20   ex := Executor()\n\
-               \x20   ts := []\n\
+               \x20   ts: List[Task[int]] = []\n\
                \x20   for i in range(1, 6):\n\
                \x20       x := i\n\
                \x20       ts.push(submit_task(ex, fn() -> int: work(x)))\n\
@@ -2958,7 +2959,7 @@ fn executor_submit_result_both_engines() {
                \x20   return n * n\n\
                fn main():\n\
                \x20   ex := Executor()\n\
-               \x20   chs := []\n\
+               \x20   chs: List[Channel[int!]] = []\n\
                \x20   for i in range(1, 6):\n\
                \x20       x := i\n\
                \x20       chs.push(ex.submit_result(fn() -> int: work(x)))\n\
@@ -13262,7 +13263,7 @@ fn golden_assert_chz_matches_expected_and_interp() {
 /// too — byte-identical against a literal golden.
 #[test]
 fn vm_panic_under_recover_yields_err_with_message() {
-    let src = "fn main():\n    r := recover:\n        panic(\"boom\")\n    match r:\n        ?v: print(\"ok: {v}\")\n        !e: print(\"recovered: {e.message()}\")\nmain()\n";
+    let src = "fn main():\n    r: int! = recover:\n        panic(\"boom\")\n    match r:\n        ?v: print(\"ok: {v}\")\n        !e: print(\"recovered: {e.message()}\")\nmain()\n";
     assert_eq!(run(src), "recovered: boom\n");
 }
 
@@ -14051,7 +14052,7 @@ fn executor_faulting_job_does_not_hang_shutdown() {
     let src = "import std.concurrency\n\
                ex := Executor()\n\
                ex.submit(fn(): panic(\"boom\"))\n\
-               r := recover: ex.shutdown()\n\
+               r: None!Error = recover: ex.shutdown()\n\
                match r:\n    \
                    ?_: print(\"no fault\")\n    \
                    !e: print(\"caught: {e.message()}\")\n";
@@ -17832,7 +17833,7 @@ fn main():
     ex := Executor()
     ex.submit(boom_a)
     ex.submit(boom_b)
-    r := recover: ex.shutdown()
+    r: None!Error = recover: ex.shutdown()
     match r:
         ?_: print("no fault")
         !e: print("fault: {e.message()}")

@@ -10,7 +10,7 @@ fn counting_sort(xs: List[int]) -> List[int]:
     counts := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     for v in xs:
         counts[v] += 1            # index compound-assign
-    out := []
+    out: List[int] = []
     digit := 0
     for c in counts:
         i := 0

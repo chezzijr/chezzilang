@@ -10,7 +10,7 @@ import std.concurrency.collection
 # 101, observed by the PARENT after the join. If the struct were deep-copied, the parent would see 1.
 # If the RMW raced (get-then-set instead of one write closure), it would be < 101.
 test fn airlock_shares_handle():
-    ctr := collection.ConcurrentCounter(RwShared({}))
+    ctr: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(RwShared({}))
     ctr.increment("k")
     parallel:
         for i in range(0, 100):
@@ -20,7 +20,7 @@ test fn airlock_shares_handle():
 
 # Single-thread ConcurrentMap surface: set/get (a value / None), contains, len, remove, get_or_insert.
 test fn map_basic():
-    m := collection.ConcurrentMap(RwShared({}))
+    m: collection.ConcurrentMap[str, int] = collection.ConcurrentMap(RwShared({}))
     assert m.len() == 0
     assert m.get("a") == None
     assert not m.contains("a")
@@ -42,7 +42,7 @@ test fn map_basic():
 
 # snapshot returns a COPY of the map (a concurrent read).
 test fn map_snapshot():
-    m := collection.ConcurrentMap(RwShared({}))
+    m: collection.ConcurrentMap[str, int] = collection.ConcurrentMap(RwShared({}))
     m.set("x", 10)
     m.set("y", 20)
     snap: Map[str, int] = m.snapshot()
@@ -55,7 +55,7 @@ test fn map_snapshot():
 
 # Single-thread ConcurrentCounter surface: increment/add/count/total.
 test fn counter_basic():
-    c := collection.ConcurrentCounter(RwShared({}))
+    c: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(RwShared({}))
     assert c.count("a") == 0            # absent -> 0
     c.increment("a")
     c.increment("a")
@@ -71,7 +71,7 @@ test fn counter_basic():
 # CORRECTNESS CORE: 100 spawned tasks each increment the SAME key once -> exactly 100.
 # The single-write-lock RMW serializes the read-modify-write; any get-then-set race would lose updates.
 test fn counter_race_exact():
-    c := collection.ConcurrentCounter(RwShared({}))
+    c: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(RwShared({}))
     parallel:
         for i in range(0, 100):
             spawn:
@@ -81,7 +81,7 @@ test fn counter_race_exact():
 
 # Order-independent concurrent shape: each task writes its OWN key i -> i*i; parent reads them all.
 test fn map_each_own_key():
-    m := collection.ConcurrentMap(RwShared({}))
+    m: collection.ConcurrentMap[int, int] = collection.ConcurrentMap(RwShared({}))
     parallel:
         for i in range(0, 10):
             spawn:
@@ -99,7 +99,7 @@ test fn map_each_own_key():
 # forever -> "maximum call depth exceeded". Now the check+insert+capture are one write lock, so this
 # can't happen. Reaching the asserts at all proves no task faulted; the only legal present value is 7.
 test fn get_or_insert_race_no_fault():
-    m := collection.ConcurrentMap(RwShared({}))
+    m: collection.ConcurrentMap[str, int] = collection.ConcurrentMap(RwShared({}))
     parallel:
         for i in range(0, 50):
             spawn:

@@ -201,6 +201,10 @@ fn grid_cells(out: &mut Vec<Cell>) {
                     Expect::Prints("6".to_string())
                 }
                 Verdict::Reject if label == "ident" => Expect::Rejects("ident["),
+                // A free closure's return is a signature: its own owner rejects the hole.
+                Verdict::Reject if s.name == "untyped closure body" => {
+                    Expect::Rejects("cannot infer return type of '<closure>'")
+                }
                 Verdict::Reject => Expect::Rejects(REJECT),
                 Verdict::Sink => Expect::Prints("ok".to_string()),
                 Verdict::Print if label == "ident" => Expect::Rejects("ident["),
@@ -415,6 +419,27 @@ fn single_cells(out: &mut Vec<Cell>) {
         ),
         p("[]\n[]"),
     );
+    // No message prints a hole as a type: a pending `?x` reads as its default `T?`.
+    add(
+        "(p) None into an int",
+        in_main("", "    a: int = None\n    print(a)\n"),
+        Expect::Rejects("cannot assign None to variable of type int"),
+    );
+    add(
+        "(p) 1 + ?5",
+        in_main("", "    print(1 + ?5)\n"),
+        Expect::Rejects("cannot apply + to int and int?"),
+    );
+    add(
+        "(p) (?5).foo()",
+        in_main("", "    print((?5).foo())\n"),
+        Expect::Rejects("type int? has no method 'foo'"),
+    );
+    add(
+        "(p) if ?5",
+        in_main("", "    if ?5:\n        print(1)\n"),
+        Expect::Rejects("if condition must be bool, found int?"),
+    );
     add(
         "(n) None ?? 1",
         in_main("", "    print(None ?? 1)\n"),
@@ -528,6 +553,18 @@ fn open_binding_grid() {
     for (i, c) in cells.iter().enumerate() {
         if let Err(e) = run_cell(&root, i, c) {
             fails.push(e);
+        }
+        // No reject cell describes a hole with an internal token.
+        if matches!(c.expect, Expect::Rejects(_)) {
+            let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+                .args(["check", "main.chz"])
+                .current_dir(root.join(format!("c{i}")))
+                .output()
+                .expect("spawn chezzi");
+            let err = String::from_utf8_lossy(&out.stderr);
+            if err.contains('\u{E000}') || err.contains("<unknown>") || err.contains("found _") {
+                fails.push(format!("{}: a hole token in {err:?}", c.name));
+            }
         }
     }
     let counted = counted_cells();

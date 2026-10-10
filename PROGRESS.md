@@ -9374,6 +9374,28 @@ the stored-callback abort net, and `std.net`'s sticky-UTF-8 + `read_bytes` drain
 
 ## Current focus
 
+### TICKET-238 — a binding's type is known on its own statement (2026-10-10)
+
+Owner decision: inference never reads a later statement. `xs := []`, `m := {}`, `z := None`,
+`h := [None]`, `c := Cell(None)`, `v := Box.new()`, `ys := id([])` and `g := ident` are errors on the
+line that creates them. This closes wave 22 Family A (19 repros; `docs/root-causes-w22.md`).
+
+- **Migration.** Write the type on the statement: `xs: List[int] = []` or `xs := List[int]()`;
+  `z: int? = None`; `Box[int].new()`; `g := ident[int]`; `r: int! = recover: ...` (or
+  `r: None!Error = recover: ...` for a body with no value). 118 bindings in 61 `.chz` files were
+  migrated (`examples`, `std`, `benches`, `judge`, `tests`).
+- **Unchanged.** Same-line inference: `[None, 7]` is `List[int?]`, `z := ?5` is `int?`, a typed
+  parameter, return, field or element slot types an empty literal, and a consumed open value
+  (`print([])`, `for x in []:`) is accepted.
+- **Also rejected.** An unannotated closure parameter typed by an open argument:
+  `s := fold([1, 2], [], fn(acc, x): acc + [x])` names `acc`; `r: List[int] = fold(...)` is accepted.
+- **Accepted, by decision.** `x := first([])` with `fn first[T](xs: List[T]) -> T`: its type is the
+  uninhabited sentinel and the call faults at run time. Before, a use of `x` was `cannot apply + to U`.
+- **Deleted.** `empty_coll_sites`, `empty_coll_aliases`, `carrier_pins` and every pin writer and
+  reader (1300 lines of `src/checker`). One predicate `Ty::has_hole`, one check
+  `Checker::closed_binding_ty`. Grid: `tests/open_binding_grid.rs` (247 cells).
+- **Messages.** No message prints an open type as `<unknown>?` or `_`.
+
 ### JIT entry rule (owner decision, 2026-09-22)
 
 The bug-hunt phase ends, and the JIT (Tier 2 quickening and Tier 3 Cranelift, `docs/future.md` §4) starts,

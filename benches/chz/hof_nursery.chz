@@ -6,7 +6,7 @@
 # Prints 501000000, the same total as hof.chz.
 
 fn main():
-    xs := []
+    xs: List[int] = []
     i := 0
     while i < 1000:
         xs.push(i)

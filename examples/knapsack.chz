@@ -9,9 +9,9 @@
 import std.cmp
 
 fn build_table(rows: int, cols: int) -> List[List[int]]:
-    dp := []
+    dp: List[List[int]] = []
     for i in 0..rows:
-        row := []
+        row: List[int] = []
         for w in 0..cols:
             row.push(0)
         dp.push(row)

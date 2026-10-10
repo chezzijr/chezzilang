@@ -1,4 +1,4 @@
 # rule: primary, mapEntries
 fn main():
-    empty := {}
+    empty: Map[str, int] = {}
     m := {"a": 1, "b": 2}

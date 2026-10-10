@@ -1,6 +1,7 @@
 //! TICKET-186 — one record per module slot. Everything the checker knows about a top-level name
 //! beyond its type lives in [`GlobalBinding`]; its type lives in `scopes[0]`.
 
+use super::setup::BindSite;
 use super::*;
 
 /// What declared a module slot.
@@ -32,8 +33,6 @@ pub(super) struct ImportFacts {
 /// - `fn_reads` records readers and is rolled back by `DiagMark` (DEC-157).
 /// - `kw_written`/`kw_pending` record assignment writes, which are walk-order and settled at
 ///   `pop_scope` at every depth.
-/// - `empty_coll_sites`/`carrier_pins` serve locals at every depth; for a global their pins land
-///   in the type store the first let no longer wipes.
 #[derive(Debug, Clone, Default)]
 pub(super) struct GlobalBinding {
     /// Every top-level declaration of the name, in source order, with its statement span.
@@ -235,11 +234,24 @@ impl Checker {
     /// fresh binding, and this is not one. Returns `false` when this is not that let, or when
     /// `declared` is not a refinement of the seed (a retype; the caller's `reject_redeclare`
     /// reports it against the seed).
-    pub(super) fn refine_first_let(&mut self, name: &str, declared: Ty, stmt_span: Span) -> bool {
+    pub(super) fn refine_first_let(
+        &mut self,
+        name: &str,
+        declared: Ty,
+        stmt_span: Span,
+        site: BindSite,
+    ) -> bool {
         let Some(merged) = self.first_let_merge(name, &declared, stmt_span) else {
             return false;
         };
+        // TICKET-238 -- the merged type is the one this let stores, so it is the one judged.
+        let (merged, poisoned) = self.closed_binding_ty(name, merged, site);
         self.reach_global(name);
+        if poisoned {
+            self.hole_rejected[0].insert(name.to_string());
+        } else {
+            self.hole_rejected[0].remove(name);
+        }
         self.scopes[0].insert(name.to_string(), merged);
         true
     }

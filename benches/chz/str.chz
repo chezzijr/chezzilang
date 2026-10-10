@@ -3,7 +3,7 @@
 # Prints the length of the joined string.
 
 fn main():
-    parts := []
+    parts: List[str] = []
     i := 0
     while i < 500000:
         parts.push("item-{i}")

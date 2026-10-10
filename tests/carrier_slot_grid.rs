@@ -568,8 +568,9 @@ fn extra_cells(cells: &mut Vec<Cell>) {
     cells.extend([
         ms("q_default_optional", SHOW_OPT, "fn main():\n    y := ?5\n    show(y)\nmain()", prints("some 5")),
         ms("q_var_bound_unknown", SHOW_OPT, "fn main():\n    y := ?5\n    ys := [y]\n    ys = []\n    show(y)\n    print(ys)\nmain()", prints("some 5\n[]")),
-        ms("q_pinned_by_result", SHOW_RES, "fn take(r: int!str):\n    show(r)\nfn main():\n    z := ?5\n    take(z)\nmain()", prints("ok 5")),
-        m("bang_pinned_by_return", "fn f() -> int!:\n    e := !\"disk\"\n    return e\nmatch f():\n    ?v:\n        print(\"ok {v + 0}\")\n    !e:\n        print(\"err {e.message()}\")", prints("err disk")),
+        // TICKET-238: `z := ?5` is `int?` on its own line; no later slot re-reads it.
+        ms("q_not_pinned_by_result", SHOW_RES, "fn take(r: int!str):\n    show(r)\nfn main():\n    z := ?5\n    take(z)\nmain()", r("expected int!str, found int?")),
+        m("bang_not_pinned_by_return", "fn f() -> int!:\n    e := !\"disk\"\n    return e\nmatch f():\n    ?v:\n        print(\"ok {v + 0}\")\n    !e:\n        print(\"err {e.message()}\")", r("a `!` value needs its type from an annotation")),
         m("bang_unpinned_fn", "fn main():\n    w := !\"disk\"\n    print(w)\nmain()", r("a `!` value needs its type from an annotation")),
         m("bang_unpinned_top", "w := !\"disk\"\nprint(w)", r("a `!` value needs its type from an annotation")),
         m("bang_not_error", "fn f() -> int!:\n    return !5\nprint(f())", r("int does not satisfy Error")),

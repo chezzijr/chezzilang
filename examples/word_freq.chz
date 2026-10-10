@@ -8,7 +8,7 @@
 
 fn main():
     text := "the quick brown fox the lazy dog the fox jumps the dog"
-    counts := {}
+    counts: Map[str, int] = {}
     for w in text.split(" "):
         if counts.has(w):
             counts[w] = counts[w] + 1
@@ -18,7 +18,7 @@ fn main():
     print("unique words: {counts.len()}")
 
     # Build (word, count) pairs by iterating the map directly (gap #14).
-    pairs := []
+    pairs: List[(str, int)] = []
     for w, c in counts:
         pairs.push((w, c))
 

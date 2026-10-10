@@ -4,7 +4,7 @@
 # string-content hashing. Prints 199999000000.
 
 fn main():
-    m := {}
+    m: Map[int, int] = {}
     i := 0
     while i < 200000:
         m[i] = i * 2

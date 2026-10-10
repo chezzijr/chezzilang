@@ -1,5 +1,5 @@
 fn main():
-    xs := []
+    xs: List[List[int]] = []
     i := 0
     while i < 2000000:
         xs.push([i, i])

@@ -8,7 +8,7 @@ fn produce(ch: Channel[int], v: int):
     ch.send(v)
 
 fn collect(ch: Channel[int], out: Channel[int], n: int):
-    nums := []
+    nums: List[int] = []
     for _ in 0..n:
         nums.push(ch.recv())            # blocks on an empty channel until a producer sends
     nums.sort_by(fn(a: int, b: int) -> int: a - b)

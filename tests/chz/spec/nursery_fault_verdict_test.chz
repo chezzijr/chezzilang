@@ -61,7 +61,7 @@ test fn main_recv_in_a_generator_resume_with_live_sender():
             if v < 0:
                 return
             yield v
-    out := []
+    out: List[int] = []
     parallel:
         spawn:
             for i in 0..3:

@@ -15,7 +15,7 @@ test fn t_heap_min():
     match h.peek():
         ?v: assert v == 1
         None: assert false, "peek empty"
-    out := []
+    out: List[int] = []
     while true:
         match h.pop():
             ?v: out.push(v)
@@ -27,7 +27,7 @@ test fn t_heap_max_and_reverse():
     g := col.max_heap()
     for x in [5, 3, 8, 1, 9, 2, 7]:
         g.push(x)
-    out := []
+    out: List[int] = []
     while true:
         match g.pop():
             ?v: out.push(v)
@@ -54,7 +54,7 @@ test fn t_heap_empty():
 
 test fn t_heap_from_list():
     h := col.from_list([3, 1, 2, 5, 4], fn(a: int, b: int) -> bool: a < b)
-    out := []
+    out: List[int] = []
     while true:
         match h.pop():
             ?v: out.push(v)
@@ -64,12 +64,12 @@ test fn t_heap_from_list():
 # ---- Deque ----
 
 test fn t_deque_fifo():
-    d := col.Deque([], [])
+    d: col.Deque[int] = col.Deque([], [])
     d.push_back(1)
     d.push_back(2)
     d.push_back(3)
     assert d.len() == 3
-    out := []
+    out: List[int] = []
     while true:
         match d.pop_front():
             ?v: out.push(v)
@@ -77,11 +77,11 @@ test fn t_deque_fifo():
     assert out == [1, 2, 3]
 
 test fn t_deque_lifo():
-    d := col.Deque([], [])
+    d: col.Deque[int] = col.Deque([], [])
     d.push_back(1)
     d.push_back(2)
     d.push_back(3)
-    out := []
+    out: List[int] = []
     while true:
         match d.pop_back():
             ?v: out.push(v)
@@ -89,7 +89,7 @@ test fn t_deque_lifo():
     assert out == [3, 2, 1]
 
 test fn t_deque_both_ends():
-    d := col.Deque([], [])
+    d: col.Deque[int] = col.Deque([], [])
     d.push_back(1)
     d.push_back(2)
     d.push_front(0)
@@ -100,7 +100,7 @@ test fn t_deque_both_ends():
     match d.peek_back():
         ?v: assert v == 2
         None: assert false, "peek_back empty"
-    out := []
+    out: List[int] = []
     while true:
         match d.pop_front():
             ?v: out.push(v)
@@ -108,7 +108,7 @@ test fn t_deque_both_ends():
     assert out == [0, 1, 2]
 
 test fn t_deque_interleaved():
-    d := col.Deque([], [])
+    d: col.Deque[int] = col.Deque([], [])
     d.push_back(2)
     d.push_back(3)
     d.push_front(1)
@@ -122,7 +122,7 @@ test fn t_deque_interleaved():
     assert d.is_empty() == true
 
 test fn t_deque_empty():
-    d := col.Deque([], [])
+    d: col.Deque[int] = col.Deque([], [])
     match d.pop_front():
         ?_: assert false
         None: assert true
@@ -141,7 +141,7 @@ test fn t_deque_empty():
 # ---- Counter ----
 
 test fn t_counter_counts():
-    c := col.Counter({})
+    c: col.Counter[str] = col.Counter({})
     for x in ["a", "b", "a", "c", "a", "b"]:
         c.add(x)
     assert c.count("a") == 3
@@ -150,7 +150,7 @@ test fn t_counter_counts():
     assert c.count("missing") == 0
 
 test fn t_counter_add_n_and_total():
-    c := col.Counter({})
+    c: col.Counter[str] = col.Counter({})
     c.add_n("x", 5)
     c.add_n("y", 3)
     c.add("x")
@@ -159,7 +159,7 @@ test fn t_counter_add_n_and_total():
     assert c.total() == 9
 
 test fn t_counter_most_common_ties():
-    c := col.Counter({})
+    c: col.Counter[str] = col.Counter({})
     # insertion order a,b,c,d ; counts a=2,b=2,d=2,c=1 -> ties keep insertion order
     for x in ["a", "b", "c", "d", "a", "b", "d"]:
         c.add(x)
@@ -174,7 +174,7 @@ test fn t_counter_most_common_ties():
 test fn t_counter_most_common_no_overflow():
     # counts spanning > i64 must NOT trap most_common (compare, not subtract): add_n takes
     # arbitrary/negative n, so MAX vs negative is a supported state.
-    c := col.Counter({})
+    c: col.Counter[str] = col.Counter({})
     c.add_n("hi", 9223372036854775807)   # i64::MAX
     c.add_n("lo", -3)
     assert c.most_common(2) == [("hi", 9223372036854775807), ("lo", -3)]

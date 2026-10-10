@@ -2049,6 +2049,14 @@ struct Capture {
     ty: Ty,
 }
 
+/// TICKET-238 -- the state of `errors` and `poison_reads` when a statement began, and its span.
+#[derive(Clone, Copy, Default)]
+pub(super) struct StmtMark {
+    pub(super) errors: usize,
+    pub(super) poison: usize,
+    pub(super) span: Span,
+}
+
 struct Checker {
     errors: Vec<CheckError>,
     /// Non-fatal diagnostics (`Severity::Warning`), collected separately so they can never reach the
@@ -2072,6 +2080,10 @@ struct Checker {
     /// (freezes the NAME; the object stays mutable — shallow). Cleared on re-declaration by `declare`
     /// (a shadowing `:=` yields a fresh, possibly-mutable binding), same rule as `loop_vars`.
     const_decls: Vec<std::collections::HashSet<String>>,
+    /// TICKET-238 -- per-scope names whose binding the hole check rejected (parallel to `scopes`,
+    /// kept site for site as `const_decls` is). A read of one is the cascade signal
+    /// (`poison_reads`); the stored type is bare `Ty::Unknown`, which other sources produce too.
+    hole_rejected: Vec<std::collections::HashSet<String>>,
     functions: HashMap<String, FnSig>,
     fn_write_scopes: Vec<HashMap<String, fn_writes::FnSummary>>,
     /// Names of functions declared in the CURRENT module (top-level `fn`s only — NOT imported names).
@@ -2664,26 +2676,6 @@ struct Checker {
     /// where this table holds exactly that module's decls (mirrors how `functions` is entry-scoped).
     /// Free fns / methods carry their doc on `FnSig::doc` instead. Runtime-inert (LSP only).
     name_docs: HashMap<String, String>,
-    /// PART A — pending "un-constrained empty collection" sites: a local `b := []`/`{}`/`Set()` whose
-    /// element/key/value slot is still `Unknown` (an un-annotated empty literal). Each entry is
-    /// `(owning_scope_idx, name, decl_span)`. A later constraining op (`push`/`add`/`insert`/`extend`,
-    /// `m[k]=v`) calls `drop_empty_site` to clear the requirement; at end-of-scope (fn body / module)
-    /// `finalize_empty_coll_sites` errors on any site whose binding STILL carries `Unknown`-in-slot
-    /// (never refined → no element type could be inferred → require an annotation).
-    empty_coll_sites: Vec<(usize, String, Span)>,
-    /// TICKET-032 A1 — pairs of `(owning_scope_idx, name)` that name the SAME runtime collection (an
-    /// un-annotated alias, `c := b`). `repin` propagates a pin across every pair reachable from the
-    /// binding it just repinned, so pinning either name pins both. A whole-binding reassignment or
-    /// re-declaration of either name breaks the pair (unlinked in `check_assign`'s Ident arm and in
-    /// `declare`), so a rebound alias is never falsely rejected.
-    empty_coll_aliases: Vec<((usize, String), (usize, String))>,
-    /// TICKET-064 — the payload type a `None`/nullary-enum-variant binding was pinned to by its
-    /// FIRST constraining use (an annotated sink, a typed argument, a typed `return`, a `??` with a
-    /// typed right-hand side, or a `Some(v)`/`Variant(v)` write). Keyed by `(owning_scope_idx, name)`,
-    /// like `empty_coll_sites`/`empty_coll_aliases`. A READ is never checked against this table — only
-    /// a later WRITE is, so a never-written binding stays permissive across differently-typed reads
-    /// (W8-46's surviving half).
-    carrier_pins: Vec<((usize, String), Ty)>,
     /// TICKET-139 (W14-2) — bindings CERTAIN to hold one known function: an unannotated single-name
     /// `:=` of a top-level user fn or a closure literal, or a nested `fn`'s own name. Only a
     /// keyword call through such a binding is legal (labels are surface-only, so any other callee
@@ -2702,19 +2694,16 @@ struct Checker {
     /// TICKET-197: an entry waits on every key it lists (the binding, then its `kw_certain`
     /// dependencies); each key settles at its own scope's `pop_scope`, and a write to any voids it.
     kw_pending: Vec<(Vec<(usize, String)>, globals::KwUse)>,
-    /// PART B — retroactive hover: when the hover probe lands on an occurrence of a binding whose
-    /// recorded type still carries `Unknown`-in-slot (a not-yet-refined empty collection), we stash the
-    /// binding's `(owning_scope_idx, name, kind, doc)` here INSTEAD of locking `hover_result`, then at
-    /// the end-of-scope seam that OWNS the binding overwrite `hover_result` with the binding's FINAL
-    /// (refined) type. The owning-scope index gates the finalize so an intervening inner fn/method seam
-    /// can't resolve it prematurely to the still-unrefined type. Probe-gated; behavior-neutral.
-    hover_pending: Option<(usize, String, HoverKind, Option<String>)>,
+    /// TICKET-238 -- where the statement being checked began (`Checker::with_stmt_mark`).
+    stmt_mark: StmtMark,
+    /// TICKET-238 -- reads of a `hole_rejected` binding so far. Written during a body walk, so
+    /// `DiagMark` saves and restores it.
+    poison_reads: usize,
     /// TICKET-157 (W12-12) — memo of the SPECULATIVE `infer_inline_fn_ret` a nested un-annotated `fn` runs
     /// (`sig.rs`'s nested-fn arm), keyed by the decl's name span: the inferred return type, then the
     /// errors and warnings that inference emitted AFTER its own `diag_rollback` (the finalize
     /// diagnostic). Everything the walk did before that rollback is erased by it (`DiagMark`), so a
-    /// hit replays these two lists and nothing else. `check_fn_body` is NEVER memoized: the
-    /// enclosing walk reads its `drop_empty_site` pin mid-walk. Cleared at the top of every OUTERMOST
+    /// hit replays these two lists and nothing else. `check_fn_body` is NEVER memoized. Cleared at the top of every OUTERMOST
     /// fn walk (`!in_fn_body`), so an entry never outlives one `infer_returns` pass.
     ret_memo: HashMap<Span, (Ty, Vec<CheckError>, Vec<CheckError>)>,
     /// `false` turns the memo off (test-only twin entry points compare with and without it).
@@ -3265,7 +3254,7 @@ fn fn_slot_params_concrete(t: &Ty, rigid: &dyn Fn(&str) -> bool) -> bool {
 /// recovery degraded to `?` (`Bx(0).two(ident, ident)`) does not read as the sentinel.
 fn fn_slot_params_have_unknown(t: &Ty) -> bool {
     matches!(t, Ty::Func { params, .. }
-        if params.iter().any(|p| p.is_unknown() || contains_unknown_in_slot(p)))
+        if params.iter().any(|p| p.is_unknown() || p.has_hole()))
 }
 
 /// THE derivation behind the uninstantiated-generic-function-value rule, asked at every position a
@@ -3339,35 +3328,6 @@ fn pin_generic_fn_value(
     FnValuePin::Pinned(pinned, refined)
 }
 
-/// True iff `t` is a COMPOUND type whose recursive structure contains a `Ty::Unknown` anywhere in a
-/// type-argument / element / key / value position. A bare top-level `Ty::Unknown` returns FALSE —
-/// that is the cascade-suppression sentinel (a real type error already happened, or a permissive
-/// receiver); refining it would fight cascade-suppression. Drives the refine-on-first-use gate: we
-/// only narrow a binding whose empty-slot Unknown is reachable, never the bare sentinel.
-fn contains_unknown_in_slot(t: &Ty) -> bool {
-    fn has_unknown(t: &Ty) -> bool {
-        match t {
-            Ty::Unknown => true,
-            Ty::List(x)
-            | Ty::Option(x)
-            | Ty::Set(x)
-            | Ty::Channel(x)
-            | Ty::Shared(x)
-            | Ty::RwShared(x)
-            | Ty::Atomic(x) => has_unknown(x),
-            Ty::Map(k, v) => has_unknown(k) || has_unknown(v),
-            Ty::Result(a, b) => has_unknown(a) || has_unknown(b),
-            Ty::Struct(_, a) | Ty::Enum(_, a) => a.iter().any(has_unknown),
-            Ty::Tuple(ts) => ts.iter().any(has_unknown),
-            _ => false,
-        }
-    }
-    match t {
-        Ty::Unknown => false, // bare sentinel — never refine
-        _ => has_unknown(t),
-    }
-}
-
 /// Structural merge for refine-on-first-use: fill `Ty::Unknown` slots in `a` with the corresponding
 /// concrete slot from `shape`, recursing to arbitrary depth (so `list[Option[Box[int]]]` fills in a
 /// single merge). A bare `Unknown` in `a` becomes `shape` (when `shape` is concrete). For matching
@@ -3430,6 +3390,26 @@ pub(crate) fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
         {
             Option(Box::new(s.clone()))
         }
+        (
+            Func {
+                params: ap,
+                ret: ar,
+                labels,
+            },
+            Func {
+                params: sp,
+                ret: sr,
+                ..
+            },
+        ) if ap.len() == sp.len() => Func {
+            params: ap
+                .iter()
+                .zip(sp)
+                .map(|(x, y)| merge_unknown(x, y))
+                .collect(),
+            ret: Box::new(merge_unknown(ar, sr)),
+            labels: labels.clone(),
+        },
         // Shape/name/arity mismatch: leave `a` unchanged (no refine — normal mismatch fires later).
         _ => a.clone(),
     }
@@ -3745,7 +3725,7 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
             if !a.is_unknown() && !map.contains_key(n) {
                 map.insert(n.clone(), a.clone());
             } else if let Some(old) = map.get(n)
-                && contains_unknown_in_slot(old)
+                && old.has_hole()
             {
                 // TICKET-234 -- a parameter first bound to a type with an open slot is filled by
                 // a later argument instead of keeping the first binding (`put(b, 7)` on an open

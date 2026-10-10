@@ -1294,20 +1294,9 @@ impl Checker {
             let recv = WitnessCallee::Dotted(tname.to_string());
             self.record_witness_call(method, &wparams, &sub, name_span, span, recv);
         }
-        // A method-OWN `[U]` param still un-inferred (no method turbofish, unbindable from args, e.g.
-        // `make[U]() -> List[U]`) degrades to the refinable `Ty::Unknown` — a method-local `[U]` with
-        // nothing to bind it is genuinely unconstrained, and downstream use refines it cleanly.
-        //
-        // The ENCLOSING type's params (`tps`, the `T` of `Box[T]`) are DELIBERATELY NOT degraded: an
-        // enclosing `T` left un-inferred (no type-level turbofish `Box[int].empty()`, no argument
-        // binding `T`, no annotation/return hint `b: Box[int] = Box.empty()`) is the SAME "you must pin
-        // `T` at the construction site" situation that already rejects bare container ctors (`[]`) and
-        // generic FREE-function returns (`mkbox()`). Leaving it as a leaked `Ty::Param` (via `subst`
-        // below) routes the first mismatching/mutating use to the existing diagnostics — a `List[T]`
-        // field mutator hits the "un-inferred type parameter … bind it at the construction site" hint,
-        // a `T`-param user method gets the base "expected T, found <ty>" — instead of `Ty::Unknown`
-        // silently swallowing any later argument and defeating homogeneity checking (the soundness hole).
-        for tp in sig.type_params.iter() {
+        // A type param still un-inferred, the method's own or the enclosing type's, is a hole
+        // (`Box.new()` is `Box[?]`): the statement that stores it is rejected (TICKET-238).
+        for tp in all_tps.iter() {
             sub.entry(tp.name.clone()).or_insert(Ty::Unknown);
         }
         subst(&sig.ret, &sub)
@@ -2279,11 +2268,12 @@ impl Checker {
         // BEFORE the per-arg check, so it reports the cause instead of leaking a
         // "cannot compare T and T" from inside the lambda. Binds the params to Unknown.
         self.report_uninferable_closure_params(name, &tps, &field_tys, args, &mut sub, span);
-        for (decl, (actual, arg)) in field_tys.iter().zip(arg_tys.iter().zip(args)) {
-            let expected = subst(decl, &sub);
-            self.check_generic_arg(name, &expected, actual, arg);
-        }
         self.enforce_bounds(&tps, &tps, &sub, span);
+        // TICKET-238 -- the same loop-back a generic call runs: a closure argument's body solves a
+        // type param on this statement (`M(1, fn(x): x * 2)` is `M[int, int]`).
+        self.recover_return_only_params(
+            name, &field_tys, &arg_tys, args, &field_tys, &tps, &mut sub, span,
+        );
         let targs = tps
             .iter()
             .map(|tp| sub.get(&tp.name).cloned().unwrap_or(Ty::Unknown))
@@ -2646,25 +2636,6 @@ impl Checker {
         if self.call_writes_receiver(&obj_ty, method) {
             self.note_projected_task_write(obj);
         }
-        // Refine-on-first-use: if `obj` is a simple variable whose type has an `Unknown` element/
-        // key/value/type-arg slot (an empty literal / nullary variant / native `None`), and this is
-        // a slot-supplying mutator (`push`/`add`/`insert`/`extend`), re-pin the binding to the
-        // concrete shape the arg supplies — so a later conflicting op is a normal `check_args`
-        // mismatch and the set-element Hashable ban runs at concrete-ification. Then re-read the
-        // (possibly refined) receiver type from scope so dispatch sees the narrowed element.
-        self.refine_receiver(obj, &obj_ty, method, args);
-        let obj_ty = match &obj.kind {
-            ExprKind::Ident(name) => self.lookup(name).unwrap_or(obj_ty),
-            // TICKET-234 -- a receiver through a place (`b.v`, `xss[0]`) was pinned through its
-            // root binding, so its type is read again.
-            _ if contains_unknown_in_slot(&obj_ty) && Self::place_root(obj).is_some() => {
-                let mark = self.diag_mark();
-                let t = self.infer(obj);
-                self.diag_rollback(mark);
-                t
-            }
-            _ => obj_ty,
-        };
         // Task 1 — a captured module-global aggregate mutated in a task (`xs.push(v)`, …) is no longer
         // a compile error: spawning deep-copies module globals per task, so the write hits the task's
         // OWN copy — invisible to the parent. The old frozen-module-global gate is deleted (`Shared`/`Channel` remain the escape
@@ -4175,8 +4146,6 @@ impl Checker {
                 ),
             );
         }
-        // The one place a generic path pins an argument binding (TICKET-234).
-        self.constrain_empty_arg(arg, expected);
         refined
     }
 
@@ -4372,63 +4341,6 @@ impl Checker {
         );
     }
 
-    /// PART A — passing a bare empty-collection binding (`b := []`) into a CONCRETE collection
-    /// parameter (`f(xs: List[int])`) CONSTRAINS its element type: the requirement is dropped and
-    /// the element pinned in one operation, the third refine-on-first-use site beside
-    /// [`Self::refine_receiver`] (`push`/`add`) and [`Self::refine_index_receiver`] (`m[k]=v`).
-    /// Passing into a concrete slot IS a use, so it pins exactly like the first `push`.
-    ///
-    /// Gated on the parameter being fully concrete so a generic (`fn ident[T](xs: List[T])`) or
-    /// un-inferred slot pins nothing, and on the argument actually fitting so a mismatch keeps its
-    /// ordinary diagnostic. Lives here rather than inline in `check_args_range_decl` because the
-    /// GENERIC call paths never reach that function — `infer_generic_call` /
-    /// `infer_generic_method` match arguments with `unify` directly — so a parameter made concrete
-    /// by a SIBLING argument pinned nothing: measured, `fn move_first[T](a: List[T], b: List[T])`
-    /// called `move_first(["x"], xs)` then `xs.push(1)` printed `['x', 1]`, check-clean at rc=0.
-    pub(super) fn constrain_empty_arg(&mut self, arg: &Expr, pt: &Ty) {
-        let ExprKind::Ident(name) = &arg.kind else {
-            // TICKET-234 -- an open collection, struct or handle passed through a place
-            // (`takes(o.b)`) pins its root binding.
-            if let Some(root) = Self::place_root(arg)
-                && ty_fully_concrete(pt)
-                && self
-                    .lookup(root)
-                    .is_some_and(|rt| contains_unknown_in_slot(&rt))
-            {
-                let mark = self.diag_mark();
-                let at = self.infer(arg);
-                self.diag_rollback(mark);
-                if Self::is_open_coll(&at) && self.assignable(pt, &at) {
-                    self.repin_place(arg, pt);
-                }
-            }
-            return;
-        };
-        let pt = &self.pin_shape(name, pt);
-        // FULLY concrete — no `Ty::Unknown` AND no `Ty::Param`, nested too. The weaker
-        // `!contains_unknown_in_slot` was enough while only `check_args_range_decl` called this (a
-        // non-generic callee's params carry no `Ty::Param`), but the generic paths hand over a
-        // SUBSTITUTED slot that can still be `List[T]` with `T` free — and pinning to that made the
-        // binding rigidly `List[T]`: measured, `fn ident[T](xs: List[T])` called `ident(xs)` then
-        // `xs.push(1)` reported *expected T, found int* on a program that must pin nothing.
-        if !ty_fully_concrete(pt) {
-            return;
-        }
-        let Some(bt) = self.lookup(name) else {
-            return;
-        };
-        if !self.assignable(pt, &bt) {
-            return;
-        }
-        self.drop_empty_site(name, Some(pt));
-        // TICKET-234 -- the callee can write through a struct or a handle, so the argument's
-        // binding takes the parameter's type. An `Option` or an enum argument is a value and is
-        // not pinned (DEC-064).
-        if Self::is_open_coll(&bt) {
-            self.repin_place(arg, pt);
-        }
-    }
-
     fn check_args_range_decl(
         &mut self,
         name: &str,
@@ -4451,14 +4363,6 @@ impl Checker {
         }
         for (i, arg) in args.iter().enumerate() {
             let at = self.infer_arg(arg, params.get(i));
-            // PART A: passing a bare empty-collection binding (`b := []`) into a CONCRETE collection
-            // parameter (`f(xs: List[int])`) constrains its element type — clear the pending annotation
-            // requirement (the spec's typed-parameter false-positive guard, one binding away from the
-            // direct-literal `f([])` form). Gated on the param being a fully-concrete type so an
-            // un-inferred / generic slot does not spuriously satisfy the requirement.
-            if let Some(pt) = params.get(i) {
-                self.constrain_empty_arg(arg, pt);
-            }
             if let Some(pt) = params.get(i)
                 && !self.assignable(pt, &at)
             {

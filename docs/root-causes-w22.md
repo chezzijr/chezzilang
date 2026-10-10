@@ -62,6 +62,10 @@ error or a fault, never a silent lost write).
 
 ## Family A — an open slot has no identity (A1..A8)
 
+**Status: closed by TICKET-238 (2026-10-10).** Later-line inference is pruned: a binding's type is
+known on the statement that creates it, and the three name tables are deleted. Grid:
+`tests/open_binding_grid.rs`.
+
 **The fact:** what type an untyped `None`, `[]`, `[None]`, `{}`, `Cell(None)` or `Box.new()` ends up
 with.
 

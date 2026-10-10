@@ -6,6 +6,10 @@
 //! carrier), because printed text is not the oracle: `7` and `?7` print the same. A reject cell
 //! holds a fragment of the message.
 //!
+//! TICKET-238 -- an untyped binder of an open value (`z := None`, `xs := [None]`) is now an error on
+//! its own line, so every cell whose program has one expects that error (`binds_open`). The rows
+//! keep their programs; the cells that still run are the ones with a typed or same-line slot.
+//!
 //! Row order follows the tables of the ticket: sites, depth, places, aliases, method and call
 //! arguments, closure arguments, `recover:` tails.
 
@@ -1249,13 +1253,13 @@ fn f():
 "#,
         [
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found <unknown>?"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
             ),
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found <unknown>?"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
             ),
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found <unknown>?"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
             ),
         ],
     ),
@@ -1270,13 +1274,13 @@ fn f():
 "#,
         [
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found <unknown>?"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
             ),
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found <unknown>?"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
             ),
             R(
-                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found <unknown>?"#,
+                r#"set element type must implement Hashable (int, str, bool, a tuple of Hashable elements, or a struct/enum defining hash(self) -> int), found None"#,
             ),
         ],
     ),
@@ -1451,7 +1455,7 @@ none
     xs := [n, 7]
     print(xs)
 "#,
-        R(r#"list elements differ: <unknown>? vs int"#),
+        R(r#"list elements differ: None vs int"#),
     ),
     one(
         "reads/loop",
@@ -1506,7 +1510,7 @@ none"#),
     xs := [[None], [7]]
     print(xs)
 "#,
-        R(r#"list elements differ: List[<unknown>?] vs List[int]"#),
+        R(r#"list elements differ: List[None] vs List[int]"#),
     ),
     one(
         "reads/push",
@@ -1528,7 +1532,7 @@ none"#),
     xs := [None, r]
     print(xs)
 "#,
-        R(r#"list elements differ: <unknown>? vs int!str"#),
+        R(r#"list elements differ: None vs int!str"#),
     ),
     one(
         "reads/ret",
@@ -2191,7 +2195,7 @@ const TWINS_ROWS: &[Row] = &[
     z = [1]
     print(z)
 "#,
-        R(r#"cannot assign List[?] to <unknown>?"#),
+        R(r#"cannot assign List[?] to None"#),
     ),
     one(
         "twins/errslot",
@@ -2201,7 +2205,7 @@ const TWINS_ROWS: &[Row] = &[
     w = 7
     print(w)
 "#,
-        R(r#"cannot assign int to _!str"#),
+        R(r#"a `!` value needs its type from an annotation"#),
     ),
     one(
         "twins/extend",
@@ -2293,7 +2297,7 @@ const TWINS_ROWS: &[Row] = &[
     z := None
     print(z.foo())
 "#,
-        R(r#"type <unknown>? has no method 'foo'"#),
+        R(r#"type None has no method 'foo'"#),
     ),
     one(
         "twins/openprint",
@@ -2314,7 +2318,7 @@ const TWINS_ROWS: &[Row] = &[
     z := None
     print(z + 1)
 "#,
-        R(r#"cannot apply + to <unknown>? and int"#),
+        R(r#"cannot apply + to None and int"#),
     ),
     one(
         "twins/opensink",
@@ -2324,7 +2328,7 @@ const TWINS_ROWS: &[Row] = &[
     x: int = z
     print(x)
 "#,
-        R(r#"cannot assign <unknown>? to variable of type int"#),
+        R(r#"cannot assign None to variable of type int"#),
     ),
     one(
         "twins/pushvar",
@@ -2366,7 +2370,7 @@ const TWINS_ROWS: &[Row] = &[
     g(true)
 "#,
         R(
-            r#"returned by 'g' is discarded — bind it (`r := …`), or discard it explicitly (`_ := …`) (`<unknown>?` is a None whose type is not known yet"#,
+            r#"returned by 'g' is discarded — bind it (`r := …`), or discard it explicitly (`_ := …`)"#,
         ),
     ),
 ];
@@ -2486,7 +2490,7 @@ const FIELD_ROWS: &[Row] = &[
     print(xs)
 "#,
         [
-            R(r#"cannot apply += to List[<unknown>?] and List[int]"#),
+            R(r#"cannot apply += to List[None] and List[int]"#),
             R(r#"cannot apply += to List[int?] and List[str?]"#),
             R(r#"cannot apply += to List[int?] and List[str?]"#),
         ],
@@ -2609,7 +2613,7 @@ const FIELD_ROWS: &[Row] = &[
     show(xs[1])
 "#,
         [
-            R(r#"cannot apply += to List[<unknown>?] and List[int]"#),
+            R(r#"cannot apply += to List[None] and List[int]"#),
             P(r#"8"#),
             P(r#"6"#),
         ],
@@ -3127,7 +3131,7 @@ const METH_ROWS: &[Row] = &[
     print(e.same({C}))
 "#,
         [
-            R(r#"argument 1 of 'same': expected <unknown>?, found int"#),
+            R(r#"argument 1 of 'same': expected None, found int"#),
             P(r#"true
 true"#),
             P(r#"true
@@ -3146,7 +3150,7 @@ true"#),
     print(z)
 "#,
         [
-            R(r#"cannot compare <unknown>? and int for equality"#),
+            R(r#"cannot compare None and int for equality"#),
             P(r#"false
 hi"#),
             P(r#"false
@@ -3165,9 +3169,9 @@ s"#),
     print(m)
 "#,
         [
-            R(r#"type Map[str, <unknown>?] has no method 'get_or'"#),
-            R(r#"type Map[str, <unknown>?] has no method 'get_or'"#),
-            R(r#"type Map[str, <unknown>?] has no method 'get_or'"#),
+            R(r#"type Map[str, None] has no method 'get_or'"#),
+            R(r#"type Map[str, None] has no method 'get_or'"#),
+            R(r#"type Map[str, None] has no method 'get_or'"#),
         ],
     ),
     row(
@@ -3247,7 +3251,7 @@ s"#),
     show(z)
 "#,
         [
-            R(r#"argument to 'pair' has type <unknown>?, expected int"#),
+            R(r#"argument to 'pair' has type None, expected int"#),
             P(r#"8"#),
             P(r#"6"#),
         ],
@@ -3297,9 +3301,9 @@ s"#),
     print(xs)
 "#,
         [
-            R(r#"type List[<unknown>?] has no method 'remove'"#),
-            R(r#"type List[<unknown>?] has no method 'remove'"#),
-            R(r#"type List[<unknown>?] has no method 'remove'"#),
+            R(r#"type List[None] has no method 'remove'"#),
+            R(r#"type List[None] has no method 'remove'"#),
+            R(r#"type List[None] has no method 'remove'"#),
         ],
     ),
     row(
@@ -3511,7 +3515,7 @@ s"#),
     print(b.v)
 "#,
         [
-            R(r#"argument to 'put2' has type Box[<unknown>?], expected Box[int]"#),
+            R(r#"argument to 'put2' has type Box[None], expected Box[int]"#),
             R(r#"'?' builds an optional or success value, found int?"#),
             R(r#"argument to 'put2' has type Box[int?], expected Box[str?]"#),
         ],
@@ -4215,7 +4219,7 @@ const REC_ROWS: &[Row] = &[
             None
     print(r)
 "#,
-        P(r#"None"#),
+        R(r#"cannot infer the"#),
     ),
     row(
         "rec/rif_print",
@@ -4443,11 +4447,50 @@ const REC_ROWS: &[Row] = &[
     ),
 ];
 
+/// TICKET-238 -- the right-hand sides that create a value with an open slot. Inference never
+/// reads a later statement, so a cell whose program binds one with an untyped `:=` is rejected on
+/// that line with the one hole error, whatever want its row holds: that want described a later
+/// pin. Every other cell keeps its want (a same-line sibling such as `[None, 7]` still joins).
+const OPEN_FORMS: [&str; 21] = [
+    "None",
+    "[None]",
+    "[None, None]",
+    "[[None]]",
+    "[]",
+    "[[]]",
+    "{}",
+    "{\"a\": None}",
+    "(None, 1)",
+    "if c: None else: None",
+    "Box(None)",
+    "Box([None])",
+    "Box([])",
+    "[Box(None)]",
+    "Out(Box(None))",
+    "Shared(None)",
+    "Shared([None])",
+    "Shared([])",
+    "RwShared(None)",
+    "Atomic(None)",
+    "E.Wrap(None)",
+];
+
+fn binds_open(src: &str) -> bool {
+    src.lines().any(|l| {
+        l.trim()
+            .split_once(" := ")
+            .is_some_and(|(_, rhs)| OPEN_FORMS.contains(&rhs))
+    })
+}
+
 fn cells_of(rows: &[Row], out: &mut Vec<Cell>) {
     for r in rows {
         let src = format!("{}fn main():\n{}main()\n", r.pre, &r.body[1..]);
         let mut push = |name: String, src: String, w: W| {
             let expect = match w {
+                // A row that does not parse is rejected before any binding is judged.
+                R(s) if s.starts_with("expected ':'") => Expect::Rejects(s),
+                _ if binds_open(&src) => Expect::Rejects("cannot infer the"),
                 P(s) => Expect::Prints(s.to_string()),
                 R(s) => Expect::Rejects(s),
             };

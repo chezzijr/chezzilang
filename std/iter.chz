@@ -15,7 +15,7 @@ import std.rand
 
 # Pair each element with its 0-based index: `[a, b]` → `[(0, a), (1, b)]`.
 fn enumerate[T](xs: List[T]) -> List[(int, T)]:
-    out := []
+    out: List[(int, T)] = []
     i := 0
     for x in xs:
         out.push((i, x))
@@ -24,7 +24,7 @@ fn enumerate[T](xs: List[T]) -> List[(int, T)]:
 
 # Zip two lists into a list of pairs, truncating to the shorter length.
 fn zip[A, B](xs: List[A], ys: List[B]) -> List[(A, B)]:
-    out := []
+    out: List[(A, B)] = []
     n := xs.len()
     if ys.len() < n:
         n = ys.len()
@@ -42,14 +42,14 @@ fn zip[A, B](xs: List[A], ys: List[B]) -> List[(A, B)]:
 
 # Apply `f` to each element, collecting the results into a new list (BEAM `Enum.map`).
 fn map[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:
-    out := []
+    out: List[U] = []
     for x in xs:
         out.push(f(x))
     return out
 
 # Keep the elements for which `pred` returns true, preserving order.
 fn filter[T](xs: List[T], pred: fn(T) -> bool) -> List[T]:
-    out := []
+    out: List[T] = []
     for x in xs:
         if pred(x):
             out.push(x)
@@ -88,7 +88,7 @@ fn sum(xs: List[int]) -> int:
 
 # The first `n` elements (clamped: `n <= 0` → `[]`, `n >= len` → the whole list).
 fn take[T](xs: List[T], n: int) -> List[T]:
-    out := []
+    out: List[T] = []
     i := 0
     while i < n and i < xs.len():
         out.push(xs[i])
@@ -97,7 +97,7 @@ fn take[T](xs: List[T], n: int) -> List[T]:
 
 # All but the first `n` elements (clamped: `n <= 0` → the whole list, `n >= len` → `[]`).
 fn drop[T](xs: List[T], n: int) -> List[T]:
-    out := []
+    out: List[T] = []
     i := n
     if i < 0:
         i = 0
@@ -129,7 +129,7 @@ fn find[T](xs: List[T], pred: fn(T) -> bool) -> T?:
 
 # Concatenate a list of lists into one list (one level of nesting, order-preserving).
 fn flatten[T](xss: List[List[T]]) -> List[T]:
-    out := []
+    out: List[T] = []
     for xs in xss:
         out.extend(xs)
     return out
@@ -205,7 +205,7 @@ fn ifilter[S: Iterable[T], T](it: S, pred: fn(T) -> bool) -> Iterator[T]:
 # Return a NEW list with the elements of `xs` randomly permuted (Fisher–Yates). Non-mutating:
 # `xs` is left untouched (matches std.iter's copy-and-return idiom).
 fn shuffle[T](xs: List[T]) -> List[T]:
-    out := []
+    out: List[T] = []
     for x in xs:
         out.push(x)
     # Walk from the high index down, swapping each element with a uniformly-chosen earlier-or-self.
@@ -233,10 +233,10 @@ fn sample[T](xs: List[T], k: int) -> List[T]:
         take_n = n
     if take_n < 0:
         take_n = 0
-    pool := []
+    pool: List[T] = []
     for x in xs:
         pool.push(x)
-    out := []
+    out: List[T] = []
     i := 0
     while i < take_n:
         # Pick from the unshuffled tail [i, n), swap into position i, then take it.

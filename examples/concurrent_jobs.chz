@@ -168,7 +168,7 @@ fn main():
     processed := Atomic(0)
     cleaned := Atomic(0)
     sum_total := Shared(0)
-    per_cat := collection.ConcurrentCounter(RwShared({}))
+    per_cat: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(RwShared({}))
     max_per_cat := RwShared[Map[str, int]]({})
     tok := cancel.manual()
 

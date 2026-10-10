@@ -208,7 +208,7 @@ struct Counter[T: Hashable + Eq]:
     # ORDER (map.keys() yields insertion order AND the list sort is STABLE). `k` is clamped to
     # [0, len]: k <= 0 -> [], k >= len -> all. O(n log n).
     fn most_common(self, k: int) -> List[(T, int)]:
-        pairs := []
+        pairs: List[(T, int)] = []
         for key in self.data.keys():
             pairs.push((key, self.data[key]))
         # Compare (don't subtract): `add_n` accepts arbitrary/negative counts, and `b.1 - a.1`

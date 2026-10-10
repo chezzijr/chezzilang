@@ -1433,31 +1433,14 @@ mod tests {
     }
 
     #[test]
-    fn hover_refined_empty_decl_shows_final_type() {
-        // PART B: hovering the `b := []` DECL site, after a later `b.push(0)` refines b to List[int],
-        // shows the FINAL refined type List[int], not the provisional List[Unknown].
-        let src = "fn main():\n b := []\n b.push(0)\n print(b)\nmain()\n";
+    fn hover_typed_empty_decl_and_use_show_the_annotation() {
+        // TICKET-238: a binding's type is known on its own statement, so the decl-site hover and a
+        // use before any `push` both show it. The three `hover_refined_empty_*` tests were deleted:
+        // their subject was a later `b.push(0)` refining `b := []`, which is now an error.
+        let src = "fn main():\n b: List[int] = []\n print(b)\n b.push(0)\nmain()\n";
         let h = hov(src, 1, 1).expect("hover on empty-list decl");
         assert_eq!(h.display, "List[int]");
-    }
-
-    #[test]
-    fn hover_refined_empty_pre_use_shows_final_type() {
-        // PART B: hovering a USE of b that occurs BEFORE the refining op also shows the final
-        // List[int] (not the provisional List[Unknown] recorded at probe time).
-        let src = "fn main():\n b := []\n print(b)\n b.push(0)\nmain()\n";
-        let h = hov(src, 2, 7).expect("hover on pre-refine use of b");
-        assert_eq!(h.display, "List[int]");
-    }
-
-    #[test]
-    fn hover_refined_empty_decl_intervening_fn_shows_final_type() {
-        // PART B / correctness-0 regression: a fn decl BETWEEN the module-level `b := []` and its
-        // refining `b.push(0)` must NOT let the inner fn's check_fn_body finalize seam lock the hover
-        // to the still-unrefined List[Unknown]. Only the module seam (which owns b) resolves it — so
-        // the decl-site hover shows the FINAL List[int]. Was "List[?]" before the owning-scope gate.
-        let src = "b := []\nfn foo():\n print(\"x\")\nb.push(0)\nprint(b)\n";
-        let h = hov(src, 0, 0).expect("hover on module-level empty-list decl");
+        let h = hov(src, 2, 7).expect("hover on a use of b before its first push");
         assert_eq!(h.display, "List[int]");
     }
 
@@ -1938,9 +1921,9 @@ mod tests {
     #[test]
     fn hover_container_ctor_bare_callee() {
         // CONFIRMING (already green): bare `List()` ctor callee records the same display sig.
-        // (`b.push(1)` constrains the otherwise-unannotated empty so PART A doesn't error — an error
-        // would make `hover_type` short-circuit to None before the callee hit is returned.)
-        let h = hov("b := List()\nb.push(1)\n", 0, 5).expect("hover on bare List ctor callee");
+        // (The annotation types the empty list on its own statement — an error would make
+        // `hover_type` short-circuit to None before the callee hit is returned.)
+        let h = hov("b: List[int] = List()\n", 0, 15).expect("hover on bare List ctor callee");
         assert_eq!(h.display, "fn(?) -> List[?]");
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
     }

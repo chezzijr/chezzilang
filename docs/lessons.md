@@ -236,6 +236,14 @@ the freeze.
   graph tests — they share process-global state and collide when scheduled together. Gate on the full
   `--lib` run or add `--test-threads=1`.
 
+- **One rule: inference never reads a later statement** (TICKET-238, wave 22 Family A). A type that a later
+  line may still fill has no identity: eleven tickets each taught one more site to find the binding
+  by NAME and overwrite it, and every site without a name (an alias inside a list, a closure
+  capture, a generic result) held a value of the wrong type with exit code 0. When a statement has
+  been checked, nothing it stored has a hole. Do not add a "pin", "refine" or side table that lets a
+  later use type an earlier binding; give the statement the type (`xs: List[int] = []`) or reject it
+  there. One predicate (`Ty::has_hole`), one check (`Checker::closed_binding_ty`).
+
 ## 4. Runtime, airlock, concurrency
 
 - **A runtime verdict that declares user code broken must be built from what is *impossible*, never

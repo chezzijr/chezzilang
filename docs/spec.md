@@ -759,9 +759,10 @@ struct Meters:
 > The same expected-type / turbofish machinery now also pins a generic fn used as a **VALUE** (not
 > called, or called indirectly): `g := ident[int]` (turbofish) and `h: fn(int) -> int = ident` /
 > HOF-param / return-position (against a concrete `fn(...) -> ...`) yield the substituted concrete fn
-> value; a bare un-pinned generic fn value takes a **type variable** per type parameter (TICKET-225,
-> Rust's model), and any later use in its frame — one fn body, or one top-level statement — pins it:
-> a call, an argument, an assignment, a return, or a join with a sibling (`if`/`match` branches, `??`,
+> value; a bare un-pinned generic fn value takes a **type variable** per type parameter (TICKET-225),
+> solved inside its frame — ONE statement, or one bound operand (TICKET-238: inference never reads a
+> later statement, so `g := ident` is an error where it is bound) — by
+> an argument, a typed binding, or a join with a sibling (`if`/`match` branches, `??`,
 > list/map literals, `==`, `in`, list `+`/`+=`, a `recover:` tail). Only `assignable` and
 > `Checker::join_ty` bind a variable (`src/checker/tyvar.rs`). A read still unpinned when its frame
 > closes is rejected at the read, named parameters and both working spellings in the message.
