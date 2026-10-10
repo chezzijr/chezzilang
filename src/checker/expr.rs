@@ -1162,11 +1162,9 @@ impl Checker {
     /// substitution map: enclosing seeded from `targs`, method from `mtargs`, then `hint` (a `let`/return
     /// annotation, `b: Box[int] = Box.empty()`) seeds any still-free ENCLOSING param, the rest inferred by
     /// unifying the declared param types against the argument types (like a generic free fn). A method-OWN
-    /// `[U]` left un-inferred degrades to `Ty::Unknown` (genuinely unconstrained, refines on use); an
-    /// un-inferred ENCLOSING param (no turbofish, no arg binding, no hint) DELIBERATELY leaks as a
-    /// `Ty::Param` so the first mismatching use routes to the "un-inferred type parameter … bind it at the
-    /// construction site" diagnostic — parity with the generic free-fn path, and closing the soundness hole
-    /// where `Ty::Unknown` swallowed any later argument. Mirrors the instance-method arms minus the receiver.
+    /// `[U]` or ENCLOSING param left un-inferred (no turbofish, no arg binding, no hint) degrades to
+    /// `Ty::Unknown`: a hole, which the binding check judges on the statement that stores the result
+    /// (TICKET-238). Mirrors the instance-method arms minus the receiver.
     #[allow(clippy::too_many_arguments)] // enclosing key/name + method + args + enclosing & method targs + span + hint
     pub(super) fn infer_static_call(
         &mut self,
@@ -1786,7 +1784,7 @@ impl Checker {
             // is REQUIRED: an empty list is the `[]` literal (zero args can't infer T).
             "List" => {
                 // `List[T]()` — explicit element type (turbofish), bare `List()` — empty list whose
-                // element type is refined from the expected type / first use (mirrors `Set()`), and
+                // element type comes from the expected type on its own statement (mirrors `Set()`), and
                 // `List(it)` builds from any for-iterable. With a turbofish AND an iterable, the
                 // iterable's elements are checked against `T`.
                 let targ_elem = match targs {
@@ -1842,8 +1840,8 @@ impl Checker {
                 }
             }
             "Set" => {
-                // `Set()`/`Set[T]()` → empty set (element from the turbofish, else inferred from
-                // later use, like `{}` for maps); `Set(it)` → a set from ANY iterable VALUE
+                // `Set()`/`Set[T]()` → empty set (element from the turbofish, else from the expected
+                // type on its own statement, like `{}` for maps); `Set(it)` → a set from ANY iterable VALUE
                 // (broadened from list-only), deduped. The element type flows through `iter_elem`;
                 // it must be Hashable. A bare RANGE is not a value, so `Set(0..3)` is rejected —
                 // use `Set(range(0, 3))`. With a turbofish AND an iterable, elements check against `T`.
@@ -1907,8 +1905,8 @@ impl Checker {
             // keys (like the `{k: v}` literal). The argument is REQUIRED: an empty map is the `{}`
             // literal. (Free-call `map(it)` is a distinct namespace from the `xs.map(f)` list HOF.)
             "Map" => {
-                // `Map[K, V]()` → typed empty map (turbofish); bare `Map()` → empty map refined from
-                // the expected type / first use (mirrors the `{}` literal and `Set()`); `Map(it)` →
+                // `Map[K, V]()` → typed empty map (turbofish); bare `Map()` → empty map typed by the
+                // expected type on its own statement (mirrors the `{}` literal and `Set()`); `Map(it)` →
                 // a map from an iterable of EXACTLY 2-tuples. With a turbofish AND an iterable, the
                 // tuple parts are checked against `[K, V]`.
                 let targ_kv = match targs {
@@ -4367,18 +4365,16 @@ impl Checker {
                 && !self.assignable(pt, &at)
             {
                 let [expected, actual] = Ty::render_distinct([pt, &at]);
-                // Annotation hint for a collection mutator whose element slot was PINNED by an
-                // earlier push/add/insert (refine-on-first-use). An un-annotated `xs := []` reads as
-                // `list[<first element>]`; a later element of a different (e.g. protocol-sibling) type
-                // is a real mismatch — point the user at the explicit annotation that makes a
-                // mixed/protocol collection legal.
-                // The element-pin narrative is only valid for a List/Set collection receiver. The
+                // Annotation hint for a collection mutator. The element type was fixed on the
+                // statement that created the collection (`xs := [a]` is `List[<type of a>]`); an
+                // element of a different (e.g. protocol-sibling) type is a real mismatch — point
+                // the user at the explicit annotation that makes a mixed/protocol collection legal.
+                // The hint is only valid for a List/Set collection receiver. The
                 // method name `add` also names `Atomic.add` (a handle), whose float mismatch must NOT
                 // show the collection hint — gate on the receiver actually being a collection.
                 let pnote = self.protocol_note(pt, &at);
-                // An int at a `float` slot is not a stale element pin — the narrative below is
-                // false there (the type was DECLARED, not learned from an earlier use), so
-                // `float_fix_note` names the fix instead.
+                // An int at a `float` slot is not a mixed collection, so `float_fix_note` names
+                // the fix instead.
                 let coll_mismatch_is_float_widen = matches!((pt, &at), (Ty::Float, Ty::Int));
                 let hint = if !pnote.is_empty() {
                     pnote
@@ -4390,21 +4386,19 @@ impl Checker {
                     // Only an UN-BOUND/leaked type param (not in scope here) means "un-inferred": a
                     // return-only `T` from `empty[T]()` called with nothing to bind it from. A
                     // `Ty::Param` that IS in scope (`self.type_params`) is a legitimately-bound
-                    // generic param genuinely pinned by an earlier push — keep the original
-                    // narrative for it (and for every concrete element type).
+                    // generic param — keep the annotation hint for it (and for every concrete
+                    // element type).
                     if matches!(pt, Ty::Param(p) if !self.type_params.contains_key(p)) {
                         // The expected element type is an un-inferred type parameter (e.g. a
-                        // return-only `T` from `empty[T]()` with nothing to bind it from), NOT a
-                        // type pinned by an earlier push. The "earlier push" narrative is wrong
-                        // here (this may be the FIRST push) and `List[<protocol>] = []` would not
-                        // help — the fix is to bind the parameter at the construction site.
+                        // return-only `T` from `empty[T]()` with nothing to bind it from).
+                        // `List[<protocol>] = []` would not help — the fix is to bind the
+                        // parameter at the construction site.
                         format!(
                             " (the collection's element type is the un-inferred type parameter {expected}; bind it at the construction site with a turbofish or annotation, e.g. `empty[int]()` or `xs: List[int] = ...`)"
                         )
                     } else {
-                        // TICKET-124 (W13-15): the old "already pinned … by an earlier use" wording
-                        // was false whenever the slot was DECLARED (`l: List[float] = [1.5]`), not
-                        // learned from an earlier push — say what's actually true of both cases.
+                        // TICKET-124 (W13-15): the slot is DECLARED (`l: List[float] = [1.5]`) or
+                        // inferred on its own statement (`l := [1.5]`); the text covers both.
                         format!(
                             " (the collection's element type is {expected}, fixed by its annotation or an earlier use; annotate the binding, e.g. `List[<protocol>] = []`, for a mixed/protocol collection)"
                         )

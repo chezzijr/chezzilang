@@ -1,5 +1,6 @@
 // checker::tyvar — TICKET-225 (R5): type variables. A generic fn value read with no pin takes one
-// `Ty::Var` per type param; a later use in its frame binds them. `solve` is the one place a var is
+// `Ty::Var` per type param; another operand of its frame binds them, and a frame is one statement
+// or one bound operand (TICKET-238). `solve` is the one place a var is
 // bound, and only `assignable` and `join_ty` call it, so every type compare in the checker sees the
 // store. The store is speculative state: `DiagMark` carries a `TyVarMark` (DEC-157).
 
@@ -23,8 +24,8 @@ pub(super) struct TyVars {
     carrier_reads: HashMap<u32, usize>,
 }
 
-/// TICKET-227: a `?x` / `!e` value whose carrier no expected type gave; a later use in its frame
-/// pins `var`.
+/// TICKET-227: a `?x` / `!e` value whose carrier no expected type gave; another operand of its
+/// frame (one statement or one bound operand, TICKET-238) binds `var`.
 pub(super) struct PendingCarrier {
     node: crate::ast::NodeId,
     span: Span,
@@ -384,7 +385,7 @@ impl Checker {
 
     /// TICKET-238 -- close the variables of ONE operand, inferred since `m`, and resolve its type.
     /// Every site that binds or destructures an operand calls it (`let`, `match`, `for`, `?.`,
-    /// `??`, `?`, `else`), so a direct `?x` operand reaches the reader as `T?`.
+    /// `??`, `?`, `else`, and a free closure's body: eight call sites), so a direct `?x` operand reaches the reader as `T?`.
     pub(super) fn close_operand(&mut self, m: TyVarMark, t: Ty) -> Ty {
         self.close_tyvar_frame(m);
         self.zonk(&t)
@@ -525,8 +526,8 @@ impl Checker {
         }
     }
 
-    /// A value type as a use that pins a binding reads it: every unpinned `?x` inside it, at any
-    /// depth, is its default, `T?`, from here on (the first constraining use decides).
+    /// A value type as a same-statement sibling that fills an open slot reads it: every unbound
+    /// `?x` inside it, at any depth, is its default, `T?`, from here on.
     pub(super) fn pinning_value_ty(&mut self, t: &Ty) -> Ty {
         loop {
             let z = self.zonk(t);

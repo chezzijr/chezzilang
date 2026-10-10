@@ -443,7 +443,7 @@ impl Checker {
     /// TICKET-183 — report each seeded, single-name, un-annotated global whose type is still
     /// `Unknown` after the joint fixpoint when it is a named initialization cycle: `x := f()` where
     /// `f`'s return is computed from `x`. Any other `Unknown` global is not reported here: the walk
-    /// types it (`xs := []` refined by a later `xs.push(1)`), a body above it is declined in
+    /// reports it (`xs := []` is the hole error on its own line, TICKET-238), a body above it is declined in
     /// `infer_ident`, and a body below it that returns it fails return inference. A let whose value
     /// itself errors is skipped: the walk reports that error.
     fn report_untyped_globals(&mut self, stmts: &[Stmt]) {
@@ -2448,8 +2448,10 @@ impl Checker {
     }
 
     /// TICKET-238 -- run `f` as one statement: `stmt_mark` records where its errors and poisoned
-    /// reads begin. A nested statement's reads do not count for the statement around it.
+    /// reads begin. A nested statement's reads do not count for the statement around it, at any
+    /// depth. `diag_rollback` restores `stmt_mark.poison` with `poison_reads`.
     pub(super) fn with_stmt_mark<R>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> R) -> R {
+        let start = self.poison_reads;
         let outer = std::mem::replace(
             &mut self.stmt_mark,
             super::StmtMark {
@@ -2459,7 +2461,9 @@ impl Checker {
             },
         );
         let r = f(self);
-        let inner = self.poison_reads - self.stmt_mark.poison;
+        // Every read made inside `f`, at any depth: counted from `start`, not from the mark,
+        // which the statements nested in `f` have already raised.
+        let inner = self.poison_reads.saturating_sub(start);
         self.stmt_mark = outer;
         self.stmt_mark.poison += inner;
         r
@@ -2543,8 +2547,8 @@ impl Checker {
                             .push(declared.clone());
                     }
                 }
-                // TICKET-186: the first let of a seeded module global refines the seed the bodies
-                // above it typed and pinned; it never wipes it. `declared` is the refined type.
+                // TICKET-186: the first let of a seeded module global merges into the seed the
+                // bodies above it read; it never wipes it. `declared` is the merged type.
                 let refined = self.refine_first_let(name, declared.clone(), span, BindSite::Let);
                 if refined {
                     declared = self.scopes[0][name].clone();
@@ -3016,12 +3020,6 @@ impl Checker {
                 body,
             } => {
                 let bindings = self.for_bindings(vars, iter);
-                // PERSISTENT refine-on-first-use (see `check_block`): a refine-on-first-use pin of an
-                // OUTER empty collection inside the loop body PERSISTS past the loop. We accept the
-                // zero-trip / always-runs over-approximation by design — `xs:=[]; for i in []:
-                // xs.push(1); xs.push("s")` REJECTS even though the body never runs at runtime; a
-                // sound static over-approximation, matching "first statement that fixes the element
-                // type records it".
                 self.push_scope();
                 // `bindings` is parallel to `vars` (and thus `var_spans`); zip truncates safely if the
                 // lengths ever diverge (a binding's hover is dropped, never a panic).
@@ -3705,8 +3703,8 @@ impl Checker {
         // The `Unknown` carve-out is ONE-SIDED, not a two-sided veto: the question is only "is
         // `declared` a REFINEMENT of `prev`?", which is exactly `merge_unknown` (fill `prev`'s
         // `Unknown` slots from `declared`'s shape; unchanged on a shape/name/arity mismatch). So
-        // `x := []` then `x := [1]` refines and stays legal, while `x := []` then `x := 42` —
-        // and `x := 1` then `x := None` — are retypes and fire. A symmetric "either side has an
+        // a `prev` the hole check rejected (bare `Unknown`) takes any `declared`, while
+        // `x := 1` then `x := None` is a retype and fires. A symmetric "either side has an
         // `Unknown` ⇒ skip" test silenced the rule for BOTH, letting a closure declared
         // `-> int` hand out a `None`, check-clean (the original W7-42 defect). The bare
         // `declared == Unknown` guard is load-bearing: `merge_unknown` early-returns `a` when
@@ -4907,7 +4905,8 @@ impl Checker {
             self.hover_record_at(param.name_span, &ty, HoverKind::Param, None);
             // A declared fn's param type is written in its signature. A hole in it is an
             // annotation the signature already rejected (`x: List[None]`), so it is not judged
-            // again (TICKET-238).
+            // again (TICKET-238). `infer_inline_fn_ret` declares the same params through the
+            // checked `declare`: that walk is rolled back, so its check reports nothing.
             self.declare_unchecked(&param.name, ty);
         }
         // An inline-expr body (`fn a() -> T: <expr>`) implicitly returns its single expression,

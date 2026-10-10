@@ -1159,7 +1159,7 @@ impl Checker {
     pub(super) fn may_be_equal(&self, l: &Ty, r: &Ty) -> bool {
         use Ty::*;
         match (l, r) {
-            // A prior error, or an un-refined empty collection — never cascade off it.
+            // A prior error, or a consumed empty literal's element — never cascade off it.
             (Unknown, _) | (_, Unknown) => true,
             // ERASED: a generic body is checked once with `T` abstract, so any concrete pairing is
             // possible at some call site. (A `where T: <scalar>` param is NOT erased — it is an

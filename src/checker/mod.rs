@@ -3328,14 +3328,14 @@ fn pin_generic_fn_value(
     FnValuePin::Pinned(pinned, refined)
 }
 
-/// Structural merge for refine-on-first-use: fill `Ty::Unknown` slots in `a` with the corresponding
+/// Structural merge for same-statement solving: fill `Ty::Unknown` slots in `a` with the corresponding
 /// concrete slot from `shape`, recursing to arbitrary depth (so `list[Option[Box[int]]]` fills in a
 /// single merge). A bare `Unknown` in `a` becomes `shape` (when `shape` is concrete). For matching
 /// compounds (List/Set/Option/Channel/Shared/Atomic ×1, Map/Result ×2, Tuple ×n, Struct/Enum by
 /// NAME + arity) it recurses pairwise. On a shape-NAME or arity mismatch (e.g. pushing a different
-/// generic enum) it leaves `a` unchanged — no refine — so the normal `check_args` mismatch fires.
+/// generic enum) it leaves `a` unchanged — no fill — so the normal `check_args` mismatch fires.
 /// One lift (TICKET-234): an open optional beside a present value is that value's optional, so
-/// `Option(Unknown)` beside `int` is `int?`. This is the rule every pin writer shares.
+/// `Option(Unknown)` beside `int` is `int?`. This is the rule every sibling join shares.
 pub(crate) fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
     use Ty::*;
     if shape.is_unknown() {
@@ -3410,7 +3410,7 @@ pub(crate) fn merge_unknown(a: &Ty, shape: &Ty) -> Ty {
             ret: Box::new(merge_unknown(ar, sr)),
             labels: labels.clone(),
         },
-        // Shape/name/arity mismatch: leave `a` unchanged (no refine — normal mismatch fires later).
+        // Shape/name/arity mismatch: leave `a` unchanged (no fill — the caller's mismatch fires).
         _ => a.clone(),
     }
 }
@@ -3728,8 +3728,8 @@ fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
                 && old.has_hole()
             {
                 // TICKET-234 -- a parameter first bound to a type with an open slot is filled by
-                // a later argument instead of keeping the first binding (`put(b, 7)` on an open
-                // `Box`). Argument loops call `Checker::unify_arg`, which reads a `?x` first.
+                // a later argument of the same call instead of keeping the first binding
+                // (`pair([], [1])`). Argument loops call `Checker::unify_arg`, which reads a `?x` first.
                 let merged = merge_unknown(old, a);
                 map.insert(n.clone(), merged);
             } else if let Ty::Width(_) = a

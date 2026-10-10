@@ -33,13 +33,16 @@ pub(super) struct DiagMark {
     /// return memo (`Checker::ret_memo`) is unsound: the memo replays only a walk's type and its
     /// post-rollback diagnostics, so everything the skipped walk did BEFORE its rollback has to be
     /// something the rollback already undoes. Each field below is written during a body walk and is
-    /// restored wholesale (never re-derived: DEC-064 first-use-wins, DEC-032 alias reverse walk).
+    /// restored wholesale, never re-derived.
     /// A NEW `Checker` field written during a body walk must be added here in the same commit.
     fn_reads: std::collections::HashSet<String>,
     /// TICKET-225 — the type-variable store (DEC-157): a walk binds vars and creates them.
     tyvars: super::tyvar::TyVarMark,
     hover_result: Option<(Ty, HoverKind, Option<String>)>,
     poison_reads: usize,
+    /// TICKET-238 -- a nested statement inside the walk raises `stmt_mark.poison` by its reads.
+    /// The rollback takes the reads back, so it takes the raise back too.
+    stmt_poison: usize,
     table_conflicts: Vec<(Span, String)>,
     kw_certain: HashMap<(usize, String), Vec<(usize, String)>>,
     kw_written: std::collections::HashSet<(usize, String)>,
@@ -1476,6 +1479,7 @@ impl Checker {
             tyvars: self.tyvars.borrow().mark(),
             hover_result: self.hover_result.clone(),
             poison_reads: self.poison_reads,
+            stmt_poison: self.stmt_mark.poison,
             table_conflicts: self.table_conflicts.clone(),
             kw_certain: self.kw_certain.clone(),
             kw_written: self.kw_written.clone(),
@@ -1497,6 +1501,7 @@ impl Checker {
         self.tyvars.borrow_mut().rollback(m.tyvars);
         self.hover_result = m.hover_result;
         self.poison_reads = m.poison_reads;
+        self.stmt_mark.poison = m.stmt_poison;
         self.table_conflicts = m.table_conflicts;
         self.kw_certain = m.kw_certain;
         self.kw_written = m.kw_written;
@@ -2591,16 +2596,14 @@ impl Checker {
             set.insert(name.to_string());
         }
     }
-    /// `declare` without the hole check: for the nested `fn` statement only, whose return type
-    /// `infer_nested_fn_ret` and `finalize_ret` judge.
+    /// `declare` without the hole check, for a name whose type a signature owns: the nested `fn`
+    /// statement's own name (`infer_nested_fn_ret` and `finalize_ret` judge its return type) and a
+    /// declared fn's params in `check_fn_body_inner` (`fn_sig` resolved and judged their annotations).
     pub(super) fn declare_unchecked(&mut self, name: &str, ty: Ty) {
         if let Some(set) = self.hole_rejected.last_mut() {
             set.remove(name);
         }
         // TICKET-139 (W14-2) — a same-scope re-declaration can share the runtime slot, so it counts
-        if let Some(s) = self.hole_rejected.last_mut() {
-            s.remove(name);
-        }
         // as a write for the keyword-call gate (`kw_written`).
         if self.scopes.last().is_some_and(|s| s.contains_key(name)) {
             self.kw_written

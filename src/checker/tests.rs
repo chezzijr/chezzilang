@@ -38583,6 +38583,26 @@ fn open_binding_is_rejected_on_its_own_line() {
     );
 }
 
+#[test]
+fn nested_statement_in_a_rolled_back_walk_keeps_the_statement_mark() {
+    // TICKET-238: the `recover:` arm is walked speculatively for its `None` sibling, then for
+    // real. The rolled-back walk's nested `print(xs)` must leave the `match` statement's mark as
+    // it found it: no underflow, and the statement's own error is still reported.
+    let errs = check_src(
+        "fn main():\n    xs := []\n    c := true\n    r := match c:\n        true: None\n        false: recover:\n            print(xs)\n            1\n    print(r)\nmain()\n",
+    );
+    let msgs: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(msgs.len(), 2, "{msgs:?}");
+    assert!(
+        msgs[0].contains("cannot infer the element type of `xs`"),
+        "{msgs:?}"
+    );
+    assert!(
+        msgs[1].contains("branches have incompatible types"),
+        "{msgs:?}"
+    );
+}
+
 /// TICKET-238 -- inference never reads a later statement. The tests of the pin machinery (alias
 /// pin groups, carrier pins, refine-on-first-use, the pin-miss texts) were deleted with it. Each
 /// program they accepted through a later pin is rejected on the line that creates the open

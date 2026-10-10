@@ -228,9 +228,9 @@ impl Checker {
                 .is_some_and(|g| g.seeded && g.first_let() == Some(stmt_span))
     }
 
-    /// The first let of a seeded global writes the slot the bodies above it already typed and
-    /// refined (TICKET-186, K4): merge `declared` into the seed in `scopes[0]` and return `true`.
-    /// It never calls `declare`, `reject_redeclare` or `declare_const`: DEC-032's untaint is for a
+    /// The first let of a seeded global writes the slot the bodies above it already read
+    /// (TICKET-186, K4): merge `declared` into the seed in `scopes[0]` and return `true`.
+    /// It never calls `declare`, `reject_redeclare` or `declare_const`: those are for a
     /// fresh binding, and this is not one. Returns `false` when this is not that let, or when
     /// `declared` is not a refinement of the seed (a retype; the caller's `reject_redeclare`
     /// reports it against the seed).

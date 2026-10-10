@@ -2213,8 +2213,6 @@ impl Checker {
                     } else {
                         None
                     };
-                    // PART B: a use of a binding whose recorded type is still an unrefined empty
-                    // collection defers to the binding's final (refined) type via `hover_record_binding`.
                     self.hover_record_at(expr.span, ty, HoverKind::Local, doc);
                 } else if let Some(sig) = self.functions.get(name) {
                     self.hover_record_at(expr.span, ty, HoverKind::Func, sig.doc.clone());
@@ -2455,9 +2453,8 @@ impl Checker {
     /// but each arm body is split into init statements (checked for effects) + a trailing value
     /// expression, and the trailing types are folded via `fold_recover_tail` into the block's `T`. Only
     /// reached when [`crate::ast::match_tail_is_value`] holds (every arm body ends in an `Expr`), so
-    /// `split_last` always yields an `Expr` tail. Uses the statement-form PERSISTENT refine-on-first-
-    /// use (no snapshot/restore) exactly like `check_match`; refinement is checker-only (no engine
-    /// effect). Scoped to the recover tail — `match` typing elsewhere is untouched. Genuinely
+    /// `split_last` always yields an `Expr` tail. Scoped to the recover tail — `match` typing
+    /// elsewhere is untouched. Genuinely
     /// heterogeneous arms fall back to `Result[nil]` (see `fold_recover_tail`) rather than erroring.
     fn infer_recover_tail_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm]) -> Ty {
         let pats: Vec<&Pattern> = arms.iter().map(|a| &a.pattern).collect();
@@ -2527,8 +2524,8 @@ impl Checker {
     }
 
     /// A statement-form `if/else` in `recover:` TAIL position, used as the block's value expression.
-    /// Mirrors the statement-`If` checker (`sig.rs`) + `check_block`'s per-branch push/pop PERSISTENT
-    /// refine, but each branch body (and the `else`) is split into init statements + a trailing value
+    /// Mirrors the statement-`If` checker (`sig.rs`) + `check_block`'s per-branch push/pop,
+    /// but each branch body (and the `else`) is split into init statements + a trailing value
     /// expression whose types fold via `fold_recover_tail` into `T`. Only reached when
     /// [`crate::ast::if_tail_is_value`] holds (has an `else` and every branch/else body ends in an
     /// `Expr`). Scoped to the recover tail — `if` typing elsewhere is untouched. Genuinely
@@ -2575,7 +2572,7 @@ impl Checker {
 
     /// Check a statement block used in recover TAIL position and return its trailing value type +
     /// the trailing expression's span (for `unify_branch` diagnostics). Mirrors `check_block`'s
-    /// push/pop PERSISTENT refine; init statements are checked for effects, the trailing `Expr` is
+    /// push/pop; init statements are checked for effects, the trailing `Expr` is
     /// the value (`nil` if the block does not end in one — the caller's predicate rules that out).
     fn infer_recover_tail_block(
         &mut self,
@@ -2745,8 +2742,9 @@ impl Checker {
             // arm's assignability diagnostic owns it. No hint at all still reports (`g := id`).
             //
             // TICKET-225 (R5, amends DEC-197): the read is no longer the final word. It takes one
-            // type variable per param, and any later use in its frame pins them; the frame verdict
-            // (`close_tyvar_frame`) reports a read still unpinned, with this same message.
+            // type variable per param, and another operand of the same statement binds them
+            // (TICKET-238: the frame is one statement); the frame verdict (`close_tyvar_frame`)
+            // reports a read still unbound, with this same message.
             FnValuePin::Undetermined
                 if hint
                     .as_ref()
@@ -4048,8 +4046,9 @@ impl Checker {
                 }
                 Ty::Result(ok, e)
             }
-            // No expected carrier: a fn body pins the success type by a later use in its frame
-            // (R5); top level decides at once; the return-inference walk leaves it open.
+            // No expected carrier: in a fn body another operand of the same statement binds the
+            // success type (TICKET-238: the frame is one statement or one bound operand); top
+            // level decides at once; the return-inference walk leaves it open.
             None | Some(Ty::Var(_)) if self.in_fn_body && !self.resolving_returns => {
                 let v = self.defer_carrier(node, super::tyvar::CarrierKind::Error);
                 Ty::Result(Box::new(Ty::Var(v)), Box::new(t))
@@ -4065,9 +4064,9 @@ impl Checker {
     /// TICKET-227 (D3) — prefix `?x` builds a present/success value, its carrier taken from the
     /// expected type: `T?` -> `Some(x)`, `T!E` -> `Ok(x)`. The operand owns `T` as its slot (so
     /// `?5` at `int??` is `Some(Some(5))`). With no expected carrier the value takes a frame type
-    /// variable in a fn body (an unpinned one defaults to `T?`); elsewhere it is `T?` at once.
-    /// Under an expected carrier whose payload is open (`z := None`, then `z = ?5`) the value is the
-    /// carrier over its operand's type, so the use can pin the binding.
+    /// variable in a fn body (one still unbound when its operand or statement closes is `T?`);
+    /// elsewhere it is `T?` at once. Under an expected carrier whose payload is open the value is
+    /// the carrier over its operand's type.
     fn infer_wrap_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
         let hint = self.expected_hint.take();
         let (payload, w) = match &hint {

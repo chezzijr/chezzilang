@@ -498,6 +498,57 @@ fn counted_cells() -> Vec<(String, String, usize, Vec<&'static str>)> {
         2,
         vec!["xs", "r"],
     ));
+    // A poisoned read at nesting depth 2..4 below the statement that binds `r`: the read never
+    // counts for `r`'s statement, at any depth.
+    for (depth, body) in [
+        (2, "        if true:\n            print(xs)\n"),
+        (
+            3,
+            "        for i in 0..1:\n            if i == 0:\n                print(xs)\n",
+        ),
+        (
+            4,
+            "        for i in 0..1:\n            if i == 0:\n                if true:\n                    print(xs)\n",
+        ),
+    ] {
+        out.push((
+            format!("(j) a nested poisoned read at depth {depth}"),
+            in_main(
+                "",
+                &format!("    xs := []\n    r := recover:\n{body}        []\n    print(r)\n"),
+            ),
+            2,
+            vec!["xs", "r"],
+        ));
+    }
+    for (label, body) in [
+        ("directly", "            print(xs)\n"),
+        (
+            "under an if",
+            "            if true:\n                print(xs)\n",
+        ),
+    ] {
+        out.push((
+            format!("(j) a poisoned read {label} in a nested fn body"),
+            in_main(
+                "",
+                &format!(
+                    "    xs := []\n    r := recover:\n        fn g() -> int:\n{body}            return 1\n        print(g())\n        []\n    print(r)\n"
+                ),
+            ),
+            2,
+            vec!["xs", "r"],
+        ));
+    }
+    out.push((
+        "(j) recover inside if inside for".into(),
+        in_main(
+            "",
+            "    xs := []\n    for i in 0..1:\n        if i == 0:\n            r := recover:\n                print(xs)\n                []\n            print(r)\n",
+        ),
+        2,
+        vec!["xs", "r"],
+    ));
     out.push((
         "(k) uses of a rejected binding do not cascade".into(),
         in_main(

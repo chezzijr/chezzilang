@@ -441,9 +441,9 @@ pub enum Ty {
     Module(String),
     /// Un-inferable, or "an error was already reported here". Compatible with everything.
     Unknown,
-    /// TICKET-225 (R5) — a type variable: a hole a later use in its frame fills
-    /// (`checker::tyvar`). Only `assignable` and `Checker::join_ty` can bind one; the pure
-    /// [`compatible`] declines on it (an unbound var equals only itself). Displayed `_`.
+    /// TICKET-225 (R5) — a type variable: pending until another operand of its frame binds it
+    /// (`checker::tyvar`; a frame is one statement or one bound operand, TICKET-238). Only `assignable` and `Checker::join_ty` can bind one; the pure
+    /// [`compatible`] declines on it (an unbound var equals only itself). Printed as a token `Checker::resolve_var_tokens` replaces.
     Var(u32),
 }
 
