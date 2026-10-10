@@ -251,6 +251,7 @@ fn else_guard_binding_form_grid() {
     ];
     // (form, setup line, statement head, takes the pair call, value returned on success,
     //  verdict per carrier in the order above)
+    #[allow(clippy::type_complexity)]
     let forms: [(&str, &str, &str, bool, &str, [Want; 3]); 13] = [
         (
             "x :=",
