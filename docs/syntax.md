@@ -684,6 +684,25 @@ mentioning a type parameter. An operator operand is not a slot, nor is the retur
 Each branch of an **if/match expression** at a slot wraps on its own (see §8): `x: int? = if c: n else:
 None` wraps only the bare `n`, leaving the already-wrapped `None` alone. Full table: §9.
 
+**Closure literals and generic slots are typed slots too (TICKET-239).** A closure literal reads its
+expected type through one carrier layer, like a list literal: `cb: (fn(int) -> int)? = fn(a): a + 1`
+types `a` as `int` and stores a present value, at a binding, an argument, a field, an element and a
+`return` alike. A generic call's slot is known when its type is **written**, by type arguments
+(`Box[int?](5)`, `opt[int?](5)`, `B[int?].mk(5)`, `s.gm[int?](5)`) or by the annotation
+(`c: Box[int?] = Box(5)`): the argument then wraps, meets its width (`b: int8? = id(300)` is
+`constant 300 does not fit int8`) and types its closure parameters exactly as at a non-generic slot.
+With neither written, the type parameter is solved from the arguments and nothing wraps.
+
+**The join rule.** Sibling values (the branches of an `if` / `match` value, the sides of `??`, the
+elements of a list / set / map literal) must have one type. A value wraps into a carrier only under
+one of two triggers: a **written type** at the slot, or a **written `None`** beside it (next
+paragraph). A `T!E` sibling types a bare `!e` the same way (`if c: a() else: !"e"` is `a()`'s
+`int!str`), at module scope and in a fn body. A `T?` or `T!E` beside a plain `T` with neither trigger
+is an error that names the fix: `[w, 3]` with `w: int?` is `list elements differ: int? vs int — a
+plain int joins int? only under a written type: annotate the binding (x: int? = ..., xs: List[int?] =
+[...])`. Two `T!E` values join to `T!E`; no join rewrites the error type. A `??` mismatch names the
+operator: `'??' sides have incompatible types: int and str`.
+
 **A literal `None` joins the value beside it (TICKET-234, same-line half).** A `None` takes its
 payload type from its own statement, never from a later one: `z := None` then `z = 7` is an error at
 `z := None`. With the type written, a plain value wraps at the slot as everywhere else:
@@ -3445,11 +3464,11 @@ licenses an int-to-float widen — `x: float = if c: 1 else: 2` is an error (wri
 left alone, and the same declines named under **Success-coercion** below apply (a generic slot, a
 declared `int??`). This is a
 property of the if/match EXPRESSION and is distinct from multi-`return` inference (which still conflicts
-on `int`/`float` — annotate `-> float`). When every branch is an `?…` (no `!e`
-branch pins the error type), an **unannotated** `if`/`match`-expression's `T!E` error slot defaults
-to the built-in `Error` protocol — `x := if c: ?1 else: ?2` is `int!Error`, matching the
-`T!`/`T!` shorthand and return-type inference (it does not leak an un-pinned error type onto a
-later `?`). An explicit annotation (`x: int!DbErr = …`) still wins. The statement forms — `match s:` /
+on `int`/`float` — annotate `-> float`). An **unannotated**
+`if`/`match`-expression never rewrites an error type (TICKET-239): two `T!E` branches join to that
+`T!E` (`x := if c: a() else: b()` over two `int!str` is `int!str`), and with no carrier beside them
+`x := if c: ?1 else: ?2` is an `int?`, as `?1` is on its own. An explicit annotation
+(`x: int!DbErr = …`) gives every branch that slot. The statement forms — `match s:` /
 `if c:` with indented blocks and `return`/assignments inside — are unchanged; loops and
 **multiline** function bodies are statement sequences (they return via explicit `return`). The one
 exception is the **inline-expr function body** (`fn a(): <expr>`, §5), whose single bare expression is
@@ -3505,8 +3524,13 @@ rs: List[int!str] = [1, !"disk", 3]   # [1, !disk, 3]
   assignment target (`x = 5`, `s.f = 5`, `xs[i] = 5`, `x, y = 5, 0`), a call or method argument, a
   struct field or variant payload, a list/map/tuple element, a `List[T](...)` / `Map[K, V](...)` /
   `Shared[T](...)` element, a comprehension element, `return`, `yield`, an inline or closure body, a
-  parameter or field default — a plain `T` becomes `?v` at `T?` and `?v` at `T!E`. Each
+  parameter or field default — a plain `T` becomes `?v` at `T?` and `?v` at `T!E`. A closure literal
+  is a plain value like any other (`cb: (fn(int) -> int)? = fn(a): a + 1`), and a generic slot whose
+  type is written, by type arguments (`Box[int?](5)`, `opt[int?](5)`) or by the annotation
+  (`c: Box[int?] = Box(5)`), wraps like a non-generic one (TICKET-239). Each
   branch of an `if`/`match` value at such a slot wraps on its own (`x: int? = if c: 5 else: None`).
+  With no written type, a value wraps only beside a written `None`; a `T!E` sibling types a bare
+  `!e`; a `T?` beside a plain `T` is an error that names the annotation (the join rule, §3).
   Three rules: a carrier is never re-wrapped (`x: int?? = ?5` stays an error); there is no
   int→float step (`fn f() -> float?: return 1` is an error); a slot that mentions an unpinned type
   parameter (`-> T?`) does not wrap. An operator operand is not a slot (`x: int? = 1 + 2` wraps the
@@ -3583,7 +3607,12 @@ n    := fetch()?.len()                  # T!E: propagate the error (`?`), then `
 
 **On a `T?`** — `x?.field` / `x?.method(args)`: `None` short-circuits to `None`, `?v`
 applies the access to `v` and re-wraps, so the result is always a `T?` (a field that is itself
-`T?` is **not** flattened: `U??`).
+`T?` is **not** flattened: `U??`). A **method that returns nothing** has nothing to re-wrap
+(TICKET-239): `c?.bump()` runs the call when `c` is present and has **no value**, like Swift's and
+Kotlin's `x?.m()`. It is legal wherever a plain call that returns nothing is legal (a statement, an
+inline fn or closure body, an `if` / `match` / `for` body) and gets no discarded-value warning; as a
+value (`x := c?.bump()`, `print(c?.bump())`) it is the usual `expression returns no value (None) and
+cannot be used as a value`.
 
 **On a `T!E`** — `x?.field` / `x?.method(args)` means **`?` then `.`**: propagate the `!e`
 out of the enclosing function, then apply the access to the unwrapped `T`. It is identical to the

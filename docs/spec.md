@@ -579,13 +579,14 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   **un-annotated multi-branch return inference**: sibling `return` branches merge with a join. It does
   **not** widen `int`→`float` across branches, so mixed `if c: return 1 else: return 2.0`
   **conflicts**; write `2.0` in both. `return ?1` / `return ?2.0` likewise conflict (no
-  widening inside a merged type-arg slot — the `float! = ?3` error above). The `T!E` **error
-  slot** defaults to the built-in `Error` protocol when it is un-pinned or its payload **satisfies
-  `Error`** (`return !"a"` + `return ?"h"` infers `str!Error`, not `str!str`,
-  because `str` satisfies `Error`; two distinct **sendable** `Error`-satisfying payloads across branches
-  unify to `Error` rather than conflicting). A concrete payload that does **not** satisfy `Error` — **or
-  satisfies it but is not sendable** — is preserved (not laundered into the `Error` existential); a
-  deliberate concrete error type is spelled explicitly (`-> str!str` / `-> int!DbErr`). The
+  widening inside a merged type-arg slot — the `float! = ?3` error above). An un-annotated
+  `if` / `match` / `??` join of two `T!E` values keeps `T!E` (TICKET-239): with `a() -> int!str` and
+  `b() -> int!str`, `x := if c: a() else: b()` is an `int!str`, so `x?` propagates a `str`. No join
+  rewrites an error type to `Error`; two different error types (`int!str` beside `int!int`) do not
+  join. A bare `!e` beside a `T!E` sibling takes that sibling's type (`if c: a() else: !"e"` is an
+  `int!str`), as a plain value beside a written `None` takes the optional. A carrier beside its
+  plain payload (`T?` or `T!E` beside `T`) does **not** join by itself: the error names the
+  annotation that makes it legal (`x: int? = ...`, `xs: List[int?] = [...]`). The
   **every** protocol existential is **sendable** (Go `chan interface` parity, Task 2): `Channel[Error]`,
   `Channel[int!]`, and `Channel[Drawable]` over any user protocol all type-check — the erased witness
   crosses the airlock by deep value copy, and the concrete witness's own sendability is checked at each

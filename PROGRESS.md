@@ -9374,6 +9374,34 @@ the stored-callback abort net, and `std.net`'s sticky-UTF-8 + `read_bytes` drain
 
 ## Current focus
 
+### TICKET-239 — the expected type has one channel (2026-10-10)
+
+Closes wave 22 Family E (`docs/root-causes-w22.md`): closures and generic calls now get the wrap,
+the width check and the `!e` type every other slot gets.
+
+- **Closures.** A closure literal reads its expected type in the `Closure` arm of `infer`, through
+  one carrier layer: `take(fn(a): a + 1)` at a `(fn(int) -> int)?` parameter is accepted, at every
+  slot kind. Five closure gates and `sink_payload` are deleted; `Ty::carrier_parts` is the one
+  carrier destructure.
+- **Generic slots.** A generic call substitutes what is written before it reads an argument:
+  `Box[int?](5)`, `opt[int?](5)`, `B[int?].mk(5)`, `s.gm[int?](5)` and `c: Box[int?] = Box(5)` wrap;
+  `b: int8? = id(300)` is rejected (`constant 300 does not fit int8`; it printed `300`);
+  module-scope `opt[int!str](!"e")` is accepted like its fn-body twin. `Checker::slot_seed` is the
+  one pre-argument substitution for all six generic paths; `ArgPass` is the one record of a
+  prepassed closure. Deleted: `ctor_arg_hints`, `hint_want`, `is_const_expr`, `unify`'s width arm.
+- **Joins.** `default_expr_result_e` is deleted: `x := if c: a() else: b()` over two `int!str` is
+  `int!str` (was `int!Error`), for `if`, `match` and `??`. A bare `!e` beside a `T!E` sibling takes
+  its type, at module scope too. `?1 < ?2` compares in a fn body.
+- **Owner decision, 2026-10-10.** `T?` beside a plain `T` does not join by itself: `[w, 3]` and
+  `if c: w else: 5` stay errors, and the message now names the annotation (`only under a written
+  type`). The same note covers `T!E` beside `T`. A `??` mismatch says `'??' sides have incompatible
+  types`.
+- **`x?.m()` with no value.** `c?.bump()` on a method that returns nothing is legal wherever a plain
+  such call is, with no discarded-value warning (`CarrierMode::OptionVoid`); as a value it is the
+  existing error.
+- **Grid.** `tests/expected_type_grid.rs`: slot kind x value x scope (418 cells, 107 red before),
+  construct x pair (146 cells, 45 red before), void `?.` (17 cells, 14 red before).
+
 ### TICKET-238 — a binding's type is known on its own statement (2026-10-10)
 
 Owner decision: inference never reads a later statement. `xs := []`, `m := {}`, `z := None`,
