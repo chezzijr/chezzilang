@@ -468,10 +468,10 @@ pub(super) enum HookMiss {
     Static,
     /// A receiver-first method whose shape the requirement rejects; the decider's reason.
     Shape(String),
-    /// The method is the hook of its declaration, and this instantiation fails the method's own
-    /// `where` bound; the text names the bound. The hook table has one bit per declared type, so
-    /// the run time calls the method for every instantiation: an operator on this one is a check
-    /// error, never the hookless path.
+    /// The method is the hook of its declaration, and this instantiation does not meet it: it
+    /// fails the method's own `where` bound, and the text names the bound. The hook table has
+    /// one bit per declared type, so the run time calls the method for every instantiation: an
+    /// operator on this one is a check error, never the hookless path.
     Bound(String),
 }
 
@@ -2157,12 +2157,15 @@ impl Checker {
         // declared-bounds check below (so a `[S: Iterator[T]]` value forwards into another
         // iterator-generic call), since neither predicate can see through a bare param.
         if protocol == "Iterator" && !matches!(ty, Ty::Param(_) | Ty::Protocol(..)) {
-            return if self.struct_iter_elem(ty).is_some() {
+            // `for` in a `[S: Iterator[T]]` body iterates the value as it iterates any other, so
+            // the bound also needs `iterable_elem`, the one reader of what that yields.
+            let has_next = self.struct_iter_elem(ty).is_some();
+            return if has_next && self.iterable_elem(ty).is_some() {
                 // A declared type's own `next` hook: a real method, not an intrinsic grant.
                 Ok(Grant::no_intrinsic_method())
             } else if Self::is_cursor_ty(ty) {
                 self.grant_intrinsic(protocol, ty)
-            } else if self.iter_elem(ty).is_some() {
+            } else if !has_next && self.iter_elem(ty).is_some() {
                 // ITERABLE but position-less (a raw collection): every remedy below actually applies
                 // to it, so spell them out — this is the W6-3b migration path.
                 Err(format!(
@@ -2419,14 +2422,43 @@ impl Checker {
         }
     }
 
+    /// The declaration that the declared type `ty` instantiates (`Key[int]` -> `Key[T]`), or
+    /// `None` when `ty` is that declaration itself or is not a struct or an enum.
+    fn declaration_of(&self, ty: &Ty) -> Option<Ty> {
+        let own = |tps: &[TyParam]| tps.iter().map(|tp| Ty::Param(tp.name.clone())).collect();
+        let decl = match ty {
+            Ty::Struct(key, _) => {
+                Ty::Struct(key.clone(), own(&self.struct_shape(key)?.type_params))
+            }
+            Ty::Enum(key, _) => Ty::enum_ty(key.clone(), own(self.enum_type_params_of(key)?)),
+            _ => return None,
+        };
+        (decl != *ty).then_some(decl)
+    }
+
     /// The one decider: the protocol's own requirement run through
-    /// [`Self::requirement_matches`]. An `Err` says why the method is not the hook.
+    /// [`Self::requirement_matches_at`]. An `Err` says why the method is not the hook.
+    ///
+    /// There is one verdict per (declared type, hook), and the DECLARATION decides it
+    /// (`Key[T]`, never `Key[int]`): the hook table has one bit per declared type. A method
+    /// whose signature conforms for one instantiation only (`fn hash(self) -> T`, an operand
+    /// `Box[int]`) is the hook of no instantiation. An instantiation adds one question, the
+    /// method's own `where` bound (`HookMiss::Bound`), and recovers the substituted types.
     pub(super) fn hook_verdict(
         &self,
         ty: &Ty,
         protocol: &str,
         method: &str,
     ) -> Result<(FnSig, HashMap<String, Ty>), HookMiss> {
+        let instantiation = match self.declaration_of(ty) {
+            Some(decl) => match self.hook_verdict(&decl, protocol, method) {
+                Ok(_) | Err(HookMiss::Bound(_)) => true,
+                Err(miss @ (HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_))) => {
+                    return Err(miss);
+                }
+            },
+            None => false,
+        };
         let methods = self.declared_methods(ty).ok_or(HookMiss::Absent)?;
         let actual = methods.get(method).ok_or(HookMiss::Absent)?;
         let pinfo = self.protocol_shape(protocol).ok_or(HookMiss::Absent)?;
@@ -2455,10 +2487,12 @@ impl Checker {
             .iter()
             .map(|name| bound.get(name).cloned().unwrap_or(Ty::Unknown))
             .collect();
-        match self.requirement_matches(ty, protocol, &args, pinfo, method, methods) {
+        match self.requirement_matches_at(ty, protocol, &args, pinfo, method, methods) {
             Ok(()) => Ok((sig, bound)),
             Err(_) if actual.is_static => Err(HookMiss::Static),
             Err(ReqMiss::Bound { why, .. }) => Err(HookMiss::Bound(why)),
+            // The declaration conforms, so the run time calls the method for this instantiation.
+            Err(miss @ ReqMiss::Shape(_)) if instantiation => Err(HookMiss::Bound(miss.text())),
             Err(miss @ ReqMiss::Shape(_)) => Err(HookMiss::Shape(miss.text())),
         }
     }
@@ -2664,8 +2698,31 @@ impl Checker {
     }
 
     /// One requirement of [`Self::satisfies_methods`]: does `methods` carry `mname` with the
-    /// signature `protocol` declares for it?
+    /// signature `protocol` declares for it? A requirement that is a `HOOKS` row is the hook of
+    /// the declaration or of no instantiation ([`Self::hook_verdict`]), so an instantiation of a
+    /// declared type takes the declaration's shape verdict before its own arguments are compared.
     fn requirement_matches(
+        &self,
+        ty: &Ty,
+        protocol: &str,
+        args: &[Ty],
+        pinfo: &ProtocolInfo,
+        mname: &str,
+        methods: &HashMap<String, FnSig>,
+    ) -> Result<(), ReqMiss> {
+        if HOOKS
+            .iter()
+            .any(|row| row.protocol == protocol && row.method == mname)
+            && let Some(decl) = self.declaration_of(ty)
+            && let Err(HookMiss::Shape(why)) = self.hook_verdict(&decl, protocol, mname)
+        {
+            return Err(ReqMiss::Shape(why));
+        }
+        self.requirement_matches_at(ty, protocol, args, pinfo, mname, methods)
+    }
+
+    /// [`Self::requirement_matches`] for `ty` as written, with no question to its declaration.
+    fn requirement_matches_at(
         &self,
         ty: &Ty,
         protocol: &str,

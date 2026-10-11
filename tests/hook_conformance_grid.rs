@@ -844,6 +844,150 @@ fn conditional_failures() -> Vec<String> {
     bad
 }
 
+/// One verdict per (declared type, hook), decided at the declaration. A method whose signature
+/// conforms for one instantiation only (its return type is the owner's `T`, or its operand
+/// names `X[int]`) is the hook of no instantiation: under every use, each instantiation behaves
+/// as the same owner with no such method, at check and at run. `index`, `slice` and `set_index`
+/// have no row: a return type `T` binds the protocol's own argument, so it conforms at the
+/// declaration, and they take no `Self` operand. `neg` and the arithmetic hooks have no
+/// `ret_t` row: no `T` equals `X[T]`.
+fn declaration_verdict_failures() -> Vec<String> {
+    let mut bad = Vec::new();
+    // (variant, signature, body, the instantiation the signature conforms for, another one)
+    type Inst = (&'static str, &'static str);
+    let ret_t = |sig: &str, conf: Inst, other: Inst| {
+        (
+            "ret_t",
+            sig.to_string(),
+            "return self.get()".to_string(),
+            conf,
+            other,
+        )
+    };
+    let operand = |sig: String, body: &str| {
+        (
+            "operand",
+            sig,
+            body.to_string(),
+            ("int", "1"),
+            ("str", "\"s\""),
+        )
+    };
+    for hook in &hooks() {
+        let n = hook.name;
+        let variants = match n {
+            "iter" => vec![ret_t(
+                "iter(self) -> T",
+                ("Iterator[int]", "[1, 2].iter()"),
+                ("int", "1"),
+            )],
+            "next" => vec![ret_t("next(self) -> T", ("int?", "None"), ("int", "1"))],
+            "str" => vec![ret_t("str(self) -> T", ("str", "\"s\""), ("int", "1"))],
+            "hash" => vec![ret_t("hash(self) -> T", ("int", "1"), ("str", "\"s\""))],
+            "contains" => vec![ret_t(
+                "contains(self, item: int) -> T",
+                ("bool", "true"),
+                ("int", "1"),
+            )],
+            "eq" => vec![
+                ret_t("eq(self, other: Self) -> T", ("bool", "true"), ("int", "1")),
+                operand("eq(self, other: X[int]) -> bool".to_string(), "return true"),
+            ],
+            "compare" => vec![
+                ret_t(
+                    "compare(self, other: Self) -> T",
+                    ("int", "1"),
+                    ("str", "\"s\""),
+                ),
+                operand(
+                    "compare(self, other: X[int]) -> int".to_string(),
+                    "return -1",
+                ),
+            ],
+            "neg" => vec![operand("neg(self) -> X[int]".to_string(), "return MK(1)")],
+            "add" | "sub" | "mul" | "div" | "mod" => vec![operand(
+                format!("{n}(self, other: X[int]) -> X[int]"),
+                "return other",
+            )],
+            "index" | "slice" | "set_index" => Vec::new(),
+            other => panic!("no declaration-verdict row for hook `{other}`"),
+        };
+        for (variant, sig, body, conf, other) in variants {
+            for (kind, head, mk) in [
+                (
+                    "gstruct",
+                    "struct X[T]:\n    n: T\n    fn get(self) -> T:\n        return self.n\n",
+                    "X",
+                ),
+                (
+                    "genum",
+                    "enum X[T]:\n    A(T)\n    fn get(self) -> T:\n        match self:\n            X.A(v): return v\n",
+                    "X.A",
+                ),
+            ] {
+                let method =
+                    m(&sig, &format!("print(\"HOOK RAN\")\n        {body}")).replace("MK", mk);
+                for (inst, (ty, arg)) in [("conf", conf), ("other", other)] {
+                    let vals = format!("x: X[{ty}] = {mk}({arg})\ny: X[{ty}] = {mk}({arg})\n");
+                    let with = format!("{head}{method}{vals}");
+                    let without = format!("{head}{vals}");
+                    for ((u, src), (_, src_none)) in uses(hook, hook.proto, &with)
+                        .into_iter()
+                        .zip(uses(hook, hook.proto, &without))
+                    {
+                        let tag = format!("decl_{kind}_{n}_{variant}_{inst}_{u}");
+                        let cell = format!("{kind}|{n}|{variant}|{inst}|{u}");
+                        let (clean, text) = check(&tag, &src);
+                        let (clean_none, _) = check(&format!("{tag}_none"), &src_none);
+                        let got = run(&tag, &src, &mut bad);
+                        let want = run(&format!("{tag}_none"), &src_none, &mut bad);
+                        if clean != clean_none || got.ok != want.ok || got.stdout != want.stdout {
+                            bad.push(format!(
+                                "{cell}: check clean={clean}, run ok={}, {:?}; the owner with no \
+                                 such method: check clean={clean_none}, run ok={}, {:?}: {text}{}",
+                                got.ok, got.stdout, want.ok, want.stdout, got.text
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // The review's named programs, each at check and at run.
+    for (name, src, want) in [
+        (
+            "G",
+            "struct Key[T]:\n    v: T\n    fn hash(self) -> T:\n        return self.v\ns: Set[Key[int]] = Set()\ns.add(Key(1))\nprint(s.len())\n",
+            "Set element type must implement Hashable",
+        ),
+        (
+            "D",
+            "struct Box[T]:\n    v: T\n    fn compare(self, other: Box[int]) -> int: return -1\nprint(Box(1) < Box(2))\n",
+            "cannot",
+        ),
+        (
+            "E",
+            "struct Box[T]:\n    v: T\n    fn add(self, other: Box[int]) -> Box[T]: return self\nprint(Box(1) + Box(2))\n",
+            "cannot apply +",
+        ),
+        (
+            "F",
+            "struct Box[T]:\n    v: T\n    fn next(self) -> str?:\n        return None\n    fn iter(self) -> T:\n        return self.v\nfor q in Box([1, 2].iter()):\n    print(q + 1)\n",
+            "cannot apply + to str and int",
+        ),
+    ] {
+        let (clean, text) = check(&format!("decl_named_{name}"), src);
+        let got = run(&format!("decl_named_{name}"), src, &mut bad);
+        if clean || got.ok || !text.contains(want) {
+            bad.push(format!(
+                "decl_named_{name}: expected the check error `{want}` and no run: {text}{}",
+                got.text
+            ));
+        }
+    }
+    bad
+}
+
 /// The grid is written from the checker's table: a hook added to `HOOKS` with no grid row, or a
 /// grid row for a method `HOOKS` does not list, fails here.
 #[test]
@@ -891,6 +1035,7 @@ fn operator_and_bound_agree_in_every_cell() {
     bad.extend(iter_run_failures());
     bad.extend(eq_failures());
     bad.extend(conditional_failures());
+    bad.extend(declaration_verdict_failures());
     bad.sort();
     assert!(
         bad.is_empty(),

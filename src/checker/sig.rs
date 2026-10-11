@@ -5104,12 +5104,6 @@ impl Checker {
     /// The element type the `next` hook of declared type `ty` yields, or `None` when `ty` has no
     /// `next` hook ([`Checker::hook_method`] decides).
     pub(super) fn struct_iter_elem(&self, ty: &Ty) -> Option<Ty> {
-        // `iter` wins at run time wherever a value is iterated. A conditional `iter` whose bound
-        // this instantiation fails (`HookMiss::Bound`) is still called, so the type has no usable
-        // iteration hook: the `next` elements must not type any consumer.
-        if let Err(HookMiss::Bound(_)) = self.hook_verdict(ty, "Iterable", "iter") {
-            return None;
-        }
         match self.hook_method(ty, "Iterator", "next")?.0.ret {
             Ty::Option(inner) => Some(*inner),
             _ => None,
@@ -5140,7 +5134,14 @@ impl Checker {
                     .and_then(|b| b.args.first().cloned())
             });
         }
-        self.struct_iterable_elem(ty).or_else(|| self.iter_elem(ty))
+        // The run time calls `iter` wherever the declaration has that hook, so its verdict
+        // decides which hook types the elements.
+        match self.hook_verdict(ty, "Iterable", "iter") {
+            Ok(_) => self.struct_iterable_elem(ty),
+            // `iter` runs and this instantiation fails its bound: no hook can type the elements.
+            Err(HookMiss::Bound(_)) => None,
+            Err(HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_)) => self.iter_elem(ty),
+        }
     }
 
     /// What a BUILTIN receiver yields per step: list/set → element, str → str, map → key,

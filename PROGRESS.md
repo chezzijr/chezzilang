@@ -9450,6 +9450,19 @@ owner), four arithmetic rows (`sub`, `mul`, `div`, `mod`) and `every_hook_row_ha
 which reads `checker::HOOKS`. Open: a conditional `str` still runs for every instantiation,
 because `print` has no check-time decider (unchanged from base).
 
+Review round 2 (one verdict per declared type). `record_hook_table` asked `hook_verdict` for the
+declaration (`Key[T]`) and every operator site asked it for the instantiation (`Key[int]`), so
+`fn hash(self) -> T` checked clean as a `Set[Key[int]]` element and then faulted
+(`struct 'Key' has no 'hash' method`). `hook_verdict` now decides at the declaration
+(`Checker::declaration_of`) for every instantiation, and `requirement_matches` takes the same
+verdict for a `HOOKS` row, so `satisfies` agrees. A signature that conforms for one instantiation
+only is the hook of none: `Set[Key[int]]`, `Box(1) < Box(2)` with an operand `Box[int]`, and `for`
+over a `next` type whose `iter` returns `T` are check errors or use the other hook. The veto in
+`struct_iter_elem` is gone: `iterable_elem` matches the `iter` verdict, and the `Iterator` bound
+reads `iterable_elem`. Grid: `declaration_verdict_failures` (hook x {return type `T`, operand
+`X[int]`} x {generic struct, generic enum} x {conforming instantiation, another} x 5 uses, each
+equal to the owner with no such method, plus the named programs G, D, E, F).
+
 `for` special-cases outside the decider, recorded for the owner's range / channel design (not
 touched): the range arm and the `Ty::Channel` arms of `Checker::for_bindings`
 (`src/checker/sig.rs:5424`, `:5476`, `:5479`, `:5482`, `:5496`), and the range arm and

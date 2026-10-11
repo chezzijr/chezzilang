@@ -2233,6 +2233,26 @@ conditional `eq`. `for`, comprehensions, `List()` / `Set()` / `Map()`, `x[k]`, `
 One exception stays open: `print` accepts every value and has no compile-time decider, so a
 conditional `str` runs for every instantiation.
 
+**The declaration decides a hook, never the instantiation (TICKET-250).** A generic type has one
+verdict per hook, taken from the signature as written. A method whose signature conforms for one
+instantiation only is the hook of no instantiation: it is an ordinary method, the near-miss
+warning applies at the declaration, and the operator reports its ordinary error.
+
+```
+struct Key[T]:
+    v: T
+    fn hash(self) -> T: return self.v      # `T` is not `int`: never the Hashable hook
+s: Set[Key[int]] = Set()                    →  type error: Set element type must implement Hashable
+
+struct Box[T]:
+    v: T
+    fn compare(self, other: Box[int]) -> int: return -1   # the operand is not `Self`
+Box(1) < Box(2)                             →  type error: cannot compare Box[int] and Box[int]
+```
+
+Write the signature for every instantiation (`other: Self`, `-> int`) and put a restriction in a
+`where` bound.
+
 **`==` honours the bound too** (`docs/gaps.md` **W7-41** / **W7-45**, both fixed 2026-08-11). A
 conditional `fn eq(self, other: Self) -> bool where T: Comparable` is the hook `==`/`!=` dispatch to,
 and the equality path consults conformance exactly as `<` does:
