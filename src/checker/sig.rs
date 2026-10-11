@@ -1597,7 +1597,7 @@ impl Checker {
     /// [`resolve_type`]. `tps` is the declared type-param list (`None` if the name isn't found, e.g.
     /// a non-generic type used with args). Errors are emitted, not returned. The protocol arm is NOT
     /// routed here — it has no bounds loop, a different arity message, and a static-method reject.
-    fn check_type_arity_and_bounds(
+    pub(super) fn check_type_arity_and_bounds(
         &mut self,
         n: &str,
         tps: Option<Vec<TyParam>>,
@@ -2097,7 +2097,10 @@ impl Checker {
                         let elem = self.resolve_type(inner, span);
                         if self.concurrency_licensed("Atomic") {
                             // INSIDE the licensing branch — see the ctor site in `expr.rs`.
-                            self.reject_eq_atomic_payload(&elem, span);
+                            self.conformance_obligation(Obligation::AtomicPayload {
+                                elem: elem.clone(),
+                                span,
+                            });
                             Ty::atomic(elem)
                         } else {
                             self.error(
@@ -2111,18 +2114,20 @@ impl Checker {
                     ("Map", [k, v]) => {
                         let key = self.resolve_type(k, span);
                         let value = self.resolve_type(v, span);
-                        if let Some(why) = self.key_ty_reject(&key) {
-                            self.error(span, format!("Map key type {why}"));
-                            self.pending_key_reject = Some(why);
-                        }
+                        self.conformance_obligation(Obligation::Hashable {
+                            ty: key.clone(),
+                            what: "Map key type",
+                            span,
+                        });
                         Ty::map(key, value)
                     }
                     ("Set", [t]) => {
                         let elem = self.resolve_type(t, span);
-                        if let Some(why) = self.key_ty_reject(&elem) {
-                            self.error(span, format!("Set element type {why}"));
-                            self.pending_key_reject = Some(why);
-                        }
+                        self.conformance_obligation(Obligation::Hashable {
+                            ty: elem.clone(),
+                            what: "Set element type",
+                            span,
+                        });
                         Ty::set(elem)
                     }
                     // A user-defined generic struct instantiated with type arguments: `Pair[int, str]`.
@@ -2132,8 +2137,13 @@ impl Checker {
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
                         // Clone the param list out so the borrow on `self.structs` is dropped before
                         // the `satisfies`/`error` calls below.
-                        let tps = self.structs.get(&key).map(|i| i.type_params.clone());
-                        self.check_type_arity_and_bounds(n, tps, &resolved, span);
+                        self.conformance_obligation(Obligation::Bound {
+                            name: n.to_string(),
+                            key: key.clone(),
+                            is_struct: true,
+                            args: resolved.clone(),
+                            span,
+                        });
                         Ty::Struct(key, resolved)
                     }
                     // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
@@ -2163,8 +2173,13 @@ impl Checker {
                             );
                             Ty::Unknown
                         } else {
-                            let tps = self.enum_type_params.get(&key).cloned();
-                            self.check_type_arity_and_bounds(n, tps, &resolved, span);
+                            self.conformance_obligation(Obligation::Bound {
+                                name: n.to_string(),
+                                key: key.clone(),
+                                is_struct: false,
+                                args: resolved.clone(),
+                                span,
+                            });
                             Ty::enum_ty(key, resolved)
                         }
                     }

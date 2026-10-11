@@ -1360,6 +1360,38 @@ fn resolve_call_tables_with(graph: &ModuleGraph, memo_enabled: bool) -> CallTabl
     })
 }
 
+/// TICKET-250 (D4) — a conformance question a type spelling asks. `hoist` resolves a type's
+/// field and method types before every type of the module is inserted, so inside `hoist` the
+/// question is deferred (`Checker::conformance_obligation`) and discharged once they all are.
+enum Obligation {
+    /// `Map[K, _]` / `Set[E]`: the key type must be `Hashable`. `what` opens the message.
+    Hashable {
+        ty: Ty,
+        what: &'static str,
+        span: Span,
+    },
+    /// `Name[args]`: arity, and each argument against its parameter's bounds.
+    Bound {
+        name: String,
+        key: String,
+        is_struct: bool,
+        args: Vec<Ty>,
+        span: Span,
+    },
+    /// `Atomic[T]`: the payload must compare structurally.
+    AtomicPayload { elem: Ty, span: Span },
+    /// An extern parameter or return type must be C-marshallable.
+    ExternMarshal {
+        ty: Ty,
+        name: String,
+        span: Span,
+        allow_void: bool,
+    },
+}
+
+/// A deferred [`Obligation`] with the type-parameter scope it was asked in.
+type DeferredObligation = (Obligation, HashMap<String, Vec<TyBound>>);
+
 /// TICKET-250 — an operator hook: a method an operator calls for the user.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Hook {
@@ -2485,6 +2517,10 @@ struct Checker {
     /// second way for the harvest pass and `check_graph` to disagree. Produced by
     /// [`resolve_call_tables`].
     carriers: CarrierTable,
+    /// TICKET-250 (D4) — `Some` while `hoist` runs: each deferred [`Obligation`] with the
+    /// type-parameter scope it was asked in. `None` outside `hoist`: an obligation is discharged
+    /// at once.
+    deferred_obligations: Option<Vec<DeferredObligation>>,
     /// TICKET-250 — the hooks each declared type has. See [`HookTable`].
     hook_table: HookTable,
     /// TICKET-250 — the call sites typed through a reserved requirement. See [`HookCallTable`].

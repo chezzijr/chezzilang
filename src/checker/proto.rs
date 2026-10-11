@@ -2425,6 +2425,52 @@ impl Checker {
         }
     }
 
+    /// TICKET-250 (D4) — ask a conformance question a type spelling raises. Inside `hoist` it is
+    /// deferred until every type of the module is inserted; anywhere else it is answered now.
+    /// A new conformance report inside `resolve_type` goes through here, never to `self.error`.
+    pub(super) fn conformance_obligation(&mut self, ob: Obligation) {
+        match &mut self.deferred_obligations {
+            Some(list) => list.push((ob, self.type_params.clone())),
+            None => self.discharge_obligation(ob),
+        }
+    }
+
+    pub(super) fn discharge_obligation(&mut self, ob: Obligation) {
+        match ob {
+            Obligation::Hashable { ty, what, span } => {
+                if let Some(why) = self.key_ty_reject(&ty) {
+                    self.error(span, format!("{what} {why}"));
+                    // The literal sites read this right after `resolve_type` to skip their own
+                    // copy of the report; a deferred obligation has no such reader.
+                    if self.deferred_obligations.is_none() {
+                        self.pending_key_reject = Some(why);
+                    }
+                }
+            }
+            Obligation::Bound {
+                name,
+                key,
+                is_struct,
+                args,
+                span,
+            } => {
+                let tps = if is_struct {
+                    self.structs.get(&key).map(|i| i.type_params.clone())
+                } else {
+                    self.enum_type_params.get(&key).cloned()
+                };
+                self.check_type_arity_and_bounds(&name, tps, &args, span);
+            }
+            Obligation::AtomicPayload { elem, span } => self.reject_eq_atomic_payload(&elem, span),
+            Obligation::ExternMarshal {
+                ty,
+                name,
+                span,
+                allow_void,
+            } => self.assert_marshallable(&ty, &name, span, allow_void),
+        }
+    }
+
     /// The declared method of `ty` that carries `hook`'s name, hook or not. It decides nothing:
     /// its readers need the candidate's own `where` bounds, and ask [`Self::hook_method`] for the
     /// verdict.

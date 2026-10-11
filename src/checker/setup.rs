@@ -169,6 +169,7 @@ impl Checker {
             harvest_keywords: false,
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
+            deferred_obligations: None,
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
@@ -3616,8 +3617,10 @@ impl Checker {
         // (field info, which `assert_marshallable` inspects for a flat-scalar struct) is only fully
         // populated once every struct in the module has been hoisted. `collect_names` already
         // pre-registered struct *names*, so `resolve_type` accepts the forward reference inline.
-        #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut extern_marshal_checks: Vec<(Ty, String, Span, bool)> = Vec::new();
+        // TICKET-250 (D4): the same holds for every conformance question a type spelling asks
+        // (`Set[Node]` inside `Node`, `Map[R, _]` before `R`, `Box[A]` with a bounded `Box`).
+        // Each is deferred here and discharged at the end of this function.
+        let outer_obligations = self.deferred_obligations.replace(Vec::new());
         for s in stmts {
             match &s.kind {
                 StmtKind::Fn(decl) => {
@@ -3948,12 +3951,12 @@ impl Checker {
                                     // return-only sentinel and would panic the backend's `ctype_of`.
                                     // Deferred to the post-loop sweep (a by-value struct param may be
                                     // declared after this extern block).
-                                    extern_marshal_checks.push((
-                                        ty.clone(),
-                                        ef.name.clone(),
-                                        ef.span,
-                                        false,
-                                    ));
+                                    self.conformance_obligation(Obligation::ExternMarshal {
+                                        ty: ty.clone(),
+                                        name: ef.name.clone(),
+                                        span: ef.span,
+                                        allow_void: false,
+                                    });
                                     ty
                                 }
                                 None => {
@@ -3974,12 +3977,12 @@ impl Checker {
                                 // The return slot may be `nil` (void) in addition to the C scalars.
                                 // Deferred to the post-loop sweep (a by-value struct return may be
                                 // declared after this extern block).
-                                extern_marshal_checks.push((
-                                    ty.clone(),
-                                    ef.name.clone(),
-                                    ef.span,
-                                    true,
-                                ));
+                                self.conformance_obligation(Obligation::ExternMarshal {
+                                    ty: ty.clone(),
+                                    name: ef.name.clone(),
+                                    span: ef.span,
+                                    allow_void: true,
+                                });
                                 ty
                             }
                             // A void extern returns nothing observable; model it as `Nil`.
@@ -4242,10 +4245,13 @@ impl Checker {
                 );
             }
         }
-        // Now every struct's field info is registered, so a by-value-struct param/return resolves its
-        // fields regardless of whether the struct was declared before or after the extern block.
-        for (ty, name, span, allow_void) in &extern_marshal_checks {
-            self.assert_marshallable(ty, name, *span, *allow_void);
+        // Now every type of the module is inserted: discharge what the loop deferred, each in the
+        // type-parameter scope it was asked in.
+        let deferred = std::mem::replace(&mut self.deferred_obligations, outer_obligations);
+        for (ob, scope) in deferred.unwrap_or_default() {
+            let saved = std::mem::replace(&mut self.type_params, scope);
+            self.discharge_obligation(ob);
+            self.type_params = saved;
         }
     }
 

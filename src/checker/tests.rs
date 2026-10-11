@@ -39523,6 +39523,42 @@ fn static_method_is_not_a_hook_for_the_operator() {
     );
 }
 
+/// TICKET-250 (D4) — `hoist` defers every conformance question a type spelling asks until all
+/// types of the module are inserted, so a type may ask it of itself or of a type declared later.
+/// The negative rows prove a deferred obligation still runs.
+#[test]
+fn a_type_may_ask_conformance_of_a_type_declared_later() {
+    let hash = "    fn hash(self) -> int:\n        return self.id\n    fn eq(self, other: Self) -> bool:\n        return self.id == other.id\n";
+    // A method returns a `Set` of its own type.
+    let own_set = |h: &str| {
+        format!(
+            "struct Node:\n    id: int\n{h}    fn peers(self) -> Set[Node]:\n        return Set([self, self])\nprint(Node(1).peers().len())\n"
+        )
+    };
+    // A field is a `Map` keyed by a struct declared later.
+    let later_key = |h: &str| {
+        format!(
+            "struct Reg:\n    m: Map[R, int]\nstruct R:\n    id: int\n{h}r := Reg({{}})\nprint(r.m.len())\n"
+        )
+    };
+    ok(&own_set(hash));
+    ok(&later_key(hash));
+    // A bounded generic applied to the type being declared.
+    ok(
+        "protocol Named:\n    fn name(self) -> str\nstruct Box[T: Named]:\n    v: T\nstruct A:\n    nxt: Box[A]?\n    fn name(self) -> str:\n        return \"a\"\na := A(None)\nprint(a.name())\n",
+    );
+    rejects(&own_set(""), "Set element type must implement Hashable");
+    rejects(&later_key(""), "Map key type must implement Hashable");
+    rejects(
+        "protocol Named:\n    fn name(self) -> str\nstruct Box[T: Named]:\n    v: T\nstruct A:\n    nxt: Box[A]?\na := A(None)\nprint(a)\n",
+        "does not satisfy Named",
+    );
+    // A bounded type parameter keeps its bound when the obligation runs late.
+    ok(
+        "struct Reg[K: Hashable + Eq]:\n    m: Map[K, int]\nr: Reg[int] = Reg({})\nprint(r.m.len())\n",
+    );
+}
+
 /// TICKET-250 — an `Atomic` payload is rejected only when its `eq` is the `Eq` hook
 /// (`Checker::hook_method`). A static `eq`, one that misnames its operand, and one that returns
 /// `int` are ordinary methods: the payload compares structurally, so `cas` and `==` agree.
