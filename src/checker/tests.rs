@@ -39485,3 +39485,30 @@ fn every_crossing_closure_method_reports_a_captured_write() {
         "import std.concurrency\nfn main():\n    seen: List[int] = []\n    w := RwShared(1)\n    n := w.read(fn(x: int) -> int: x + seen.remove_at(0))\n    print(n, seen)\nmain()\n",
     );
 }
+
+#[test]
+fn inline_optional_never_satisfies_a_bound_through_its_payload() {
+    let num = "fn double[T: Num](x: T) -> T:\n    return x + x\n";
+    let loc = "protocol Located:\n    fn line(self) -> int\nstruct Tok:\n    n: int\n    fn line(self) -> int:\n        return self.n\nfn where_is[T: Located](x: T) -> int:\n    return x.line()\n";
+    let cells: Vec<(&str, String)> = vec![
+        ("num", format!("{num}print(double(?5))\n")),
+        ("user-protocol", format!("{loc}n: int = where_is(?Tok(7))\n")),
+        (
+            "comparable",
+            "fn mx[T: Comparable](a: T, b: T) -> T:\n    return if a < b: b else: a\nstruct NC:\n    n: int\nprint(mx(?NC(1), ?NC(2)))\n".to_string(),
+        ),
+    ];
+    let mut missed = Vec::new();
+    for (name, src) in &cells {
+        if !check_src(src)
+            .iter()
+            .any(|e| e.message.contains("does not satisfy"))
+        {
+            missed.push(*name);
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "inline optional passed a bound unchecked in cells: {missed:?}"
+    );
+}
