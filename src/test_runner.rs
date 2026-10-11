@@ -1630,13 +1630,41 @@ struct Suite:
             "test fn backlog():\n    ch := Channel[List[int]](200000)\n    \
              for i in range(40000):\n        ch.send([i, i, i, i, i, i, i, i])\n",
         );
-        // The sibling single-value path: a big list parked in a `Shared` (a REPLACING store — the
-        // summary is refreshed by `SharedCore::store`, not only at construction).
+        // The sibling single-value path: data parked in `Shared` boxes. TICKET-246 — a box keeps
+        // its value in its own heap (8 bytes per `int`, not a wire value), so the 150000-item list
+        // this test used to park is 1.2 MB and no longer near the cap. Three boxes of ~3.6 MB each
+        // are: no single heap exceeds the cap (`one` below PASSes), only the caller's walk over
+        // the three box heaps does.
+        const BOXES: &str = "import std.concurrency\n\n\
+             fn keep(acc: List[List[int]], xs: List[int]) -> List[List[int]]:\n    \
+             acc.push(xs)\n    return acc\n\n\
+             fn fill(n: int) -> List[Shared[List[List[int]]]]:\n    \
+             xs: List[int] = []\n    for i in range(150000):\n        xs.push(i)\n    \
+             boxes: List[Shared[List[List[int]]]] = []\n    for _b in range(n):\n        \
+             s: Shared[List[List[int]]] = Shared([])\n        for _k in range(3):\n            \
+             s.update(fn(acc): keep(acc, xs))\n        boxes.push(s)\n    return boxes\n\n";
         let parked = d2.write(
             "parked_test.chz",
-            "import std.concurrency\n\ntest fn parked():\n    s := Shared([0])\n    \
-             xs: List[int] = []\n    for i in range(150000):\n        xs.push(i)\n    s.set(xs)\n    \
-             zs: List[int] = []\n    for i in range(2000):\n        zs = [i]\n",
+            &format!(
+                "{BOXES}test fn parked():\n    boxes := fill(3)\n    \
+                 zs: List[int] = []\n    for i in range(2000):\n        zs = [i]\n    \
+                 assert boxes.len() == 3 and zs.len() == 1\n"
+            ),
+        );
+        let d3 = TmpDir::new();
+        let one = d3.write(
+            "one_test.chz",
+            &format!(
+                "{BOXES}test fn one():\n    boxes := fill(1)\n    \
+                 zs: List[int] = []\n    for i in range(2000):\n        zs = [i]\n    \
+                 assert boxes.len() == 1 and zs.len() == 1\n"
+            ),
+        );
+        let report = run_tests_capped(&one, CAP);
+        assert!(
+            report.text.contains("PASS one"),
+            "one box of the three is under the cap; report:\n{}",
+            report.text
         );
         for (label, f) in [("backlog", &backlog), ("parked", &parked)] {
             {

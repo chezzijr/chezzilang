@@ -1911,6 +1911,24 @@ pub fn nested_core_bytes(w: &WireValue, seen: &mut super::fxhash::FxHashSet<usiz
     acc + drain_pending_core_bytes(seen, &mut pending)
 }
 
+/// TICKET-246 — the bytes reachable through one box under a live cap. `ctx` is the box context
+/// when the caller got the state lock WITHOUT waiting (`try_lock` / `try_read`): the box heap is
+/// then walked with the caller's `seen` set and its nested cores are queued into `pending`. When
+/// the lock is busy (a closure is running in the box) the walk declines and reads `fallback`, the
+/// figure the box stored at its last settle. Never take the state lock blocking from an accounting
+/// walk: it is held across user code, and a collection can start inside that code.
+pub(super) fn box_bytes(
+    ctx: Option<&super::FiberCtx>,
+    fallback: &AtomicUsize,
+    seen: &mut super::fxhash::FxHashSet<usize>,
+    pending: &mut Vec<WireValue>,
+) -> usize {
+    match ctx.and_then(|c| c.heap.as_ref()) {
+        Some(heap) => heap.bytes_with(true, seen, pending),
+        None => fallback.load(Ordering::Relaxed),
+    }
+}
+
 /// Bytes owned by the cores queued by the structural byte walk, locking exactly ONE at a time.
 ///
 /// **Call with NO core guard held**, for the same reason as [`drain_pending_cores`]: this walk is the
@@ -1939,7 +1957,11 @@ pub fn drain_pending_core_bytes(
                 };
                 acc += queued + c.held_bytes();
             }
-            WireValue::Shared(c) => acc += c.bytes.load(Ordering::Relaxed),
+            WireValue::Shared(c) => {
+                let g = c.state.0.try_lock().ok();
+                let ctx = g.as_ref().and_then(|g| g.as_deref());
+                acc += box_bytes(ctx, &c.bytes, seen, pending);
+            }
             WireValue::RwShared(c) => {
                 let g = c.v.read().unwrap();
                 acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
