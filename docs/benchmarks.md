@@ -3995,3 +3995,20 @@ Cells slower than their run-to-run range, each explained:
 9. The accepted cliff: an inner closure that reads a 100000-item global the caller mutates before
    every call costs 15305-16320 us per call (two module snapshots per call) against 3-8 us. The
    one-box form of this cliff is what `spawn` pays today. Capture the value the closure needs.
+
+## TICKET-250 — operator hooks through the hook table, base vs branch (2026-10-11)
+
+`benches/chz/hook_dispatch.chz`: one loop of 200000 `==` through a conforming `eq`, one of 200000
+`Set.add` through a conforming `hash`. Release binaries, wall clock of the whole run, five runs per
+binary, taken twice (base, tip, base, tip). Load average 2.87.
+
+| binary | sorted runs (ms) | median |
+|---|---|---|
+| base `1df21e89` | 290 327 346 355 359 | 346 |
+| tip | 311 317 331 345 355 | 331 |
+| base `1df21e89` | 300 302 311 333 396 | 311 |
+| tip | 314 324 338 348 351 | 338 |
+
+No measurable change: the two base medians (346, 311) bracket the two tip medians (331, 338).
+`Vm::invoke_hook` enters the hook's proto itself. `==` on a type with no `eq` hook tests one
+program-wide flag (`Program::any_eq_hook`) and one dense table entry, as `eq_struct` did.
