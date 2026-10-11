@@ -372,10 +372,31 @@ depend on the no-arg form never blocking. Port Go's `make(chan T)` to `Channel[T
 `Channel[T]()`.
 
 ### `Shared[T]` — cross-task shared cell
-`get() -> T` · `set(x: T) -> None` · `update(f: fn(T) -> T) -> None`. `get` is a **snapshot copy out**
-(the value lives off the GC heap so it can cross threads): mutating it — `s.get().push(x)` — changes a
-throwaway, not the box, and is silently lost. Mutate via `update` (or `set` a whole new value). Same for
-`RwShared`/`Atomic`; *unlike* a plain in-task `struct` field, whose reads alias the live value but can't cross a spawn.
+`get() -> T` · `set(x: T) -> None` · `update(f: fn(T) -> T) -> None` · `read(f: fn(T) -> R) -> R`.
+
+**Where the value lives (TICKET-246).** A `Shared[T]` keeps its value in a private heap of its own.
+`update(f)` runs `f` **inside the box, on the live value, in place**: `s.update(fn(t): hit(t))`
+with `hit` doing `t.hits += 1` and returning `t` copies nothing, however large `t` is. The value `f`
+returns is the new state. `Shared.read(f)` runs `f` inside the box too and copies only its **result**
+out; it runs on the live value, so a mutation `f` makes **persists** (use `RwShared.read` for a
+reader that works on its own copy). `get` is a **whole-value copy out**: mutating it —
+`s.get().push(x)` — changes the caller's copy, not the box (the checker warns on that shape).
+
+**The closure rule.** A closure given to `update` / `read` runs like the body of a spawned task:
+
+- Its captures are **copies**. A write to a captured value is the task-copy error or fault
+  (`... is this task's copy: a write to it would be lost at the join ...`), never a silent lost write.
+  A capture the closure stores into the state is the box's own value once the call ends.
+- It sees **module globals as the caller has them at the call** (a binding made after the box, and a
+  rebinding between two calls, are both visible). A write to a module global faults the same way.
+- A module global's copy that the closure stores into the state stays a copy: a later in-place
+  write to it faults, and the fault says so. Store `G.copy()` instead.
+- A fault inside the closure is raised in the caller and `recover:` catches it; the box keeps
+  serving, and the state is **what the closure left** (a `push` made before the fault stays).
+- A slow closure blocks every other user of the box and holds its worker, as with Elixir's `Agent`:
+  keep the closure short and do slow work outside it.
+
+Same for `RwShared`/`Atomic` regarding `get`; *unlike* a plain in-task `struct` field, whose reads alias the live value but can't cross a spawn.
 `update(f)` runs `f` **under the box's process-global update guard** (read-modify-write is atomic
 against other tasks — this is why it exists over a `get`-then-`set`, which races); `set` takes the
 same guard, so a cross-task `set` racing an in-flight `update` **blocks** and lands rather than being
@@ -385,7 +406,8 @@ if you do — measured at the default worker count and again at `CHEZZI_THREADS=
 
 | from inside `s.update(f)` / `rw.write(f)` | behaviour |
 |---|---|
-| `s.get()` (or `rw.read(g)`) | **succeeds, returning the PRE-guard value** — a stale read, by design; `get`/`read` never take the guard |
+| `s.get()` / `s.read(g)` / `print(s)` — same `Shared` box | **faults** the same way (TICKET-246): the value lives in the box and the closure holds it, so no earlier copy exists to return |
+| `rw.get()` / `rw.read(g)` — same `RwShared` box | **succeeds, returning the PRE-guard value** — a stale read; `RwShared` still stores an encoded copy until it gets the same private heap |
 | `s.set(x)` — same box | **faults**: `"deadlock: this task already holds the update guard on this Shared box"` |
 | `s.update(g)` / `rw.write(g)` — same box | **faults** the same way, instead of hanging undetected |
 

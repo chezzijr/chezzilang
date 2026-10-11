@@ -9391,8 +9391,20 @@ Landed so far, in plan-step order:
    hanging (`Shared`, `Atomic`) or overflowing the stack (`RwShared`). Grid:
    `vm::tests::display_box_grid_terminates_on_every_cycle`, `tests/chz/suites/box_grid_test.chz`.
 
-Not landed yet: the live `Shared` / `RwShared` state (steps 5 to 7) and everything after it. Until
-then both boxes still store an encoded value and `update` / `write` still copy it out and back.
+5. `Shared[T]` keeps its value in a private heap: `update` runs in place, `Shared.read(f)` is new,
+   `get` / `read` / `set` / `update` / display from inside the box's own closure fault with
+   `already holds the update guard`. GC and byte accounting take no lock on a `Shared`. Grids:
+   `tests/chz/suites/box_grid_test.chz` (33 cells), `tests/chz/suites/box_nested_grid_test.chz`
+   (112 cells, values equal to the base binary's), `tests/chz/stdlib/box_in_place_perf_test.chz`.
+   Plan step 9's two pinned tests are migrated with it.
+
+Measured cost, not yet explained: small-value `update` with one caller is 401-432 ms before and
+450-493 ms after per 200000 calls.
+
+Not landed yet: the live `RwShared` state and the collections on it (step 6), deleting the encoded
+store (step 7), the `CROSSING_CLOSURE_METHODS` table and checker floor (step 8), the rule grid,
+cancellation rows, reader stress test, benchmark tables and the remaining docs (steps 10 to 14).
+`RwShared` still stores an encoded value and `write` still copies it out and back.
 
 ### TICKET-239 — the expected type has one channel (2026-10-10)
 

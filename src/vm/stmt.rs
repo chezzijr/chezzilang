@@ -8,6 +8,10 @@ use super::*;
 /// write site stays byte-identical. `copied_write_err` prefixes it with `'<name>'` or `this value`.
 pub(crate) const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
 
+/// TICKET-246 — appended to the D4 fault when the write happens inside a `Shared` / `RwShared`
+/// closure.
+pub(crate) const BOX_COPY_WRITE_NOTE: &str = " (inside a Shared/RwShared closure this value is a copy of a capture or of a module global; if the box holds a module global's copy, store its .copy() in the box instead)";
+
 /// TICKET-246 — one of the three boxes that render what they hold, borrowed from a heap object
 /// or from a wire handle. [`Vm::display_box`] is its only renderer.
 #[derive(Clone, Copy)]
@@ -66,7 +70,15 @@ impl Vm {
             Some(n) => format!("'{n}'"),
             None => "this value".to_string(),
         };
-        self.err(format!("{subject} {COPY_WRITE_TAIL}"), span)
+        // TICKET-246 — inside a box closure a marked value is a capture's copy or a module
+        // global's copy. The second can be held by the box state (`s.update(fn(_): DEFAULTS)`),
+        // where "lost at the join" alone would mislead, so the fault names that case and its fix.
+        let in_box = if self.box_chain.is_empty() {
+            ""
+        } else {
+            BOX_COPY_WRITE_NOTE
+        };
+        self.err(format!("{subject} {COPY_WRITE_TAIL}{in_box}"), span)
     }
 
     /// Fault when `h` is an airlock copy (D4 layer C). Called at every write site that has no
@@ -2512,7 +2524,11 @@ impl Vm {
     /// state cannot be read without waiting.
     fn box_peek(&self, core: BoxCore) -> Option<WireValue> {
         Some(match core {
-            BoxCore::Shared(c) => c.v.lock().unwrap().clone(),
+            // The state lock is held across user code, so a `&self` render only TRIES it.
+            BoxCore::Shared(c) => {
+                let st = c.state.0.try_lock().ok()?;
+                self.box_copy_out(st.as_ref()?, Span::default()).ok()?
+            }
             BoxCore::RwShared(c) => c.v.read().unwrap().clone(),
             BoxCore::Atomic(c) => c.v.lock().unwrap().clone(),
         })
@@ -2555,8 +2571,12 @@ impl Vm {
 
     /// One box's snapshot for the print path, which may wait.
     fn box_snapshot_one(&mut self, core: BoxCore, span: Span) -> Result<WireValue, RuntimeError> {
-        self.box_peek(core)
-            .ok_or_else(|| self.err("a box state could not be read".to_string(), span))
+        match core {
+            BoxCore::Shared(c) => self.shared_copy_out(c, span),
+            _ => self
+                .box_peek(core)
+                .ok_or_else(|| self.err("a box state could not be read".to_string(), span)),
+        }
     }
 
     /// Snapshots of `root` and of every box nested in a snapshot, each box once. The print path

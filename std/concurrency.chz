@@ -23,10 +23,23 @@
 # of its return, so `f` is declared UNANNOTATED and retyped to `fn() -> ?`. `Atomic.add`/`sub` exist
 # only for a numeric `T` — a dispatch-time constraint the `Ty::Atomic` arm keeps as a residual gate.
 
+# `Shared[T]` keeps its value in a private heap of its own (TICKET-246), one user at a time.
+#   - `update(f)` runs `f` INSIDE the box, on the live value, in place: `fn(t): t.hits += 1` then
+#     returning `t` copies nothing. The value `f` returns is the new state.
+#   - `read(f)` runs `f` inside the box too and copies only its RESULT out (`read(fn(T) -> R) -> R`,
+#     `f` declared unannotated and retyped like `RwShared.read`). It runs on the live value: a
+#     mutation `f` makes persists.
+#   - `get()` copies the whole value out; `set(v)` copies `v` in.
+# A closure given to `update` / `read` runs like the body of a spawned task: its captures are
+# copies (a write to one is the task-copy error or fault, never a silent lost write) and it sees
+# module globals as the caller has them at the call. `get` / `read` / `set` / `update` / printing of
+# a box from inside that box's own `update` / `read` closure fault with
+# `already holds the update guard`. A slow closure blocks every other user of the box.
 native struct Shared[T]:
     native fn get(self) -> T
     native fn set(self, v: T) -> None
     native fn update(self, f: fn(T) -> T) -> None
+    native fn read(self, f)
 
 # `RwShared[T]` has exactly four methods for every `T`: `get`, `set`, `read`, `write`. A shared
 # container is used through `std.concurrency.collection` (`ConcurrentList`, `ConcurrentMap`,

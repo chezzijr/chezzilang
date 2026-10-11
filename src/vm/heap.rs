@@ -586,6 +586,12 @@ pub struct Heap {
     /// its GC boundary to hard-abort the running test, re-observed each sweep like a cancel checkpoint
     /// (so a runaway `defer` during the abort unwind re-trips it); cleared per test by `clear_over_cap`.
     over_cap: bool,
+    /// TICKET-246 — copy marks recorded for one box call (see `begin_copy_log`), and whether
+    /// `set_copied` is recording now.
+    copy_log: Vec<u32>,
+    copy_logging: bool,
+    /// `live_bytes()` as of the last `sweep()`; half of [`approx_bytes`](Heap::approx_bytes).
+    last_live_bytes: usize,
     /// W6-10s — force the next [`should_collect`](Heap::should_collect), regardless of object count.
     /// Set only under a live cap, by [`request_collect`](Heap::request_collect), for a heap that is
     /// handed a large payload in very few `Obj`s (a worker's rebuilt task args/captures) — the
@@ -630,6 +636,9 @@ impl Default for Heap {
             peak_live_bytes: 0,
             mem_cap: 0,
             over_cap: false,
+            copy_log: Vec::new(),
+            copy_logging: false,
+            last_live_bytes: 0,
             force_collect: false,
             err_spans: FxHashMap::default(),
         }
@@ -672,6 +681,38 @@ impl Heap {
         }
         self.copied[i >> 6] |= 1u64 << (i & 63);
         self.any_copied = true;
+        if self.copy_logging {
+            self.copy_log.push(h.0);
+        }
+    }
+
+    /// TICKET-246 — start recording the objects [`set_copied`](Heap::set_copied) marks. A box call
+    /// records the marks made while it rebuilds its closure (the closure's captures), so it can
+    /// clear exactly those when the call ends.
+    pub fn begin_copy_log(&mut self) {
+        self.copy_log.clear();
+        self.copy_logging = true;
+    }
+
+    /// Stop recording; the recorded marks stay until [`unmark_copy_log`](Heap::unmark_copy_log).
+    pub fn end_copy_log(&mut self) {
+        self.copy_logging = false;
+    }
+
+    /// Clear the mark of every recorded object that is still live, and forget the record. A
+    /// capture the closure stored into the box state is the box's own value from here on.
+    pub fn unmark_copy_log(&mut self) {
+        self.copy_logging = false;
+        for i in std::mem::take(&mut self.copy_log) {
+            self.clear_copied(i as usize);
+        }
+    }
+
+    /// An O(1) upper estimate of this heap's bytes: the live bytes at the last sweep plus what
+    /// was charged since. `live_bytes()` scans every slot and is the exact measure.
+    pub fn approx_bytes(&self) -> usize {
+        self.last_live_bytes
+            .saturating_add(self.since_gc_bytes.load(Ordering::Relaxed))
     }
 
     /// Test whether `h` is an airlock copy. `any_copied` makes this one predictable branch on a
@@ -980,13 +1021,10 @@ impl Heap {
                 }
                 crate::vm::core::drain_pending_cores(&mut out, &mut seen, &mut pending);
             }
-            Obj::Shared(core) => {
-                let (mut seen, mut pending) = {
-                    let g = core.v.lock().unwrap();
-                    Self::mark_core_payload(&g, &core.summary, Arc::as_ptr(core) as usize, &mut out)
-                };
-                crate::vm::core::drain_pending_cores(&mut out, &mut seen, &mut pending);
-            }
+            // TICKET-246 — a `Shared` holds no handle into THIS heap: its value lives in the box's
+            // own heap, rooted there. Nothing to trace, and no lock (the state lock is held
+            // across user code, where a collection can start).
+            Obj::Shared(_) => {}
             Obj::RwShared(core) => {
                 let (mut seen, mut pending) = {
                     let g = core.v.read().unwrap();
@@ -1111,7 +1149,14 @@ impl Heap {
             .unwrap_or_else(|e| e.into_inner()) = None;
         self.force_collect = false;
         self.next_gc = (self.live * 2).max(MIN_GC_THRESHOLD);
+        // A recorded copy mark whose object was just freed must not be cleared later: the slot
+        // can be re-handed to another object by then.
+        if !self.copy_log.is_empty() {
+            let slots = &self.slots;
+            self.copy_log.retain(|&i| slots[i as usize].obj.is_some());
+        }
         let lb = self.live_bytes();
+        self.last_live_bytes = lb;
         if lb > self.peak_live_bytes {
             self.peak_live_bytes = lb;
         }
@@ -1268,23 +1313,9 @@ impl Heap {
                     // job finishes, TICKET-205). One facade, `ExecutorCore::held_bytes`.
                     queued + nested + core.held_bytes()
                 }
+                // TICKET-246 — the box's values live in its own heap; no lock, one atomic read.
                 Obj::Shared(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
-                    if deep {
-                        // Guard scoped, drain after (see the `Obj::Channel` arm above).
-                        let mut pending = Vec::new();
-                        let acc = {
-                            let g = core.v.lock().unwrap();
-                            crate::vm::core::value_core_bytes_structural(
-                                &core.summary,
-                                &g,
-                                &mut cores,
-                                &mut pending,
-                            )
-                        };
-                        acc + crate::vm::core::drain_pending_core_bytes(&mut cores, &mut pending)
-                    } else {
-                        core.summary.bytes()
-                    }
+                    core.bytes.load(Ordering::Relaxed)
                 }
                 Obj::RwShared(core)
                     if include_cores && cores.insert(Arc::as_ptr(core) as usize) =>
@@ -1782,11 +1813,11 @@ mod iter_obj_tests {
     fn core_payload_walk_is_memoized() {
         use crate::vm::core::{WS_CLEAN, WS_UNKNOWN};
         let mut h = Heap::new();
-        let core = Arc::new(SharedCore {
+        let core = Arc::new(AtomicCore {
             v: Mutex::new(wlist(1000)),
             ..Default::default()
         });
-        let r = h.alloc(Obj::Shared(Arc::clone(&core)));
+        let r = h.alloc(Obj::Atomic(Arc::clone(&core)));
         assert_eq!(core.summary.state(), WS_UNKNOWN);
         assert!(h.children(r).is_empty());
         assert_eq!(core.summary.state(), WS_CLEAN);
@@ -1795,7 +1826,7 @@ mod iter_obj_tests {
 
         // Swap in a 5x bigger payload WITHOUT going through a store path: a memoized CLEAN core is
         // never re-walked, so neither `children()` nor the cached byte count moves. (A real store
-        // goes through `SharedCore::store`, which refreshes both — and a debug-build `debug_assert`
+        // goes through `AtomicCore::store`, which refreshes both — and a debug-build `debug_assert`
         // in `mark_core_payload` re-derives the verdict on every pass to catch a store that didn't.)
         *core.v.lock().unwrap() = wlist(5000);
         assert!(
@@ -1823,14 +1854,14 @@ mod iter_obj_tests {
         let mut h = Heap::new();
         let kept = h.alloc(Obj::Str("kept".into()));
 
-        let sc = Arc::new(SharedCore {
+        let sc = Arc::new(AtomicCore {
             v: Mutex::new(crate::vm::wire::WireValue::List {
                 id: 0,
                 items: vec![crate::vm::wire::WireValue::Handle(kept)],
             }),
             ..Default::default()
         });
-        let sr = h.alloc(Obj::Shared(Arc::clone(&sc)));
+        let sr = h.alloc(Obj::Atomic(Arc::clone(&sc)));
         assert!(h.children(sr).contains(&kept));
         assert_eq!(sc.summary.state(), WS_DIRTY);
         assert!(h.children(sr).contains(&kept), "DIRTY must re-walk");
@@ -1847,18 +1878,18 @@ mod iter_obj_tests {
         // NESTED: the outer core's payload is a `Shared` holding only ints when first marked; the
         // inner core then gains a handle. `wire_summary` calls any nested core dirty, so the outer
         // keeps walking and the late handle is still collected.
-        let inner = Arc::new(SharedCore {
+        let inner = Arc::new(AtomicCore {
             v: Mutex::new(wlist(4)),
             ..Default::default()
         });
-        let outer = Arc::new(SharedCore {
+        let outer = Arc::new(AtomicCore {
             v: Mutex::new(crate::vm::wire::WireValue::List {
                 id: 0,
-                items: vec![crate::vm::wire::WireValue::Shared(Arc::clone(&inner))],
+                items: vec![crate::vm::wire::WireValue::Atomic(Arc::clone(&inner))],
             }),
             ..Default::default()
         });
-        let or = h.alloc(Obj::Shared(Arc::clone(&outer)));
+        let or = h.alloc(Obj::Atomic(Arc::clone(&outer)));
         assert!(h.children(or).is_empty());
         assert_eq!(
             outer.summary.state(),
@@ -1877,16 +1908,16 @@ mod iter_obj_tests {
     #[test]
     fn live_bytes_counts_offheap_wire_payload() {
         let mut h = Heap::new();
-        let empty = Arc::new(SharedCore::default());
-        let er = h.alloc(Obj::Shared(empty));
+        let empty = Arc::new(AtomicCore::default());
+        let er = h.alloc(Obj::Atomic(empty));
         h.children(er); // fill the lazy summary
         let base = h.live_bytes();
 
-        let core = Arc::new(SharedCore {
+        let core = Arc::new(AtomicCore {
             v: Mutex::new(wlist(10_000)),
             ..Default::default()
         });
-        let r = h.alloc(Obj::Shared(Arc::clone(&core)));
+        let r = h.alloc(Obj::Atomic(Arc::clone(&core)));
         h.children(r); // fill the lazy summary
         let with_payload = h.live_bytes();
         assert!(
@@ -1939,9 +1970,9 @@ mod iter_obj_tests {
         let inner_bytes = inner.q.lock().unwrap().summary().0;
         assert!(inner_bytes > 100 * 500 * std::mem::size_of::<crate::vm::wire::WireValue>());
 
-        let outer = Arc::new(SharedCore::default());
+        let outer = Arc::new(AtomicCore::default());
         outer.store(crate::vm::wire::WireValue::Channel(Arc::clone(&inner)));
-        let or = h.alloc(Obj::Shared(Arc::clone(&outer)));
+        let or = h.alloc(Obj::Atomic(Arc::clone(&outer)));
         h.children(or); // fill the lazy summary, exactly as a real GC pass would
 
         // Cap OFF: unchanged behaviour — the nested backlog is not walked.
@@ -1982,7 +2013,7 @@ mod iter_obj_tests {
         h.set_mem_cap(1);
 
         // A core nested inside a queued LIST message: queue → message → container → core.
-        let deep = Arc::new(SharedCore::default());
+        let deep = Arc::new(AtomicCore::default());
         deep.store(wlist(500));
         let deep_bytes = deep.summary.bytes();
         assert!(deep_bytes > 500 * std::mem::size_of::<crate::vm::wire::WireValue>());
@@ -1990,7 +2021,7 @@ mod iter_obj_tests {
         let mid = Arc::new(ChannelCore::default());
         let msg = crate::vm::wire::WireValue::List {
             id: 0,
-            items: vec![crate::vm::wire::WireValue::Shared(Arc::clone(&deep))],
+            items: vec![crate::vm::wire::WireValue::Atomic(Arc::clone(&deep))],
         };
         mid.q
             .lock()
@@ -2007,11 +2038,11 @@ mod iter_obj_tests {
         let _ = cr;
 
         // A → B → A. The walk must terminate (and charge each core once).
-        let a = Arc::new(SharedCore::default());
-        let b = Arc::new(SharedCore::default());
-        b.store(crate::vm::wire::WireValue::Shared(Arc::clone(&a)));
-        a.store(crate::vm::wire::WireValue::Shared(Arc::clone(&b)));
-        let ar = h.alloc(Obj::Shared(Arc::clone(&a)));
+        let a = Arc::new(AtomicCore::default());
+        let b = Arc::new(AtomicCore::default());
+        b.store(crate::vm::wire::WireValue::Atomic(Arc::clone(&a)));
+        a.store(crate::vm::wire::WireValue::Atomic(Arc::clone(&b)));
+        let ar = h.alloc(Obj::Atomic(Arc::clone(&a)));
         let cyclic = h.live_bytes();
         assert!(cyclic > with_deep, "the cycle's cores must still register");
         assert_eq!(
@@ -2030,17 +2061,17 @@ mod iter_obj_tests {
     #[test]
     fn live_bytes_counts_a_shared_core_once_per_heap() {
         let mut h = Heap::new();
-        let core = Arc::new(SharedCore {
+        let core = Arc::new(AtomicCore {
             v: Mutex::new(wlist(10_000)),
             ..Default::default()
         });
-        let first = h.alloc(Obj::Shared(Arc::clone(&core)));
+        let first = h.alloc(Obj::Atomic(Arc::clone(&core)));
         h.children(first); // fill the lazy summary
         let one_alias = h.live_bytes();
 
         // Nine more handles to the SAME core (what `hs.push(ch.recv())` × K produces).
         for _ in 0..9 {
-            h.alloc(Obj::Shared(Arc::clone(&core)));
+            h.alloc(Obj::Atomic(Arc::clone(&core)));
         }
         let ten_aliases = h.live_bytes();
         assert!(
@@ -2078,11 +2109,11 @@ mod iter_obj_tests {
         let base = h.live_bytes();
         let mut one = 0usize;
         for i in 0..64 {
-            let core = Arc::new(SharedCore {
+            let core = Arc::new(AtomicCore {
                 v: Mutex::new(wlist(100)),
                 ..Default::default()
             });
-            let r = h.alloc(Obj::Shared(Arc::clone(&core)));
+            let r = h.alloc(Obj::Atomic(Arc::clone(&core)));
             h.children(r); // fill the lazy summary
             if i == 0 {
                 one = h.live_bytes() - base;
@@ -2112,17 +2143,17 @@ mod iter_obj_tests {
         };
 
         // Shared::set / Shared::update write-back.
-        let sc = Arc::new(SharedCore {
+        let sc = Arc::new(AtomicCore {
             v: Mutex::new(wlist(4)),
             ..Default::default()
         });
-        let sr = h.alloc(Obj::Shared(Arc::clone(&sc)));
+        let sr = h.alloc(Obj::Atomic(Arc::clone(&sc)));
         assert!(h.children(sr).is_empty());
         assert_eq!(sc.summary.state(), WS_CLEAN, "memoized CLEAN");
         sc.store(handle());
         assert!(
             h.children(sr).contains(&kept),
-            "SharedCore::store must refresh the memo"
+            "AtomicCore::store must refresh the memo"
         );
 
         // RwShared::set / RwShared::write write-back.

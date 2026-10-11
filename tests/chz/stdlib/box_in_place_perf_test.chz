@@ -1,0 +1,76 @@
+# tests/chz/stdlib/box_in_place_perf_test.chz — TICKET-246.
+#
+# `Shared.update` runs its closure inside the box's private heap, on the live value: it does not
+# copy the value out and back. Measured on the base release binary (commit 7e4421e4, encoded
+# store) for this struct with n = 100000: 6478-7075 us per `update` call, about 13 s for 2000
+# calls. One absolute bound per row (DEC-243), 1000 ms, no ratio of two samples.
+#
+# Row 3: a closure that calls a top-level `fn` while the caller mutates a 100000-item global
+# between calls must not pay a module snapshot per call (the box's slot door). With a view only,
+# the planning prototype measured 13507-13816 ms for these 2000 calls.
+#
+# The `RwShared.write` row joins this file when `RwShared` gets the same state (plan step 6).
+
+import std.concurrency
+import std.time
+
+struct Table:
+    keys: List[int]
+    hits: int
+
+fn hit(t: Table) -> Table:
+    t.hits += 1
+    return t
+
+fn inc(x: int) -> int:
+    return x + 1
+
+BIG: List[int] = []
+
+fn big_table() -> Table:
+    keys: List[int] = []
+    i := 0
+    while i < 100000:
+        keys.push(i)
+        i = i + 1
+    return Table(keys, 0)
+
+test fn shared_update_on_a_100k_value_does_not_copy_it():
+    s := Shared(big_table())
+    t0 := time.now_ms()
+    i := 0
+    while i < 2000:
+        s.update(fn(t): hit(t))
+        i = i + 1
+    ms := time.now_ms() - t0
+    assert ms < 1000, "2000 Shared.update calls on a 100k value took {ms} ms; the bound is 1000 ms (a copy out and back measured 6478-7075 us per call)"
+    assert s.read(fn(t): t.hits) == 2000
+    assert s.read(fn(t): t.keys.len()) == 100000
+
+test fn shared_read_on_a_100k_value_copies_only_its_result():
+    s := Shared(big_table())
+    t0 := time.now_ms()
+    total := 0
+    i := 0
+    while i < 2000:
+        total = total + s.read(fn(t): t.keys[7])
+        i = i + 1
+    ms := time.now_ms() - t0
+    assert ms < 1000, "2000 Shared.read calls on a 100k value took {ms} ms; the bound is 1000 ms"
+    assert total == 14000
+
+test fn shared_update_calling_a_top_level_fn_pays_no_snapshot_per_call():
+    i := 0
+    while i < 100000:
+        BIG.push(i)
+        i = i + 1
+    s := Shared(0)
+    t0 := time.now_ms()
+    i = 0
+    while i < 2000:
+        BIG[0] = i
+        s.update(fn(x): inc(x))
+        i = i + 1
+    ms := time.now_ms() - t0
+    assert ms < 1000, "2000 Shared.update(fn(x): inc(x)) calls with a mutated 100k global took {ms} ms; the bound is 1000 ms (a view per call measured 13507-13816 ms)"
+    assert s.get() == 2000

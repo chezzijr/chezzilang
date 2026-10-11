@@ -241,9 +241,32 @@ pub(super) struct WalkSrc<'a> {
     pub(super) active_generators: &'a [GcRef],
     pub(super) program: &'a Program,
     pub(super) walk_base: usize,
+    /// The heap id a closure is stamped with (`WireValue::Closure::origin_heap`). A receiver
+    /// marks a closure whose stamp is not its own heap as a task copy (D4 layer C). A `Vm` stamps
+    /// its own heap. A copy handed OUT of a box is stamped with the READER's heap: the reader
+    /// owns that copy, so a write through it is not a lost write (DEC-189, a hand-off never marks).
+    pub(super) origin: u64,
 }
 
 impl<'a> WalkSrc<'a> {
+    /// The source for a parked context (a box state): its heap and its module table. Nothing runs
+    /// in a parked context, so no generator of its heap is mid-resume.
+    pub(super) fn of_ctx(
+        ctx: &'a FiberCtx,
+        program: &'a Program,
+        walk_base: usize,
+        origin: u64,
+    ) -> Self {
+        WalkSrc {
+            heap: ctx.heap.as_ref().expect("a box context owns its heap"),
+            module_objs: &ctx.module_objs,
+            active_generators: &[],
+            program,
+            walk_base,
+            origin,
+        }
+    }
+
     fn err(&self, message: String, span: Span) -> RuntimeError {
         super::exec::plain_err(message, span)
     }
@@ -305,6 +328,7 @@ impl Vm {
             active_generators: &self.active_generators,
             program: &self.program,
             walk_base: self.walk_base,
+            origin: self.heap.id(),
         }
     }
 
@@ -3767,10 +3791,15 @@ impl Vm {
         // `MnSched::send_wake`'s signature for a debug/CI guard. Monotonic pacing HINT, not
         // accounting (`live_bytes()` stays the sole measure): a replacing store charges too and a
         // `recv` never decrements, because under-triggering means a guard that fails open.
-        if self.heap.mem_cap() != 0 {
-            self.heap.charge_bytes(crate::vm::core::wire_summary(&w).0);
-        }
+        self.charge_wire(&w);
         Ok(w)
+    }
+
+    /// Charge an encoded payload's bytes against THIS heap's GC trigger, under a live cap only.
+    pub(super) fn charge_wire(&self, w: &WireValue) {
+        if self.heap.mem_cap() != 0 {
+            self.heap.charge_bytes(crate::vm::core::wire_summary(w).0);
+        }
     }
 
     /// TICKET-111 — true iff `h` is a data node kind eligible for the snapshot node registry / adoption:
@@ -3945,7 +3974,7 @@ impl WalkSrc<'_> {
                             proto: *proto,
                             captured: wcap,
                             home: self.home_index(*home),
-                            origin_heap: self.heap.id(),
+                            origin_heap: self.origin,
                         }
                     }
                 }

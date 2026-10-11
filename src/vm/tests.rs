@@ -10300,10 +10300,8 @@ fn display_shared_renders_contents() {
     let mut vm = Vm::new(Arc::new(empty_program()));
     let s = vm.heap.alloc(Obj::Str("hi".into()));
     let boxed = vm.to_wire(Value::obj(s)).unwrap();
-    let sh = vm.heap.alloc(Obj::Shared(Arc::new(SharedCore {
-        v: Mutex::new(boxed),
-        ..Default::default()
-    })));
+    let core = vm.new_shared_core(boxed);
+    let sh = vm.heap.alloc(Obj::Shared(core));
     // The payload sits INSIDE `Shared(…)`, i.e. nested — so it renders as its `repr` (W7-25),
     // matching `print(s.get())` on the same box.
     assert_eq!(vm.display(Value::obj(sh)), "Shared('hi')");
@@ -13919,8 +13917,11 @@ main()
 fn parallel_many_spawns_cheap_and_correct() {
     const N: usize = 2000;
     let program = |n: usize, step: &str| {
+        // TICKET-246 (plan step 9): the global read sits in the TASK body, outside the box
+        // closure, so the replay count stays a property of `spawn`. A box closure reads a scalar
+        // global through the box's slot door, which replays no module.
         let mut src = format!(
-            "step: int = 1\nfn bump(s: Shared[int]):\n    s.update(fn(x): x + {step})\nfn main():\n    s := Shared(0)\n    parallel:\n"
+            "step: int = 1\nfn bump(s: Shared[int]):\n    k := {step}\n    s.update(fn(x): x + k)\nfn main():\n    s := Shared(0)\n    parallel:\n"
         );
         for _ in 0..n {
             src.push_str("        spawn bump(s)\n");
@@ -21715,8 +21716,10 @@ print(\"done\")
     );
 }
 
-/// TICKET-016 / W8-3 — `get` inside `update` stays legal and reads the pre-guard value; it must not
-/// be made to take the update guard.
+/// TICKET-016 / W8-3, reversed by TICKET-246 (owner answer Q2 (a), plan step 9; the name is kept
+/// per DEC-016). The state lives in the box, so no pre-update copy exists: `get` inside the box's
+/// own `update` takes the update guard and faults instead of self-deadlocking. The fault is
+/// catchable, the update did not happen, and the box keeps serving.
 #[test]
 fn ticket_016_get_inside_update_still_reads_pre_guard_value() {
     let src = "\
@@ -21725,14 +21728,20 @@ s := Shared(10)
 fn peek(v: int) -> int:
     print(s.get())
     return v + 1
-s.update(peek)
+r := recover: s.update(peek)
+match r:
+    ?_: print(\"no fault\")
+    !e: print(e.message().contains(\"already holds the update guard\"))
 print(s.get())
 ";
     let entry = write_temp_chz("ticket016_get_inside_update", src);
     let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
     let _ = std::fs::remove_file(&entry);
     assert!(res.is_ok(), "run faulted: {res:?} err={err}");
-    assert_eq!(out, "10\n11\n", "expected 10 then 11: {out:?}");
+    assert_eq!(
+        out, "true\n10\n",
+        "expected the guard fault then 10: {out:?}"
+    );
 }
 
 /// TICKET-016 / W8-3 — `write` nested in `read` is the one legal `RwShared` crossing and must still
@@ -22565,7 +22574,7 @@ fn live_bytes_counts_an_executors_held_bytes() {
 /// `drain_pending_core_bytes` and `Heap::live_bytes` read different numbers.
 #[test]
 fn nested_executor_charges_its_held_bytes_in_either_visit_order() {
-    use crate::vm::core::SharedCore;
+    use crate::vm::core::AtomicCore;
     use crate::vm::heap::{Heap, Obj};
     let ex = Arc::new(crate::vm::core::ExecutorCore::default());
     let sched = capped_sched(10);
@@ -22579,10 +22588,10 @@ fn nested_executor_charges_its_held_bytes_in_either_visit_order() {
     // (a) reachable ONLY through a `Shared`'s payload — no `Obj::Executor` slot at all.
     let mut h = Heap::new();
     h.set_mem_cap(1);
-    let outer = Arc::new(SharedCore::default());
+    let outer = Arc::new(AtomicCore::default());
     outer.store(crate::vm::wire::WireValue::Executor(Arc::clone(&ex)));
     let base = h.live_bytes();
-    let sr = h.alloc(Obj::Shared(Arc::clone(&outer)));
+    let sr = h.alloc(Obj::Atomic(Arc::clone(&outer)));
     assert!(
         h.live_bytes() >= base + eager_bytes,
         "a nested executor's held bytes must be charged"
@@ -22593,7 +22602,7 @@ fn nested_executor_charges_its_held_bytes_in_either_visit_order() {
     let mut h = Heap::new();
     h.set_mem_cap(1);
     let base = h.live_bytes();
-    let sr = h.alloc(Obj::Shared(Arc::clone(&outer)));
+    let sr = h.alloc(Obj::Atomic(Arc::clone(&outer)));
     let er = h.alloc(Obj::Executor(Arc::clone(&ex)));
     assert!(
         h.live_bytes() >= base + eager_bytes,
@@ -22993,6 +23002,7 @@ fn walk_src_copies_out_of_a_heap_it_only_borrows() {
         active_generators: &owner.active_generators,
         program: &owner.program,
         walk_base: 0,
+        origin: owner.heap.id(),
     };
     let wire = src
         .to_wire_crossable_memo(
@@ -23085,16 +23095,19 @@ fn display_box_grid_terminates_on_every_cycle() {
         Stringify,
     }
     // A box of `kind` as a wire handle, plus the way to set what it holds.
-    fn new_box(kind: Kind) -> WireValue {
+    fn new_box(vm: &mut Vm, kind: Kind) -> WireValue {
         match kind {
-            Kind::Shared => WireValue::Shared(Arc::new(SharedCore::default())),
+            Kind::Shared => WireValue::Shared(vm.new_shared_core(WireValue::Nil)),
             Kind::RwShared => WireValue::RwShared(Arc::new(RwSharedCore::default())),
             Kind::Atomic => WireValue::Atomic(Arc::new(AtomicCore::default())),
         }
     }
-    fn set(b: &WireValue, held: WireValue) {
+    fn set(vm: &mut Vm, b: &WireValue, held: WireValue) {
         match b {
-            WireValue::Shared(c) => *c.v.lock().unwrap() = held,
+            WireValue::Shared(c) => {
+                let mut st = c.state.lock();
+                vm.box_store(&mut st, held);
+            }
             WireValue::RwShared(c) => *c.v.write().unwrap() = held,
             WireValue::Atomic(c) => *c.v.lock().unwrap() = held,
             _ => unreachable!(),
@@ -23102,11 +23115,12 @@ fn display_box_grid_terminates_on_every_cycle() {
     }
     fn cell(kind: Kind, shape: Shape, renderer: Renderer) -> String {
         let mut vm = Vm::new(Arc::new(empty_program()));
-        let b = new_box(kind);
+        let b = new_box(&mut vm, kind);
         match shape {
-            Shape::NoCycle => set(&b, WireValue::Int(1)),
-            Shape::Itself => set(&b, b.clone()),
+            Shape::NoCycle => set(&mut vm, &b, WireValue::Int(1)),
+            Shape::Itself => set(&mut vm, &b, b.clone()),
             Shape::ThroughList => set(
+                &mut vm,
                 &b,
                 WireValue::List {
                     id: 0,
@@ -23114,6 +23128,7 @@ fn display_box_grid_terminates_on_every_cycle() {
                 },
             ),
             Shape::ThroughStruct => set(
+                &mut vm,
                 &b,
                 WireValue::Struct {
                     id: 0,
@@ -23122,9 +23137,9 @@ fn display_box_grid_terminates_on_every_cycle() {
                 },
             ),
             Shape::EachOther => {
-                let other = new_box(kind);
-                set(&other, b.clone());
-                set(&b, other);
+                let other = new_box(&mut vm, kind);
+                set(&mut vm, &other, b.clone());
+                set(&mut vm, &b, other);
             }
         }
         match renderer {
@@ -23145,7 +23160,17 @@ fn display_box_grid_terminates_on_every_cycle() {
             (Shape::NoCycle, format!("{l}(1)")),
             (Shape::Itself, format!("{l}({l}(...))")),
             (Shape::ThroughList, format!("{l}([{l}(...)])")),
-            (Shape::ThroughStruct, format!("{l}(N(b={l}(...)))")),
+            // A `Shared` decodes what it holds into its own heap, and this fixture's empty
+            // program declares no struct `N`, so the struct prints with no name. The cell's
+            // subject is the cycle marker; `tests/chz/suites/box_grid_test.chz` runs the same
+            // shape with a declared struct.
+            (
+                Shape::ThroughStruct,
+                match kind {
+                    Kind::Shared => format!("{l}(?(0={l}(...)))"),
+                    _ => format!("{l}(N(b={l}(...)))"),
+                },
+            ),
             (Shape::EachOther, format!("{l}({l}({l}(...)))")),
         ] {
             for renderer in [
@@ -23167,4 +23192,33 @@ fn display_box_grid_terminates_on_every_cycle() {
             }
         }
     }
+    // Shape "state lock held by another thread" (a writer sits in a slow closure): the `&self`
+    // renderer builds fault messages and must not wait, so it shows `<locked>`.
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let mut vm = Vm::new(Arc::new(empty_program()));
+            let core = vm.new_shared_core(WireValue::Int(1));
+            let (held_tx, held_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel::<()>();
+            let holder_core = Arc::clone(&core);
+            let holder = std::thread::spawn(move || {
+                let _st = holder_core.state.lock();
+                held_tx.send(()).unwrap();
+                let _ = done_rx.recv();
+            });
+            held_rx.recv().unwrap();
+            let h = vm.heap.alloc(Obj::Shared(Arc::clone(&core)));
+            let shown = vm.display(Value::obj(h));
+            done_tx.send(()).unwrap();
+            holder.join().unwrap();
+            let _ = tx.send((shown, vm.display(Value::obj(h))));
+        })
+        .unwrap();
+    let (busy, free) = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("Vm::display waited for a held Shared state");
+    assert_eq!(busy, "Shared(<locked>)");
+    assert_eq!(free, "Shared(1)");
 }

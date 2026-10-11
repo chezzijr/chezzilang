@@ -3041,11 +3041,15 @@ impl Vm {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         match method {
+            // TICKET-246: the value lives in the box's private heap. EVERY arm takes the update
+            // guard first (TICKET-016 / W8-3, the process-global wait-for graph) and only then the
+            // state lock, so a same-box re-entry from the box's own closure FAULTS (the length-1
+            // cycle) for `get` / `read` / `set` / `update` alike, a cross-box wait cycle faults, and
+            // user code never waits on the state lock itself.
             "get" => {
                 self.arity_err("get", args, 0, span)?;
-                // Clone the wire form out under the lock, then reconstruct into this heap (one
-                // round-trip == the old deep_clone-out).
-                let w = self.shared_core(h).v.lock().unwrap().clone();
+                let core = self.shared_core(h);
+                let w = self.shared_copy_out(&core, span)?;
                 Ok(self.from_wire(w))
             }
             "set" => {
@@ -3054,32 +3058,27 @@ impl Vm {
                 let core = self.shared_core(h);
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
-                core.store(w);
+                let mut st = core.state.lock();
+                let bytes = self.box_store(&mut st, w);
+                core.bytes.store(bytes, Ordering::Relaxed);
                 Ok(Value::nil())
             }
-            "update" => {
-                self.arity_err("update", args, 1, span)?;
-                let f = args[0];
+            // `update(f)` runs `f` inside the box on the live state and its result becomes the
+            // state; `read(f)` does the same with no write-back and copies the result out.
+            "update" | "read" => {
+                self.arity_err(method, args, 1, span)?;
+                let fw = self.to_wire_crossable(args[0], span)?;
                 let core = self.shared_core(h);
-                // TICKET-016 (W8-3): the whole read-modify-write is serialised across threads by the
-                // box's update guard, taken via the process-global wait-for graph (`core.rs`) instead
-                // of a bare `Mutex` — so a same-box re-entry FAULTS (the length-1 cycle) instead of
-                // hanging, and a cross-box wait cycle faults instead of hanging undetected. The value
-                // lock `v` is still held only briefly — read here, write at the end — so the closure
-                // may freely re-enter `get` (or `update` on a *different*, non-cyclic box). The
-                // handle is re-rooted on the operand stack so the nested call's GC keeps the core's
-                // contents traced (the receiver was popped off the stack in `do_method_call`).
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
-                let w = core.v.lock().unwrap().clone();
-                let cur = self.from_wire(w);
-                self.push(Value::obj(h));
-                let next = self.reentered(|vm| vm.invoke_value(f, vec![cur], span));
-                self.pop();
-                let next = next?;
-                let stored = self.to_wire_crossable(next, span)?;
-                core.store(stored);
-                Ok(Value::nil())
+                let mut st = core.state.lock();
+                let (r, bytes) = self.box_call(&mut st, fw, method == "update", span);
+                core.bytes.store(bytes, Ordering::Relaxed);
+                drop(st);
+                Ok(match r? {
+                    Some(w) => self.from_wire(w),
+                    None => Value::nil(),
+                })
             }
             _ => Err(self.err(format!("type Shared has no method '{method}'"), span)),
         }

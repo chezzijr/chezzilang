@@ -68,7 +68,6 @@ impl Vm {
     /// A fresh box context: its own heap, an EMPTY module view (seated lazily, per call, from the
     /// caller — see [`Vm::box_global`]) and the state slot `stack[0]`, which that heap's own GC
     /// roots.
-    #[allow(dead_code)] // first caller lands with the `Shared` state (TICKET-246 step 5)
     pub(super) fn box_new(&mut self) -> Box<FiberCtx> {
         let worker = self.spawn_worker();
         Box::new(FiberCtx {
@@ -105,7 +104,6 @@ impl Vm {
     /// Run `f` inside the box context in `slot`, with the caller parked on `box_chain`. The ONLY
     /// swap into a box. Everything is undone on return AND on unwind: a Rust panic inside `f`
     /// leaves the `Vm` on the caller's heap, the context back in `slot` and the chain as it was.
-    #[allow(dead_code)] // first caller lands with the `Shared` state (TICKET-246 step 5)
     pub(super) fn with_box<R>(
         &mut self,
         slot: &mut Option<Box<FiberCtx>>,
@@ -176,6 +174,124 @@ impl Vm {
             Ok(v) => v,
             Err(p) => resume_unwind(p),
         }
+    }
+
+    /// A new `Shared` core holding `init`, decoded into the box's own heap.
+    pub(super) fn new_shared_core(&mut self, init: WireValue) -> Arc<SharedCore> {
+        let mut slot = Some(self.box_new());
+        let bytes = self.box_store(&mut slot, init);
+        Arc::new(SharedCore {
+            state: core::SharedState(Mutex::new(slot)),
+            bytes: std::sync::atomic::AtomicUsize::new(bytes),
+        })
+    }
+
+    /// Replace the state of the box in `slot` with `w` (construction, `set`). Returns the box
+    /// heap's byte estimate for the core's `bytes`.
+    pub(super) fn box_store(&mut self, slot: &mut Option<Box<FiberCtx>>, w: WireValue) -> usize {
+        self.with_box(slot, |vm| {
+            // A value stored into the box is handed to it: the box owns the copy, so the marks
+            // the rebuild makes for a closure from another heap are cleared at once.
+            vm.heap.begin_copy_log();
+            let v = vm.from_wire(w);
+            vm.heap.unmark_copy_log();
+            vm.stack[0] = v;
+            vm.box_settle()
+        })
+    }
+
+    /// The heap id of the caller of the box call now running (its heap is parked on the chain).
+    fn box_caller_heap_id(&self) -> u64 {
+        self.box_chain
+            .last()
+            .and_then(|f| f.caller.heap.as_ref())
+            .map_or(self.heap.id(), |h| h.id())
+    }
+
+    /// Runs INSIDE a box, at the end of a write: collect when the box heap is due (a box whose
+    /// users only `set` runs no bytecode of its own, so nothing else would), then report its
+    /// bytes. The box heap is collected only here and in the closure's own dispatch loop, both
+    /// under the exclusive lock.
+    fn box_settle(&mut self) -> usize {
+        if self.heap.should_collect() {
+            self.collect();
+        }
+        self.heap.approx_bytes()
+    }
+
+    /// Run the encoded closure `fw` inside the box in `slot`, on the live state. With
+    /// `write_back` the closure's result becomes the state (`update` / `write`) and `Ok(None)`
+    /// returns; without it the result is encoded for the caller (`read`). A fault leaves the state
+    /// as the closure left it.
+    ///
+    /// The closure's captures are copies marked as such (DEC-189), so a write to one is the D4
+    /// fault. Those marks are cleared when the call ends: a capture the closure stored into the
+    /// state is the box's own value from then on.
+    pub(super) fn box_call(
+        &mut self,
+        slot: &mut Option<Box<FiberCtx>>,
+        fw: WireValue,
+        write_back: bool,
+        span: Span,
+    ) -> (Result<Option<WireValue>, RuntimeError>, usize) {
+        self.with_box(slot, |vm| {
+            vm.heap.begin_copy_log();
+            let f = vm.from_wire(fw);
+            vm.heap.end_copy_log();
+            vm.stack.push(f);
+            let state = vm.stack[0];
+            let r = vm.reentered(|vm| vm.invoke_value(f, vec![state], span));
+            // A view that could not be seated at a site with no fault channel surfaces here at
+            // the latest.
+            let r = match (r, vm.box_view_err.take()) {
+                (Ok(_), Some(e)) => Err(e),
+                (r, _) => r,
+            };
+            let r = r.and_then(|v| {
+                if write_back {
+                    vm.stack[0] = v;
+                    Ok(None)
+                } else {
+                    // The result is handed to the caller, so it carries the CALLER's stamp.
+                    let mut src = vm.walk_src();
+                    src.origin = vm.box_caller_heap_id();
+                    src.to_wire_crossable_memo(v, span, &mut sched::WireMemo::default())
+                        .map(Some)
+                }
+            });
+            vm.heap.unmark_copy_log();
+            (r, vm.box_settle())
+        })
+    }
+
+    /// Copy the state out of a parked box context, for this `Vm`'s heap. The walk only borrows
+    /// the box heap; the reader charges its OWN heap.
+    pub(super) fn box_copy_out(
+        &self,
+        ctx: &FiberCtx,
+        span: Span,
+    ) -> Result<WireValue, RuntimeError> {
+        let src = sched::WalkSrc::of_ctx(ctx, &self.program, self.walk_base, self.heap.id());
+        let w = src.to_wire_crossable_memo(ctx.stack[0], span, &mut sched::WireMemo::default())?;
+        self.charge_wire(&w);
+        Ok(w)
+    }
+
+    /// The whole value of a `Shared`, encoded: update guard, state lock, copy, unlock. The task
+    /// that holds the guard (inside the box's own `update` / `read` closure) gets the
+    /// `already holds the update guard` fault instead of a self-deadlock.
+    pub(super) fn shared_copy_out(
+        &mut self,
+        core: &Arc<SharedCore>,
+        span: Span,
+    ) -> Result<WireValue, RuntimeError> {
+        let key = Arc::as_ptr(core) as usize;
+        let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
+        let st = core.state.lock();
+        let ctx = st
+            .as_ref()
+            .expect("a Shared state is in its slot under the guard");
+        self.box_copy_out(ctx, span)
     }
 
     /// "Is this view a task's copy?" — a write to a module global faults there (D4). True for a

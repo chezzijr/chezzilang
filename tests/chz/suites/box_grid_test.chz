@@ -69,3 +69,363 @@ test fn display_box_contents_are_structural_no_user_str_hook():
     assert str([P(4)]) == "[P<4>]"
     s := Shared(P(1))
     assert "{s}" == "Shared(P(x=1))"
+
+# ---- Section Shared: the value lives in the box's private heap ----
+#
+# Grid: method {update, read, get, set} x value {int, str, List, Map, Set, struct with a mutating
+# method, nested struct, a value holding a closure} x callers {1, 8}. The closure rule cells
+# (captures are copies, globals are the caller's as of the call) and the self re-entry cells follow.
+
+fn msg_of[T](r: T!Error, where_: str) -> str:
+    match r:
+        ?_: assert false, where_ + " must fault"
+        !e: return e.message()
+    return ""
+
+struct Acc:
+    n: int
+    log: List[int]
+    fn add(self, k: int) -> Acc:
+        self.n += k
+        self.log.push(k)
+        return self
+
+struct Outer:
+    acc: Acc
+    tag: str
+
+struct Holder:
+    f: fn(int) -> int
+    calls: int
+
+fn inc(x: int) -> int:
+    return x + 1
+
+fn keep(xs: List[int], x: int) -> int:
+    xs.push(x)
+    return x
+
+fn push_one(xs: List[int]) -> List[int]:
+    xs.push(1)
+    return xs
+
+fn show_self(s: Shared[int], x: int) -> int:
+    print(s)
+    return x
+
+fn put(d: Map[str, int], k: str, v: int) -> Map[str, int]:
+    d[k] = v
+    return d
+
+fn add_to(s: Set[int], v: int) -> Set[int]:
+    s.add(v)
+    return s
+
+fn set_n(a: Acc, n: int) -> Acc:
+    a.n = n
+    return a
+
+fn bump_outer(o: Outer) -> Outer:
+    o.acc.add(1)
+    return o
+
+fn call_holder(h: Holder) -> Holder:
+    h.calls = h.f(h.calls)
+    return h
+
+fn fault_after_push(xs: List[int]) -> List[int]:
+    xs.push(1)
+    z := 0
+    xs.push(1 / z)
+    return xs
+
+fn set_then(s: Shared[int], x: int) -> int:
+    s.set(0)
+    return x
+
+fn update_then(s: Shared[int], x: int) -> int:
+    s.update(fn(y): y + 1)
+    return x
+
+fn push_first(xss: List[List[int]]) -> List[List[int]]:
+    xss[0].push(1)
+    return xss
+
+K := 7
+DEFAULTS: List[int] = [5, 6]
+EARLY := Shared(1)
+LATE := Shared(10)
+
+test fn shared_int_update_read_get_set():
+    s := Shared(1)
+    s.update(fn(x): x + 1)
+    assert s.get() == 2
+    assert s.read(fn(x): x * 10) == 20
+    s.set(5)
+    assert s.get() == 5
+
+test fn shared_str_update_read_get_set():
+    s := Shared("a")
+    s.update(fn(x): x + "b")
+    assert s.get() == "ab"
+    assert s.read(fn(x): x.len()) == 2
+    s.set("z")
+    assert s.get() == "z"
+
+test fn shared_list_push_in_place_persists():
+    s: Shared[List[int]] = Shared([1])
+    s.update(fn(xs): push_one(xs))
+    s.update(fn(xs): push_one(xs))
+    assert s.get() == [1, 1, 1]
+    assert s.read(fn(xs): xs.len()) == 3
+    s.set([9])
+    assert s.get() == [9]
+
+test fn shared_map_and_set_in_place_persist():
+    m: Shared[Map[str, int]] = Shared({"a": 1})
+    m.update(fn(d): put(d, "b", 2))
+    assert m.get() == {"a": 1, "b": 2}
+    assert m.read(fn(d): d.len()) == 2
+    st: Shared[Set[int]] = Shared({1})
+    st.update(fn(x): add_to(x, 2))
+    assert st.read(fn(x): x.len()) == 2
+    assert st.get() == {1, 2}
+
+test fn shared_struct_mutating_method_and_field_assign_persist():
+    s := Shared(Acc(1, []))
+    s.update(fn(a): a.add(5))
+    s.update(fn(a): set_n(a, a.n + 100))
+    assert s.get().n == 106
+    assert s.get().log == [5]
+    assert s.read(fn(a): a.n) == 106
+
+test fn shared_nested_struct_in_place_persists():
+    s := Shared(Outer(Acc(0, []), "t"))
+    s.update(fn(o): bump_outer(o))
+    s.update(fn(o): bump_outer(o))
+    assert s.get().acc.n == 2
+    assert s.get().acc.log == [1, 1]
+    assert s.read(fn(o): o.tag) == "t"
+
+test fn shared_value_holding_a_closure():
+    s := Shared(Holder(inc, 0))
+    s.update(fn(h): call_holder(h))
+    assert s.get().calls == 1
+    assert s.read(fn(h): h.f(41)) == 42
+    g := s.get()
+    assert g.f(1) == 2
+
+test fn shared_update_returning_a_new_value_replaces_the_state():
+    s: Shared[List[int]] = Shared([1, 2, 3])
+    s.update(fn(xs): [xs.len()])
+    assert s.get() == [3]
+
+test fn shared_eight_callers_lose_no_update():
+    s := Shared(Acc(0, []))
+    n: Shared[int] = Shared(0)
+    parallel:
+        for i in range(0, 8):
+            spawn:
+                for j in range(0, 50):
+                    s.update(fn(a): a.add(1))
+                    n.update(fn(x): x + 1)
+    assert s.get().n == 400
+    assert s.read(fn(a): a.log.len()) == 400
+    assert n.get() == 400
+
+test fn shared_eight_readers_see_a_whole_value():
+    s := Shared(Acc(3, [1, 2, 3]))
+    bad: Shared[int] = Shared(0)
+    parallel:
+        for i in range(0, 8):
+            spawn:
+                for j in range(0, 20):
+                    g := s.get()
+                    if g.n != g.log.len():
+                        bad.update(fn(x): x + 1)
+                    if s.read(fn(a): a.n - a.log.len()) != 0:
+                        bad.update(fn(x): x + 1)
+                    s.update(fn(a): a.add(1))
+    assert bad.get() == 0
+    assert s.get().n == 3 + 160
+
+test fn shared_read_closure_mutation_persists():
+    s: Shared[List[int]] = Shared([1])
+    assert s.read(fn(xs): push_one(xs).len()) == 2
+    assert s.get() == [1, 1]
+
+test fn shared_fault_inside_update_is_caught_and_the_box_keeps_serving():
+    s: Shared[List[int]] = Shared([1])
+    r := recover: s.update(fn(xs): fault_after_push(xs))
+    assert msg_of(r, "update") == "division by zero"
+    # The state is what the closure left: the push before the fault persists.
+    assert s.get() == [1, 1]
+    s.update(fn(xs): push_one(xs))
+    assert s.get() == [1, 1, 1]
+
+test fn shared_closure_sees_a_box_bound_after_it():
+    EARLY.set(1)
+    EARLY.update(fn(x): x + LATE.get())
+    assert EARLY.get() == 11
+
+test fn shared_closure_calls_a_top_level_fn_and_reads_a_scalar_global():
+    s := Shared(1)
+    s.update(fn(x): inc(x) + K)
+    assert s.get() == 9
+
+test fn shared_closure_reads_an_aggregate_global():
+    s := Shared(1)
+    s.update(fn(x): x + DEFAULTS.len())
+    assert s.get() == 3
+
+test fn shared_captured_local_is_a_copy_a_write_through_a_callee_faults():
+    s := Shared(10)
+    seen: List[int] = []
+    r := recover: s.update(fn(x): keep(seen, x))
+    fault := msg_of(r, "captured write")
+    assert fault.starts_with("this value is this task's copy:"), fault
+    assert seen == []
+    assert s.get() == 10
+
+test fn shared_captured_local_read_is_fine():
+    s := Shared(10)
+    ks := [1, 2, 3]
+    s.update(fn(x): x + ks.len())
+    assert s.get() == 13
+    assert s.read(fn(x): x + ks[0]) == 14
+
+test fn shared_get_inside_its_own_update_faults():
+    s := Shared(10)
+    r := recover: s.update(fn(x): x + s.get())
+    fault := msg_of(r, "self get")
+    assert fault.contains("already holds the update guard"), fault
+    assert s.get() == 10
+
+test fn shared_read_set_update_inside_its_own_update_fault():
+    s := Shared(10)
+    r1 := recover: s.update(fn(x): x + s.read(fn(y): y))
+    assert msg_of(r1, "self read").contains("already holds the update guard")
+    r2 := recover: s.update(fn(x): set_then(s, x))
+    assert msg_of(r2, "self set").contains("already holds the update guard")
+    r3 := recover: s.update(fn(x): update_then(s, x))
+    assert msg_of(r3, "self update").contains("already holds the update guard")
+    r4: int! = recover: s.read(fn(x): x + s.get())
+    assert msg_of(r4, "get in read").contains("already holds the update guard")
+    assert s.get() == 10
+
+test fn shared_print_of_itself_inside_its_own_update_faults():
+    s := Shared(10)
+    r := recover: s.update(fn(x): show_self(s, x))
+    fault := msg_of(r, "self print")
+    assert fault.contains("already holds the update guard"), fault
+    assert s.get() == 10
+
+test fn shared_get_result_is_the_callers_own_value():
+    s: Shared[List[int]] = Shared([1])
+    g := s.get()
+    g.push(2)
+    assert g == [1, 2]
+    assert s.get() == [1]
+    r := s.read(fn(xs): xs)
+    r.push(3)
+    assert s.get() == [1]
+
+struct Ctr:
+    inc: fn() -> None
+    get: fn() -> int
+
+fn make_ctr() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+
+fn bump_ctr(c: Ctr) -> Ctr:
+    c.inc()
+    return c
+
+# A value holding closures over ONE captured cell. Stored into the box it is the box's own
+# value: the closure's write to its cell inside `update` persists. Handed out by `get` / `read`
+# it is the caller's own copy: a write through it is no fault and does not reach the box.
+test fn shared_closure_over_a_cell_is_owned_by_whoever_holds_it():
+    s := Shared(make_ctr())
+    s.update(fn(c): bump_ctr(c))
+    s.update(fn(c): bump_ctr(c))
+    assert s.read(fn(c): c.get()) == 2
+    d := s.get()
+    d.inc()
+    assert d.get() == 3
+    e := s.read(fn(c): c)
+    e.inc()
+    assert e.get() == 3
+    assert s.read(fn(c): c.get()) == 2
+    s.set(make_ctr())
+    s.update(fn(c): bump_ctr(c))
+    assert s.get().get() == 1
+
+fn bump_other(b: Shared[int], x: int) -> int:
+    b.update(fn(y): y + K)
+    return x + b.read(fn(y): y)
+
+# `Shared.read` nested with `update`, both ways: the inner closure sees the caller's globals.
+test fn shared_read_nested_in_update_sees_the_callers_globals():
+    a := Shared(1)
+    b := Shared(2)
+    a.update(fn(x): x + b.read(fn(y): y + K + DEFAULTS.len() + inc(0)))
+    assert a.get() == 13
+    assert b.get() == 2
+
+test fn shared_update_nested_in_read_persists_in_the_other_box():
+    a := Shared(1)
+    b := Shared(2)
+    assert a.read(fn(x): bump_other(b, x)) == 10
+    assert a.get() == 1
+    assert b.get() == 9
+
+# Owner note 1 (2026-10-11): a module global's copy stored into the state, as the whole result and
+# nested inside it, then written in place by a later call.
+#
+# Base binary (encoded store, commit 7e4421e4): no fault; the state reads `[5, 6, 1]` (nested:
+# `[[5, 6, 1]]`) and the global stays `[5, 6]`.
+# Now: the stored value is still the box view's copy of the global, so the in-place write faults.
+# The fault names this case and its fix (`.copy()`); it is never a silent lost write. The exact
+# fix (unmark the result root) was declined: the view's module slot would keep aliasing the state,
+# and a later read of the global inside the box would silently see the box's writes.
+test fn shared_global_copy_stored_as_the_state_faults_on_an_in_place_write():
+    s: Shared[List[int]] = Shared([])
+    s.update(fn(_): DEFAULTS)
+    r := recover: s.update(fn(xs): push_one(xs))
+    fault := msg_of(r, "write to a stored global copy")
+    assert fault.starts_with("this value is this task's copy:"), fault
+    assert fault.contains("if the box holds a module global's copy, store its .copy()"), fault
+    assert s.get() == [5, 6]
+    assert DEFAULTS == [5, 6]
+
+test fn shared_global_copy_stored_nested_in_the_state_faults_on_an_in_place_write():
+    s: Shared[List[List[int]]] = Shared([])
+    s.update(fn(_): [DEFAULTS])
+    r := recover: s.update(fn(xss): push_first(xss))
+    fault := msg_of(r, "write to a nested stored global copy")
+    assert fault.contains("if the box holds a module global's copy, store its .copy()"), fault
+    assert s.get() == [[5, 6]]
+    assert DEFAULTS == [5, 6]
+
+# The documented way out: store the box's own copy.
+test fn shared_global_copy_stored_with_copy_is_the_boxes_own_value():
+    s: Shared[List[int]] = Shared([])
+    s.update(fn(_): DEFAULTS.copy())
+    s.update(fn(xs): push_one(xs))
+    assert s.get() == [5, 6, 1]
+    assert DEFAULTS == [5, 6]
+
+# A CAPTURE stored into the state is the box's own value once the call ends: its copy mark is
+# cleared with the call.
+test fn shared_capture_stored_into_the_state_is_the_boxes_own_value():
+    s: Shared[List[int]] = Shared([])
+    ks := [1, 2]
+    s.update(fn(_): ks)
+    s.update(fn(xs): push_one(xs))
+    assert s.get() == [1, 2, 1]
+    assert ks == [1, 2]

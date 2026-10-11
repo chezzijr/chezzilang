@@ -713,6 +713,36 @@ task* but is **not** sendable (copy-on-spawn gives each task its own copy); `Sha
 Under the sequential executor a single thread already serialises every write, so `Shared` is correct
 from C3 with no locking; under C5 it becomes a real owner-task + channel, same API.
 
+**Where the value lives (TICKET-246).** A `Shared[T]` owns a private heap and its value lives
+there. `update(f)` and the new `read(f)` run `f` inside that heap, on the live value:
+
+```chezzi
+s := Shared(Table(keys, 0))            # keys: 100000 items
+s.update(fn(t): hit(t))                # hit: t.hits += 1; return t   -- in place, no copy
+n := s.read(fn(t): t.hits)             # only the int is copied out
+```
+
+Measured (release, one caller, struct with a 100000-item list): `update` cost 6478-7075 us per call
+with the old encoded store; 2000 such calls now finish inside the 1000 ms bound of
+`tests/chz/stdlib/box_in_place_perf_test.chz`. A small value with one caller got slower: 200000
+calls of `s.update(fn(x): x + 1)` took 401-432 ms before and 450-493 ms after (five runs each).
+
+The closure runs like the body of a spawned task. Its captures are copies, so a write to one is the
+D4 error or fault, never a silent lost write. It sees module globals as the caller has them **at the
+call**. Reading a scalar, a `str`, a `fn` or a box handle from a global costs nothing extra. Reading
+a mutable aggregate global (`List`, `Map`, a struct) takes the caller's module snapshot, and when
+the caller also mutates such a global between calls the snapshot is rebuilt per call: 13493 ms for
+2000 calls on a 100000-item global, about 6.7 ms per call, the price `spawn` pays (15 ms per call
+when the read sits two boxes deep). Capture what the closure needs instead (`n := G.len()` outside,
+`fn(x): x + n` inside): 8 ms for the same 2000 calls.
+
+`get` / `read` / `set` / `update` / `print` of a `Shared` from inside that box's own `update` or
+`read` closure fault with `already holds the update guard`; the closure holds the value, so no
+earlier copy exists. A fault inside the closure is raised in the caller, `recover:` catches it, the
+box keeps serving and the state is what the closure left. A slow closure blocks every user of the
+box and holds its worker (the Elixir `Agent` warning applies: keep it short). `RwShared` does not
+have this state yet; its `write` still copies the value out and back.
+
 **Display rule (TICKET-246).** `print`, `str` and interpolation of a `Shared` / `RwShared` /
 `Atomic` render what the box holds structurally, with no user `str` hook: `str(Shared(P(1)))` is
 `Shared(P(x=1))` even when `P` defines `str`. A box that holds itself, directly or through a

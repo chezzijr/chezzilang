@@ -1,0 +1,1335 @@
+# TICKET-246 -- nested box calls: a box closure that calls another box.
+#
+# Grid: depth {2, 3} x inner read {top-level fn, scalar, aggregate, none, qualified module call}
+# x outer closure {reads none, a scalar, an aggregate} x box kinds {Shared, RwShared, mixed}
+# x inner action {plain, spawn, Executor.submit_result}; then global boxes, a later-bound box,
+# a rebinding between calls, and the plan validator's program.
+#
+# Every expected value is the output of the base binary (commit 7e4421e4, encoded store) for
+# the same cell: a box closure sees the caller's globals as of the call, at every depth. With
+# ONE saved caller instead of the chain `Vm.box_chain` the depth-3 cells panic
+# (`index out of bounds: the len is 0 but the index is 4`).
+# Generated once from the planning probe by target/t246-scratch/nest_to_test.py.
+
+import std.concurrency
+import std.math
+K: int = 7
+G: List[int] = [1, 2, 3]
+fn inc(y: int) -> int:
+    return y + 1
+fn job(ch: Channel[int]):
+    ch.send(K + G.len())
+test fn nest_cell_1():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 Shared/Shared outer=none inner=fn"
+test fn nest_cell_2():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 9", "d2 Shared/Shared outer=none inner=scalar"
+test fn nest_cell_3():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 5", "d2 Shared/Shared outer=none inner=aggregate"
+test fn nest_cell_4():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 Shared/Shared outer=none inner=none"
+test fn nest_cell_5():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 Shared/Shared outer=none inner=qualified"
+test fn nest_cell_6():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 Shared/Shared outer=scalar inner=fn"
+test fn nest_cell_7():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 9", "d2 Shared/Shared outer=scalar inner=scalar"
+test fn nest_cell_8():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 5", "d2 Shared/Shared outer=scalar inner=aggregate"
+test fn nest_cell_9():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 Shared/Shared outer=scalar inner=none"
+test fn nest_cell_10():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 Shared/Shared outer=scalar inner=qualified"
+test fn nest_cell_11():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 Shared/Shared outer=aggregate inner=fn"
+test fn nest_cell_12():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 9", "d2 Shared/Shared outer=aggregate inner=scalar"
+test fn nest_cell_13():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 5", "d2 Shared/Shared outer=aggregate inner=aggregate"
+test fn nest_cell_14():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 Shared/Shared outer=aggregate inner=none"
+test fn nest_cell_15():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 Shared/Shared outer=aggregate inner=qualified"
+test fn nest_cell_16():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 RwShared/RwShared outer=none inner=fn"
+test fn nest_cell_17():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 9", "d2 RwShared/RwShared outer=none inner=scalar"
+test fn nest_cell_18():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 5", "d2 RwShared/RwShared outer=none inner=aggregate"
+test fn nest_cell_19():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 RwShared/RwShared outer=none inner=none"
+test fn nest_cell_20():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 RwShared/RwShared outer=none inner=qualified"
+test fn nest_cell_21():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 RwShared/RwShared outer=scalar inner=fn"
+test fn nest_cell_22():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 9", "d2 RwShared/RwShared outer=scalar inner=scalar"
+test fn nest_cell_23():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 5", "d2 RwShared/RwShared outer=scalar inner=aggregate"
+test fn nest_cell_24():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 RwShared/RwShared outer=scalar inner=none"
+test fn nest_cell_25():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 RwShared/RwShared outer=scalar inner=qualified"
+test fn nest_cell_26():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 RwShared/RwShared outer=aggregate inner=fn"
+test fn nest_cell_27():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 9", "d2 RwShared/RwShared outer=aggregate inner=scalar"
+test fn nest_cell_28():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 5", "d2 RwShared/RwShared outer=aggregate inner=aggregate"
+test fn nest_cell_29():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 RwShared/RwShared outer=aggregate inner=none"
+test fn nest_cell_30():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 RwShared/RwShared outer=aggregate inner=qualified"
+test fn nest_cell_31():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 Shared/RwShared outer=none inner=fn"
+test fn nest_cell_32():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 9", "d2 Shared/RwShared outer=none inner=scalar"
+test fn nest_cell_33():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 5", "d2 Shared/RwShared outer=none inner=aggregate"
+test fn nest_cell_34():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 Shared/RwShared outer=none inner=none"
+test fn nest_cell_35():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 Shared/RwShared outer=none inner=qualified"
+test fn nest_cell_36():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 Shared/RwShared outer=scalar inner=fn"
+test fn nest_cell_37():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 9", "d2 Shared/RwShared outer=scalar inner=scalar"
+test fn nest_cell_38():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 5", "d2 Shared/RwShared outer=scalar inner=aggregate"
+test fn nest_cell_39():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 Shared/RwShared outer=scalar inner=none"
+test fn nest_cell_40():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 Shared/RwShared outer=scalar inner=qualified"
+test fn nest_cell_41():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 Shared/RwShared outer=aggregate inner=fn"
+test fn nest_cell_42():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 9", "d2 Shared/RwShared outer=aggregate inner=scalar"
+test fn nest_cell_43():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 5", "d2 Shared/RwShared outer=aggregate inner=aggregate"
+test fn nest_cell_44():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 Shared/RwShared outer=aggregate inner=none"
+test fn nest_cell_45():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 Shared/RwShared outer=aggregate inner=qualified"
+test fn nest_cell_46():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 RwShared/Shared outer=none inner=fn"
+test fn nest_cell_47():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 9", "d2 RwShared/Shared outer=none inner=scalar"
+test fn nest_cell_48():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 5", "d2 RwShared/Shared outer=none inner=aggregate"
+test fn nest_cell_49():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 RwShared/Shared outer=none inner=none"
+test fn nest_cell_50():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 3", "d2 RwShared/Shared outer=none inner=qualified"
+test fn nest_cell_51():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 RwShared/Shared outer=scalar inner=fn"
+test fn nest_cell_52():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 9", "d2 RwShared/Shared outer=scalar inner=scalar"
+test fn nest_cell_53():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 5", "d2 RwShared/Shared outer=scalar inner=aggregate"
+test fn nest_cell_54():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 RwShared/Shared outer=scalar inner=none"
+test fn nest_cell_55():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 3", "d2 RwShared/Shared outer=scalar inner=qualified"
+test fn nest_cell_56():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return inc(y)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 RwShared/Shared outer=aggregate inner=fn"
+test fn nest_cell_57():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 9", "d2 RwShared/Shared outer=aggregate inner=scalar"
+test fn nest_cell_58():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 5", "d2 RwShared/Shared outer=aggregate inner=aggregate"
+test fn nest_cell_59():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 RwShared/Shared outer=aggregate inner=none"
+test fn nest_cell_60():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 3", "d2 RwShared/Shared outer=aggregate inner=qualified"
+test fn nest_cell_61():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return inc(y)
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 4", "d3 Shared/RwShared/Shared outer=none inner=fn"
+test fn nest_cell_62():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + K
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 10", "d3 Shared/RwShared/Shared outer=none inner=scalar"
+test fn nest_cell_63():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + G.len()
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 6", "d3 Shared/RwShared/Shared outer=none inner=aggregate"
+test fn nest_cell_64():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + 1
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 4", "d3 Shared/RwShared/Shared outer=none inner=none"
+test fn nest_cell_65():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 4", "d3 Shared/RwShared/Shared outer=none inner=qualified"
+test fn nest_cell_66():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return inc(y)
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 4", "d3 Shared/RwShared/Shared outer=scalar inner=fn"
+test fn nest_cell_67():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + K
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 10", "d3 Shared/RwShared/Shared outer=scalar inner=scalar"
+test fn nest_cell_68():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + G.len()
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 6", "d3 Shared/RwShared/Shared outer=scalar inner=aggregate"
+test fn nest_cell_69():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + 1
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 4", "d3 Shared/RwShared/Shared outer=scalar inner=none"
+test fn nest_cell_70():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 4", "d3 Shared/RwShared/Shared outer=scalar inner=qualified"
+test fn nest_cell_71():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return inc(y)
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 4", "d3 Shared/RwShared/Shared outer=aggregate inner=fn"
+test fn nest_cell_72():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + K
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 10", "d3 Shared/RwShared/Shared outer=aggregate inner=scalar"
+test fn nest_cell_73():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + G.len()
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 6", "d3 Shared/RwShared/Shared outer=aggregate inner=aggregate"
+test fn nest_cell_74():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + 1
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 4", "d3 Shared/RwShared/Shared outer=aggregate inner=none"
+test fn nest_cell_75():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 4", "d3 Shared/RwShared/Shared outer=aggregate inner=qualified"
+test fn nest_cell_76():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return inc(y)
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 4", "d3 RwShared/Shared/RwShared outer=none inner=fn"
+test fn nest_cell_77():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + K
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 10", "d3 RwShared/Shared/RwShared outer=none inner=scalar"
+test fn nest_cell_78():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + G.len()
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 6", "d3 RwShared/Shared/RwShared outer=none inner=aggregate"
+test fn nest_cell_79():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + 1
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 4", "d3 RwShared/Shared/RwShared outer=none inner=none"
+test fn nest_cell_80():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 4", "d3 RwShared/Shared/RwShared outer=none inner=qualified"
+test fn nest_cell_81():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return inc(y)
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 4", "d3 RwShared/Shared/RwShared outer=scalar inner=fn"
+test fn nest_cell_82():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + K
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 10", "d3 RwShared/Shared/RwShared outer=scalar inner=scalar"
+test fn nest_cell_83():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + G.len()
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 6", "d3 RwShared/Shared/RwShared outer=scalar inner=aggregate"
+test fn nest_cell_84():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + 1
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 4", "d3 RwShared/Shared/RwShared outer=scalar inner=none"
+test fn nest_cell_85():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 4", "d3 RwShared/Shared/RwShared outer=scalar inner=qualified"
+test fn nest_cell_86():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return inc(y)
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 4", "d3 RwShared/Shared/RwShared outer=aggregate inner=fn"
+test fn nest_cell_87():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + K
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 10", "d3 RwShared/Shared/RwShared outer=aggregate inner=scalar"
+test fn nest_cell_88():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + G.len()
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 6", "d3 RwShared/Shared/RwShared outer=aggregate inner=aggregate"
+test fn nest_cell_89():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + 1
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 4", "d3 RwShared/Shared/RwShared outer=aggregate inner=none"
+test fn nest_cell_90():
+    b0 := RwShared(1)
+    b1 := Shared(2)
+    b2 := RwShared(3)
+    fn f2(y: int) -> int:
+        return y + math.abs(0 - 1)
+    fn f1(x: int) -> int:
+        b2.write(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 4", "d3 RwShared/Shared/RwShared outer=aggregate inner=qualified"
+test fn nest_cell_91():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        ch := Channel[int](1)
+        parallel:
+            spawn job(ch)
+        return y + ch.recv()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 12", "d2 Shared/Shared outer=none inner=spawn"
+test fn nest_cell_92():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        ex := Executor()
+        o := ex.submit_result(fn() -> int: K + G.len())
+        ex.shutdown()
+        return y + (o.recv() ?? 0)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 12", "d2 Shared/Shared outer=none inner=submit"
+test fn nest_cell_93():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        ch := Channel[int](1)
+        parallel:
+            spawn job(ch)
+        return y + ch.recv()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 12", "d2 Shared/Shared outer=scalar inner=spawn"
+test fn nest_cell_94():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        ex := Executor()
+        o := ex.submit_result(fn() -> int: K + G.len())
+        ex.shutdown()
+        return y + (o.recv() ?? 0)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 12", "d2 Shared/Shared outer=scalar inner=submit"
+test fn nest_cell_95():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        ch := Channel[int](1)
+        parallel:
+            spawn job(ch)
+        return y + ch.recv()
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 12", "d2 Shared/Shared outer=aggregate inner=spawn"
+test fn nest_cell_96():
+    b0 := Shared(1)
+    b1 := Shared(2)
+    fn f1(y: int) -> int:
+        ex := Executor()
+        o := ex.submit_result(fn() -> int: K + G.len())
+        ex.shutdown()
+        return y + (o.recv() ?? 0)
+    fn f0(x: int) -> int:
+        b1.update(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 12", "d2 Shared/Shared outer=aggregate inner=submit"
+test fn nest_cell_97():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        ch := Channel[int](1)
+        parallel:
+            spawn job(ch)
+        return y + ch.recv()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 12", "d2 RwShared/RwShared outer=none inner=spawn"
+test fn nest_cell_98():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        ex := Executor()
+        o := ex.submit_result(fn() -> int: K + G.len())
+        ex.shutdown()
+        return y + (o.recv() ?? 0)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 2 12", "d2 RwShared/RwShared outer=none inner=submit"
+test fn nest_cell_99():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        ch := Channel[int](1)
+        parallel:
+            spawn job(ch)
+        return y + ch.recv()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 12", "d2 RwShared/RwShared outer=scalar inner=spawn"
+test fn nest_cell_100():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        ex := Executor()
+        o := ex.submit_result(fn() -> int: K + G.len())
+        ex.shutdown()
+        return y + (o.recv() ?? 0)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 8 12", "d2 RwShared/RwShared outer=scalar inner=submit"
+test fn nest_cell_101():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        ch := Channel[int](1)
+        parallel:
+            spawn job(ch)
+        return y + ch.recv()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 12", "d2 RwShared/RwShared outer=aggregate inner=spawn"
+test fn nest_cell_102():
+    b0 := RwShared(1)
+    b1 := RwShared(2)
+    fn f1(y: int) -> int:
+        ex := Executor()
+        o := ex.submit_result(fn() -> int: K + G.len())
+        ex.shutdown()
+        return y + (o.recv() ?? 0)
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.write(f0)
+    assert "{r} {b0.get()} {b1.get()}" == "None 4 12", "d2 RwShared/RwShared outer=aggregate inner=submit"
+test fn nest_cell_103():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        ch := Channel[int](1)
+        parallel:
+            spawn job(ch)
+        return y + ch.recv()
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 13", "d3 Shared/RwShared/Shared outer=none inner=spawn"
+test fn nest_cell_104():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        ex := Executor()
+        o := ex.submit_result(fn() -> int: K + G.len())
+        ex.shutdown()
+        return y + (o.recv() ?? 0)
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + 1
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + 1
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 2 3 13", "d3 Shared/RwShared/Shared outer=none inner=submit"
+test fn nest_cell_105():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        ch := Channel[int](1)
+        parallel:
+            spawn job(ch)
+        return y + ch.recv()
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 13", "d3 Shared/RwShared/Shared outer=scalar inner=spawn"
+test fn nest_cell_106():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        ex := Executor()
+        o := ex.submit_result(fn() -> int: K + G.len())
+        ex.shutdown()
+        return y + (o.recv() ?? 0)
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + K
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + K
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 8 9 13", "d3 Shared/RwShared/Shared outer=scalar inner=submit"
+test fn nest_cell_107():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        ch := Channel[int](1)
+        parallel:
+            spawn job(ch)
+        return y + ch.recv()
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 13", "d3 Shared/RwShared/Shared outer=aggregate inner=spawn"
+test fn nest_cell_108():
+    b0 := Shared(1)
+    b1 := RwShared(2)
+    b2 := Shared(3)
+    fn f2(y: int) -> int:
+        ex := Executor()
+        o := ex.submit_result(fn() -> int: K + G.len())
+        ex.shutdown()
+        return y + (o.recv() ?? 0)
+    fn f1(x: int) -> int:
+        b2.update(f2)
+        return x + G.len()
+    fn f0(x: int) -> int:
+        b1.write(f1)
+        return x + G.len()
+    r := recover: b0.update(f0)
+    assert "{r} {b0.get()} {b1.get()} {b2.get()}" == "None 4 5 13", "d3 Shared/RwShared/Shared outer=aggregate inner=submit"
+ga := Shared(1)
+gb := RwShared(2)
+gc := Shared(3)
+late := Shared(100)
+fn g2(y: int) -> int:
+    return y + late.get() + inc(0)
+fn g1(x: int) -> int:
+    gb.write(g2)
+    return x + 1
+fn h3(z: int) -> int:
+    return z + late.get() + G.len()
+fn h2(y: int) -> int:
+    gc.update(h3)
+    return y + 1
+fn h1(x: int) -> int:
+    gb.write(h2)
+    return x + K
+r1 := recover: ga.update(g1)
+assert "{r1} {ga.get()} {gb.get()}" == "None 2 103", "top d2 later-box"
+r2 := recover: ga.update(h1)
+assert "{r2} {ga.get()} {gb.get()} {gc.get()}" == "None 9 104 106", "top d3 later-box"
+G.push(4)
+K = 8
+r3 := recover: ga.update(h1)
+assert "{r3} {ga.get()} {gb.get()} {gc.get()}" == "None 17 105 210", "top d3 after rebinding"
+va := Shared(1)
+vb := Shared(2)
+fn bumpb(x: int) -> int:
+    vb.update(fn(y: int) -> int: inc(y))
+    return x + 1
+va.update(bumpb)
+assert "{va.get()} {vb.get()}" == "2 3", "validator"
+# The module top level runs before any `test fn`: put the two globals back, so every cell
+# above sees the values its expectation was measured with.
+K = 7
+G.pop()

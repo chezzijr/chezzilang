@@ -810,27 +810,36 @@ impl Drop for PendingOp {
 /// write-back. A same-box `set`/`update` re-entry inside `update`'s own closure is the guard
 /// registry's length-1 wait-for cycle and FAULTS; a cross-task contender BLOCKS until the guard
 /// frees; a genuine cross-box wait-for cycle (AB-BA) FAULTS instead of hanging.
+///
+/// TICKET-246: the value is no longer an encoded copy. It lives in the box's PRIVATE heap, at
+/// `stack[0]` of the box's own context (`state`), which that heap's GC roots. Every method takes
+/// the update guard first and then locks `state`, so user code never contends on the `Mutex`; the
+/// closure of `update` / `read` runs under it, inside the box heap (`Vm::with_box`). GC and byte
+/// accounting of an OUTER heap take no lock here: the box's values are roots of its own heap and
+/// an outer walk reads `bytes`.
 #[derive(Debug, Default)]
 pub struct SharedCore {
-    pub v: Mutex<WireValue>,
-    /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s lock by every store.
-    pub summary: WireSummary,
+    pub state: SharedState,
+    /// `Heap::approx_bytes()` of the box heap after the last write: an O(1) upper estimate.
+    pub bytes: AtomicUsize,
 }
 
-impl SharedCore {
-    /// Replace the payload AND refresh the cached GC summary **under the same lock** (W6-7/W6-10).
-    /// Every write path (`set`, `update`'s write-back) must go through here: a stale `WS_CLEAN`
-    /// would stop the GC tracing a handle stored into this box — a use-after-free.
-    ///
-    /// The O(payload) [`wire_summary`] walk runs BEFORE the lock is taken (`w` is caller-owned at
-    /// that point, so the result is exact); only the two atomic stores + the move happen inside.
-    /// Same rule as [`ChanState::push`]: lock hold time must not scale with user payload size —
-    /// here it is a *reader* stall, since `RwShared`'s whole contract is many concurrent readers.
-    pub fn store(&self, w: WireValue) {
-        let sum = wire_summary(&w);
-        let mut g = self.v.lock().unwrap();
-        self.summary.store(sum.0, sum.1);
-        *g = w;
+/// The context of a `Shared` box: its heap, its module view and the state at `stack[0]`. `None`
+/// only while a call has taken it out (`Vm::with_box`), under the lock.
+#[derive(Default)]
+pub struct SharedState(pub(super) Mutex<Option<Box<super::FiberCtx>>>);
+
+impl std::fmt::Debug for SharedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedState")
+    }
+}
+
+impl SharedState {
+    /// Lock the state. A panic inside a box closure unwinds through the guard; `with_box` has put
+    /// the context back by then, so a poisoned lock still holds a whole state.
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Option<Box<super::FiberCtx>>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -1554,10 +1563,8 @@ pub fn drain_pending_cores(
                     collect_gcrefs_structural(w, out, seen, pending);
                 }
             }
-            WireValue::Shared(c) => {
-                let v = c.v.lock().unwrap();
-                collect_gcrefs_structural(&v, out, seen, pending);
-            }
+            // TICKET-246 — a `Shared` holds its value in its own heap: no handle to collect, no lock.
+            WireValue::Shared(_) => {}
             WireValue::RwShared(c) => {
                 let v = c.v.read().unwrap();
                 collect_gcrefs_structural(&v, out, seen, pending);
@@ -1932,10 +1939,7 @@ pub fn drain_pending_core_bytes(
                 };
                 acc += queued + c.held_bytes();
             }
-            WireValue::Shared(c) => {
-                let g = c.v.lock().unwrap();
-                acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
-            }
+            WireValue::Shared(c) => acc += c.bytes.load(Ordering::Relaxed),
             WireValue::RwShared(c) => {
                 let g = c.v.read().unwrap();
                 acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
@@ -2330,11 +2334,11 @@ mod summary_tests {
 
         // A nested core is ALWAYS dirty (it may gain a handle via its OWN store, invisible here)
         // and its bytes stop at the boundary.
-        let inner = Arc::new(SharedCore {
+        let inner = Arc::new(AtomicCore {
             v: Mutex::new(list((0..1000).map(WireValue::Int).collect())),
             ..Default::default()
         });
-        let (b, d) = wire_summary(&list(vec![WireValue::Shared(inner)]));
+        let (b, d) = wire_summary(&list(vec![WireValue::Atomic(inner)]));
         assert!(d, "a nested core is conservatively dirty");
         assert!(
             b < 1000 * node,

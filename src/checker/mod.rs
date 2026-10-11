@@ -1989,7 +1989,11 @@ fn attach_native_module_metadata(name: &str, sig: &mut ModuleSig) {
         // `fn(T) -> ?` (any closure return accepted; the real R is recovered at the call site by the
         // `Ty::RwShared` dispatch arm). `T` is RwShared's own type param (kept as `Ty::Param` in the
         // seeded table; the dispatch arm substitutes the concrete element type).
-        if let Some(rw) = sig.struct_defs.get_mut("RwShared") {
+        // TICKET-246: `Shared[T].read(f)` has the same shape, so both boxes take one retype.
+        for owner in ["RwShared", "Shared"] {
+            let Some(rw) = sig.struct_defs.get_mut(owner) else {
+                continue;
+            };
             let t = rw
                 .type_params
                 .first()
@@ -4035,7 +4039,7 @@ const SET_METHODS: &[&str] = &[
 const CHANNEL_METHODS: &[&str] = &[
     "send", "try_send", "recv", "try_recv", "close", "trip", "len", "cap",
 ];
-const SHARED_METHODS: &[&str] = &["get", "set", "update"];
+const SHARED_METHODS: &[&str] = &["get", "set", "update", "read"];
 const RWSHARED_METHODS: &[&str] = &["get", "set", "read", "write"];
 const ATOMIC_METHODS: &[&str] = &["load", "store", "exchange", "cas", "add", "sub"];
 // `AtomicInt` exposes the same method surface as `Atomic`.

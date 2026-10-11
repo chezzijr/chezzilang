@@ -3100,10 +3100,9 @@ impl Vm {
                 // non-sendable init (a frame-holding generator / module/native/FFI handle) faults
                 // gracefully with this Op's span — the box is a shared cross-thread cell.
                 let init = self.to_wire_crossable(init, span)?;
-                let h = self.heap.alloc(Obj::Shared(Arc::new(SharedCore {
-                    v: Mutex::new(init),
-                    ..Default::default()
-                })));
+                // TICKET-246: the value is decoded into the box's own heap and lives there.
+                let core = self.new_shared_core(init);
+                let h = self.heap.alloc(Obj::Shared(core));
                 self.push(Value::obj(h));
             }
             Op::NewRwShared => {

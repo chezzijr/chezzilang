@@ -2535,6 +2535,20 @@ impl Checker {
     /// arm). Extracting this makes it structurally impossible for a handle arm to forget the generic
     /// branch (the forgettable hazard); each arm keeps its residual special case inline (Atomic numeric
     /// gate, Executor `submit` capture-floor, RwShared `read` R-recovery) by matching on the result.
+    /// `read(fn(T) -> R) -> R` on a `Shared` / `RwShared`: R is the closure argument's actual
+    /// return type (`Unknown` on an arity error). `check_args` already inferred the closure and
+    /// emitted any body errors; this is a RECOVERY-ONLY re-inference, so it rolls its own
+    /// diagnostics back to avoid reporting those errors twice.
+    fn recover_read_ret(&mut self, args: &[Expr]) -> Ty {
+        let mark = self.diag_mark();
+        let recovered = args.first().map(|arg| self.infer_value(arg));
+        self.diag_rollback(mark);
+        match recovered {
+            Some(Ty::Func { ret, .. }) => *ret,
+            _ => Ty::Unknown,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn resolve_native_handle_method(
         &mut self,
@@ -3494,6 +3508,9 @@ impl Checker {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
                         self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                        if method == "read" {
+                            return self.recover_read_ret(args);
+                        }
                         sig.ret
                     }
                     NativeHandleMethod::Miss => {
@@ -3723,17 +3740,7 @@ impl Checker {
                     NativeHandleMethod::Concrete(sig) => {
                         self.check_args_range(method, &sig.params, sig.min_params, args, span);
                         if method == "read" {
-                            // R = the closure argument's actual return type (else `Unknown` on arity
-                            // error). `check_args` already inferred the closure (emitting any body
-                            // errors); this is a RECOVERY-ONLY re-inference, so snapshot + truncate to
-                            // avoid double-reporting those same body errors.
-                            let mark = self.diag_mark();
-                            let recovered = args.first().map(|arg| self.infer_value(arg));
-                            self.diag_rollback(mark);
-                            if let Some(Ty::Func { ret, .. }) = recovered {
-                                return *ret;
-                            }
-                            return Ty::Unknown;
+                            return self.recover_read_ret(args);
                         }
                         sig.ret
                     }
