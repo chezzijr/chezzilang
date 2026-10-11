@@ -1,0 +1,245 @@
+# TICKET-246 — the rules of a box closure, one test per rule. A closure given to
+# `Shared.update` / `Shared.read` / `RwShared.write` runs inside the box heap, like the body of a
+# spawned task. Each rule here is RUN; `tests/box_private_heap_grid.rs` runs this file at
+# CHEZZI_THREADS 1, 2 and default, on the debug binary.
+
+import std.concurrency
+import std.time
+
+fn msg_of[T](r: T!Error, where_: str) -> str:
+    match r:
+        ?_: assert false, where_ + " must fault"
+        !e: return e.message()
+    return ""
+
+# ---- rule 3: an AB-BA cycle in ONE task faults; both boxes keep serving ----
+
+fn into_a(a: Shared[int], y: int) -> int:
+    a.update(fn(z): z + 1)
+    return y
+
+fn a_then_b_then_a(a: Shared[int], b: Shared[int], x: int) -> int:
+    b.update(fn(y): into_a(a, y))
+    return x
+
+test fn ab_ba_cycle_in_one_task_faults_and_both_boxes_keep_serving():
+    a := Shared(1)
+    b := Shared(2)
+    r := recover: a.update(fn(x): a_then_b_then_a(a, b, x))
+    fault := msg_of(r, "AB-BA")
+    assert fault.contains("already holds the update guard"), fault
+    a.update(fn(x): x + 1)
+    b.update(fn(x): x + 1)
+    assert a.get() == 2 and b.get() == 3
+
+fn rinto_a(a: RwShared[int], y: int) -> int:
+    a.write(fn(z): z + 1)
+    return y
+
+fn ra_then_b_then_a(a: RwShared[int], b: RwShared[int], x: int) -> int:
+    b.write(fn(y): rinto_a(a, y))
+    return x
+
+test fn rwshared_ab_ba_cycle_in_one_task_faults():
+    a := RwShared(1)
+    b := RwShared(2)
+    r := recover: a.write(fn(x): ra_then_b_then_a(a, b, x))
+    assert msg_of(r, "AB-BA").contains("already holds the update guard")
+    assert a.get() == 1 and b.get() == 2
+
+# ---- rule 5: what a closure may do inside the box ----
+
+fn via_executor(x: int) -> int:
+    ex := Executor(2)
+    ch := ex.submit_result(fn() -> int: 5)
+    got := 0
+    match ch.recv():
+        ?v: got = v
+        !_: got = -1
+    ex.shutdown()
+    return x + got
+
+test fn executor_submit_and_recv_inside_a_box_closure():
+    s := Shared(1)
+    s.update(via_executor)
+    assert s.get() == 6
+    assert s.read(via_executor) == 11
+    w := RwShared(1)
+    w.write(via_executor)
+    assert w.get() == 6
+
+fn feed(ch: Channel[int], v: int):
+    time.sleep_ms(5)
+    ch.send(v)
+
+fn wait_for_a_sibling(x: int) -> int:
+    ch := Channel[int](0)
+    got := AtomicInt(0)
+    parallel:
+        spawn feed(ch, 7)
+        spawn:
+            got.store(ch.recv())
+    return x + got.load()
+
+# A channel wait and a timed wait inside the closure; the nursery joins inside the box.
+test fn a_wait_inside_a_box_closure_completes():
+    s := Shared(1)
+    s.update(wait_for_a_sibling)
+    assert s.get() == 8
+    w := RwShared(1)
+    w.write(wait_for_a_sibling)
+    assert w.get() == 8
+
+fn count_up(n: int) -> Iterator[int]:
+    for i in 0..n:
+        yield i
+
+fn sum_gen(x: int) -> int:
+    total := x
+    for v in count_up(4):
+        total += v
+    g := count_up(3)
+    match g.next():
+        ?v: total += v + 10
+        None: total += 1000
+    return total
+
+test fn a_generator_created_and_advanced_inside_a_box_closure():
+    s := Shared(0)
+    s.update(sum_gen)
+    assert s.get() == 16
+    assert s.read(sum_gen) == 32
+    w := RwShared(0)
+    w.write(sum_gen)
+    assert w.get() == 16
+
+fn one(c: AtomicInt):
+    c.add(1)
+
+fn nursery_body(x: int) -> int:
+    c := AtomicInt(0)
+    parallel:
+        for _ in 0..4:
+            spawn one(c)
+    return x + c.load()
+
+fn shared_caller(s: Shared[int]):
+    for _ in 0..10:
+        s.update(nursery_body)
+
+fn rw_caller(w: RwShared[int]):
+    for _ in 0..10:
+        w.write(nursery_body)
+
+# The TICKET-245 cells: a `parallel:` nursery inside the closure, called from three tasks.
+test fn a_parallel_nursery_inside_a_box_closure_from_three_tasks():
+    s := Shared(0)
+    w := RwShared(0)
+    parallel:
+        for _ in 0..3:
+            spawn shared_caller(s)
+            spawn rw_caller(w)
+    assert s.get() == 120
+    assert w.get() == 120
+    assert s.read(nursery_body) == 124
+
+struct Ctr:
+    inc: fn() -> None
+    get: fn() -> int
+
+fn make_ctr() -> Ctr:
+    n := 0
+    fn inc():
+        n = n + 1
+    fn get() -> int:
+        return n
+    return Ctr(inc, get)
+
+GLOBAL_CTR := make_ctr()
+
+fn read_global_cell(x: int) -> int:
+    return x + GLOBAL_CTR.get()
+
+fn bump_global_cell(x: int) -> int:
+    GLOBAL_CTR.inc()
+    return x
+
+# A closure whose cell a module global also holds: the box closure READS the caller's value as
+# of the call, and a WRITE through it is the D4 fault, never a silent lost write.
+test fn a_cell_a_module_global_also_holds_reads_fresh_and_a_write_faults():
+    GLOBAL_CTR.inc()
+    before := GLOBAL_CTR.get()
+    s := Shared(0)
+    s.update(read_global_cell)
+    assert s.get() == before
+    GLOBAL_CTR.inc()
+    s.set(0)
+    s.update(read_global_cell)
+    assert s.get() == before + 1
+    r := recover: s.update(bump_global_cell)
+    fault := msg_of(r, "write to a global's cell")
+    assert fault.contains("this task's copy"), fault
+    assert GLOBAL_CTR.get() == before + 1
+
+# ---- rule 2 for RwShared collections: a fault in a writer leaves the box serving ----
+
+struct BadKey:
+    k: int
+    fn hash(self) -> int:
+        return 1
+    fn eq(self, other: BadKey) -> bool:
+        z := 0
+        return self.k / z == other.k
+
+test fn a_fault_in_a_key_hook_inside_the_box_is_caught_and_the_box_keeps_serving():
+    w: RwShared[Map[BadKey, int]] = RwShared({})
+    w.write(fn(m): put_bad(m, 1))
+    r := recover: w.write(fn(m): put_bad(m, 2))
+    assert msg_of(r, "eq hook") == "division by zero"
+    assert w.read(fn(m): m.len()) == 1
+
+fn put_bad(m: Map[BadKey, int], k: int) -> Map[BadKey, int]:
+    m[BadKey(k)] = k
+    return m
+
+# ---- rule 10: a slow closure blocks every user of the box ----
+
+fn slow_inc(started: Channel[int], x: int) -> int:
+    started.send(1)
+    time.sleep_ms(150)
+    return x + 1
+
+fn slow_writer(s: Shared[int], started: Channel[int]):
+    s.update(fn(x): slow_inc(started, x))
+
+fn slow_rw_writer(w: RwShared[int], started: Channel[int]):
+    w.write(fn(x): slow_inc(started, x))
+
+# A reader and a `str` beside a slow writer WAIT and then see the new value; user output never
+# shows `<locked>`.
+test fn a_reader_and_a_print_wait_for_a_slow_writer():
+    s := Shared(0)
+    w := RwShared(0)
+    started := Channel[int](2)
+    shown := Channel[List[str]](1)
+    parallel:
+        spawn slow_writer(s, started)
+        spawn slow_rw_writer(w, started)
+        spawn:
+            _ := started.recv()
+            _ := started.recv()
+            shown.send([str(s), str(w), str(s.get()), str(w.get()), str(w.read(fn(x): x))])
+    got := shown.recv()
+    assert got == ["Shared(1)", "RwShared(1)", "1", "1", "1"], str(got)
+
+struct Pair:
+    other: Shared[Pair?]
+
+test fn two_boxes_that_hold_each_other_print_with_a_cycle_marker():
+    a: Shared[Pair?] = Shared(None)
+    b: Shared[Pair?] = Shared(None)
+    a.set(?Pair(b))
+    b.set(?Pair(a))
+    text := str([a, b])
+    assert text.contains("Shared(...)"), text
+    assert text.starts_with("[Shared(Pair(other=Shared(Pair(other=Shared(...)")

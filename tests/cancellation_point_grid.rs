@@ -17,8 +17,6 @@
 //! - ready send cap 0: user code cannot see that a receiver parked.
 //! - would-wait unbounded send: it never waits.
 //! - would-wait hook rows: a hook op never waits.
-//! - would-wait `RwShared.read`: it never takes the update guard, and its `RwLock` read lock is
-//!   held only for a clone, never across user code or a wait.
 //! - guard freed by the halt itself: a holder inside the halt's scope may be cut first, and the act
 //!   may then legally find the guard free and complete. Holders here run in their own `hx`.
 
@@ -178,6 +176,25 @@ fn keep(m: Map[int, int], held: Channel[int], hold: Channel[int]) -> Map[int, in
 fn hold_m(wm: RwShared[Map[int, int]], held: Channel[int], hold: Channel[int]):
     wm.write(fn(m: Map[int, int]) -> Map[int, int]: keep(m, held, hold))
 
+fn keep_l(xs: List[int], held: Channel[int], hold: Channel[int]) -> List[int]:
+    _ := block_in(held, hold)
+    return xs
+
+fn hold_l(wl: RwShared[List[int]], held: Channel[int], hold: Channel[int]):
+    wl.write(fn(xs: List[int]) -> List[int]: keep_l(xs, held, hold))
+
+fn keep_t(xs: Set[int], held: Channel[int], hold: Channel[int]) -> Set[int]:
+    _ := block_in(held, hold)
+    return xs
+
+fn hold_t(ws: RwShared[Set[int]], held: Channel[int], hold: Channel[int]):
+    ws.write(fn(xs: Set[int]) -> Set[int]: keep_t(xs, held, hold))
+
+fn some_or(o: int?, d: int) -> int:
+    match o:
+        ?x: return x
+        None: return d
+
 fn fault(gate: Channel[int]):
     gate.send(7)
     panic(\"boom\")
@@ -188,14 +205,16 @@ fn child(gate: Channel[int]):
 ";
 
 const PARAMS: &str = "out: Channel[int], src: Channel[int], got: AtomicInt, s: Shared[int], w: \
-                      RwShared[int], wm: RwShared[Map[int, int]], after: AtomicInt, held: Channel[int]";
-const ARGS: &str = "out, src, got, s, w, wm, after, held";
+                      RwShared[int], wm: RwShared[Map[int, int]], wl: RwShared[List[int]], ws: RwShared[Set[int]], after: AtomicInt, held: Channel[int]";
+const ARGS: &str = "out, src, got, s, w, wm, wl, ws, after, held";
 
 const LOCALS: &str = "src := Channel[int](1)
 got := AtomicInt(0)
 s := Shared[int](0)
 w := RwShared[int](0)
 wm := RwShared[Map[int, int]]({})
+wl := RwShared[List[int]]([])
+ws := RwShared[Set[int]](Set[int]())
 after := AtomicInt(0)
 held := Channel[int](1)";
 
@@ -211,6 +230,8 @@ fn holder_args(h: &str) -> &'static str {
     match h {
         "hold_s" => "s, held, hold",
         "hold_w" => "w, held, hold",
+        "hold_l" => "wl, held, hold",
+        "hold_t" => "ws, held, hold",
         _ => "wm, held, hold",
     }
 }
@@ -265,7 +286,7 @@ fn run_src(c: &Cell) -> String {
     }
     body += &format!("return {}\n", c.done);
     format!(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\n\n{DECLS}\n{}\n{extra}\nfn round() -> bool:\n{}\n{main}",
+        "import std.concurrency\nimport ConcurrentMap, ConcurrentList, ConcurrentSet from std.concurrency.collection\n\n{DECLS}\n{}\n{extra}\nfn round() -> bool:\n{}\n{main}",
         act_fn(c),
         indent(&body, 4)
     )
@@ -284,7 +305,7 @@ fn timeout_src(c: &Cell) -> String {
     }
     body += &format!("    act(7, {ARGS})\n");
     format!(
-        "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nimport std.time\n\n{DECLS}\n{}\ntest fn cell():\n{}",
+        "import std.concurrency\nimport ConcurrentMap, ConcurrentList, ConcurrentSet from std.concurrency.collection\nimport std.time\n\n{DECLS}\n{}\ntest fn cell():\n{}",
         act_fn(c),
         indent(&body, 4)
     )
@@ -481,6 +502,135 @@ fn ops() -> Vec<Op> {
             )),
         },
     ]
+    .into_iter()
+    .chain(box_guard_ops())
+    .collect()
+}
+
+/// TICKET-246 — every guard taker the private-heap boxes added. A `RwShared` reader takes the
+/// update guard only on its slow path (a writer holds the state), which is the would-wait column;
+/// its ready column is the lock-free `try_read`. Every `_` reader goes through
+/// `Vm::rwshared_read`, every `_` writer through `Vm::rwshared_mutate`, display through
+/// `Vm::box_snapshots`.
+fn box_guard_ops() -> Vec<Op> {
+    // (name, act leaving `got == 7` or the box changed, ready check, holder)
+    let rows: [(&'static str, &'static str, &'static str, &'static str); 17] = [
+        (
+            "RwShared.get",
+            "got.add(w.get() + v)",
+            "got.load() == 7",
+            "hold_w",
+        ),
+        (
+            "RwShared.read (slow path)",
+            "got.add(w.read(fn(x: int) -> int: x + v))",
+            "got.load() == 7",
+            "hold_w",
+        ),
+        (
+            "display Shared",
+            "got.add(str(s).len() + v - 9)",
+            "got.load() == 7",
+            "hold_s",
+        ),
+        (
+            "display RwShared",
+            "got.add(str(w).len() + v - 11)",
+            "got.load() == 7",
+            "hold_w",
+        ),
+        (
+            "ConcurrentMap.get",
+            "got.add(some_or(ConcurrentMap(wm).get(1), v))",
+            "got.load() == 7",
+            "hold_m",
+        ),
+        (
+            "ConcurrentMap.contains",
+            "if not ConcurrentMap(wm).contains(1):\n    got.add(v)",
+            "got.load() == 7",
+            "hold_m",
+        ),
+        (
+            "ConcurrentMap.len",
+            "got.add(ConcurrentMap(wm).len() + v)",
+            "got.load() == 7",
+            "hold_m",
+        ),
+        (
+            "ConcurrentMap.remove",
+            "ConcurrentMap(wm).remove(1)\ngot.add(v)",
+            "got.load() == 7",
+            "hold_m",
+        ),
+        (
+            "ConcurrentMap.get_or_insert",
+            "got.add(ConcurrentMap(wm).get_or_insert(1, v))",
+            "got.load() == 7",
+            "hold_m",
+        ),
+        (
+            "ConcurrentList.push",
+            "ConcurrentList(wl).push(v)",
+            "wl.get() == [7]",
+            "hold_l",
+        ),
+        (
+            "ConcurrentList.len",
+            "got.add(ConcurrentList(wl).len() + v)",
+            "got.load() == 7",
+            "hold_l",
+        ),
+        (
+            "ConcurrentList.at",
+            "got.add(some_or(ConcurrentList(wl).at(0), v))",
+            "got.load() == 7",
+            "hold_l",
+        ),
+        (
+            "ConcurrentList.slice",
+            "got.add(ConcurrentList(wl).slice(0, 1).len() + v)",
+            "got.load() == 7",
+            "hold_l",
+        ),
+        (
+            "ConcurrentSet.add",
+            "ConcurrentSet(ws).add(v)",
+            "ws.get().len() == 1",
+            "hold_t",
+        ),
+        (
+            "ConcurrentSet.remove",
+            "ConcurrentSet(ws).remove(v)\ngot.add(v)",
+            "got.load() == 7",
+            "hold_t",
+        ),
+        (
+            "ConcurrentSet.contains",
+            "if not ConcurrentSet(ws).contains(1):\n    got.add(v)",
+            "got.load() == 7",
+            "hold_t",
+        ),
+        (
+            "ConcurrentSet.len",
+            "got.add(ConcurrentSet(ws).len() + v)",
+            "got.load() == 7",
+            "hold_t",
+        ),
+    ];
+    rows.into_iter()
+        .map(|(name, act, check, holder)| Op {
+            name,
+            out: "Channel[int](1)",
+            ready: Some(("", act, check)),
+            wait: Some((
+                "",
+                Box::leak(format!("_ := held.recv()\n{act}").into_boxed_str()),
+                "after.load() == 0",
+                Some(holder),
+            )),
+        })
+        .collect()
 }
 
 /// One row per single-call re-entry site (`## Single source` item 3 of TICKET-194 maps each site

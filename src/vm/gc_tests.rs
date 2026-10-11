@@ -1048,6 +1048,66 @@ main()";
     );
 }
 
+/// TICKET-246 — the `RwShared` twin under gc-stress: a state built across three `write`s inside
+/// the box heap, then every reader copy (`get`, `read`, display, the collection views and
+/// writers) taken while the READER's heap collects at each safepoint. A copy decoded into the
+/// reader's heap is rooted only by what the reader does next, so a missing root here is a freed
+/// slot read back as a wrong value.
+#[test]
+fn rwshared_state_and_reader_copies_survive_collections() {
+    let src = "\
+import std.concurrency
+# The std-internal primitives are called directly: this harness compiles one module.
+struct Acc:
+    log: List[str]
+    n: int
+struct K:
+    id: str
+    fn hash(self) -> int:
+        junk := [str(1), str(2)]
+        return self.id.len() + junk.len()
+    fn eq(self, other: K) -> bool:
+        junk := [str(3)]
+        return self.id == other.id and junk.len() == 1
+fn add(a: Acc, s: str) -> Acc:
+    junk := [str(1), str(2), str(3)]
+    a.log.push(s + str(junk.len()))
+    a.n += 1
+    return a
+fn main():
+    keep := [str(7), str(8)]
+    w := RwShared(Acc([str(0)], 0))
+    for i in range(3):
+        pre := \"p\" + str(i)
+        w.write(fn(a): add(a, pre))
+    print(w.read(fn(a): a.log.len() + a.n))
+    print(w.get().log)
+    print(w)
+    m: RwShared[Map[K, List[str]]] = RwShared({})
+    xs: RwShared[List[List[str]]] = RwShared([])
+    st: RwShared[Set[K]] = RwShared(Set[K]())
+    for i in range(4):
+        m._set_key(K(\"k\" + str(i)), [str(i), str(i + 1)])
+        xs._push([str(i)])
+        st._add(K(\"k\" + str(i % 2)))
+    print(m._get_key(K(\"k2\")), m._has(K(\"k9\")), m._len())
+    print(m._get_or_insert(K(\"k1\"), [str(0)]), m._get_or_insert(K(\"k7\"), [str(7)]))
+    _ := m._remove_key(K(\"k0\"))
+    print(xs._at(1), xs._slice(1, 3), xs._len())
+    print(st._contains(K(\"k1\")), st._len(), m._len())
+    st._remove(K(\"k1\"))
+    print(st.get().len())
+    print(keep)
+main()";
+    assert_eq!(
+        run_capture_stress(src),
+        "7\n['0', 'p03', 'p13', 'p23']\n\
+         RwShared(Acc(log=['0', 'p03', 'p13', 'p23'], n=3))\n\
+         ['2', '3'] false 4\n['1', '2'] ['7']\n\
+         ['1'] [['1'], ['2']] 4\ntrue 2 4\n1\n['7', '8']\n"
+    );
+}
+
 /// TICKET-246 — a global read through the box's slot door is cached for the call, and the cache
 /// is a GC root of the box heap (`BoxFrame::roots`). The closure reads one heap-allocated `str`
 /// global twice with nothing else holding it and allocations in between. Without the root the
