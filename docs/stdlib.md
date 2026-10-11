@@ -407,7 +407,7 @@ if you do — measured at the default worker count and again at `CHEZZI_THREADS=
 | from inside `s.update(f)` / `rw.write(f)` | behaviour |
 |---|---|
 | `s.get()` / `s.read(g)` / `print(s)` — same `Shared` box | **faults** the same way (TICKET-246): the value lives in the box and the closure holds it, so no earlier copy exists to return |
-| `rw.get()` / `rw.read(g)` — same `RwShared` box | **succeeds, returning the PRE-guard value** — a stale read; `RwShared` still stores an encoded copy until it gets the same private heap |
+| `rw.get()` / `rw.read(g)` / `print(rw)` — same `RwShared` box, inside its `write` | **faults** the same way (TICKET-246); inside a `read` closure they are legal, because that closure runs on its own copy |
 | `s.set(x)` — same box | **faults**: `"deadlock: this task already holds the update guard on this Shared box"` |
 | `s.update(g)` / `rw.write(g)` — same box | **faults** the same way, instead of hanging undetected |
 
@@ -421,8 +421,8 @@ crossing — `read` never takes the guard, so the nested `write` persists.)
 result, no write-back) · `write(f: fn(T) -> T) -> None` (exclusive write guard; `Shared.update` under
 the write lock). Reach for it over `Shared` when reads dominate. Same reentrancy limit as
 `Shared.update`, with the same three measured outcomes (see the table above): a nested `write` or
-`set` on the same box faults through the update-guard deadlock detector, while a nested `read`/`get`
-reads the pre-guard value.
+`set` on the same box faults through the update-guard deadlock detector, and so does a nested `read`/`get`
+inside `write` (the closure holds the value). `write` runs in place in the box heap; `read(f)` runs `f` on a copy in the reader's heap.
 Constructed
 value-first: `RwShared(v)`; an optional turbofish pins (and is checked against) the element type —
 `RwShared[T](v)` (a mismatch like `RwShared[str](0)` is a type error).
@@ -434,17 +434,13 @@ A shared container is used through [`std.concurrency.collection`](#stdconcurrenc
 — `ConcurrentList`, `ConcurrentMap`, `ConcurrentSet`, `ConcurrentCounter` — which owns the
 per-entry readers and the single-entry writers.
 
-How the collections' per-entry readers behave (`at`, `slice`, `for_each`, `fold`, `get`, `contains`,
-`for_each_entry`, `fold_entries`): they walk the stored value **entry-at-a-time** and materialize
-ONE entry at a time, so a worker can scan/reduce a shared large container in **O(1) memory** — instead of
-`get`/`read`, which `from_wire`-copy the WHOLE inner into the caller's heap on every access. Reach for
-`fold*`/`for_each*` to **reduce in place** when fanning a big shared container out to many workers. Every
-walk RE-ACQUIRES the shared read guard **per entry** and drops it before running the callback (and before
-any `get`/`contains` hash+eq probe — never held across user code), so a nested read OR write of
-the same box — and a GC pass inside the callback — are deadlock-free. Trade-off: the walk is **not one
-atomic snapshot** (a concurrent/in-callback write to the same box may be seen mid-walk; use
-`snapshot()` for a stable copy). Reduce into a **different** box (an `AtomicInt`/local) — the real use
-case.
+How the collections read (TICKET-246): the container is a live `List` / `Map` / `Set` in the box's
+private heap. The single-entry readers (`len`, `at`, `slice`, `get`, `contains`) copy only what they
+return, under the shared read lock, and run a key's `hash` / `eq` in the caller after the lock
+dropped. The walks (`for_each`, `fold`, `for_each_entry`, `fold_entries`) copy the collection **once**
+(`inner.get()`) and loop over the copy: a walk visits exactly the entries present when it starts,
+each once, whatever the callback or another task removes or adds meanwhile, and the callback may
+call any method of the collection it walks. Cost: one copy of the collection per walk.
 Second trade-off: each piece is copied out **independently**, so two sibling closures over one captured
 local do NOT share their binding when pulled out one at a time (two `at()` calls are two crossings); a
 whole-container `get()`/`read()`, and `slice` (one call returning a container), are one crossing and do
@@ -1770,7 +1766,7 @@ write the same collection; the walk is not one atomic snapshot.
 
 | member | signature | concurrency / semantics |
 | --- | --- | --- |
-| `.push(item)` | `(E) -> None` | **update guard**. Appends one element without copying the list. The first `push` after a whole `inner.set` / `inner.write` (and after construction) re-encodes the list once; later ones splice. |
+| `.push(item)` | `(E) -> None` | **update guard**. Appends one element without copying the list. It is a plain list push inside the box heap. |
 | `.len()` | `() -> int` | **concurrent read**. |
 | `.at(i)` | `(int) -> E?` | **concurrent read**, constant time. Out of range is `None`, never a fault; a negative `i` counts from the end, as `xs[i]`. |
 | `.slice(lo, hi)` | `(int, int) -> List[E]` | **concurrent read**; a copy of `[lo, hi)` with `xs[lo:hi]`'s clamping. |

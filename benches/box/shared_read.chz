@@ -1,0 +1,35 @@
+# benches/box/shared_read.chz — TICKET-246: `Shared.read(f)`, new with this ticket (no "before").
+# Same value and cells as benches/box/update_read.chz: `name|n|callers|us per call`.
+
+import std.concurrency
+import std.time
+
+struct Table:
+    keys: List[int]
+    hits: int
+
+fn table(n: int) -> Table:
+    keys: List[int] = []
+    for i in range(n):
+        keys.push(i)
+    return Table(keys, 0)
+
+fn hits_of(t: Table) -> int:
+    return t.hits
+
+fn reads(s: Shared[Table], calls: int, sink: AtomicInt):
+    for _ in range(calls):
+        sink.add(s.read(hits_of))
+
+for n in [1, 1000, 100000]:
+    for callers in [1, 8]:
+        calls := 100000
+        each := calls / callers
+        sink := AtomicInt(0)
+        s := Shared(table(n))
+        t0 := time.monotonic()
+        parallel:
+            for _ in range(callers):
+                spawn reads(s, each, sink)
+        us := (time.monotonic() - t0) * 1000000.0 / float(each * callers)
+        print("Shared.read|{n}|{callers}|{us}")

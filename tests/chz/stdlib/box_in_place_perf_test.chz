@@ -9,7 +9,7 @@
 # between calls must not pay a module snapshot per call (the box's slot door). With a view only,
 # the planning prototype measured 13507-13816 ms for these 2000 calls.
 #
-# The `RwShared.write` row joins this file when `RwShared` gets the same state (plan step 6).
+# `RwShared.write` has the same row: it runs in place under the exclusive lock.
 
 import std.concurrency
 import std.time
@@ -74,3 +74,14 @@ test fn shared_update_calling_a_top_level_fn_pays_no_snapshot_per_call():
     ms := time.now_ms() - t0
     assert ms < 1000, "2000 Shared.update(fn(x): inc(x)) calls with a mutated 100k global took {ms} ms; the bound is 1000 ms (a view per call measured 13507-13816 ms)"
     assert s.get() == 2000
+
+test fn rwshared_write_on_a_100k_value_does_not_copy_it():
+    w := RwShared(big_table())
+    t0 := time.now_ms()
+    i := 0
+    while i < 2000:
+        w.write(fn(t): hit(t))
+        i = i + 1
+    ms := time.now_ms() - t0
+    assert ms < 1000, "2000 RwShared.write calls on a 100k value took {ms} ms; the bound is 1000 ms (a copy out and back measured 6455-6923 us per call)"
+    assert w.read(fn(t): t.hits) == 2000

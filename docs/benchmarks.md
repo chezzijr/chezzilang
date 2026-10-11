@@ -3886,3 +3886,112 @@ The after run is branch `f94a5f63`. The base binary, run again beside the after 
 `1.79, 2.05, 2.51`), gave 0.357 for the fresh-graph bench: the two builds are within the spread of
 seven runs (0.335 to 0.395). Each spawn with a fresh operand now walks that operand's rebuilt graph
 once to unmark it; the bench's 20000 spawns do not show it.
+
+### TICKET-246: boxes with a private heap
+
+A `Shared` / `RwShared` keeps its value in a private heap; `update` / `write` run in place. Before,
+every `update` / `write` decoded the whole value into the caller's heap and encoded it back.
+
+Method: `benches/box/update_read.chz` (and `benches/box/shared_read.chz` for the new
+`Shared.read`), release binaries, 28 cores, three runs per cell, the range is min-max, microseconds
+per call. The value is a struct with `keys: List[int]` of n items and `hits: int`; `update` /
+`write` is `t.hits += 1`. `base` is the merge-base `9ed5f89c` built into its own target directory;
+`new` is the branch. `uptime` load average during the runs: 3.1 to 4.6 (base), 1.8 to 3.0 (new).
+`T` is `CHEZZI_THREADS`.
+
+| op | n | callers | base T=1 | new T=1 | base T=2 | new T=2 | base T=default | new T=default |
+|---|---|---|---|---|---|---|---|---|
+| `Shared.update` | 1 | 1 | 2.80-3.07 | 1.93-1.98 | 3.09-3.46 | 1.63-2.03 | 2.88-3.32 | 1.69-2.01 |
+| `Shared.get` | 1 | 1 | 1.68-1.82 | 2.14-2.25 | 1.61-2.31 | 2.58-2.67 | 1.52-1.96 | 2.08-2.49 |
+| `RwShared.write` | 1 | 1 | 3.04-3.41 | 1.75-2.01 | 3.04-3.74 | 2.00-2.06 | 2.95-3.50 | 1.62-2.09 |
+| `RwShared.read` | 1 | 1 | 1.76-2.06 | 2.21-2.26 | 1.71-1.86 | 2.26-2.43 | 1.72-1.87 | 2.04-2.22 |
+| `RwShared.get` | 1 | 1 | 1.66-1.73 | 2.02-2.18 | 1.58-1.63 | 1.88-1.99 | 1.51-1.70 | 1.89-2.02 |
+| `Shared.update` | 1 | 8 | 3.05-3.25 | 2.19-2.21 | 4.79-4.97 | 2.84-2.96 | 9.77-12.0 | 5.92-6.09 |
+| `Shared.get` | 1 | 8 | 0.96-0.99 | 1.55-1.65 | 0.93-1.00 | 1.45-1.71 | 0.68-0.82 | 2.22-2.63 |
+| `RwShared.write` | 1 | 8 | 3.23-3.37 | 2.12-2.24 | 4.82-4.93 | 2.99-3.08 | 11.4-12.7 | 6.14-6.23 |
+| `RwShared.read` | 1 | 8 | 1.13-1.61 | 1.71-1.93 | 1.14-1.18 | 1.28-1.39 | 0.57-0.59 | 0.45-0.61 |
+| `RwShared.get` | 1 | 8 | 0.94-1.16 | 1.41-1.51 | 0.82-0.95 | 1.07-1.10 | 0.47-0.52 | 0.41-0.55 |
+| `Shared.update` | 1000 | 1 | 66.4-73.3 | 1.64-1.79 | 69.5-84.3 | 2.08-2.13 | 72.1-89.0 | 2.09-2.65 |
+| `Shared.get` | 1000 | 1 | 24.6-28.0 | 42.2-51.2 | 22.2-28.3 | 52.7-52.9 | 22.4-28.3 | 52.8-54.2 |
+| `RwShared.write` | 1000 | 1 | 70.2-74.7 | 2.33-2.47 | 65.6-73.1 | 2.06-2.11 | 66.4-85.5 | 2.14-2.39 |
+| `RwShared.read` | 1000 | 1 | 24.9-27.3 | 43.8-47.1 | 23.0-24.8 | 50.0-53.6 | 22.7-24.3 | 47.8-56.6 |
+| `RwShared.get` | 1000 | 1 | 24.2-25.2 | 44.8-46.2 | 23.0-24.4 | 42.8-45.9 | 21.8-23.8 | 46.8-55.8 |
+| `Shared.update` | 1000 | 8 | 77.2-84.0 | 2.55-2.97 | 106-119 | 3.19-3.29 | 115-120 | 7.72-8.43 |
+| `Shared.get` | 1000 | 8 | 24.3-30.3 | 45.6-51.4 | 27.3-29.1 | 46.9-47.6 | 45.3-47.8 | 72.2-80.2 |
+| `RwShared.write` | 1000 | 8 | 82.6-86.8 | 2.35-2.67 | 89.7-120 | 3.14-3.17 | 122-132 | 9.13-10.7 |
+| `RwShared.read` | 1000 | 8 | 25.0-25.6 | 45.8-52.3 | 17.6-19.8 | 25.7-26.8 | 7.47-11.8 | 12.7-14.3 |
+| `RwShared.get` | 1000 | 8 | 23.9-29.0 | 45.4-46.3 | 15.3-15.9 | 25.2-26.1 | 8.11-9.86 | 8.79-9.49 |
+| `Shared.update` | 100000 | 1 | 6904-7100 | 3.20-6.25 | 7234-7580 | 2.56-2.83 | 7410-7614 | 3.22-3.43 |
+| `Shared.get` | 100000 | 1 | 2296-2527 | 4301-4422 | 2357-2535 | 4196-4335 | 2359-2544 | 4800-4912 |
+| `RwShared.write` | 100000 | 1 | 6488-6923 | 5.90-6.31 | 6714-6960 | 3.38-3.58 | 6455-6632 | 2.96-3.42 |
+| `RwShared.read` | 100000 | 1 | 2357-2427 | 4159-4513 | 2474-2520 | 4165-4415 | 2322-2532 | 4187-4349 |
+| `RwShared.get` | 100000 | 1 | 2282-2416 | 4335-4405 | 2384-2587 | 4258-4364 | 2296-2508 | 4086-4282 |
+| `Shared.update` | 100000 | 8 | 6518-6981 | 6.79-7.87 | 9644-9892 | 4.11-5.09 | 9221-9560 | 6.72-8.36 |
+| `Shared.get` | 100000 | 8 | 2123-2438 | 4211-4384 | 2310-2532 | 7251-7943 | 3939-4083 | 7253-7852 |
+| `RwShared.write` | 100000 | 8 | 6425-6857 | 5.41-8.36 | 9089-9537 | 5.61-11.7 | 8861-9411 | 11.9-24.6 |
+| `RwShared.read` | 100000 | 8 | 2402-2533 | 4113-4305 | 1876-2066 | 2587-2769 | 2746-2939 | 3437-3448 |
+| `RwShared.get` | 100000 | 8 | 2384-2452 | 3997-4201 | 1759-1983 | 2196-2353 | 2750-3020 | 3398-3497 |
+| `ConcurrentList.at` | 100000 | 1 | 1.54-1.54 | 1.60-1.75 | 1.40-1.56 | 1.52-1.64 | 1.48-1.52 | 1.62-1.67 |
+| `ConcurrentMap.get` | 100000 | 1 | 1.71-1.74 | 1.89-2.01 | 1.49-1.71 | 1.68-1.83 | 1.62-1.63 | 1.72-1.83 |
+| `ConcurrentList.at` | 100000 | 8 | 1.02-1.04 | 1.17-1.20 | 0.69-0.74 | 0.80-0.83 | 0.39-0.43 | 0.41-0.44 |
+| `ConcurrentMap.get` | 100000 | 8 | 1.09-1.15 | 1.28-1.40 | 0.75-0.81 | 0.85-0.89 | 0.39-0.42 | 0.40-0.50 |
+| `ConcurrentList.push` | 100000 | 1 | 3.26-3.47 | 3.87-3.96 | 1.55-1.67 | 1.61-1.71 | 1.48-2.16 | 2.07-2.59 |
+| `Shared(i) + get` | 1 | 1 | 1.40-1.44 | 5.67-5.87 | 0.89-0.95 | 4.45-4.56 | 0.92-0.99 | 4.43-4.58 |
+| `RwShared(i) + get` | 1 | 1 | 1.27-1.39 | 4.40-4.57 | 0.88-0.88 | 4.41-4.55 | 0.89-0.91 | 4.26-4.54 |
+| `Atomic(i) + load` | 1 | 1 | 1.18-1.44 | 0.88-0.91 | 0.84-0.88 | 0.86-0.91 | 0.87-0.91 | 0.83-0.90 |
+| `Shared.update(inc) int` | 1 | 1 | 1.43-1.52 | 1.43-1.46 | 1.23-1.24 | 1.36-1.44 | 1.21-1.27 | 1.39-1.46 |
+| `update: 1M calls of a top-level fn` | 1 | 1 | 309791-327477 | 334790-340164 | 312863-322552 | 339162-349865 | 318231-322868 | 335843-362125 |
+| `update: math.abs` | 1 | 1 | 3.05-3.58 | 4.31-4.38 | 3.02-3.39 | 4.11-4.29 | 3.17-3.28 | 4.14-4.53 |
+| `nested: inner fn, caller mutates a 100k global` | 2 | 1 | 2.95-3.20 | 4.66-4.88 | 3.25-3.34 | 4.56-4.81 | 3.14-4.83 | 4.54-5.08 |
+| `nested: inner reads the mutated 100k global` | 2 | 1 | 3.87-8.18 | 15772-15976 | 3.19-3.67 | 15712-16153 | 3.25-4.22 | 15560-15971 |
+| `nested: inner reads the 100k global, caller idle` | 2 | 1 | 3.10-3.29 | 6.50-7.08 | 3.15-3.32 | 6.98-7.36 | 3.06-3.38 | 6.77-7.02 |
+
+`Shared.read(f)` is new (no base column); same value, `f` returns `t.hits`:
+
+| op | n | callers | read T=1 | read T=2 | read T=default |
+|---|---|---|---|---|---|
+| `Shared.read` | 1 | 1 | 1.68-1.98 | 1.72-2.07 | 1.90-2.16 |
+| `Shared.read` | 1 | 8 | 1.80-2.11 | 2.00-2.61 | 5.71-6.55 |
+| `Shared.read` | 1000 | 1 | 1.72-1.93 | 1.64-1.77 | 1.73-2.16 |
+| `Shared.read` | 1000 | 8 | 1.66-1.92 | 2.27-2.62 | 6.30-8.81 |
+| `Shared.read` | 100000 | 1 | 1.72-1.89 | 1.66-1.81 | 1.77-2.13 |
+| `Shared.read` | 100000 | 8 | 1.67-1.73 | 1.77-2.68 | 6.85-9.09 |
+
+What got faster: every `update` / `write` on a value that is not tiny. At n = 100000 one call costs
+3 to 8 us (`RwShared.write` with 8 callers: 5 to 25 us) against 6425 to 9892 us; at n = 1 with a struct state it costs
+1.5 to 2.1 us against 2.8 to 3.7 us. `Shared.read` costs about 2 us at every n with one caller.
+The collection reads hold: `ConcurrentList.at` 1.5-1.8 us and `ConcurrentMap.get` 1.7-2.0 us with
+one reader (base 1.4-1.7 us), 0.40-0.50 us per read with 8 readers at the default worker count
+(2 to 2.5 million reads per second; base 0.39-0.43 us). 200 `push` calls on a 100000-item list
+cost 1.6-4.0 us each, 0.3 to 0.8 ms in all, against 1.5-3.5 us: a push decodes its argument into the
+box heap and checks the box heap's collection trigger.
+
+Cells slower than their run-to-run range, each explained:
+
+1. Whole-value copies of a big value (`Shared.get`, `RwShared.get`, `RwShared.read` at n = 1000 and
+   n = 100000) cost about 1.8 times more: 4086-4912 us against 2282-2587 us at n = 100000 with one
+   caller. Before, a copy cloned an already-encoded value and decoded it. Now it walks the live
+   heap to encode, then decodes. This is the price of `update` no longer encoding. A caller that
+   needs part of a big value uses `Shared.read(f)` (2 us) or a collection read (1.6 us).
+2. `Shared.get` with 8 callers at the default worker count: 2.2-2.6 us against 0.68-0.82 us at
+   n = 1. A `Shared` admits one user at a time and a reader now encodes under its lock. With the
+   update guard taken on every `get` this cell measured 5.3-5.7 us; `get` now tries the state lock
+   first and takes the guard only when the lock is busy. `RwShared.get` / `read` with 8 readers,
+   the cell most at risk, held: 0.41-0.61 us against 0.47-0.59 us.
+3. Small-value `get` / `RwShared.read` with one caller: 1.9-2.5 us against 1.5-2.0 us. Same cause
+   as 1: an encode walk in place of a clone.
+4. Box creation: `Shared(i)` plus one `get` costs 4.4-5.9 us against 0.9-1.4 us, about 4 us more
+   per box (the prototype measured about 6 us more). A box now owns a heap and a module table.
+   Peak RSS of 100000 boxes created and dropped: 11.7 MB (`RwShared` 11.8 MB) against 10.8 MB.
+5. `update` with an `int` state and `fn(x): x + 1`: 1.32-1.54 us against 1.21-1.52 us. The closure
+   is encoded and decoded per call and the context is swapped twice; the state is not copied.
+6. A closure that calls a top-level `fn` one million times: 337-355 ms against 310-327 ms per call
+   of the closure (about 8 percent). Each read of a module global inside a box closure goes through
+   the slot-door cache, one hash lookup.
+7. A closure that calls `math.abs`: 4.2-4.5 us against 3.0-3.6 us. A qualified call reads the
+   module handle, which takes the caller's view once per call.
+8. Nested box calls: 4.5-5.2 us against 3.0-4.8 us for an inner top-level `fn`; 6.6-7.3 us against
+   3.1-3.4 us when the inner closure reads a 100000-item global the caller does not mutate.
+9. The accepted cliff: an inner closure that reads a 100000-item global the caller mutates before
+   every call costs 15305-16320 us per call (two module snapshots per call) against 3-8 us. The
+   one-box form of this cliff is what `spawn` pays today. Capture the value the closure needs.

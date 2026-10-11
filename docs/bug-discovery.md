@@ -104,6 +104,14 @@ cases.
    Complements #1 (which targets the error paths) by targeting the *accept* paths.
 6. **TSan / loom on the concurrency engine** — channels, `Shared`, `Executor`, netpoller under race
    detection / exhaustive interleaving.
+   TICKET-246 (2026-10-11) tried to run `tests/rwshared_parallel_readers_stress.rs` under
+   ThreadSanitizer and could not: this box has no nightly toolchain. `rustup toolchain list`
+   printed `command not found: rustup` and `cargo +nightly --version` printed
+   ``error: no such command: `+nightly` ``. The parallel-reader path therefore rests on the
+   compile-time `Heap: Sync` assertion (no `unsafe` on the reader path) and on that stress test at
+   `CHEZZI_THREADS` 1, 2 and default (16 readers, one writer, 0 torn copies). The command to run
+   once a nightly exists: `RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target
+   x86_64-unknown-linux-gnu --test rwshared_parallel_readers_stress`.
 
 **Tier 3:**
 

@@ -1,0 +1,208 @@
+# benches/box/update_read.chz — TICKET-246: the cost of one box call, in microseconds.
+#
+# Rows: `Shared.update`, `Shared.get`, `RwShared.write`, `RwShared.read`, `RwShared.get` on a
+# struct holding an n-item list (n = 1, 1000, 100000) with 1 and 8 callers; box creation; the
+# collection numbers (`ConcurrentList.at`, `ConcurrentMap.get`, 8-reader throughput, `push` x200
+# on 100k); a closure that loops a top-level fn; a closure that calls `math.abs`; the nested rows.
+# `Shared.read` did not exist before TICKET-246; its rows are in `benches/box/shared_read.chz`.
+#
+# Run: chezzi run benches/box/update_read.chz     (release binary; one line per cell:
+#      `name|n|callers|us per call`). See docs/benchmarks.md "TICKET-246".
+
+import std.concurrency
+import std.time
+import std.math
+import ConcurrentList, ConcurrentMap from std.concurrency.collection
+
+struct Table:
+    keys: List[int]
+    hits: int
+
+fn table(n: int) -> Table:
+    keys: List[int] = []
+    for i in range(n):
+        keys.push(i)
+    return Table(keys, 0)
+
+fn hit(t: Table) -> Table:
+    t.hits += 1
+    return t
+
+fn hits_of(t: Table) -> int:
+    return t.hits
+
+fn inc(x: int) -> int:
+    return x + 1
+
+fn loop_inc(x: int) -> int:
+    y := x
+    for _ in range(1000000):
+        y = inc(y)
+    return y
+
+fn abs_inc(x: int) -> int:
+    return math.abs(x) + 1
+
+fn calls_for(n: int) -> int:
+    if n >= 100000:
+        return 200
+    if n >= 1000:
+        return 5000
+    return 100000
+
+fn report(name: str, n: int, callers: int, calls: int, t0: float):
+    us := (time.monotonic() - t0) * 1000000.0 / float(calls)
+    print("{name}|{n}|{callers}|{us}")
+
+fn shared_updates(s: Shared[Table], calls: int):
+    for _ in range(calls):
+        s.update(hit)
+
+fn shared_gets(s: Shared[Table], calls: int, sink: AtomicInt):
+    for _ in range(calls):
+        sink.add(s.get().hits)
+
+fn rw_writes(w: RwShared[Table], calls: int):
+    for _ in range(calls):
+        w.write(hit)
+
+fn rw_reads(w: RwShared[Table], calls: int, sink: AtomicInt):
+    for _ in range(calls):
+        sink.add(w.read(hits_of))
+
+fn rw_gets(w: RwShared[Table], calls: int, sink: AtomicInt):
+    for _ in range(calls):
+        sink.add(w.get().hits)
+
+fn cell(n: int, callers: int):
+    calls := calls_for(n)
+    each := calls / callers
+    sink := AtomicInt(0)
+    s := Shared(table(n))
+    w := RwShared(table(n))
+    t0 := time.monotonic()
+    parallel:
+        for _ in range(callers):
+            spawn shared_updates(s, each)
+    report("Shared.update", n, callers, each * callers, t0)
+    t0 = time.monotonic()
+    parallel:
+        for _ in range(callers):
+            spawn shared_gets(s, each, sink)
+    report("Shared.get", n, callers, each * callers, t0)
+    t0 = time.monotonic()
+    parallel:
+        for _ in range(callers):
+            spawn rw_writes(w, each)
+    report("RwShared.write", n, callers, each * callers, t0)
+    t0 = time.monotonic()
+    parallel:
+        for _ in range(callers):
+            spawn rw_reads(w, each, sink)
+    report("RwShared.read", n, callers, each * callers, t0)
+    t0 = time.monotonic()
+    parallel:
+        for _ in range(callers):
+            spawn rw_gets(w, each, sink)
+    report("RwShared.get", n, callers, each * callers, t0)
+
+fn list_ats(xs: ConcurrentList[int], calls: int, sink: AtomicInt):
+    for i in range(calls):
+        match xs.at(i % 1000):
+            ?v: sink.add(v)
+            None: pass
+
+fn map_gets(m: ConcurrentMap[int, int], calls: int, sink: AtomicInt):
+    for i in range(calls):
+        match m.get(i % 1000):
+            ?v: sink.add(v)
+            None: pass
+
+fn collections():
+    sink := AtomicInt(0)
+    xs := ConcurrentList[int].new()
+    m := ConcurrentMap[int, int].new()
+    for i in range(100000):
+        xs.push(i)
+        m.set(i, i)
+    for callers in [1, 8]:
+        each := 200000 / callers
+        t0 := time.monotonic()
+        parallel:
+            for _ in range(callers):
+                spawn list_ats(xs, each, sink)
+        report("ConcurrentList.at", 100000, callers, each * callers, t0)
+        t0 = time.monotonic()
+        parallel:
+            for _ in range(callers):
+                spawn map_gets(m, each, sink)
+        report("ConcurrentMap.get", 100000, callers, each * callers, t0)
+    t0 := time.monotonic()
+    for i in range(200):
+        xs.push(i)
+    report("ConcurrentList.push", 100000, 1, 200, t0)
+
+fn creation():
+    t0 := time.monotonic()
+    total := 0
+    for i in range(100000):
+        total += Shared(i).get()
+    report("Shared(i) + get", 1, 1, 100000, t0)
+    t0 = time.monotonic()
+    for i in range(100000):
+        total += RwShared(i).get()
+    report("RwShared(i) + get", 1, 1, 100000, t0)
+    t0 = time.monotonic()
+    for i in range(100000):
+        total += Atomic(i).load()
+    report("Atomic(i) + load", 1, 1, 100000, t0)
+
+G: List[int] = []
+
+fn outer_fn(b: Shared[int], x: int) -> int:
+    b.update(inc)
+    return x + 1
+
+fn outer_agg(b: Shared[int], x: int) -> int:
+    b.update(fn(y: int) -> int: y + G.len())
+    return x + 1
+
+fn closures():
+    for _ in range(100000):
+        G.push(1)
+    s := Shared(0)
+    t0 := time.monotonic()
+    for _ in range(100000):
+        s.update(inc)
+    report("Shared.update(inc) int", 1, 1, 100000, t0)
+    t0 = time.monotonic()
+    for _ in range(5):
+        s.update(loop_inc)
+    report("update: 1M calls of a top-level fn", 1, 1, 5, t0)
+    t0 = time.monotonic()
+    for _ in range(100000):
+        s.update(abs_inc)
+    report("update: math.abs", 1, 1, 100000, t0)
+    a := Shared(0)
+    b := Shared(0)
+    t0 = time.monotonic()
+    for i in range(2000):
+        G[0] = i
+        a.update(fn(x: int) -> int: outer_fn(b, x))
+    report("nested: inner fn, caller mutates a 100k global", 2, 1, 2000, t0)
+    t0 = time.monotonic()
+    for i in range(100):
+        G[0] = i
+        a.update(fn(x: int) -> int: outer_agg(b, x))
+    report("nested: inner reads the mutated 100k global", 2, 1, 100, t0)
+    t0 = time.monotonic()
+    for _ in range(2000):
+        a.update(fn(x: int) -> int: outer_agg(b, x))
+    report("nested: inner reads the 100k global, caller idle", 2, 1, 2000, t0)
+
+for n in [1, 1000, 100000]:
+    for callers in [1, 8]:
+        cell(n, callers)
+collections()
+creation()
+closures()

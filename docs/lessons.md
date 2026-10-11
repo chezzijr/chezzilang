@@ -347,6 +347,22 @@ the freeze.
   raising `VM_STACK_BYTES`: it is reserved per M:N worker.
 - **Opt-in caps whose measure is per-heap or wall-clock are non-comparable across execution contexts.**
   Do not design one expecting two contexts to agree.
+- **Swap what indexes a heap, and undo the swap on unwind (TICKET-246).** A `Shared` / `RwShared`
+  closure runs inside the box's private heap, so the `Vm` swaps contexts around it. Everything that
+  holds a `GcRef` travels with its heap: `FiberCtx`, the running generators and their parked hosts.
+  `out` / `stderr` swap BACK (a `print` in the closure is the caller's output; without it
+  `"10\n11\n"` printed as `"11\n"`). Only `Vm::with_box` swaps, and it undoes the swap under
+  `catch_unwind`: a hand-written swap pair after the call leaves contexts crossed on a Rust panic.
+- **Render a shared box from a snapshot: copy, drop the lock, then render (TICKET-246).** Rendering
+  under the payload lock hung `print` of a box that holds itself (`rc=124`) or overflowed the stack
+  (`rc=134`). `Vm::display_box` keeps a stack of the boxes being rendered and prints `Shared(...)`
+  for one already on it. A `&self` render builds fault messages and never waits: a busy box prints
+  `Shared(<locked>)`. The print path waits first, through the update guard.
+- **A parallel reader of a live heap is proven by the type system, not by review (TICKET-246).**
+  `RwShared` readers copy out of the box heap under a read lock. `Heap: Sync` is a `const _`
+  assertion; a new `Cell` / `RefCell` in `Heap` or `Obj` must fail that build, never be worked
+  around with `unsafe impl Sync`. No user code runs under the read lock: copy, unlock, then decode,
+  compare keys or run the closure.
 - **A pure-Chezzi scanner over non-ASCII text must pre-collect its codepoints.** As of TICKET-072,
   `text[i:i+1]` is O(1) per call for an ALL-ASCII `text` (`ChzStr` caches ASCII-ness at
   construction); a non-ASCII `text` still re-collects the whole `Vec<char>` per call (O(n²)).

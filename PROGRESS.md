@@ -9378,7 +9378,7 @@ the stored-callback abort net, and `std.net`'s sticky-UTF-8 + `read_bytes` drain
 
 ## Current focus
 
-### TICKET-246 — boxes with a private heap (in progress, 2026-10-11)
+### TICKET-246 — boxes with a private heap (2026-10-11)
 
 Landed so far, in plan-step order:
 
@@ -9412,6 +9412,23 @@ Landed so far, in plan-step order:
    `from_wire_piece`, `wire_pieces_are_self_contained`, `WireMemo::seeded`, the `WireTable`
    mutation methods and `WireSummary::adjust`. `WireTable` / `HashIndex` stay (every `Map` / `Set`
    crossing carries them); `AtomicCore` still stores a wire.
+8. `CROSSING_CLOSURE_METHODS` (`src/vm/boxctx.rs`) is the one list of native methods whose closure
+   crosses: `Executor.submit`, `Executor._submit_settled`, `Shared.update`, `Shared.read`,
+   `RwShared.write`. The checker's capture floor reads it (`check_crossing_closure_call`), so a
+   direct write to a captured local in a box closure is the D4 error at check time; the run time
+   reads it in `Vm::cross_closure`. Sweep: `chezzi check` over 696 tracked `.chz` files, 0
+   pre-existing files change. A "stale global" warning was measured and declined
+   (`docs/concurrency.md`, "Box closures and module globals: measured").
+9. Tests: `tests/box_private_heap_grid.rs` (the four grids at `CHEZZI_THREADS` 1, 2, default plus
+   process-level rules), `tests/chz/suites/box_rules_test.chz`,
+   `tests/rwshared_parallel_readers_stress.rs` (16 readers, one writer, no torn copy), 17 new rows
+   in `tests/cancellation_point_grid.rs`, a `RwShared` gc-stress cell.
+10. Perf (`docs/benchmarks.md`, "TICKET-246"): `update` / `write` on a 100000-item value costs 3 to
+    8 us against 6425 to 9892 us. Slower, and explained there: whole-value `get` of a big value
+    (about 1.8 times), `Shared.get` with 8 callers, box creation (about 4 us more per box), nested
+    box calls. `Shared.get` tries the state lock before the update guard.
+11. Not done: ThreadSanitizer (no nightly toolchain on this box, `docs/bug-discovery.md`); box cells
+    in `tests/callback_nursery_grid.rs`; a socket wait inside a box closure has no test.
 
 Measured cost, not yet explained: small-value `update` with one caller is 401-432 ms before and
 450-493 ms after per 200000 calls.
