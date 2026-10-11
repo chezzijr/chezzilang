@@ -1,7 +1,9 @@
 //! Proven writes made by statically named functions. Function values remain opaque.
 
 use super::{ChainLink, Checker, FnSig, Ty};
-use crate::ast::{BinaryOp, DeferTarget, Expr, ExprKind, FnDecl, SpawnTarget, Stmt, StmtKind};
+use crate::ast::{
+    BinaryOp, DeferTarget, Expr, ExprKind, FnDecl, SpawnTarget, Stmt, StmtKind, UnaryOp,
+};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -62,12 +64,60 @@ pub(super) enum RootUse {
     Field(String),
     /// `n[i]` or a slice of `n`, read or written.
     Index,
-    /// An operand of an arithmetic, comparison or unary operator, or a compound assignment target.
+    /// An operand of an operator [`aliases_operand`] proves fresh, or a compound assignment target.
     Op,
     /// `for v in n`.
     Iter,
     /// Positional argument `j` of a statically named callee.
     Arg(ArgCallee, usize),
+}
+
+/// TICKET-247 — what the result of an operator node is to its operands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum OperandAlias {
+    /// A new object that holds each operand (`?x`, `!x`).
+    Holds,
+    /// A value the operator computes. It is no operand when the operand's type has no user
+    /// operator ([`Checker::use_keeps_root`] owns that type rule).
+    Fresh,
+    /// One of the operands itself (`a and b`, `a or b`, `a ?? b`).
+    Child,
+}
+
+/// TICKET-247 — the one decider of "can the result of this operator node be, or hold, an
+/// operand?". [`UseWalk`] and `Checker::fresh_shape` both read it. Each operator enum is matched
+/// with no wildcard, so a new operator does not compile until it is classified here. A kind that
+/// is no operator holds its operands.
+pub(super) fn aliases_operand(kind: &ExprKind) -> OperandAlias {
+    match kind {
+        ExprKind::Unary { op, .. } => match op {
+            UnaryOp::Neg | UnaryOp::Not => OperandAlias::Fresh,
+            UnaryOp::Wrap | UnaryOp::ErrVal => OperandAlias::Holds,
+        },
+        ExprKind::Binary { op, .. } => match op {
+            BinaryOp::And | BinaryOp::Or => OperandAlias::Child,
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::Lt
+            | BinaryOp::LtEq
+            | BinaryOp::Gt
+            | BinaryOp::GtEq
+            | BinaryOp::Eq
+            | BinaryOp::NotEq
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::In => OperandAlias::Fresh,
+        },
+        ExprKind::Compare { .. } => OperandAlias::Fresh,
+        ExprKind::NullCoalesce { .. } => OperandAlias::Child,
+        _ => OperandAlias::Holds,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -357,24 +407,12 @@ impl UseWalk<'_> {
                     self.value(v);
                 }
             }
-            ExprKind::Unary { expr, .. } => self.operand(expr),
-            ExprKind::Binary {
-                op: BinaryOp::And | BinaryOp::Or,
-                lhs,
-                rhs,
-            }
-            | ExprKind::NullCoalesce { lhs, rhs, .. } => {
-                self.value(lhs);
-                self.value(rhs);
-            }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                self.operand(lhs);
-                self.operand(rhs);
+            ExprKind::Unary { expr, .. } => self.operator(e, &[expr]),
+            ExprKind::Binary { lhs, rhs, .. } | ExprKind::NullCoalesce { lhs, rhs, .. } => {
+                self.operator(e, &[lhs, rhs])
             }
             ExprKind::Compare { operands, .. } => {
-                for o in operands {
-                    self.operand(o);
-                }
+                self.operator(e, &operands.iter().collect::<Vec<_>>())
             }
             ExprKind::Range { start, end } => {
                 self.value(start);
@@ -469,6 +507,19 @@ impl UseWalk<'_> {
             }
             // A closure, comprehension, interpolation, `?`, `?.` or anything else.
             _ => self.escape_free(e),
+        }
+    }
+
+    /// Walk the operands of operator node `node`: a bare name keeps its root only under an
+    /// operator [`aliases_operand`] proves fresh; under any other it is a plain value.
+    fn operator(&mut self, node: &Expr, operands: &[&Expr]) {
+        let fresh = aliases_operand(&node.kind) == OperandAlias::Fresh;
+        for o in operands {
+            if fresh {
+                self.operand(o);
+            } else {
+                self.value(o);
+            }
         }
     }
 
@@ -1272,7 +1323,7 @@ impl Checker {
     }
 
     /// The type rule of one kept use: its result cannot alias a root of type `t`.
-    fn use_keeps_root(&self, u: &RootUse, t: &Ty) -> bool {
+    pub(super) fn use_keeps_root(&self, u: &RootUse, t: &Ty) -> bool {
         let t = t.scalar();
         match u {
             // A native method keeps its receiver only when its declared return type cannot hold it.

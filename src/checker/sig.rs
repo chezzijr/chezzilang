@@ -2398,20 +2398,22 @@ impl Checker {
             }
             // An explicit `?x` takes its one level from the node: its carrier record can arrive
             // at frame end, after this runs. The compiler finds no record for a synthesized node.
-            ExprKind::Unary {
-                op: crate::ast::UnaryOp::Wrap,
-                expr,
-            } => {
-                return if e.id.0 == crate::ast::NodeId::SYNTH.0 {
+            ExprKind::Unary { op, expr } => match super::fn_writes::aliases_operand(&e.kind) {
+                super::fn_writes::OperandAlias::Holds => {
+                    let held = Fresh::at(vec![self.fresh_shape(expr, d, live)]);
+                    if *op == crate::ast::UnaryOp::Wrap {
+                        return if e.id.0 == crate::ast::NodeId::SYNTH.0 {
+                            Fresh::Marked
+                        } else {
+                            held
+                        };
+                    }
+                    held
+                }
+                super::fn_writes::OperandAlias::Fresh | super::fn_writes::OperandAlias::Child => {
                     Fresh::Marked
-                } else {
-                    Fresh::at(vec![self.fresh_shape(expr, d, live)])
-                };
-            }
-            ExprKind::Unary {
-                op: crate::ast::UnaryOp::ErrVal,
-                expr,
-            } => Fresh::at(vec![self.fresh_shape(expr, d, live)]),
+                }
+            },
             ExprKind::Call {
                 callee,
                 args,
@@ -2776,20 +2778,10 @@ impl Checker {
                 {
                     let fresh = if *op == AssignOp::Eq {
                         self.fresh_shape(value, 0, true)
-                    } else if matches!(
-                        self.lookup(n),
-                        Some(
-                            Ty::Int
-                                | Ty::Float
-                                | Ty::Bool
-                                | Ty::Str
-                                | Ty::Bytes
-                                | Ty::List(_)
-                                | Ty::Map(..)
-                                | Ty::Set(_)
-                                | Ty::ByteArray
-                        )
-                    ) {
+                    } else if self
+                        .lookup(n)
+                        .is_some_and(|t| self.use_keeps_root(&super::fn_writes::RootUse::Op, &t))
+                    {
                         Fresh::root()
                     } else {
                         Fresh::Marked

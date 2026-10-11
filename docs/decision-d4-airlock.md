@@ -173,6 +173,9 @@ value after the join? Two routes decide it, each in one place:
    RwShared, Atomic) marks nothing, so the verdict changes nothing there. A frame never takes a
    positional shape: it lives on between build and crossing, so a permuting method (`reverse`,
    `pop`, `sort`) would move a named child under a fresh position.
+   `?x` and `!x` hold `x`, so a slot whose name is wrapped is marked like a slot whose name is
+   yielded bare (TICKET-247; `aliases_operand` in `src/checker/fn_writes.rs` is the one decider of
+   which operator results hold an operand).
    A local slot is `Root` when every single-name `let` and assignment of it builds a fresh root
    and that root never escapes (yield, return, store, plain-value use, a callee that keeps its
    argument); the checker decides it once per generator decl (`root_escapes`, reading the one

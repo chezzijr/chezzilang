@@ -283,6 +283,13 @@ the freeze.
   copy mark, so a graph walk that stops at an unmarked object never reaches a carrier's payload;
   and a map key can be a struct with a mutable field, so "every value is fresh" does not make a
   map fresh.
+- **An operator arm with a wildcard on the operator absorbs every operator added later
+  (TICKET-247).** `ExprKind::Unary { expr, .. } => self.operand(expr)` was right while `UnaryOp` was
+  `{Neg, Not}`. TICKET-227 added `Wrap` (`?x`) and `ErrVal` (`!x`), which hold their operand; the
+  wildcard classed them as fresh, and `yield ?buf` lost a task's write silently. Match the operator
+  enum with no wildcard, in one function every walker reads (`aliases_operand`), so a new operator
+  does not compile until it is classified. Default an unnamed kind to "holds": that costs a false
+  fault, the other default costs a lost write.
 - **D4's "task copy" mark approximates the wrong property, and "is a write" has two owners.** The
   runtime marks everything *rebuilt by the airlock walk* (spawn args, captures, a started generator's
   frame), but D4's claim is about writes *the parent could observe*; a fresh `spawn work([], out)`
