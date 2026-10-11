@@ -1,0 +1,7 @@
+# rule: waitArm
+# expect: expected ':', found ':='
+ch := Channel[int](1)
+wait:
+    recover:
+        1
+    := ch.recv(): pass

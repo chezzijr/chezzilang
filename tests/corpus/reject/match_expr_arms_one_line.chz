@@ -1,0 +1,5 @@
+# rule: exprArm
+# expect: expected end of line, found identifier
+n := 1
+x := match n:
+    1: 10 _: 20

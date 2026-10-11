@@ -1,0 +1,50 @@
+# rule: exprEnd, matchExpr, recoverExpr, exprArm
+fn g() -> int:
+    return 7
+n := 1
+xs := [1]
+a := match n:
+    1: 10
+    _: 20
+[1, 2]
+b := recover:
+    1
+[i for i in xs]
+c := match n:
+    1: 10
+    _: 20
+(g())
+d := match n:
+    1: 10
+    _: 20
+-1
+e := match n:
+    1: 10
+    _: 20
+?g()
+fn o(k: int) -> int?:
+    return ?k
+fn h(t: (int, int), m: int) -> int:
+    r := match o(m):
+        None: match m:
+            1: 10
+            _: 20
+        ?_: 30
+    s := match t:
+        (0, y): match y:
+            1: 10
+            _: 20
+        (x, _): 30
+    u := match m:
+        0: match m:
+            1: 10
+            _: 20
+        -1: 30
+        _: 40
+    match m:
+        0: v := match m:
+            1: 10
+            _: 20
+        -1: return 30
+        _: return 40
+    return r + s + u

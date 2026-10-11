@@ -3461,6 +3461,17 @@ if n > 0: print("pos") else: print("neg")
 if s >= 90: print("A") elif s >= 80: print("B") else: print("F")
 ```
 
+A block expression ends at its dedent. The next line is a new statement or a new arm, whatever
+its first token: `(c.bump())`, `[1, 2]`, `-1` or `?g()` after `x := match n:` and its arms is its
+own statement, and an arm `?_: v`, `(x, _): v` or `-1: v` after an arm whose value is a nested
+`match` is an arm of the outer match. A line that starts with a binary operator, `.`, `?.`, `|>`,
+`,` or an assignment operator there is a parse error on that line. Only an `else` guard may
+follow a block-valued binding (`x := match n:` + arms, then `else:`); `elif` or `else:` may follow
+a block that is the first branch of an if-expression. Each match-expression arm ends its line
+(`1: 10 _: 20` on one line is an error). After a block inside an inline body (`if c: x := match n:`
++ arms) a dedented `else` belongs to the header (`if`, `elif`, a `wait` arm), never to the inline
+statement; it is an error after a `for`, `while` or match-arm header.
+
 **The one-line `if … else` statement is the if-expression** (TICKET-242). `if c: a() else: b()` on
 one line is not a third form: it is `if c: a() else: b()` the expression, used as a statement, and
 its value is discarded. So each branch is an **expression**, as in `x := if …`. A statement in a

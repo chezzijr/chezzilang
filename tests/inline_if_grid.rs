@@ -150,8 +150,8 @@ const FORMS: &[Form] = &[
         inline_fn: "!expected end of line, found '='",
         inline_loop: "!a nested block must be indented",
         stmt_arm: "!a nested block must be indented",
-        // the arm ends after the else branch, and `= 2` does not start the next arm's pattern
-        expr_arm: "!expected identifier, found '='",
+        // the arm ends after the else branch: the arm-end check rejects `= 2`
+        expr_arm: "!expected end of line, found '='",
         paren: "!expected ')', found '='",
         arg: "!expected ')', found '='",
     },
@@ -271,7 +271,8 @@ fn form_by_position_grid() {
 
     // The three block-expression bodies need layout, so they exist in the three indented-capable
     // positions only: top level, fn body, loop body. A dedented `elif` / `else:` is not on the
-    // `if` line. In the guard form a misread `else:` (the `if`'s own) would run the leave.
+    // `if` line. After the block a dedented `else:` is the `if`'s own, never a guard on `y`
+    // (TICKET-249), so it runs exactly when the condition is false.
     let arms = "    1: 10\n    _: 20";
     let opt_arms = "    1: g()\n    _: g()";
     let elif = format!("n := 1\nif f: y := match n:\n{arms}\nelif t:\n    print(2)");
@@ -312,28 +313,28 @@ fn form_by_position_grid() {
         format!("n := 1\nif f: y := match n:\n{opt_arms}\nelse:\n    {leave}\nprint(\"after\")")
     };
     cells.push(cell(
-        "match body then dedented else guard / top level",
+        "match body then dedented else of the if / top level",
         LIB,
-        &guard("panic(\"guard\")"),
-        "=after",
+        &guard("print(\"else\")"),
+        "=else\nafter",
     ));
     cells.push(cell(
-        "match body then dedented else guard / fn body",
+        "match body then dedented else of the if / fn body",
         LIB,
         "fn h(c: bool, n: int) -> int:\n    if c: y := match n:\n        1: g()\n        _: g()\n    else:\n        return 7\n    return 8\nprint(h(true, 1), h(false, 1))",
-        "=7 8",
+        "=8 7",
     ));
     cells.push(cell(
-        "match body then dedented else guard / loop body",
+        "match body then dedented else of the if / loop body",
         LIB,
-        &format!("for i in 0..2:\n{}", indent(&guard("continue"))),
-        "=after\nafter",
+        &format!("for i in 0..2:\n{}", indent(&guard("print(\"else\")"))),
+        "=else\nafter\nelse\nafter",
     ));
     cells.push(cell(
         "match body of int arms then dedented else / top level",
         LIB,
-        &format!("n := 1\nif f: y := match n:\n{arms}\nelse:\n    panic(\"p\")"),
-        "!`else` needs a `T?` or `T!E` value, found int",
+        &format!("n := 1\nif f: y := match n:\n{arms}\nelse:\n    print(\"else\")"),
+        "=else",
     ));
     run_grid("inline-if-form", &cells);
 }

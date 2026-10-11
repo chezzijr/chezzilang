@@ -1,0 +1,7 @@
+# rule: assertStmt
+# expect: unexpected ',' in expression
+n := 1
+assert match n:
+    1: true
+    _: false
+, "m"

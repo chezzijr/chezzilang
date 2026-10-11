@@ -738,43 +738,14 @@ const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Where `docs/grammar.bnf` and the hand parser disagree after a block expression, `(source, does
+/// Where `docs/grammar.bnf` and the hand parser disagree on a block expression, `(source, does
 /// the grammar derive it, reason)`. A block expression (`match`, `recover:` with an indented body)
 /// ends at its `DEDENT`; the grammar derives it as the LAST operand of its statement (`<tailExpr>`).
-/// The parser also reads the next line as a continuation of that operand, which the BNF cannot
-/// state. The parser's verdict is the opposite of the grammar's on every entry, so an entry that
-/// stops being true forces itself out.
+/// The parser also takes it in a head position (the first branch of an if-expression, a block
+/// header's condition, an operand behind an operator before an `else` guard), which `<tailExpr>`
+/// cannot state. The parser's verdict is the opposite of the grammar's on every entry, so an
+/// entry that stops being true forces itself out.
 const BLOCK_EXPR_DRIFT: &[(&str, bool, &str)] = &[
-    (
-        "n := 1\nx := match n:\n    1: 10\n    _: 20\n+ 1\n",
-        false,
-        "a binary operator on the next line continues a block expression",
-    ),
-    (
-        "n := 1\nx := match n:\n    1: 10\n    _: 20\n.abs()\n",
-        false,
-        "a `.` on the next line reads a member of a block expression",
-    ),
-    (
-        "n := 1\nx := match n:\n    1: 10\n    _: 20\n?\n",
-        false,
-        "a `?` on the next line propagates a block expression",
-    ),
-    (
-        "n := 1\nx := match n:\n    1: 10\n    _: 20\n|> inc()\n",
-        false,
-        "a `|>` line continues a block expression",
-    ),
-    (
-        "n := 1\nassert match n:\n    1: true\n    _: false\n, \"m\"\n",
-        false,
-        "a `,` on the next line continues the statement of a block expression",
-    ),
-    (
-        "n := 1\na, b := match n:\n    1: 10\n    _: 20\n, 2\n",
-        false,
-        "a `,` on the next line continues the value list of a block expression",
-    ),
     (
         "n := 1\nx := if n == 1: match n:\n    1: 10\n    _: 20\nelse: 2\n",
         false,
@@ -789,16 +760,6 @@ const BLOCK_EXPR_DRIFT: &[(&str, bool, &str)] = &[
         "fn f(n: int):\n    x := ?match n:\n        1: 10\n        _: 20\n    else:\n        return\n",
         false,
         "an `else` guard after a block expression behind an operator",
-    ),
-    (
-        "n := 1\nx := match n:\n    1: 10\n    _: 20\n[1, 2]\n",
-        true,
-        "a `[` on the next line reads a subscript of a block expression, so a list literal there is rejected",
-    ),
-    (
-        "xs := [1]\nx := recover:\n    1\n[i for i in xs]\n",
-        true,
-        "a `[` on the next line reads a subscript of a block expression, so a comprehension there is rejected",
     ),
 ];
 

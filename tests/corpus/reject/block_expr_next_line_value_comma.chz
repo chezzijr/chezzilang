@@ -1,0 +1,7 @@
+# rule: exprEnd
+# expect: unexpected ',' in expression
+n := 1
+a, b := match n:
+    1: 10
+    _: 20
+, 2

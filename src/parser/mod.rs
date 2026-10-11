@@ -242,6 +242,9 @@ struct Parser {
     /// The inline body of the `if` / `elif` being parsed: the token index where it starts, and the
     /// `depth` of its one statement.
     if_line: Option<(usize, usize)>,
+    /// The statement being parsed is the one statement of an inline body (`parse_stmt_in(true)`),
+    /// so it does not start its line.
+    stmt_inline: bool,
     toks: Vec<Tok>,
     pos: usize,
     depth: usize,
@@ -282,6 +285,7 @@ impl Parser {
             .collect();
         Parser {
             if_line: None,
+            stmt_inline: false,
             toks,
             pos: 0,
             depth: 0,
@@ -556,6 +560,19 @@ impl Parser {
         matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof) || self.if_line_else()
     }
 
+    /// The previous token is a `Dedent`: a block expression (`match`, `recover:` with an indented
+    /// body) just ended, so the expression and its statement end here. The lexer emits no `Newline`
+    /// after that `Dedent`, so the next token is the first token of the next line.
+    fn ended_at_block(&self) -> bool {
+        self.pos > 0 && matches!(self.toks[self.pos - 1].kind, Token::Dedent)
+    }
+
+    /// Eat `t` as a continuation of the statement on this line (a `,` of a value or target list, the
+    /// `:=` / `=` of a target list or a `wait` arm); never across a block's end.
+    fn eat_in_line(&mut self, t: &Token) -> bool {
+        !self.ended_at_block() && self.eat(t)
+    }
+
     /// A simple statement must end the logical line; otherwise trailing tokens are a syntax error
     /// (e.g. `x := 5 y := 6` packed onto one line).
     fn expect_stmt_end(&mut self) -> PResult<()> {
@@ -563,9 +580,9 @@ impl Parser {
             return Ok(());
         }
         // A simple statement whose value is a block-valued expression (`x := match s:` with
-        // indented arms) is terminated by the arm block's `Dedent`, which the expression already
-        // consumed — so there's no separate line terminator left to require.
-        if self.pos > 0 && matches!(self.toks[self.pos - 1].kind, Token::Dedent) {
+        // indented arms) ended with that block ([`Self::ended_at_block`]): there is no separate
+        // line terminator left to require.
+        if self.ended_at_block() {
             return Ok(());
         }
         Err(self.err(format!(
@@ -575,12 +592,11 @@ impl Parser {
     }
 
     /// A member of a `struct`/`enum`/native body must end its logical line: `docs/grammar.bnf`'s
-    /// `<field>`, `<variant>` and `<nativeMethodDecl>` all end in `"NEWLINE"`. Carries the same
-    /// `Dedent`-previous escape as [`Self::expect_stmt_end`] for a block-valued field default,
-    /// whose arm block's `Dedent` is the terminator with no NEWLINE of its own.
+    /// `<field>`, `<variant>` and `<nativeMethodDecl>` all end in `"NEWLINE"`. A block-valued field
+    /// default ends with its block ([`Self::ended_at_block`]), with no NEWLINE of its own.
     fn expect_member_end(&self, what: &str, name: &str) -> PResult<()> {
         if matches!(self.peek(), Token::Newline | Token::Dedent | Token::Eof)
-            || (self.pos > 0 && matches!(self.toks[self.pos - 1].kind, Token::Dedent))
+            || self.ended_at_block()
         {
             return Ok(());
         }
@@ -714,6 +730,7 @@ impl Parser {
             return Err(self.err(format!("{kind} must be a top-level declaration")));
         }
         let span = self.cur_span();
+        let outer_inline = std::mem::replace(&mut self.stmt_inline, inline);
         // Compound statements own a block and end at its `Dedent`; line-oriented statements
         // (let/assign/expr/return) must be followed by a line terminator.
         let kind = match Self::compound_keyword(self.peek(), self.peek_at(1)) {
@@ -727,6 +744,7 @@ impl Parser {
             Some(parse) => parse(self)?,
             None => self.parse_line_stmt()?,
         };
+        self.stmt_inline = outer_inline;
         self.depth -= 1;
         Ok(Stmt { kind, span })
     }
@@ -823,7 +841,7 @@ impl Parser {
         let expr = self.parse_expr()?;
 
         // `f() else e: <block>` -- the guard in statement form: the success value is discarded.
-        if self.check(&Token::Else) && !self.if_line_else() {
+        if self.else_is_guard() {
             let span = expr.span;
             let value = self.parse_else_guard(expr)?;
             return Ok(StmtKind::Let {
@@ -842,19 +860,21 @@ impl Parser {
         //   - tuple assignment `a, b = b, a` / `data[0], data[1] = …` (lvalues, `=`; op==Eq only)
         // `for k, v in m:` never reaches here (parse_for handles it); a parenthesized `(a, b)` is a
         // single expr (no top-level comma).
+        if self.ended_at_block() {
+            return Ok(StmtKind::Expr(expr));
+        }
         if self.peek() == &Token::Comma {
             let mut targets = vec![expr];
-            while self.eat(&Token::Comma) {
+            while self.eat_in_line(&Token::Comma) {
                 targets.push(self.parse_expr()?);
             }
             // `a, b := pair()` — destructuring let. Requires every target to be a bare identifier.
             // The RHS is a single expression by default; a same-arity, comma-separated value list
             // (`a, b := 1, 2`) is the tuple written without parentheses — Go's/CPython's
             // multi-assignment shape.
-            if self.peek() == &Token::Walrus {
-                self.advance();
+            if self.eat_in_line(&Token::Walrus) {
                 let mut values = vec![self.parse_expr()?];
-                while self.eat(&Token::Comma) {
+                while self.eat_in_line(&Token::Comma) {
                     values.push(self.parse_expr()?);
                 }
                 let value = if values.len() == 1 {
@@ -900,7 +920,7 @@ impl Parser {
             }
             // `a, b = b, a` — tuple assignment. Only `=` is allowed (compound `+=`, … with multiple
             // targets is rejected); the RHS must be a value list of equal arity.
-            if self.peek() != &Token::Assign {
+            if self.ended_at_block() || self.peek() != &Token::Assign {
                 let msg = if is_compound_assign(self.peek()) {
                     "compound assignment is not allowed with multiple targets; assign each separately"
                 } else {
@@ -928,7 +948,7 @@ impl Parser {
             }
             self.advance(); // '='
             let mut values = vec![self.parse_expr()?];
-            while self.eat(&Token::Comma) {
+            while self.eat_in_line(&Token::Comma) {
                 values.push(self.parse_expr()?);
             }
             self.reject_else_guard()?;
@@ -2047,6 +2067,7 @@ impl Parser {
             };
             self.expect(&Token::Colon)?;
             let body = self.parse_expr()?;
+            self.expect_stmt_end()?;
             arms.push(MatchExprArm {
                 span: arm_span,
                 pattern,
@@ -2137,11 +2158,20 @@ impl Parser {
             .is_some_and(|(start, depth)| self.depth == depth && self.bare_else_on_line(start))
     }
 
+    /// An `else` here is THIS statement's guard. After a block expression the `else` starts a line at
+    /// the column of the line that holds the block's head; an inline-body statement starts deeper, so
+    /// that `else` belongs to the header (`if`, `elif`, a `wait` arm), not to the statement.
+    fn else_is_guard(&self) -> bool {
+        self.check(&Token::Else)
+            && !self.if_line_else()
+            && !(self.ended_at_block() && self.stmt_inline)
+    }
+
     /// `<value> else e: <block>` -- the `else` guard, read only after a let's whole value (an if
     /// expression has already taken its own `else` inside `parse_expr`). Returns `value` unchanged
     /// when no `else` follows.
     fn parse_else_guard(&mut self, value: Expr) -> PResult<Expr> {
-        if !self.check(&Token::Else) || self.if_line_else() {
+        if !self.else_is_guard() {
             return Ok(value);
         }
         let span = self.cur_span();
@@ -2172,7 +2202,7 @@ impl Parser {
 
     /// An `else` after the value of an assignment or a `return`: no guard exists there.
     fn reject_else_guard(&self) -> PResult<()> {
-        if self.check(&Token::Else) && !self.if_line_else() {
+        if self.else_is_guard() {
             return Err(self.err(ELSE_GUARD_PLACE.to_string()));
         }
         Ok(())
@@ -2466,7 +2496,7 @@ impl Parser {
     fn parse_assert(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Assert)?;
         let cond = self.parse_expr()?;
-        let msg = if self.eat(&Token::Comma) {
+        let msg = if self.eat_in_line(&Token::Comma) {
             Some(self.parse_expr()?)
         } else {
             None
@@ -2547,7 +2577,7 @@ impl Parser {
             // assignment `lhs = $waitN` as the arm's first statement, so the assigned value has a
             // node (it can wrap into a carrier target like any assignment).
             let mut assign_first: Option<Stmt> = None;
-            let kind = if self.eat(&Token::Walrus) {
+            let kind = if self.eat_in_line(&Token::Walrus) {
                 let name =
                     self.binder_name(lhs, "left side of ':=' in a wait arm must be a name")?;
                 let target = if name == "_" {
@@ -2559,7 +2589,7 @@ impl Parser {
                     target,
                     chan: self.parse_recv_chan()?,
                 }
-            } else if self.eat(&Token::Assign) {
+            } else if self.eat_in_line(&Token::Assign) {
                 let target = if matches!(lhs.kind, ExprKind::Ident(ref n) if n == "_") {
                     WaitTarget::Discard
                 } else if matches!(
@@ -2990,7 +3020,7 @@ impl Parser {
         };
         let mut chain = 0usize;
         while let Some((op, l_bp, r_bp)) = infix_op(self.peek()) {
-            if l_bp < min_bp {
+            if l_bp < min_bp || self.ended_at_block() {
                 break;
             }
             chain += 1;
@@ -3011,7 +3041,7 @@ impl Parser {
                     while let Some((InfixOp::Bin(next_op), next_l, next_r)) = infix_op(self.peek())
                         .filter(|(o, ..)| matches!(o, InfixOp::Bin(nop) if is_comparison(*nop)))
                     {
-                        if next_l < min_bp {
+                        if next_l < min_bp || self.ended_at_block() {
                             break;
                         }
                         chain += 1;
@@ -3187,6 +3217,9 @@ impl Parser {
                 return Err(self.err("expression nested too deeply".to_string()));
             }
             let span = e.span;
+            if self.ended_at_block() {
+                break;
+            }
             e = match self.peek() {
                 Token::LParen => {
                     self.advance();
@@ -9264,10 +9297,10 @@ fn g():
             "if c: x := match n:\n    1: 10\n    _: 20\nelse:\n    return\n",
         ));
         assert_eq!(branches.len(), 1);
-        assert!(else_block.is_none());
+        assert!(else_block.is_some());
         assert!(matches!(
             value_of(&branches[0].1[0]).kind,
-            ExprKind::ElseGuard { .. }
+            ExprKind::Match { .. }
         ));
 
         // `else e:` stays a guard on the body's statement

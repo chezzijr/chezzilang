@@ -152,7 +152,9 @@
 # Indented block: ':' NEWLINE INDENT stmts DEDENT. Inline block: ':' followed by ONE simple
 # statement on the same line (its NEWLINE terminates the line). Inline bodies exclude compound
 # statements, so `if a: if b: x` cannot parse inline — a trailing `else` would be ambiguous.
-# An inline body is exactly ONE <simpleStmt>: `fn name`, `parallel:`, `wait:`, `spawn:` and both
+# An inline body is exactly ONE <inlineStmt>, which is <simpleStmt> without a guard after a block
+# value: a block expression ends at its DEDENT, and a dedented `else` there belongs to the header
+# that starts the line, not to the inline statement. `fn name`, `parallel:`, `wait:`, `spawn:` and both
 # `defer` forms need an indented line. A closure literal (`fn(x): x`) and `spawn f()` are simple.
 # A `<fnDecl>` inline body may still be an `<ifExpr>` (via `<exprStmt>`): `fn f(n): if n > 0: 1 else: 2`;
 # `else` is required there, so it is an expression, not a nested statement block.
@@ -161,7 +163,8 @@
 # <ifExpr> in an <exprStmt>. The BNF cannot exclude a leftmost <primary>, so the `if` half of this
 # rule is a context rule the conformance test records.
 <block> ::= "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
-          | "COLON" <simpleStmt>
+          | "COLON" <inlineStmt>
+<inlineStmt> ::= <plainLet> | <letLhs> <expr> <elseGuard> | <plainStmt> | <expr> "NEWLINE" | <expr> <elseGuard> | <stmtTail>
 
 # ===== declarations =====
 # An omitted "ARROW" <type> means "returns nothing" for a block body, and "the type of the one
@@ -390,13 +393,14 @@
            | "IF" <expr> <ifBlock> <elseChain>
 # The body of an `if` / `elif`. On the line of an inline body a bare `else:` or `elif` after its
 # one statement belongs to the `if`, so that statement takes no bare-`else:` guard (<ifLineStmt>
-# is <simpleStmt> without it); `else e:` stays a guard (<errGuard>). A nested block on the line
+# is <inlineStmt> without it); `else e:` stays a guard (<errGuard>). After a block value the
+# statement takes no guard at all: a dedented `else` belongs to the `if`. A nested block on the line
 # (a `recover:` body, a guard body) is a <block> and keeps its own `else:` guard. `if c: a() else:
 # b()` on one line is not an <ifStmt>: it is the <ifExpr> in an <exprStmt>, value discarded, and
 # each branch is an expression. A one-line `elif` body ends its line.
 <ifBlock> ::= "COLON" "NEWLINE" "INDENT" <stmts> "DEDENT"
             | "COLON" <ifLineStmt>
-<ifLineStmt> ::= <plainLet> | <letLhs> <expr> <errGuard> | <letLhs> <blockValue> <elseGuard> | <plainStmt> | <expr> "NEWLINE" | <expr> <errGuard> | <stmtTail> | <recoverBlock> <elseGuard>
+<ifLineStmt> ::= <plainLet> | <letLhs> <expr> <errGuard> | <plainStmt> | <expr> "NEWLINE" | <expr> <errGuard> | <stmtTail>
 # zero+ `elif` branches, optionally a final `else`; at least one clause here.
 <elseChain> ::= <elseIf> | <elseFinal> | <elseIf> <elseChain>
 <elseIf>    ::= "ELIF" <expr> <ifBlock>

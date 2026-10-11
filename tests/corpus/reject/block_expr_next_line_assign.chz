@@ -1,0 +1,6 @@
+# rule: exprEnd
+# expect: unexpected '=' in expression
+n := 1
+recover:
+    n
+= 5
