@@ -1008,3 +1008,96 @@ fn main():
 main()";
     assert_eq!(run_capture_stress(by_src), "1\n");
 }
+
+/// TICKET-246 — a `Shared` state lives in the box's own heap, rooted at `stack[0]` of the box
+/// context. Under gc-stress a collection runs at every instruction INSIDE the closure, with the
+/// caller's heap parked: the state, the closure, its captures and the slot-door values must all
+/// survive, and the caller's own values must be intact after the call. The state is built
+/// across three updates, then read back three ways.
+#[test]
+fn shared_state_survives_collections_inside_its_closure() {
+    let src = "\
+import std.concurrency
+struct Acc:
+    log: List[str]
+    n: int
+fn tag(i: int) -> str:
+    return \"t\" + str(i)
+fn add(a: Acc, s: str) -> Acc:
+    junk := [str(1), str(2), str(3)]
+    a.log.push(s + str(junk.len()))
+    a.n += 1
+    return a
+fn main():
+    keep := [str(7), str(8)]
+    s := Shared(Acc([str(0)], 0))
+    for i in range(3):
+        pre := \"p\" + str(i)
+        s.update(fn(a): add(a, pre + tag(i)))
+    print(s.read(fn(a): a.log.len() + a.n))
+    print(s.get().log)
+    print(s)
+    s.set(Acc([str(9)], 9))
+    print(s.read(fn(a): a.log[0] + str(a.n)))
+    print(keep)
+main()";
+    assert_eq!(
+        run_capture_stress(src),
+        "7\n['0', 'p0t03', 'p1t13', 'p2t23']\n\
+         Shared(Acc(log=['0', 'p0t03', 'p1t13', 'p2t23'], n=3))\n99\n['7', '8']\n"
+    );
+}
+
+/// TICKET-246 — a global read through the box's slot door is cached for the call, and the cache
+/// is a GC root of the box heap (`BoxFrame::roots`). The closure reads one heap-allocated `str`
+/// global twice with nothing else holding it and allocations in between. Without the root the
+/// first copy is swept, its slot is re-handed, and the second read returns another object.
+#[test]
+fn box_slot_door_cache_is_rooted_across_collections() {
+    let src = "\
+import std.concurrency
+KS: str = \"abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\"
+fn probe(x: int) -> int:
+    n := KS.len()
+    junk := [str(x), str(x + 1), str(x + 2)]
+    more := [str(n), str(n + 1)]
+    m := KS.len()
+    return n + m + junk.len() + more.len()
+fn main():
+    s := Shared(0)
+    s.update(probe)
+    print(s.get())
+    print(s.read(probe))
+main()";
+    assert_eq!(run_capture_stress(src), "129\n129\n");
+}
+
+/// TICKET-246 — two boxes deep under gc-stress: the inner closure reads an aggregate module
+/// global (the view is seated through the caller chain while every heap but the innermost is
+/// parked) and allocates; both states and the root's values survive.
+#[test]
+fn nested_shared_calls_survive_collections_at_every_depth() {
+    let src = "\
+import std.concurrency
+G: List[str] = [str(1), str(2)]
+fn main():
+    a: Shared[List[str]] = Shared([str(0)])
+    b: Shared[List[str]] = Shared([])
+    fn inner(ys: List[str]) -> List[str]:
+        ys.push(G[1] + str(G.len()))
+        return ys
+    fn outer(xs: List[str]) -> List[str]:
+        b.update(inner)
+        xs.push(str(b.read(fn(ys): ys.len())) + G[0])
+        return xs
+    a.update(outer)
+    a.update(outer)
+    print(a.get())
+    print(b.get())
+    print(G)
+main()";
+    assert_eq!(
+        run_capture_stress(src),
+        "['0', '11', '21']\n['22', '22']\n['1', '2']\n"
+    );
+}
