@@ -169,7 +169,6 @@ impl Checker {
             harvest_keywords: false,
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
-            proto_eq_calls: crate::checker::ProtoEqTable::new(),
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),

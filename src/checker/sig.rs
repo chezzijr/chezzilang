@@ -3026,7 +3026,6 @@ impl Checker {
                         .cloned()
                     {
                         self.record_method_decl_hover(m.name_span, &sig);
-                        self.validate_eq_shape(m, &sig, &self_ty);
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
@@ -3093,7 +3092,6 @@ impl Checker {
                         .cloned()
                     {
                         self.record_method_decl_hover(m.name_span, &sig);
-                        self.validate_eq_shape(m, &sig, &self_ty);
                         self.check_fn_body(m, Some(self_ty.clone()), sig);
                     }
                 }
@@ -3625,90 +3623,6 @@ impl Checker {
             self.error(
                 span,
                 format!("lifecycle hook '{}' must not return a value", decl.name),
-            );
-        }
-    }
-
-    /// M23 — a struct/enum method named `eq` is the `Eq` protocol HOOK that `==`/`!=` dispatch to, so
-    /// its signature is enforced at the DECLARATION rather than left to answer wrongly (or fault) at
-    /// the operator. Exactly two shapes survive:
-    ///
-    /// * `fn eq(self, other: Self) -> bool` — the hook. `==` dispatches to it.
-    /// * `fn eq(self, x: T) -> bool` with a GENERIC operand — an ordinary method (`Opt[T].eq(self,
-    ///   x: T)`); `==` leaves it alone and stays structural. `eq` is not a reserved name (Rust puts it
-    ///   in `PartialEq` and still allows an inherent `eq`; Python namespaces the hook as `__eq__`), so
-    ///   this must stay legal.
-    ///
-    /// Everything else — a missing/extra operand, a concrete non-`Self` operand, a non-`bool` return —
-    /// is a typo of the first, and a check error beats a silently un-dispatched `==`. Nothing here is
-    /// ambiguous enough to warrant guessing: the operand's type alone separates "wrote the hook" from
-    /// "wrote a method that happens to be called eq". The backend's `binds_eq_hook` is the syntactic
-    /// twin of the *same* split, so checker and compiler agree by construction.
-    ///
-    /// Is an `eq` method's second parameter the hook's `Self` operand, or the ordinary-method escape
-    /// hatch (a type PARAMETER)? The single source of truth for that split, so it never grows a
-    /// second, divergent notion of "is this the hook": [`Self::validate_eq_shape`] below calls it to
-    /// decide whether to enforce the hook's remaining shape (`Self` operand, `bool` return), and
-    /// `satisfies`'s `Eq` D1 gate (`proto.rs`) calls it to decide whether a type's declared `eq` is
-    /// the one `==` actually dispatches — a NON-hook `eq` falls back to structural equality and must
-    /// still satisfy `Eq` (C1, W7-53 follow-up: `struct Key: fn eq[U](self, o: U) -> bool` did not,
-    /// even though `==`/`Map`/`Set` all worked on it — `==` and `[T: Eq]` must agree).
-    pub(super) fn eq_operand_is_hook(operand: &Ty) -> bool {
-        !matches!(operand, Ty::Param(_)) && !operand.is_unknown()
-    }
-
-    pub(super) fn validate_eq_shape(&mut self, decl: &FnDecl, sig: &FnSig, self_ty: &Ty) {
-        if decl.name != "eq" {
-            return;
-        }
-        let span = Self::fn_span(decl);
-        let hint = "the `Eq` protocol hook `==` dispatches to";
-        // M24 Task 5 — `==` dispatches to this proto by NAME with exactly one operand pushed, so a
-        // hidden witness argument could never be supplied: the operand would be read as the witness.
-        if !sig.witness_params.is_empty() {
-            self.error(
-                span,
-                format!(
-                    "'eq' on {self_ty} is {hint}: it cannot construct through a static-protocol bound ({}) — `==` calls it with the operand only, and the hidden type witness has nowhere to ride. Move the construction into an ordinary method and call it from here",
-                    sig.witness_params.join(", ")
-                ),
-            );
-            return;
-        }
-        if sig.params.len() != 2 {
-            self.error(
-                span,
-                format!(
-                    "'eq' on {self_ty} is {hint}: it must take exactly one operand — `fn eq(self, other: Self) -> bool`"
-                ),
-            );
-            return;
-        }
-        let operand = &sig.params[1];
-        // A GENERIC operand is the ordinary-method escape hatch — not the hook, and not an error.
-        // [`Self::eq_operand_is_hook`] is the single source of truth for this split — `satisfies`'s
-        // `Eq` D1 gate (`proto.rs`) asks the identical question of an already-declared `eq`, and the
-        // two must never disagree about what counts as the hook (C1, W7-53 follow-up).
-        if !Self::eq_operand_is_hook(operand) {
-            return;
-        }
-        if operand != self_ty {
-            let [self_s, operand_s] = Ty::render_distinct([self_ty, operand]);
-            self.error(
-                span,
-                format!(
-                    "'eq' on {self_s} is {hint}: its operand must be {self_s}, found {operand_s} — rename the method if it is not equality"
-                ),
-            );
-            return;
-        }
-        if sig.ret != Ty::Bool {
-            self.error(
-                span,
-                format!(
-                    "'eq' on {self_ty} is {hint}: it must return bool, found {}",
-                    sig.ret
-                ),
             );
         }
     }

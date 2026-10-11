@@ -21,9 +21,9 @@ use std::fmt;
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,
-    FallOff, FallOffTable, FnLabels, ForBind, ForBindTable, Fresh, GenCrossings, ProtoEqTable,
-    Resolution, ResolutionTable, RetCoerce, RetCoerceTable, SlotFresh, SumSeed, SumSeedTable,
-    WitnessCallee, WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
+    FallOff, FallOffTable, FnLabels, ForBind, ForBindTable, Fresh, GenCrossings, Resolution,
+    ResolutionTable, RetCoerce, RetCoerceTable, SlotFresh, SumSeed, SumSeedTable, WitnessCallee,
+    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -1320,9 +1320,9 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
 /// lowering each `?.` carrier takes. Unlike the other two it is recorded UNCONDITIONALLY (not gated
 /// on `harvest_keywords`) — a gate would be a second way for this pass and [`check_graph`] to
 /// disagree about the same program.
-/// W7-53 I1′ rides it as the fourth element: the [`ProtoEqTable`] telling the compiler which
-/// `.eq(x)` call sites are PROTOCOL dispatch through a generic bound (and so mean `==`) rather than
-/// ordinary by-name method calls. Recorded unconditionally, exactly like the carriers.
+/// TICKET-250 rides it as the last two elements: the [`HookTable`] and the [`HookCallTable`]. A
+/// `.eq(x)` call typed through the `Eq` requirement is a `Hook::Eq` entry of the second, and the
+/// compiler lowers it to `==`.
 /// W7-49 rides it as the last element: the key CONFLICTS this pass refused to overwrite. This pass
 /// discards its type errors, so a conflict cannot travel as one — the compiler turns the first into a
 /// hard `CompileError`. See [`record_call_table_entry`].
@@ -1345,7 +1345,6 @@ fn resolve_call_tables_with(graph: &ModuleGraph, memo_enabled: bool) -> CallTabl
             std::mem::take(&mut c.call_plans),
             std::mem::take(&mut c.witnesses),
             std::mem::take(&mut c.carriers),
-            std::mem::take(&mut c.proto_eq_calls),
             std::mem::take(&mut c.sum_seeds),
             std::mem::take(&mut c.ret_coerce),
             std::mem::take(&mut c.table_conflicts),
@@ -1445,7 +1444,6 @@ pub type CallTables = (
     CallPlanTable,
     WitnessTable,
     CarrierTable,
-    ProtoEqTable,
     SumSeedTable,
     RetCoerceTable,
     TableConflicts,
@@ -2487,11 +2485,6 @@ struct Checker {
     /// second way for the harvest pass and `check_graph` to disagree. Produced by
     /// [`resolve_call_tables`].
     carriers: CarrierTable,
-    /// W7-53 I1′ — which dispatch each `.eq(x)` call site takes, keyed by [`carrier_key`] and
-    /// consumed verbatim by the compiler (which cannot re-derive it: the decision is the RECEIVER's
-    /// type). Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See
-    /// [`ProtoEqTable`].
-    proto_eq_calls: ProtoEqTable,
     /// TICKET-250 — the hooks each declared type has. See [`HookTable`].
     hook_table: HookTable,
     /// TICKET-250 — the call sites typed through a reserved requirement. See [`HookCallTable`].

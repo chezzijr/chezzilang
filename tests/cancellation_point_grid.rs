@@ -123,15 +123,15 @@ struct PK:
 
 struct PE:
     x: int
-    fn eq(self, o: PE) -> bool:
-        return self.x == o.x
+    fn eq(self, other: PE) -> bool:
+        return self.x == other.x
 
 struct PH:
     x: int
     fn hash(self) -> int:
         return self.x
-    fn eq(self, o: PH) -> bool:
-        return self.x == o.x
+    fn eq(self, other: PH) -> bool:
+        return self.x == other.x
 
 struct PS:
     x: int

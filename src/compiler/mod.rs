@@ -91,7 +91,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) =
+    let (kw, wt, ct, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) =
         crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
@@ -101,7 +101,6 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.call_plans = kw;
     c.witnesses = wt;
     c.carriers = ct;
-    c.proto_eq_calls = pe;
     c.sum_seeds = ns;
     c.crossings = fo;
     c.gen_crossings = gc;
@@ -142,7 +141,6 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
     c.program.rebuild_struct_names();
-    c.build_eq_hooks();
     c.build_hooks();
     c.build_provider_table()?;
     Ok(c.program)
@@ -179,7 +177,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) =
+    let (kw, wt, ct, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
@@ -189,7 +187,6 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.call_plans = kw;
     c.witnesses = wt;
     c.carriers = ct;
-    c.proto_eq_calls = pe;
     c.sum_seeds = ns;
     c.crossings = fo;
     c.gen_crossings = gc;
@@ -218,7 +215,6 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.program.method_ic_sites = c.method_ic_next;
     c.program.rebuild_struct_names();
     c.build_provider_table()?;
-    c.build_eq_hooks();
     c.build_hooks();
     Ok(c.program)
 }
@@ -244,11 +240,6 @@ fn decode_fn_name(pid: ProtoId) -> String {
 
 struct Compiler {
     program: Program,
-    /// M23 — struct/enum runtime key → its `Eq` protocol hook (`(proto, home module index)`), for the
-    /// types whose `eq` method [`binds_eq_hook`] accepts. Materialized into the `tid`- and
-    /// `variant_id`-indexed `Program::eq_struct` / `eq_enum` by [`Compiler::build_eq_hooks`] once every
-    /// module is compiled (the dense ids are only final then).
-    eq_hooks: HashMap<String, (ProtoId, usize)>,
     /// TICKET-250 — the checker's verdict per declared type, and the call sites it typed through a
     /// reserved protocol requirement. Consumed verbatim; the compiler decides no hook.
     hook_table: crate::checker::HookTable,
@@ -337,11 +328,6 @@ struct Compiler {
     /// [`crate::checker::CarrierTable`]), consumed verbatim: the backend is type-blind and cannot
     /// re-derive whether a carrier's operand was an `Option` or a `Result`.
     carriers: crate::checker::CarrierTable,
-    /// W7-53 I1′ — which `.eq(x)` call sites are PROTOCOL dispatch through a generic bound. The
-    /// backend is type-blind, so this is CONSUMED from the checker and never re-derived; a MISS
-    /// means "ordinary by-name call", which is the pre-W7-53 lowering. See
-    /// [`crate::checker::ProtoEqTable`].
-    proto_eq_calls: crate::checker::ProtoEqTable,
     /// Which `.sum()` sites need a `0.0` SEED pushed as a hidden argument. The backend is
     /// type-blind — an empty `List[float]` carries no element to read a kind off — so this is
     /// CONSUMED from the checker and never re-derived; a MISS means "plain numeric sum", which is the
@@ -449,31 +435,6 @@ fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity
         .insert((enum_name.to_string(), variant.to_string()), def);
 }
 
-/// Does this struct/enum method declaration bind the `Eq` protocol hook — the `fn eq(self, other: Self)
-/// -> bool` that `==`/`!=` dispatch to (`Vm::user_eq_method`)?
-///
-/// The backend is type-blind, so this is the SYNTACTIC twin of the checker's `validate_eq_shape`
-/// (`src/checker/sig.rs`), which has already forced every struct/enum `eq` into exactly one of two
-/// shapes: the hook, or an ordinary method whose operand is a type PARAMETER (`Opt[T].eq(self,
-/// x: T)` — legal, and the operator must leave it alone). So the only thing left to ask here is which
-/// of the two it is, and "the operand names a type parameter in scope" answers it without resolving a
-/// single type. The two therefore agree by construction on every program that type-checks.
-///
-/// Deliberately does NOT re-test the return type: `type B = bool` is an alias the backend cannot see,
-/// and a non-`bool` return already faults cleanly at the operator ("eq() must return bool, got …").
-fn binds_eq_hook(m: &FnDecl, owner_params: &[crate::ast::TypeParam]) -> bool {
-    if m.name != "eq" || m.params.len() != 2 {
-        return false;
-    }
-    let Some(Type::Named { name, .. }) = &m.params[1].ty else {
-        return true; // `o: Box[T]` / `o: Self` / unannotated — never a bare type-param name
-    };
-    !owner_params
-        .iter()
-        .chain(m.type_params.iter())
-        .any(|tp| &tp.name == name)
-}
-
 impl Compiler {
     /// Materialize the `Eq`-hook tables the VM's `==` reads (`Program::eq_struct` / `eq_enum`) from
     /// the key-based `eq_hooks` gathered while compiling. Runs last: `tid`s and `variant_id`s are the
@@ -533,26 +494,10 @@ impl Compiler {
             .iter()
             .map(|vd| self.hook_sets.get(&vd.enum_name).map_or(0, |set| set.0))
             .collect();
+        let eq = crate::checker::Hook::Eq.bit();
+        self.program.any_eq_hook = self.hook_sets.values().any(|set| set.0 & eq != 0);
         self.program.hooks_struct = by_tid;
         self.program.hooks_enum = by_vid;
-    }
-
-    fn build_eq_hooks(&mut self) {
-        if self.eq_hooks.is_empty() {
-            return; // the overwhelmingly common case — leave both tables empty (every lookup misses)
-        }
-        let mut by_tid = vec![None; self.program.struct_names.len()];
-        for (key, def) in &self.program.structs {
-            if let Some(hook) = self.eq_hooks.get(key) {
-                by_tid[def.tid as usize] = Some(*hook);
-            }
-        }
-        let mut by_vid = vec![None; self.program.variants_by_id.len()];
-        for (vid, vd) in self.program.variants_by_id.iter().enumerate() {
-            by_vid[vid] = self.eq_hooks.get(&vd.enum_name).copied();
-        }
-        self.program.eq_struct = by_tid;
-        self.program.eq_enum = by_vid;
     }
 
     fn new() -> Self {
@@ -568,8 +513,7 @@ impl Compiler {
             variants: HashMap::new(),
             variants_by_id: Vec::new(),
             struct_names: Vec::new(),
-            eq_struct: Vec::new(),
-            eq_enum: Vec::new(),
+            any_eq_hook: false,
             hooks_struct: Vec::new(),
             hooks_enum: Vec::new(),
             modules: Vec::new(),
@@ -635,7 +579,6 @@ impl Compiler {
         }
         Compiler {
             program,
-            eq_hooks: HashMap::new(),
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
             hook_sets: HashMap::new(),
@@ -658,7 +601,6 @@ impl Compiler {
             call_plans: crate::checker::CallPlanTable::new(),
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
-            proto_eq_calls: crate::checker::ProtoEqTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             crossings: crate::checker::CrossingTable::new(),
             fresh_index: HashMap::new(),
@@ -998,7 +940,6 @@ impl Compiler {
                 name,
                 methods,
                 fields,
-                type_params,
                 ..
             } = &stmt.kind
             {
@@ -1017,9 +958,6 @@ impl Compiler {
                     let def = self.program.structs.get_mut(&key).expect("hoisted");
                     def.module_idx = module_idx;
                     def.methods.insert(m.name.clone(), pid);
-                    if binds_eq_hook(m, type_params) {
-                        self.eq_hooks.insert(key.clone(), (pid, module_idx));
-                    }
                     if m.is_test {
                         test_methods.push(m.name.clone());
                         suite_tests.push((m.name.clone(), pid));
@@ -1049,13 +987,7 @@ impl Compiler {
         // Compile enum methods next (type-erased — no `StructDef`/`tid`), recording proto ids under
         // the enum's module-scoped runtime key. Mirrors the struct-method pass above.
         for stmt in &module.stmts {
-            if let StmtKind::Enum {
-                name,
-                methods,
-                type_params,
-                ..
-            } = &stmt.kind
-            {
+            if let StmtKind::Enum { name, methods, .. } = &stmt.kind {
                 if methods.is_empty() {
                     continue;
                 }
@@ -1068,9 +1000,6 @@ impl Compiler {
                     self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
                     let pid = self.compile_fn(m, false)?;
                     compiled.insert(m.name.clone(), pid);
-                    if binds_eq_hook(m, type_params) {
-                        self.eq_hooks.insert(key.clone(), (pid, module_idx));
-                    }
                 }
                 self.program
                     .enum_methods
@@ -4375,25 +4304,6 @@ impl Compiler {
             .unwrap_or_default()
     }
 
-    /// M24 Task 5 — the witness arguments recorded for a MEMBER call site (`h.make(c)`,
-    /// `Holder.build(c)`, `lib.Type.build(c)`). Keyed on the member-name TOKEN
-    /// ([`crate::checker::witness_key_span`]), which is unique per link of a postfix chain — the call
-    /// span is not.
-    /// W7-53 I1′ — is this `Field`-callee call the protocol-dispatched `.eq(x)` the checker marked?
-    /// Keyed on the method-NAME token, exactly like [`Self::member_witness_srcs`] and the `?.`
-    /// carriers. The `name`/arity re-test is not redundant: it keeps the lookup from ever firing on
-    /// a call shape the checker could not have recorded.
-    fn is_proto_eq_call(&self, name: &str, args: &[Expr], name_span: Span) -> bool {
-        name == "eq"
-            && args.len() == 1
-            && self.proto_eq_calls.get(&crate::checker::carrier_key(
-                self.current_module_idx,
-                self.kw_frag_ctx,
-                self.kw_frag_ord,
-                name_span,
-            )) == Some(&true)
-    }
-
     /// The spawn op's operand reference (D4, TICKET-240): the checker's shapes for call `call_id`,
     /// stored once per distinct entry in `Program.fresh_calls` and named through
     /// [`crate::vm::crossing::operand_ref`], which owns the layout. Witness args sit past the
@@ -5206,7 +5116,13 @@ impl Compiler {
             // user `eq` HOOK and falls back to structural equality otherwise. Rust resolves the same
             // call to `<T as PartialEq>::eq`; a CONCRETE receiver keeps the inherent-wins rule and
             // is recorded `false` by the checker, so it never lands here.
-            if self.is_proto_eq_call(name, args, *name_span) {
+            let eq_key = crate::checker::carrier_key(
+                self.current_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                *name_span,
+            );
+            if self.hook_calls.get(&eq_key) == Some(&crate::checker::Hook::Eq) && args.len() == 1 {
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, &args[0])?;
                 fc.emit(Op::Eq, span);

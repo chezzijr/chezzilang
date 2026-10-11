@@ -5899,64 +5899,44 @@ fn struct_with_eq_satisfies_eq() {
     );
 }
 
-/// `eq` must be `(self, Self) -> bool`. A wrong RETURN type is a wrong signature, not a conformance —
-/// admitting it would let an erased `[T: Eq]` body use a non-bool as a condition.
+/// TICKET-250 — an `eq` that does not satisfy `Eq`'s requirement (`(self, other: Self) -> bool`)
+/// is an ordinary method, not a declaration error. The type is `Eq` structurally, and `a.eq(b)`
+/// through a `[T: Eq]` bound is `==`, which never calls it.
 #[test]
-fn eq_wrong_return_type_rejected() {
-    entry_rejects(
+fn eq_wrong_return_type_is_an_ordinary_method() {
+    entry_ok(
         "struct P:\n    x: int\n    fn eq(self, other: P) -> int:\n        return 0\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
-        "wrong signature",
     );
-    // The ARITY half of the same signature rule — `eq` takes exactly one `Self` besides the
-    // receiver. This rejected before the row existed; nothing held it. C1 (W7-53 follow-up):
-    // 1-param `eq` fails `eq_sig_is_hook`'s `params.len() == 2` too, so it is now judged the same
-    // as the ordinary-method escape hatch and D1 no longer runs the redundant structural check —
-    // the single decl-time `validate_eq_shape` error is the only diagnostic, and it already names
-    // the arity requirement directly, so "wrong signature" is no longer the right substring here.
-    entry_rejects(
+    // The arity half: a one-parameter `eq` is the same class.
+    entry_ok(
         "struct P:\n    x: int\n    fn eq(self) -> bool:\n        return true\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(P(1), P(2)))\n",
-        "it must take exactly one operand",
     );
 }
 
-/// M23 — `eq` on a struct/enum is the `Eq` HOOK that `==`/`!=` dispatch to, so a MALFORMED one is a
-/// DECLARATION-site error rather than a silently wrong operator. Pre-fix every case below
-/// type-checked and then ran: `struct A: fn eq(self) -> bool: return true` answered
-/// `A(1) == A(2)` ⇒ `true` with the second operand silently dropped, the 3-param form ran with
-/// `extra = nil`, and the `o: int` form reached a runtime `cannot apply Gt to struct and int`. `eq`
-/// was the only protocol hook with no signature gate — `contains`/`hash` are check errors and a
-/// malformed `str` is simply never dispatched.
+/// TICKET-250 — every `eq` shape that is not the hook checks clean at the declaration, and `==`
+/// on its type stays structural (the run-time half is `tests/hook_conformance_grid.rs`). One
+/// decider, `Checker::hook_method`, says which `eq` is the hook; there is no `eq`-only shape rule.
 #[test]
-fn malformed_eq_rejected_at_decl() {
+fn malformed_eq_is_an_ordinary_method() {
     // no operand at all — the headline silently-wrong case
-    entry_rejects(
+    entry_ok(
         "struct A:\n    v: int\n    fn eq(self) -> bool:\n        return true\nprint(A(1) == A(2))\n",
-        "must take exactly one operand",
     );
     // an EXTRA operand the dispatch would have filled with nil
-    entry_rejects(
+    entry_ok(
         "struct A:\n    v: int\n    fn eq(self, o: A, extra: int) -> bool:\n        return true\nprint(A(1) == A(2))\n",
-        "must take exactly one operand",
     );
     // a CONCRETE non-Self operand — the body was handed a struct where it declared an int
-    entry_rejects(
+    entry_ok(
         "struct A:\n    v: int\n    fn eq(self, o: int) -> bool:\n        return o > 0\nprint(A(1) == A(2))\n",
-        "its operand must be A, found int",
     );
     // a non-bool return, now caught at the DECLARATION (it was only reachable via a `[T: Eq]` bound)
-    entry_rejects(
+    entry_ok(
         "struct A:\n    v: int\n    fn eq(self, other: A) -> int:\n        return 1\nprint(A(1) == A(2))\n",
-        "it must return bool, found int",
     );
     // the enum arm of the same rule
-    entry_rejects(
-        "enum E:\n    A\n    B\n\n    fn eq(self) -> bool:\n        return true\n",
-        "must take exactly one operand",
-    );
-    entry_rejects(
-        "enum E:\n    A\n    B\n\n    fn eq(self, o: int) -> bool:\n        return true\n",
-        "its operand must be E, found int",
-    );
+    entry_ok("enum E:\n    A\n    B\n\n    fn eq(self) -> bool:\n        return true\n");
+    entry_ok("enum E:\n    A\n    B\n\n    fn eq(self, o: int) -> bool:\n        return true\n");
 }
 
 /// The BOUNDARY `malformed_eq_rejected_at_decl` must not cross. `eq` is NOT a reserved name — Rust
@@ -29733,13 +29713,11 @@ fn witness_member_not_reachable_by_fixed_arity_dispatch_rejected() {
         ),
         "cannot slice S",
     );
-    // the `eq` hook: `==` pushes the operand only, so the operand would be read as the type key
-    entry_rejects(
-        &format!(
-            "{head}struct S:\n    n: int\n    fn eq[T: Default](self, o: S) -> bool:\n        c := T.default()\n        return true\nfn main():\n    print(S(1) == S(2))\nmain()\n"
-        ),
-        "it cannot construct through a static-protocol bound",
-    );
+    // a witness-taking `eq` is not the `Eq` hook (TICKET-250): an ordinary method, and `==` stays
+    // structural, so no operand is ever read as the type key
+    entry_ok(&format!(
+        "{head}struct S:\n    n: int\n    fn eq[T: Default](self, o: S) -> bool:\n        c := T.default()\n        return true\nfn main():\n    print(S(1) == S(2))\nmain()\n"
+    ));
     // the test runner (a free `test fn`, a suite `test fn`, and a lifecycle hook)
     entry_rejects(
         &format!("{head}test fn t[T: Default]():\n    c := T.default()\n    assert true\n"),
@@ -32585,33 +32563,38 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
             "{name}: carriers"
         );
         assert_eq!(
+            sorted_debug(&on.13),
+            sorted_debug(&off.13),
+            "{name}: hook_calls"
+        );
+        assert_eq!(
+            sorted_debug(&on.12),
+            sorted_debug(&off.12),
+            "{name}: hook_table"
+        );
+        assert_eq!(
             sorted_debug(&on.3),
             sorted_debug(&off.3),
-            "{name}: proto_eq_calls"
+            "{name}: sum_seeds"
         );
         assert_eq!(
             sorted_debug(&on.4),
             sorted_debug(&off.4),
-            "{name}: sum_seeds"
-        );
-        assert_eq!(
-            sorted_debug(&on.5),
-            sorted_debug(&off.5),
             "{name}: ret_coerce"
         );
-        assert_eq!(sorted_debug(&on.12), sorted_debug(&off.12), "{name}: wraps");
-        assert_eq!(on.6, off.6, "{name}: table_conflicts");
+        assert_eq!(sorted_debug(&on.11), sorted_debug(&off.11), "{name}: wraps");
+        assert_eq!(on.5, off.5, "{name}: table_conflicts");
         assert_eq!(
-            sorted_debug(&on.8),
-            sorted_debug(&off.8),
+            sorted_debug(&on.7),
+            sorted_debug(&off.7),
             "{name}: crossings"
         );
         assert_eq!(
-            sorted_debug(&on.11.calls),
-            sorted_debug(&off.11.calls),
+            sorted_debug(&on.10.calls),
+            sorted_debug(&off.10.calls),
             "{name}: gen_crossings.calls"
         );
-        assert_eq!(on.11.frames, off.11.frames, "{name}: gen_crossings.frames");
+        assert_eq!(on.10.frames, off.10.frames, "{name}: gen_crossings.frames");
     }
 }
 
@@ -34260,7 +34243,7 @@ fn fn_body_keyword_call_through_closure_global_below_checks() {
 fn head_resolution(src: &str, line: u32, col: u32) -> Resolution {
     let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
     crate::desugar::run_standalone(&mut m).expect("desugar");
-    let table = resolve_call_tables_standalone(&m.stmts).9;
+    let table = resolve_call_tables_standalone(&m.stmts).8;
     let hits: Vec<Resolution> = crate::ast::node_ids(&m)
         .into_iter()
         .filter(|(_, sp)| sp.line == line && sp.col == col)
@@ -34401,7 +34384,7 @@ fn resolution_records_every_pattern_head() {
                fn k(n: int) -> int:\n    return match n:\n        1: 1\n        other: other\n";
     let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
     crate::desugar::run_standalone(&mut m).expect("desugar");
-    let table = resolve_call_tables_standalone(&m.stmts).9;
+    let table = resolve_call_tables_standalone(&m.stmts).8;
     let mut got: Vec<String> = crate::ast::node_ids(&m)
         .into_iter()
         .filter_map(|(id, _)| table.get(&(0, id)))
@@ -34457,7 +34440,7 @@ fn decode_target_is_recorded_for_an_imported_alias() {
     );
     let graph = crate::resolver::build_graph(&main).expect("resolve");
     assert!(check_graph(&graph).is_ok(), "{:?}", check_graph(&graph));
-    let table = resolve_call_tables(&graph).9;
+    let table = resolve_call_tables(&graph).8;
     let decodes: Vec<&TypeDescriptor<ArgFill>> = table
         .values()
         .filter_map(|r| match r {
@@ -34511,7 +34494,7 @@ fn decode_descriptor_fills_equal_the_ctor_plan_fills() {
     let plans: Vec<&Vec<ArgFill>> = tables.0.values().filter(|p| p.len() == 2).collect();
     assert_eq!(plans.len(), 1, "{plans:?}");
     let decodes: Vec<&TypeDescriptor<ArgFill>> = tables
-        .9
+        .8
         .values()
         .filter_map(|r| match r {
             Resolution::Decode(d) => Some(d),
@@ -38816,7 +38799,7 @@ fn spawn_crossing(src: &str) -> crate::checker::CallCrossing {
     let mut m = parser::parse(tokens).unwrap_or_else(|e| panic!("parse failed: {e:?}\n{src}"));
     crate::desugar::run_standalone(&mut m).unwrap_or_else(|e| panic!("desugar failed: {e:?}"));
     assert_eq!(format!("{:?}", check_diags(&m)), "(Ok(()), [])", "{src}");
-    let table = crate::checker::resolve_call_tables_standalone(&m.stmts).8;
+    let table = crate::checker::resolve_call_tables_standalone(&m.stmts).7;
     assert_eq!(table.len(), 1, "one spawn per program\n{src}");
     table.into_values().next().unwrap()
 }

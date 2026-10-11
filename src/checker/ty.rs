@@ -118,22 +118,6 @@ pub enum CarrierMode {
 /// `Expr::span`, which aliases in `(a ?? b) ?? c`).
 pub type CarrierTable = HashMap<CarrierKey, CarrierMode>;
 
-/// W7-53 I1′ — which dispatch each `.eq(x)` call site takes, keyed exactly like [`CarrierKey`] (the
-/// method-NAME token, which is a distinct source node per link of a postfix chain — see
-/// [`CarrierKey`] for the full derivation and why the call node's span would alias).
-///
-/// `true` = the receiver is a generic type parameter whose bound exposes `eq`, so the call is
-/// PROTOCOL dispatch and must mean the protocol's equality (whatever `==` does for the runtime
-/// receiver). `false` = an ordinary by-name method call on a receiver whose type is known, which
-/// keeps Rust's inherent-wins behaviour.
-///
-/// BOTH decisions are recorded, never just the `true` one: a `false` entry is what lets
-/// [`crate::checker::record_call_table_entry`] see an aliased key and turn it into a hard compile
-/// error instead of silently applying one site's dispatch to another. A lookup MISS means "ordinary
-/// call", which is also the pre-W7-53 lowering — so a missing entry can only ever under-apply the
-/// fix, never mis-apply it.
-pub type ProtoEqTable = HashMap<CarrierKey, bool>;
-
 /// W8-21 — the bare-`return` success at a declared `Result[nil, E]` sink, keyed exactly like
 /// [`CarrierKey`] on the `return` statement's span (a bare `return` has no value node; every valued
 /// wrap is a [`Wrap`] keyed by NodeId). The compiler is TYPE-BLIND, so it consumes this verbatim.

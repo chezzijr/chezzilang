@@ -200,41 +200,24 @@ impl Vm {
         Ok(())
     }
 
-    /// Does `l == r` dispatch to a user `eq(self, o: Self) -> bool`? `Some((proto, home))` only when
-    /// both operands are the SAME struct/enum type AND that type declares the `Eq` HOOK; a mismatched
-    /// pair is `None` WITHOUT calling user code.
-    ///
-    /// The hook is looked up in [`Program::eq_struct`] / [`Program::eq_enum`] — dense tables indexed by
-    /// the ids the operands already carry — NOT by a `"eq"` name lookup in the method map. Two reasons,
-    /// both load-bearing:
-    ///
-    /// * **Correctness.** A method merely NAMED `eq` is not the hook: `Opt[T].eq(self, x: T)` is an
-    ///   ordinary method (the operand is a type parameter, not `Self`), and dispatching `==` to it
-    ///   answered a silently wrong `true`. The compiler decides hook-vs-ordinary from the declaration
-    ///   (`binds_eq_hook`), after the checker has rejected every other shape, so the operator can only
-    ///   ever reach a real `(self, Self) -> bool`.
-    /// * **Cost.** This runs on the MISS path of every struct/enum `==` — including every `Option` /
-    ///   `Result` compare — where the answer is almost always "no". A table index beats hashing `"eq"`.
-    fn user_eq_method(&self, l: Value, r: Value) -> Option<(usize, GcRef)> {
-        let (hl, hr) = (l.as_obj()?, r.as_obj()?);
+    /// TICKET-250 — do `l` and `r` share one declared type that has the `Eq` hook? The same-type
+    /// guard is read from the operands: one `tid` for structs, one enum for enum values (a hook
+    /// also decides `Shape.Circle == Shape.Square`, as Rust `PartialEq` and Python `__eq__` do).
+    /// This runs on the MISS path of every struct/enum `==`, where the answer is almost always
+    /// "no": one flag test, then one dense table index.
+    fn eq_hook_applies(&self, l: Value, r: Value) -> bool {
+        if !self.program.any_eq_hook || !self.hook_of(l, Hook::Eq) {
+            return false;
+        }
+        let (Some(hl), Some(hr)) = (l.as_obj(), r.as_obj()) else {
+            return false;
+        };
         match (self.heap.get(hl), self.heap.get(hr)) {
-            (Obj::Struct { tid: a, .. }, Obj::Struct { tid: b, .. }) if a == b => {
-                let (proto, home) = (*self.program.eq_struct.get(*a as usize)?)?;
-                Some((proto, self.module_objs[home]))
-            }
-            // Keyed on the ENUM, not the variant: one type's `eq` also decides `Shape.Circle ==
-            // Shape.Square` (Rust `PartialEq` / Python `__eq__` compare ACROSS variants), so a
-            // `variant_id` equality guard would be too narrow and silently keep the structural
-            // `false` for every cross-variant pair. Equal entries ⇒ same enum (a hook proto belongs to
-            // exactly one enum), so this compare IS the same-type guard the struct arm gets from `tid`.
+            (Obj::Struct { tid: a, .. }, Obj::Struct { tid: b, .. }) => a == b,
             (Obj::Enum { variant_id: a, .. }, Obj::Enum { variant_id: b, .. }) => {
-                let hook = (*self.program.eq_enum.get(*a as usize)?)?;
-                if Some(hook) != *self.program.eq_enum.get(*b as usize)? {
-                    return None;
-                }
-                Some((hook.0, self.module_objs[hook.1]))
+                self.enum_names(*a).0 == self.enum_names(*b).0
             }
-            _ => None,
+            _ => false,
         }
     }
 
@@ -1971,13 +1954,12 @@ impl Vm {
     }
 
     /// Can ANY equality in this program dispatch a user `eq` — i.e. can a compare re-enter the VM and
-    /// therefore collect? Both hook tables are left EMPTY unless the program declares at least one
-    /// `fn eq(self, other: Self) -> bool` (`Compiler::build_eq_hooks`), so this is a whole-program answer,
-    /// and `false` for the overwhelming majority of programs. Used to skip the probe rooting on the
+    /// therefore collect? `Program::any_eq_hook` is a whole-program answer, and `false` for the
+    /// overwhelming majority of programs. Used to skip the probe rooting on the
     /// hot map/set/`==` paths, where it would otherwise be pure overhead.
     #[inline]
     fn eq_may_reenter(&self) -> bool {
-        !self.program.eq_struct.is_empty() || !self.program.eq_enum.is_empty()
+        self.program.any_eq_hook
     }
 
     /// Root the ELEMENTS of two cloned element/field/entry vecs across `f` — the container-equality
@@ -2084,23 +2066,18 @@ impl Vm {
             (ValueView::Bool(a), ValueView::Bool(b)) => Ok(a == b),
             (ValueView::Nil, ValueView::Nil) => Ok(true),
             (ValueView::Obj(ha), ValueView::Obj(hb)) => {
-                // `Eq` protocol (M23). The `user_eq_method` peek is `&self`, so the immutable
-                // `self.heap` borrow is over before `run_proto` needs `&mut self` (the borrow shape
-                // `op_contains`/`struct_compare` use). Both operands are already GC-reachable from
+                // `Eq` protocol (M23): two values of one declared type that has the `eq` hook. Both operands are already GC-reachable from
                 // whatever rooted the top of this walk (`with_roots` at the entry points).
                 // `eq_hook_off` is `Atomic.cas`'s window (see the field's doc): a compare under the
                 // box's value lock must stay structural, whatever the checker did or did not see.
-                if let Some((proto, home)) = (!self.eq_hook_off)
-                    .then(|| self.user_eq_method(l, r))
-                    .flatten()
-                {
+                if !self.eq_hook_off && self.eq_hook_applies(l, r) {
                     // The hook re-enters the VM and may start its own structural walk, so hand it
                     // the depth this walk has already consumed — one shared budget (see
                     // [`Vm::walk_base`]), not a fresh 10 000 per nesting level.
                     let base = self.walk_base + depth;
-                    let res = self.guarded_walk(base, |vm| {
-                        vm.run_proto(proto, home, None, vec![l, r], true, false, span)
-                    })?;
+                    let res = self
+                        .guarded_walk(base, |vm| vm.invoke_hook(Hook::Eq, l, &[r], span))?
+                        .unwrap_or(Value::nil());
                     return match res.as_bool() {
                         Some(b) => Ok(b),
                         None => Err(self.err(

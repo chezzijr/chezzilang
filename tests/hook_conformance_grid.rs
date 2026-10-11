@@ -168,6 +168,26 @@ fn hooks() -> Vec<Hook> {
             call: "print(v.str())",
         },
         Hook {
+            name: "eq",
+            proto: "Eq",
+            slot_proto: None,
+            shapes: [
+                m(
+                    "eq(self, other: Self) -> bool",
+                    "print(\"HOOK\")\n        return true",
+                ),
+                m("eq(self, other: Self) -> Iterator[bool]", "yield true"),
+                m("eq(a: int, other: int) -> bool", "return true"),
+                m("eq(self, other: Self) -> int", "return 1"),
+                m("eq(self, other: Self, z: int) -> bool", "return true"),
+                m("eq[U](self, other: Self) -> bool", "return true"),
+            ],
+            op: "print(x == y)\n",
+            slot: "print(v == v)",
+            intr: "print(x.eq(y))\n",
+            call: "print(v.eq(v))",
+        },
+        Hook {
             name: "hash",
             proto: "Hashable",
             slot_proto: None,
@@ -425,7 +445,11 @@ fn cell_failures(kind: &str, hook: &Hook, si: usize) -> Vec<String> {
                 "{cell}|{u}: a conforming hook is rejected: {}",
                 got.text
             )),
-            Some(true) if hook.name == "str" && u == "op" && !got.stdout.contains("HOOK") => {
+            Some(true)
+                if matches!(hook.name, "str" | "eq")
+                    && u == "op"
+                    && !got.stdout.contains("HOOK") =>
+            {
                 bad.push(format!("{cell}|{u}: the hook did not run: {}", got.text))
             }
             Some(false) => {
@@ -441,7 +465,8 @@ fn cell_failures(kind: &str, hook: &Hook, si: usize) -> Vec<String> {
         }
     }
     // `print` accepts every value (default display), so for `str` the operator and the bound
-    // agree on WHICH method runs, checked above, not on acceptance.
+    // agree on WHICH method runs, checked above, not on acceptance. `==` is total the same way
+    // (structural), and there the three uses do agree.
     if hook.name != "str" && answers.iter().any(|(_, ok)| *ok != answers[0].1) {
         bad.push(format!("{cell}: the uses disagree: {answers:?}"));
     }
@@ -595,6 +620,36 @@ fn iter_call_failures() -> Vec<String> {
     bad
 }
 
+/// Rows beside the grid for `eq` and for a conditional hook.
+fn eq_failures() -> Vec<String> {
+    let mut bad = Vec::new();
+    let user = |operand: &str| {
+        format!(
+            "protocol MyEq:\n    fn eq(self, {operand}: Self) -> bool\nstruct P:\n    v: int\n    fn eq(self, {operand}: P) -> bool:\n        return true\nfn f[T: MyEq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(f(P(1), P(2)), P(1) == P(2))\n"
+        )
+    };
+    for (row, src, want) in [
+        // A user protocol that declares its own `eq` dispatches `a.eq(b)` to the declared
+        // method. `==` on a type whose `eq` misnames the operand is structural.
+        ("user_protocol_eq_misnamed", user("o"), "true false\nEND\n"),
+        // The same method with the operand named `other` is also the `Eq` hook.
+        ("user_protocol_eq_named", user("other"), "true true\nEND\n"),
+        // A conditional method is the hook for every instantiation the checker admits.
+        (
+            "conditional_hooks",
+            "struct Box[T]:\n    v: T\n    fn compare(self, other: Box[T]) -> int where T: Comparable:\n        return self.v.compare(other.v)\n    fn eq(self, other: Box[T]) -> bool where T: Eq:\n        print(\"eq hook\")\n        return self.v == other.v\nprint(Box(1) < Box(2))\nprint(Box(1) == Box(1))\n"
+                .to_string(),
+            "true\neq hook\ntrue\nEND\n",
+        ),
+    ] {
+        let got = run(&format!("eq_{row}"), &src, &mut bad);
+        if got.stdout != want {
+            bad.push(format!("eq|{row}: expected {want:?}, got: {}", got.text));
+        }
+    }
+    bad
+}
+
 #[test]
 fn operator_and_bound_agree_in_every_cell() {
     let hooks = hooks();
@@ -625,6 +680,7 @@ fn operator_and_bound_agree_in_every_cell() {
     let mut bad = bad.into_inner().expect("grid lock");
     bad.extend(iter_call_failures());
     bad.extend(iter_run_failures());
+    bad.extend(eq_failures());
     bad.sort();
     assert!(
         bad.is_empty(),
