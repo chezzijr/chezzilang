@@ -4251,16 +4251,13 @@ mod tests {
         let mut failed = Vec::new();
         let mut total = 0;
         for pos in POSITIONS {
-            for kind in 0..KINDS.len() {
+            for (kind, &(head, _)) in KINDS.iter().enumerate() {
                 for &(tok, arm) in TOKENS {
                     total += 1;
                     let (lines, at) = build(pos, kind, tok, arm);
                     let src = lines.join("\n") + "\n";
                     let want = want(pos, kind, tok, arm);
-                    let cell = format!(
-                        "{pos:?} / {:?} / {:?}: want {want:?}",
-                        KINDS[kind].0, lines[at]
-                    );
+                    let cell = format!("{pos:?} / {:?} / {:?}: want {want:?}", head, lines[at]);
                     let base = || {
                         let mut without = lines.clone();
                         without.remove(at);
