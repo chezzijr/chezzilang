@@ -1,6 +1,7 @@
 # TICKET-249: indentation ends a block expression. The line after a `match` / `recover:` value is a
-# new statement or a new arm, whatever its first token. Ancestor values (run): Rust `Some(-1)`,
-# `10 20 30 40`, `a b c`, `Err("division by zero")`; CPython `True` for `callable(f)`.
+# new statement or a new arm, whatever its first token. Ancestor values (run): Rust prints
+# `-1` in its present-value wrapper, `10 20 30 40`, `a b c` and `division by zero` in its error
+# wrapper; CPython prints `True` for `callable(f)`.
 # Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 
 struct Ctr:
