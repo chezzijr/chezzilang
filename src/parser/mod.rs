@@ -4101,6 +4101,8 @@ mod tests {
             ("fn(a: int) -> int: match a:", ARMS),
             ("-match n:", ARMS),
             ("1 + match n:", ARMS),
+            // the right operand of a comparison: the comparison-chain loop reads the block's end
+            ("1 < match n:", ARMS),
         ];
         const POSITIONS: &[&str] = &[
             "x := ",
@@ -4300,7 +4302,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(total, 3864);
+        assert_eq!(total, 4508);
         report_cells("block-end", total, &failed);
     }
 
@@ -4389,18 +4391,36 @@ mod tests {
                                 let StmtKind::Fn(f) = &m.stmts[0].kind else {
                                     panic!("not a fn: {src}")
                                 };
+                                // the header's branch count, its else block, its inline bodies
                                 let (len, else_block, bodies) = match &f.body[0].kind {
                                     StmtKind::If {
                                         branches,
                                         else_block,
-                                    } => (branches.len(), else_block, format!("{branches:?}")),
-                                    StmtKind::Wait { arms, else_block } => {
-                                        (arms.len(), else_block, format!("{arms:?}"))
-                                    }
+                                    } => (
+                                        branches.len(),
+                                        else_block,
+                                        branches.iter().map(|b| &b.1).collect::<Vec<_>>(),
+                                    ),
+                                    StmtKind::Wait { arms, else_block } => (
+                                        arms.len(),
+                                        else_block,
+                                        arms.iter().map(|a| &a.body).collect(),
+                                    ),
                                     other => panic!("not an `if` or a `wait`: {other:?}"),
                                 };
-                                if bodies.contains("ElseGuard") {
+                                let inline = bodies
+                                    .get(usize::from(header == "elif"))
+                                    .and_then(|b| b.last())
+                                    .map(|s| &s.kind);
+                                if format!("{bodies:?}").contains("ElseGuard") {
                                     Some("the inline statement took the `else` as a guard".into())
+                                } else if matches!(*stmt, "1 + " | "")
+                                    && !matches!(inline, Some(StmtKind::Expr(_)))
+                                {
+                                    Some(
+                                        "the inline statement is not an expression statement"
+                                            .into(),
+                                    )
                                 } else if len != n || else_block.is_some() != has_else {
                                     Some(format!(
                                         "{len} branches, else block {}",
