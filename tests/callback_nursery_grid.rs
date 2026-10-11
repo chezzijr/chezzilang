@@ -93,7 +93,7 @@ struct Kind {
     per_round: usize,
 }
 
-const KINDS: [Kind; 6] = [
+const KINDS: [Kind; 7] = [
     Kind {
         name: "update",
         box_ty: "Shared[int]",
@@ -114,6 +114,14 @@ const KINDS: [Kind; 6] = [
         name: "read",
         box_ty: "RwShared[int]",
         box_ctor: "RwShared(0)",
+        call: "        t.add(b.read(fn(x: int) -> int: body(x, q)))\n",
+        result: "t.load()",
+        per_round: 1,
+    },
+    Kind {
+        name: "shared_read",
+        box_ty: "Shared[int]",
+        box_ctor: "Shared(0)",
         call: "        t.add(b.read(fn(x: int) -> int: body(x, q)))\n",
         result: "t.load()",
         per_round: 1,

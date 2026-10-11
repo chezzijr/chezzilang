@@ -4,6 +4,7 @@
 # CHEZZI_THREADS 1, 2 and default, on the debug binary.
 
 import std.concurrency
+import std.net
 import std.time
 
 fn msg_of[T](r: T!Error, where_: str) -> str:
@@ -243,3 +244,72 @@ test fn two_boxes_that_hold_each_other_print_with_a_cycle_marker():
     text := str([a, b])
     assert text.contains("Shared(...)"), text
     assert text.starts_with("[Shared(Pair(other=Shared(Pair(other=Shared(...)")
+
+# ---- rule 5: a socket wait inside a box closure (loopback only) ----
+# The closure accepts, then reads one byte the sibling writes only after the accept: both the
+# accept and the read are socket waits made inside the box heap. The listener and the channel
+# cross into the box as captures (handles keep their identity).
+
+fn feed_one(addr: str, go: Channel[int]):
+    match net.connect(addr):
+        ?c:
+            _ := go.recv()
+            match c.write("7"):
+                ?_: c.close()
+                !e: panic(e.message())
+        !e: panic(e.message())
+
+fn take_one(ln: Listener, go: Channel[int]) -> int:
+    match ln.accept():
+        ?peer:
+            go.send(1)
+            match peer.read(1):
+                ?t:
+                    peer.close()
+                    if t == "7":
+                        return 7
+                    return -1
+                !_: return -2
+        !_: return -3
+    return -4
+
+fn listen_local() -> Listener:
+    match net.listen("127.0.0.1:0"):
+        ?ln: return ln
+        !e: panic(e.message())
+
+fn addr_of(ln: Listener) -> str:
+    match ln.addr():
+        ?a: return a
+        !e: panic(e.message())
+
+test fn a_socket_wait_inside_a_shared_update_closure_completes():
+    ln := listen_local()
+    go := Channel[int](1)
+    s := Shared(10)
+    parallel:
+        spawn feed_one(addr_of(ln), go)
+        s.update(fn(x): x + take_one(ln, go))
+    ln.close()
+    assert s.get() == 17
+
+test fn a_socket_wait_inside_a_shared_read_closure_completes():
+    ln := listen_local()
+    go := Channel[int](1)
+    s := Shared(10)
+    got := 0
+    parallel:
+        spawn feed_one(addr_of(ln), go)
+        got = s.read(fn(x): x + take_one(ln, go))
+    ln.close()
+    assert got == 17 and s.get() == 10
+
+test fn a_socket_wait_inside_a_rwshared_write_closure_completes():
+    ln := listen_local()
+    go := Channel[int](1)
+    s := RwShared(10)
+    parallel:
+        spawn feed_one(addr_of(ln), go)
+        s.write(fn(x): x + take_one(ln, go))
+    ln.close()
+    assert s.get() == 17

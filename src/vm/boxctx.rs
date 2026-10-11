@@ -502,40 +502,55 @@ impl Vm {
             .sum()
     }
 
-    /// TICKET-188 — does this party own an open nursery? The gate of the owned halt read.
-    #[inline]
-    pub(super) fn owns_nursery(&self) -> bool {
-        !self.eager_scheds.is_empty()
-            || self
-                .box_chain
-                .iter()
-                .any(|f| !f.caller.eager_scheds.is_empty())
-    }
-
-    /// TICKET-188 — THE open nurseries of this party, outermost first, for every `Vm` reader. A
-    /// task's nurseries belong to the task, not to the heap its code runs in: inside a box call
-    /// the callers' nurseries are parked on `box_chain` and are still this party's, so a child's
-    /// fault cuts an owner that waits inside a box closure. `n` is task-wide (see
-    /// [`Vm::nursery_base`]).
-    pub(super) fn owned_nurseries(&self) -> impl DoubleEndedIterator<Item = block::OwnedRef<'_>> {
+    /// THE eager-scope stacks of this party, outermost first: each parked caller's on
+    /// `box_chain`, then this context's, each with its task-wide nursery base (see
+    /// [`Vm::nursery_base`]). A task's nurseries belong to the task, not to the heap its code runs
+    /// in. Every `Vm` reader that asks "which nurseries does this task have open" reads this
+    /// through [`Vm::owned_nurseries`], [`Vm::owned_eager_scopes`] or [`Vm::owns_nursery`]. The
+    /// other uses of `eager_scheds` push, pop or index THIS context's stack in lockstep with
+    /// `nurseries` (enter, join, abort, `spawn` into the innermost nursery).
+    fn eager_stacks(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (usize, &[Option<super::EagerScope>])> {
         let below = |i: usize| -> usize {
             self.box_chain[..i]
                 .iter()
                 .map(|f| f.caller.nurseries.len())
                 .sum()
         };
-        let own = self.nursery_base();
         self.box_chain
             .iter()
             .enumerate()
-            .map(move |(i, f)| (below(i), &f.caller.eager_scheds))
-            .chain(std::iter::once((own, &self.eager_scheds)))
-            .flat_map(|(base, eager)| {
-                super::open_nurseries(eager).map(move |mut o| {
-                    o.n += base;
-                    o
-                })
+            .map(move |(i, f)| (below(i), f.caller.eager_scheds.as_slice()))
+            .chain(std::iter::once((
+                self.nursery_base(),
+                self.eager_scheds.as_slice(),
+            )))
+    }
+
+    /// TICKET-188 — does this party own an open nursery? The gate of the owned halt read.
+    #[inline]
+    pub(super) fn owns_nursery(&self) -> bool {
+        !self.eager_scheds.is_empty() || self.eager_stacks().any(|(_, e)| !e.is_empty())
+    }
+
+    /// TICKET-188 — THE open nurseries of this party, outermost first. Inside a box call the
+    /// callers' nurseries are still this party's, so a child's fault cuts an owner that waits
+    /// inside a box closure. `n` is task-wide (see [`Vm::nursery_base`]).
+    pub(super) fn owned_nurseries(&self) -> impl DoubleEndedIterator<Item = block::OwnedRef<'_>> {
+        self.eager_stacks().flat_map(|(base, eager)| {
+            super::open_nurseries(eager).map(move |mut o| {
+                o.n += base;
+                o
             })
+        })
+    }
+
+    /// The eager scopes behind [`Vm::owned_nurseries`], outermost first: the bodies a block of
+    /// this thread marks blocked, and the enclosing sched a nested `parallel:` joins.
+    pub(super) fn owned_eager_scopes(&self) -> impl DoubleEndedIterator<Item = &super::EagerScope> {
+        self.eager_stacks()
+            .flat_map(|(_, eager)| eager.iter().flatten())
     }
 
     /// "Is this view a task's copy?" — a write to a module global faults there (D4). True for a

@@ -393,7 +393,9 @@ impl Vm {
                 let c = sched.lock();
                 if c.terminate {
                     drop(c);
-                    break Err(sched.deadlock_err.clone());
+                    // The waiter names its own wait (the text and span its party site carries
+                    // above), as on the process-wide verdict: a guard wait is not a channel wait.
+                    break Err(sched.deadlock_err.at_site(GUARD_DEADLOCK, span));
                 }
                 if sched.is_deadlocked(&c) {
                     // TICKET-232 — the next pass ends the wait through the run halt or `terminate`.
@@ -2239,7 +2241,7 @@ impl Vm {
     /// [`OWNER_FAULT_WINDOW_ENV`] in this run's own `HostConfig.env`.
     #[cfg(test)]
     fn owner_fault_window_hook(&self) {
-        if self.eager_scheds.is_empty() {
+        if !self.owns_nursery() {
             return;
         }
         let armed = self
@@ -2314,9 +2316,7 @@ impl Vm {
             _party: None,
             awaiting: awaiting_builder,
             bodies: self
-                .eager_scheds
-                .iter()
-                .flatten()
+                .owned_eager_scopes()
                 // TICKET-103 — a fiber-owned nursery's body is a counted fiber, and marking its scope
                 // `awaiting_builder` would veto a genuine deadlock. Continuations need no entry here:
                 // `set_body_wait` marks the whole family.

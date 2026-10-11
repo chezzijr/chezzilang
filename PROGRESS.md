@@ -9431,16 +9431,21 @@ Landed so far, in plan-step order:
     the callers parked on `box_chain`, with a task-wide nursery index (`Vm::nursery_base`), so a
     child's fault cuts an owner that waits inside a box closure (`tests/owner_fault_grid.rs`, the
     `update` context; `a_child_fault_cuts_its_owner_inside_a_box_closure`).
-11. Not done: ThreadSanitizer (no nightly toolchain on this box, `docs/bug-discovery.md`); box cells
-    in `tests/callback_nursery_grid.rs`; a socket wait inside a box closure has no test.
+    Deadlocks: every reader of "which nurseries does this task have open" goes through the caller
+    chain (`Vm::owned_nurseries`, `Vm::owned_eager_scopes`, `Vm::owns_nursery`, one walk in
+    `src/vm/boxctx.rs`). A `parallel:` inside a box closure joins the enclosing sched and a block
+    there marks the caller's bodies, so a nursery deadlock inside a closure faults as on the base
+    binary (it hung). A closure that waits directly on a channel under an enclosing `parallel:`
+    still hangs, as on base (a declined verdict). A guard waiter ended by its own sched's verdict
+    reports `update guard wait: deadlock` at its own call, not the channel text. Grid:
+    `a_deadlock_inside_a_box_closure_is_judged_as_on_the_caller`.
+11. Also tested: a socket wait inside a box closure (`box_rules_test.chz`, loopback), 100000 boxes
+    created and dropped within 2 MB of the `Atomic` loop's max RSS, a `Shared.read` row in
+    `tests/callback_nursery_grid.rs`. Not done: ThreadSanitizer (no nightly toolchain on this box,
+    `docs/bug-discovery.md`).
 
 Measured cost, not yet explained: small-value `update` with one caller is 401-432 ms before and
 450-493 ms after per 200000 calls.
-
-Not landed yet: the live `RwShared` state and the collections on it (step 6), deleting the encoded
-store (step 7), the `CROSSING_CLOSURE_METHODS` table and checker floor (step 8), the rule grid,
-cancellation rows, reader stress test, benchmark tables and the remaining docs (steps 10 to 14).
-`RwShared` still stores an encoded value and `write` still copies it out and back.
 
 ### TICKET-239 — the expected type has one channel (2026-10-10)
 

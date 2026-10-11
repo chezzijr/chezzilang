@@ -106,6 +106,15 @@ impl RuntimeError {
         self
     }
 
+    /// This verdict, reported as the blocking op of one waiter: its own text and span, every
+    /// marker kept. The one way a sched's deadlock fault is re-sited.
+    pub(crate) fn at_site(&self, msg: &str, span: Span) -> Self {
+        let mut e = self.clone();
+        e.message = msg.to_string();
+        e.span = span;
+        e
+    }
+
     /// Mark this fault as raised by `panic(...)` (see [`RuntimeError::is_panic`]).
     pub(crate) fn raised_by_panic(mut self) -> Self {
         self.is_panic = true;
@@ -6111,12 +6120,7 @@ impl SchedCore {
         // span the in-place path raises there. Else the sched-wide `err`.
         let scope_err = match (&self.scopes[sid].deadlock_err, f.park_site) {
             (Some(e), _) => e.clone(),
-            (None, Some((msg, span))) if self.leaf_site => {
-                let mut e = err.clone();
-                e.message = msg.to_string();
-                e.span = span;
-                e
-            }
+            (None, Some((msg, span))) if self.leaf_site => err.at_site(msg, span),
             _ => err.clone(),
         };
         self.slots[ti] = Some(TaskOutcome::Deadlocked {

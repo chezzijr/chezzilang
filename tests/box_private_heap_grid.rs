@@ -130,7 +130,9 @@ fn a_child_task_reading_the_box_inside_its_own_closure_is_a_deadlock_fault_not_a
             let r = chezzi(&["run", path.to_str().unwrap()], threads, 30);
             assert_eq!(r.code, Some(1), "{kind} at {threads:?}: {}", r.stderr);
             assert!(
-                r.stderr.contains("deadlock") && r.stdout.is_empty(),
+                r.stderr.contains("update guard wait: deadlock")
+                    && r.stderr.contains("main.chz:4:")
+                    && r.stdout.is_empty(),
                 "{kind} at {threads:?}: stdout {:?} stderr {}",
                 r.stdout,
                 r.stderr
@@ -178,6 +180,59 @@ fn a_child_fault_cuts_its_owner_inside_a_box_closure() {
                     r.stdout,
                     r.stderr
                 );
+            }
+        }
+    }
+}
+
+/// The no-fault deadlock column: an outer `parallel:` whose sibling can never be fed, and a box
+/// closure that waits forever. The expectation of each `update` / `write` cell is the BASE
+/// binary's measured behaviour (`Shared.read` has no base; it follows `update`).
+///
+/// - `nursery`: the closure opens its own `parallel:` whose child waits. Base reports
+///   `deadlock` and exits 1 at every worker count. The inner nursery must join the task's
+///   enclosing sched, which is parked on `box_chain` inside a box; with only this context's
+///   nurseries read, the run hung.
+/// - `direct`: the closure waits on the channel itself. Base hangs; the verdict declines. The
+///   cell pins that no wrong verdict appears: the run never passes the call.
+#[test]
+fn a_deadlock_inside_a_box_closure_is_judged_as_on_the_caller() {
+    let waits = [
+        ("direct", "    _ := ch.recv()", false),
+        (
+            "nursery",
+            "    parallel:\n        spawn:\n            _ := ch.recv()",
+            true,
+        ),
+    ];
+    let calls = [
+        ("Shared", "w.update(park)"),
+        ("Shared", "print(w.read(park))"),
+        ("RwShared", "w.write(park)"),
+        ("Shared", "w.update(fn(x): nested(x))"),
+    ];
+    for (wname, wait, faults) in waits {
+        for (i, (kind, call)) in calls.into_iter().enumerate() {
+            let src = format!(
+                "import std.concurrency\nch := Channel[int](0)\nch2 := Channel[int](0)\ninner := Shared(0)\nfn park(x: int) -> int:\n{wait}\n    return x\nfn nested(x: int) -> int:\n    inner.update(park)\n    return x\nw := {kind}(0)\nparallel:\n    spawn:\n        _ := ch2.recv()\n    {call}\n    print(\"after\")\n"
+            );
+            let path = write_program(&format!("dl-{wname}-{i}"), &src);
+            for threads in [Some("1"), Some("2"), None] {
+                let r = chezzi(
+                    &["run", path.to_str().unwrap()],
+                    threads,
+                    if faults { 20 } else { 2 },
+                );
+                let cell = format!(
+                    "{wname} / {call} at {threads:?}: code {:?} stdout {:?} stderr {}",
+                    r.code, r.stdout, r.stderr
+                );
+                assert!(r.stdout.is_empty(), "{cell}");
+                if faults {
+                    assert!(r.code == Some(1) && r.stderr.contains("deadlock"), "{cell}");
+                } else {
+                    assert_eq!(r.code, None, "{cell}");
+                }
             }
         }
     }
@@ -232,5 +287,66 @@ fn the_read_temporary_warning_is_unchanged() {
         "'push' mutates the copy returned by 'w.get()', so the write is discarded — write through 'w.write(…)' instead",
     ] {
         assert!(r.stderr.contains(want), "stderr: {}", r.stderr);
+    }
+}
+
+/// Run `chezzi run <entry>` at one worker; return (exit ok, stdout, max RSS in KB). `wait4` on
+/// the pid, so no other child this test binary reaps contaminates the figure.
+// `wait4` IS the reap (`waitpid` + rusage in one syscall).
+#[allow(clippy::zombie_processes)]
+fn run_max_rss(entry: &std::path::Path) -> (bool, String, i64) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+        .arg("run")
+        .arg(entry)
+        .env("CHEZZI_THREADS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn chezzi");
+    let pid = child.id() as libc::pid_t;
+    let mut out = String::new();
+    let _ = child.stdout.take().unwrap().read_to_string(&mut out);
+    let mut status: libc::c_int = 0;
+    let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `pid` is a child this test spawned and has not waited on; both out-params are valid.
+    let ret = unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
+    assert_eq!(ret, pid, "wait4({pid}) failed");
+    (
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+        out,
+        rusage.ru_maxrss as i64,
+    )
+}
+
+/// The box heap is freed when the last handle drops: 100000 boxes created and dropped peak at
+/// most 2 MB above the same loop over `Atomic`, which keeps no heap. A box heap that outlives
+/// its handle costs at least 100000 heaps, far over the bound. Each side is the lowest of three
+/// runs, so one noisy run cannot fail the cell.
+#[test]
+fn a_hundred_thousand_dropped_boxes_do_not_grow_memory() {
+    const SLACK_KB: i64 = 2 * 1024;
+    let rss = |kind: &str| -> i64 {
+        let src = format!(
+            "import std.concurrency\nfn churn():\n    for i in range(100000):\n        b := {kind}(i)\n        _ := b\nchurn()\nprint(\"done\")\n"
+        );
+        let path = write_program(&format!("rss-{kind}"), &src);
+        (0..3)
+            .map(|_| {
+                let (ok, out, kb) = run_max_rss(&path);
+                assert!(ok && out == "done\n", "{kind}: ok {ok} stdout {out:?}");
+                kb
+            })
+            .min()
+            .unwrap()
+    };
+    let base = rss("Atomic");
+    for kind in ["Shared", "RwShared"] {
+        let kb = rss(kind);
+        eprintln!("maxrss: Atomic {base} KB, {kind} {kb} KB");
+        assert!(
+            kb <= base + SLACK_KB,
+            "{kind}: {kb} KB against Atomic {base} KB (bound: +{SLACK_KB} KB)"
+        );
     }
 }

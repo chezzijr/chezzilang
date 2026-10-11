@@ -1270,7 +1270,7 @@ impl Vm {
         // different nursery generation and a private eager sched sharing the run's `sched_registry` is
         // the per-connection-spawn design; that path is unchanged.
         if self.mn.is_none()
-            && let Some(outer) = self.eager_scheds.iter().flatten().next_back()
+            && let Some(outer) = self.owned_eager_scopes().next_back()
         {
             let sched = Arc::clone(&outer.sched);
             let cancel = Arc::new(AtomicBool::new(false));
