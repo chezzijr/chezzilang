@@ -1876,7 +1876,10 @@ impl Checker {
                             None => {
                                 self.error(
                                     args[0].span,
-                                    format!("List() expects an iterable, got {it}"),
+                                    format!(
+                                        "List() expects an iterable, got {it}{}",
+                                        self.iter_hook_note(&it)
+                                    ),
                                 );
                                 Ty::Unknown
                             }
@@ -1934,7 +1937,10 @@ impl Checker {
                             None => {
                                 self.error(
                                     args[0].span,
-                                    format!("Set() expects an iterable, got {it}"),
+                                    format!(
+                                        "Set() expects an iterable, got {it}{}",
+                                        self.iter_hook_note(&it)
+                                    ),
                                 );
                                 Ty::Unknown
                             }
@@ -2001,7 +2007,10 @@ impl Checker {
                             None => {
                                 self.error(
                                     args[0].span,
-                                    format!("Map() expects an iterable, got {it}"),
+                                    format!(
+                                        "Map() expects an iterable, got {it}{}",
+                                        self.iter_hook_note(&it)
+                                    ),
                                 );
                                 Ty::Unknown
                             }

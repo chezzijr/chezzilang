@@ -468,6 +468,34 @@ pub(super) enum HookMiss {
     Static,
     /// A receiver-first method whose shape the requirement rejects; the decider's reason.
     Shape(String),
+    /// The method is the hook of its declaration, and this instantiation fails the method's own
+    /// `where` bound; the text names the bound. The hook table has one bit per declared type, so
+    /// the run time calls the method for every instantiation: an operator on this one is a check
+    /// error, never the hookless path.
+    Bound(String),
+}
+
+/// Why one requirement of a protocol is not met ([`Checker::requirement_matches`]).
+enum ReqMiss {
+    /// The method is missing or its signature does not match; the full message.
+    Shape(String),
+    /// The signature matches and the receiver's type argument fails the method's `where` bound.
+    Bound {
+        ty: String,
+        protocol: String,
+        why: String,
+    },
+}
+
+impl ReqMiss {
+    fn text(self) -> String {
+        match self {
+            ReqMiss::Shape(text) => text,
+            ReqMiss::Bound { ty, protocol, why } => {
+                format!("type {ty} does not satisfy {protocol} ({why})")
+            }
+        }
+    }
 }
 
 impl Checker {
@@ -1035,6 +1063,7 @@ impl Checker {
             if let Some(bad) = self.unhashable_tuple_elem(t) {
                 msg.push_str(&format!(": element {bad} is not Hashable"));
             }
+            msg.push_str(&self.hook_name_note(t, "Hashable", "hash"));
             return Some(msg);
         }
         self.eq_bounds_unsatisfied(t)
@@ -2096,11 +2125,12 @@ impl Checker {
         // guard keeping distinct empty-struct types unequal despite the hash collision). This lets
         // `struct S: pass` be used as a Set element / Map key without an explicit `hash(self)` method.
         // A zero-field struct that HAS the `hash` hook falls through to the structural check and
-        // gets its method dispatched. `hook_method` is the one answer to "has the hook".
+        // gets its method dispatched. `declares_hook` is the one answer to "does the run time
+        // call the method".
         if protocol == "Hashable"
             && let Ty::Struct(name, _) = ty
             && self.structs.get(name).is_some_and(|d| d.fields.is_empty())
-            && self.hook_method(ty, "Hashable", "hash").is_none()
+            && !self.declares_hook(ty, "Hashable", "hash")
         {
             return self.grant_intrinsic(protocol, ty);
         }
@@ -2143,7 +2173,8 @@ impl Checker {
             } else {
                 // NOT iterable at all (`int`, a plain struct): `for`/`.iter()`/`Iterable` are all dead
                 // ends for it, so appending that advice would misdirect. Keep the bare pre-W6-3b text.
-                Err(format!("type {ty} does not satisfy Iterator"))
+                let note = self.iter_hook_note(ty);
+                Err(format!("type {ty} does not satisfy Iterator{note}"))
             };
         }
         // `Iterable` conformance is "can produce a fresh cursor". Built-in collections satisfy it
@@ -2159,7 +2190,8 @@ impl Checker {
         // and nothing wider (that arm is where the strict arg invariance lives).
         if protocol == "Iterable" && !matches!(ty, Ty::Param(_) | Ty::Protocol(..)) {
             let Some(elem) = self.iterable_elem(ty) else {
-                return Err(format!("type {ty} does not satisfy Iterable"));
+                let note = self.iter_hook_note(ty);
+                return Err(format!("type {ty} does not satisfy Iterable{note}"));
             };
             if let Some(want) = args.first()
                 && !want.is_unknown()
@@ -2357,7 +2389,8 @@ impl Checker {
         methods: &HashMap<String, FnSig>,
     ) -> Result<(), String> {
         for (mname, _) in &pinfo.methods {
-            self.requirement_matches(ty, protocol, args, pinfo, mname, methods)?;
+            self.requirement_matches(ty, protocol, args, pinfo, mname, methods)
+                .map_err(ReqMiss::text)?;
         }
         Ok(())
     }
@@ -2372,6 +2405,18 @@ impl Checker {
         method: &str,
     ) -> Option<(FnSig, HashMap<String, Ty>)> {
         self.hook_verdict(ty, protocol, method).ok()
+    }
+
+    /// Does the run time call `method` of `ty` for `protocol`'s operator? True when the method is
+    /// the hook of the declaration: for this instantiation ([`Self::hook_method`]), or for the
+    /// instantiations that satisfy the method's own `where` bound (`HookMiss::Bound`). The hook
+    /// table has one bit per declared type, so a reader that grants a hookless path (a constant
+    /// hash, structural equality, the other iteration hook) asks this, never `hook_method`.
+    pub(super) fn declares_hook(&self, ty: &Ty, protocol: &str, method: &str) -> bool {
+        match self.hook_verdict(ty, protocol, method) {
+            Ok(_) | Err(HookMiss::Bound(_)) => true,
+            Err(HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_)) => false,
+        }
     }
 
     /// The one decider: the protocol's own requirement run through
@@ -2413,7 +2458,8 @@ impl Checker {
         match self.requirement_matches(ty, protocol, &args, pinfo, method, methods) {
             Ok(()) => Ok((sig, bound)),
             Err(_) if actual.is_static => Err(HookMiss::Static),
-            Err(why) => Err(HookMiss::Shape(why)),
+            Err(ReqMiss::Bound { why, .. }) => Err(HookMiss::Bound(why)),
+            Err(miss @ ReqMiss::Shape(_)) => Err(HookMiss::Shape(miss.text())),
         }
     }
 
@@ -2445,24 +2491,12 @@ impl Checker {
             };
             let mut set = HookSet::default();
             for row in HOOKS {
-                // A conditional method (`fn compare(..) where T: Comparable`) is the hook for
-                // every instantiation the checker lets reach the operator, so ask with its own
-                // receiver bounds assumed.
-                let assumed = self
-                    .hook_candidate(&ty, row.hook)
-                    .map(|sig| sig.where_bounds)
-                    .unwrap_or_default();
-                let saved_bounds = self.type_params.clone();
-                for wb in assumed {
-                    self.type_params
-                        .entry(wb.name)
-                        .or_default()
-                        .extend(wb.bounds);
-                }
-                let verdict = self.hook_verdict(&ty, row.protocol, row.method);
-                self.type_params = saved_bounds;
-                match verdict {
-                    Ok(_) => set.insert(row.hook),
+                // A conditional method (`fn compare(..) where T: Comparable`) is the hook of the
+                // declaration: the table has one bit per declared type, and `HookMiss::Bound`
+                // makes an operator on an instantiation that fails the bound a check error.
+                match self.hook_verdict(&ty, row.protocol, row.method) {
+                    // The same two verdicts `declares_hook` answers `true` for.
+                    Ok(_) | Err(HookMiss::Bound(_)) => set.insert(row.hook),
                     Err(HookMiss::Shape(why)) => {
                         let span = methods
                             .iter()
@@ -2639,7 +2673,7 @@ impl Checker {
         pinfo: &ProtocolInfo,
         mname: &str,
         methods: &HashMap<String, FnSig>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ReqMiss> {
         // TICKET-027: `protocol` may carry a module-qualified KEY — render the BARE name in messages.
         let protocol_display = crate::compiler::bare_display(protocol);
         let pmap: HashMap<String, Ty> = pinfo
@@ -2721,10 +2755,10 @@ impl Checker {
             match actual_owned.as_ref() {
                 Some(actual) if self.method_matches(msig, actual, ty) => {
                     if let Some(mm) = param_name_mismatch(msig, actual) {
-                        return Err(format!(
+                        return Err(ReqMiss::Shape(format!(
                             "type {ty} does not satisfy {protocol_display} ({})",
                             name_mismatch_text(&protocol_display, mname, mm)
-                        ));
+                        )));
                     }
                     // Conditional conformance: a method whose `where` bounds the RECEIVER's own type
                     // param (e.g. `compare(self, o: Box[T]) -> int where T: Comparable` on `Box[T]`)
@@ -2745,11 +2779,15 @@ impl Checker {
                             let bargs: Vec<Ty> =
                                 bound.args.iter().map(|a| subst(a, &tymap)).collect();
                             if self.satisfies_args(concrete, &bound.name, &bargs).is_err() {
-                                return Err(format!(
-                                    "type {ty} does not satisfy {protocol_display} (method '{mname}' requires {}: {})",
-                                    concrete,
-                                    crate::compiler::bare_display(&bound.name)
-                                ));
+                                return Err(ReqMiss::Bound {
+                                    ty: ty.to_string(),
+                                    protocol: protocol_display,
+                                    why: format!(
+                                        "method '{mname}' requires {}: {}",
+                                        concrete,
+                                        crate::compiler::bare_display(&bound.name)
+                                    ),
+                                });
                             }
                         }
                     }
@@ -2758,20 +2796,20 @@ impl Checker {
                 // that is otherwise correct — the same message `satisfies_native` gives for a generic
                 // native method. See `method_matches` for why a generic method cannot witness.
                 Some(actual) if !actual.type_params.is_empty() => {
-                    return Err(format!(
+                    return Err(ReqMiss::Shape(format!(
                         "type {ty} does not satisfy {protocol_display} (method '{mname}' is generic \
                          and cannot witness a protocol requirement)"
-                    ));
+                    )));
                 }
                 Some(_) => {
-                    return Err(format!(
+                    return Err(ReqMiss::Shape(format!(
                         "type {ty} does not satisfy {protocol_display} (method '{mname}' has the wrong signature)"
-                    ));
+                    )));
                 }
                 None => {
-                    return Err(format!(
+                    return Err(ReqMiss::Shape(format!(
                         "type {ty} does not satisfy {protocol_display} (missing method '{mname}')"
-                    ));
+                    )));
                 }
             }
         }
@@ -3204,7 +3242,7 @@ impl Checker {
                 if let hit @ Some(_) = any(self, args, stack) {
                     return hit;
                 }
-                if self.hook_method(ty, "Eq", "eq").is_some() {
+                if self.declares_hook(ty, "Eq", "eq") {
                     return Some(EqReach::Hook(ty.to_string()));
                 }
                 if stack.contains(name) {
@@ -3222,7 +3260,7 @@ impl Checker {
                 if let hit @ Some(_) = any(self, args, stack) {
                     return hit;
                 }
-                if self.hook_method(ty, "Eq", "eq").is_some() {
+                if self.declares_hook(ty, "Eq", "eq") {
                     return Some(EqReach::Hook(ty.to_string()));
                 }
                 if stack.contains(name) {

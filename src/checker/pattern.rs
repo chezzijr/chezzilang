@@ -3957,7 +3957,8 @@ impl Checker {
                 if t.is_numeric() || t.is_unknown() || self.satisfies(&t, "Neg").is_ok() {
                     t
                 } else {
-                    self.error(inner.span, format!("cannot negate {t}"));
+                    let note = self.hook_name_note(&t, "Neg", "neg");
+                    self.error(inner.span, format!("cannot negate {t}{note}"));
                     Ty::Unknown
                 }
             }

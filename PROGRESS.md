@@ -9437,6 +9437,19 @@ in `checker::tests::a_nonconforming_next_is_an_ordinary_method` went from reject
 to checking clean. `tests/cancellation_point_grid.rs` renamed the operand of `PE.eq` and `PH.eq`
 from `o` to `other`, so each stays the `Eq` hook. Hit-path cost: `docs/benchmarks.md`, TICKET-250.
 
+Review round 1 (conditional hooks). A conditional hook (`fn iter(self) -> .. where T: P`) set the
+run-time hook bit for every instantiation while the checker decided per instantiation, so `for` on
+a `next` type with a conditional `iter` was typed from `next` and driven by `iter`
+(`cannot apply Add to str and int`). `hook_verdict` now returns `HookMiss::Bound` for an
+instantiation that fails the method's own `where` bound, and `Checker::declares_hook` is the one
+answer to "does the run time call the method". Every reader that grants a hookless path asks it:
+the `next` fallback of iteration, the zero-field constant hash, `StructuralEq`. An operator on such
+an instantiation is a check error that names the bound. `record_hook_table` no longer assumes the
+bounds by hand. Grid: `conditional_failures` (hook x {bound satisfied, not satisfied} x generic
+owner), four arithmetic rows (`sub`, `mul`, `div`, `mod`) and `every_hook_row_has_a_grid_row`,
+which reads `checker::HOOKS`. Open: a conditional `str` still runs for every instantiation,
+because `print` has no check-time decider (unchanged from base).
+
 `for` special-cases outside the decider, recorded for the owner's range / channel design (not
 touched): the range arm and the `Ty::Channel` arms of `Checker::for_bindings`
 (`src/checker/sig.rs:5424`, `:5476`, `:5479`, `:5482`, `:5496`), and the range arm and

@@ -2211,6 +2211,28 @@ rejected at compile time. The bound is honoured *everywhere* conformance is quer
 dispatch (`<`, `+`, …), generic bounds, and protocol-typed parameters — not just at an explicit
 `.compare()` call.
 
+**A conditional hook never falls back to the hookless path (TICKET-250).** A conditional method
+that is an operator's hook is the hook of the *declaration*. The run time keeps one answer per
+declared type, so it calls the method for every instantiation. An operator on an instantiation
+that fails the bound is therefore a compile error that names the bound, even where the type has
+another way to satisfy the operator:
+
+```
+struct Box[T]:
+    v: T
+    fn next(self) -> int?: return None
+    fn iter(self) -> Iterator[str] where T: Comparable: return ["a"].iter()
+for q in Box(Tag(1)):   →  type error: cannot iterate over Box[Tag]
+                            (method 'iter' requires Tag: Comparable)
+```
+
+`Box[Tag]` does not iterate through `next`, a zero-field `struct Z[T]` with a conditional `hash`
+gets no constant hash for `Z[Tag]`, and `Box[Tag]` is not a `StructuralEq` payload when `Box` has a
+conditional `eq`. `for`, comprehensions, `List()` / `Set()` / `Map()`, `x[k]`, `x[k] = v`,
+`x[a:b]`, `in`, the arithmetic operators, unary `-` and a `Set` / `Map` key all report the bound.
+One exception stays open: `print` accepts every value and has no compile-time decider, so a
+conditional `str` runs for every instantiation.
+
 **`==` honours the bound too** (`docs/gaps.md` **W7-41** / **W7-45**, both fixed 2026-08-11). A
 conditional `fn eq(self, other: Self) -> bool where T: Comparable` is the hook `==`/`!=` dispatch to,
 and the equality path consults conformance exactly as `<` does:

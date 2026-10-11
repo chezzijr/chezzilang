@@ -31,6 +31,38 @@ struct Hook {
     call: &'static str,
 }
 
+/// The row of one binary arithmetic hook: `fn <name>(self, other: Self) -> Self` behind `<sym>`.
+fn arith(name: &'static str, proto: &'static str, sym: &str) -> Hook {
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    Hook {
+        name,
+        proto,
+        slot_proto: None,
+        shapes: [
+            m(&format!("{name}(self, other: Self) -> Self"), "return self"),
+            m(
+                &format!("{name}(self, other: Self) -> Iterator[int]"),
+                "yield 1",
+            ),
+            m(&format!("{name}(a: int, other: int) -> int"), "return a"),
+            m(&format!("{name}(self, other: Self) -> int"), "return 1"),
+            m(
+                &format!("{name}(self, other: Self, z: int) -> Self"),
+                "return self",
+            ),
+            m(
+                &format!("{name}[U](self, other: Self) -> Self"),
+                "return self",
+            ),
+        ],
+        op: leak(format!("z := x {sym} y\nprint(\"applied\")\n")),
+        slot: "print(\"slot\")",
+        intr: leak(format!("z := x.{name}(y)\nprint(\"applied\")\n")),
+        call: leak(format!("z := v.{name}(v)\n    print(\"applied\")")),
+    }
+}
+
+/// One row per entry of `chezzi::checker::HOOKS`; `every_hook_row_has_a_grid_row` pins that.
 fn hooks() -> Vec<Hook> {
     let idx = m("index(self, k: int) -> int", "return self.n");
     let eq = m("eq(self, other: Self) -> bool", "return true");
@@ -221,23 +253,11 @@ fn hooks() -> Vec<Hook> {
             intr: "print(x.compare(y))\n",
             call: "print(v.compare(v))",
         },
-        Hook {
-            name: "add",
-            proto: "Add",
-            slot_proto: None,
-            shapes: [
-                m("add(self, other: Self) -> Self", "return self"),
-                m("add(self, other: Self) -> Iterator[int]", "yield 1"),
-                m("add(a: int, other: int) -> int", "return a + other"),
-                m("add(self, other: Self) -> int", "return 1"),
-                m("add(self, other: Self, z: int) -> Self", "return self"),
-                m("add[U](self, other: Self) -> Self", "return self"),
-            ],
-            op: "z := x + y\nprint(\"added\")\n",
-            slot: "print(\"slot\")",
-            intr: "z := x.add(y)\nprint(\"added\")\n",
-            call: "z := v.add(v)\n    print(\"added\")",
-        },
+        arith("add", "Add", "+"),
+        arith("sub", "Sub", "-"),
+        arith("mul", "Mul", "*"),
+        arith("div", "Div", "/"),
+        arith("mod", "Mod", "%"),
         Hook {
             name: "neg",
             proto: "Neg",
@@ -425,7 +445,7 @@ fn cell_failures(kind: &str, hook: &Hook, si: usize) -> Vec<String> {
     let none = owner(kind, &renamed);
     let cell = format!("{kind}|{}|{shape}", hook.name);
     // A requirement that names `Self` in an operand cannot be called through a slot.
-    let self_operand = matches!(hook.name, "compare" | "add" | "eq");
+    let self_operand = hook.shapes[0].contains("other: Self");
     let mut answers = Vec::new();
     for ((u, src), (_, src_none)) in uses(hook, proto, &decl)
         .into_iter()
@@ -677,6 +697,168 @@ fn eq_failures() -> Vec<String> {
     bad
 }
 
+/// A conditional hook (`fn m(..) where T: Comparable`) x {bound satisfied, bound not satisfied}
+/// x generic owner. The hook table has one bit per declared type, so a conditional method is the
+/// hook of every instantiation the checker admits. An instantiation that satisfies the bound
+/// behaves as the unconditional conforming shape under every use. One that does not is a check
+/// error under every use, and the error names the bound; no use falls back to the hookless
+/// path, because the run time cannot tell the two instantiations apart.
+///
+/// `str` has no unsatisfied row: `print` accepts every value and has no check-time decider.
+fn conditional_failures() -> Vec<String> {
+    let mut bad = Vec::new();
+    let unsatisfied = |src: &str| {
+        format!(
+            "struct N:\n    w: int\n{}",
+            src.replace("X(1)", "X(N(1))")
+                .replace("X(2)", "X(N(2))")
+                .replace("X.A(1)", "X.A(N(1))")
+                .replace("X.A(2)", "X.A(N(2))")
+                .replace("X[int]", "X[N]")
+        )
+    };
+    for hook in &hooks() {
+        for kind in ["gstruct", "genum"] {
+            let plain = owner(kind, &hook.shapes[0]);
+            // Every method of the shape carries the bound (`set_index` comes with an `index`).
+            let cond_methods: String = hook.shapes[0]
+                .lines()
+                .map(|line| match line.strip_suffix(':') {
+                    Some(sig) if line.starts_with("    fn ") => {
+                        format!("{sig} where T: Comparable:\n")
+                    }
+                    _ => format!("{line}\n"),
+                })
+                .collect();
+            let cond = owner(kind, &cond_methods);
+            let cell = format!("{kind}|{}|where", hook.name);
+            for ((u, src), (_, src_plain)) in uses(hook, hook.proto, &cond)
+                .into_iter()
+                .zip(uses(hook, hook.proto, &plain))
+            {
+                let tag = format!("{kind}_{}_where_{u}", hook.name);
+                let got = run(&format!("{tag}_sat"), &src, &mut bad);
+                let want = run(&format!("{tag}_plain"), &src_plain, &mut bad);
+                if got.ok != want.ok || got.stdout != want.stdout {
+                    bad.push(format!(
+                        "{cell}|{u}: a satisfied bound gives {:?} (ok={}), the unconditional hook {:?} (ok={}): {}",
+                        got.stdout, got.ok, want.stdout, want.ok, got.text
+                    ));
+                }
+                if hook.name == "str" {
+                    continue;
+                }
+                let (clean, text) = check(&format!("{tag}_unsat"), &unsatisfied(&src));
+                if clean {
+                    bad.push(format!(
+                        "{cell}|{u}: an instantiation that fails the bound checks clean"
+                    ));
+                } else if matches!(u, "op" | "bound") && !text.contains("N: Comparable") {
+                    bad.push(format!(
+                        "{cell}|{u}: the error does not name the bound: {text}"
+                    ));
+                }
+            }
+        }
+    }
+    // A type with the `next` hook and a conditional `iter` hook of another element type. A
+    // satisfied bound iterates through `iter`. An unsatisfied one is not iterable: `iter` wins
+    // at run time, so no consumer may read the `next` elements.
+    let both = m(
+        "next(self) -> int?",
+        "print(\"next ran\")\n        return None",
+    ) + &m(
+        "iter(self) -> Iterator[str] where T: Comparable",
+        "return [\"a\"].iter()",
+    );
+    for (kind, head, mk) in [
+        ("struct", "struct X[T]:\n    n: T\n", "X"),
+        ("enum", "enum X[T]:\n    A(T)\n", "X.A"),
+    ] {
+        for (consumer, tail) in [
+            ("for", "for q in x:\n    print(q)\n"),
+            ("list", "print(List(x))\n"),
+            ("comp", "print([q for q in x])\n"),
+            (
+                "bbody",
+                "fn w[S: Iterable[str]](s: S):\n    print(List(s.iter()))\nw(x)\n",
+            ),
+            (
+                "bbody_int",
+                "fn w[S: Iterable[int]](s: S):\n    print(List(s.iter()))\nw(x)\n",
+            ),
+            (
+                "iterator_bound",
+                "fn w[S: Iterator[int]](s: S):\n    for q in s:\n        print(q)\nw(x)\n",
+            ),
+        ] {
+            let tag = format!("where_both_{kind}_{consumer}");
+            let unsat = format!("struct N:\n    w: int\n{head}{both}x := {mk}(N(1))\n{tail}");
+            let (clean, text) = check(&format!("{tag}_unsat"), &unsat);
+            if clean {
+                bad.push(format!(
+                    "{tag}: `iter` fails its bound and the type still iterates"
+                ));
+            } else if matches!(consumer, "for" | "list" | "comp")
+                && !text.contains("method 'iter' requires N: Comparable")
+            {
+                bad.push(format!("{tag}: the error does not name the bound: {text}"));
+            }
+            let sat = format!("{head}{both}x := {mk}(1)\n{tail}");
+            let got = run(&format!("{tag}_sat"), &sat, &mut bad);
+            // The two rows that ask for `int` elements are check errors: `iter` yields `str`.
+            let int_row = matches!(consumer, "bbody_int" | "iterator_bound");
+            let right = if int_row {
+                !got.ok && !got.stdout.contains("next ran")
+            } else {
+                got.ok && got.stdout.contains('a') && !got.stdout.contains("next ran")
+            };
+            if !right {
+                bad.push(format!(
+                    "{tag}: a satisfied bound must iterate through `iter`: {}",
+                    got.text
+                ));
+            }
+        }
+    }
+    // A zero-field struct with a conditional `hash`: the constant-hash grant applies only when
+    // the declaration has no `hash` hook, so an unsatisfied instantiation is not `Hashable`.
+    let z = "struct Z[T]:\n    fn hash(self) -> int where T: Comparable:\n        print(\"hash ran\")\n        return 7\n";
+    let (clean, text) = check(
+        "where_zero_field_unsat",
+        &format!("struct N:\n    w: int\n{z}s: Set[Z[N]] = Set()\ns.add(Z[N]())\n"),
+    );
+    if clean || !text.contains("N: Comparable") {
+        bad.push(format!(
+            "where_zero_field_unsat: expected an error that names the bound: {text}"
+        ));
+    }
+    let got = run(
+        "where_zero_field_sat",
+        &format!("{z}s: Set[Z[int]] = Set()\ns.add(Z[int]())\nprint(s.len())\n"),
+        &mut bad,
+    );
+    if got.stdout != "hash ran\n1\nEND\n" {
+        bad.push(format!("where_zero_field_sat: {}", got.text));
+    }
+    bad
+}
+
+/// The grid is written from the checker's table: a hook added to `HOOKS` with no grid row, or a
+/// grid row for a method `HOOKS` does not list, fails here.
+#[test]
+fn every_hook_row_has_a_grid_row() {
+    let table: Vec<&str> = chezzi::checker::HOOKS
+        .iter()
+        .map(|row| row.method)
+        .collect();
+    let grid: Vec<&str> = hooks().iter().map(|hook| hook.name).collect();
+    let mut sorted = (table.clone(), grid.clone());
+    sorted.0.sort_unstable();
+    sorted.1.sort_unstable();
+    assert_eq!(sorted.0, sorted.1, "HOOKS: {table:?}, grid: {grid:?}");
+}
+
 #[test]
 fn operator_and_bound_agree_in_every_cell() {
     let hooks = hooks();
@@ -708,6 +890,7 @@ fn operator_and_bound_agree_in_every_cell() {
     bad.extend(iter_call_failures());
     bad.extend(iter_run_failures());
     bad.extend(eq_failures());
+    bad.extend(conditional_failures());
     bad.sort();
     assert!(
         bad.is_empty(),

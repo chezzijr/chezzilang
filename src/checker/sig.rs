@@ -1,6 +1,7 @@
 // checker::sig — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Function signatures and return-type inference passes.
 
+use super::proto::HookMiss;
 use super::setup::{BindSite, HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
@@ -5103,6 +5104,12 @@ impl Checker {
     /// The element type the `next` hook of declared type `ty` yields, or `None` when `ty` has no
     /// `next` hook ([`Checker::hook_method`] decides).
     pub(super) fn struct_iter_elem(&self, ty: &Ty) -> Option<Ty> {
+        // `iter` wins at run time wherever a value is iterated. A conditional `iter` whose bound
+        // this instantiation fails (`HookMiss::Bound`) is still called, so the type has no usable
+        // iteration hook: the `next` elements must not type any consumer.
+        if let Err(HookMiss::Bound(_)) = self.hook_verdict(ty, "Iterable", "iter") {
+            return None;
+        }
         match self.hook_method(ty, "Iterator", "next")?.0.ret {
             Ty::Option(inner) => Some(*inner),
             _ => None,
@@ -5513,7 +5520,8 @@ impl Checker {
                         }
                     }
                     None => {
-                        self.error(iter.span, format!("cannot iterate over {it}"));
+                        let note = self.iter_hook_note(&it);
+                        self.error(iter.span, format!("cannot iterate over {it}{note}"));
                         unknowns(vars)
                     }
                 }
@@ -5554,7 +5562,8 @@ impl Checker {
                 unknowns(vars)
             }
             other => {
-                self.error(iter.span, format!("cannot iterate over {other}"));
+                let note = self.iter_hook_note(other);
+                self.error(iter.span, format!("cannot iterate over {other}{note}"));
                 unknowns(vars)
             }
         }
@@ -5899,6 +5908,10 @@ impl Checker {
     /// parameter: ` (method 'add' parameter 1 is named 'o', but Add declares 'other')` for a
     /// struct or enum whose `method` misnames a parameter of `protocol`, else empty.
     pub(super) fn hook_name_note(&self, ty: &Ty, protocol: &str, method: &str) -> String {
+        // A conditional hook whose `where` bound this instantiation fails: name the bound.
+        if let Err(HookMiss::Bound(why)) = self.hook_verdict(ty, protocol, method) {
+            return format!(" ({why})");
+        }
         let methods = match ty {
             Ty::Struct(name, _) => self.structs.get(name).map(|info| &info.methods),
             Ty::Enum(name, _) => self.enum_methods_of(name),
@@ -5909,6 +5922,16 @@ impl Checker {
             .and_then(|sig| self.hook_name_mismatch(protocol, method, sig))
             .map(|mm| format!(" ({})", name_mismatch_text(protocol, method, mm)))
             .unwrap_or_default()
+    }
+
+    /// [`Self::hook_name_note`] for iteration: the `iter` hook's reason, else the `next` hook's.
+    pub(super) fn iter_hook_note(&self, ty: &Ty) -> String {
+        let note = self.hook_name_note(ty, "Iterable", "iter");
+        if note.is_empty() {
+            self.hook_name_note(ty, "Iterator", "next")
+        } else {
+            note
+        }
     }
 }
 
