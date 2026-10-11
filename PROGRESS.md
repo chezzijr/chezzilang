@@ -9378,6 +9378,22 @@ the stored-callback abort net, and `std.net`'s sticky-UTF-8 + `read_bytes` drain
 
 ## Current focus
 
+### TICKET-246 — boxes with a private heap (in progress, 2026-10-11)
+
+Landed so far, in plan-step order:
+
+1. `Heap` is `Sync` (`since_gc_bytes` is an atomic, `pending_mut` a `Mutex`; a `const _` asserts it).
+2. The copy walk runs on a borrowed `WalkSrc`; a `Vm` and a box reader share one body.
+3. `src/vm/boxctx.rs`: `Vm::with_box` (the one swap into a box context, undone on unwind),
+   `Vm.box_chain` + `Vm::as_box_caller` (the caller at any depth), `Vm::box_global` (the one door
+   for a module global inside a box closure), `Vm::is_task_view`.
+4. One box renderer, `Vm::display_box`. A box that holds itself prints `Shared(...)` instead of
+   hanging (`Shared`, `Atomic`) or overflowing the stack (`RwShared`). Grid:
+   `vm::tests::display_box_grid_terminates_on_every_cycle`, `tests/chz/suites/box_grid_test.chz`.
+
+Not landed yet: the live `Shared` / `RwShared` state (steps 5 to 7) and everything after it. Until
+then both boxes still store an encoded value and `update` / `write` still copy it out and back.
+
 ### TICKET-239 — the expected type has one channel (2026-10-10)
 
 Closes wave 22 Family E (`docs/root-causes-w22.md`): closures and generic calls now get the wrap,

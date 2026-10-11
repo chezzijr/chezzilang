@@ -8,6 +8,55 @@ use super::*;
 /// write site stays byte-identical. `copied_write_err` prefixes it with `'<name>'` or `this value`.
 pub(crate) const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
 
+/// TICKET-246 — one of the three boxes that render what they hold, borrowed from a heap object
+/// or from a wire handle. [`Vm::display_box`] is its only renderer.
+#[derive(Clone, Copy)]
+pub(super) enum BoxCore<'a> {
+    Shared(&'a Arc<SharedCore>),
+    RwShared(&'a Arc<RwSharedCore>),
+    Atomic(&'a Arc<AtomicCore>),
+}
+
+impl<'a> BoxCore<'a> {
+    /// The box behind a wire handle; `None` for every other wire value.
+    pub(super) fn of_wire(w: &'a WireValue) -> Option<Self> {
+        match w {
+            WireValue::Shared(c) => Some(BoxCore::Shared(c)),
+            WireValue::RwShared(c) => Some(BoxCore::RwShared(c)),
+            WireValue::Atomic(c) => Some(BoxCore::Atomic(c)),
+            _ => None,
+        }
+    }
+
+    fn to_wire(self) -> WireValue {
+        match self {
+            BoxCore::Shared(c) => WireValue::Shared(Arc::clone(c)),
+            BoxCore::RwShared(c) => WireValue::RwShared(Arc::clone(c)),
+            BoxCore::Atomic(c) => WireValue::Atomic(Arc::clone(c)),
+        }
+    }
+
+    /// The core's identity: what the `seen` stack and the snapshot map are keyed on.
+    fn addr(self) -> usize {
+        match self {
+            BoxCore::Shared(c) => Arc::as_ptr(c) as usize,
+            BoxCore::RwShared(c) => Arc::as_ptr(c) as usize,
+            BoxCore::Atomic(c) => Arc::as_ptr(c) as usize,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            BoxCore::Shared(_) => "Shared",
+            BoxCore::RwShared(_) => "RwShared",
+            BoxCore::Atomic(_) => "Atomic",
+        }
+    }
+}
+
+/// Box snapshots taken before a render, keyed on [`BoxCore::addr`].
+pub(super) type BoxSnaps = fxhash::FxHashMap<usize, WireValue>;
+
 impl Vm {
     /// Build the D4 layer-C fault for a write to an airlock copy. `name` is the binding name when
     /// the write site knows it (a global slot store); every other site passes `None` and gets the
@@ -2384,20 +2433,10 @@ impl Vm {
                 // TICKET-185 — `len()` counts the buffer only: a parked sender's offer stays
                 // invisible here too, matching `Channel.len()`.
                 Obj::Channel(core) => Ok(format!("Channel(len={})", core.q.lock().unwrap().len())),
-                // B3.1: the box holds the wire form; render it directly (`display` is `&self` and
-                // cannot `from_wire`, which allocates — `display_wire` is the read-only equivalent).
-                Obj::Shared(core) => Ok(format!(
-                    "Shared({})",
-                    self.display_wire(&core.v.lock().unwrap())
-                )),
-                Obj::RwShared(core) => Ok(format!(
-                    "RwShared({})",
-                    self.display_wire(&core.v.read().unwrap())
-                )),
-                Obj::Atomic(core) => Ok(format!(
-                    "Atomic({})",
-                    self.display_wire(&core.v.lock().unwrap())
-                )),
+                // A box renders through `display_box` only (TICKET-246).
+                Obj::Shared(core) => Ok(self.display_box_alone(BoxCore::Shared(core))),
+                Obj::RwShared(core) => Ok(self.display_box_alone(BoxCore::RwShared(core))),
+                Obj::Atomic(core) => Ok(self.display_box_alone(BoxCore::Atomic(core))),
                 Obj::AtomicInt(core) => Ok(format!(
                     "AtomicInt({})",
                     core.v.load(std::sync::atomic::Ordering::SeqCst)
@@ -2456,10 +2495,97 @@ impl Vm {
     }
 
     /// `Display` form of a [`WireValue`] — the read-only (`&self`) counterpart of [`display`] for
-    /// values that live in a core (only `Shared` renders its contents). Mirrors `display` arm-for-arm;
-    /// a `Handle(GcRef)` resolves back through the heap via `display`, a nested core renders like its
-    /// heap counterpart. B3.1: total over the sendable set.
+    /// values that live in a core (only a box renders its contents). A `Handle(GcRef)` resolves
+    /// back through the heap via `display`; a nested box renders through [`Vm::display_box`], the
+    /// same function its heap counterpart uses. B3.1: total over the sendable set.
+    #[cfg(test)]
     pub(super) fn display_wire(&self, w: &WireValue) -> String {
+        self.display_wire_in(w, &BoxSnaps::default(), &mut Vec::new())
+    }
+
+    /// A box with no snapshots taken beforehand and nothing being rendered around it.
+    fn display_box_alone(&self, core: BoxCore) -> String {
+        self.display_box(core, &BoxSnaps::default(), &mut Vec::new())
+    }
+
+    /// What a box holds, copied out; the lock is dropped before this returns. `None` when the
+    /// state cannot be read without waiting.
+    fn box_peek(&self, core: BoxCore) -> Option<WireValue> {
+        Some(match core {
+            BoxCore::Shared(c) => c.v.lock().unwrap().clone(),
+            BoxCore::RwShared(c) => c.v.read().unwrap().clone(),
+            BoxCore::Atomic(c) => c.v.lock().unwrap().clone(),
+        })
+    }
+
+    /// TICKET-246 — the ONE renderer of a `Shared` / `RwShared` / `Atomic`, for a heap object and
+    /// for a wire handle alike. Its rule:
+    ///
+    /// 1. a box already on the `seen` stack renders `Shared(...)`, like any container cycle;
+    /// 2. it never takes a blocking lock on a box state: a state it cannot read renders
+    ///    `Shared(<locked>)`;
+    /// 3. it renders a snapshot (from `snaps`, else peeked) after the lock dropped, never under it;
+    /// 4. contents render structurally, with no user `str` hook: a hook is user code.
+    pub(super) fn display_box(
+        &self,
+        core: BoxCore,
+        snaps: &BoxSnaps,
+        seen: &mut Vec<usize>,
+    ) -> String {
+        let (label, addr) = (core.label(), core.addr());
+        if seen.contains(&addr) {
+            return format!("{label}(...)");
+        }
+        let peeked;
+        let w = match snaps.get(&addr) {
+            Some(w) => w,
+            None => match self.box_peek(core) {
+                Some(w) => {
+                    peeked = w;
+                    &peeked
+                }
+                None => return format!("{label}(<locked>)"),
+            },
+        };
+        seen.push(addr);
+        let inner = self.display_wire_in(w, snaps, seen);
+        seen.pop();
+        format!("{label}({inner})")
+    }
+
+    /// One box's snapshot for the print path, which may wait.
+    fn box_snapshot_one(&mut self, core: BoxCore, span: Span) -> Result<WireValue, RuntimeError> {
+        self.box_peek(core)
+            .ok_or_else(|| self.err("a box state could not be read".to_string(), span))
+    }
+
+    /// Snapshots of `root` and of every box nested in a snapshot, each box once. The print path
+    /// takes them BEFORE it renders, so [`Vm::display_box`] never waits and never shows
+    /// `<locked>` to user output.
+    pub(super) fn box_snapshots(
+        &mut self,
+        root: BoxCore,
+        span: Span,
+    ) -> Result<BoxSnaps, RuntimeError> {
+        let mut snaps = BoxSnaps::default();
+        let mut seen = super::core::SeenCores::with(root.addr());
+        let mut work = vec![root.to_wire()];
+        let mut handles = Vec::new();
+        while let Some(w) = work.pop() {
+            // `pending` also carries channels and executors; they hold no box state to render.
+            let Some(core) = BoxCore::of_wire(&w) else {
+                continue;
+            };
+            let snap = self.box_snapshot_one(core, span)?;
+            super::core::collect_gcrefs_structural(&snap, &mut handles, &mut seen, &mut work);
+            snaps.insert(core.addr(), snap);
+        }
+        Ok(snaps)
+    }
+
+    /// [`display_wire`](Vm::display_wire) with the box snapshots taken beforehand and the stack of
+    /// boxes being rendered.
+    fn display_wire_in(&self, w: &WireValue, snaps: &BoxSnaps, seen: &mut Vec<usize>) -> String {
         match w {
             WireValue::Int(n) => n.to_string(),
             WireValue::Float(x) => format_float(*x),
@@ -2474,7 +2600,7 @@ impl Vm {
             WireValue::List { items, .. } => {
                 let inner = items
                     .iter()
-                    .map(|v| self.display_wire(v))
+                    .map(|v| self.display_wire_in(v, snaps, seen))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("[{inner}]")
@@ -2482,7 +2608,7 @@ impl Vm {
             WireValue::Tuple { items, .. } => {
                 let inner = items
                     .iter()
-                    .map(|v| self.display_wire(v))
+                    .map(|v| self.display_wire_in(v, snaps, seen))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("({inner})")
@@ -2490,7 +2616,13 @@ impl Vm {
             WireValue::Map { entries, .. } => {
                 let inner = entries
                     .iter()
-                    .map(|(_, k, v)| format!("{}: {}", self.display_wire(k), self.display_wire(v)))
+                    .map(|(_, k, v)| {
+                        format!(
+                            "{}: {}",
+                            self.display_wire_in(k, snaps, seen),
+                            self.display_wire_in(v, snaps, seen)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{{{inner}}}")
@@ -2501,7 +2633,7 @@ impl Vm {
                 } else {
                     let inner = entries
                         .iter()
-                        .map(|(_, v)| self.display_wire(v))
+                        .map(|(_, v)| self.display_wire_in(v, snaps, seen))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("{{{inner}}}")
@@ -2510,7 +2642,7 @@ impl Vm {
             WireValue::Struct { name, fields, .. } => {
                 let inner = fields
                     .iter()
-                    .map(|(k, v)| format!("{k}={}", self.display_wire(v)))
+                    .map(|(k, v)| format!("{k}={}", self.display_wire_in(v, snaps, seen)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 // ROOT REDESIGN — `name` is the qualified identity key; render the bare display name.
@@ -2530,7 +2662,7 @@ impl Vm {
                 // A carrier: its prefix, then its payload (a wire position is always nested).
                 if let Some(prefix) = Self::carrier_prefix_wire(*variant_id, payload) {
                     let inner = match payload.first() {
-                        Some(v) => self.display_wire(v),
+                        Some(v) => self.display_wire_in(v, snaps, seen),
                         None => Self::NONE_TEXT.to_string(),
                     };
                     return format!("{prefix}{inner}");
@@ -2543,7 +2675,7 @@ impl Vm {
                 } else {
                     let inner = payload
                         .iter()
-                        .map(|v| self.display_wire(v))
+                        .map(|v| self.display_wire_in(v, snaps, seen))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("{variant}({inner})")
@@ -2553,15 +2685,9 @@ impl Vm {
                 // TICKET-042a — see the `Obj::Channel` arm above.
                 format!("Channel(len={})", core.q.lock().unwrap().len())
             }
-            WireValue::Shared(core) => {
-                format!("Shared({})", self.display_wire(&core.v.lock().unwrap()))
-            }
-            WireValue::RwShared(core) => {
-                format!("RwShared({})", self.display_wire(&core.v.read().unwrap()))
-            }
-            WireValue::Atomic(core) => {
-                format!("Atomic({})", self.display_wire(&core.v.lock().unwrap()))
-            }
+            WireValue::Shared(core) => self.display_box(BoxCore::Shared(core), snaps, seen),
+            WireValue::RwShared(core) => self.display_box(BoxCore::RwShared(core), snaps, seen),
+            WireValue::Atomic(core) => self.display_box(BoxCore::Atomic(core), snaps, seen),
             WireValue::AtomicInt(core) => {
                 format!(
                     "AtomicInt({})",
@@ -2639,7 +2765,7 @@ impl Vm {
             // A wired cursor renders like its heap counterpart (`Obj::Iter` → "<iterator>").
             WireValue::Iter { .. } => "<iterator>".to_string(),
             // A cell is a transparent box — render its inner value (never user-visible in practice).
-            WireValue::Cell { inner, .. } => self.display_wire(inner),
+            WireValue::Cell { inner, .. } => self.display_wire_in(inner, snaps, seen),
             // A back-reference closes a Cell/Closure cycle; render a stable marker rather than recurse
             // (never user-visible in practice — a wire value is only rendered on the error path).
             WireValue::Backref(_) => "<cycle>".to_string(),
@@ -3017,9 +3143,6 @@ impl Vm {
             // Channel / Shared / Executor have no protocol hook — reuse the structural `Display`
             // (`stringify`'s catch-all falls back to `Display` too).
             Obj::Channel(_)
-            | Obj::Shared(_)
-            | Obj::RwShared(_)
-            | Obj::Atomic(_)
             | Obj::AtomicInt(_)
             | Obj::Executor(_)
             | Obj::Socket(_)
@@ -3028,6 +3151,19 @@ impl Vm {
             | Obj::Reader(_)
             | Obj::Ptr(_) => {
                 out.push_str(&self.display_guarded(Value::obj(h), depth)?);
+            }
+            // TICKET-246 — the print path snapshots the box and every box nested in it first
+            // (it may wait there), then renders with no lock held.
+            Obj::Shared(_) | Obj::RwShared(_) | Obj::Atomic(_) => {
+                let root = match self.heap.get(h) {
+                    Obj::Shared(c) => WireValue::Shared(Arc::clone(c)),
+                    Obj::RwShared(c) => WireValue::RwShared(Arc::clone(c)),
+                    Obj::Atomic(c) => WireValue::Atomic(Arc::clone(c)),
+                    _ => unreachable!("matched a box above"),
+                };
+                let core = BoxCore::of_wire(&root).expect("a box handle");
+                let snaps = self.box_snapshots(core, span)?;
+                out.push_str(&self.display_box(core, &snaps, &mut Vec::new()));
             }
             // Experimental generators stringify opaquely (no protocol hook).
             Obj::Generator(_) => out.push_str("<generator>"),

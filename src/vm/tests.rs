@@ -23055,3 +23055,116 @@ fn with_box_restores_the_context_when_the_closure_panics() {
     // The box contexts still work after both unwinds.
     assert_eq!(vm.with_box(&mut outer, |vm| vm.stack.len()), 1);
 }
+
+/// TICKET-246 (F1) — every renderer terminates on every box cycle, with the container cycle
+/// marker. Grid: renderer {`Vm::display`, `Vm::display_wire`, `stringify`} x box {Shared,
+/// RwShared, Atomic} x shape {no cycle, holds itself, through a `List`, through a struct, two
+/// boxes holding each other}. Each cell runs on its own thread under a ten-second wait, so a
+/// renderer that recurses while it holds a payload lock fails its cell instead of hanging the run.
+#[test]
+fn display_box_grid_terminates_on_every_cycle() {
+    use std::sync::mpsc;
+    #[derive(Clone, Copy, Debug)]
+    enum Kind {
+        Shared,
+        RwShared,
+        Atomic,
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum Shape {
+        NoCycle,
+        Itself,
+        ThroughList,
+        ThroughStruct,
+        EachOther,
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum Renderer {
+        Display,
+        DisplayWire,
+        Stringify,
+    }
+    // A box of `kind` as a wire handle, plus the way to set what it holds.
+    fn new_box(kind: Kind) -> WireValue {
+        match kind {
+            Kind::Shared => WireValue::Shared(Arc::new(SharedCore::default())),
+            Kind::RwShared => WireValue::RwShared(Arc::new(RwSharedCore::default())),
+            Kind::Atomic => WireValue::Atomic(Arc::new(AtomicCore::default())),
+        }
+    }
+    fn set(b: &WireValue, held: WireValue) {
+        match b {
+            WireValue::Shared(c) => *c.v.lock().unwrap() = held,
+            WireValue::RwShared(c) => *c.v.write().unwrap() = held,
+            WireValue::Atomic(c) => *c.v.lock().unwrap() = held,
+            _ => unreachable!(),
+        }
+    }
+    fn cell(kind: Kind, shape: Shape, renderer: Renderer) -> String {
+        let mut vm = Vm::new(Arc::new(empty_program()));
+        let b = new_box(kind);
+        match shape {
+            Shape::NoCycle => set(&b, WireValue::Int(1)),
+            Shape::Itself => set(&b, b.clone()),
+            Shape::ThroughList => set(
+                &b,
+                WireValue::List {
+                    id: 0,
+                    items: vec![b.clone()],
+                },
+            ),
+            Shape::ThroughStruct => set(
+                &b,
+                WireValue::Struct {
+                    id: 0,
+                    name: "N".into(),
+                    fields: vec![("b".into(), b.clone())],
+                },
+            ),
+            Shape::EachOther => {
+                let other = new_box(kind);
+                set(&other, b.clone());
+                set(&b, other);
+            }
+        }
+        match renderer {
+            Renderer::DisplayWire => vm.display_wire(&b),
+            Renderer::Display => {
+                let v = vm.from_wire(b);
+                vm.display(v)
+            }
+            Renderer::Stringify => {
+                let v = vm.from_wire(b);
+                vm.stringify(v, Span::default(), 0).expect("renders")
+            }
+        }
+    }
+    for kind in [Kind::Shared, Kind::RwShared, Kind::Atomic] {
+        let l = format!("{kind:?}");
+        for (shape, want) in [
+            (Shape::NoCycle, format!("{l}(1)")),
+            (Shape::Itself, format!("{l}({l}(...))")),
+            (Shape::ThroughList, format!("{l}([{l}(...)])")),
+            (Shape::ThroughStruct, format!("{l}(N(b={l}(...)))")),
+            (Shape::EachOther, format!("{l}({l}({l}(...)))")),
+        ] {
+            for renderer in [
+                Renderer::Display,
+                Renderer::DisplayWire,
+                Renderer::Stringify,
+            ] {
+                let (tx, rx) = mpsc::channel();
+                std::thread::Builder::new()
+                    .stack_size(VM_STACK_BYTES)
+                    .spawn(move || {
+                        let _ = tx.send(cell(kind, shape, renderer));
+                    })
+                    .unwrap();
+                let got = rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap_or_else(|_| panic!("{kind:?} x {shape:?} x {renderer:?}: no render"));
+                assert_eq!(got, want, "{kind:?} x {shape:?} x {renderer:?}");
+            }
+        }
+    }
+}

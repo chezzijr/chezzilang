@@ -713,6 +713,22 @@ task* but is **not** sendable (copy-on-spawn gives each task its own copy); `Sha
 Under the sequential executor a single thread already serialises every write, so `Shared` is correct
 from C3 with no locking; under C5 it becomes a real owner-task + channel, same API.
 
+**Display rule (TICKET-246).** `print`, `str` and interpolation of a `Shared` / `RwShared` /
+`Atomic` render what the box holds structurally, with no user `str` hook: `str(Shared(P(1)))` is
+`Shared(P(x=1))` even when `P` defines `str`. A box that holds itself, directly or through a
+container or a struct, prints the cycle marker like any other container cycle:
+
+```
+b: Shared[N?] = Shared(None)
+n := N(1, b)
+b.set(?n)
+print(n)        # N(id=1, box=Shared(N(id=1, box=Shared(...))))
+```
+
+The renderer takes a snapshot of the box, drops the lock, then renders. A fault message that
+shows a box never waits for it: when the state is busy the message shows `Shared(<locked>)`.
+User output from `print` / `str` never shows `<locked>`.
+
 ---
 
 ## 6b. `Atomic[T]` — the cross-task atomic box
