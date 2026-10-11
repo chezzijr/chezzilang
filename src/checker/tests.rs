@@ -39523,6 +39523,36 @@ fn static_method_is_not_a_hook_for_the_operator() {
     );
 }
 
+/// TICKET-250 — an `Atomic` payload is rejected only when its `eq` is the `Eq` hook
+/// (`Checker::hook_method`). A static `eq`, one that misnames its operand, and one that returns
+/// `int` are ordinary methods: the payload compares structurally, so `cas` and `==` agree.
+#[test]
+fn an_atomic_payload_with_a_non_hook_eq_is_legal() {
+    for owner in ["struct P:\n    v: int\n", "enum P:\n    A(int)\n"] {
+        let mk = if owner.starts_with("struct") {
+            "P(1)"
+        } else {
+            "P.A(1)"
+        };
+        for eq in [
+            "    fn eq(a: int, b: int) -> bool:\n        return true\n",
+            "    fn eq(self, o: P) -> bool:\n        return true\n",
+            "    fn eq(self, other: P) -> int:\n        return 1\n",
+        ] {
+            entry_ok(&format!(
+                "import std.concurrency\n{owner}{eq}a := Atomic({mk})\nprint(a.load() == {mk})\n"
+            ));
+        }
+        // The hook itself is still refused.
+        entry_rejects(
+            &format!(
+                "import std.concurrency\n{owner}    fn eq(self, other: P) -> bool:\n        return true\na := Atomic({mk})\nprint(a.load() == {mk})\n"
+            ),
+            "payload defines its own 'eq'",
+        );
+    }
+}
+
 /// TICKET-250 — `self` is the receiver only as the first parameter of a method declared in a
 /// struct, enum or protocol body, un-annotated or annotated with the owner, with no default.
 /// Every other parameter named `self` is a declaration error. A cell the parser rejects is

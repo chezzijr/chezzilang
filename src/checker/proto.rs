@@ -2403,9 +2403,8 @@ impl Checker {
                 // every instantiation the checker lets reach the operator, so ask with its own
                 // receiver bounds assumed.
                 let assumed = self
-                    .declared_methods(&ty)
-                    .and_then(|ms| ms.get(*method))
-                    .map(|sig| sig.where_bounds.clone())
+                    .hook_candidate(&ty, *hook)
+                    .map(|sig| sig.where_bounds)
                     .unwrap_or_default();
                 let saved_bounds = self.type_params.clone();
                 for wb in assumed {
@@ -2424,6 +2423,13 @@ impl Checker {
                 self.hook_table.insert((self.graph_module_idx, key), set);
             }
         }
+    }
+
+    /// The declared method of `ty` that carries `hook`'s name, hook or not. It decides nothing:
+    /// its readers need the candidate's own `where` bounds, and ask [`Self::hook_method`] for the
+    /// verdict.
+    pub(super) fn hook_candidate(&self, ty: &Ty, hook: Hook) -> Option<FnSig> {
+        self.declared_methods(ty)?.get(hook.method()).cloned()
     }
 
     /// The hook a call to `method` through `protocol` is: `Some` when the nearest protocol that
@@ -3026,10 +3032,7 @@ impl Checker {
                 if let hit @ Some(_) = any(self, args, stack) {
                     return hit;
                 }
-                if self
-                    .struct_shape(name)
-                    .is_some_and(|i| i.methods.contains_key("eq"))
-                {
+                if self.hook_method(ty, "Eq", "eq").is_some() {
                     return Some(ty.to_string());
                 }
                 if stack.contains(name) {
@@ -3047,10 +3050,7 @@ impl Checker {
                 if let hit @ Some(_) = any(self, args, stack) {
                     return hit;
                 }
-                if self
-                    .enum_methods_of(name)
-                    .is_some_and(|m| m.contains_key("eq"))
-                {
+                if self.hook_method(ty, "Eq", "eq").is_some() {
                     return Some(ty.to_string());
                 }
                 if stack.contains(name) {
@@ -3401,8 +3401,8 @@ impl Checker {
                 // So: bounds first (a `where`-less escape hatch has none, so it still costs
                 // nothing), then the hook alone short-circuits; a non-hook `eq` falls through to the
                 // structural walk below, because structural equality really is what its `==` does.
-                if let Some(sig) = info.methods.get("eq") {
-                    if let hit @ Some(_) = self.eq_where_unsatisfied(ty, sig) {
+                if let Some(sig) = self.hook_candidate(ty, Hook::Eq) {
+                    if let hit @ Some(_) = self.eq_where_unsatisfied(ty, &sig) {
                         return hit;
                     }
                     if self.hook_method(ty, "Eq", "eq").is_some() {
@@ -3425,7 +3425,7 @@ impl Checker {
                 // Bounds-then-hook, exactly as the struct arm above — see its comment for why a
                 // non-hook `eq`'s `where` clause must still be proven. (`.cloned()` because
                 // `enum_methods_of` borrows `self`, which `eq_where_unsatisfied` needs mutably-free.)
-                if let Some(sig) = self.enum_methods_of(name).and_then(|m| m.get("eq")).cloned() {
+                if let Some(sig) = self.hook_candidate(ty, Hook::Eq) {
                     if let hit @ Some(_) = self.eq_where_unsatisfied(ty, &sig) {
                         return hit;
                     }

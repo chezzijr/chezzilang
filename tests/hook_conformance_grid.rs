@@ -690,3 +690,80 @@ fn operator_and_bound_agree_in_every_cell() {
         bad.join("\n")
     );
 }
+
+/// TICKET-250 (D6) — `iterable_elem` is the one reader of "what does iterating this yield".
+/// Every source of an iterand feeds every consumer, and each prints the same elements. No range
+/// and no channel row: the owner is designing their rule separately.
+#[test]
+fn every_iterand_source_feeds_every_consumer() {
+    const E: &str = "(int, int)";
+    let decls = format!(
+        "struct Bag:\n    xs: List[{E}]\n    fn iter(self) -> Iterator[{E}]:\n        return self.xs.iter()\nstruct Cur:\n    i: int\n    fn next(self) -> {E}?:\n        if self.i >= 2:\n            return None\n        self.i += 1\n        return (self.i, self.i * 10)\nfn drain[S: Iterable[T], T](s: S) -> List[T]:\n    return [q for q in s]\n"
+    );
+    const BAG: &str = "Bag([(1, 10), (2, 20)])";
+    // (source, wrapper header or "" for a top-level use, the value the consumer iterates)
+    let sources: [(&str, String, &str); 5] = [
+        ("struct with iter", String::new(), BAG),
+        ("struct with next", String::new(), "Cur(0)"),
+        (
+            "S: Iterable[T]",
+            format!("fn w[S: Iterable[{E}]](s: S):\n"),
+            BAG,
+        ),
+        (
+            "S: Iterator[T]",
+            format!("fn w[S: Iterator[{E}]](s: S):\n"),
+            "Cur(0)",
+        ),
+        (
+            "Iterable[T]-typed value",
+            format!("fn w(s: Iterable[{E}]):\n"),
+            BAG,
+        ),
+    ];
+    let list = "[(1, 10), (2, 20)]\n";
+    let consumers: [(&str, String, &str); 6] = [
+        (
+            "for",
+            format!("t: List[{E}] = []\nfor q in SRC:\n    t.push(q)\nprint(t)\n"),
+            list,
+        ),
+        (
+            "comprehension",
+            "print([q for q in SRC])\n".to_string(),
+            list,
+        ),
+        ("List()", "print(List(SRC))\n".to_string(), list),
+        ("Set()", "print(Set(SRC).len())\n".to_string(), "2\n"),
+        ("Map()", "print(Map(SRC))\n".to_string(), "{1: 10, 2: 20}\n"),
+        ("generic inference", "print(drain(SRC))\n".to_string(), list),
+    ];
+    let mut bad = Vec::new();
+    for (si, (source, wrapper, value)) in sources.iter().enumerate() {
+        for (ci, (consumer, body, want)) in consumers.iter().enumerate() {
+            let src = if wrapper.is_empty() {
+                format!("{decls}{}", body.replace("SRC", value))
+            } else {
+                let inner: String = body
+                    .replace("SRC", "s")
+                    .lines()
+                    .map(|l| format!("    {l}\n"))
+                    .collect();
+                format!("{decls}{wrapper}{inner}w({value})\n")
+            };
+            let got = run(&format!("iterand_{si}_{ci}"), &src, &mut bad);
+            if got.stdout != format!("{want}END\n") {
+                bad.push(format!(
+                    "{source} -> {consumer}: expected {want:?}, got: {}",
+                    got.text
+                ));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} cell(s) wrong:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}

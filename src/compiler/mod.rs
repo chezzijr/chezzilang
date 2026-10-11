@@ -436,11 +436,8 @@ fn register_variant(program: &mut Program, enum_name: &str, variant: &str, arity
 }
 
 impl Compiler {
-    /// Materialize the `Eq`-hook tables the VM's `==` reads (`Program::eq_struct` / `eq_enum`) from
-    /// the key-based `eq_hooks` gathered while compiling. Runs last: `tid`s and `variant_id`s are the
-    /// index space, and both are only final once every module has been hoisted and compiled.
     /// Materialize `Program::providers` from the emit-site ids and the declaration-site protos.
-    /// Runs last, for the same reason [`Compiler::build_eq_hooks`] does: the caller's module is
+    /// Runs last, for the same reason [`Compiler::build_hooks`] does: the caller's module is
     /// compiled BEFORE the definer's, so a provider's `ProtoId` is only known once every module has
     /// been compiled.
     ///
