@@ -749,6 +749,10 @@ the closure itself spawns: a child of a `parallel:` inside the closure that read
 **same** box can never be served (the closure holds the box until the nursery joins), so the run
 stops with a `deadlock:` fault at that `parallel:`; it does not hang. Before TICKET-246 such a child
 `get` returned the pre-update value. Pass the child the value it needs instead of the box.
+A task's open nurseries stay its own inside a box closure: when a child of an enclosing `parallel:`
+faults, an owner that waits inside the closure is cut there, and a `recover:` inside the closure
+does not catch the child's fault. A reader of a `RwShared` whose writer is blocked for good gets the
+`update guard wait: deadlock` fault at its own `read` / `get`, as a `Shared` user does.
 `Shared.read(f)` runs
 `f` on the live value, so a mutation `f` makes persists. `RwShared` (section 6f) is the same box
 core behind a read-write lock.

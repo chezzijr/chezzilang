@@ -142,8 +142,10 @@ fn main():
     ex.shutdown()
 main()
 "#,
-        site: "6:11",
-        after_ok: true,
+        // TICKET-246: a reader waits for a writer that holds the box, so main is the first party
+        // at its `read`, as in `ex_guard`.
+        site: "9:10",
+        after_ok: false,
         test_mode: false,
     },
     Row {
@@ -236,7 +238,7 @@ fn main():
 main()
 "#,
         site: "6:5",
-        after_ok: true,
+        after_ok: false,
         test_mode: false,
     },
     Row {
@@ -509,7 +511,7 @@ fn run_cell(
 
 /// TICKET-223 — the whole family: every shape x which judge may decide first x worker count x seed.
 /// The run always ends at the first party's site with one report, and nothing prints after the
-/// verdict except where a `RwShared.read` legally runs beside a writer (ex_rw, sp_rw); plus
+/// verdict (since TICKET-246 a `RwShared.read` waits for a writer too: ex_rw, sp_rw); plus
 /// `CLEANUP_ROWS`, where nothing prints after the verdict and the cause keeps the report.
 #[test]
 fn deadlock_verdict_grid_ends_at_the_first_party_site() {

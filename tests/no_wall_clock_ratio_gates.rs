@@ -513,7 +513,7 @@ fn no_new_rust_test_sleeps_to_order_two_events() {
 /// nothing else can express the wait: a parked rendezvous sender or a job that must be INSIDE the
 /// sleep when cancelled has no Chezzi-visible predicate, and one entry asserts a window a value must
 /// NOT change across, which is a legitimate clock use, not a happens-before guess (TICKET-059/060).
-const CHZ_SLEEP_SITES: [(&str, &str); 8] = [
+const CHZ_SLEEP_SITES: [(&str, &str); 10] = [
     (
         "tests/chz/spec/rendezvous_channel_test.chz",
         "time.sleep_ms(150)",
@@ -543,6 +543,12 @@ const CHZ_SLEEP_SITES: [(&str, &str); 8] = [
     // TICKET-163: the sleep IS the measured quantity -- two `time.now_ms()` reads around it must
     // differ by at least its length. It orders no two events, so no handshake can replace it.
     ("tests/chz/stdlib/time_ms_test.chz", "time.sleep_ms(50)"),
+    // TICKET-246: the sleep IS the wait under test -- a timed wait inside a box closure. The
+    // `recv` beside it blocks until the `send` that follows the sleep, so the sleep orders nothing.
+    ("tests/chz/suites/box_rules_test.chz", "time.sleep_ms(5)"),
+    // TICKET-246: the writer holds the box in this sleep; `started` orders the events. A reader
+    // that arrives after the sleep still sees the new value, so the assert holds at any timing.
+    ("tests/chz/suites/box_rules_test.chz", "time.sleep_ms(150)"),
 ];
 
 /// Every `path:line: text` under `tests/chz` that calls `time.sleep_ms(` and is not one of

@@ -139,6 +139,50 @@ fn a_child_task_reading_the_box_inside_its_own_closure_is_a_deadlock_fault_not_a
     }
 }
 
+/// A child task's fault cuts its owner wherever the owner waits (TICKET-188), a box closure
+/// included: the nurseries a task has open belong to the task, not to the heap its code runs in.
+/// A `recover:` inside the closure sits inside the faulting nursery and must not catch (DEC-096).
+/// With the caller's nurseries invisible inside the box, the plain wait hung and the `recover:`
+/// cell printed `caught`.
+#[test]
+fn a_child_fault_cuts_its_owner_inside_a_box_closure() {
+    let waits = [
+        ("plain", "    print(ch.recv())"),
+        (
+            "recover",
+            "    r := recover: ch.recv()\n    print(\"caught {r}\")",
+        ),
+        (
+            "nursery",
+            "    parallel:\n        spawn:\n            print(ch.recv())",
+        ),
+    ];
+    let calls = [
+        ("Shared", "w.update(park)"),
+        ("Shared", "print(w.read(park))"),
+        ("RwShared", "w.write(park)"),
+        ("Shared", "w.update(fn(x): nested(x))"),
+    ];
+    for (wname, wait) in waits {
+        for (i, (kind, call)) in calls.into_iter().enumerate() {
+            let src = format!(
+                "import std.concurrency\nch := Channel[int](0)\nstarted := Channel[int](1)\ninner := Shared(0)\nfn park(x: int) -> int:\n    started.send(1)\n{wait}\n    return x\nfn nested(x: int) -> int:\n    inner.update(park)\n    return x\nw := {kind}(0)\nparallel:\n    spawn:\n        _ := started.recv()\n        panic(\"boom\")\n    {call}\n    print(\"after\")\n"
+            );
+            let path = write_program(&format!("cut-{wname}-{i}"), &src);
+            for threads in [Some("1"), Some("2"), None] {
+                let r = chezzi(&["run", path.to_str().unwrap()], threads, 20);
+                assert!(
+                    r.code == Some(1) && r.stderr.contains("boom") && r.stdout.is_empty(),
+                    "{wname} / {call} at {threads:?}: code {:?} stdout {:?} stderr {}",
+                    r.code,
+                    r.stdout,
+                    r.stderr
+                );
+            }
+        }
+    }
+}
+
 /// A fault message is built by the `&self` renderer. An `Err` payload that holds a box holding
 /// the payload must render with the cycle marker and exit 1; on the base binary it hung.
 #[test]

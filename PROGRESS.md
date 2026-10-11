@@ -9427,6 +9427,10 @@ Landed so far, in plan-step order:
     8 us against 6425 to 9892 us. Slower, and explained there: whole-value `get` of a big value
     (about 1.8 times), `Shared.get` with 8 callers, box creation (about 4 us more per box), nested
     box calls. `Shared.get` tries the state lock before the update guard.
+    Owner faults: `Vm::owned_nurseries` is the one walk of a task's open nurseries and it includes
+    the callers parked on `box_chain`, with a task-wide nursery index (`Vm::nursery_base`), so a
+    child's fault cuts an owner that waits inside a box closure (`tests/owner_fault_grid.rs`, the
+    `update` context; `a_child_fault_cuts_its_owner_inside_a_box_closure`).
 11. Not done: ThreadSanitizer (no nightly toolchain on this box, `docs/bug-discovery.md`); box cells
     in `tests/callback_nursery_grid.rs`; a socket wait inside a box closure has no test.
 

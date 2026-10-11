@@ -488,7 +488,7 @@ impl Vm {
         // non-empty), for the width yield at the bottom. (The owner-fault rung that first rode this
         // sample is now the `take_halt` below, TICKET-188.) A program with no `parallel:` and no cap
         // still neither ticks nor takes a lock.
-        let sampled = if self.deadline.is_some() || !self.eager_scheds.is_empty() {
+        let sampled = if self.deadline.is_some() || self.owns_nursery() {
             self.hof_sampled_tick()?
         } else {
             false
@@ -1677,10 +1677,13 @@ impl Vm {
         // fault that was neither caught nor propagated cannot bypass an unrelated later handler.
         // This makes the delivery happen ONCE — the owner aborts at the first delivery instead of
         // catching and re-reading the recorded fault at every later checkpoint.
+        // `n` is task-wide (`Vm::owned_nurseries`): inside a box call a nursery of a parked caller
+        // sits below `base`, so every handler of this context is inside it.
+        let base = self.nursery_base();
         let owner_bypass = matches!(
             (self.cut, self.handlers.last()),
             (Some(Cut::Delivered { floor: Some(n) }), Some(h))
-                if caught_here && n < self.nurseries.len() && h.nursery_len > n
+                if caught_here && n < base + self.nurseries.len() && base + h.nursery_len > n
         );
         if cancel_bypass || owner_bypass || rte.is_over_memory || rte.is_timed_out {
             let over_mem = rte.is_over_memory;
@@ -2011,7 +2014,7 @@ impl Vm {
         if self.cancel_suppressed() {
             return None;
         }
-        if !owned || self.eager_scheds.is_empty() {
+        if !owned || !self.owns_nursery() {
             return block::halt_of(self.cancel_flags().map(|a| &**a), std::iter::empty(), false);
         }
         self.halt_requested_owned()
@@ -2024,7 +2027,7 @@ impl Vm {
     fn halt_requested_owned(&self) -> Option<Halt> {
         block::halt_of(
             self.cancel_flags().map(|a| &**a),
-            super::open_nurseries(&self.eager_scheds),
+            self.owned_nurseries(),
             self.quiesce.run_halt_hint(),
         )
     }
@@ -2168,9 +2171,7 @@ impl Vm {
         }
         WakeSet {
             cancel: self.cancel_flags().cloned().collect(),
-            owned: super::open_nurseries(&self.eager_scheds)
-                .map(|o| OwnedScope::of(&o))
-                .collect(),
+            owned: self.owned_nurseries().map(|o| OwnedScope::of(&o)).collect(),
         }
     }
 
@@ -2248,7 +2249,7 @@ impl Vm {
         // an eager job inherits nothing (`creator_cancel` in `Op::NewExecutor`); an owner in its
         // `shutdown()` is cut by its own halt read in `join_executor`. This used to be a
         // second walk, `nursery_ancestors`, read by only the eager-nursery seams.
-        a.extend(super::open_nurseries(&self.eager_scheds).map(|o| Arc::clone(o.flag)));
+        a.extend(self.owned_nurseries().map(|o| Arc::clone(o.flag)));
         a
     }
 

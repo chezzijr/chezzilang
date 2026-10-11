@@ -491,6 +491,53 @@ impl Vm {
         }
     }
 
+    /// How many nurseries this task has open BELOW the context now running: the parked callers'
+    /// stacks, summed over `box_chain`. `0` outside a box call. A nursery index a halt carries is
+    /// this base plus the index in its own context's `nurseries`, so one index names one nursery
+    /// of the task at every box depth.
+    pub(super) fn nursery_base(&self) -> usize {
+        self.box_chain
+            .iter()
+            .map(|f| f.caller.nurseries.len())
+            .sum()
+    }
+
+    /// TICKET-188 — does this party own an open nursery? The gate of the owned halt read.
+    #[inline]
+    pub(super) fn owns_nursery(&self) -> bool {
+        !self.eager_scheds.is_empty()
+            || self
+                .box_chain
+                .iter()
+                .any(|f| !f.caller.eager_scheds.is_empty())
+    }
+
+    /// TICKET-188 — THE open nurseries of this party, outermost first, for every `Vm` reader. A
+    /// task's nurseries belong to the task, not to the heap its code runs in: inside a box call
+    /// the callers' nurseries are parked on `box_chain` and are still this party's, so a child's
+    /// fault cuts an owner that waits inside a box closure. `n` is task-wide (see
+    /// [`Vm::nursery_base`]).
+    pub(super) fn owned_nurseries(&self) -> impl DoubleEndedIterator<Item = block::OwnedRef<'_>> {
+        let below = |i: usize| -> usize {
+            self.box_chain[..i]
+                .iter()
+                .map(|f| f.caller.nurseries.len())
+                .sum()
+        };
+        let own = self.nursery_base();
+        self.box_chain
+            .iter()
+            .enumerate()
+            .map(move |(i, f)| (below(i), &f.caller.eager_scheds))
+            .chain(std::iter::once((own, &self.eager_scheds)))
+            .flat_map(|(base, eager)| {
+                super::open_nurseries(eager).map(move |mut o| {
+                    o.n += base;
+                    o
+                })
+            })
+    }
+
     /// "Is this view a task's copy?" — a write to a module global faults there (D4). True for a
     /// spawned task and inside a box closure.
     pub(super) fn is_task_view(&self) -> bool {
