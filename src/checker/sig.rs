@@ -5104,8 +5104,21 @@ impl Checker {
     /// The element type the `next` hook of declared type `ty` yields, or `None` when `ty` has no
     /// `next` hook ([`Checker::hook_method`] decides).
     pub(super) fn struct_iter_elem(&self, ty: &Ty) -> Option<Ty> {
-        match self.hook_method(ty, "Iterator", "next")?.0.ret {
+        Self::next_ret_elem(self.hook_method(ty, "Iterator", "next")?.0.ret)
+    }
+
+    /// The element type in the return type of a `next` hook, `Option[E]`.
+    pub(super) fn next_ret_elem(ret: Ty) -> Option<Ty> {
+        match ret {
             Ty::Option(inner) => Some(*inner),
+            _ => None,
+        }
+    }
+
+    /// The element type in the return type of an `iter` hook, `Iterator[E]`.
+    pub(super) fn iter_ret_elem(ret: Ty) -> Option<Ty> {
+        match ret {
+            Ty::Struct(name, mut args) if name == "Iterator" && args.len() == 1 => args.pop(),
             _ => None,
         }
     }
@@ -5113,10 +5126,7 @@ impl Checker {
     /// The element type the `iter` hook of declared type `ty` produces, or `None` when `ty` has
     /// no `iter` hook ([`Checker::hook_method`] decides).
     pub(super) fn struct_iterable_elem(&self, ty: &Ty) -> Option<Ty> {
-        match self.hook_method(ty, "Iterable", "iter")?.0.ret {
-            Ty::Struct(name, mut args) if name == "Iterator" && args.len() == 1 => args.pop(),
-            _ => None,
-        }
+        Self::iter_ret_elem(self.hook_method(ty, "Iterable", "iter")?.0.ret)
     }
 
     /// The element type of ANY `Iterable` value — the single source of truth for `Iterable`

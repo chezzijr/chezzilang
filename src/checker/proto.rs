@@ -2159,8 +2159,12 @@ impl Checker {
         if protocol == "Iterator" && !matches!(ty, Ty::Param(_) | Ty::Protocol(..)) {
             // `for` in a `[S: Iterator[T]]` body iterates the value as it iterates any other, so
             // the bound also needs `iterable_elem`, the one reader of what that yields.
+            let elem = match self.iterator_bound_elem(ty) {
+                Ok(elem) => elem,
+                Err(why) => return Err(format!("type {ty} does not satisfy Iterator {why}")),
+            };
             let has_next = self.struct_iter_elem(ty).is_some();
-            return if has_next && self.iterable_elem(ty).is_some() {
+            return if has_next && elem.is_some() {
                 // A declared type's own `next` hook: a real method, not an intrinsic grant.
                 Ok(Grant::no_intrinsic_method())
             } else if Self::is_cursor_ty(ty) {
@@ -2422,6 +2426,30 @@ impl Checker {
         }
     }
 
+    /// The `Iterator[T]` bound has ONE element type for a type: `s.next()`, `for q in s`,
+    /// `List(s)` and the recovery of `T` all read it. `for` and `List()` run `iter` where the
+    /// declaration has that hook and `s.next()` runs `next`, so a declaration whose two hooks
+    /// yield different element types has no such type: `Err` names both, read at the
+    /// DECLARATION, so every instantiation gets one answer. `Ok` is what iterating `ty` yields
+    /// ([`Checker::iterable_elem`]).
+    pub(super) fn iterator_bound_elem(&self, ty: &Ty) -> Result<Option<Ty>, String> {
+        let decl = self.declaration_of(ty).unwrap_or_else(|| ty.clone());
+        let called = |protocol: &str, hook: Hook| {
+            self.declares_hook(&decl, protocol, hook.method())
+                .then(|| self.hook_candidate(&decl, hook))
+                .flatten()
+        };
+        let next = called("Iterator", Hook::Next).and_then(|sig| Self::next_ret_elem(sig.ret));
+        let iter = called("Iterable", Hook::Iter).and_then(|sig| Self::iter_ret_elem(sig.ret));
+        match (next, iter) {
+            (Some(next), Some(iter)) if next != iter => Err(format!(
+                "('next' yields {next}, 'iter' yields {iter}); the bound needs one element type. \
+                 Bound the parameter `Iterable[{iter}]`, or make both hooks yield the same type"
+            )),
+            (Some(_) | None, Some(_) | None) => Ok(self.iterable_elem(ty)),
+        }
+    }
+
     /// The declaration that the declared type `ty` instantiates (`Key[int]` -> `Key[T]`), or
     /// `None` when `ty` is that declaration itself or is not a struct or an enum.
     fn declaration_of(&self, ty: &Ty) -> Option<Ty> {
@@ -2450,15 +2478,14 @@ impl Checker {
         protocol: &str,
         method: &str,
     ) -> Result<(FnSig, HashMap<String, Ty>), HookMiss> {
-        let instantiation = match self.declaration_of(ty) {
-            Some(decl) => match self.hook_verdict(&decl, protocol, method) {
-                Ok(_) | Err(HookMiss::Bound(_)) => true,
+        if let Some(decl) = self.declaration_of(ty) {
+            match self.hook_verdict(&decl, protocol, method) {
+                Ok(_) | Err(HookMiss::Bound(_)) => {}
                 Err(miss @ (HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_))) => {
                     return Err(miss);
                 }
-            },
-            None => false,
-        };
+            }
+        }
         let methods = self.declared_methods(ty).ok_or(HookMiss::Absent)?;
         let actual = methods.get(method).ok_or(HookMiss::Absent)?;
         let pinfo = self.protocol_shape(protocol).ok_or(HookMiss::Absent)?;
@@ -2491,8 +2518,6 @@ impl Checker {
             Ok(()) => Ok((sig, bound)),
             Err(_) if actual.is_static => Err(HookMiss::Static),
             Err(ReqMiss::Bound { why, .. }) => Err(HookMiss::Bound(why)),
-            // The declaration conforms, so the run time calls the method for this instantiation.
-            Err(miss @ ReqMiss::Shape(_)) if instantiation => Err(HookMiss::Bound(miss.text())),
             Err(miss @ ReqMiss::Shape(_)) => Err(HookMiss::Shape(miss.text())),
         }
     }
@@ -4071,9 +4096,15 @@ impl Checker {
         for tp in tps {
             if let Some(concrete) = sub.get(&tp.name).cloned() {
                 for b in &tp.bounds {
-                    if (b.name == "Iterator" || b.name == "Iterable")
-                        && let Some(arg) = b.args.first()
-                        && let Some(elem) = self.iterable_elem(&concrete)
+                    // A type whose two hooks disagree gives `Iterator` no element type; the
+                    // bound check reports it.
+                    let elem = match b.name.as_str() {
+                        "Iterator" => self.iterator_bound_elem(&concrete).ok().flatten(),
+                        "Iterable" => self.iterable_elem(&concrete),
+                        _ => None,
+                    };
+                    if let Some(arg) = b.args.first()
+                        && let Some(elem) = elem
                     {
                         binds.push((arg.clone(), elem));
                     }

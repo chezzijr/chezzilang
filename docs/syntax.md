@@ -2895,6 +2895,23 @@ requirement (extra parameters, a return that isn't `E?`, no `self`) is an **ordi
 is not the hook, it never runs under `for`, and it does not stop a conforming `iter` beside it
 from making the type iterable.
 
+**The `Iterator[T]` bound has one element type.** In a `[S: Iterator[T], T]` body, `s.next()`
+runs `next` while `for q in s` and `List(s)` run `iter`. A type whose two hooks yield different
+element types therefore does not satisfy `Iterator`; it still satisfies `Iterable` through `iter`.
+The declaration decides, so a generic `Both[T]` gets one answer for every instantiation.
+
+```
+struct Both:
+    n: int
+    fn next(self) -> int?: return None
+    fn iter(self) -> Iterator[str]: return ["a", "b"].iter()
+
+for q in Both(2): print(q)                 # a, b: `iter` wins (before TICKET-250: `next`'s ints)
+fn first[S: Iterator[T], T](s: S) -> T?: return s.next()
+first(Both(2))
+# error: type Both does not satisfy Iterator ('next' yields int, 'iter' yields str); ...
+```
+
 **One rule for every hook.** A method is the hook an operator calls (`iter` / `next` for `for`,
 `str` for `print`, `index` / `slice` / `set_index` for `x[k]`, `contains` for `in`, `eq` for `==`,
 `hash`, `compare`, the arithmetic methods) exactly when it satisfies the builtin protocol's

@@ -988,6 +988,170 @@ fn declaration_verdict_failures() -> Vec<String> {
     bad
 }
 
+/// The `Iterator[T]` bound has one element type for a type: `s.next()`, `for q in s`, `List(s)`
+/// and the recovery of `T` all read it. A declared type whose `next` and `iter` hooks yield
+/// different element types does not satisfy `Iterator` (it still satisfies `Iterable`).
+/// Grid: both hooks x {same element type, another} x bound x use x owner, at check and at run.
+fn iterator_bound_failures() -> Vec<String> {
+    let mut bad = Vec::new();
+    // (owner kind, head, `next` element as declared, body of `next`, body of a same-type `iter`,
+    //  the instantiations: (element type, value, printed element))
+    type Inst = (&'static str, &'static str, &'static str);
+    type Owner = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [Inst],
+    );
+    let owners: [Owner; 3] = [
+        (
+            "struct",
+            "struct Both:\n    n: int\n",
+            "int",
+            "return ?self.n",
+            "return [self.n].iter()",
+            &[("int", "Both(5)", "5")],
+        ),
+        (
+            "enum",
+            "enum Both:\n    A(int)\n",
+            "int",
+            "return ?5",
+            "return [5].iter()",
+            &[("int", "Both.A(5)", "5")],
+        ),
+        (
+            "gstruct",
+            "struct Both[T]:\n    n: T\n",
+            "T",
+            "return ?self.n",
+            "return [self.n].iter()",
+            &[("int", "Both(5)", "5"), ("str", "Both(\"s\")", "'s'")],
+        ),
+    ];
+    for (kind, head, next_elem, next_body, iter_body, insts) in owners {
+        for same in [true, false] {
+            let iter = if same {
+                m(&format!("iter(self) -> Iterator[{next_elem}]"), iter_body)
+            } else {
+                m(
+                    "iter(self) -> Iterator[str]",
+                    "return [\"a\", \"b\"].iter()",
+                )
+            };
+            let next = m(&format!("next(self) -> {next_elem}?"), next_body);
+            for &(elem, value, shown) in insts {
+                for bound in ["T", "int", "str"] {
+                    let (params, e) = match bound {
+                        "T" => ("[S: Iterator[T], T]".to_string(), "T"),
+                        b => (format!("[S: Iterator[{b}]]"), b),
+                    };
+                    let uses = [
+                        (
+                            "next",
+                            format!(
+                                "fn f{params}(s: S) -> {e}?:\n    return s.next()\nmatch f({value}):\n    ?v: print([v])\n    None: print(\"none\")\n"
+                            ),
+                        ),
+                        (
+                            "for",
+                            format!(
+                                "fn f{params}(s: S) -> List[{e}]:\n    out: List[{e}] = []\n    for q in s:\n        out.push(q)\n    return out\nprint(f({value}))\n"
+                            ),
+                        ),
+                        (
+                            "list",
+                            format!(
+                                "fn f{params}(s: S) -> List[{e}]:\n    return List(s)\nprint(f({value}))\n"
+                            ),
+                        ),
+                    ];
+                    for (u, f) in uses {
+                        let which = if same { "same" } else { "other" };
+                        let tag = format!("itb_{kind}_{which}_{elem}_{bound}_{u}");
+                        let src = format!("{head}{next}{iter}{f}");
+                        let (clean, text) = check(&tag, &src);
+                        let got = run(&tag, &src, &mut bad);
+                        // The two hooks disagree at the DECLARATION -> the one error that names
+                        // both element types; else the bound's argument must be the element.
+                        let want = if !same {
+                            Err(format!(
+                                "does not satisfy Iterator ('next' yields {next_elem}, 'iter' yields str)"
+                            ))
+                        } else if bound != "T" && bound != elem {
+                            Err("does not match the declared element type".to_string())
+                        } else {
+                            Ok(format!("[{shown}]\nEND\n"))
+                        };
+                        let wrong = match &want {
+                            Ok(out) => !clean || !got.ok || got.stdout != *out,
+                            // A conflict is the ONE error of its program.
+                            Err(msg) => {
+                                clean
+                                    || got.ok
+                                    || !text.contains(msg.as_str())
+                                    || (!same && !text.contains("chezzi: 1 type error"))
+                            }
+                        };
+                        if wrong {
+                            bad.push(format!(
+                                "{tag}: expected {want:?}; check clean={clean}, run ok={}, {:?}: {text}",
+                                got.ok, got.stdout
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // The review's named programs. `Both`: `next` yields `int`, `iter` yields `str`.
+    let both = "struct Both:\n    n: int\n    fn next(self) -> int?:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return ?self.n\n    fn iter(self) -> Iterator[str]:\n        return [\"a\", \"b\"].iter()\n";
+    let one_error = "does not satisfy Iterator ('next' yields int, 'iter' yields str)";
+    for (name, tail, want) in [
+        // `iter` wins for `for` and `List()`, and the type still satisfies `Iterable[str]`.
+        (
+            "N0",
+            "for q in Both(2):\n    print(q)\nprint(List(Both(2)))\nfn g[S: Iterable[T], T](s: S) -> List[T]:\n    return List(s)\nprint(g(Both(2)))\n",
+            Ok("a\nb\n['a', 'b']\n['a', 'b']\nEND\n"),
+        ),
+        (
+            "N1",
+            "fn first[S: Iterator[T], T](s: S) -> T?:\n    return s.next()\nr := first(Both(2))\nmatch r:\n    ?v: print(v + \"!\")\n    None: print(\"none\")\n",
+            Err(one_error),
+        ),
+        (
+            "N2",
+            "fn w[S: Iterator[int]](s: S) -> int?:\n    return s.next()\nprint(w(Both(2)))\n",
+            Err(one_error),
+        ),
+        (
+            "N3",
+            "fn w[S: Iterator[str]](s: S):\n    for q in s:\n        print(q + \"!\")\nw(Both(2))\n",
+            Err(one_error),
+        ),
+    ] {
+        let tag = format!("itb_named_{name}");
+        let src = format!("{both}{tail}");
+        let (clean, text) = check(&tag, &src);
+        let got = run(&tag, &src, &mut bad);
+        let wrong = match want {
+            Ok(out) => !clean || !got.ok || got.stdout != out,
+            Err(msg) => {
+                clean || got.ok || !text.contains(msg) || !text.contains("chezzi: 1 type error")
+            }
+        };
+        if wrong {
+            bad.push(format!(
+                "{tag}: expected {want:?}; check clean={clean}, run ok={}, {:?}: {text}",
+                got.ok, got.stdout
+            ));
+        }
+    }
+    bad
+}
+
 /// The grid is written from the checker's table: a hook added to `HOOKS` with no grid row, or a
 /// grid row for a method `HOOKS` does not list, fails here.
 #[test]
@@ -1036,6 +1200,7 @@ fn operator_and_bound_agree_in_every_cell() {
     bad.extend(eq_failures());
     bad.extend(conditional_failures());
     bad.extend(declaration_verdict_failures());
+    bad.extend(iterator_bound_failures());
     bad.sort();
     assert!(
         bad.is_empty(),

@@ -9463,6 +9463,22 @@ reads `iterable_elem`. Grid: `declaration_verdict_failures` (hook x {return type
 `X[int]`} x {generic struct, generic enum} x {conforming instantiation, another} x 5 uses, each
 equal to the owner with no such method, plus the named programs G, D, E, F).
 
+Review round 3 (one element type for the `Iterator` bound). A type with a `next` hook and an
+`iter` hook of another element type passed `[S: Iterator[T], T]` with `T` read from `iter`, so
+`s.next()` was typed `str?` and returned an int (`cannot apply Add to int and str` at run time).
+`Checker::iterator_bound_elem` compares the two hooks' element types at the declaration, and
+the `Iterator` arm of `satisfies_args_d` rejects a conflict: `type Both does not satisfy Iterator
+('next' yields int, 'iter' yields str)`. The type still satisfies `Iterable[str]`. The
+`ReqMiss::Shape -> HookMiss::Bound` arm of `hook_verdict` is deleted: a probe in the arm recorded
+no hit over the grid, `cargo test --lib checker::` and `tests/chz`. Grid:
+`iterator_bound_failures` (both hooks x {same element type, another} x three bounds x
+{`s.next()`, `for`, `List()`} x {struct, enum, generic struct at two instantiations}, plus N0..N3).
+
+Silent change (base `03422eaf` prints a value, the tip prints another value, no diagnostic):
+`for q in Both(2)` and `List(Both(2))` on a type with `next -> int?` and `iter -> Iterator[str]`
+printed `1`, `0` and `[1, 0]`; they now print `a`, `b` and `['a', 'b']` (`iter` wins, owner
+decision). No tracked `.chz` program has that shape besides the rewritten `Both` test.
+
 `for` special-cases outside the decider, recorded for the owner's range / channel design (not
 touched): the range arm and the `Ty::Channel` arms of `Checker::for_bindings`
 (`src/checker/sig.rs:5424`, `:5476`, `:5479`, `:5482`, `:5496`), and the range arm and
