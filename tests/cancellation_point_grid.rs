@@ -430,6 +430,34 @@ fn ops() -> Vec<Op> {
                 Some("hold_s"),
             )),
         },
+        // TICKET-246 — the value lives in the box, so `Shared.get` and `Shared.read` take the
+        // update guard too and wait behind a holder like `update` and `set`.
+        Op {
+            name: "Shared.get",
+            out: "Channel[int](1)",
+            ready: Some(("", "got.add(s.get() + v)", "got.load() == 7")),
+            wait: Some((
+                "",
+                "_ := held.recv()\ngot.add(s.get() + v)",
+                "after.load() == 0",
+                Some("hold_s"),
+            )),
+        },
+        Op {
+            name: "Shared.read",
+            out: "Channel[int](1)",
+            ready: Some((
+                "",
+                "got.add(s.read(fn(x: int) -> int: x + v))",
+                "got.load() == 7",
+            )),
+            wait: Some((
+                "",
+                "_ := held.recv()\ngot.add(s.read(fn(x: int) -> int: x + v))",
+                "after.load() == 0",
+                Some("hold_s"),
+            )),
+        },
         Op {
             name: "RwShared.set",
             out: "Channel[int](1)",
