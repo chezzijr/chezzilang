@@ -373,3 +373,4 @@ None at the moment. Resolved on 2026-10-07: "nothing, or an error" is `None!E`; 
 | 2026-10-07 | design B: `else` must leave; values only from `??` / `match` |
 | 2026-10-07 | match patterns `?v` / `!e` / `None`; a bare constant in a pattern is rejected |
 | 2026-10-07 | a bare name in a match is the default arm and binds the whole value |
+| 2026-10-11 | TICKET-248: an un-hinted `?x` binds only to a carrier (beside any other type it is `T?`); every `?x` is judged before every `!e`, so `[!"e", ?1]` is `int!str` as `[?1, !"e"]` is; an optional or a result never meets a bound through its payload (`int?` does not satisfy `Num`) |

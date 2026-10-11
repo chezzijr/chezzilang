@@ -115,7 +115,7 @@ test fn encode_faults_on_a_non_encodable_value():
     r1 := recover: json.encode(res)
     match r1:
         ?_: assert false, "expected a Result to fault"
-        !e: assert e.message() == "json.encode: cannot encode a `T!E` value"
+        !e: assert e.message() == "json.encode: cannot encode a result value (`T!E`)"
 
     r2 := recover: json.encode(math.nan)
     match r2:

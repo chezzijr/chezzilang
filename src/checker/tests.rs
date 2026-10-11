@@ -21168,11 +21168,11 @@ fn scalar_cast_rejects_option_result_bytes_bytearray_shared_arg() {
     // struct/enum/fn: check-OK today, then a runtime fault (`{cast}() cannot convert {kind}`).
     rejects(
         "fn main():\n    x: int? = 1\n    print(int(x))\nmain()\n",
-        "int() cannot convert enum",
+        "int() cannot convert an optional value (`int?`) —",
     );
     rejects(
         "fn main():\n    r: int!str = ?1\n    print(int(r))\nmain()\n",
-        "int() cannot convert enum",
+        "int() cannot convert a result value (`int!str`) —",
     );
     rejects(
         "fn main():\n    print(int(b\"ab\"))\nmain()\n",

@@ -9379,6 +9379,39 @@ the stored-callback abort net, and `std.net`'s sticky-UTF-8 + `read_bytes` drain
 
 ## Current focus
 
+### TICKET-248 — an un-hinted `?x` is a carrier, never a free variable (2026-10-11)
+
+`double(?5)` with `fn double[T: Num]` type-checked and faulted at run time; `n: int = where_is(?Tok(7))`
+left `None` in an `int`. Four rules, one source (`TyVars::present_payload`, read by `solve_at`):
+
+1. An un-hinted `?x` binds only to a carrier. Beside a carrier it takes that carrier; under a callee's
+   `T?` / `T!E` it takes that carrier over its own payload; beside any other type it is `T?`. So
+   `un1(?5)` with `fn un1[T](o: T?)` prints `[5]`, and `x: Any = ?5` holds an optional.
+2. A frame judges carriers before bounds, and every `?x` before every `!e`: `[!"e", ?1]` is accepted
+   as `[?1, !"e"]` is.
+3. A bound is never dropped. One that still holds a variable of an enclosing frame is re-queued; a
+   leftover is an `internal:` error.
+4. `int?` never meets a bound through its payload: `double(?5)` is `type int? does not satisfy Num`,
+   and `Ord(?NC(1))` is `type NC? does not satisfy Comparable`, as the named form always was.
+
+Also: `t: (int8, int)? = (300, 1)` is rejected (`constant 300 does not fit int8`); the tuple arm reads
+`slot_payload()` like the list, map and set arms. Grid: `tests/inline_carrier_grid.rs` (100 cells).
+
+Message changes:
+
+- The checker verdict `'?' builds an optional or success value, found X` is deleted. A payload
+  mismatch reads `'?' value: expected int, found float`.
+- A fault never names a `T?` / `T!E` value `enum`, `Option` or `Result`. The two words are
+  `crate::vm::OPTION_VALUE_WORD` (``an optional value (`T?`)``) and `RESULT_VALUE_WORD`
+  (``a result value (`T!E`)``): ``bool() cannot convert an optional value (`T?`)``,
+  ``an optional value (`T?`) has no method 'foo'``, ``json.encode: cannot encode a result value (`T!E`)``.
+  The checker's cast error reads the same words over the written type:
+  ``int() cannot convert an optional value (`int?`)``.
+
+Nine golden cells moved: eight `some` cells of `sibling_form_grid` (`tests/expected_type_grid.rs`, now
+`cannot assign int? to variable of type int` and its list / box forms) and `rec/rif_hetero` of
+`tests/open_none_slot_grid.rs` (now prints `7`).
+
 ### TICKET-246 — boxes with a private heap (2026-10-11)
 
 Landed so far, in plan-step order:

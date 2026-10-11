@@ -6859,7 +6859,7 @@ mod netio;
 mod sched;
 mod stmt;
 pub(crate) use boxctx::CROSSING_CLOSURE_METHODS;
-pub(crate) use stmt::COPY_WRITE_TAIL;
+pub(crate) use stmt::{COPY_WRITE_TAIL, OPTION_VALUE_WORD, RESULT_VALUE_WORD, carrier_word_for};
 mod stream;
 
 pub use stream::{flush_stream, out_dead_reason, stream_error};

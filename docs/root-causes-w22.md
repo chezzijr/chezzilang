@@ -64,7 +64,9 @@ error or a fault, never a silent lost write).
 
 **Status: closed by TICKET-238 (2026-10-10).** Later-line inference is pruned: a binding's type is
 known on the statement that creates it, and the three name tables are deleted. Grid:
-`tests/open_binding_grid.rs`.
+`tests/open_binding_grid.rs`. That closed the named-binding cells only; the inline `?x` cells (a
+bound, a `T?` parameter, a lambda parameter, an `Any` slot, a join with `!e`) were closed by
+TICKET-248 (2026-10-11). Grid: `tests/inline_carrier_grid.rs`.
 
 **The fact:** what type an untyped `None`, `[]`, `[None]`, `{}`, `Cell(None)` or `Box.new()` ends up
 with.

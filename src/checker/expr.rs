@@ -1589,10 +1589,11 @@ impl Checker {
     /// scalars and `Obj::Str`, then fall through to the error
     /// (`{cast}() cannot convert List`). Catching it here turns a check-OK-then-run-fault into a
     /// clean compile error (the value a statically-typed language adds over Python's runtime `TypeError`).
-    /// Also covers `Ty::Option`/`Ty::Result` (both `Obj::Enum` at runtime, so both report `enum`),
+    /// Also covers `Ty::Option`/`Ty::Result` (named by `crate::vm::OPTION_VALUE_WORD` / `RESULT_VALUE_WORD` over the written type),
     /// `Ty::Bytes`, `Ty::ByteArray`, and the `Shared`/`Channel` handle family (TICKET-020).
     /// `Ty::Protocol` and `Ty::Module` stay excluded — see `## Decisions` in TICKET-020.
     pub(super) fn reject_non_scalar_cast(&mut self, cast: &str, aty: &Ty, span: Span) {
+        let written: String;
         let kind = match aty {
             Ty::List(_) => "List",
             Ty::Map(..) => "Map",
@@ -1601,9 +1602,17 @@ impl Checker {
             Ty::Struct(..) => "struct",
             Ty::Enum(..) => "enum",
             Ty::Func { .. } | Ty::BuiltinFn { .. } => "function",
-            // `Option`/`Result` are their own `Ty` variants, not `Ty::Enum`, but both are
-            // `Obj::Enum` at runtime, so `Vm::type_name` renders both as `enum`.
-            Ty::Option(_) | Ty::Result(..) => "enum",
+            // A carrier is named by the word `Vm::type_name` reads for its value, over the type
+            // as the user wrote it.
+            Ty::Option(_) | Ty::Result(..) => {
+                let word = if matches!(aty, Ty::Option(_)) {
+                    crate::vm::OPTION_VALUE_WORD
+                } else {
+                    crate::vm::RESULT_VALUE_WORD
+                };
+                written = crate::vm::carrier_word_for(word, &aty.to_string());
+                &written
+            }
             Ty::Bytes => "bytes",
             Ty::ByteArray => "bytearray",
             Ty::Shared(_) => "Shared",

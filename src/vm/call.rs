@@ -1186,7 +1186,7 @@ impl Vm {
                         // `VID_SOME` is peeled at the top of this fn, before this match.
                         VID_NONE_VARIANT => self.json_variant("Null", Vec::new()),
                         VID_OK | VID_ERR => {
-                            Err("json.encode: cannot encode a `T!E` value".to_string())
+                            Err(format!("json.encode: cannot encode {}", self.type_name(v)))
                         }
                         _ => Err(format!("json.encode: cannot encode enum {ty}")),
                     }
@@ -1884,8 +1884,8 @@ impl Vm {
                     self.push(v);
                     return Ok(());
                 }
-                let display = crate::compiler::bare_display(&enum_key);
-                Err(self.err(format!("type {display} has no method '{method}'"), span))
+                let who = Self::enum_subject(variant_id, &enum_key, |n| format!("type {n}"));
+                Err(self.err(format!("{who} has no method '{method}'"), span))
             }
             // W6-3 — a BOXED scalar (`Obj::BigInt`, and any other Obj-tagged scalar) is Obj-tagged, so
             // it never reaches the inline-scalar miss above and lands here instead: it must answer the

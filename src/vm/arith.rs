@@ -790,13 +790,8 @@ impl Vm {
                     .get(&key)
                     .and_then(|ms| ms.get(method))
                     .ok_or_else(|| {
-                        self.err(
-                            format!(
-                                "enum '{}' has no '{method}' method",
-                                crate::compiler::bare_display(&key)
-                            ),
-                            span,
-                        )
+                        let who = Self::enum_subject(*variant_id, &key, |n| format!("enum '{n}'"));
+                        self.err(format!("{who} has no '{method}' method"), span)
                     })?;
                 Ok((proto, self.module_objs[self.enum_home_module(&key)]))
             }

@@ -23296,3 +23296,49 @@ fn display_box_grid_terminates_on_every_cycle() {
         .expect("Vm::display waited for a held RwShared state");
     assert_eq!(shown, ["RwShared(<locked>)", "RwShared(1)", "RwShared(1)"]);
 }
+
+/// TICKET-248 — a missing-method fault and an operand fault name a carrier value by its kind in
+/// plain words and by the way the user writes its type, never `enum`, `Option` or `Result`.
+/// `run_capture` skips the checker; no checker-clean program reaches the two method-miss sites.
+#[test]
+fn a_method_miss_names_a_carrier_as_the_user_writes_it() {
+    const OPT: &str = "an optional value (`T?`)";
+    const RES: &str = "a result value (`T!E`)";
+    let cells = [
+        (
+            "o: int? = ?5\nprint(o.foo())\n",
+            format!("{OPT} has no method 'foo'"),
+        ),
+        (
+            "o: int? = None\nprint(o.foo())\n",
+            format!("{OPT} has no method 'foo'"),
+        ),
+        (
+            "o: int!str = ?5\nprint(o.foo())\n",
+            format!("{RES} has no method 'foo'"),
+        ),
+        (
+            "o: int!str = !\"e\"\nprint(o.foo())\n",
+            format!("{RES} has no method 'foo'"),
+        ),
+        (
+            "o: int? = ?5\nprint(o + o)\n",
+            format!("{OPT} has no 'add' method"),
+        ),
+        (
+            "o: int!str = ?5\nprint(o + o)\n",
+            format!("{RES} has no 'add' method"),
+        ),
+        (
+            "o: int? = ?5\nprint(o + 1)\n",
+            format!("cannot apply Add to {OPT} and int"),
+        ),
+    ];
+    for (src, expect) in cells {
+        let got = match run_capture(src) {
+            Ok(o) => format!("ran: {o:?}"),
+            Err(e) => e.message,
+        };
+        assert_eq!(got, expect, "src: {src}");
+    }
+}

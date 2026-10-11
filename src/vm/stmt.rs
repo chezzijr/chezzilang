@@ -4,6 +4,21 @@
 use super::block::Cut;
 use super::*;
 
+/// How a diagnostic or a fault names an optional value: its kind in plain words, then its type as
+/// the user writes it. Never `enum`.
+pub(crate) const OPTION_VALUE_WORD: &str = "an optional value (`T?`)";
+/// How a diagnostic or a fault names a result value.
+pub(crate) const RESULT_VALUE_WORD: &str = "a result value (`T!E`)";
+
+/// `word` (one of the two constants above) with `written` as its quoted type, for a reader that
+/// knows the type the user wrote: ``an optional value (`int?`)``.
+pub(crate) fn carrier_word_for(word: &str, written: &str) -> String {
+    match (word.find('`'), word.rfind('`')) {
+        (Some(a), Some(b)) if a < b => format!("{}{written}{}", &word[..=a], &word[b..]),
+        _ => word.to_string(),
+    }
+}
+
 /// D4 layer C (TICKET-169): the one copy of the fault message text, quoted once here so every
 /// write site stays byte-identical. `copied_write_err` prefixes it with `'<name>'` or `this value`.
 pub(crate) const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
@@ -516,6 +531,24 @@ impl Vm {
             crate::vm::op::VID_SOME => Some(if absent_payload() { "?" } else { "" }),
             _ => None,
         }
+    }
+
+    /// How a fault names a carrier value: one of the two words above, never `enum`.
+    pub(super) fn carrier_word(variant_id: u32) -> Option<&'static str> {
+        match variant_id {
+            crate::vm::op::VID_SOME | crate::vm::op::VID_NONE_VARIANT => Some(OPTION_VALUE_WORD),
+            crate::vm::op::VID_OK | crate::vm::op::VID_ERR => Some(RESULT_VALUE_WORD),
+            _ => None,
+        }
+    }
+
+    /// The subject of a missing-method fault on an enum value: a carrier by [`Self::carrier_word`],
+    /// a user enum by `plain` over its display name.
+    pub(super) fn enum_subject(variant_id: u32, key: &str, plain: fn(&str) -> String) -> String {
+        Self::carrier_word(variant_id).map_or_else(
+            || plain(&crate::compiler::bare_display(key)),
+            str::to_string,
+        )
     }
 
     /// [`Self::carrier_prefix_of`] for a heap carrier.
@@ -2275,7 +2308,7 @@ impl Vm {
                 Obj::Map(_) => "Map",
                 Obj::Set(_) => "Set",
                 Obj::Struct { .. } => "struct",
-                Obj::Enum { .. } => "enum",
+                Obj::Enum { variant_id, .. } => Self::carrier_word(*variant_id).unwrap_or("enum"),
                 Obj::Func { .. } | Obj::Closure { .. } => "function",
                 Obj::Module(_) => "module",
                 Obj::Native { .. } => "function",
