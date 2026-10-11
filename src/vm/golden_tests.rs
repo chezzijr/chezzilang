@@ -12818,7 +12818,7 @@ fn generic_fn_over_native_handles_run_parity() {
     let src = "import std.concurrency\n\
                fn peek[T](s: Shared[T]) -> T:\n\
                \x20   return s.get()\n\
-               fn look[T](a: Atomic[T]) -> T:\n\
+               fn look[T: StructuralEq](a: Atomic[T]) -> T:\n\
                \x20   return a.load()\n\
                print(peek(Shared(9)))\n\
                print(look(Atomic(3)))\n";

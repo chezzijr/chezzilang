@@ -6139,7 +6139,7 @@ fn comparable_types_equality_still_ok() {
     // `compatible`, which is neither `Param`-tolerant nor conformance-aware, so BOTH the erased-param
     // escape (8) and the existential-nesting case (7) stopped one constructor short.
     entry_ok(
-        "import std.concurrency\nfn chans[T](a: Channel[T], b: Channel[int]) -> bool:\n    return a == b\nfn atoms[T](a: Atomic[T], b: Atomic[int]) -> bool:\n    return a == b\nfn rws[T](a: RwShared[T], b: RwShared[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
+        "import std.concurrency\nfn chans[T](a: Channel[T], b: Channel[int]) -> bool:\n    return a == b\nfn atoms[T: StructuralEq](a: Atomic[T], b: Atomic[int]) -> bool:\n    return a == b\nfn rws[T](a: RwShared[T], b: RwShared[int]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
     );
     entry_ok(
         "import std.concurrency\nstruct MyErr:\n    m: str\n    fn message(self) -> str:\n        return self.m\nfn shr(a: Shared[Error], b: Shared[MyErr]) -> bool:\n    return a == b\nfn nested(a: List[Shared[Error]], b: List[Shared[MyErr]]) -> bool:\n    return a == b\nfn main():\n    pass\nmain()\n",
@@ -28495,7 +28495,7 @@ fn generic_fn_over_native_handles_infers_param() {
         "import std.concurrency\nfn first[T](c: Channel[T]) -> T:\n    return c.recv()\nch := Channel[int]()\nch.send(1)\nprint(first(ch))\n",
     );
     entry_ok(
-        "import std.concurrency\nfn look[T](a: Atomic[T]) -> T:\n    return a.load()\nprint(look(Atomic(3)))\n",
+        "import std.concurrency\nfn look[T: StructuralEq](a: Atomic[T]) -> T:\n    return a.load()\nprint(look(Atomic(3)))\n",
     );
     entry_ok(
         "import std.concurrency\nfn peekrw[T](s: RwShared[T]) -> T:\n    return s.get()\nprint(peekrw(RwShared(4)))\n",
@@ -39749,4 +39749,85 @@ fn self_is_the_receiver_only_as_a_methods_first_parameter() {
     );
     // S2-8: a free fn's `self` was an untyped parameter that took any argument.
     rejects("fn cast(self) -> int: self\nprint(cast(2.5))\n", ERR);
+}
+
+/// TICKET-250 (D5) — `Atomic[T]` over a bare type parameter must carry the sealed bound
+/// `StructuralEq`, which `std.concurrency` declares and an import licenses. Without the bound a
+/// payload with the `eq` hook reached `Atomic` by substitution: `==` said `true`, `cas` said `false`.
+#[test]
+fn an_atomic_payload_parameter_must_carry_structural_eq() {
+    const MK: &str = "(v: T) -> Atomic[T]:\n    return Atomic(v)\n";
+    const HOOKED: &str =
+        "struct P:\n    n: int\n    fn eq(self, other: P) -> bool:\n        return true\n";
+    const UNKNOWN: &str = "unknown protocol 'StructuralEq' in bound on 'T' (import it from std.concurrency: `import std.concurrency`)";
+    // The unbounded parameter is refused, in a signature and in a struct field.
+    entry_rejects(
+        &format!("import std.concurrency\nfn mk[T]{MK}"),
+        "Atomic[T] payload 'T' must carry the bound StructuralEq (import it from std.concurrency)",
+    );
+    entry_rejects(
+        "import std.concurrency\nstruct H[T]:\n    a: Atomic[T]\n",
+        "payload 'T' must carry the bound StructuralEq",
+    );
+    // A parameter nested in the payload is the same hole.
+    entry_rejects(
+        "import std.concurrency\nfn f[T](a: Atomic[List[T]]) -> int:\n    return 1\n",
+        "payload 'T' must carry the bound StructuralEq",
+    );
+    // Another bound does not stand in for it.
+    entry_rejects(
+        &format!("import std.concurrency\nfn mk[T: Hashable]{MK}"),
+        "must carry the bound StructuralEq",
+    );
+    // The bound checks under both import forms and as a `where` clause.
+    entry_ok(&format!(
+        "import std.concurrency\nfn mk[T: StructuralEq]{MK}print(mk(3).load())\n"
+    ));
+    entry_ok(&format!(
+        "import Atomic, StructuralEq from std.concurrency\nfn mk[T: StructuralEq]{MK}print(mk([1]).load())\n"
+    ));
+    entry_ok(
+        "import std.concurrency\nstruct H[T: StructuralEq]:\n    a: Atomic[T]\nh := H(Atomic(1))\n",
+    );
+    // `Atomic` alone does not license the bound's name; neither does no import at all.
+    entry_rejects(
+        &format!("import Atomic from std.concurrency\nfn mk[T: StructuralEq]{MK}"),
+        UNKNOWN,
+    );
+    rejects("fn f[T: StructuralEq](v: T) -> T:\n    return v\n", UNKNOWN);
+    // A module's own `protocol StructuralEq` wins over the imported name.
+    const OWN: &str = "import std.concurrency\nprotocol StructuralEq:\n    fn tag(self) -> int\nstruct Q:\n    fn tag(self) -> int:\n        return 7\nfn f[T: StructuralEq](v: T) -> int:\n    return v.tag()\n";
+    entry_ok(&format!("{OWN}print(f(Q()))\n"));
+    entry_rejects(
+        &format!("{OWN}print(f(3))\n"),
+        "does not satisfy StructuralEq",
+    );
+    // The bound is sealed: a type that reaches the `eq` hook does not satisfy it.
+    for call in ["mk(P(1))", "mk([P(1)])", "mk((1, ?P(1)))"] {
+        entry_rejects(
+            &format!("import std.concurrency\n{HOOKED}fn mk[T: StructuralEq]{MK}x := {call}\n"),
+            "does not satisfy StructuralEq",
+        );
+    }
+    // A method named `eq` that is not the hook leaves the type structural: a legal payload, direct
+    // and through the bound, for a struct and for an enum.
+    for eq in [
+        "fn eq(a: P, b: P) -> bool:\n        return true",
+        "fn eq(self, o: P) -> bool:\n        return true",
+        "fn eq(self, other: P) -> int:\n        return 1",
+    ] {
+        for (decl, val) in [
+            ("struct P:\n    n: int", "P(1)"),
+            ("enum P:\n    A(int)", "P.A(1)"),
+        ] {
+            entry_ok(&format!(
+                "import std.concurrency\n{decl}\n    {eq}\nfn mk[T: StructuralEq]{MK}a := Atomic({val})\nb := mk({val})\n"
+            ));
+        }
+    }
+    // Must still fail: the direct spelling of a hooked payload.
+    entry_rejects(
+        &format!("import std.concurrency\n{HOOKED}a := Atomic(P(1))\n"),
+        "payload defines its own 'eq'",
+    );
 }

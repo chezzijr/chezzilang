@@ -647,6 +647,33 @@ fn eq_failures() -> Vec<String> {
             bad.push(format!("eq|{row}: expected {want:?}, got: {}", got.text));
         }
     }
+    // `StructuralEq` (D5): a payload reaches a generic `Atomic[T]` only through the sealed bound.
+    // A type with the `eq` hook does not satisfy it. A type whose `eq` is not the hook does, and
+    // then `==` and `cas` give the same answer.
+    for (kind, decl, one, two) in [
+        ("struct", "struct P:\n    v: int", "P(1)", "P(2)"),
+        ("enum", "enum P:\n    A(int)", "P.A(1)", "P.A(2)"),
+    ] {
+        for (shape, sig, hook) in [
+            ("conforming", "fn eq(self, other: P) -> bool", true),
+            ("static", "fn eq(a: P, b: P) -> bool", false),
+            ("misnamed", "fn eq(self, o: P) -> bool", false),
+            ("generic", "fn eq[U](self, other: U) -> bool", false),
+        ] {
+            let src = format!(
+                "import std.concurrency\n{decl}\n    {sig}:\n        return true\nfn mk[T: StructuralEq](v: T) -> Atomic[T]:\n    return Atomic(v)\na := mk({one})\nprint(a.load() == {two}, a.cas({two}, {two}))\n"
+            );
+            let got = run(&format!("eq_structural_{kind}_{shape}"), &src, &mut bad);
+            let right = if hook {
+                !got.ok && got.text.contains("does not satisfy StructuralEq")
+            } else {
+                got.stdout == "false false\nEND\n"
+            };
+            if !right {
+                bad.push(format!("eq|StructuralEq|{kind}|{shape}: {}", got.text));
+            }
+        }
+    }
     bad
 }
 

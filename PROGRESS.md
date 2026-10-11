@@ -9408,8 +9408,15 @@ Landed on the ticket branch:
   the other iteration hook). `hook_conformance_grid.rs` measures the gate per cell: 44 of 355
   cells warn.
 
-Not landed yet: the `StructuralEq` bound on a generic `Atomic[T]` (plan step 6; `fn mk[T](v: T)
--> Atomic[T]` still checks, the D5 hole).
+- D5 (plan step 6): an `Atomic[T]` payload parameter must carry the sealed bound `StructuralEq`.
+  `protocol StructuralEq` is declared in `std/concurrency.chz` and import-gated like `Atomic`; it
+  is not a global reserved name and has no prelude mirror. `fn mk[T](v: T) -> Atomic[T]` and
+  `Atomic(v)` on a `v: T` now report `Atomic[T] payload 'T' must carry the bound StructuralEq
+  (import it from std.concurrency)`; `mk(P(1))` for a `P` with the `eq` hook reports `type P does
+  not satisfy StructuralEq (it has the 'eq' hook)`. Before: check OK, then `true false` (`==`
+  against `cas`). `Checker::structural_eq` is the one answer behind the bound and the payload
+  rule. A native std module now exports a `protocol` under a module-scoped key
+  (`harvest_native_module`, `run_graph_pass`). Seven generic fixtures gained the bound.
 
 Base (`1df21e89`) versus tip, release binaries, for every tracked file with a near-miss hook or
 both iteration hooks (last line of `chezzi test` / `chezzi run`):

@@ -2534,7 +2534,10 @@ cannot) enforce.
   entry, tuple slot, struct field or enum payload the structural compare would
   recurse into (use `Shared[T]`, which has no `cas`, for such a type) — and the VM **switches the
   `eq` hook off** for the duration of the compare, so the guarantee does not depend on that walk
-  being able to see through a protocol existential. See [`concurrency.md`](concurrency.md).
+  being able to see through a protocol existential. A type parameter as the payload must carry the
+  sealed bound `StructuralEq` from `std.concurrency` (`fn mk[T: StructuralEq](v: T) -> Atomic[T]`),
+  so a payload built by substitution gets the same check at each call (TICKET-250). See
+  [`concurrency.md`](concurrency.md).
 * **A generic type's instantiation is ERASED at runtime, so `Any` can hand `eq` a foreign operand.**
   `a: Any = Box(1)`, `b: Any = Box("x")`, `a == b` type-checks (the `Any` escape hatch from the
   disjoint-type rule) and dispatches `Box`'s `eq`, whose body then faults on `int` vs `str`. It is a
@@ -4613,7 +4616,8 @@ fn fetch_all(urls: List[str]):
   value): `a.load()`, `a.store(v)`, `a.exchange(v) -> T` (returns old), `a.cas(expected, new) ->
   bool`, and on numeric `T` `a.add(x) -> T` / `a.sub(x) -> T` (return the new value; checked-overflow
   like `+`/`-`). Each op is atomic across threads. Use it for counters/flags/CAS-loops; `Shared` for
-  arbitrary-transform updates.
+  arbitrary-transform updates. A generic function over the payload writes the sealed bound
+  `StructuralEq` (same import): `fn mk[T: StructuralEq](v: T) -> Atomic[T]`.
 - **`AtomicInt`** — the monomorphic **lock-free** int atomic (Rust `AtomicI64` / Java `AtomicInteger` /
   Go `atomic.Int64` style). `Atomic[T]`'s int-only sibling with no `[T]`, so it is a genuine lock-free
   `AtomicI64` (not a `Mutex`). Same method surface, all int-typed, `add`/`sub` always available (int is

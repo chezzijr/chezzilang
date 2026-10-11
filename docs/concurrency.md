@@ -845,7 +845,21 @@ happens under the value's lock, and re-entering user code there could deadlock. 
 check time** — its own (`Atomic[K] payload defines its own 'eq' …`) or one on any element, entry, tuple
 slot, struct field or enum payload the structural compare would recurse into
 (`Atomic[List[K]] payload reaches 'K', which defines its own 'eq' …`); use `Shared[K]`, which has no
-`cas`. Because no checker walk can see through a protocol existential payload, the VM ALSO switches the
+`cas`. "Defines its own `eq`" means the type has the `Eq` hook (TICKET-250): a method named `eq` that
+is static, misnames its parameter or returns another type is an ordinary method, `==` on that type
+stays structural, and the type is a legal payload. **A type parameter as the payload must carry the
+sealed bound `StructuralEq`** (TICKET-250): `fn mk[T](v: T) -> Atomic[T]` is rejected
+(`Atomic[T] payload 'T' must carry the bound StructuralEq (import it from std.concurrency)`), and so
+is `Atomic(v)` on a `v: T` inside a generic body. Write `fn mk[T: StructuralEq](v: T) -> Atomic[T]`;
+each call then checks its own `T`, and `mk(K(1))` for a `K` with the `eq` hook reports
+`type K does not satisfy StructuralEq (it has the 'eq' hook)`. Before this rule a payload built by
+substitution passed the check, and `==` answered `true` where `cas` answered `false`.
+`StructuralEq` is declared in `std/concurrency.chz` and import-gated like `Atomic`:
+`import std.concurrency` licenses it, and so does `import Atomic, StructuralEq from std.concurrency`.
+`import Atomic from std.concurrency` alone does not; the bound then reports `unknown protocol
+'StructuralEq' in bound on 'T' (import it from std.concurrency: `import std.concurrency`)`. A
+module's own `protocol StructuralEq` wins over the imported name. No type can implement the bound:
+the checker answers it from the payload's shape. Because no checker walk can see through a protocol existential payload, the VM ALSO switches the
 `eq` hook off for the compare — the no-user-code-under-the-lock property is enforced, not assumed. **`cas` on a payload that holds a `fn` value is rejected too**
 (TICKET-144, W14-24; `Atomic[fn() -> int]`, a struct field or `List` element of `fn` type): every `load()` returns a fresh copy of the closure and
 closures compare by identity, so `cas(a.load(), new)` could never succeed and the standard CAS retry loop would spin forever

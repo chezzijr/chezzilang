@@ -1139,7 +1139,12 @@ impl Vm {
                     if self.module_name(target_obj) == "std.concurrency"
                         && matches!(
                             member.as_str(),
-                            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor"
+                            "Shared"
+                                | "RwShared"
+                                | "Atomic"
+                                | "AtomicInt"
+                                | "Executor"
+                                | "StructuralEq"
                         )
                     {
                         continue;

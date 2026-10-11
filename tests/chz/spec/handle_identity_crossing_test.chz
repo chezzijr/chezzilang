@@ -84,7 +84,7 @@ fn via_shared[T](x: T) -> T:
 fn via_rwshared[T](x: T) -> T:
     return RwShared(x).get()
 
-fn via_atomic[T](x: T) -> T:
+fn via_atomic[T: StructuralEq](x: T) -> T:
     return Atomic(x).load()
 
 fn via_executor[T](x: T) -> T:
@@ -101,7 +101,7 @@ fn tag(bad: List[str], kind: str, route: str, cells: List[str]):
         bad.push(kind + "/" + route + "/" + cell)
 
 # Every route for one kind. `same-slot` is the control row (no crossing).
-fn grid[T](kind: str, a: T, c: T, ops: fn(T, T, T) -> List[str]) -> List[str]:
+fn grid[T: StructuralEq](kind: str, a: T, c: T, ops: fn(T, T, T) -> List[str]) -> List[str]:
     bad: List[str] = []
     tag(bad, kind, "same-slot", ops(a, a, c))
     b := a
@@ -126,7 +126,7 @@ fn grid[T](kind: str, a: T, c: T, ops: fn(T, T, T) -> List[str]) -> List[str]:
 extern "libm.so.6":
     fn cos(x: float) -> float
 
-fn cas_self[T](a: Atomic[T], v: T) -> bool:
+fn cas_self[T: StructuralEq](a: Atomic[T], v: T) -> bool:
     return a.cas(a.load(), v)
 
 fn refused(r: bool!, want: str) -> bool:

@@ -35,6 +35,14 @@
 # module globals as the caller has them at the call. `get` / `read` / `set` / `update` / printing of
 # a box from inside that box's own `update` / `read` closure fault with
 # `already holds the update guard`. A slow closure blocks every other user of the box.
+# `StructuralEq` -- the SEALED bound an `Atomic[T]` payload parameter must carry (TICKET-250). A type
+# satisfies it only when `==` on it is structural: it reaches no type that has the `eq` hook. The
+# checker answers that itself, so the body is empty. `Atomic.cas` compares stored values
+# structurally; the bound keeps `==` and `cas` in agreement for a payload built by substitution.
+# Import-gated like `Atomic`: `import std.concurrency` or `import StructuralEq from std.concurrency`.
+protocol StructuralEq:
+    pass
+
 native struct Shared[T]:
     native fn get(self) -> T
     native fn set(self, v: T) -> None

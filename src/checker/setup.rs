@@ -393,7 +393,18 @@ impl Checker {
         if self.protocols.contains_key(&key) || self.owning_protocol_def(&key).is_some() {
             return key;
         }
-        self.protocol_alias_key(name).unwrap_or(key)
+        if let Some(alias) = self.protocol_alias_key(name) {
+            return alias;
+        }
+        // TICKET-250 -- `std.concurrency`'s `StructuralEq`, licensed like `Atomic`. Last, so a
+        // module's own `protocol StructuralEq` or alias wins.
+        if name == "StructuralEq"
+            && self.concurrency_licensed(name)
+            && self.owning_protocol_def(STRUCTURAL_EQ_KEY).is_some()
+        {
+            return STRUCTURAL_EQ_KEY.to_string();
+        }
+        key
     }
 
     /// The protocol key a module-qualified bound spelling `alias.Name` names through a whole-module
@@ -806,6 +817,14 @@ impl Checker {
     /// convention (unannotated param → `Ty::Unknown`; no `-> ret` → `Ty::Unknown`). The transient
     /// `struct_names` inserts and `self.structs` overwrites are then REVERTED so IMPORT-GATING is
     /// preserved (a bare unimported `m: Match` still errors) and this arm leaves NO residue.
+    /// Export a protocol's shape from its module: the name joins `sig.types` and the shape joins
+    /// `sig.protocol_defs`. A file module and a native module both export through here.
+    fn export_protocol(sig: &mut ModuleSig, name: &str, info: ProtocolInfo, doc: Option<String>) {
+        sig.types.insert(name.to_string());
+        sig.protocol_defs
+            .insert(name.to_string(), ProtocolSigInfo { info, doc });
+    }
+
     pub(super) fn harvest_native_module(&mut self, ast: &crate::ast::Module, sig: &mut ModuleSig) {
         // PASS 1 — native structs.
         let mut transient: Vec<String> = Vec::new();
@@ -881,6 +900,31 @@ impl Checker {
                 sig.types.insert(name.clone());
                 if self.imported_ffi_types.insert(name.clone()) {
                     ffi_type_transient.push(name.clone());
+                }
+            }
+        }
+        // PASS 1c — protocol exports (TICKET-250; std.concurrency's `StructuralEq`). The protocol is
+        // hoisted the ordinary way and moved into the sig: this harvest runs WITHOUT `begin_module`,
+        // so the entry `hoist_protocol` inserts under the bare name must not stay visible to a later
+        // module that never imported it. A reserved protocol (the prelude mirrors) is not exported.
+        for s in &ast.stmts {
+            if let StmtKind::Protocol {
+                name,
+                type_params,
+                methods,
+                embeds,
+                ..
+            } = &s.kind
+                && !is_reserved_protocol(name)
+            {
+                let key = self.bare_key(name);
+                let prev = self.protocols.remove(&key);
+                self.hoist_protocol(name, type_params, methods, embeds, s.span);
+                if let Some(info) = self.protocols.remove(&key) {
+                    Self::export_protocol(sig, name, info, None);
+                }
+                if let Some(prev) = prev {
+                    self.protocols.insert(key, prev);
                 }
             }
         }
@@ -1860,7 +1904,7 @@ impl Checker {
             }
         } else if matches!(
             member.as_str(),
-            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor"
+            "Shared" | "RwShared" | "Atomic" | "AtomicInt" | "Executor" | "StructuralEq"
         ) {
             // A selective `import Shared from std.concurrency` licenses just the named
             // ctor/TYPE in THIS module (mirrors the per-name FFI width imports). Like
@@ -2200,7 +2244,14 @@ impl Checker {
                 // TYPE names (the ergonomic default). Keyed on the EXACT len-2 path, so the real file
                 // submodule `import std.concurrency.collection` (len-3) does NOT license them.
                 if path.as_slice() == ["std".to_string(), "concurrency".to_string()] {
-                    for tn in ["Shared", "RwShared", "Atomic", "AtomicInt", "Executor"] {
+                    for tn in [
+                        "Shared",
+                        "RwShared",
+                        "Atomic",
+                        "AtomicInt",
+                        "Executor",
+                        "StructuralEq",
+                    ] {
                         self.imported_concurrency.insert(tn.to_string());
                     }
                 }
@@ -2477,16 +2528,10 @@ impl Checker {
                     // source for its 21 names (mirrored, drift-guarded, in `std/prelude.chz`), so
                     // exporting it here would put a second, sig-borne copy into `sig.types`.
                     if !is_reserved_protocol(name)
-                        && let Some(info) = self.protocol_shape(name)
+                        && let Some(info) = self.protocol_shape(name).cloned()
                     {
-                        sig.types.insert(name.clone());
-                        sig.protocol_defs.insert(
-                            name.clone(),
-                            ProtocolSigInfo {
-                                info: info.clone(),
-                                doc: self.name_docs.get(name).cloned(),
-                            },
-                        );
+                        let doc = self.name_docs.get(name).cloned();
+                        Self::export_protocol(&mut sig, name, info, doc);
                     }
                 }
                 _ => {}

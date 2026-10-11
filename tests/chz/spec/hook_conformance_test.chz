@@ -6,7 +6,7 @@
 # The whole grid (hook x shape x owner x use) is `tests/hook_conformance_grid.rs`; these are the
 # programs the bug-hunt wave filed, one `test fn` each, judged against CPython's output.
 
-import std.concurrency
+import Atomic, StructuralEq from std.concurrency
 
 # ---- D1: a hook written with `yield` ----
 
@@ -184,3 +184,17 @@ test fn a_misnamed_eq_is_not_the_hook():
     assert not (a.load() == Misnamed(2))
     assert not a.cas(Misnamed(2), Misnamed(3))
     assert a.cas(Misnamed(1), Misnamed(3))
+
+# ---- D5: a generic `Atomic[T]` carries the sealed bound `StructuralEq`, imported by name ----
+
+fn mk[T: StructuralEq](v: T) -> Atomic[T]:
+    return Atomic(v)
+
+test fn structural_eq_is_importable_and_runs():
+    assert mk(3).load() == 3
+    a := mk([1, 2])
+    assert a.load() == [1, 2]
+    assert a.cas([1, 2], [3]), "`==` and `cas` agree on a structural payload"
+    assert a.load() == [3]
+    m := mk(Misnamed(1))
+    assert not m.cas(Misnamed(2), Misnamed(3)), "a non-hook `eq` leaves the payload structural"

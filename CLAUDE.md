@@ -206,8 +206,9 @@ user-overloadable `==` via `Eq`, static protocol requirements via witness passin
 landed through **Tier-D** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, the real
 OS-thread M:N engine, netpoller + `std.net`). The checker has a **non-fatal warning channel**
 (`Severity::Warning`, `"severity"` in `--errors=json`, `DiagnosticSeverity::WARNING` in the LSP) with
-four rules — a discarded `T!E`/`T?`, a mutating call on a `Shared`/`RwShared`/`Atomic` read
-temporary, an unreachable `match` arm, an unread local (TICKET-090). Test totals move with every ticket;
+five rules — a discarded `T!E`/`T?`, a mutating call on a `Shared`/`RwShared`/`Atomic` read
+temporary, an unreachable `match` arm, an unread local (TICKET-090), a near-miss hook that its
+operator skips (TICKET-250). Test totals move with every ticket;
 read the live counts from `cargo test` / `chezzi test tests/chz`, never from prose.
 
 ## Current focus

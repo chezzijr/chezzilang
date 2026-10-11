@@ -227,6 +227,13 @@ const EQ_BOUNDS_MAX_NODES: usize = 50_000;
 pub(super) const EQ_BUDGET_MARKER: &str = "grows without bound or nests too deeply";
 
 /// One live entry on [`EQ_BOUNDS_IN_PROGRESS`], popped on every exit path (including `?` and panic).
+/// What [`Checker::reaches_user_eq`] found: a type that has the `eq` hook, or a type parameter that
+/// does not carry the sealed bound `StructuralEq`. Each holds the rendered name.
+enum EqReach {
+    Hook(String),
+    Param(String),
+}
+
 /// Minted only by [`Checker::enter_eq_obligation`], so an entry cannot be pushed without its pop.
 /// Carries the entry's [`Checker::ty_nodes`] size so the pop can subtract exactly what the push added
 /// without re-walking the `Ty`.
@@ -1888,6 +1895,13 @@ impl Checker {
         // to the `Ty::Param` arm, which matches bounds by name (`protocol_provides`), so
         // `[T: Arithmetic + Mod + Neg + Comparable]` is not `Num`. A protocol value passes only if its
         // protocol embeds `Num`, so erasure cannot bypass the seal.
+        // TICKET-250: `StructuralEq` is SEALED too. Its body is empty, so without this arm every
+        // type would satisfy it through the empty-protocol rule below.
+        if protocol == STRUCTURAL_EQ_KEY {
+            return self
+                .structural_eq(ty)
+                .map(|()| Grant::no_intrinsic_method());
+        }
         if protocol == "Num" {
             let admitted = match ty {
                 Ty::Int | Ty::Float | Ty::Param(_) => true,
@@ -3100,15 +3114,22 @@ impl Checker {
     /// the same compare that a bare `Atomic[P]` does. Keying on the payload's own `eq` let every one
     /// of those through the gate (`docs/gaps.md` — M23 review, CRITICAL 2).
     pub(super) fn reject_eq_atomic_payload(&mut self, elem: &Ty, span: Span) {
-        if let Some(inner) = self.reaches_user_eq(elem, &mut Vec::new()) {
-            let owner = if inner == elem.to_string() {
-                "payload defines its own 'eq'".to_string()
-            } else {
-                format!("payload reaches '{inner}', which defines its own 'eq'")
+        if let Some(reach) = self.reaches_user_eq(elem, &mut Vec::new()) {
+            let msg = match reach {
+                EqReach::Param(p) => format!(
+                    "Atomic[{elem}] payload '{p}' must carry the bound StructuralEq (import it from std.concurrency)"
+                ),
+                EqReach::Hook(inner) => {
+                    let owner = if inner == elem.to_string() {
+                        "payload defines its own 'eq'".to_string()
+                    } else {
+                        format!("payload reaches '{inner}', which defines its own 'eq'")
+                    };
+                    format!(
+                        "Atomic[{elem}] {owner} — Atomic.cas compares stored values structurally, never through that 'eq', so cas and the payload's own equality would disagree; use Shared[{elem}] (no cas) instead"
+                    )
+                }
             };
-            let msg = format!(
-                "Atomic[{elem}] {owner} — Atomic.cas compares stored values structurally, never through that 'eq', so cas and the payload's own equality would disagree; use Shared[{elem}] (no cas) instead"
-            );
             // ONCE per (payload type, SITE). `a: Atomic[P]` resolves its annotation TWICE, which
             // would report the identical message at the identical span; the span keys that pair
             // down to one. It deliberately does NOT key on the type alone: a second, genuinely
@@ -3126,22 +3147,51 @@ impl Checker {
         }
     }
 
-    /// The name of the first type reachable from `ty` by a STRUCTURAL equality walk that declares its
-    /// own `eq`, or `None`. `stack` is the cycle guard (`sendable_rec`'s shape — a recursive
+    /// TICKET-250 (D5) — is `==` on `ty` structural all the way down? The one answer behind the
+    /// sealed bound `StructuralEq` and the `Atomic` payload rule.
+    pub(super) fn structural_eq(&self, ty: &Ty) -> Result<(), String> {
+        match self.reaches_user_eq(ty, &mut Vec::new()) {
+            None => Ok(()),
+            Some(EqReach::Hook(inner)) if inner == ty.to_string() => Err(format!(
+                "type {ty} does not satisfy StructuralEq (it has the 'eq' hook)"
+            )),
+            Some(EqReach::Hook(inner)) => Err(format!(
+                "type {ty} does not satisfy StructuralEq (it reaches '{inner}', which has the 'eq' hook)"
+            )),
+            Some(EqReach::Param(p)) if matches!(ty, Ty::Param(_)) => {
+                Err(format!("type {p} does not satisfy StructuralEq"))
+            }
+            Some(EqReach::Param(p)) => Err(format!(
+                "type {ty} does not satisfy StructuralEq ('{p}' does not carry the bound)"
+            )),
+        }
+    }
+
+    /// The first type reachable from `ty` by a STRUCTURAL equality walk that has the `eq` hook,
+    /// or the first type parameter that does not carry `StructuralEq`, or `None`. `stack` is the cycle guard (`sendable_rec`'s shape — a recursive
     /// `Node { next: Option[Node] }` terminates).
     ///
     /// Reachability here means exactly what `Vm::values_equal_guarded` recurses through: list/set
     /// elements, map keys AND values, `Option`/`Result` payloads, tuple slots, struct fields, enum
     /// variant payloads. NOT through a `Channel`/`Shared`/`Atomic`
     /// handle (comparing two handles compares the handles, never their contents) and not into a
-    /// `Func`. `Protocol`/`Param`/`Unknown` are permissive holes by construction — the concrete
+    /// `Func`. `Protocol`/`Unknown` are permissive holes by construction — the concrete
     /// witness is unknown here — which is why the RUNTIME `cas` also refuses to dispatch the hook
-    /// (`vm/netio.rs`), rather than trusting this walk to be exhaustive.
-    fn reaches_user_eq(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
-        let any = |s: &Self, ts: &[Ty], stack: &mut Vec<String>| -> Option<String> {
+    /// (`vm/netio.rs`), rather than trusting this walk to be exhaustive. A type parameter is a hit
+    /// unless it carries the sealed bound `StructuralEq` (TICKET-250): its instantiations are then
+    /// checked at each call.
+    fn reaches_user_eq(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<EqReach> {
+        let any = |s: &Self, ts: &[Ty], stack: &mut Vec<String>| -> Option<EqReach> {
             ts.iter().find_map(|t| s.reaches_user_eq(t, stack))
         };
         match ty {
+            Ty::Param(name) => {
+                let carries = self.type_params.get(name).is_some_and(|bs| {
+                    bs.iter()
+                        .any(|b| self.protocol_provides(&b.name, &b.args, STRUCTURAL_EQ_KEY, &[]))
+                });
+                (!carries).then(|| EqReach::Param(name.clone()))
+            }
             Ty::List(t) | Ty::Set(t) | Ty::Option(t) => self.reaches_user_eq(t, stack),
             Ty::Map(k, v) => self
                 .reaches_user_eq(k, stack)
@@ -3155,7 +3205,7 @@ impl Checker {
                     return hit;
                 }
                 if self.hook_method(ty, "Eq", "eq").is_some() {
-                    return Some(ty.to_string());
+                    return Some(EqReach::Hook(ty.to_string()));
                 }
                 if stack.contains(name) {
                     return None;
@@ -3173,7 +3223,7 @@ impl Checker {
                     return hit;
                 }
                 if self.hook_method(ty, "Eq", "eq").is_some() {
-                    return Some(ty.to_string());
+                    return Some(EqReach::Hook(ty.to_string()));
                 }
                 if stack.contains(name) {
                     return None;

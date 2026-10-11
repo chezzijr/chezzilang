@@ -1389,6 +1389,11 @@ enum Obligation {
     },
 }
 
+/// The key of `std.concurrency`'s sealed protocol `StructuralEq`
+/// (TICKET-250): the module-scoped identity key `run_graph_pass` gives a protocol that a native
+/// module exports. Only the bare NAME is import-gated, through [`Checker::protocol_key`].
+pub(crate) const STRUCTURAL_EQ_KEY: &str = "std.concurrency::StructuralEq";
+
 /// A deferred [`Obligation`] with the type-parameter scope it was asked in.
 type DeferredObligation = (Obligation, HashMap<String, Vec<TyBound>>);
 
@@ -1951,6 +1956,13 @@ impl Checker {
                 // replacement). Cached AFTER `attach_native_module_metadata` (unlike net's before-attach
                 // cache) because that step mutates `RwShared.read`/`Executor.submit`'s closure-param sigs
                 // — caching before would seed the pre-port (unannotated) tables.
+                // TICKET-250 -- a protocol a native module exports gets a module-scoped identity
+                // key, so `owning_protocol_def` finds it by that key alone. Under the bare key a
+                // std module's types keep, every module would see it with no import.
+                for pname in sig.protocol_defs.keys() {
+                    c.type_keys
+                        .insert((lm.id.clone(), pname.clone()), format!("{name}::{pname}"));
+                }
                 if name == "std.concurrency" {
                     for tn in ["Shared", "RwShared", "Atomic", "AtomicInt", "Executor"] {
                         if let Some(info) = sig.struct_defs.get(tn) {

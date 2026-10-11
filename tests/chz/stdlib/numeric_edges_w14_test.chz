@@ -43,7 +43,7 @@ struct H:
 fn one() -> int:
     return 1
 
-fn try_cas[T](a: Atomic[T], v: T) -> bool:
+fn try_cas[T: StructuralEq](a: Atomic[T], v: T) -> bool:
     return a.cas(a.load(), v)
 
 test fn float_sum_neumaier_vectors():

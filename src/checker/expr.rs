@@ -2180,7 +2180,10 @@ impl Checker {
                 if self.concurrency_licensed("Atomic") {
                     // INSIDE the licensing branch: an unavailable type must not first get advice
                     // about its payload (the `unknown type 'Atomic'` error is the only useful one).
-                    self.reject_eq_atomic_payload(&elem, span);
+                    self.conformance_obligation(Obligation::AtomicPayload {
+                        elem: elem.clone(),
+                        span,
+                    });
                     Some(Ty::atomic(elem))
                 } else {
                     self.error(
@@ -4658,9 +4661,16 @@ impl Checker {
                     }
                     continue;
                 }
+                // The one protocol whose bare name an import licenses (TICKET-250): give the hint
+                // the `Atomic` arm of `resolve_type` gives.
+                let hint = if b.name == "StructuralEq" {
+                    " (import it from std.concurrency: `import std.concurrency`)"
+                } else {
+                    ""
+                };
                 self.error(
                     span,
-                    format!("unknown protocol '{}' in bound on '{param}'", b.name),
+                    format!("unknown protocol '{}' in bound on '{param}'{hint}", b.name),
                 );
                 continue;
             };

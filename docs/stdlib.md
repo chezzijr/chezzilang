@@ -453,7 +453,10 @@ share — see [`concurrency.md`](concurrency.md) §airlock.
 `eq` (its own, or one on any element/entry/field/payload the structural compare recurses into) is a
 check-time error (use `Shared[T]`, which has no `cas`); the VM also switches the `eq` hook off for the
 compare, so the guarantee holds even where the checker cannot see the witness (a protocol existential
-payload). See [`concurrency.md`](concurrency.md).
+payload). A type parameter as the payload must carry the sealed bound **`StructuralEq`**
+(`protocol StructuralEq`, exported by `std.concurrency`, import-gated like `Atomic`):
+`fn mk[T: StructuralEq](v: T) -> Atomic[T]`. No type implements it; the checker grants it to every
+type that reaches no `eq` hook. See [`concurrency.md`](concurrency.md).
 
 ### `AtomicInt` — monomorphic **lock-free** int atomic
 `load() -> int` · `store(x: int) -> None` · `exchange(x: int) -> int` · `cas(expected: int, new: int) -> bool` ·
