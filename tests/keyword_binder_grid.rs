@@ -61,6 +61,11 @@ fn keyword_text(name: &str) -> String {
     )
 }
 
+/// TICKET-250: `self` is the receiver only as the first parameter of a method. A free fn or a
+/// closure that names a parameter `self` (T05, T06) is a declaration error; every other `self`
+/// cell (a local, a loop variable, a pattern binding, a field) keeps its result.
+const SELF_PARAM: &str = "'self' is only allowed as the first parameter of a method declared in a struct, enum or protocol body";
+
 /// (form, template, the cell per name in `NAMES` order). `NAME` in a template is the cell's name.
 #[rustfmt::skip]
 const GRID: [(&str, &str, [Cell; 11]); 26] = [
@@ -68,8 +73,8 @@ const GRID: [(&str, &str, [Cell; 11]); 26] = [
     ("T02 typed binding", "NAME: int = 4\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T03 const binding", "NAME: const int = 4\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T04 for destructuring", "for a, NAME in [(1, 2)]:\n    pass\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
-    ("T05 param", "fn f(NAME: int) -> int:\n    return 1\nprint(f(2))\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
-    ("T06 lambda param", "g := fn(NAME: int) -> int: 1\nprint(g(2))\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T05 param", "fn f(NAME: int) -> int:\n    return 1\nprint(f(2))\n", [Keyword, Keyword, Keyword, Keyword, Fails(SELF_PARAM), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T06 lambda param", "g := fn(NAME: int) -> int: 1\nprint(g(2))\n", [Keyword, Keyword, Keyword, Keyword, Fails(SELF_PARAM), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T07 for var", "for NAME in [1, 2]:\n    pass\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T08 comprehension var", "print([1 for NAME in [1, 2]])\n", [Keyword, Keyword, Keyword, Keyword, Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]")]),
     ("T09 tuple pattern", "x: (int, int) = (3, 4)\nmatch x:\n    (NAME, b): print(1)\n", [Fails("variant pattern 'None' cannot match a value of type int"), Fails("literal of type bool cannot match a value of type int"), Fails("literal of type bool cannot match a value of type int"), Keyword, Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Fails("`Some(x)` is removed; write `x` or `?x` (pattern `?v`)")]),
