@@ -1643,8 +1643,9 @@ for v in pipe:             # 20, 40
 it := {1: "a", 2: "b"}.iter()   # map iterates KEYS; str → 1-char str; bytes/bytearray → int 0..=255
 print(it.next())           # 1
 # `Iterable` is the LOOSER sibling of `Iterator`: an `Iterable` only promises `iter()`; an `Iterator`
-# also has `next`. So every `Iterator` IS `Iterable` — `iter()` on a cursor / generator / `next`-struct
-# returns SELF (idempotent), and all three flow into an `[S: Iterable[T]]` bound. A user struct with
+# also has `next`. So every `Iterator` IS `Iterable` — `iter()` on a cursor / generator returns SELF
+# (idempotent), and `s.iter()` in an `[S: Iterable[T]]` body or on an `Iterable[T]` slot returns the
+# value itself when its type has the `next` hook and no `iter` hook. All three flow into the bound. A user struct with
 # ONLY `iter(self) -> Iterator[E]` (no `next`) is for-iterable too (driven by a one-time `.iter()`):
 fn total[S: Iterable[int]](src: S) -> int:
     sum := 0
@@ -2842,10 +2843,24 @@ with a concrete arg (`[S: Iterable[int]]`) or annotate the parameter `Iterable[i
 the element type, so nothing has to be recovered). The cursor's type is the existing `Iterator[T]`
 existential — there is no new value type.
 
-**`next` wins by NAME.** A struct that declares a `next` at all is iterated through `next`, never
-through `iter` — that is how the runtime picks, so it is how the type-checker picks. A struct that
-declares a MALFORMED `next` (extra params, or a return that isn't `E?`) is therefore **not
-iterable at all**; it does not silently fall back to its `iter`. Drop the bad `next`, or fix it.
+**`iter` wins over `next`.** A struct or enum with both hooks is iterated through `iter` by every
+consumer: `for`, a comprehension, `List()`, `Set()`, `Map()`, a `[S: Iterable[T]]` bound and
+`.iter()` (Python: `for` calls `__iter__`). A `next` that does not satisfy `Iterator`'s
+requirement (extra parameters, a return that isn't `E?`, no `self`) is an **ordinary method**: it
+is not the hook, it never runs under `for`, and it does not stop a conforming `iter` beside it
+from making the type iterable.
+
+**One rule for every hook.** A method is the hook an operator calls (`iter` / `next` for `for`,
+`str` for `print`, `index` / `slice` / `set_index` for `x[k]`, `contains` for `in`, `eq` for `==`,
+`hash`, `compare`, the arithmetic methods) exactly when it satisfies the builtin protocol's
+requirement: `self` first, the protocol's parameter names, its parameter and return types, no
+type parameters of its own. A struct and an enum get every hook the same way. A method with a
+hook's name that does not satisfy the requirement is an ordinary method: the operator behaves as
+if the type had no hook (default display for `print`, structural `==`, the usual "cannot iterate /
+index" error for the others), the bound `T: P` rejects the type, and a call by name
+(`Temp.str(21)`) still works. A hook may be written with `yield`; the operator then gets the
+generator. `self` is the receiver only as the first parameter of a method declared in a struct,
+enum or protocol body; any other parameter named `self` is an error.
 
 `Iterable[T]` also works in **TYPE position**, not only as a bound: `fn f(xs: Iterable[int])` takes any
 iterable as a plain (non-generic) parameter, and the body may `for v in xs`, comprehend `[v for v in
@@ -2968,10 +2983,11 @@ every NaN comparison): one shared order, one rule. `+0.0` and `-0.0` are EQUAL i
 **Display-hook resolution.** `print`/`str()`/interpolation use your `str` method as the display hook
 **only when it conforms to `Stringable`** — a single `self` parameter and a **`str` return** (whether
 that return type is written explicitly, inferred from the body, or a `str` type-alias). `str` is
-otherwise a normal method you may define however you like: a `str` method with extra parameters, or
-one that returns something other than `str` (e.g. the receiving struct), simply **isn't** the display
-hook — those values fall back to the default repr, and a direct `obj.str(…)` call still works as
-written. (This is why a `fn str(self) -> S: return self` prints `S(...)` rather than looping.)
+otherwise a normal method you may define however you like: a static `str` (no `self`), a `str` with
+extra parameters, or one that returns something other than `str` (e.g. the receiving struct), simply
+**isn't** the display hook — those values print with the default repr, the method is **never called**
+by `print` (not even for its side effects), and a direct `obj.str(…)` or `Type.str(…)` call still
+works as written. The type checker decides this once; the runtime does not inspect the result.
 
 ```chezzi
 struct Point:

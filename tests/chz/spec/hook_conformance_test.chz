@@ -1,0 +1,186 @@
+# TICKET-250 — a method is an operator hook exactly when it satisfies the builtin protocol's
+# requirement, `self` included. A hook written with `yield` allocates a generator, as every
+# generator method does. A method with a hook's name that does not satisfy the requirement is an
+# ordinary method: the operator behaves as if the type had no hook, and never calls it.
+#
+# The whole grid (hook x shape x owner x use) is `tests/hook_conformance_grid.rs`; these are the
+# programs the bug-hunt wave filed, one `test fn` each, judged against CPython's output.
+
+import std.concurrency
+
+# ---- D1: a hook written with `yield` ----
+
+struct Countdown:
+    n: int
+    fn iter(self) -> Iterator[int]:
+        i := self.n
+        while i > 0:
+            yield i
+            i -= 1
+
+fn total(c: Countdown) -> int:
+    t := 0
+    for x in c:
+        t += x
+    return t
+
+fn doubled(c: Countdown) -> Iterator[int]:
+    for x in c:
+        yield x * 2
+
+struct Table:
+    step: int
+    fn index(self, k: int) -> Iterator[int]:
+        i := 0
+        while i < k:
+            yield i * self.step
+            i += 1
+
+test fn a_generator_iter_hook_drives_for():
+    # CPython `h5_1_min.py`: `total = 6`. It used to end the program at the first `yield`.
+    assert total(Countdown(3)) == 6
+
+test fn a_generator_iter_hook_inside_a_generator():
+    # CPython `h5_1_panic.py`: `[6, 4, 2]`. It used to panic the VM.
+    assert List(doubled(Countdown(3))) == [6, 4, 2]
+
+test fn a_generator_index_hook_returns_its_generator():
+    # CPython `h5_1_index.py`: `after [0, 10, 20]`.
+    t := Table(10)
+    g := t[3]
+    assert List(g) == [0, 10, 20]
+
+# ---- D2: a static `str` is not the display hook ----
+
+seen: List[int] = []
+
+struct Temp:
+    deg: int
+    fn str(reading: int) -> str:
+        seen.push(reading)
+        if reading > 25:
+            return "hot"
+        return "mild"
+
+struct Loud:
+    n: int
+    fn str(self) -> List[str]:
+        seen.push(999)
+        return ["x"]
+
+test fn a_static_str_is_an_ordinary_method():
+    # CPython `h5_2_static_str.py`: `mild`, `Temp(deg=30)`, `1`, `21`.
+    assert Temp.str(21) == "mild"
+    t := Temp(30)
+    assert "{t}" == "Temp(deg=30)"
+    assert str(t) == "Temp(deg=30)"
+    assert "{[t]}" == "[Temp(deg=30)]"
+    assert seen == [21], "print never called the static method"
+
+test fn a_str_with_the_wrong_return_never_runs():
+    before := seen.len()
+    assert "{Loud(1)}" == "Loud(n=1)"
+    assert seen.len() == before, "the method did not run for its side effects"
+
+# ---- D3: an enum gets every hook a struct gets ----
+
+enum Grid:
+    Sq(int)
+    fn index(self, k: int) -> int:
+        return k * 3
+    fn iter(self) -> Iterator[int]:
+        return [7, 8].iter()
+    fn contains(self, item: int) -> bool:
+        return item == 7
+
+test fn an_enum_has_index_iter_and_contains_hooks():
+    g := Grid.Sq(1)
+    assert g[2] == 6
+    assert [x for x in g] == [7, 8]
+    assert 7 in g
+    assert not (8 in g)
+
+# ---- a zero-field struct with a static `hash` hashes as one with no `hash` ----
+
+struct Unit:
+    fn hash(k: int) -> int:
+        return k
+
+test fn a_zero_field_struct_with_a_static_hash_is_a_set_element():
+    s: Set[Unit] = Set([])
+    s.add(Unit())
+    s.add(Unit())
+    assert s.len() == 1
+
+# ---- `iter` wins over `next` ----
+
+struct Both:
+    n: int
+    fn next(self) -> int?:
+        if self.n <= 0:
+            return None
+        self.n -= 1
+        return self.n
+    fn iter(self) -> Iterator[str]:
+        return ["a", "b"].iter()
+
+fn through_bound[S: Iterable[T], T](s: S) -> List[T]:
+    return [x for x in s]
+
+fn through_slot(s: Iterable[str]) -> List[str]:
+    return List(s.iter())
+
+test fn iter_wins_over_next_everywhere():
+    # CPython `both.py`: `['a', 'b']`; `for` calls `__iter__`.
+    assert [x for x in Both(2)] == ["a", "b"]
+    assert through_bound(Both(2)) == ["a", "b"]
+    assert through_slot(Both(2)) == ["a", "b"]
+    assert List(Both(2)) == ["a", "b"]
+
+# ---- D6: every consumer accepts what `for` accepts ----
+
+struct Bag:
+    xs: List[int]
+    fn iter(self) -> Iterator[int]:
+        return self.xs.iter()
+
+struct Pairs:
+    fn iter(self) -> Iterator[(str, int)]:
+        return [("k", 9)].iter()
+
+test fn list_set_map_and_inference_accept_an_iter_only_struct():
+    b := Bag([1, 2, 3])
+    assert List(b) == [1, 2, 3]
+    assert Set(b) == {1, 2, 3}
+    assert Map(Pairs()) == {"k": 9}
+    assert through_bound(b) == [1, 2, 3]
+
+# ---- D4: a type may ask conformance of itself ----
+
+struct Node:
+    id: int
+    fn hash(self) -> int:
+        return self.id
+    fn eq(self, other: Self) -> bool:
+        return self.id == other.id
+    fn peers(self) -> Set[Node]:
+        return Set([self, self])
+
+test fn a_method_returns_a_set_of_its_own_type():
+    # CPython, Rust and Go print `2` for `len + 1`.
+    assert Node(1).peers().len() + 1 == 2
+
+# ---- an `eq` that is not the hook leaves `==` and `cas` structural, and in agreement ----
+
+struct Misnamed:
+    v: int
+    fn eq(self, o: Misnamed) -> bool:
+        return true
+
+test fn a_misnamed_eq_is_not_the_hook():
+    assert Misnamed(1) != Misnamed(2), "`==` is structural"
+    assert Misnamed(1).eq(Misnamed(2)), "the method still works when called by name"
+    a := Atomic(Misnamed(1))
+    assert not (a.load() == Misnamed(2))
+    assert not a.cas(Misnamed(2), Misnamed(3))
+    assert a.cas(Misnamed(1), Misnamed(3))

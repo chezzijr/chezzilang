@@ -9380,6 +9380,38 @@ the stored-callback abort net, and `std.net`'s sticky-UTF-8 + `read_bytes` drain
 
 ## Current focus
 
+### TICKET-250 — one decider for operator hooks (2026-10-11, IN PROGRESS: steps 1-5 and 7 of 10)
+
+A method is a hook exactly when it satisfies the builtin protocol's requirement, `self` included.
+Landed on the ticket branch:
+
+- `Checker::receiver` is the one answer to "is this parameter `self`"; a `self` outside a method's
+  first slot is an error (`fn cast(self) -> int` as a free fn used to take any argument).
+- `Checker::hook_method` (the protocol's requirement run through `method_matches`) decides every
+  hook for a struct and an enum alike. `hook_impl`, the per-operator arity and return tests, the
+  three by-name `next` rules, `validate_eq_shape`, `binds_eq_hook`, `eq_struct` / `eq_enum`,
+  `dispatch_index_method`, `resolve_overload_method` and every bare `run_proto` at a hook site are
+  deleted.
+- `HookTable` (checker to compiler) and `Program::hooks_struct` / `hooks_enum` carry the verdict;
+  `Vm::hook_of` / `Vm::invoke_hook` are the only readers. A call typed through a reserved
+  requirement (`s.iter()` in a `[S: Iterable[T]]` body) is `Op::CallHook`.
+- Behaviour: a hook written with `yield` works (it ended the program with rc=0, or panicked the
+  VM); a static or wrong-shaped `str` / `iter` / `index` / `eq` / `hash` is an ordinary method;
+  `iter` wins over `next`; `List()` / `Set()` / `Map()` and generic `S: Iterable[T]` inference
+  accept an `iter`-only struct; `hoist` defers conformance obligations, so `Set[Node]` inside
+  `Node` checks; an `Atomic` payload is refused only for a real `eq` hook.
+- Tests: `tests/hook_conformance_grid.rs` (360 cells, `chezzi run` at `CHEZZI_THREADS` 1, 2 and
+  default), `tests/chz/spec/hook_conformance_test.chz`.
+
+Not landed yet: the `StructuralEq` bound on a generic `Atomic[T]` (plan step 6), the near-miss
+hook warning (step 8), the base-versus-tip report and the `benches/chz/hook_dispatch.chz` row
+(step 10).
+
+`for` special-cases outside the decider, recorded for the owner's range / channel design (not
+touched): the range arm and the `Ty::Channel` arms of `Checker::for_bindings`
+(`src/checker/sig.rs:5424`, `:5476`, `:5479`, `:5482`, `:5496`), and the range arm and
+`Op::IsChannel` of the `for` lowering (`src/compiler/mod.rs:2400`, `:2474`).
+
 ### TICKET-248 — an un-hinted `?x` is a carrier, never a free variable (2026-10-11)
 
 `double(?5)` with `fn double[T: Num]` type-checked and faulted at run time; `n: int = where_is(?Tok(7))`
