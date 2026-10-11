@@ -2736,8 +2736,15 @@ impl Checker {
             | Ty::ByteArray
             | Ty::Nil
             | Ty::Unknown
-            | Ty::Var(_)
             | Ty::Param(_) => true,
+            // A type variable is read through the store: a pending `?x` crosses iff its payload does.
+            Ty::Var(_) => match self.zonk(ty) {
+                Ty::Var(v) => {
+                    let p = self.tyvars.borrow().present_payload(v);
+                    p.is_none_or(|p| self.sendable_rec(&p, stack))
+                }
+                t => self.sendable_rec(&t, stack),
+            },
             // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
             // its element type is *not* a constraint (the value never crosses, only the handle).
             Ty::Shared(_) => true,

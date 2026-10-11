@@ -119,6 +119,18 @@ impl TyVars {
         }
     }
 
+    /// The payload of the pending `?x` whose variable is `v`: the one read of "what is known about
+    /// an un-hinted `?x`".
+    pub(super) fn present_payload(&self, v: u32) -> Option<Ty> {
+        self.carriers
+            .iter()
+            .find(|c| c.var == v)
+            .and_then(|c| match &c.kind {
+                CarrierKind::Present(p) => Some(p.clone()),
+                CarrierKind::Error => None,
+            })
+    }
+
     /// `t` with every bound var replaced by its binding, recursively.
     pub(super) fn zonk(&self, t: &Ty) -> Ty {
         if !self.any() || !has_var(t) {
@@ -219,22 +231,49 @@ impl Checker {
         match (&a, &b) {
             (Ty::Var(x), Ty::Var(y)) => {
                 if x != y {
-                    let (hi, lo) = if x > y { (*x, *y) } else { (*y, *x) };
-                    self.tyvars.borrow_mut().bind(hi, Ty::Var(lo));
+                    // A `?x` variable is never bound to a plain variable: the plain one follows it.
+                    let mut st = self.tyvars.borrow_mut();
+                    let (px, py) = (
+                        st.present_payload(*x).is_some(),
+                        st.present_payload(*y).is_some(),
+                    );
+                    let (from, to) = match (px, py) {
+                        (true, false) => (*y, *x),
+                        (false, true) => (*x, *y),
+                        _ if x > y => (*x, *y),
+                        _ => (*y, *x),
+                    };
+                    st.bind(from, Ty::Var(to));
                 }
             }
             (Ty::Var(x), t) | (t, Ty::Var(x)) => {
                 if t.is_unknown() && top {
                     return;
                 }
-                let leaked = !ty_all_holes(t, &|h| match h {
-                    Ty::Param(n) => self.rigid_param(n, &[]),
-                    _ => true,
-                });
-                if leaked || mentions_var(t, *x) {
+                let has_leak = |t: &Ty| {
+                    !ty_all_holes(t, &|h| match h {
+                        Ty::Param(n) => self.rigid_param(n, &[]),
+                        _ => true,
+                    })
+                };
+                let leaked = has_leak(t);
+                if mentions_var(t, *x) {
                     return;
                 }
-                self.tyvars.borrow_mut().bind(*x, t.clone());
+                // A `?x` binds only to a carrier. Beside a carrier it takes that carrier; under a
+                // callee's `T?` / `T!E` it takes that carrier over its own payload; beside any
+                // other type it is its default, `T?`.
+                let present = self.tyvars.borrow().present_payload(*x);
+                let t = match (present, t) {
+                    (Some(p), Ty::Option(_)) if leaked => Ty::Option(Box::new(p)),
+                    (Some(p), Ty::Result(_, e)) if leaked && !has_leak(e) => {
+                        Ty::Result(Box::new(p), e.clone())
+                    }
+                    _ if leaked => return,
+                    (Some(p), t) if t.carrier_parts().is_none() => Ty::Option(Box::new(p)),
+                    _ => t.clone(),
+                };
+                self.tyvars.borrow_mut().bind(*x, t);
             }
             (Ty::Width(_), _) => self.solve_at(a.scalar(), &b, top),
             (_, Ty::Width(_)) => self.solve_at(&a, b.scalar(), top),
@@ -397,7 +436,7 @@ impl Checker {
     /// A var bound to `Unknown` (the empty-collection sentinel) accepts silently, except for a
     /// decode read, whose value is compiled per `T`.
     pub(super) fn close_tyvar_frame(&mut self, start: TyVarMark) {
-        let (pending, bounds, carriers) = {
+        let (pending, bounds) = {
             let mut s = self.tyvars.borrow_mut();
             if s.pending.len() <= start.pending
                 && s.bounds.len() <= start.bounds
@@ -416,13 +455,7 @@ impl Checker {
             }
             .collect();
             s.reads.retain(|_, i| *i < start.pending);
-            let c: Vec<PendingCarrier> = {
-                let n = start.carriers.min(s.carriers.len());
-                s.carriers.drain(n..)
-            }
-            .collect();
-            s.carrier_reads.retain(|_, i| *i < start.carriers);
-            (p, b, c)
+            (p, b)
         };
         for p in pending {
             let map: HashMap<String, Ty> = p
@@ -452,6 +485,7 @@ impl Checker {
                 self.record_decode_value(p.node, refined, p.span);
             }
         }
+        self.judge_carriers(start);
         for b in bounds {
             let map: HashMap<String, Ty> = b
                 .map
@@ -460,11 +494,41 @@ impl Checker {
                 .collect();
             if !map.values().any(has_var) {
                 self.enforce_bounds(&b.params, &b.owner, &map, b.span);
+            } else if map.values().any(|t| older_var(t, start.slots)) {
+                self.tyvars.borrow_mut().bounds.push(b);
+            } else {
+                self.error(
+                    b.span,
+                    "internal: a bound still holds a type variable when its statement closes"
+                        .to_string(),
+                );
             }
         }
-        for c in carriers {
+    }
+
+    /// The verdict on every `?x` / `!e` created since `start`: every `?x` first, so an `!e` beside
+    /// one reads the success type it pinned, in either order.
+    fn judge_carriers(&mut self, start: TyVarMark) {
+        let carriers: Vec<PendingCarrier> = {
+            let mut s = self.tyvars.borrow_mut();
+            let n = start.carriers.min(s.carriers.len());
+            let c = s.carriers.drain(n..).collect();
+            s.carrier_reads.retain(|_, i| *i < start.carriers);
+            c
+        };
+        let (present, error): (Vec<_>, Vec<_>) = carriers
+            .into_iter()
+            .partition(|c| matches!(c.kind, CarrierKind::Present(_)));
+        for c in present.into_iter().chain(error) {
             self.judge_carrier(c);
         }
+    }
+
+    /// The carriers of one operand, judged, and its type resolved; reads and bounds stay pending.
+    /// For the return-inference walk, which is rolled back and reports no generic read.
+    pub(super) fn close_carriers(&mut self, m: TyVarMark, t: Ty) -> Ty {
+        self.judge_carriers(m);
+        self.zonk(&t)
     }
 
     /// TICKET-227 — the frame verdict on one `?x` / `!e`. An unpinned `?x` is optional; a `?x`
@@ -488,10 +552,10 @@ impl Checker {
                 z if z.is_unknown() => {
                     self.record_wrap(c.node, crate::checker::Wrap::Some, c.span);
                 }
-                z => self.error(
-                    c.span,
-                    format!("'?' builds an optional or success value, found {z}"),
-                ),
+                z => {
+                    let p = z.slot_payload().clone();
+                    self.error(c.span, super::wrap_payload_mismatch(&p, &t))
+                }
             },
             CarrierKind::Error => {
                 if let Ty::Var(v) = z {
@@ -507,16 +571,7 @@ impl Checker {
     pub(super) fn var_text(&self, v: u32) -> String {
         match self.zonk(&Ty::Var(v)) {
             Ty::Var(v) => {
-                let s = self.tyvars.borrow();
-                let present = s
-                    .carriers
-                    .iter()
-                    .find(|c| c.var == v)
-                    .and_then(|c| match &c.kind {
-                        CarrierKind::Present(p) => Some(p.clone()),
-                        CarrierKind::Error => None,
-                    });
-                drop(s);
+                let present = self.tyvars.borrow().present_payload(v);
                 match present {
                     Some(p) => Ty::Option(Box::new(self.zonk(&p))).to_string(),
                     None => "_".to_string(),
@@ -534,20 +589,14 @@ impl Checker {
             let mut hit: Option<(u32, Ty)> = None;
             {
                 let s = self.tyvars.borrow();
-                let _ =
-                    map_ty(&z, &mut |x| {
-                        if let Ty::Var(v) = x
-                            && hit.is_none()
-                        {
-                            hit = s.carriers.iter().find(|c| c.var == *v).and_then(|c| {
-                                match &c.kind {
-                                    CarrierKind::Present(p) => Some((*v, p.clone())),
-                                    CarrierKind::Error => None,
-                                }
-                            });
-                        }
-                        None
-                    });
+                let _ = map_ty(&z, &mut |x| {
+                    if let Ty::Var(v) = x
+                        && hit.is_none()
+                    {
+                        hit = s.present_payload(*v).map(|p| (*v, p));
+                    }
+                    None
+                });
             }
             let Some((v, p)) = hit else { return z };
             self.tyvars.borrow_mut().bind(v, Ty::Option(Box::new(p)));
@@ -581,6 +630,16 @@ impl Checker {
     pub(super) fn join_fill(&self, a: &Ty, b: &Ty) -> Option<Ty> {
         self.join_ty(a, b).then(|| super::merge_unknown(a, b))
     }
+}
+
+/// Whether `t` mentions a var created before slot `n`: one an enclosing frame owns.
+fn older_var(t: &Ty, n: usize) -> bool {
+    let mut found = false;
+    let _ = map_ty(t, &mut |x| {
+        found |= matches!(x, Ty::Var(v) if (*v as usize) < n);
+        None
+    });
+    found
 }
 
 /// Whether `t` mentions var `id` (the occurs check).

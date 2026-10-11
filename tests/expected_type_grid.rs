@@ -801,7 +801,6 @@ struct SiblingRow {
     some: Out,
 }
 
-const Q_ON_INT: Out = Out::Rejects("'?' builds an optional or success value, found int");
 const PLUS_OPT: Out = Out::Rejects("cannot apply + to int? and int");
 const PLUS_RES: Out = Out::Rejects("cannot apply + to int!str and int");
 
@@ -819,7 +818,7 @@ fn sibling_rows() -> Vec<SiblingRow> {
             plain: Out::Prints("{v}"),
             closure: Out::Prints("7"),
             none: Out::Rejects("cannot assign int? to variable of type int"),
-            some: Q_ON_INT,
+            some: Out::Rejects("cannot assign int? to variable of type int"),
         },
         // The seed rows: `T` is solved from the arguments and the result wraps at the binding.
         SiblingRow {
@@ -853,7 +852,7 @@ fn sibling_rows() -> Vec<SiblingRow> {
             plain: Out::Prints("some {v}"),
             closure: Out::Prints("some 7"),
             none: Out::Rejects("cannot assign int?? to variable of type int?"),
-            some: Q_ON_INT,
+            some: Out::Rejects("cannot assign int?? to variable of type int?"),
         },
         SiblingRow {
             shape: "opt",
@@ -919,7 +918,9 @@ fn sibling_rows() -> Vec<SiblingRow> {
             r(format!(
                 "cannot assign {ty}[int?] to variable of type {ty}[int]"
             )),
-            Q_ON_INT,
+            r(format!(
+                "cannot assign {ty}[int?] to variable of type {ty}[int]"
+            )),
         );
         row(
             "R?",
@@ -927,7 +928,7 @@ fn sibling_rows() -> Vec<SiblingRow> {
             p(format!("some {word} {{v}}")),
             p(format!("some {word} 7")),
             r(format!("to variable of type {ty}[int]?")),
-            Q_ON_INT,
+            r(format!("to variable of type {ty}[int]?")),
         );
         row(
             "R!str",
@@ -935,7 +936,7 @@ fn sibling_rows() -> Vec<SiblingRow> {
             p(format!("ok {word} {{v}}")),
             p(format!("ok {word} 7")),
             r(format!("to variable of type {ty}[int]!str")),
-            Q_ON_INT,
+            r(format!("to variable of type {ty}[int]!str")),
         );
         // The written `T` is the carrier, so every argument owns a carrier slot and wraps; the
         // closure's parameter is the carrier too.

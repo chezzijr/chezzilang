@@ -1664,7 +1664,10 @@ impl Checker {
                 // `fmtspec`); only `Unknown`, a generic `Param(T)` and a protocol existential keep
                 // the runtime backstop (see `format_spec_kind`).
                 if let Some(fs) = spec
-                    && let Some((kind, text_form)) = self.format_spec_kind(&ty)
+                    && let Some((kind, text_form)) = {
+                        let ty = self.pinning_value_ty(&ty);
+                        self.format_spec_kind(&ty)
+                    }
                     && let Err(msg) = crate::fmtspec::spec_valid_for_scalar(fs, kind)
                 {
                     // TICKET-124 (W13-18) / TICKET-142 (W14-19): a value that renders as its text
@@ -1938,7 +1941,7 @@ impl Checker {
                 // literal inside the tuple sees its own element's hint instead of the bare
                 // bottom-up type.
                 let hint = self.expected_hint.take();
-                let tys = match hint {
+                let tys = match hint.map(|h| h.slot_payload().clone()) {
                     Some(Ty::Tuple(hs)) if hs.len() == items.len() => items
                         .iter()
                         .zip(&hs)
@@ -3994,8 +3997,8 @@ impl Checker {
         match hint {
             // No expected carrier: another operand of the same statement binds the success type
             // (TICKET-238: the frame is one statement or one bound operand), at module scope as
-            // in a fn body; the return-inference walk leaves it open.
-            None | Some(Ty::Var(_)) if !self.resolving_returns => {
+            // in a fn body, and in the return-inference walk.
+            None | Some(Ty::Var(_)) => {
                 let v = self.defer_carrier(node, super::tyvar::CarrierKind::Error);
                 Ty::Result(Box::new(Ty::Var(v)), Box::new(t))
             }
@@ -4007,7 +4010,7 @@ impl Checker {
     /// expected type: `T?` -> `Some(x)`, `T!E` -> `Ok(x)`. The operand owns `T` as its slot (so
     /// `?5` at `int??` is `Some(Some(5))`). With no expected carrier the value takes a frame type
     /// variable, at module scope as in a fn body (one still unbound when its operand or statement
-    /// closes is `T?`); the return-inference walk makes it `T?` at once. Under an expected carrier
+    /// closes is `T?`), and in the return-inference walk. Under an expected carrier
     /// whose payload is open the value is the carrier over its operand's type.
     fn infer_wrap_val(&mut self, node: &Expr, inner: &Expr) -> Ty {
         let hint = self.expected_hint.take();
@@ -4015,22 +4018,15 @@ impl Checker {
             Some((w, p, _)) => (p.clone(), w),
             None => {
                 let t = self.infer_value(inner);
-                if !self.resolving_returns {
-                    let v = self.defer_carrier(node, super::tyvar::CarrierKind::Present(t));
-                    return Ty::Var(v);
-                }
-                self.record_wrap(node.id, crate::checker::Wrap::Some, node.span);
-                return Ty::Option(Box::new(t));
+                let v = self.defer_carrier(node, super::tyvar::CarrierKind::Present(t));
+                return Ty::Var(v);
             }
         };
         let t = self.infer_value_in(inner, &payload);
         if !t.is_unknown() && !self.assignable(&payload, &t) {
             self.error(
                 inner.span,
-                format!(
-                    "'?' value: expected {payload}, found {t}{}",
-                    crate::checker::float_fix_note(&payload, &t)
-                ),
+                crate::checker::wrap_payload_mismatch(&payload, &t),
             );
         }
         self.record_wrap(node.id, w, node.span);

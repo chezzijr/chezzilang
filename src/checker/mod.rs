@@ -3793,6 +3793,14 @@ fn mask_closure_ret(actual: &Ty) -> Ty {
     }
 }
 
+/// The one text for a `?x` whose operand does not fit the payload of its carrier.
+fn wrap_payload_mismatch(payload: &Ty, t: &Ty) -> String {
+    format!(
+        "'?' value: expected {payload}, found {t}{}",
+        float_fix_note(payload, t)
+    )
+}
+
 fn unify(decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
     match (decl, actual) {
         (Ty::Param(n), a) => {

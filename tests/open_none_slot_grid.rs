@@ -4187,11 +4187,7 @@ const REC_ROWS: &[Row] = &[
             {V}
     print(r)
 "#,
-        [
-            P(r#"7"#),
-            R(r#"'?' builds an optional or success value, found None"#),
-            P(r#"5"#),
-        ],
+        [P(r#"7"#), P(r#"7"#), P(r#"5"#)],
     ),
     row(
         "rec/rif_init",

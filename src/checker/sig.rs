@@ -890,7 +890,9 @@ impl Checker {
             ] = decl.body.as_slice()
         {
             let saved = self.untyped_call.replace(None);
+            let body_mark = self.tyvar_mark();
             let raw = self.inline_body_ty(e, None);
+            let raw = self.close_carriers(body_mark, raw);
             let untyped = std::mem::replace(&mut self.untyped_call, saved).flatten();
             (raw, untyped)
         } else {

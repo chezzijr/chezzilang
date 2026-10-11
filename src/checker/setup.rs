@@ -2580,7 +2580,7 @@ impl Checker {
     /// no frame: a lambda param is declared while its statement still solves. A desugar temp
     /// (`OPT_RECV_PREFIX`) holds a consumed operand and is not judged.
     pub(super) fn closed_binding_ty(&mut self, name: &str, ty: Ty, site: BindSite) -> (Ty, bool) {
-        let t = self.zonk(&ty);
+        let t = self.pinning_value_ty(&ty);
         if name.starts_with(super::pattern::OPT_RECV_PREFIX) {
             return (t, false);
         }
@@ -2866,7 +2866,9 @@ impl Checker {
             }
             super::unify(decl, actual, map);
         } else {
-            super::unify(decl, actual, map);
+            // A `?x` under a declared carrier (`o: T?`) takes that carrier, so `T` is its payload.
+            self.solve(&super::subst(decl, map), actual);
+            super::unify(decl, &self.zonk(actual), map);
         }
     }
 
