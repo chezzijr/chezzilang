@@ -9397,6 +9397,21 @@ Landed so far, in plan-step order:
    `tests/chz/suites/box_grid_test.chz` (33 cells), `tests/chz/suites/box_nested_grid_test.chz`
    (112 cells, values equal to the base binary's), `tests/chz/stdlib/box_in_place_perf_test.chz`.
    Plan step 9's two pinned tests are migrated with it.
+6. `RwShared[T]` is the same box core behind a `RwLock`: `write` / `set` and the collection
+   writers run inside the box heap in place; `get` / `read` / the read views copy out under the
+   read lock (`try_read` first, the update guard only when a writer holds or waits) and decode
+   after it dropped. `get` / `read` / display inside the box's own `write` closure fault; `write`
+   nested in `read` stays legal. The four native walk primitives are gone: `for_each`, `fold`,
+   `for_each_entry`, `fold_entries` of `std.concurrency.collection` are `inner.get()` plus a
+   loop, so a walk visits exactly the entries present when it starts (F2; before, a callback that
+   removed the visited entry saw `[1, 3, 5]` of six). Grids: `box_grid_test.chz` (50 cells),
+   `tests/chz/suites/concurrent_collection_walk_grid_test.chz`.
+7. The encoded store is deleted: `rwshared_probe`, `rwshared_write_entry`, `rwshared_splice`,
+   `rwshared_list_push`, `rwshared_write_entry_slow`, `rwshared_snapshot_pieces`, `EntryWrite`,
+   `RwSharedCore.{v, summary, generation, list_ceiling}` and its `store*` / `with_*_mut`,
+   `from_wire_piece`, `wire_pieces_are_self_contained`, `WireMemo::seeded`, the `WireTable`
+   mutation methods and `WireSummary::adjust`. `WireTable` / `HashIndex` stay (every `Map` / `Set`
+   crossing carries them); `AtomicCore` still stores a wire.
 
 Measured cost, not yet explained: small-value `update` with one caller is 401-432 ms before and
 450-493 ms after per 200000 calls.

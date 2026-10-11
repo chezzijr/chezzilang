@@ -1025,13 +1025,7 @@ impl Heap {
             // own heap, rooted there. Nothing to trace, and no lock (the state lock is held
             // across user code, where a collection can start).
             Obj::Shared(_) => {}
-            Obj::RwShared(core) => {
-                let (mut seen, mut pending) = {
-                    let g = core.v.read().unwrap();
-                    Self::mark_core_payload(&g, &core.summary, Arc::as_ptr(core) as usize, &mut out)
-                };
-                crate::vm::core::drain_pending_cores(&mut out, &mut seen, &mut pending);
-            }
+            Obj::RwShared(_) => {}
             Obj::Atomic(core) => {
                 let (mut seen, mut pending) = {
                     let g = core.v.lock().unwrap();
@@ -1340,18 +1334,11 @@ impl Heap {
                     if include_cores && cores.insert(Arc::as_ptr(core) as usize) =>
                 {
                     if deep {
-                        // Guard scoped, drain after (see the `Obj::Channel` arm above).
-                        {
-                            let g = core.v.read().unwrap();
-                            crate::vm::core::value_core_bytes_structural(
-                                &core.summary,
-                                &g,
-                                cores,
-                                pending,
-                            )
-                        }
+                        let g = core.state.try_read();
+                        let ctx = g.as_ref().and_then(|g| g.as_deref());
+                        crate::vm::core::box_bytes(ctx, &core.bytes, cores, pending)
                     } else {
-                        core.summary.bytes()
+                        core.bytes.load(Ordering::Relaxed)
                     }
                 }
                 Obj::Atomic(core) if include_cores && cores.insert(Arc::as_ptr(core) as usize) => {
@@ -2148,7 +2135,7 @@ mod iter_obj_tests {
     /// `summary.set` in `vm::core`'s `store`/`store_guarded` turns this RED.
     #[test]
     fn replacing_store_refreshes_the_gc_summary() {
-        use crate::vm::core::{AtomicCore, RwSharedCore, WS_CLEAN};
+        use crate::vm::core::{AtomicCore, WS_CLEAN};
         use crate::vm::wire::WireValue;
         let mut h = Heap::new();
         let kept = h.alloc(Obj::Str("kept".into()));
@@ -2170,21 +2157,6 @@ mod iter_obj_tests {
             h.children(sr).contains(&kept),
             "AtomicCore::store must refresh the memo"
         );
-
-        // RwShared::set / RwShared::write write-back.
-        let rc = Arc::new(RwSharedCore {
-            v: std::sync::RwLock::new(wlist(4)),
-            ..Default::default()
-        });
-        let rr = h.alloc(Obj::RwShared(Arc::clone(&rc)));
-        assert!(h.children(rr).is_empty());
-        assert_eq!(rc.summary.state(), WS_CLEAN);
-        rc.store(handle());
-        assert!(
-            h.children(rr).contains(&kept),
-            "RwSharedCore::store must refresh the memo"
-        );
-
         // Atomic::store, and the guarded RMW paths (exchange / cas / add|sub).
         let ac = Arc::new(AtomicCore {
             v: Mutex::new(wlist(4)),
@@ -2212,7 +2184,7 @@ mod iter_obj_tests {
         );
 
         // …and the payload actually SURVIVES a collection rooted only through the core.
-        for r in [sr, rr, ar] {
+        for r in [sr, ar] {
             let mut stack = vec![r];
             while let Some(x) = stack.pop() {
                 if h.mark(x) {

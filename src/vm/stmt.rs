@@ -2529,7 +2529,10 @@ impl Vm {
                 let st = c.state.0.try_lock().ok()?;
                 self.box_copy_out(st.as_ref()?, Span::default()).ok()?
             }
-            BoxCore::RwShared(c) => c.v.read().unwrap().clone(),
+            BoxCore::RwShared(c) => {
+                let st = c.state.try_read()?;
+                self.box_copy_out(st.as_ref()?, Span::default()).ok()?
+            }
             BoxCore::Atomic(c) => c.v.lock().unwrap().clone(),
         })
     }
@@ -2573,7 +2576,10 @@ impl Vm {
     fn box_snapshot_one(&mut self, core: BoxCore, span: Span) -> Result<WireValue, RuntimeError> {
         match core {
             BoxCore::Shared(c) => self.shared_copy_out(c, span),
-            _ => self
+            BoxCore::RwShared(c) => {
+                self.rwshared_read(c, span, |vm, ctx| vm.box_copy_out(ctx, span))
+            }
+            BoxCore::Atomic(_) => self
                 .box_peek(core)
                 .ok_or_else(|| self.err("a box state could not be read".to_string(), span)),
         }

@@ -48,11 +48,21 @@ impl ArgPass {
 /// `(head, the std.concurrency.collection type that owns the surface, the primitive names)`.
 /// The `Ty::RwShared` arm types exactly these names, and only inside std (`std_internal_hidden`);
 /// a Miss on one names the collection.
+///
+/// A walk is not a primitive (TICKET-246): the collection writes it as `inner.get()` plus a
+/// loop. [`RWSHARED_WALKS`] lists the walk names per head only so a Miss on one still names the
+/// collection.
+pub(super) const RWSHARED_WALKS: &[(&str, &[&str])] = &[
+    ("List", &["for_each", "fold"]),
+    ("Map", &["for_each_entry", "fold_entries"]),
+    ("Set", &["for_each", "fold"]),
+];
+
 pub(super) const RWSHARED_VIEWS: &[(&str, &str, &[&str])] = &[
     (
         "List",
         "ConcurrentList",
-        &["_len", "_at", "_slice", "_for_each", "_fold", "_push"],
+        &["_len", "_at", "_slice", "_push"],
     ),
     (
         "Map",
@@ -64,14 +74,12 @@ pub(super) const RWSHARED_VIEWS: &[(&str, &str, &[&str])] = &[
             "_set_key",
             "_remove_key",
             "_get_or_insert",
-            "_for_each_entry",
-            "_fold_entries",
         ],
     ),
     (
         "Set",
         "ConcurrentSet",
-        &["_len", "_contains", "_for_each", "_fold", "_add", "_remove"],
+        &["_len", "_contains", "_add", "_remove"],
     ),
 ];
 
@@ -2459,17 +2467,6 @@ impl Checker {
             | Ty::Listener
             | Ty::Writer
             | Ty::Reader => {
-                // ARM-ONLY generics: the `RwShared` read-view `fold`/`fold_entries` are hand-built in
-                // the `Ty::RwShared` dispatch arm (their `R` is not nameable in `RwShared[T]`'s
-                // harvested surface), so they are absent from the `structs` table the lookup below
-                // consults — which rejected their turbofish outright. They ARE genuinely generic and
-                // already route through `infer_generic_method` WITH `type_args` (see `fold_sig`).
-                // A wrong receiver element (`RwShared[int].fold[int]`) still rejects downstream, via
-                // the native handle resolver's "no method".
-                if matches!(recv_ty, Ty::RwShared(_)) && matches!(method, "_fold" | "_fold_entries")
-                {
-                    return true;
-                }
                 let bare = match recv_ty {
                     Ty::List(_) => "List",
                     Ty::Map(_, _) => "Map",
@@ -3535,75 +3532,12 @@ impl Checker {
                 // hover (inside the helper) shows the declared `fn(fn(T) -> ?) -> ?` shape, the sig
                 // of record.
                 let elem = (**elem).clone();
-                // Zero-copy READ-view methods on a CONTAINER element of `RwShared[T]` — `List[E]`,
-                // `Map[K,V]`, `Set[E]` (Tuple EXCLUDED: heterogeneous). They walk the stored
-                // heap-independent `WireValue::List`/`Map`/`Set` under the read guard and `from_wire`
-                // ONE entry/element at a time (O(1) memory), so a worker can scan/reduce a shared large
-                // container without materializing the whole inner (what `get`/`read` do). E/K/V are NOT
-                // nameable in `RwShared[T]`'s harvested `std/concurrency.chz` surface, so these sigs are
-                // ARM-ONLY (hand-built here, element types ARM-RECOVERED by destructuring the concrete
-                // container: `List[?E]`/`Map[?K,?V]`/`Set[?E]`). Dispatch branches on the container HEAD
-                // first (method names overlap — `len` on all three, `for_each`/`fold` on List+Set), then
-                // the method within that container's set; anything else (a scalar/tuple head, or a wrong
-                // method for the head) falls through to the native handle resolver → a clean "no method"
-                // reject (no check-OK-then-run-fault). The constructor-kind gate is the surface form of
-                // the `where T: List/Map/Set` bound (see `container_bound_matches`). NOTE (runtime): the
-                // walk re-acquires the read guard PER ENTRY and drops it before the closure/hash/eq
-                // probe (never held across user code), so a nested read/write of the same box is
-                // deadlock-free; see `rwshared_method` in `src/vm/netio.rs`.
-                //
-                // `fold`/`fold_entries` are GENUINELY generic (the `List.fold[U]` route): R PINS from
-                // the concrete `init` accumulator, routed through `infer_generic_method` exactly as a
-                // harvested generic method is. `for_each*`'s closure return is DISCARDED (`Ty::Unknown`
-                // ret), so any return is accepted (a strict `-> nil` would reject `fn(x): acc.add(x)`).
-                let fold_sig = |this: &mut Self, name: &str, elem_params: Vec<Ty>| -> Ty {
-                    // `R` is the method's own param: rename it when the receiver mentions a caller's
-                    // `R`, the same rule `instantiate_method` applies to a declared method.
-                    let mut free = Vec::new();
-                    ty_collect_params(&obj_ty, None, &mut free);
-                    let r_name = if free.iter().any(|n| n == "R") {
-                        fresh_param_name("R", &free.into_iter().collect())
-                    } else {
-                        "R".to_string()
-                    };
-                    let r = Ty::Param(r_name.clone());
-                    let mut fn_params = vec![r.clone()];
-                    fn_params.extend(elem_params);
-                    let params = vec![
-                        obj_ty.clone(),
-                        r.clone(),
-                        Ty::Func {
-                            params: fn_params,
-                            ret: Box::new(r.clone()),
-                            labels: crate::checker::FnLabels::default(),
-                        },
-                    ];
-                    let tps = vec![TyParam {
-                        name: r_name,
-                        name_span: Span::default(),
-                        bounds: vec![],
-                    }];
-                    this.infer_generic_method(
-                        name,
-                        &params,
-                        &[],
-                        &r,
-                        &tps,
-                        &[],
-                        &obj_ty,
-                        type_args,
-                        args,
-                        usize::MAX, // synthesized builtin sig: exact arity
-                        name_span,
-                        span,
-                        hint,
-                    )
-                };
-                let func = |params: Vec<Ty>| Ty::Func {
-                    params,
-                    ret: Box::new(Ty::Unknown),
-                    labels: crate::checker::FnLabels::default(),
-                };
+                // The std-internal `_` primitives of a CONTAINER element (`List[E]`, `Map[K, V]`,
+                // `Set[E]`; `RWSHARED_VIEWS`). E/K/V are not nameable in `RwShared[T]`'s harvested
+                // surface, so these sigs are built here from the concrete container. A read copies
+                // only what it returns; a writer is the plain container operation under the box's
+                // update guard (`rwshared_method` in `src/vm/netio.rs`). A walk is not a primitive:
+                // the collections write it as `inner.get()` plus a loop.
                 let view = RWSHARED_VIEWS.iter().find(|(head, _, _)| {
                     matches!(
                         (&elem, *head),
@@ -3637,11 +3571,6 @@ impl Checker {
                                 self.check_args_range("_slice", &[Ty::Int, Ty::Int], 2, args, span);
                                 return Ty::list(e);
                             }
-                            "_for_each" => {
-                                self.check_args_range("_for_each", &[func(vec![e])], 1, args, span);
-                                return Ty::Nil;
-                            }
-                            "_fold" => return fold_sig(self, "_fold", vec![e]),
                             _ => {
                                 unreachable!("RWSHARED_VIEWS lists a method this arm does not type")
                             }
@@ -3682,17 +3611,6 @@ impl Checker {
                                 );
                                 return v;
                             }
-                            "_for_each_entry" => {
-                                self.check_args_range(
-                                    "_for_each_entry",
-                                    &[func(vec![k, v])],
-                                    1,
-                                    args,
-                                    span,
-                                );
-                                return Ty::Nil;
-                            }
-                            "_fold_entries" => return fold_sig(self, "_fold_entries", vec![k, v]),
                             _ => {
                                 unreachable!("RWSHARED_VIEWS lists a method this arm does not type")
                             }
@@ -3713,11 +3631,6 @@ impl Checker {
                                 self.check_args_range(method, &[e], 1, args, span);
                                 return Ty::Nil;
                             }
-                            "_for_each" => {
-                                self.check_args_range("_for_each", &[func(vec![e])], 1, args, span);
-                                return Ty::Nil;
-                            }
-                            "_fold" => return fold_sig(self, "_fold", vec![e]),
                             _ => {
                                 unreachable!("RWSHARED_VIEWS lists a method this arm does not type")
                             }
@@ -3750,8 +3663,12 @@ impl Checker {
                         // before any near-miss: `set_key` is not a typo of `set`.
                         let under = format!("_{method}");
                         let help = match view {
-                            Some((_, coll, names))
-                                if names.contains(&method) || names.contains(&under.as_str()) =>
+                            Some((head, coll, names))
+                                if names.contains(&method)
+                                    || names.contains(&under.as_str())
+                                    || RWSHARED_WALKS
+                                        .iter()
+                                        .any(|(h, walks)| h == head && walks.contains(&method)) =>
                             {
                                 Some(format!("use {coll} from std.concurrency.collection"))
                             }

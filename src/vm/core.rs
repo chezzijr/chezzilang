@@ -17,7 +17,7 @@ use super::wire::{WireGenState, WireValue};
 use crate::lexer::Span;
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -843,99 +843,63 @@ impl SharedState {
     }
 }
 
-/// `RwShared[T]` core: the read-write counterpart to [`SharedCore`]. The value lives behind a
-/// `RwLock` instead of a `Mutex`, so MANY concurrent `read` guards (or ONE exclusive `write` guard)
-/// can be held at once — the point of the type is that read-heavy workloads scale. `read(f)` takes a
-/// SHARED read guard, clones the value out, drops the guard, then runs `f` (no write-back) — `read`
-/// never takes the update guard. `write(f)` and `set` each take the box's process-global update guard
-/// (TICKET-016 / W8-3, [`super::core::acquire_update_guard`]) before touching `v`.
+/// `RwShared[T]` core: the read-write counterpart to [`SharedCore`], on the same box core. The
+/// value lives in the box's PRIVATE heap, at `stack[0]` of the box's own context (`state`), behind
+/// a `RwLock`: MANY readers copy out of the live heap at once, or ONE writer runs inside it.
 ///
-/// `write`'s read-modify-write must be **atomic across threads** (the box's contract, exactly like
-/// `Shared.update`), and `set` must not be able to silently clobber an in-flight `write`'s closure —
-/// so `set` takes the SAME guard `write` does. The value lock `v` cannot be held across the user
-/// closure (a `RwLock` write guard is not reentrant — it would deadlock a closure that re-enters
-/// `get`/`read` on the same box), so the update guard — not `v` — serialises the whole RMW: held for
-/// the entire operation, while `v` is taken only for the brief read-out and the brief write-back. A
-/// same-box `set`/`write` re-entry inside `write`'s own closure FAULTS (the guard registry's
-/// length-1 wait-for cycle); `write` nested in `read` still persists (`read` never takes the guard); a
-/// genuine cross-box wait-for cycle FAULTS instead of hanging.
+/// - `write(f)` / `set` and the single-entry writers take the box's update guard (TICKET-016 /
+///   W8-3, [`super::core::acquire_update_guard`]) and then the write lock; the closure runs under
+///   it, inside the box heap (`Vm::with_box`), exactly like `Shared.update`.
+/// - A reader (`get`, `read`, the `_` read views, display) tries the read lock with no registry
+///   lock. Only when a writer holds or waits for the state does it take the update guard and then
+///   the read lock, so its wait is a registered guard wait, and a reader inside the box's OWN
+///   `write` closure faults (`already holds the update guard`) instead of deadlocking.
+/// - No user code runs under the read lock: a reader copies with `WalkSrc`, drops the lock and
+///   only then decodes, compares keys or runs its closure. So `write` nested in `read` is legal.
+/// - The box heap is written, and collected, only under the write lock.
+///
+/// GC and byte accounting of an OUTER heap never wait here: see [`SharedCore`].
 #[derive(Debug, Default)]
 pub struct RwSharedCore {
-    pub v: RwLock<WireValue>,
-    /// W6-7/W6-10 — cached GC summary of `v`. MUST be re-`set` under `v`'s write lock by every store.
-    pub summary: WireSummary,
-    /// TICKET-192 — write generation of `v`, bumped under `v`'s write lock by every mutation. A probe
-    /// that drops the read guard to run a user `eq` re-reads it under the next guard and restarts when
-    /// it moved, so a concurrent remove that shifts positions cannot make a present key read as
-    /// missing. It lives on the core, not the table: a whole `set` replaces the table, and a counter
-    /// restarting with it could return to an old value.
-    pub generation: AtomicU64,
-    /// TICKET-243 — the id ceiling of a stored `List`: every wire id inside it is below this, so
-    /// an element spliced in by `_push` mints its ids from here up (a `WireValue::List` carries no
-    /// ceiling of its own, unlike a `WireTable`). `0` means unknown: every whole
-    /// [`store`](Self::store) resets it, and the next `_push` re-encodes the list once to learn it.
-    pub list_ceiling: AtomicU32,
+    pub state: RwSharedState,
+    /// `Heap::approx_bytes()` of the box heap after the last write: an O(1) upper estimate.
+    pub bytes: AtomicUsize,
 }
 
-impl RwSharedCore {
-    /// Replace the payload AND refresh the cached GC summary under the same write lock — see
-    /// [`SharedCore::store`] (the walk is hoisted OFF the exclusive lock for the same reason).
-    pub fn store(&self, w: WireValue) {
-        let sum = wire_summary(&w);
-        let mut g = self.v.write().unwrap();
-        self.summary.store(sum.0, sum.1);
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        self.list_ceiling.store(0, Ordering::Relaxed);
-        *g = w;
-    }
+/// The context of a `RwShared` box. `None` only while a writer has taken it out
+/// (`Vm::with_box`), under the write lock, so a reader never sees `None`.
+#[derive(Default)]
+pub struct RwSharedState(pub(super) RwLock<BoxSlot>);
 
-    /// [`store`](Self::store) for a list serialized by ONE memo whose `next_id` is `ceiling`:
-    /// records the ceiling under the same write lock, so the next `_push` splices.
-    pub fn store_list(&self, w: WireValue, ceiling: u32) {
-        let sum = wire_summary(&w);
-        let mut g = self.v.write().unwrap();
-        self.summary.store(sum.0, sum.1);
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        self.list_ceiling.store(ceiling.max(1), Ordering::Relaxed);
-        *g = w;
+impl std::fmt::Debug for RwSharedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RwSharedState")
     }
+}
 
-    /// TICKET-243 — [`with_map_mut`](Self::with_map_mut) for a stored `List`'s items.
-    pub fn with_list_mut<R>(&self, f: impl FnOnce(&mut Vec<WireValue>) -> R) -> Option<R> {
-        let mut g = self.v.write().unwrap();
-        match &mut *g {
-            WireValue::List { items, .. } => {
-                self.generation.fetch_add(1, Ordering::Relaxed);
-                Some(f(items))
-            }
-            _ => None,
+/// Where a box context sits behind its lock.
+pub(super) type BoxSlot = Option<Box<super::FiberCtx>>;
+
+impl RwSharedState {
+    /// The read lock when no writer holds or waits for the state; never blocks. A poisoned lock
+    /// still holds a whole state (see [`SharedState::lock`]).
+    pub(super) fn try_read(&self) -> Option<std::sync::RwLockReadGuard<'_, BoxSlot>> {
+        match self.0.try_read() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
         }
     }
 
-    /// TICKET-243 — [`with_map_mut`](Self::with_map_mut) for a stored `Set`.
-    pub fn with_set_mut<R>(&self, f: impl FnOnce(&mut super::wire::WireSet) -> R) -> Option<R> {
-        let mut g = self.v.write().unwrap();
-        match &mut *g {
-            WireValue::Set { entries, .. } => {
-                self.generation.fetch_add(1, Ordering::Relaxed);
-                Some(f(entries))
-            }
-            _ => None,
-        }
+    /// The read lock, blocking. Only for a reader that holds the update guard: its only possible
+    /// wait is then another reader's Rust copy.
+    pub(super) fn read(&self) -> std::sync::RwLockReadGuard<'_, BoxSlot> {
+        self.0.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// TICKET-192 — run `f` on the stored map under the write lock, bumping the write generation
-    /// (see [`generation`](Self::generation)). `None` when the stored value is not a `Map`. `f` must
-    /// keep `summary` in step itself ([`WireSummary::adjust`]); it runs under the lock, so it may.
-    pub fn with_map_mut<R>(&self, f: impl FnOnce(&mut super::wire::WireMap) -> R) -> Option<R> {
-        let mut g = self.v.write().unwrap();
-        match &mut *g {
-            WireValue::Map { entries, .. } => {
-                self.generation.fetch_add(1, Ordering::Relaxed);
-                Some(f(entries))
-            }
-            _ => None,
-        }
+    /// The write lock, blocking. Only for a writer that holds the update guard.
+    pub(super) fn write(&self) -> std::sync::RwLockWriteGuard<'_, BoxSlot> {
+        self.0.write().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -1565,10 +1529,7 @@ pub fn drain_pending_cores(
             }
             // TICKET-246 — a `Shared` holds its value in its own heap: no handle to collect, no lock.
             WireValue::Shared(_) => {}
-            WireValue::RwShared(c) => {
-                let v = c.v.read().unwrap();
-                collect_gcrefs_structural(&v, out, seen, pending);
-            }
+            WireValue::RwShared(_) => {}
             WireValue::Atomic(c) => {
                 let v = c.v.lock().unwrap();
                 collect_gcrefs_structural(&v, out, seen, pending);
@@ -1758,25 +1719,6 @@ impl WireSummary {
         self.state
             .store(if dirty { WS_DIRTY } else { WS_CLEAN }, Ordering::Relaxed);
     }
-
-    /// TICKET-192 — fold one in-place entry write into the summary: `add_bytes`/`add_dirty` are the
-    /// new pieces' [`wire_summary`], `sub_bytes` the replaced pieces' bytes. Leaves `UNKNOWN` alone
-    /// (the GC still walks and fills it), saturates bytes at zero, and never turns `DIRTY` back into
-    /// `CLEAN`: dropping one dirty piece does not prove the rest clean. Only a whole store cleans.
-    /// Call it under the same write lock as the entry write.
-    pub fn adjust(&self, add_bytes: usize, add_dirty: bool, sub_bytes: usize) {
-        if self.state() == WS_UNKNOWN {
-            return;
-        }
-        let b = self
-            .bytes()
-            .saturating_add(add_bytes)
-            .saturating_sub(sub_bytes);
-        self.bytes.store(b, Ordering::Relaxed);
-        if add_dirty {
-            self.state.store(WS_DIRTY, Ordering::Relaxed);
-        }
-    }
 }
 
 /// W6-7/W6-10 — ONE walk of a stored wire payload yielding both GC facts: `(approximate owned bytes,
@@ -1963,8 +1905,9 @@ pub fn drain_pending_core_bytes(
                 acc += box_bytes(ctx, &c.bytes, seen, pending);
             }
             WireValue::RwShared(c) => {
-                let g = c.v.read().unwrap();
-                acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
+                let g = c.state.try_read();
+                let ctx = g.as_ref().and_then(|g| g.as_deref());
+                acc += box_bytes(ctx, &c.bytes, seen, pending);
             }
             WireValue::Atomic(c) => {
                 let g = c.v.lock().unwrap();
@@ -2206,24 +2149,6 @@ mod tests {
             q.send(Some(1), (8, false), WireValue::Int(1), None),
             SendOutcome::Closed
         ));
-    }
-
-    /// TICKET-192 — `adjust` keeps UNKNOWN, moves bytes by the delta (saturating), turns CLEAN into
-    /// DIRTY on a dirty piece, and never turns DIRTY into CLEAN.
-    #[test]
-    fn wire_summary_adjust_never_cleans_a_dirty_summary() {
-        let s = WireSummary::default();
-        s.adjust(10, true, 0);
-        assert_eq!((s.state(), s.bytes()), (WS_UNKNOWN, 0));
-        s.store(100, false);
-        s.adjust(5, false, 0);
-        assert_eq!((s.state(), s.bytes()), (WS_CLEAN, 105));
-        s.adjust(10, true, 15);
-        assert_eq!((s.state(), s.bytes()), (WS_DIRTY, 100));
-        s.adjust(0, false, 60);
-        assert_eq!((s.state(), s.bytes()), (WS_DIRTY, 40));
-        s.adjust(0, false, 1000);
-        assert_eq!((s.state(), s.bytes()), (WS_DIRTY, 0));
     }
 
     /// D6 — every `SocketCore`/`ListenerCore` gets a fresh, distinct poll key (the ABA-avoiding

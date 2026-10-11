@@ -3112,10 +3112,8 @@ impl Vm {
                 // gracefully with this Op's span — the box is a shared cross-thread cell.
                 // TICKET-154: an `RwShared` store serializes like every other cross-heap store (one object per alias).
                 let init = self.to_wire_crossable(init, span)?;
-                let h = self.heap.alloc(Obj::RwShared(Arc::new(RwSharedCore {
-                    v: RwLock::new(init),
-                    ..Default::default()
-                })));
+                let core = self.new_rwshared_core(init);
+                let h = self.heap.alloc(Obj::RwShared(core));
                 self.push(Value::obj(h));
             }
             // `NewAtomic`/`NewTimer` delegate to `#[inline(never)]` helpers so their locals (the timer's

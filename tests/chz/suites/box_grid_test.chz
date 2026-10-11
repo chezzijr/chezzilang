@@ -429,3 +429,186 @@ test fn shared_capture_stored_into_the_state_is_the_boxes_own_value():
     s.update(fn(xs): push_one(xs))
     assert s.get() == [1, 2, 1]
     assert ks == [1, 2]
+
+# ---- Section RwShared: the same core, many readers or one writer ----
+#
+# `write` / `set` run like `Shared.update` / `set` (inside the box heap, in place). `read(f)` and
+# `get()` copy the value out; the `read` closure runs in the READER's heap, so a `write` nested in
+# it stays legal and a mutation inside it does not reach the box.
+
+fn rset_then(s: RwShared[int], x: int) -> int:
+    s.set(0)
+    return x
+
+fn rwrite_then(s: RwShared[int], x: int) -> int:
+    s.write(fn(y): y + 1)
+    return x
+
+fn rshow_self(s: RwShared[int], x: int) -> int:
+    print(s)
+    return x
+
+fn rwrite_from_read(s: RwShared[int], x: int) -> int:
+    s.write(fn(y): y + x)
+    return x
+
+RLATE := RwShared(10)
+
+test fn rwshared_int_write_read_get_set():
+    s := RwShared(1)
+    s.write(fn(x): x + 1)
+    assert s.get() == 2
+    assert s.read(fn(x): x * 10) == 20
+    s.set(5)
+    assert s.get() == 5
+
+test fn rwshared_str_write_read_get_set():
+    s := RwShared("a")
+    s.write(fn(x): x + "b")
+    assert s.get() == "ab"
+    assert s.read(fn(x): x.len()) == 2
+    s.set("z")
+    assert s.get() == "z"
+
+test fn rwshared_list_map_set_in_place_persist():
+    s: RwShared[List[int]] = RwShared([1])
+    s.write(fn(xs): push_one(xs))
+    s.write(fn(xs): push_one(xs))
+    assert s.get() == [1, 1, 1]
+    assert s.read(fn(xs): xs.len()) == 3
+    m: RwShared[Map[str, int]] = RwShared({"a": 1})
+    m.write(fn(d): put(d, "b", 2))
+    assert m.get() == {"a": 1, "b": 2}
+    st: RwShared[Set[int]] = RwShared({1})
+    st.write(fn(x): add_to(x, 2))
+    assert st.get() == {1, 2}
+    s.set([9])
+    assert s.get() == [9]
+
+test fn rwshared_struct_nested_struct_and_closure_holder_persist():
+    s := RwShared(Acc(1, []))
+    s.write(fn(a): a.add(5))
+    s.write(fn(a): set_n(a, a.n + 100))
+    assert s.get().n == 106
+    assert s.read(fn(a): a.log) == [5]
+    o := RwShared(Outer(Acc(0, []), "t"))
+    o.write(fn(v): bump_outer(v))
+    o.write(fn(v): bump_outer(v))
+    assert o.get().acc.log == [1, 1]
+    h := RwShared(Holder(inc, 0))
+    h.write(fn(v): call_holder(v))
+    assert h.get().calls == 1
+    assert h.read(fn(v): v.f(41)) == 42
+
+test fn rwshared_write_returning_a_new_value_replaces_the_state():
+    s: RwShared[List[int]] = RwShared([1, 2, 3])
+    s.write(fn(xs): [xs.len()])
+    assert s.get() == [3]
+
+test fn rwshared_eight_writers_lose_no_update():
+    s := RwShared(Acc(0, []))
+    parallel:
+        for i in range(0, 8):
+            spawn:
+                for j in range(0, 50):
+                    s.write(fn(a): a.add(1))
+    assert s.get().n == 400
+    assert s.read(fn(a): a.log.len()) == 400
+
+test fn rwshared_eight_readers_see_a_whole_value():
+    s := RwShared(Acc(3, [1, 2, 3]))
+    bad := AtomicInt(0)
+    parallel:
+        for i in range(0, 8):
+            spawn:
+                for j in range(0, 20):
+                    g := s.get()
+                    if g.n != g.log.len():
+                        bad.add(1)
+                    if s.read(fn(a): a.n - a.log.len()) != 0:
+                        bad.add(1)
+                    s.write(fn(a): a.add(1))
+    assert bad.load() == 0
+    assert s.get().n == 3 + 160
+
+# The reader closure runs on a COPY in the reader's heap: its mutation does not reach the box.
+test fn rwshared_read_closure_mutation_does_not_reach_the_box():
+    s: RwShared[List[int]] = RwShared([1])
+    assert s.read(fn(xs): push_one(xs).len()) == 2
+    assert s.get() == [1]
+
+test fn rwshared_fault_inside_write_is_caught_and_the_box_keeps_serving():
+    s: RwShared[List[int]] = RwShared([1])
+    r := recover: s.write(fn(xs): fault_after_push(xs))
+    assert msg_of(r, "write") == "division by zero"
+    assert s.get() == [1, 1]
+    s.write(fn(xs): push_one(xs))
+    assert s.get() == [1, 1, 1]
+
+test fn rwshared_write_closure_sees_later_bindings_and_globals():
+    s := RwShared(1)
+    s.write(fn(x): inc(x) + K + DEFAULTS.len() + RLATE.get())
+    assert s.get() == 21
+
+test fn rwshared_captured_local_is_a_copy_a_write_through_a_callee_faults():
+    s := RwShared(10)
+    seen: List[int] = []
+    r := recover: s.write(fn(x): keep(seen, x))
+    fault := msg_of(r, "captured write")
+    assert fault.starts_with("this value is this task's copy:"), fault
+    assert seen == []
+    assert s.get() == 10
+
+# The reader closure runs in the reader's own heap: a captured write is an ordinary write.
+test fn rwshared_read_closure_writes_its_capture():
+    s := RwShared(10)
+    seen: List[int] = []
+    assert s.read(fn(x): keep(seen, x)) == 10
+    assert seen == [10]
+
+test fn rwshared_get_read_set_write_print_inside_its_own_write_fault():
+    s := RwShared(10)
+    r0 := recover: s.write(fn(x): x + s.get())
+    assert msg_of(r0, "self get").contains("already holds the update guard")
+    r1 := recover: s.write(fn(x): x + s.read(fn(y): y))
+    assert msg_of(r1, "self read").contains("already holds the update guard")
+    r2 := recover: s.write(fn(x): rset_then(s, x))
+    assert msg_of(r2, "self set").contains("already holds the update guard")
+    r3 := recover: s.write(fn(x): rwrite_then(s, x))
+    assert msg_of(r3, "self write").contains("already holds the update guard")
+    r4 := recover: s.write(fn(x): rshow_self(s, x))
+    assert msg_of(r4, "self print").contains("already holds the update guard")
+    assert s.get() == 10
+
+test fn rwshared_write_nested_in_read_stays_legal():
+    s := RwShared(10)
+    assert s.read(fn(x): rwrite_from_read(s, x)) == 10
+    assert s.get() == 20
+    assert s.read(fn(x): x + s.get()) == 40
+
+test fn rwshared_get_result_is_the_callers_own_value():
+    s: RwShared[List[int]] = RwShared([1])
+    g := s.get()
+    g.push(2)
+    assert s.get() == [1]
+    r := s.read(fn(xs): xs)
+    r.push(3)
+    assert s.get() == [1]
+
+test fn rwshared_closure_over_a_cell_is_owned_by_whoever_holds_it():
+    s := RwShared(make_ctr())
+    s.write(fn(c): bump_ctr(c))
+    s.write(fn(c): bump_ctr(c))
+    assert s.read(fn(c): c.get()) == 2
+    d := s.get()
+    d.inc()
+    assert d.get() == 3
+    assert s.read(fn(c): c.get()) == 2
+
+test fn rwshared_capture_stored_into_the_state_is_the_boxes_own_value():
+    s: RwShared[List[int]] = RwShared([])
+    ks := [1, 2]
+    s.write(fn(_): ks)
+    s.write(fn(xs): push_one(xs))
+    assert s.get() == [1, 2, 1]
+    assert ks == [1, 2]

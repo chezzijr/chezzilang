@@ -30,7 +30,7 @@ use op::{CapEntry, CapSrc, NO_IC, Op, Program, ProtoId, TID_NONE, WaitMeta};
 use quiesce::RunHalt;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use value::{GcRef, Value, ValueView};
 use wire::{WireCallFrame, WireGenState, WireValue};
 
@@ -1137,7 +1137,7 @@ pub struct Vm {
     /// one depth-1 element of a stored wire at a time, each with its own rebuild map, so a piece whose
     /// cycle closes through the ROOT container cannot be self-contained); every other caller pairs the
     /// serialize memo's scope with the rebuild map's by construction, so a trip there is a BUG (see the
-    /// `debug_assert` in [`Vm::from_wire`]). [`Vm::from_wire_piece`] clears it before each attempt and
+    /// `debug_assert` in [`Vm::from_wire`]). [`Vm::from_wire_pieces`] clears it before each attempt and
     /// re-rebuilds the whole container when it trips. This used to be a `.expect` that ABORTED THE HOST
     /// on a legal program. Pure scratch — cleared and read inside one helper call, never across a park,
     /// so it is a `Vm` field and NOT part of [`FiberCtx`].

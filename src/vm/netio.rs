@@ -3084,359 +3084,20 @@ impl Vm {
         }
     }
 
-    /// TICKET-192 — the ONE probe of a stored `RwShared` `Map`/`Set`: which position holds a key equal
-    /// to `needle` (whose hash is `qh`)? Walks the `HashIndex` candidates for `qh`, so it is O(1)
-    /// expected. Returns the position and, when `with_value`, the rebuilt value of a `Map` entry.
+    /// `RwShared[T]` methods (TICKET-246: the value lives in the box's private heap).
     ///
-    /// Per candidate it takes the read guard, clones the key wire (and the value wire), rebuilds both
-    /// with ONE `from_wire_piece` map per entry (DEC-154), and DROPS the guard before the `eq`, which
-    /// may run user code that re-enters this box. Each guard re-reads `core.generation`: if it moved
-    /// since the first guard, a write shifted positions under the probe and it restarts from the first
-    /// candidate. A miss is therefore exact as of the last guard, and a hit was present as of its own.
+    /// - `write(f)` / `set` and the single-entry writers (`_set_key`, `_remove_key`,
+    ///   `_get_or_insert`, `_add`, `_remove`, `_push`) take the update guard, then the write lock,
+    ///   and run inside the box heap on the live value ([`Vm::rwshared_mutate`]): a writer is the
+    ///   plain `Map` / `Set` / `List` operation, with no copy of the container.
+    /// - `get`, `read(f)` and the read views (`_len`, `_at`, `_slice`, `_contains`, `_has`,
+    ///   `_get_key`) copy what they return out of the live heap under the read lock
+    ///   ([`Vm::rwshared_read`]) and decode it after the lock dropped. `read`'s closure, and a
+    ///   key's `eq`, run in the READER's heap with no lock held, so `write` nested in `read` is
+    ///   legal and no user code runs under the read lock.
     ///
-    /// `Ok(None)` also covers a stored value that is no longer a `Map`/`Set` (a concurrent `set`);
-    /// the callers check the element kind before probing.
-    pub(super) fn rwshared_probe(
-        &mut self,
-        core: &Arc<RwSharedCore>,
-        qh: u64,
-        needle: Value,
-        with_value: bool,
-        span: Span,
-    ) -> Result<Option<(usize, Option<Value>)>, RuntimeError> {
-        'restart: loop {
-            let mut first_gen: Option<u64> = None;
-            let mut j = 0;
-            loop {
-                let (pos, k, v) = {
-                    let g = core.v.read().unwrap();
-                    let now = core.generation.load(std::sync::atomic::Ordering::Relaxed);
-                    match first_gen {
-                        None => first_gen = Some(now),
-                        Some(was) if was != now => continue 'restart,
-                        Some(_) => {}
-                    }
-                    let (pos, kw, vw) = match &*g {
-                        WireValue::Map { entries, .. } => match entries.candidates(qh).get(j) {
-                            Some(&p) => (
-                                p,
-                                entries[p].1.clone(),
-                                with_value.then(|| entries[p].2.clone()),
-                            ),
-                            None => return Ok(None),
-                        },
-                        WireValue::Set { entries, .. } => match entries.candidates(qh).get(j) {
-                            Some(&p) => (p, entries[p].1.clone(), None),
-                            None => return Ok(None),
-                        },
-                        _ => return Ok(None),
-                    };
-                    // TICKET-154: ONE map per ENTRY, so a value that aliases its own key rebuilds as
-                    // one object.
-                    let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                    let k = self.from_wire_piece(&g, kw, &mut rb);
-                    let v = vw.map(|vw| self.from_wire_piece(&g, vw, &mut rb));
-                    (pos, k, v)
-                };
-                // ROOT both reconstructions (fresh, Rust-local) across the possibly re-entrant eq.
-                let roots = [k, v.unwrap_or_else(Value::nil)];
-                if self.with_roots(&roots, |vm| vm.values_equal_guarded(k, needle, 0, span))? {
-                    return Ok(Some((pos, v)));
-                }
-                j += 1;
-            }
-        }
-    }
-
-    /// TICKET-192 — the ONE single-entry writer of a stored `RwShared[Map[K, V]]`: `set_key`,
-    /// `remove_key`, `get_or_insert`. Takes the update guard exactly as `set`/`write` do (DEC-016),
-    /// probes with [`rwshared_probe`](Self::rwshared_probe), and splices the one entry into the stored
-    /// table instead of re-encoding the map:
-    ///
-    /// 1. Insert serializes key then value in ONE memo seeded at the table's id ceiling, so the new
-    ///    ids never collide with stored ones (a whole `get()` would otherwise tie two entries).
-    /// 2. Overwrite keeps the STORED key (CPython `d[k] = v`) and serializes the value alone.
-    /// 3. Remove and overwrite splice in place only when every stored piece stands alone (`flat`):
-    ///    otherwise another entry may `Backref` into the one replaced, so they decode the whole map,
-    ///    mutate it on the heap and re-encode it (the pre-TICKET-192 cost).
-    ///
-    /// The summary moves by the spliced pieces' bytes and never turns DIRTY into CLEAN.
-    pub(super) fn rwshared_write_entry(
-        &mut self,
-        h: GcRef,
-        op: EntryWrite,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let (name, key, val) = match op {
-            EntryWrite::Put(k, v) => ("_set_key", k, v),
-            EntryWrite::Remove(k) => ("_remove_key", k, Value::nil()),
-            EntryWrite::GetOrInsert(k, v) => ("_get_or_insert", k, v),
-            EntryWrite::Add(e) => ("_add", e, Value::nil()),
-            EntryWrite::Discard(e) => ("_remove", e, Value::nil()),
-        };
-        let on_set = op.on_set();
-        // Root the receiver, key and value across a user `hash` (VM re-entry, may GC).
-        let qh = self.hash_key_rooted(key, &[Value::obj(h), key, val], span)?;
-        let core = self.rwshared_core(h);
-        let _guard =
-            self.take_update_guard(Arc::as_ptr(&core) as usize, "a RwShared update guard", span)?;
-        let kind_ok = match &*core.v.read().unwrap() {
-            WireValue::Map { .. } => !on_set,
-            WireValue::Set { .. } => on_set,
-            _ => false,
-        };
-        if !kind_ok {
-            let want = if on_set { "set" } else { "map" };
-            return Err(self.err(format!("RwShared.{name} requires a {want} element"), span));
-        }
-        self.with_roots(&[Value::obj(h), key, val], |vm| {
-            let with_value = matches!(op, EntryWrite::Remove(_) | EntryWrite::GetOrInsert(..));
-            let probed = vm.rwshared_probe(&core, qh, key, with_value, span)?;
-            let pos = match (op, probed) {
-                (EntryWrite::GetOrInsert(..), Some((_, v))) => {
-                    return Ok(v.expect("get_or_insert probes with the value"));
-                }
-                (EntryWrite::Remove(_), None) => {
-                    return Ok(vm.alloc_enum("Option", "None", vec![]));
-                }
-                (EntryWrite::Add(_), Some(_)) | (EntryWrite::Discard(_), None) => {
-                    return Ok(Value::nil());
-                }
-                (_, p) => p,
-            };
-            // Hold the removed value (a fresh rebuild) rooted until it is returned.
-            let removed = pos.and_then(|(_, v)| v).unwrap_or_else(Value::nil);
-            vm.with_roots(&[removed], |vm| {
-                let (ceiling, flat) = {
-                    let g = core.v.read().unwrap();
-                    match &*g {
-                        WireValue::Map { entries, .. } => (
-                            entries.id_ceiling(),
-                            entries
-                                .flat()
-                                .unwrap_or_else(|| Vm::wire_pieces_are_self_contained(&g)),
-                        ),
-                        WireValue::Set { entries, .. } => (
-                            entries.id_ceiling(),
-                            entries
-                                .flat()
-                                .unwrap_or_else(|| Vm::wire_pieces_are_self_contained(&g)),
-                        ),
-                        _ => unreachable!("the update guard keeps the element's kind"),
-                    }
-                };
-                if pos.is_some() && !flat {
-                    vm.rwshared_write_entry_slow(&core, op, qh, span)?;
-                } else {
-                    vm.rwshared_splice(&core, op, pos.map(|(i, _)| i), qh, ceiling, flat, span)?;
-                }
-                Ok(match op {
-                    EntryWrite::Put(..) | EntryWrite::Add(_) | EntryWrite::Discard(_) => {
-                        Value::nil()
-                    }
-                    EntryWrite::Remove(_) => vm.alloc_enum("Option", "Some", vec![removed]),
-                    EntryWrite::GetOrInsert(_, v) => v,
-                })
-            })
-        })
-    }
-
-    /// The in-place half of [`rwshared_write_entry`](Self::rwshared_write_entry): `pos` is the
-    /// probed position (`None` = insert). The caller holds the update guard, so `pos` is stable.
-    #[allow(clippy::too_many_arguments)]
-    fn rwshared_splice(
-        &mut self,
-        core: &Arc<RwSharedCore>,
-        op: EntryWrite,
-        pos: Option<usize>,
-        qh: u64,
-        ceiling: u32,
-        flat: bool,
-        span: Span,
-    ) -> Result<(), RuntimeError> {
-        let none = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        let mut memo = super::sched::WireMemo::seeded(ceiling);
-        let (kw, vw) = match (op, pos) {
-            (EntryWrite::Put(k, v) | EntryWrite::GetOrInsert(k, v), None) => {
-                let kw = self.to_wire_crossable_memo(k, span, &mut memo)?;
-                (
-                    Some(kw),
-                    Some(self.to_wire_crossable_memo(v, span, &mut memo)?),
-                )
-            }
-            (EntryWrite::Put(_, v), Some(_)) => {
-                (None, Some(self.to_wire_crossable_memo(v, span, &mut memo)?))
-            }
-            (EntryWrite::Add(e), None) => {
-                (Some(self.to_wire_crossable_memo(e, span, &mut memo)?), None)
-            }
-            _ => (None, None),
-        };
-        let entry_flat = kw
-            .iter()
-            .chain(vw.iter())
-            .all(|w| w.backrefs_resolvable(&none));
-        let (add_bytes, add_dirty) = kw.iter().chain(vw.iter()).fold((0, false), |acc, w| {
-            let (b, d) = super::core::wire_summary(w);
-            (acc.0 + b, acc.1 | d)
-        });
-        let next_id = memo.next_id();
-        if op.on_set() {
-            core.with_set_mut(|s| {
-                let (add_bytes, sub_bytes) = match (kw, pos) {
-                    (Some(ew), None) => {
-                        s.push((qh, ew));
-                        (add_bytes + std::mem::size_of::<u64>(), 0)
-                    }
-                    (None, Some(i)) => {
-                        let (_, e) = s.remove_at(i);
-                        (
-                            0,
-                            std::mem::size_of::<u64>() + super::core::wire_summary(&e).0,
-                        )
-                    }
-                    _ => unreachable!("splice: op and position disagree"),
-                };
-                s.raise_ceiling(next_id);
-                s.set_flat(flat && entry_flat);
-                core.summary.adjust(add_bytes, add_dirty, sub_bytes);
-            })
-            .expect("the update guard keeps the element a set");
-            return Ok(());
-        }
-        core.with_map_mut(|m| {
-            let sub_bytes = match (kw, vw, pos) {
-                (Some(kw), Some(vw), None) => {
-                    m.push((qh, kw, vw));
-                    0
-                }
-                (None, Some(vw), Some(i)) => super::core::wire_summary(&m.replace_value(i, vw)).0,
-                (None, None, Some(i)) => {
-                    let (_, k, v) = m.remove_at(i);
-                    std::mem::size_of::<u64>()
-                        + super::core::wire_summary(&k).0
-                        + super::core::wire_summary(&v).0
-                }
-                _ => unreachable!("splice: op and position disagree"),
-            };
-            let add_bytes = if pos.is_none() {
-                add_bytes + std::mem::size_of::<u64>()
-            } else {
-                add_bytes
-            };
-            m.raise_ceiling(next_id);
-            m.set_flat(flat && entry_flat);
-            core.summary.adjust(add_bytes, add_dirty, sub_bytes);
-        })
-        .expect("the update guard keeps the element a map");
-        Ok(())
-    }
-
-    /// TICKET-243 — `RwShared[List[E]]._push`: append one element under the update guard (DEC-016).
-    /// A stored wire list carries no id ceiling, so the first push after a whole store decodes the
-    /// list, pushes on the heap and re-encodes it with ONE memo, recording that memo's `next_id` in
-    /// [`RwSharedCore::list_ceiling`]. Every later push serializes the element alone, seeded at the
-    /// ceiling, and splices it: its ids never collide with a stored one.
-    fn rwshared_list_push(
-        &mut self,
-        h: GcRef,
-        e: Value,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        use std::sync::atomic::Ordering;
-        let core = self.rwshared_core(h);
-        let _guard =
-            self.take_update_guard(Arc::as_ptr(&core) as usize, "a RwShared update guard", span)?;
-        if !matches!(&*core.v.read().unwrap(), WireValue::List { .. }) {
-            return Err(self.err("RwShared._push requires a list element".into(), span));
-        }
-        self.with_roots(&[Value::obj(h), e], |vm| {
-            let ceiling = core.list_ceiling.load(Ordering::Relaxed);
-            if ceiling == 0 {
-                let w = core.v.read().unwrap().clone();
-                let lv = vm.from_wire(w);
-                let lh = lv.as_obj().expect("a stored list rebuilds as a heap list");
-                return vm.with_roots(&[lv], |vm| {
-                    let Obj::List(items) = vm.heap.get_mut(lh) else {
-                        unreachable!()
-                    };
-                    items.push(e);
-                    let mut memo = super::sched::WireMemo::default();
-                    let stored = vm.to_wire_crossable_memo(lv, span, &mut memo)?;
-                    core.store_list(stored, memo.next_id());
-                    Ok(Value::nil())
-                });
-            }
-            let mut memo = super::sched::WireMemo::seeded(ceiling);
-            let ew = vm.to_wire_crossable_memo(e, span, &mut memo)?;
-            let (bytes, dirty) = super::core::wire_summary(&ew);
-            let next_id = memo.next_id();
-            core.with_list_mut(|items| {
-                items.push(ew);
-                core.list_ceiling.store(next_id, Ordering::Relaxed);
-                core.summary.adjust(bytes, dirty, 0);
-            })
-            .expect("the update guard keeps the element a list");
-            Ok(Value::nil())
-        })
-    }
-
-    /// The decode-mutate-re-encode half of
-    /// [`rwshared_write_entry`](Self::rwshared_write_entry), for a remove or overwrite on a
-    /// map whose pieces do not all stand alone. The caller holds the update guard and roots the key
-    /// and value.
-    fn rwshared_write_entry_slow(
-        &mut self,
-        core: &Arc<RwSharedCore>,
-        op: EntryWrite,
-        qh: u64,
-        span: Span,
-    ) -> Result<(), RuntimeError> {
-        let w = core.v.read().unwrap().clone();
-        let mv = self.from_wire(w);
-        let mh = mv
-            .as_obj()
-            .expect("a stored map or set rebuilds on the heap");
-        self.with_roots(&[mv], |vm| {
-            match op {
-                EntryWrite::Discard(e) => {
-                    if let Some(i) = vm.set_probe(mh, qh, e, span)? {
-                        let Obj::Set(s) = vm.heap.get_mut(mh) else {
-                            unreachable!()
-                        };
-                        s.remove_at(i);
-                    }
-                }
-                EntryWrite::Add(_) => unreachable!("an insert never takes the slow path"),
-                EntryWrite::Put(k, v) => vm.map_upsert_in_heap(mh, qh, k, v, span)?,
-                EntryWrite::Remove(k) => {
-                    if let Some(i) = vm.map_probe(mh, qh, k, span)? {
-                        let Obj::Map(m) = vm.heap.get_mut(mh) else {
-                            unreachable!()
-                        };
-                        m.remove_at(i);
-                    }
-                }
-                EntryWrite::GetOrInsert(..) => unreachable!("an insert never takes the slow path"),
-            }
-            let stored = vm.to_wire_crossable(mv, span)?;
-            core.store(stored);
-            Ok(())
-        })
-    }
-
-    /// `RwShared[T]` methods: `get`/`set` (read/write-guarded copy out/in), `read(f)` (SHARED read
-    /// guard: clone out, drop guard, run `f`, return its result — NO write-back), `write(f)`
-    /// (EXCLUSIVE write guard: a write-locked read-modify-write, the `Shared.update` shape under a
-    /// `RwLock`). As with `Shared.update`, the lock guard is
-    /// dropped across the user closure (a `RwLock` guard is not reentrant) and the receiver is
-    /// re-rooted on the operand stack so the nested call's GC keeps the core's contents traced (the
-    /// receiver was popped off the stack in `do_method_call`). `write`'s whole RMW is serialised
-    /// across threads by a separate `update_lock`, held UNCONDITIONALLY for the entire RMW — the
-    /// `RwLock` write guard alone is NOT enough because it is dropped across the closure, so two
-    /// writers could clone the same base and lose an update (same discipline as `Shared.update`). A
-    /// closure that re-acquires the SAME box's write lock (or a write inside a read) deadlocks — a
-    /// documented edge, mirroring `Shared.update`'s same-box re-entry limit.
+    /// The receiver and the arguments are popped by the dispatcher, so they are rooted here across
+    /// every user call (`hash`, `eq`, the `read` closure).
     pub(super) fn rwshared_method(
         &mut self,
         h: GcRef,
@@ -3444,600 +3105,285 @@ impl Vm {
         args: &[Value],
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        let mut roots = Vec::with_capacity(args.len() + 1);
+        roots.push(Value::obj(h));
+        roots.extend_from_slice(args);
+        self.with_roots(&roots, |vm| {
+            vm.rwshared_method_rooted(h, method, args, span)
+        })
+    }
+
+    fn rwshared_method_rooted(
+        &mut self,
+        h: GcRef,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let core = self.rwshared_core(h);
+        let want_elem = |vm: &Vm, got: &str, want: &'static str| {
+            if got == want {
+                Ok(())
+            } else {
+                Err(vm.err(format!("RwShared.{method} requires a {want} element"), span))
+            }
+        };
         match method {
             "get" => {
                 self.arity_err("get", args, 0, span)?;
-                // Clone the wire form out under the SHARED read guard, reconstruct into this heap.
-                let w = self.rwshared_core(h).v.read().unwrap().clone();
+                let w = self.rwshared_read(&core, span, |vm, ctx| vm.box_copy_out(ctx, span))?;
                 Ok(self.from_wire(w))
-            }
-            "set" => {
-                self.arity_err("set", args, 1, span)?;
-                // TICKET-154: same rule as every other cross-heap store; the read views resolve aliases on the rebuild side.
-                let w = self.to_wire_crossable(args[0], span)?;
-                let core = self.rwshared_core(h);
-                let key = Arc::as_ptr(&core) as usize;
-                let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
-                core.store(w);
-                Ok(Value::nil())
             }
             "read" => {
                 self.arity_err("read", args, 1, span)?;
-                let f = args[0];
-                let core = self.rwshared_core(h);
-                // SHARED read guard: clone the value out, then DROP the guard before invoking `f`
-                // (the guard is not reentrant; dropping it also lets other readers/a writer proceed).
-                // No write-back — `read` returns `f`'s result.
-                let w = core.v.read().unwrap().clone();
+                let w = self.rwshared_read(&core, span, |vm, ctx| vm.box_copy_out(ctx, span))?;
+                // The lock is dropped: `f` runs on the reader's own copy, in the reader's heap.
                 let cur = self.from_wire(w);
-                self.push(Value::obj(h));
-                let result = self.reentered(|vm| vm.invoke_value(f, vec![cur], span));
-                self.pop();
-                result
+                self.reentered(|vm| vm.invoke_value(args[0], vec![cur], span))
             }
-            // TICKET-192: the single-entry writers of a `Map` element (update guard, O(1) expected).
-            "_set_key" => {
-                self.arity_err("_set_key", args, 2, span)?;
-                self.rwshared_write_entry(h, EntryWrite::Put(args[0], args[1]), span)
-            }
-            "_remove_key" => {
-                self.arity_err("_remove_key", args, 1, span)?;
-                self.rwshared_write_entry(h, EntryWrite::Remove(args[0]), span)
-            }
-            "_get_or_insert" => {
-                self.arity_err("_get_or_insert", args, 2, span)?;
-                self.rwshared_write_entry(h, EntryWrite::GetOrInsert(args[0], args[1]), span)
-            }
-            // TICKET-243: the single-element writers of a `Set` and a `List` element.
-            "_add" => {
-                self.arity_err("_add", args, 1, span)?;
-                self.rwshared_write_entry(h, EntryWrite::Add(args[0]), span)
-            }
-            "_remove" => {
-                self.arity_err("_remove", args, 1, span)?;
-                self.rwshared_write_entry(h, EntryWrite::Discard(args[0]), span)
-            }
-            "_push" => {
-                self.arity_err("_push", args, 1, span)?;
-                self.rwshared_list_push(h, args[0], span)
-            }
-            "write" => {
-                self.arity_err("write", args, 1, span)?;
-                let f = args[0];
-                let core = self.rwshared_core(h);
-                // TICKET-016 (W8-3): the whole read-modify-write is serialised across threads by the
-                // box's update guard (the process-global wait-for graph in `core.rs`), exactly like
-                // `Shared.update`. The `RwLock` write guard alone is NOT enough: it must be DROPPED
-                // across the user closure (not reentrant), so two `write`s could clone the same base
-                // and lose an update. `get`/`read` never take this guard, so `write` nested in `read`
-                // still persists; a same-box `write`/`set` re-entry FAULTS instead of hanging.
+            "set" => {
+                self.arity_err("set", args, 1, span)?;
+                let w = self.to_wire_crossable(args[0], span)?;
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
-                let w = core.v.write().unwrap().clone();
-                let cur = self.from_wire(w);
-                self.push(Value::obj(h));
-                let next = self.reentered(|vm| vm.invoke_value(f, vec![cur], span));
-                self.pop();
-                let next = next?;
-                // TICKET-154: same rule as every other cross-heap store; the read views resolve aliases on the rebuild side.
-                let stored = self.to_wire_crossable(next, span)?;
-                core.store(stored);
+                let mut st = core.state.write();
+                let bytes = self.box_store(&mut st, w);
+                core.bytes.store(bytes, Ordering::Relaxed);
                 Ok(Value::nil())
             }
-            // Zero-copy READ-view methods on a CONTAINER element of `RwShared[T]` — `List[E]`
-            // (len/at/slice/for_each/fold), `Map[K,V]` (len/get_key/has/for_each_entry/fold_entries),
-            // `Set[E]` (len/contains/for_each/fold). Checker-gated to the recognized container head.
-            // They walk the stored heap-independent `WireValue::List`/`Map`/`Set` Vec and `from_wire`
-            // ONE entry per step — O(1) memory, never materializing the whole inner (what `get`/`read`
-            // do). This is deterministic by construction: the walk reads a heap-independent wire form,
-            // so every reader sees identical elements. The read-only `len`/`at`/`slice` take the shared guard only for the brief clone
-            // (no user code under it). `for_each`/`fold` RE-ACQUIRE the shared guard PER ELEMENT, clone
-            // one wire element, DROP the guard, then run the closure — mirroring `read`'s
-            // clone-out-then-drop, per element. The guard is NEVER held across the user closure (or the
-            // GC's mark of `Obj::RwShared`, which re-locks `core.v`), so a nested read/write of the SAME
-            // box, an AB-BA cross-box walk, and a GC pass triggered inside the closure can't deadlock —
-            // the write-preferring `std::sync::RwLock` never sees a recursive read behind a queued writer.
-            //
-            // W7-11 — every per-piece rebuild goes through [`Vm::from_wire_piece`] rather than
-            // `from_wire`, because a piece whose cycle closes through the ROOT container is not
-            // self-contained and used to ABORT THE HOST. The helper takes `&WireValue` (the caller's
-            // live guard), never the core: it must not re-acquire `core.v`, and the guard must still be
-            // held across the rebuild so its fallback resolves the piece against the SAME serialization
-            // it was cloned from (a second acquisition is the torn read `docs/gaps.md` W7-4 round 2 hit).
-            // Holding it across `from_wire*` is safe and is exactly the window `at`/`slice` already
-            // held: it allocs and nothing else, and `Heap::alloc` never collects, so no GC can re-lock
-            // `core.v` underneath. The guard is still DROPPED before any user code (closure/hash/eq).
-            "_len" => {
-                self.arity_err("_len", args, 0, span)?;
-                let core = self.rwshared_core(h);
-                let g = core.v.read().unwrap();
-                let n = match &*g {
-                    WireValue::List { items, .. } => items.len() as i64,
-                    WireValue::Map { entries, .. } => entries.len() as i64,
-                    WireValue::Set { entries, .. } => entries.len() as i64,
-                    _ => {
-                        return Err(
-                            self.err("RwShared._len requires a container element".into(), span)
-                        );
-                    }
-                };
-                Ok(self.make_int(n))
-            }
-            // `at(i) -> Option[E]` — out of range is `None`, not a fault, matching the language's
-            // other named-accessor spellings: `get_key(k) -> Option[V]` below and
-            // `std.json.at -> Option[Json]`. (`RwShared` itself has no `[]` — it does not satisfy the
-            // `Index` protocol, since a view walks the stored wire and has no heap object to dispatch
-            // a user `index()` on — so this is the ONLY read accessor here, and it reports absence
-            // rather than faulting.) A wrong container HEAD is still a fault: that is a type error,
-            // not a missing element. Negative indexing (`at(-1)`) is unchanged — `norm_index` first.
-            "_at" => {
-                self.arity_err("_at", args, 1, span)?;
-                let i = self.int_of(args[0]);
-                let core = self.rwshared_core(h);
-                let g = core.v.read().unwrap();
-                let ew = match &*g {
-                    WireValue::List { items, .. } => match crate::slice::norm_index(i, items.len())
-                    {
-                        Some(u) => items[u].clone(),
-                        None => {
-                            drop(g);
-                            return Ok(self.alloc_enum("Option", "None", vec![]));
-                        }
-                    },
-                    _ => return Err(self.err("RwShared._at requires a list element".into(), span)),
-                };
-                let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                let v = self.from_wire_piece(&g, ew, &mut rb);
-                drop(g); // the rebuild is done — release before the `Option` wrapper allocs
-                Ok(self.alloc_enum("Option", "Some", vec![v]))
-            }
-            "_slice" => {
-                self.arity_err("_slice", args, 2, span)?;
-                let lo = self.int_of(args[0]);
-                let hi = self.int_of(args[1]);
-                let core = self.rwshared_core(h);
-                let g = core.v.read().unwrap();
-                let idxs = match &*g {
-                    WireValue::List { items, .. } => {
-                        crate::slice::slice_indices(Some(lo), Some(hi), None, items.len())
-                            .map_err(|e| self.err(e.to_string(), span))?
-                    }
-                    _ => {
-                        return Err(
-                            self.err("RwShared._slice requires a list element".into(), span)
-                        );
-                    }
-                };
-                // Materialize ONLY [lo:hi] into a fresh list, rooted on the operand stack across the
-                // per-element `from_wire`s (defensive — `from_wire` only allocs and `alloc` never
-                // collects, but rooting matches the list-HOF precedent and is future-proof).
-                let res_h = self.heap.alloc(Obj::List(Vec::new()));
-                self.push(Value::obj(res_h));
-                // W7-4: ONE rebuild map across the sliced-out elements — `slice` is a SINGLE crossing
-                // that returns a container (like `get`), so two sliced-out closures over the same
-                // captured local land on ONE cell. A per-element view (`at`, `for_each`) is its own
-                // crossing and keeps its own copy.
-                let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                // W7-11 — the whole-container decision is made ONCE, before the first element, and
-                // that is load-bearing (adversarial review, round 2). `from_wire_piece`'s fallback
-                // rebuilds the container into this shared map, and the container arms of
-                // `from_wire_memo` have NO first-wins dedupe (only `Cell` does) — so a fallback taken
-                // at element k OVERWRITES `rb` for elements 0..k, orphaning the copies already pushed
-                // into the result. Identity then depended on element ORDER: with only element 1
-                // cyclic, `sl[1].back[0]` was a different object than `sl[0]` (CPython: the same one).
-                // Deciding up front means every element is served from one container, whichever of
-                // them needs it.
-                if idxs.iter().any(|&i| match &*g {
-                    WireValue::List { items, .. } => !items[i].backrefs_resolvable(&rb),
-                    _ => false,
-                }) {
-                    let _whole = self.from_wire_memo((*g).clone(), &mut rb);
-                }
-                for idx in idxs {
-                    let ew = match &*g {
-                        WireValue::List { items, .. } => items[idx].clone(),
-                        _ => unreachable!(),
-                    };
-                    let elem = self.from_wire_piece(&g, ew, &mut rb);
-                    if let Obj::List(items) = self.heap.get_mut(res_h) {
-                        items.push(elem);
-                    }
-                }
-                self.pop();
-                Ok(Value::obj(res_h))
-            }
-            // `for_each(f: fn(E) -> _)` on a `List[E]` OR `Set[E]` — a per-element side-effect scan.
-            "_for_each" => {
-                self.arity_err("_for_each", args, 1, span)?;
-                let f = args[0];
-                let core = self.rwshared_core(h);
-                // Snapshot the length under a brief guard (dropped immediately).
-                let n = match &*core.v.read().unwrap() {
-                    WireValue::List { items, .. } => items.len(),
-                    WireValue::Set { entries, .. } => entries.len(),
-                    _ => {
-                        return Err(self.err(
-                            "RwShared._for_each requires a list or set element".into(),
-                            span,
-                        ));
-                    }
-                };
-                self.push(Value::obj(h)); // root the receiver across nested GC
-                // TICKET-154: an aliased store is materialized under ONE map and ONE guard first,
-                // then walked with no guard held. A self-contained store keeps the walk below.
-                if let Some(all) = self.rwshared_snapshot_pieces(&core) {
-                    self.push(Value::obj(all));
-                    let mut i = 0;
-                    while let Some(elem) = self.snapshot_piece(all, i) {
-                        self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
-                        i += 1;
-                    }
-                    self.pop();
-                    self.pop();
-                    return Ok(Value::nil());
-                }
-                for i in 0..n {
-                    // RE-ACQUIRE the shared guard, clone ONE element, rebuild it, DROP the guard
-                    // before the closure — never hold `core.v` across `invoke_value`/GC (see the
-                    // arm's header comment). The rebuild stays INSIDE the guard so W7-11's fallback
-                    // resolves the piece against the same serialization it was cloned from.
-                    let g = core.v.read().unwrap();
-                    let ew = match &*g {
-                        WireValue::List { items, .. } => {
-                            if i >= items.len() {
-                                break; // the list shrank under a concurrent write — stop
-                            }
-                            items[i].clone()
-                        }
-                        WireValue::Set { entries, .. } => {
-                            if i >= entries.len() {
-                                break;
-                            }
-                            entries[i].1.clone()
-                        }
-                        _ => break, // replaced by a non-container under a concurrent set — stop
-                    };
-                    let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                    let elem = self.from_wire_piece(&g, ew, &mut rb);
-                    drop(g);
-                    self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
-                }
-                self.pop();
+            // `write(f)` runs `f` inside the box on the live state, exclusive; its result becomes
+            // the state. Exactly `Shared.update` under the write lock.
+            "write" => {
+                self.arity_err("write", args, 1, span)?;
+                let fw = self.to_wire_crossable(args[0], span)?;
+                let key = Arc::as_ptr(&core) as usize;
+                let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
+                let mut st = core.state.write();
+                let (r, bytes) = self.box_call(&mut st, fw, true, span);
+                core.bytes.store(bytes, Ordering::Relaxed);
+                drop(st);
+                r?;
                 Ok(Value::nil())
             }
-            // `fold(init, f: fn(R, E) -> R) -> R` on a `List[E]` OR `Set[E]`.
-            "_fold" => {
-                self.arity_err("_fold", args, 2, span)?;
-                let init = args[0];
-                let f = args[1];
-                let core = self.rwshared_core(h);
-                let n = match &*core.v.read().unwrap() {
-                    WireValue::List { items, .. } => items.len(),
-                    WireValue::Set { entries, .. } => entries.len(),
-                    _ => {
-                        return Err(
-                            self.err("RwShared._fold requires a list or set element".into(), span)
-                        );
-                    }
-                };
-                self.push(Value::obj(h)); // root the receiver
-                self.push(init); // root the accumulator; its slot sits below every nested frame's base
-                let acc_slot = self.stack.len() - 1;
-                // TICKET-154: see `for_each` -- one map, one guard, then walk with no guard held.
-                if let Some(all) = self.rwshared_snapshot_pieces(&core) {
-                    self.push(Value::obj(all));
-                    let mut i = 0;
-                    while let Some(elem) = self.snapshot_piece(all, i) {
-                        let acc = self.stack[acc_slot];
-                        let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
-                        self.stack[acc_slot] = new;
-                        i += 1;
-                    }
-                    self.pop(); // unroot the snapshot
-                    let acc = self.pop();
-                    self.pop();
-                    return Ok(acc);
-                }
-                for i in 0..n {
-                    // RE-ACQUIRE per element, rebuild under the guard, DROP before the closure (see
-                    // the arm's header comment).
-                    let g = core.v.read().unwrap();
-                    let ew = match &*g {
-                        WireValue::List { items, .. } => {
-                            if i >= items.len() {
-                                break;
-                            }
-                            items[i].clone()
-                        }
-                        WireValue::Set { entries, .. } => {
-                            if i >= entries.len() {
-                                break;
-                            }
-                            entries[i].1.clone()
-                        }
-                        _ => break,
+            "_set_key" => {
+                self.arity_err(method, args, 2, span)?;
+                let qh = self.hash_value(args[0], span)?;
+                self.rwshared_mutate(&core, args, span, |vm, st, a| {
+                    want_elem(vm, vm.elem_kind(st), "map")?;
+                    let mh = st.as_obj().expect("a map is a heap object");
+                    vm.map_upsert_in_heap(mh, qh, a[0], a[1], span)?;
+                    Ok(None)
+                })?;
+                Ok(Value::nil())
+            }
+            "_remove_key" => {
+                self.arity_err(method, args, 1, span)?;
+                let qh = self.hash_value(args[0], span)?;
+                let removed = self.rwshared_mutate(&core, args, span, |vm, st, a| {
+                    want_elem(vm, vm.elem_kind(st), "map")?;
+                    let mh = st.as_obj().expect("a map is a heap object");
+                    let Some(i) = vm.map_probe(mh, qh, a[0], span)? else {
+                        return Ok(None);
                     };
-                    let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                    let elem = self.from_wire_piece(&g, ew, &mut rb);
-                    drop(g);
-                    let acc = self.stack[acc_slot];
-                    let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
-                    self.stack[acc_slot] = new;
-                }
-                let acc = self.pop(); // unroot accumulator
-                self.pop(); // unroot receiver
-                Ok(acc)
-            }
-            // Set[E] membership: hash the query element ONCE (guard NOT held — `hash_value` may
-            // dispatch a user `hash`/GC), then `rwshared_probe` (TICKET-192): the stored table's
-            // `HashIndex` candidates only, each cloned under a guard that is DROPPED before the eq.
-            // The guard is NEVER held across hash/eq (same deadlock invariant as `for_each`/`fold`).
-            "_contains" => {
-                self.arity_err("_contains", args, 1, span)?;
-                let needle = args[0];
-                // Root the receiver `h` AND `needle` across the hash: for a struct/enum
-                // element `hash_value` dispatches the user `hash` (re-enters the VM, may GC), and
-                // `h`/`needle` are off the operand stack (popped at dispatch) so they'd be collectable
-                // mid-hash → the following `rwshared_core(h)` would hit a freed slot. Mirrors the
-                // non-RwShared Set `in` path (arith.rs:913).
-                let qh = self.hash_key_rooted(needle, &[Value::obj(h), needle], span)?;
-                let core = self.rwshared_core(h);
-                match &*core.v.read().unwrap() {
-                    WireValue::Set { .. } => {}
-                    _ => {
-                        return Err(
-                            self.err("RwShared._contains requires a set element".into(), span)
-                        );
+                    let Obj::Map(m) = vm.heap.get_mut(mh) else {
+                        unreachable!()
+                    };
+                    Ok(Some(m.remove_at(i).2))
+                })?;
+                Ok(match removed {
+                    Some(w) => {
+                        let v = self.from_wire(w);
+                        self.alloc_enum("Option", "Some", vec![v])
                     }
-                };
-                self.push(Value::obj(h)); // root the receiver
-                self.push(needle); // root the query element across from_wire/eq (may GC)
-                let found = self
-                    .rwshared_probe(&core, qh, needle, false, span)?
-                    .is_some();
-                self.pop();
-                self.pop();
-                Ok(Value::bool(found))
-            }
-            // Map[K,V].has(k) -> bool — same hash-once + per-probe re-lock discipline as `contains`,
-            // comparing the KEY (entry.1 is the key wire, entry.2 the value wire).
-            "_has" => {
-                self.arity_err("_has", args, 1, span)?;
-                let key = args[0];
-                // Root receiver `h` AND `key` across the hash — a struct/enum key's `hash`
-                // re-enters the VM and may GC; both are off the operand stack here. Mirrors the
-                // non-RwShared Map path (arith.rs:921).
-                let qh = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
-                let core = self.rwshared_core(h);
-                match &*core.v.read().unwrap() {
-                    WireValue::Map { .. } => {}
-                    _ => return Err(self.err("RwShared._has requires a map element".into(), span)),
-                };
-                self.push(Value::obj(h));
-                self.push(key);
-                let found = self.rwshared_probe(&core, qh, key, false, span)?.is_some();
-                self.pop();
-                self.pop();
-                Ok(Value::bool(found))
-            }
-            // Map[K,V].get_key(k) -> Option[V] — probe as `has`, rebuilding the VALUE wire under the
-            // same guard as the key; `Some(v)` on an eq-match, `None` on a miss.
-            "_get_key" => {
-                self.arity_err("_get_key", args, 1, span)?;
-                let key = args[0];
-                // Root receiver `h` AND `key` across the hash — a struct/enum key's `hash`
-                // re-enters the VM and may GC; both are off the operand stack here. Mirrors the
-                // non-RwShared Map path (arith.rs:921).
-                let qh = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
-                let core = self.rwshared_core(h);
-                match &*core.v.read().unwrap() {
-                    WireValue::Map { .. } => {}
-                    _ => {
-                        return Err(
-                            self.err("RwShared._get_key requires a map element".into(), span)
-                        );
-                    }
-                };
-                self.push(Value::obj(h));
-                self.push(key);
-                let result = self
-                    .rwshared_probe(&core, qh, key, true, span)?
-                    .and_then(|(_, v)| v);
-                self.pop();
-                self.pop();
-                Ok(match result {
-                    Some(v) => self.alloc_enum("Option", "Some", vec![v]),
                     None => self.alloc_enum("Option", "None", vec![]),
                 })
             }
-            // Map[K,V].for_each_entry(f: fn(K, V) -> _) — per-entry side-effect scan (2-arg closure).
-            "_for_each_entry" => {
-                self.arity_err("_for_each_entry", args, 1, span)?;
-                let f = args[0];
-                let core = self.rwshared_core(h);
-                let n = match &*core.v.read().unwrap() {
-                    WireValue::Map { entries, .. } => entries.len(),
-                    _ => {
-                        return Err(self.err(
-                            "RwShared._for_each_entry requires a map element".into(),
-                            span,
-                        ));
-                    }
-                };
-                self.push(Value::obj(h));
-                // TICKET-154: see `for_each` -- an aliased map is materialized once, flattened
-                // key-then-value, under one map and one guard.
-                if let Some(all) = self.rwshared_snapshot_pieces(&core) {
-                    self.push(Value::obj(all));
-                    let mut i = 0;
-                    while let (Some(k), Some(v)) =
-                        (self.snapshot_piece(all, i), self.snapshot_piece(all, i + 1))
-                    {
-                        self.guarded(|vm| vm.invoke_value(f, vec![k, v], span))?;
-                        i += 2;
-                    }
-                    self.pop();
-                    self.pop();
-                    return Ok(Value::nil());
-                }
-                for i in 0..n {
-                    // Clone AND rebuild both halves of the entry under ONE guard, dropped before the
-                    // closure (W7-11 — see the arm header).
-                    let (k, v) = {
-                        let g = core.v.read().unwrap();
-                        let (kw, vw) = match &*g {
-                            WireValue::Map { entries, .. } => {
-                                if i >= entries.len() {
-                                    break;
-                                }
-                                (entries[i].1.clone(), entries[i].2.clone())
-                            }
-                            _ => break,
+            // Compound-atomic: the probe and the insert run under ONE exclusive lock.
+            "_get_or_insert" => {
+                self.arity_err(method, args, 2, span)?;
+                let qh = self.hash_value(args[0], span)?;
+                let present = self.rwshared_mutate(&core, args, span, |vm, st, a| {
+                    want_elem(vm, vm.elem_kind(st), "map")?;
+                    let mh = st.as_obj().expect("a map is a heap object");
+                    if let Some(i) = vm.map_probe(mh, qh, a[0], span)? {
+                        let Obj::Map(m) = vm.heap.get(mh) else {
+                            unreachable!()
                         };
-                        // TICKET-154: ONE map per ENTRY (see `get_key`).
-                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                        let k = self.from_wire_piece(&g, kw, &mut rb);
-                        // Root the reconstructed key while building the value (both alloc; `alloc`
-                        // never collects, but rooting matches the receiver-rooting precedent).
-                        self.push(k);
-                        let v = self.from_wire_piece(&g, vw, &mut rb);
-                        (self.pop(), v)
+                        return Ok(Some(m.entries[i].2));
+                    }
+                    let k = vm.snapshot_key(a[0]);
+                    let Obj::Map(m) = vm.heap.get_mut(mh) else {
+                        unreachable!()
                     };
-                    self.guarded(|vm| vm.invoke_value(f, vec![k, v], span))?;
-                }
-                self.pop();
+                    m.push(qh, k, a[1]);
+                    Ok(None)
+                })?;
+                Ok(match present {
+                    Some(w) => self.from_wire(w),
+                    None => args[1],
+                })
+            }
+            "_add" | "_remove" => {
+                self.arity_err(method, args, 1, span)?;
+                let qh = self.hash_value(args[0], span)?;
+                let add = method == "_add";
+                self.rwshared_mutate(&core, args, span, |vm, st, a| {
+                    want_elem(vm, vm.elem_kind(st), "set")?;
+                    let sh = st.as_obj().expect("a set is a heap object");
+                    let pos = vm.set_probe(sh, qh, a[0], span)?;
+                    let e = vm.snapshot_key(a[0]);
+                    let Obj::Set(s) = vm.heap.get_mut(sh) else {
+                        unreachable!()
+                    };
+                    match pos {
+                        None if add => s.push(qh, e),
+                        Some(i) if !add => {
+                            s.remove_at(i);
+                        }
+                        _ => {}
+                    }
+                    Ok(None)
+                })?;
                 Ok(Value::nil())
             }
-            // Map[K,V].fold_entries(init, f: fn(R, K, V) -> R) -> R — per-entry reduce (3-arg closure).
-            "_fold_entries" => {
-                self.arity_err("_fold_entries", args, 2, span)?;
-                let init = args[0];
-                let f = args[1];
-                let core = self.rwshared_core(h);
-                let n = match &*core.v.read().unwrap() {
-                    WireValue::Map { entries, .. } => entries.len(),
-                    _ => {
-                        return Err(
-                            self.err("RwShared._fold_entries requires a map element".into(), span)
-                        );
-                    }
-                };
-                self.push(Value::obj(h)); // root the receiver
-                self.push(init); // root the accumulator
-                let acc_slot = self.stack.len() - 1;
-                // TICKET-154: see `for_each_entry`.
-                if let Some(all) = self.rwshared_snapshot_pieces(&core) {
-                    self.push(Value::obj(all));
-                    let mut i = 0;
-                    while let (Some(k), Some(v)) =
-                        (self.snapshot_piece(all, i), self.snapshot_piece(all, i + 1))
-                    {
-                        let acc = self.stack[acc_slot];
-                        let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, k, v], span))?;
-                        self.stack[acc_slot] = new;
-                        i += 2;
-                    }
-                    self.pop(); // unroot the snapshot
-                    let acc = self.pop();
-                    self.pop();
-                    return Ok(acc);
-                }
-                for i in 0..n {
-                    // One guard for the clone AND both rebuilds, dropped before the closure (W7-11).
-                    let (k, v) = {
-                        let g = core.v.read().unwrap();
-                        let (kw, vw) = match &*g {
-                            WireValue::Map { entries, .. } => {
-                                if i >= entries.len() {
-                                    break;
-                                }
-                                (entries[i].1.clone(), entries[i].2.clone())
-                            }
-                            _ => break,
-                        };
-                        // TICKET-154: ONE map per ENTRY (see `get_key`).
-                        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-                        let k = self.from_wire_piece(&g, kw, &mut rb);
-                        self.push(k); // root key while reconstructing value
-                        let v = self.from_wire_piece(&g, vw, &mut rb);
-                        (self.pop(), v)
+            "_push" => {
+                self.arity_err(method, args, 1, span)?;
+                self.rwshared_mutate(&core, args, span, |vm, st, a| {
+                    want_elem(vm, vm.elem_kind(st), "list")?;
+                    let lh = st.as_obj().expect("a list is a heap object");
+                    let Obj::List(items) = vm.heap.get_mut(lh) else {
+                        unreachable!()
                     };
-                    let acc = self.stack[acc_slot];
-                    let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, k, v], span))?;
-                    self.stack[acc_slot] = new;
-                }
-                let acc = self.pop(); // unroot accumulator
-                self.pop(); // unroot receiver
-                Ok(acc)
+                    items.push(a[0]);
+                    Ok(None)
+                })?;
+                Ok(Value::nil())
+            }
+            "_len" => {
+                self.arity_err(method, args, 0, span)?;
+                let n =
+                    self.rwshared_read(&core, span, |vm, ctx| match boxctx::state_obj(ctx) {
+                        Some(Obj::List(items)) => Ok(items.len()),
+                        Some(Obj::Map(m)) => Ok(m.entries.len()),
+                        Some(Obj::Set(s)) => Ok(s.entries.len()),
+                        _ => Err(vm.err("RwShared._len requires a container element".into(), span)),
+                    })?;
+                Ok(self.make_int(n as i64))
+            }
+            // `at(i) -> Option[E]` — out of range is `None`, not a fault (the safe accessor, like
+            // `get_key`). A negative index counts from the end (`norm_index`).
+            "_at" => {
+                self.arity_err(method, args, 1, span)?;
+                let i = self.int_of(args[0]);
+                let piece =
+                    self.rwshared_read(&core, span, |vm, ctx| match boxctx::state_obj(ctx) {
+                        Some(Obj::List(items)) => crate::slice::norm_index(i, items.len())
+                            .map(|u| vm.box_copy_pieces(ctx, &[items[u]], span))
+                            .transpose(),
+                        _ => Err(vm.err("RwShared._at requires a list element".into(), span)),
+                    })?;
+                Ok(match piece {
+                    Some(ws) => {
+                        let v = self.from_wire_pieces(ws);
+                        self.alloc_enum("Option", "Some", v)
+                    }
+                    None => self.alloc_enum("Option", "None", vec![]),
+                })
+            }
+            // `slice(lo, hi)` is ONE crossing that returns a container, like `get`: the elements
+            // are encoded with one memo, so two that alias one node land on one object.
+            "_slice" => {
+                self.arity_err(method, args, 2, span)?;
+                let (lo, hi) = (self.int_of(args[0]), self.int_of(args[1]));
+                let ws =
+                    self.rwshared_read(&core, span, |vm, ctx| match boxctx::state_obj(ctx) {
+                        Some(Obj::List(items)) => {
+                            let idxs =
+                                crate::slice::slice_indices(Some(lo), Some(hi), None, items.len())
+                                    .map_err(|e| vm.err(e.to_string(), span))?;
+                            let picked: Vec<Value> = idxs.into_iter().map(|i| items[i]).collect();
+                            vm.box_copy_pieces(ctx, &picked, span)
+                        }
+                        _ => Err(vm.err("RwShared._slice requires a list element".into(), span)),
+                    })?;
+                let items = self.from_wire_pieces(ws);
+                Ok(Value::obj(self.heap.alloc(Obj::List(items))))
+            }
+            "_contains" => {
+                self.arity_err(method, args, 1, span)?;
+                let hit = self.rwshared_find(&core, method, args[0], false, span)?;
+                Ok(Value::bool(hit.is_some()))
+            }
+            "_has" => {
+                self.arity_err(method, args, 1, span)?;
+                let hit = self.rwshared_find(&core, method, args[0], false, span)?;
+                Ok(Value::bool(hit.is_some()))
+            }
+            "_get_key" => {
+                self.arity_err(method, args, 1, span)?;
+                Ok(
+                    match self.rwshared_find(&core, method, args[0], true, span)? {
+                        Some(v) => self.alloc_enum("Option", "Some", vec![v]),
+                        None => self.alloc_enum("Option", "None", vec![]),
+                    },
+                )
             }
             _ => Err(self.err(format!("type RwShared has no method '{method}'"), span)),
         }
     }
 
-    /// TICKET-154 (W11-15) -- the ONE-map snapshot behind `for_each`, `fold`, `for_each_entry` and
-    /// `fold_entries`. Returns `None` when every depth-1 piece of the stored wire stands alone
-    /// ([`Vm::wire_pieces_are_self_contained`]); the caller then keeps its per-element walk, which
-    /// stays flat in memory. Otherwise the stored wire holds an ALIAS (a container or cell reached
-    /// twice, or a cycle through the root), so it rebuilds the WHOLE wire once into ONE map and
-    /// materializes every piece from that map into a fresh list (a `Map` flattens key then value per
-    /// entry). Two elements that alias one node then land on ONE object, which is what `get()` and
-    /// CPython's `copy.deepcopy` give.
+    /// The ONE probe of a `RwShared` `Map` / `Set` by a reader: is a key equal to `needle`
+    /// stored, and (`with_value`) what does it map to? O(1) expected.
     ///
-    /// Two invariants, both load-bearing:
-    /// 1. ONE read guard spans the decision AND every materialization. The looping arms re-acquire the
-    ///    guard per element, so a map carried across two acquisitions would resolve an id against a
-    ///    serialization a concurrent `set` had already replaced (the torn read of W7-4 round 2).
-    /// 2. The result list is rooted on the operand stack across every piece, matching `slice`; it is
-    ///    popped before return, so the CALLER must root it before anything allocates or collects.
-    ///
-    /// Not used by `at`/`get_key`: materializing a whole container to read one element is strictly
-    /// worse, and two separate calls are two crossings (CPython: two separate deep copies).
-    fn rwshared_snapshot_pieces(&mut self, core: &Arc<RwSharedCore>) -> Option<GcRef> {
-        let g = core.v.read().unwrap();
-        if !matches!(
-            &*g,
-            WireValue::List { .. } | WireValue::Set { .. } | WireValue::Map { .. }
-        ) || Vm::wire_pieces_are_self_contained(&g)
-        {
-            return None;
-        }
-        let mut rb = super::fxhash::FxHashMap::<u32, GcRef>::default();
-        let _whole = self.from_wire_memo((*g).clone(), &mut rb);
-        let res_h = self.heap.alloc(Obj::List(Vec::new()));
-        self.push(Value::obj(res_h));
-        let n = match &*g {
-            WireValue::List { items, .. } => items.len(),
-            WireValue::Set { entries, .. } => entries.len(),
-            WireValue::Map { entries, .. } => entries.len(),
-            _ => unreachable!(),
-        };
-        for i in 0..n {
-            let (first, second) = match &*g {
-                WireValue::List { items, .. } => (items[i].clone(), None),
-                WireValue::Set { entries, .. } => (entries[i].1.clone(), None),
-                WireValue::Map { entries, .. } => {
-                    (entries[i].1.clone(), Some(entries[i].2.clone()))
+    /// The hash runs in the caller first. Under the read lock the candidates of that hash are
+    /// copied out (one memo per entry, so a value that aliases its key decodes as one object);
+    /// the lock is dropped; then each candidate is decoded and compared in the CALLER's heap. So
+    /// a user `hash` / `eq` never runs under the lock, and the candidates are one consistent
+    /// view: a hit was present, and a miss was absent, as of that one lock.
+    fn rwshared_find(
+        &mut self,
+        core: &Arc<RwSharedCore>,
+        method: &str,
+        needle: Value,
+        with_value: bool,
+        span: Span,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let on_set = method == "_contains";
+        let qh = self.hash_value(needle, span)?;
+        let cands = self.rwshared_read(core, span, |vm, ctx| {
+            let mut out = Vec::new();
+            match boxctx::state_obj(ctx) {
+                Some(Obj::Map(m)) if !on_set => {
+                    for &p in m.candidates(qh) {
+                        let (_, k, v) = m.entries[p];
+                        let picked = if with_value { vec![k, v] } else { vec![k] };
+                        out.push(vm.box_copy_pieces(ctx, &picked, span)?);
+                    }
                 }
-                _ => unreachable!(),
-            };
-            let a = self.from_wire_piece(&g, first, &mut rb);
-            let b = second.map(|w| self.from_wire_piece(&g, w, &mut rb));
-            if let Obj::List(items) = self.heap.get_mut(res_h) {
-                items.push(a);
-                items.extend(b);
+                Some(Obj::Set(s)) if on_set => {
+                    for &p in s.candidates(qh) {
+                        out.push(vm.box_copy_pieces(ctx, &[s.entries[p].1], span)?);
+                    }
+                }
+                _ => {
+                    let want = if on_set { "set" } else { "map" };
+                    return Err(
+                        vm.err(format!("RwShared.{method} requires a {want} element"), span)
+                    );
+                }
+            }
+            Ok(out)
+        })?;
+        for ws in cands {
+            let vals = self.from_wire_pieces(ws);
+            let k = vals[0];
+            let v = vals.get(1).copied().unwrap_or_else(Value::nil);
+            // Root the fresh rebuilds across the possibly re-entrant `eq`.
+            if self.with_roots(&[k, v], |vm| vm.values_equal_guarded(k, needle, 0, span))? {
+                return Ok(Some(v));
             }
         }
-        self.pop();
-        Some(res_h)
-    }
-
-    /// Element `i` of a [`rwshared_snapshot_pieces`](Vm::rwshared_snapshot_pieces) list, or `None`
-    /// once `i` runs past it.
-    fn snapshot_piece(&self, all: GcRef, i: usize) -> Option<Value> {
-        match self.heap.get(all) {
-            Obj::List(items) => items.get(i).copied(),
-            _ => None,
-        }
+        Ok(None)
     }
 
     /// `Atomic[T]` methods: `load` (copy out), `store` (copy in), `exchange` (swap, returns old),
@@ -4464,25 +3810,5 @@ impl Vm {
             }
         }
         Ok(())
-    }
-}
-
-/// TICKET-192 — one single-entry write of a `RwShared[Map[K, V]]` (see
-/// [`Vm::rwshared_write_entry`]).
-#[derive(Debug, Clone, Copy)]
-pub(super) enum EntryWrite {
-    Put(Value, Value),
-    Remove(Value),
-    GetOrInsert(Value, Value),
-    /// TICKET-243 — `RwShared[Set[E]]._add`: no-op on a present element.
-    Add(Value),
-    /// TICKET-243 — `RwShared[Set[E]]._remove`: no-op on an absent element.
-    Discard(Value),
-}
-
-impl EntryWrite {
-    /// The op writes a stored `Set` (the other three write a `Map`).
-    fn on_set(self) -> bool {
-        matches!(self, EntryWrite::Add(_) | EntryWrite::Discard(_))
     }
 }

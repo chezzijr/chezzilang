@@ -8988,7 +8988,7 @@ main()";
 /// DAG alias stored in an `RwShared` is ONE object. `outer := [inner, inner]` stored in an
 /// `RwShared`, read back with `get()`, then pushed through `v[0]`: both slots see it (`2 2`).
 /// CPython 3.14.7 (`copy.deepcopy(outer)`) and Rust agree. The piecewise read views resolve the
-/// cross-element back-ref on the rebuild side by sharing one map (`rwshared_snapshot_pieces`), which
+/// cross-element back-ref on the rebuild side by sharing one map (`box_copy_pieces`), which
 /// is what keeps `rwshared_view_over_shared_bindings_is_not_quadratic` green.
 #[test]
 fn airlock_rwshared_store_dag_alias_is_one_object() {

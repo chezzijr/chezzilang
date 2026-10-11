@@ -18914,7 +18914,7 @@ main()
 /// ENTIRE stored container once PER ELEMENT, so `for_each`/`fold`/`at` over a container of closures
 /// sharing one binding went quadratic (measured on the pre-fix release binary: n=4000 → 3.7s, n=12000
 /// → 34s, versus 0.02s before W7-4). Since TICKET-154 the looping views share ONE rebuild map over an
-/// aliased store (`rwshared_snapshot_pieces`), so no looping view re-materializes the whole per
+/// aliased store (`box_copy_pieces`), so no looping view re-materializes the whole per
 /// element. Pinned with a COUNT of the wire nodes the view rebuilt (TICKET-233): about one per
 /// element when the walk shares one map, about n per element when it does not.
 #[test]
@@ -18981,7 +18981,7 @@ main()
 }
 
 /// TICKET-154 (W11-15) -- the widened single-piece cost. On an aliased store `at(1)` is a bare
-/// back-ref, so it takes `from_wire_piece`'s whole-root fallback: the ROOT once per CALL instead of
+/// back-ref, so it takes `from_wire_pieces`'s whole-root fallback: the ROOT once per CALL instead of
 /// the element. This bounds the wire nodes rebuilt (TICKET-233; the root is 45011 nodes, so five
 /// calls rebuild 225055) so it cannot become the root twice per call, or per ELEMENT.
 #[test]
@@ -21744,6 +21744,38 @@ print(s.get())
     );
 }
 
+/// TICKET-246 — the `RwShared` twin of the test above: `get` (and `read`) inside the box's own
+/// `write` closure fault with the guard text. `read` nested in `read` and `write` nested in
+/// `read` stay legal, because the reader closure runs after its lock dropped.
+#[test]
+fn ticket_246_rwshared_get_inside_its_own_write_faults() {
+    let src = "\
+import std.concurrency
+s := RwShared(10)
+fn peek(v: int) -> int:
+    print(s.get())
+    return v + 1
+fn peek_read(v: int) -> int:
+    return v + s.read(fn(x): x)
+fn bump(v: int) -> int:
+    s.write(fn(x): x + v)
+    return v
+for f in [peek, peek_read]:
+    r := recover: s.write(f)
+    match r:
+        ?_: print(\"no fault\")
+        !e: print(e.message().contains(\"already holds the update guard\"))
+print(s.get())
+print(s.read(fn(x): x + s.get()))
+print(s.read(bump), s.get())
+";
+    let entry = write_temp_chz("ticket246_rwshared_get_inside_write", src);
+    let (out, err, res, _code) = run_file_with(&entry, crate::native::HostConfig::default());
+    let _ = std::fs::remove_file(&entry);
+    assert!(res.is_ok(), "run faulted: {res:?} err={err}");
+    assert_eq!(out, "true\ntrue\n10\n20\n10 20\n", "got: {out:?}");
+}
+
 /// TICKET-016 / W8-3 — `write` nested in `read` is the one legal `RwShared` crossing and must still
 /// persist.
 #[test]
@@ -22216,27 +22248,33 @@ main()
 /// O(n) and n lookups on an n-entry shared map are O(n^2). Go `sync.Map` / a CPython `dict` behind a
 /// `Lock` are O(1) per lookup. Pinned with a COUNT of the wire nodes rebuilt (TICKET-233): a key and
 /// a value per lookup, against every stored entry per lookup for a scan.
+///
+/// TICKET-246: the box decodes its initial map ONCE into its own heap (2000 keys + 2000 values),
+/// so the count is that plus two per lookup: 8001. A scan would be 4 000 000.
 #[test]
 fn rwshared_map_get_key_is_not_linear() {
     let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    i := 0\n    while i < n:\n        m[i] = i\n        i = i + 1\n    box := ConcurrentMap(RwShared(m))\n    s := 0\n    i = 0\n    while i < n:\n        match box.get(i):\n            ?v: s = s + 1\n            None: s = s\n        i = i + 1\n    print(s)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n");
     assert!(
-        (2000..=4000).contains(&touches),
-        "2000 ConcurrentMap.get on a 2000-entry map rebuilt {touches} wire nodes (want 2000..=4000) -- O(n) per lookup"
+        (4000..=8100).contains(&touches),
+        "2000 ConcurrentMap.get on a 2000-entry map rebuilt {touches} wire nodes (want 4000..=8100) -- O(n) per lookup"
     );
 }
 
 /// TICKET-192: `RwShared[Map].set_key` writes one entry in place instead of re-encoding the whole map
 /// (what `write` does). 2000 inserts then 2000 overwrites on one box, pinned with the same count.
+///
+/// TICKET-246: a writer decodes its key and its value into the box heap and touches nothing else,
+/// so 4000 writes rebuild 8000 nodes (plus the final `get`). A re-encode would be millions.
 #[test]
 fn rwshared_map_set_key_is_not_linear() {
     let src = "import std.concurrency\nimport ConcurrentMap from std.concurrency.collection\nfn main():\n    n := 2000\n    m: Map[int, int] = {}\n    box := ConcurrentMap(RwShared(m))\n    i := 0\n    while i < n:\n        box.set(i, i)\n        i = i + 1\n    i = 0\n    while i < n:\n        box.set(i, i + 1)\n        i = i + 1\n    print(box.len())\n    match box.get(1999):\n        ?v: print(v)\n        None: print(-1)\nmain()\n";
     let (out, touches) = super::golden_tests::golden_entry_counting(src, &WIRE_DECODE_NODES);
     assert_eq!(out, "2000\n2000\n");
     assert!(
-        (2000..=4000).contains(&touches),
-        "2000 ConcurrentMap.set inserts + 2000 overwrites rebuilt {touches} wire nodes (want 2000..=4000) -- O(n) per write"
+        (4000..=8100).contains(&touches),
+        "2000 ConcurrentMap.set inserts + 2000 overwrites rebuilt {touches} wire nodes (want 4000..=8100) -- O(n) per write"
     );
 }
 
@@ -23098,7 +23136,7 @@ fn display_box_grid_terminates_on_every_cycle() {
     fn new_box(vm: &mut Vm, kind: Kind) -> WireValue {
         match kind {
             Kind::Shared => WireValue::Shared(vm.new_shared_core(WireValue::Nil)),
-            Kind::RwShared => WireValue::RwShared(Arc::new(RwSharedCore::default())),
+            Kind::RwShared => WireValue::RwShared(vm.new_rwshared_core(WireValue::Nil)),
             Kind::Atomic => WireValue::Atomic(Arc::new(AtomicCore::default())),
         }
     }
@@ -23108,7 +23146,10 @@ fn display_box_grid_terminates_on_every_cycle() {
                 let mut st = c.state.lock();
                 vm.box_store(&mut st, held);
             }
-            WireValue::RwShared(c) => *c.v.write().unwrap() = held,
+            WireValue::RwShared(c) => {
+                let mut st = c.state.write();
+                vm.box_store(&mut st, held);
+            }
             WireValue::Atomic(c) => *c.v.lock().unwrap() = held,
             _ => unreachable!(),
         }
@@ -23160,15 +23201,15 @@ fn display_box_grid_terminates_on_every_cycle() {
             (Shape::NoCycle, format!("{l}(1)")),
             (Shape::Itself, format!("{l}({l}(...))")),
             (Shape::ThroughList, format!("{l}([{l}(...)])")),
-            // A `Shared` decodes what it holds into its own heap, and this fixture's empty
-            // program declares no struct `N`, so the struct prints with no name. The cell's
+            // A `Shared` / `RwShared` decodes what it holds into its own heap, and this fixture's
+            // empty program declares no struct `N`, so the struct prints with no name. The cell's
             // subject is the cycle marker; `tests/chz/suites/box_grid_test.chz` runs the same
             // shape with a declared struct.
             (
                 Shape::ThroughStruct,
                 match kind {
-                    Kind::Shared => format!("{l}(?(0={l}(...)))"),
-                    _ => format!("{l}(N(b={l}(...)))"),
+                    Kind::Atomic => format!("{l}(N(b={l}(...)))"),
+                    _ => format!("{l}(?(0={l}(...)))"),
                 },
             ),
             (Shape::EachOther, format!("{l}({l}({l}(...)))")),
@@ -23221,4 +23262,37 @@ fn display_box_grid_terminates_on_every_cycle() {
         .expect("Vm::display waited for a held Shared state");
     assert_eq!(busy, "Shared(<locked>)");
     assert_eq!(free, "Shared(1)");
+    // The same shape for `RwShared`: a writer holds the write lock. A reader beside it (the read
+    // lock held by another thread) does NOT block the render: readers share.
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(VM_STACK_BYTES)
+        .spawn(move || {
+            let mut vm = Vm::new(Arc::new(empty_program()));
+            let core = vm.new_rwshared_core(WireValue::Int(1));
+            let h = vm.heap.alloc(Obj::RwShared(Arc::clone(&core)));
+            let mut shown = Vec::new();
+            for write in [true, false] {
+                let (held_tx, held_rx) = mpsc::channel();
+                let (done_tx, done_rx) = mpsc::channel::<()>();
+                let holder_core = Arc::clone(&core);
+                let holder = std::thread::spawn(move || {
+                    let _w = write.then(|| holder_core.state.write());
+                    let _r = (!write).then(|| holder_core.state.read());
+                    held_tx.send(()).unwrap();
+                    let _ = done_rx.recv();
+                });
+                held_rx.recv().unwrap();
+                shown.push(vm.display(Value::obj(h)));
+                done_tx.send(()).unwrap();
+                holder.join().unwrap();
+            }
+            shown.push(vm.display(Value::obj(h)));
+            let _ = tx.send(shown);
+        })
+        .unwrap();
+    let shown = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("Vm::display waited for a held RwShared state");
+    assert_eq!(shown, ["RwShared(<locked>)", "RwShared(1)", "RwShared(1)"]);
 }

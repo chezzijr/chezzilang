@@ -1666,6 +1666,24 @@ struct Suite:
             "one box of the three is under the cap; report:\n{}",
             report.text
         );
+        // TICKET-246 — the `RwShared` twins: the same programs, `write` for `update`. Three
+        // boxes trip the cap only when the accounting walk reads each box heap (`try_read`).
+        for (n, want) in [(3, "OVER-MEMORY rw"), (1, "PASS rw")] {
+            let d = TmpDir::new();
+            let src = format!(
+                "{BOXES}test fn rw():\n    boxes := fill({n})\n    \
+                 zs: List[int] = []\n    for i in range(2000):\n        zs = [i]\n    \
+                 assert boxes.len() == {n} and zs.len() == 1\n"
+            )
+            .replace("Shared", "RwShared")
+            .replace("s.update(", "s.write(");
+            let report = run_tests_capped(&d.write("rw_test.chz", &src), CAP);
+            assert!(
+                report.text.contains(want),
+                "{n} RwShared box(es): want {want}; report:\n{}",
+                report.text
+            );
+        }
         for (label, f) in [("backlog", &backlog), ("parked", &parked)] {
             {
                 let report = run_tests_capped(f, CAP);
@@ -1987,6 +2005,18 @@ struct Suite:
                 report.text
             );
         }
+        // TICKET-246 — the `RwShared` twin: a channel held only inside the box grows through
+        // `s.get().send(..)` with no write to the box, so only the walk of the box heap sees it.
+        let d = TmpDir::new();
+        let src = std::fs::read_to_string(&nested)
+            .unwrap()
+            .replace("Shared", "RwShared");
+        let report = run_tests_capped(&d.write("nested_test.chz", &src), CAP);
+        assert!(
+            report.text.contains("OVER-MEMORY nested"),
+            "a backlog behind a core nested in a RwShared must trip the cap; report:\n{}",
+            report.text
+        );
     }
 
     /// W6-10 review, the SAMPLING half: counting the off-heap bytes is worthless if the cap is

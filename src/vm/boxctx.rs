@@ -64,6 +64,19 @@ pub(super) fn slot_is_leaf(heap: &Heap, v: Value) -> bool {
     )
 }
 
+/// The pieces of one crossing out of (or into) a box, encoded with one memo. With `prelude` the
+/// first wire is the whole state, which the pieces back-reference; the decoder drops it.
+pub(super) struct BoxPieces {
+    prelude: bool,
+    ws: Vec<WireValue>,
+}
+
+/// The state object of a parked box context, when the state is a heap value.
+pub(super) fn state_obj(ctx: &FiberCtx) -> Option<&Obj> {
+    let heap = ctx.heap.as_ref().expect("a box context owns its heap");
+    ctx.stack[0].as_obj().map(|h| heap.get(h))
+}
+
 impl Vm {
     /// A fresh box context: its own heap, an EMPTY module view (seated lazily, per call, from the
     /// caller — see [`Vm::box_global`]) and the state slot `stack[0]`, which that heap's own GC
@@ -292,6 +305,144 @@ impl Vm {
             .as_ref()
             .expect("a Shared state is in its slot under the guard");
         self.box_copy_out(ctx, span)
+    }
+
+    /// A new `RwShared` core holding `init`, decoded into the box's own heap.
+    pub(super) fn new_rwshared_core(&mut self, init: WireValue) -> Arc<RwSharedCore> {
+        let mut slot = Some(self.box_new());
+        let bytes = self.box_store(&mut slot, init);
+        Arc::new(RwSharedCore {
+            state: core::RwSharedState(std::sync::RwLock::new(slot)),
+            bytes: std::sync::atomic::AtomicUsize::new(bytes),
+        })
+    }
+
+    /// The ONE reader of a `RwShared` state: run `pick` on the parked box context under the read
+    /// lock. `pick` only copies (`&Vm`, `&FiberCtx`): it runs no user code and writes nothing
+    /// into the box heap, which is what makes many readers at once sound.
+    ///
+    /// Fast path: `try_read`, with no registry lock (the 8-reader cell). It fails only when a
+    /// writer holds or waits for the state; the reader then takes the update guard, so its wait
+    /// is a registered guard wait (deadlock detection, cancellation) and a reader inside the
+    /// box's OWN `write` closure faults with `already holds the update guard`. Under the guard no
+    /// writer can hold the lock, so the blocking `read` waits at most for another reader's copy.
+    pub(super) fn rwshared_read<R>(
+        &mut self,
+        core: &Arc<RwSharedCore>,
+        span: Span,
+        pick: impl FnOnce(&Vm, &FiberCtx) -> Result<R, RuntimeError>,
+    ) -> Result<R, RuntimeError> {
+        if let Some(st) = core.state.try_read() {
+            let ctx = st.as_ref().expect("a RwShared state is in its slot");
+            return pick(self, ctx);
+        }
+        let key = Arc::as_ptr(core) as usize;
+        let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
+        let st = core.state.read();
+        let ctx = st.as_ref().expect("a RwShared state is in its slot");
+        pick(self, ctx)
+    }
+
+    /// The ONE single-entry writer of a `RwShared` container: update guard, write lock, then
+    /// `op` runs INSIDE the box on the live state with `args` decoded into the box heap (one
+    /// memo, so a value that aliases its key stays one object). `op` is the plain `Map` / `Set`
+    /// / `List` operation; a value it returns is encoded for the caller.
+    pub(super) fn rwshared_mutate(
+        &mut self,
+        core: &Arc<RwSharedCore>,
+        args: &[Value],
+        span: Span,
+        op: impl FnOnce(&mut Vm, Value, &[Value]) -> Result<Option<Value>, RuntimeError>,
+    ) -> Result<Option<WireValue>, RuntimeError> {
+        let mut memo = sched::WireMemo::default();
+        let mut ws = Vec::with_capacity(args.len());
+        for &a in args {
+            ws.push(self.to_wire_crossable_memo(a, span, &mut memo)?);
+        }
+        let key = Arc::as_ptr(core) as usize;
+        let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
+        let mut st = core.state.write();
+        let (r, bytes) = self.with_box(&mut st, |vm| {
+            // Handed to the box: it owns these copies (see `box_store`).
+            vm.heap.begin_copy_log();
+            let vals = vm.from_wire_pieces(BoxPieces { prelude: false, ws });
+            vm.heap.unmark_copy_log();
+            // Rooted across a key's `eq` hook; `with_box` truncates the stack on the way out.
+            vm.stack.extend_from_slice(&vals);
+            let state = vm.stack[0];
+            let r = op(vm, state, &vals).and_then(|out| {
+                out.map(|v| {
+                    let mut src = vm.walk_src();
+                    src.origin = vm.box_caller_heap_id();
+                    src.to_wire_crossable_memo(v, span, &mut sched::WireMemo::default())
+                })
+                .transpose()
+            });
+            (r, vm.box_settle())
+        });
+        core.bytes
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
+        r
+    }
+
+    /// Copy `vals` (values of the parked box context `ctx`) out for this `Vm`'s heap, as ONE
+    /// crossing: one memo, so two pieces that alias one node decode as one object.
+    ///
+    /// A piece that cannot be encoded alone (a generator whose closure reaches the root
+    /// container, W7-11) is encoded against the WHOLE state instead: the state goes first, as a
+    /// prelude the decoder rebuilds and drops, and the pieces resolve into it. That is CPython's
+    /// `copy.deepcopy(xs[0])`, which copies the container too.
+    pub(super) fn box_copy_pieces(
+        &self,
+        ctx: &FiberCtx,
+        vals: &[Value],
+        span: Span,
+    ) -> Result<BoxPieces, RuntimeError> {
+        let src = sched::WalkSrc::of_ctx(ctx, &self.program, self.walk_base, self.heap.id());
+        let encode = |prelude: Option<Value>| -> Result<BoxPieces, RuntimeError> {
+            let mut memo = sched::WireMemo::default();
+            let mut ws = Vec::with_capacity(vals.len() + 1);
+            for &v in prelude.iter().chain(vals) {
+                ws.push(src.to_wire_crossable_memo(v, span, &mut memo)?);
+            }
+            Ok(BoxPieces {
+                prelude: prelude.is_some(),
+                ws,
+            })
+        };
+        let out = encode(None).or_else(|_| encode(Some(ctx.stack[0])))?;
+        for w in &out.ws {
+            self.charge_wire(w);
+        }
+        Ok(out)
+    }
+
+    /// Decode the pieces of one crossing ([`box_copy_pieces`](Vm::box_copy_pieces)) with ONE
+    /// rebuild map, in order. A hand-off: it never marks.
+    #[allow(clippy::wrong_self_convention)]
+    pub(super) fn from_wire_pieces(&mut self, pieces: BoxPieces) -> Vec<Value> {
+        let mut rebuild = fxhash::FxHashMap::<u32, GcRef>::default();
+        let saved = self.copy_mark;
+        self.copy_mark = crossing::marks(crossing::Route::Handoff, saved);
+        let mut vals: Vec<Value> = Vec::with_capacity(pieces.ws.len());
+        for w in pieces.ws {
+            vals.push(self.from_wire_memo(w, &mut rebuild));
+        }
+        self.copy_mark = saved;
+        if pieces.prelude {
+            vals.remove(0);
+        }
+        vals
+    }
+
+    /// `"list"` / `"map"` / `"set"` for a container value of the live heap, else `""`.
+    pub(super) fn elem_kind(&self, v: Value) -> &'static str {
+        match v.as_obj().map(|h| self.heap.get(h)) {
+            Some(Obj::List(_)) => "list",
+            Some(Obj::Map(_)) => "map",
+            Some(Obj::Set(_)) => "set",
+            _ => "",
+        }
     }
 
     /// "Is this view a task's copy?" — a write to a module global faults there (D4). True for a
