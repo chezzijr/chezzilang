@@ -39523,6 +39523,61 @@ fn static_method_is_not_a_hook_for_the_operator() {
     );
 }
 
+/// TICKET-250 — a receiver-first method with a hook's name that `hook_verdict` rejects for its
+/// shape warns, and only where the operator still accepts the type and silently skips the method
+/// (`==`, `print`, a zero-field `Set` element, `for` through the other iteration hook). A static
+/// method never warns. A type the operator rejects never warns: that use is already a check error
+/// carrying the reason, and a `Set`-like `fn add(self, item)` must stay silent.
+#[test]
+fn a_near_miss_hook_warns_only_where_the_operator_silently_skips_it() {
+    let p = |m: &str| format!("struct P:\n    v: int\n{m}x := P(1)\nprint(x.v)\n");
+    let cases = [
+        (
+            "    fn eq(self, o: P) -> bool:\n        return true\n",
+            "'o'",
+        ),
+        (
+            "    fn eq[U](self, o: U) -> bool:\n        return true\n",
+            "'eq' on P is not the Eq hook",
+        ),
+        (
+            "    fn eq(self, other: P) -> int:\n        return 1\n",
+            "'eq' on P is not the Eq hook",
+        ),
+        (
+            "    fn str(self) -> List[str]:\n        return [\"x\"]\n",
+            "'str' on P is not the Stringable hook",
+        ),
+        (
+            "    fn str[T](self) -> str:\n        return \"x\"\n",
+            "'str' on P is not the Stringable hook",
+        ),
+    ];
+    for (m, needle) in cases {
+        warns(&p(m), needle);
+    }
+    warns(
+        "struct Z:\n    fn hash(self) -> str:\n        return \"h\"\nz := Z()\nprint(z)\n",
+        "'hash' on Z is not the Hashable hook",
+    );
+    warns(
+        "struct C:\n    n: int\n    fn next(self) -> int?:\n        return None\n    fn iter(self, k: int) -> Iterator[int]:\n        return [k].iter()\nc := C(1)\nprint(c.n)\n",
+        "'iter' on C is not the Iterable hook",
+    );
+    for m in [
+        "    fn eq(a: P, b: P) -> bool:\n        return true\n",
+        "    fn str(reading: int) -> str:\n        return \"x\"\n",
+        "    fn add(self, item: int):\n        pass\n",
+        "    fn index(self, a: int, b: int) -> int:\n        return a + b\n",
+        "    fn hash(self) -> str:\n        return \"h\"\n",
+        "    fn eq(self, other: P) -> bool:\n        return true\n",
+        "    fn str(self) -> str:\n        return \"x\"\n",
+        "    fn compare(self, other: P) -> int:\n        return 0\n",
+    ] {
+        no_warn(&p(m));
+    }
+}
+
 /// TICKET-250 (D4) — `hoist` defers every conformance question a type spelling asks until all
 /// types of the module are inserted, so a type may ask it of itself or of a type declared later.
 /// The negative rows prove a deferred obligation still runs.

@@ -1413,25 +1413,132 @@ pub enum Hook {
     Contains,
 }
 
-/// One row per hook: the reserved protocol and the method that satisfies its requirement.
-/// `Checker::hook_method` decides each row for a declared type; nothing else decides hook-ness.
-pub const HOOKS: &[(Hook, &str, &str)] = &[
-    (Hook::Iter, "Iterable", "iter"),
-    (Hook::Next, "Iterator", "next"),
-    (Hook::Index, "Index", "index"),
-    (Hook::SetIndex, "IndexSet", "set_index"),
-    (Hook::Slice, "Slice", "slice"),
-    (Hook::Str, "Stringable", "str"),
-    (Hook::Eq, "Eq", "eq"),
-    (Hook::Hash, "Hashable", "hash"),
-    (Hook::Compare, "Comparable", "compare"),
-    (Hook::Add, "Add", "add"),
-    (Hook::Sub, "Sub", "sub"),
-    (Hook::Mul, "Mul", "mul"),
-    (Hook::Div, "Div", "div"),
-    (Hook::Mod, "Mod", "mod"),
-    (Hook::Neg, "Neg", "neg"),
-    (Hook::Contains, "Contains", "contains"),
+/// One row per hook. `Checker::hook_verdict` decides each row for a declared type; nothing else
+/// decides hook-ness.
+pub struct HookRow {
+    pub hook: Hook,
+    /// The reserved protocol whose requirement the method must satisfy.
+    pub protocol: &'static str,
+    pub method: &'static str,
+    /// The user-facing spelling of the operator that calls the hook.
+    pub operator: &'static str,
+    /// The operator accepts every value, hook or not (`print` falls back to the default display).
+    pub total: bool,
+}
+
+pub const HOOKS: &[HookRow] = &[
+    HookRow {
+        hook: Hook::Iter,
+        protocol: "Iterable",
+        method: "iter",
+        operator: "for",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Next,
+        protocol: "Iterator",
+        method: "next",
+        operator: "for",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Index,
+        protocol: "Index",
+        method: "index",
+        operator: "x[k]",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::SetIndex,
+        protocol: "IndexSet",
+        method: "set_index",
+        operator: "x[k] = v",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Slice,
+        protocol: "Slice",
+        method: "slice",
+        operator: "x[a:b]",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Str,
+        protocol: "Stringable",
+        method: "str",
+        operator: "print",
+        total: true,
+    },
+    HookRow {
+        hook: Hook::Eq,
+        protocol: "Eq",
+        method: "eq",
+        operator: "==",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Hash,
+        protocol: "Hashable",
+        method: "hash",
+        operator: "a Set or Map key",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Compare,
+        protocol: "Comparable",
+        method: "compare",
+        operator: "<",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Add,
+        protocol: "Add",
+        method: "add",
+        operator: "+",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Sub,
+        protocol: "Sub",
+        method: "sub",
+        operator: "-",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Mul,
+        protocol: "Mul",
+        method: "mul",
+        operator: "*",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Div,
+        protocol: "Div",
+        method: "div",
+        operator: "/",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Mod,
+        protocol: "Mod",
+        method: "mod",
+        operator: "%",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Neg,
+        protocol: "Neg",
+        method: "neg",
+        operator: "unary -",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Contains,
+        protocol: "Contains",
+        method: "contains",
+        operator: "in",
+        total: false,
+    },
 ];
 
 impl Hook {
@@ -1443,8 +1550,8 @@ impl Hook {
     pub fn method(self) -> &'static str {
         HOOKS
             .iter()
-            .find(|(h, _, _)| *h == self)
-            .map_or("", |(_, _, m)| m)
+            .find(|row| row.hook == self)
+            .map_or("", |row| row.method)
     }
 }
 

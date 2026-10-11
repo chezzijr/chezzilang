@@ -453,6 +453,16 @@ impl Grant {
     }
 }
 
+/// Why a method is not the hook ([`Checker::hook_verdict`]).
+pub(super) enum HookMiss {
+    /// The type declares no method of that name.
+    Absent,
+    /// The method has no receiver: a static method is never a hook, and never a near miss.
+    Static,
+    /// A receiver-first method whose shape the requirement rejects; the decider's reason.
+    Shape(String),
+}
+
 impl Checker {
     /// The receiver-KIND key [`INTRINSIC_PROTO_METHODS`] is indexed by — the granted `Ty`'s built-in
     /// shape, at the granularity the runtime dispatches on. `"?"` for anything unclassified, which
@@ -2339,8 +2349,7 @@ impl Checker {
     }
 
     /// TICKET-250 — is method `method` of declared type `ty` the hook for the reserved
-    /// `protocol`? The one decider: the protocol's own requirement run through
-    /// [`Self::requirement_matches`]. `Some` carries the method's signature with the owner's type
+    /// `protocol`? [`Self::hook_verdict`]'s `Ok`: the method's signature with the owner's type
     /// arguments substituted in, and the protocol's type parameters as that signature binds them.
     pub(super) fn hook_method(
         &self,
@@ -2348,10 +2357,25 @@ impl Checker {
         protocol: &str,
         method: &str,
     ) -> Option<(FnSig, HashMap<String, Ty>)> {
-        let methods = self.declared_methods(ty)?;
-        let actual = methods.get(method)?;
-        let pinfo = self.protocol_shape(protocol)?;
-        let (_, req) = pinfo.methods.iter().find(|(n, _)| n == method)?;
+        self.hook_verdict(ty, protocol, method).ok()
+    }
+
+    /// The one decider: the protocol's own requirement run through
+    /// [`Self::requirement_matches`]. An `Err` says why the method is not the hook.
+    pub(super) fn hook_verdict(
+        &self,
+        ty: &Ty,
+        protocol: &str,
+        method: &str,
+    ) -> Result<(FnSig, HashMap<String, Ty>), HookMiss> {
+        let methods = self.declared_methods(ty).ok_or(HookMiss::Absent)?;
+        let actual = methods.get(method).ok_or(HookMiss::Absent)?;
+        let pinfo = self.protocol_shape(protocol).ok_or(HookMiss::Absent)?;
+        let (_, req) = pinfo
+            .methods
+            .iter()
+            .find(|(n, _)| n == method)
+            .ok_or(HookMiss::Absent)?;
         let tymap = self.nominal_param_map(ty);
         let sig = FnSig {
             params: actual.params.iter().map(|t| subst(t, &tymap)).collect(),
@@ -2372,9 +2396,11 @@ impl Checker {
             .iter()
             .map(|name| bound.get(name).cloned().unwrap_or(Ty::Unknown))
             .collect();
-        self.requirement_matches(ty, protocol, &args, pinfo, method, methods)
-            .ok()?;
-        Some((sig, bound))
+        match self.requirement_matches(ty, protocol, &args, pinfo, method, methods) {
+            Ok(()) => Ok((sig, bound)),
+            Err(_) if actual.is_static => Err(HookMiss::Static),
+            Err(why) => Err(HookMiss::Shape(why)),
+        }
     }
 
     /// TICKET-250 — fill [`HookTable`] for every struct and enum this module declares: one
@@ -2382,13 +2408,19 @@ impl Checker {
     /// Runs after `infer_returns`, so an inferred return type is final.
     pub(super) fn record_hook_table(&mut self, stmts: &[Stmt]) {
         for s in stmts {
-            let (name, type_params, is_struct) = match &s.kind {
+            let (name, type_params, methods, is_struct) = match &s.kind {
                 StmtKind::Struct {
-                    name, type_params, ..
-                } => (name, type_params, true),
+                    name,
+                    type_params,
+                    methods,
+                    ..
+                } => (name, type_params, methods, true),
                 StmtKind::Enum {
-                    name, type_params, ..
-                } => (name, type_params, false),
+                    name,
+                    type_params,
+                    methods,
+                    ..
+                } => (name, type_params, methods, false),
                 _ => continue,
             };
             let saved = self.enter_type_params(type_params);
@@ -2398,12 +2430,12 @@ impl Checker {
                 self.enum_self_ty(name)
             };
             let mut set = HookSet::default();
-            for (hook, protocol, method) in HOOKS {
+            for row in HOOKS {
                 // A conditional method (`fn compare(..) where T: Comparable`) is the hook for
                 // every instantiation the checker lets reach the operator, so ask with its own
                 // receiver bounds assumed.
                 let assumed = self
-                    .hook_candidate(&ty, *hook)
+                    .hook_candidate(&ty, row.hook)
                     .map(|sig| sig.where_bounds)
                     .unwrap_or_default();
                 let saved_bounds = self.type_params.clone();
@@ -2413,10 +2445,19 @@ impl Checker {
                         .or_default()
                         .extend(wb.bounds);
                 }
-                if self.hook_method(&ty, protocol, method).is_some() {
-                    set.insert(*hook);
-                }
+                let verdict = self.hook_verdict(&ty, row.protocol, row.method);
                 self.type_params = saved_bounds;
+                match verdict {
+                    Ok(_) => set.insert(row.hook),
+                    Err(HookMiss::Shape(why)) => {
+                        let span = methods
+                            .iter()
+                            .find(|m| m.name == row.method)
+                            .map_or(s.span, |m| m.name_span);
+                        self.warn_near_miss_hook(&ty, name, row, &why, span);
+                    }
+                    Err(HookMiss::Absent | HookMiss::Static) => {}
+                }
             }
             self.exit_type_params(saved);
             if let Ty::Struct(key, _) | Ty::Enum(key, _) = ty {
@@ -2478,6 +2519,41 @@ impl Checker {
         self.declared_methods(ty)?.get(hook.method()).cloned()
     }
 
+    /// TICKET-250 — the near-miss warning. A receiver-first method that [`Self::hook_verdict`]
+    /// rejects for its shape warns only where the operator still accepts the type and silently
+    /// skips the method: the operator is total (`print`), or the type satisfies the protocol
+    /// without the hook (structural `==`, a zero-field `Set` element, `for` through the other
+    /// iteration hook). Where the operator rejects the type, that use is already a check error
+    /// with the same reason, so nothing is silent and no warning fires. For a generic owner the
+    /// question is asked with each of its type parameters carrying the protocol, the most an
+    /// instantiation can supply. The text is the decider's own reject reason.
+    fn warn_near_miss_hook(&mut self, ty: &Ty, owner: &str, row: &HookRow, why: &str, span: Span) {
+        if self.current_module_is_stdlib {
+            return;
+        }
+        let skipped = row.total || {
+            let saved = self.type_params.clone();
+            for bounds in self.type_params.values_mut() {
+                bounds.push(TyBound {
+                    name: row.protocol.to_string(),
+                    args: Vec::new(),
+                });
+            }
+            let ok = self.satisfies(ty, row.protocol).is_ok();
+            self.type_params = saved;
+            ok
+        };
+        if skipped {
+            self.warn(
+                span,
+                format!(
+                    "'{}' on {owner} is not the {} hook ({why}); {} will not call it",
+                    row.method, row.protocol, row.operator
+                ),
+            );
+        }
+    }
+
     /// The hook a call to `method` through `protocol` is: `Some` when the nearest protocol that
     /// declares `method` (`protocol` itself, or one it embeds) is a reserved one. A requirement a
     /// user protocol declares itself is an ordinary method call.
@@ -2488,8 +2564,8 @@ impl Checker {
         }
         HOOKS
             .iter()
-            .find(|(_, _, m)| *m == method)
-            .map(|(hook, _, _)| *hook)
+            .find(|row| row.method == method)
+            .map(|row| row.hook)
     }
 
     fn requirement_owner(

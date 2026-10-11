@@ -9380,7 +9380,7 @@ the stored-callback abort net, and `std.net`'s sticky-UTF-8 + `read_bytes` drain
 
 ## Current focus
 
-### TICKET-250 — one decider for operator hooks (2026-10-11, IN PROGRESS: steps 1-5 and 7 of 10)
+### TICKET-250 — one decider for operator hooks (2026-10-11, IN PROGRESS: steps 1-5, 7 and 8 of 10)
 
 A method is a hook exactly when it satisfies the builtin protocol's requirement, `self` included.
 Landed on the ticket branch:
@@ -9403,9 +9403,14 @@ Landed on the ticket branch:
 - Tests: `tests/hook_conformance_grid.rs` (360 cells, `chezzi run` at `CHEZZI_THREADS` 1, 2 and
   default), `tests/chz/spec/hook_conformance_test.chz`.
 
-Not landed yet: the `StructuralEq` bound on a generic `Atomic[T]` (plan step 6), the near-miss
-hook warning (step 8), the base-versus-tip report and the `benches/chz/hook_dispatch.chz` row
-(step 10).
+- A fifth warning rule: a receiver-first method with a hook's name that is not the hook warns
+  where the operator silently skips it (`==`, `print`, a zero-field `Set` element, `for` through
+  the other iteration hook). `hook_conformance_grid.rs` measures the gate per cell: 44 of 355
+  cells warn.
+
+Not landed yet: the `StructuralEq` bound on a generic `Atomic[T]` (plan step 6; `fn mk[T](v: T)
+-> Atomic[T]` still checks, the D5 hole), the base-versus-tip report and the
+`benches/chz/hook_dispatch.chz` row (step 10).
 
 `for` special-cases outside the decider, recorded for the owner's range / channel design (not
 touched): the range arm and the `Ty::Channel` arms of `Checker::for_bindings`

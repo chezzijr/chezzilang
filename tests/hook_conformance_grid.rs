@@ -767,3 +767,52 @@ fn every_iterand_source_feeds_every_consumer() {
         bad.join("\n")
     );
 }
+
+/// TICKET-250 — the near-miss warning is true where it fires. For every (hook, shape, owner)
+/// cell: the checker warns `'m' on X is not the P hook` exactly when the method has a receiver,
+/// the grid's table says it is not the hook, and the operator use still runs to its last
+/// statement (so the operator skipped the method silently). The gate is measured per cell on the
+/// built binary. A cell where the gate and the run disagree is fixed by declining the warning.
+#[test]
+fn a_warning_fires_exactly_where_the_operator_skips_the_method() {
+    let hooks = hooks();
+    let mut bad = Vec::new();
+    let mut cells = 0;
+    for kind in OWNERS {
+        for hook in &hooks {
+            for (si, shape) in SHAPES.iter().enumerate() {
+                let Some(conforming) = conforms(hook, shape) else {
+                    continue;
+                };
+                cells += 1;
+                let src = format!("{}{}", owner(kind, &hook.shapes[si]), hook.op);
+                let tag = format!("warn_{kind}_{}_{shape}", hook.name);
+                let path = dir().join(format!("{tag}.chz"));
+                std::fs::write(&path, &src).expect("write the cell");
+                let checked = Command::new(env!("CARGO_BIN_EXE_chezzi"))
+                    .arg("check")
+                    .arg("--errors=json")
+                    .arg(&path)
+                    .output()
+                    .expect("run chezzi");
+                let report = String::from_utf8_lossy(&checked.stdout).to_string();
+                let warned = report.contains(&format!("'{}' on X is not the", hook.name));
+                let ran = chezzi("run", &tag, &format!("{src}print(\"END\")\n"), Some("2"));
+                let skipped = ran.ok && ran.stdout.ends_with("END\n");
+                let want = *shape != "static" && !conforming && skipped;
+                if warned != want {
+                    bad.push(format!(
+                        "{kind}|{}|{shape}: warned={warned}, expected {want} (operator ran={skipped}): {report}",
+                        hook.name
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {cells} cells wrong:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}

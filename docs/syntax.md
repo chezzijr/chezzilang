@@ -2862,6 +2862,14 @@ index" error for the others), the bound `T: P` rejects the type, and a call by n
 generator. `self` is the receiver only as the first parameter of a method declared in a struct,
 enum or protocol body; any other parameter named `self` is an error.
 
+**Near-miss warning.** A method with a receiver and a hook's name that is not the hook warns
+(`'eq' on P is not the Eq hook (…); == will not call it`) where the operator would otherwise skip
+it silently: `==` (structural), `print` and interpolation (default display), a zero-field struct
+as a `Set` element or `Map` key (constant hash), and `for` on a type that has the other iteration
+hook. It stays silent where the operator rejects the type, because that use is already an error
+with the same reason, and it never fires on a static method. The generic-operand `eq` forms
+(`fn eq(self, x: T)`, `fn eq[U](self, o: U)`) are ordinary methods, so they warn too.
+
 `Iterable[T]` also works in **TYPE position**, not only as a bound: `fn f(xs: Iterable[int])` takes any
 iterable as a plain (non-generic) parameter, and the body may `for v in xs`, comprehend `[v for v in
 xs]`, or `List(xs)` it. `T` comes from the annotation. Like every other protocol existential it is
