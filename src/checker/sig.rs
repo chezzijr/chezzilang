@@ -5171,81 +5171,37 @@ impl Checker {
     /// (`for k, v in m:`) to destructure a map's entries. A range/list/str binds a single value; a
     /// map binds its key (1 name) or key+value (2 names). Any other arity/iterand combination is an
     /// error (a dummy `Unknown` binding is returned per name so checking continues).
-    /// If `ty` is a user struct with a method `next(self) -> Option[E]` (self-only, no extra params),
-    /// return the element type `E` (with the struct's type arguments substituted in). This is the
-    /// structural "iterator protocol": such a struct is iterable in a `for`. Mirrors the type-arg
-    /// substitution `infer_method_call` does for the `Ty::Struct` arm.
+    /// The element type the `next` hook of declared type `ty` yields, or `None` when `ty` has no
+    /// `next` hook ([`Checker::hook_method`] decides).
     pub(super) fn struct_iter_elem(&self, ty: &Ty) -> Option<Ty> {
-        let Ty::Struct(name, targs) = ty else {
-            return None;
-        };
-        let info = self.structs.get(name)?;
-        let sig = self.hook_impl("Iterator", "next", info.methods.get("next")?)?;
-        if sig.params.len() != 1 {
-            return None; // (self) only — no extra args
+        match self.hook_method(ty, "Iterator", "next")?.0.ret {
+            Ty::Option(inner) => Some(*inner),
+            _ => None,
         }
-        let Ty::Option(inner) = &sig.ret else {
-            return None;
-        };
-        let map = struct_param_map(info, targs);
-        Some(subst(inner, &map))
     }
 
-    /// The element type a user struct's structural `iter(self) -> Iterator[E]` produces, or `None`.
-    /// Sibling of [`struct_iter_elem`](Self::struct_iter_elem); used so a struct with `iter` but no
-    /// `next` is recognised as `Iterable` and bound in `for`. `Iterator` is not a registered struct,
-    /// so this only matches real user structs.
-    ///
-    /// "no `next`" is by NAME, not by conformance, and that is load-bearing: the runtime peer
-    /// ([`Vm::iterable_to_cursor`]) picks the iteration protocol by name presence — a struct that
-    /// declares `next` is driven through `next`, never converted via `iter`. Admitting a struct whose
-    /// `next` is MALFORMED (wrong arity, non-`Option` return) on the strength of its `iter` would sign
-    /// off on an element type the runtime never produces. So a declared `next` disqualifies this path
-    /// outright; a well-formed one is picked up by `struct_iter_elem` in `iterable_elem`'s first half.
+    /// The element type the `iter` hook of declared type `ty` produces, or `None` when `ty` has
+    /// no `iter` hook ([`Checker::hook_method`] decides).
     pub(super) fn struct_iterable_elem(&self, ty: &Ty) -> Option<Ty> {
-        let Ty::Struct(name, targs) = ty else {
-            return None;
-        };
-        if name == "Iterator" {
-            return None; // the existential cursor — handled by `iter_elem`, not as a user struct
+        match self.hook_method(ty, "Iterable", "iter")?.0.ret {
+            Ty::Struct(name, mut args) if name == "Iterator" && args.len() == 1 => args.pop(),
+            _ => None,
         }
-        let info = self.structs.get(name)?;
-        if info.methods.contains_key("next") {
-            return None; // the runtime would drive `next`; only `struct_iter_elem` may admit it
-        }
-        let sig = self.hook_impl("Iterable", "iter", info.methods.get("iter")?)?;
-        if sig.params.len() != 1 {
-            return None; // (self) only
-        }
-        let Ty::Struct(rname, rargs) = &sig.ret else {
-            return None;
-        };
-        if rname != "Iterator" || rargs.len() != 1 {
-            return None; // must declare `-> Iterator[E]`
-        }
-        let map = struct_param_map(info, targs);
-        Some(subst(&rargs[0], &map))
     }
 
     /// The element type of ANY `Iterable` value — the single source of truth for `Iterable`
-    /// conformance and the `Iterable`-driven `for`. A built-in collection, an `Iterator[T]`/
-    /// `Iterable[T]` existential (a generator result or an ANNOTATED param), or a struct with
-    /// structural `next` all flow through [`iter_elem`](Self::iter_elem)
-    /// (every `Iterator` is `Iterable` via `iter() == self`); a struct with only `iter` flows through
-    /// [`struct_iterable_elem`](Self::struct_iterable_elem). `None` ⇒ not iterable.
+    /// conformance and the `Iterable`-driven `for`. A declared type is iterated through its `iter`
+    /// hook, and through its `next` hook only when `iter` is not the hook (CPython: `for` calls
+    /// `__iter__`). Everything else flows through [`iter_elem`](Self::iter_elem).
+    /// `None` ⇒ not iterable.
     pub(super) fn iterable_elem(&self, ty: &Ty) -> Option<Ty> {
-        self.iter_elem(ty).or_else(|| self.struct_iterable_elem(ty))
+        self.struct_iterable_elem(ty).or_else(|| self.iter_elem(ty))
     }
 
-    /// What iterating `ty` yields per step — the `Iterator` element type. Built-in collections yield
-    /// intrinsically (list/set → element, str → str, map → key, matching the single-variable `for`);
-    /// a user struct yields via its structural `next(self) -> Option[E]`; an `Iterator[T]`/`Iterable[T]`
-    /// existential yields its single type argument. `None` ⇒ not iterable. This
-    /// is the single source of truth shared by `for`-binding, `satisfies(Iterable)`, and the
-    /// `Iterator[T]`/`Iterable[T]` element-recovery in `infer_generic_call`. NOT
-    /// `satisfies(Iterator)` — that one needs a cursor, so it uses the narrower
-    /// [`struct_iter_elem`](Self::struct_iter_elem) plus the `Iterator[E]` existential (W6-3b).
-    pub(super) fn iter_elem(&self, ty: &Ty) -> Option<Ty> {
+    /// What a BUILTIN receiver yields per step: list/set → element, str → str, map → key,
+    /// bytes → int, and an `Iterator[T]` cursor its type argument. No declared type and no
+    /// protocol existential is answered here.
+    pub(super) fn builtin_iter_elem(&self, ty: &Ty) -> Option<Ty> {
         match ty {
             Ty::List(e) | Ty::Set(e) => Some((**e).clone()),
             Ty::Str => Some(Ty::Str),
@@ -5256,6 +5212,19 @@ impl Checker {
             Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
                 Some(args[0].clone())
             }
+            _ => None,
+        }
+    }
+
+    /// What iterating `ty` yields per step — the `Iterator` element type: a builtin receiver
+    /// ([`builtin_iter_elem`](Self::builtin_iter_elem)), an `Iterator[T]`/`Iterable[T]`
+    /// existential (its single type argument), or a declared type's `next` hook.
+    /// `None` ⇒ not iterable.
+    pub(super) fn iter_elem(&self, ty: &Ty) -> Option<Ty> {
+        if let Some(elem) = self.builtin_iter_elem(ty) {
+            return Some(elem);
+        }
+        match ty {
             // The SAME existential written in TYPE position. Representation asymmetry: `resolve_type`
             // intercepts the reserved name `Iterator[T]` into `Ty::Struct` (see its `("Iterator",
             // [elem])` arm), while every other protocol name — `Iterable[T]` included — falls to the
@@ -5283,14 +5252,9 @@ impl Checker {
             // `bytes[i]`/`bytearray[i]` yield an `int` (0–255).
             Ty::Bytes | Ty::ByteArray => Some((Ty::Int, Ty::Int)),
             Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())),
-            Ty::Struct(name, targs) => {
-                let info = self.structs.get(name)?;
-                let sig = self.hook_impl("Index", "index", info.methods.get("index")?)?;
-                if sig.params.len() != 2 {
-                    return None; // (self, key)
-                }
-                let map = struct_param_map(info, targs);
-                Some((subst(&sig.params[1], &map), subst(&sig.ret, &map)))
+            Ty::Struct(..) | Ty::Enum(..) => {
+                let (sig, _) = self.hook_method(ty, "Index", "index")?;
+                Some((sig.params.get(1)?.clone(), sig.ret))
             }
             // A protocol existential that IS or embeds `Index[K, V]` (M22).
             Ty::Protocol(..) => {
@@ -5372,29 +5336,8 @@ impl Checker {
             }
             return Some(subst(&sig.params[1], &map));
         }
-        let (sig, map) = match ty {
-            Ty::Struct(name, targs) => {
-                let info = self.structs.get(name)?;
-                (
-                    self.hook_impl("Contains", "contains", info.methods.get("contains")?)?,
-                    struct_param_map(info, targs),
-                )
-            }
-            Ty::Enum(name, targs) => (
-                self.hook_impl(
-                    "Contains",
-                    "contains",
-                    self.enum_methods_of(name)?.get("contains")?,
-                )?,
-                self.enum_param_map(name, targs),
-            ),
-            _ => return None,
-        };
-        // A valid `Contains` impl is `contains(self, item) -> bool`: arity 2, `bool` return.
-        if sig.params.len() != 2 || sig.ret != Ty::Bool {
-            return None;
-        }
-        Some(subst(&sig.params[1], &map))
+        let (sig, _) = self.hook_method(ty, "Contains", "contains")?;
+        sig.params.get(1).cloned()
     }
 
     /// TICKET-227 — the type a plain `=` writes into `target`: its read type, except a struct
@@ -5438,21 +5381,10 @@ impl Checker {
             }
             return Some((subst(&sig.params[1], &map), subst(&sig.params[2], &map)));
         }
-        let Ty::Struct(name, targs) = ty else {
-            return None;
-        };
-        let info = self.structs.get(name)?;
-        let sig = self.hook_impl("IndexSet", "set_index", info.methods.get("set_index")?)?;
-        if sig.params.len() != 3 {
-            return None; // (self, key, val)
-        }
-        // Must also be readable — `index(self, key) -> val` — or compound index-assign would crash.
-        let read = self.hook_impl("Index", "index", info.methods.get("index")?)?;
-        if read.params.len() != 2 {
-            return None; // (self, key)
-        }
-        let map = struct_param_map(info, targs);
-        Some((subst(&sig.params[1], &map), subst(&sig.params[2], &map)))
+        let (sig, _) = self.hook_method(ty, "IndexSet", "set_index")?;
+        // Must also be readable — the `index` hook — or compound index-assign would crash.
+        self.hook_method(ty, "Index", "index")?;
+        Some((sig.params.get(1)?.clone(), sig.params.get(2)?.clone()))
     }
 
     /// The result type of `obj[a..b]` — the `Slice` protocol's arg. `list[T] → list[T]`, `str → str`;
@@ -5462,20 +5394,7 @@ impl Checker {
             // `bytes[a:b:c]` yields a new `bytes`; `bytearray` slices to a new `bytearray`;
             // `list`/`str` slice to themselves.
             Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray => Some(ty.clone()),
-            Ty::Struct(name, targs) => {
-                let info = self.structs.get(name)?;
-                let sig = self.hook_impl("Slice", "slice", info.methods.get("slice")?)?;
-                // The `Slice` protocol fixes the bounds: `slice(self, int? , int?, int?) -> R`.
-                // The runtime always passes three `Option[int]` components (start/end/step, each
-                // `None` when omitted), so a non-conforming signature (wrong arity or non-`int?`
-                // bounds) is not a valid `Slice` impl — reject rather than green-light a crash.
-                let opt_int = Ty::option(Ty::Int);
-                if sig.params.len() != 4 || sig.params[1..=3].iter().any(|p| *p != opt_int) {
-                    return None;
-                }
-                let map = struct_param_map(info, targs);
-                Some(subst(&sig.ret, &map))
-            }
+            Ty::Struct(..) | Ty::Enum(..) => Some(self.hook_method(ty, "Slice", "slice")?.0.ret),
             // A protocol existential that IS or embeds `Slice[R]` (M22) — same signature rule.
             Ty::Protocol(..) => {
                 let (sig, map) = self.protocol_op_sig(ty, "slice")?;
@@ -6034,31 +5953,6 @@ fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
 }
 
 impl Checker {
-    /// M24 Task 5 — the gate every STRUCTURAL protocol lookup passes its candidate through: a
-    /// method the RUNTIME dispatches BY NAME at a fixed argument count (`next`/`iter`/`index`/
-    /// `set_index`/`contains`/`slice`, and `eq` via `validate_eq_shape`) may not take hidden witness
-    /// arguments. Those emit sites push exactly the declared operands, so a witness-taking method
-    /// would read one of them as its type key — a check-OK-then-runtime-fault. Such a method simply
-    /// does not implement the protocol, which is what `None` says here (the shape errors stay the
-    /// arity/type ones each site already reports). The protocol-DECLARED family (`Add`/`Eq`/
-    /// `Comparable`/…) is walled by the same rule inside `method_matches`.
-    ///
-    /// TICKET-197: a hook also conforms to the reserved `protocol`'s parameter names
-    /// (`param_name_mismatch`, DEC-187), exactly as `satisfies` requires of a declared protocol.
-    pub(super) fn hook_impl<'a>(
-        &self,
-        protocol: &str,
-        method: &str,
-        sig: &'a FnSig,
-    ) -> Option<&'a FnSig> {
-        if !sig.witness_params.is_empty()
-            || self.hook_name_mismatch(protocol, method, sig).is_some()
-        {
-            return None;
-        }
-        Some(sig)
-    }
-
     /// The `param_name_mismatch` verdict of hook `sig` against the reserved `protocol`'s own
     /// `method` requirement; `None` when the protocol declares no such method.
     fn hook_name_mismatch(

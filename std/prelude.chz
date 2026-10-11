@@ -315,11 +315,9 @@ protocol Arithmetic:
 protocol Num:
     Arithmetic + Mod + Neg + Comparable
 
-# `Iterator[Elem]` carries one type param (the element) so the generic-arity check treats `Iterator[T]`
-# uniformly, but its `next` sig is `-> Self?` (Elem is arity-only, unused in the sig — matching the
-# Rust seed); real element recovery + conformance stay special-cased (`iter_elem`).
+# `Iterator[Elem]` — `next` yields the element, or `None` when the cursor is spent.
 protocol Iterator[Elem]:
-    fn next(self) -> Option[Self]
+    fn next(self) -> Option[Elem]
 
 # `Iterable[Elem]` — "can produce a fresh cursor" — its `iter(self) -> Iterator[Elem]` returns the
 # reserved `Iterator[T]` value type (`Ty::Struct("Iterator",[Elem])`), which `resolve_type` accepts

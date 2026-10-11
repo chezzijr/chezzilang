@@ -2739,9 +2739,9 @@ impl Checker {
     /// through `infer_witness_static_call`) and a miss. Protocol methods take no own type params,
     /// so the value is never generic.
     pub(super) fn param_member_fn(&self, tname: &str, name: &str) -> Option<PathFn> {
-        let (bound, msig, map) = self.bound_method(tname, name, &|s| !s.is_static)?;
+        let (_, msig, map) = self.bound_method(tname, name, &|s| !s.is_static)?;
         let mut inst = subst_sig(&msig, &map);
-        inst.ret = self.bound_method_ret(&bound, name, &msig, &map);
+        inst.ret = self.bound_method_ret(&msig, &map);
         let sig = method_value_sig(&inst, &[], Ty::Param(tname.to_string()));
         let arity = sig.params.len();
         Some(PathFn {

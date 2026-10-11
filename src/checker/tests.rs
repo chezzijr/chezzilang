@@ -20637,38 +20637,27 @@ fn iter_only_struct_bound_recovery_still_not_total() {
     );
 }
 
-/// CHECKER↔RUNTIME PROTOCOL-SELECTION PARITY. The runtime picks a struct's iteration protocol by NAME
-/// PRESENCE (`iterable_to_cursor`: has `next` ⇒ drive `next`, else convert via `iter`), so the checker
-/// must admit a struct as `Iterable` on the SAME rule. `struct_iterable_elem` therefore refuses any
-/// struct that declares a `next` at all: a NON-conforming `next` (wrong arity, or a non-`Option`
-/// return) plus a conforming `iter` used to be admitted via `iter` and then driven through the
-/// malformed `next` — silently yielding different elements than the contract the checker signed off on.
+/// TICKET-250 — a `next` that does not satisfy `Iterator`'s requirement is an ordinary method. It
+/// does not make the type non-iterable: a conforming `iter` beside it is the hook, for every
+/// consumer (`for`, `List()`, the bound, an `Iterable[T]` slot).
 #[test]
-fn struct_with_nonconforming_next_is_not_iterable() {
-    // (a) extra param on `next` + a conforming `iter`: rejected everywhere, not admitted via `iter`.
+fn a_nonconforming_next_is_an_ordinary_method() {
+    // (a) extra param on `next` + a conforming `iter`: `next` is an ordinary method, `iter` is the hook.
     let odd = "struct Odd:\n    xs: List[int]\n    n: int\n    fn next(self, k: int) -> int?:\n        self.n += 1\n        if self.n > 3:\n            return None\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\n";
-    rejects(
-        &format!(
-            "{odd}fn viaList(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(viaList(Odd([9, 9], 0))))\nmain()\n"
-        ),
-        "expected Iterable[int], found Odd",
-    );
-    rejects(
-        &format!("{odd}fn main():\n    for v in Odd([9, 9], 0):\n        print(str(v))\nmain()\n"),
-        "cannot iterate over Odd",
-    );
-    rejects(
-        &format!(
-            "{odd}fn count[S: Iterable[int]](xs: S) -> int:\n    return 0\nfn main():\n    print(str(count(Odd([9, 9], 0))))\nmain()\n"
-        ),
-        "does not satisfy Iterable",
-    );
+    ok(&format!(
+        "{odd}fn viaList(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(viaList(Odd([9, 9], 0))))\nmain()\n"
+    ));
+    ok(&format!(
+        "{odd}fn main():\n    for v in Odd([9, 9], 0):\n        print(str(v))\nmain()\n"
+    ));
+    ok(&format!(
+        "{odd}fn count[S: Iterable[int]](xs: S) -> int:\n    return 0\nfn main():\n    print(str(count(Odd([9, 9], 0))))\nmain()\n"
+    ));
     // (b) a non-`Option` return on `next` is the same class.
-    rejects(
+    ok(
         "struct Bad:\n    xs: List[int]\n    fn next(self) -> int:\n        return 1\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> List[int]:\n    return List(xs)\nfn main():\n    print(str(f(Bad([1, 2]))))\nmain()\n",
-        "expected Iterable[int], found Bad",
     );
-    // (c) a CONFORMING `next` alongside `iter` still works — and `next` wins, matching the runtime.
+    // (c) a conforming `next` alongside `iter`: `iter` is the hook `for` drives.
     ok(
         "struct Both:\n    n: int\n    xs: List[int]\n    fn next(self) -> int?:\n        if self.n <= 0:\n            return None\n        self.n -= 1\n        return ?self.n\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f(Both(3, [9]))))\nmain()\n",
     );
@@ -22831,30 +22820,26 @@ fn empty_struct_is_hashable() {
         main()\n");
 }
 
-/// A zero-field struct that DEFINES a `hash` method must fall through to the STRUCTURAL Hashable
-/// check — the zero-field intrinsic only fires when there is NO `hash` method (mirrors the runtime
-/// `struct_hash` guard `fields.is_empty() && !methods.contains_key("hash")`). A mis-typed `hash`
-/// (wrong return type) must be REJECTED at check time, not accepted then faulted at runtime
-/// (`hash() must return int, got str`). Regression for the check-ok/run-diverge soundness hole.
+/// TICKET-250 — a zero-field struct is `Hashable` with the constant hash unless it has the `hash`
+/// hook. A `hash` that does not satisfy `Hashable`'s requirement (wrong return, extra parameter)
+/// is an ordinary method: the struct hashes as one with no `hash` at all, and the method never
+/// runs under `Set` or `Map`.
 #[test]
-fn empty_struct_with_mistyped_hash_rejected() {
-    rejects(
+fn empty_struct_with_mistyped_hash_is_not_the_hook() {
+    ok(
         "struct S:\n    fn hash(self) -> str:\n        return \"x\"\n\
         fn main():\n\
         \x20   m: Map[S, int] = {S(): 1}\n\
         \x20   print(m.len())\n\
         main()\n",
-        "Hashable",
     );
-    // Arity variant: an extra param makes the `hash` method un-dispatchable by `struct_hash`
-    // (runtime `hash() must return int, got nil`); must be a check-time reject too.
-    rejects(
+    // Arity variant: an extra parameter is the same class.
+    ok(
         "struct S:\n    fn hash(self, k: int) -> int:\n        return k\n\
         fn main():\n\
         \x20   seen: Set[S] = {S()}\n\
         \x20   print(seen.len())\n\
         main()\n",
-        "Hashable",
     );
 }
 

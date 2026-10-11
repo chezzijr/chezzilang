@@ -3115,15 +3115,14 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     m.insert(
         "Iterator".to_string(),
         ProtocolInfo {
-            // One type param (the element) so the generic arity check in `check_bounds` treats
-            // `Iterator[T]` uniformly; its conformance + element recovery stay special-cased.
+            // One type param: the element `next` yields.
             type_params: vec!["Elem".to_string()],
             embeds: Vec::new(),
             methods: vec![(
                 "next".to_string(),
                 FnSig::plain(
                     vec![Ty::Unknown],
-                    Ty::Option(Box::new(Ty::Param("Self".into()))),
+                    Ty::Option(Box::new(Ty::Param("Elem".into()))),
                 ),
             )],
         },

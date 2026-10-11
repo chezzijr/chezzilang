@@ -372,9 +372,11 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Iterable", "iter", "bytes"),
     ("Iterable", "iter", "bytearray"),
     ("Iterable", "iter", "struct"),
+    ("Iterable", "iter", "enum"),
     // Iterator — only a struct/cursor holds the position `next` needs (W6-3b: a raw collection does
     // NOT satisfy `Iterator`, only `Iterable`).
     ("Iterator", "next", "struct"),
+    ("Iterator", "next", "enum"),
     // Index / IndexSet / Slice — the built-in containers `index_kv`/`slice_result` accept
     // (`IndexSet` excludes the immutable `str`/`bytes`; `Slice` excludes `map`).
     ("Index", "index", "list"),
@@ -2074,18 +2076,12 @@ impl Checker {
         // has no state to hash, so the runtime returns a constant hash for it (with `==`'s type-tag
         // guard keeping distinct empty-struct types unequal despite the hash collision). This lets
         // `struct S: pass` be used as a Set element / Map key without an explicit `hash(self)` method.
-        // The `!methods.contains_key("hash")` clause MUST mirror the runtime `struct_hash` guard
-        // (src/vm/mod.rs, src/interp/mod.rs): the runtime only substitutes the constant-0 hash when the
-        // struct has NO `hash` method — a zero-field struct that DOES define `hash` gets its method
-        // dispatched. So a zero-field struct WITH a `hash` method must fall through to the structural
-        // check (which validates `hash(self) -> int`), or a mis-typed `hash` (wrong return / arity)
-        // would pass the checker and fault at runtime (check-ok/run-diverge).
+        // A zero-field struct that HAS the `hash` hook falls through to the structural check and
+        // gets its method dispatched. `hook_method` is the one answer to "has the hook".
         if protocol == "Hashable"
             && let Ty::Struct(name, _) = ty
-            && self
-                .structs
-                .get(name)
-                .is_some_and(|d| d.fields.is_empty() && !d.methods.contains_key("hash"))
+            && self.structs.get(name).is_some_and(|d| d.fields.is_empty())
+            && self.hook_method(ty, "Hashable", "hash").is_none()
         {
             return self.grant_intrinsic(protocol, ty);
         }
@@ -2156,7 +2152,10 @@ impl Checker {
         // conforms structurally, falling through to the matcher below; a `Ty::Param` forwards to its
         // declared bounds). `str` is immutable, so it satisfies `Index`/`Slice` but NOT `IndexSet`.
         if matches!(protocol, "Index" | "IndexSet" | "Slice")
-            && !matches!(ty, Ty::Param(_) | Ty::Struct(..) | Ty::Protocol(..))
+            && !matches!(
+                ty,
+                Ty::Param(_) | Ty::Struct(..) | Ty::Enum(..) | Ty::Protocol(..)
+            )
         {
             let provided: Vec<Ty> = match protocol {
                 "Slice" => match self.slice_result(ty) {
@@ -2330,6 +2329,62 @@ impl Checker {
         pinfo: &ProtocolInfo,
         methods: &HashMap<String, FnSig>,
     ) -> Result<(), String> {
+        for (mname, _) in &pinfo.methods {
+            self.requirement_matches(ty, protocol, args, pinfo, mname, methods)?;
+        }
+        Ok(())
+    }
+
+    /// TICKET-250 — is method `method` of declared type `ty` the hook for the reserved
+    /// `protocol`? The one decider: the protocol's own requirement run through
+    /// [`Self::requirement_matches`]. `Some` carries the method's signature with the owner's type
+    /// arguments substituted in, and the protocol's type parameters as that signature binds them.
+    pub(super) fn hook_method(
+        &self,
+        ty: &Ty,
+        protocol: &str,
+        method: &str,
+    ) -> Option<(FnSig, HashMap<String, Ty>)> {
+        let methods = self.declared_methods(ty)?;
+        let actual = methods.get(method)?;
+        let pinfo = self.protocol_shape(protocol)?;
+        let (_, req) = pinfo.methods.iter().find(|(n, _)| n == method)?;
+        let tymap = self.nominal_param_map(ty);
+        let sig = FnSig {
+            params: actual.params.iter().map(|t| subst(t, &tymap)).collect(),
+            ret: subst(&actual.ret, &tymap),
+            ..actual.clone()
+        };
+        let self_map = HashMap::from([("Self".to_string(), ty.clone())]);
+        let mut bound: HashMap<String, Ty> = HashMap::new();
+        if req.params.len() == sig.params.len() {
+            for (want, got) in req.params.iter().zip(&sig.params) {
+                unify(&subst(want, &self_map), got, &mut bound);
+            }
+            unify(&subst(&req.ret, &self_map), &sig.ret, &mut bound);
+        }
+        bound.retain(|name, _| pinfo.type_params.contains(name));
+        let args: Vec<Ty> = pinfo
+            .type_params
+            .iter()
+            .map(|name| bound.get(name).cloned().unwrap_or(Ty::Unknown))
+            .collect();
+        self.requirement_matches(ty, protocol, &args, pinfo, method, methods)
+            .ok()?;
+        Some((sig, bound))
+    }
+
+    /// One requirement of [`Self::satisfies_methods`]: does `methods` carry `mname` with the
+    /// signature `protocol` declares for it?
+    fn requirement_matches(
+        &self,
+        ty: &Ty,
+        protocol: &str,
+        args: &[Ty],
+        pinfo: &ProtocolInfo,
+        mname: &str,
+        methods: &HashMap<String, FnSig>,
+    ) -> Result<(), String> {
         // TICKET-027: `protocol` may carry a module-qualified KEY — render the BARE name in messages.
         let protocol_display = crate::compiler::bare_display(protocol);
         let pmap: HashMap<String, Ty> = pinfo
@@ -2369,7 +2424,10 @@ impl Checker {
             }
             _ => self.nominal_param_map(ty),
         };
-        for (mname, msig) in &pinfo.methods {
+        let Some((_, msig)) = pinfo.methods.iter().find(|(n, _)| n == mname) else {
+            return Ok(());
+        };
+        {
             let subst_params: Vec<Ty> = msig.params.iter().map(|t| subst(t, &pmap)).collect();
             let min_params = subst_params.len();
             let want = FnSig {
@@ -4209,29 +4267,9 @@ impl Checker {
         Some((bound, msig, map))
     }
 
-    /// The return of bound `bound`'s `method` (sig `msig`, map `map`): `Iterator[T].next()` yields
-    /// `Option[T]` and `Iterable[T].iter()` the cursor `Iterator[T]` — the bound's element arg,
-    /// resolved at the declaration (TICKET-202), not the registered `Self` placeholder — else the
-    /// substituted declared return.
-    pub(super) fn bound_method_ret(
-        &self,
-        bound: &TyBound,
-        method: &str,
-        msig: &FnSig,
-        map: &HashMap<String, Ty>,
-    ) -> Ty {
-        if bound.name == "Iterator"
-            && method == "next"
-            && let Some(arg) = bound.args.first()
-        {
-            return Ty::Option(Box::new(arg.clone()));
-        }
-        if bound.name == "Iterable"
-            && method == "iter"
-            && let Some(arg) = bound.args.first()
-        {
-            return Ty::Struct("Iterator".to_string(), vec![arg.clone()]);
-        }
+    /// The return of a bound's method (sig `msig`, map `map`): the requirement's declared return
+    /// with the bound's arguments substituted in.
+    pub(super) fn bound_method_ret(&self, msig: &FnSig, map: &HashMap<String, Ty>) -> Ty {
         subst(&msig.ret, map)
     }
 

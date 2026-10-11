@@ -2719,16 +2719,12 @@ impl Checker {
             );
             return Ty::Unknown;
         }
-        // `.iter()` — the formal `Iterable[T]` entry point. Returns a fresh cursor typed as the
-        // existing `Iterator[T]` existential (no new `Ty`), `T = iter_elem`. Handled here, BEFORE the
-        // per-type dispatch, for every built-in iterable AND for an `Iterator[T]` value (a generator
-        // result or another cursor) where `iter()` is idempotent (returns self). A user STRUCT is
-        // excluded so a struct that declares its own `iter` (the pure-`Iterable` producer) resolves
-        // through the normal struct-method path below — its `iter` return type IS `Iterator[E]`.
+        // `.iter()` on a BUILTIN receiver (a collection, or an `Iterator[T]` cursor, where it
+        // returns the cursor itself): a fresh cursor typed `Iterator[T]`. A struct, an enum and a
+        // protocol slot are not typed here; each reaches its own arm of the dispatch below.
         if method == "iter"
             && args.is_empty()
-            && !matches!(&obj_ty, Ty::Struct(n, _) if n != "Iterator")
-            && let Some(elem) = self.iter_elem(&obj_ty)
+            && let Some(elem) = self.builtin_iter_elem(&obj_ty)
         {
             return Ty::Struct("Iterator".to_string(), vec![elem]);
         }
@@ -3872,7 +3868,7 @@ impl Checker {
                 // `T: Add + Mul` exposes the union of both protocols' methods).
                 // `Self` maps to the receiver `Ty::Param(pname)`, and the parameterized protocol's
                 // own params to the bound's args (`Container[int]` ⇒ `T ↦ int`).
-                if let Some((proto, msig, map)) = self.bound_method(pname, method, &|_| true) {
+                if let Some((_, msig, map)) = self.bound_method(pname, method, &|_| true) {
                     let expected: Vec<Ty> = match msig.params.split_first() {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
                         None => Vec::new(),
@@ -3887,7 +3883,7 @@ impl Checker {
                         return Ty::Unknown;
                     };
                     self.check_args_subst(method, &expected, expected.len(), &bound, span);
-                    return self.bound_method_ret(&proto, method, &msig, &map);
+                    return self.bound_method_ret(&msig, &map);
                 }
                 self.infer_all(args);
                 let bounds = self.type_params.get(pname).cloned().unwrap_or_default();
