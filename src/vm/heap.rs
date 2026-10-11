@@ -14,9 +14,9 @@ use super::op::ProtoId;
 use super::value::{GcRef, Value};
 use super::wire::HashIndex;
 use crate::lexer::Span;
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A real hash table that *also* preserves insertion order. `entries` is the insertion-ordered
 /// store (so iteration, `keys()`, set equality, and GC tracing stay deterministic); `index` maps a
@@ -529,8 +529,9 @@ pub struct Heap {
     /// and a `recv`/`pop` never decrements — under-triggering leaves the `--max-heap` guard failing
     /// open, over-triggering just costs a sweep). Read by
     /// [`should_collect`](Heap::should_collect) ONLY when `mem_cap != 0`, so cap-off pacing is
-    /// bit-for-bit the object-count trigger it has always been. `Cell` because two of the three
-    /// charge points hold `&self`.
+    /// bit-for-bit the object-count trigger it has always been. An atomic because two of the three
+    /// charge points hold `&self` and a `RwShared` reader borrows the heap from another thread
+    /// (TICKET-246); only the heap's owner writes it, so a `Relaxed` load then store is enough.
     ///
     /// Every byte a heap gains arrives one of exactly three ways, and each has exactly one funnel:
     /// a NEW object → [`alloc`](Heap::alloc); growth IN PLACE inside an existing one →
@@ -542,11 +543,12 @@ pub struct Heap {
     /// is defeated by `big.extend(chunk)` (measured ~240 MB past an 8 MB cap in ~1200 instructions),
     /// the object count by `s = s + s` ×22 (41 MB in 22 allocations) and by
     /// `"x".repeat(20000000)` (20 MB in ONE).
-    since_gc_bytes: Cell<usize>,
+    since_gc_bytes: AtomicUsize,
     /// The in-place-growth half of `since_gc_bytes`: the object handed out by the last
     /// [`get_mut`](Heap::get_mut) and its payload size AT THAT MOMENT. The next settle — the next
     /// `get_mut`, or [`should_collect`](Heap::should_collect) — re-measures the same object and
-    /// charges the difference. `Cell` because `should_collect` holds `&self`.
+    /// charges the difference. A `Mutex` because `should_collect` holds `&self` and `Heap` must be
+    /// `Sync` (TICKET-246); it is touched only under a live cap.
     ///
     /// This is the door for byte growth that allocates NOTHING: `xs.push(i)` /
     /// `m[k] = v` / `s.add(x)` / `ba.push(b)` / `big.extend(chunk)` all append into the `Vec` behind
@@ -570,7 +572,7 @@ pub struct Heap {
     ///
     /// Sound against a freed slot because `sweep()` — the only thing that frees, and so the only
     /// thing that can make `alloc` re-hand this slot to a different object — clears it.
-    pending_mut: Cell<Option<(GcRef, usize)>>,
+    pending_mut: Mutex<Option<(GcRef, usize)>>,
     /// Collect once `since_gc` reaches this; grows with the live set after each collection.
     next_gc: usize,
     /// Peak of `live_bytes()` sampled at each `sweep()` — the memory probe's high-water mark
@@ -597,6 +599,14 @@ pub struct Heap {
     err_spans: FxHashMap<u32, Span>,
 }
 
+/// TICKET-246 — a `RwShared` reader walks a box heap through `&Heap` while other readers do the
+/// same. A new `Cell` / `RefCell` in `Heap` or `Obj` must fail here, never be worked around with
+/// `unsafe impl Sync`.
+const _: fn() = || {
+    fn s<T: Sync + Send>() {}
+    s::<Heap>();
+};
+
 /// Process-wide source for [`Heap::heap_id`] — one fresh id per `Heap::default()`, never reused.
 static NEXT_HEAP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -614,8 +624,8 @@ impl Default for Heap {
             free: Vec::new(),
             live: 0,
             since_gc: 0,
-            since_gc_bytes: Cell::new(0),
-            pending_mut: Cell::new(None),
+            since_gc_bytes: AtomicUsize::new(0),
+            pending_mut: Mutex::new(None),
             next_gc: MIN_GC_THRESHOLD,
             peak_live_bytes: 0,
             mem_cap: 0,
@@ -785,8 +795,11 @@ impl Heap {
         // handed out, then arm this one.
         if self.mem_cap != 0 {
             self.settle_pending_mut();
-            self.pending_mut
-                .set(Some((h, obj_bytes_shallow(self.get(h)))));
+            let armed = Some((h, obj_bytes_shallow(self.get(h))));
+            *self
+                .pending_mut
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner()) = armed;
         }
         // TICKET-213 — the same sole-door argument decides view freshness: a `&mut` to an object
         // the cached module snapshot reaches is the only way that view can change in place.
@@ -804,7 +817,12 @@ impl Heap {
     /// measures; this only decides when to look).
     #[inline]
     fn settle_pending_mut(&self) {
-        if let Some((h, before)) = self.pending_mut.take() {
+        let pending = self
+            .pending_mut
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((h, before)) = pending {
             let now = obj_bytes_shallow(self.get(h));
             self.charge_bytes(now.saturating_sub(before));
         }
@@ -822,8 +840,9 @@ impl Heap {
     /// reached when a `--max-heap` cap is live.
     #[inline]
     pub fn charge_bytes(&self, n: usize) {
+        let charged = self.since_gc_bytes.load(Ordering::Relaxed);
         self.since_gc_bytes
-            .set(self.since_gc_bytes.get().saturating_add(n));
+            .store(charged.saturating_add(n), Ordering::Relaxed);
     }
 
     /// How many charged bytes force a sweep under a live cap: a quarter of the cap bounds the
@@ -853,7 +872,7 @@ impl Heap {
             return false;
         }
         self.settle_pending_mut();
-        self.since_gc_bytes.get() >= self.bytes_gc_threshold()
+        self.since_gc_bytes.load(Ordering::Relaxed) >= self.bytes_gc_threshold()
     }
 
     /// W6-10s — force the next [`should_collect`](Heap::should_collect), so a heap that was HANDED a
@@ -1082,11 +1101,14 @@ impl Heap {
             }
         }
         self.since_gc = 0;
-        self.since_gc_bytes.set(0);
+        *self.since_gc_bytes.get_mut() = 0;
         // Drop the armed `get_mut` record: this is the ONLY thing that frees a slot, so it is also
         // the only thing that could leave the record pointing at a slot `alloc` then re-hands to a
         // different object. Clearing it here is what makes the settle sound.
-        self.pending_mut.set(None);
+        *self
+            .pending_mut
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.force_collect = false;
         self.next_gc = (self.live * 2).max(MIN_GC_THRESHOLD);
         let lb = self.live_bytes();
@@ -1327,7 +1349,10 @@ impl Heap {
         // and be settled against a slot `alloc` re-handed to a different object. Production sets the
         // cap exactly once per `Vm`, so this is belt-and-braces — but it makes the settle's soundness
         // a local property of this file instead of an argument about every caller.
-        self.pending_mut.set(None);
+        *self
+            .pending_mut
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// The configured `--max-heap` cap in bytes (`0` = OFF) — for the abort message.
@@ -2159,6 +2184,19 @@ mod iter_obj_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TICKET-246 — a reader that holds only `&Heap`, on another thread, charges the pacing
+    /// counter. The `thread::scope` borrow is what needs `Heap: Sync`.
+    #[test]
+    fn heap_is_sync_and_charges_through_a_shared_ref() {
+        let heap = Heap::default();
+        let shared: &Heap = &heap;
+        shared.charge_bytes(40);
+        std::thread::scope(|sc| {
+            sc.spawn(|| shared.charge_bytes(2));
+        });
+        assert_eq!(shared.since_gc_bytes.load(Ordering::Relaxed), 42);
+    }
 
     /// TICKET-125 — `channel_handles` counts every slot holding the given core, by `Arc` pointer
     /// identity, and none holding a different core.
