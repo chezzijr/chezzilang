@@ -3989,6 +3989,45 @@ mod tests {
         assert_eq!(describe(&Token::Str("a".into())), "a string literal");
     }
 
+    /// TICKET-249 -- indentation ends a block expression: the first token of the next line starts a
+    /// NEW statement, it never continues the block's value. Each cell asserts the tree shape
+    /// (statement count of the fn body), not accept/reject.
+    #[test]
+    fn next_line_after_block_expr_starts_a_new_statement() {
+        let blocks = [
+            "match n:\n        1: 10\n        _: 20\n",
+            "recover:\n        10 / n\n",
+        ];
+        for head in ["x := ", "x: int = "] {
+            for block in blocks {
+                for next in ["(c.bump())", "[1, 2]", "-1", "(1)"] {
+                    let src = format!("fn f(n: int):\n    {head}{block}    {next}\n");
+                    let m = parse_ok(&src);
+                    let StmtKind::Fn(f) = &m.stmts[0].kind else {
+                        panic!("not a fn: {src}")
+                    };
+                    assert_eq!(
+                        f.body.len(),
+                        2,
+                        "next line must be its own statement:\n{src}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// TICKET-249 -- an arm after an arm whose value is a nested `match` is a new arm of the outer
+    /// match, whatever its first token (`?_`, `(x, _)`, `-1`).
+    #[test]
+    fn arm_after_nested_match_arm_is_an_outer_arm() {
+        for arm in ["?_: 3", "(x, _): 3", "-1: 3"] {
+            let src = format!(
+                "fn f(t: int):\n    r := match t:\n        0: match t:\n            1: 1\n            _: 2\n        {arm}\n"
+            );
+            parse_ok(&src);
+        }
+    }
+
     /// The single statement in a one-statement module.
     fn only(src: &str) -> StmtKind {
         let mut m = parse_ok(src);
