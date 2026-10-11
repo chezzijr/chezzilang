@@ -114,6 +114,31 @@ fn os_exit_inside_a_box_closure_exits_with_its_status() {
     }
 }
 
+/// A CHILD task of a nursery inside a box closure that reads the same box can never be served:
+/// the closure holds the box until the nursery joins, and the nursery waits for the child. The
+/// run reports a deadlock and exits 1; it never hangs. On the base binary (encoded store) the
+/// child read the pre-update value and the program printed `ok 21`. The compiler cannot see this
+/// shape (the box reaches the child through a parameter), so it is pinned and documented.
+#[test]
+fn a_child_task_reading_the_box_inside_its_own_closure_is_a_deadlock_fault_not_a_hang() {
+    for (kind, call) in [("Shared", "update"), ("RwShared", "write")] {
+        let src = format!(
+            "import std.concurrency\n\nfn peek(w: {kind}[int], out: AtomicInt):\n    out.store(w.get())\n\nfn body(w: {kind}[int], x: int) -> int:\n    out := AtomicInt(0)\n    parallel:\n        spawn peek(w, out)\n    return x + out.load() + 1\n\nw := {kind}(10)\nw.{call}(fn(x): body(w, x))\nprint(\"unreachable\")\n"
+        );
+        let path = write_program(&format!("child-{kind}"), &src);
+        for threads in [Some("1"), Some("2"), None] {
+            let r = chezzi(&["run", path.to_str().unwrap()], threads, 30);
+            assert_eq!(r.code, Some(1), "{kind} at {threads:?}: {}", r.stderr);
+            assert!(
+                r.stderr.contains("deadlock") && r.stdout.is_empty(),
+                "{kind} at {threads:?}: stdout {:?} stderr {}",
+                r.stdout,
+                r.stderr
+            );
+        }
+    }
+}
+
 /// A fault message is built by the `&self` renderer. An `Err` payload that holds a box holding
 /// the payload must render with the cycle marker and exit 1; on the base binary it hung.
 #[test]

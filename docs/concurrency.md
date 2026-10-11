@@ -744,7 +744,12 @@ when the read sits two boxes deep). Capture what the closure needs instead (`n :
 `read` closure fault with `already holds the update guard`; the closure holds the value, so no
 earlier copy exists. A fault inside the closure is raised in the caller, `recover:` catches it, the
 box keeps serving and the state is what the closure left. A slow closure blocks every user of the
-box and holds its worker (the Elixir `Agent` warning applies: keep it short). `Shared.read(f)` runs
+box and holds its worker (the Elixir `Agent` warning applies: keep it short). That includes a task
+the closure itself spawns: a child of a `parallel:` inside the closure that reads or writes the
+**same** box can never be served (the closure holds the box until the nursery joins), so the run
+stops with a `deadlock:` fault at that `parallel:`; it does not hang. Before TICKET-246 such a child
+`get` returned the pre-update value. Pass the child the value it needs instead of the box.
+`Shared.read(f)` runs
 `f` on the live value, so a mutation `f` makes persists. `RwShared` (section 6f) is the same box
 core behind a read-write lock.
 
