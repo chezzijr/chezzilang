@@ -4028,6 +4028,370 @@ mod tests {
         }
     }
 
+    /// Parse without panicking: the module, or the error's line and message. A lexer error has
+    /// line 0.
+    fn try_parse(src: &str) -> Result<Module, (usize, String)> {
+        let toks = lexer::tokenize(src).map_err(|e| (0, format!("lexer: {e}")))?;
+        parse(toks).map_err(|e| (e.span.line as usize, e.message))
+    }
+
+    /// Panic once with the count of failing grid cells and the first twenty.
+    fn report_cells(grid: &str, total: usize, failed: &[String]) {
+        assert!(
+            failed.is_empty(),
+            "{} of {total} {grid} cells failed; first {}:\n{}",
+            failed.len(),
+            failed.len().min(20),
+            failed[..failed.len().min(20)].join("\n")
+        );
+    }
+
+    /// TICKET-249 -- the family's grid: block kind x position x first token of the next line. A
+    /// block expression ends at its dedent, so the next line is its own statement or arm (Split),
+    /// an `else` guard on the block-valued binding (Guard), or a parse error on that line (Reject).
+    /// Each cell asserts where the line lands in the tree, never accept / reject alone. A new first
+    /// token or position is a new row of these tables.
+    #[test]
+    fn block_end_grid() {
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum Want {
+            Split,
+            Guard,
+            Reject,
+        }
+        const ARMS: &[&str] = &["    1: 10", "    _: 20"];
+        // (head, body lines one level deeper than the statement)
+        const KINDS: &[(&str, &[&str])] = &[
+            ("match n:", ARMS),
+            ("recover:", &["    10"]),
+            ("if n == 1: 5 else: match n:", ARMS),
+            ("fn(a: int) -> int: match a:", ARMS),
+            ("-match n:", ARMS),
+            ("1 + match n:", ARMS),
+        ];
+        const POSITIONS: &[&str] = &[
+            "x := ",
+            "x: int = ",
+            "x = ",
+            "a, b := ",
+            "a, b = ",
+            "assert ",
+            "return ",
+            "yield ",
+            "field",
+            "outer arm",
+            "statement arm",
+            "",
+            "a, ",
+            "wait arm",
+        ];
+        // (the next line in a statement position, the arm line used in the two arm positions)
+        const TOKENS: &[(&str, Option<&str>)] = &[
+            ("?g()", Some("?_: 1")),
+            ("(g())", Some("(a, b): 1")),
+            ("[1, 2]", None),
+            (".abs()", None),
+            ("?.abs()", None),
+            ("-1", Some("-1: 1")),
+            ("!b", None),
+            ("?? 1", None),
+            ("+ 1", None),
+            ("* 2", None),
+            ("/ 2", None),
+            ("% 2", None),
+            ("== 1", None),
+            ("!= 1", None),
+            ("< 1", None),
+            ("<= 1", None),
+            ("> 1", None),
+            (">= 1", None),
+            ("in xs", None),
+            ("and b", None),
+            ("or b", None),
+            ("| 1", None),
+            ("^ 1", None),
+            ("& 1", None),
+            ("<< 1", None),
+            (">> 1", None),
+            (".. 3", None),
+            ("|> inc()", None),
+            (", 2", None),
+            ("else: 0", None),
+            ("else e: 0", None),
+            ("elif n == 2: 3 else: 4", None),
+            ("= 5", None),
+            (":= 5", None),
+            ("+= 1", None),
+            ("-= 1", None),
+            ("*= 1", None),
+            ("/= 1", None),
+            ("%= 1", None),
+            ("&= 1", None),
+            ("|= 1", None),
+            ("^= 1", None),
+            ("<<= 1", None),
+            (">>= 1", None),
+            (", b = 1, 2", None),
+            (", b := 1, 2", None),
+        ];
+        const STARTS_A_LINE: &[&str] = &["?g()", "(g())", "[1, 2]", "-1", "!b", "?? 1"];
+        const ELSE: &[&str] = &["else: 0", "else e: 0"];
+
+        /// The lines of a cell and the index of the next line among them.
+        fn build(pos: &str, kind: usize, tok: &str, arm: Option<&str>) -> (Vec<String>, usize) {
+            let (head, body) = KINDS[kind];
+            let blk = |ind: &str, prefix: &str| {
+                let mut v = vec![format!("{ind}{prefix}{head}")];
+                v.extend(body.iter().map(|b| format!("{ind}{b}")));
+                v
+            };
+            let (before, block, next, after): (&[&str], _, _, &[&str]) = match pos {
+                "wait arm" => (
+                    &["ch := Channel[int](1)", "n := 1", "wait:"],
+                    blk("    ", ""),
+                    format!("    {tok}"),
+                    &["    else: pass", "z := 0"],
+                ),
+                "return " | "yield " => (
+                    &["fn f(n: int) -> int:"],
+                    blk("    ", pos),
+                    format!("    {tok}"),
+                    &["    z := 0"],
+                ),
+                "field" => (
+                    &["struct S:"],
+                    blk("    ", "a: int = "),
+                    format!("    {tok}"),
+                    &["    b: int = 0"],
+                ),
+                "outer arm" => (
+                    &["n := 1", "y := match n:"],
+                    blk("    ", "0: "),
+                    format!("    {}", arm.unwrap_or(tok)),
+                    &["    _: 0", "z := 0"],
+                ),
+                "statement arm" => (
+                    &["n := 1", "match n:"],
+                    blk("    ", "0: x := "),
+                    format!("    {}", arm.unwrap_or(tok)),
+                    &["    _: pass", "z := 0"],
+                ),
+                _ => (&["n := 1"], blk("", pos), tok.to_string(), &["z := 0"]),
+            };
+            let mut lines: Vec<String> = before.iter().map(|l| l.to_string()).collect();
+            lines.extend(block);
+            let at = lines.len();
+            lines.push(next);
+            lines.extend(after.iter().map(|l| l.to_string()));
+            (lines, at)
+        }
+
+        /// The spans of the list the next line must join: statements or arms.
+        fn entries(m: &Module, pos: &str) -> Vec<Span> {
+            match (pos, m.stmts.get(1).map(|s| &s.kind)) {
+                ("return " | "yield ", _) => match &m.stmts[0].kind {
+                    StmtKind::Fn(f) => f.body.iter().map(|s| s.span).collect(),
+                    other => panic!("not a fn: {other:?}"),
+                },
+                ("outer arm", Some(StmtKind::Let { value, .. })) => match &value.kind {
+                    ExprKind::Match { arms, .. } => arms.iter().map(|a| a.span).collect(),
+                    other => panic!("not a match expression: {other:?}"),
+                },
+                ("statement arm", Some(StmtKind::Match { arms, .. })) => {
+                    arms.iter().map(|a| a.span).collect()
+                }
+                _ => m.stmts.iter().map(|s| s.span).collect(),
+            }
+        }
+
+        let want = |pos: &str, kind: usize, tok: &str, arm: Option<&str>| match pos {
+            "field" | "a, " | "wait arm" => Want::Reject,
+            "outer arm" | "statement arm" if arm.is_some() => Want::Split,
+            "outer arm" | "statement arm" => Want::Reject,
+            _ if STARTS_A_LINE.contains(&tok) => Want::Split,
+            // a bare `match` / `if` is a statement, and a statement takes no guard
+            "" if ELSE.contains(&tok) && kind != 0 && kind != 2 => Want::Guard,
+            "x := " | "x: int = " | "a, b := " if ELSE.contains(&tok) => Want::Guard,
+            _ => Want::Reject,
+        };
+
+        let mut failed = Vec::new();
+        let mut total = 0;
+        for pos in POSITIONS {
+            for kind in 0..KINDS.len() {
+                for &(tok, arm) in TOKENS {
+                    total += 1;
+                    let (lines, at) = build(pos, kind, tok, arm);
+                    let src = lines.join("\n") + "\n";
+                    let want = want(pos, kind, tok, arm);
+                    let cell = format!(
+                        "{pos:?} / {:?} / {:?}: want {want:?}",
+                        KINDS[kind].0, lines[at]
+                    );
+                    let base = || {
+                        let mut without = lines.clone();
+                        without.remove(at);
+                        entries(&parse_ok(&(without.join("\n") + "\n")), pos).len()
+                    };
+                    let problem = match (want, try_parse(&src)) {
+                        (Want::Reject, Err((line, _))) if line == at + 1 => None,
+                        (Want::Reject, Err((line, msg))) => {
+                            Some(format!("error on line {line}, not {}: {msg}", at + 1))
+                        }
+                        (Want::Reject, Ok(_)) => Some("parsed".to_string()),
+                        (_, Err((line, msg))) => Some(format!("error on line {line}: {msg}")),
+                        (Want::Split, Ok(m)) => {
+                            let spans = entries(&m, pos);
+                            if spans.len() != base() + 1 {
+                                Some(format!("{} entries, want {}", spans.len(), base() + 1))
+                            } else if !spans.iter().any(|s| s.line as usize == at + 1) {
+                                Some("no entry starts on the next line".to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        (Want::Guard, Ok(m)) => {
+                            let guarded = matches!(&m.stmts[1].kind,
+                                StmtKind::Let { names, value, .. }
+                                    if matches!(value.kind, ExprKind::ElseGuard { .. })
+                                        && (!pos.is_empty() || names[..] == ["_"]));
+                            if m.stmts.len() != base() {
+                                Some(format!("{} statements, want {}", m.stmts.len(), base()))
+                            } else if !guarded {
+                                Some("the binding's value is not an `else` guard".to_string())
+                            } else {
+                                None
+                            }
+                        }
+                    };
+                    if let Some(p) = problem {
+                        failed.push(format!("{cell}; got {p}"));
+                    }
+                }
+            }
+        }
+        assert_eq!(total, 3864);
+        report_cells("block-end", total, &failed);
+    }
+
+    /// TICKET-249 -- after a block expression in an inline body, a dedented `else` belongs to the
+    /// header that starts the line, never to the inline statement: header x inline statement x
+    /// block kind x next line. Each cell asserts the owner in the tree or the error's line.
+    #[test]
+    fn else_owner_after_block_grid() {
+        const KINDS: &[(&str, &[&str])] = &[
+            ("match n:", &["    1: 10", "    _: 20"]),
+            ("recover:", &["    10"]),
+        ];
+        const STMTS: &[&str] = &[
+            "x := ",
+            "x: int = ",
+            "x = ",
+            "x += ",
+            "return ",
+            "yield ",
+            "assert ",
+            "1 + ",
+            "",
+        ];
+        // (name, lines before, header on the statement's line, lines after)
+        const HEADERS: &[(&str, &[&str], &str, &[&str])] = &[
+            ("if", &[], "if c: ", &[]),
+            ("elif", &["if d:", "    pass"], "elif c: ", &[]),
+            ("wait", &["wait:"], "    v := ch.recv(): ", &[]),
+            ("match", &["match n:"], "    0: ", &["    _: pass"]),
+            ("for", &[], "for i in xs: ", &[]),
+            ("while", &[], "while c: ", &[]),
+        ];
+        const NEXT: &[&str] = &["else: pass", "else e: pass", "elif d: pass", "  else: pass"];
+
+        let mut failed = Vec::new();
+        let mut total = 0;
+        for &(header, before, prefix, after) in HEADERS {
+            for stmt in STMTS {
+                for &(head, body) in KINDS {
+                    // the bare statement is a block expression only for `recover:`
+                    if stmt.is_empty() && head != "recover:" {
+                        continue;
+                    }
+                    for next in NEXT {
+                        total += 1;
+                        let ind = if matches!(header, "wait" | "match") {
+                            "    "
+                        } else {
+                            ""
+                        };
+                        let mut lines = vec!["fn f(n: int, c: bool, d: bool):".to_string()];
+                        lines.extend(before.iter().map(|l| format!("    {l}")));
+                        lines.push(format!("    {prefix}{stmt}{head}"));
+                        lines.extend(body.iter().map(|b| format!("    {ind}{b}")));
+                        let at = lines.len() + 1;
+                        lines.push(format!("    {ind}{next}"));
+                        lines.extend(after.iter().map(|l| format!("    {l}")));
+                        lines.push("    z := 0".to_string());
+                        let src = lines.join("\n") + "\n";
+                        let cell = format!("{header} / {stmt:?} / {head:?} / {next:?}");
+                        if next.starts_with(' ') {
+                            if lexer::tokenize(&src).is_ok() {
+                                failed.push(format!("{cell}: want a lexer error; got tokens"));
+                            }
+                            continue;
+                        }
+                        // the header's branch count and else block once it owns the next line
+                        let owner = match (header, *next) {
+                            ("if", "else: pass") => Some((1, true)),
+                            ("elif", "else: pass") => Some((2, true)),
+                            ("if", "elif d: pass") => Some((2, false)),
+                            ("elif", "elif d: pass") => Some((3, false)),
+                            ("wait", "else: pass") => Some((1, true)),
+                            _ => None,
+                        };
+                        let problem = match (owner, try_parse(&src)) {
+                            (None, Err((line, _))) if line == at => None,
+                            (None, Err((line, msg))) => {
+                                Some(format!("error on line {line}, not {at}: {msg}"))
+                            }
+                            (None, Ok(_)) => Some("parsed".to_string()),
+                            (Some(_), Err((line, msg))) => {
+                                Some(format!("error on line {line}: {msg}"))
+                            }
+                            (Some((n, has_else)), Ok(m)) => {
+                                let StmtKind::Fn(f) = &m.stmts[0].kind else {
+                                    panic!("not a fn: {src}")
+                                };
+                                let (len, else_block, bodies) = match &f.body[0].kind {
+                                    StmtKind::If {
+                                        branches,
+                                        else_block,
+                                    } => (branches.len(), else_block, format!("{branches:?}")),
+                                    StmtKind::Wait { arms, else_block } => {
+                                        (arms.len(), else_block, format!("{arms:?}"))
+                                    }
+                                    other => panic!("not an `if` or a `wait`: {other:?}"),
+                                };
+                                if bodies.contains("ElseGuard") {
+                                    Some("the inline statement took the `else` as a guard".into())
+                                } else if len != n || else_block.is_some() != has_else {
+                                    Some(format!(
+                                        "{len} branches, else block {}",
+                                        else_block.is_some()
+                                    ))
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        if let Some(p) = problem {
+                            failed.push(format!("{cell}: got {p}"));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(total, 408);
+        report_cells("else-owner", total, &failed);
+    }
+
     /// The single statement in a one-statement module.
     fn only(src: &str) -> StmtKind {
         let mut m = parse_ok(src);
