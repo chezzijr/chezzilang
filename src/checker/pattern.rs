@@ -5947,6 +5947,7 @@ impl Checker {
         body: &Expr,
         expected: Option<&Ty>,
     ) -> Ty {
+        self.receiver_or_report(params, None, body.span);
         self.closure_write_frames
             .push((self.scopes.len(), HashSet::new()));
         // Source #1 — the *expected* type of the slot the closure literal sits in. When it is a

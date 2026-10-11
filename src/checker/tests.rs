@@ -22549,7 +22549,7 @@ fn instance_method_turbofish_mismatch_errors() {
 fn method_param_in_receiver_turbofish_contradiction_errors() {
     rejects(
         "struct Box[T]:\n    val: T\n    fn idret[U](self: U) -> U:\n        return self\nfn main():\n    b := Box(5)\n    x: str = b.idret[str]()\n    print(x)\n",
-        "receiver",
+        "'self' is only allowed as the first parameter of a method",
     );
 }
 
@@ -25611,7 +25611,7 @@ fn fn_sig_variadic_collapses_to_list() {
         panic!("expected fn");
     };
     let mut c = Checker::new();
-    let sig = c.fn_sig(decl, Span::default());
+    let sig = c.fn_sig(decl, Span::default(), None);
     assert_eq!(sig.params, vec![Ty::List(Box::new(Ty::Int))]);
     assert_eq!(sig.variadic, Some(0));
 }
@@ -25628,7 +25628,7 @@ fn fn_sig_variadic_middle_slot() {
         panic!("expected fn");
     };
     let mut c = Checker::new();
-    let sig = c.fn_sig(decl, Span::default());
+    let sig = c.fn_sig(decl, Span::default(), None);
     assert_eq!(
         sig.params,
         vec![Ty::Str, Ty::List(Box::new(Ty::Int)), Ty::Bool]
@@ -39555,4 +39555,111 @@ fn static_method_is_not_a_hook_for_the_operator() {
         accepted.is_empty(),
         "operator accepted a static hook: {accepted:?}"
     );
+}
+
+/// TICKET-250 — `self` is the receiver only as the first parameter of a method declared in a
+/// struct, enum or protocol body, un-annotated or annotated with the owner, with no default.
+/// Every other parameter named `self` is a declaration error. A cell the parser rejects is
+/// skipped: the grid asks only that no cell yields a typed non-receiver `self`.
+#[test]
+fn self_is_the_receiver_only_as_a_methods_first_parameter() {
+    const ERR: &str = "'self' is only allowed as the first parameter of a method declared in a struct, enum or protocol body";
+    // (kind, program with `{P}` for the parameter list, owner spelling, is a method owner)
+    let kinds: [(&str, &str, &str, bool); 7] = [
+        (
+            "struct method",
+            "struct S:\n    v: int\n    fn m({P}) -> int:\n        return 1\n",
+            "S",
+            true,
+        ),
+        (
+            "enum method",
+            "enum E:\n    A\n    fn m({P}) -> int:\n        return 1\n",
+            "E",
+            true,
+        ),
+        (
+            "protocol method",
+            "protocol Pr:\n    fn m({P}) -> int\n",
+            "Self",
+            true,
+        ),
+        ("free fn", "fn m({P}) -> int:\n    return 1\n", "int", false),
+        (
+            "nested fn in a method",
+            "struct S:\n    v: int\n    fn outer(self) -> int:\n        fn m({P}) -> int:\n            return 1\n        return self.v\n",
+            "S",
+            false,
+        ),
+        (
+            "closure",
+            "f := fn({P}) -> int: 1\nprint(f)\n",
+            "int",
+            false,
+        ),
+        (
+            "extern fn",
+            "extern \"libc\":\n    fn m({P}) -> int\n",
+            "int",
+            false,
+        ),
+    ];
+    let mut bad: Vec<String> = Vec::new();
+    for (kind, tmpl, owner, is_method) in kinds {
+        for pos in ["first", "second", "absent", "twice"] {
+            for ann in ["none", "owner", "other"] {
+                for dflt in [false, true] {
+                    let other = if owner.starts_with("int") {
+                        "str"
+                    } else {
+                        "int"
+                    };
+                    let slf = match (ann, dflt) {
+                        ("none", false) => "self".to_string(),
+                        ("none", true) => "self = 1".to_string(),
+                        ("owner", false) => format!("self: {owner}"),
+                        ("owner", true) => format!("self: {owner} = 1"),
+                        (_, false) => format!("self: {other}"),
+                        (_, true) => format!("self: {other} = 1"),
+                    };
+                    let a = "a: int";
+                    let params = match pos {
+                        "first" => format!("{slf}, {a}"),
+                        "second" => format!("{a}, {slf}"),
+                        "absent" => a.to_string(),
+                        _ => format!("{slf}, {slf}"),
+                    };
+                    let src = tmpl.replace("{P}", &params);
+                    let receiver = is_method && pos == "first" && ann != "other" && !dflt;
+                    let clean = receiver || pos == "absent";
+                    let cell = format!("{kind} / {pos} / {ann} / default={dflt}");
+                    let parsed = lexer::tokenize(&src)
+                        .map_err(|e| format!("{e:?}"))
+                        .and_then(|t| parser::parse(t).map_err(|e| format!("{e:?}")));
+                    let errs: Vec<String> = match parsed {
+                        Ok(module) => match check(&module) {
+                            Ok(()) => Vec::new(),
+                            Err(e) => e.into_iter().map(|e| e.message).collect(),
+                        },
+                        Err(parse) if clean => vec![format!("parse: {parse}")],
+                        Err(_) => continue,
+                    };
+                    if clean && !errs.is_empty() {
+                        bad.push(format!("{cell}: expected clean, got {errs:?}"));
+                    }
+                    if !clean && !errs.iter().any(|m| m.contains(ERR)) {
+                        bad.push(format!("{cell}: expected the self error, got {errs:?}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} cell(s) wrong:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+    // S2-8: a free fn's `self` was an untyped parameter that took any argument.
+    rejects("fn cast(self) -> int: self\nprint(cast(2.5))\n", ERR);
 }

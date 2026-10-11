@@ -912,8 +912,15 @@ impl Checker {
                 // type-checked back in the graph loop's native arm (which now runs `check_fn_body` on a
                 // FRESH self-carrying `fn_sig` — NOT this stripped table sig); this harvest only supplies
                 // the call-arg method-table shape.
+                let owner_args: Vec<Ty> = type_params
+                    .iter()
+                    .map(|tp| Ty::Param(tp.name.clone()))
+                    .collect();
+                let owner = self
+                    .qualified_builtin_ty(name, &owner_args)
+                    .unwrap_or_else(|| self.struct_self_ty(name));
                 for m in bodied_methods {
-                    let mut fsig = self.fn_sig(m, m.name_span);
+                    let mut fsig = self.fn_sig(m, m.name_span, Some(&owner));
                     if !fsig.params.is_empty() {
                         fsig.params.remove(0);
                         fsig.min_params = fsig.min_params.saturating_sub(1);
@@ -955,7 +962,7 @@ impl Checker {
         // bodied fn may name a sibling native struct in its signature (`-> Reader`).
         for s in &ast.stmts {
             if let StmtKind::Fn(decl) = &s.kind {
-                sig.insert_fn(decl.name.clone(), self.fn_sig(decl, decl.name_span));
+                sig.insert_fn(decl.name.clone(), self.fn_sig(decl, decl.name_span, None));
             }
         }
         // PASS 2c — module CONSTANTS (TICKET-218): a top-level `NAME: const T = value` let is a const
@@ -3627,7 +3634,7 @@ impl Checker {
                             format!("function '{}' is already defined", decl.name),
                         );
                     }
-                    let sig = self.fn_sig(decl, s.span);
+                    let sig = self.fn_sig(decl, s.span, None);
                     self.functions.insert(decl.name.clone(), sig);
                     // Same-module fn name (top-level `fn` only, NOT an import) — licenses the
                     // generic-fn-as-value turbofish B-path in `infer_index`, in lockstep with the
@@ -3728,10 +3735,10 @@ impl Checker {
                             .map(|tp| Ty::Param(tp.name.clone()))
                             .collect(),
                     );
-                    let saved_self = self.current_self_ty.replace(self_ty);
+                    let saved_self = self.current_self_ty.replace(self_ty.clone());
                     let methods = methods
                         .iter()
-                        .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
+                        .map(|m| (m.name.clone(), self.fn_sig(m, s.span, Some(&self_ty))))
                         .collect();
                     self.current_self_ty = saved_self;
                     self.exit_type_params(saved);
@@ -3842,10 +3849,10 @@ impl Checker {
                             .map(|tp| Ty::Param(tp.name.clone()))
                             .collect(),
                     );
-                    let saved_self = self.current_self_ty.replace(self_ty);
+                    let saved_self = self.current_self_ty.replace(self_ty.clone());
                     let method_sigs: HashMap<String, FnSig> = methods
                         .iter()
-                        .map(|m| (m.name.clone(), self.fn_sig(m, s.span)))
+                        .map(|m| (m.name.clone(), self.fn_sig(m, s.span, Some(&self_ty))))
                         .collect();
                     self.current_self_ty = saved_self;
                     // Variant names and STATIC-method names must be DISJOINT: `Enum.name` always
@@ -3913,6 +3920,7 @@ impl Checker {
                         // (and the harvested C signature below), then reset so a bare non-extern use
                         // is rejected.
                         self.in_extern_sig = true;
+                        self.receiver_or_report(&ef.params, None, ef.span);
                         let params: Vec<Ty> = ef
                             .params
                             .iter()

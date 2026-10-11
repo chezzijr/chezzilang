@@ -43,7 +43,57 @@ impl Checker {
     /// first param of a method) is left for `check_fn_body` to bind to the struct type. The decl's
     /// generic `type_params` are installed (so `T` in annotations resolves to `Ty::Param("T")`) and
     /// each declared bound is validated against the known protocols.
-    pub(super) fn fn_sig(&mut self, decl: &FnDecl, span: Span) -> FnSig {
+    /// TICKET-250 — the one answer to "is this parameter the receiver". `Ok(Some(owner))` when
+    /// `params[0]` is named `self`, has no default, and is un-annotated or annotated with exactly
+    /// `owner` (the struct, enum or protocol the method is declared in). `Ok(None)` when no
+    /// parameter is named `self`. Every other parameter named `self` is the error.
+    pub(super) fn receiver(
+        &mut self,
+        params: &[Param],
+        owner: Option<&Ty>,
+        span: Span,
+    ) -> Result<Option<Ty>, String> {
+        let mut found = None;
+        for (i, p) in params.iter().enumerate() {
+            if p.name != "self" {
+                continue;
+            }
+            let ok = match owner {
+                Some(o) if i == 0 && p.default.is_none() => {
+                    p.ty.as_ref()
+                        .is_none_or(|t| self.resolve_type(t, span) == *o)
+                }
+                _ => false,
+            };
+            if !ok {
+                return Err(
+                    "'self' is only allowed as the first parameter of a method declared in a \
+                     struct, enum or protocol body"
+                        .to_string(),
+                );
+            }
+            found = owner.cloned();
+        }
+        Ok(found)
+    }
+
+    /// [`Checker::receiver`], reporting its error at `span`.
+    pub(super) fn receiver_or_report(
+        &mut self,
+        params: &[Param],
+        owner: Option<&Ty>,
+        span: Span,
+    ) -> Option<Ty> {
+        match self.receiver(params, owner, span) {
+            Ok(r) => r,
+            Err(e) => {
+                self.error(span, e);
+                None
+            }
+        }
+    }
+
+    pub(super) fn fn_sig(&mut self, decl: &FnDecl, span: Span, owner: Option<&Ty>) -> FnSig {
         // A free fn's or method's own type param `[U]` may not be named after a reserved builtin type
         // (`fn id[int]`). This is the SOLE funnel for free fns AND struct/enum methods (it is
         // hoist-only, so it fires once per decl — a method's `[U]` is checked here while the struct's
@@ -134,16 +184,18 @@ impl Checker {
         for tp in &receiver_bounds {
             self.check_bounds(&tp.bounds, &tp.name, span);
         }
+        let receiver = self.receiver_or_report(&decl.params, owner, span);
         let params: Vec<Ty> = decl
             .params
             .iter()
-            .map(|p| match &p.ty {
+            .enumerate()
+            .map(|(i, p)| match &p.ty {
+                _ if i == 0 && receiver.is_some() => receiver.clone().unwrap_or(Ty::Unknown),
                 // A variadic param `...xs: T` collapses to the slot type `List[T]` — the desugar pass
                 // sweeps the surplus positionals into a `List[T]` literal, so the checker sees an
                 // ordinary `List[T]` argument for this slot.
                 Some(t) if p.is_variadic => Ty::List(Box::new(self.resolve_type(t, span))),
                 Some(t) => self.resolve_type(t, span),
-                None if p.name == "self" => Ty::Unknown, // bound in check_fn_body
                 None => {
                     self.error(
                         span,
@@ -169,11 +221,11 @@ impl Checker {
         let type_params = self.resolve_bounds(&merged, span);
         let where_bounds = self.resolve_bounds(&receiver_bounds, span);
         self.exit_type_params(saved);
-        // STATIC classification (the "no self ⇒ static" rule): a method whose first param is NOT
-        // named `self` — or which has no params at all — is a static (associated) method, dispatched
-        // `Type.method(args)`. This flag is consulted only when the sig is reached as a struct/enum
-        // method; for a free fn it is meaningless (free fns are never reached via the method maps).
-        let is_static = decl.params.first().is_none_or(|p| p.name != "self");
+        // STATIC classification: a method with no receiver is a static (associated) method,
+        // dispatched `Type.method(args)`. `Checker::receiver` is the one answer. This flag is
+        // consulted only when the sig is reached as a struct/enum method; for a free fn it is
+        // meaningless (free fns are never reached via the method maps).
+        let is_static = receiver.is_none();
         // Surface-only labels for a value form of this fn: the param NAMES (parallel to `params`),
         // with `self` contributing `None` (a value keyword call never names the receiver).
         let labels: Vec<Option<String>> = decl
@@ -873,11 +925,7 @@ impl Checker {
         };
         self.push_scope();
         for (i, param) in decl.params.iter().enumerate() {
-            let ty = if param.name == "self" {
-                self_ty.clone().unwrap_or(Ty::Unknown)
-            } else {
-                sig.params.get(i).cloned().unwrap_or(Ty::Unknown)
-            };
+            let ty = sig.params.get(i).cloned().unwrap_or(Ty::Unknown);
             self.declare(&param.name, ty);
         }
         // Only an inline expression body reaches this walk; anything else returns nothing.
@@ -2832,7 +2880,7 @@ impl Checker {
                         );
                         return;
                     }
-                    let mut sig = self.fn_sig(decl, decl.name_span);
+                    let mut sig = self.fn_sig(decl, decl.name_span, None);
                     self.bind_nested_fn_writes(decl);
                     // TICKET-139 (W14-2) — a nested fn's own name is certain to hold that one fn (a
                     // keyword call through it is legal). Its two declares below are a same-scope
@@ -4877,13 +4925,7 @@ impl Checker {
             };
             self.hover_record_at(decl.name_span, &fty, HoverKind::Func, sig.doc.clone());
         }
-        let param_ty = |i: usize, param: &Param| {
-            if param.name == "self" {
-                self_ty.clone().unwrap_or(Ty::Unknown)
-            } else {
-                sig.params.get(i).cloned().unwrap_or(Ty::Unknown)
-            }
-        };
+        let param_ty = |i: usize, _: &Param| sig.params.get(i).cloned().unwrap_or(Ty::Unknown);
         // TICKET-201: every decl-site default is typed before any parameter of this fn is
         // declared: a default runs in module scope, so a parameter's name there reads the module
         // binding (CPython), and an unbound one is `unknown name`.

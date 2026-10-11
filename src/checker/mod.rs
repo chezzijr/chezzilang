@@ -1816,7 +1816,7 @@ impl Checker {
                                 .qualified_builtin_ty(name, &args)
                                 .unwrap_or_else(|| c.struct_self_ty(name));
                             for m in bodied_methods {
-                                let msig = c.fn_sig(m, m.name_span);
+                                let msig = c.fn_sig(m, m.name_span, Some(&self_ty));
                                 c.check_fn_body(m, Some(self_ty.clone()), msig);
                             }
                             c.exit_type_params(saved);

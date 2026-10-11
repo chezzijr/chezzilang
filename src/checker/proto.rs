@@ -608,12 +608,17 @@ impl Checker {
         let sigs = methods
             .iter()
             .map(|m| {
+                let self_param = Ty::Param("Self".to_string());
+                let receiver = self.receiver_or_report(&m.params, Some(&self_param), span);
                 let params = m
                     .params
                     .iter()
-                    .map(|p| match &p.ty {
+                    .enumerate()
+                    .map(|(i, p)| match &p.ty {
+                        // The receiver slot stays untyped in a requirement: `method_matches`
+                        // compares an implementor's operands, never its receiver.
+                        _ if i == 0 && receiver.is_some() => Ty::Unknown,
                         Some(t) => self.resolve_type(t, span),
-                        None if p.name == "self" => Ty::Unknown,
                         None => {
                             self.error(
                                 span,
@@ -635,7 +640,7 @@ impl Checker {
                 // (`protocol_has_static_method`). Ordinary `fn get(self, …)` requirements are instance
                 // methods (`is_static == false`), unchanged.
                 let mut sig = FnSig::plain(params, ret);
-                sig.is_static = m.params.first().is_none_or(|p| p.name != "self");
+                sig.is_static = receiver.is_none();
                 // TICKET-187: a protocol's parameter names are part of its contract — a call through
                 // the protocol binds by them, and an implementor conforms only with the same names.
                 sig.labels = protocol_labels(&m.params);
