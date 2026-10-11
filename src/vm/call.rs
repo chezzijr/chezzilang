@@ -2,6 +2,7 @@
 // Calls: value/native/method/static dispatch, builtins, defer/return.
 
 use super::*;
+use crate::checker::Hook;
 
 /// Why `coerce_json` stopped: a decode mismatch (the `Err` of the decode's `Result`), or a fault
 /// raised by a field default it ran, which propagates as a runtime fault (TICKET-198).
@@ -1321,6 +1322,127 @@ impl Vm {
     /// must take the re-entrant `run_proto` path (never the in-place frame flatten). A real `ic` ⟺ the
     /// caller is the running dispatch loop (the sole emit path), so a real `ic` is exactly the
     /// "flatten-safe" signal: the pushed frame is executed by the `run_until` that called us.
+    /// TICKET-250 — does the declared type of `v` have `hook`? The checker decided it
+    /// (`Checker::hook_method`); this reads `Program::hooks_struct` / `hooks_enum`. `false` for
+    /// every value that is not a struct or an enum.
+    pub(super) fn hook_of(&self, v: Value, hook: Hook) -> bool {
+        let Some(h) = v.as_obj() else {
+            return false;
+        };
+        let set = match self.heap.get(h) {
+            Obj::Struct { tid, .. } => self.program.hooks_struct.get(*tid as usize),
+            Obj::Enum { variant_id, .. } => self.program.hooks_enum.get(*variant_id as usize),
+            _ => None,
+        };
+        set.is_some_and(|bits| bits & hook.bit() != 0)
+    }
+
+    /// The proto and home module of `recv`'s `hook`, when its type has that hook.
+    fn hook_proto(&self, recv: Value, hook: Hook) -> Option<(ProtoId, GcRef)> {
+        if !self.hook_of(recv, hook) {
+            return None;
+        }
+        match self.heap.get(recv.as_gcref()) {
+            Obj::Struct { tid, .. } => {
+                let def = self.program.structs.get(self.struct_name_of_tid(*tid))?;
+                let proto = *def.methods.get(hook.method())?;
+                Some((proto, self.module_objs[def.module_idx]))
+            }
+            Obj::Enum { variant_id, .. } => {
+                let key = self.enum_names(*variant_id).0;
+                let proto = *self.program.enum_methods.get(key)?.get(hook.method())?;
+                Some((proto, self.module_objs[self.enum_home_module(key)]))
+            }
+            _ => None,
+        }
+    }
+
+    /// TICKET-250 — the one entry an operator's handler calls a hook through. `Ok(None)` when
+    /// `recv` has no such hook; else the hook's result. A generator hook allocates a generator,
+    /// as every method call does. It enters the proto directly, not through `do_method_call`:
+    /// that frame is large, and a hook that re-enters itself (`fn str(self): str(self)`) must
+    /// reach the call-depth fault before the native stack ends. The receiver and `args` are
+    /// rooted as the new frame's locals. The caller keeps its own re-entry wrapper
+    /// (`reentered`, `guarded`, `guarded_walk`).
+    pub(super) fn invoke_hook(
+        &mut self,
+        hook: Hook,
+        recv: Value,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let Some((proto, home)) = self.hook_proto(recv, hook) else {
+            return Ok(None);
+        };
+        self.check_proto_arity(proto, args.len() + 1, span)?;
+        let mut call_args = Vec::with_capacity(args.len() + 1);
+        call_args.push(recv);
+        call_args.extend_from_slice(args);
+        if self.program.protos[proto].is_generator {
+            return Ok(Some(self.alloc_generator(proto, home, None, call_args)));
+        }
+        self.run_proto(proto, home, None, call_args, true, false, span)
+            .map(Some)
+    }
+
+    /// The fault an operator reports on a struct or enum that has no `hook`.
+    pub(super) fn missing_hook(&self, recv: Value, hook: Hook, span: Span) -> RuntimeError {
+        let method = hook.method();
+        let who = match self.heap.get(recv.as_gcref()) {
+            Obj::Struct { tid, .. } => {
+                let name = self.struct_name_of_tid(*tid);
+                let display = self
+                    .program
+                    .structs
+                    .get(name)
+                    .map_or(name, |d| d.display_name.as_str());
+                format!("struct '{display}'")
+            }
+            Obj::Enum { variant_id, .. } => {
+                let key = self.enum_names(*variant_id).0.to_string();
+                Self::enum_subject(*variant_id, &key, |n| format!("enum '{n}'"))
+            }
+            _ => self.type_name(recv).to_string(),
+        };
+        self.err(format!("{who} has no '{method}' method"), span)
+    }
+
+    /// `Op::CallHook` — a method call typed through a reserved protocol's requirement. A receiver
+    /// that is not a struct or enum, or whose type has the hook, takes the ordinary dispatch. A
+    /// struct or enum without the hook never reaches a declared method of that name: the builtin
+    /// grant answers, or a `next` owner is its own cursor for `iter`.
+    pub(super) fn call_hook(
+        &mut self,
+        hook: Hook,
+        name: &str,
+        argc: usize,
+        ic: u32,
+        span: Span,
+    ) -> Result<(), RuntimeError> {
+        let recv = self.stack[self.stack.len() - argc - 1];
+        let declared = recv
+            .as_obj()
+            .is_some_and(|h| matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. }));
+        if !declared || self.hook_of(recv, hook) {
+            return self.do_method_call(name, argc, ic, span);
+        }
+        let at = self.stack.len() - argc;
+        let args: Vec<Value> = self.stack.split_off(at);
+        self.pop();
+        if let Some(v) = self.intrinsic_proto_method(recv, name, &args, span)? {
+            self.push(v);
+            return Ok(());
+        }
+        if hook == Hook::Iter && args.is_empty() && self.hook_of(recv, Hook::Next) {
+            self.push(recv);
+            return Ok(());
+        }
+        Err(self.err(
+            format!("type {} has no method '{name}'", self.type_name(recv)),
+            span,
+        ))
+    }
+
     pub(super) fn do_method_call(
         &mut self,
         method: &str,
@@ -1790,19 +1912,6 @@ impl Vm {
                     self.push(v);
                     return Ok(());
                 }
-                // A user iterator struct (`next`, no explicit `iter`) IS Iterable — `.iter()` returns
-                // self (idempotent), letting it flow into an `[S: Iterable[T]]` body. Mirrors interp.
-                if method == "iter"
-                    && args.is_empty()
-                    && self
-                        .program
-                        .structs
-                        .get(name)
-                        .is_some_and(|d| d.methods.contains_key("next"))
-                {
-                    self.push(recv);
-                    return Ok(());
-                }
                 // TICKET-030 — every struct gets an intrinsic, MISS-ONLY `copy()`: it is reached only
                 // after the declared-method lookup and the fn-typed-field fallback above both failed,
                 // for the same precedence reason as the checker's arm. `fields` is already the OWNED
@@ -1824,10 +1933,9 @@ impl Vm {
                     .get(name)
                     .map(|d| d.display_name.clone())
                     .unwrap_or_else(|| crate::compiler::bare_display(name));
-                // W6-3 — a ZERO-FIELD struct with no `hash` method is intrinsically `Hashable`
+                // W6-3 — a zero-field struct with no `hash` hook is intrinsically `Hashable`
                 // (`proto.rs`), so `x.hash()` in an erased `[T: Hashable]` body must answer with the
-                // SAME constant `struct_hash` gives it as a Map/Set key. Miss-only, so a struct that
-                // DEFINES `hash` (or any other protocol method) already dispatched above.
+                // SAME constant `declared_hash` gives it as a Map/Set key.
                 if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
                     self.push(v);
                     return Ok(());
@@ -2866,10 +2974,9 @@ impl Vm {
         match (method, args.len()) {
             ("neg", 0) => Ok(Some(self.neg_value(recv, span)?)),
             // `Hashable` → the SAME hash a Map/Set key gets, so `x.hash()` can never disagree with
-            // `m[x]` / `s.has(x)` membership. Routes a zero-field struct through `struct_hash`'s
-            // `fields.is_empty() && !methods.contains_key("hash")` guard, which is the runtime mirror
-            // of the checker's zero-field `Hashable` grant. `recv` stays rooted across the (possibly
-            // re-entrant, possibly allocating) hash + the result box.
+            // `m[x]` / `s.has(x)` membership. A zero-field struct with no `hash` hook gets
+            // `declared_hash`'s constant. `recv` stays rooted across the (possibly re-entrant,
+            // possibly allocating) hash + the result box.
             ("hash", 0) => {
                 self.push(recv);
                 let hv = self.hash_value(recv, span)?;

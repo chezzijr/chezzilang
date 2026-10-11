@@ -2540,6 +2540,12 @@ impl Vm {
             }
             Op::Call(argc) => self.do_call(*argc, span)?,
             Op::CallMethod { name, argc, ic } => self.do_method_call(name, *argc, *ic, span)?,
+            Op::CallHook {
+                hook,
+                name,
+                argc,
+                ic,
+            } => self.call_hook(*hook, name, *argc, *ic, span)?,
             Op::CallStatic {
                 type_key,
                 method,
@@ -2916,11 +2922,10 @@ impl Vm {
                 };
                 self.push(Value::int(len));
             }
-            Op::IsStruct => {
+            Op::HasNextHook => {
                 let v = self.pop();
-                let is_struct =
-                    matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Struct { .. }));
-                self.push(Value::bool(is_struct));
+                let has = self.hook_of(v, crate::checker::Hook::Next);
+                self.push(Value::bool(has));
             }
             Op::IsGenerator => {
                 let v = self.pop();

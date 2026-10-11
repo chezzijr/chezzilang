@@ -1870,7 +1870,7 @@ impl Checker {
                     0 => Some(Ty::list(targ_elem.unwrap_or(Ty::Unknown))),
                     1 => {
                         let it = self.infer_conv_arg(&args[0], targ_elem.clone());
-                        let elem = match self.iter_elem(&it) {
+                        let elem = match self.iterable_elem(&it) {
                             Some(e) => e,
                             None if it.is_unknown() => Ty::Unknown,
                             None => {
@@ -1928,7 +1928,7 @@ impl Checker {
                     0 => targ_elem.unwrap_or(Ty::Unknown),
                     1 => {
                         let it = self.infer_conv_arg(&args[0], targ_elem.clone());
-                        let elem = match self.iter_elem(&it) {
+                        let elem = match self.iterable_elem(&it) {
                             Some(e) => e,
                             None if it.is_unknown() => Ty::Unknown,
                             None => {
@@ -1995,7 +1995,7 @@ impl Checker {
                             &args[0],
                             targ_kv.clone().map(|(k, v)| Ty::Tuple(vec![k, v])),
                         );
-                        let elem = match self.iter_elem(&it) {
+                        let elem = match self.iterable_elem(&it) {
                             Some(e) => e,
                             None if it.is_unknown() => Ty::Unknown,
                             None => {
@@ -2885,6 +2885,7 @@ impl Checker {
                     (msig, ptps)
                 });
                 if let Some((msig, ptps)) = found {
+                    self.record_hook_call(name_span, pname, method, span);
                     // OBJECT SAFETY — `Self` in a parameter slot is un-dispatchable through a
                     // protocol value: it erases which witness it holds, so `a.add(b)` over two
                     // `Vecish` values could hand a `W` to `V::add`. Rejected with the remedy, not
@@ -3868,7 +3869,8 @@ impl Checker {
                 // `T: Add + Mul` exposes the union of both protocols' methods).
                 // `Self` maps to the receiver `Ty::Param(pname)`, and the parameterized protocol's
                 // own params to the bound's args (`Container[int]` ⇒ `T ↦ int`).
-                if let Some((_, msig, map)) = self.bound_method(pname, method, &|_| true) {
+                if let Some((proto, msig, map)) = self.bound_method(pname, method, &|_| true) {
+                    self.record_hook_call(name_span, &proto.name, method, span);
                     let expected: Vec<Ty> = match msig.params.split_first() {
                         Some((_recv, rest)) => rest.iter().map(|t| subst(t, &map)).collect(),
                         None => Vec::new(),

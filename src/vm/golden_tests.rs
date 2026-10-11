@@ -9595,7 +9595,7 @@ fn cursor_composes_into_adapter() {
 
 #[test]
 fn for_over_pure_iterable_struct() {
-    // A struct with ONLY iter() drives `for`; one with BOTH still uses next() (sentinel).
+    // A struct with ONLY iter() drives `for`; one with BOTH is driven by iter() too (sentinel).
     let only_iter = concat!(
         "struct Wrap:\n",
         "    xs: List[int]\n",
@@ -9607,7 +9607,7 @@ fn for_over_pure_iterable_struct() {
         "main()\n"
     );
     assert_golden_out(only_iter, "1\n2\n3\n");
-    // Both iter() and next(): next() wins (iter() would print a different sentinel).
+    // Both iter() and next(): iter() wins (next() would print 100 and 101).
     let both = concat!(
         "struct Two:\n",
         "    n: int\n",
@@ -9624,7 +9624,7 @@ fn for_over_pure_iterable_struct() {
         "        print(x)\n",
         "main()\n"
     );
-    assert_golden_out(both, "100\n101\n");
+    assert_golden_out(both, "999\n");
 }
 
 // ---- Bug C: a `for`/`List()`/`Set()` over a NAMED builtin cursor consumes it in place ----

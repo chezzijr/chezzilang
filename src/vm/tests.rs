@@ -1774,6 +1774,8 @@ pub(crate) fn empty_program() -> Program {
         struct_names: Vec::new(),
         eq_struct: Vec::new(),
         eq_enum: Vec::new(),
+        hooks_struct: Vec::new(),
+        hooks_enum: Vec::new(),
         modules: vec![],
         field_ic_sites: 0,
         method_ic_sites: 0,
@@ -20321,12 +20323,11 @@ fn str_hook_direct_call_returning_nonstr_still_works() {
 
 #[test]
 fn str_hook_nonstr_fallback_is_gc_safe_after_mutating_hook() {
-    // A non-`str`-returning `str(self)` that MUTATES a non-interned heap field (a List) and
-    // allocates enough to trigger a mark-sweep before returning `self`: the default-repr fallback
-    // must re-read the LIVE rooted struct (not the pre-hook clone, whose old field was swept), or it
-    // would dereference a dangling GcRef and panic uncatchably. Expect the CURRENT field state.
+    // TICKET-250 — a `str(self)` that does not return `str` is not the `Stringable` hook, so
+    // `print` never runs it: the default repr shows the fields as they are, and the method's
+    // side effects (the `tag` write) do not happen.
     let src = "struct S:\n    n: int\n    tag: List[int]\n    fn str(self) -> S:\n        self.tag = [9, 9, 9]\n        i := 0\n        acc := [0]\n        while i < 100000:\n            acc = [i]\n            i = i + 1\n        return self\nfn main(): print(S(5, [1, 2, 3]))\nmain()\n";
-    assert_mc_parity(src, "S(n=5, tag=[9, 9, 9])\n");
+    assert_mc_parity(src, "S(n=5, tag=[1, 2, 3])\n");
 }
 
 // A bare same-module generic fn pinned through a builtin closure-result HOF slot (`.map`/`.fold`)
@@ -20975,6 +20976,15 @@ fn intrinsic_grants_all_have_vm_arms() {
             .replace("{r}", "a")
             .replace("{k}", rv.key)
             .replace("{v}", rv.val);
+        // TICKET-250 — a `next` owner is its own cursor for `iter` only where the call is typed
+        // through the `Iterable` requirement (`Op::CallHook`); a concrete `a.iter()` on it is a
+        // check error (`has no method 'iter'`). So this one row is probed through a bound.
+        if method == "iter" && kind == "struct" {
+            return Some(format!(
+                "{}fn via[S: Iterable[int]](s: S) -> Iterator[int]:\n    return s.iter()\na := {}\nb := {}\nres := via(a)\n",
+                rv.prelude, rv.lit, rv.lit
+            ));
+        }
         // BIND the result: a bare `Option`/`Result`-valued expression statement auto-propagates
         // (`unhandled error: None`), which would mask the dispatch this probe is about.
         Some(format!(

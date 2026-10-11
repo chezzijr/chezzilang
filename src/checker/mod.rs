@@ -1355,9 +1355,90 @@ fn resolve_call_tables_with(graph: &ModuleGraph, memo_enabled: bool) -> CallTabl
             std::mem::take(&mut c.fall_off),
             std::mem::take(&mut c.gen_crossings),
             std::mem::take(&mut c.wraps),
+            std::mem::take(&mut c.hook_table),
+            std::mem::take(&mut c.hook_calls),
         )
     })
 }
+
+/// TICKET-250 — an operator hook: a method an operator calls for the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Hook {
+    Iter,
+    Next,
+    Index,
+    SetIndex,
+    Slice,
+    Str,
+    Eq,
+    Hash,
+    Compare,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Neg,
+    Contains,
+}
+
+/// One row per hook: the reserved protocol and the method that satisfies its requirement.
+/// `Checker::hook_method` decides each row for a declared type; nothing else decides hook-ness.
+pub const HOOKS: &[(Hook, &str, &str)] = &[
+    (Hook::Iter, "Iterable", "iter"),
+    (Hook::Next, "Iterator", "next"),
+    (Hook::Index, "Index", "index"),
+    (Hook::SetIndex, "IndexSet", "set_index"),
+    (Hook::Slice, "Slice", "slice"),
+    (Hook::Str, "Stringable", "str"),
+    (Hook::Eq, "Eq", "eq"),
+    (Hook::Hash, "Hashable", "hash"),
+    (Hook::Compare, "Comparable", "compare"),
+    (Hook::Add, "Add", "add"),
+    (Hook::Sub, "Sub", "sub"),
+    (Hook::Mul, "Mul", "mul"),
+    (Hook::Div, "Div", "div"),
+    (Hook::Mod, "Mod", "mod"),
+    (Hook::Neg, "Neg", "neg"),
+    (Hook::Contains, "Contains", "contains"),
+];
+
+impl Hook {
+    pub fn bit(self) -> u32 {
+        1 << (self as u32)
+    }
+
+    /// The method name of this hook's `HOOKS` row.
+    pub fn method(self) -> &'static str {
+        HOOKS
+            .iter()
+            .find(|(h, _, _)| *h == self)
+            .map_or("", |(_, _, m)| m)
+    }
+}
+
+/// The hooks one declared type has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HookSet(pub u32);
+
+impl HookSet {
+    pub fn insert(&mut self, hook: Hook) {
+        self.0 |= hook.bit();
+    }
+
+    pub fn has(self, hook: Hook) -> bool {
+        self.0 & hook.bit() != 0
+    }
+}
+
+/// Per declared type, keyed `(graph module index, type key)` like the witness table's members:
+/// which methods are conforming hooks. The only channel that carries hook-ness to the runtime.
+pub type HookTable = HashMap<(usize, String), HookSet>;
+
+/// Which method-call sites are typed through a reserved protocol's requirement (`s.iter()` in a
+/// `[S: Iterable[T]]` body or on an `Iterable[T]` slot), keyed by [`carrier_key`] on the
+/// method-name token. The compiler lowers each to `Op::CallHook`.
+pub type HookCallTable = HashMap<CarrierKey, Hook>;
 
 /// Every checker-to-compiler side table [`resolve_call_tables`] returns, in this order.
 pub type CallTables = (
@@ -1374,6 +1455,8 @@ pub type CallTables = (
     FallOffTable,
     GenCrossings,
     WrapTable,
+    HookTable,
+    HookCallTable,
 );
 
 /// W7-49 — side-table keys asked to hold two different decisions, as `(span, message)`. Empty for
@@ -2409,6 +2492,10 @@ struct Checker {
     /// type). Recorded UNCONDITIONALLY, for the same reason [`Self::carriers`] is. See
     /// [`ProtoEqTable`].
     proto_eq_calls: ProtoEqTable,
+    /// TICKET-250 — the hooks each declared type has. See [`HookTable`].
+    hook_table: HookTable,
+    /// TICKET-250 — the call sites typed through a reserved requirement. See [`HookCallTable`].
+    hook_calls: HookCallTable,
     /// Which `.sum()` sites sum a `List[float]` and so need a `0.0` seed, keyed by
     /// [`carrier_key`] on the method-name token and consumed verbatim by the compiler (which cannot
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).

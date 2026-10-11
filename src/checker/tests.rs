@@ -20614,18 +20614,16 @@ fn documented_iterable_bound_forms_unchanged() {
     );
 }
 
-/// THE EDGE, fenced in both directions. A struct with ONLY `iter` (no `next`):
-/// - under an `[S: Iterable[T], T]` BOUND, `T` is still not recovered (the documented known limit —
-///   `iter_elem` is None for it and only `struct_iterable_elem` sees it); the rejection now names
-///   that unresolved `T` rather than falsely blaming the valid `iter` signature;
-/// - passed to a param ANNOTATED `Iterable[int]` it now WORKS, because the annotation is the source
+/// A struct with ONLY `iter` (no `next`):
+/// - under an `[S: Iterable[T], T]` BOUND, `T` is recovered from the `iter` hook (TICKET-250, D6:
+///   generic recovery reads `iterable_elem`, the reader `for` uses);
+/// - passed to a param ANNOTATED `Iterable[int]` it works, because the annotation is the source
 ///   of truth for `T` and the runtime drives it through the same `IterableToCursor` conversion.
 #[test]
-fn iter_only_struct_bound_recovery_still_not_total() {
-    // BOUND position: element type not recovered -> still rejects, now on the actual inference gap.
-    rejects(
-        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn to_list[S: Iterable[T], T](xs: S) -> List[T]:\n    out := []\n    for x in xs:\n        out.push(x)\n    return out\nfn main():\n    print(to_list(Wrap([1, 2])))\nmain()\n",
-        "cannot infer type parameter T for 'to_list'",
+fn iter_only_struct_bound_recovers_its_element() {
+    // BOUND position: `T` is recovered from the `iter` hook.
+    ok(
+        "struct Wrap:\n    xs: List[int]\n    fn iter(self) -> Iterator[int]:\n        return self.xs.iter()\nfn to_list[S: Iterable[T], T](xs: S) -> List[T]:\n    out: List[T] = []\n    for x in xs:\n        out.push(x)\n    return out\nfn main():\n    print(to_list(Wrap([1, 2])))\nmain()\n",
     );
     // …and the concrete-arg workaround the docs prescribe still works.
     ok(

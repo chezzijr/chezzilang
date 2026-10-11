@@ -372,11 +372,9 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     ("Iterable", "iter", "bytes"),
     ("Iterable", "iter", "bytearray"),
     ("Iterable", "iter", "struct"),
-    ("Iterable", "iter", "enum"),
     // Iterator — only a struct/cursor holds the position `next` needs (W6-3b: a raw collection does
     // NOT satisfy `Iterator`, only `Iterable`).
     ("Iterator", "next", "struct"),
-    ("Iterator", "next", "enum"),
     // Index / IndexSet / Slice — the built-in containers `index_kv`/`slice_result` accept
     // (`IndexSet` excludes the immutable `str`/`bytes`; `Slice` excludes `map`).
     ("Index", "index", "list"),
@@ -2108,7 +2106,10 @@ impl Checker {
         // declared-bounds check below (so a `[S: Iterator[T]]` value forwards into another
         // iterator-generic call), since neither predicate can see through a bare param.
         if protocol == "Iterator" && !matches!(ty, Ty::Param(_) | Ty::Protocol(..)) {
-            return if Self::is_cursor_ty(ty) || self.struct_iter_elem(ty).is_some() {
+            return if self.struct_iter_elem(ty).is_some() {
+                // A declared type's own `next` hook: a real method, not an intrinsic grant.
+                Ok(Grant::no_intrinsic_method())
+            } else if Self::is_cursor_ty(ty) {
                 self.grant_intrinsic(protocol, ty)
             } else if self.iter_elem(ty).is_some() {
                 // ITERABLE but position-less (a raw collection): every remedy below actually applies
@@ -2146,7 +2147,12 @@ impl Checker {
             {
                 return Err(format!("type {ty} does not satisfy Iterable"));
             }
-            return self.grant_intrinsic(protocol, ty);
+            // A declared type iterates through its own hook, not through an intrinsic grant.
+            return if self.declared_methods(ty).is_some() {
+                Ok(Grant::no_intrinsic_method())
+            } else {
+                self.grant_intrinsic(protocol, ty)
+            };
         }
         // `Index`/`IndexSet`/`Slice` — built-in `list`/`map`/`str` conform intrinsically (a struct
         // conforms structurally, falling through to the matcher below; a `Ty::Param` forwards to its
@@ -2372,6 +2378,103 @@ impl Checker {
         self.requirement_matches(ty, protocol, &args, pinfo, method, methods)
             .ok()?;
         Some((sig, bound))
+    }
+
+    /// TICKET-250 — fill [`HookTable`] for every struct and enum this module declares: one
+    /// `hook_method` question per `HOOKS` row, asked inside the owner's type-parameter scope.
+    /// Runs after `infer_returns`, so an inferred return type is final.
+    pub(super) fn record_hook_table(&mut self, stmts: &[Stmt]) {
+        for s in stmts {
+            let (name, type_params, is_struct) = match &s.kind {
+                StmtKind::Struct {
+                    name, type_params, ..
+                } => (name, type_params, true),
+                StmtKind::Enum {
+                    name, type_params, ..
+                } => (name, type_params, false),
+                _ => continue,
+            };
+            let saved = self.enter_type_params(type_params);
+            let ty = if is_struct {
+                self.struct_self_ty(name)
+            } else {
+                self.enum_self_ty(name)
+            };
+            let mut set = HookSet::default();
+            for (hook, protocol, method) in HOOKS {
+                if self.hook_method(&ty, protocol, method).is_some() {
+                    set.insert(*hook);
+                }
+            }
+            self.exit_type_params(saved);
+            if let Ty::Struct(key, _) | Ty::Enum(key, _) = ty {
+                self.hook_table.insert((self.graph_module_idx, key), set);
+            }
+        }
+    }
+
+    /// The hook a call to `method` through `protocol` is: `Some` when the nearest protocol that
+    /// declares `method` (`protocol` itself, or one it embeds) is a reserved one. A requirement a
+    /// user protocol declares itself is an ordinary method call.
+    pub(super) fn hook_requirement(&self, protocol: &str, method: &str) -> Option<Hook> {
+        let owner = self.requirement_owner(protocol, method, &mut HashSet::new())?;
+        if !is_reserved_protocol(&owner) {
+            return None;
+        }
+        HOOKS
+            .iter()
+            .find(|(_, _, m)| *m == method)
+            .map(|(hook, _, _)| *hook)
+    }
+
+    fn requirement_owner(
+        &self,
+        pname: &str,
+        method: &str,
+        seen: &mut HashSet<String>,
+    ) -> Option<String> {
+        if !seen.insert(pname.to_string()) {
+            return None;
+        }
+        let pinfo = self.protocol_shape(pname)?;
+        if pinfo.methods.iter().any(|(n, _)| n == method) {
+            return Some(pname.to_string());
+        }
+        pinfo
+            .embeds
+            .iter()
+            .find_map(|e| self.requirement_owner(&e.name, method, seen))
+    }
+
+    /// Record a method call typed through `protocol`'s requirement for the backend, when that
+    /// requirement is a hook ([`Self::hook_requirement`]).
+    pub(super) fn record_hook_call(
+        &mut self,
+        name_span: Span,
+        protocol: &str,
+        method: &str,
+        span: Span,
+    ) {
+        let Some(hook) = self.hook_requirement(protocol, method) else {
+            return;
+        };
+        if hook == Hook::Eq {
+            return;
+        }
+        let key = crate::checker::carrier_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            name_span,
+        );
+        crate::checker::record_call_table_entry(
+            &mut self.hook_calls,
+            &mut self.table_conflicts,
+            key,
+            hook,
+            "hook call",
+            span,
+        );
     }
 
     /// One requirement of [`Self::satisfies_methods`]: does `methods` carry `mname` with the
@@ -3767,7 +3870,7 @@ impl Checker {
                 for b in &tp.bounds {
                     if (b.name == "Iterator" || b.name == "Iterable")
                         && let Some(arg) = b.args.first()
-                        && let Some(elem) = self.iter_elem(&concrete)
+                        && let Some(elem) = self.iterable_elem(&concrete)
                     {
                         binds.push((arg.clone(), elem));
                     }

@@ -3,6 +3,7 @@
 
 use super::block::Cut;
 use super::*;
+use crate::checker::Hook;
 
 /// How a diagnostic or a fault names an optional value: its kind in plain words, then its type as
 /// the user writes it. Never `enum`.
@@ -799,7 +800,7 @@ impl Vm {
                     .map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::ByteArray(idxs.iter().map(|&i| b[i]).collect())
             }
-            Obj::Struct { .. } => Sliced::Struct,
+            Obj::Struct { .. } | Obj::Enum { .. } => Sliced::Struct,
             _ => return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span)),
         };
         match sliced {
@@ -840,42 +841,15 @@ impl Vm {
                 let e_v = opt(self, e);
                 let st_v = opt(self, st);
                 self.pop();
-                let v = self.dispatch_index_method(h, "slice", vec![obj, s_v, e_v, st_v], span)?;
+                let Some(v) =
+                    self.reentered(|vm| vm.invoke_hook(Hook::Slice, obj, &[s_v, e_v, st_v], span))?
+                else {
+                    return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span));
+                };
                 self.push(v);
             }
         }
         Ok(())
-    }
-
-    /// Dispatch an `Index`/`IndexSet`/`Slice` protocol method (`index`/`set_index`/`slice`) on a
-    /// struct heap object. `args` already includes the receiver as its first element (bound to
-    /// `self`). Mirrors `struct_arith`'s frame dispatch; the args are rooted as the new frame's locals.
-    pub(super) fn dispatch_index_method(
-        &mut self,
-        h: GcRef,
-        method: &str,
-        args: Vec<Value>,
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let Obj::Struct { tid, .. } = self.heap.get(h) else {
-            unreachable!()
-        };
-        let name = self.struct_name_of_tid(*tid);
-        let def = self
-            .program
-            .structs
-            .get(name)
-            .cloned()
-            .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-        let proto = *def
-            .methods
-            .get(method)
-            .ok_or_else(|| self.err(format!("struct '{name}' has no method '{method}'"), span))?;
-        let home = self.module_objs[def.module_idx];
-        // Re-entered (B1): `index`/`slice`/`set_index` overloads run from native opcode handlers whose
-        // operand state is on the host stack, so a blocking `recv` inside one cannot park — it faults
-        // `deadlock` instead of suspending (matches `struct_arith`/`compare`/`hash`).
-        self.reentered(|vm| vm.run_proto(proto, home, None, args, true, false, span))
     }
 
     pub(super) fn get_index(&mut self, span: Span) -> Result<(), RuntimeError> {
@@ -1047,9 +1021,13 @@ impl Vm {
                     }
                 }
             }
-            // A struct satisfying `Index` dispatches `obj[k]` to `index(self, k)`.
-            Obj::Struct { .. } => {
-                let v = self.dispatch_index_method(h, "index", vec![obj, key], span)?;
+            // A struct or enum with the `index` hook dispatches `obj[k]` to `index(self, k)`.
+            Obj::Struct { .. } | Obj::Enum { .. } => {
+                let Some(v) =
+                    self.reentered(|vm| vm.invoke_hook(Hook::Index, obj, &[key], span))?
+                else {
+                    return Err(self.err(format!("cannot index {}", self.type_name(obj)), span));
+                };
                 self.push(v);
                 Ok(())
             }
@@ -1189,9 +1167,14 @@ impl Vm {
             }
             return Ok(());
         }
-        // A struct satisfying `IndexSet` dispatches `obj[k] = v` to `set_index(self, k, v)`.
-        if matches!(self.heap.get(h), Obj::Struct { .. }) {
-            self.dispatch_index_method(h, "set_index", vec![obj, key, val], span)?;
+        // A struct or enum with the `set_index` hook dispatches `obj[k] = v` to it.
+        if matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. }) {
+            if self
+                .reentered(|vm| vm.invoke_hook(Hook::SetIndex, obj, &[key, val], span))?
+                .is_none()
+            {
+                return Err(self.err(format!("cannot index-assign {}", self.type_name(obj)), span));
+            }
             return Ok(());
         }
         let idx = match self.int_val(key) {
@@ -1492,44 +1475,19 @@ impl Vm {
         }))
     }
 
-    /// One-time `Iterable` → cursor conversion: a PURE-`Iterable` struct (has `iter`, lacks `next`)
-    /// becomes its cursor by running `iter(self)`; EVERYTHING else passes through unchanged (so it is
-    /// safe to call on any value). Shared by `Op::IterableToCursor` (the `for` lowering) and
-    /// [`drain_iterable`](Self::drain_iterable) (`List()`/`Set()`/`Map()`/`.iter()`), which must accept
-    /// the same witnesses — the checker's `iterable_elem` admits an `iter`-only struct, and an
-    /// `Iterable[T]` ANNOTATION hands one to every consumer, not only to `for`.
-    ///
-    /// The `next`-lacks test is by NAME, and the checker mirrors it: `struct_iterable_elem` refuses any
-    /// struct that DECLARES a `next`, so a struct whose `next` is malformed is rejected at check time
-    /// rather than admitted via `iter` here and then driven through that `next` by `drain_iterable`.
+    /// One-time `Iterable` → cursor conversion: a struct or enum with the `iter` hook becomes its
+    /// cursor by running `iter(self)`; EVERYTHING else passes through unchanged (so it is safe to
+    /// call on any value). Shared by `Op::IterableToCursor` (the `for` lowering) and
+    /// [`drain_iterable`](Self::drain_iterable) (`List()`/`Set()`/`Map()`/`.iter()`). `iter` wins
+    /// over `next`: a type with both hooks is iterated through `iter`.
     pub(super) fn iterable_to_cursor(
         &mut self,
         v: Value,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let convert = if let Some(h) = v.as_obj()
-            && let Obj::Struct { tid, .. } = self.heap.get(h)
-        {
-            let name = self.struct_name_of_tid(*tid);
-            self.program
-                .structs
-                .get(name)
-                .filter(|d| !d.methods.contains_key("next"))
-                .and_then(|d| d.methods.get("iter").map(|p| (*p, d.module_idx)))
-        } else {
-            None
-        };
-        let Some((proto, module_idx)) = convert else {
-            return Ok(v);
-        };
-        let home = self.module_objs[module_idx];
-        // Re-enter the VM to run `iter(self)`; it returns the cursor (the body calls `self.xs.iter()`).
-        // Root the receiver across the call (guarded GC).
-        self.push(v);
-        let cursor =
-            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
-        self.pop(); // unroot receiver
-        Ok(cursor)
+        Ok(self
+            .reentered(|vm| vm.invoke_hook(Hook::Iter, v, &[], span))?
+            .unwrap_or(v))
     }
 
     /// Drain ANY for-iterable into a `Vec<Value>` of its elements — the runtime peer of the checker's
@@ -1593,35 +1551,14 @@ impl Vm {
         let Some(h) = v.as_obj() else {
             return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span));
         };
-        // Resolve the iteration step: a generator resumes; a user struct dispatches its `next` proto.
+        // Resolve the iteration step: a generator resumes; a struct or enum runs its `next` hook.
         enum Step {
             Generator,
-            StructNext { proto: ProtoId, home: GcRef },
+            NextHook,
         }
         let step = match self.heap.get(h) {
             Obj::Generator(_) => Step::Generator,
-            Obj::Struct { tid, .. } => {
-                let name = self.struct_name_of_tid(*tid);
-                let def = self
-                    .program
-                    .structs
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-                let proto = *def.methods.get("next").ok_or_else(|| {
-                    self.err(
-                        format!(
-                            "cannot iterate over {} (no `next` method)",
-                            self.type_name(v)
-                        ),
-                        span,
-                    )
-                })?;
-                Step::StructNext {
-                    proto,
-                    home: self.module_objs[def.module_idx],
-                }
-            }
+            Obj::Struct { .. } | Obj::Enum { .. } if self.hook_of(v, Hook::Next) => Step::NextHook,
             _ => return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span)),
         };
         // Root the source + the growing accumulator list across the re-entrant calls.
@@ -1632,9 +1569,9 @@ impl Vm {
             loop {
                 let res = match step {
                     Step::Generator => self.generator_next(h, span)?,
-                    Step::StructNext { proto, home } => self.guarded(|vm| {
-                        vm.run_proto(proto, home, None, vec![v], true, false, span)
-                    })?,
+                    Step::NextHook => self
+                        .guarded(|vm| vm.invoke_hook(Hook::Next, v, &[], span))?
+                        .unwrap_or(Value::nil()),
                 };
                 let Some(rh) = res.as_obj() else {
                     return Err(self.bad_next_value(res, span));
@@ -2959,16 +2896,6 @@ impl Vm {
         Ok(())
     }
 
-    /// True iff `v` is a `str` at runtime (a heap [`Obj::Str`]). `str` is the only string
-    /// representation — [`Value`] carries no inline string — so a user `str(self)` display hook's
-    /// result "conforms to `Stringable`" exactly when this holds. Used by the display-hook arms to
-    /// decide, AFTER invoking the hook, whether to use its result or fall back to the default repr
-    /// (Bug B). Checking the runtime VALUE (not the declared syntax) transparently covers an
-    /// annotated `-> str`, an inferred (un-annotated) str, and a str type-alias return alike.
-    pub(super) fn is_str_value(&self, v: Value) -> bool {
-        matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Str(_)))
-    }
-
     /// Render a value that is NESTED inside something else — a list/tuple/map/set element, a struct
     /// field, an enum payload. Identical to [`Self::stringify_into`] except that a `str` renders as
     /// its Python `repr` (quoted + escaped) instead of its bare characters, so `["a", "b"]` and
@@ -3071,44 +2998,22 @@ impl Vm {
                     out.push('}');
                 }
             }
-            Obj::Struct { tid, mut fields } => {
+            Obj::Struct { tid, fields } => {
                 // Resolve the type key from `tid` (owned — the `str` hook below takes `&mut self`,
                 // so a `&self` borrow of the name can't live across it). Cold stringify path.
                 let name = self.struct_name_of_tid(tid).to_string();
-                // A self-only `str(self)` overrides the default repr — but ONLY when it actually
-                // conforms to `Stringable`, i.e. it returns a `str`. Bug B: `str` is a normal user
-                // method that may legitimately return anything (e.g. `-> S` returning the struct
-                // itself, or an inferred/aliased str), and its return type is not reliably reachable
-                // at the bytecode level. So — mirroring arith.rs `struct_hash`/`enum_hash`, which
-                // invoke the hook then inspect the returned value — invoke `str` and use its result
-                // ONLY when it is a `str`. A non-`str` result must NOT be re-stringified: that
-                // re-enters this arm, re-invokes the hook, and recurses forever (uncatchable native
-                // stack overflow). It falls through to the default repr, like a wrong-arity `str`.
+                // The `str` hook overrides the default repr. The checker decided whether the
+                // type has it; a `str` that is not the hook is an ordinary method and never runs
+                // here. The hook re-enters the VM and may start its own structural walk, so hand
+                // it the depth this walk has already consumed — one shared budget (see
+                // [`Vm::walk_base`]). The `stringify_into(out, res, ...)` below runs AFTER
+                // `guarded_walk` restored, at the outer `depth`: it is the hook's RESULT.
                 let def = self.program.structs.get(name.as_str()).cloned();
-                if let Some(def) = &def
-                    && let Some(&proto) = def.methods.get("str")
-                    && self.program.protos[proto].arity == 1
-                {
-                    let home = self.module_objs[def.module_idx];
-                    // The hook re-enters the VM and may start its own structural walk, so hand it
-                    // the depth this walk has already consumed — one shared budget (see
-                    // [`Vm::walk_base`]), not a fresh 10 000 per nesting level. The
-                    // `stringify_into(out, res, ...)` below runs AFTER `guarded_walk` restored, at
-                    // the outer `depth` — correct, it is the hook's RESULT, not a nested walk.
-                    let base = self.walk_base + depth;
-                    let res = self.guarded_walk(base, |vm| {
-                        vm.run_proto(proto, home, None, vec![Value::obj(h)], true, false, span)
-                    })?;
-                    if self.is_str_value(res) {
-                        return self.stringify_into(out, res, span, depth);
-                    }
-                    // Non-`str`: fall through to the default repr. The hook may have mutated self's
-                    // fields (and triggered GC, freeing the pre-hook `fields` clone taken at fn
-                    // entry), so re-read the live, rooted struct — otherwise the render loop below
-                    // could dereference a swept GcRef and panic uncatchably (GC-safety).
-                    if let Obj::Struct { fields: cur, .. } = self.heap.get(h) {
-                        fields = cur.clone();
-                    }
+                let base = self.walk_base + depth;
+                if let Some(res) = self.guarded_walk(base, |vm| {
+                    vm.invoke_hook(Hook::Str, Value::obj(h), &[], span)
+                })? {
+                    return self.stringify_into(out, res, span, depth);
                 }
                 // Positional layout: recover declaration-order field names from the StructDef (the
                 // same `def` already cloned for the `str` hook) — no per-instance name strings.
@@ -3130,37 +3035,14 @@ impl Vm {
             }
             Obj::Enum {
                 variant_id,
-                mut payload,
+                payload,
             } => {
-                // A self-only `str(self)` overrides the default `Variant(payload)` repr, but only
-                // when it returns a `str` — checked on the returned value, not the declared syntax
-                // (mirrors the struct arm; see its Bug B note).
-                let key = self.enum_names(variant_id).0.to_string();
-                if let Some(&proto) = self
-                    .program
-                    .enum_methods
-                    .get(&key)
-                    .and_then(|m| m.get("str"))
-                    && self.program.protos[proto].arity == 1
-                {
-                    let home = self.module_objs[self.enum_home_module(&key)];
-                    // The hook re-enters the VM and may start its own structural walk, so hand it
-                    // the depth this walk has already consumed — one shared budget (see
-                    // [`Vm::walk_base`]), not a fresh 10 000 per nesting level. The
-                    // `stringify_into(out, res, ...)` below runs AFTER `guarded_walk` restored, at
-                    // the outer `depth` — correct, it is the hook's RESULT, not a nested walk.
-                    let base = self.walk_base + depth;
-                    let res = self.guarded_walk(base, |vm| {
-                        vm.run_proto(proto, home, None, vec![Value::obj(h)], true, false, span)
-                    })?;
-                    if self.is_str_value(res) {
-                        return self.stringify_into(out, res, span, depth);
-                    }
-                    // Non-`str`: re-read the live rooted enum before the default render (GC-safety;
-                    // see the struct arm).
-                    if let Obj::Enum { payload: cur, .. } = self.heap.get(h) {
-                        payload = cur.clone();
-                    }
+                // The `str` hook overrides the default `Variant(payload)` repr (see the struct arm).
+                let base = self.walk_base + depth;
+                if let Some(res) = self.guarded_walk(base, |vm| {
+                    vm.invoke_hook(Hook::Str, Value::obj(h), &[], span)
+                })? {
+                    return self.stringify_into(out, res, span, depth);
                 }
                 // A carrier prints its prefix, then its payload in the mode of the position the
                 // carrier itself occupies. This is the bare (str) mode; a nested carrier is

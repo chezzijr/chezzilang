@@ -170,6 +170,8 @@ impl Checker {
             witnesses: crate::checker::WitnessTable::default(),
             carriers: crate::checker::CarrierTable::new(),
             proto_eq_calls: crate::checker::ProtoEqTable::new(),
+            hook_table: crate::checker::HookTable::new(),
+            hook_calls: crate::checker::HookCallTable::new(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             crossings: crate::checker::CrossingTable::new(),
             gen_crossings: crate::checker::GenCrossings::default(),
@@ -1658,6 +1660,7 @@ impl Checker {
             self.populate_struct_ctypes(stmts, id);
         }
         self.infer_returns(stmts);
+        self.record_hook_table(stmts);
         for stmt in stmts {
             self.check_stmt(stmt);
         }

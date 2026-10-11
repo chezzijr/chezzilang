@@ -2,6 +2,7 @@
 // Arithmetic, comparison, ordering, hashing, equality.
 
 use super::*;
+use crate::checker::Hook;
 
 impl Vm {
     // ===== 8-byte `Value` boxing helpers =====
@@ -586,8 +587,10 @@ impl Vm {
         {
             // M22: unary `-` on a struct/enum dispatches to its `neg(self) -> Self` method
             // (the `Neg` protocol). Mirrors `struct_arith`, but self-only (no `other`).
-            let (proto, home) = self.resolve_overload_method(v, "neg", span)?;
-            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))
+            match self.reentered(|vm| vm.invoke_hook(Hook::Neg, v, &[], span))? {
+                Some(r) => Ok(r),
+                None => Err(self.missing_hook(v, Hook::Neg, span)),
+            }
         } else {
             Err(self.err(format!("cannot apply Neg to {}", self.type_name(v)), span))
         }
@@ -743,59 +746,17 @@ impl Vm {
         r: Value,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let method = match op {
-            Op::Add => "add",
-            Op::Sub => "sub",
-            Op::Mul => "mul",
-            Op::Div => "div",
-            Op::Mod => "mod",
+        let hook = match op {
+            Op::Add => Hook::Add,
+            Op::Sub => Hook::Sub,
+            Op::Mul => Hook::Mul,
+            Op::Div => Hook::Div,
+            Op::Mod => Hook::Mod,
             _ => unreachable!("struct_arith only handles + - * / %"),
         };
-        let (proto, home) = self.resolve_overload_method(l, method, span)?;
-        self.reentered(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))
-    }
-
-    /// Resolve `(proto, home_module_obj)` for an operator-overload method `method` on receiver `recv`
-    /// — a struct (via `program.structs`) or an enum (via `program.enum_methods` + `enum_home`). The
-    /// shared dispatch core for arithmetic and ordering overloads on both struct and enum values.
-    pub(super) fn resolve_overload_method(
-        &self,
-        recv: Value,
-        method: &str,
-        span: Span,
-    ) -> Result<(usize, GcRef), RuntimeError> {
-        debug_assert!(recv.is_obj(), "resolve_overload_method on non-obj");
-        let h = recv.as_gcref();
-        match self.heap.get(h) {
-            Obj::Struct { tid, .. } => {
-                let name = self.struct_name_of_tid(*tid);
-                let def = self
-                    .program
-                    .structs
-                    .get(name)
-                    .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-                let proto = *def.methods.get(method).ok_or_else(|| {
-                    self.err(
-                        format!("struct '{}' has no '{method}' method", def.display_name),
-                        span,
-                    )
-                })?;
-                Ok((proto, self.module_objs[def.module_idx]))
-            }
-            Obj::Enum { variant_id, .. } => {
-                let key = self.enum_names(*variant_id).0.to_string();
-                let proto = *self
-                    .program
-                    .enum_methods
-                    .get(&key)
-                    .and_then(|ms| ms.get(method))
-                    .ok_or_else(|| {
-                        let who = Self::enum_subject(*variant_id, &key, |n| format!("enum '{n}'"));
-                        self.err(format!("{who} has no '{method}' method"), span)
-                    })?;
-                Ok((proto, self.module_objs[self.enum_home_module(&key)]))
-            }
-            _ => unreachable!("overload receiver is a struct or enum"),
+        match self.reentered(|vm| vm.invoke_hook(hook, l, &[r], span))? {
+            Some(v) => Ok(v),
+            None => Err(self.missing_hook(l, hook, span)),
         }
     }
 
@@ -891,18 +852,11 @@ impl Vm {
         if let Some(h) = container.as_obj()
             && matches!(self.heap.get(h), Obj::Struct { .. } | Obj::Enum { .. })
         {
-            let (proto, home) = self.resolve_overload_method(container, "contains", span)?;
-            let res = self.reentered(|vm| {
-                vm.run_proto(
-                    proto,
-                    home,
-                    None,
-                    vec![container, needle],
-                    true,
-                    false,
-                    span,
-                )
-            })?;
+            let Some(res) =
+                self.reentered(|vm| vm.invoke_hook(Hook::Contains, container, &[needle], span))?
+            else {
+                return Err(self.missing_hook(container, Hook::Contains, span));
+            };
             return match res.as_bool() {
                 Some(b) => {
                     self.push(Value::bool(b));
@@ -968,10 +922,7 @@ impl Vm {
                 }
             },
             _ => {
-                return Err(self.err(
-                    format!("cannot use `in` on {}", self.type_name(container)),
-                    span,
-                ));
+                return Err(self.missing_hook(container, Hook::Contains, span));
             }
         };
         self.push(Value::bool(found));
@@ -1086,9 +1037,9 @@ impl Vm {
         r: Value,
         span: Span,
     ) -> Result<std::cmp::Ordering, RuntimeError> {
-        let (proto, home) = self.resolve_overload_method(l, "compare", span)?;
-        let res =
-            self.reentered(|vm| vm.run_proto(proto, home, None, vec![l, r], true, false, span))?;
+        let Some(res) = self.reentered(|vm| vm.invoke_hook(Hook::Compare, l, &[r], span))? else {
+            return Err(self.missing_hook(l, Hook::Compare, span));
+        };
         match self.int_val(res) {
             Some(n) => Ok(n.cmp(&0)),
             None => Err(self.err(
@@ -1277,8 +1228,7 @@ impl Vm {
     fn hash_user(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
         let Some(h) = v.as_obj() else { unreachable!() };
         match self.heap.get(h) {
-            Obj::Struct { .. } => self.struct_hash(v, span),
-            Obj::Enum { .. } => self.enum_hash(v, span),
+            Obj::Struct { .. } | Obj::Enum { .. } => self.declared_hash(v, span),
             _ => unreachable!("hash_user receiver is a struct or enum"),
         }
     }
@@ -1339,57 +1289,30 @@ impl Vm {
         }
     }
 
-    /// Dispatch a struct key's user `hash(self) -> int`, returning its `i64` as a `u64`. Mirrors
-    /// [`struct_compare`] (re-entrant via `run_proto`).
-    pub(super) fn struct_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
-        let Some(h) = v.as_obj() else { unreachable!() };
-        let Obj::Struct { tid, .. } = self.heap.get(h) else {
-            unreachable!()
+    /// Hash a struct or enum key through its `hash` hook, returning the `i64` as a `u64`. A
+    /// zero-field struct with no hook hashes to the constant 0: it has no state, and `==`'s
+    /// type-tag guard keeps distinct empty-struct types unequal despite the shared hash.
+    pub(super) fn declared_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
+        if let Some(res) = self.reentered(|vm| vm.invoke_hook(Hook::Hash, v, &[], span))? {
+            return match self.int_val(res) {
+                Some(n) => Ok(n as u64),
+                None => Err(self.err(
+                    format!("hash() must return int, got {}", self.type_name(res)),
+                    span,
+                )),
+            };
+        }
+        let Obj::Struct { tid, .. } = self.heap.get(v.as_gcref()) else {
+            return Err(self.missing_hook(v, Hook::Hash, span));
         };
         let name = self.struct_name_of_tid(*tid);
-        let def = self
-            .program
-            .structs
-            .get(name)
-            .cloned()
-            .ok_or_else(|| self.err(format!("unknown struct type '{name}'"), span))?;
-        // A ZERO-FIELD struct with no `hash` method hashes to a constant (0): it has no state, so
-        // there is nothing to hash. `==`'s type-tag guard keeps distinct empty-struct types unequal
-        // despite the shared hash. Mirrors the checker's zero-field `Hashable` intrinsic.
-        if def.fields.is_empty() && !def.methods.contains_key("hash") {
-            return Ok(0);
-        }
-        let proto = *def.methods.get("hash").ok_or_else(|| {
-            self.err(
+        match self.program.structs.get(name) {
+            Some(def) if def.fields.is_empty() => Ok(0),
+            def => Err(self.err(
                 format!(
                     "struct '{}' has no 'hash' method (needed to use it as a map/set key)",
-                    def.display_name
+                    def.map_or(name, |d| d.display_name.as_str())
                 ),
-                span,
-            )
-        })?;
-        let home = self.module_objs[def.module_idx];
-        let res =
-            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
-        match self.int_val(res) {
-            Some(n) => Ok(n as u64),
-            None => Err(self.err(
-                format!("hash() must return int, got {}", self.type_name(res)),
-                span,
-            )),
-        }
-    }
-
-    /// Dispatch an enum key's user `hash(self) -> int` via the shared enum-aware
-    /// [`resolve_overload_method`], mirroring [`struct_hash`] (re-entrant via `run_proto`).
-    pub(super) fn enum_hash(&mut self, v: Value, span: Span) -> Result<u64, RuntimeError> {
-        let (proto, home) = self.resolve_overload_method(v, "hash", span)?;
-        let res =
-            self.reentered(|vm| vm.run_proto(proto, home, None, vec![v], true, false, span))?;
-        match self.int_val(res) {
-            Some(n) => Ok(n as u64),
-            None => Err(self.err(
-                format!("hash() must return int, got {}", self.type_name(res)),
                 span,
             )),
         }

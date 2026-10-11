@@ -5195,6 +5195,15 @@ impl Checker {
     /// `__iter__`). Everything else flows through [`iter_elem`](Self::iter_elem).
     /// `None` ⇒ not iterable.
     pub(super) fn iterable_elem(&self, ty: &Ty) -> Option<Ty> {
+        // A type parameter bounded `S: Iterator[T]` or `S: Iterable[T]` yields the bound's
+        // element argument (resolved at the declaration, TICKET-202).
+        if let Ty::Param(name) = ty {
+            return self.type_params.get(name).and_then(|bs| {
+                bs.iter()
+                    .find(|b| b.name == "Iterator" || b.name == "Iterable")
+                    .and_then(|b| b.args.first().cloned())
+            });
+        }
         self.struct_iterable_elem(ty).or_else(|| self.iter_elem(ty))
     }
 
@@ -5557,16 +5566,9 @@ impl Checker {
             // closed-and-drained (Go's `for v := range ch`). Binds a single element of type `T`.
             Ty::Channel(elem) => vec![(vars[0].clone(), (**elem).clone())],
             Ty::Unknown => unknowns(vars),
-            Ty::Param(name) => {
-                // A type parameter bounded `S: Iterator[T]` is iterable; bind the loop var to its
-                // declared element type `T` (resolved at the declaration, TICKET-202).
-                let arg = self.type_params.get(name).and_then(|bs| {
-                    // `S: Iterator[T]` OR `S: Iterable[T]` is for-iterable; both carry the element as
-                    // their single bound arg (an `Iterable` is driven through a one-time `.iter()`).
-                    bs.iter()
-                        .find(|b| b.name == "Iterator" || b.name == "Iterable")
-                        .and_then(|b| b.args.first().cloned())
-                });
+            Ty::Param(_) => {
+                // A bounded type parameter binds the element `iterable_elem` reads off its bound.
+                let arg = self.iterable_elem(&it);
                 match arg {
                     Some(t) => {
                         let elem = t;
@@ -5602,11 +5604,9 @@ impl Checker {
                 unknowns(vars)
             }
             _ if self.iterable_elem(&it).is_some() => {
-                // Everything else `iterable_elem` admits, binding a single element: a user struct with
-                // `next(self) -> Option[E]`; a pure-`Iterable` struct (`iter(self) -> Iterator[E]`, no
-                // `next`) driven by a one-time `.iter()`; and an `Iterable[E]` ANNOTATION. `next`
-                // before `iter` (a struct with BOTH keeps the `next()` fast path) is `iterable_elem`'s
-                // own `iter_elem().or_else(struct_iterable_elem)` precedence.
+                // Everything else `iterable_elem` admits, binding a single element: a declared type
+                // with the `iter` hook (driven by a one-time `.iter()`), one with the `next` hook,
+                // and an `Iterable[E]` ANNOTATION. `iter` before `next` is `iterable_elem`'s rule.
                 let elem = self.iterable_elem(&it).expect("guarded by the match arm");
                 if vars.len() == 1 {
                     return vec![(vars[0].clone(), elem)];

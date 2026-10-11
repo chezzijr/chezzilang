@@ -91,9 +91,11 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc, wr) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) =
         crate::checker::resolve_call_tables(graph);
     reject_table_conflicts(conflicts)?;
+    c.hook_table = ht;
+    c.hook_calls = hc;
     c.fall_off = nf;
     c.for_binds = fb;
     c.call_plans = kw;
@@ -141,6 +143,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.method_ic_sites = c.method_ic_next;
     c.program.rebuild_struct_names();
     c.build_eq_hooks();
+    c.build_hooks();
     c.build_provider_table()?;
     Ok(c.program)
 }
@@ -176,9 +179,11 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc, wr) =
+    let (kw, wt, ct, pe, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
+    c.hook_table = ht;
+    c.hook_calls = hc;
     c.fall_off = nf;
     c.for_binds = fb;
     c.call_plans = kw;
@@ -214,6 +219,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.program.rebuild_struct_names();
     c.build_provider_table()?;
     c.build_eq_hooks();
+    c.build_hooks();
     Ok(c.program)
 }
 
@@ -243,6 +249,13 @@ struct Compiler {
     /// `variant_id`-indexed `Program::eq_struct` / `eq_enum` by [`Compiler::build_eq_hooks`] once every
     /// module is compiled (the dense ids are only final then).
     eq_hooks: HashMap<String, (ProtoId, usize)>,
+    /// TICKET-250 — the checker's verdict per declared type, and the call sites it typed through a
+    /// reserved protocol requirement. Consumed verbatim; the compiler decides no hook.
+    hook_table: crate::checker::HookTable,
+    hook_calls: crate::checker::HookCallTable,
+    /// Runtime type key → its hooks, gathered at each declaration and materialized into
+    /// `Program::hooks_struct` / `hooks_enum` by [`Compiler::build_hooks`].
+    hook_sets: HashMap<String, crate::checker::HookSet>,
     /// Default-argument provider NAME → its dense `Op::MakeFuncIn` operand. Ids are handed out at
     /// EMIT sites (a call site in a module that cannot name the provider), which run before the
     /// declaring module is compiled — hence the indirection. See [`Compiler::build_provider_table`].
@@ -505,6 +518,25 @@ impl Compiler {
         *self.provider_ids.entry(name.to_string()).or_insert(next)
     }
 
+    /// Materialize `Program::hooks_struct` (by `tid`) and `Program::hooks_enum` (by `variant_id`)
+    /// from the checker's verdicts. Runs last: both id spaces are final only then.
+    fn build_hooks(&mut self) {
+        let mut by_tid = vec![0u32; self.program.struct_names.len()];
+        for (key, def) in &self.program.structs {
+            if let Some(set) = self.hook_sets.get(key) {
+                by_tid[def.tid as usize] = set.0;
+            }
+        }
+        let by_vid = self
+            .program
+            .variants_by_id
+            .iter()
+            .map(|vd| self.hook_sets.get(&vd.enum_name).map_or(0, |set| set.0))
+            .collect();
+        self.program.hooks_struct = by_tid;
+        self.program.hooks_enum = by_vid;
+    }
+
     fn build_eq_hooks(&mut self) {
         if self.eq_hooks.is_empty() {
             return; // the overwhelmingly common case — leave both tables empty (every lookup misses)
@@ -538,6 +570,8 @@ impl Compiler {
             struct_names: Vec::new(),
             eq_struct: Vec::new(),
             eq_enum: Vec::new(),
+            hooks_struct: Vec::new(),
+            hooks_enum: Vec::new(),
             modules: Vec::new(),
             field_ic_sites: 0,
             method_ic_sites: 0,
@@ -602,6 +636,9 @@ impl Compiler {
         Compiler {
             program,
             eq_hooks: HashMap::new(),
+            hook_table: crate::checker::HookTable::new(),
+            hook_calls: crate::checker::HookCallTable::new(),
+            hook_sets: HashMap::new(),
             globals: HashMap::new(),
             provider_ids: HashMap::new(),
             provider_defs: HashMap::new(),
@@ -971,6 +1008,9 @@ impl Compiler {
                 let mut test_methods: Vec<String> = Vec::new();
                 let mut suite_tests: Vec<(String, ProtoId)> = Vec::new();
                 let mut hooks: HashMap<String, ProtoId> = HashMap::new();
+                if let Some(set) = self.hook_table.get(&(module_idx, key.clone())) {
+                    self.hook_sets.insert(key.clone(), *set);
+                }
                 for m in methods {
                     self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
                     let pid = self.compile_fn(m, false)?;
@@ -1021,6 +1061,9 @@ impl Compiler {
                 }
                 let key = self.type_key(module_idx, name);
                 let mut compiled: HashMap<String, ProtoId> = HashMap::new();
+                if let Some(set) = self.hook_table.get(&(module_idx, key.clone())) {
+                    self.hook_sets.insert(key.clone(), *set);
+                }
                 for m in methods {
                     self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
                     let pid = self.compile_fn(m, false)?;
@@ -2465,7 +2508,7 @@ impl Compiler {
             // The iterand may be a sequence (list/map-keys/set/str), a user struct implementing the
             // iterator protocol (`next(self) -> Option[T]`), OR a `Channel[T]` (`for v in ch:` — block
             // per value, end on close). The compiler is type-erased, so we branch at RUNTIME on
-            // `IsChannel`/`IsStruct`: the channel and struct paths are both driven LAZILY by an
+            // `IsChannel`/`HasNextHook`: the channel and struct paths are both driven LAZILY by an
             // `Option`-producing step (so an infinite iterator with a `break` terminates, and a channel
             // blocks then ends on close); anything else is indexed as a snapshotted list. The channel
             // and struct steps converge on ONE shared `Option` (None ⇒ exit, Some ⇒ bind) decoder —
@@ -2506,7 +2549,7 @@ impl Compiler {
             let chan_mode_slot = fc.add_hidden(); // true ⇒ channel path (ChanRecvOrClosed)
             fc.emit_hidden_set(chan_mode_slot, span);
             fc.emit_hidden_get(iter_slot, span);
-            fc.emit(Op::IsStruct, span);
+            fc.emit(Op::HasNextHook, span);
             let struct_mode_slot = fc.add_hidden(); // true ⇒ struct-iterator path (next())
             fc.emit_hidden_set(struct_mode_slot, span);
             // A generator result (experimental, VM-only) answers `next()` intrinsically, so it rides
@@ -5181,14 +5224,28 @@ impl Compiler {
                 None => 0,
             };
             let ic = self.next_method_ic();
-            fc.emit(
-                Op::CallMethod {
+            // TICKET-250 — a call the checker typed through a reserved protocol's requirement
+            // reads the hook table at run time; it never finds a method by name alone.
+            let hook_key = crate::checker::carrier_key(
+                self.current_module_idx,
+                self.kw_frag_ctx,
+                self.kw_frag_ord,
+                *name_span,
+            );
+            let op = match self.hook_calls.get(&hook_key) {
+                Some(&hook) => Op::CallHook {
+                    hook,
                     name: name.clone(),
                     argc: argc + w,
                     ic,
                 },
-                span,
-            );
+                None => Op::CallMethod {
+                    name: name.clone(),
+                    argc: argc + w,
+                    ic,
+                },
+            };
+            fc.emit(op, span);
             return Ok(());
         }
         if let ExprKind::Ident(_) = &callee.kind {

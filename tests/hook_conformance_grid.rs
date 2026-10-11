@@ -25,6 +25,10 @@ struct Hook {
     shapes: [String; 6],
     op: &'static str,
     slot: &'static str,
+    /// The intrinsic spelling `x.m(..)`, an ordinary method call.
+    intr: &'static str,
+    /// `v.m(..)` on a receiver `v` typed through the protocol (a bound or a slot).
+    call: &'static str,
 }
 
 fn hooks() -> Vec<Hook> {
@@ -45,6 +49,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "for q in x:\n    print(q)\n",
             slot: "for q in v:\n        print(q)",
+            intr: "print(List(x.iter()))\n",
+            call: "print(List(v.iter()))",
         },
         Hook {
             name: "next",
@@ -60,6 +66,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "for q in x:\n    print(q)\nprint(\"done\")\n",
             slot: "for q in v:\n        print(q)\n    print(\"done\")",
+            intr: "print(x.next())\n",
+            call: "print(v.next())",
         },
         Hook {
             name: "index",
@@ -75,6 +83,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "print(x[2])\n",
             slot: "print(v[2])",
+            intr: "print(x.index(2))\n",
+            call: "print(v.index(2))",
         },
         Hook {
             name: "slice",
@@ -108,6 +118,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "print(x[1:2])\n",
             slot: "print(v[1:2])",
+            intr: "print(x.slice(1, 2, None))\n",
+            call: "print(v.slice(1, 2, None))",
         },
         Hook {
             name: "set_index",
@@ -135,6 +147,25 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "x[0] = 9\nprint(\"set\")\n",
             slot: "v[0] = 9\n    print(\"set\")",
+            intr: "x.set_index(0, 9)\nprint(\"set\")\n",
+            call: "v.set_index(0, 9)\n    print(\"set\")",
+        },
+        Hook {
+            name: "str",
+            proto: "Stringable",
+            slot_proto: None,
+            shapes: [
+                m("str(self) -> str", "return \"HOOK\""),
+                m("str(self) -> Iterator[str]", "yield \"G\""),
+                m("str(a: int) -> str", "return \"STATIC\""),
+                m("str(self) -> int", "return 5"),
+                m("str(self, z: int) -> str", "return \"X\""),
+                m("str[U](self) -> str", "return \"GEN\""),
+            ],
+            op: "print(x)\nprint(\"{x}\")\n",
+            slot: "print(v)",
+            intr: "print(x.str())\n",
+            call: "print(v.str())",
         },
         Hook {
             name: "hash",
@@ -150,6 +181,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "s := Set([x, y])\nprint(s.len())\n",
             slot: "print(\"slot\")",
+            intr: "print(x.hash())\n",
+            call: "print(v.hash())",
         },
         Hook {
             name: "compare",
@@ -165,6 +198,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "print(x < y)\n",
             slot: "print(\"slot\")",
+            intr: "print(x.compare(y))\n",
+            call: "print(v.compare(v))",
         },
         Hook {
             name: "add",
@@ -180,6 +215,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "z := x + y\nprint(\"added\")\n",
             slot: "print(\"slot\")",
+            intr: "z := x.add(y)\nprint(\"added\")\n",
+            call: "z := v.add(v)\n    print(\"added\")",
         },
         Hook {
             name: "neg",
@@ -195,6 +232,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "z := -x\nprint(\"negged\")\n",
             slot: "print(\"slot\")",
+            intr: "z := x.neg()\nprint(\"negged\")\n",
+            call: "z := v.neg()\n    print(\"negged\")",
         },
         Hook {
             name: "contains",
@@ -210,6 +249,8 @@ fn hooks() -> Vec<Hook> {
             ],
             op: "print(1 in x)\n",
             slot: "print(1 in v)",
+            intr: "print(x.contains(1))\n",
+            call: "print(v.contains(1))",
         },
     ]
 }
@@ -259,26 +300,76 @@ fn dir() -> PathBuf {
     d
 }
 
-/// `chezzi check <src>`: did it check clean, and everything it printed.
-fn check(name: &str, src: &str) -> (bool, String) {
-    let path = dir().join(format!("{name}.chz"));
-    std::fs::write(&path, src).expect("write the cell");
-    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-        .arg("check")
-        .arg(&path)
-        .output()
-        .expect("run chezzi");
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    (out.status.success(), text)
+/// One run of a cell: did it exit with status zero, its stdout, and everything it printed.
+#[derive(Clone, PartialEq)]
+struct Outcome {
+    ok: bool,
+    stdout: String,
+    text: String,
 }
 
-/// The three uses of one owner: operator, bound `T: P`, protocol-typed slot.
-fn uses(hook: &Hook, proto: &str, decl: &str) -> [(&'static str, String); 3] {
+fn chezzi(sub: &str, name: &str, src: &str, threads: Option<&str>) -> Outcome {
+    let path = dir().join(format!("{name}.chz"));
+    std::fs::write(&path, src).expect("write the cell");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
+    cmd.arg(sub).arg(&path);
+    match threads {
+        Some(n) => cmd.env("CHEZZI_THREADS", n),
+        None => cmd.env_remove("CHEZZI_THREADS"),
+    };
+    let out = cmd.output().expect("run chezzi");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let text = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
+    Outcome {
+        ok: out.status.success(),
+        stdout,
+        text,
+    }
+}
+
+/// `chezzi check <src>`: did it check clean, and everything it printed.
+fn check(name: &str, src: &str) -> (bool, String) {
+    let out = chezzi("check", name, src, None);
+    (out.ok, out.text)
+}
+
+/// `chezzi run <src>` at `CHEZZI_THREADS` 1, 2 and default. The three runs must agree; a
+/// disagreement is reported in `bad` and the first run is returned.
+fn run(name: &str, src: &str, bad: &mut Vec<String>) -> Outcome {
+    let src = format!("{src}print(\"END\")\n");
+    let first = chezzi("run", name, &src, Some("1"));
+    for threads in [Some("2"), None] {
+        let again = chezzi("run", name, &src, threads);
+        if again.ok != first.ok || again.stdout != first.stdout {
+            bad.push(format!(
+                "{name}: CHEZZI_THREADS=1 and {threads:?} disagree: {:?} vs {:?}",
+                first.stdout, again.stdout
+            ));
+        }
+    }
+    // D1: a run that exits with status zero must reach its last statement.
+    if first.ok && !first.stdout.ends_with("END\n") {
+        bad.push(format!(
+            "{name}: exits with status zero before its last statement: {:?}",
+            first.stdout
+        ));
+    }
+    first
+}
+
+/// The uses of one owner: operator, bound `T: P`, protocol-typed slot, `v.m(..)` in a bounded
+/// body, `v.m(..)` through a slot.
+fn uses(hook: &Hook, proto: &str, decl: &str) -> [(&'static str, String); 5] {
+    let slot_ty = hook.slot_proto.unwrap_or(proto);
     [
+        (
+            "bbody",
+            format!("{decl}fn bb[C: {proto}](v: C):\n    {}\nbb(x)\n", hook.call),
+        ),
+        (
+            "sbody",
+            format!("{decl}fn sb(v: {slot_ty}):\n    {}\nsb(x)\n", hook.call),
+        ),
         ("op", format!("{decl}{}", hook.op)),
         (
             "bound",
@@ -313,31 +404,139 @@ fn cell_failures(kind: &str, hook: &Hook, si: usize) -> Vec<String> {
         );
     let none = owner(kind, &renamed);
     let cell = format!("{kind}|{}|{shape}", hook.name);
+    // A requirement that names `Self` in an operand cannot be called through a slot.
+    let self_operand = matches!(hook.name, "compare" | "add" | "eq");
     let mut answers = Vec::new();
     for ((u, src), (_, src_none)) in uses(hook, proto, &decl)
         .into_iter()
         .zip(uses(hook, proto, &none))
     {
         let tag = format!("{kind}_{}_{shape}_{u}", hook.name);
-        let (ok, text) = check(&tag, &src);
-        answers.push((u, ok));
+        let got = run(&tag, &src, &mut bad);
+        if matches!(u, "op" | "bound" | "slot") {
+            answers.push((u, got.ok));
+        }
         match verdict {
-            Some(true) if !ok => {
-                bad.push(format!("{cell}|{u}: a conforming hook is rejected: {text}"))
+            Some(true) if u == "sbody" && self_operand => {}
+            // `Iterator[T]` in type position is the cursor itself; no slot holds a `next` owner
+            // and exposes `next`.
+            _ if u == "sbody" && hook.name == "next" => {}
+            Some(true) if !got.ok => bad.push(format!(
+                "{cell}|{u}: a conforming hook is rejected: {}",
+                got.text
+            )),
+            Some(true) if hook.name == "str" && u == "op" && !got.stdout.contains("HOOK") => {
+                bad.push(format!("{cell}|{u}: the hook did not run: {}", got.text))
             }
             Some(false) => {
-                let (ok_none, _) = check(&format!("{tag}_none"), &src_none);
-                if ok != ok_none {
+                let want = run(&format!("{tag}_none"), &src_none, &mut bad);
+                if got.ok != want.ok || got.stdout != want.stdout {
                     bad.push(format!(
-                        "{cell}|{u}: a non-hook answers {ok}, the owner with no such method {ok_none}: {text}"
+                        "{cell}|{u}: a non-hook gives {:?} (ok={}), the owner with no such method {:?} (ok={}): {}",
+                        got.stdout, got.ok, want.stdout, want.ok, got.text
                     ));
                 }
             }
             _ => {}
         }
     }
-    if answers.iter().any(|(_, ok)| *ok != answers[0].1) {
+    // `print` accepts every value (default display), so for `str` the operator and the bound
+    // agree on WHICH method runs, checked above, not on acceptance.
+    if hook.name != "str" && answers.iter().any(|(_, ok)| *ok != answers[0].1) {
         bad.push(format!("{cell}: the uses disagree: {answers:?}"));
+    }
+    // The intrinsic spelling is an ordinary method call, whatever the shape.
+    let intr = run(
+        &format!("{kind}_{}_{shape}_intr", hook.name),
+        &format!("{decl}{}", hook.intr),
+        &mut bad,
+    );
+    let intr_ok = match shape {
+        "conf" => intr.ok,
+        "static" => intr.text.contains("is a static method of"),
+        "extra" => intr.text.contains("expects"),
+        _ => true,
+    };
+    if !intr_ok {
+        bad.push(format!("{cell}|intr: {}", intr.text));
+    }
+    bad
+}
+
+/// Run-time rows beside the grid: `.iter()` typed through `Iterable` reads the hook table, and
+/// never finds a declared method by name alone.
+fn iter_run_failures() -> Vec<String> {
+    let mut bad = Vec::new();
+    let next = m("next(self) -> int?", "return None");
+    let static_iter = m(
+        "iter(k: int) -> int",
+        "print(\"static iter ran\")\n        return k",
+    );
+    let str_iter = m(
+        "iter(self) -> Iterator[str]",
+        "return [\"a\", \"b\"].iter()",
+    );
+    let through = |elem: &str| {
+        format!(
+            "fn g(s: Iterable[{elem}]) -> List[{elem}]:\n    return List(s.iter())\nfn b[S: Iterable[{elem}]](s: S) -> List[{elem}]:\n    return List(s.iter())\nprint(g(c))\nprint(b(c))\n"
+        )
+    };
+    for (kind, head, mk) in [
+        ("struct", "struct C:\n    n: int\n", "c := C(2)\n"),
+        ("enum", "enum C:\n    A(int)\n", "c := C.A(2)\n"),
+    ] {
+        for (row, methods, body, want) in [
+            ("next", next.clone(), through("int"), Some("[]\n[]\nEND\n")),
+            (
+                "next_static_iter",
+                next.clone() + &static_iter,
+                through("int"),
+                Some("[]\n[]\nEND\n"),
+            ),
+            (
+                "static_next",
+                m("next(a: int) -> int?", "return None"),
+                through("int"),
+                None,
+            ),
+            (
+                "next_str_iter",
+                next.clone() + &str_iter,
+                through("str"),
+                Some("['a', 'b']\n['a', 'b']\nEND\n"),
+            ),
+            (
+                "concrete_both",
+                next.clone() + &str_iter,
+                "print(List(c.iter()))\n".to_string(),
+                Some("['a', 'b']\nEND\n"),
+            ),
+        ] {
+            let got = run(
+                &format!("iter_{kind}_{row}"),
+                &format!("{head}{methods}{mk}{body}"),
+                &mut bad,
+            );
+            match want {
+                Some(out) if got.stdout != out => bad.push(format!(
+                    "s.iter()|{kind}|{row}: expected {out:?}, got: {}",
+                    got.text
+                )),
+                None if got.ok => bad.push(format!(
+                    "s.iter()|{kind}|{row}: a static `next` is iterable: {}",
+                    got.text
+                )),
+                _ => {}
+            }
+        }
+    }
+    let slot = "fn g(s: Iterable[int]) -> List[int]:\n    return List(s.iter())\nprint(g([1, 2]))\nprint(g(Set([3])))\n";
+    let got = run("iter_slot_builtin", slot, &mut bad);
+    if got.stdout != "[1, 2]\n[3]\nEND\n" {
+        bad.push(format!(
+            "s.iter() on a builtin in an Iterable[int] slot: {}",
+            got.text
+        ));
     }
     bad
 }
@@ -425,6 +624,7 @@ fn operator_and_bound_agree_in_every_cell() {
     });
     let mut bad = bad.into_inner().expect("grid lock");
     bad.extend(iter_call_failures());
+    bad.extend(iter_run_failures());
     bad.sort();
     assert!(
         bad.is_empty(),

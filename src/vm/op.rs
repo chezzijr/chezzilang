@@ -249,6 +249,16 @@ pub enum Op {
         argc: usize,
         ic: u32,
     },
+    /// TICKET-250 — `obj.method(args)` typed through a reserved protocol's requirement (`s.iter()`
+    /// in a `[S: Iterable[T]]` body or on an `Iterable[T]` slot). Same stack as `CallMethod`. A
+    /// struct or enum receiver runs its method only when the hook table says it is the hook;
+    /// otherwise the builtin grant answers (`Vm::call_hook`).
+    CallHook {
+        hook: crate::checker::Hook,
+        name: String,
+        argc: usize,
+        ic: u32,
+    },
     /// `Type.method(args)` — a STATIC (associated) method call (the "no self ⇒ static" rule). Stack:
     /// `[arg0, …]` (NO receiver — `argc` values, never `argc + 1`). Resolves `method` in the named
     /// struct's or enum's method table by `type_key` (the type's runtime key), pushes a frame with
@@ -436,10 +446,10 @@ pub enum Op {
     ListClone,
     /// Pop a list; push its length as an int.
     ArrLen,
-    /// Pop a value; push `true` if it is a struct instance, else `false`. Used by `for` to pick the
-    /// struct-iterator path (`next(self) -> Option[T]`) vs the sequence path at runtime, since the
-    /// compiler is type-erased and can't decide statically.
-    IsStruct,
+    /// Pop a value; push `true` if it is a struct or enum that has the `next` hook, else `false`.
+    /// Used by `for` to pick the iterator path (`next(self) -> T?`) vs the sequence path at
+    /// runtime, since the compiler is type-erased and can't decide statically.
+    HasNextHook,
     /// Pop a value; push `true` if it is a generator (experimental), else `false`. Used by `for x in
     /// g():` to route a generator result into the same lazy `next()` step as a struct iterator
     /// (type-erased: the compiler can't tell a generator result from a struct statically).
@@ -759,6 +769,11 @@ pub struct Program {
     /// proto belongs to exactly one enum), so the compare that finds the hook doubles as the same-type
     /// guard `tid` gives the struct arm.
     pub eq_enum: Vec<Option<(ProtoId, usize)>>,
+    /// TICKET-250 — the hooks each struct type has, as `checker::HookSet` bits, indexed by `tid`.
+    /// The checker decided every bit (`Checker::hook_method`); `Vm::hook_of` is the only reader.
+    pub hooks_struct: Vec<u32>,
+    /// The enum twin of [`Self::hooks_struct`], indexed by `variant_id`.
+    pub hooks_enum: Vec<u32>,
     /// M19 Phase 4 — number of struct-field inline-cache sites (dense ids `0..field_ic_sites`
     /// baked into `GetField`/`SetField` ops). The VM pre-sizes its per-`Vm` `field_ic` vector to
     /// this length. Carries no heap state, so it is never snapshotted or swapped.
