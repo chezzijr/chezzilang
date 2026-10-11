@@ -145,6 +145,8 @@ impl Vm {
             cur_base: 0,
             handlers: Vec::new(),
             pending_exit: None,
+            box_chain: Vec::new(),
+            box_view_err: None,
             fault_trace: None,
             fault_trace_depth: 0,
             gc_stress: false,
@@ -1907,6 +1909,11 @@ impl Vm {
         // module-global key): load-bearing the same way, so a capture waiting to be adopted by a
         // module the task has not read yet is never swept out from under it.
         work.extend(self.snapshot_adopt.values().copied());
+        // TICKET-246 — the slot-door cache of the box call now running indexes this (box) heap.
+        // The frames below it index parked heaps and are not roots here.
+        if let Some(frame) = self.box_chain.last() {
+            work.extend(frame.roots());
+        }
         work
     }
 
@@ -2372,8 +2379,20 @@ impl Vm {
                 // closure's free globals are installed into the RECEIVING view's own module copy at
                 // the airlock (`from_wire_memo`'s `WireValue::Closure` arm), so a plain live read
                 // always agrees with a closure's read of the same slot.
-                self.ensure_module_faulted(home); // D1: lazily reconstruct the worker's home module
-                let v = self.read_slot(home, *slot, span)?;
+                // TICKET-246: inside a box closure the global is the caller's, through the one door.
+                let door = if self.box_chain.is_empty() {
+                    None
+                } else {
+                    self.box_global(home, Some(*slot), span)?
+                };
+                let v = match door {
+                    Some(v) => v,
+                    None => {
+                        // D1: lazily reconstruct the worker's home module
+                        self.ensure_module_faulted(home);
+                        self.read_slot(home, *slot, span)?
+                    }
+                };
                 self.push(v);
             }
             Op::DefineGlobalSlot(slot) => {
@@ -2386,8 +2405,8 @@ impl Vm {
                 let home = self.frames.last().unwrap().home;
                 // D4 layer C (TICKET-169): a spawned task's write to its module-global copy is a
                 // fault, never a silent lost write (owner decision D4 supersedes DEC-137's write
-                // half). The root task (`module_snapshot.is_none()`) writes its globals freely.
-                if self.module_snapshot.is_some() {
+                // half). The root task (not a task view) writes its globals freely.
+                if self.is_task_view() {
                     self.ensure_module_faulted(home);
                     let name = self.global_slot_name(home, *slot);
                     return Err(self.copied_write_err(name.as_deref(), span));

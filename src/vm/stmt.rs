@@ -2076,6 +2076,12 @@ impl Vm {
         slot: u32,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        // TICKET-246 — a view the box could not seat for this read (see `ensure_module_faulted`).
+        if !self.box_chain.is_empty()
+            && let Some(e) = &self.box_view_err
+        {
+            return Err(self.err(e.message.clone(), span));
+        }
         let v = match self.heap.get(module) {
             Obj::Module(m) => m.slots[slot as usize],
             _ => Value::nil(),

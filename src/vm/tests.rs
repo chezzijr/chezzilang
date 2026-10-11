@@ -23006,3 +23006,52 @@ fn walk_src_copies_out_of_a_heap_it_only_borrows() {
     let copy = reader.from_wire(wire);
     assert_eq!(reader.display(copy), "[[1, 2], 's']");
 }
+
+/// TICKET-246 — `with_box` undoes its swap on unwind, not only on return: after a Rust panic
+/// inside the closure the `Vm` runs on the caller's heap again, the box context is back in its
+/// slot and no caller frame is left on the chain. The second half panics two boxes deep, inside
+/// `as_box_caller`.
+#[test]
+fn with_box_restores_the_context_when_the_closure_panics() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let mut vm = Vm::new(Arc::new(empty_program()));
+    vm.out.extend_from_slice(b"caller");
+    let mut outer = Some(vm.box_new());
+    let mut inner = Some(vm.box_new());
+    let (heap_id, stack_len) = (vm.heap.id(), vm.stack.len());
+
+    let seen_inside = std::cell::Cell::new(0);
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        vm.with_box(&mut outer, |vm| {
+            seen_inside.set(vm.heap.id());
+            assert_eq!(vm.out, b"caller", "out stays the caller's inside a box");
+            vm.stack.push(Value::int(7));
+            panic!("boom");
+        })
+    }));
+    assert!(r.is_err());
+    assert_ne!(
+        seen_inside.get(),
+        heap_id,
+        "the closure ran on the box heap"
+    );
+    assert_eq!(vm.heap.id(), heap_id);
+    assert_eq!(vm.stack.len(), stack_len);
+    assert_eq!(vm.out, b"caller");
+    assert!(vm.box_chain.is_empty());
+    assert!(outer.is_some());
+
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        vm.with_box(&mut outer, |vm| {
+            vm.with_box(&mut inner, |vm| vm.as_box_caller(|_| panic!("deep")))
+        })
+    }));
+    assert!(r.is_err());
+    assert_eq!(vm.heap.id(), heap_id);
+    assert_eq!(vm.stack.len(), stack_len);
+    assert_eq!(vm.out, b"caller");
+    assert!(vm.box_chain.is_empty());
+    assert!(outer.is_some() && inner.is_some());
+    // The box contexts still work after both unwinds.
+    assert_eq!(vm.with_box(&mut outer, |vm| vm.stack.len()), 1);
+}

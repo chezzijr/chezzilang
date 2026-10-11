@@ -588,6 +588,8 @@ impl Vm {
     /// generator — faults where the task is PREPARED, so a nursery whose tasks are all cancelled
     /// before preparation stays faultless.
     pub(super) fn fresh_view(&mut self, span: Span) -> Result<Arc<ModuleSnapshot>, RuntimeError> {
+        // TICKET-246 — a box context seats its OWN view from its caller before it snapshots.
+        self.box_seat_view(span)?;
         let now = (self.heap.id(), self.heap.view_epoch());
         if self
             .snapshot_memo
@@ -5713,7 +5715,7 @@ impl Vm {
         if let Some(s) = &self.snapshot_memo {
             return Ok(Arc::clone(s));
         }
-        if self.module_snapshot.is_some() {
+        if self.is_task_view() {
             for i in 0..self.module_faulted.len().min(self.module_objs.len()) {
                 self.fault_module(i);
             }
@@ -5867,35 +5869,16 @@ impl Vm {
     /// `Heap::get_mut`, the sole `&mut Obj` door, moves the view epoch the snapshot is stamped with
     /// (`ModuleSnapshot::view`, read by [`Vm::fresh_view`]). No mutating intrinsic is hooked.
     fn slot_snapshot_reusable(&self, v: Value) -> bool {
-        let Some(h) = v.as_obj() else {
-            return true; // inline scalar (int/bool/nil) — immutable
-        };
-        match self.heap.get(h) {
-            Obj::Str(_)
-            | Obj::Bytes(_)
-            | Obj::BigInt(_)
-            | Obj::FloatBox(_)
-            | Obj::Ptr(_)
-            | Obj::Func { .. }
-            | Obj::Native { .. }
-            | Obj::Builtin(_)
-            | Obj::Cffi(_)
-            | Obj::Channel(_)
-            | Obj::Shared(_)
-            | Obj::RwShared(_)
-            | Obj::Atomic(_)
-            | Obj::AtomicInt(_)
-            | Obj::Executor(_)
-            | Obj::Socket(_)
-            | Obj::Listener(_)
-            | Obj::Writer(_)
-            | Obj::Reader(_) => true,
-            // An import alias: reusable iff it is one of the modules this same walk snapshots (so its
-            // own globals were vetted too). A module NOT in `module_objs` is encoded INLINE — its
-            // globals are unvetted here, so play it safe and rebuild.
-            Obj::Module(_) => self.module_objs.contains(&h),
-            _ => false,
+        // The leaf list has one owner (`boxctx::slot_is_leaf`); the box slot door reads it too.
+        if super::boxctx::slot_is_leaf(&self.heap, v) {
+            return true;
         }
+        // An import alias: reusable iff it is one of the modules this same walk snapshots (so its
+        // own globals were vetted too). A module NOT in `module_objs` is encoded INLINE — its
+        // globals are unvetted here, so play it safe and rebuild.
+        v.as_obj().is_some_and(|h| {
+            matches!(self.heap.get(h), Obj::Module(_)) && self.module_objs.contains(&h)
+        })
     }
 
     /// D1 — lower one parent-heap global value into a heap-independent [`SnapValue`]. The snapshot
@@ -6441,7 +6424,15 @@ impl Vm {
     /// views are untouched. Called at every module-global read site (`GetGlobal`, the `GetCaptured`
     /// home fallback, module member access, and a `module.fn(...)` call).
     pub(super) fn ensure_module_faulted(&mut self, home: GcRef) {
-        if self.module_snapshot.is_none() {
+        // TICKET-246 — inside a box closure this read seats the caller's view first. This site
+        // returns no fault, so one is kept for the `read_slot` that follows.
+        if !self.box_chain.is_empty()
+            && let Err(e) = self.box_global(home, None, Span::default())
+        {
+            self.box_view_err = Some(e);
+            return;
+        }
+        if !self.is_task_view() {
             return;
         }
         if let Some(idx) = self.module_objs.iter().position(|&m| m == home) {

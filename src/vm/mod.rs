@@ -1006,6 +1006,13 @@ pub struct Vm {
     /// every `recover:` handler and unwinds to the top — a hard, uncatchable halt; the driver then
     /// reports `code` as the process exit status.
     pending_exit: Option<i32>,
+    /// TICKET-246 — the open box calls of the task running on this `Vm`, innermost last (see
+    /// `boxctx.rs`). A `Vm` field, NOT a `FiberCtx` field, and `swap_ctx` does not move it: a box
+    /// closure runs under `Vm::reentered`, where no other fiber runs on this stack (DEC-245).
+    box_chain: Vec<boxctx::BoxFrame>,
+    /// A fault from seating the caller's view at a site that cannot return one
+    /// (`ensure_module_faulted`). `read_slot` raises it; `with_box` clears it.
+    box_view_err: Option<RuntimeError>,
     /// The stack trace of the uncaught fault that propagates, captured before frames unwind. The
     /// **deepest** fault wins (`fault_trace_depth` = frame count at capture): the original fault site
     /// captures first; a `defer`red call that itself faults runs while its owning frame is still on
@@ -6836,6 +6843,7 @@ struct TimerSleep {
 
 mod arith;
 mod block;
+mod boxctx;
 #[cfg(test)]
 use block::Waiter;
 use block::{BlockMode, DemoteReg, WaitSpec};
