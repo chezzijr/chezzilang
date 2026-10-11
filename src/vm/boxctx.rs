@@ -64,6 +64,25 @@ pub(super) fn slot_is_leaf(heap: &Heap, v: Value) -> bool {
     )
 }
 
+/// The ONE list of native methods whose closure argument CROSSES: it is encoded and runs in
+/// another heap, so its captures are copies (D4). Two readers, one fact:
+///
+/// - the checker (`Checker::check_crossing_closure_call`) puts the capture floor on these calls,
+///   so a direct write to a captured local is the D4 error at check time;
+/// - the run time ([`Vm::cross_closure`]) encodes the closure of exactly these methods, and
+///   asserts the row in a debug build.
+///
+/// A new method that runs its closure in another heap gets a row here and encodes through
+/// `cross_closure`; never an `if method == ..` clause. `RwShared.read` has no row: its closure
+/// runs in the reader's heap.
+pub(crate) const CROSSING_CLOSURE_METHODS: &[(&str, &str)] = &[
+    ("Executor", "submit"),
+    ("Executor", "_submit_settled"),
+    ("Shared", "update"),
+    ("Shared", "read"),
+    ("RwShared", "write"),
+];
+
 /// The pieces of one crossing out of (or into) a box, encoded with one memo. With `prelude` the
 /// first wire is the whole state, which the pieces back-reference; the decoder drops it.
 pub(super) struct BoxPieces {
@@ -305,6 +324,24 @@ impl Vm {
             .as_ref()
             .expect("a Shared state is in its slot under the guard");
         self.box_copy_out(ctx, span)
+    }
+
+    /// Encode the closure argument `f` of the native method `owner.method` for another heap. The
+    /// ONE function a native arm calls to cross a closure: it reads
+    /// [`CROSSING_CLOSURE_METHODS`], the list the checker's capture floor reads, so a native arm
+    /// that crosses a closure with no row panics in a debug build the first time it runs.
+    pub(super) fn cross_closure(
+        &mut self,
+        owner: &'static str,
+        method: &'static str,
+        f: Value,
+        span: Span,
+    ) -> Result<WireValue, RuntimeError> {
+        debug_assert!(
+            CROSSING_CLOSURE_METHODS.contains(&(owner, method)),
+            "{owner}.{method} crosses a closure but has no row in CROSSING_CLOSURE_METHODS"
+        );
+        self.to_wire_crossable(f, span)
     }
 
     /// A new `RwShared` core holding `init`, decoded into the box's own heap.

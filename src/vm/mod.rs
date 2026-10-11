@@ -6854,6 +6854,7 @@ mod fileio;
 mod netio;
 mod sched;
 mod stmt;
+pub(crate) use boxctx::CROSSING_CLOSURE_METHODS;
 pub(crate) use stmt::COPY_WRITE_TAIL;
 mod stream;
 

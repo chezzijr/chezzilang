@@ -3067,7 +3067,12 @@ impl Vm {
             // state; `read(f)` does the same with no write-back and copies the result out.
             "update" | "read" => {
                 self.arity_err(method, args, 1, span)?;
-                let fw = self.to_wire_crossable(args[0], span)?;
+                let fw = self.cross_closure(
+                    "Shared",
+                    if method == "update" { "update" } else { "read" },
+                    args[0],
+                    span,
+                )?;
                 let core = self.shared_core(h);
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a Shared update guard", span)?;
@@ -3155,7 +3160,7 @@ impl Vm {
             // the state. Exactly `Shared.update` under the write lock.
             "write" => {
                 self.arity_err("write", args, 1, span)?;
-                let fw = self.to_wire_crossable(args[0], span)?;
+                let fw = self.cross_closure("RwShared", "write", args[0], span)?;
                 let key = Arc::as_ptr(&core) as usize;
                 let _guard = self.take_update_guard(key, "a RwShared update guard", span)?;
                 let mut st = core.state.write();
@@ -3590,7 +3595,7 @@ impl Vm {
         match method {
             "submit" => {
                 self.arity_err("submit", args, 1, span)?;
-                self.executor_submit(h, args[0], None, span)?;
+                self.executor_submit(h, "submit", args[0], None, span)?;
                 Ok(Value::nil())
             }
             // TICKET-219 — a std internal: `submit_result` submits its job with the fresh cap-1
@@ -3609,7 +3614,13 @@ impl Vm {
                 let msg = self.alloc_str(super::EXEC_CANCELLED_MSG.to_string());
                 let err = self.alloc_enum("Result", "Err", vec![msg]);
                 let cancel = self.to_wire(err)?;
-                self.executor_submit(h, args[0], Some(JobSettle { ch, cancel }), span)?;
+                self.executor_submit(
+                    h,
+                    "_submit_settled",
+                    args[0],
+                    Some(JobSettle { ch, cancel }),
+                    span,
+                )?;
                 Ok(Value::nil())
             }
             "shutdown" => {
@@ -3661,10 +3672,17 @@ impl Vm {
     pub(super) fn executor_submit(
         &mut self,
         h: GcRef,
+        method: &'static str,
         f: Value,
         settle: Option<JobSettle>,
         span: Span,
     ) -> Result<(), RuntimeError> {
+        // The job's closure crosses on the spawn path (`spawn_into`), so the method is a row of
+        // the one list the checker's capture floor reads (TICKET-246, fact A4).
+        debug_assert!(
+            super::CROSSING_CLOSURE_METHODS.contains(&("Executor", method)),
+            "Executor.{method} crosses a closure but has no row in CROSSING_CLOSURE_METHODS"
+        );
         let core = self.executor_core(h);
         // Cheap early reject so a shut executor costs no wiring work. Re-checked below under
         // the lock — this one is advisory, the one that decides is the atomic one.

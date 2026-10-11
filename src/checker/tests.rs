@@ -39365,3 +39365,123 @@ fn shared_has_a_read_method() {
         "import std.concurrency\nfn main():\n    s := Shared([1, 2, 3])\n    n := s.read(fn(l: List[int]) -> int: l.len())\n    print(n)\nmain()\n",
     );
 }
+
+/// TICKET-246 (Airlock, fact A4) — every row of `CROSSING_CLOSURE_METHODS` gets the capture floor:
+/// its closure runs in another heap, so a DIRECT write to a captured local is the D4 error at
+/// check time. Grid: row x {direct write in a literal closure, direct write in a closure value,
+/// write through a callee, read only, a closure that mutates only its parameter}.
+///
+/// The callee column is `ok` for every row: the floor reports a direct write only (measured,
+/// Digest section 10); that shape is the run-time D4 fault, a cell of
+/// `tests/chz/suites/box_grid_test.chz`. `RwShared.read` has no row (its closure runs in the
+/// reader's heap), so a captured write there stays `ok`.
+#[test]
+fn every_crossing_closure_method_reports_a_captured_write() {
+    // (owner, method, receiver setup, a call with `{F}` for the closure, the closure's parameter).
+    let user_rows = [
+        (
+            "Executor",
+            "submit",
+            "r := Executor(1)",
+            "r.submit({F})",
+            "",
+        ),
+        (
+            "Shared",
+            "update",
+            "r := Shared(1)",
+            "r.update({F})",
+            "x: int",
+        ),
+        (
+            "Shared",
+            "read",
+            "r := Shared(1)",
+            "_ := r.read({F})",
+            "x: int",
+        ),
+        (
+            "RwShared",
+            "write",
+            "r := RwShared(1)",
+            "r.write({F})",
+            "x: int",
+        ),
+    ];
+    for (owner, method, ..) in user_rows {
+        assert!(
+            crate::vm::CROSSING_CLOSURE_METHODS.contains(&(owner, method)),
+            "{owner}.{method} has no row"
+        );
+    }
+    // `_submit_settled` is std-internal: its row exists and its one caller checks clean.
+    assert!(crate::vm::CROSSING_CLOSURE_METHODS.contains(&("Executor", "_submit_settled")));
+    assert_eq!(
+        crate::vm::CROSSING_CLOSURE_METHODS.len(),
+        user_rows.len() + 1
+    );
+    entry_ok(
+        "import std.concurrency\nfn main():\n    ex := Executor(1)\n    ch := ex.submit_result(fn() -> int: 1)\n    print(ch.recv())\n    ex.shutdown()\nmain()\n",
+    );
+    for (owner, method, setup, call, param) in user_rows {
+        let ret = if param.is_empty() { "None" } else { "int" };
+        let tail = if param.is_empty() { "" } else { "x + " };
+        let program = |pre: &str, f: &str| {
+            format!(
+                "import std.concurrency\nfn keep(xs: List[int]) -> int:\n    xs.push(1)\n    return 1\nfn main():\n    seen: List[int] = []\n    {setup}\n{pre}    {}\n    print(seen)\nmain()\n",
+                call.replace("{F}", f)
+            )
+        };
+        let direct = format!("fn({param}): {tail}seen.remove_at(0)");
+        let value = format!("    f := fn({param}) -> {ret}: {tail}seen.remove_at(0)\n");
+        let value = if param.is_empty() {
+            "    f := fn(): seen.push(1)\n".to_string()
+        } else {
+            value
+        };
+        let direct = if param.is_empty() {
+            "fn(): seen.push(1)".to_string()
+        } else {
+            direct
+        };
+        let cell = |shape: &str, src: String, rejects: bool| {
+            let errs = check_entry(&src);
+            let hit = errs
+                .iter()
+                .any(|e| e.message.contains("is this task's copy"));
+            if rejects {
+                assert!(
+                    hit,
+                    "{owner}.{method} x {shape}: want the D4 error, got {errs:?}"
+                );
+            } else {
+                assert!(
+                    errs.is_empty(),
+                    "{owner}.{method} x {shape}: want ok, got {errs:?}"
+                );
+            }
+        };
+        cell("literal direct write", program("", &direct), true);
+        cell("closure value direct write", program(&value, "f"), true);
+        let callee = if param.is_empty() {
+            "fn(): keep(seen)".to_string()
+        } else {
+            format!("fn({param}): {tail}keep(seen)")
+        };
+        cell("write through a callee", program("", &callee), false);
+        let read = if param.is_empty() {
+            "fn(): print(seen.len())".to_string()
+        } else {
+            format!("fn({param}): {tail}seen.len()")
+        };
+        cell("read only", program("", &read), false);
+    }
+    // A closure that mutates only its PARAMETER is the point of the box: `ok`.
+    entry_ok(
+        "import std.concurrency\nfn bump(xs: List[int]) -> List[int]:\n    xs.push(1)\n    return xs\nfn main():\n    s := Shared([1])\n    s.update(fn(xs): bump(xs))\n    w := RwShared([1])\n    w.write(fn(xs): bump(xs))\n    print(s.read(fn(xs): xs.len()), w.get())\nmain()\n",
+    );
+    // No row: `RwShared.read` runs its closure in the reader's heap, so a captured write is legal.
+    entry_ok(
+        "import std.concurrency\nfn main():\n    seen: List[int] = []\n    w := RwShared(1)\n    n := w.read(fn(x: int) -> int: x + seen.remove_at(0))\n    print(n, seen)\nmain()\n",
+    );
+}

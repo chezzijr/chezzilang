@@ -3504,7 +3504,14 @@ impl Checker {
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
-                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                        self.check_crossing_closure_call(
+                            "Shared",
+                            method,
+                            &sig.params,
+                            sig.min_params,
+                            args,
+                            span,
+                        );
                         if method == "read" {
                             return self.recover_read_ret(args);
                         }
@@ -3651,7 +3658,14 @@ impl Checker {
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
-                        self.check_args_range(method, &sig.params, sig.min_params, args, span);
+                        self.check_crossing_closure_call(
+                            "RwShared",
+                            method,
+                            &sig.params,
+                            sig.min_params,
+                            args,
+                            span,
+                        );
                         if method == "read" {
                             return self.recover_read_ret(args);
                         }
@@ -3800,41 +3814,14 @@ impl Checker {
                 ) {
                     NativeHandleMethod::Generic(t) => t,
                     NativeHandleMethod::Concrete(sig) => {
-                        // A3b (B3.6): `submit`'s closure runs on a pool thread under `--parallel`, so
-                        // its captures cross the airlock exactly like a `spawn` task's. Push a capture
-                        // floor at the current scope depth around the argument check; the submitted
-                        // closure opens its own scope at that depth, so its params/locals are
-                        // task-local while any outer binding it reads is flagged by the `infer_ident`
-                        // read gate (mirrors `spawn:`).
-                        if method == "submit" {
-                            self.capture_floors.push(self.scopes.len());
-                            self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                            self.capture_floors.pop();
-                            if let Some(task) = args.first() {
-                                self.report_named_call_writes(task, &[], true);
-                                let mut writes: Vec<String> = match &task.kind {
-                                    ExprKind::Closure { body, .. } => self
-                                        .closure_literal_writes
-                                        .get(&(self.graph_module_idx, body.span))
-                                        .cloned()
-                                        .unwrap_or_else(|| {
-                                            std::mem::take(&mut self.last_closure_writes)
-                                                .into_iter()
-                                                .collect()
-                                        }),
-                                    _ => self.value_writes(task),
-                                };
-                                writes.sort();
-                                if let Some(written) = writes.first() {
-                                    self.error(
-                                        task.span,
-                                        format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
-                                    );
-                                }
-                            }
-                        } else {
-                            self.check_args_range(method, &sig.params, sig.min_params, args, span);
-                        }
+                        self.check_crossing_closure_call(
+                            "Executor",
+                            method,
+                            &sig.params,
+                            sig.min_params,
+                            args,
+                            span,
+                        );
                         sig.ret
                     }
                     NativeHandleMethod::Miss => {
@@ -4735,6 +4722,60 @@ fn type_apply_param_head(obj: &Expr) -> Option<String> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+impl Checker {
+    /// Check the arguments of the native handle method `owner.method`. When the pair is a row of
+    /// [`crate::vm::CROSSING_CLOSURE_METHODS`] its closure argument crosses into another heap
+    /// (an `Executor` job, a `Shared` / `RwShared` box closure), exactly like a `spawn` task's:
+    ///
+    /// 1. a capture floor at the current scope depth surrounds the argument check, so the closure's
+    ///    own params and locals are task-local and an outer binding it reads is a capture;
+    /// 2. a direct write to a captured local is the D4 error (`COPY_WRITE_TAIL`), for a literal
+    ///    closure and for a closure value alike.
+    ///
+    /// Known ceiling (measured, TICKET-246): a write through a callee is not seen here; it is the
+    /// run-time D4 fault.
+    pub(super) fn check_crossing_closure_call(
+        &mut self,
+        owner: &str,
+        method: &str,
+        params: &[Ty],
+        min_params: usize,
+        args: &[Expr],
+        span: Span,
+    ) {
+        if !crate::vm::CROSSING_CLOSURE_METHODS.contains(&(owner, method)) {
+            self.check_args_range(method, params, min_params, args, span);
+            return;
+        }
+        self.capture_floors.push(self.scopes.len());
+        self.check_args_range(method, params, min_params, args, span);
+        self.capture_floors.pop();
+        let Some(task) = args.first() else {
+            return;
+        };
+        self.report_named_call_writes(task, &[], true);
+        let mut writes: Vec<String> = match &task.kind {
+            ExprKind::Closure { body, .. } => self
+                .closure_literal_writes
+                .get(&(self.graph_module_idx, body.span))
+                .cloned()
+                .unwrap_or_else(|| {
+                    std::mem::take(&mut self.last_closure_writes)
+                        .into_iter()
+                        .collect()
+                }),
+            _ => self.value_writes(task),
+        };
+        writes.sort();
+        if let Some(written) = writes.first() {
+            self.error(
+                task.span,
+                format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
+            );
+        }
     }
 }
 
