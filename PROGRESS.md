@@ -9409,8 +9409,26 @@ Landed on the ticket branch:
   cells warn.
 
 Not landed yet: the `StructuralEq` bound on a generic `Atomic[T]` (plan step 6; `fn mk[T](v: T)
--> Atomic[T]` still checks, the D5 hole), the base-versus-tip report and the
-`benches/chz/hook_dispatch.chz` row (step 10).
+-> Atomic[T]` still checks, the D5 hole).
+
+Base (`1df21e89`) versus tip, release binaries, for every tracked file with a near-miss hook or
+both iteration hooks (last line of `chezzi test` / `chezzi run`):
+
+| file | base | tip | changed |
+|---|---|---|---|
+| `tests/chz/spec/eq_protocol_test.chz` | 15 passed | 15 passed | 3 new near-miss warnings on stderr |
+| `tests/chz/spec/eq_protocol_bound_dispatch_test.chz` | 8 passed | 8 passed | 2 new warnings on stderr |
+| `tests/chz/spec/intrinsic_proto_methods_test.chz` | `Both` iterated through `next` (`[2, 1, 0]`) | through `iter` (`[9]`); test rewritten as `iter_wins_over_next_for_every_iterable_consumer` | yes |
+| `tests/chz/spec/opt_carrier_test.chz` | 28 passed | 28 passed | no |
+| `tests/chz/suites/box_grid_test.chz` | 50 passed | 50 passed | no |
+| `examples/builtin_named_method.chz` | `[2, 4, 6]` | `[2, 4, 6]` | no |
+| `examples/protocols_5c.chz` | `99` | `99` | no |
+
+Rust-embedded both-hook programs: `Two` in `vm::golden_tests::for_over_pure_iterable_struct`
+went from the `next` golden `"100\n101\n"` to the `iter` golden `"999\n"`; `Odd`, `Bad` and `Both`
+in `checker::tests::a_nonconforming_next_is_an_ordinary_method` went from rejected (`Odd`, `Bad`)
+to checking clean. `tests/cancellation_point_grid.rs` renamed the operand of `PE.eq` and `PH.eq`
+from `o` to `other`, so each stays the `Eq` hook. Hit-path cost: `docs/benchmarks.md`, TICKET-250.
 
 `for` special-cases outside the decider, recorded for the owner's range / channel design (not
 touched): the range arm and the `Ty::Channel` arms of `Checker::for_bindings`

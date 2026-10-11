@@ -1,0 +1,32 @@
+# TICKET-250 — the hit path of two operator hooks: `==` through a conforming `eq`, and `Set.add`
+# through a conforming `hash` (plus `eq` on a collision). The hook table decides which method is
+# the hook; this measures what calling it costs.
+
+struct P:
+    v: int
+    fn eq(self, other: P) -> bool:
+        return self.v == other.v
+    fn hash(self) -> int:
+        return self.v
+
+fn eq_loop(n: int) -> int:
+    a := P(1)
+    b := P(1)
+    hits := 0
+    i := 0
+    while i < n:
+        if a == b:
+            hits += 1
+        i += 1
+    return hits
+
+fn set_loop(n: int) -> int:
+    s: Set[P] = Set([])
+    i := 0
+    while i < n:
+        s.add(P(i % 1000))
+        i += 1
+    return s.len()
+
+print(eq_loop(200000))
+print(set_loop(200000))
