@@ -39512,3 +39512,47 @@ fn inline_optional_never_satisfies_a_bound_through_its_payload() {
         "inline optional passed a bound unchecked in cells: {missed:?}"
     );
 }
+
+/// TICKET-250: a static method with a hook's name is not the hook, so the operator must reject it
+/// exactly as the matching protocol bound does.
+#[test]
+fn static_method_is_not_a_hook_for_the_operator() {
+    let cells = [
+        (
+            "index",
+            r"fn index(a: int, k: int) -> int:
+        return k",
+            "print(c[2])",
+        ),
+        (
+            "iter",
+            r"fn iter(a: int) -> Iterator[int]:
+        return [1].iter()",
+            r"for x in c:
+    print(x)",
+        ),
+        (
+            "contains",
+            r"fn contains(a: int, k: int) -> bool:
+        return true",
+            "print(2 in c)",
+        ),
+        (
+            "set_index",
+            r"fn set_index(a: int, k: int, v: int):
+        return",
+            "c[1] = 2",
+        ),
+    ];
+    let mut accepted = Vec::new();
+    for (hook, method, use_site) in cells {
+        let src = format!("struct C:\n    n: int\n    {method}\nc := C(1)\n{use_site}\n");
+        if check_src(&src).is_empty() {
+            accepted.push(hook);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "operator accepted a static hook: {accepted:?}"
+    );
+}
