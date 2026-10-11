@@ -425,10 +425,7 @@ impl Vm {
     /// Returns `"?"` for [`crate::vm::op::TID_NONE`] / an out-of-range id (defensive — every
     /// source-constructed struct has a registered `def.tid`, so this is unreachable for Display).
     pub(super) fn struct_name_of_tid(&self, tid: u32) -> &str {
-        self.program
-            .struct_names
-            .get(tid as usize)
-            .map_or("?", |s| s)
+        self.walk_src().struct_name_of_tid(tid)
     }
 
     /// M19 lever #2 — resolve a `variant_id` back to its `(enum-type, variant)` names on the COLD path

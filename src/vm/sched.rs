@@ -231,7 +231,83 @@ pub(super) enum SpawnHead {
     Receiver(ProtoId),
 }
 
+/// TICKET-246 — everything the copy walk reads, borrowed. The walk is `&self` over these five
+/// fields and nothing else, so one body serves a `Vm` encoding out of its own heap
+/// ([`Vm::walk_src`]) and a `RwShared` reader encoding out of a box heap it only borrows
+/// (TICKET-246 step 5). It never charges a heap: the caller charges its OWN.
+pub(super) struct WalkSrc<'a> {
+    pub(super) heap: &'a Heap,
+    pub(super) module_objs: &'a [GcRef],
+    pub(super) active_generators: &'a [GcRef],
+    pub(super) program: &'a Program,
+    pub(super) walk_base: usize,
+}
+
+impl<'a> WalkSrc<'a> {
+    fn err(&self, message: String, span: Span) -> RuntimeError {
+        super::exec::plain_err(message, span)
+    }
+
+    fn depth_exceeded_err(&self, span: Span) -> RuntimeError {
+        super::exec::depth_exceeded(span)
+    }
+
+    /// B3.3c — the index of a `home` module `GcRef` in the source's `module_objs`, so the receiver
+    /// can resolve the corresponding rebuilt module. `None` for a home not in the table.
+    pub(super) fn home_index(&self, home: GcRef) -> Option<usize> {
+        self.module_objs.iter().position(|&m| m == home)
+    }
+
+    /// Resolve a struct instance's `tid` to its type key. Returns `"?"` for
+    /// [`crate::vm::op::TID_NONE`] / an out-of-range id.
+    pub(super) fn struct_name_of_tid(&self, tid: u32) -> &'a str {
+        self.program
+            .struct_names
+            .get(tid as usize)
+            .map_or("?", |s| s)
+    }
+
+    /// Encode `v` for another heap, with the [`ensure_crossable`](Vm::ensure_crossable)
+    /// handle-reject backstop. A fault carries `span`.
+    pub(super) fn to_wire_crossable_memo(
+        &self,
+        v: Value,
+        span: Span,
+        memo: &mut WireMemo,
+    ) -> Result<WireValue, RuntimeError> {
+        let w = self
+            .to_wire_depth(v, 0, memo)
+            .map_err(|e| self.err(e.message, span))?;
+        ensure_crossable_wire(&w, span)?;
+        Ok(w)
+    }
+}
+
+/// The handle-reject backstop behind [`Vm::ensure_crossable`] and [`WalkSrc`].
+fn ensure_crossable_wire(w: &WireValue, span: Span) -> Result<(), RuntimeError> {
+    if w.has_handle() {
+        return Err(super::exec::plain_err(
+            "this task value can't cross a worker boundary — plain data, closures/functions, \
+             native/FFI fns, and Channel/Shared/Executor handles are sendable, but a module handle cannot cross"
+                .to_string(),
+            span,
+        ));
+    }
+    Ok(())
+}
+
 impl Vm {
+    /// The copy walk's source for this `Vm`'s own heap.
+    pub(super) fn walk_src(&self) -> WalkSrc<'_> {
+        WalkSrc {
+            heap: &self.heap,
+            module_objs: &self.module_objs,
+            active_generators: &self.active_generators,
+            program: &self.program,
+            walk_base: self.walk_base,
+        }
+    }
+
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
     /// the method form, the receiver) across the airlock, and register the task on the innermost
     /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. `fresh`
@@ -3675,8 +3751,7 @@ impl Vm {
         span: Span,
         memo: &mut WireMemo,
     ) -> Result<WireValue, RuntimeError> {
-        let w = self.to_wire_memo_at(v, span, memo)?;
-        self.ensure_crossable(&w, span)?;
+        let w = self.walk_src().to_wire_crossable_memo(v, span, memo)?;
         // W6-10 (sampling half) — charge the payload's off-heap bytes against the GC trigger so a
         // live `--max-heap` cap actually gets SAMPLED. `over_cap` is only evaluated in `sweep()`,
         // and `sweep()` only runs when `should_collect()` fires; a store loop that pushes megabytes
@@ -3739,6 +3814,19 @@ impl Vm {
         self.to_wire_depth(v, 0, &mut memo)
     }
 
+    /// [`WalkSrc::to_wire_depth`] over this `Vm`'s own heap.
+    #[inline]
+    fn to_wire_depth(
+        &self,
+        v: Value,
+        depth: usize,
+        memo: &mut WireMemo,
+    ) -> Result<WireValue, RuntimeError> {
+        self.walk_src().to_wire_depth(v, depth, memo)
+    }
+}
+
+impl WalkSrc<'_> {
     /// Depth-counted worker behind [`Vm::to_wire`]. A **self-referential** sendable (e.g. a struct
     /// whose field points back at itself) now ROUND-TRIPS via the identity-preserving id + `Backref`
     /// machinery (every container arm + `Cell`/`Closure`), so it never recurses unbounded. This depth
@@ -4250,7 +4338,9 @@ impl Vm {
             },
         })
     }
+}
 
+impl Vm {
     /// B3.0 — reconstruct a [`WireValue`] into a heap [`Value`] (the airlock's inbound half). Data
     /// arms `alloc` fresh objects into *this* `Vm`'s heap (mirroring the old deep_clone allocation);
     /// [`WireValue::Handle`] returns the same handle (by-reference preserved). `Map`/`Set` rebuild
@@ -5544,15 +5634,7 @@ impl Vm {
     /// module handle — a module's mutable globals can't be shared across an OS-thread heap boundary.
     /// (Source-unreachable: `module` is not a nameable type, so this is a defensive-only guard.)
     pub(super) fn ensure_crossable(&self, w: &WireValue, span: Span) -> Result<(), RuntimeError> {
-        if w.has_handle() {
-            return Err(self.err(
-                "this task value can't cross a worker boundary — plain data, closures/functions, \
-                 native/FFI fns, and Channel/Shared/Executor handles are sendable, but a module handle cannot cross"
-                    .to_string(),
-                span,
-            ));
-        }
-        Ok(())
+        ensure_crossable_wire(w, span)
     }
 
     /// Serialize a task's argument list across the airlock (read-only walk of this heap), rejecting any
@@ -5590,7 +5672,7 @@ impl Vm {
     /// B3.3c — the index of a `home` module `GcRef` in this VM's `module_objs`, so the worker can
     /// resolve the corresponding rebuilt module. `None` for a home not in the table (test fixtures).
     pub(super) fn home_index(&self, home: GcRef) -> Option<usize> {
-        self.module_objs.iter().position(|&m| m == home)
+        self.walk_src().home_index(home)
     }
 
     /// B3.3c — resolve a lowered home index to this (worker) VM's reconstructed module obj, falling

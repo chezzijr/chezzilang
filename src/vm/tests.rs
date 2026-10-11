@@ -22974,3 +22974,35 @@ fn the_settle_internals_reject_a_non_channel() {
         .expect_err("_submit_settled with a non-channel must fault");
     assert!(e.message.contains("requires a Channel"), "{}", e.message);
 }
+
+/// TICKET-246 — the copy walk reads a heap it only borrows: `WalkSrc` holds `&Heap` and the
+/// module table of ANOTHER `Vm`, and the value decodes into this one.
+#[test]
+fn walk_src_copies_out_of_a_heap_it_only_borrows() {
+    let mut owner = Vm::new(Arc::new(empty_program()));
+    let s = owner.heap.alloc(Obj::Str("s".into()));
+    let inner = owner
+        .heap
+        .alloc(Obj::List(vec![Value::int(1), Value::int(2)]));
+    let outer = owner
+        .heap
+        .alloc(Obj::List(vec![Value::obj(inner), Value::obj(s)]));
+    let src = super::sched::WalkSrc {
+        heap: &owner.heap,
+        module_objs: &owner.module_objs,
+        active_generators: &owner.active_generators,
+        program: &owner.program,
+        walk_base: 0,
+    };
+    let wire = src
+        .to_wire_crossable_memo(
+            Value::obj(outer),
+            Span::default(),
+            &mut super::sched::WireMemo::default(),
+        )
+        .expect("plain data crosses");
+    let mut reader = Vm::new(Arc::new(empty_program()));
+    assert_ne!(reader.heap.id(), owner.heap.id());
+    let copy = reader.from_wire(wire);
+    assert_eq!(reader.display(copy), "[[1, 2], 's']");
+}

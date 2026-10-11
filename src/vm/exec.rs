@@ -4,6 +4,30 @@
 use super::block::{self, Cut, Halt, OwnedScope, WakeSet};
 use super::*;
 
+/// A plain runtime fault: no assert, cap, timeout, deadlock or panic flag. Behind [`Vm::err`] and
+/// the copy walk (`WalkSrc`), which has no `Vm`.
+pub(super) fn plain_err(message: String, span: Span) -> RuntimeError {
+    RuntimeError {
+        message,
+        span,
+        is_assert: false,
+        is_over_memory: false,
+        is_timed_out: false,
+        is_deadlock: false,
+        is_panic: false,
+    }
+}
+
+/// Behind [`Vm::depth_exceeded_err`]; the one copy of the message.
+pub(super) fn depth_exceeded(span: Span) -> RuntimeError {
+    plain_err(
+        format!(
+            "maximum structural depth ({MAX_STRUCTURAL_DEPTH}) exceeded (cyclic data structure?)"
+        ),
+        span,
+    )
+}
+
 impl Vm {
     /// The stdout sink. DEFAULT (`host.stream == false`) = append to the captured `out` buffer:
     /// byte-identical to what every test helper and embedder has always seen. STREAM (`chezzi run`
@@ -194,25 +218,14 @@ impl Vm {
     }
 
     pub(super) fn err(&self, message: String, span: Span) -> RuntimeError {
-        RuntimeError {
-            message,
-            span,
-            is_assert: false,
-            is_over_memory: false,
-            is_timed_out: false,
-            is_deadlock: false,
-            is_panic: false,
-        }
+        plain_err(message, span)
     }
 
     /// The shared recoverable fault raised by every structural walker when recursion exceeds
     /// [`MAX_STRUCTURAL_DEPTH`] (cyclic data). Single source of truth for the message so it stays in
     /// sync with the constant; callers pass their own span.
     pub(super) fn depth_exceeded_err(&self, span: Span) -> RuntimeError {
-        self.err(
-            format!("maximum structural depth ({MAX_STRUCTURAL_DEPTH}) exceeded (cyclic data structure?)"),
-            span,
-        )
+        depth_exceeded(span)
     }
 
     /// B3.4 — set this VM's nursery cancel flag (if it runs under one), so sibling workers abort.
