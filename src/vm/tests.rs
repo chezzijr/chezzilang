@@ -23351,3 +23351,27 @@ fn a_method_miss_names_a_carrier_as_the_user_writes_it() {
         assert_eq!(got, expect, "src: {src}");
     }
 }
+
+/// TICKET-252: a hole's text is read once, as written. Expected values are CPython 3.12+ f-string output.
+#[test]
+fn interpolation_hole_text_is_read_once() {
+    let cells: Vec<(&str, &str)> = vec![
+        (
+            "a := \"{'\\\\n'}\"\nprint(a.len(), a == \"\\\\n\")\n",
+            "2 true\n",
+        ),
+        (
+            "line := \"a\\\\nb\"\nprint(\"{line.replace('\\\\n', ' ')}\")\n",
+            "a b\n",
+        ),
+        ("x := 5\nprint(\"\\u{7B}x\\u{7D}\")\n", "{x}\n"),
+        ("x := 5\nprint(\"\"\"{x +\n 1}\"\"\")\n", "6\n"),
+    ];
+    for (src, expect) in cells {
+        let got = match run_capture(src) {
+            Ok(o) => o,
+            Err(e) => e.message,
+        };
+        assert_eq!(got, expect, "src: {src}");
+    }
+}
