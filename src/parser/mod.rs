@@ -5765,6 +5765,17 @@ fn token_ends_range(t: &Token) -> bool {
             | Token::In
             | Token::Else
             | Token::Elif
+            | Token::For
+            | Token::If
+            | Token::BitOr
+            | Token::Caret
+            | Token::Amp
+            | Token::Shl
+            | Token::Shr
+            | Token::Plus
+            | Token::Star
+            | Token::Slash
+            | Token::Percent
     )
 }
 
@@ -10457,18 +10468,27 @@ mod tests {
             first_arm_pattern("match x:\n    -10..-5: print(1)\n    _: print(0)\n"),
             Pattern::Range {
                 start: -10,
-                end: -5
+                end: -5,
+                inclusive: false
             }
         );
         // Mixed range bounds: negative start, positive end.
         assert_eq!(
             first_arm_pattern("match x:\n    -10..5: print(1)\n    _: print(0)\n"),
-            Pattern::Range { start: -10, end: 5 }
+            Pattern::Range {
+                start: -10,
+                end: 5,
+                inclusive: false
+            }
         );
         // Positive start, negative end (still parses; semantics: empty range).
         assert_eq!(
             first_arm_pattern("match x:\n    0..-5: print(1)\n    _: print(0)\n"),
-            Pattern::Range { start: 0, end: -5 }
+            Pattern::Range {
+                start: 0,
+                end: -5,
+                inclusive: false
+            }
         );
         // Negatives compose with or-patterns.
         match first_arm_pattern("match x:\n    -1 | -2: print(1)\n    _: print(0)\n") {

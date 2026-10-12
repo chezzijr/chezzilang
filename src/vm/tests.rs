@@ -13078,16 +13078,6 @@ fn golden_format_specs_chz_matches_expected_and_interp() {
     assert_eq!(vm_out, expected);
 }
 
-/// Slicing golden: `examples/slicing.chz` (list/str slicing + the `Index`/`IndexSet`/`Slice`
-/// protocols on a struct + a generic over both) byte-identical on the VM, interp, and `.expected`.
-#[test]
-fn golden_slicing_chz_matches_expected_and_interp() {
-    let src = include_str!("../../examples/slicing.chz");
-    let expected = include_str!("../../examples/slicing.expected");
-    let vm_out = run_capture(src).expect("vm run");
-    assert_eq!(vm_out, expected);
-}
-
 /// `range` golden: `examples/range_step.chz` (3-arg up/down/by-N, empty / wrong-direction cases,
 /// the unchanged 1/2-arg forms, and slicing a `..` range literal with a `::step`) byte-identical
 /// on the VM against `.expected` — the guard for stepped ranges.

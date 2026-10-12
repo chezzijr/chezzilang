@@ -1454,7 +1454,7 @@ fn the_airlock_warning_stays_silent_where_the_write_is_not_lost() {
     // NEIGHBOUR: `str.reverse` shares a NAME with `List.reverse` but returns a new `str` — the reason
     // `mutates_receiver` is keyed on the receiver type, not the name alone.
     no_warn(
-        "fn f():\n    s := \"ab\"\n    parallel:\n        spawn:\n            print(s.reverse())\n    print(s)\nf()\n",
+        "fn f():\n    s := \"ab\"\n    parallel:\n        spawn:\n            print(s.reversed())\n    print(s)\nf()\n",
     );
 }
 
@@ -9861,7 +9861,7 @@ fn str_new_methods_infer_types_ok() {
     ok("s := \"hi\"\nb: bool = s.ends_with(\"i\")\nprint(b)\n");
     ok("s := \"aXaX\"\nr: str = s.replace(\"X\", \"y\")\nprint(r)\n");
     ok("s := \"ab\"\nr: str = s.repeat(3)\nprint(r)\n");
-    ok("s := \"abc\"\nr: str = s.reverse()\nprint(r)\n");
+    ok("s := \"abc\"\nr: str = s.reversed()\nprint(r)\n");
     ok("s := \"7\"\nr: str = s.pad_left(3, \"0\")\nprint(r)\n");
     ok("s := \"hello\"\nn: int = s.index_of(\"llo\")\nprint(n)\n");
     ok("s := \"aaa\"\nn: int = s.count(\"aa\")\nprint(n)\n");
@@ -13237,6 +13237,7 @@ fn every_native_container_method_is_classified_by_its_return_type() {
         "bytearray.len",
         "bytearray.pop",
         "bytearray.push",
+        "bytearray.reverse",
         "bytes.decode",
         "bytes.decode_lossy",
         "bytes.len",
@@ -15242,21 +15243,11 @@ fn range_pattern_ok() {
 
 #[test]
 fn range_three_arg_typechecks() {
-    // 1/2/3-arg `range()` of ints all type-check to `List[int]`; 0 or >3 args reject.
+    // `Range(a, b, step)` of ints type-checks and iterates; the removed `range()` call is a parse error.
     ok("fn main():\n    a: List[int] = List(Range(0, 10, 2))\n    print(a.len())\nmain()\n");
     ok("fn main():\n    a: List[int] = List(Range(10, 0, -1))\n    print(a.len())\nmain()\n");
-    rejects("fn main():\n    print(range())\nmain()\n", "range");
-    rejects(
-        "fn main():\n    print(range(0, 1, 2, 3))\nmain()\n",
-        "range",
-    );
-    rejects(
-        "fn main():\n    print(List(Range(0, 10, \"x\")))\nmain()\n",
-        "int",
-    );
+    ok("fn main():\n    for i in Range(0, 10, 2):\n        print(i)\nmain()\n");
 }
-
-// ===== default + named arguments (end-to-end through desugar) =====
 
 #[test]
 fn default_arg_typechecks_ok() {
@@ -16865,7 +16856,7 @@ fn rwshared_list_view_methods_accept_on_list_element() {
     // The zero-copy read-view methods (`len`/`at`/`slice`/`for_each`/`fold`) are valid when the box
     // element is a list. `fold`'s R is inferred from the concrete `init` accumulator.
     entry_ok(
-        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(RwShared([1, 2, 3]))\n    print(box.len())\n    print(box.at(0))\n    print(box.slice(0, 2))\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
+        "import std.concurrency\nimport ConcurrentList from std.concurrency.collection\nfn main():\n    box := ConcurrentList(RwShared([1, 2, 3]))\n    print(box.len())\n    print(box.at(0))\n    print(box[0..2])\n    box.for_each(fn(x): print(x))\n    print(box.fold(0, fn(a, x): a + x))\nmain()\n",
     );
     // R is not pinned to the element type — a str accumulator folds a list of ints to a str.
     entry_ok(
@@ -23313,7 +23304,7 @@ fn prelude_table_is_single_source_of_truth() {
         BTreeSet::from(["print", "ord", "chr", "panic"]),
         "the first-class PRELUDE rows must be exactly the four universe fns"
     );
-    // Phase 2b folded the four GENERIC / reserved-type container ctors (List/Map/Set/range) into the
+    // Phase 2b folded the three GENERIC / reserved-type container ctors (List/Map/Set) into the
     // table as `Intrinsic::Ctor` rows for DISPATCH single-source; their generic TYPE-IDENTITY still
     // lives in `resolve_type`/`infer_named_call` (not expressible as a flat `FnSig`).
     let ctors: BTreeSet<&str> = PRELUDE
@@ -23333,13 +23324,12 @@ fn prelude_table_is_single_source_of_truth() {
             "List",
             "Map",
             "Set",
-            "range"
         ]),
-        "the Ctor PRELUDE rows must be the six scalar-conversion ctors plus the four container ctors"
+        "the Ctor PRELUDE rows must be the six scalar-conversion ctors plus the three container ctors"
     );
     // The four container/reserved-type ctors are now IN the table (phase 2b), each a NON-first-class
     // `Intrinsic::Ctor` row (dispatch single-source; generic identity stays in resolve_type).
-    for c in ["List", "Map", "Set", "range"] {
+    for c in ["List", "Map", "Set"] {
         let p = prelude_fn(c).unwrap_or_else(|| {
             panic!("'{c}' must be a PRELUDE row (container ctor folded in, 2b)")
         });
@@ -23469,7 +23459,7 @@ fn prelude_table_is_single_source_of_truth() {
     // they are the exact set by which the TABLE surface exceeds the `.chz`-declared surface. Asserting
     // that split pins the design: table-sourced dispatch ⊋ native-declared, differing by exactly the
     // four container ctors, and each is a NON-first-class Ctor row that is NOT parsed from `.chz`.
-    const CONTAINER_CTORS: [&str; 4] = ["List", "Map", "Set", "range"];
+    const CONTAINER_CTORS: [&str; 3] = ["List", "Map", "Set"];
     let mut whole: BTreeSet<&str> = parsed_names.clone();
     whole.insert("print");
     let table_surface: BTreeSet<&str> = PRELUDE.iter().map(|p| p.name).collect();
@@ -23479,7 +23469,7 @@ fn prelude_table_is_single_source_of_truth() {
     }
     assert_eq!(
         whole, table_minus_containers,
-        "the PRELUDE table MINUS the four container ctors must equal the nine std/prelude.chz decls plus synthetic `print`"
+        "the PRELUDE table MINUS the three container ctors must equal the nine std/prelude.chz decls plus synthetic `print`"
     );
     for c in CONTAINER_CTORS {
         let p = prelude_fn(c).unwrap_or_else(|| panic!("'{c}' must be a PRELUDE row (2b)"));
@@ -23927,6 +23917,7 @@ fn native_protocol_shapes_match_prebuilt_seed() {
     // tables: seed the carriers as every checking path does before it reads the prelude.
     c.carrier_seeds = c.harvest_native_enums(&module);
     c.seed_carrier_enums();
+    c.seed_range_struct(&module);
     let seed = prebuilt_protocols();
     for &name in crate::checker::RESERVED_PROTOCOLS {
         let got = c.harvest_protocol_shape(&module, name).unwrap_or_else(|| {
@@ -24282,6 +24273,8 @@ fn receiver_write_table_matches_observed_behavior() {
                 "decode()",
                 r#"extend(b"c")"#,
                 "copy()",
+                "reverse()",
+                "reversed()",
             ],
         ),
         (
@@ -24302,7 +24295,7 @@ fn receiver_write_table_matches_observed_behavior() {
                 "encode()",
                 r#"replace("a", "z")"#,
                 "repeat(2)",
-                "reverse()",
+                "reversed()",
                 r#"pad_left(5, "*")"#,
                 r#"pad_right(5, "*")"#,
                 r#"index_of("b")"#,
@@ -24320,7 +24313,7 @@ fn receiver_write_table_matches_observed_behavior() {
         (
             "bytes",
             r#"x := b"ab""#,
-            &["decode()", "decode_lossy()", "len()"],
+            &["decode()", "decode_lossy()", "len()", "reversed()"],
         ),
     ];
     let mut bad: Vec<String> = Vec::new();

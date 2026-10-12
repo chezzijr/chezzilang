@@ -785,12 +785,19 @@
 <stmtTail>    ::= <recoverExpr> | <tailIf> | <tailClosure>
                 | <prefixOp> <tailUnary>
                 | <cmpExpr> <binOp> <tailUnary>
+                | <tailRange>
                 | "NOT" <tailNot>
                 | <orExpr> "OR" <tailNot> | <orExpr> "AND" <tailNot>
-<tailNot>     ::= <tailUnary> | <cmpExpr> <binOp> <tailUnary> | "NOT" <tailNot>
+<tailNot>     ::= <tailUnary> | <cmpExpr> <binOp> <tailUnary> | <tailRange> | "NOT" <tailNot>
+# A range whose end bound is a block expression (`a..recover: ...`, `..match n: ...`): the bound
+# before `..` is a <bitOrExpr>, never a range, because `..` does not chain.
+# An `if` after `..` ends the range instead (`[x for x in 5.. if x > 2]`), so the bound is no <tailIf>.
+<tailRange>   ::= <bitOrExpr> <rangeOp> <rangeTail> | <rangeOp> <rangeTail>
+<rangeTail>   ::= <matchExpr> | <recoverExpr> | <tailClosure> | <prefixOp> <tailUnary>
+<rangeOp>     ::= "DOTDOT" | "DOTDOTEQ"
 <tailUnary>   ::= <matchExpr> | <recoverExpr> | <tailIf> | <tailClosure> | <prefixOp> <tailUnary>
 <prefixOp>    ::= "MINUS" | "BANG" | "QUESTION" | "QUESTIONQUESTION"
-<binOp>       ::= <cmpOp> | "BITOR" | "CARET" | "AMP" | "SHL" | "SHR" | "DOTDOT" | "PLUS" | "MINUS" | "STAR" | "SLASH" | "PERCENT" | "QUESTIONQUESTION"
+<binOp>       ::= <cmpOp> | "BITOR" | "CARET" | "AMP" | "SHL" | "SHR" | "PLUS" | "MINUS" | "STAR" | "SLASH" | "PERCENT" | "QUESTIONQUESTION"
 <tailIf>      ::= "IF" <expr> "COLON" <expr> <tailIfTail>
 <tailIfTail>  ::= "ELSE" "COLON" <tailExpr> | "ELIF" <expr> "COLON" <expr> <tailIfTail>
 <tailClosure> ::= <closureHead> <tailExpr>

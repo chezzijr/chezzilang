@@ -509,6 +509,11 @@ impl Vm {
         // named-field constructor before codegen), so split them straight in — no per-field name
         // strings, no zip with `def.fields`. `argc == def.fields.len()` is checked above.
         let fields: Vec<Value> = self.stack.split_off(at);
+        // TICKET-253: `Range(a, b, 0)` faults where it is built, however it is built.
+        if name == self.program.range_key && fields.get(2).and_then(|s| self.int_val(*s)) == Some(0)
+        {
+            return Err(self.err("Range() step cannot be zero".to_string(), span));
+        }
         let h = self.heap.alloc(Obj::Struct {
             tid: def.tid,
             fields: Fields::from_vec(fields),

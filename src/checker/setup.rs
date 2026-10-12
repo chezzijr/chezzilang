@@ -4880,21 +4880,7 @@ impl Checker {
         // `Result[T, E]`, and those resolve through the enum tables.
         self.carrier_seeds = self.harvest_native_enums(&module);
         self.seed_carrier_enums();
-        // TICKET-253 — `Range` is a struct of the prelude that every module sees with no `import`
-        // (the resolver adds `import Range from std.prelude` on the graph path). The graph-less path
-        // hoists its declaration straight into this checker so `Range(0, 3)` resolves here too.
-        let range_decl: Vec<Stmt> = module
-            .stmts
-            .iter()
-            .filter(|s| matches!(&s.kind, StmtKind::Struct { name, .. } if name == "Range"))
-            .cloned()
-            .collect();
-        let outer = std::mem::replace(&mut self.current_module_is_stdlib, true);
-        self.hoist(&range_decl);
-        self.current_module_is_stdlib = outer;
-        if let Some(info) = self.structs.get("Range").cloned() {
-            self.bind_imported_struct_name("Range", "Range", &info);
-        }
+        self.seed_range_struct(&module);
         for s in &module.stmts {
             if let StmtKind::Native(decl) = &s.kind {
                 self.register_native_decl(decl);
@@ -4917,6 +4903,25 @@ impl Checker {
             }
         }
         self.adopt_reserved_protocol_labels(&module);
+    }
+
+    /// TICKET-253 — `Range` is a struct of the prelude that every module sees with no `import`
+    /// (the resolver adds `import Range from std.prelude` on the graph path). The graph-less path
+    /// hoists its declaration straight into this checker so `Range(0, 3)` resolves here too.
+    #[cfg(test)]
+    pub(super) fn seed_range_struct(&mut self, module: &crate::ast::Module) {
+        let range_decl: Vec<Stmt> = module
+            .stmts
+            .iter()
+            .filter(|s| matches!(&s.kind, StmtKind::Struct { name, .. } if name == "Range"))
+            .cloned()
+            .collect();
+        let outer = std::mem::replace(&mut self.current_module_is_stdlib, true);
+        self.hoist(&range_decl);
+        self.current_module_is_stdlib = outer;
+        if let Some(info) = self.structs.get("Range").cloned() {
+            self.bind_imported_struct_name("Range", "Range", &info);
+        }
     }
 
     /// Is this surface extern `Type` a RETURN-ONLY marshalling form (`owned_str`, `str?`, or

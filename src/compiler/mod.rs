@@ -8422,9 +8422,18 @@ mod capture_layout_tests {
                 .filter(|op| matches!(op, Op::ConstStr(s) if s.contains("fell off the end")))
                 .count()
         };
-        assert_eq!(traps("fn a() -> int:\n    return 1\nprint(a())\n"), 1);
-        assert_eq!(traps("fn b():\n    print(1)\nb()\n"), 0);
-        assert_eq!(traps("type N = None\nfn f() -> N:\n    print(1)\nf()\n"), 0);
+        // A standalone module also carries the prelude's `Range` methods (TICKET-253): count against
+        // the program that holds only those.
+        let base = traps("print(1)\n");
+        assert_eq!(
+            traps("fn a() -> int:\n    return 1\nprint(a())\n"),
+            base + 1
+        );
+        assert_eq!(traps("fn b():\n    print(1)\nb()\n"), base);
+        assert_eq!(
+            traps("type N = None\nfn f() -> N:\n    print(1)\nf()\n"),
+            base
+        );
     }
 
     #[test]

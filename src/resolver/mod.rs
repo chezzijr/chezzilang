@@ -687,6 +687,12 @@ impl Builder {
                 });
             }
         }
+        // The span of the import no one wrote: no source position, and no editor probe, equals it.
+        const NOWHERE: Span = Span {
+            line: u32::MAX,
+            col: u32::MAX,
+            file: 0,
+        };
         // TICKET-253: `Range` is a struct of `std.prelude` that every module sees with no `import`
         // line. The one seam that makes it so: each module but the prelude itself resolves the import
         // `import Range from std.prelude`, so the checker, compiler and VM carry the type through the
@@ -699,9 +705,9 @@ impl Builder {
                 import: Import::From {
                     path: prelude_path,
                     names: vec![("Range".to_string(), None)],
-                    name_spans: vec![Span::RUNTIME],
+                    name_spans: vec![NOWHERE],
                 },
-                span: Span::RUNTIME,
+                span: NOWHERE,
             });
         }
         self.on_stack.pop();

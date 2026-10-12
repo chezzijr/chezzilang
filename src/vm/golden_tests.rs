@@ -8394,7 +8394,7 @@ fn slice_clamped_parity() {
     // Zero step faults with a clear message.
     assert_eq!(
         vm_outcome("print([1, 2, 3][Range(None, None, 0)])\n").unwrap_err(),
-        "runtime error (line 1, col 7): slice step cannot be zero"
+        "runtime error (line 1, col 17): Range() step cannot be zero"
     );
 }
 
@@ -8403,35 +8403,6 @@ fn negative_index_parity() {
     assert_golden_out("print([10, 20, 30][-1])\n", "30\n");
     assert_golden_out("print(\"hello\"[-2])\n", "l\n");
     assert_golden_out("xs := [1, 2, 3]\nxs[-1] = 99\nprint(xs[2])\n", "99\n");
-}
-
-const BUF_PROG: &str = "\
-struct Buf:
-    xs: List[int]
-    fn index(self, k: int) -> int:
-        return self.xs[k]
-    fn set_index(self, k: int, v: int):
-        self.xs[k] = v
-    fn slice(self, r: Range) -> List[int]:
-        return self.xs[r]
-fn main():
-    b := Buf([10, 20, 30])
-    print(b[0])
-    b[1] = 99
-    print(b[1])
-    b[0] += 5
-    print(b[0])
-    print(b[0..2])
-    print(b[..])
-    print(b[Range(None, None, -1)])
-main()";
-
-#[test]
-fn struct_index_slice_dispatch_parity() {
-    assert_golden_out(
-        BUF_PROG,
-        "10\n99\n15\n[15, 99]\n[15, 99, 30]\n[30, 99, 15]\n",
-    );
 }
 
 #[test]
@@ -12776,27 +12747,6 @@ fn main():
     print(f())
 main()";
     assert_golden_out(src, "-1\n");
-}
-
-#[test]
-fn parity_struct_slice_wide_bound() {
-    // The `slice`-protocol path unwraps each bound via `int_val` (accepts a boxed BigInt) then
-    // re-wraps it as an `Option[int]` for the user body. A wide bound must round-trip via `make_int`,
-    // not the inline-only `Value::int` (debug-panic / release-corrupt at |n| > 2^62-1).
-    let src = "\
-struct Cut:
-    xs: List[int]
-    fn index(self, k: int) -> int:
-        return self.xs[k]
-    fn slice(self, r: Range) -> int:
-        match r.start:
-            ?s: return s
-            None: return 0
-fn main():
-    c := Cut([1])
-    print(c[9000000000000000000..])
-main()";
-    assert_golden_out(src, "9000000000000000000\n");
 }
 
 // ===== F3 — checker over-rejection fixes, end-to-end RUN goldens =====

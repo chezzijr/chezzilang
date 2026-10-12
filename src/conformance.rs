@@ -376,6 +376,9 @@ fn parser_rules_match_fns() {
         "parse_unary",
         "parse_postfix",
         "parse_subscript",
+        // `parse_range_end` reads the end bound of a range whose operator was just consumed; the
+        // `<rangeExpr>` rule is `parse_bp`'s (the operator is an infix level there).
+        "parse_range_end",
         "parse_bracket",
         "parse_call_args",
         "parse_type_postfix",
