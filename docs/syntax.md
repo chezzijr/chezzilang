@@ -4312,7 +4312,8 @@ its code in place with the same rules as the code around it. Three rules follow:
 
 1. **A nested literal may use the enclosing quote**, as in CPython 3.12+: `"{d["k"]}"` is the value at
    key `k`, and `"{"{x}"}"` nests an interpolated literal. A hole may nest up to **149** levels
-   (CPython 3.14's limit); the 150th is `too many nested interpolated strings`.
+   (CPython 3.14's limit); the 150th is `too many nested interpolated strings`. A hole spends the
+   expression-depth budget of the expression around it, one level like a parenthesis.
 2. **There is no backslash in hole code.** `"{d[\"k\"]}"` and `"{x\t+ 1}"` are errors that name the fix
    (write the quote directly). Escapes exist in a literal's own text and in a format spec's text, and
    inside a nested literal, where they resolve once: `"{'\\n'.len()}"` is `2`.
