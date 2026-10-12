@@ -389,23 +389,46 @@ fn composed_interp_depth_is_bounded_globally() {
     // (a0) THE TIGHT one, and a FIXED number on purpose. A cap-relative fixture cannot see a
     // narrowing narrower than its own slack, so it would miss exactly the regression this arm
     // exists for: charging an interpolation level twice cost ~2 nodes and pushed a lone
-    // `x := "{ 1+1×15996 }".len()` — inside the parser's own flat ceiling of 15 997 — over the cap.
-    // 15 996 is the last folds count that builds; it must keep building.
-    let lone = t.write(
-        "interp_lone.chz",
-        "x := \"{ 1{} }\".len()\n"
-            .replace("{}", &"+1".repeat(15_996))
-            .as_str(),
-    );
-    let out = Command::new(env!("CARGO_BIN_EXE_chezzi"))
-        .args(["check", lone.to_str().unwrap()])
-        .output()
-        .expect("run chezzi check");
+    // `x := "{ 1+1×N }".len()` — inside the parser's own flat ceiling of 15 997 — over the cap.
+    //
+    // Re-pinned by TICKET-252 from 15 996 to 15 993. A hole now parses on the SAME parser and
+    // costs one depth level, like a parenthesis; the old number was an under-count (a hole
+    // accepted a deeper chain than the same chain in parentheses). Last folds count that builds,
+    // measured with `chezzi check` on both binaries:
+    //
+    //   shape                    before TICKET-252   since TICKET-252
+    //   x := 1+1..                    15 997              15 997
+    //   x := (1+1..)                  15 995              15 995
+    //   x := "{1+1..}"                15 998              15 995
+    //   x := "{1+1..}".len()          15 996              15 993
+    //
+    // 15 993 must keep building. 15 996 must stay refused: a depth discount per hole would let
+    // nested holes, which recurse on one Rust stack, spend more than the one shared budget.
+    let lone_check = |folds: usize| {
+        let lone = t.write(
+            "interp_lone.chz",
+            "x := \"{ 1{} }\".len()\n"
+                .replace("{}", &"+1".repeat(folds))
+                .as_str(),
+        );
+        Command::new(env!("CARGO_BIN_EXE_chezzi"))
+            .args(["check", lone.to_str().unwrap()])
+            .output()
+            .expect("run chezzi check")
+    };
+    let out = lone_check(15_993);
     assert!(
         out.status.success(),
-        "a LONE 15 996-fold interpolation fragment must still build — the composed bound is \
-         charging an interpolation level more than the one AST level it occupies: {}",
+        "a LONE 15 993-fold interpolation fragment must still build — the composed bound is \
+         charging an interpolation level more than a parenthesis costs: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    let out = lone_check(15_996);
+    assert!(
+        out.status.code() == Some(1) && String::from_utf8_lossy(&out.stderr).contains("too deeply"),
+        "a LONE 15 996-fold interpolation fragment must be refused with a depth diagnostic — a \
+         hole is spending less of the shared budget than a parenthesis, got {:?}",
+        out.status
     );
 
     // (a) NO OVER-REJECTION, near the boundary: one level, ~cap−95 nodes deep, still runs. The
