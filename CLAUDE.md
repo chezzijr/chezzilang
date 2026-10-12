@@ -113,6 +113,11 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   `vm/{exec,arith,call,sched,netio,stmt}.rs`), plus `gc`, `native` (builtins / std),
   `resolver` (module paths). (The tree-walk `interp` engine has been removed.)
 - Keep modules small and single-purpose.
+- **No wildcard arm on an enum in library or binary code.** `Cargo.toml` denies
+  `clippy::wildcard_enum_match_arm`; add an exhaustive classifier on the enum first, name the variants
+  second, and raise `PINNED_ALLOWS` in `tests/wildcard_enum_lint_gate.rs` for an `#[allow]` (with a
+  one-line reason at the site). Test code is out of scope. Do not turn the `match` into `if let` or
+  `matches!` on the raw enum to silence the lint. See `docs/lessons.md` §4.
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global
   reserved namespace.** The global surface stays minimal: scalars, `tuple`, `range`, `Channel`,
   `T!E`/`T?`/`Iterator`, structural protocols. (`timer(ms)` moved to `import std.time`; `Shared`/

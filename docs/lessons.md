@@ -290,6 +290,17 @@ the freeze.
   enum with no wildcard, in one function every walker reads (`aliases_operand`), so a new operator
   does not compile until it is classified. Default an unnamed kind to "holds": that costs a false
   fault, the other default costs a lost write.
+- **No wildcard arm on an enum in non-test code (TICKET-251).** A `_ =>` arm on a language enum gives
+  every variant added later the old behaviour and the build stays green: TICKET-247's `Unary` arm and
+  S3-4's `stmt_expr_recover_blocks` (`_ => {}` that omits `StmtKind::Assert`) are the same defect.
+  `Cargo.toml` `[lints.clippy]` denies `clippy::wildcard_enum_match_arm` for the library and the
+  binaries; `tests/wildcard_enum_lint_gate.rs` runs `cargo clippy --lib --bins --features lsp` inside
+  `cargo test`, so the suite gate sees it. Resolve a flagged arm in this order: (1) one exhaustive
+  classifier on the enum that every site calls (`Obj::as_list`, `Obj::as_enum`, `ExprKind::as_ident`,
+  `ExprKind::is_named_head`); (2) the named variants; (3) an `#[allow]` with a one-line reason at the
+  `match`, and a raised `PINNED_ALLOWS` in the gate test. Do not rewrite a flagged `match` as `if let`,
+  `let ... else` or `matches!` on the raw enum: those absorb a new variant the same way and the lint
+  does not see them. A foreign `#[non_exhaustive]` enum keeps its `_`.
 - **D4's "task copy" mark approximates the wrong property, and "is a write" has two owners.** The
   runtime marks everything *rebuilt by the airlock walk* (spawn args, captures, a started generator's
   frame), but D4's claim is about writes *the parent could observe*; a fresh `spawn work([], out)`
