@@ -239,9 +239,13 @@ pub fn word_end_col(source: &str, line1: usize, col1: usize) -> u32 {
     let chars: Vec<char> = line.chars().collect();
     let at = |i: usize| chars.get(i).copied();
     let is_quote = |c: Option<char>| matches!(c, Some('"' | '\''));
-    let end = if is_quote(at(col0))
-        || (matches!(at(col0), Some('b' | 'B' | 'r' | 'R')) && is_quote(at(col0 + 1)))
-    {
+    let end = if is_quote(at(col0)) {
+        // A plain `str` literal may hold holes with nested literals of its own quote, so its
+        // extent is the lexer's: the one place that knows where a hole ends. A literal the lexer
+        // cannot close on this line (unterminated, or a hole that runs on) stops at end of line.
+        let rest: String = chars[col0..].iter().collect();
+        col0 + crate::lexer::literal_len(&rest).unwrap_or(chars.len() - col0)
+    } else if matches!(at(col0), Some('b' | 'B' | 'r' | 'R')) && is_quote(at(col0 + 1)) {
         col0 + measure_string(&chars, col0)
     } else if matches!(at(col0), Some(c) if c.is_ascii_digit()) {
         col0 + measure_number(&chars, col0)
@@ -349,7 +353,8 @@ fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(u32, u32)> {
             Token::Int(_) | Token::IntMinMagnitude | Token::Float(_) => {
                 measure_number(&chars, start_abs)
             }
-            Token::Str(_) | Token::RawStr(_) | Token::Bytes(_) => measure_string(&chars, start_abs),
+            Token::Str(s) => s.len,
+            Token::RawStr(_) | Token::Bytes(_) => measure_string(&chars, start_abs),
             other @ Token::Fn
             | other @ Token::Return
             | other @ Token::If
@@ -544,7 +549,11 @@ fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
             Token::Int(_) | Token::IntMinMagnitude | Token::Float(_) => {
                 (NUMBER, measure_number(&chars, start_abs))
             }
-            Token::Str(_) | Token::RawStr(_) | Token::Bytes(_) => {
+            Token::Str(s) => {
+                string_extents.push((start_abs, start_abs + s.len));
+                (STRING, s.len)
+            }
+            Token::RawStr(_) | Token::Bytes(_) => {
                 let l = measure_string(&chars, start_abs);
                 string_extents.push((start_abs, start_abs + l));
                 (STRING, l)
@@ -1248,9 +1257,11 @@ fn measure_number(chars: &[char], start: usize) -> usize {
     i - start
 }
 
-/// Char-length of the string literal starting at `start`, covering the optional `b`/`r` prefix,
-/// single/triple quotes of either style, and (for non-raw strings) backslash escapes. An unterminated
-/// literal is measured to end-of-input (or end-of-line for a single-quoted one).
+/// Char-length of the `b"…"` / `r"…"` literal starting at `start`, covering the prefix, single/triple
+/// quotes of either style, and (for a byte string) backslash escapes. An unterminated literal is
+/// measured to end-of-input (or end-of-line for a single-quoted one). Neither kind holds an
+/// interpolation hole, so a quote scan is exact for them; a plain `str` literal's extent is
+/// `StrLit::len`, which only the lexer can know (a hole may nest a literal of the same quote).
 fn measure_string(chars: &[char], start: usize) -> usize {
     let at = |i: usize| chars.get(i).copied();
     let mut i = start;
@@ -1394,33 +1405,71 @@ pub fn tmlanguage_json() -> String {
     o.push_str("      ]\n");
     o.push_str("    },\n");
 
-    // strings
+    // strings. A `b"…"` / `r"…"` literal has no hole, so its rules are verbatim. A plain literal
+    // may hold `{expr}` holes, and a hole may nest a literal of the SAME quote (`"{d["k"]}"`): its
+    // rules skip `{{` / `}}`, and a hole is a begin/end region that includes `#strings` again, so
+    // the inner quote opens a nested string instead of ending the outer one.
+    let esc = format!(
+        "{{ \"name\": \"constant.character.escape.chezzi\", \"match\": {} }}",
+        json_str_lit("\\\\.")
+    );
+    let hole = format!(
+        "{{ \"match\": {} }}, {{ \"name\": \"meta.interpolation.chezzi\", \"begin\": {}, \"end\": {}, \"patterns\": [ {{ \"include\": \"#strings\" }}, {{ \"begin\": {}, \"end\": {} }} ] }}",
+        json_str_lit("\\{\\{|\\}\\}"),
+        json_str_lit("\\{"),
+        json_str_lit("\\}"),
+        json_str_lit("\\{"),
+        json_str_lit("\\}"),
+    );
+    // (name, begin, end, escapes, holes)
+    let rules: [(&str, &str, &str, bool, bool); 8] = [
+        (
+            "string.quoted.triple.chezzi",
+            "[bBrR]\"\"\"",
+            "\"\"\"",
+            false,
+            false,
+        ),
+        (
+            "string.quoted.triple.chezzi",
+            "\"\"\"",
+            "\"\"\"",
+            false,
+            true,
+        ),
+        (
+            "string.quoted.triple.chezzi",
+            "[bBrR]'''",
+            "'''",
+            false,
+            false,
+        ),
+        ("string.quoted.triple.chezzi", "'''", "'''", false, true),
+        ("string.quoted.double.chezzi", "[bBrR]\"", "\"", true, false),
+        ("string.quoted.double.chezzi", "\"", "\"", true, true),
+        ("string.quoted.single.chezzi", "[bBrR]'", "'", true, false),
+        ("string.quoted.single.chezzi", "'", "'", true, true),
+    ];
     o.push_str("    \"strings\": {\n");
     o.push_str("      \"patterns\": [\n");
-    o.push_str("        { \"name\": \"string.quoted.triple.chezzi\", \"begin\": ");
-    o.push_str(&json_str_lit("[bBrR]?\"\"\""));
-    o.push_str(", \"end\": ");
-    o.push_str(&json_str_lit("\"\"\""));
-    o.push_str(" },\n");
-    o.push_str("        { \"name\": \"string.quoted.triple.chezzi\", \"begin\": ");
-    o.push_str(&json_str_lit("[bBrR]?'''"));
-    o.push_str(", \"end\": ");
-    o.push_str(&json_str_lit("'''"));
-    o.push_str(" },\n");
-    o.push_str("        { \"name\": \"string.quoted.double.chezzi\", \"begin\": ");
-    o.push_str(&json_str_lit("[bBrR]?\""));
-    o.push_str(", \"end\": ");
-    o.push_str(&json_str_lit("\""));
-    o.push_str(", \"patterns\": [ { \"name\": \"constant.character.escape.chezzi\", \"match\": ");
-    o.push_str(&json_str_lit("\\\\."));
-    o.push_str(" } ] },\n");
-    o.push_str("        { \"name\": \"string.quoted.single.chezzi\", \"begin\": ");
-    o.push_str(&json_str_lit("[bBrR]?'"));
-    o.push_str(", \"end\": ");
-    o.push_str(&json_str_lit("'"));
-    o.push_str(", \"patterns\": [ { \"name\": \"constant.character.escape.chezzi\", \"match\": ");
-    o.push_str(&json_str_lit("\\\\."));
-    o.push_str(" } ] }\n");
+    for (i, (name, begin, end, escapes, holes)) in rules.iter().enumerate() {
+        o.push_str(&format!(
+            "        {{ \"name\": \"{name}\", \"begin\": {}, \"end\": {}",
+            json_str_lit(begin),
+            json_str_lit(end)
+        ));
+        let mut inner: Vec<&str> = Vec::new();
+        if *escapes {
+            inner.push(&esc);
+        }
+        if *holes {
+            inner.push(&hole);
+        }
+        if !inner.is_empty() {
+            o.push_str(&format!(", \"patterns\": [ {} ]", inner.join(", ")));
+        }
+        o.push_str(if i + 1 < rules.len() { " },\n" } else { " }\n" });
+    }
     o.push_str("      ]\n");
     o.push_str("    },\n");
 
@@ -1571,6 +1620,39 @@ mod tests {
             semantic_tokens(&format!("\u{feff}{src}")),
             semantic_tokens(src)
         );
+    }
+
+    /// TICKET-252 -- a string token's extent is the lexer's: a hole may nest a literal of the SAME
+    /// quote (`"{d["k"]}"`), so a quote scan would end the string at the inner quote. The semantic
+    /// token, the caret width (`word_end_col`) and a `# comment` after the literal all agree.
+    #[test]
+    fn a_string_token_extent_covers_a_same_quote_hole() {
+        // line 1: print("{d["k"]}") # c      `"` col 7 .. closing `"` col 16 (1-based)
+        let src = "print(\"{d[\"k\"]}\") # c\n";
+        let strings: Vec<_> = semantic_tokens(src)
+            .into_iter()
+            .filter(|t| t.token_type == STRING)
+            .collect();
+        assert_eq!(strings.len(), 1, "one string token, got {strings:?}");
+        assert_eq!(
+            (strings[0].line, strings[0].start, strings[0].len),
+            (0, 6, 10)
+        );
+        // The caret of a diagnostic at the opening quote spans the whole literal: 0-based end col 16.
+        assert_eq!(word_end_col(src, 1, 7), 16);
+        // The `#` after the literal is a comment, and the `#` inside a nested literal is not.
+        let src = "print(\"{'#'}\") # c\n";
+        let comment_starts: Vec<_> = semantic_tokens(src)
+            .into_iter()
+            .filter(|t| t.token_type == COMMENT)
+            .map(|t| t.start)
+            .collect();
+        assert_eq!(comment_starts, vec![15]);
+        // A literal that runs on past the line is measured to the end of the line, as before.
+        assert_eq!(word_end_col("x := \"{a\n", 1, 6), 8);
+        // A nested chain of holes deeper than the one-line allowance falls back to the line's end.
+        let deep = format!("{}x{}", "\"{".repeat(20), "}\"".repeat(20));
+        assert_eq!(word_end_col(&deep, 1, 1) as usize, deep.chars().count());
     }
 
     #[test]

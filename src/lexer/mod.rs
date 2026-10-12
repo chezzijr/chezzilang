@@ -394,6 +394,9 @@ pub const ESCAPES: [(char, char); 7] = [
 /// 3.14.7 accepts 149 levels and rejects 150 ("too many nested f-strings or t-strings").
 pub const MAX_HOLE_NEST: usize = 149;
 
+/// The holes [`literal_len`] follows: far below [`MAX_HOLE_NEST`], and beyond what a line holds.
+pub const ONE_LINE_HOLE_NEST: usize = 8;
+
 /// A token paired with where it came from. The lexer emits these; the `Token` payload is the
 /// `kind`. (`tokens` CLI output prints only `kind`, so M1 output is unchanged.)
 #[derive(Debug, Clone, PartialEq)]
@@ -1989,6 +1992,23 @@ impl Lexer {
 /// Convenience free function: `lexer::tokenize(src)`.
 pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
     Lexer::new(source).tokenize()
+}
+
+/// The length in source chars of the plain `str` literal that starts `rest_of_line` (a `"` or `'`
+/// is its first char), delimiters included, or `None` when the lexer cannot close it within
+/// `rest_of_line`. The one answer to "where does this literal end": a caret width and an LSP token
+/// extent ask here, so neither scans for a quote itself. It lexes ONE line, so a literal that runs
+/// onto the next line is `None`, and it allows [`ONE_LINE_HOLE_NEST`] levels of nested holes: the
+/// editor calls it on a small thread stack, where the full [`MAX_HOLE_NEST`] recursion is not safe.
+pub fn literal_len(rest_of_line: &str) -> Option<usize> {
+    let mut lexer = Lexer::new(rest_of_line);
+    lexer.hole_nest = MAX_HOLE_NEST - ONE_LINE_HOLE_NEST;
+    let tok = lexer.next_token().ok()?;
+    if let Token::Str(s) = tok.kind {
+        Some(s.len)
+    } else {
+        None
+    }
 }
 
 /// Convenience free function: `lexer::tokenize_with_comments(src)` — tokens plus the doc-comment

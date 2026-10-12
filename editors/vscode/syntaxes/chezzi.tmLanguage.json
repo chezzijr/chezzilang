@@ -17,10 +17,14 @@
     },
     "strings": {
       "patterns": [
-        { "name": "string.quoted.triple.chezzi", "begin": "[bBrR]?\"\"\"", "end": "\"\"\"" },
-        { "name": "string.quoted.triple.chezzi", "begin": "[bBrR]?'''", "end": "'''" },
-        { "name": "string.quoted.double.chezzi", "begin": "[bBrR]?\"", "end": "\"", "patterns": [ { "name": "constant.character.escape.chezzi", "match": "\\\\." } ] },
-        { "name": "string.quoted.single.chezzi", "begin": "[bBrR]?'", "end": "'", "patterns": [ { "name": "constant.character.escape.chezzi", "match": "\\\\." } ] }
+        { "name": "string.quoted.triple.chezzi", "begin": "[bBrR]\"\"\"", "end": "\"\"\"" },
+        { "name": "string.quoted.triple.chezzi", "begin": "\"\"\"", "end": "\"\"\"", "patterns": [ { "match": "\\{\\{|\\}\\}" }, { "name": "meta.interpolation.chezzi", "begin": "\\{", "end": "\\}", "patterns": [ { "include": "#strings" }, { "begin": "\\{", "end": "\\}" } ] } ] },
+        { "name": "string.quoted.triple.chezzi", "begin": "[bBrR]'''", "end": "'''" },
+        { "name": "string.quoted.triple.chezzi", "begin": "'''", "end": "'''", "patterns": [ { "match": "\\{\\{|\\}\\}" }, { "name": "meta.interpolation.chezzi", "begin": "\\{", "end": "\\}", "patterns": [ { "include": "#strings" }, { "begin": "\\{", "end": "\\}" } ] } ] },
+        { "name": "string.quoted.double.chezzi", "begin": "[bBrR]\"", "end": "\"", "patterns": [ { "name": "constant.character.escape.chezzi", "match": "\\\\." } ] },
+        { "name": "string.quoted.double.chezzi", "begin": "\"", "end": "\"", "patterns": [ { "name": "constant.character.escape.chezzi", "match": "\\\\." }, { "match": "\\{\\{|\\}\\}" }, { "name": "meta.interpolation.chezzi", "begin": "\\{", "end": "\\}", "patterns": [ { "include": "#strings" }, { "begin": "\\{", "end": "\\}" } ] } ] },
+        { "name": "string.quoted.single.chezzi", "begin": "[bBrR]'", "end": "'", "patterns": [ { "name": "constant.character.escape.chezzi", "match": "\\\\." } ] },
+        { "name": "string.quoted.single.chezzi", "begin": "'", "end": "'", "patterns": [ { "name": "constant.character.escape.chezzi", "match": "\\\\." }, { "match": "\\{\\{|\\}\\}" }, { "name": "meta.interpolation.chezzi", "begin": "\\{", "end": "\\}", "patterns": [ { "include": "#strings" }, { "begin": "\\{", "end": "\\}" } ] } ] }
       ]
     },
     "numbers": {
