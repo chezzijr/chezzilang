@@ -2504,38 +2504,69 @@ impl Compiler {
             defer_floor: fc.defer_scopes,
             nursery_floor: fc.nursery_scopes,
         });
-        if let ExprKind::Range { start, end } = &iter.kind {
-            // Lazy counting loop — the range is never materialized. The checker guarantees a single
-            // loop variable for a range.
-            self.compile_expr(fc, end)?;
-            fc.emit(Op::AsInt, end.span);
-            let end_slot = fc.add_hidden();
-            fc.emit_hidden_set(end_slot, span);
+        // A literal range WITH a start is a lazy counting loop, an optimisation of the general path
+        // below: the grid of `tests/range_value_grid.rs` runs the literal and the same range bound to a
+        // name and asserts both print the same. A literal with no start takes the general path, where
+        // `Range.iter` faults (the checker reports the literal earlier).
+        if let ExprKind::Range {
+            start: Some(start),
+            end,
+            inclusive,
+        } = &iter.kind
+            && vars.len() == 1
+        {
+            // The start runs first (U7), then the end; both land in hidden slots before the loop
+            // variable exists, so `for i in a..i` reads the OUTER `i`.
             self.compile_expr(fc, start)?;
             fc.emit(Op::AsInt, start.span);
+            let start_slot = fc.add_hidden();
+            fc.emit_hidden_set(start_slot, span);
+            let end_slot = if let Some(end) = end {
+                self.compile_expr(fc, end)?;
+                fc.emit(Op::AsInt, end.span);
+                let slot = fc.add_hidden();
+                fc.emit_hidden_set(slot, span);
+                Some(slot)
+            } else {
+                None
+            };
             let i_slot = fc.add_local(vars[0].clone());
             // The COUNTER is a plain int mutated in place: the user var's own slot when it isn't
             // boxed, else a hidden slot (the boxed user cell is refreshed from it each iteration).
             let counter = fc.loopvar_raw_slot(i_slot);
+            fc.emit_hidden_get(start_slot, span);
             fc.emit_set_local_raw(counter, span);
 
             let loop_start = fc.here();
-            fc.emit_get_local_raw(counter, span);
-            fc.emit_hidden_get(end_slot, span);
-            fc.emit(Op::Lt, span);
-            let exit = fc.emit_jump(Op::JumpIfFalse(0), span);
+            let mut exits = Vec::new();
+            if let Some(end_slot) = end_slot {
+                fc.emit_get_local_raw(counter, span);
+                fc.emit_hidden_get(end_slot, span);
+                fc.emit(if *inclusive { Op::LtEq } else { Op::Lt }, span);
+                exits.push(fc.emit_jump(Op::JumpIfFalse(0), span));
+            }
             // Each iteration binds the user var to a fresh cell (when boxed) from the counter's value.
             fc.emit_loopvar_refresh(i_slot, counter, span);
             self.compile_defer_scoped_block(fc, body)?;
             // `continue` must land HERE — on the increment, not the condition (re-testing without
             // advancing `i` would loop forever) and not after it (skipping the advance also hangs).
             let inc_target = fc.here();
+            if let (Some(end_slot), true) = (end_slot, *inclusive) {
+                // The last value of `a..=b` is `b`: leave before the increment so `a..=i64::MAX` ends
+                // instead of overflowing.
+                fc.emit_get_local_raw(counter, span);
+                fc.emit_hidden_get(end_slot, span);
+                fc.emit(Op::NotEq, span);
+                exits.push(fc.emit_jump(Op::JumpIfFalse(0), span));
+            }
             fc.emit_get_local_raw(counter, span);
             fc.emit(Op::ConstInt(1), span);
             fc.emit(Op::Add, span);
             fc.emit_set_local_raw(counter, span);
             fc.emit(Op::Jump(loop_start), span);
-            fc.patch_jump(exit);
+            for exit in exits {
+                fc.patch_jump(exit);
+            }
             self.patch_loop(fc, inc_target);
         } else {
             // The iterand may be a sequence (list/map-keys/set/str), a user struct implementing the
@@ -3726,22 +3757,25 @@ impl Compiler {
                     fc.patch_jump(jump);
                 }
             }
-            ExprKind::Range { .. } => {
-                // A bare range has no runtime value: it is lowered ONLY as a `for`/comprehension
-                // iterable (a counting loop) or a slice receiver (materialize + slice), none of
-                // which route through here.
-                //
-                // DEFENSIVE BACKSTOP — unreachable from a check-clean program. The checker rejects
-                // every value use of a range up front (`RANGE_NOT_A_VALUE`, checker/pattern.rs),
-                // so its accepted set is now a subset of what this compiler can lower; that fix is
-                // what stops this error from surfacing at RUN time on a program `chezzi check`
-                // called clean. It stays because the compiler is also driven WITHOUT the checker:
-                // synthesized ASTs (difftest / panicfuzz) and the VM test helpers `run_capture` /
-                // `run_capture` skip type-checking entirely.
-                return Err(CompileError {
-                    message: "a range can only be used as the iterable of a `for` loop".to_string(),
-                    span: expr.span,
-                });
+            // TICKET-253: a range literal builds the prelude struct `Range(start, end, 1, inclusive)`;
+            // an omitted bound is `None`, a present one `Some(bound)`. Module 0 is the prelude.
+            ExprKind::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                for bound in [start, end] {
+                    match bound {
+                        Some(b) => {
+                            self.compile_expr(fc, b)?;
+                            self.emit_new_enum(fc, "Option", "Some", 1, b.span);
+                        }
+                        None => self.emit_new_enum(fc, "Option", "None", 0, expr.span),
+                    }
+                }
+                fc.emit(Op::ConstInt(1), expr.span);
+                fc.emit(if *inclusive { Op::True } else { Op::False }, expr.span);
+                fc.emit(Op::NewStruct(self.type_key(0, "Range"), 4), expr.span);
             }
             // `type_args` are type-erased — the compiler never sees them (checker already used them).
             ExprKind::Call {
@@ -3864,13 +3898,7 @@ impl Compiler {
                 // list through the shared `GetSlice` path — reusing the `::step` machinery, not a
                 // parallel one. A bare range still has no value anywhere else (the error below fires
                 // for `let x = 0..10`); only this slice-receiver position is unblocked.
-                if let ExprKind::Range { start: rs, end: re } = &obj.kind {
-                    self.compile_expr(fc, rs)?;
-                    self.compile_expr(fc, re)?;
-                    fc.emit(Op::CallBuiltin("range".to_string(), 2), obj.span);
-                } else {
-                    self.compile_expr(fc, obj)?;
-                }
+                self.compile_expr(fc, obj)?;
                 // Each omitted component compiles to `nil` (mapped to `None`/default at runtime).
                 for comp in [start, end, step] {
                     match comp {
@@ -6511,9 +6539,13 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
                 find_boundary_free_expr(o, out);
             }
         }
-        ExprKind::Range { start, end } => {
-            find_boundary_free_expr(start, out);
-            find_boundary_free_expr(end, out);
+        ExprKind::Range { start, end, .. } => {
+            if let Some(start) = start {
+                find_boundary_free_expr(start, out);
+            }
+            if let Some(end) = end {
+                find_boundary_free_expr(end, out);
+            }
         }
         ExprKind::Call {
             callee,
@@ -7148,9 +7180,13 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             free_names_expr(lhs, bound, out);
             free_names_expr(rhs, bound, out);
         }
-        ExprKind::Range { start, end } => {
-            free_names_expr(start, bound, out);
-            free_names_expr(end, bound, out);
+        ExprKind::Range { start, end, .. } => {
+            if let Some(start) = start {
+                free_names_expr(start, bound, out);
+            }
+            if let Some(end) = end {
+                free_names_expr(end, bound, out);
+            }
         }
         ExprKind::Call {
             callee,
@@ -7308,9 +7344,13 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) {
                 collect_frame_binds_expr(o, out);
             }
         }
-        ExprKind::Range { start, end } => {
-            collect_frame_binds_expr(start, out);
-            collect_frame_binds_expr(end, out);
+        ExprKind::Range { start, end, .. } => {
+            if let Some(start) = start {
+                collect_frame_binds_expr(start, out);
+            }
+            if let Some(end) = end {
+                collect_frame_binds_expr(end, out);
+            }
         }
         ExprKind::Call {
             callee,
@@ -7455,7 +7495,10 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
             expr_has_bare_spawn(lhs) || expr_has_bare_spawn(rhs)
         }
         ExprKind::Compare { operands, .. } => operands.iter().any(expr_has_bare_spawn),
-        ExprKind::Range { start, end } => expr_has_bare_spawn(start) || expr_has_bare_spawn(end),
+        ExprKind::Range { start, end, .. } => [start, end]
+            .into_iter()
+            .flatten()
+            .any(|b| expr_has_bare_spawn(b)),
         ExprKind::Call {
             callee,
             args,

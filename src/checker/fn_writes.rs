@@ -644,9 +644,13 @@ impl UseWalk<'_> {
             ExprKind::Compare { operands, .. } => {
                 self.operator(e, &operands.iter().collect::<Vec<_>>())
             }
-            ExprKind::Range { start, end } => {
-                self.value(start);
-                self.value(end);
+            ExprKind::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    self.value(start);
+                }
+                if let Some(end) = end {
+                    self.value(end);
+                }
             }
             ExprKind::Call {
                 callee,

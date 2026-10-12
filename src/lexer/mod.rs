@@ -132,6 +132,7 @@ pub enum Token {
     Colon,     // :
     Dot,       // .
     DotDot,    // ..  (range, e.g. 0..10)
+    DotDotEq,  // ..= (inclusive range, e.g. 0..=10)
     DotDotDot, // ... (variadic param marker, e.g. `...args: T`)
 
     // --- layout (the interesting part) ---
@@ -535,6 +536,7 @@ pub const PUNCTUATION: &[Token] = &[
     Token::Colon,
     Token::Dot,
     Token::DotDot,
+    Token::DotDotEq,
     Token::DotDotDot,
 ];
 
@@ -601,6 +603,7 @@ impl Token {
             Colon => ":",
             Dot => ".",
             DotDot => "..",
+            DotDotEq => "..=",
             DotDotDot => "...",
             Int(_) | IntMinMagnitude | Float(_) | Str(_) | Bytes(_) | RawStr(_) | Ident(_) | Fn
             | Return | If | Else | Elif | For | While | In | Break | Continue | Pass | Struct
@@ -1112,6 +1115,8 @@ impl Lexer {
                     if self.match_char('.') {
                         if self.match_char('.') {
                             Token::DotDotDot
+                        } else if self.match_char('=') {
+                            Token::DotDotEq
                         } else {
                             Token::DotDot
                         }

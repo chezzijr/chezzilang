@@ -117,6 +117,7 @@ fn symbol(tok: &Token) -> &'static str {
         Token::Colon => "COLON",
         Token::Dot => "DOT",
         Token::DotDot => "DOTDOT",
+        Token::DotDotEq => "DOTDOTEQ",
         Token::DotDotDot => "DOTDOTDOT",
         Token::Newline => "NEWLINE",
         Token::Indent => "INDENT",

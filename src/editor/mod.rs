@@ -436,6 +436,7 @@ fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(u32, u32)> {
             | other @ Token::Colon
             | other @ Token::Dot
             | other @ Token::DotDot
+            | other @ Token::DotDotEq
             | other @ Token::DotDotDot
             | other @ Token::Newline
             | other @ Token::Indent
@@ -639,6 +640,7 @@ fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
             | other @ Token::Colon
             | other @ Token::Dot
             | other @ Token::DotDot
+            | other @ Token::DotDotEq
             | other @ Token::DotDotDot
             | other @ Token::Newline
             | other @ Token::Indent
@@ -1071,9 +1073,10 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
                 overlay_expr(o, map);
             }
         }
-        ExprKind::Range { start, end } => {
-            overlay_expr(start, map);
-            overlay_expr(end, map);
+        ExprKind::Range { start, end, .. } => {
+            for bound in [start, end].into_iter().flatten() {
+                overlay_expr(bound, map);
+            }
         }
         ExprKind::Index { obj, index, .. } => {
             overlay_expr(obj, map);

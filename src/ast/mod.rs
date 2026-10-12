@@ -1135,10 +1135,12 @@ pub enum ExprKind {
         operands: Vec<Expr>,
         ops: Vec<BinaryOp>,
     },
-    /// `start..end` (end-exclusive).
+    /// A range VALUE of the prelude struct `Range` (TICKET-253): `a..b`, `a..=b` (`inclusive`), `..b`,
+    /// `a..` and `..` (an omitted bound is `None`). The literal has no step; `Range(a, b, step)` does.
     Range {
-        start: Box<Expr>,
-        end: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        inclusive: bool,
     },
     /// `callee(args…)`, optionally with explicit call-site type arguments `callee[T, …](args…)`.
     /// `type_args` is empty for an ordinary call; non-empty only for `name[Types](…)` where `name`
@@ -1521,9 +1523,13 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
                 go(o);
             }
         }
-        ExprKind::Range { start, end } => {
-            go(start);
-            go(end);
+        ExprKind::Range { start, end, .. } => {
+            if let Some(start) = start {
+                go(start);
+            }
+            if let Some(end) = end {
+                go(end);
+            }
         }
         ExprKind::Call {
             callee,
@@ -1976,9 +1982,13 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
             go(lhs, f);
             go(rhs, f);
         }
-        ExprKind::Range { start, end } => {
-            go(start, f);
-            go(end, f);
+        ExprKind::Range { start, end, .. } => {
+            if let Some(start) = start {
+                go(start, f);
+            }
+            if let Some(end) = end {
+                go(end, f);
+            }
         }
         ExprKind::Call {
             callee,

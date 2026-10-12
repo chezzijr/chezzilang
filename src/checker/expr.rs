@@ -3067,6 +3067,9 @@ impl Checker {
             // entry, so the receiver read in `infer(obj)` below still yields exactly one warning.
             self.note_task_write(&name, obj.span);
         }
+        if method == "len" {
+            self.range_literal_fault(obj, true);
+        }
         let obj_ty = self.infer(obj);
         // TICKET-165 — a mutator on a PROJECTED receiver (`xs[0].push(v)`, `s.xs.push(v)`,
         // `m[k].push(v)`) mutates the container IN PLACE through the root binding (measured: `ys :=

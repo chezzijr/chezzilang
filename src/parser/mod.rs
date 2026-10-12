@@ -475,6 +475,7 @@ impl Parser {
             | Token::Colon
             | Token::Dot
             | Token::DotDot
+            | Token::DotDotEq
             | Token::DotDotDot
             | Token::Newline
             | Token::Indent
@@ -613,6 +614,7 @@ impl Parser {
             | t @ Token::Colon
             | t @ Token::Dot
             | t @ Token::DotDot
+            | t @ Token::DotDotEq
             | t @ Token::DotDotDot
             | t @ Token::Newline
             | t @ Token::Indent
@@ -779,6 +781,7 @@ impl Parser {
             | Token::Colon
             | Token::Dot
             | Token::DotDot
+            | Token::DotDotEq
             | Token::DotDotDot
             | Token::Newline
             | Token::Indent
@@ -902,6 +905,7 @@ impl Parser {
                 | Token::Colon
                 | Token::Dot
                 | Token::DotDot
+                | Token::DotDotEq
                 | Token::DotDotDot
                 | Token::Newline
                 | Token::Indent
@@ -994,6 +998,7 @@ impl Parser {
             | Token::Colon
             | Token::Dot
             | Token::DotDot
+            | Token::DotDotEq
             | Token::DotDotDot
             | Token::Newline
             | Token::Indent
@@ -1166,6 +1171,7 @@ impl Parser {
                 | k @ Token::Colon
                 | k @ Token::Dot
                 | k @ Token::DotDot
+                | k @ Token::DotDotEq
                 | k @ Token::DotDotDot
                     if k == kind =>
                 {
@@ -1259,6 +1265,7 @@ impl Parser {
                 | Token::Colon
                 | Token::Dot
                 | Token::DotDot
+                | Token::DotDotEq
                 | Token::DotDotDot => i += 1,
             }
         }
@@ -1381,6 +1388,7 @@ impl Parser {
             | Token::Colon
             | Token::Dot
             | Token::DotDot
+            | Token::DotDotEq
             | Token::DotDotDot
             | Token::Newline
             | Token::Indent
@@ -1505,6 +1513,7 @@ impl Parser {
             | Token::Colon
             | Token::Dot
             | Token::DotDot
+            | Token::DotDotEq
             | Token::DotDotDot
             | Token::Newline
             | Token::Indent
@@ -1675,6 +1684,7 @@ impl Parser {
             | Token::Colon
             | Token::Dot
             | Token::DotDot
+            | Token::DotDotEq
             | Token::DotDotDot
             | Token::Newline
             | Token::Indent
@@ -1976,6 +1986,7 @@ impl Parser {
             | Token::Colon
             | Token::Dot
             | Token::DotDot
+            | Token::DotDotEq
             | Token::DotDotDot
             | Token::Newline
             | Token::Indent
@@ -3233,6 +3244,7 @@ impl Parser {
             | t @ Token::Comma
             | t @ Token::Dot
             | t @ Token::DotDot
+            | t @ Token::DotDotEq
             | t @ Token::DotDotDot
             | t @ Token::Newline
             | t @ Token::Indent
@@ -3489,6 +3501,7 @@ impl Parser {
                         | Token::Colon
                         | Token::Dot
                         | Token::DotDot
+                        | Token::DotDotEq
                         | Token::DotDotDot
                         | Token::Newline
                         | Token::Indent
@@ -3595,6 +3608,7 @@ impl Parser {
             | Token::Colon
             | Token::Dot
             | Token::DotDot
+            | Token::DotDotEq
             | Token::DotDotDot
             | Token::Newline
             | Token::Indent
@@ -4284,6 +4298,21 @@ impl Parser {
                 },
                 span: not_span,
             }
+        } else if matches!(self.peek(), Token::DotDot | Token::DotDotEq) && min_bp <= RANGE_BP {
+            // `..b`, `..=b` and `..`: a range with no start.
+            let span = self.cur_span();
+            let inclusive = self.check(&Token::DotDotEq);
+            self.advance();
+            let end = self.parse_range_end(inclusive, span)?;
+            Expr {
+                id: crate::ast::NodeId::fresh(),
+                kind: ExprKind::Range {
+                    start: None,
+                    end,
+                    inclusive,
+                },
+                span,
+            }
         } else {
             self.parse_unary()?
         };
@@ -4297,7 +4326,29 @@ impl Parser {
                 return Err(self.too_deep());
             }
             let op_span = self.cur_span();
+            let inclusive = self.check(&Token::DotDotEq);
             self.advance(); // the operator
+            if let InfixOp::Range = op {
+                if matches!(lhs.kind, ExprKind::Range { .. }) {
+                    return Err(ParseError {
+                        message: "a range has no third bound; write `Range(a, b, step)` for a step"
+                            .to_string(),
+                        span: op_span,
+                    });
+                }
+                let end = self.parse_range_end(inclusive, op_span)?;
+                let span = lhs.span;
+                lhs = Expr {
+                    id: crate::ast::NodeId::fresh(),
+                    kind: ExprKind::Range {
+                        start: Some(Box::new(lhs)),
+                        end,
+                        inclusive,
+                    },
+                    span,
+                };
+                continue;
+            }
             let rhs = self.parse_bp(r_bp)?;
             let span = lhs.span;
             lhs = match op {
@@ -4349,14 +4400,7 @@ impl Parser {
                     },
                     span,
                 },
-                InfixOp::Range => Expr {
-                    id: crate::ast::NodeId::fresh(),
-                    kind: ExprKind::Range {
-                        start: Box::new(lhs),
-                        end: Box::new(rhs),
-                    },
-                    span,
-                },
+                InfixOp::Range => unreachable!("a range is built before the generic operand parse"),
                 InfixOp::Coalesce => Expr {
                     id: crate::ast::NodeId::fresh_block(crate::ast::CARRIER_IDS),
                     kind: ExprKind::NullCoalesce {
@@ -4552,6 +4596,7 @@ impl Parser {
             | Token::Colon
             | Token::Dot
             | Token::DotDot
+            | Token::DotDotEq
             | Token::DotDotDot
             | Token::Newline
             | Token::Indent
@@ -4802,6 +4847,7 @@ impl Parser {
                 | Token::Comma
                 | Token::Colon
                 | Token::DotDot
+                | Token::DotDotEq
                 | Token::DotDotDot
                 | Token::Newline
                 | Token::Indent
@@ -4811,6 +4857,21 @@ impl Parser {
         }
         self.fold_depth = outer_fold.max(self.fold_depth + chain);
         Ok(e)
+    }
+
+    /// The end bound of a range whose operator was just consumed: an expression above `..`'s own
+    /// level, or none when the next token cannot start one (`5..`, `..`). `a..=` needs an end.
+    fn parse_range_end(&mut self, inclusive: bool, span: Span) -> PResult<Option<Box<Expr>>> {
+        if token_ends_range(self.peek()) || self.ended_at_block() {
+            if inclusive {
+                return Err(ParseError {
+                    message: "an inclusive range needs an end".to_string(),
+                    span,
+                });
+            }
+            return Ok(None);
+        }
+        Ok(Some(Box::new(self.parse_bp(RANGE_BP + 1)?)))
     }
 
     /// Parse the inside of a subscript `[ ... ]` (the `[` already consumed) and the closing `]`,
@@ -5292,6 +5353,7 @@ impl Parser {
             | other @ Token::Colon
             | other @ Token::Dot
             | other @ Token::DotDot
+            | other @ Token::DotDotEq
             | other @ Token::DotDotDot
             | other @ Token::Newline
             | other @ Token::Indent
@@ -5528,6 +5590,7 @@ fn describe(tok: &Token) -> String {
         Colon => "':'",
         Dot => "'.'",
         DotDot => "'..'",
+        DotDotEq => "'..='",
         Newline => "end of line",
         Indent => "an indented block",
         Dedent => "a dedent",
@@ -5646,6 +5709,40 @@ fn is_compound_assign(tok: &Token) -> bool {
 /// `and` (5) and the comparisons (7), matching Python: `not x in xs` is `not (x in xs)`.
 const NOT_BP: u8 = 6;
 
+/// Binding power of `..` / `..=` (TICKET-253): below arithmetic, shifts and the bitwise operators,
+/// above comparison, `in`, `not`, `and` and `or`. `0..1 << 2` is `0..(1 << 2)`; `x in 0..3` and
+/// `0..3 == 0..3` need no parentheses. A range does not chain: `a..b..c` is an error.
+const RANGE_BP: u8 = 9;
+
+/// A range with no end bound (`5..`, `xs[2..]`, `..`) is a range whose next token cannot start an
+/// expression. The list names every token that closes or continues a surrounding construct.
+fn token_ends_range(t: &Token) -> bool {
+    matches!(
+        t,
+        Token::Colon
+            | Token::RBracket
+            | Token::RParen
+            | Token::RBrace
+            | Token::Comma
+            | Token::Newline
+            | Token::Eof
+            | Token::Dedent
+            | Token::And
+            | Token::Or
+            | Token::Pipe
+            | Token::Assign
+            | Token::EqEq
+            | Token::NotEq
+            | Token::Lt
+            | Token::LtEq
+            | Token::Gt
+            | Token::GtEq
+            | Token::In
+            | Token::Else
+            | Token::Elif
+    )
+}
+
 fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
     use BinaryOp::*;
     use InfixOp::*;
@@ -5674,7 +5771,7 @@ fn infix_op(tok: &Token) -> Option<(InfixOp, u8, u8)> {
         Token::Amp => (Bin(BitAnd), 15),
         Token::Shl => (Bin(Shl), 17),
         Token::Shr => (Bin(Shr), 17),
-        Token::DotDot => (Range, 19),
+        Token::DotDot | Token::DotDotEq => (Range, 9),
         Token::Plus => (Bin(Add), 21),
         Token::Minus => (Bin(Sub), 21),
         Token::Star => (Bin(Mul), 23),
@@ -5943,7 +6040,7 @@ mod tests {
             (", b = 1, 2", None),
             (", b := 1, 2", None),
         ];
-        const STARTS_A_LINE: &[&str] = &["?g()", "(g())", "[1, 2]", "-1", "!b", "?? 1"];
+        const STARTS_A_LINE: &[&str] = &["?g()", "(g())", "[1, 2]", "-1", "!b", "?? 1", ".. 3"];
         const ELSE: &[&str] = &["else: 0", "else e: 0"];
 
         /// The lines of a cell and the index of the next line among them.

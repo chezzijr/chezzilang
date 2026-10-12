@@ -6290,21 +6290,26 @@ impl Checker {
         }
     }
 
+    /// TICKET-253 — the two faults of `Range`'s own methods, reported early when the checker sees the
+    /// range LITERAL as the direct iterand or `.len()` receiver: iterating a range with no start, and
+    /// `len` of a range with a missing bound. A range VALUE reaches the same rules at run time, from
+    /// `Range.iter` and `Range.len` in `std/prelude.chz` (the one source of the two messages).
+    pub(super) fn range_literal_fault(&mut self, e: &Expr, needs_end: bool) {
+        let ExprKind::Range { start, end, .. } = &e.kind else {
+            return;
+        };
+        if needs_end {
+            if start.is_none() || end.is_none() {
+                self.error(e.span, "len() needs a range with a start and an end");
+            }
+        } else if start.is_none() {
+            self.error(e.span, "a range with no start cannot be iterated");
+        }
+    }
+
     pub(super) fn for_bindings(&mut self, vars: &[String], iter: &Expr) -> Vec<(String, Ty)> {
         let unknowns = |vars: &[String]| vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect();
-        // Ranges are syntactic and always yield a single int.
-        if let ExprKind::Range { start, end } = &iter.kind {
-            self.expect_int(start, "range bound");
-            self.expect_int(end, "range bound");
-            if vars.len() != 1 {
-                self.error(
-                    iter.span,
-                    "a range binds a single loop variable; `for k, v` needs a map",
-                );
-                return unknowns(vars);
-            }
-            return vec![(vars[0].clone(), Ty::Int)];
-        }
+        self.range_literal_fault(iter, false);
         let m = self.tyvar_mark();
         let it = self.infer(iter);
         let it = self.close_operand(m, it);

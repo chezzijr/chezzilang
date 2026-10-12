@@ -2267,13 +2267,14 @@ fn in_rejects_non_container() {
 }
 
 #[test]
-fn in_rejects_range_rhs() {
-    // A range has no runtime value, so it can't be an `in` container. This used to need an ad-hoc
-    // guard in the `In` arm; the generic `ExprKind::Range` rejection in `infer_kind` now subsumes
-    // it. Exactly ONE diagnostic — a leftover ad-hoc guard would double-report.
-    let errs = check_entry("fn main():\n    print(5 in 1..10)\nmain()\n");
-    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
-    assert!(errs[0].message.contains("range"), "got: {errs:?}");
+fn in_takes_a_range_rhs() {
+    // TICKET-253: a range is a value that satisfies `Contains[int]`.
+    ok("fn main():\n    print(5 in 1..10)\nmain()\n");
+    ok("fn main():\n    r := 1..10\n    print(5 in r)\nmain()\n");
+    rejects(
+        "x := \"a\" in 1..10\n",
+        "cannot test membership of str in Range",
+    );
 }
 
 // ===== 1. unknown name =====
@@ -11570,7 +11571,10 @@ fn for_tuple_element_types_checked() {
 
 #[test]
 fn for_kv_over_range_rejected() {
-    rejects("for a, b in 0..3:\n    print(a)\n", "range");
+    rejects(
+        "for a, b in 0..3:\n    print(a)\n",
+        "binds a single loop variable",
+    );
 }
 
 #[test]
@@ -15250,12 +15254,6 @@ fn range_three_arg_typechecks() {
         "fn main():\n    print(range(0, 10, \"x\"))\nmain()\n",
         "int",
     );
-}
-
-#[test]
-fn range_slice_typechecks() {
-    // Slicing a range literal infers `List[int]` (the SECONDARY range-slicing path).
-    ok("fn main():\n    a: List[int] = (0..10)[::2]\n    print(a.len())\nmain()\n");
 }
 
 // ===== default + named arguments (end-to-end through desugar) =====
@@ -20755,7 +20753,7 @@ fn for_multi_name_rejects_non_tuple_and_wrong_arity() {
     );
     rejects(
         "fn main():\n    for a, b in 0..3:\n        print(a)\nmain()\n",
-        "a range binds a single loop variable; `for k, v` needs a map",
+        "a struct iterator binds a single loop variable",
     );
     rejects(
         "fn trip() -> Iterator[(int, str, float)]:\n    yield (1, \"x\", 2.5)\nfn main():\n    for a, b in trip():\n        print(a)\nmain()\n",
@@ -28183,79 +28181,50 @@ fn index_set_coherent_still_ok() {
     );
 }
 
-// ===== a range is NOT a value (check-OK-then-cannot-run class) =====
+// ===== a range is a value (TICKET-253) =====
 
-/// A range literal has no runtime value: the compiler lowers it ONLY as a `for`/comprehension
-/// iterable or a slice receiver, and rejects it everywhere else ("a range can only be used as the
-/// iterable of a `for` loop"). The checker used to type `a..b` as `List[int]`, so every value
-/// position type-checked clean and then FAILED TO COMPILE at run time (zero output, exit 1).
-/// The checker's accepted set must be a SUBSET of what the compiler can lower.
+/// A range is an ordinary value of the prelude struct `Range` in every position; what a value of that
+/// type cannot do is still an error. The grid of `tests/range_value_grid.rs` runs the accepted cells.
 #[test]
-fn range_in_value_position_is_a_type_error() {
-    let m = "range";
-    // (a) the repro: bound to a variable, then printed.
-    entry_rejects(
-        "fn main():\n    print(\"before\")\n    x := 0..3\n    print(x)\nmain()\n",
-        m,
+fn range_in_value_position_is_a_value() {
+    entry_ok("fn main():\n    x := 0..3\n    print(x)\nmain()\n");
+    entry_ok(
+        "fn main():\n    y := List(0..3)\n    z := Set(0..3)\n    print(y)\n    print(z)\nmain()\n",
     );
-    // (b)/(c) the "materialize it" ctors — `range(a, b)` is the real escape hatch, not these.
-    entry_rejects("fn main():\n    y := List(0..3)\n    print(y)\nmain()\n", m);
-    entry_rejects("fn main():\n    y := Set(0..3)\n    print(y)\nmain()\n", m);
-    // (d)/(e) method receiver.
-    entry_rejects(
-        "fn main():\n    n := (0..5).len()\n    print(n)\nmain()\n",
-        m,
+    entry_ok("fn main():\n    n := (0..5).len()\n    print(n)\nmain()\n");
+    entry_ok(
+        "fn main():\n    xs := [0..3, 5..6]\n    m := {\"a\": 0..3}\n    print(xs)\n    print(m)\nmain()\n",
     );
-    entry_rejects("fn main():\n    (0..3).push(7)\nmain()\n", m);
-    // (f) binary operand.
+    entry_ok(
+        "fn total(xs: Iterable[int]) -> int:\n    s := 0\n    for x in xs:\n        s = s + x\n    return s\nfn main():\n    print(total(0..4))\nmain()\n",
+    );
+    entry_ok(
+        "fn first_or[S: Iterable[int]](xs: S, d: int) -> int:\n    for x in xs:\n        return x\n    return d\nfn main():\n    print(first_or(0..3, 9))\nmain()\n",
+    );
+    // What a `Range` is not.
+    entry_rejects(
+        "fn main():\n    (0..3).push(7)\nmain()\n",
+        "no method 'push'",
+    );
     entry_rejects(
         "fn main():\n    y := (0..3) + [7]\n    print(y)\nmain()\n",
-        m,
+        "Range",
     );
-    // (g) equality — the `Eq | NotEq` arm must still INFER both operands (its own B2 check is
-    // silenced by the resulting `Unknown`, which is exactly why the range error must fire first),
-    // or the error never fires and the compiler backstop stays reachable from check-clean code.
     entry_rejects(
         "fn main():\n    b := (0..3) == [0, 1, 2]\n    print(b)\nmain()\n",
-        m,
+        "Range",
     );
-    // (h)/(i) collection literal element / map value.
+    // A list parameter does not take a range; the old laundering as `List[int]` is gone.
     entry_rejects(
-        "fn main():\n    xs := [0..3, [9]]\n    print(xs)\nmain()\n",
-        m,
+        "fn total(xs: List[int]) -> int:\n    return 0\nfn main():\n    print(total(0..4))\nmain()\n",
+        "Range",
     );
     entry_rejects(
-        "fn main():\n    m := {\"a\": 0..3}\n    print(m)\nmain()\n",
-        m,
+        "fn main():\n    y: str = 0..3\n    print(y)\nmain()\n",
+        "Range",
     );
-    // (j) call argument against a `List[int]` param.
-    entry_rejects(
-        "fn total(xs: List[int]) -> int:\n    s := 0\n    for x in xs:\n        s = s + x\n    return s\nfn main():\n    print(total(0..4))\nmain()\n",
-        m,
-    );
-    // (k) through an `[S: Iterator[T], T]` bound.
-    entry_rejects(
-        "fn first_or[S: Iterator[T], T](xs: S, d: T) -> T:\n    for x in xs:\n        return x\n    return d\nfn main():\n    print(first_or(0..3, 9))\nmain()\n",
-        m,
-    );
-    // (l) plain INDEX (not a slice) — the compiler has no lowering for this either.
-    entry_rejects("fn main():\n    print((0..10)[2])\nmain()\n", m);
-    // (m) `in` on a range RHS (was a piecemeal ad-hoc guard; the generic arm subsumes it).
-    entry_rejects("fn main():\n    print(5 in 1..10)\nmain()\n", m);
-    // (n) an annotated binding must name the RANGE, not leak the old `List[int]` laundering.
-    let errs = check_entry("fn main():\n    y: str = 0..3\n    print(y)\nmain()\n");
-    assert!(
-        errs.iter().any(|e| e.message.contains("range")),
-        "expected a range error, got: {errs:?}"
-    );
-    // Pre-fix this said "cannot assign List[int] to variable of type str" — the laundering, and the
-    // very diagnostic that proved the root cause. It must be gone (the hint's own "List[int]" is
-    // fine, hence matching on the assignment wording, not the type name).
-    assert!(
-        !errs.iter().any(|e| e.message.contains("cannot assign")),
-        "a range must not be laundered as List[int]: {errs:?}"
-    );
-    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
+    // No `r[i]`, no `r[a..b]` (owner answer 4).
+    entry_rejects("fn main():\n    print((0..10)[2])\nmain()\n", "Range");
 }
 
 /// The sanctioned positions — the ONLY three places a `Range` expr reaches the compiler
@@ -28281,10 +28250,6 @@ fn range_sanctioned_positions_still_check() {
     );
     entry_ok("fn main():\n    print({i: i * i for i in 0..3})\nmain()\n");
     entry_ok("fn main():\n    print({i % 3 for i in 0..9})\nmain()\n");
-    // slice receiver — a range literal is sliceable (it materializes, then slices).
-    entry_ok("fn main():\n    a: List[int] = (0..10)[::2]\n    print(a.len())\nmain()\n");
-    entry_ok("fn main():\n    print((0..10)[1:8:3])\nmain()\n");
-    entry_ok("fn main():\n    print((0..5)[::-1])\nmain()\n");
     // match range PATTERNS (`Pattern::Range`, never reaches `infer_kind`), incl. negative bounds.
     entry_ok(
         "fn grade(n: int) -> str:\n    match n:\n        0..60: return \"F\"\n        60..90: return \"B\"\n        _: return \"A\"\nfn main():\n    print(grade(70))\nmain()\n",

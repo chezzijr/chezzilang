@@ -7,12 +7,6 @@ use super::*;
 use crate::ast::CarrierTag;
 use crate::ast::consteval;
 
-/// The one diagnostic for a range used where it has no runtime value. It names every legal position
-/// AND the materialization escape hatch — the `range(a, b)` builtin, which really does return a
-/// `List[int]` (so `List(0..3)` is rejected and `Set(range(0, 3))` is the way).
-pub(super) const RANGE_NOT_A_VALUE: &str = "a range is only valid as the iterable of a `for` loop or comprehension, as a slice receiver, \
-     or as a `match` pattern — use `range(a, b)` to materialize a `List[int]`";
-
 /// What a bare, payload-free name in a pattern is. `Checker::bare_pattern_name` is the one
 /// classifier; every pattern walker reads it.
 pub(super) enum BareName {
@@ -2152,24 +2146,12 @@ impl Checker {
                 step.as_deref(),
                 expr.span,
             ),
-            // A range has NO runtime value in any engine: the compiler lowers `a..b` only as a
-            // `for`/comprehension iterable (a counting loop) or a slice receiver (materialize +
-            // slice), and rejects it everywhere else. This arm is reached from every VALUE position
-            // (assign RHS, call arg, collection element, binary operand, method receiver, index
-            // object, return, generic bound arg, interpolation, pipe) — so typing it as `List[int]`
-            // laundered a whole class of programs that check clean and then FAIL TO COMPILE at run
-            // time. Reject here instead; the sanctioned positions never reach `infer_kind`:
-            // `for_bindings` (sig.rs) matches `ExprKind::Range` syntactically for BOTH iterable
-            // forms, `infer_slice` special-cases a range receiver, and `case a..b:` is a
-            // `Pattern::Range` (a different AST node). Keeps the checker's accepted set a subset of
-            // what the compiler can lower (see the backstop in compiler/mod.rs).
-            ExprKind::Range { start, end } => {
-                self.expect_int(start, "range bound");
-                self.expect_int(end, "range bound");
-                self.error(expr.span, RANGE_NOT_A_VALUE);
-                // `Unknown` (not `list[int]`) so the rejection doesn't cascade into a second,
-                // misleading diagnostic that names a type the range never had.
-                Ty::Unknown
+            // TICKET-253: a range is a VALUE of the prelude struct `Range`; its bounds are `int`s.
+            ExprKind::Range { start, end, .. } => {
+                for bound in [start, end].into_iter().flatten() {
+                    self.expect_int(bound, "range bound");
+                }
+                Ty::Struct(self.bare_key("Range"), Vec::new())
             }
             ExprKind::Call {
                 callee,
@@ -5367,16 +5349,7 @@ impl Checker {
         for comp in [start, end, step].into_iter().flatten() {
             self.expect_int(comp, "slice bound");
         }
-        // A range receiver is a SANCTIONED position: the compiler materializes it and then slices
-        // (`CallBuiltin("range", 2)` + `GetSlice`), so `(0..10)[::2]` is a real `List[int]`. Handle
-        // it here rather than through `infer_value`, whose `Range` arm rejects every value use.
-        let obj_ty = if let ExprKind::Range { start, end } = &obj.kind {
-            self.expect_int(start, "range bound");
-            self.expect_int(end, "range bound");
-            Ty::list(Ty::Int)
-        } else {
-            self.infer_value(obj)
-        };
+        let obj_ty = self.infer_value(obj);
         if obj_ty.is_unknown() {
             return Ty::Unknown;
         }
@@ -6388,9 +6361,13 @@ impl Checker {
                     self.scan_expr_for_pin(name, o, match_pin, member_pin);
                 }
             }
-            ExprKind::Range { start, end } => {
-                self.scan_expr_for_pin(name, start, match_pin, member_pin);
-                self.scan_expr_for_pin(name, end, match_pin, member_pin);
+            ExprKind::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    self.scan_expr_for_pin(name, start, match_pin, member_pin);
+                }
+                if let Some(end) = end {
+                    self.scan_expr_for_pin(name, end, match_pin, member_pin);
+                }
             }
             ExprKind::Call {
                 callee,

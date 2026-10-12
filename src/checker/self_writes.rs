@@ -200,9 +200,13 @@ impl Scan {
                 self.expr(lhs);
                 self.expr(rhs);
             }
-            ExprKind::Range { start, end } => {
-                self.expr(start);
-                self.expr(end);
+            ExprKind::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    self.expr(start);
+                }
+                if let Some(end) = end {
+                    self.expr(end);
+                }
             }
             ExprKind::Call {
                 callee,

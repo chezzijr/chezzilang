@@ -163,7 +163,10 @@ fn is_inline_default(e: &Expr) -> bool {
         ExprKind::Str(_) => true,
         ExprKind::Unary { expr, .. } => is_inline_default(expr),
         ExprKind::Binary { lhs, rhs, .. } => is_inline_default(lhs) && is_inline_default(rhs),
-        ExprKind::Range { start, end } => is_inline_default(start) && is_inline_default(end),
+        ExprKind::Range { start, end, .. } => [start, end]
+            .into_iter()
+            .flatten()
+            .all(|b| is_inline_default(b)),
         ExprKind::List(xs, _) | ExprKind::Tuple(xs) | ExprKind::Set(xs) => {
             xs.iter().all(is_inline_default)
         }
@@ -827,9 +830,13 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
                 walk_idents_and_types(o, f, tf);
             }
         }
-        ExprKind::Range { start, end } => {
-            walk_idents_and_types(start, f, tf);
-            walk_idents_and_types(end, f, tf);
+        ExprKind::Range { start, end, .. } => {
+            if let Some(start) = start {
+                walk_idents_and_types(start, f, tf);
+            }
+            if let Some(end) = end {
+                walk_idents_and_types(end, f, tf);
+            }
         }
         ExprKind::Call {
             callee,
@@ -1338,9 +1345,13 @@ impl Walker<'_> {
                     self.walk_expr(o)?;
                 }
             }
-            ExprKind::Range { start, end } => {
-                self.walk_expr(start)?;
-                self.walk_expr(end)?;
+            ExprKind::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    self.walk_expr(start)?;
+                }
+                if let Some(end) = end {
+                    self.walk_expr(end)?;
+                }
             }
             ExprKind::List(xs, _) | ExprKind::Set(xs) | ExprKind::Tuple(xs) => {
                 for x in xs.iter_mut() {
