@@ -1573,7 +1573,7 @@ for i in Range(10, 0, -1):   # 10, 9, 8, … , 1
 # iterated: `a range with no start cannot be iterated` (a check error for a literal, a fault for a value).
 # `a()..b()` runs `a()` first, in every position (`for`, comprehension, binding).
 # PERFORMANCE: `for i in a..b` over a LITERAL range is a counter loop (no allocation). Iterating a range
-# VALUE (`for i in r`) resumes a generator per step (about 4x the cost of the literal loop,
+# VALUE (`for i in r`) resumes a generator per step (about 3.3x the cost of the literal loop,
 # docs/benchmarks.md).
 
 for item in items:     # iterate a list

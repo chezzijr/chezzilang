@@ -418,7 +418,20 @@ struct Range:
                 panic("a range with no start cannot be iterated")
         match self.end:
             ?e:
-                if self._in(cur, e):
+                if self.step == 1:
+                    # The common case with no method call per step: `cur < e` bounds `cur + 1`, so
+                    # the add cannot overflow.
+                    if self.inclusive:
+                        if cur <= e:
+                            yield cur
+                            while cur < e:
+                                cur = cur + 1
+                                yield cur
+                    else:
+                        while cur < e:
+                            yield cur
+                            cur = cur + 1
+                elif self._in(cur, e):
                     yield cur
                     while self._has_next(cur, e):
                         cur = cur + self.step

@@ -4110,12 +4110,8 @@ impl Checker {
             // termination depends on `close()`. Draining it into a list/set/map is out of scope; reject
             // it here instead — the `for v in ch:` statement form is the way to drain a channel.
             // Checked per clause so a channel in ANY clause is rejected.
-            // `for_bindings` above already handled a range clause SYNTACTICALLY (a comprehension
-            // over a range is sanctioned); a range is never a Channel, so skip it here — `infer`
-            // would otherwise re-visit it as a VALUE and reject `[i for i in 0..3]`.
-            if !matches!(clause.iter.kind, ExprKind::Range { .. })
-                && matches!(self.infer(&clause.iter), Ty::Channel(_))
-            {
+            // Every clause is typed alike (TICKET-253): a range is a value, never a Channel.
+            if matches!(self.infer(&clause.iter), Ty::Channel(_)) {
                 self.error(
                     clause.iter.span,
                     "a channel cannot be drained in a comprehension; use the `for v in ch:` statement form",

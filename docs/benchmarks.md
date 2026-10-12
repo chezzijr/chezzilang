@@ -6,6 +6,28 @@ re-stamp this table when the runtime changes. The optimization backlog these num
 justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap **M19**
 (`spec.md` / `PROGRESS.md`).
 
+## 2026-10-13 — TICKET-253: a range is a value
+
+Release binary, `uptime` load average 6.4 (a cargo test run had just stopped), wall clock of `chezzi run benches/chz/<name>.chz`, five runs each, milliseconds.
+
+| bench | before (main `902b678c`, min–max, median) | after (min–max, median) |
+|---|---|---|
+| `loop` | 1774–1921, 1848 | 1847–1916, 1883 |
+| `primes` | 1176–1277, 1230 | 1203–1254, 1231 |
+| `fib` | 549–599, 579 | 524–592, 560 |
+
+The three medians of the new binary lie inside the before ranges: the literal `for i in a..b` keeps the allocation-free counter loop (the loop test is `Lt`, or `LtEq` for `a..=b`, and the start now runs before the end).
+
+Iterating a `Range` VALUE resumes the generator `Range.iter` once per step. Three runs each of a 3,000,000-step sum, milliseconds:
+
+| program | ms |
+|---|---|
+| `for i in 0..3000000:` (literal, counter loop) | 575, 580, 531 |
+| `r := 0..3000000` then `for i in r:` with the first `Range.iter` (a method call per step) | 3706, 3646, 3684 |
+| the same with the `step == 1` branch of `Range.iter` (no method call per step) | 1822, 1885, 1906 |
+
+A value costs about 3.3x the literal loop. A native cursor for the prelude struct is the first follow-up; it must print what the generator prints, which the grid of `tests/range_value_grid.rs` would prove by running both paths.
+
 > **Reading note (added 2026-08-16).** Rows below labelled `--serial` are **dated measurements** taken
 > on the cooperative single-thread engine, which was **removed 2026-08-16** (`docs/future.md` §2b).
 > They are kept as the record of what was measured at the time; they are not reproducible on today's

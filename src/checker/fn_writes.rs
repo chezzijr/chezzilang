@@ -1327,6 +1327,12 @@ impl Scan {
                 self.expr(lhs);
                 self.expr(rhs);
             }
+            // A range bound is any expression, so a bound may call a writer (TICKET-253).
+            ExprKind::Range { start, end, .. } => {
+                for bound in [start, end].into_iter().flatten() {
+                    self.expr(bound);
+                }
+            }
             ExprKind::Compare { operands, .. } => {
                 // A chain `a < b < c` evaluates `c` only when `a < b` holds.
                 for (i, operand) in operands.iter().enumerate() {
@@ -1349,7 +1355,6 @@ impl Scan {
             | ExprKind::Pass
             | ExprKind::Ident(_)
             | ExprKind::Comprehension { .. }
-            | ExprKind::Range { .. }
             | ExprKind::OptChain { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
