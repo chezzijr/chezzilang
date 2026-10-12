@@ -119,7 +119,7 @@ UPDATE_EDITOR_ASSETS=1 cargo test --test editor_tmlanguage    # regenerate the V
   one-line reason at the site). Test code is out of scope. Do not turn the `match` into `if let` or
   `matches!` on the raw enum to silence the lint. See `docs/lessons.md` §4.
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global
-  reserved namespace.** The global surface stays minimal: scalars, `tuple`, `range`, `Channel`,
+  reserved namespace.** The global surface stays minimal: scalars, `tuple`, `Range`, `Channel`,
   `T!E`/`T?`/`Iterator`, structural protocols. (`timer(ms)` moved to `import std.time`; `Shared`/
   `RwShared`/`Atomic`/`Executor` to `import std.concurrency` — all stay reserved names.) Register in the
   module's `.chz` (`native type` / `native struct`; no Rust-side module sig exists) and gate the bare name behind `import` via the per-module licensing set

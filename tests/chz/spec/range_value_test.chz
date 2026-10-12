@@ -1,0 +1,145 @@
+# tests/chz/spec/range_value_test.chz -- a range is a value of the prelude struct `Range` (TICKET-253).
+# Every expectation is the value of the same program in Rust (the literal forms, `contains`) or CPython
+# (negative bounds, stepped ranges) -- or the Decision of the ticket that makes Chezzi differ on purpose.
+#
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+test fn slices_resolve_negative_bounds_clamp_and_the_empty_cases():
+    xs := [10, 20, 30]
+    assert xs[-2..] == [20, 30]
+    assert xs[0..=-1] == [10, 20, 30]
+    assert xs[2..1] == []
+    assert xs[-1..0] == []
+    assert xs[1..99] == [20, 30]
+    assert xs[-99..2] == [10, 20]
+    assert xs[..-1] == [10, 20]
+    assert xs[..] == [10, 20, 30]
+
+test fn a_plain_index_stays_strict():
+    xs := [10, 20, 30]
+    r := recover: xs[-4]
+    match r:
+        ?_: assert false, "xs[-4] must fault"
+        !e: assert e.message() == "index -4 out of bounds (len 3)"
+
+test fn a_negative_step_slices_like_cpython():
+    xs := [10, 20, 30]
+    assert xs[Range(None, None, -1)] == xs.reversed()
+    assert xs[Range(2, 0, -1)] == [30, 20]
+    assert xs[Range(2, 0, -1, inclusive=true)] == [30, 20, 10]
+    assert xs[Range(0, 3, 2)] == [10, 30]
+
+test fn a_zero_step_faults_at_construction():
+    r := recover: Range(0, 3, 0)
+    match r:
+        ?_: assert false, "step 0 must fault"
+        !e: assert e.message() == "Range() step cannot be zero"
+
+test fn an_open_end_iterates_lazily_until_a_break():
+    seen: List[int] = []
+    for i in 5..:
+        seen.push(i)
+        if seen.len() == 3:
+            break
+    assert seen == [5, 6, 7]
+
+test fn a_range_with_no_start_cannot_be_iterated():
+    r := ..5
+    out := recover:
+        n := 0
+        for i in r:
+            n += i
+        n
+    match out:
+        ?_: assert false, "no start must fault"
+        !e: assert e.message() == "a range with no start cannot be iterated"
+
+test fn len_needs_both_bounds():
+    open := 5..
+    r := recover: open.len()
+    match r:
+        ?_: assert false, "no end must fault"
+        !e: assert e.message() == "len() needs a range with a start and an end"
+    assert (2..5).len() == 3
+    assert (2..=5).len() == 4
+    assert Range(0, 10, 3).len() == 4
+
+test fn contains_tests_the_bounds_and_the_alignment_of_a_step():
+    assert not (3 in 5..)
+    assert 7 in 5..
+    assert 3 in ..5
+    assert not (5 in ..5)
+    assert 5 in ..=5
+    assert 6 in Range(0, 10, 3)
+    assert not (5 in Range(0, 10, 3))
+
+test fn equality_hash_and_a_range_as_a_map_key():
+    assert (0..3) == (0..3)
+    assert Range(5, None) == 5..
+    assert Range(None, 5) == ..5
+    assert Range(0, 3, inclusive=true) == 0..=3
+    assert Range(0, 3).inclusive == false
+    m := {0..3: "a", 5..: "b"}
+    assert m[0..3] == "a"
+    assert m[5..] == "b"
+
+test fn display_is_the_source_form():
+    assert "{0..3}" == "0..3"
+    assert "{0..=3}" == "0..=3"
+    assert "{..3}" == "..3"
+    assert "{3..}" == "3.."
+    assert "{Range(0, 10, 3)}" == "Range(0, 10, 3)"
+
+test fn a_range_value_iterates_more_than_once():
+    r := 2..5
+    first: List[int] = []
+    second: List[int] = []
+    for i in r:
+        first.push(i)
+    for i in r:
+        second.push(i)
+    assert first == [2, 3, 4]
+    assert second == first
+
+fn tick(log: List[str], name: str, v: int) -> int:
+    log.push(name)
+    return v
+
+test fn the_start_runs_before_the_end_in_every_position():
+    log: List[str] = []
+    for _i in tick(log, "a", 0)..tick(log, "b", 1):
+        pass
+    r := tick(log, "c", 0)..tick(log, "d", 1)
+    xs := [i for i in tick(log, "e", 0)..tick(log, "f", 1)]
+    assert log == ["a", "b", "c", "d", "e", "f"]
+    assert xs == [0]
+    assert r == 0..1
+
+test fn a_range_ends_at_the_top_of_int_without_a_fault():
+    assert List(9223372036854775806..=9223372036854775807) == [9223372036854775806, 9223372036854775807]
+    assert List(Range(9223372036854775806, 9223372036854775807)) == [9223372036854775806]
+    n := 0
+    for _i in 9223372036854775806..=9223372036854775807:
+        n += 1
+    assert n == 2
+
+test fn an_open_range_faults_at_the_top_of_int_as_plus_does():
+    r := recover:
+        n := 0
+        for _i in 9223372036854775806..:
+            n += 1
+        n
+    match r:
+        ?_: assert false, "must overflow"
+        !e: assert e.message().contains("integer overflow")
+
+test fn match_patterns_take_half_open_and_inclusive_ranges():
+    fn grade(n: int) -> str:
+        match n:
+            0..60: return "F"
+            60..=89: return "B"
+            _: return "A"
+    assert grade(59) == "F"
+    assert grade(60) == "B"
+    assert grade(89) == "B"
+    assert grade(90) == "A"

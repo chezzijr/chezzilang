@@ -19,7 +19,7 @@ Conventions used below:
 | Function | Signature | Notes |
 |----------|-----------|-------|
 | `print` | `print(...args: Any, sep: str = " ", end: str = "\n") -> None` | Write each argument (any type) to stdout. Variadic — declared as `native fn print(...args: Any, sep, end)` in `std/prelude.chz`; `Any` is the top type so every value is accepted. The args are joined by `sep` (default `" "`) and `end` (default `"\n"`) is appended after — both `str` keyword-only (the only builtin that takes named arguments). `print("a", end="")` emits `a` with no newline (incremental output); `print("a","b", sep="-", end="!")` emits `a-b!`. The **value form** (`p := print`) is a fixed 1-arg call (see `syntax.md`). |
-| `range` | `range(end)` / `range(start, end)` / `range(start, end, step) -> List[int]` | End-exclusive list of ints. `step` is a non-zero int: positive counts up, negative counts down (e.g. `range(10, 0, -1)` → `10,9,…,1`). A wrong-direction step or `start == end` gives `[]`; `step == 0` is a recoverable fault. Capped at 10M elements. |
+| `Range` | `a..b` / `a..=b` / `..b` / `a..` / `..` / `Range(start, end, step = 1, inclusive = false)` | A range of ints as a VALUE (`std/prelude.chz`, in scope everywhere). Fields `start: int?`, `end: int?`, `step: int`, `inclusive: bool`. `Iterable[int]` (iterate it any number of times), `Contains[int]` (`x in r`), `len()` (needs both bounds), Eq and Hashable. A negative `step` counts down (`Range(10, 0, -1)` yields `10,9,…,1`); `step == 0` faults at construction. `range()` is removed: `range(n)` is `0..n`, `range(a, b)` is `a..b`, `range(a, b, c)` is `Range(a, b, c)`, a list is `List(0..n)`. |
 | `int` | `int(x) -> int` | Convert from `int`/`float`/`bool`/`str` (parses a string; truncates a float). A string parse accepts PEP-515 single underscores between digits (`"1_000"` → `1000`), mirroring the lexer's numeric-literal rule. ASCII digits only — `int("١٢")`/`int("１２")` raise (Go/Rust semantics; CPython's `int()` accepts Unicode decimal digits). Bad string raises (recoverable) — for `None`-on-failure use `s.to_int() -> int?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`T?`/`T!E`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
 | `float` | `float(x) -> float` | Convert from `float`/`int`/`str`. A string parse accepts PEP-515 single underscores between digits (`"1_0.5"` → `10.5`). Bad string raises — for `None`-on-failure use `s.to_float() -> float?`. Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`T?`/`T!E`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
 | `bool` | `bool(x) -> bool` | Truthiness cast (never faults on a scalar). `int`: `0` → `false`, else `true`. `float`: `0.0`/`-0.0` → `false`, `NaN` → `true` (Python parity), else `true`. `bool`: identity. `str`: `""` → `false`, else `true` (non-empty is truthy — **not** a parse, so `bool(" ")` is `true`). Rejects a `List`/`Map`/`Set`/tuple/struct/enum/function/`T?`/`T!E`/`bytes`/`bytearray`/`Shared`/`Channel`/`Atomic`/`AtomicInt`/`RwShared`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`/`ptr` argument at CHECK time. |
@@ -72,8 +72,9 @@ primitives are Go's, not Python's.
 | `a << n` with `n` out of range | `shift amount -1 out of range (0..64)` | `ValueError: negative shift count` | — |
 | integer overflow | `integer overflow in Add` | *(upward divergence — Python ints are arbitrary-precision; Chezzi's i64 faults recoverably rather than wrapping)* | — |
 | `crypto.secure_bytes(n)`, `n` out of range | `secure_bytes: n must be >= 0, got -1` | *(deliberate fail-closed — a crypto primitive must not silently produce fewer bytes)* | — |
-| `range(a, b, 0)`, step is zero | `range() step cannot be zero` | `ValueError: range() arg 3 must not be zero` | — |
-| `range(a, b)`, materialized length > 10,000,000 | `range() length 20000000 exceeds the maximum of 10000000` | *(no ancestor — CPython's `range` is lazy, `range(0, 20_000_000)` is legal; this is a Chezzi resource limit, not a domain error)* | — |
+| `Range(a, b, 0)`, step is zero | `Range() step cannot be zero` | `ValueError: range() arg 3 must not be zero` | — |
+| iterating a `Range` with no start | `a range with no start cannot be iterated` | *(Rust: `RangeTo` is not an iterator — a compile error)* | — |
+| `r.len()` with a missing bound | `len() needs a range with a start and an end` | *(Rust: `RangeFrom` has no `len`)* | — |
 | `math.lcm`/`math.gcd`/`math.abs(int)`, i64 overflow | `integer overflow in lcm` (also `in gcd` / `in abs`) | *(upward divergence — `math.gcd`/`math.lcm`/`abs` are arbitrary-precision in Python; same family as the `integer overflow` row above)* | — |
 | `math.trunc(x)`, non-finite or out of i64 range | `trunc(): NaN is out of integer range` / `trunc(): inf is out of integer range` / `trunc(): 9223372036854776000 is out of integer range` | `ValueError: cannot convert float NaN to integer` / `OverflowError: cannot convert float infinity to integer` | — |
 | `math.divmod(a, 0)` | `division by zero` | `ZeroDivisionError: division by zero` | — |
@@ -159,7 +160,7 @@ than the Python analogue; there is nothing to fix.
 | `join` | `(xs: List[str]) -> str` | Join `xs` with the receiver as the separator. |
 | `replace` | `(old: str, new: str) -> str` | Replace every non-overlapping `old`; empty `old` matches at every codepoint boundary, so `new` lands between every codepoint and at both ends (`"abc".replace("", "-")` → `"-a-b-c-"`, matching CPython and Go). |
 | `repeat` | `(n: int) -> str` | `n <= 0` → `""`. Raises a recoverable `string repeat capacity overflow` fault if `n * len` would exceed allocatable capacity. |
-| `reverse` | `() -> str` | Reversed copy (by codepoint). |
+| `reversed` | `() -> str` | A NEW string with the codepoints in reverse order (`s[::-1]` and `s.reverse()` are removed). |
 | `pad_left` | `(width: int, fill: str) -> str` | Left-pad to `width` codepoints; never shrinks (`width` ≤ len → unchanged). A multi-char `fill` is a repeating cycle truncated to fit, so the result is **exactly** `width` codepoints (`"a".pad_left(4, "xy")` → `"xyxa"`). An empty `fill` raises a recoverable `pad_left: fill must not be empty` fault. Raises a recoverable `string pad capacity overflow` fault if the pad would exceed allocatable capacity. |
 | `pad_right` | `(width: int, fill: str) -> str` | Right-pad (CPython `str.ljust`): the mirror of `pad_left` with the fill after the text (`"ab".pad_right(5, ".")` → `"ab..."`); same never-shrink rule, exact-width cycle, and faults (`pad_right: fill must not be empty`, `string pad capacity overflow`). For a runtime column width either this or `"{s:<{w}}"` works. |
 | `index_of` | `(sub: str) -> int` | First **codepoint** index, `-1` if absent, `0` for empty `sub`. A **sentinel, not a carrier** — see the `-1` hazard under `List.index_of`. |
@@ -175,7 +176,7 @@ than the Python analogue; there is nothing to fix.
 | `encode` | `() -> bytes` | UTF-8 encode. |
 | `message` | `() -> str` | Returns self — lets a bare `str` satisfy the `Error` protocol. |
 
-The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`pad_right`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
+The `ends_with`/`replace`/`repeat`/`reversed`/`pad_left`/`pad_right`/`index_of`/`count`/`strip_prefix`/`strip_suffix`/`split_lines`
 methods are receiver-method aliases of the identically-named `std.string` free fns — `s.replace(a, b)` and
 `text.replace(s, a, b)` (after `import std.string as text`) are byte-identical for valid inputs; the free fns
 keep working. **There is no longer any safety divergence between the two spellings** — as of 2026-08-18
@@ -198,7 +199,7 @@ quote-doubling with it (unaffected: it always passes a literal `"` as `old`, nev
 | `len` | `() -> int` | |
 | `push` | `(x: T) -> None` | *mutates* — append. |
 | `pop` | `() -> T?` | *mutates* — remove & return last (`None` if empty). |
-| `reverse` | `() -> None` | *mutates* — reverse in place. |
+| `reverse` | `() -> None` | *mutates* — reverse in place (`List` and `bytearray`; `bytearray` also has `reversed() -> bytearray`, and `bytes.reversed() -> bytes`). |
 | `contains` | `(x: T) -> bool` | |
 | `index_of` | `(x: T) -> int` | First index, or `-1`. A **sentinel, not a carrier** — see the `-1` hazard below. |
 | `concat` | `(other: List[T]) -> List[T]` | Returns a **new** list. Operator form: `a + b`. |
@@ -314,7 +315,7 @@ Index a map with `m[k]` (read/write); iterate with `for k, v in m:`.
 | `bytearray` | `copy` | `() -> bytearray` | Returns a **new** bytearray (Python `bytearray.copy()`). |
 
 Index either with `b[i]` (byte as `int`); `bytearray` also supports `b[i] = byte`. **Both types slice**
-(`b[1:3]`), and a slice keeps the receiver's type — `bytes[1:3]` is `bytes`, `bytearray[1:3]` is a fresh
+(`b[1..3]`), and a slice keeps the receiver's type — `bytes[1..3]` is `bytes`, `bytearray[1..3]` is a fresh
 `bytearray`. (`syntax.md` §2's type table lists the same surface; the two used to disagree.)
 
 A `bytearray` is **not** assignable to a `bytes` slot (it is mutable — an alias under an immutable
@@ -1373,10 +1374,10 @@ fn cmp(a: ptr, b: ptr) -> int:           # qsort hands two const void* (each an 
 data := [5, 2, 9, 1, 7]
 buf := ffi.alloc(data.len() * 8)         # one int64 slot per element
 defer ffi.free(buf)                      # manual free — never auto-freed
-for i in range(data.len()):
+for i in 0..data.len():
     ffi.store_int64_at(buf, i * 8, data[i])
 qsort(buf, data.len(), 8, cmp)           # sorts in place, calling back into `cmp`
-for i in range(data.len()):
+for i in 0..data.len():
     print(ffi.load_int64_at(buf, i * 8)) # 1 2 5 7 9
 ```
 
@@ -1772,7 +1773,7 @@ write the same collection; the walk is not one atomic snapshot.
 | `.push(item)` | `(E) -> None` | **update guard**. Appends one element without copying the list. It is a plain list push inside the box heap. |
 | `.len()` | `() -> int` | **concurrent read**. |
 | `.at(i)` | `(int) -> E?` | **concurrent read**, constant time. Out of range is `None`, never a fault; a negative `i` counts from the end, as `xs[i]`. |
-| `.slice(lo, hi)` | `(int, int) -> List[E]` | **concurrent read**; a copy of `[lo, hi)` with `xs[lo:hi]`'s clamping. |
+| `.slice(r)` / `c[a..b]` | `(Range) -> List[E]` | **concurrent read**; a copy of the elements the `Range` selects, resolved exactly as `xs[r]` resolves it on a `List` (negative bound, inclusive end, clamping, step). |
 | `.for_each(f)` | `(fn(E) -> R) -> None` | Calls `f` once per element, in order, one element in the caller's heap at a time. |
 | `.fold(init, f)` | `(R, fn(R, E) -> R) -> R` | Reduces in order; `R` is inferred from `init`. |
 | `.snapshot()` | `() -> List[E]` | **concurrent read** returning a **copy** of the whole list. |

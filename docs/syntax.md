@@ -83,7 +83,7 @@ bytes (the lexer applies escapes + strips the `b` prefix). Accepted escapes: `\x
 digits → one byte `0x00`–`0xFF`, the only way to write a byte ≥ 0x80) plus `\n \t \r \\ \" \' \0`.
 `\u{…}` is **rejected** (a byte literal is byte-exact, not UTF-8), as is a raw non-ASCII source char.
 No interpolation. Operations: `b[i]` → `int` 0–255 (Index protocol; out-of-range is a recoverable
-panic), `b[a:b:c]` → `bytes` (Slice protocol over byte offsets — open bounds / step / reverse /
+panic), `b[a..b]` → `bytes` (Slice protocol over byte offsets — open bounds / `Range` step / `reversed()` /
 negative), `for x in b` yields `int`, `b.len()` is the byte count, `==`/`!=` are structural, and `bytes`
 is `Hashable` (valid `map`/`set` key). `str(b)` / `print(b)` / interpolation use the Python `b'...'`
 repr (printable ASCII literal, others `\xHH`). `bytes` is immutable — `b[i] = x` is a type error.
@@ -106,7 +106,7 @@ prefix `rb"..."`, and Rust-style `r#"..."#` hash delimiters — the triple form 
 `bytearray(N)` (N zero bytes, Python semantics), `bytearray(b)` (a mutable copy of a `bytes`),
 `bytearray([ints])` (each element 0–255). Operations: `ba[i]` → `int` 0–255, **`ba[i] = x`** mutates
 in place (`IndexSet`; the value must be 0–255 and the index in range, else a recoverable panic — the
-new capability `bytes` lacks), `ba[a:b:c]` → a NEW `bytearray` (mutable copy, byte offsets),
+new capability `bytes` lacks), `ba[a..b]` → a NEW `bytearray` (mutable copy, byte offsets),
 `for x in ba` yields `int`, `ba.len()`, `.push(int)` (append one byte 0–255), `.pop() -> int?`,
 `.extend(bytes | bytearray | List[int])` (append in place). `==`/`!=` are structural; cross-type
 `b"a" == bytearray([97])` is **content-equal** (Python parity). `bytearray` is **NOT `Hashable`**
@@ -643,7 +643,7 @@ what each call head means and the backend reads that record, so the local wins a
 | `float` | `3.14` | 64-bit |
 | `bool` | `true` | |
 | `str` | `"hi"` | UTF-8 |
-| `bytes` | `b"\x01AB"` | immutable byte sequence; `b[i]`→int, `b[a:b:c]`→bytes, iterates int; `Hashable` |
+| `bytes` | `b"\x01AB"` | immutable byte sequence; `b[i]`→int, `b[a..b]`→bytes, iterates int; `Hashable` |
 | `bytearray` | `bytearray([1,2])` | MUTABLE byte buffer (constructor-only); `ba[i]`→int, `ba[i]=x`, slice→bytearray, `push`/`pop`/`extend`; NOT `Hashable` |
 | `List[T]` | `[1, 2]` | growable |
 | `Map[K, V]` | `{"a": 1}` | insertion-ordered hash map; `K` is any `Hashable` type |
@@ -763,11 +763,11 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 4 | `??` | null-coalescing, RIGHT-associative, `T?` or `T!E` (see below) |
 | 5 | `*` `/` `%` | `*` also list repeat: `[0] * 3` (and `3 * [0]`, commutative) |
 | 6 | `+` `-` | `+` also list concat: `[1,2] + [3,4]`; `-` also set difference: `a - b` |
-| 7 | `..` | range (end-exclusive) |
-| 8 | `<<` `>>` | bitwise shift (int-only) |
-| 9 | `&` | bitwise and (int) / set intersection (`Set[T]`) |
-| 10 | `^` | bitwise xor (int) / set symmetric-difference (`Set[T]`) |
-| 11 | `\|` | bitwise or (int) / set union (`Set[T]`) |
+| 7 | `<<` `>>` | bitwise shift (int-only) |
+| 8 | `&` | bitwise and (int) / set intersection (`Set[T]`) |
+| 9 | `^` | bitwise xor (int) / set symmetric-difference (`Set[T]`) |
+| 10 | `\|` | bitwise or (int) / set union (`Set[T]`) |
+| 11 | `..` `..=` | range value (`Range`); does not chain; either bound may be omitted: `..b`, `a..`, `..` |
 | 12 | `<` `<=` `>` `>=` `==` `!=` `in` | ALL SEVEN comparisons — one level, and they CHAIN (see below); `in` = membership, yields `bool` |
 | 13 | `not` (prefix) | looser than the comparisons, tighter than `and` (Python's grammar) |
 | 14 | `and` | |
@@ -775,7 +775,7 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 | 16 | `\|>` | pipe (§11), left-assoc |
 
 > This table is the contract for the Pratt parser. The relative order follows Python (comparison
-> looser than `\|` < `^` < `&` < shifts). A shift amount outside `0..64` is a runtime error. A left
+> looser than `..` < `\|` < `^` < `&` < shifts). `0..1 << 2` is `0..4`; `x in 0..3` and `0..3 == 0..3` need no parentheses. A shift amount outside `0..64` is a runtime error. A left
 > shift (`<<`) that drops a significant bit overflows like `+ - * /` — a recoverable
 > `integer overflow in Shl` (e.g. `n := 1; n << 63`), not a silent wrap; round-trip-safe shifts
 > incl. `-1 << 63 == INT_MIN` still succeed. `>>` never overflows. An **all-constant** int expression
@@ -1142,7 +1142,7 @@ is an unknown name: `fn f(a: int, b: int = a)` is *"unknown name 'a'"* (CPython 
 at `def`). The same holds inside an **interpolated fragment**: with `n := 100`,
 `fn f(n: int, x: str = "n={n}")` gives `n=100` for `f(3)` and for `g := f; g(3)`. A binder inside
 the default is its own: `g: fn(int) -> int = fn(x: int) -> int: x * 2` beside a parameter `x`, and
-`xs: List[int] = [n * 2 for n in range(3)]` beside a parameter `n`, both check clean and give CPython's value at a direct call, through
+`xs: List[int] = [n * 2 for n in 0..3]` beside a parameter `n`, both check clean and give CPython's value at a direct call, through
 `g := f`, and from another module (the prologue allocates a binder's slot like any other local).
 
 A struct field default and a method default are evaluated in module scope too. CPython evaluates
@@ -1552,23 +1552,29 @@ else:
 
 for i in 0..10:        # range: 0..10 is 0 through 9 (end-exclusive, ascending only)
     print(i)
+for i in 0..=10:       # inclusive: 0 through 10
 
-# `a..b` is always ascending: `for i in 10..0` yields nothing (no auto-reverse). To count down or
-# by N, use the 3-arg `range(start, end, step)` builtin — `step` is a non-zero int, negative counts
-# down (end-exclusive). It returns a materialized `List[int]` (capped at 10M; `step == 0` faults).
-for i in range(10, 0, -1):   # 10, 9, 8, … , 1
+# A range is a VALUE of type `Range` (the struct of `std/prelude.chz`, in scope in every module):
+#   a..b  a..=b  ..b  a..  ..          the literal forms; `..` binds below `|` and above `==`/`in`
+#   Range(a, b)  Range(a, b, step)      the constructor: the ONLY place for a step; a negative step counts
+#                                       down (`Range(3, 0, -1)` yields 3, 2, 1); a step of 0 faults
+# Fields `start: int?`, `end: int?`, `step: int = 1`, `inclusive: bool = false` are readable.
+r := 0..3              # a value: bind it, pass it, return it, store it, send it across a spawn
+print(r)               # 0..3       — display is the source form (`0..=3`, `..3`, `3..`, `Range(0, 10, 3)`)
+print(3 in r, r.len()) # false 3    — `Contains[int]`; `len` needs a start and an end
+print(List(r), Set(r)) # [0, 1, 2] {0, 1, 2}  — `Iterable[int]` (NOT an `Iterator`: iterate it twice)
+print(r == Range(0, 3))  # true      — Eq and Hashable on the four fields; a `Range` is a map key
+for i in Range(10, 0, -1):   # 10, 9, 8, … , 1
     print(i)
-print(range(0, 10, 2))       # [0, 2, 4, 6, 8]   — by-N
-print((0..10)[::2])          # [0, 2, 4, 6, 8]   — a range literal is sliceable like a list
 
-# A range is NOT a value: `a..b` is a syntactic form legal ONLY as the iterable of a `for` loop or
-# comprehension, as a slice receiver, or as a `match` pattern. It is lazy (`for i in 0..10000000000`
-# never materializes), so it has no runtime representation to bind, print, index, or pass along —
-# any other use is a TYPE ERROR at `chezzi check`. Use `range(a, b)` to materialize a `List[int]`:
-#   x := 0..3          # error: a range is only valid as the iterable of a `for` loop or …
-#   List(0..3)         # error (same) — the ctors take an iterable VALUE, and a range isn't one
-xs := range(0, 3)            # [0, 1, 2]         — the materializing escape hatch
-print(Set(range(0, 3)))      # a real List[int], so every container ctor / list op accepts it
+# Open ends: `for i in 5..:` runs lazily until a `break` (at the top of `int` it faults with `integer
+# overflow in Add`, as `+` does); `3 in 5..` and `xs[5..]` work; `List(5..)` runs until memory ends,
+# as `List(g())` does for an endless generator. A range with no start (`..5`, `..`) cannot be
+# iterated: `a range with no start cannot be iterated` (a check error for a literal, a fault for a value).
+# `a()..b()` runs `a()` first, in every position (`for`, comprehension, binding).
+# PERFORMANCE: `for i in a..b` over a LITERAL range is a counter loop (no allocation). Iterating a range
+# VALUE (`for i in r`) resumes a generator per step (about 4x the cost of the literal loop,
+# docs/benchmarks.md).
 
 for item in items:     # iterate a list
     print(item)
@@ -1751,36 +1757,43 @@ print(xs[1])           # 20    — index
 xs[1] = 99             # mutate in place
 print(xs[-1])          # 40    — negative index counts from the end
 xs[-1] = 0             # negative index works as an assignment target too
-sub := xs[1:3]         # slice: half-open `start:end` → [99, 30]
-print("hello"[0:2])    # he    — strings slice too (→ a new str)
-print(xs[1:99])        # [99, 30, 0]   — slice bounds are clamped (no panic)
-print(xs[2:])          # [30, 0]       — open end (defaults to len)
-print(xs[:2])          # [10, 99]      — open start (defaults to 0)
-print(xs[:])           # full copy
-print(xs[0:4:2])       # [10, 30]      — `start:end:step`
-print(xs[::-1])        # [0, 30, 99, 10]  — negative step reverses
-print(xs[-2:])         # [30, 0]       — negative bounds count from the end
+sub := xs[1..3]        # slice: a Range value → [99, 30]
+print("hello"[0..2])   # he    — strings slice too (→ a new str)
+print(xs[1..99])       # [99, 30, 0]   — slice bounds are clamped (no panic)
+print(xs[2..])         # [30, 0]       — open end (defaults to len)
+print(xs[..2])         # [10, 99]      — open start (defaults to 0)
+print(xs[..])          # full copy
+print(xs[0..=2])       # [10, 99, 30]  — inclusive end
+print(xs[Range(0, 4, 2)])   # [10, 30]  — a step goes through the constructor
+print(xs.reversed())   # [0, 30, 99, 10]  — a NEW list; `xs[::-1]` is removed
+print(xs[-2..])        # [30, 0]       — negative bounds count from the end
 ```
 
-Slicing is **Python-style** `obj[start:end:step]`. Each component is optional — an omitted bound
-defaults per direction (forward: start `0`, end `len`; reverse: start `len-1`, end "before 0"), and an
-omitted step defaults to `1`. A `step` of `0` faults (`slice step cannot be zero`). The `..` operator
-is unchanged — it stays the **range** used by `for i in 0..10` and match range-patterns (`0..10 =>`);
-only the subscript-slice form moved from `[a..b]` to `[a:b]`. A **range literal is sliceable** like a
-list: `(0..10)[::2]` materializes the (ascending) range then slices it with the same `start:end:step`
-machinery (`(0..5)[::-1]` → `[4, 3, 2, 1, 0]`). The slice receiver is one of the few positions a range
-literal is legal in at all — it is **not a value** anywhere else (see the range section above); use
-`range(a, b)` to materialize a `List[int]`.
+Slicing takes a `Range` value: `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[..]`, or any `Range` (`xs[r]`,
+`xs[Range(a, b, step)]`). ONE function resolves it against a length, for `List`, `str`, `bytes`,
+`bytearray` and `ConcurrentList`: (1) a missing start is `0` and a missing end is `len` (for a negative
+step: `len - 1` and "before index 0", as CPython); (2) a negative bound `b` becomes `b + len`; (3) an
+inclusive end adds one AFTER step 2 (for a negative step it subtracts one); (4) both bounds clamp to
+the sequence; (5) a start at or past the end gives an empty result. So with `xs = [10, 20, 30]`:
+`xs[-2..]` is `[20, 30]`, `xs[0..=-1]` is `[10, 20, 30]`, `xs[2..1]` and `xs[-1..0]` are `[]`, `xs[1..99]`
+is `[20, 30]`. A plain index stays strict: `xs[-4]` faults. A `step` of `0` cannot be built
+(`Range() step cannot be zero`). The colon slice `xs[a:b]` / `xs[a:b:c]` / `xs[::-1]` is REMOVED; the
+parser's error names the replacement. A subscript by a `Range` is a slice, or — on a `Map[Range, V]` —
+a key lookup: the checker decides once (`Slice` before `Index`) and the compiler emits that choice.
+`xs[a..b] = v` is the check error `cannot assign to a slice`.
 
 **Negative indexing** counts from the end (`xs[-1]` is the last element) for plain indexing *and*
 slice bounds, on `list`/`str`, including as an assignment target (`xs[-1] = v`). The out-of-range
 rule follows Python's asymmetry: a plain `xs[-100]` on a short list **faults** (`index -100 out of
-bounds (len N)`), while a slice bound `xs[-100:]` **clamps** to the start (never faults).
+bounds (len N)`), while a slice bound `xs[-100..]` **clamps** to the start (never faults).
 
 `List[T]` slices to `List[T]`, `str` to `str`. Indexing and slicing are **protocols**, so custom
-types opt in — see `Index`/`IndexSet`/`Slice` in §7b. A user `Slice` impl gets the full Python
-surface via default parameters: `slice(self, start: int? = None, end: int? = None, step: int? = None)
--> R` (each component arrives as `None` when omitted, `?n` otherwise).
+types opt in — see `Index`/`IndexSet`/`Slice` in §7b. A user `Slice` impl is `slice(self, r: Range) -> R`
+(the parameter is named `r`); it hands the range to the list it holds (`return self.items[r]`) to get the
+standard result.
+
+`reversed()` returns a NEW value on `List`, `str`, `bytes` and `bytearray`; `reverse()` changes in place
+and exists on `List` and `bytearray` only. `str.reverse()` is removed.
 
 ## 6c. Comprehensions  (M16)
 
@@ -2229,7 +2242,7 @@ for q in Box(Tag(1)):   →  type error: cannot iterate over Box[Tag]
 `Box[Tag]` does not iterate through `next`, a zero-field `struct Z[T]` with a conditional `hash`
 gets no constant hash for `Z[Tag]`, and `Box[Tag]` is not a `StructuralEq` payload when `Box` has a
 conditional `eq`. `for`, comprehensions, `List()` / `Set()` / `Map()`, `x[k]`, `x[k] = v`,
-`x[a:b]`, `in`, the arithmetic operators, unary `-` and a `Set` / `Map` key all report the bound.
+`x[a..b]`, `in`, the arithmetic operators, unary `-` and a `Set` / `Map` key all report the bound.
 One exception stays open: `print` accepts every value and has no compile-time decider, so a
 conditional `str` runs for every instantiation.
 
@@ -2355,7 +2368,7 @@ struct Doc2:
 
 The built-in protocols take their names from `std/prelude.chz`: `compare`/`eq` and the operator
 methods (`add`/`sub`/`mul`/`div`/`mod`) name their operand `other`, `Index.index` names `k`,
-`IndexSet.set_index` names `k`, `v`, `Slice.slice` names `start`, `end`, `step`, and
+`IndexSet.set_index` names `k`, `v`, `Slice.slice` names `r`, and
 `Contains.contains` names `item`. So `fn compare(self, o: P) -> int` no longer makes `P`
 `Comparable`; write `fn compare(self, other: P) -> int`. A built-in type conforms through its native
 method's declared names (`str.replace(self, old, new)` satisfies `Rep`), though a direct call to a
@@ -2692,7 +2705,7 @@ embed is an error.
 
 The embed set flattens at **every** use site, not only at a bound. Through a value annotated with the
 protocol (an *interface value*) and through a bounded type parameter alike: an embedded method is
-callable, `in` resolves an embedded `Contains`, `[]`/`[a:b]` an embedded `Index`/`IndexSet`/`Slice`,
+callable, `in` resolves an embedded `Contains`, `[]`/`[a..b]` an embedded `Index`/`IndexSet`/`Slice`,
 and unary `-` an embedded `Neg`. A protocol value also **satisfies the protocols it embeds**, so a
 `Person` (embedding `Named`) is accepted where a `Named` is wanted — Go's interface-to-interface
 assignment. Type arguments stay **invariant** throughout: a `Container[str]` value never satisfies
@@ -2757,7 +2770,7 @@ fn show(p: Person) -> str:       # an INTERFACE VALUE, not a bound
 
 Indexing and slicing are overloaded through the prebuilt **`Index[K, V]`** (read `obj[k]` via
 `index(self, key: K) -> V`), **`IndexSet[K, V]`** (mutable `obj[k] = v`, adds `set_index(self, key: K,
-val: V)`), and **`Slice[R]`** (`obj[a:b:c]` via `slice(self, start: int? = None, end: int? = None,
+val: V)`), and **`Slice[R]`** (`obj[r]` for a `Range` `r` via `slice(self, r: Range) -> R`; the old form was `slice(self, start: int? = None, end: int? = None,
 step: int? = None) -> R` — each component is `None` when omitted) protocols.
 Built-in `list`/`map`/`str` satisfy them intrinsically (`str` is read-only — `Index`/`Slice` but not
 `IndexSet`); a struct defining the matching methods becomes indexable/sliceable. Because they are real
@@ -2788,7 +2801,7 @@ struct Ring:
 r := Ring([10, 20, 30])
 print(r[3])            # 10   — wraps; `index` dispatched
 r[1] = 99              # `set_index` dispatched
-print(r[0:2])          # [10, 99]   — `slice` dispatched
+print(r[0..2])         # [10, 99]   — `slice` dispatched
 
 fn first[C: Index[int, V], V](c: C) -> V:   # works over a list OR a Ring
     return c[0]
@@ -3031,10 +3044,10 @@ a direct `(5).str()` on a concrete scalar is still a compile error — use the f
 protocols a built-in satisfies intrinsically, not just `Stringable`: inside an erased `[T: P]` body you
 may call `a.add(b)`/`a.sub(b)`/`a.mul(b)`/
 `a.div(b)`/`a.mod(b)`/`a.neg()` on `int`/`float`, `a.compare(b)`, `x.hash()` on
-`int`/`str`/`bytes`/`bool`/a zero-field struct, and `c.index(k)`/`c.set_index(k, v)`/`c.slice(s, e, st)`
+`int`/`str`/`bytes`/`bool`/a zero-field struct, and `c.index(k)`/`c.set_index(k, v)`/`c.slice(r)`
 on `list`/`map`/`str`/`bytes`/`bytearray`. Each is **defined as** the operator form — `a.add(b)` ≡
 `a + b` (same overflow / divide-by-zero fault), `c.index(k)` ≡ `c[k]` (negative indexing and the same
-out-of-bounds message), `c.slice(?0, ?2, None)` ≡ `c[0:2]` (the three components are `int?`),
+out-of-bounds message), `c.slice(0..2)` ≡ `c[0..2]` (the argument is a `Range`),
 `x.hash()` is exactly the hash `x` gets as a map/set key. A type that defines the method itself always
 gets its own.
 
