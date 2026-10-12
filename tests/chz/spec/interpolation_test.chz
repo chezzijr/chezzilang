@@ -119,13 +119,12 @@ test fn fragment_local_shadows_fn_name():
     assert with_default(1) == 100
     assert "{with_default(1)}" == "100"
 
-# ---- M24-6: the lexer's per-literal position map is RUNTIME-INERT ----
+# ---- M24-6: a hole's real source positions are RUNTIME-INERT ----
 #
-# A `{…}` fragment is re-lexed against a `PosMap` so its token spans are real source positions. That
-# is a diagnostics/table-key change and it must not move a single rendered char. These are pure
-# value assertions over exactly the shapes the map has to reason about: an escape that is many
-# source chars for one content char, a fragment spanning a real newline, and `{{`/`}}` (which the
-# fragment scanner consumes as content, keeping the raw index it keys on true).
+# The lexer lexes a `{…}` hole in place, so its token spans are real source positions. That is a
+# diagnostics/table-key change and it must not move a single rendered char. These are pure value
+# assertions over exactly the shapes that position has to reason about: an escape that is many
+# source chars for one content char, a hole spanning a real newline, and `{{`/`}}`.
 
 test fn an_astral_escape_before_a_fragment_renders():
     n := 7

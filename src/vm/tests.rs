@@ -20452,13 +20452,12 @@ fn deep_accepted_chains_run_without_stack_overflow() {
     // 8 000 first proposed. Note what 16 000 did NOT do: it NARROWED the worst accepted AST from
     // ~29 940 nodes (measured on `b1307258` — a paren level can spend BOTH fold loops, at ~998 nodes
     // per level) to ~15 968, deliberately, because 29 940 sat at only 1.11x the ~33 100-node cliff.
-    // That ~15 968 held only per-`Parser` until `desugar::Walker::walk_expr` started bounding the
-    // composed tree: an interpolated `{…}` fragment is built by a second `Parser` and used to get a
-    // fresh 16 000, so depth summed across nesting levels. That bound is UNCONDITIONAL as of W7-51:
-    // the one seam it missed — an interpolated literal inside a default argument spliced on
-    // desugar's second pass, never walked, reaching ~31 986 nodes — needed both a second pass and a
-    // spliced default EXPRESSION, and neither exists now. Re-measured on `ed4830b3` with a probe on
-    // `checker::check_interpolation`'s success arm: `925dd0f7` 1 hit, `ed4830b3` 0.
+    // That ~15 968 held only per-`Parser` while an interpolated `{…}` fragment was built by a second
+    // `Parser` that got a fresh 16 000, so depth summed across nesting levels. A hole is parsed by
+    // the SAME `Parser` now (TICKET-252), so its depth and fold-depth carry on, and
+    // `desugar::Walker::walk_expr` bounds the finished tree as the backstop. The bound is
+    // UNCONDITIONAL as of W7-51: it needed both a second desugar pass and a spliced default
+    // EXPRESSION to slip past, and neither exists.
     // Value is invariant (all `+0`) so the result is deterministic; the point is that
     // walking/compiling/running this depth does not abort. Assign then print separately so the
     // `print(...)` call wrapper doesn't eat into the paren budget. THE PAREN COUNT IS CALIBRATED TO

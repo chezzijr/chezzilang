@@ -30192,10 +30192,10 @@ fn witness_forwarding_still_charges_every_unpinned_shape_rejected() {
 }
 
 /// E — an interpolation-fragment diagnostic points at the FRAGMENT EXPRESSION's real column. A
-/// fragment is re-lexed from its own source, and while only its LINE was re-anchored every column
-/// restarted at 1; three successive anchors papered over that (one mutating a cloned root's span,
-/// one carried beside the AST) and each one broke a table key or a nested fragment. The lexer now
-/// re-lexes the fragment against the literal's `PosMap`, so there is nothing left to anchor.
+/// fragment was once re-lexed from its own source, and while only its LINE was re-anchored every
+/// column restarted at 1; three successive anchors papered over that (one mutating a cloned root's
+/// span, one carried beside the AST) and each one broke a table key or a nested fragment. The lexer
+/// now lexes a hole in place, so its tokens carry real positions and there is nothing left to anchor.
 /// CPython is the ancestor and points at the expression too (3.14.6 carets `nope` in
 /// `print(f"hello {nope}")`, not the literal).
 #[test]
@@ -30214,8 +30214,8 @@ fn interpolation_fragment_error_points_at_the_fragment() {
 }
 
 /// …and a fragment NESTED in another fragment's literal is a real position too — the case that
-/// reported column 1 at every depth. Positions compose through the nesting: the inner literal builds
-/// its own `PosMap` out of the outer lexer's `span_at`, which already routes through the outer map.
+/// reported column 1 at every depth. There is nothing to compose: the inner literal is lexed in place
+/// by the same lexer, so its holes carry real positions at any depth.
 #[test]
 fn nested_interpolation_fragment_error_points_at_the_fragment() {
     // col:            1234567890123456789012345
@@ -30228,11 +30228,9 @@ fn nested_interpolation_fragment_error_points_at_the_fragment() {
 }
 
 /// …and the composition hazard: a nested literal AFTER a parent escape. The parent's `\t` is TWO
-/// source chars for one content char, and the inner lexer sees only the content char — so any
-/// "record a position at escapes and newlines" shortcut inside `PosMap::note` misses the jump and
-/// puts the inner fragment one column LEFT of the truth, which is how a nested fragment lands on a
-/// neighbour's table key. `note` asks `span_at` per char, and `span_at` already routes through the
-/// parent map, so the jump is recorded. **This test is what fails if `note` is "simplified".**
+/// source chars for one content char; a column counted off the post-escape text puts the inner
+/// fragment one column LEFT of the truth, which is how a nested fragment lands on a neighbour's
+/// table key. The lexer reads the nested literal in place, so its columns are the file's.
 #[test]
 fn a_nested_literal_after_an_escape_composes() {
     // line 3:  print("{ f('a\tb{nope}c') }")
@@ -30279,8 +30277,8 @@ fn a_fragment_past_an_escape_newline_keeps_the_literals_line() {
 }
 
 /// An escape before the fragment used to shift its reported column LEFT by one per escape, because
-/// `raw` is the post-escape payload and the column was an offset into it. The lexer's `PosMap` makes
-/// the column physical, so the escapes now cost exactly the source chars they occupy — asserted as
+/// the payload is post-escape text and the column was an offset into it. The lexer lexes the hole in
+/// place, so the escapes now cost exactly the source chars they occupy — asserted as
 /// exact hand-counted values, since a uniformly-wrong-by-one column reads as correct to a human.
 /// What must still hold is the KEY property: two fragments, two different columns.
 #[test]
@@ -30304,8 +30302,8 @@ fn escapes_before_a_fragment_keep_two_fragments_apart() {
 /// Padding inside a fragment (`"{   nope   }"`, legal in Python) is insignificant, and the column
 /// must still land on the expression. This is the guard that the leading-whitespace COUNT and the
 /// `trim()` that drops it agree: they used to be two derivations in two functions, and any drift
-/// between them is a silently-shifted column. They are one derivation now — the trim moved next to
-/// the count in `interpolation::parse_interpolation`.
+/// between them is a silently-shifted column. They are one derivation now — the lexer skips the
+/// padding as white space and the first token carries its own column.
 #[test]
 fn padded_fragment_column_points_past_the_padding() {
     // print("{   nope   }")

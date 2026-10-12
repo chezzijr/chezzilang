@@ -790,8 +790,6 @@ impl Builder {
                 // `e.message`, NOT `e.to_string()`: the position is already carried on the `span`
                 // below and re-rendered by the caller, so `LexError`'s own `(line, col)` prefix
                 // stutters it — `resolve error (line 1, col 8): … lex error (line 1, col 8): …`.
-                // The interpolation seam (`interpolation::parse_expr_str`) strips exactly this
-                // prefix for exactly this reason; this is the primary path saying the same thing.
                 message: prefix(dotted, format!("lex error: {}", e.message)),
                 span: Span {
                     // `as u32`: 1-based source counters — cannot approach u32::MAX.

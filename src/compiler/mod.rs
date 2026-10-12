@@ -382,7 +382,7 @@ struct Compiler {
     /// String-interpolation fragment discriminators for the [`crate::checker::WitnessKey`] and
     /// [`crate::checker::CarrierKey`]: the
     /// whole-string span + the fragment's 0-based ordinal, maintained (save/restore) around each
-    /// fragment in `compile_str`. Mirrors the checker's `kw_frag_ctx`/`kw_frag_ord` so the keyword-call
+    /// fragment in `compile_interp`. Mirrors the checker's `kw_frag_ctx`/`kw_frag_ord` so the keyword-call
     /// key computed at lookup matches the one the checker recorded. Inert (`Span::default()`/`0`)
     /// outside interpolation.
     kw_frag_ctx: crate::lexer::Span,

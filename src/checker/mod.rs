@@ -2821,11 +2821,11 @@ struct Checker {
     graph_module_idx: usize,
     /// The string-interpolation fragment CONTEXT for keyword-call keying: the whole-string span of the
     /// interpolation currently being inferred (or `Span::default()` outside interpolation) paired with
-    /// [`Self::kw_frag_ord`], the fragment's 0-based index in that string. Because each `{…}` fragment
-    /// is re-lexed from a fresh source its sub-expression spans restart at `(1,1)`, so span alone
-    /// cannot tell two fragments apart; these two fields disambiguate them in the [`WitnessKey`] and [`CarrierKey`]. Set
-    /// (save/restore for nesting) around each fragment in `check_interpolation`; the compiler and
-    /// interp maintain the identical pair at their own interpolation boundaries.
+    /// [`Self::kw_frag_ord`], the fragment's 0-based index in that string. A fragment's spans are its
+    /// real source positions, so span alone tells two fragments apart; this pair is belt-and-braces
+    /// in the [`WitnessKey`] and [`CarrierKey`]. Set (save/restore for nesting) around each fragment
+    /// in `check_interp_chunks`; the compiler maintains the identical pair at its own interpolation
+    /// boundary.
     kw_frag_ctx: Span,
     kw_frag_ord: usize,
     /// True only while resolving an `extern "lib":` fn's param/return signature. `owned_str` is a

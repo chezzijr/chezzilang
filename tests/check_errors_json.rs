@@ -366,10 +366,10 @@ fn interp_nest(levels: usize, k: usize, folds: usize) -> String {
 }
 
 /// **THE COMPOSED-BUDGET REGRESSION** (W7-50 task 3b). `parser::MAX_AST_DEPTH` is enforced by the
-/// `Parser` that builds a tree, and an interpolated `{…}` fragment is built by a *second* `Parser`
-/// (`interpolation::parse_expr_str`) whose counters start at zero — so the budgets composed and the
-/// bound was per-parse, not global. `desugar::Walker::walk_expr` now bounds the composed depth,
-/// because it re-enters its own walk on the fragment's subtree and therefore sees the real total.
+/// `Parser` that builds a tree, and an interpolated `{…}` fragment was built by a *second* `Parser`
+/// whose counters started at zero — so the budgets composed and the bound was per-parse, not
+/// global. Since TICKET-252 a hole is parsed by the SAME `Parser` (its counters carry on), and
+/// `desugar::Walker::walk_expr` bounds the finished tree as the backstop.
 ///
 /// **Pre-fix observation (`e1137096`), recorded so this test's detection is not a guess:** debug
 /// `chezzi run` on the three-level fixture below exited 134 with

@@ -1190,11 +1190,9 @@ impl Lexer {
 
     /// Build a `LexError` pointing at char index `pos` **on the current line**.
     ///
-    /// It asks `span_at` rather than reading `self.line`/`self.line_start`, because inside a
-    /// re-lexed interpolation FRAGMENT those are fragment-local — so a lex error in
-    /// `"{ 'unterminated }"` on line 40 of a real program surfaced as `lex error (line 1)`.
-    /// `span_at` composes through the enclosing literal's `PosMap`, so a column inside a fragment
-    /// is right for free. At top level it returns `self.line` verbatim.
+    /// It asks `span_at` rather than reading `self.line`/`self.line_start`, so every error site
+    /// derives its position the same way. A hole is lexed in place, by this lexer, so a column
+    /// inside a hole is the real one with no further composition.
     ///
     /// **`pos` must not predate `self.line_start`** — `span_at` derives the column as
     /// `pos - self.line_start`, so a position on an EARLIER line underflows. When the offending

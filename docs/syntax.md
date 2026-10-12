@@ -4293,8 +4293,10 @@ print(r"""{"k": [1,2]}""")    # {"k": [1,2]}   ← triple raw embeds quotes + br
 **Escapes.** Backslash escapes resolve at lex time: `\n` `\t` `\r` `\\` `\"` `\'` `\0` and
 `\u{HEX}` (1-6 hex digits naming a Unicode scalar value, e.g. `\u{41}` → `A`, `\u{1F600}` → 😀).
 A surrogate (`D800`-`DFFF`), a value above `10FFFF`, an empty `\u{}`, a missing brace, a non-hex
-digit, or any other unknown escape is an error. Two independent layers, like Python f-strings: `\`
-escapes a *character* (`\"` → a quote), while `{{` / `}}` escape *interpolation* (→ a literal brace).
+digit, or any other unknown escape is an error. A backslash escapes a *character* of the literal's
+text (`\"` → a quote), while `{{` / `}}` write a literal brace. An escape resolves **once**, in the
+text of the literal that holds it, and an escaped brace is text: `"\u{7B}x\u{7D}"` is `{x}`, never a
+hole. The text of a hole is code, and code has no escapes (next paragraph).
 
 ```chezzi
 print("tab\tgap, quote \"x\", path C:\\tmp")
@@ -4302,16 +4304,31 @@ print('single quotes work too: {name}, with \'apostrophe\' and \u{2728}')
 print("literal {{x}} vs value {x}")
 ```
 
-**What goes inside `{…}`.** Any expression, with no second-class rules — a call in a fragment takes
+**What goes inside `{…}`.** Any expression, with no second-class rules — a call in a hole takes
 **named arguments, defaults, and variadics** exactly like the same call written outside the string
-(fragments are parsed with the rest of the module, before call arguments are normalized). The
-fragment scanner is **quote- and depth-aware**, so a `}` inside a nested string literal or inside
-`(`/`[`/`{` belongs to the expression rather than closing the fragment; whitespace padding around the
-fragment is insignificant. A `#` outside a nested string literal starts a comment that runs to the
-end of the line, as in CPython 3.12+ (W12-19). In a multi-line (`"""`) hole the comment ends at the
-line break, so `"""{x # note⏎}"""` is `x`; on one line it comments out the closing `}` and is a
-compile error pointing at the `#`. An escaped `\n` does not end it. A `#` in a nested string
-(`{d['#']}`) or in the format spec (`{n:#x}`) is ordinary text.
+(holes are parsed with the rest of the module, before call arguments are normalized). The hole's text is
+**code, read once, as you wrote it**: the lexer finds each hole while it scans the literal, and lexes
+its code in place with the same rules as the code around it. Three rules follow:
+
+1. **A nested literal may use the enclosing quote**, as in CPython 3.12+: `"{d["k"]}"` is the value at
+   key `k`, and `"{"{x}"}"` nests an interpolated literal. A hole may nest up to **149** levels
+   (CPython 3.14's limit); the 150th is `too many nested interpolated strings`.
+2. **There is no backslash in hole code.** `"{d[\"k\"]}"` and `"{x\t+ 1}"` are errors that name the fix
+   (write the quote directly). Escapes exist in a literal's own text and in a format spec's text, and
+   inside a nested literal, where they resolve once: `"{'\\n'.len()}"` is `2`.
+3. **The first `:` at hole depth** (outside every bracket and every nested literal) **starts the format
+   spec.** `{if c: 1 else: 2}`, `{fn(): 1}` and a bare `match` or `recover:` in a hole are errors that
+   say to wrap the expression in parentheses: `{(if c: 1 else: 2)}` works, and `{(if c: 1 else: 2):>5}`
+   carries a spec. `{x:=5}` is the spec `=5`, not a walrus.
+
+A hole is a bracket for layout, like `()`, `[]` and `{}`: a line break inside it is white space, so
+`{x +⏎ 1}`, `{x⏎ + 1}` and a method chain over three lines work in a `"""…"""` or a `"…"` literal alike.
+Whitespace padding around the code is insignificant. A `}` inside a nested string literal or inside
+`(`/`[`/`{` belongs to the expression rather than closing the hole. A `#` outside a nested string
+literal starts a comment that runs to the end of the line, as in CPython 3.12+ (W12-19). In a
+multi-line hole the comment ends at the line break, so `"""{x # note⏎}"""` is `x`; on one line it comments
+out the closing `}` and is a compile error pointing at the `#`. A `#` in a nested string (`{d['#']}`)
+or in the format spec (`{n:#x}`) is ordinary text.
 
 ```chezzi
 fn greet(name: str, greeting: str = "hi") -> str:
@@ -4327,13 +4344,17 @@ print("{ {'a': 1}['a'] }")    # 1
 print("{d['a}}b']}")          # value at key `a}b` — the quoted brace does not close the fragment
 ```
 
-Past the top-level `:` the rest of the fragment is the **format spec** — literal text, not an
-expression — so any character may be the fill (`"{x:'>5}"` → `''''7`, `"{x:(>5}"` → `((((7`).
+Past the first `:` at hole depth the rest of the hole is the **format spec** — literal text, not an
+expression — so any character may be the fill (`"{x:'>5}"` → `''''7`, `"{x:(>5}"` → `((((7`). An
+escape in a spec resolves once (`"{x:\u{3E}4}"` pads like `{x:>4}`). The literal's own closing
+delimiter ends the spec too, so a fill that equals the literal's quote needs the other quote style.
 
-Two limits, both shared with CPython < 3.12. The **lexer** ends the string at the first unescaped
-delimiter, so a fragment cannot nest the *same* quote style (`"{d["k"]}"` is a lex error — use
-`"{d['k']}"`). And a nested literal is itself a normal Chezzi string, so it interpolates too and a
-literal brace inside it is still doubled (`'a}}b'` above is the key `a}b`).
+**Two deliberate differences from CPython.** Every Chezzi literal interpolates, a nested one
+included, so a literal brace inside it is doubled: `"{'}}'}"` is `}` where CPython writes
+`f"{'}'}"`, and a lone `}` in a nested literal is `unmatched '}'` (as it is at the top level). And a
+hole whose whole text is digits is text (`"a{4}b"` is `a{4}b`, CPython `a4b`), so a regex
+quantifier survives. An `extern "lib":` header takes a plain string only: `extern "lib{x}"` is
+`an extern library name cannot interpolate`.
 
 **Format specifiers.** An interpolation may carry a Python-style format spec after a `:` —
 `{expr:spec}`. The mini-language is a coherent subset:
@@ -4445,10 +4466,10 @@ The **runtime** validation stays as an identical backstop (same wording, single-
 type — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an `Unknown`, or a
 protocol existential — where the mismatch is only knowable at run time. A program that passes
 `check` never faults with `format spec:` on a concrete-typed hole. The spec is parsed once,
-one module (`src/fmtspec.rs`), so its output is byte-identical across runs. The `:` split is bracket/quote-aware — a `:` inside an index, string key, or
-slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries:** a bare interpolated
-ternary `{if b: a else: b}` works (its colons are part of the expression, not a spec); to attach a
-spec to a ternary, **parenthesize** it — `{(if b: 1 else: 2):>5}`.
+one module (`src/fmtspec.rs`), so its output is byte-identical across runs. The lexer decides where the spec starts (above) — a `:` inside an index, string key, or
+slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries and other keyword colons:**
+a ternary in a hole is **parenthesized**, with or without a spec — `{(if b: 1 else: 2)}`,
+`{(if b: 1 else: 2):>5}`; the bare `{if b: a else: b}` is an error that says so.
 
 **Plain float formatting matches CPython `repr()`/`str()` exactly, with ONE exception: `NaN` casing.**
 Chezzi prints `NaN` where CPython prints `nan` (`inf`/`-inf` agree; the upper-case `E`/`F`/`G` type chars print `INF`/`-INF`/`NAN` like CPython). It is the single differing byte

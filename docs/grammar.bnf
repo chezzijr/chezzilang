@@ -703,16 +703,17 @@
 # then `)`) is a 1-element tuple. Comprehension forms take no trailing comma.
 #
 # A "STR" token is the whole string literal (the lexer has already stripped quotes + resolved
-# backslash escapes). Its `{expr}` / `{expr:spec}` interpolations — including the Python-style format
-# mini-language after a `:` (see syntax.md §10, implemented in src/fmtspec.rs) — are parsed in a
-# SEPARATE post-lexer pass over the STR token's contents (compiler::parse_interpolation),
-# so they need NO production here.
+# backslash escapes). Its `{expr}` / `{expr:spec}` holes — including the Python-style format
+# mini-language after a `:` (see syntax.md §10, implemented in src/fmtspec.rs) — are found by the
+# LEXER while it scans the literal: the hole's code is lexed in place, one bracket deep, with no
+# escape processing, and the first `:` at hole depth starts the spec. The token carries the hole's
+# tokens, the parser parses them as one `<expr>`, so they need NO production here.
 # A "BYTES" token is a whole `b"..."` / `b'...'` byte-string literal (the lexer stripped the `b`
 # prefix + quotes and resolved escapes, incl. `\xHH`; no `\u`, no interpolation — see syntax.md).
 # A "RAWSTR" token is a whole `r"..."` / `r'...'` (or triple `r"""..."""` / `r'''...'''`) raw-string
 # literal: VERBATIM contents (the lexer stripped the `r` prefix + quotes only). Unlike STR there is
 # NO escape processing (`\n` is backslash-n, `\` is a literal backslash) and NO `{expr}` interpolation
-# (braces are literal) — so the post-lexer interpolation pass never sees it. Its type is plain `str`.
+# (braces are literal) — so the lexer never looks for a hole in it. Its type is plain `str`.
 # The short form cannot contain its closing quote; the triple form embeds lone quotes (e.g. JSON).
 <primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW" | "IDENT"
             | "LPAREN" <expr> "RPAREN"

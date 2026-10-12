@@ -108,46 +108,18 @@ pub const MAX_DEPTH: usize = 512;
 /// list costs the depth of its deepest element, not their sum. `tests::deep_iterative_chains_error_not_crash`
 /// pins breadth, composition, and the double fold above.
 ///
-/// **Everything above holds across the interpolation re-parse only because that took a SECOND
-/// enforcement point.** On its own, everything above is enforced by the `Parser` that builds a tree,
-/// so it bounds *one parse*. An interpolated `{…}` fragment is built by a **different** `Parser`:
-/// `interpolation::parse_expr_str` re-lexes the fragment text and calls [`parse_expr`], whose
-/// `depth`/`fold_depth` start at zero. Until W7-50
-/// task 3b the budgets therefore **composed** — one fresh 16 000 per level of
-/// `"{ <15 985 deep> }".len()` — and a three-level program type-checked clean at ~46 000 nodes
-/// (measured: peak walk depth 15 000 / 30 000 / 45 000 for one, two, three levels), which SIGABRTed
-/// debug `chezzi run` on the 384 MiB `vm::VM_STACK_BYTES` worker.
-///
-/// The composed depth is now bounded where the composition physically happens:
-/// `desugar::Walker::walk_expr` re-enters its own walk on a parsed fragment's subtree, so its
-/// recursion depth **is** the real depth of the composed tree the checker and compiler then descend,
-/// and it refuses at this same constant. See that method for why every front-end path routes through
-/// it and why the other three `parse_interpolation` callers need no budget of their own. It is a
-/// measurement of the finished tree rather than a remaining-budget parameter threaded through the
-/// re-parse: one number, exact, and no caller can forget to pass it.
-///
-/// So the ~15 968-node worst case and its 2.07× margin above hold across the interpolation re-parse,
-/// not just within a single `parse` call: measured, total accepted depth is ~16 000 at one, two,
-/// three and four nesting levels alike, where it used to be L × 16 000. **That is unconditional as
-/// of W7-51.** The one residual that used to qualify it — a default argument spliced in on
-/// `desugar`'s *second* pass, never walked, so a well-formed interpolated literal inside one reached
-/// the checker and compiler un-converted at ~31 986 nodes — is gone by construction: there is no
-/// second pass, and a non-literal default is no longer spliced as an *expression* at all (it is
-/// compiled once, in its defining module, and the call site gets a two-node call). Re-measured with
-/// a probe on `checker::check_interpolation`'s success arm, both binaries identical but for the
-/// probe, on the fixture the residual was recorded with: `925dd0f7` **1 hit** at peak walk depth
-/// 15 995, `ed4830b3` **0 hits** at 15 994 — and 2 hits with the desugar conversion disabled, so the
-/// zero is a live zero (see `desugar::Walker::walk_expr` and `docs/gaps.md` W7-50).
-///
-/// The five bisected shapes are identical before and after — but that is not "non-interpolated
-/// programs are unaffected": a default argument filled in at the call site composes with the
-/// caller's expression the same way an interpolated fragment does, and is a SIXTH shape the
-/// bisection above never covered. Measured, release binary: `fn f(a: int = <15 000-deep chain>) ->
-/// int: return a` called as `x := f() + <2000-deep chain>` — `check` accepted it (rc 0) and `run`
-/// printed the answer on `e1137096`; HEAD refuses it with `expression nested too deeply`. An
-/// interpolated literal or a spliced default is now charged for the nodes it hangs beneath, so
-/// either one within ~4 nodes of the ceiling is refused where the parser alone accepted it.
-/// `check_errors_json::composed_interp_depth_is_bounded_globally` detects the interpolation seam.
+/// **A hole is parsed by the SAME `Parser` as the code around it** (`Parser::parse_hole`), so the
+/// bound above composes across an interpolated `{…}` hole: its `depth` and `fold_depth` carry on,
+/// and `"{ <15 985 deep> }".len()` nested three times is refused, as one expression is. Until
+/// TICKET-252 a second `Parser` re-parsed the hole text from depth zero and the budgets composed:
+/// one fresh 16 000 per level, ~46 000 nodes at three levels, a SIGABRT in debug `chezzi run` on the
+/// 384 MiB `vm::VM_STACK_BYTES` worker. `desugar::Walker::walk_expr` stays as the backstop: it
+/// measures the finished tree and refuses at this same constant. A default argument filled in at the
+/// call site composes with the caller's expression the same way (measured, release binary: `fn f(a:
+/// int = <15 000-deep chain>) -> int: return a` called as `x := f() + <2000-deep chain>` was accepted
+/// on `e1137096`; HEAD refuses it with `expression nested too deeply`).
+/// `tests::nested_holes_share_the_parser_depth_budget` and
+/// `check_errors_json::composed_interp_depth_is_bounded_globally` detect the hole seam.
 pub const MAX_AST_DEPTH: usize = 16_000;
 
 /// Parse a full token stream into a `Module`.
@@ -11289,7 +11261,7 @@ fn g():
     }
 
     /// Where a spec starts and what a nested field is: the lexer decides, the parser hands the
-    /// pieces to `fmtspec`. Ported from the `parse_interpolation_*` tests of the deleted scanner.
+    /// pieces to `fmtspec`. Ported from the tests of the scanner this ticket deleted.
     #[test]
     fn hole_specs_and_nested_fields_parse_as_expressions() {
         let chunks = chunks_of("x := \"{x:{w}.{p}f}\"\n");
