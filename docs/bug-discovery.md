@@ -504,7 +504,7 @@ printing, and equality would false-positive on that routine, harmless shape (`ga
   **non-empty** literal (empty `sep` per-char-splits in Chezzi but `ValueError`s in Python). A
   `replace` `old` is also kept non-empty, by choice only: since TICKET-121 an empty `old`
   interleaves in Chezzi exactly as in Python.
-- **Slicing + negative indexing** (`slicing`): Python-style `xs[a:b:c]` on lists/strings and negative
+- **Slicing + negative indexing** (`slicing`): `xs[a..b]` / `xs[Range(a, b, c)]` on lists/strings (Python's `xs[a:b:c]` on the CPython side) and negative
   scalar index `xs[-k]`. Both engines clamp out-of-range bounds identically and step `0` errors on
   both, so no shim — the generator just never emits step `0` and keeps negative scalar indices in
   `[-len, -1]`. Slice results carry `len: None`, so they are never scalar-indexed (no OOB seam).

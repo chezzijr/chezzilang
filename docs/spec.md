@@ -92,7 +92,7 @@ step, and a slot mentioning an unpinned type parameter does not wrap.
 - **M12** — iterator protocol (structs with `next(self) -> T?` iterable in `for`), match guards + range patterns.
 - **M13** — the first **parameterized** protocol bounds, with element-type recovery: `[S: Iterable[T], T]` accepts any iterable, `[S: Iterator[T], T]` a cursor you may call `.next()` on (Rust's `IntoIterator` vs `Iterator`); lazy adapter structs replace `yield`.
 - **M14** — method-level type params (`fn map_to[U](self, …)`) + **user-defined parameterized protocols** (`protocol Container[T]`, concrete-arg bounds `[X: Container[int]]`, and first-class **value/annotation types** `c: Container[int]` — statically witnessed at the store/pass boundary, runtime-erased, strictly invariant, with method-return element recovery) — generalizing the special-cased `Iterator[T]`.
-- **M15** — slicing + indexing protocols (Python-style `xs[a:b:c]` + negative indexing; `Index`/`IndexSet`/`Slice` structural protocols, built-ins intrinsic + user structs via `index`/`set_index`/`slice`).
+- **M15** — slicing + indexing protocols (`xs[a..b]` with a `Range`, originally Python-style `xs[a:b:c]`, + negative indexing; `Index`/`IndexSet`/`Slice` structural protocols, built-ins intrinsic + user structs via `index`/`set_index`/`slice`).
 - **M16–M18** — **concurrency** (`spawn` / `parallel:` nursery, `Channel[T]`, `Shared[T]`, `Executor`, real OS-thread M:N engine via `--parallel`, netpoller + `std.net`) and the **`defer`** statement (call + block forms, `recover:`-integrated). See [`docs/concurrency.md`](concurrency.md).
 - **M20** — **in-language test framework**: `assert <cond>[, "<msg>"]` (a statement primitive that faults with its source line), the `test fn` marker (free tests + struct **suites** with `before_all`/`after_all`/`before_each`/`after_each` lifecycle hooks + a shared typed fixture), and `chezzi test [path]` — a Rust-side, VM-only runner over `*_test.chz` files reporting `PASS/FAIL name (file:line:col) msg` with a non-zero exit on failure. See [`docs/syntax.md §9c`](syntax.md).
 
@@ -513,13 +513,13 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
 
 ## Standard library
 
-- **Builtins (no import):** `print`, `range`, casts (`int()`/`str()`/`float()`),
+- **Builtins (no import):** `print`, `Range`, casts (`int()`/`str()`/`float()`),
   `ord`/`chr`, `Set()`/`Set(list)`, `panic(msg)` (raise a recoverable fault), core-type methods
   (`s.upper()`, `s.chars()`, `xs.push()`, `m.get()`, `set.add()`). The **universe builtins**
   `ord`/`chr`/`panic` (first-class `native fn`) and `int`/`float`/`str`/`bytes`/`bytearray`
   (non-first-class `native ctor`) now declare their **signatures in Chezzi**, in the always-linked
   **`std/prelude.chz`** (see §"`native fn`/`native ctor`" in `syntax.md`) — the engine binds their bodies
-  by name. `print` (variadic) and `range` + the `List`/`Map`/`Set` container ctors stay engine-synthetic.
+  by name. `print` (variadic) and the `List`/`Map`/`Set` container ctors stay engine-synthetic.
   A `native fn`/`native ctor` decl is **prelude/std-only** (rejected in user code): an internal analog of
   `extern`, with the same-scoped relaxation that an unannotated param / missing `-> ret` means the
   dynamic/native type — Chezzi user code stays statically typed (no user-facing `any`/`never`).

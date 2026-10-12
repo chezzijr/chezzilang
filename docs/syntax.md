@@ -133,7 +133,7 @@ char; `b"\xff\xfe".decode()` faults **recoverably** (catchable by `recover:`), n
 
 `List(it)` / `Set(it)` / `Map(it)` accept **any for-iterable** — exactly what `for x in it` accepts:
 `list`, `set`, `str` (per-char `str`), `bytes`/`bytearray` (per-byte `int`), `map` (its keys),
-`range`, and a user struct with `next(self) -> T?`. They do **not** require a formal
+a `Range` value, and a user struct with `next(self) -> T?`. They do **not** require a formal
 `Iterable[T]` bound — they reuse the same internal iterable union as the `for` loop. The empty
 **container constructors** are first-class: `List[T]()` / `Map[K, V]()` / `Set[T]()` take a
 **turbofish** that pins the element/key/value type, and the bare `List()` / `Map()` / `Set()`
@@ -2770,8 +2770,7 @@ fn show(p: Person) -> str:       # an INTERFACE VALUE, not a bound
 
 Indexing and slicing are overloaded through the prebuilt **`Index[K, V]`** (read `obj[k]` via
 `index(self, key: K) -> V`), **`IndexSet[K, V]`** (mutable `obj[k] = v`, adds `set_index(self, key: K,
-val: V)`), and **`Slice[R]`** (`obj[r]` for a `Range` `r` via `slice(self, r: Range) -> R`; the old form was `slice(self, start: int? = None, end: int? = None,
-step: int? = None) -> R` — each component is `None` when omitted) protocols.
+val: V)`), and **`Slice[R]`** (`obj[r]` for a `Range` `r` via `slice(self, r: Range) -> R`; the parameter is named `r`, and the old three-parameter form `slice(self, start, end, step)` is removed) protocols.
 Built-in `list`/`map`/`str` satisfy them intrinsically (`str` is read-only — `Index`/`Slice` but not
 `IndexSet`); a struct defining the matching methods becomes indexable/sliceable. Because they are real
 protocols, a generic can be bounded by them — `K`/`V`/`R` are recovered at the call site like
@@ -2793,10 +2792,8 @@ struct Ring:
         return self.data[k % self.data.len()]
     fn set_index(self, k: int, v: int):
         self.data[k % self.data.len()] = v
-    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
-        s := start ?? 0
-        e := end ?? self.data.len()
-        return self.data[s:e:step ?? 1]
+    fn slice(self, r: Range) -> List[int]:
+        return self.data[r]
 
 r := Ring([10, 20, 30])
 print(r[3])            # 10   — wraps; `index` dispatched
@@ -3982,7 +3979,7 @@ for path in paths:
 closure, or a name bound to one). The four **universe builtin functions** `print`, `ord`, `chr`, and
 `panic` are first-class values, so `defer print("done")` (etc.) works directly — and they can be
 bound and passed like any function (`f := ord; f("a")`, a HOF arg). **Type / container / runtime
-constructors** (`int`, `str`, `List`, `Map`, `Channel`, `range`, …) and user struct/enum constructors
+constructors** (`int`, `str`, `List`, `Map`, `Channel`, `Range`, …) and user struct/enum constructors
 are **not** first-class values — wrap them: `fn log(m: str): print(m)` then `defer log("done")`.
 That constructor rule reaches **every dotted spelling of a constructor**, since they all merely build
 a value and throw it away: a variant constructor (`defer E.A(3)`, `defer E[int].A(3)`,
@@ -4727,7 +4724,7 @@ fn fetch_all(urls: List[str]):
   Like `Shared`/`Executor`/`timer`, a bare annotation requires `import std.net` (whole-module, or
   `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
   `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
-  (`List`/`Set`/`Map`/`Channel`/`range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
+  (`List`/`Set`/`Map`/`Channel`/`Range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
   at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 22
   prebuilt PROTOCOL names (`Any`/`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
   `Neg`/`Arithmetic`/`Num`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`) are reserved the same way — usable
@@ -5451,7 +5448,7 @@ vs LLP64); deferred to a future task. See `examples/ffi_int.chz`.
 
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
 it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
-(`range`/`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
+(`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
 (`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), any of your `struct`/
 enum-variant names, or a **builtin variant ctor** (`?x`/`!e`/`None`) — those resolve to a special op before a
 plain call, so the extern would be silently shadowed; the checker rejects the collision (*'…' is a
@@ -5532,7 +5529,7 @@ The universe builtins `print`, `ord`, `chr`, `panic` (fns) and `int`, `float`, `
 `bytearray` (ctors) are declared this way in `std/prelude.chz`. `print` is now expressible as the
 variadic decl `native fn print(...args: Any, sep: str = " ", end: str = "\n") -> None` (its lowering
 still uses the specialized print opcodes — the decl is the checker-only signature authority), retiring
-the last engine-synthetic signature. `range` + the `List`/`Map`/`Set` container ctors remain built-in
+the last engine-synthetic signature. The `List`/`Map`/`Set` container ctors remain built-in
 for now (their type-arg-driven generic identity is not a flat signature).
 
 ## 12d. `native struct` — native-type signatures in Chezzi (prelude/std-only)
@@ -5651,7 +5648,7 @@ native enum Carrier[T]:    # the shape of a declaration; the prelude's two are t
 > **The complete library reference — every global builtin, type method, runtime type, and `std.*`
 > module with signatures — lives in [`stdlib.md`](stdlib.md).** This section is a short orientation.
 
-Always available (no import): `print`, `range`, `int()`/`float()`/`str()`,
+Always available (no import): `print`, `Range`, `int()`/`float()`/`str()`,
 `ord(s)→int` (codepoint of a **1-character** `s`; longer or empty faults, like Python), `chr(n)→str`
 (codepoint → 1-char string), `Set()`/`Set(list)`,
 `panic(msg)` (raise a recoverable fault; see `recover:`), plus methods on the core types

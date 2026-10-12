@@ -4630,9 +4630,8 @@ impl Checker {
             // `Contains` protocol, L5) dispatches to that method; anything else rejects. The
             // element/key/item type must be compatible with the LHS.
             In => {
-                // (A range RHS needs no special case here: `r = self.infer(rhs)` above already
-                // rejected it generically — see `infer_kind`'s `ExprKind::Range` arm — and lands
-                // `Unknown`, which `either_unknown` then silences. A guard here would DOUBLE-report.)
+                // (A range RHS needs no special case here: `r = self.infer(rhs)` above types it as
+                // the prelude `Range`, and the `Contains` arm below checks the item against it.)
                 match r {
                     Ty::List(elem) | Ty::Set(elem) => {
                         if !either_unknown && !self.join_ty(elem, l) && !self.assignable(elem, l) {

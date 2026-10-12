@@ -496,7 +496,7 @@ struct Range:
                     return false
             None:
                 pass
-        # The end bound is tested before the step alignment, so `item - s` below only runs for an
+        # The end bound is tested before the step alignment, so `_aligned` below only runs for an
         # item between the bounds.
         match self.end:
             ?e:
