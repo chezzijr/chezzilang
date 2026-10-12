@@ -5209,6 +5209,10 @@ impl Checker {
     /// index is not inferred: that reading would report `int` as an unknown name on top of the
     /// head's error (DEC-158: the mark counts errors only).
     pub(super) fn index_value(&mut self, obj: &Expr, index: &Expr, type_shaped: bool) -> Ty {
+        #[cfg(test)]
+        {
+            self.index_value_checks += 1;
+        }
         // TICKET-225: the read's expected type is the ELEMENT's slot, never the object's or the
         // subscript's; left in place, `x: int8 = xs[200]` checked the int index `200` against int8.
         self.expected_hint = None;

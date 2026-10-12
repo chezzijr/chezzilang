@@ -234,6 +234,8 @@ impl Checker {
             memo_enabled: true,
             #[cfg(test)]
             fn_body_checks: 0,
+            #[cfg(test)]
+            index_value_checks: 0,
             memo_verify: std::env::var_os("CHEZZI_MEMO_VERIFY").is_some(),
             memo_verifying: false,
         };

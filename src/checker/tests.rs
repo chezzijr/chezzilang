@@ -39832,18 +39832,24 @@ fn a_user_fn_named_after_the_range_type_is_reserved() {
     rejects("fn Range(a: int) -> int:\n    return a\n", "reserved");
 }
 
-/// Each index is typed once: `xs[xs[xs[..i..]]]` 24 levels deep is linear, not 2^24.
+/// Each index is typed once: `xs[xs[xs[..i..]]]` costs one `index_value` entry per subscript, so
+/// 24 levels cost at most twice 12 levels plus a constant. Typed twice per level it is 2^depth.
+/// Counted, not timed (`no_new_rust_test_reads_a_wall_clock`).
 #[test]
 fn nested_subscripts_type_each_index_once() {
-    let depth = 24;
-    let expr = format!("{}i{}", "xs[".repeat(depth), "]".repeat(depth));
-    let src = format!("xs := [0]\ni := 0\nprint({expr})\n");
-    let start = std::time::Instant::now();
-    ok(&src);
+    let entries = |depth: usize| {
+        let expr = format!("{}i{}", "xs[".repeat(depth), "]".repeat(depth));
+        let src = format!("xs := [0]\ni := 0\nprint({expr})\n");
+        let tokens = lexer::tokenize(&src).expect("lex should succeed");
+        let module = parser::parse(tokens).expect("parse should succeed");
+        let (res, entries) = check_counting_index_values(&module);
+        assert!(res.is_ok(), "{depth} nested subscripts: {res:?}");
+        entries
+    };
+    let (shallow, deep) = (entries(12), entries(24));
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(2),
-        "checking {depth} nested subscripts took {:?}",
-        start.elapsed()
+        deep <= 2 * shallow + 4,
+        "12 nested subscripts made {shallow} index_value entries, 24 made {deep}"
     );
 }
 
