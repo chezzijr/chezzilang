@@ -11475,4 +11475,90 @@ fn g():
             "{message}"
         );
     }
+    /// The value of the expression statement `src`.
+    fn expr_stmt(src: &str) -> Expr {
+        match only(src) {
+            StmtKind::Expr(e) => e,
+            other => panic!("not an expression statement: {other:?}"),
+        }
+    }
+
+    /// TICKET-253 -- `..` binds below shifts and arithmetic and above comparison and `in`.
+    #[test]
+    fn range_binds_below_shift_and_above_comparison() {
+        let ExprKind::Range { start, end, .. } = expr_stmt("0..1 << 2\n").kind else {
+            panic!("`0..1 << 2` is not a range")
+        };
+        assert!(matches!(start.unwrap().kind, ExprKind::Int(0)));
+        assert!(matches!(
+            end.unwrap().kind,
+            ExprKind::Binary {
+                op: BinaryOp::Shl,
+                ..
+            }
+        ));
+        let ExprKind::Binary { op, rhs, .. } = expr_stmt("x in 0..3\n").kind else {
+            panic!("`x in 0..3` is not a binary")
+        };
+        assert_eq!(op, BinaryOp::In);
+        assert!(matches!(rhs.kind, ExprKind::Range { .. }));
+        let ExprKind::Binary { op, lhs, rhs } = expr_stmt("0..3 == 0..3\n").kind else {
+            panic!("`0..3 == 0..3` is not a binary")
+        };
+        assert_eq!(op, BinaryOp::Eq);
+        assert!(matches!(lhs.kind, ExprKind::Range { .. }));
+        assert!(matches!(rhs.kind, ExprKind::Range { .. }));
+        // Arithmetic on either side stays inside the bound.
+        let ExprKind::Range { start, end, .. } = expr_stmt("a + 1..b - 1\n").kind else {
+            panic!("not a range")
+        };
+        assert!(matches!(start.unwrap().kind, ExprKind::Binary { .. }));
+        assert!(matches!(end.unwrap().kind, ExprKind::Binary { .. }));
+    }
+
+    /// TICKET-253 -- every form of the literal: bound present or omitted, inclusive or not.
+    #[test]
+    fn open_and_inclusive_range_forms_parse() {
+        for (src, has_start, has_end, inclusive) in [
+            ("a..b\n", true, true, false),
+            ("a..=b\n", true, true, true),
+            ("..b\n", false, true, false),
+            ("..=b\n", false, true, true),
+            ("a..\n", true, false, false),
+            ("..\n", false, false, false),
+        ] {
+            let ExprKind::Range {
+                start,
+                end,
+                inclusive: inc,
+            } = expr_stmt(src).kind
+            else {
+                panic!("{src:?} is not a range")
+            };
+            assert_eq!(
+                (start.is_some(), end.is_some(), inc),
+                (has_start, has_end, inclusive),
+                "{src:?}"
+            );
+        }
+        // An open end closes at `)`, `]`, `,` and `:`.
+        parse_ok("f(2.., 3)\nxs[2..]\nfor i in 5..:\n    pass\n");
+    }
+
+    /// TICKET-253 -- a range has two bounds; the step lives in `Range(a, b, step)`.
+    #[test]
+    fn a_range_with_a_third_bound_or_no_inclusive_end_is_a_parse_error() {
+        let third = parse_err("a..b..c\n");
+        assert!(
+            third.message.contains("no third bound"),
+            "{}",
+            third.message
+        );
+        let open = parse_err("a..=\n");
+        assert!(
+            open.message.contains("inclusive range needs an end"),
+            "{}",
+            open.message
+        );
+    }
 }

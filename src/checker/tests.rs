@@ -39796,3 +39796,39 @@ fn range_struct_is_in_scope_with_no_import() {
 fn a_user_struct_named_range_is_reserved() {
     rejects("struct Range:\n    a: int\n", "reserved");
 }
+
+#[test]
+fn a_literal_range_with_no_start_cannot_be_iterated() {
+    rejects(
+        "for i in ..5:\n    print(i)\n",
+        "a range with no start cannot be iterated",
+    );
+    rejects(
+        "xs := [i for i in ..5]\n",
+        "a range with no start cannot be iterated",
+    );
+    // A value reaches the same rule at run time, not at check time.
+    ok("r := ..5\nxs := 3 in r\n");
+    // A literal with a start iterates, however open its end.
+    ok("for i in 2..:\n    break\n");
+}
+
+#[test]
+fn len_of_a_literal_range_with_a_missing_bound_is_a_check_error() {
+    rejects(
+        "n := (5..).len()\n",
+        "len() needs a range with a start and an end",
+    );
+    rejects(
+        "n := (..5).len()\n",
+        "len() needs a range with a start and an end",
+    );
+    ok("n := (2..5).len()\n");
+}
+
+#[test]
+fn a_list_built_from_an_endless_literal_range_type_checks() {
+    // No collector tests for a missing end (owner answer A): `List(5..)` runs until memory ends, as
+    // `List(g())` does for an endless generator.
+    ok("xs := List(5..)\n");
+}
