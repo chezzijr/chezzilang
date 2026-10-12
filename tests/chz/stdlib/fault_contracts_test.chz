@@ -34,12 +34,17 @@ test fn range_faults():
     r1 := recover: List(Range(0, 5, 0))
     match r1:
         ?_: assert false, "step 0 must fault"
-        !e: assert e.message() == "range() step cannot be zero"
-    # a computed length past the 10M cap faults BEFORE materializing (no OOM/hang)
-    r2 := recover: List(0..20000000)
+        !e: assert e.message() == "Range() step cannot be zero"
+    # A range with no start cannot be iterated; `len` needs both bounds.
+    r2 := recover: List(..5)
     match r2:
-        ?_: assert false, "20M elements must exceed the cap"
-        !e: assert e.message() == "range() length 20000000 exceeds the maximum of 10000000"
+        ?_: assert false, "no start must fault"
+        !e: assert e.message() == "a range with no start cannot be iterated"
+    endless := 5..
+    r3 := recover: endless.len()
+    match r3:
+        ?_: assert false, "no end must fault"
+        !e: assert e.message() == "len() needs a range with a start and an end"
 
 test fn math_number_theory_overflow():
     r1 := recover: math.lcm(9223372036854775807, 9223372036854775806)

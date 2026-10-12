@@ -112,9 +112,9 @@ impl Emitter {
             } => {
                 self.out.push_str("for ");
                 self.out.push_str(var);
-                self.out.push_str(" in range(");
+                self.out.push_str(" in (");
                 self.expr(start);
-                self.out.push_str(", ");
+                self.out.push_str(")..(");
                 self.expr(end);
                 self.out.push_str("):\n");
                 self.block(body, depth + 1);
@@ -266,8 +266,8 @@ impl Emitter {
         }
     }
 
-    /// `(base)[start:end:step]` — each bound emitted only if present; the step `:` is emitted
-    /// only when a step is present. Identical text to the Python emitter.
+    /// `(base)[(start)..(end)]`, or `(base)[Range(start, end, step)]` when a step is present (`None` for
+    /// an omitted bound). The Python emitter writes the same slice as `start:end:step`.
     fn slice(
         &mut self,
         base: &Expr,
@@ -278,16 +278,28 @@ impl Emitter {
         self.out.push('(');
         self.expr(base);
         self.out.push('[');
-        if let Some(s) = start {
-            self.expr(s);
-        }
-        self.out.push(':');
-        if let Some(e) = end {
-            self.expr(e);
-        }
+        let bound = |this: &mut Self, b: &Option<Box<Expr>>, none: &str| match b {
+            Some(e) => {
+                this.out.push('(');
+                this.expr(e);
+                this.out.push(')');
+            }
+            None => this.out.push_str(none),
+        };
         if let Some(st) = step {
-            self.out.push(':');
+            self.out.push_str("Range(");
+            bound(self, start, "None");
+            self.out.push_str(", ");
+            bound(self, end, "None");
+            self.out.push_str(", ");
+            self.out.push('(');
             self.expr(st);
+            self.out.push(')');
+            self.out.push(')');
+        } else {
+            bound(self, start, "");
+            self.out.push_str("..");
+            bound(self, end, "");
         }
         self.out.push_str("])");
     }
