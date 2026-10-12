@@ -882,7 +882,32 @@ impl Compiler {
                 StmtKind::Native(d) if d.name == "_to_json" => {
                     self.json_to_value_home = Some(module_idx);
                 }
-                _ => {}
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Protocol { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
         Ok(())
@@ -1877,7 +1902,35 @@ impl Compiler {
                 fc.emit_hidden_get(tmp, span);
                 fc.emit(Op::SetIndex, span);
             }
-            _ => {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => {
                 return Err(CompileError {
                     message: "invalid wait-arm assignment target".to_string(),
                     span,
@@ -2197,7 +2250,34 @@ impl Compiler {
                     self.compile_assign_element(fc, t, tuple_slot, i, span)?;
                 }
             }
-            _ => {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => {
                 return Err(CompileError {
                     message: "invalid assignment target".to_string(),
                     span,
@@ -2270,7 +2350,35 @@ impl Compiler {
                 );
                 fc.emit(Op::SetIndex, span);
             }
-            _ => {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => {
                 return Err(CompileError {
                     message: "invalid assignment target".to_string(),
                     span,
@@ -2821,7 +2929,11 @@ impl Compiler {
             Pattern::Variant { id, .. }
             | Pattern::Ident(_, _, id)
             | Pattern::Carrier { id, .. } => id,
-            _ => return None,
+            Pattern::Tuple(_)
+            | Pattern::Literal(_)
+            | Pattern::Range { .. }
+            | Pattern::Wildcard
+            | Pattern::Or(_) => return None,
         };
         Some(
             self.resolutions
@@ -2922,7 +3034,10 @@ impl Compiler {
                 Some(Ok(r)) if !matches!(r, Resolution::Variant { .. })
             ),
             Pattern::Or(alts) => alts.iter().all(|a| self.pattern_is_literal(a)),
-            _ => false,
+            Pattern::Ident(..)
+            | Pattern::Variant { .. }
+            | Pattern::Tuple(_)
+            | Pattern::Carrier { .. } => false,
         }
     }
 
@@ -3075,7 +3190,14 @@ impl Compiler {
                 Pattern::Ident(n, _, _) if !self.pat_is_variant(b) && !fc.is_boxed_name(n) => {
                     fc.add_local(n.clone());
                 }
-                _ => {
+                Pattern::Ident(..)
+                | Pattern::Variant { .. }
+                | Pattern::Tuple(_)
+                | Pattern::Literal(_)
+                | Pattern::Range { .. }
+                | Pattern::Wildcard
+                | Pattern::Or(_)
+                | Pattern::Carrier { .. } => {
                     fc.add_hidden();
                 }
             }
@@ -3107,7 +3229,16 @@ impl Compiler {
                     fc.emit_decl_named(n.clone(), span);
                 }
                 // Nested / nullary-variant sub-pattern: test/destructure the raw slot.
-                _ => self.emit_pattern(fc, b, bind_start + i, fails, span)?,
+                Pattern::Ident(..)
+                | Pattern::Variant { .. }
+                | Pattern::Tuple(_)
+                | Pattern::Literal(_)
+                | Pattern::Range { .. }
+                | Pattern::Wildcard
+                | Pattern::Or(_)
+                | Pattern::Carrier { .. } => {
+                    self.emit_pattern(fc, b, bind_start + i, fails, span)?
+                }
             }
         }
         Ok(())
@@ -3388,7 +3519,10 @@ impl Compiler {
                                 // An unconditional catch-all alternative — always hits.
                                 hit_jumps.push(fc.emit_jump(Op::Jump(0), span));
                             }
-                            _ => unreachable!(
+                            Pattern::Ident(..)
+                            | Pattern::Tuple(_)
+                            | Pattern::Or(_)
+                            | Pattern::Carrier { .. } => unreachable!(
                                 "literal or-pattern has only literal/range/wildcard/binding alternatives"
                             ),
                         }
@@ -3535,7 +3669,24 @@ impl Compiler {
                 fc.emit(Op::AsBool, lhs.span);
                 let jump = match op {
                     BinaryOp::And => fc.emit_jump(Op::JumpIfFalseKeep(0), expr.span),
-                    _ => fc.emit_jump(Op::JumpIfTrueKeep(0), expr.span),
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq
+                    | BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Or
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr
+                    | BinaryOp::In => fc.emit_jump(Op::JumpIfTrueKeep(0), expr.span),
                 };
                 fc.emit(Op::Pop, expr.span);
                 self.compile_expr(fc, rhs)?;
@@ -3664,7 +3815,16 @@ impl Compiler {
                             expr.span,
                         );
                     }
-                    other => {
+                    other @ Resolution::Local
+                    | other @ Resolution::Global { .. }
+                    | other @ Resolution::Builtin(_)
+                    | other @ Resolution::StructCtor(_)
+                    | other @ Resolution::Provider
+                    | other @ Resolution::IndexCall
+                    | other @ Resolution::WitnessStatic(_)
+                    | other @ Resolution::Module(_)
+                    | other @ Resolution::PatBinding
+                    | other @ Resolution::PatStruct(_) => {
                         return Err(CompileError {
                             message: format!("internal: a value field resolved to {other:?}"),
                             span: expr.span,
@@ -3939,7 +4099,33 @@ impl Compiler {
                 } if crate::ast::if_tail_is_value(branches, else_block) => {
                     self.compile_if_value(fc, branches, else_block.as_deref(), last.span)?;
                 }
-                _ => {
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Struct { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::Enum { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. } => {
                     self.compile_stmt(fc, last)?;
                     fc.emit(Op::Nil, span);
                 }
@@ -4164,7 +4350,17 @@ impl Compiler {
             | Resolution::Global { .. }
             | Resolution::Fn { .. }
             | Resolution::Module(_) => self.emit_load(fc, name, e.span),
-            other => {
+            other @ Resolution::StructCtor(_)
+            | other @ Resolution::Provider
+            | other @ Resolution::ParamMethodFn { .. }
+            | other @ Resolution::IndexCall
+            | other @ Resolution::MethodFn { .. }
+            | other @ Resolution::WitnessStatic(_)
+            | other @ Resolution::ModuleMember { .. }
+            | other @ Resolution::Member
+            | other @ Resolution::PatBinding
+            | other @ Resolution::PatStruct(_)
+            | other @ Resolution::Decode(_) => {
                 return Err(CompileError {
                     message: format!("internal: a value name resolved to {other:?}"),
                     span: e.span,
@@ -4508,7 +4704,37 @@ impl Compiler {
         // A tuple slot (`t.0`) is a value, never a name (`compile_call` skips it the same way).
         match &callee.kind {
             ExprKind::Field { name, .. } if !crate::ast::is_tuple_index(name) => {}
-            _ => return Ok(false),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::Ident(_)
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => return Ok(false),
         }
         // A type member, a native ctor or a module member is receiverless; a value's member (a
         // local that merely SHADOWS a type or module name included) is a genuine receiver.
@@ -4654,17 +4880,77 @@ impl Compiler {
         Ok(match &callee.kind {
             ExprKind::Ident(_) => match self.resolution(callee)? {
                 Resolution::Fn { module, name } => Some((*module, name.clone())),
-                _ => None,
+                Resolution::Local
+                | Resolution::Global { .. }
+                | Resolution::Builtin(_)
+                | Resolution::StructCtor(_)
+                | Resolution::Provider
+                | Resolution::ParamMethodFn { .. }
+                | Resolution::IndexCall
+                | Resolution::Variant { .. }
+                | Resolution::MethodFn { .. }
+                | Resolution::VariantFn { .. }
+                | Resolution::WitnessStatic(_)
+                | Resolution::ModuleMember { .. }
+                | Resolution::Module(_)
+                | Resolution::Member
+                | Resolution::PatBinding
+                | Resolution::PatStruct(_)
+                | Resolution::Decode(_) => None,
             },
             ExprKind::Field { name, .. } if !crate::ast::is_tuple_index(name) => {
                 match self.resolution(callee)? {
                     Resolution::ModuleMember { module, name } | Resolution::Fn { module, name } => {
                         Some((*module, name.clone()))
                     }
-                    _ => None,
+                    Resolution::Local
+                    | Resolution::Global { .. }
+                    | Resolution::Builtin(_)
+                    | Resolution::StructCtor(_)
+                    | Resolution::Provider
+                    | Resolution::ParamMethodFn { .. }
+                    | Resolution::IndexCall
+                    | Resolution::Variant { .. }
+                    | Resolution::MethodFn { .. }
+                    | Resolution::VariantFn { .. }
+                    | Resolution::WitnessStatic(_)
+                    | Resolution::Module(_)
+                    | Resolution::Member
+                    | Resolution::PatBinding
+                    | Resolution::PatStruct(_)
+                    | Resolution::Decode(_) => None,
                 }
             }
-            _ => None,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => None,
         })
     }
 
@@ -5065,7 +5351,14 @@ impl Compiler {
                     return self.compile_builtin_call(fc, &b, args, named, span);
                 }
                 Resolution::Member | Resolution::ModuleMember { .. } | Resolution::Fn { .. } => {}
-                other => {
+                other @ Resolution::Local
+                | other @ Resolution::Global { .. }
+                | other @ Resolution::Provider
+                | other @ Resolution::IndexCall
+                | other @ Resolution::Module(_)
+                | other @ Resolution::PatBinding
+                | other @ Resolution::PatStruct(_)
+                | other @ Resolution::Decode(_) => {
                     return Err(CompileError {
                         message: format!("internal: a call callee resolved to {other:?}"),
                         span,
@@ -5185,7 +5478,20 @@ impl Compiler {
                     fc.emit(Op::JsonToValue, span);
                     return Ok(());
                 }
-                _ => {}
+                Resolution::Local
+                | Resolution::Global { .. }
+                | Resolution::Fn { .. }
+                | Resolution::Provider
+                | Resolution::ParamMethodFn { .. }
+                | Resolution::IndexCall
+                | Resolution::MethodFn { .. }
+                | Resolution::WitnessStatic(_)
+                | Resolution::ModuleMember { .. }
+                | Resolution::Module(_)
+                | Resolution::Member
+                | Resolution::PatBinding
+                | Resolution::PatStruct(_)
+                | Resolution::Decode(_) => {}
             }
         }
         // M24 — a call to a generic fn that takes hidden trailing witness params, by its bare name
@@ -5326,7 +5632,35 @@ impl Compiler {
                 ExprKind::Ident(_) => Ok(&SYNTH_LOCAL),
                 // `$comp.push` / `$comp.add` (`method_call_stmt`).
                 ExprKind::Field { .. } => Ok(&SYNTH_MEMBER),
-                _ => Err(CompileError {
+                ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Interp(_)
+                | ExprKind::Bytes(_)
+                | ExprKind::RawStr(_)
+                | ExprKind::Bool(_)
+                | ExprKind::NoneLit
+                | ExprKind::Pass
+                | ExprKind::List(..)
+                | ExprKind::Tuple(_)
+                | ExprKind::Map(_)
+                | ExprKind::Set(_)
+                | ExprKind::Comprehension { .. }
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Compare { .. }
+                | ExprKind::Range { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Slice { .. }
+                | ExprKind::Try(_)
+                | ExprKind::OptChain { .. }
+                | ExprKind::NullCoalesce { .. }
+                | ExprKind::Closure { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::IfElse { .. }
+                | ExprKind::Recover(_)
+                | ExprKind::ElseGuard { .. } => Err(CompileError {
                     message: "internal: a synthesized node has no name resolution".to_string(),
                     span: e.span,
                 }),
@@ -5451,7 +5785,9 @@ impl Compiler {
         let proto = self.finish(fc);
         let module = match fill {
             crate::checker::ArgFill::Inline { module, .. } => *module,
-            _ => self.current_module_idx,
+            crate::checker::ArgFill::Arg(_)
+            | crate::checker::ArgFill::Pack(_)
+            | crate::checker::ArgFill::Provider(_) => self.current_module_idx,
         };
         Ok(crate::json_decode::DefaultThunk { proto, module })
     }
@@ -5714,7 +6050,19 @@ fn assert_cmp(op: BinaryOp) -> Option<AssertCmp> {
         BinaryOp::GtEq => Some(AssertCmp::GtEq),
         BinaryOp::Eq => Some(AssertCmp::Eq),
         BinaryOp::NotEq => Some(AssertCmp::NotEq),
-        _ => None,
+        BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Mod
+        | BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::BitAnd
+        | BinaryOp::BitOr
+        | BinaryOp::BitXor
+        | BinaryOp::Shl
+        | BinaryOp::Shr
+        | BinaryOp::In => None,
     }
 }
 
@@ -5995,7 +6343,22 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>)
             }
             // `defer:` / `spawn:` blocks are SEPARATE frames — their binds are not this frame's.
             // Everything else binds no frame-local name.
-            _ => {}
+            StmtKind::Struct { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Spawn(_)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. } => {}
         }
     }
 }
@@ -6082,7 +6445,20 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
                 out.extend(free_names_of_block(&decl.body, &params));
             }
             // Remaining statements contain no capture boundary.
-            _ => {}
+            StmtKind::Struct { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. } => {}
         }
     }
 }
@@ -6366,13 +6742,72 @@ fn record_call_site(
             }
             match &obj.kind {
                 ExprKind::Ident(m) if !bound.contains(m) => (Some(m.clone()), name.clone()),
-                _ => {
+                ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Interp(_)
+                | ExprKind::Bytes(_)
+                | ExprKind::RawStr(_)
+                | ExprKind::Bool(_)
+                | ExprKind::NoneLit
+                | ExprKind::Pass
+                | ExprKind::Ident(_)
+                | ExprKind::List(..)
+                | ExprKind::Tuple(_)
+                | ExprKind::Map(_)
+                | ExprKind::Set(_)
+                | ExprKind::Comprehension { .. }
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Compare { .. }
+                | ExprKind::Range { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Field { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Slice { .. }
+                | ExprKind::Try(_)
+                | ExprKind::OptChain { .. }
+                | ExprKind::NullCoalesce { .. }
+                | ExprKind::Closure { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::IfElse { .. }
+                | ExprKind::Recover(_)
+                | ExprKind::ElseGuard { .. } => {
                     out.opaque_calls = true;
                     return;
                 }
             }
         }
-        _ => {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => {
             out.opaque_calls = true;
             return;
         }
@@ -6457,9 +6892,59 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
                     .chain(named.iter().map(|(_, v)| v))
                     .all(|a| closed_expr(a, bound, heads))
             }
-            _ => false,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::Ident(_)
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => false,
         },
-        _ => false,
+        ExprKind::Ident(_)
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => false,
     }
 }
 
@@ -6634,7 +7119,16 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
                 }
             }
             // Type/import/native/extern decls inside a block reference no frame value.
-            _ => {}
+            StmtKind::Struct { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. } => {}
         }
     }
 }
@@ -7447,7 +7941,118 @@ impl FnComp {
             | Op::JumpIfTrueKeep(t)
             | Op::PushHandler(t)
             | Op::MatchArm { next: t, .. } => *t = target,
-            other => panic!("patch_jump_to on non-jump op: {other:?}"),
+            other @ Op::ConstInt(_)
+            | other @ Op::ConstFloat(_)
+            | other @ Op::ConstStr(_)
+            | other @ Op::ConstBytes(_)
+            | other @ Op::True
+            | other @ Op::False
+            | other @ Op::Nil
+            | other @ Op::Pop
+            | other @ Op::StampGen(_)
+            | other @ Op::Assert { .. }
+            | other @ Op::LoadBuiltin(_)
+            | other @ Op::GetLocal(_)
+            | other @ Op::SetLocal(_)
+            | other @ Op::GetGlobalSlot(_)
+            | other @ Op::DefineGlobalSlot(_)
+            | other @ Op::SetGlobalSlot(_)
+            | other @ Op::GetCaptured(_)
+            | other @ Op::Add
+            | other @ Op::AddInPlace
+            | other @ Op::Sub
+            | other @ Op::Mul
+            | other @ Op::Div
+            | other @ Op::Mod
+            | other @ Op::Neg
+            | other @ Op::Not
+            | other @ Op::Lt
+            | other @ Op::LtEq
+            | other @ Op::Gt
+            | other @ Op::GtEq
+            | other @ Op::Eq
+            | other @ Op::NotEq
+            | other @ Op::BitAnd
+            | other @ Op::BitOr
+            | other @ Op::BitXor
+            | other @ Op::Shl
+            | other @ Op::Shr
+            | other @ Op::Contains
+            | other @ Op::AsBool
+            | other @ Op::AsInt
+            | other @ Op::BinLocalLocal { .. }
+            | other @ Op::BinLocalConst { .. }
+            | other @ Op::IncLocal { .. }
+            | other @ Op::PopHandler
+            | other @ Op::Call(_)
+            | other @ Op::CallMethod { .. }
+            | other @ Op::CallHook { .. }
+            | other @ Op::CallStatic { .. }
+            | other @ Op::CallStaticDyn { .. }
+            | other @ Op::CallBuiltin(..)
+            | other @ Op::CallPrint(_)
+            | other @ Op::CallPrintSep { .. }
+            | other @ Op::Return
+            | other @ Op::Yield
+            | other @ Op::DeferCall(_)
+            | other @ Op::DeferMethod(..)
+            | other @ Op::EnterDeferScope
+            | other @ Op::LeaveDeferScope
+            | other @ Op::DrainHandlerDefers
+            | other @ Op::Try
+            | other @ Op::JsonDecode(_)
+            | other @ Op::JsonToValue
+            | other @ Op::NewList(_)
+            | other @ Op::NewTuple(_)
+            | other @ Op::NewMap(_)
+            | other @ Op::NewSet(_)
+            | other @ Op::NewStruct(..)
+            | other @ Op::NewCell
+            | other @ Op::CellLoad
+            | other @ Op::CellStore
+            | other @ Op::NewEnum { .. }
+            | other @ Op::MakeFunc(_)
+            | other @ Op::MakeFuncIn(_)
+            | other @ Op::MakeMethodFunc { .. }
+            | other @ Op::JumpIfProvided(..)
+            | other @ Op::MakeCffi(_)
+            | other @ Op::MakeClosure(..)
+            | other @ Op::GetField { .. }
+            | other @ Op::GetIndex
+            | other @ Op::GetSlice
+            | other @ Op::SetField { .. }
+            | other @ Op::SetIndex
+            | other @ Op::Dup
+            | other @ Op::Dup2
+            | other @ Op::ToStr
+            | other @ Op::ToStrFmt(_)
+            | other @ Op::BuildStr(_)
+            | other @ Op::ListClone
+            | other @ Op::ArrLen
+            | other @ Op::HasNextHook
+            | other @ Op::IsGenerator
+            | other @ Op::IsCursor
+            | other @ Op::IterableToCursor
+            | other @ Op::IsMap
+            | other @ Op::IsChannel
+            | other @ Op::ChanRecvOrClosed
+            | other @ Op::EnsureEnum(_)
+            | other @ Op::MatchNoArm(_)
+            | other @ Op::EnterNursery
+            | other @ Op::JoinNursery
+            | other @ Op::ReclaimNursery
+            | other @ Op::SpawnCall(..)
+            | other @ Op::SpawnRecv(..)
+            | other @ Op::SpawnBlock(..)
+            | other @ Op::WaitPoll(_)
+            | other @ Op::NewChannel(_)
+            | other @ Op::NewShared
+            | other @ Op::NewRwShared
+            | other @ Op::NewAtomic
+            | other @ Op::NewAtomicInt
+            | other @ Op::NewTimer
+            | other @ Op::NewExecutor
+            | other @ Op::NewExecutorN => panic!("patch_jump_to on non-jump op: {other:?}"),
         }
     }
 
@@ -7484,7 +8089,118 @@ impl FnComp {
             | Op::JumpIfTrueKeep(t)
             | Op::PushHandler(t)
             | Op::MatchArm { next: t, .. } => *t = target,
-            other => panic!("patch_jump on non-jump op: {other:?}"),
+            other @ Op::ConstInt(_)
+            | other @ Op::ConstFloat(_)
+            | other @ Op::ConstStr(_)
+            | other @ Op::ConstBytes(_)
+            | other @ Op::True
+            | other @ Op::False
+            | other @ Op::Nil
+            | other @ Op::Pop
+            | other @ Op::StampGen(_)
+            | other @ Op::Assert { .. }
+            | other @ Op::LoadBuiltin(_)
+            | other @ Op::GetLocal(_)
+            | other @ Op::SetLocal(_)
+            | other @ Op::GetGlobalSlot(_)
+            | other @ Op::DefineGlobalSlot(_)
+            | other @ Op::SetGlobalSlot(_)
+            | other @ Op::GetCaptured(_)
+            | other @ Op::Add
+            | other @ Op::AddInPlace
+            | other @ Op::Sub
+            | other @ Op::Mul
+            | other @ Op::Div
+            | other @ Op::Mod
+            | other @ Op::Neg
+            | other @ Op::Not
+            | other @ Op::Lt
+            | other @ Op::LtEq
+            | other @ Op::Gt
+            | other @ Op::GtEq
+            | other @ Op::Eq
+            | other @ Op::NotEq
+            | other @ Op::BitAnd
+            | other @ Op::BitOr
+            | other @ Op::BitXor
+            | other @ Op::Shl
+            | other @ Op::Shr
+            | other @ Op::Contains
+            | other @ Op::AsBool
+            | other @ Op::AsInt
+            | other @ Op::BinLocalLocal { .. }
+            | other @ Op::BinLocalConst { .. }
+            | other @ Op::IncLocal { .. }
+            | other @ Op::PopHandler
+            | other @ Op::Call(_)
+            | other @ Op::CallMethod { .. }
+            | other @ Op::CallHook { .. }
+            | other @ Op::CallStatic { .. }
+            | other @ Op::CallStaticDyn { .. }
+            | other @ Op::CallBuiltin(..)
+            | other @ Op::CallPrint(_)
+            | other @ Op::CallPrintSep { .. }
+            | other @ Op::Return
+            | other @ Op::Yield
+            | other @ Op::DeferCall(_)
+            | other @ Op::DeferMethod(..)
+            | other @ Op::EnterDeferScope
+            | other @ Op::LeaveDeferScope
+            | other @ Op::DrainHandlerDefers
+            | other @ Op::Try
+            | other @ Op::JsonDecode(_)
+            | other @ Op::JsonToValue
+            | other @ Op::NewList(_)
+            | other @ Op::NewTuple(_)
+            | other @ Op::NewMap(_)
+            | other @ Op::NewSet(_)
+            | other @ Op::NewStruct(..)
+            | other @ Op::NewCell
+            | other @ Op::CellLoad
+            | other @ Op::CellStore
+            | other @ Op::NewEnum { .. }
+            | other @ Op::MakeFunc(_)
+            | other @ Op::MakeFuncIn(_)
+            | other @ Op::MakeMethodFunc { .. }
+            | other @ Op::JumpIfProvided(..)
+            | other @ Op::MakeCffi(_)
+            | other @ Op::MakeClosure(..)
+            | other @ Op::GetField { .. }
+            | other @ Op::GetIndex
+            | other @ Op::GetSlice
+            | other @ Op::SetField { .. }
+            | other @ Op::SetIndex
+            | other @ Op::Dup
+            | other @ Op::Dup2
+            | other @ Op::ToStr
+            | other @ Op::ToStrFmt(_)
+            | other @ Op::BuildStr(_)
+            | other @ Op::ListClone
+            | other @ Op::ArrLen
+            | other @ Op::HasNextHook
+            | other @ Op::IsGenerator
+            | other @ Op::IsCursor
+            | other @ Op::IterableToCursor
+            | other @ Op::IsMap
+            | other @ Op::IsChannel
+            | other @ Op::ChanRecvOrClosed
+            | other @ Op::EnsureEnum(_)
+            | other @ Op::MatchNoArm(_)
+            | other @ Op::EnterNursery
+            | other @ Op::JoinNursery
+            | other @ Op::ReclaimNursery
+            | other @ Op::SpawnCall(..)
+            | other @ Op::SpawnRecv(..)
+            | other @ Op::SpawnBlock(..)
+            | other @ Op::WaitPoll(_)
+            | other @ Op::NewChannel(_)
+            | other @ Op::NewShared
+            | other @ Op::NewRwShared
+            | other @ Op::NewAtomic
+            | other @ Op::NewAtomicInt
+            | other @ Op::NewTimer
+            | other @ Op::NewExecutor
+            | other @ Op::NewExecutorN => panic!("patch_jump on non-jump op: {other:?}"),
         }
     }
 

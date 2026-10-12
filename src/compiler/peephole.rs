@@ -33,7 +33,114 @@ fn bin_kind(op: &Op) -> Option<BinKind> {
         Op::LtEq => BinKind::LtEq,
         Op::Gt => BinKind::Gt,
         Op::GtEq => BinKind::GtEq,
-        _ => return None,
+        Op::ConstInt(_)
+        | Op::ConstFloat(_)
+        | Op::ConstStr(_)
+        | Op::ConstBytes(_)
+        | Op::True
+        | Op::False
+        | Op::Nil
+        | Op::Pop
+        | Op::StampGen(_)
+        | Op::Assert { .. }
+        | Op::LoadBuiltin(_)
+        | Op::GetLocal(_)
+        | Op::SetLocal(_)
+        | Op::GetGlobalSlot(_)
+        | Op::DefineGlobalSlot(_)
+        | Op::SetGlobalSlot(_)
+        | Op::GetCaptured(_)
+        | Op::Neg
+        | Op::Not
+        | Op::Eq
+        | Op::NotEq
+        | Op::BitAnd
+        | Op::BitOr
+        | Op::BitXor
+        | Op::Shl
+        | Op::Shr
+        | Op::Contains
+        | Op::AsBool
+        | Op::AsInt
+        | Op::BinLocalLocal { .. }
+        | Op::BinLocalConst { .. }
+        | Op::IncLocal { .. }
+        | Op::Jump(_)
+        | Op::JumpIfFalse(_)
+        | Op::JumpIfFalseKeep(_)
+        | Op::JumpIfTrueKeep(_)
+        | Op::PushHandler(_)
+        | Op::PopHandler
+        | Op::Call(_)
+        | Op::CallMethod { .. }
+        | Op::CallHook { .. }
+        | Op::CallStatic { .. }
+        | Op::CallStaticDyn { .. }
+        | Op::CallBuiltin(..)
+        | Op::CallPrint(_)
+        | Op::CallPrintSep { .. }
+        | Op::Return
+        | Op::Yield
+        | Op::DeferCall(_)
+        | Op::DeferMethod(..)
+        | Op::EnterDeferScope
+        | Op::LeaveDeferScope
+        | Op::DrainHandlerDefers
+        | Op::Try
+        | Op::JsonDecode(_)
+        | Op::JsonToValue
+        | Op::NewList(_)
+        | Op::NewTuple(_)
+        | Op::NewMap(_)
+        | Op::NewSet(_)
+        | Op::NewStruct(..)
+        | Op::NewCell
+        | Op::CellLoad
+        | Op::CellStore
+        | Op::NewEnum { .. }
+        | Op::MakeFunc(_)
+        | Op::MakeFuncIn(_)
+        | Op::MakeMethodFunc { .. }
+        | Op::JumpIfProvided(..)
+        | Op::MakeCffi(_)
+        | Op::MakeClosure(..)
+        | Op::GetField { .. }
+        | Op::GetIndex
+        | Op::GetSlice
+        | Op::SetField { .. }
+        | Op::SetIndex
+        | Op::Dup
+        | Op::Dup2
+        | Op::ToStr
+        | Op::ToStrFmt(_)
+        | Op::BuildStr(_)
+        | Op::ListClone
+        | Op::ArrLen
+        | Op::HasNextHook
+        | Op::IsGenerator
+        | Op::IsCursor
+        | Op::IterableToCursor
+        | Op::IsMap
+        | Op::IsChannel
+        | Op::ChanRecvOrClosed
+        | Op::EnsureEnum(_)
+        | Op::MatchArm { .. }
+        | Op::MatchNoArm(_)
+        | Op::EnterNursery
+        | Op::JoinNursery
+        | Op::ReclaimNursery
+        | Op::SpawnCall(..)
+        | Op::SpawnRecv(..)
+        | Op::SpawnBlock(..)
+        | Op::WaitPoll(_)
+        | Op::NewChannel(_)
+        | Op::NewShared
+        | Op::NewRwShared
+        | Op::NewAtomic
+        | Op::NewAtomicInt
+        | Op::NewTimer
+        | Op::NewExecutor
+        | Op::NewExecutorN => return None,
     })
 }
 
@@ -49,7 +156,117 @@ fn jump_target(op: &Op) -> Option<usize> {
         | Op::MatchArm { next: t, .. } => Some(*t),
         // The SECOND field is the target; the first is a SLOT index and must never be relocated.
         Op::JumpIfProvided(_, t) => Some(*t),
-        _ => None,
+        Op::ConstInt(_)
+        | Op::ConstFloat(_)
+        | Op::ConstStr(_)
+        | Op::ConstBytes(_)
+        | Op::True
+        | Op::False
+        | Op::Nil
+        | Op::Pop
+        | Op::StampGen(_)
+        | Op::Assert { .. }
+        | Op::LoadBuiltin(_)
+        | Op::GetLocal(_)
+        | Op::SetLocal(_)
+        | Op::GetGlobalSlot(_)
+        | Op::DefineGlobalSlot(_)
+        | Op::SetGlobalSlot(_)
+        | Op::GetCaptured(_)
+        | Op::Add
+        | Op::AddInPlace
+        | Op::Sub
+        | Op::Mul
+        | Op::Div
+        | Op::Mod
+        | Op::Neg
+        | Op::Not
+        | Op::Lt
+        | Op::LtEq
+        | Op::Gt
+        | Op::GtEq
+        | Op::Eq
+        | Op::NotEq
+        | Op::BitAnd
+        | Op::BitOr
+        | Op::BitXor
+        | Op::Shl
+        | Op::Shr
+        | Op::Contains
+        | Op::AsBool
+        | Op::AsInt
+        | Op::BinLocalLocal { .. }
+        | Op::BinLocalConst { .. }
+        | Op::IncLocal { .. }
+        | Op::PopHandler
+        | Op::Call(_)
+        | Op::CallMethod { .. }
+        | Op::CallHook { .. }
+        | Op::CallStatic { .. }
+        | Op::CallStaticDyn { .. }
+        | Op::CallBuiltin(..)
+        | Op::CallPrint(_)
+        | Op::CallPrintSep { .. }
+        | Op::Return
+        | Op::Yield
+        | Op::DeferCall(_)
+        | Op::DeferMethod(..)
+        | Op::EnterDeferScope
+        | Op::LeaveDeferScope
+        | Op::DrainHandlerDefers
+        | Op::Try
+        | Op::JsonDecode(_)
+        | Op::JsonToValue
+        | Op::NewList(_)
+        | Op::NewTuple(_)
+        | Op::NewMap(_)
+        | Op::NewSet(_)
+        | Op::NewStruct(..)
+        | Op::NewCell
+        | Op::CellLoad
+        | Op::CellStore
+        | Op::NewEnum { .. }
+        | Op::MakeFunc(_)
+        | Op::MakeFuncIn(_)
+        | Op::MakeMethodFunc { .. }
+        | Op::MakeCffi(_)
+        | Op::MakeClosure(..)
+        | Op::GetField { .. }
+        | Op::GetIndex
+        | Op::GetSlice
+        | Op::SetField { .. }
+        | Op::SetIndex
+        | Op::Dup
+        | Op::Dup2
+        | Op::ToStr
+        | Op::ToStrFmt(_)
+        | Op::BuildStr(_)
+        | Op::ListClone
+        | Op::ArrLen
+        | Op::HasNextHook
+        | Op::IsGenerator
+        | Op::IsCursor
+        | Op::IterableToCursor
+        | Op::IsMap
+        | Op::IsChannel
+        | Op::ChanRecvOrClosed
+        | Op::EnsureEnum(_)
+        | Op::MatchNoArm(_)
+        | Op::EnterNursery
+        | Op::JoinNursery
+        | Op::ReclaimNursery
+        | Op::SpawnCall(..)
+        | Op::SpawnRecv(..)
+        | Op::SpawnBlock(..)
+        | Op::WaitPoll(_)
+        | Op::NewChannel(_)
+        | Op::NewShared
+        | Op::NewRwShared
+        | Op::NewAtomic
+        | Op::NewAtomicInt
+        | Op::NewTimer
+        | Op::NewExecutor
+        | Op::NewExecutorN => None,
     }
 }
 
@@ -64,7 +281,117 @@ fn jump_target_mut(op: &mut Op) -> Option<&mut usize> {
         | Op::MatchArm { next: t, .. } => Some(t),
         // The SECOND field is the target; the first is a SLOT index and must never be relocated.
         Op::JumpIfProvided(_, t) => Some(t),
-        _ => None,
+        Op::ConstInt(_)
+        | Op::ConstFloat(_)
+        | Op::ConstStr(_)
+        | Op::ConstBytes(_)
+        | Op::True
+        | Op::False
+        | Op::Nil
+        | Op::Pop
+        | Op::StampGen(_)
+        | Op::Assert { .. }
+        | Op::LoadBuiltin(_)
+        | Op::GetLocal(_)
+        | Op::SetLocal(_)
+        | Op::GetGlobalSlot(_)
+        | Op::DefineGlobalSlot(_)
+        | Op::SetGlobalSlot(_)
+        | Op::GetCaptured(_)
+        | Op::Add
+        | Op::AddInPlace
+        | Op::Sub
+        | Op::Mul
+        | Op::Div
+        | Op::Mod
+        | Op::Neg
+        | Op::Not
+        | Op::Lt
+        | Op::LtEq
+        | Op::Gt
+        | Op::GtEq
+        | Op::Eq
+        | Op::NotEq
+        | Op::BitAnd
+        | Op::BitOr
+        | Op::BitXor
+        | Op::Shl
+        | Op::Shr
+        | Op::Contains
+        | Op::AsBool
+        | Op::AsInt
+        | Op::BinLocalLocal { .. }
+        | Op::BinLocalConst { .. }
+        | Op::IncLocal { .. }
+        | Op::PopHandler
+        | Op::Call(_)
+        | Op::CallMethod { .. }
+        | Op::CallHook { .. }
+        | Op::CallStatic { .. }
+        | Op::CallStaticDyn { .. }
+        | Op::CallBuiltin(..)
+        | Op::CallPrint(_)
+        | Op::CallPrintSep { .. }
+        | Op::Return
+        | Op::Yield
+        | Op::DeferCall(_)
+        | Op::DeferMethod(..)
+        | Op::EnterDeferScope
+        | Op::LeaveDeferScope
+        | Op::DrainHandlerDefers
+        | Op::Try
+        | Op::JsonDecode(_)
+        | Op::JsonToValue
+        | Op::NewList(_)
+        | Op::NewTuple(_)
+        | Op::NewMap(_)
+        | Op::NewSet(_)
+        | Op::NewStruct(..)
+        | Op::NewCell
+        | Op::CellLoad
+        | Op::CellStore
+        | Op::NewEnum { .. }
+        | Op::MakeFunc(_)
+        | Op::MakeFuncIn(_)
+        | Op::MakeMethodFunc { .. }
+        | Op::MakeCffi(_)
+        | Op::MakeClosure(..)
+        | Op::GetField { .. }
+        | Op::GetIndex
+        | Op::GetSlice
+        | Op::SetField { .. }
+        | Op::SetIndex
+        | Op::Dup
+        | Op::Dup2
+        | Op::ToStr
+        | Op::ToStrFmt(_)
+        | Op::BuildStr(_)
+        | Op::ListClone
+        | Op::ArrLen
+        | Op::HasNextHook
+        | Op::IsGenerator
+        | Op::IsCursor
+        | Op::IterableToCursor
+        | Op::IsMap
+        | Op::IsChannel
+        | Op::ChanRecvOrClosed
+        | Op::EnsureEnum(_)
+        | Op::MatchNoArm(_)
+        | Op::EnterNursery
+        | Op::JoinNursery
+        | Op::ReclaimNursery
+        | Op::SpawnCall(..)
+        | Op::SpawnRecv(..)
+        | Op::SpawnBlock(..)
+        | Op::WaitPoll(_)
+        | Op::NewChannel(_)
+        | Op::NewShared
+        | Op::NewRwShared
+        | Op::NewAtomic
+        | Op::NewAtomicInt
+        | Op::NewTimer
+        | Op::NewExecutor
+        | Op::NewExecutorN => None,
     }
 }
 
@@ -88,7 +415,119 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
             Op::Mul => Some(BinaryOp::Mul),
             Op::Div => Some(BinaryOp::Div),
             Op::Mod => Some(BinaryOp::Mod),
-            _ => None,
+            Op::ConstInt(_)
+            | Op::ConstFloat(_)
+            | Op::ConstStr(_)
+            | Op::ConstBytes(_)
+            | Op::True
+            | Op::False
+            | Op::Nil
+            | Op::Pop
+            | Op::StampGen(_)
+            | Op::Assert { .. }
+            | Op::LoadBuiltin(_)
+            | Op::GetLocal(_)
+            | Op::SetLocal(_)
+            | Op::GetGlobalSlot(_)
+            | Op::DefineGlobalSlot(_)
+            | Op::SetGlobalSlot(_)
+            | Op::GetCaptured(_)
+            | Op::AddInPlace
+            | Op::Neg
+            | Op::Not
+            | Op::Lt
+            | Op::LtEq
+            | Op::Gt
+            | Op::GtEq
+            | Op::Eq
+            | Op::NotEq
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::Shl
+            | Op::Shr
+            | Op::Contains
+            | Op::AsBool
+            | Op::AsInt
+            | Op::BinLocalLocal { .. }
+            | Op::BinLocalConst { .. }
+            | Op::IncLocal { .. }
+            | Op::Jump(_)
+            | Op::JumpIfFalse(_)
+            | Op::JumpIfFalseKeep(_)
+            | Op::JumpIfTrueKeep(_)
+            | Op::PushHandler(_)
+            | Op::PopHandler
+            | Op::Call(_)
+            | Op::CallMethod { .. }
+            | Op::CallHook { .. }
+            | Op::CallStatic { .. }
+            | Op::CallStaticDyn { .. }
+            | Op::CallBuiltin(..)
+            | Op::CallPrint(_)
+            | Op::CallPrintSep { .. }
+            | Op::Return
+            | Op::Yield
+            | Op::DeferCall(_)
+            | Op::DeferMethod(..)
+            | Op::EnterDeferScope
+            | Op::LeaveDeferScope
+            | Op::DrainHandlerDefers
+            | Op::Try
+            | Op::JsonDecode(_)
+            | Op::JsonToValue
+            | Op::NewList(_)
+            | Op::NewTuple(_)
+            | Op::NewMap(_)
+            | Op::NewSet(_)
+            | Op::NewStruct(..)
+            | Op::NewCell
+            | Op::CellLoad
+            | Op::CellStore
+            | Op::NewEnum { .. }
+            | Op::MakeFunc(_)
+            | Op::MakeFuncIn(_)
+            | Op::MakeMethodFunc { .. }
+            | Op::JumpIfProvided(..)
+            | Op::MakeCffi(_)
+            | Op::MakeClosure(..)
+            | Op::GetField { .. }
+            | Op::GetIndex
+            | Op::GetSlice
+            | Op::SetField { .. }
+            | Op::SetIndex
+            | Op::Dup
+            | Op::Dup2
+            | Op::ToStr
+            | Op::ToStrFmt(_)
+            | Op::BuildStr(_)
+            | Op::ListClone
+            | Op::ArrLen
+            | Op::HasNextHook
+            | Op::IsGenerator
+            | Op::IsCursor
+            | Op::IterableToCursor
+            | Op::IsMap
+            | Op::IsChannel
+            | Op::ChanRecvOrClosed
+            | Op::EnsureEnum(_)
+            | Op::MatchArm { .. }
+            | Op::MatchNoArm(_)
+            | Op::EnterNursery
+            | Op::JoinNursery
+            | Op::ReclaimNursery
+            | Op::SpawnCall(..)
+            | Op::SpawnRecv(..)
+            | Op::SpawnBlock(..)
+            | Op::WaitPoll(_)
+            | Op::NewChannel(_)
+            | Op::NewShared
+            | Op::NewRwShared
+            | Op::NewAtomic
+            | Op::NewAtomicInt
+            | Op::NewTimer
+            | Op::NewExecutor
+            | Op::NewExecutorN => None,
         };
         if let Some(op) = op {
             // The arithmetic is `ast::consteval`'s (TICKET-225), the one evaluator the checker
