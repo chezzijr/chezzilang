@@ -176,7 +176,30 @@ pub fn from_ty<F: Clone>(
                 fields: descs,
             })
         }
-        other => Err(format!("decode: cannot decode into {other}")),
+        other @ Ty::Bytes
+        | other @ Ty::ByteArray
+        | other @ Ty::Nil
+        | other @ Ty::Set(_)
+        | other @ Ty::Func { .. }
+        | other @ Ty::BuiltinFn { .. }
+        | other @ Ty::Enum(..)
+        | other @ Ty::Param(_)
+        | other @ Ty::Result(..)
+        | other @ Ty::Channel(_)
+        | other @ Ty::Shared(_)
+        | other @ Ty::Atomic(_)
+        | other @ Ty::AtomicInt
+        | other @ Ty::RwShared(_)
+        | other @ Ty::Executor
+        | other @ Ty::Socket
+        | other @ Ty::Listener
+        | other @ Ty::Writer
+        | other @ Ty::Reader
+        | other @ Ty::Ptr
+        | other @ Ty::Width(_)
+        | other @ Ty::Protocol(..)
+        | other @ Ty::Module(_)
+        | other @ Ty::Var(_) => Err(format!("decode: cannot decode into {other}")),
     }
 }
 

@@ -1018,7 +1018,7 @@ fn type_check(
     let root = root.map(|r| r.to_path_buf());
     let owned = match entry_fn {
         EntryGate::Named(f) => Some(f.to_string()),
-        _ => None,
+        EntryGate::FromManifest | EntryGate::Script => None,
     };
     let script = matches!(entry_fn, EntryGate::Script);
     chezzi::on_frontend_stack(move || {
@@ -1069,11 +1069,11 @@ fn type_check_inner(
     // able to do is land in that arm by accident — see [`EntryGate::Script`].
     let derived = match entry_fn {
         EntryGate::FromManifest => manifest::entry_fn_for(entry),
-        _ => None,
+        EntryGate::Named(_) | EntryGate::Script => None,
     };
     let entry_fn = match entry_fn {
         EntryGate::Named(f) => Some(f),
-        _ => derived.as_deref(),
+        EntryGate::FromManifest | EntryGate::Script => derived.as_deref(),
     };
     let build = resolver::build_graph_with_entry_source_and_root(
         entry,

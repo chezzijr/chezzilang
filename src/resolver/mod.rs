@@ -259,7 +259,7 @@ fn std_miss_message(dotted: &[String], miss: &StdMiss) -> String {
             dotted_label(dotted),
             path.display()
         ),
-        _ => format!(
+        StdMiss::NotStd | StdMiss::NoSuchModule => format!(
             "cannot find module '{}' (no such module in the stdlib)",
             dotted_label(dotted)
         ),
@@ -614,7 +614,7 @@ impl Builder {
         for (import, span) in imports {
             let full = full_path_import(&import).filter(|f| match f {
                 Import::Module { alias: Some(a), .. } => full_paths.insert(a.clone()),
-                _ => false,
+                Import::Module { .. } | Import::From { .. } | Import::Variants { .. } => false,
             });
             let path = import_path(&import);
             // Native std modules (std.math/io/os) are virtual: no `.chz` file, members injected by
@@ -832,7 +832,33 @@ impl Builder {
                 // A variant import names an enum of this file; there is no module to load.
                 StmtKind::Import(Import::Variants { .. }) => None,
                 StmtKind::Import(import) => Some((import.clone(), s.span)),
-                _ => None,
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Struct { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::Enum { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => None,
             })
             .collect()
     }
@@ -858,7 +884,7 @@ fn full_path_import(import: &Import) -> Option<Import> {
             alias: Some(path.join(".")),
             name_span: *name_span,
         }),
-        _ => None,
+        Import::Module { .. } | Import::From { .. } | Import::Variants { .. } => None,
     }
 }
 
@@ -875,7 +901,7 @@ fn expand_std_namespace(imports: Vec<(Import, Span)>) -> Vec<(Import, Span)> {
             Import::Module {
                 path, alias: None, ..
             } if path.len() == 2 && path[0] == "std" => Some(path[1].clone()),
-            _ => None,
+            Import::Module { .. } | Import::From { .. } | Import::Variants { .. } => None,
         })
         .collect();
     let mut out = Vec::with_capacity(imports.len());
@@ -901,7 +927,9 @@ fn expand_std_namespace(imports: Vec<(Import, Span)>) -> Vec<(Import, Span)> {
                     ));
                 }
             }
-            other => out.push((other, span)),
+            other @ Import::Module { .. }
+            | other @ Import::From { .. }
+            | other @ Import::Variants { .. } => out.push((other, span)),
         }
     }
     out
@@ -973,7 +1001,9 @@ fn normalize(p: &Path) -> PathBuf {
                 out.pop();
             }
             Component::CurDir => {}
-            other => out.push(other.as_os_str()),
+            other @ Component::Prefix(_)
+            | other @ Component::RootDir
+            | other @ Component::Normal(_) => out.push(other.as_os_str()),
         }
     }
     out

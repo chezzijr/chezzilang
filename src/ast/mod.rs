@@ -316,7 +316,33 @@ impl StmtKind {
     pub fn as_expr(&self) -> Option<&Expr> {
         match self {
             StmtKind::Expr(e) => Some(e),
-            _ => None,
+            StmtKind::Let { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::Fn(_)
+            | StmtKind::Struct { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::If { .. }
+            | StmtKind::For { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Match { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Yield(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Parallel { .. }
+            | StmtKind::Spawn(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. }
+            | StmtKind::Assert { .. } => None,
         }
     }
 }
@@ -762,7 +788,32 @@ pub fn classify_variant_imports(m: &mut Module, module_exists: &dyn Fn(&str) -> 
             StmtKind::Import(Import::From { names, .. }) => {
                 enum_like.extend(names.iter().map(|(n, a)| a.clone().unwrap_or(n.clone())));
             }
-            _ => {}
+            StmtKind::Let { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::Fn(_)
+            | StmtKind::Struct { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::If { .. }
+            | StmtKind::For { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Match { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Yield(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Parallel { .. }
+            | StmtKind::Spawn(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeType { .. }
+            | StmtKind::Assert { .. }
+            | StmtKind::Expr(_) => {}
         }
     }
     for s in &mut m.stmts {
@@ -1260,7 +1311,36 @@ impl ExprKind {
     pub fn as_ident(&self) -> Option<&String> {
         match self {
             ExprKind::Ident(n) => Some(n),
-            _ => None,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => None,
         }
     }
 }
@@ -1357,7 +1437,37 @@ pub fn type_application(e: &Expr) -> Option<TypeApplication<'_>> {
             args: types.clone(),
             args_span: index.as_ref().map_or(e.span, |i| i.span),
         }),
-        _ => None,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => None,
     }
 }
 
@@ -1510,7 +1620,25 @@ pub fn stmt_expr_recover_blocks<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
             WaitArmKind::Recv { chan, .. } => expr_recover_blocks(chan, out),
             WaitArmKind::Send { call } => expr_recover_blocks(call, out),
         }),
-        _ => {}
+        StmtKind::Fn(_)
+        | StmtKind::Struct { .. }
+        | StmtKind::Protocol { .. }
+        | StmtKind::Enum { .. }
+        | StmtKind::TypeAlias { .. }
+        | StmtKind::Return(_)
+        | StmtKind::Defer(_)
+        | StmtKind::Parallel { .. }
+        | StmtKind::Spawn(_)
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Pass
+        | StmtKind::Import(_)
+        | StmtKind::Extern { .. }
+        | StmtKind::Native(_)
+        | StmtKind::NativeStruct { .. }
+        | StmtKind::NativeEnum { .. }
+        | StmtKind::NativeType { .. }
+        | StmtKind::Assert { .. } => {}
     }
 }
 
@@ -1764,7 +1892,35 @@ fn ids_in_pattern(p: &mut Pattern, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
 pub fn id_width(kind: &ExprKind) -> u32 {
     match kind {
         ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } => CARRIER_IDS,
-        _ => 1,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => 1,
     }
 }
 

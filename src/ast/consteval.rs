@@ -47,7 +47,15 @@ pub fn int_binop(op: BinaryOp, a: i64, b: i64) -> Option<Result<i64, &'static st
             })
         }
         BinaryOp::Shr => Some(Ok(a >> (b as u32))),
-        _ => None,
+        BinaryOp::Lt
+        | BinaryOp::LtEq
+        | BinaryOp::Gt
+        | BinaryOp::GtEq
+        | BinaryOp::Eq
+        | BinaryOp::NotEq
+        | BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::In => None,
     }
 }
 
@@ -60,7 +68,20 @@ pub fn float_binop(op: BinaryOp, a: f64, b: f64) -> Option<f64> {
         BinaryOp::Div | BinaryOp::Mod if b == 0.0 => None,
         BinaryOp::Div => Some(a / b),
         BinaryOp::Mod => Some(a % b),
-        _ => None,
+        BinaryOp::Lt
+        | BinaryOp::LtEq
+        | BinaryOp::Gt
+        | BinaryOp::GtEq
+        | BinaryOp::Eq
+        | BinaryOp::NotEq
+        | BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::BitAnd
+        | BinaryOp::BitOr
+        | BinaryOp::BitXor
+        | BinaryOp::Shl
+        | BinaryOp::Shr
+        | BinaryOp::In => None,
     }
 }
 
@@ -82,7 +103,7 @@ pub fn eval(e: &Expr, visits: &mut usize) -> Fold {
                 None => Fold::Overflow(e.span, "negation"),
             },
             Fold::Value(Const::Float(f)) => Fold::Value(Const::Float(-f)),
-            other => other,
+            other @ Fold::Overflow(..) | other @ Fold::NotConst => other,
         },
         ExprKind::Binary { op, lhs, rhs } => {
             let l = eval(lhs, visits);
@@ -105,7 +126,34 @@ pub fn eval(e: &Expr, visits: &mut usize) -> Fold {
                 _ => Fold::NotConst,
             }
         }
-        _ => Fold::NotConst,
+        ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => Fold::NotConst,
     }
 }
 

@@ -350,7 +350,92 @@ fn token_at(source: &str, line0: usize, char_col: usize) -> Option<(u32, u32)> {
                 measure_number(&chars, start_abs)
             }
             Token::Str(_) | Token::RawStr(_) | Token::Bytes(_) => measure_string(&chars, start_abs),
-            other => match other.lexeme() {
+            other @ Token::Fn
+            | other @ Token::Return
+            | other @ Token::If
+            | other @ Token::Else
+            | other @ Token::Elif
+            | other @ Token::For
+            | other @ Token::While
+            | other @ Token::In
+            | other @ Token::Break
+            | other @ Token::Continue
+            | other @ Token::Pass
+            | other @ Token::Struct
+            | other @ Token::Enum
+            | other @ Token::Protocol
+            | other @ Token::Type
+            | other @ Token::Match
+            | other @ Token::Recover
+            | other @ Token::Defer
+            | other @ Token::Assert
+            | other @ Token::Test
+            | other @ Token::Spawn
+            | other @ Token::Parallel
+            | other @ Token::Wait
+            | other @ Token::Yield
+            | other @ Token::Import
+            | other @ Token::Extern
+            | other @ Token::Native
+            | other @ Token::From
+            | other @ Token::As
+            | other @ Token::Const
+            | other @ Token::And
+            | other @ Token::Or
+            | other @ Token::Not
+            | other @ Token::True
+            | other @ Token::False
+            | other @ Token::NoneKw
+            | other @ Token::Where
+            | other @ Token::Plus
+            | other @ Token::Minus
+            | other @ Token::Star
+            | other @ Token::Slash
+            | other @ Token::Percent
+            | other @ Token::Assign
+            | other @ Token::Walrus
+            | other @ Token::EqEq
+            | other @ Token::NotEq
+            | other @ Token::Lt
+            | other @ Token::LtEq
+            | other @ Token::Gt
+            | other @ Token::GtEq
+            | other @ Token::PlusEq
+            | other @ Token::MinusEq
+            | other @ Token::StarEq
+            | other @ Token::SlashEq
+            | other @ Token::PercentEq
+            | other @ Token::AmpEq
+            | other @ Token::PipeEq
+            | other @ Token::CaretEq
+            | other @ Token::ShlEq
+            | other @ Token::ShrEq
+            | other @ Token::Arrow
+            | other @ Token::Pipe
+            | other @ Token::Question
+            | other @ Token::QuestionDot
+            | other @ Token::QuestionQuestion
+            | other @ Token::Bang
+            | other @ Token::Amp
+            | other @ Token::Caret
+            | other @ Token::BitOr
+            | other @ Token::Shl
+            | other @ Token::Shr
+            | other @ Token::LParen
+            | other @ Token::RParen
+            | other @ Token::LBracket
+            | other @ Token::RBracket
+            | other @ Token::LBrace
+            | other @ Token::RBrace
+            | other @ Token::Comma
+            | other @ Token::Colon
+            | other @ Token::Dot
+            | other @ Token::DotDot
+            | other @ Token::DotDotDot
+            | other @ Token::Newline
+            | other @ Token::Indent
+            | other @ Token::Dedent
+            | other @ Token::Eof => match other.lexeme() {
                 Some(lex) => lex.chars().count(),
                 None => continue, // layout token — no extent
             },
@@ -464,7 +549,92 @@ fn semantic_tokens_inner(source: &str) -> Vec<SemTok> {
                 string_extents.push((start_abs, start_abs + l));
                 (STRING, l)
             }
-            other => match other.lexeme() {
+            other @ Token::Fn
+            | other @ Token::Return
+            | other @ Token::If
+            | other @ Token::Else
+            | other @ Token::Elif
+            | other @ Token::For
+            | other @ Token::While
+            | other @ Token::In
+            | other @ Token::Break
+            | other @ Token::Continue
+            | other @ Token::Pass
+            | other @ Token::Struct
+            | other @ Token::Enum
+            | other @ Token::Protocol
+            | other @ Token::Type
+            | other @ Token::Match
+            | other @ Token::Recover
+            | other @ Token::Defer
+            | other @ Token::Assert
+            | other @ Token::Test
+            | other @ Token::Spawn
+            | other @ Token::Parallel
+            | other @ Token::Wait
+            | other @ Token::Yield
+            | other @ Token::Import
+            | other @ Token::Extern
+            | other @ Token::Native
+            | other @ Token::From
+            | other @ Token::As
+            | other @ Token::Const
+            | other @ Token::And
+            | other @ Token::Or
+            | other @ Token::Not
+            | other @ Token::True
+            | other @ Token::False
+            | other @ Token::NoneKw
+            | other @ Token::Where
+            | other @ Token::Plus
+            | other @ Token::Minus
+            | other @ Token::Star
+            | other @ Token::Slash
+            | other @ Token::Percent
+            | other @ Token::Assign
+            | other @ Token::Walrus
+            | other @ Token::EqEq
+            | other @ Token::NotEq
+            | other @ Token::Lt
+            | other @ Token::LtEq
+            | other @ Token::Gt
+            | other @ Token::GtEq
+            | other @ Token::PlusEq
+            | other @ Token::MinusEq
+            | other @ Token::StarEq
+            | other @ Token::SlashEq
+            | other @ Token::PercentEq
+            | other @ Token::AmpEq
+            | other @ Token::PipeEq
+            | other @ Token::CaretEq
+            | other @ Token::ShlEq
+            | other @ Token::ShrEq
+            | other @ Token::Arrow
+            | other @ Token::Pipe
+            | other @ Token::Question
+            | other @ Token::QuestionDot
+            | other @ Token::QuestionQuestion
+            | other @ Token::Bang
+            | other @ Token::Amp
+            | other @ Token::Caret
+            | other @ Token::BitOr
+            | other @ Token::Shl
+            | other @ Token::Shr
+            | other @ Token::LParen
+            | other @ Token::RParen
+            | other @ Token::LBracket
+            | other @ Token::RBracket
+            | other @ Token::LBrace
+            | other @ Token::RBrace
+            | other @ Token::Comma
+            | other @ Token::Colon
+            | other @ Token::Dot
+            | other @ Token::DotDot
+            | other @ Token::DotDotDot
+            | other @ Token::Newline
+            | other @ Token::Indent
+            | other @ Token::Dedent
+            | other @ Token::Eof => match other.lexeme() {
                 // Keyword vs operator/delimiter: a keyword is in the KEYWORDS table.
                 Some(lex) => {
                     let t = if lexer::KEYWORDS.iter().any(|(_, k)| k == other) {
@@ -792,7 +962,35 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
                     overlay_mark(map, *name_span, FUNCTION);
                     overlay_expr(obj, map);
                 }
-                _ => overlay_expr(callee, map),
+                ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Interp(_)
+                | ExprKind::Bytes(_)
+                | ExprKind::RawStr(_)
+                | ExprKind::Bool(_)
+                | ExprKind::NoneLit
+                | ExprKind::Pass
+                | ExprKind::List(..)
+                | ExprKind::Tuple(_)
+                | ExprKind::Map(_)
+                | ExprKind::Set(_)
+                | ExprKind::Comprehension { .. }
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Compare { .. }
+                | ExprKind::Range { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Slice { .. }
+                | ExprKind::Try(_)
+                | ExprKind::OptChain { .. }
+                | ExprKind::NullCoalesce { .. }
+                | ExprKind::Closure { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::IfElse { .. }
+                | ExprKind::Recover(_)
+                | ExprKind::ElseGuard { .. } => overlay_expr(callee, map),
             }
             for a in args {
                 overlay_expr(a, map);

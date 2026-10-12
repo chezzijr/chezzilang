@@ -642,7 +642,11 @@ impl Token {
             Dot => ".",
             DotDot => "..",
             DotDotDot => "...",
-            _ => return None,
+            Int(_) | IntMinMagnitude | Float(_) | Str(_) | Bytes(_) | RawStr(_) | Ident(_) | Fn
+            | Return | If | Else | Elif | For | While | In | Break | Continue | Pass | Struct
+            | Enum | Protocol | Type | Match | Recover | Defer | Assert | Test | Spawn
+            | Parallel | Wait | Yield | Import | Extern | Native | From | As | Const | And | Or
+            | Not | True | False | NoneKw | Where | Newline | Indent | Dedent | Eof => return None,
         })
     }
 }

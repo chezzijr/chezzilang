@@ -145,7 +145,7 @@ fn verdict_status(v: &Verdict) -> &'static str {
 fn verdict_line(v: &Verdict) -> Option<usize> {
     match v {
         Verdict::Fail { site, .. } | Verdict::Error { site, .. } => Some(site.line),
-        _ => None,
+        Verdict::Pass | Verdict::OverMemory { .. } | Verdict::TimedOut { .. } => None,
     }
 }
 
@@ -566,7 +566,7 @@ fn render_line(report: &mut Vec<u8>, o: &Outcome, opts: &RunOpts) {
     report.push(b'\n');
     let frames: &[String] = match &o.verdict {
         Verdict::Fail { site, .. } | Verdict::Error { site, .. } => &site.frames,
-        _ => &[],
+        Verdict::Pass | Verdict::OverMemory { .. } | Verdict::TimedOut { .. } => &[],
     };
     for frame in frames {
         report.extend_from_slice(frame.as_bytes());

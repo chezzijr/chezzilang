@@ -170,7 +170,23 @@ fn is_inline_default(e: &Expr) -> bool {
         ExprKind::Map(ps) => ps
             .iter()
             .all(|(k, v)| is_inline_default(k) && is_inline_default(v)),
-        _ => false,
+        ExprKind::Interp(_)
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => false,
     }
 }
 
@@ -607,7 +623,7 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
                                 d.clone(),
                             ));
                         }
-                        _ => {}
+                        Dflt::Inline(_) | Dflt::CalleeFilled => {}
                     }
                 }
                 for mth in methods {
@@ -660,7 +676,30 @@ fn synthesize_providers_into(stmts: &mut Vec<Stmt>, file: u32) {
                     );
                 }
             }
-            _ => {}
+            StmtKind::Let { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::If { .. }
+            | StmtKind::For { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Match { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Yield(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Parallel { .. }
+            | StmtKind::Spawn(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. }
+            | StmtKind::Assert { .. }
+            | StmtKind::Expr(_) => {}
         }
     }
     stmts.extend(new_fns);
@@ -1711,7 +1750,35 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
                 ],
             }
         }
-        other => other, // unreachable: caller guards on the two carrier kinds
+        other @ ExprKind::Int(_)
+        | other @ ExprKind::Float(_)
+        | other @ ExprKind::Str(_)
+        | other @ ExprKind::Interp(_)
+        | other @ ExprKind::Bytes(_)
+        | other @ ExprKind::RawStr(_)
+        | other @ ExprKind::Bool(_)
+        | other @ ExprKind::NoneLit
+        | other @ ExprKind::Pass
+        | other @ ExprKind::Ident(_)
+        | other @ ExprKind::List(..)
+        | other @ ExprKind::Tuple(_)
+        | other @ ExprKind::Map(_)
+        | other @ ExprKind::Set(_)
+        | other @ ExprKind::Comprehension { .. }
+        | other @ ExprKind::Unary { .. }
+        | other @ ExprKind::Binary { .. }
+        | other @ ExprKind::Compare { .. }
+        | other @ ExprKind::Range { .. }
+        | other @ ExprKind::Call { .. }
+        | other @ ExprKind::Field { .. }
+        | other @ ExprKind::Index { .. }
+        | other @ ExprKind::Slice { .. }
+        | other @ ExprKind::Try(_)
+        | other @ ExprKind::Closure { .. }
+        | other @ ExprKind::Match { .. }
+        | other @ ExprKind::IfElse { .. }
+        | other @ ExprKind::Recover(_)
+        | other @ ExprKind::ElseGuard { .. } => other, // unreachable: caller guards on the two carrier kinds
     };
 }
 
@@ -1848,7 +1915,27 @@ fn module_level_names(
                         .map(|(n, a)| a.clone().unwrap_or_else(|| n.clone())),
                 );
             }
-            _ => {}
+            StmtKind::Assign { .. }
+            | StmtKind::If { .. }
+            | StmtKind::For { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Match { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Yield(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Parallel { .. }
+            | StmtKind::Spawn(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. }
+            | StmtKind::Assert { .. }
+            | StmtKind::Expr(_) => {}
         }
     }
     for imp in imports {
