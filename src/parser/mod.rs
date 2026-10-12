@@ -226,6 +226,9 @@ struct Parser {
     /// (a failed speculative type parse restores `pos` only). [`Parser::eat_type_assign`] is the
     /// only reader.
     bang_eq: Option<usize>,
+    /// A hole has been parsed on this parser. A depth error after that says so: a hole spends the
+    /// same budget as the code around it, and a bare "too deeply" would not tell the user why.
+    hole_parsed: bool,
 }
 
 impl Parser {
@@ -247,7 +250,19 @@ impl Parser {
             docs: std::collections::HashMap::new(),
             native_enums,
             bang_eq: None,
+            hole_parsed: false,
         }
+    }
+
+    /// The error for an expression past a depth bound. The one place that words it.
+    fn too_deep(&self) -> ParseError {
+        let mut message = "expression nested too deeply".to_string();
+        if self.hole_parsed {
+            message.push_str(&format!(
+                " (limits: {MAX_DEPTH} nested levels, {MAX_AST_DEPTH} levels of tree depth); an interpolated `{{…}}` fragment nests INSIDE the expression around it and spends the same budget"
+            ));
+        }
+        self.err(message)
     }
 
     /// TICKET-228 (D6) — reject a removed long carrier name read as a BARE name (expression
@@ -4245,7 +4260,7 @@ impl Parser {
     fn parse_bp(&mut self, min_bp: u8) -> PResult<Expr> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            return Err(self.err("expression nested too deeply".to_string()));
+            return Err(self.too_deep());
         }
         // Each fold below adds one level to a left-leaning AST that the recursive front-end walkers
         // descend. Iterative, so the `self.depth` guard above never sees it — the bound is
@@ -4279,7 +4294,7 @@ impl Parser {
             }
             chain += 1;
             if self.depth + self.fold_depth + chain > MAX_AST_DEPTH {
-                return Err(self.err("expression nested too deeply".to_string()));
+                return Err(self.too_deep());
             }
             let op_span = self.cur_span();
             self.advance(); // the operator
@@ -4300,7 +4315,7 @@ impl Parser {
                         }
                         chain += 1;
                         if self.depth + self.fold_depth + chain > MAX_AST_DEPTH {
-                            return Err(self.err("expression nested too deeply".to_string()));
+                            return Err(self.too_deep());
                         }
                         self.advance();
                         let next_rhs = self.parse_bp(next_r)?;
@@ -4430,7 +4445,7 @@ impl Parser {
     fn parse_unary(&mut self) -> PResult<Expr> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            return Err(self.err("expression nested too deeply".to_string()));
+            return Err(self.too_deep());
         }
         let span = self.cur_span();
         if self.check(&Token::QuestionQuestion) {
@@ -4586,7 +4601,7 @@ impl Parser {
         loop {
             chain += 1;
             if self.depth + self.fold_depth + chain > MAX_AST_DEPTH {
-                return Err(self.err("expression nested too deeply".to_string()));
+                return Err(self.too_deep());
             }
             let span = e.span;
             if self.ended_at_block() {
@@ -5355,6 +5370,7 @@ impl Parser {
     /// code around it. The hole's tokens stand in for the module's while it parses; token-indexed
     /// state (`if_line`, `bang_eq`) belongs to the module's tokens and is set aside.
     fn parse_hole(&mut self, tokens: Vec<Tok>) -> PResult<Expr> {
+        self.hole_parsed = true;
         let outer_toks = std::mem::replace(&mut self.toks, tokens);
         let outer_pos = std::mem::replace(&mut self.pos, 0);
         let outer_if_line = self.if_line.take();
@@ -11351,10 +11367,15 @@ fn g():
             (alone_ok, composed_err.map(|e| e.message))
         });
         assert!(alone_ok, "150 parentheses must parse on their own");
-        assert_eq!(
-            composed_err.as_deref(),
-            Some("expression nested too deeply"),
-            "a hole shares its parser's depth budget"
+        let message = composed_err.expect("a hole shares its parser's depth budget");
+        assert!(
+            message.starts_with("expression nested too deeply"),
+            "{message}"
+        );
+        // The message says why: the hole spends the budget of the code around it.
+        assert!(
+            message.contains("interpolated") && message.contains(&MAX_AST_DEPTH.to_string()),
+            "{message}"
         );
     }
 }
