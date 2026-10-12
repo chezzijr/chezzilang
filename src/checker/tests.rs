@@ -7477,6 +7477,23 @@ fn unknown_type_spans_the_type_name_and_suggests() {
     );
 }
 
+/// TICKET-253: `range` is no type (the builtin is removed; the name stays reserved only to carry the
+/// `range()` error), so a misspelt type must not be suggested `range`.
+#[test]
+fn an_unknown_type_is_never_suggested_the_removed_name_range() {
+    let errs = check_src("x: rnge = 1\n");
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("unknown type 'rnge'")),
+        "expected `unknown type 'rnge'`, got: {errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .all(|e| !e.help.as_deref().is_some_and(|h| h.contains("'range'"))),
+        "a help suggests the removed name `range`: {errs:?}"
+    );
+}
+
 /// TICKET-079/TICKET-080 (b): the span carets the TYPE NAME, not column 1. `Strng` starts at
 /// 1-based column 9 in `fn f(a: Strng) -> int:`.
 #[test]

@@ -806,13 +806,17 @@ only one engine**, so nothing here constrains the remaining steps 1–4.
 
 1. **Comprehensions** — `[x*2 for x in xs if x>0]` (+ dict/set). A Python-feel language without
    these feels broken. Pure parse-time desugar to loop + push. Cheap, large UX win.
-2. **Slicing — DONE, and since upgraded to Python colon syntax.** Originally shipped as Rust-style
-   `xs[1..3]` (half-open, bounds-clamped, reusing `..`). Mid-M19 (owner-requested language change) the
-   subscript-slice form moved to **Python `xs[a:b:c]`** with the full surface: open bounds, step, reverse
-   `[::-1]`, and negative indexing (plain index faults out of range, slice bounds clamp — Python's
-   asymmetry). `ExprKind::Slice { obj, start, end, step }` (each `Option`); one shared resolver in
-   `src/slice.rs` drives it. The `..` operator stays the for-loop/match range. See
-   [`PROGRESS.md`](../PROGRESS.md) "Slice syntax → Python colon".
+2. **Slicing — DONE, and since moved onto the `Range` value (TICKET-253).** Originally shipped as
+   Rust-style `xs[1..3]`, then moved mid-M19 to Python colon syntax `xs[a:b:c]`, and now back to
+   `xs[a..b]` with one difference: `a..b` is no longer syntax that only a slice, a `for` and a pattern
+   accept. It builds a `Range` value (`std/prelude.chz`), and a slice takes any `Range`: `xs[a..b]`,
+   `xs[a..=b]`, `xs[..b]`, `xs[a..]`, `xs[..]`, `xs[Range(0, 10, 2)]`. The colon slice and `[::-1]` are
+   removed (`xs.reversed()` replaces the last). A negative bound counts from the end, an inclusive end
+   adds one after that, both bounds clamp (Python's asymmetry stays: a plain index faults out of range).
+   There is no `ExprKind::Slice`: a slice is `ExprKind::Index` with a `Range` index, and one function,
+   `slice::range_indices` in `src/slice.rs`, resolves it for `List`, `str`, `bytes`, `bytearray` and
+   `ConcurrentList`. The `Slice` protocol requires `slice(self, r: Range) -> R`. The `..` operator builds
+   the value everywhere. See [`PROGRESS.md`](../PROGRESS.md) "TICKET-253" and `docs/syntax.md` §6b.
 3. ~~**Iterator protocol + generators (`yield`)**~~ — **iterator DONE; generators removed.** The
    `Iterator[T]` parameterized protocol shipped (M13): user structs usable in `for`, generic
    `[S: Iterator[T], T]` bounds, and lazy `map`/`filter`/`take` written as **adapter structs** over it

@@ -218,10 +218,10 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "bytes"
         || name == "bytearray"
         // Builtin container/collection type names — recognized by `resolve_type`'s generic arms
-        // (`List[T]`/`Set[T]`/`Map[K,V]`/`Channel[T]`) and `range` (a reserved callable whose ctor a
-        // `struct range` would silently shadow). (List/Map/Set/range's `CallBuiltin` DISPATCH is
+        // (`List[T]`/`Set[T]`/`Map[K,V]`/`Channel[T]`). (List/Map/Set's `CallBuiltin` DISPATCH is
         // table-sourced — the `Intrinsic::Ctor` PRELUDE rows; their generic TYPE-IDENTITY is HERE +
-        // in `resolve_type`/`infer_named_call`. See the `Intrinsic` doc.)
+        // in `resolve_type`/`infer_named_call`. See the `Intrinsic` doc.) `range` has no ctor any
+        // more (TICKET-253); the name stays reserved only so `range(n)` reports "write `0..n`".
         || name == "List"
         || name == "Set"
         || name == "Map"

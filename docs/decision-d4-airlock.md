@@ -61,6 +61,31 @@ the fact that a write lost to it is silent.
    `'xs' is this task's copy: a write to it would be lost at the join; share it through
    Shared/Channel, or make a task-local copy with .copy()`.
    It replaces the W8-3/W11-13 warning, which becomes redundant.
+
+   **A slice is one place link (TICKET-253).** The walkers that find these writes (`chain`, `view_root`,
+   `path` in `src/checker/fn_writes.rs`; `self_chain` in `src/checker/self_writes.rs`; `chain_path` in
+   `src/checker/setup.rs`) run before any body is checked, so they read syntax only. With a `Range` as
+   the subscript, the syntax does not hold the fact "this subscript slices": `xs[r]` holds a value, and
+   `Map[Range, V][0..3]` is a key lookup. So every subscript is one link, and `grid[0..2]` gets the
+   answer `grid[0]` gets. Program, run on the release binary:
+
+   ```
+   fn t(grid: List[List[int]]):
+       grid[0..2].push([9])
+
+   grid := [[1], [2], [3]]
+   spawn t(grid)
+   ```
+
+   ```
+   type error (d4.chz:5:7): 'grid' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()
+   help: call to 't' writes 'grid' through 'push'
+   ```
+
+   The colon spelling `grid[0:2].push([9])` gave no report before, although the statement changed a
+   temporary that the program dropped. The new error is true, and 0 of 713 tracked `.chz` files
+   change (prototype of the ticket). Do not add a syntactic "is this a range" test to a walker: it
+   would be wrong in both directions.
 2. **Runtime fault: a spawned task writes a module global.** This covers rows 3–4. The checker cannot
    see these writes, because they happen inside an ordinary `fn` that is also legal on the main task.
    The runtime can: the task knows it is not the root task. Both a global store (`n = 5`) and a

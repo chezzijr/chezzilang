@@ -748,7 +748,6 @@ impl Checker {
                     "bytearray",
                     crate::lexer::NONE,
                     "tuple",
-                    "range",
                     "List",
                     "Map",
                     "Set",

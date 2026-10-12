@@ -601,6 +601,27 @@ fn; it captures the enclosing scope exactly like a closure value:
   (`f()`, `obj.m()`, `lib.f()`, `lib.K.f()`, a function value); a parameter the callee rebinds
   before writing it (`ys = [1, 2]; ys.push(3)`) is not a task copy (TICKET-189).
 
+  A slice does not change that rule (TICKET-253). The write walkers run before any body is checked, so
+  they read a subscript as one place link and cannot tell `grid[0]` from `grid[0..2]` or from `grid[r]`
+  (a `Range` value, or a key of a `Map[Range, V]`). So a mutating call on a slice of a captured nested
+  container, inside a function that a `spawn` calls, is the same D4 type error as `grid[0].push(9)`:
+
+  ```
+  fn t(grid: List[List[int]]):
+      grid[0..2].push([9])
+
+  grid := [[1], [2], [3]]
+  spawn t(grid)
+  ```
+
+  ```
+  type error (d4.chz:5:7): 'grid' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()
+  help: call to 't' writes 'grid' through 'push'
+  ```
+
+  Before TICKET-253 the colon spelling `grid[0:2].push([9])` gave no report, and the statement changed a
+  temporary that the program dropped. The new error names a write that was lost.
+
 `fn` is the only declaration allowed inside a block. `struct`, `enum`, `protocol`, `type`, `test fn`, `import`, `extern` and `native` are top-level only; inside any block each is a parse error (`struct must be a top-level declaration`).
 
 ```chezzi
