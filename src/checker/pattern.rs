@@ -5219,16 +5219,18 @@ impl Checker {
             return Ty::Unknown;
         }
         // TICKET-253 — a subscript whose index is a `Range` is a slice or a key lookup, decided
-        // here once (a map keyed by `Range` looks the key up; everything else slices). The index is
-        // typed on a probe; when it is no `Range` the probe's reports are dropped and the arms below
-        // type it again as before.
-        if !matches!(obj_ty, Ty::Map(..)) && !matches!(index.kind, ExprKind::Int(_)) {
-            let probe = self.errors.len();
-            if self.infer_value(index) == self.range_ty() {
+        // here once (a map keyed by `Range` looks the key up; everything else slices). A map types
+        // its index against the key type below. Every other receiver types the index ONCE here and
+        // the arms read that type: typing it again per arm costs 2^depth on `xs[xs[xs[i]]]`.
+        let idx_ty = if matches!(obj_ty, Ty::Map(..)) {
+            Ty::Unknown
+        } else {
+            let t = self.infer_value(index);
+            if t == self.range_ty() {
                 return self.range_subscript(&obj_ty, obj, index);
             }
-            self.errors.truncate(probe);
-        }
+            t
+        };
         // Map keys are NOT int — infer the object first and check the index against the key type.
         match obj_ty {
             Ty::Map(k, v) => {
@@ -5240,29 +5242,28 @@ impl Checker {
                 *v
             }
             Ty::List(inner) => {
-                self.expect_int(index, "index");
+                self.expect_int_ty(index, &idx_ty, "index");
                 *inner
             }
             Ty::Str => {
-                self.expect_int(index, "index");
+                self.expect_int_ty(index, &idx_ty, "index");
                 Ty::Str
             }
             Ty::Unknown => {
-                self.expect_int(index, "index");
+                self.expect_int_ty(index, &idx_ty, "index");
                 Ty::Unknown
             }
             // A bounded `[C: Index[K, V]]` type parameter is indexable inside the generic body; its
             // value type is the bound's `V` arg (resolved with sibling params in scope).
             Ty::Param(name) => {
                 if let Some((k, v)) = self.param_index_kv(&name) {
-                    let idx_ty = self.infer_value(index);
                     if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
                         let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
                         self.error(index.span, format!("index must be {k_s}, found {idx_s}"));
                     }
                     return v;
                 }
-                self.expect_int(index, "index");
+                self.expect_int_ty(index, &idx_ty, "index");
                 self.error(obj.span, format!("cannot index into {name}"));
                 Ty::Unknown
             }
@@ -5297,14 +5298,13 @@ impl Checker {
             | other @ Ty::Var(_) => {
                 // A user struct satisfying `Index` (has `index(self, K) -> V`) is indexable by `K`.
                 if let Some((k, v)) = self.index_kv(&other) {
-                    let idx_ty = self.infer_value(index);
                     if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
                         let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
                         self.error(index.span, format!("index must be {k_s}, found {idx_s}"));
                     }
                     return v;
                 }
-                self.expect_int(index, "index");
+                self.expect_int_ty(index, &idx_ty, "index");
                 let note = self.hook_name_note(&other, "Index", "index");
                 self.error(obj.span, format!("cannot index into {other}{note}"));
                 Ty::Unknown

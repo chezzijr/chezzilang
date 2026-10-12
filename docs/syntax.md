@@ -4481,7 +4481,7 @@ type — a generic `fn show[T](v: T): "{v:.2f}"` instantiated with a `str`, an `
 protocol existential — where the mismatch is only knowable at run time. A program that passes
 `check` never faults with `format spec:` on a concrete-typed hole. The spec is parsed once,
 one module (`src/fmtspec.rs`), so its output is byte-identical across runs. The lexer decides where the spec starts (above) — a `:` inside an index, string key, or
-slice (`{m["a:b"]}`, `{xs[1:2]}`) is *not* the spec separator. **Ternaries and other keyword colons:**
+slice (`{m["a:b"]}`, `{xs[1..2]}`) is *not* the spec separator. **Ternaries and other keyword colons:**
 a ternary in a hole is **parenthesized**, with or without a spec — `{(if b: 1 else: 2)}`,
 `{(if b: 1 else: 2):>5}`; the bare `{if b: a else: b}` is an error that says so.
 
@@ -4509,7 +4509,7 @@ s.trim()         s.strip()        s.split(",")
 s.starts_with("ab")  s.ends_with("yz")  s.contains("b")
 ",".join(parts)  # join: separator.join(List[str])
 s.chars()        # → List[str] of 1-char strings; also `for c in s:` iterates them
-s.replace("a","b")  s.repeat(3)   s.reverse()      s.pad_left(4,"0")  s.pad_right(4," ")
+s.replace("a","b")  s.repeat(3)   s.reversed()     s.pad_left(4,"0")  s.pad_right(4," ")
 s.index_of("x")  s.count("x")     s.strip_prefix("p")  s.strip_suffix("s")
 s.split_lines()  # → List[str] split on a newline (LF, CRLF, or lone CR)
 s.to_int()       s.to_float()     # → int? / float? (a value / None — None on bad input)
@@ -4517,7 +4517,7 @@ s.parse_int()    s.parse_float()  # → int!str / float!str (the value / !msg on
 "a" + "b"        # concatenation
 ```
 
-The `ends_with`/`replace`/`repeat`/`reverse`/`pad_left`/`index_of`/`count`/`strip_prefix`/
+The `ends_with`/`replace`/`repeat`/`pad_left`/`index_of`/`count`/`strip_prefix`/
 `strip_suffix`/`split_lines` methods forward to the matching `std.string` free fns (no import needed).
 
 A character is just a 1-char `str` (Python-style — there is no `char` type): index with `s[i]`,
@@ -4737,7 +4737,7 @@ fn fetch_all(urls: List[str]):
   the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
   with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs and the
   built-in collections) and OPERATOR
-  BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[:]`→`Slice`) stay Rust-wired.
+  BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[a..b]`→`Slice`) stay Rust-wired.
   (All 21 are file-backed — the 20 above plus `Any` (the top type, reserved the same way): `Any` is
   `protocol Any:` + `pass` (empty), and
   `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves to the same `Iterator[T]` value type the
@@ -4757,7 +4757,7 @@ fn fetch_all(urls: List[str]):
   reachable from SYNTAX, so no import could ever be required for them: the operator protocols
   (`Eq`→`==`, `Comparable`→`<`, `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg`→the arithmetic operators,
   `Arithmetic` the bundle over four of them), indexing (`Index`→`xs[i]`, `IndexSet`→`xs[i] = v`,
-  `Slice`→`xs[a:b]`), iteration (`Iterator`/`Iterable`→`for`), membership (`Contains`→`in`),
+  `Slice`→`xs[a..b]`), iteration (`Iterator`/`Iterable`→`for`), membership (`Contains`→`in`),
   construction through a bound (`Convert`→`T.convert(...)`), rendering and keys (`Stringable`→
   interpolation, `Hashable`→a map key), errors (`Error`→`!` and `recover:`), and `Any` (the top type).
   A user cannot import their way to `==` or `in`, so each of those must resolve with no import in

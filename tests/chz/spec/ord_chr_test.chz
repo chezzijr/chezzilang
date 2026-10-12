@@ -30,7 +30,7 @@ test fn chr_round_trips_ord():
     assert chr(233) == "é"
     assert ord(chr(1114111)) == 1114111
 
-test fn chr_faults_outside_the_unicode_codepoint_range():
+test fn chr_faults_outside_the_unicode_codepoint_span():
     # CPython: ValueError: chr() arg not in the range 0..0x110000 for both.
     for bad in [-1, 1114112]:
         r := recover: chr(bad)

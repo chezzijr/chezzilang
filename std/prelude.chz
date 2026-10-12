@@ -473,13 +473,19 @@ struct Range:
             ?s:
                 if (up and item < s) or (not up and item > s):
                     return false
-                if self.step != 1 and self.step != -1 and (item - s) % self.step != 0:
+            None:
+                pass
+        # The end bound is tested before the step alignment, so `item - s` below only runs for an
+        # item between the bounds.
+        match self.end:
+            ?e:
+                if not self._in(item, e):
                     return false
             None:
                 pass
-        match self.end:
-            ?e:
-                return self._in(item, e)
+        match self.start:
+            ?s:
+                return self.step == 1 or self.step == -1 or (item - s) % self.step == 0
             None:
                 return true
 

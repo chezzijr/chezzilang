@@ -595,13 +595,13 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   rejected at the **runtime airlock**, not at construction. See [`docs/syntax.md`](syntax.md) "Return types".
   No `byte`/`u8` scalar (Python model — binary data is the immutable `bytes` *sequence* type, **shipped**, not a
   scalar) and no bignum (a non-goal). **`bytes`** is a heap byte sequence (`b"..."` literal with
-  `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[a:b:c]` -> `bytes` (Slice protocol, byte
+  `\xHH` escapes): `b[i]` -> `int` 0-255 (Index protocol), `b[r]` (`r` a `Range`) -> `bytes` (Slice protocol, byte
   offsets), `for x in b` yields `int`, `b.len()` is the byte count, `==`/`!=` are structural, and
   `bytes` is `Hashable` (valid map/set key). `str(b)` / `print(b)` / interpolation use the Python
   `b'...'` repr. Immutable (no `b[i] = x`). **`bytearray`** is the **mutable sibling** (Python
   `bytearray` model), **shipped**: constructor-only (`bytearray()` empty, `bytearray(N)` N zero bytes,
   `bytearray(b)`/`bytearray([ints])` from a bytes/List[int]) — no `ba"..."` literal. `ba[i]` -> `int`,
-  `ba[i] = x` mutates in place (`IndexSet`; value 0–255), `ba[a:b:c]` -> a new `bytearray`,
+  `ba[i] = x` mutates in place (`IndexSet`; value 0–255), `ba[r]` -> a new `bytearray`,
   `for x in ba` yields `int`, `len`, `.push(int)` / `.pop() -> int?` / `.extend(bytes|bytearray|
   List[int])`, `==` structural (incl. cross-type `bytes == bytearray` content-equal, Python parity).
   `bytearray` is **NOT** `Hashable` (mutable ⇒ not a map/set key, like `list`); its repr is
@@ -621,7 +621,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   (`{a, b, c}`), **`s.chars()`** + iterable strings (Python-style; no `char` type).
 - **Std modules — M9 (shipped):** `std.regex` (the `regex` crate; stateless `is_match`/`find`/
   `find_all`/`find_all_text`/`replace_all`/`split`, returning a `Match` struct `{text, start, end, groups}` — spans
-  are codepoint offsets, so `subject[m.start:m.end] == m.text`); `std.request` (blocking HTTP/HTTPS via `ureq`+rustls; `get(url)` /
+  are codepoint offsets, so `subject[m.start..m.end] == m.text`); `std.request` (blocking HTTP/HTTPS via `ureq`+rustls; `get(url)` /
   `post(url, body)` returning a `Response` struct `{status, body, headers: Map[str,str]}`, where a
   ≥400 status is a normal `Response`, not an `!e`). These are Chezzi's **first runtime
   dependencies**. Both are **synchronous/blocking** (the language is single-threaded — see below).
@@ -650,7 +650,7 @@ root marker (all fields default to unset, so `entrypoint` is required only for t
   `int`/`float`, `hash` on `int`/`str`/`bytes`/`bool`/a zero-field struct, and
   `index`/`set_index`/`slice` on `list`/`map`/`str`/`bytes`/`bytearray`. Each dispatches to the **same
   primitive its operator form uses**, so `a.add(b)` ≡ `a + b`, `c.index(k)` ≡ `c[k]`, `c.slice(…)` ≡
-  `c[a:b:c]` and `x.hash()` is exactly the hash `x` gets as a map/set key — same values, same faults.
+  `c[r]` and `x.hash()` is exactly the hash `x` gets as a map/set key — same values, same faults.
   The checker↔runtime pairing is machine-checked per **(protocol × receiver type)**
   (`checker::proto::INTRINSIC_PROTO_METHODS` + `vm::tests::intrinsic_grants_all_have_vm_arms`, which
   sweeps the whole cross product), and a bare `return ?(())` grant no longer compiles — so neither a
@@ -992,7 +992,7 @@ CONCRETE receiver: **through a protocol bound `a.eq(b)` is always the protocol's
 `≡ a == b` above holds unconditionally there**, matching how rustc resolves `a.eq(b)` under `T: Eq` to
 `<T as PartialEq>::eq` rather than to an inherent same-named method, `docs/gaps.md` **W7-53** I1′),
 `c.index(k)` ≡ `c[k]`, `c.set_index(k, v)` ≡ `c[k] = v` (returns
-`None`), `c.slice(s, e, st)` ≡ `c[s:e:st]` (its three components are `int?`, i.e. `int?`), and
+`None`), `c.slice(r)` ≡ `c[r]` (`r` is a `Range`), and
 `x.hash()` is exactly the hash `x` gets as a map/set key. `hash()`'s numeric value itself is
 **unspecified** (a build-dependent 64-bit hash, possibly negative) — only its consistency is
 guaranteed: equal values hash equally, and it agrees with container membership.

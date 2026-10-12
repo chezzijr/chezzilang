@@ -4063,7 +4063,11 @@ impl Checker {
                     // `range`, …) is silently SHADOWED: `infer_named_call` / the backends resolve the
                     // builtin arm before a plain named call, so the user fn is dead code. Reject the
                     // collision with a clear `reserved` error (mirrors the extern-name guard).
-                    if is_reserved_name(&decl.name) {
+                    // A reserved TYPE name (`Range`, which every module imports from the prelude) is
+                    // no function name either.
+                    if is_reserved_name(&decl.name)
+                        || (is_reserved_type(&decl.name) && !self.current_module_is_stdlib)
+                    {
                         self.error(
                             s.span,
                             format!("function name '{}' is reserved (builtin)", decl.name),

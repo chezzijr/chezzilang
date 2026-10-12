@@ -143,3 +143,13 @@ test fn match_patterns_take_half_open_and_inclusive_ranges():
     assert grade(60) == "B"
     assert grade(89) == "B"
     assert grade(90) == "A"
+
+test fn contains_tests_the_bounds_before_the_step_alignment():
+    # CPython: 9223372036854775807 in range(-1, 5, 2) is False (no overflow).
+    top := 9223372036854775807
+    bottom := -9223372036854775808
+    assert not (top in Range(-1, 5, 2))
+    assert not (bottom in Range(-1, 5, 2))
+    assert 3 in Range(-1, 5, 2)
+    assert not (4 in Range(-1, 5, 2))
+    assert not (top in Range(5, -1, -2))

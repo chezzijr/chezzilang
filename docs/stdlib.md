@@ -1120,7 +1120,7 @@ runs once seeded — draw in one task, or guard with a
 
 ### `std.regex`
 Returns use `struct Match { text: str, start: int, end: int, groups: List[str] }` (**codepoint**
-offsets, like Python's `re` — so `subject[m.start:m.end] == m.text` holds on non-ASCII input, Chezzi
+offsets, like Python's `re` — so `subject[m.start..m.end] == m.text` holds on non-ASCII input, Chezzi
 slicing being codepoint-indexed; `groups` are capture groups 1..n; a non-participating optional group
 is `""`).
 `is_match(pattern, subject) -> bool!` · `find(pattern, subject) -> Match?!` ·

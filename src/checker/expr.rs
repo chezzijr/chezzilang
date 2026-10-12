@@ -4905,7 +4905,12 @@ impl Checker {
 
     pub(super) fn expect_int(&mut self, e: &Expr, ctx: &str) {
         let t = self.infer_value(e);
-        if t != Ty::Int && !t.is_unknown() {
+        self.expect_int_ty(e, &t, ctx);
+    }
+
+    /// `expect_int` for an expression the caller already inferred to `t`.
+    pub(super) fn expect_int_ty(&mut self, e: &Expr, t: &Ty, ctx: &str) {
+        if *t != Ty::Int && !t.is_unknown() {
             self.error(e.span, format!("{ctx} must be int, found {t}"));
         }
     }

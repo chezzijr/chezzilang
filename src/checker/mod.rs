@@ -417,8 +417,13 @@ const RESERVED_CALLABLE: &[&str] = &[
     "Executor",
 ];
 
+/// A name that is no longer a builtin but stays reserved so `range(n)` reports its removal
+/// (TICKET-253, owner answer 7 (v)); a user `fn range` or `extern fn range` is rejected like any
+/// reserved name. It has no `builtin_sig`, so it is not in `RESERVED_CALLABLE`.
+const REMOVED_CALLABLE: &[&str] = &["range"];
+
 fn is_reserved_name(name: &str) -> bool {
-    RESERVED_CALLABLE.contains(&name)
+    RESERVED_CALLABLE.contains(&name) || REMOVED_CALLABLE.contains(&name)
 }
 
 /// True iff `name` may NOT be an import-alias TARGET — a reserved builtin, whether CALLABLE

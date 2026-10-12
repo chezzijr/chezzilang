@@ -39803,6 +39803,33 @@ fn a_user_struct_named_range_is_reserved() {
     rejects("struct Range:\n    a: int\n", "reserved");
 }
 
+/// A user `fn range` stays a reserved name (the name only carries the removal error).
+#[test]
+fn a_user_fn_named_range_is_reserved() {
+    rejects("fn range(n: int) -> int:\n    return n\n", "reserved");
+}
+
+/// A user `fn Range` is rejected where it is declared, not at a use of the injected import.
+#[test]
+fn a_user_fn_named_after_the_range_type_is_reserved() {
+    rejects("fn Range(a: int) -> int:\n    return a\n", "reserved");
+}
+
+/// Each index is typed once: `xs[xs[xs[..i..]]]` 24 levels deep is linear, not 2^24.
+#[test]
+fn nested_subscripts_type_each_index_once() {
+    let depth = 24;
+    let expr = format!("{}i{}", "xs[".repeat(depth), "]".repeat(depth));
+    let src = format!("xs := [0]\ni := 0\nprint({expr})\n");
+    let start = std::time::Instant::now();
+    ok(&src);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "checking {depth} nested subscripts took {:?}",
+        start.elapsed()
+    );
+}
+
 #[test]
 fn a_literal_range_with_no_start_cannot_be_iterated() {
     rejects(

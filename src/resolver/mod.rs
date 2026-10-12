@@ -696,7 +696,7 @@ impl Builder {
         // TICKET-253: `Range` is a struct of `std.prelude` that every module sees with no `import`
         // line. The one seam that makes it so: each module but the prelude itself resolves the import
         // `import Range from std.prelude`, so the checker, compiler and VM carry the type through the
-        // ordinary from-import path. `Span::RUNTIME` marks it as written by no one.
+        // ordinary from-import path. `NOWHERE` marks it as written by no one.
         if dotted != ["std".to_string(), "prelude".to_string()] {
             let prelude_path = vec!["std".to_string(), "prelude".to_string()];
             let file = module_file(&prelude_path, &self.project_root, &self.std_root);
