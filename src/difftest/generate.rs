@@ -317,7 +317,7 @@ impl Gen {
         let i = *self.rng.choice(&cands);
         let elems = match &self.scope[i].ty {
             Ty::Tuple(es) => es.clone(),
-            _ => unreachable!(),
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Float | Ty::List(_) | Ty::Map(..) => unreachable!(),
         };
         let bounds = self.scope[i].tuple_bounds.clone();
         let tname = self.scope[i].name.clone();
@@ -603,7 +603,9 @@ impl Gen {
                     let key = match **k {
                         Ty::Int => Expr::IntLit(i as i64),
                         Ty::Str => Expr::StrLit(format!("k{i}")),
-                        _ => Expr::IntLit(i as i64),
+                        Ty::Bool | Ty::Float | Ty::List(_) | Ty::Map(..) | Ty::Tuple(_) => {
+                            Expr::IntLit(i as i64)
+                        }
                     };
                     let (val, _) = self.gen_expr(v, MAX_EXPR_DEPTH);
                     keys.push(key.clone());
@@ -631,7 +633,7 @@ impl Gen {
                 }
                 (Expr::TupleLit(items), 0, None, Vec::new(), bounds)
             }
-            _ => {
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Float => {
                 let (e, b) = self.gen_expr(ty, 1);
                 (e, b, None, Vec::new(), Vec::new())
             }
@@ -793,7 +795,16 @@ impl Gen {
                     bound,
                 )
             }
-            _ => unreachable!(),
+            BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge
+            | BinOp::Eq
+            | BinOp::Ne
+            | BinOp::And
+            | BinOp::Or
+            | BinOp::Concat
+            | BinOp::In => unreachable!(),
         }
     }
 
@@ -1283,7 +1294,9 @@ impl Gen {
                 };
                 (self.leaf_str(), vec![arg])
             }
-            _ => unreachable!(),
+            Method::Split | Method::StartsWith | Method::EndsWith | Method::Contains => {
+                unreachable!()
+            }
         };
         Some(Expr::Method {
             recv: Box::new(recv),
@@ -1344,7 +1357,9 @@ impl Gen {
                 let i = *self.rng.choice(&list_cands);
                 let elem = match &self.scope[i].ty {
                     Ty::List(e) => (**e).clone(),
-                    _ => unreachable!(),
+                    Ty::Int | Ty::Bool | Ty::Str | Ty::Float | Ty::Map(..) | Ty::Tuple(_) => {
+                        unreachable!()
+                    }
                 };
                 let name = self.scope[i].name.clone();
                 let (lhs, _) = self.gen_expr(&elem, MAX_EXPR_DEPTH); // leaf elem value
@@ -1359,7 +1374,9 @@ impl Gen {
                 let i = *self.rng.choice(&map_cands);
                 let kty = match &self.scope[i].ty {
                     Ty::Map(k, _) => (**k).clone(),
-                    _ => unreachable!(),
+                    Ty::Int | Ty::Bool | Ty::Str | Ty::Float | Ty::List(_) | Ty::Tuple(_) => {
+                        unreachable!()
+                    }
                 };
                 let name = self.scope[i].name.clone();
                 let (lhs, _) = self.gen_expr(&kty, MAX_EXPR_DEPTH); // leaf key value
@@ -1405,7 +1422,7 @@ impl Gen {
                 .filter(|(_, e)| **e == Ty::Int)
                 .map(|(j, _)| j)
                 .collect(),
-            _ => unreachable!(),
+            Ty::Int | Ty::Bool | Ty::Str | Ty::Float | Ty::List(_) | Ty::Map(..) => unreachable!(),
         };
         let pos = *self.rng.choice(&int_positions);
         let bound = self.scope[i].tuple_bounds.get(pos).copied().unwrap_or(0);

@@ -53,7 +53,7 @@ pub fn describe(seed: u64, outcome: &Outcome, input: &[u8]) -> String {
             ));
         }
         Outcome::HarnessError(msg) => s.push_str(&format!("harness error: {msg}\n")),
-        _ => {}
+        Outcome::Clean { .. } | Outcome::Timeout => {}
     }
     s.push_str(&format!(
         "reproduce: panicfuzz --seed {seed}\n--- triggering input ({} bytes) ---\n{}\n",

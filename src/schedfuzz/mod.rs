@@ -318,7 +318,7 @@ pub fn measure_baseline(
         TargetKind::Program {
             expected: Some(exp),
         } => runs.iter().all(|c| c.stdout == *exp),
-        _ => false,
+        TargetKind::ChzTest | TargetKind::Program { .. } => false,
     };
     BaselineOutcome::Stable(Baseline {
         code: code0,
