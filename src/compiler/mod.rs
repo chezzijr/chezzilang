@@ -139,6 +139,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.field_ic_sites = c.field_ic_next;
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
+    c.program.range_key = c.type_key(0, "Range");
     c.program.rebuild_struct_names();
     c.build_hooks();
     c.build_provider_table()?;
@@ -150,6 +151,18 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
 pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileError> {
     // Mirror the file-backed path: normalize named/default call arguments before compiling.
     let mut module = module.clone();
+    // TICKET-253: every module sees the prelude's `Range` struct; a standalone module has no graph,
+    // so it carries the declaration itself (unless it declares one).
+    let is_range = |s: &Stmt| matches!(&s.kind, StmtKind::Struct { name, .. } if name == "Range");
+    if !module.stmts.iter().any(is_range)
+        && let Ok(src) = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()])
+        && let Ok(toks) = crate::lexer::tokenize(&src)
+        && let Ok(prelude) = crate::parser::parse(toks)
+    {
+        module
+            .stmts
+            .extend(prelude.stmts.into_iter().filter(is_range));
+    }
     crate::desugar::run_standalone(&mut module).map_err(|e| CompileError {
         message: e.message,
         span: e.span,
@@ -212,6 +225,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.program.field_ic_sites = c.field_ic_next;
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
+    c.program.range_key = c.type_key(0, "Range");
     c.program.rebuild_struct_names();
     c.build_provider_table()?;
     c.build_hooks();
@@ -500,6 +514,7 @@ impl Compiler {
         let mut program = Program {
             protos: Vec::new(),
             structs: HashMap::new(),
+            range_key: "Range".to_string(),
             enum_methods: HashMap::new(),
             enum_home: HashMap::new(),
             providers: Vec::new(),
@@ -3322,8 +3337,12 @@ impl Compiler {
                 fc.emit(Op::Eq, span);
                 fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
             }
-            Pattern::Range { start, end } => {
-                emit_range_test(fc, scrut, *start, *end, fails, span);
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                emit_range_test(fc, scrut, (*start, *end, *inclusive), fails, span);
             }
             Pattern::Tuple(subs) => {
                 for (i, sub) in subs.iter().enumerate() {
@@ -3457,10 +3476,14 @@ impl Compiler {
                     }
                     fc.end_scope();
                 }
-                Pattern::Range { start, end } => {
+                Pattern::Range {
+                    start,
+                    end,
+                    inclusive,
+                } => {
                     fc.begin_scope();
                     let mut fails = Vec::new();
-                    emit_range_test(fc, scrut, *start, *end, &mut fails, span);
+                    emit_range_test(fc, scrut, (*start, *end, *inclusive), &mut fails, span);
                     self.emit_guard(fc, arm.guard(), &mut fails)?;
                     run_body(self, fc, arm.body())?;
                     end_jumps.push(fc.emit_jump(Op::Jump(0), span));
@@ -3527,9 +3550,19 @@ impl Compiler {
                                     fc.patch_jump(miss);
                                 }
                             }
-                            Pattern::Range { start, end } => {
+                            Pattern::Range {
+                                start,
+                                end,
+                                inclusive,
+                            } => {
                                 let mut alt_fails = Vec::new();
-                                emit_range_test(fc, scrut, *start, *end, &mut alt_fails, span);
+                                emit_range_test(
+                                    fc,
+                                    scrut,
+                                    (*start, *end, *inclusive),
+                                    &mut alt_fails,
+                                    span,
+                                );
                                 if last {
                                     fails.extend(alt_fails);
                                 } else {
@@ -6139,8 +6172,7 @@ impl MatchArmLike for MatchExprArm {
 fn emit_range_test(
     fc: &mut FnComp,
     scrut: usize,
-    start: i64,
-    end: i64,
+    (start, end, inclusive): (i64, i64, bool),
     fails: &mut Vec<usize>,
     span: Span,
 ) {
@@ -6149,10 +6181,10 @@ fn emit_range_test(
     fc.emit(Op::ConstInt(start), span);
     fc.emit(Op::GtEq, span);
     fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
-    // scrut < end
+    // scrut < end (scrut <= end for `a..=b`)
     fc.emit_hidden_get(scrut, span);
     fc.emit(Op::ConstInt(end), span);
-    fc.emit(Op::Lt, span);
+    fc.emit(if inclusive { Op::LtEq } else { Op::Lt }, span);
     fails.push(fc.emit_jump(Op::JumpIfFalse(0), span));
 }
 

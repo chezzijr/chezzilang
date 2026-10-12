@@ -322,7 +322,7 @@ fn program(cell: &Cell, eight: bool) -> (String, String) {
         }
         (Write(op, observe, _, all), true) => {
             src.push_str(&format!(
-                "    parallel:\n        for i in range(0, 8):\n            spawn:\n                assert i >= 0\n                {op}\n    print({observe})\n"
+                "    parallel:\n        for i in 0..8:\n            spawn:\n                assert i >= 0\n                {op}\n    print({observe})\n"
             ));
             all.to_string()
         }

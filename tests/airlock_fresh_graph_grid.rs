@@ -72,7 +72,7 @@ impl Inner {
     fn expr(self) -> (&'static str, bool) {
         match self {
             Lit => ("[[[0]]]", false),
-            Comp => ("[[[0]] for _i in range(1)]", false),
+            Comp => ("[[[0]] for _i in 0..1]", false),
             Struct => ("N([[0]])", true),
             Named => ("named", false),
             Call => ("mk_l()", false),
@@ -477,7 +477,7 @@ fn program(w: Wrapper, cells: &[(Inner, usize)]) -> (String, String) {
     src += &post;
     src += "    ex.shutdown()\n    out: List[str] = []\n";
     src += &format!(
-        "    for _i in range({}):\n        out.push(r.recv())\n",
+        "    for _i in 0..{}:\n        out.push(r.recv())\n",
         cells.len()
     );
     src += "    out.sort()\n    for s in out:\n        print(s)\n    print(\"parent\", named, nn)\nmain()\n";

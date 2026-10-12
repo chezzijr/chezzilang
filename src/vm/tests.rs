@@ -1763,6 +1763,7 @@ pub(crate) fn empty_program() -> Program {
     Program {
         protos: vec![],
         structs: Default::default(),
+        range_key: "Range".to_string(),
         enum_methods: Default::default(),
         enum_home: Default::default(),
         providers: Default::default(),
@@ -11600,51 +11601,36 @@ fn bytes_len_method() {
 }
 
 #[test]
-fn builtin_range_and_cap() {
-    assert_eq!(run("print(range(3))"), "[0, 1, 2]\n");
-    assert_eq!(run("print(range(2, 5))"), "[2, 3, 4]\n");
-    assert!(run_err("print(range(20000000))").contains("exceeds the maximum"));
-}
-
-#[test]
-fn range_three_arg_up_vm() {
-    assert_eq!(run("print(range(0, 10, 2))"), "[0, 2, 4, 6, 8]\n");
-    assert_eq!(run("print(range(1, 7, 3))"), "[1, 4]\n");
-}
-
-#[test]
-fn range_three_arg_down_vm() {
+fn range_values_up_down_and_empty_vm() {
+    assert_eq!(run("print(List(0..3))"), "[0, 1, 2]\n");
+    assert_eq!(run("print(List(2..5))"), "[2, 3, 4]\n");
+    assert_eq!(run("print(List(Range(0, 10, 2)))"), "[0, 2, 4, 6, 8]\n");
+    assert_eq!(run("print(List(Range(1, 7, 3)))"), "[1, 4]\n");
     assert_eq!(
-        run("print(range(10, 0, -1))"),
+        run("print(List(Range(10, 0, -1)))"),
         "[10, 9, 8, 7, 6, 5, 4, 3, 2, 1]\n"
     );
-    assert_eq!(run("print(range(10, 2, -3))"), "[10, 7, 4]\n");
+    assert_eq!(run("print(List(Range(10, 2, -3)))"), "[10, 7, 4]\n");
+    assert_eq!(run("print(List(Range(5, 5, 1)))"), "[]\n");
+    assert_eq!(run("print(List(Range(5, 5, -1)))"), "[]\n");
+    assert_eq!(run("print(List(Range(0, 10, -1)))"), "[]\n");
+    assert_eq!(run("print(List(Range(10, 0, 1)))"), "[]\n");
 }
 
 #[test]
-fn range_step_zero_faults_vm() {
-    let msg = run_err("print(range(0, 5, 0))");
-    assert!(msg.contains("range"), "msg: {msg}");
-    assert!(msg.contains("step"), "msg: {msg}");
-    assert!(msg.contains("zero"), "msg: {msg}");
+fn range_step_zero_faults_at_construction_vm() {
+    let msg = run_err("print(Range(0, 5, 0))");
+    assert!(msg.contains("Range() step cannot be zero"), "msg: {msg}");
 }
 
 #[test]
-fn range_empty_cases_vm() {
-    assert_eq!(run("print(range(5, 5, 1))"), "[]\n");
-    assert_eq!(run("print(range(5, 5, -1))"), "[]\n");
-    assert_eq!(run("print(range(0, 10, -1))"), "[]\n");
-    assert_eq!(run("print(range(10, 0, 1))"), "[]\n");
-}
-
-#[test]
-fn range_slice_step_parity_vm() {
+fn range_slice_of_a_list_with_a_step_vm() {
     assert_eq!(
-        run("print((0..10)[Range(None, None, 2)])"),
+        run("print(List(0..10)[Range(None, None, 2)])"),
         "[0, 2, 4, 6, 8]\n"
     );
-    assert_eq!(run("print((0..10)[Range(1, 8, 3)])"), "[1, 4, 7]\n");
-    assert_eq!(run("print((0..5).reversed())"), "[4, 3, 2, 1, 0]\n");
+    assert_eq!(run("print(List(0..10)[Range(1, 8, 3)])"), "[1, 4, 7]\n");
+    assert_eq!(run("print(List(0..5).reversed())"), "[4, 3, 2, 1, 0]\n");
 }
 
 #[test]
@@ -19033,7 +19019,7 @@ struct N:
 fn mk() -> N:
     head := N(None)
     cur := head
-    for i in range(5000):
+    for i in 0..5000:
         n := N(None)
         cur.next = ?n
         cur = n
@@ -19115,7 +19101,7 @@ fn airlock_deep_module_global_of_nested_closures_is_not_quadratic() {
     let src = "\
 fn mk(k: int) -> fn() -> int:
     f := fn() -> int: 0
-    for i in range(k):
+    for i in 0..k:
         inner := f
         f = fn() -> int: inner() + 1
     return f
@@ -19185,7 +19171,7 @@ fn build() -> G:
     h := G(None, None)
     y := G(None, None)
     cur := y
-    for i in range(4950):
+    for i in 0..4950:
         n := G(None, None)
         cur.a = ?n
         cur = n
@@ -19197,7 +19183,7 @@ fn build() -> G:
     a1 := G(None, None)
     h.b = ?a1
     p := a1
-    for i in range(50):
+    for i in 0..50:
         q := G(None, None)
         p.a = ?q
         p = q
@@ -19279,7 +19265,7 @@ struct N:
 fn mk() -> N:
     head := N(None)
     cur := head
-    for i in range(4500):
+    for i in 0..4500:
         n := N(None)
         cur.next = ?n
         cur = n
@@ -21148,7 +21134,7 @@ fn snapshot_builds_for(src: &str) -> usize {
 /// * a global ASSIGNMENT between spawns → one build per assignment-then-spawn.
 #[test]
 fn snapshot_cache_short_circuits_per_epoch_not_per_spawn() {
-    let three_nurseries = "\nfor i in range(3):\n    parallel:\n        spawn: pass\n";
+    let three_nurseries = "\nfor i in 0..3:\n    parallel:\n        spawn: pass\n";
     assert_eq!(
         snapshot_builds_for(&format!("n: int = 1\ns := \"x\"{three_nurseries}")),
         1,

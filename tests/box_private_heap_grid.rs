@@ -328,7 +328,7 @@ fn a_hundred_thousand_dropped_boxes_do_not_grow_memory() {
     const SLACK_KB: i64 = 2 * 1024;
     let rss = |kind: &str| -> i64 {
         let src = format!(
-            "import std.concurrency\nfn churn():\n    for i in range(100000):\n        b := {kind}(i)\n        _ := b\nchurn()\nprint(\"done\")\n"
+            "import std.concurrency\nfn churn():\n    for i in 0..100000:\n        b := {kind}(i)\n        _ := b\nchurn()\nprint(\"done\")\n"
         );
         let path = write_program(&format!("rss-{kind}"), &src);
         (0..3)

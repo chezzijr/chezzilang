@@ -3367,10 +3367,16 @@ impl Parser {
         match self.peek() {
             Token::Int(_) | Token::Minus => {
                 let start = self.expect_pattern_int()?;
-                // `start..end` — a half-open integer range pattern (matches `start <= v < end`).
-                if self.eat(&Token::DotDot) {
+                // `start..end` — a half-open integer range pattern (matches `start <= v < end`);
+                // `start..=end` is the inclusive form.
+                let inclusive = self.check(&Token::DotDotEq);
+                if self.eat(&Token::DotDot) || self.eat(&Token::DotDotEq) {
                     let end = self.expect_pattern_int()?;
-                    return Ok(Pattern::Range { start, end });
+                    return Ok(Pattern::Range {
+                        start,
+                        end,
+                        inclusive,
+                    });
                 }
                 return Ok(Pattern::Literal(LitPattern::Int(start)));
             }
@@ -6737,7 +6743,7 @@ mod tests {
             ("method body", "struct H:\n    x: int\n    fn m(self):\n", 8),
             ("if", "fn f():\n    if true:\n", 8),
             ("while", "fn f():\n    while true:\n", 8),
-            ("for", "fn f():\n    for i in range(3):\n", 8),
+            ("for", "fn f():\n    for i in 0..3:\n", 8),
             ("match arm", "fn f():\n    match 1:\n        _:\n", 12),
             ("parallel", "fn f():\n    parallel:\n", 8),
             ("spawn", "fn f():\n    spawn:\n", 8),

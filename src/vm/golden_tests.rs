@@ -5788,7 +5788,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // builtins
     (
-        "print(range(4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint([1, 2, 3].len())\nprint(str(42))",
+        "print(List(0..4))\nprint(int(\"7\") + 1)\nprint(float(3))\nprint([1, 2, 3].len())\nprint(str(42))",
         Ok("[0, 1, 2, 3]\n8\n3.0\n3\n42\n"),
     ),
     // recursion
@@ -8412,17 +8412,8 @@ struct Buf:
         return self.xs[k]
     fn set_index(self, k: int, v: int):
         self.xs[k] = v
-    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
-        match (start, end, step):
-            (?s, ?e, ?c): return self.xs[Range(s, e, c)]
-            (?s, ?e, None): return self.xs[s..e]
-            (?s, None, ?c): return self.xs[Range(s, None, c)]
-            (?s, None, None): return self.xs[s..]
-            (None, ?e, ?c): return self.xs[Range(None, e, c)]
-            (None, ?e, None): return self.xs[..e]
-            (None, None, ?c): return self.xs[Range(None, None, c)]
-            (None, None, None): return self.xs[..]
-            _: return self.xs[..]
+    fn slice(self, r: Range) -> List[int]:
+        return self.xs[r]
 fn main():
     b := Buf([10, 20, 30])
     print(b[0])
@@ -8432,7 +8423,7 @@ fn main():
     print(b[0])
     print(b[0..2])
     print(b[..])
-    print(b.reversed())
+    print(b[Range(None, None, -1)])
 main()";
 
 #[test]
@@ -11308,13 +11299,11 @@ print(w[0])
     );
 }
 
-/// A range is not a value — but its three SANCTIONED lowerings (`for` iterable, comprehension
-/// clause, slice receiver) and the `match` range pattern must still RUN, byte-identically, on both
-/// engines. These helpers SKIP the checker, so this pins the COMPILER half of the invariant: the
-/// checker now rejects exactly what the compiler cannot lower, and everything below still lowers.
-/// Also pins the diagnostic's hint as TRUE: `range(a, b)` really does materialize a `List[int]`.
+/// A range is a value (TICKET-253): the `for` iterable, the comprehension clause, a list slice, the
+/// `match` range pattern and the `List`/`Set` constructors all RUN through the helpers that skip the
+/// checker's rejection.
 #[test]
-fn range_sanctioned_positions_run_on_both_engines() {
+fn range_positions_run() {
     let src = "
 fn main():
     total := 0
@@ -11323,9 +11312,9 @@ fn main():
     print(total)
     print([i for i in 0..3])
     print([i for i in 0..10 if i % 2 == 0])
-    print((0..10)[Range(None, None, 2)])
-    print((0..10)[Range(1, 8, 3)])
-    print((0..5).reversed())
+    print(List(0..10)[Range(None, None, 2)])
+    print(List(0..10)[Range(1, 8, 3)])
+    print(List(0..5).reversed())
     match 3:
         1..5: print(\"in\")
         _: print(\"out\")
@@ -11343,16 +11332,14 @@ main()
     );
 }
 
-/// The bug: `x := 0..3` used to type-check clean and then die in the COMPILER, so `print("before")`
-/// never ran (a compile error surfaced at run time, zero output, exit 1). The checker now rejects
-/// it, but the compiler keeps its rejection as a defensive backstop — unreachable from a
-/// check-clean program, yet still guarding these checker-SKIPPING helpers and synthesized ASTs.
+/// `x := 0..3` is a value of the prelude struct `Range`; it binds, prints and compares.
 #[test]
-fn bare_range_value_still_rejected_by_the_compiler_backstop() {
-    let err =
-        vm_outcome("fn main():\n    print(\"before\")\n    x := 0..3\n    print(x)\nmain()\n")
-            .expect_err("a bare range has no runtime value");
-    assert!(err.contains("range can only be used"), "got: {err}");
+fn a_range_bound_to_a_name_is_a_value() {
+    let out = vm_outcome(
+        "fn main():\n    print(\"before\")\n    x := 0..3\n    print(x)\n    print(x == Range(0, 3))\nmain()\n",
+    )
+    .expect("a range is a value");
+    assert_eq!(out, "before\n0..3\ntrue\n");
 }
 
 /// R1/B1 — BINARY sockets. `write_bytes` / `read_bytes` carry raw bytes over TCP byte-exactly (the
@@ -12801,8 +12788,8 @@ struct Cut:
     xs: List[int]
     fn index(self, k: int) -> int:
         return self.xs[k]
-    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> int:
-        match start:
+    fn slice(self, r: Range) -> int:
+        match r.start:
             ?s: return s
             None: return 0
 fn main():

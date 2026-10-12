@@ -2016,7 +2016,7 @@ mod tests {
     #[test]
     fn hover_builtin_callee_range() {
         // `range` is overload-collapsed to the canonical `range(end) -> List[int]` display.
-        let h = hov("range(10)\n", 0, 0).expect("hover on builtin range callee");
+        let h = hov("List(0..10)\n", 0, 0).expect("hover on builtin range callee");
         assert_eq!(h.display, "fn(int) -> List[int]");
         assert_eq!(h.kind, crate::checker::HoverKind::Func);
     }

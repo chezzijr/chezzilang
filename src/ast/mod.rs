@@ -683,9 +683,14 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
     /// An int/str/bool literal pattern. Float is intentionally excluded (float equality footgun).
     Literal(LitPattern),
-    /// A half-open integer range pattern `start..end` — matches an `int` value `v` when
-    /// `start <= v < end`. Int-only; refutable (never irrefutable / never makes a match exhaustive).
-    Range { start: i64, end: i64 },
+    /// An integer range pattern `start..end` (matches `start <= v < end`) or `start..=end`
+    /// (`inclusive`; matches `start <= v <= end`). Int-only; refutable (never irrefutable / never
+    /// makes a match exhaustive).
+    Range {
+        start: i64,
+        end: i64,
+        inclusive: bool,
+    },
     /// The `_` catch-all arm.
     Wildcard,
     /// An or-pattern `p1 | p2 | ...` — matches if ANY alternative matches (first match wins).

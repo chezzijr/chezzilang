@@ -1616,7 +1616,7 @@ fn a_fresh_binding_of_the_name_untaints_it() {
         "fn f():\n    n: int = 0\n    print(n)\n    parallel:\n        spawn:\n            n = 5\n";
     for tail in [
         // `for` loop variable — the reported repro
-        "    for n in range(2):\n        print(n)\n",
+        "    for n in 0..2:\n        print(n)\n",
         // `for` DESTRUCTURING target
         "    ps := [(1, 2)]\n    for n, m in ps:\n        print(n + m)\n",
         // block-local `:=` shadow
@@ -4009,7 +4009,7 @@ fn tuple_key_of_hashable_elements_checks_ok() {
     ok("m := {((1, 2), 3): \"a\"}\n");
     ok("s: Set[(int, str)] = Set()\n");
     ok("s := Set([(1, 2)])\n");
-    ok("m := {(i, i): i for i in range(3)}\n");
+    ok("m := {(i, i): i for i in 0..3}\n");
     ok("struct Z:\n    pass\nm := {(1, Z()): \"a\"}\n");
     ok("fn f[T: Hashable](x: T) -> int:\n    return x.hash()\nprint(f((1, 2)))\n");
 }
@@ -8142,9 +8142,9 @@ fn nested_fn_shadows_reserved_builtin_accepted() {
     entry_ok(
         "fn wrapper() -> int:\n    fn print(x: int) -> int:\n        return x + 1\n    return print(5)\nv := wrapper()\nprint(v)\n",
     );
-    // `fn range(...)` — same family, silent wrong value on base.
+    // `fn Set(...)` — same family, silent wrong value on base.
     entry_ok(
-        "fn wrapper() -> int:\n    fn range(x: int) -> int:\n        return x\n    return range(5)\nprint(wrapper())\n",
+        "fn wrapper() -> int:\n    fn Set(x: int) -> int:\n        return x\n    return Set(5)\nprint(wrapper())\n",
     );
 }
 
@@ -15251,7 +15251,7 @@ fn range_three_arg_typechecks() {
         "range",
     );
     rejects(
-        "fn main():\n    print(range(0, 10, \"x\"))\nmain()\n",
+        "fn main():\n    print(List(Range(0, 10, \"x\")))\nmain()\n",
         "int",
     );
 }
@@ -15583,21 +15583,28 @@ fn slice_of_str_types_as_str() {
 fn slice_bounds_must_be_int() {
     rejects(
         "xs := [1, 2, 3]\nys := xs[\"a\"..2]\n",
-        "slice bound must be int, found str",
+        "range bound must be int, found str",
     );
     rejects(
         "xs := [1, 2, 3]\nys := xs[0..\"b\"]\n",
-        "slice bound must be int, found str",
+        "range bound must be int, found str",
     );
+    // `Range(a, b, step)` takes ints and `None`: a str step is an argument type error.
     rejects(
         "xs := [1, 2, 3]\nys := xs[Range(None, None, \"c\")]\n",
-        "slice bound must be int, found str",
+        "Range",
     );
 }
 
 #[test]
 fn map_is_not_sliceable() {
-    rejects("m: Map[int, int] = {}\nx := m[0..2]\n", "cannot slice");
+    // A map subscript is a key lookup: a `Range` is not an `int` key.
+    rejects(
+        "m: Map[int, int] = {}\nx := m[0..2]\n",
+        "map key must be int, found Range",
+    );
+    // A map keyed by `Range` looks the key up.
+    ok("m: Map[Range, int] = {}\nx := m[0..2]\n");
 }
 
 const BUF: &str = "\
@@ -15607,7 +15614,7 @@ struct Buf:
         return self.xs[k]
     fn set_index(self, k: int, v: int):
         self.xs[k] = v
-    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> Buf:
+    fn slice(self, r: Range) -> Buf:
         return self
 ";
 
@@ -15628,10 +15635,14 @@ fn struct_index_assign_ok() {
 #[test]
 fn struct_slice_ok() {
     ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[0..2]\n"));
-    // Optional bounds / step all route through the same protocol method.
+    // Open bounds and a stepped range all route through the same protocol method.
     ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[..]\n"));
     ok(&format!(
-        "{BUF}b := Buf([1, 2, 3])\nc: Buf = b.reversed()\n"
+        "{BUF}b := Buf([1, 2, 3])\nc: Buf = b[Range(None, None, -1)]\n"
+    ));
+    // A range VALUE slices the same way, and so does the old three-parameter shape NOT.
+    ok(&format!(
+        "{BUF}b := Buf([1, 2, 3])\nr := 1..3\nc: Buf = b[r]\n"
     ));
 }
 
@@ -19685,7 +19696,7 @@ fn extern_named_after_builtin_rejected() {
     // so the extern is dead — and the compiler's eager `MakeCffi` dlsyms a symbol it can never call.
     // Reject the collision at hoist with a clear message.
     rejects(
-        "extern \"libc.so.6\":\n    fn range(x: int) -> int\n",
+        "extern \"libc.so.6\":\n    fn List(x: int) -> int\n",
         "builtin/reserved name",
     );
 }
@@ -23242,7 +23253,7 @@ fn index_and_slice_on_a_protocol_existential() {
         "struct S:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nfn read(o: Index[int, int]) -> int:\n    return o[0]\nfn main():\n    print(read(S([7])))\nmain()\n",
     );
     ok(
-        "struct S:\n    xs: List[int]\n    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:\n        return self.xs\nfn cut(o: Slice[List[int]]) -> List[int]:\n    return o[0..1]\nfn main():\n    print(cut(S([7])))\nmain()\n",
+        "struct S:\n    xs: List[int]\n    fn slice(self, r: Range) -> List[int]:\n        return self.xs\nfn cut(o: Slice[List[int]]) -> List[int]:\n    return o[0..1]\nfn main():\n    print(cut(S([7])))\nmain()\n",
     );
     // The key type still has to match.
     rejects(
@@ -33186,7 +33197,7 @@ fn blank_identifier_discards_in_every_position() {
 #[test]
 fn blank_identifier_is_not_readable() {
     rejects("_ := 5\nprint(_)\n", "cannot use '_' as a value");
-    ok("for _ in range(2):\n    print(_)\n");
+    ok("for _ in 0..2:\n    print(_)\n");
 }
 
 // TICKET-142 (W14-33): an all-constant int expression that overflows i64 is a compile error.
@@ -33646,7 +33657,7 @@ fn unused_local_accumulator_typo_warns_once_at_the_inner_binding() {
 #[test]
 fn unused_local_warn_table_fires() {
     warns(
-        "fn f():\n    for x in range(2):\n        pass\nf()\n",
+        "fn f():\n    for x in 0..2:\n        pass\nf()\n",
         "unused variable 'x'",
     );
     warns(
@@ -33662,7 +33673,7 @@ fn unused_local_warn_table_fires() {
         "unused variable 'z'",
     );
     warns("test fn t():\n    y := 3\n", "unused variable 'y'");
-    warns("for i in range(1):\n    pass\n", "unused variable 'i'");
+    warns("for i in 0..1:\n    pass\n", "unused variable 'i'");
     warns(
         "struct P:\n    a: int\n    fn m(self) -> int:\n        k := 1\n        return self.a\nprint(P(1).m())\n",
         "unused variable 'k'",
@@ -33678,7 +33689,7 @@ fn unused_local_warn_table_fires() {
 fn unused_local_warn_table_stays_silent() {
     no_warn("fn f():\n    _u := 42\n    _ := 1\nf()\n");
     no_warn("fn f(a: int):\n    pass\nf(1)\n");
-    no_warn("fn f():\n    for _ in range(2):\n        pass\nf()\n");
+    no_warn("fn f():\n    for _ in 0..2:\n        pass\nf()\n");
     no_warn("fn f():\n    x := 1\n    g := fn() -> int: x\n    print(g())\nf()\n");
     no_warn("fn f():\n    x := 1\n    defer:\n        print(x)\nf()\n");
     no_warn("fn f():\n    x := 1\n    parallel:\n        spawn:\n            print(x)\nf()\n");
@@ -34794,12 +34805,12 @@ fn ticket184_flow_grid() {
         ),
         (
             "E3",
-            "fn f():\n    for i in range(2):\n        r := recover:\n            parallel:\n                break\n        print(r)\nf()\n",
+            "fn f():\n    for i in 0..2:\n        r := recover:\n            parallel:\n                break\n        print(r)\nf()\n",
             "'break' is not allowed inside a recover block",
         ),
         (
             "E4",
-            "fn f():\n    r := recover:\n        for i in range(2):\n            break\n    print(r)\nf()\n",
+            "fn f():\n    r := recover:\n        for i in 0..2:\n            break\n    print(r)\nf()\n",
             "ok",
         ),
         (
@@ -34847,7 +34858,7 @@ fn ticket184_flow_grid() {
         // The recover escape check names the escape that comes first in source order.
         (
             "N3",
-            "fn f():\n    for i in range(2):\n        r := recover:\n            if i == 0:\n                continue\n            return\n        print(r)\nf()\n",
+            "fn f():\n    for i in 0..2:\n        r := recover:\n            if i == 0:\n                continue\n            return\n        print(r)\nf()\n",
             "'continue' is not allowed inside a recover block",
         ),
     ];
@@ -35446,10 +35457,10 @@ fn hook_param_name_grid() {
             bad.then_some("x"),
         ));
     }
-    for ((a, b, c), bad) in [(("a", "b", "c"), true), (("start", "end", "step"), false)] {
+    for (a, bad) in [("a", true), ("r", false)] {
         cells.push((
             "slice".to_string(),
-            format!("    fn slice(self, {a}: int?, {b}: int?, {c}: int?) -> int:\n        return self.n\n"),
+            format!("    fn slice(self, {a}: Range) -> int:\n        return self.n\n"),
             "print(V(1)[1..2])\n".to_string(),
             bad.then_some("a"),
         ));
@@ -35741,7 +35752,7 @@ fn fn_value_slot_grid() {
     cells.push((
         "ambiguous_alias_loop".to_string(),
         String::new(),
-        format!("fn outer():\n{VU}    for _i in range(2):\n        w := v\n        print(w(b=5, a=1))\n        v = u\nouter()\n"),
+        format!("fn outer():\n{VU}    for _i in 0..2:\n        w := v\n        print(w(b=5, a=1))\n        v = u\nouter()\n"),
         false,
     ));
     cells.push((
@@ -38804,19 +38815,19 @@ fn fresh_shape_grid() {
             "[Node(Marked)]",
         ),
         // Comprehensions.
-        ("x: List[List[int]]", "[[0] for _i in range(1)]", "[All]"),
+        ("x: List[List[int]]", "[[0] for _i in 0..1]", "[All]"),
         (
             "x: List[List[int]]",
-            "[[i] for i in range(1)]",
+            "[[i] for i in 0..1]",
             "[Node(Each(Node(At([Marked]))))]",
         ),
         (
             "x: List[List[int]]",
-            "[xs for _i in range(1)]",
+            "[xs for _i in 0..1]",
             "[Node(Marked)]",
         ),
-        ("x: Set[int]", "{1 for _i in range(1)}", "[All]"),
-        ("x: Set[int]", "{i for i in range(1)}", "[Node(Marked)]"),
+        ("x: Set[int]", "{1 for _i in 0..1}", "[All]"),
+        ("x: Set[int]", "{i for i in 0..1}", "[Node(Marked)]"),
         // Carriers: explicit, error value, implicit.
         ("x: List[int]?", "?[]", "[All]"),
         ("x: List[int]?", "?xs", "[Node(At([Marked]))]"),

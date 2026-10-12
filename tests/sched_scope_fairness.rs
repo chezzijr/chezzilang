@@ -179,7 +179,7 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
         _ => unreachable!(),
     };
     let recv = if cancel == "sibling" {
-        "for _i in range(0, 20):\n    _v := c.recv()\npanic(\"boom\")"
+        "for _i in 0..20:\n    _v := c.recv()\npanic(\"boom\")"
     } else {
         "for _v in c:\n    pass"
     };
@@ -210,7 +210,7 @@ fn h1_program(nest: &str, cancel: &str) -> (String, &'static str) {
     src += "fn guarded(c: Channel[int], started: Channel[int]):\n    _r := recover: outer(c, started)\n";
     src += "fn run():\n";
     src += &indent(&run_body, 4);
-    src += &format!("fn main():\n    for _k in range(0, {rounds}):\n        run()\n");
+    src += &format!("fn main():\n    for _k in 0..{rounds}:\n        run()\n");
     src += "    print(\"done\")\nmain()\n";
     let expected = if cancel == "exit" { "" } else { "done\n" };
     (src, expected)

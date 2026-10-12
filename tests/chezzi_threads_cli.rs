@@ -493,7 +493,7 @@ fn main():
         spawn:
             burn(200000)
             flag.store(1)
-        _xs := range(0, 2000000).map(fn(i: int) -> int: flag.load()).filter(fn(v: int) -> bool: v == 1)
+        _xs := List(0..2000000).map(fn(i: int) -> int: flag.load()).filter(fn(v: int) -> bool: v == 1)
         print(\"hof done\")
 main()
 ";
@@ -831,7 +831,7 @@ fn threads_one_serializes_a_cpu_bound_nursery_inside_an_executor_job() {
     let program = "import std.concurrency\n\
         fn burn(n: int) -> int:\n    \
             x := 0\n    \
-            for i in range(n):\n        \
+            for i in 0..n:\n        \
                 x = (x + i * 7) % 1000003\n    \
             return x\n\
         fn job():\n    \
@@ -2105,7 +2105,7 @@ const ESC_BRK: &str = "fn burn(n: int) -> int:
     return x
 
 fn inner() -> int:
-    for k in range(1):
+    for k in 0..1:
         parallel:
             spawn: burn(2000000)
             break

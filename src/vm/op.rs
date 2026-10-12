@@ -719,6 +719,9 @@ pub struct ModuleProto {
 pub struct Program {
     pub protos: Vec<Proto>,
     pub structs: HashMap<String, StructDef>,
+    /// The runtime key of the prelude's `Range` struct (TICKET-253): what a slice site reads a
+    /// `Range` value by. Module 0 of a graph is the prelude.
+    pub range_key: String,
     /// Enum methods, keyed by the enum's module-scoped runtime key → (method name → its proto). The
     /// enum analogue of `StructDef::methods` (enums are type-erased — no `StructDef`/`tid`). Looked up
     /// by `do_method_call` (via `variants_by_id[id].enum_name`) and the arith/compare overload paths.

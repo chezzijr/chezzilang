@@ -908,7 +908,7 @@ ex.submit(bad)
         ("loop", "n := 0\nwhile true:\n    n += 1\n"),
         (
             "native-hof",
-            "n := range(0, 10000000).map(double).fold(0, keep)\n",
+            "n := List(0..10000000).map(double).fold(0, keep)\n",
         ),
         ("sleep", "time.sleep_ms(6000)\n"),
         (

@@ -81,7 +81,7 @@ fn for_over_channel_in_generator_driven_from_a_task_prints_the_value() {
             "        yield v",
             "fn burn(n: int) -> int:",
             "    s := 0",
-            "    for i in range(n):",
+            "    for i in 0..n:",
             "        s += i % 7",
             "    return s",
             "fn main():",

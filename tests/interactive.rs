@@ -172,7 +172,7 @@ fn task(i: int):
     print(\"t{i}\")
 
 parallel:
-    for i in range(8):
+    for i in 0..8:
         spawn: task(i)
 ";
 
@@ -663,7 +663,7 @@ fn write_error_is_reported() {
         return; // not Linux — nothing to assert against
     }
     let t = TmpDir::new();
-    let entry = t.write("main.chz", "for i in range(100):\n    print(\"line\", i)\n");
+    let entry = t.write("main.chz", "for i in 0..100:\n    print(\"line\", i)\n");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
     let out = cmd
@@ -701,9 +701,9 @@ fn stalled_reader_does_not_starve_other_tasks() {
     let witness = t.0.join("witness.txt");
     let src = format!(
         "import std.io\nimport std.time\n\n\
-         fn spam():\n    for i in range(20000):\n        io.print(\"{pad}\")\n\n\
+         fn spam():\n    for i in 0..20000:\n        io.print(\"{pad}\")\n\n\
          fn witness():\n    time.sleep_ms(300)\n    io.write_file(\"{w}\", \"done\")\n\n\
-         parallel:\n    for i in range(8):\n        spawn: spam()\n    spawn: witness()\n",
+         parallel:\n    for i in 0..8:\n        spawn: spam()\n    spawn: witness()\n",
         pad = "x".repeat(64),
         w = witness.display()
     );
@@ -758,7 +758,7 @@ fn stderr_failure_does_not_kill_the_run() {
     let entry = t.write(
         "main.chz",
         "import std.io\nimport std.time\nio.eprint(\"warn one\")\nio.eprint(\"warn two\")\n\
-         time.sleep_ms(200)\nfor i in range(50):\n    print(\"line {i}\")\n",
+         time.sleep_ms(200)\nfor i in 0..50:\n    print(\"line {i}\")\n",
     );
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_chezzi"));
     cmd.arg("run");
@@ -874,9 +874,9 @@ fn stalled_reader_flush_does_not_starve_other_tasks() {
     let witness = t.0.join("witness_flush.txt");
     let src = format!(
         "import std.io\nimport std.time\n\n\
-         fn spam():\n    for i in range(20000):\n        io.print(\"{pad}\")\n        io.flush()\n\n\
+         fn spam():\n    for i in 0..20000:\n        io.print(\"{pad}\")\n        io.flush()\n\n\
          fn witness():\n    time.sleep_ms(300)\n    io.write_file(\"{w}\", \"done\")\n\n\
-         parallel:\n    for i in range(8):\n        spawn: spam()\n    spawn: witness()\n",
+         parallel:\n    for i in 0..8:\n        spawn: spam()\n    spawn: witness()\n",
         pad = "x".repeat(64),
         w = witness.display()
     );
@@ -954,7 +954,7 @@ fn last_print_into_closed_pipe_is_deterministically_nonzero_mn() {
 /// still exit 0. Proves the N1 fix does not over-fire on a clean finite run.
 fn fully_drained_output_stays_success() {
     let t = TmpDir::new();
-    let entry = t.write("main.chz", "for i in range(5):\n    print(i)\n");
+    let entry = t.write("main.chz", "for i in 0..5:\n    print(i)\n");
     for _ in 0..30 {
         let mut child = spawn(&entry);
         // Drain stdout fully to EOF on a helper thread — the reader reads EVERYTHING, so no write

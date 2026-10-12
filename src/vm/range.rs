@@ -14,7 +14,7 @@ impl Vm {
         let Obj::Struct { tid, fields } = self.heap.get(h) else {
             return None;
         };
-        if *tid != self.struct_tid("Range") {
+        if *tid != self.struct_tid(&self.program.range_key) {
             return None;
         }
         let [start, end, step, inclusive] = fields.as_slice() else {

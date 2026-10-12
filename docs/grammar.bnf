@@ -445,7 +445,8 @@
 # must bind the same variables (checker-enforced). A primary: a bare "IDENT" is a BINDING (or, for the
 # carrier pattern head, a variant); a QUALIFIED "IDENT" "DOT" "IDENT" names a user variant
 # (nullary, or with "LPAREN" a payload-carrying one); "(" … ")" a tuple pattern; an int/str/bool
-# literal; or a half-open integer range "INT" ".." "INT" (matches `start <= v < end`). Sub-patterns
+# literal; or a half-open integer range "INT" ".." "INT" (matches `start <= v < end`) or an inclusive
+# one "INT" "..=" "INT" (matches `start <= v <= end`). Sub-patterns
 # nest (gap #15): a variant payload slot or tuple element is itself a <subpattern>. The SAME
 # `"IDENT" "LPAREN" <subpatterns> "RPAREN"` primary ALSO destructures a USER STRUCT positionally when
 # the scrutinee is that struct type (L2 — `Point(x, y)` binds the fields in declaration order). A
@@ -477,6 +478,7 @@
                 | <carrierPattern>
                 | "INT" | "STR" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW"
                 | "INT" "DOTDOT" "INT"
+                | "INT" "DOTDOTEQ" "INT"
 # A leading "MINUS" makes the int literal / range bound negative (int-only — there is no float
 # pattern, so a "MINUS" before a float is a parse error, exactly like a bare float). Either range
 # bound may independently be negative (`-10..-5`, `-10..5`); the grammar also accepts an empty
@@ -485,6 +487,9 @@
                 | "MINUS" "INT" "DOTDOT" "MINUS" "INT"
                 | "MINUS" "INT" "DOTDOT" "INT"
                 | "INT" "DOTDOT" "MINUS" "INT"
+                | "MINUS" "INT" "DOTDOTEQ" "MINUS" "INT"
+                | "MINUS" "INT" "DOTDOTEQ" "INT"
+                | "INT" "DOTDOTEQ" "MINUS" "INT"
 # A sub-pattern (nested position) is itself an or-alternation of primaries. A bare "IDENT" here is a
 # binding name OR — when it names a nullary variant of the matched type — a refutable variant match
 # (checker-promoted; e.g. the `Red` in `?Red`). Same surface grammar either way. The `None` in
@@ -576,17 +581,28 @@
 # express: they CHAIN, Python-style. `a < b == c` means `a < b and b == c`, with `b` evaluated
 # exactly once and the chain short-circuiting at the first false link; `(a < b) == c` (parenthesized)
 # stays two ordinary comparisons instead. See `docs/syntax.md` §4 for the semantic rule.
-<cmpExpr>  ::= <bitOrExpr> | <cmpExpr> <cmpOp> <bitOrExpr>
+<cmpExpr>  ::= <rangeExpr> | <cmpExpr> <cmpOp> <rangeExpr>
 <cmpOp>    ::= "EQEQ" | "NOTEQ" | "IN" | "LT" | "LTEQ" | "GT" | "GTEQ"
 # Bitwise / shift cascade (gap #13), Python's relative order: `|` looser than `^` looser than `&`
-# looser than the shifts, which sit just above range. Int-only on int operands; `| & ^` ALSO do set
+# looser than the shifts, which sit just above addition. Int-only on int operands; `| & ^` ALSO do set
 # algebra (union/intersection/symmetric-difference) on two `Set[T]` (gap #3). `<< >>` stay int-only.
 # (Type-directed by the checker; same tokens, no grammar change.)
 <bitOrExpr> ::= <bitXorExpr> | <bitOrExpr> "BITOR" <bitXorExpr>
 <bitXorExpr>::= <bitAndExpr> | <bitXorExpr> "CARET" <bitAndExpr>
 <bitAndExpr>::= <shiftExpr>  | <bitAndExpr> "AMP" <shiftExpr>
-<shiftExpr> ::= <rangeExpr>  | <shiftExpr> "SHL" <rangeExpr> | <shiftExpr> "SHR" <rangeExpr>
-<rangeExpr>::= <addExpr> | <rangeExpr> "DOTDOT" <addExpr>
+<shiftExpr> ::= <addExpr>  | <shiftExpr> "SHL" <addExpr> | <shiftExpr> "SHR" <addExpr>
+# TICKET-253: a range is a VALUE of the prelude struct `Range`. `..` and `..=` bind below `|` and
+# above the comparisons and `in` (`x in 0..3`, `0..3 == 0..3`, `0..1 << 2` is `0..(1 << 2)`), and do
+# not chain. Either bound may be omitted (`..b`, `a..`, `..`); `..=` needs an end. A bound is ended by
+# a token that cannot start an expression (the parser's `token_ends_range`); the BNF recognizes the
+# open forms without that lookahead. The literal has no step: `Range(a, b, step)` builds one.
+<rangeExpr>::= <bitOrExpr>
+             | <bitOrExpr> "DOTDOT" <bitOrExpr>
+             | <bitOrExpr> "DOTDOTEQ" <bitOrExpr>
+             | <bitOrExpr> "DOTDOT"
+             | "DOTDOT" <bitOrExpr>
+             | "DOTDOTEQ" <bitOrExpr>
+             | "DOTDOT"
 <addExpr>  ::= <mulExpr> | <addExpr> "PLUS" <mulExpr> | <addExpr> "MINUS" <mulExpr>
 <mulExpr>  ::= <coalesceExpr>
              | <mulExpr> "STAR" <coalesceExpr> | <mulExpr> "SLASH" <coalesceExpr> | <mulExpr> "PERCENT" <coalesceExpr>
@@ -647,7 +663,8 @@
             | <postfix> "DOT" "INT"                         # tuple element: `t.0` (literal index, read-only —
                                                             # NOT in <lvalue>, and `t[0]` is a type error)
             # one bracket: a type application (`pair[str, int]`, `idt[fn(int) -> int]`, a type-level
-            # head), a plain index, or a Python slice; its `.member` and `(args)` attach above.
+            # head) or a subscript (an index, or a slice by a `Range` value); its `.member` and
+            # `(args)` attach above.
             | <postfix> "LBRACKET" <subscript> "RBRACKET"
             | <typeHead> "LBRACKET" <bracket> "RBRACKET"
             | <typeHead> "LBRACKET" <typeList> "RBRACKET" "LPAREN" "RPAREN"
@@ -676,25 +693,11 @@
             | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" "RPAREN"
             | <postfix> "QUESTIONDOT" "IDENT" "LPAREN" <argList> "RPAREN"
 
-# The inside of a subscript `[ … ]`. With no colon it is a plain index expression; one or two colons
-# make it a Python slice `start:end:step`, each component optional (`xs[:]`, `xs[1:]`, `xs[::-1]`,
-# `xs[a:b:c]`). The colon is unambiguous here — map-literal / type-annotation / match-arm colons never
-# occur inside a subscript bracket — so the parser owns it directly (see parser::parse_subscript),
-# replacing the old "parse one expr then check if it's a `..` range" rewrite. The Range operator `..`
-# is untouched: it stays the for-loop / match-pattern range (see <rangeExpr>, <patternPrimary>).
+# The inside of a subscript `[ … ]`: one expression. A `Range` value in it (`xs[a..b]`, `xs[2..]`,
+# `xs[..]`, `xs[Range(0, 10, 2)]`) is a slice; any other value is an index or a map key. The colon
+# slice `xs[a:b]`, `xs[a:b:c]` and `xs[::-1]` is removed: the parser reports it as an error that
+# names the replacement (see parser::parse_subscript).
 <subscript> ::= <expr>
-              | "COLON"
-              | "COLON" <expr>
-              | <expr> "COLON"
-              | <expr> "COLON" <expr>
-              | "COLON" "COLON"
-              | "COLON" "COLON" <expr>
-              | "COLON" <expr> "COLON"
-              | "COLON" <expr> "COLON" <expr>
-              | <expr> "COLON" "COLON"
-              | <expr> "COLON" "COLON" <expr>
-              | <expr> "COLON" <expr> "COLON"
-              | <expr> "COLON" <expr> "COLON" <expr>
 
 # A parenthesized expression is grouping when it holds one expr (`(e)`); a comma makes it a tuple
 # — `(e,)` is a 1-element tuple and `(e1, e2, …)` an N-tuple. The empty `()` is not valid.

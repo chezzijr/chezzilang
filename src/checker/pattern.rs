@@ -625,17 +625,30 @@ impl Checker {
     }
 
     /// Reject an empty range pattern. `start..end` is half-open (`start <= v < end`), so
-    /// `start >= end` matches nothing on any run; rustc rejects the same shapes (E0579).
+    /// `start >= end` matches nothing on any run; `start..=end` (`start <= v <= end`) is empty when
+    /// `start > end`. rustc rejects the same shapes (E0579, E0030).
     fn reject_empty_range(&mut self, pattern: &Pattern, span: Span) {
-        if let Pattern::Range { start, end } = pattern
-            && start >= end
+        if let Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } = pattern
         {
-            self.error(
-                span,
-                format!(
-                    "empty range pattern '{start}..{end}': the lower bound must be less than the upper bound (a range pattern matches start <= v < end)"
-                ),
-            );
+            if *inclusive && start > end {
+                self.error(
+                    span,
+                    format!(
+                        "empty range pattern '{start}..={end}': the lower bound must not exceed the upper bound (a range pattern matches start <= v <= end)"
+                    ),
+                );
+            } else if !*inclusive && start >= end {
+                self.error(
+                    span,
+                    format!(
+                        "empty range pattern '{start}..{end}': the lower bound must be less than the upper bound (a range pattern matches start <= v < end)"
+                    ),
+                );
+            }
         }
     }
 

@@ -1800,14 +1800,14 @@ struct Suite:
             "join_test.chz",
             &format!(
                 "import std.concurrency\n\n{noisy}test fn exjoin():\n    ex := Executor()\n    \
-                 for i in range(300):\n        ex.submit(noisy)\n    ex.shutdown()\n    assert true\n"
+                 for i in 0..300:\n        ex.submit(noisy)\n    ex.shutdown()\n    assert true\n"
             ),
         );
         let d2 = TmpDir::new();
         let nursery = d2.write(
             "nurs_test.chz",
             &format!(
-                "{noisy}test fn nursjoin():\n    parallel:\n        for i in range(300):\n            \
+                "{noisy}test fn nursjoin():\n    parallel:\n        for i in 0..300:\n            \
                  spawn noisy()\n    assert true\n"
             ),
         );
