@@ -219,7 +219,7 @@ struct Counter[T: Hashable + Eq]:
             kk = 0
         if kk > pairs.len():
             kk = pairs.len()
-        return pairs[0:kk]
+        return pairs[0..kk]
 
 # NOTE: there is no `counter()` factory — same reason as Deque: a no-argument generic factory cannot
 # bind T. Construct directly: `c: Counter[str] = Counter({})` or `Counter[str]({})`; that statement gives T.

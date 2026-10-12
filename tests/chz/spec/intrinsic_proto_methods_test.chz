@@ -226,21 +226,21 @@ fn si_li[T: IndexSet[int, int]](c: T, k: int, v: int):
 fn si_map[T: IndexSet[str, int]](c: T, k: str, v: int):
     c.set_index(k, v)
 
-fn sl_li[T: Slice[List[int]]](c: T, a: int?, b: int?, st: int?) -> List[int]:
-    return c.slice(a, b, st)
+fn sl_li[T: Slice[List[int]]](c: T, r: Range) -> List[int]:
+    return c.slice(r)
 
-fn sl_str[T: Slice[str]](c: T, a: int?, b: int?, st: int?) -> str:
-    return c.slice(a, b, st)
+fn sl_str[T: Slice[str]](c: T, r: Range) -> str:
+    return c.slice(r)
 
 test fn list_index_and_slice_methods_match_operators():
     xs := [7, 8, 9]
     assert ix_li(xs, 0) == xs[0]
     assert ix_li(xs, 2) == xs[2]
     assert ix_li(xs, -1) == xs[-1], "negative indexing identical to the operator"
-    assert sl_li(xs, ?0, ?2, None) == xs[0:2]
-    assert sl_li(xs, None, None, None) == xs[:]
-    assert sl_li(xs, None, None, ?(-1)) == xs[::-1], "reversed slice"
-    assert sl_li(xs, ?(-2), None, None) == xs[-2:]
+    assert sl_li(xs, 0..2) == xs[0..2]
+    assert sl_li(xs, ..) == xs[..]
+    assert sl_li(xs, Range(None, None, -1)) == xs.reversed(), "reversed slice"
+    assert sl_li(xs, -2..) == xs[-2..]
     # fault messages identical to the operator form
     rm := recover: ix_li(xs, 9)
     ro := recover: xs[9]
@@ -277,8 +277,8 @@ test fn str_index_and_slice_methods_match_operators():
     s := "hello"
     assert ix_str(s, 0) == s[0]
     assert ix_str(s, -1) == s[-1]
-    assert sl_str(s, ?1, ?3, None) == s[1:3]
-    assert sl_str(s, None, None, ?(-1)) == s[::-1]
+    assert sl_str(s, 1..3) == s[1..3]
+    assert sl_str(s, Range(None, None, -1)) == s.reversed()
     rm := recover: ix_str(s, 9)
     ro := recover: s[9]
     assert msg_of(rm, "str.index") == msg_of(ro, "s[9]")

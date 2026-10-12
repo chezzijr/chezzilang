@@ -291,7 +291,7 @@ test fn rwshared_views_over_sibling_closures():
     match s.at(1):
         ?f: assert f() == 0
         None: assert false, "at(1) on a 2-element list must be Some"
-    sl := s.slice(0, 2)      # one call, one container → shared within the slice
+    sl := s[0..2]      # one call, one container → shared within the slice
     sl[0]()
     assert sl[1]() == 1
     calls := 0

@@ -1093,7 +1093,7 @@ fn main():
     print(m._get_key(K(\"k2\")), m._has(K(\"k9\")), m._len())
     print(m._get_or_insert(K(\"k1\"), [str(0)]), m._get_or_insert(K(\"k7\"), [str(7)]))
     _ := m._remove_key(K(\"k0\"))
-    print(xs._at(1), xs._slice(1, 3), xs._len())
+    print(xs._at(1), xs._slice(1..3), xs._len())
     print(st._contains(K(\"k1\")), st._len(), m._len())
     st._remove(K(\"k1\"))
     print(st.get().len())

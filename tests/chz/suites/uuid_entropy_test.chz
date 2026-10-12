@@ -20,12 +20,12 @@ test fn t_v4_draws_differ():
 test fn t_v4_shape():
     u := uuid.v4()
     assert u.len() == 36
-    assert u[8:9] == "-"
-    assert u[13:14] == "-"
-    assert u[18:19] == "-"
-    assert u[23:24] == "-"
-    assert u[14:15] == "4", "version nibble not 4: {u}"
-    assert u[19:20] in "89ab", "variant char not in 8/9/a/b: {u}"
+    assert u[8..9] == "-"
+    assert u[13..14] == "-"
+    assert u[18..19] == "-"
+    assert u[23..24] == "-"
+    assert u[14..15] == "4", "version nibble not 4: {u}"
+    assert u[19..20] in "89ab", "variant char not in 8/9/a/b: {u}"
 
 test fn t_v4_lowercase_hex():
     u := uuid.v4()

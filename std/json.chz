@@ -134,12 +134,12 @@ struct Parser:
             c := self.src[self.pos]
             if c == "\"":
                 if run < self.pos:
-                    parts.push("".join(self.src[run : self.pos]))
+                    parts.push("".join(self.src[run..self.pos]))
                 self.pos += 1
                 return ?"".join(parts)
             if c == "\\":
                 if run < self.pos:
-                    parts.push("".join(self.src[run : self.pos]))
+                    parts.push("".join(self.src[run..self.pos]))
                 self.pos += 1
                 e := self.bump()
                 match e:
@@ -227,7 +227,7 @@ struct Parser:
                 exp += 1
             if exp == 0:
                 return !self.at_pos("invalid number: digits required in exponent", exp_at)
-        raw := "".join(self.src[start : self.pos])
+        raw := "".join(self.src[start..self.pos])
         if is_int:
             match raw.to_int():
                 ?i: return ?Json.Int(i)
@@ -340,7 +340,7 @@ fn escape(s: str) -> str:
             i += 1
         else:
             if run < i:
-                parts.push("".join(cs[run : i]))
+                parts.push("".join(cs[run..i]))
             if c == "\"":
                 parts.push("\\\"")
             elif c == "\\":
@@ -360,7 +360,7 @@ fn escape(s: str) -> str:
             i += 1
             run = i
     if run < end:
-        parts.push("".join(cs[run : end]))
+        parts.push("".join(cs[run..end]))
     parts.push("\"")
     return "".join(parts)
 

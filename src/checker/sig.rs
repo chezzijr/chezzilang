@@ -4435,17 +4435,17 @@ impl Checker {
                         self.check_assign_value(&v, op, &val_ty, value, target.span);
                     }
                     Ty::List(elem) => {
-                        self.expect_int(index, "index");
+                        self.expect_assign_index(index);
                         self.check_assign_value(&elem, op, &val_ty, value, target.span);
                     }
                     // `ba[i] = x` — the MUTABLE sibling of bytes. Int index, int value (0–255
                     // validated at runtime). Bytes has NO arm here (immutable); bytearray adds one.
                     Ty::ByteArray => {
-                        self.expect_int(index, "index");
+                        self.expect_assign_index(index);
                         self.check_assign_value(&Ty::Int, op, &val_ty, value, target.span);
                     }
                     Ty::Str => {
-                        self.expect_int(index, "index");
+                        self.expect_assign_index(index);
                         self.error(
                             target.span,
                             "cannot assign to an index of str (strings are immutable)",

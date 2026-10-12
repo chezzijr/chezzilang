@@ -145,7 +145,7 @@ test fn list_push_after_a_whole_store():
     c.push([9])
     c.push([10])
     assert c.snapshot() == [[7], [8], [9], [10]]
-    c.inner.write(fn(xs): xs[0:1])
+    c.inner.write(fn(xs): xs[0..1])
     c.push([11])
     c.push([12])
     snap := c.snapshot()
@@ -170,7 +170,7 @@ test fn list_push_on_empty_and_readers():
     c.push("a")
     c.push("b")
     assert c.at(-1) == ?"b"
-    assert c.slice(0, 5) == ["a", "b"]
+    assert c[0..5] == ["a", "b"]
     assert c.fold("", fn(acc: str, x: str) -> str: acc + x) == "ab"
 
 # add is a no-op on a present element and remove on an absent one; colliding user hashes probe by eq.

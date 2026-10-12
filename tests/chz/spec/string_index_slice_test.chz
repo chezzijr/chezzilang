@@ -8,9 +8,9 @@ test fn ascii_index_and_slice():
     s := "abcdef"
     assert s[0] == "a"
     assert s[-1] == "f"
-    assert s[1:3] == "bc"
-    assert s[::-1] == "fedcba"
-    assert s[::2] == "ace"
+    assert s[1..3] == "bc"
+    assert s.reversed() == "fedcba"
+    assert s[Range(None, None, 2)] == "ace"
 
 test fn non_ascii_index_is_by_codepoint_not_byte():
     assert "héllo"[1] == "é"
@@ -20,9 +20,9 @@ test fn non_ascii_index_is_by_codepoint_not_byte():
     assert "aé b"[2] == " "
 
 test fn non_ascii_slice_is_by_codepoint():
-    assert "日本語"[1:3] == "本語"
-    assert "日本語"[::-1] == "語本日"
-    assert "aé b"[1:3] == "é "
+    assert "日本語"[1..3] == "本語"
+    assert "日本語".reversed() == "語本日"
+    assert "aé b"[1..3] == "é "
 
 test fn index_out_of_bounds_faults():
     r := recover: "abc"[5]

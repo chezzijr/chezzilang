@@ -6,26 +6,26 @@
 
 test fn huge_positive_step_on_a_list_takes_the_start_only():
     xs := [0, 1, 2, 3, 4, 5]
-    assert xs[1::9223372036854775807] == [1]
-    assert xs[1:2:9223372036854775807] == [1]
-    assert xs[2::9223372036854775806] == [2]
-    assert [0, 1, 2][0::9223372036854775807] == [0]
+    assert xs[Range(1, None, 9223372036854775807)] == [1]
+    assert xs[Range(1, 2, 9223372036854775807)] == [1]
+    assert xs[Range(2, None, 9223372036854775806)] == [2]
+    assert [0, 1, 2][Range(0, None, 9223372036854775807)] == [0]
 
 test fn huge_negative_step_still_works():
-    assert [0, 1, 2][::-9223372036854775807] == [2]
+    assert [0, 1, 2][Range(None, None, -9223372036854775807)] == [2]
 
 test fn huge_step_on_str_and_bytes():
-    assert "abc"[1:2:9223372036854775807] == "b"
-    assert b"abc"[1:2:9223372036854775807] == b"b"
+    assert "abc"[Range(1, 2, 9223372036854775807)] == "b"
+    assert b"abc"[Range(1, 2, 9223372036854775807)] == b"b"
     ba := bytearray(b"abc")
-    assert ba[1:2:9223372036854775807] == bytearray(b"b")
+    assert ba[Range(1, 2, 9223372036854775807)] == bytearray(b"b")
 
 test fn huge_step_under_recover_is_a_value_not_a_crash():
-    r := recover: [0, 1, 2, 3][1::9223372036854775807]
+    r := recover: [0, 1, 2, 3][Range(1, None, 9223372036854775807)]
     assert r == ?[1]
 
 test fn huge_step_on_a_range():
     r := range(0, 10)
-    assert r[1:2:9223372036854775807] == [1]
-    assert r[::9223372036854775807] == [0]
-    assert r[::-9223372036854775807] == [9]
+    assert r[Range(1, 2, 9223372036854775807)] == [1]
+    assert r[Range(None, None, 9223372036854775807)] == [0]
+    assert r[Range(None, None, -9223372036854775807)] == [9]

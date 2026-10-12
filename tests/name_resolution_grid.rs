@@ -406,7 +406,7 @@ fn same_module_fn_cells() -> Vec<Cell> {
         one(
             "toplevel_fn/alias/k2_recursive_call",
             format!(
-                "{p}type Q = P\nfn Q(s: str) -> P:\n    if s == \"\":\n        return P(0)\n    return Q(s[1:])\nprint(Q(\"abc\"))\n"
+                "{p}type Q = P\nfn Q(s: str) -> P:\n    if s == \"\":\n        return P(0)\n    return Q(s[1..])\nprint(Q(\"abc\"))\n"
             ),
             Expect::Prints("P(x=0)".into()),
         ),

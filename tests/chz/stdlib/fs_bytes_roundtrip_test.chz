@@ -107,7 +107,7 @@ test fn canonicalize_round_trips_a_non_utf8_name():
     assert fs.exists(c), "the canonical path must exist"
     # The final component is the undecodable name, byte-exact.
     raw := c.bytes()
-    assert raw[raw.len() - BAD.len() : raw.len()] == BAD
+    assert raw[raw.len() - BAD.len()..raw.len()] == BAD
 
 # The stat + whole-file read paths take the same byte path unchanged.
 test fn stat_and_reads_take_a_non_utf8_path():

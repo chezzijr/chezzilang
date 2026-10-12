@@ -589,7 +589,7 @@ fn box_guard_ops() -> Vec<Op> {
         ),
         (
             "ConcurrentList.slice",
-            "got.add(ConcurrentList(wl).slice(0, 1).len() + v)",
+            "got.add(ConcurrentList(wl)[0..1].len() + v)",
             "got.load() == 7",
             "hold_l",
         ),

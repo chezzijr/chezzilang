@@ -19,7 +19,7 @@ fn main():
     print(range(2, 5))
 
     # Slicing a range literal reuses the list step machinery.
-    print((0..10)[::2])
-    print((0..10)[1:8:3])
-    print((0..5)[::-1])
+    print((0..10)[Range(None, None, 2)])
+    print((0..10)[Range(1, 8, 3)])
+    print((0..5).reversed())
 main()

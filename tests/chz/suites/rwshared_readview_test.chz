@@ -14,8 +14,8 @@ test fn read_view_indexing():
     assert box.at(999) == ?1000
     assert box.at(-1) == ?1000
     assert box.at(-1000) == ?1
-    assert box.slice(2, 5) == [3, 4, 5]
-    assert box.slice(0, 0) == []
+    assert box[2..5] == [3, 4, 5]
+    assert box[0..0] == []
     assert box.at(5000) == None
     assert box.at(-5000) == None
 
@@ -272,7 +272,7 @@ test fn cyclic_element_at_returns_the_piece_with_its_cycle_intact():
 
 test fn cyclic_element_slice_for_each_fold():
     box := ConcurrentList(RwShared(cyclic_list()))
-    sliced := box.slice(0, 1)
+    sliced := box[0..1]
     assert sliced.len() == 1
     assert sliced[0].back[0].back[0].val == 1
     n := AtomicInt(0)
@@ -322,7 +322,7 @@ test fn cyclic_slice_shared_map_is_not_poisoned_by_a_piece_that_needs_the_contai
     g := fn() -> int: xs.len() + 100
     xs.push(f)
     xs.push(g)
-    sl := ConcurrentList(RwShared(xs)).slice(0, 2)
+    sl := ConcurrentList(RwShared(xs))[0..2]
     assert sl[0]() == 2
     assert sl[1]() == 102
 
@@ -336,7 +336,7 @@ test fn cyclic_slice_shares_within_itself_like_get():
     a.back = xs
     b.back = xs
     box := ConcurrentList(RwShared(xs))
-    sl := box.slice(0, 2)
+    sl := box[0..2]
     sl[1].val = 99
     assert sl[0].back[1].val == 99, "slice must share within itself, like get()"
     g := box.inner.get()
@@ -356,7 +356,7 @@ test fn cyclic_slice_shares_when_only_a_LATER_element_is_cyclic():
     b := Cyc(2, [])
     xs := [a, b]
     b.back = xs                # element 0 is self-contained; only element 1 needs the container
-    sl := ConcurrentList(RwShared(xs)).slice(0, 2)
+    sl := ConcurrentList(RwShared(xs))[0..2]
     sl[0].val = 55
     assert sl[1].back[0].val == 55, "slice identity must not depend on element order"
 

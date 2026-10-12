@@ -67,7 +67,7 @@ const CELLS: &[Cell] = &[
         collection: "ConcurrentList",
         method: "slice",
         setup: LIST,
-        kind: Read("c.slice(1, 3)", "[20, 30]"),
+        kind: Read("c[1..3]", "[20, 30]"),
     },
     Cell {
         collection: "ConcurrentList",

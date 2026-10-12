@@ -9256,7 +9256,7 @@ fn n11() -> Iterator[int]:
     yield 0
 fn n12() -> Iterator[int]:
     buf := [[0]]
-    s := buf[0:1]
+    s := buf[0..1]
     yield s.len()
 fn n13(i: int) -> Iterator[int]:
     buf := [[i]]

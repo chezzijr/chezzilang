@@ -4416,7 +4416,7 @@ const STR_METHODS: &[&str] = &[
     "contains",
     "replace",
     "repeat",
-    "reverse",
+    "reversed",
     "pad_left",
     "pad_right",
     "index_of",
@@ -4490,8 +4490,10 @@ const LISTENER_METHODS: &[&str] = &["accept", "addr", "close"];
 const WRITER_METHODS: &[&str] = &["write", "write_bytes", "flush", "close"];
 const READER_METHODS: &[&str] = &["read_line", "read_bytes", "close"];
 const EXECUTOR_METHODS: &[&str] = &["submit", "shutdown", "shutdown_now"];
-const BYTES_METHODS: &[&str] = &["decode", "decode_lossy", "len"];
-const BYTEARRAY_METHODS: &[&str] = &["len", "push", "pop", "decode", "copy"];
+const BYTES_METHODS: &[&str] = &["decode", "decode_lossy", "len", "reversed"];
+const BYTEARRAY_METHODS: &[&str] = &[
+    "len", "push", "pop", "decode", "copy", "reverse", "reversed",
+];
 
 /// Does `method` mutate its receiver in place (as opposed to returning a new value)? Maps the
 /// receiver's type to its kind and reads the one table, `crate::vm::is_mutating_native_kind`.

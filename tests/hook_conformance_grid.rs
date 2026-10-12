@@ -123,35 +123,17 @@ fn hooks() -> Vec<Hook> {
             proto: "Slice[int]",
             slot_proto: None,
             shapes: [
-                m(
-                    "slice(self, start: int?, end: int?, step: int?) -> int",
-                    "return 7",
-                ),
-                m(
-                    "slice(self, start: int?, end: int?, step: int?) -> Iterator[int]",
-                    "yield 7",
-                ),
-                m(
-                    "slice(a: int?, start: int?, end: int?, step: int?) -> int",
-                    "return 7",
-                ),
-                m(
-                    "slice(self, start: int?, end: int?, step: int?) -> str",
-                    "return \"s\"",
-                ),
-                m(
-                    "slice(self, start: int?, end: int?, step: int?, z: int) -> int",
-                    "return 7",
-                ),
-                m(
-                    "slice[U](self, start: int?, end: int?, step: int?) -> int",
-                    "return 7",
-                ),
+                m("slice(self, r: Range) -> int", "return 7"),
+                m("slice(self, r: Range) -> Iterator[int]", "yield 7"),
+                m("slice(r: Range) -> int", "return 7"),
+                m("slice(self, r: Range) -> str", "return \"s\""),
+                m("slice(self, r: Range, z: int) -> int", "return 7"),
+                m("slice[U](self, r: Range) -> int", "return 7"),
             ],
-            op: "print(x[1:2])\n",
-            slot: "print(v[1:2])",
-            intr: "print(x.slice(1, 2, None))\n",
-            call: "print(v.slice(1, 2, None))",
+            op: "print(x[1..2])\n",
+            slot: "print(v[1..2])",
+            intr: "print(x.slice(1..2))\n",
+            call: "print(v.slice(1..2))",
         },
         Hook {
             name: "set_index",

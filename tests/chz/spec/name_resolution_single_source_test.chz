@@ -9,7 +9,7 @@ type Q = P
 fn Q(s: str) -> P:
     if s == "":
         return P(0)
-    return Q(s[1:])
+    return Q(s[1..])
 
 fn local_shadows_builtin() -> int:
     ord := fn(s: str) -> int: 1000

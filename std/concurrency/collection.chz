@@ -124,9 +124,10 @@ struct ConcurrentList[E]:
     fn at(self, i: int) -> E?:
         return self.inner._at(i)
 
-    # A COPY of the elements in `[lo, hi)`, with `xs[lo:hi]`'s clamping. CONCURRENT READ.
-    fn slice(self, lo: int, hi: int) -> List[E]:
-        return self.inner._slice(lo, hi)
+    # A COPY of the elements the `Range` selects, resolved exactly as `xs[r]` resolves it on a `List`
+    # (`c[a..b]`, `c[3..]`, `c[Range(0, 10, 2)]`). CONCURRENT READ.
+    fn slice(self, r: Range) -> List[E]:
+        return self.inner._slice(r)
 
     # Call `f(element)` once per element, in order.
     fn for_each[R](self, f: fn(E) -> R):

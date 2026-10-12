@@ -18,10 +18,10 @@ fn main():
     print(b[-1])
 
     # b[a:b:c] -> bytes: open bounds, step, reverse, negative.
-    print(b[1:3])
-    print(b[::-1])
-    print(b[::2])
-    print(b[-2:])
+    print(b[1..3])
+    print(b.reversed())
+    print(b[Range(None, None, 2)])
+    print(b[-2..])
 
     # for x in b -> int: sum the bytes.
     total := 0

@@ -30,8 +30,8 @@ fn main():
     print(ba[1])                       # 66 — observed through the other binding
 
     # ba[a:b:c] -> a NEW bytearray (mutable copy): reverse, step.
-    print(ba[::-1])
-    print(ba[::2])
+    print(ba.reversed())
+    print(ba[Range(None, None, 2)])
 
     # for x in ba -> int: sum the bytes.
     total := 0

@@ -270,12 +270,12 @@ fn parse_iso8601(input: str) -> DateTime!:
     dp := date_part
     if dp.starts_with("-"):
         neg = true
-        dp = dp[1:]
+        dp = dp[1..]
     dc := dp.split("-")
     if dc.len() != 3:
         # Accept the ISO BASIC form too (no dashes): YYYYMMDD, all digits, exactly 8 characters.
         if dc.len() == 1 and dp.len() == 8 and all_digits(dp):
-            dc = [dp[0:4], dp[4:6], dp[6:8]]
+            dc = [dp[0..4], dp[4..6], dp[6..8]]
         else:
             return !("date must be YYYY-MM-DD or YYYYMMDD, got '" + date_part + "'")
     if not all_digits(dc[0]):
@@ -308,7 +308,7 @@ fn parse_iso8601(input: str) -> DateTime!:
         # 3a. peel a trailing tz: 'Z' (UTC) or '+HH:MM' / '-HH:MM' offset. The time itself has only
         #     digits, ':' and '.', so the first '+'/'-' unambiguously marks the offset.
         if tp.ends_with("Z"):
-            tp = tp[0 : tp.len() - 1]
+            tp = tp[0..tp.len() - 1]
         else:
             pi := s.index_of(tp, "+")
             sign := 1
@@ -316,13 +316,13 @@ fn parse_iso8601(input: str) -> DateTime!:
                 pi = s.index_of(tp, "-")
                 sign = -1
             if pi >= 0:
-                otxt := tp[pi + 1 :]
+                otxt := tp[pi + 1..]
                 oc := otxt.split(":")
-                tp = tp[0:pi]
+                tp = tp[0..pi]
                 if oc.len() != 2:
                     # Accept the colonless form too: +HHMM / -HHMM, exactly 4 digits.
                     if oc.len() == 1 and otxt.len() == 4 and all_digits(otxt):
-                        oc = [otxt[0:2], otxt[2:4]]
+                        oc = [otxt[0..2], otxt[2..4]]
                     else:
                         return !"offset must be +HH:MM / +HHMM (or the '-' forms)"
                 oh := field2(oc[0])?
@@ -336,7 +336,7 @@ fn parse_iso8601(input: str) -> DateTime!:
         if fc.len() == 2:
             if not all_digits(fc[1]):
                 return !"invalid fractional seconds"
-            milli = to_uint((fc[1] + "00")[0:3])
+            milli = to_uint((fc[1] + "00")[0..3])
             tp = fc[0]
         elif fc.len() != 1:
             return !"malformed fractional seconds"
@@ -344,9 +344,9 @@ fn parse_iso8601(input: str) -> DateTime!:
         tc := tp.split(":")
         if tc.len() == 1:
             if tp.len() == 6 and all_digits(tp):
-                tc = [tp[0:2], tp[2:4], tp[4:6]]
+                tc = [tp[0..2], tp[2..4], tp[4..6]]
             elif tp.len() == 4 and all_digits(tp):
-                tc = [tp[0:2], tp[2:4], "00"]
+                tc = [tp[0..2], tp[2..4], "00"]
             else:
                 return !("time must be HH:MM[:SS] or HHMM[SS], got '" + time_part + "'")
         elif tc.len() == 2:

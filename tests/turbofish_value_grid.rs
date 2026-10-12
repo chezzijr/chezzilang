@@ -401,7 +401,7 @@ fn neighbour_cells(out: &mut Vec<Cell>) {
     ));
     out.push(main_only(
         "slice",
-        "xs := [1, 2, 3, 4]\nprint(xs[1:3], xs[::2])",
+        "xs := [1, 2, 3, 4]\nprint(xs[1..3], xs[Range(None, None, 2)])",
         prints("[2, 3] [1, 3]"),
     ));
     out.push(main_only(
@@ -1161,7 +1161,7 @@ fn bracket_grid_cells(out: &mut Vec<Cell>) {
         ),
         (
             "shadow/index_forms",
-            "xs := [1, 2, 3]\ni := 1\nxs[i] = 9\nprint(xs[i], xs[i + 1], xs[0:2])".to_string(),
+            "xs := [1, 2, 3]\ni := 1\nxs[i] = 9\nprint(xs[i], xs[i + 1], xs[0..2])".to_string(),
             prints("9 3 [1, 9]"),
         ),
         (

@@ -186,7 +186,10 @@ native struct str:
     # fault instead of aborting on a huge count).
     native fn replace(self, old: str, new: str) -> str
     native fn repeat(self, n: int) -> str
-    native fn reverse(self) -> str
+    # A NEW string with the codepoints in reverse order (`s[::-1]` is removed). `str` is immutable, so
+    # there is no in-place `reverse`: `reversed()` returns a new value on `List`, `str`, `bytes` and
+    # `bytearray`; `reverse()` changes in place and exists on `List` and `bytearray` only.
+    native fn reversed(self) -> str
     native fn pad_left(self, width: int, fill: str) -> str
     native fn pad_right(self, width: int, fill: str) -> str
     # SENTINEL, NOT A CARRIER — `-1` on a miss, exactly Python's `str.find`. Same hazard as
@@ -216,6 +219,7 @@ native struct bytes:
     # (Python `b.decode(errors="replace")`), so it NEVER faults. `path.Path.str()` is built on it.
     native fn decode_lossy(self) -> str
     native fn len(self) -> int
+    native fn reversed(self) -> bytes
 
 # `bytearray` (mutable byte buffer): `len`, `push(int)` (appends one byte, 0-255 validated at runtime),
 # `pop() -> int?` (removes the last), `decode() -> str` (UTF-8, recoverable fault on invalid
@@ -228,6 +232,8 @@ native struct bytearray:
     native fn pop(self) -> Option[int]
     native fn decode(self) -> str
     native fn copy(self) -> bytearray
+    native fn reverse(self) -> None
+    native fn reversed(self) -> bytearray
 
 # The two carrier ENUMS. These decls ARE the enums behind `T?` and `T!E`: the checker harvests them
 # (`harvest_native_enums`) into its ordinary enum tables, so variants, patterns and exhaustiveness

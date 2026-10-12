@@ -6,6 +6,12 @@ use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
+/// `str` methods that were removed, with what to write instead.
+const REMOVED_STR_METHODS: &[(&str, &str)] = &[(
+    "reverse",
+    "`str.reverse()` is removed; write `s.reversed()`",
+)];
+
 /// Result of resolving a bodied/native method on one of the reserved native handles
 /// (`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`). The shared
 /// `resolve_native_handle_method` helper folds the byte-identical lookup + hover + generic branch;
@@ -3624,11 +3630,13 @@ impl Checker {
                 }
                 self.infer_all(args);
                 let names = self.method_names("str");
-                self.error_help(
-                    name_span,
-                    format!("type str has no method '{method}'"),
-                    suggest::did_you_mean(method, &names),
-                );
+                // A removed method names its replacement (TICKET-253: one `reversed` name for every
+                // container that reverses into a new value).
+                let message = match REMOVED_STR_METHODS.iter().find(|(m, _)| *m == method) {
+                    Some((_, text)) => format!("type str has no method '{method}': {text}"),
+                    None => format!("type str has no method '{method}'"),
+                };
+                self.error_help(name_span, message, suggest::did_you_mean(method, &names));
                 Ty::Unknown
             }
             Ty::List(elem) => {
@@ -4911,6 +4919,17 @@ impl Checker {
         let t = self.infer_value(e);
         if t != Ty::Int && !t.is_unknown() {
             self.error(e.span, format!("{ctx} must be int, found {t}"));
+        }
+    }
+
+    /// The index of an index ASSIGNMENT `xs[i] = v` into a list, `bytearray` or `str`: an `int`. A
+    /// `Range` index is a slice (TICKET-253), and a slice is not a place.
+    pub(super) fn expect_assign_index(&mut self, e: &Expr) {
+        let t = self.infer_value(e);
+        if t == self.range_ty() {
+            self.error(e.span, "cannot assign to a slice");
+        } else if t != Ty::Int && !t.is_unknown() {
+            self.error(e.span, format!("index must be int, found {t}"));
         }
     }
 

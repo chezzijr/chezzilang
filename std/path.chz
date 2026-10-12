@@ -120,10 +120,10 @@ fn _split(b: bytes, sep: int) -> List[bytes]:
     i := 0
     while i < b.len():
         if b[i] == sep:
-            out.push(b[start : i])
+            out.push(b[start..i])
             start = i + 1
         i += 1
-    out.push(b[start : b.len()])
+    out.push(b[start..b.len()])
     return out
 
 # Index of the LAST `byte` in `b`, or -1 if absent — the one backwards scan `basename`/`dirname`/`ext`
@@ -175,7 +175,7 @@ fn is_rel(p: PathLike) -> bool:
 #   basename("") -> "" · basename("a") -> "a"
 fn basename(p: PathLike) -> Path:
     raw := p.as_path()
-    return Path(raw[_last_idx(raw, SEP) + 1 : raw.len()])
+    return Path(raw[_last_idx(raw, SEP) + 1..raw.len()])
 
 # Everything before the final component (Python os.path.dirname): the head up to the last '/',
 # with a trailing slash stripped EXCEPT when the head is all slashes (then it stays "/").
@@ -186,7 +186,7 @@ fn dirname(p: PathLike) -> Path:
     cut := _last_idx(raw, SEP)
     if cut < 0:
         return Path(b"")         # no slash -> no directory
-    head := raw[0 : cut]         # everything before the last '/'
+    head := raw[0..cut]         # everything before the last '/'
     # strip a trailing slash on the head unless the head is entirely slashes
     allslash := head.len() > 0
     j := 0
@@ -195,12 +195,12 @@ fn dirname(p: PathLike) -> Path:
             allslash = false
         j += 1
     if head.len() == 0 or allslash:
-        return Path(raw[0 : cut + 1])   # keep the slashes (e.g. "/a" -> "/")
+        return Path(raw[0..cut + 1])   # keep the slashes (e.g. "/a" -> "/")
     # strip ALL redundant trailing slashes on the head ("a//b" -> head "a/" -> "a")
     end := head.len()
     while end > 0 and head[end - 1] == SEP:
         end -= 1
-    return Path(head[0 : end])
+    return Path(head[0..end])
 
 # Split `p` into (head, tail) so that head == dirname(p) and tail == basename(p)
 # (Python os.path.split). split("a/b") -> ("a", "b") · split("a/b/") -> ("a/b", "") ·
@@ -223,7 +223,7 @@ fn ext(p: PathLike) -> Path:
     j := 0
     while j < dot:
         if b[j] != DOT:
-            return Path(b[dot : b.len()])
+            return Path(b[dot..b.len()])
         j += 1
     return Path(b"")
 
@@ -235,7 +235,7 @@ fn stem(p: PathLike) -> Path:
     e := ext(p).bytes()
     if e.len() == 0:
         return Path(b)
-    return Path(b[0 : b.len() - e.len()])
+    return Path(b[0..b.len() - e.len()])
 
 # Replace the final extension of `p` with `e`. `e` is normalized to exactly one leading dot when
 # non-empty ("md" and ".md" both yield ".md"); a run of leading dots collapses to one ("..d" -> ".d");
@@ -255,7 +255,7 @@ fn with_ext(p: PathLike, e: PathLike) -> Path:
         k := 0
         while k < ne.len() and ne[k] == DOT:
             k += 1
-        ne = ne[k : ne.len()]
+        ne = ne[k..ne.len()]
         if ne.len() == 0 or _last_idx(ne, SEP) >= 0:
             panic("with_ext: invalid extension: '" + Path(raw).str() + "'")
         ne = _cat(b".", ne)
@@ -267,10 +267,10 @@ fn with_ext(p: PathLike, e: PathLike) -> Path:
         n := raw_p.len()
         more = false
         if n >= 2 and raw_p[n - 1] == DOT and raw_p[n - 2] == SEP:
-            raw_p = raw_p[0 : n - 1]
+            raw_p = raw_p[0..n - 1]
             more = true
         elif n >= 1 and raw_p[n - 1] == SEP and not _all_slashes(raw_p):
-            raw_p = raw_p[0 : n - 1]
+            raw_p = raw_p[0..n - 1]
             more = true
     name := basename(Path(raw_p)).bytes()
     if name.len() == 0 or (name.len() == 1 and name[0] == DOT):

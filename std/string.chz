@@ -54,7 +54,7 @@ fn split_lines(s: str) -> List[str]:
 fn ends_with(s: str, suffix: str) -> bool:
     if suffix.len() > s.len():
         return false
-    return s[s.len() - suffix.len() : s.len()] == suffix
+    return s[s.len() - suffix.len()..s.len()] == suffix
 
 # First index at which `sub` occurs in `s`, or -1 if absent (mirrors the native list `index_of`).
 # The empty substring is found at 0. Thin wrapper over `find` (the generalized from-index search).
@@ -71,7 +71,7 @@ fn count(s: str, sub: str) -> int:
     n := 0
     i := 0
     while i + m <= s.len():
-        if s[i : i + m] == sub:
+        if s[i..i + m] == sub:
             n += 1
             i += m
         else:
@@ -89,13 +89,13 @@ fn replace(s: str, old: str, new: str) -> str:
 # Remove `p` from the front of `s` if present, else return `s` unchanged.
 fn strip_prefix(s: str, p: str) -> str:
     if s.starts_with(p):
-        return s[p.len() : s.len()]
+        return s[p.len()..s.len()]
     return s
 
 # Remove `p` from the end of `s` if present, else return `s` unchanged.
 fn strip_suffix(s: str, p: str) -> str:
     if ends_with(s, p):
-        return s[0 : s.len() - p.len()]
+        return s[0..s.len() - p.len()]
     return s
 
 # Is codepoint `c` cased? (has distinct upper/lower forms). ASCII letters + accented letters are
@@ -110,7 +110,7 @@ fn is_cased(c: str) -> bool:
 fn capitalize(s: str) -> str:
     if s.len() == 0:
         return s
-    return s[0 : 1].upper() + s[1 : s.len()].lower()
+    return s[0..1].upper() + s[1..s.len()].lower()
 
 # Python `str.title`: upper-case the first cased char of each word, lower-case the rest. A "word"
 # boundary is any uncased char (space, digit, apostrophe): "they're" -> "They'Re".
@@ -120,7 +120,7 @@ fn title(s: str) -> str:
     prev_cased := false
     i := 0
     while i < s.len():
-        c := s[i : i + 1]
+        c := s[i..i + 1]
         if is_cased(c):
             if prev_cased:
                 out = out + c.lower()
@@ -139,7 +139,7 @@ fn swapcase(s: str) -> str:
     out := ""
     i := 0
     while i < s.len():
-        c := s[i : i + 1]
+        c := s[i..i + 1]
         if is_cased(c):
             if c == c.lower():
                 out = out + c.upper()
@@ -168,7 +168,7 @@ fn find(s: str, sub: str, from_index: int) -> int:
         return start
     i := start
     while i + m <= n:
-        if s[i : i + m] == sub:
+        if s[i..i + m] == sub:
             return i
         i += 1
     return -1
@@ -187,7 +187,7 @@ fn split(s: str, sep: str, maxsplit: int = -1) -> List[str]:
     while i < maxsplit:
         out.push(parts[i])
         i += 1
-    out.push(sep.join(parts[maxsplit : parts.len()]))
+    out.push(sep.join(parts[maxsplit..parts.len()]))
     return out
 
 # Split `s` on `sep` from the RIGHT, at most `maxsplit + 1` pieces (Python `str.rsplit(sep,
@@ -198,11 +198,11 @@ fn split(s: str, sep: str, maxsplit: int = -1) -> List[str]:
 fn rsplit(s: str, sep: str, maxsplit: int = -1) -> List[str]:
     if sep.len() == 0:
         panic("rsplit: sep must not be empty")
-    rev := split(s.reverse(), sep.reverse(), maxsplit)
+    rev := split(s.reversed(), sep.reversed(), maxsplit)
     out: List[str] = []
     i := rev.len() - 1
     while i >= 0:
-        out.push(rev[i].reverse())
+        out.push(rev[i].reversed())
         i -= 1
     return out
 
@@ -215,7 +215,7 @@ fn split_whitespace(s: str) -> List[str]:
     cur := ""
     i := 0
     while i < s.len():
-        c := s[i : i + 1]
+        c := s[i..i + 1]
         if c.trim() == "":
             if cur.len() > 0:
                 out.push(cur)

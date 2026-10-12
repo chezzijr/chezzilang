@@ -11639,9 +11639,12 @@ fn range_empty_cases_vm() {
 
 #[test]
 fn range_slice_step_parity_vm() {
-    assert_eq!(run("print((0..10)[::2])"), "[0, 2, 4, 6, 8]\n");
-    assert_eq!(run("print((0..10)[1:8:3])"), "[1, 4, 7]\n");
-    assert_eq!(run("print((0..5)[::-1])"), "[4, 3, 2, 1, 0]\n");
+    assert_eq!(
+        run("print((0..10)[Range(None, None, 2)])"),
+        "[0, 2, 4, 6, 8]\n"
+    );
+    assert_eq!(run("print((0..10)[Range(1, 8, 3)])"), "[1, 4, 7]\n");
+    assert_eq!(run("print((0..5).reversed())"), "[4, 3, 2, 1, 0]\n");
 }
 
 #[test]
@@ -20952,7 +20955,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         ("next", "{r}.next()"),
         ("index", "{r}.index({k})"),
         ("set_index", "{r}.set_index({k}, {v})"),
-        ("slice", "{r}.slice(?0, ?1, None)"),
+        ("slice", "{r}.slice(0..1)"),
         ("add", "{r}.add(b)"),
         ("sub", "{r}.sub(b)"),
         ("mul", "{r}.mul(b)"),
@@ -23413,7 +23416,7 @@ fn interpolation_hole_text_is_read_once() {
         (r#"¤}}¤"#, "}"),
         (r#" {¤a¤: 1}[¤a¤] "#, "1"),
         (r#"[y * 2 for y in [1, 2]]"#, "[2, 4]"),
-        (r#"xs[0:1].len()"#, "1"),
+        (r#"xs[0..1].len()"#, "1"),
         (r#"(if c: 1 else: 2)"#, "1"),
         (r#"(fn(): 1)()"#, "1"),
         (r#"x + 1"#, "6"),

@@ -96,9 +96,9 @@ fn main():
     print(n)
 
     # slice producing results on both sides of the boundary (slice itself allocs a str)
-    print(c[0:22])                    # 22 bytes — inline
-    print(c[0:23])                    # 23 bytes — heap
-    print(ab[0:22])
+    print(c[0..22])                    # 22 bytes — inline
+    print(c[0..23])                    # 23 bytes — heap
+    print(ab[0..22])
 
     # case-fold can change byte length, straddling the boundary either way
     print(b.upper())                  # 22 ascii → 22, inline
@@ -497,8 +497,8 @@ fn regex_offsets_are_codepoint_slicable_parity() {
                    \x20   ?opt:\n\
                    \x20       match opt:\n\
                    \x20           ?m:\n\
-                   \x20               print(s[m.start:m.end])\n\
-                   \x20               print(str(s[m.start:m.end] == m.text))\n\
+                   \x20               print(s[m.start..m.end])\n\
+                   \x20               print(str(s[m.start..m.end] == m.text))\n\
                    \x20           None: print(\"none\")\n\
                    \x20   !e: print(e)\n";
     let out = golden_entry(src);
@@ -8361,28 +8361,31 @@ fn parity_tuple_heap_elements_gc_stress() {
 
 #[test]
 fn slice_list_and_str_parity() {
-    assert_golden_out("print([1, 2, 3, 4, 5][1:3])\n", "[2, 3]\n");
-    assert_golden_out("print(\"hello\"[0:2])\n", "he\n");
+    assert_golden_out("print([1, 2, 3, 4, 5][1..3])\n", "[2, 3]\n");
+    assert_golden_out("print(\"hello\"[0..2])\n", "he\n");
     // Open bounds + step + reverse.
-    assert_golden_out("print([1, 2, 3, 4, 5][2:])\n", "[3, 4, 5]\n");
-    assert_golden_out("print([1, 2, 3, 4, 5][:2])\n", "[1, 2]\n");
-    assert_golden_out("print([1, 2, 3, 4, 5][::2])\n", "[1, 3, 5]\n");
-    assert_golden_out("print([1, 2, 3, 4, 5][::-1])\n", "[5, 4, 3, 2, 1]\n");
-    assert_golden_out("print(\"hello\"[::-1])\n", "olleh\n");
+    assert_golden_out("print([1, 2, 3, 4, 5][2..])\n", "[3, 4, 5]\n");
+    assert_golden_out("print([1, 2, 3, 4, 5][..2])\n", "[1, 2]\n");
+    assert_golden_out(
+        "print([1, 2, 3, 4, 5][Range(None, None, 2)])\n",
+        "[1, 3, 5]\n",
+    );
+    assert_golden_out("print([1, 2, 3, 4, 5].reversed())\n", "[5, 4, 3, 2, 1]\n");
+    assert_golden_out("print(\"hello\".reversed())\n", "olleh\n");
     // Multibyte UTF-8 must round-trip through char-stepping (SSO/heap boundary).
-    assert_golden_out("print(\"héllo\"[::-1])\n", "olléh\n");
-    assert_golden_out("print(\"héllo\"[1:3])\n", "él\n");
+    assert_golden_out("print(\"héllo\".reversed())\n", "olléh\n");
+    assert_golden_out("print(\"héllo\"[1..3])\n", "él\n");
 }
 
 #[test]
 fn slice_clamped_parity() {
-    assert_golden_out("print([1, 2, 3][1:99])\n", "[2, 3]\n");
-    assert_golden_out("print([1, 2, 3][2:1])\n", "[]\n");
+    assert_golden_out("print([1, 2, 3][1..99])\n", "[2, 3]\n");
+    assert_golden_out("print([1, 2, 3][2..1])\n", "[]\n");
     // Negative bound counts from the end (Python): [-1:2] -> start=2,end=2 -> [].
-    assert_golden_out("print([1, 2, 3][-1:2])\n", "[]\n");
-    assert_golden_out("print([1, 2, 3, 4, 5][-2:])\n", "[4, 5]\n");
+    assert_golden_out("print([1, 2, 3][-1..2])\n", "[]\n");
+    assert_golden_out("print([1, 2, 3, 4, 5][-2..])\n", "[4, 5]\n");
     // Slice bounds CLAMP (no fault) even far out of range...
-    assert_golden_out("print([1, 2, 3][-100:])\n", "[1, 2, 3]\n");
+    assert_golden_out("print([1, 2, 3][-100..])\n", "[1, 2, 3]\n");
     // ...but a plain out-of-range negative index FAULTS, byte-identically.
     assert_eq!(
         vm_outcome("print([1, 2, 3][0 - 100])\n").unwrap_err(),
@@ -8390,7 +8393,7 @@ fn slice_clamped_parity() {
     );
     // Zero step faults with a clear message.
     assert_eq!(
-        vm_outcome("print([1, 2, 3][::0])\n").unwrap_err(),
+        vm_outcome("print([1, 2, 3][Range(None, None, 0)])\n").unwrap_err(),
         "runtime error (line 1, col 7): slice step cannot be zero"
     );
 }
@@ -8411,15 +8414,15 @@ struct Buf:
         self.xs[k] = v
     fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:
         match (start, end, step):
-            (?s, ?e, ?c): return self.xs[s:e:c]
-            (?s, ?e, None): return self.xs[s:e]
-            (?s, None, ?c): return self.xs[s::c]
-            (?s, None, None): return self.xs[s:]
-            (None, ?e, ?c): return self.xs[:e:c]
-            (None, ?e, None): return self.xs[:e]
-            (None, None, ?c): return self.xs[::c]
-            (None, None, None): return self.xs[:]
-            _: return self.xs[:]
+            (?s, ?e, ?c): return self.xs[Range(s, e, c)]
+            (?s, ?e, None): return self.xs[s..e]
+            (?s, None, ?c): return self.xs[Range(s, None, c)]
+            (?s, None, None): return self.xs[s..]
+            (None, ?e, ?c): return self.xs[Range(None, e, c)]
+            (None, ?e, None): return self.xs[..e]
+            (None, None, ?c): return self.xs[Range(None, None, c)]
+            (None, None, None): return self.xs[..]
+            _: return self.xs[..]
 fn main():
     b := Buf([10, 20, 30])
     print(b[0])
@@ -8427,9 +8430,9 @@ fn main():
     print(b[1])
     b[0] += 5
     print(b[0])
-    print(b[0:2])
-    print(b[:])
-    print(b[::-1])
+    print(b[0..2])
+    print(b[..])
+    print(b.reversed())
 main()";
 
 #[test]
@@ -8444,7 +8447,7 @@ fn struct_index_slice_dispatch_parity() {
 fn slice_survives_gc_stress() {
     // The sliced list shares the source's element handles; a GC during the slice alloc must not
     // collect them. (Source is an inline temporary, unrooted except by the slice path.)
-    let src = "print([1, 2, 3, 4, 5][1:4])\n";
+    let src = "print([1, 2, 3, 4, 5][1..4])\n";
     assert_golden_out(src, "[2, 3, 4]\n");
     assert_eq!(
         run_capture_stress(src),
@@ -9285,9 +9288,9 @@ fn vm_bytes_ops() {
     let src = concat!(
         "fn main():\n",
         "    b := b\"\\x01\\x02\\x03\"\n",
-        "    print(b[0])\n",    // 1
-        "    print(b[-1])\n",   // 3
-        "    print(b[::-1])\n", // b'\x03\x02\x01'
+        "    print(b[0])\n",         // 1
+        "    print(b[-1])\n",        // 3
+        "    print(b.reversed())\n", // b'\x03\x02\x01'
         "    s := 0\n",
         "    for x in b:\n",
         "        s = s + x\n",
@@ -9340,7 +9343,7 @@ fn vm_bytes_repr_and_map_key() {
 
 #[test]
 fn vm_bytes_slice_step_parity() {
-    let src = "print(b\"\\x00\\x01\\x02\\x03\\x04\"[1:4:2])\nprint(b\"abc\"[1:])\n";
+    let src = "print(b\"\\x00\\x01\\x02\\x03\\x04\"[Range(1, 4, 2)])\nprint(b\"abc\"[1..])\n";
     assert_golden_out(src, "b'\\x01\\x03'\nb'bc'\n");
 }
 
@@ -9377,10 +9380,10 @@ fn vm_bytearray_ops() {
         "    print(bytearray(3))\n",               // bytearray(b'\x00\x00\x00')
         "    print(bytearray(b\"\\x01\\x02\"))\n", // bytearray(b'\x01\x02')
         "    ba := bytearray([1, 2, 3])\n",
-        "    print(ba)\n",       // bytearray(b'\x01\x02\x03')
-        "    print(ba[0])\n",    // 1
-        "    print(ba[-1])\n",   // 3
-        "    print(ba[::-1])\n", // bytearray(b'\x03\x02\x01')
+        "    print(ba)\n",            // bytearray(b'\x01\x02\x03')
+        "    print(ba[0])\n",         // 1
+        "    print(ba[-1])\n",        // 3
+        "    print(ba.reversed())\n", // bytearray(b'\x03\x02\x01')
         "    s := 0\n",
         "    for x in ba:\n",
         "        s = s + x\n",
@@ -11320,9 +11323,9 @@ fn main():
     print(total)
     print([i for i in 0..3])
     print([i for i in 0..10 if i % 2 == 0])
-    print((0..10)[::2])
-    print((0..10)[1:8:3])
-    print((0..5)[::-1])
+    print((0..10)[Range(None, None, 2)])
+    print((0..10)[Range(1, 8, 3)])
+    print((0..5).reversed())
     match 3:
         1..5: print(\"in\")
         _: print(\"out\")
@@ -12804,7 +12807,7 @@ struct Cut:
             None: return 0
 fn main():
     c := Cut([1])
-    print(c[9000000000000000000:])
+    print(c[9000000000000000000..])
 main()";
     assert_golden_out(src, "9000000000000000000\n");
 }

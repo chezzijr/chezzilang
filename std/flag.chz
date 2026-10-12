@@ -54,17 +54,17 @@ fn _parse_go_int(s: str) -> int!str:
     if body.starts_with("-") or body.starts_with("+"):
         if body.starts_with("-"):
             sign = "-"
-        body = body[1 : body.len()]
+        body = body[1..body.len()]
     base := 10
     digits := body
     prefixed := false
     if body.starts_with("0"):
         p := ""
         if body.len() >= 3:
-            p = body[1 : 2].lower()
+            p = body[1..2].lower()
         if p == "x" or p == "o" or p == "b":
             prefixed = true
-            digits = body[2 : body.len()]
+            digits = body[2..body.len()]
             if p == "x":
                 base = 16
             elif p == "o":
@@ -73,7 +73,7 @@ fn _parse_go_int(s: str) -> int!str:
                 base = 2
         else:
             base = 8
-            digits = body[1 : body.len()]
+            digits = body[1..body.len()]
     if body.contains("_"):
         saw := "^"
         scan := body
@@ -96,7 +96,7 @@ fn _parse_go_int(s: str) -> int!str:
         if body.starts_with("0") and not prefixed:
             return ?0
         return !bad
-    valid := "0123456789abcdef"[0 : base]
+    valid := "0123456789abcdef"[0..base]
     for c in clean.lower():
         if not valid.contains(c):
             return !bad
@@ -161,9 +161,9 @@ struct FlagSet:
                 continue
             if tok.len() > 1 and tok.starts_with("-"):
                 # One or two leading dashes; a third, or `-=`/`--=`, is Go's `bad flag syntax`.
-                body := tok[1 : tok.len()]
+                body := tok[1..tok.len()]
                 if body.starts_with("-"):
-                    body = body[1 : body.len()]
+                    body = body[1..body.len()]
                 if body == "" or body.starts_with("-") or body.starts_with("="):
                     return !("bad flag syntax: " + tok)
                 name := body
@@ -171,8 +171,8 @@ struct FlagSet:
                 has_inline := false
                 eq := body.index_of("=")
                 if eq >= 0:
-                    name = body[0 : eq]
-                    inline = body[eq + 1 : body.len()]
+                    name = body[0..eq]
+                    inline = body[eq + 1..body.len()]
                     has_inline = true
                 kind := ""
                 match self.kind.get(name):

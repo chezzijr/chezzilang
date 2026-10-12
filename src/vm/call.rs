@@ -45,7 +45,7 @@ pub(crate) fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
         ),
         "Map" => matches!(method, "remove" | "update"),
         "Set" => matches!(method, "add" | "remove"),
-        "bytearray" => matches!(method, "push" | "pop" | "extend"),
+        "bytearray" => matches!(method, "push" | "pop" | "extend" | "reverse"),
         _ => false,
     }
 }
@@ -3662,8 +3662,8 @@ impl Vm {
                             }
                         }
                     }
-                    "reverse" => {
-                        self.arity_err("reverse", args, 0, span)?;
+                    "reversed" => {
+                        self.arity_err("reversed", args, 0, span)?;
                         Ok(self.alloc_str(s.chars().rev().collect::<String>()))
                     }
                     // `pad_right` is the mirror (CPython `str.ljust`): same guards, fill after `s`.
@@ -4539,6 +4539,25 @@ impl Vm {
                 let bytes = b.clone();
                 self.decode_utf8(&bytes, span)
             }
+            // `reverse() -> None` reverses in place, `reversed() -> bytearray` returns a NEW buffer
+            // (Python `bytearray.reverse()`, `bytearray(reversed(b))`).
+            "reverse" => {
+                self.arity_err("reverse", args, 0, span)?;
+                let Obj::ByteArray(b) = self.heap.get_mut(h) else {
+                    unreachable!()
+                };
+                b.reverse();
+                Ok(Value::nil())
+            }
+            "reversed" => {
+                self.arity_err("reversed", args, 0, span)?;
+                let Obj::ByteArray(b) = self.heap.get(h) else {
+                    unreachable!()
+                };
+                let mut dup = b.clone();
+                dup.reverse();
+                Ok(Value::obj(self.heap.alloc(Obj::ByteArray(dup))))
+            }
             // `copy() -> bytearray`: a new buffer with the same bytes (Python `bytearray.copy()`).
             "copy" => {
                 self.arity_err("copy", args, 0, span)?;
@@ -4589,6 +4608,15 @@ impl Vm {
                     unreachable!()
                 };
                 Ok(Value::int(b.len() as i64))
+            }
+            // A NEW `bytes` with the bytes in reverse order.
+            "reversed" => {
+                self.arity_err("reversed", args, 0, span)?;
+                let Obj::Bytes(b) = self.heap.get(h) else {
+                    unreachable!()
+                };
+                let out: Box<[u8]> = b.iter().rev().copied().collect();
+                Ok(Value::obj(self.heap.alloc(Obj::Bytes(out))))
             }
             _ => Err(self.err(format!("type bytes has no method '{method}'"), span)),
         }

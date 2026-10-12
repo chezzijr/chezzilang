@@ -3299,7 +3299,7 @@ fn a_decl_site_default_binder_is_alpha_renameable() {
         ));
         // …and a slice of the provider call, the other non-tail position.
         ok_desugared(&format!(
-            "struct G[T]:\n    v: T\nfn mkl[{own}]() -> List[G[{own}]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl()[0:0]) -> int:\n        return xs.len()\nfn main():\n    print(H[int]().tot())\n"
+            "struct G[T]:\n    v: T\nfn mkl[{own}]() -> List[G[{own}]]:\n    return []\nstruct H[T]:\n    fn tot(self, xs: List[G[T]] = mkl()[0..0]) -> int:\n        return xs.len()\nfn main():\n    print(H[int]().tot())\n"
         ));
         // The wrapped BOUND shape is enforced now too — it was accepted before, on both spellings.
         rejects(
@@ -15559,22 +15559,22 @@ main()
 
 #[test]
 fn slice_of_list_types_as_list() {
-    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[1:3]\n");
+    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[1..3]\n");
     // Optional bounds / step still type as the same container type.
-    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[1:]\n");
-    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[:3]\n");
-    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[::2]\n");
+    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[1..]\n");
+    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[..3]\n");
+    ok("xs := [1, 2, 3, 4]\nys: List[int] = xs[Range(None, None, 2)]\n");
     rejects(
-        "xs := [1, 2, 3, 4]\nys: str = xs[1:3]\n",
+        "xs := [1, 2, 3, 4]\nys: str = xs[1..3]\n",
         "cannot assign List[int] to variable of type str",
     );
 }
 
 #[test]
 fn slice_of_str_types_as_str() {
-    ok("s := \"hello\"\nt: str = s[0:2]\n");
+    ok("s := \"hello\"\nt: str = s[0..2]\n");
     rejects(
-        "s := \"hello\"\nn: int = s[0:2]\n",
+        "s := \"hello\"\nn: int = s[0..2]\n",
         "cannot assign str to variable of type int",
     );
 }
@@ -15582,22 +15582,22 @@ fn slice_of_str_types_as_str() {
 #[test]
 fn slice_bounds_must_be_int() {
     rejects(
-        "xs := [1, 2, 3]\nys := xs[\"a\":2]\n",
+        "xs := [1, 2, 3]\nys := xs[\"a\"..2]\n",
         "slice bound must be int, found str",
     );
     rejects(
-        "xs := [1, 2, 3]\nys := xs[0:\"b\"]\n",
+        "xs := [1, 2, 3]\nys := xs[0..\"b\"]\n",
         "slice bound must be int, found str",
     );
     rejects(
-        "xs := [1, 2, 3]\nys := xs[::\"c\"]\n",
+        "xs := [1, 2, 3]\nys := xs[Range(None, None, \"c\")]\n",
         "slice bound must be int, found str",
     );
 }
 
 #[test]
 fn map_is_not_sliceable() {
-    rejects("m: Map[int, int] = {}\nx := m[0:2]\n", "cannot slice");
+    rejects("m: Map[int, int] = {}\nx := m[0..2]\n", "cannot slice");
 }
 
 const BUF: &str = "\
@@ -15627,10 +15627,12 @@ fn struct_index_assign_ok() {
 
 #[test]
 fn struct_slice_ok() {
-    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[0:2]\n"));
+    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[0..2]\n"));
     // Optional bounds / step all route through the same protocol method.
-    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[:]\n"));
-    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[::-1]\n"));
+    ok(&format!("{BUF}b := Buf([1, 2, 3])\nc: Buf = b[..]\n"));
+    ok(&format!(
+        "{BUF}b := Buf([1, 2, 3])\nc: Buf = b.reversed()\n"
+    ));
 }
 
 #[test]
@@ -15665,7 +15667,7 @@ struct NS:
         return self.xs[k]
 ";
     rejects(
-        &format!("{no_slice}b := NS([1, 2, 3])\nc := b[0:2]\n"),
+        &format!("{no_slice}b := NS([1, 2, 3])\nc := b[0..2]\n"),
         "cannot slice NS",
     );
 }
@@ -15708,7 +15710,7 @@ struct BadSlice:
         return self.xs.len()
 ";
     rejects(
-        &format!("{bad}b := BadSlice([1, 2, 3])\nc := b[0:2]\n"),
+        &format!("{bad}b := BadSlice([1, 2, 3])\nc := b[0..2]\n"),
         "cannot slice BadSlice",
     );
     // Old 2-arg `slice(self, int, int)` is no longer a conforming `Slice` impl.
@@ -15719,7 +15721,7 @@ struct TwoArg:
         return self.xs.len()
 ";
     rejects(
-        &format!("{two_arg}b := TwoArg([1, 2, 3])\nc := b[0:2]\n"),
+        &format!("{two_arg}b := TwoArg([1, 2, 3])\nc := b[0..2]\n"),
         "cannot slice TwoArg",
     );
 }
@@ -15747,7 +15749,7 @@ fn generic_indexset_rejects_str() {
 fn generic_over_slice_protocol_ok() {
     // A struct AND a built-in list both satisfy `Slice[R]`; the bound recovers `R`.
     ok(&format!(
-        "{BUF}fn mid[C: Slice[R], R](c: C) -> R:\n    return c[1:2]\n\
+        "{BUF}fn mid[C: Slice[R], R](c: C) -> R:\n    return c[1..2]\n\
          b := Buf([1, 2, 3])\nc: Buf = mid(b)\nd: List[int] = mid([1, 2, 3])\n"
     ));
 }
@@ -20116,7 +20118,7 @@ fn lifecycle_name_in_non_suite_struct_not_validated() {
 fn bytes_literal_infers_bytes_and_protocols() {
     // literal infers `bytes`; b[i] -> int; b[a:b] -> bytes; for c in b -> int; len -> int
     ok(
-        "fn main():\n    b := b\"hi\"\n    x: int = b[0]\n    s: bytes = b[0:1]\n    for c in b:\n        print(c)\n    n: int = b.len()\n    print(x + n)\nmain()\n",
+        "fn main():\n    b := b\"hi\"\n    x: int = b[0]\n    s: bytes = b[0..1]\n    for c in b:\n        print(c)\n    n: int = b.len()\n    print(x + n)\nmain()\n",
     );
 }
 
@@ -20151,7 +20153,7 @@ fn bytearray_constructor_and_ty() {
     // `bytearray([..])` infers `bytearray`; ba[i] -> int; ba[i] = int ok; ba[a:b] -> bytearray;
     // for x in ba -> int; len ok.
     ok(
-        "fn main():\n    ba := bytearray([1, 2, 3])\n    x: int = ba[0]\n    ba[0] = 5\n    s: bytearray = ba[0:1]\n    for c in ba:\n        print(c)\n    n: int = ba.len()\n    print(x + n)\nmain()\n",
+        "fn main():\n    ba := bytearray([1, 2, 3])\n    x: int = ba[0]\n    ba[0] = 5\n    s: bytearray = ba[0..1]\n    for c in ba:\n        print(c)\n    n: int = ba.len()\n    print(x + n)\nmain()\n",
     );
 }
 
@@ -23240,7 +23242,7 @@ fn index_and_slice_on_a_protocol_existential() {
         "struct S:\n    xs: List[int]\n    fn index(self, k: int) -> int:\n        return self.xs[k]\nfn read(o: Index[int, int]) -> int:\n    return o[0]\nfn main():\n    print(read(S([7])))\nmain()\n",
     );
     ok(
-        "struct S:\n    xs: List[int]\n    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:\n        return self.xs\nfn cut(o: Slice[List[int]]) -> List[int]:\n    return o[0:1]\nfn main():\n    print(cut(S([7])))\nmain()\n",
+        "struct S:\n    xs: List[int]\n    fn slice(self, start: int? = None, end: int? = None, step: int? = None) -> List[int]:\n        return self.xs\nfn cut(o: Slice[List[int]]) -> List[int]:\n    return o[0..1]\nfn main():\n    print(cut(S([7])))\nmain()\n",
     );
     // The key type still has to match.
     rejects(
@@ -29696,7 +29698,7 @@ fn witness_member_not_reachable_by_fixed_arity_dispatch_rejected() {
     );
     entry_rejects(
         &format!(
-            "{head}struct S:\n    n: int\n    fn slice[T: Default](self, a: int?, b: int?, c: int?) -> int:\n        x := T.default()\n        return 1\nfn main():\n    print(S(1)[0:1])\nmain()\n"
+            "{head}struct S:\n    n: int\n    fn slice[T: Default](self, a: int?, b: int?, c: int?) -> int:\n        x := T.default()\n        return 1\nfn main():\n    print(S(1)[0..1])\nmain()\n"
         ),
         "cannot slice S",
     );
@@ -34218,7 +34220,7 @@ fn resolution_records_local_for_a_closure_named_like_a_builtin() {
 #[test]
 fn resolution_records_fn_for_a_recursive_call_inside_fn_named_like_an_alias() {
     let r = head_resolution(
-        "struct P:\n    x: int\ntype Q = P\nfn Q(s: str) -> P:\n    if s == \"\":\n        return P(0)\n    return Q(s[1:])\nprint(Q(\"abc\"))\n",
+        "struct P:\n    x: int\ntype Q = P\nfn Q(s: str) -> P:\n    if s == \"\":\n        return P(0)\n    return Q(s[1..])\nprint(Q(\"abc\"))\n",
         7,
         12,
     );
@@ -35448,7 +35450,7 @@ fn hook_param_name_grid() {
         cells.push((
             "slice".to_string(),
             format!("    fn slice(self, {a}: int?, {b}: int?, {c}: int?) -> int:\n        return self.n\n"),
-            "print(V(1)[1:2])\n".to_string(),
+            "print(V(1)[1..2])\n".to_string(),
             bad.then_some("a"),
         ));
     }
@@ -36946,7 +36948,7 @@ fn untyped_constant_width_grid() {
         "xs: List[int8] = [1]\nfn take(v: int8) -> None:\n    pass\ntake(xs[200])\n",
         "xs: List[int8] = [1]\nfn r() -> int8:\n    return xs[200]\nprint(r())\n",
         "xs: List[int8] = [1]\nx: int8 = xs[200] + 1\nprint(x)\n",
-        "xs: List[int8] = [1]\nx: int8 = xs[0:200][0]\nprint(x)\n",
+        "xs: List[int8] = [1]\nx: int8 = xs[0..200][0]\nprint(x)\n",
         "s := \"abc\"\nn: int8 = s[200].len()\nprint(n)\n",
     ] {
         run("int8", body, "", None);

@@ -93,7 +93,7 @@ fn reader(w: RwShared[State], xs: ConcurrentList[int], m: ConcurrentMap[int, int
             # The list only grows and item i is i, at every moment.
             if some_or(xs.at(n - 1), -1) != n - 1:
                 bad.add(1)
-            sl := xs.slice(0, 2)
+            sl := xs[0..2]
             if sl.len() > 0 and sl[0] != 0:
                 bad.add(1)
             if some_or(m.get(0), -1) != 0 or not m.contains(0) or not st.contains(0):

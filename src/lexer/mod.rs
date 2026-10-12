@@ -3543,7 +3543,7 @@ mod tests {
             h.spec.clone()
         };
         assert_eq!(spec_of("s = \"{x}\"\n"), None);
-        assert_eq!(spec_of("s = \"{x[1:2]}\"\n"), None);
+        assert_eq!(spec_of("s = \"{x[1..2]}\"\n"), None);
         assert_eq!(spec_of("s = \"{m[':']}\"\n"), None);
         assert_eq!(
             spec_of("s = \"{x:>4}\"\n"),
