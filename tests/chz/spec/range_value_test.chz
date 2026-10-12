@@ -145,7 +145,7 @@ test fn match_patterns_take_half_open_and_inclusive_ranges():
     assert grade(90) == "A"
 
 test fn contains_tests_the_bounds_before_the_step_alignment():
-    # CPython: 9223372036854775807 in CPython's Range(-1, 5, 2) twin is False (no overflow).
+    # CPython gives False for the top of int in this range, with no overflow.
     top := 9223372036854775807
     bottom := -9223372036854775808
     assert not (top in Range(-1, 5, 2))
