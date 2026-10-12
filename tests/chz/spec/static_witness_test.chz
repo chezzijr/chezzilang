@@ -810,7 +810,7 @@ test fn a_member_witness_reaches_a_spawn_block_in_its_own_body():
 
 fn gen_defaults[T: Default](x: T, n: int) -> Iterator[T]:
     f := fn() -> T: T.default()
-    for i in range(n):
+    for i in 0..n:
         yield f()
 
 test fn a_generators_closure_reaches_the_witness():

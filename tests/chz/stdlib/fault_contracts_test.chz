@@ -31,12 +31,12 @@ import std.os
 import std.concurrency
 
 test fn range_faults():
-    r1 := recover: range(0, 5, 0)
+    r1 := recover: List(Range(0, 5, 0))
     match r1:
         ?_: assert false, "step 0 must fault"
         !e: assert e.message() == "range() step cannot be zero"
     # a computed length past the 10M cap faults BEFORE materializing (no OOM/hang)
-    r2 := recover: range(0, 20000000)
+    r2 := recover: List(0..20000000)
     match r2:
         ?_: assert false, "20M elements must exceed the cap"
         !e: assert e.message() == "range() length 20000000 exceeds the maximum of 10000000"

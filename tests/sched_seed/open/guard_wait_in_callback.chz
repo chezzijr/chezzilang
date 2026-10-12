@@ -11,7 +11,7 @@ fn bump(box: Shared[List[str]], tag: str) -> int:
 fn main():
     box := Shared[List[str]]([])
     parallel:
-        for c in range(4):
+        for c in 0..4:
             spawn:
                 _r := [0, 1, 2].map(fn(k: int) -> int: bump(box, "c{c}.{k}"))
     print(" ".join(box.get()))

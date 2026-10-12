@@ -392,7 +392,6 @@ fn describe_extern_type(t: &Type) -> String {
 /// hovering `None` for v1.) Mirrors `compiler::is_builtin` + the constructor/`print` special cases.
 const RESERVED_CALLABLE: &[&str] = &[
     // builtins (mirrors compiler::is_builtin)
-    "range",
     "int",
     "float",
     "bool",
@@ -570,11 +569,6 @@ pub(crate) const PRELUDE: &[PreludeFn] = &[
     // return typing); `builtin_container_sig` supplies only the FLAT DISPLAY/PLACEHOLDER sig used for
     // hover/value-position. `range` is a Ctor row but NON-generic (`name_is_generic` false), so
     // `range[int]()` still errors in `infer_named_call` — table membership is orthogonal to genericity.
-    PreludeFn {
-        name: "range",
-        intrinsic: Intrinsic::Ctor,
-        first_class: false,
-    },
     PreludeFn {
         name: "List",
         intrinsic: Intrinsic::Ctor,
@@ -4602,9 +4596,6 @@ fn builtin_container_sig(name: &str) -> Option<FnSig> {
     // fallback) — the last synthetic Rust sig, retired. Only the generic container/runtime ctors, whose
     // type-arg-driven identity is not a flat `FnSig`, remain here.
     let (params, ret) = match name {
-        // Overloads `range(end)` / `range(start, end)` / `range(start, end, step)` collapse to the
-        // canonical `range(end)`.
-        "range" => (vec![Ty::Int], Ty::list(Ty::Int)),
         // Container constructors --------------------------------------------------------------
         // Element/key/value types are inferred from the argument → `?` slots.
         "List" => (vec![Ty::Unknown], Ty::list(Ty::Unknown)),
@@ -4703,8 +4694,8 @@ fn builtin_type_doc(name: &str) -> Option<String> {
             Some(READER_METHODS),
         ),
         // Types without a built-in method table (usage line only) --------------------------------
-        "range" => (
-            "end-exclusive sequence of ints — range(end) / range(start, end) / range(start, end, step)",
+        "Range" => (
+            "a range of ints as a value — a..b, a..=b, ..b, a.., or Range(start, end, step); iterable, `in`, slices",
             None,
         ),
         "tuple" => (

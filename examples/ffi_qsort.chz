@@ -34,12 +34,12 @@ n := data.len()
 # Lay out a C int64[n] buffer and fill it from the list.
 buf := ffi.alloc(n * 8)
 defer ffi.free(buf)
-for i in range(n):
+for i in 0..n:
     ffi.store_int64_at(buf, i * 8, data[i])
 
 # Sort in place: libc qsort calls `cmp` for each pair, which derefs the Chezzi-side load builtins.
 qsort(buf, n, 8, cmp)
 
 # Read the sorted values back out and print them.
-for i in range(n):
+for i in 0..n:
     print(ffi.load_int64_at(buf, i * 8))

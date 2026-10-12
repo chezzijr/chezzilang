@@ -172,7 +172,7 @@ extern "libc.so.6":
 fn handler(sig: int) -> int:
     return 0
 
-for i in range(20000):
+for i in 0..20000:
     print(i)
 print("about to raise")
 h := signal(10, handler)
@@ -295,7 +295,7 @@ fn cb(x: int) -> int:
 
 bad := "a" + chr(0) + "b"
 errs := 0
-for i in range({iters}):
+for i in 0..{iters}:
     r := recover: puts(cb, bad)
     match r:
         ?v: pass
@@ -390,7 +390,7 @@ if rc != 0:
 buf := ffi.alloc(16)
 ffi.store_int64_at(buf, 0, 9)
 ffi.store_int64_at(buf, 8, 4)
-for i in range(2000000):
+for i in 0..2000000:
     r := recover: qsort(buf, 2, 8, cmp)
     match r:
         ?v: pass

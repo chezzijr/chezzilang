@@ -39,7 +39,7 @@ fn pmap[T, U](xs: List[T], f: fn(T) -> U) -> List[U]:
     n := xs.len()
     results := Channel[_PmapCell[U]]()
     parallel:
-        for i in range(0, n):
+        for i in 0..n:
             x := xs[i]
             spawn:
                 results.send(_PmapCell(idx=i, val=f(x)))
@@ -54,10 +54,10 @@ fn pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]:
     results := Channel[_PmapCell[U]]()
     # Semaphore: a token bucket seeded with `limit` permits. `recv` acquires, `send` releases.
     sem := Channel[int]()
-    for _ in range(0, limit):
+    for _ in 0..limit:
         sem.send(0)
     parallel:
-        for i in range(0, n):
+        for i in 0..n:
             x := xs[i]
             spawn:
                 # acquire a permit (blocks while `limit` tasks already run `f`), run, then release
@@ -70,7 +70,7 @@ fn pmap_limited[T, U](xs: List[T], f: fn(T) -> U, limit: int) -> List[U]:
 # `n` sends by the time this runs (the nursery has joined), so no `recv` here blocks.
 fn _collect_sorted[U](results: Channel[_PmapCell[U]], n: int) -> List[U]:
     cells: List[_PmapCell[U]] = []
-    for _ in range(0, n):
+    for _ in 0..n:
         cells.push(results.recv())
     cells.sort_by_key(fn(c: _PmapCell[U]) -> int: c.idx)
     out: List[U] = []

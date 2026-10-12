@@ -2348,7 +2348,7 @@ fn bounded_channel_fanout_golden_both_engines() {
                \x20   c := Channel[int](2)\n\
                \x20   parallel:\n\
                \x20       spawn:\n\
-               \x20           for i in range(0, 5):\n\
+               \x20           for i in 0..5:\n\
                \x20               c.send(i)\n\
                \x20           c.close()\n\
                \x20       spawn:\n\
@@ -2383,7 +2383,7 @@ fn wait_send_arm_park_wake_stress_parallel() {
                \x20   c := Channel[int](1)\n\
                \x20   parallel:\n\
                \x20       spawn:\n\
-               \x20           for i in range(0, 12):\n\
+               \x20           for i in 0..12:\n\
                \x20               wait:\n\
                \x20                   c.send(i): pass\n\
                \x20           c.close()\n\
@@ -2506,10 +2506,10 @@ fn bounded_channel_try_send_atomic_no_overfill_both_engines() {
                \x20   c.try_send(1)\n\
                fn main():\n\
                \x20   over := 0\n\
-               \x20   for trial in range(0, 200):\n\
+               \x20   for trial in 0..200:\n\
                \x20       c := Channel[int](1)\n\
                \x20       parallel:\n\
-               \x20           for k in range(0, 16):\n\
+               \x20           for k in 0..16:\n\
                \x20               spawn producer(c)\n\
                \x20       if c.len() > 1:\n\
                \x20           over = over + 1\n\
@@ -2916,7 +2916,7 @@ fn task_submit_get_submission_order_both_engines() {
                fn main():\n\
                \x20   ex := Executor()\n\
                \x20   ts: List[Task[int]] = []\n\
-               \x20   for i in range(1, 6):\n\
+               \x20   for i in 1..6:\n\
                \x20       x := i\n\
                \x20       ts.push(submit_task(ex, fn() -> int: work(x)))\n\
                \x20   ex.shutdown()\n\
@@ -2962,7 +2962,7 @@ fn executor_submit_result_both_engines() {
                fn main():\n\
                \x20   ex := Executor()\n\
                \x20   chs: List[Channel[int!]] = []\n\
-               \x20   for i in range(1, 6):\n\
+               \x20   for i in 1..6:\n\
                \x20       x := i\n\
                \x20       chs.push(ex.submit_result(fn() -> int: work(x)))\n\
                \x20   ex.shutdown()\n\
@@ -7994,7 +7994,7 @@ fn nursery_deadlock_headline_has_a_real_position() {
     let entry = dir.join("main.chz");
     std::fs::write(
         &entry,
-        "ch := Channel[int](1)\nfn main():\n    parallel:\n        spawn:\n            for i in range(5): ch.send(i)\n        spawn: print(ch.recv())\nmain()\n",
+        "ch := Channel[int](1)\nfn main():\n    parallel:\n        spawn:\n            for i in 0..5: ch.send(i)\n        spawn: print(ch.recv())\nmain()\n",
     )
     .unwrap();
     let (_o, _e, res, _c) = run_file(&entry);
@@ -15978,7 +15978,7 @@ fn executor_bounded_pipeline_is_not_mistaken_for_a_deadlock() {
 import std.concurrency
 a: Channel[int] = Channel[int](1)
 fn prod():
-    for i in range(0, 50):
+    for i in 0..50:
         a.send(i)
     a.close()
 fn cons():
@@ -16282,7 +16282,7 @@ import std.concurrency
 data := Channel[int](1)
 done := Channel[int](1)
 fn producer():
-    for i in range(300):
+    for i in 0..300:
         data.send(i)
     data.close()
 fn consumer():
@@ -16309,7 +16309,7 @@ fn server():
     resp.close()
 fn client():
     total := 0
-    for i in range(300):
+    for i in 0..300:
         req.send(i)
         total = total + resp.recv()
     req.close()
@@ -16762,7 +16762,7 @@ fn eager_handshake_is_driven_by_wakeups_not_by_the_poll_timeout() {
 import std.concurrency
 a: Channel[int] = Channel[int](1)
 fn prod():
-    for i in range(0, 200):
+    for i in 0..200:
         a.send(i)
     a.close()
 ex := Executor()
@@ -16952,13 +16952,13 @@ data: Channel[int] = Channel[int](1)
 other: Channel[int] = Channel[int](1)
 gate: Channel[bool] = Channel[bool](1)
 fn prod():
-    for i in range(0, 300):
+    for i in 0..300:
         _ := gate.recv()
         data.send(i)
 ex := Executor()
 ex.submit(prod)
 s := 0
-for i in range(0, 300):
+for i in 0..300:
     gate.send(true)
     wait:
         v := data.recv():
@@ -18932,7 +18932,7 @@ fn main():
         n = n + 1
         return n
     fs: List[fn() -> int] = [inc]
-    for i in range(0, 3000):
+    for i in 0..3000:
         fs.push(inc)
     s := ConcurrentList(RwShared(fs))
     c := 0
@@ -18964,7 +18964,7 @@ import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collect
 fn main():
     inner := [1]
     fs: List[List[int]] = [inner]
-    for i in range(0, 3000):
+    for i in 0..3000:
         fs.push(inner)
     s := ConcurrentList(RwShared(fs))
     c := 0
@@ -18994,13 +18994,13 @@ fn rwshared_at_over_an_aliased_store_stays_under_its_ceiling() {
 import std.concurrency
 import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collection
 fn main():
-    inner := List(range(0, 5000))
+    inner := List(0..5000)
     outer: List[List[int]] = [inner, inner]
-    for k in range(0, 8):
-        outer.push(List(range(0, 5000)))
+    for k in 0..8:
+        outer.push(List(0..5000))
     s := ConcurrentList(RwShared(outer))
     total := 0
-    for k in range(0, 5):
+    for k in 0..5:
         match s.at(1):
             ?v: total = total + v.len()
             None: total = total + 0
@@ -19076,7 +19076,7 @@ struct N:
 fn mk() -> N:
     head := N([1], None)
     cur := head
-    for i in range(5000):
+    for i in 0..5000:
         n := N([i], None)
         cur.next = ?n
         cur = n
@@ -19158,7 +19158,7 @@ fn airlock_doomed_skip_keeps_a_sibling_backref_and_the_program_crosses() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("k.chz"), "V := 41\n").unwrap();
     let entry = dir.join("main.chz");
-    let src = "import k\nstruct N:\n    next: N?\nstruct Last:\n    count: fn() -> int\n    tail: N\nstruct P:\n    next: P?\n    last: Last?\nstruct Holder:\n    gen: Iterator[int]\n    x: N\n    y: P\nfn make() -> fn() -> int:\n    p := [k]\n    fn count() -> int:\n        return p.len()\n    return count\nfn mk(k: int) -> N:\n    head := N(None)\n    cur := head\n    for i in range(k):\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    return head\nfn chain_to(k: int, tail: N) -> N:\n    head := N(None)\n    cur := head\n    for i in range(k):\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    cur.next = ?tail\n    return head\nfn nth(h: N, i: int) -> N:\n    cur := h\n    for j in range(i):\n        match cur.next:\n            ?n: cur = n\n            None: return cur\n    return cur\nfn drive(deep: N) -> Iterator[int]:\n    yield 1\n    match deep.next:\n        ?n: yield 2\n        None: yield 0\nfn build() -> Holder:\n    h := mk(3000)\n    y := P(None, ?Last(make(), h))\n    for i in range(2600):\n        y = P(?y, None)\n    return Holder(drive(chain_to(2500, h)), nth(h, 1000), y)\nholder: Holder = build()\nstarted := holder.gen.next()\nfn main():\n    r := recover:\n        parallel:\n            spawn:\n                print(\"crossed\")\n        0\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"err: {e.message()}\")\nmain()\n";
+    let src = "import k\nstruct N:\n    next: N?\nstruct Last:\n    count: fn() -> int\n    tail: N\nstruct P:\n    next: P?\n    last: Last?\nstruct Holder:\n    gen: Iterator[int]\n    x: N\n    y: P\nfn make() -> fn() -> int:\n    p := [k]\n    fn count() -> int:\n        return p.len()\n    return count\nfn mk(k: int) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    return head\nfn chain_to(k: int, tail: N) -> N:\n    head := N(None)\n    cur := head\n    for i in 0..k:\n        n := N(None)\n        cur.next = ?n\n        cur = n\n    cur.next = ?tail\n    return head\nfn nth(h: N, i: int) -> N:\n    cur := h\n    for j in 0..i:\n        match cur.next:\n            ?n: cur = n\n            None: return cur\n    return cur\nfn drive(deep: N) -> Iterator[int]:\n    yield 1\n    match deep.next:\n        ?n: yield 2\n        None: yield 0\nfn build() -> Holder:\n    h := mk(3000)\n    y := P(None, ?Last(make(), h))\n    for i in 0..2600:\n        y = P(?y, None)\n    return Holder(drive(chain_to(2500, h)), nth(h, 1000), y)\nholder: Holder = build()\nstarted := holder.gen.next()\nfn main():\n    r := recover:\n        parallel:\n            spawn:\n                print(\"crossed\")\n        0\n    match r:\n        ?v: print(\"ok\")\n        !e: print(\"err: {e.message()}\")\nmain()\n";
     std::fs::write(&entry, src).unwrap();
     let (vm_out, _e, vm_res, _) = run_file(&entry);
     let _ = std::fs::remove_dir_all(&dir);
@@ -19235,7 +19235,7 @@ struct Holder:
 fn mk(k: int) -> N:
     head := N([1], None)
     cur := head
-    for i in range(k):
+    for i in 0..k:
         n := N([i], None)
         cur.next = ?n
         cur = n
@@ -19243,7 +19243,7 @@ fn mk(k: int) -> N:
 fn chain_to(k: int, tail: N) -> N:
     head := N([0], None)
     cur := head
-    for i in range(k):
+    for i in 0..k:
         n := N([i], None)
         cur.next = ?n
         cur = n
@@ -19309,7 +19309,7 @@ struct N:
 fn mk(k: int) -> N:
     head := N(None)
     cur := head
-    for i in range(k):
+    for i in 0..k:
         n := N(None)
         cur.next = ?n
         cur = n
@@ -21161,7 +21161,7 @@ fn snapshot_cache_short_circuits_per_epoch_not_per_spawn() {
     );
     assert_eq!(
         snapshot_builds_for(
-            "q: List[int] = [1]\nparallel:\n    for i in range(50):\n        spawn: pass\n"
+            "q: List[int] = [1]\nparallel:\n    for i in 0..50:\n        spawn: pass\n"
         ),
         1,
         "50 spawns over an unmutated aggregate global: ONE build"
@@ -22694,7 +22694,7 @@ fn a_finished_executor_job_no_longer_vetoes_a_parked_nursery_task() {
 #[test]
 fn sequential_executor_round_trips_reuse_their_runner() {
     let vm = ran_standalone(
-        "ex := Executor()\nch := Channel[int](0)\nn := 0\nfor i in range(200):\n    ex.submit(fn(): ch.send(1))\n    n = n + ch.recv()\n",
+        "ex := Executor()\nch := Channel[int](0)\nn := 0\nfor i in 0..200:\n    ex.submit(fn(): ch.send(1))\n    n = n + ch.recv()\n",
     );
     let Obj::Module(m) = vm.heap.get(vm.module_objs[0]) else {
         panic!("module_objs[0] is the entry module");

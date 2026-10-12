@@ -182,6 +182,10 @@ pub const REMOVED_NAMES: [(&str, &str, &str, Option<&str>); 5] = [
     ),
 ];
 
+/// TICKET-253 -- the message of a call to the removed builtin `range`. `range` stays a reserved
+/// name only so that this message is reachable; nothing builds on it.
+const REMOVED_RANGE: &str = "`range()` is removed; write `0..n`, `a..b` or `Range(a, b, step)`; for a list write `List(0..n)`";
+
 /// TICKET-241 -- the one text for an `else` guard written where none exists (an assignment, a
 /// compound assignment, `return`). [`Parser::reject_else_guard`] is its only user.
 const ELSE_GUARD_PLACE: &str =
@@ -5161,6 +5165,12 @@ impl Parser {
             Token::NoneKw => ExprKind::NoneLit,
             Token::Ident(name) => {
                 self.reject_removed_name(&name, span)?;
+                if name == "range" && self.check(&Token::LParen) {
+                    return Err(ParseError {
+                        message: REMOVED_RANGE.to_string(),
+                        span,
+                    });
+                }
                 ExprKind::Ident(name)
             }
             Token::LParen => {

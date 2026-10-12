@@ -10,7 +10,7 @@ struct Table:
 
 fn table(n: int) -> Table:
     keys: List[int] = []
-    for i in range(n):
+    for i in 0..n:
         keys.push(i)
     return Table(keys, 0)
 
@@ -18,7 +18,7 @@ fn hits_of(t: Table) -> int:
     return t.hits
 
 fn reads(s: Shared[Table], calls: int, sink: AtomicInt):
-    for _ in range(calls):
+    for _ in 0..calls:
         sink.add(s.read(hits_of))
 
 for n in [1, 1000, 100000]:
@@ -29,7 +29,7 @@ for n in [1, 1000, 100000]:
         s := Shared(table(n))
         t0 := time.monotonic()
         parallel:
-            for _ in range(callers):
+            for _ in 0..callers:
                 spawn reads(s, each, sink)
         us := (time.monotonic() - t0) * 1000000.0 / float(each * callers)
         print("Shared.read|{n}|{callers}|{us}")

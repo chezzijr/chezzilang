@@ -1574,7 +1574,6 @@ impl Vm {
             return Err(self.err(message, sp).raised_by_panic());
         }
         let result = match name {
-            "range" => self.builtin_range(&args, span)?,
             "int" => self.builtin_int(&args, span)?,
             "float" => self.builtin_float(&args, span)?,
             "bool" => self.builtin_bool(&args, span)?,
@@ -2128,30 +2127,6 @@ impl Vm {
         Ok(Value::obj(
             self.heap.alloc(Obj::Bytes(bytes.into_boxed_slice())),
         ))
-    }
-
-    pub(super) fn builtin_range(
-        &mut self,
-        args: &[Value],
-        span: Span,
-    ) -> Result<Value, RuntimeError> {
-        let ints: Option<Vec<i64>> = args.iter().map(|v| self.int_val(*v)).collect();
-        let (start, end, step) = match ints.as_deref() {
-            Some([n]) => (0, *n, 1),
-            Some([a, b]) => (*a, *b, 1),
-            Some([a, b, s]) => (*a, *b, *s),
-            _ => {
-                return Err(self.err(
-                    "range() expects range(end), range(start, end), or range(start, end, step) of ints"
-                        .to_string(),
-                    span,
-                ));
-            }
-        };
-        let raw = crate::slice::range_values(start, end, step)
-            .map_err(|message| self.err(message, span))?;
-        let items: Vec<Value> = raw.into_iter().map(|n| self.make_int(n)).collect();
-        Ok(Value::obj(self.heap.alloc(Obj::List(items))))
     }
 
     pub(super) fn builtin_int(

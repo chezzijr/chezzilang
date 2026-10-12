@@ -350,7 +350,7 @@ fn gen_decls() -> String {
         ),
         (
             "comp",
-            "(d: int) -> Iterator[int]:\n    buf: List[List[List[int]]] = [[[0]] for _i in range(1)]\n",
+            "(d: int) -> Iterator[int]:\n    buf: List[List[List[int]]] = [[[0]] for _i in 0..1]\n",
             "buf",
             false,
         ),
@@ -811,7 +811,7 @@ fn main():
     r := Channel[str](32)
     parallel:
         spawn w2(r, "a named-first 0", [xs, []], 0)
-        spawn w2(r, "c comp-named 0", [xs for _i in range(2)], 0)
+        spawn w2(r, "c comp-named 0", [xs for _i in 0..2], 0)
         spawn w2(r, "d alias-twice 1", [xs, xs], 1)
         spawn wopt(r, "e named-opt", opt)
         spawn wopt(r, "f wrap-named", xs)
@@ -820,7 +820,7 @@ fn main():
         spawn wtup(r, "i tuple 0", (xs, []), 0)
         spawn w2(r, "k copy-child 0", [xs].copy(), 0)
     out: List[str] = []
-    for _i in range(9):
+    for _i in 0..9:
         out.push(r.recv())
     out.sort()
     for s in out:

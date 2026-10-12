@@ -45,7 +45,7 @@ test fn a_struct_cycle_through_lists_matches_the_dataclass_rendering():
 
 test fn a_deep_acyclic_nest_still_faults_recoverably():
     x: Any = 0
-    for _ in range(12000):
+    for _ in 0..12000:
         x = [x]
     r := recover: str(x)
     match r:
@@ -54,7 +54,7 @@ test fn a_deep_acyclic_nest_still_faults_recoverably():
 
 test fn a_faulted_render_leaves_no_open_object_behind():
     x: Any = 0
-    for _ in range(12000):
+    for _ in 0..12000:
         x = [x]
     first := recover: str(x)
     match first:

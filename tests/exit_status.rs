@@ -175,7 +175,7 @@ fn closing_a_listener_wakes_a_parked_accept() {
         "main.chz",
         r#"import std.net
 fn main() -> None!:
-    for _i in range(200):
+    for _i in 0..200:
         ln := net.listen("127.0.0.1:0")?
         parallel:
             spawn:
@@ -222,7 +222,7 @@ fn closing_a_socket_wakes_a_parked_read() {
 fn main() -> None!:
     ln := net.listen("127.0.0.1:0")?
     addr := ln.addr()?
-    for _i in range(200):
+    for _i in 0..200:
         c := net.connect(addr)?
         _s := ln.accept()?
         parallel:
@@ -723,7 +723,7 @@ fn keep(a: int, b: int) -> int:
 
 ex := Executor()
 ex.submit(bail)
-n := range(0, 10000000).map(double).fold(0, keep)
+n := List(0..10000000).map(double).fold(0, keep)
 print("main hof finished {{n}}")
 "#
         ),
@@ -813,7 +813,7 @@ fn cleanup():
     i := 0
     while i < 3000000:
         i = i + 1
-    n := range(0, 1000000).map(double).fold(0, keep)
+    n := List(0..1000000).map(double).fold(0, keep)
     print("DEFER EXIT {{i}} {{n}}")
 
 fn sib():
@@ -1222,7 +1222,7 @@ test fn loop_spins():
     assert total > 0
 
 test fn hof_spins():
-    total := range(0, 10000000).map(double).fold(0, add)
+    total := List(0..10000000).map(double).fold(0, add)
     assert total > 0
 "#,
     );
@@ -1340,7 +1340,7 @@ test fn hof_completes():
     doubled := xs.map(double)
     assert doubled == [2, 4, 6, 8, 10]
     assert xs.fold(0, add) == 15
-    assert range(0, 1000).map(double).fold(0, add) == 999000
+    assert List(0..1000).map(double).fold(0, add) == 999000
 "#,
     );
     for args in [

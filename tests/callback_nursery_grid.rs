@@ -300,7 +300,7 @@ fn named_cells_p1b_p3_p5() {
 const I6N2: &str = "fn main():
     out := Channel[int](0)
     parallel:
-        for i in range(2):
+        for i in 0..2:
             spawn:
                 r := recover:
                     parallel:
@@ -311,7 +311,7 @@ const I6N2: &str = "fn main():
                     ?_: out.send(0)
                     !e: out.send(1)
         t := 0
-        for i in range(2):
+        for i in 0..2:
             t = t + out.recv()
         print(\"t {t}\")
 main()
@@ -327,14 +327,14 @@ const I6N2_IN_CALLBACK: &str = "fn inner(x: int) -> int:
 fn main():
     out := Channel[int](0)
     parallel:
-        for i in range(2):
+        for i in 0..2:
             spawn:
                 r := recover: [1].map(inner)
                 match r:
                     ?_: out.send(0)
                     !e: out.send(1)
         t := 0
-        for i in range(2):
+        for i in 0..2:
             t = t + out.recv()
         print(\"t {t}\")
 main()

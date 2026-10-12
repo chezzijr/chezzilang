@@ -99,7 +99,7 @@ const NURSERY_IN_SPAWN_CHILD_FAULT: &str = r#"fn run():
             for _v in c:
                 pass
 fn main():
-    for _k in range(0, 50):
+    for _k in 0..50:
         run()
     print("done")
 main()
@@ -139,7 +139,7 @@ fn run():
     started := Channel[int](1)
     _r := recover: outer(c, started)
 fn main():
-    for _k in range(0, 400):
+    for _k in 0..400:
         run()
     print("done")
 main()

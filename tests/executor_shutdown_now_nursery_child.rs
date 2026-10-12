@@ -220,7 +220,7 @@ fn shutdown_now_races_a_parked_nursery_child_at_one_worker() {
                     ready.send(1)\n            \
                     never.recv()\n\
         fn main():\n    \
-            for i in range(20):\n        \
+            for i in 0..20:\n        \
                 never := Channel[int](0)\n        \
                 ready := Channel[int](1)\n        \
                 ex := Executor()\n        \

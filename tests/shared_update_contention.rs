@@ -11,9 +11,9 @@ fn inc(n: int) -> int:
 fn main():
     s := Shared[int](0)
     parallel:
-        for _ in range(6):
+        for _ in 0..6:
             spawn:
-                for _ in range(2000):
+                for _ in 0..2000:
                     s.update(inc)
     print(s.get())
 main()

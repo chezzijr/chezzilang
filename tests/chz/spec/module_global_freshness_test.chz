@@ -355,7 +355,7 @@ test fn defer_reads_a_global_during_teardown():
 test fn nursery_in_a_loop_pins_per_iteration():
     seen := Shared(0)
     total := 0
-    for i in range(10):
+    for i in 0..10:
         loopg = i
         parallel:
             spawn: seen.set(loopg)
@@ -406,7 +406,7 @@ test fn every_in_place_mutation_door_refreshes_the_next_tasks_view():
         spawn: seen.send(view213())
         spawn: seen.send(view213())
     got: List[str] = []
-    for _ in range(11):
+    for _ in 0..11:
         got.push(seen.recv())
     got.sort()
     want := ["1 1 1 1 1 1 1 2 1", "2 1 1 1 1 1 1 2 1", "2 2 1 1 1 1 1 2 1", "2 2 2 1 1 1 1 2 1", "2 2 2 2 1 1 1 2 1", "2 2 2 2 2 1 1 2 1", "2 2 2 2 2 2 1 2 1", "2 2 2 2 2 2 2 2 1", "2 2 2 2 2 2 2 1 1", "2 2 2 2 2 2 2 1 2", "2 2 2 2 2 2 2 1 2"]

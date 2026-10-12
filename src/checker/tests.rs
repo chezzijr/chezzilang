@@ -1637,7 +1637,7 @@ fn a_fresh_binding_of_the_name_untaints_it() {
     // NEIGHBOUR: a loop whose variable is a DIFFERENT name must still warn — the untaint is keyed on
     // the name bound, not on "a binding happened".
     rejects(
-        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    for i in range(2):\n        print(xs.len())\nf()\n",
+        "fn f():\n    xs: List[int] = []\n    parallel:\n        spawn:\n            xs.push(1)\n    for i in 0..2:\n        print(xs.len())\nf()\n",
         "'xs' is this task's copy",
     );
 }
@@ -15243,8 +15243,8 @@ fn range_pattern_ok() {
 #[test]
 fn range_three_arg_typechecks() {
     // 1/2/3-arg `range()` of ints all type-check to `List[int]`; 0 or >3 args reject.
-    ok("fn main():\n    a: List[int] = range(0, 10, 2)\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: List[int] = range(10, 0, -1)\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[int] = List(Range(0, 10, 2))\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[int] = List(Range(10, 0, -1))\n    print(a.len())\nmain()\n");
     rejects("fn main():\n    print(range())\nmain()\n", "range");
     rejects(
         "fn main():\n    print(range(0, 1, 2, 3))\nmain()\n",
@@ -20229,11 +20229,11 @@ fn constructor_iter_types() {
     ok("fn main():\n    s := {1, 2}\n    a: List[int] = List(s)\n    print(a.len())\nmain()\n");
     ok("fn main():\n    a: List[int] = List(b\"hi\")\n    print(a.len())\nmain()\n");
     ok("fn main():\n    a: List[str] = List(\"ab\")\n    print(a.len())\nmain()\n");
-    ok("fn main():\n    a: List[int] = List(range(3))\n    print(a.len())\nmain()\n");
+    ok("fn main():\n    a: List[int] = List(0..3)\n    print(a.len())\nmain()\n");
     ok("fn main():\n    a: List[int] = List(bytearray([1, 2]))\n    print(a.len())\nmain()\n");
     // Set() broadened from list-only to any for-iterable.
     ok("fn main():\n    s: Set[str] = Set(\"abc\")\n    print(s.len())\nmain()\n");
-    ok("fn main():\n    s: Set[int] = Set(range(3))\n    print(s.len())\nmain()\n");
+    ok("fn main():\n    s: Set[int] = Set(0..3)\n    print(s.len())\nmain()\n");
     ok("fn main():\n    s: Set[int] = Set([1, 1, 2])\n    print(s.len())\nmain()\n");
     // Map() from a list of 2-tuples.
     ok(
@@ -28261,7 +28261,7 @@ fn range_sanctioned_positions_still_check() {
     );
     // the documented escape hatch: `range(a, b)` really does materialize a `List[int]`.
     entry_ok(
-        "fn main():\n    xs: List[int] = range(0, 3)\n    print(Set(range(0, 3)).len() + xs.len())\nmain()\n",
+        "fn main():\n    xs: List[int] = List(0..3)\n    print(Set(0..3).len() + xs.len())\nmain()\n",
     );
 }
 
@@ -33017,7 +33017,7 @@ fn int_never_widens_at_every_sink() {
         "enum E:\n    V(float)\n\nfn main():\n    print(E.V(1))\n".into(),
         "fn main():\n    o: float? = None\n    x: float = o ?? 1\n    print(x)\n".into(),
         "fn gen() -> Iterator[float]:\n    yield 1\n".into(),
-        "fn main():\n    l: List[float] = [i for i in range(3)]\n    print(l)\n".into(),
+        "fn main():\n    l: List[float] = [i for i in 0..3]\n    print(l)\n".into(),
         "fn g(a: float = 3) -> float: a\n".into(),
         "struct S:\n    a: float = 3\n".into(),
         "fn main():\n    g := fn() -> float: 3\n    print(g())\n".into(),

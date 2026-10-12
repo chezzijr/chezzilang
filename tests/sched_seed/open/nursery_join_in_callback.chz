@@ -1,21 +1,21 @@
 fn work(tag: str, ch: Channel[str]) -> int:
     parallel:
-        for i in range(3):
+        for i in 0..3:
             spawn:
-                for j in range(3):
+                for j in 0..3:
                     ch.send("{tag}{i}.{j}")
     return 0
 fn main():
     ch := Channel[str](16)
     res := Channel[str](4)
     parallel:
-        for c in range(3):
+        for c in 0..3:
             spawn:
                 _got := [0, 1, 2].map(fn(k: int) -> int: work("c{c}k{k}:", ch))
                 res.send("done{c}")
         spawn:
             out: List[str] = []
-            for _ in range(81):
+            for _ in 0..81:
                 out.push(ch.recv())
             print(" ".join(out))
     print(res.recv())

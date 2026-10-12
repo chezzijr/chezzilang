@@ -5,10 +5,10 @@ fn main():
     pong := Channel[int](0)
     parallel:
         spawn:
-            for _ in range(200000):
+            for _ in 0..200000:
                 pong.send(ping.recv() + 1)
         n := 0
-        for _ in range(200000):
+        for _ in 0..200000:
             ping.send(n)
             n = pong.recv()
         print(n)

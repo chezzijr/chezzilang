@@ -567,9 +567,9 @@ fn main():
     parallel:
         spawn:
             burn(200000)
-            for _ in range(3):
+            for _ in 0..3:
                 ch.recv()
-        for i in range(3):
+        for i in 0..3:
             ch.send(i)
         print(\"send ok\")
 main()
@@ -1138,7 +1138,7 @@ main()
 /// Must complete at every worker count.
 const TWO_RECOVERERS_NO_FAN_IN: &str = "fn main():
     parallel:
-        for i in range(2):
+        for i in 0..2:
             spawn:
                 r := recover:
                     parallel:
@@ -1548,13 +1548,13 @@ fn main():
     ch := Channel[int](0)
     parallel:
         spawn:
-            for i in range(3):
+            for i in 0..3:
                 ch.send(i)
             print(\"sender resumed\")
         spawn:
-            for i in range(3):
+            for i in 0..3:
                 t := 0
-                for j in range(200000):
+                for j in 0..200000:
                     t += j
                 v := ch.recv()
             s := io.input(\"\")
@@ -1632,7 +1632,7 @@ fn a_rendezvous_wake_does_not_wait_for_the_receivers_blocking_native() {
 const TWO_RECOVERERS_FAN_IN: &str = "fn main():
     out := Channel[int](0)
     parallel:
-        for i in range(2):
+        for i in 0..2:
             spawn:
                 r := recover:
                     parallel:
@@ -1643,7 +1643,7 @@ const TWO_RECOVERERS_FAN_IN: &str = "fn main():
                     ?_: out.send(0)
                     !e: out.send(1)
         t := 0
-        for i in range(2):
+        for i in 0..2:
             t = t + out.recv()
         print(\"t {t}\")
 main()

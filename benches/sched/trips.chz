@@ -4,7 +4,7 @@ fn f() -> int:
     return 1
 ex := Executor()
 s := 0
-for _ in range(2000):
+for _ in 0..2000:
     r := submit_task(ex, f).get()
     s += 1
 ex.shutdown()

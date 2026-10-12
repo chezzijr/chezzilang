@@ -38,7 +38,7 @@ fn try_escape(log: Shared[str]) -> int!str:
 
 fn loop_escape(log: Shared[str]) -> int:
     n := 0
-    for k in range(3):
+    for k in 0..3:
         ch := Channel[int]()
         parallel:
             spawn: park(ch)

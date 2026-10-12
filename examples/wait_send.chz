@@ -36,7 +36,7 @@ fn main():
     c := Channel[int](1)
     parallel:
         spawn:
-            for i in range(0, 5):
+            for i in 0..5:
                 wait:
                     c.send(i): pass
             c.close()

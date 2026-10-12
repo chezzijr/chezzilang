@@ -87,7 +87,7 @@ test fn inline_spawn_call_inside_parallel():
     on := true
     parallel:
         if on: spawn put(c, 1)
-        for i in range(2): spawn put(c, i + 2)
+        for i in 0..2: spawn put(c, i + 2)
     assert c.recv() + c.recv() + c.recv() == 6
 
 test fn inline_spawn_call_in_a_match_arm():

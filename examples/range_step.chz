@@ -1,25 +1,25 @@
-# range() stepping + range-slicing golden. Covers the 3-arg range form (up / down / by-N),
-# the empty / wrong-direction cases, and slicing a range literal with a step.
+# Range stepping golden. `Range(a, b, step)` is the only place for a step; `a..b` has none. Covers the
+# 3-argument form (up / down / by-N), the empty / wrong-direction cases, and slicing a list with a step.
 fn main():
-    # 3-arg range, counting up (half-open [start, end)).
-    print(range(0, 10, 2))
-    print(range(1, 7, 3))
+    # `Range(start, end, step)` counting up (half-open [start, end)).
+    print(List(Range(0, 10, 2)))
+    print(List(Range(1, 7, 3)))
 
-    # 3-arg range, counting down with a negative step (still excludes end).
-    print(range(10, 0, -1))
-    print(range(10, 2, -3))
+    # Counting down with a negative step (still excludes end).
+    print(List(Range(10, 0, -1)))
+    print(List(Range(10, 2, -3)))
 
     # Empty cases: start == end, and a wrong-direction step.
-    print(range(5, 5, 1))
-    print(range(0, 10, -1))
-    print(range(10, 0, 1))
+    print(List(Range(5, 5, 1)))
+    print(List(Range(0, 10, -1)))
+    print(List(Range(10, 0, 1)))
 
-    # The 1-arg and 2-arg forms still work unchanged.
-    print(range(3))
-    print(range(2, 5))
+    # The literal forms: `0..n` and `a..b`.
+    print(List(0..3))
+    print(List(2..5))
 
-    # Slicing a range literal reuses the list step machinery.
-    print((0..10)[Range(None, None, 2)])
-    print((0..10)[Range(1, 8, 3)])
-    print((0..5).reversed())
+    # Slicing a list takes a range value; a step goes through the constructor.
+    print(List(0..10)[Range(None, None, 2)])
+    print(List(0..10)[Range(1, 8, 3)])
+    print(List(0..5).reversed())
 main()

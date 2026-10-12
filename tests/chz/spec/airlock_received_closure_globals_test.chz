@@ -105,7 +105,7 @@ struct DeepL:
 
 fn build_deep(d: int) -> DeepL:
     n := DeepL([])
-    for _ in range(d):
+    for _ in 0..d:
         n = DeepL([n])
     return n
 
@@ -113,7 +113,7 @@ deep_glob := build_deep(2000)
 
 test fn deep_module_global_nursery_opens_stay_linear():
     t0 := time.monotonic()
-    for i in range(6):
+    for i in 0..6:
         parallel:
             spawn:
                 pass

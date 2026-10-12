@@ -87,7 +87,7 @@ fn worker(jobs: Channel[(str, int)], report: Channel[int], tok: cancel.Token,
 # =====================================================================================================
 fn shard_fold(lo: int, hi: int, out: Channel[int]):
     acc := 0
-    for i in range(lo, hi):
+    for i in lo..hi:
         acc = acc + value(i) * (i + 1)
     out.send(acc)
 
@@ -178,7 +178,7 @@ fn main():
     parallel:
         # producer: fan the whole dataset out, then close the queue
         spawn:
-            for i in range(0, n):
+            for i in 0..n:
                 jobs.send((cats[i % 4], value(i)))
             jobs.close()
         # a small worker pool (spawn <expr> form)
@@ -197,7 +197,7 @@ fn main():
     seq_sum := 0
     seq_count: Map[str, int] = {}
     seq_max: Map[str, int] = {}
-    for i in range(0, n):
+    for i in 0..n:
         c := cats[i % 4]
         v := value(i)
         seq_sum = seq_sum + v
@@ -226,16 +226,16 @@ fn main():
     out := Channel[int]()
     shards := 4
     per := n / shards
-    for s in range(0, shards):
+    for s in 0..shards:
         lo := s * per
         hi := lo + per
         ex.submit(fn(): shard_fold(lo, hi, out))
     ex.shutdown()                          # drains the queue FIFO; partials land on `out`
     checksum := 0
-    for _ in range(0, shards):
+    for _ in 0..shards:
         checksum = checksum + out.recv()
     seq_checksum := 0
-    for i in range(0, n):
+    for i in 0..n:
         seq_checksum = seq_checksum + value(i) * (i + 1)
     check("p2.checksum", checksum, seq_checksum)
     # submit_result: bodied generic method on Executor — hands back a Channel[T!] carrying f()'s outcome

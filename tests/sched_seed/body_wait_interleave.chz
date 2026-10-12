@@ -3,14 +3,14 @@ fn main():
     b := Channel[str](1)
     out: List[str] = []
     parallel:
-        for i in range(4):
+        for i in 0..4:
             spawn:
-                for j in range(3):
+                for j in 0..3:
                     if i % 2 == 0:
                         a.send("a{i}.{j}")
                     else:
                         b.send("b{i}.{j}")
-        for _ in range(12):
+        for _ in 0..12:
             wait:
                 v := a.recv(): out.push(v)
                 w := b.recv(): out.push(w)

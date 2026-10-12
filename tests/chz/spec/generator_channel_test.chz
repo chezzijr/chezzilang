@@ -11,7 +11,7 @@ fn gen_over(c: Channel[int]) -> Iterator[int]:
 
 fn burn(n: int) -> int:
     s := 0
-    for i in range(n):
+    for i in 0..n:
         s += i % 7
     return s
 

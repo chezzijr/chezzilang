@@ -52,7 +52,7 @@ test fn a_fresh_arg_at_bit_31_is_writable():
 
 fn t179e_gen() -> Iterator[int]:
     acc: List[int] = []
-    for i in range(3):
+    for i in 0..3:
         acc.push(i)
         yield acc.len()
 

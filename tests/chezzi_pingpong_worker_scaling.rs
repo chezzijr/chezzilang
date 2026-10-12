@@ -112,11 +112,11 @@ fn pp():\n    \
     pong := Channel[int](0)\n    \
     parallel:\n        \
         spawn:\n            \
-            for i in range({n}):\n                \
+            for i in 0..{n}:\n                \
                 ping.send(i)\n                \
                 n := pong.recv()\n        \
         spawn:\n            \
-            for i in range({n}):\n                \
+            for i in 0..{n}:\n                \
                 v := ping.recv()\n                \
                 pong.send(v)\n\n\
 fn main():\n    \

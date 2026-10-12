@@ -13,7 +13,7 @@ fn must[T](r: T!) -> T:
 
 fn t190_gen() -> Iterator[int]:
     acc: List[int] = []
-    for i in range(3):
+    for i in 0..3:
         acc.push(i)
         yield acc.len()
 
@@ -39,10 +39,10 @@ test fn started_generator_drained_in_executor_job_runs():
 # 200k-object parent took ~4 s on the release binary before TICKET-190 (a whole-heap reach scan).
 test fn generator_crossing_cost_is_independent_of_parent_heap():
     big: List[List[int]] = []
-    for i in range(200000):
+    for i in 0..200000:
         big.push([i])
     t0 := time.now_ms()
-    for _ in range(200):
+    for _ in 0..200:
         g := t190_gen()
         _ := g.next()
         r := Channel[str](1)
@@ -198,7 +198,7 @@ fn t190_snapshot_row(named: List[List[int]], sink: List[List[int]]) -> str:
     for g in t190_cells(named, sink):
         t190_mcells.push(g)
     got: List[str] = []
-    for i in range(t190_mcells.len()):
+    for i in 0..t190_mcells.len():
         out := Channel[str](1)
         parallel:
             spawn: out.send(t190_cell(t190_mcells[i]))
@@ -335,7 +335,7 @@ fn t190_written_in_loop(named: List[int]) -> Iterator[int]:
     fn gen(xs: List[int]) -> Iterator[int]:
         yield xs.len()
     g := gen([])
-    for _i in range(2):
+    for _i in 0..2:
         g = gen([])
         gen = fn(a: List[int]) -> Iterator[int]: t190_gen2(named)
     return g
@@ -387,7 +387,7 @@ test fn task_get_copy_of_frame_local_generator_runs():
 test fn memoize_copy_hit_of_frame_local_generator_runs():
     m := memoize1(fn(k: int) -> Iterator[int]: t220_started())
     got: List[str] = []
-    for _ in range(2):
+    for _ in 0..2:
         out := Channel[str](1)
         parallel:
             spawn: out.send(t190_cell(m(0)))

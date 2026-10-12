@@ -39,7 +39,7 @@ test fn a_cancelled_tasks_get_returns_the_cancel_error():
 test fn every_task_is_done_after_shutdown_now_started_or_not():
     hold := Channel[int](1)
     ex := Executor()
-    ts := [submit_task(ex, fn(): slow(hold)) for i in range(30)]
+    ts := [submit_task(ex, fn(): slow(hold)) for i in 0..30]
     ex.shutdown_now()
     n := 0
     for t in ts:

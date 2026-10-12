@@ -199,7 +199,7 @@ fn differs[T: Eq](a: T, b: T) -> bool:
 test fn an_int_warmed_eq_site_still_dispatches_user_eq():
     # warm the site hard on ints
     n := 0
-    for i in range(0, 50):
+    for i in 0..50:
         if same(i, i):
             n = n + 1
     assert n == 50

@@ -6,6 +6,6 @@ fn w():
 c := true
 parallel:
     if c: spawn w()
-    for _ in range(2): spawn w()
+    for _ in 0..2: spawn w()
 if c: spawn w()
 parallel: spawn w()

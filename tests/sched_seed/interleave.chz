@@ -1,12 +1,12 @@
 fn main():
     ch := Channel[str]()
     parallel:
-        for i in range(4):
+        for i in 0..4:
             spawn:
-                for j in range(3):
+                for j in 0..3:
                     ch.send("t{i}.{j}")
     out: List[str] = []
-    for _ in range(12):
+    for _ in 0..12:
         out.push(ch.recv())
     print(" ".join(out))
 main()

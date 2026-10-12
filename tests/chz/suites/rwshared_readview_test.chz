@@ -8,7 +8,7 @@ import ConcurrentList, ConcurrentMap, ConcurrentSet from std.concurrency.collect
 # len / at (incl. negative index) / slice. `at` is the SAFE index: out of range is None, never a
 # fault (`[]` is the dangerous one). Same split as `ConcurrentMap.get` below and `std.json.at`.
 test fn read_view_indexing():
-    box := ConcurrentList(RwShared(List(range(1, 1001))))   # [1, 2, ..., 1000]
+    box := ConcurrentList(RwShared(List(1..1001)))   # [1, 2, ..., 1000]
     assert box.len() == 1000
     assert box.at(0) == ?1
     assert box.at(999) == ?1000
@@ -21,27 +21,27 @@ test fn read_view_indexing():
 
 # for_each: side-effect scan accumulating into an AtomicInt (its own box, no reentrancy).
 test fn read_view_for_each():
-    box := ConcurrentList(RwShared(List(range(1, 1001))))
+    box := ConcurrentList(RwShared(List(1..1001)))
     n := AtomicInt(0)
     box.for_each(fn(x): n.add(x))
     assert n.load() == 500500
 
 # fold: reduce; R is inferred from the init accumulator (int here).
 test fn read_view_fold_int():
-    box := ConcurrentList(RwShared(List(range(1, 1001))))
+    box := ConcurrentList(RwShared(List(1..1001)))
     s := box.fold(0, fn(a, x): a + x)
     assert s == 500500
 
 # fold with a str accumulator — proves R is NOT pinned to int (recovered from init).
 test fn read_view_fold_str():
-    box := ConcurrentList(RwShared(List(range(1, 4))))   # [1, 2, 3]
+    box := ConcurrentList(RwShared(List(1..4)))   # [1, 2, 3]
     s := box.fold("", fn(a, x): a + str(x))
     assert s == "123"
 
 # The real fan-out use case: reduce the shared list from inside a spawned task under parallel:.
 # Assert the scalar reduced value (order-insensitive) so M:N output ordering can't flake.
 test fn read_view_fold_under_parallel():
-    box := ConcurrentList(RwShared(List(range(1, 1001))))
+    box := ConcurrentList(RwShared(List(1..1001)))
     out := AtomicInt(0)
     parallel:
         spawn:
@@ -63,35 +63,35 @@ fn nested_first(b: ConcurrentList[int]) -> int:
         None: return 0
 
 test fn read_view_nested_read_under_writer():
-    box := ConcurrentList(RwShared(List(range(1, 51))))
+    box := ConcurrentList(RwShared(List(1..51)))
     done := AtomicInt(0)
     parallel:
         spawn:                                   # walker: nested read of the SAME box inside the walk
-            for _round in range(0, 20):
+            for _round in 0..20:
                 box.for_each(fn(x): box.len())   # closure re-reads the same box (return discarded)
                 s := box.fold(0, fn(a, x): a + nested_first(box))
                 assert s == 50
             done.add(1)
         spawn:                                   # writer: hammer the same box's write lock concurrently
-            for _round in range(0, 2000):
-                box.inner.set(List(range(1, 51)))
+            for _round in 0..2000:
+                box.inner.set(List(1..51))
     assert done.load() == 1
 
 # Regression: AB-BA cross-box walk. W1 walks A calling B.set; W2 walks B calling A.set. The pre-fix
 # impl held A's read guard across B.set (blocked on B.write) while W2 held B's read guard across A.set
 # -> mutual M:N deadlock; serial serialises the spawns so it never deadlocks (parity divergence).
 test fn read_view_cross_box_no_deadlock():
-    a := ConcurrentList(RwShared(List(range(1, 31))))
-    b := ConcurrentList(RwShared(List(range(1, 31))))
+    a := ConcurrentList(RwShared(List(1..31)))
+    b := ConcurrentList(RwShared(List(1..31)))
     done := AtomicInt(0)
     parallel:
         spawn:
-            for _round in range(0, 30):
-                a.for_each(fn(x): b.inner.set(List(range(1, 31))))
+            for _round in 0..30:
+                a.for_each(fn(x): b.inner.set(List(1..31)))
             done.add(1)
         spawn:
-            for _round in range(0, 30):
-                b.for_each(fn(x): a.inner.set(List(range(1, 31))))
+            for _round in 0..30:
+                b.for_each(fn(x): a.inner.set(List(1..31)))
             done.add(1)
     assert done.load() == 2
 
@@ -177,13 +177,13 @@ test fn map_read_view_nested_read_under_writer():
     done := AtomicInt(0)
     parallel:
         spawn:                                            # walker: nested read of the SAME box
-            for _round in range(0, 20):
+            for _round in 0..20:
                 box.for_each_entry(fn(k, v): box.len())   # closure re-reads the same box
                 s := box.fold_entries(0, fn(a, k, v): a + box.len())
                 assert s == 9                             # 3 entries * len 3
             done.add(1)
         spawn:                                            # writer: hammer the same box's write lock
-            for _round in range(0, 2000):
+            for _round in 0..2000:
                 box.inner.set({"a": 1, "b": 2, "c": 3})
     assert done.load() == 1
 
@@ -192,13 +192,13 @@ test fn map_read_view_get_key_nested_under_writer():
     done := AtomicInt(0)
     parallel:
         spawn:                                            # walker does a nested get_key/has of same box
-            for _round in range(0, 50):
+            for _round in 0..50:
                 match box.get("b"):
                     ?v: assert box.contains("a")
                     None: assert true                     # may miss under a concurrent set
             done.add(1)
         spawn:
-            for _round in range(0, 2000):
+            for _round in 0..2000:
                 box.inner.set({"a": 1, "b": 2, "c": 3})
     assert done.load() == 1
 
@@ -207,13 +207,13 @@ test fn set_read_view_nested_read_under_writer():
     done := AtomicInt(0)
     parallel:
         spawn:
-            for _round in range(0, 20):
+            for _round in 0..20:
                 box.for_each(fn(x): box.len())
                 s := box.fold(0, fn(a, x): a + box.len())
                 assert s == 25                            # 5 elements * len 5
             done.add(1)
         spawn:
-            for _round in range(0, 2000):
+            for _round in 0..2000:
                 box.inner.set(Set([1, 2, 3, 4, 5]))
     assert done.load() == 1
 
@@ -398,11 +398,11 @@ test fn map_set_read_view_cross_box_no_deadlock():
     done := AtomicInt(0)
     parallel:
         spawn:
-            for _round in range(0, 30):
+            for _round in 0..30:
                 a.for_each_entry(fn(k, v): b.inner.set(Set([1, 2, 3])))
             done.add(1)
         spawn:
-            for _round in range(0, 30):
+            for _round in 0..30:
                 b.for_each(fn(x): a.inner.set({"a": 1, "b": 2, "c": 3}))
             done.add(1)
     assert done.load() == 2

@@ -20,12 +20,12 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 
 const STORM: &str = "g: List[int] = []
-for i in range(100000):
+for i in 0..100000:
     g.push(i)
 fn work(i: int) -> int:
     return i + g.len()
 parallel:
-    for i in range(120):
+    for i in 0..120:
         spawn work(i)
 print(\"done\")
 ";

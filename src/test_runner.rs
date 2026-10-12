@@ -1586,7 +1586,7 @@ struct Suite:
         // trigger a sweep and so never trip the cap (the documented GC-granularity limit).
         let f = d.write(
             "boom_test.chz",
-            "test fn boom():\n    xs: List[List[int]] = []\n    for i in range(1000000):\n        xs.push([i])\n",
+            "test fn boom():\n    xs: List[List[int]] = []\n    for i in 0..1000000:\n        xs.push([i])\n",
         );
         {
             let report = run_tests_capped(&f, 1_000_000);
@@ -1628,7 +1628,7 @@ struct Suite:
         let backlog = d.write(
             "backlog_test.chz",
             "test fn backlog():\n    ch := Channel[List[int]](200000)\n    \
-             for i in range(40000):\n        ch.send([i, i, i, i, i, i, i, i])\n",
+             for i in 0..40000:\n        ch.send([i, i, i, i, i, i, i, i])\n",
         );
         // The sibling single-value path: data parked in `Shared` boxes. TICKET-246 — a box keeps
         // its value in its own heap (8 bytes per `int`, not a wire value), so the 150000-item list
@@ -1639,15 +1639,15 @@ struct Suite:
              fn keep(acc: List[List[int]], xs: List[int]) -> List[List[int]]:\n    \
              acc.push(xs)\n    return acc\n\n\
              fn fill(n: int) -> List[Shared[List[List[int]]]]:\n    \
-             xs: List[int] = []\n    for i in range(150000):\n        xs.push(i)\n    \
-             boxes: List[Shared[List[List[int]]]] = []\n    for _b in range(n):\n        \
-             s: Shared[List[List[int]]] = Shared([])\n        for _k in range(3):\n            \
+             xs: List[int] = []\n    for i in 0..150000:\n        xs.push(i)\n    \
+             boxes: List[Shared[List[List[int]]]] = []\n    for _b in 0..n:\n        \
+             s: Shared[List[List[int]]] = Shared([])\n        for _k in 0..3:\n            \
              s.update(fn(acc): keep(acc, xs))\n        boxes.push(s)\n    return boxes\n\n";
         let parked = d2.write(
             "parked_test.chz",
             &format!(
                 "{BOXES}test fn parked():\n    boxes := fill(3)\n    \
-                 zs: List[int] = []\n    for i in range(2000):\n        zs = [i]\n    \
+                 zs: List[int] = []\n    for i in 0..2000:\n        zs = [i]\n    \
                  assert boxes.len() == 3 and zs.len() == 1\n"
             ),
         );
@@ -1656,7 +1656,7 @@ struct Suite:
             "one_test.chz",
             &format!(
                 "{BOXES}test fn one():\n    boxes := fill(1)\n    \
-                 zs: List[int] = []\n    for i in range(2000):\n        zs = [i]\n    \
+                 zs: List[int] = []\n    for i in 0..2000:\n        zs = [i]\n    \
                  assert boxes.len() == 1 and zs.len() == 1\n"
             ),
         );
@@ -1672,7 +1672,7 @@ struct Suite:
             let d = TmpDir::new();
             let src = format!(
                 "{BOXES}test fn rw():\n    boxes := fill({n})\n    \
-                 zs: List[int] = []\n    for i in range(2000):\n        zs = [i]\n    \
+                 zs: List[int] = []\n    for i in 0..2000:\n        zs = [i]\n    \
                  assert boxes.len() == {n} and zs.len() == 1\n"
             )
             .replace("Shared", "RwShared")
@@ -1731,8 +1731,8 @@ struct Suite:
         let ex = d.write(
             "ex_test.chz",
             "import std.concurrency\n\ntest fn execres():\n    parts: List[str] = []\n    \
-             for i in range(10000):\n        parts.push(\"0123456789\")\n    \
-             blob := \"\".join(parts)\n    ex := Executor()\n    for i in range(300):\n        \
+             for i in 0..10000:\n        parts.push(\"0123456789\")\n    \
+             blob := \"\".join(parts)\n    ex := Executor()\n    for i in 0..300:\n        \
              ex.submit(fn(): print(blob))\n    ex.shutdown()\n    assert true\n",
         );
         {
@@ -1793,7 +1793,7 @@ struct Suite:
         // `noisy()` captures NOTHING: it builds ~100 KB and prints it, so the retained bytes appear
         // only after the parent has already blocked in its join.
         let noisy = "fn noisy():\n    parts: List[str] = []\n    \
-                     for k in range(10000):\n        parts.push(\"0123456789\")\n    \
+                     for k in 0..10000:\n        parts.push(\"0123456789\")\n    \
                      print(\"\".join(parts))\n\n";
         let d = TmpDir::new();
         let ex = d.write(
@@ -1870,10 +1870,10 @@ struct Suite:
             format!(
                 "import std.concurrency\nimport std.time\n\ntest fn queued():\n    \
                  parts: List[str] = []\n    \
-                 for i in range({blob_len}):\n        parts.push(\"0123456789\")\n    \
+                 for i in 0..{blob_len}:\n        parts.push(\"0123456789\")\n    \
                  blob := \"\".join(parts)\n    deadline := time.monotonic() + 1.0\n    \
                  fn job() -> int:\n{body}\n    \
-                 ex := Executor()\n    for i in range(60):\n        ex.submit(job)\n    \
+                 ex := Executor()\n    for i in 0..60:\n        ex.submit(job)\n    \
                  ex.shutdown()\n    assert true\n"
             )
         };
@@ -1939,12 +1939,12 @@ struct Suite:
         let shared = d3.write(
             "shared_test.chz",
             "import std.concurrency\nimport std.time\n\ntest fn queued():\n    \
-             parts: List[str] = []\n    for i in range(100000):\n        \
+             parts: List[str] = []\n    for i in 0..100000:\n        \
              parts.push(\"0123456789\")\n    box := Shared(\"\".join(parts))\n    \
              deadline := time.monotonic() + 1.0\n    \
              fn job() -> int:\n        while time.monotonic() < deadline:\n            \
              pass\n        return box.get().len()\n    \
-             ex := Executor()\n    for i in range(60):\n        ex.submit(job)\n    \
+             ex := Executor()\n    for i in 0..60:\n        ex.submit(job)\n    \
              ex.shutdown()\n    assert true\n",
         );
         let report = run_tests_capped(&shared, 20_000_000);
@@ -1987,8 +1987,8 @@ struct Suite:
             "import std.concurrency\n\nfn make() -> Shared[Channel[str]]:\n    \
              ch := Channel[str](100000)\n    return Shared(ch)\n\n\
              test fn nested():\n    s := make()\n    parts: List[str] = []\n    \
-             for i in range(100000):\n        parts.push(\"0123456789\")\n    \
-             blob := \"\".join(parts)\n    for i in range(300):\n        \
+             for i in 0..100000:\n        parts.push(\"0123456789\")\n    \
+             blob := \"\".join(parts)\n    for i in 0..300:\n        \
              s.get().send(blob)\n    assert true\n",
         );
         {
@@ -2034,16 +2034,16 @@ struct Suite:
         let msg = d.write(
             "msg_test.chz",
             "test fn msg():\n    parts: List[str] = []\n    \
-             for i in range(100000):\n        parts.push(\"0123456789\")\n    \
+             for i in 0..100000:\n        parts.push(\"0123456789\")\n    \
              blob := \"\".join(parts)\n    ch := Channel[str](10000)\n    \
-             for i in range(300):\n        ch.send(blob)\n    assert true\n",
+             for i in 0..300:\n        ch.send(blob)\n    assert true\n",
         );
         // The sibling shape: a 200k-int list built once, sent 100 times (3369 MB RSS pre-fix).
         let ints = d2.write(
             "ints_test.chz",
             "test fn ints():\n    big: List[int] = []\n    \
-             for i in range(200000):\n        big.push(i)\n    \
-             ch := Channel[List[int]](1000)\n    for i in range(100):\n        ch.send(big)\n    \
+             for i in 0..200000:\n        big.push(i)\n    \
+             ch := Channel[List[int]](1000)\n    for i in 0..100:\n        ch.send(big)\n    \
              assert true\n",
         );
         for (label, f) in [("msg", &msg), ("ints", &ints)] {
@@ -2114,7 +2114,7 @@ struct Suite:
         let body = |name: &str| {
             format!(
                 "test fn {name}():\n    blob: List[int] = []\n    \
-                 for i in range(200000):\n        blob.push(i)\n    \
+                 for i in 0..200000:\n        blob.push(i)\n    \
                  parallel:\n        spawn use(blob)\n\n"
             )
         };
@@ -2134,7 +2134,7 @@ struct Suite:
             "noisy_test.chz",
             &format!(
                 "{}fn use(xs: List[int]) -> int:\n    junk: List[int] = []\n    \
-                 for i in range(3000):\n        junk = [i]\n    return xs.len()\n",
+                 for i in 0..3000:\n        junk = [i]\n    return xs.len()\n",
                 body("noisy")
             ),
         );
@@ -2445,10 +2445,10 @@ struct Suite:
         let f = d.write(
             "alias_test.chz",
             "import std.concurrency\n\ntest fn alias():\n    xs: List[int] = []\n    \
-             for i in range(20000):\n        xs.push(i)\n    s := Shared(xs)\n    \
-             ch := Channel[Shared[List[int]]](100)\n    for i in range(50):\n        ch.send(s)\n    \
-             hs: List[Shared[List[int]]] = []\n    for i in range(50):\n        hs.push(ch.recv())\n    \
-             junk: List[int] = []\n    for i in range(5000):\n        junk = [i]\n    \
+             for i in 0..20000:\n        xs.push(i)\n    s := Shared(xs)\n    \
+             ch := Channel[Shared[List[int]]](100)\n    for i in 0..50:\n        ch.send(s)\n    \
+             hs: List[Shared[List[int]]] = []\n    for i in 0..50:\n        hs.push(ch.recv())\n    \
+             junk: List[int] = []\n    for i in 0..5000:\n        junk = [i]\n    \
              assert hs.len() == 50\n",
         );
         {
@@ -3403,7 +3403,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "ctl_test.chz",
-            "test fn small():\n    xs: List[int] = []\n    for i in range(100):\n        xs.push(i)\n    assert xs.len() == 100\n",
+            "test fn small():\n    xs: List[int] = []\n    for i in 0..100:\n        xs.push(i)\n    assert xs.len() == 100\n",
         );
         let report = run_tests_capped(&f, 100_000_000);
         assert!(report.passed, "report:\n{}", report.text);
@@ -3421,7 +3421,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "rec_test.chz",
-            "fn boom() -> int:\n    xs: List[List[int]] = []\n    for i in range(1000000):\n        xs.push([i])\n    return 0\ntest fn t():\n    r := recover: boom()\n    assert true\n",
+            "fn boom() -> int:\n    xs: List[List[int]] = []\n    for i in 0..1000000:\n        xs.push([i])\n    return 0\ntest fn t():\n    r := recover: boom()\n    assert true\n",
         );
         let report = run_tests_capped(&f, 1_000_000);
         assert!(!report.passed, "report:\n{}", report.text);
@@ -3441,7 +3441,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "recnat_test.chz",
-            "fn grow(x: int) -> int:\n    ys: List[List[int]] = []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    r := recover: [1].map(grow)\n    assert true\n",
+            "fn grow(x: int) -> int:\n    ys: List[List[int]] = []\n    for j in 0..1000000:\n        ys.push([j])\n    return 0\ntest fn t():\n    r := recover: [1].map(grow)\n    assert true\n",
         );
         {
             let report = run_tests_capped(&f, 1_000_000);
@@ -3462,7 +3462,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "spawnmem_test.chz",
-            "fn runaway() -> int:\n    ys: List[List[int]] = []\n    for j in range(1000000):\n        ys.push([j])\n    return 0\ntest fn t():\n    parallel:\n        spawn runaway()\n",
+            "fn runaway() -> int:\n    ys: List[List[int]] = []\n    for j in 0..1000000:\n        ys.push([j])\n    return 0\ntest fn t():\n    parallel:\n        spawn runaway()\n",
         );
         {
             let report = run_tests_capped(&f, 1_000_000);
@@ -3486,7 +3486,7 @@ struct Suite:
             "concpass_test.chz",
             "fn work() -> int:\n\
             \x20   ys: List[List[int]] = []\n\
-            \x20   for j in range(2000):\n\
+            \x20   for j in 0..2000:\n\
             \x20       ys.push([j])\n\
             \x20   return ys.len()\n\
              test fn t():\n\
@@ -3521,11 +3521,11 @@ struct Suite:
              fn leak():\n\
             \x20   defer:\n\
             \x20       junk: List[List[int]] = []\n\
-            \x20       for j in range(200000):\n\
+            \x20       for j in 0..200000:\n\
             \x20           junk.push([j])\n\
             \x20       sentinel.push(1)\n\
             \x20   xs: List[List[int]] = []\n\
-            \x20   for i in range(1000000):\n\
+            \x20   for i in 0..1000000:\n\
             \x20       xs.push([i])\n\
              test fn trip():\n\
             \x20   leak()\n\

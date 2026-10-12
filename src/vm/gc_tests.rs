@@ -838,19 +838,19 @@ struct Bag:
 fn main():
     # REPLACING stores on every single-value core, interleaved with allocation.
     s := Shared(Bag([str(1)]))
-    for i in range(20):
+    for i in 0..20:
         s.update(fn(b): Bag(b.xs + [str(i)]))
         junk := [str(i), str(i + 1)]
     print(s.get().xs.len())
 
     rw := RwShared([str(0)])
-    for i in range(20):
+    for i in 0..20:
         rw.write(fn(xs): xs + [str(i)])
         junk := [str(i)]
     print(rw.get().len())
 
     a := Atomic([str(9)])
-    for i in range(10):
+    for i in 0..10:
         a.store([str(i), str(i)])
         junk := [str(i)]
     print(a.load()[0])
@@ -860,7 +860,7 @@ fn main():
     tag := str(42)
     ch.send(fn() -> str: tag)
     filler := []
-    for i in range(30):
+    for i in 0..30:
         filler.push([str(i)])
     f := ch.recv()
     print(f())
@@ -869,7 +869,7 @@ fn main():
     inner := Channel[str]()
     inner.send(str(7))
     outer := Shared(inner)
-    for i in range(30):
+    for i in 0..30:
         junk := [str(i)]
     print(outer.get().recv())
 
@@ -877,7 +877,7 @@ fn main():
     ex := Executor(1)
     note := str(5)
     ex.submit(fn(): print(note))
-    for i in range(20):
+    for i in 0..20:
         junk := [str(i)]
     ex.shutdown()
 main()";
@@ -1031,7 +1031,7 @@ fn add(a: Acc, s: str) -> Acc:
 fn main():
     keep := [str(7), str(8)]
     s := Shared(Acc([str(0)], 0))
-    for i in range(3):
+    for i in 0..3:
         pre := \"p\" + str(i)
         s.update(fn(a): add(a, pre + tag(i)))
     print(s.read(fn(a): a.log.len() + a.n))
@@ -1077,7 +1077,7 @@ fn add(a: Acc, s: str) -> Acc:
 fn main():
     keep := [str(7), str(8)]
     w := RwShared(Acc([str(0)], 0))
-    for i in range(3):
+    for i in 0..3:
         pre := \"p\" + str(i)
         w.write(fn(a): add(a, pre))
     print(w.read(fn(a): a.log.len() + a.n))
@@ -1086,7 +1086,7 @@ fn main():
     m: RwShared[Map[K, List[str]]] = RwShared({})
     xs: RwShared[List[List[str]]] = RwShared([])
     st: RwShared[Set[K]] = RwShared(Set[K]())
-    for i in range(4):
+    for i in 0..4:
         m._set_key(K(\"k\" + str(i)), [str(i), str(i + 1)])
         xs._push([str(i)])
         st._add(K(\"k\" + str(i % 2)))

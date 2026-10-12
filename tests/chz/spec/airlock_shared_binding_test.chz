@@ -349,13 +349,13 @@ test fn rwshared_view_survives_a_concurrent_writer():
     d := Channel[int](2)
     parallel:
         spawn:
-            for i in range(0, 20000):
+            for i in 0..20000:
                 s.inner.set([zero, zero])
                 s.inner.set([inc, get])
             d.send(1)
         spawn:
             hits := 0
-            for i in range(0, 20000):
+            for i in 0..20000:
                 match s.at(1):
                     ?f: hits = hits + f()
                     None: assert false, "the writer always stores a 2-element list"

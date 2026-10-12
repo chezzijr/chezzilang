@@ -11,7 +11,7 @@ fn main():
     # --- ConcurrentCounter: race-free RMW. 100 tasks each increment the same key once -> exactly 100.
     ctr: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(RwShared({}))
     parallel:
-        for i in range(0, 100):
+        for i in 0..100:
             spawn:
                 ctr.increment("hits")
     print(ctr.count("hits"))            # 100  (single-write-lock RMW; no lost updates)
@@ -27,11 +27,11 @@ fn main():
     # --- ConcurrentMap: each task writes its OWN key i -> i*i. Order-independent; parent reads all.
     m: collection.ConcurrentMap[int, int] = collection.ConcurrentMap(RwShared({}))
     parallel:
-        for i in range(0, 10):
+        for i in 0..10:
             spawn:
                 m.set(i, i * i)
     s := 0
-    for i in range(0, 10):
+    for i in 0..10:
         match m.get(i):
             ?v: s = s + v
             None: s = s - 1

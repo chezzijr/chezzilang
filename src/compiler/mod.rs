@@ -8438,7 +8438,7 @@ mod capture_layout_tests {
         // Phase 2b — the GENERIC / reserved-type container CTORS must STILL lower to the name-keyed
         // CallBuiltin, byte-identical to their old hard-coded `is_builtin` arm (now table-driven via
         // `Intrinsic::Ctor`). `range(5)`/`List()`/`Map()`/`Set()` each lower to `CallBuiltin(name, 1)`.
-        for name in ["range", "List", "Map", "Set"] {
+        for name in ["List", "Map", "Set"] {
             let ops = all_ops(&compile(&format!("{name}([])\n")));
             assert!(
                 ops.iter()
@@ -9263,7 +9263,7 @@ fn n13(i: int) -> Iterator[int]:
     buf[0].push(1)
     yield 0
 fn n15() -> Iterator[int]:
-    buf := [[0] for _i in range(1)]
+    buf := [[0] for _i in 0..1]
     buf[0].push(1)
     yield 0
 fn n14() -> Iterator[int]:

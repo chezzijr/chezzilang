@@ -964,7 +964,7 @@ fn n3_cells() -> Vec<Cell> {
         ),
         cell(
             "n3/dflt/comprehension_var",
-            "fn f(n: int, xs: List[int] = [n * 2 for n in range(3)]) -> int:\n    return xs.len() + n\nprint(f(1))\n",
+            "fn f(n: int, xs: List[int] = [n * 2 for n in 0..3]) -> int:\n    return xs.len() + n\nprint(f(1))\n",
             prints("4"),
         ),
         cell(
@@ -1018,7 +1018,7 @@ fn n3_cells() -> Vec<Cell> {
         ),
         cell(
             "n3/dflt/comprehension_var_alias",
-            "fn f(n: int, xs: List[int] = [n * 2 for n in range(3)]) -> int:\n    return xs.len() + n\ng := f\nprint(g(1))\n",
+            "fn f(n: int, xs: List[int] = [n * 2 for n in 0..3]) -> int:\n    return xs.len() + n\ng := f\nprint(g(1))\n",
             prints("4"),
         ),
         cell(
@@ -1028,14 +1028,14 @@ fn n3_cells() -> Vec<Cell> {
         ),
         cell(
             "n3/dflt/interp_fragment_binder",
-            "fn s(n: int, x: str = \"{[n * 2 for n in range(3)]}\") -> str:\n    return x\nprint(s(5))\nt := s\nprint(t(5))\n",
+            "fn s(n: int, x: str = \"{[n * 2 for n in 0..3]}\") -> str:\n    return x\nprint(s(5))\nt := s\nprint(t(5))\n",
             prints("[0, 2, 4]\n[0, 2, 4]"),
         ),
         Cell {
             name: "n3/dflt/imported_binders".to_string(),
             files: with_lib(
                 "lib.chz",
-                "n := 100\nfn f(n: int, xs: List[int] = [n * 2 for n in range(3)]) -> int:\n    return xs.len() + n\nfn h(x: int, g: fn(int) -> int = fn(x: int) -> int: x * 2) -> int:\n    return g(x)\nfn s(n: int, x: str = \"n={n} {[n * 2 for n in range(3)]}\") -> str:\n    return x\n".to_string(),
+                "n := 100\nfn f(n: int, xs: List[int] = [n * 2 for n in 0..3]) -> int:\n    return xs.len() + n\nfn h(x: int, g: fn(int) -> int = fn(x: int) -> int: x * 2) -> int:\n    return g(x)\nfn s(n: int, x: str = \"n={n} {[n * 2 for n in 0..3]}\") -> str:\n    return x\n".to_string(),
                 "import f, h, s from lib\nprint(f(1))\nprint(h(3))\nprint(s(5))\ng := f\nk := h\nt := s\nprint(g(1))\nprint(k(3))\nprint(t(5))\n".to_string(),
             ),
             expect: prints("4\n6\nn=100 [0, 2, 4]\n4\n6\nn=100 [0, 2, 4]"),
@@ -1066,17 +1066,17 @@ fn n3_cells() -> Vec<Cell> {
         ),
         cell(
             "n3/dflt/comprehension_in_lambda",
-            "n := 100\nfn f(n: int, g: fn() -> List[int] = fn() -> List[int]: [x + n for x in range(3)]) -> List[int]:\n    return g()\nprint(f(3))\nh := f\nprint(h(3))\n",
+            "n := 100\nfn f(n: int, g: fn() -> List[int] = fn() -> List[int]: [x + n for x in 0..3]) -> List[int]:\n    return g()\nprint(f(3))\nh := f\nprint(h(3))\n",
             prints("[100, 101, 102]\n[100, 101, 102]"),
         ),
         cell(
             "n3/dflt/comprehension_binder_in_lambda",
-            "n := 100\nfn f(n: int, g: fn() -> List[int] = fn() -> List[int]: [n * 2 for n in range(3)]) -> List[int]:\n    return g()\nprint(f(3))\nh := f\nprint(h(3))\n",
+            "n := 100\nfn f(n: int, g: fn() -> List[int] = fn() -> List[int]: [n * 2 for n in 0..3]) -> List[int]:\n    return g()\nprint(f(3))\nh := f\nprint(h(3))\n",
             prints("[0, 2, 4]\n[0, 2, 4]"),
         ),
         cell(
             "n3/dflt/boxed_param_binders",
-            "n := 100\nfn f(n: int, xs: List[int] = [n * 2 for n in range(3)], g: fn() -> int = fn() -> int: n) -> int:\n    k := fn() -> int: n\n    return xs.len() + k() + g()\nprint(f(1))\nh := f\nprint(h(1))\nfn outer() -> int:\n    m := 7\n    fn inner(n: int, g: fn() -> int = fn() -> int: n) -> int:\n        return g() + m\n    return inner(1)\nprint(outer())\n",
+            "n := 100\nfn f(n: int, xs: List[int] = [n * 2 for n in 0..3], g: fn() -> int = fn() -> int: n) -> int:\n    k := fn() -> int: n\n    return xs.len() + k() + g()\nprint(f(1))\nh := f\nprint(h(1))\nfn outer() -> int:\n    m := 7\n    fn inner(n: int, g: fn() -> int = fn() -> int: n) -> int:\n        return g() + m\n    return inner(1)\nprint(outer())\n",
             prints("104\n104\n107"),
         ),
         cell(

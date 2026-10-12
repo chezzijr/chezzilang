@@ -224,9 +224,9 @@ test fn shared_eight_callers_lose_no_update():
     s := Shared(Acc(0, []))
     n: Shared[int] = Shared(0)
     parallel:
-        for i in range(0, 8):
+        for i in 0..8:
             spawn:
-                for j in range(0, 50):
+                for j in 0..50:
                     s.update(fn(a): a.add(1))
                     n.update(fn(x): x + 1)
     assert s.get().n == 400
@@ -237,9 +237,9 @@ test fn shared_eight_readers_see_a_whole_value():
     s := Shared(Acc(3, [1, 2, 3]))
     bad: Shared[int] = Shared(0)
     parallel:
-        for i in range(0, 8):
+        for i in 0..8:
             spawn:
-                for j in range(0, 20):
+                for j in 0..20:
                     g := s.get()
                     if g.n != g.log.len():
                         bad.update(fn(x): x + 1)
@@ -508,9 +508,9 @@ test fn rwshared_write_returning_a_new_value_replaces_the_state():
 test fn rwshared_eight_writers_lose_no_update():
     s := RwShared(Acc(0, []))
     parallel:
-        for i in range(0, 8):
+        for i in 0..8:
             spawn:
-                for j in range(0, 50):
+                for j in 0..50:
                     s.write(fn(a): a.add(1))
     assert s.get().n == 400
     assert s.read(fn(a): a.log.len()) == 400
@@ -519,9 +519,9 @@ test fn rwshared_eight_readers_see_a_whole_value():
     s := RwShared(Acc(3, [1, 2, 3]))
     bad := AtomicInt(0)
     parallel:
-        for i in range(0, 8):
+        for i in 0..8:
             spawn:
-                for j in range(0, 20):
+                for j in 0..20:
                     g := s.get()
                     if g.n != g.log.len():
                         bad.add(1)

@@ -13,7 +13,7 @@ test fn airlock_shares_handle():
     ctr: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(RwShared({}))
     ctr.increment("k")
     parallel:
-        for i in range(0, 100):
+        for i in 0..100:
             spawn:
                 ctr.increment("k")
     assert ctr.count("k") == 101
@@ -73,7 +73,7 @@ test fn counter_basic():
 test fn counter_race_exact():
     c: collection.ConcurrentCounter[str] = collection.ConcurrentCounter(RwShared({}))
     parallel:
-        for i in range(0, 100):
+        for i in 0..100:
             spawn:
                 c.increment("hit")
     assert c.count("hit") == 100
@@ -83,11 +83,11 @@ test fn counter_race_exact():
 test fn map_each_own_key():
     m: collection.ConcurrentMap[int, int] = collection.ConcurrentMap(RwShared({}))
     parallel:
-        for i in range(0, 10):
+        for i in 0..10:
             spawn:
                 m.set(i, i * i)
     s := 0
-    for i in range(0, 10):
+    for i in 0..10:
         match m.get(i):
             ?v: s = s + v
             None: assert false
@@ -101,10 +101,10 @@ test fn map_each_own_key():
 test fn get_or_insert_race_no_fault():
     m: collection.ConcurrentMap[str, int] = collection.ConcurrentMap(RwShared({}))
     parallel:
-        for i in range(0, 50):
+        for i in 0..50:
             spawn:
                 m.get_or_insert("k", 7)
-        for i in range(0, 50):
+        for i in 0..50:
             spawn:
                 m.remove("k")
     match m.get("k"):
@@ -211,7 +211,7 @@ test fn list_and_set_writes_from_tasks_reach_the_parent():
     cl := collection.ConcurrentList[List[int]].new()
     cs := collection.ConcurrentSet[int].new()
     parallel:
-        for i in range(0, 50):
+        for i in 0..50:
             spawn:
                 cl.push([i, i + 1])
                 cs.add(i % 10)

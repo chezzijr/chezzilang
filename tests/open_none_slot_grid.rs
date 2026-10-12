@@ -1501,7 +1501,7 @@ none
         SHOW,
         r#"
     z := None
-    for i in range(3):
+    for i in 0..3:
         if i == 1:
             z = i
     show(z)

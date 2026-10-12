@@ -491,7 +491,7 @@ const TWO_DEFER_HEAD: &str = "import std.concurrency
 import std.os
 hs := Channel[int](1)
 xs: List[int] = []
-for i in range(400000):
+for i in 0..400000:
     xs.push((i * 7919) % 400009)
 fn bail():
     hs.recv()

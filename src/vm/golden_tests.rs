@@ -34,8 +34,8 @@ fn vm_outcome(src: &str) -> Result<String, String> {
 fn container_ctor_parity() {
     let src = r#"
 fn main():
-    print(range(5).len())
-    for i in range(1, 10, 2):
+    print(List(0..5).len())
+    for i in Range(1, 10, 2):
         print(i)
     xs := List[int]()
     xs.push(10)
@@ -5542,7 +5542,7 @@ fn json_decode_field_defaults_survive_gc_stress() {
     let src = r#"import std.json
 fn mk() -> List[str]:
     junk := []
-    for i in range(20):
+    for i in 0..20:
         junk.push(str(i))
     return [str(junk.len())]
 struct In:
@@ -5570,7 +5570,7 @@ fn json_decode_map_and_tuple_children_survive_gc_stress() {
     let src = r#"import std.json
 fn mk() -> List[str]:
     junk := []
-    for i in range(20):
+    for i in 0..20:
         junk.push(str(i))
     return [str(junk.len())]
 struct In:
@@ -5610,7 +5610,7 @@ xs := [1, 2, 3]
 fn worker():
     recover: xs.push(99)
     junk := []
-    for i in range(30):
+    for i in 0..30:
         junk.push([str(i), str(i + 1)])
 fn main():
     ex := concurrency.Executor()
@@ -11143,7 +11143,7 @@ struct Node:
     fn hash(self) -> int: return self.val
 fn main():
     n := Node(0, None)
-    for i in range(10050):
+    for i in 0..10050:
         n = Node(i, ?n)
     m: Map[Node, str] = {}
     m[n] = "deep"
@@ -11329,8 +11329,8 @@ fn main():
     match 3:
         1..5: print(\"in\")
         _: print(\"out\")
-    print(range(0, 3))
-    print(Set(range(0, 3)).len())
+    print(List(0..3))
+    print(Set(0..3).len())
 main()
 ";
     assert_golden_out(

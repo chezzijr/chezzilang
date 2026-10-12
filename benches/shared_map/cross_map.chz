@@ -5,11 +5,11 @@ import std.concurrency
 
 fn main():
     m: Map[int, int] = {}
-    for i in range(10000):
+    for i in 0..10000:
         m[i] = i
     box := Shared(m)
     s := 0
-    for _ in range(200):
+    for _ in 0..200:
         box.set(m)
         s = s + box.get().len()
     print(s)

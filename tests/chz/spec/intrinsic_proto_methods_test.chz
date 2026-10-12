@@ -129,7 +129,7 @@ test fn mod_fast_path_ordinary_values_still_correct():
     # this is a regression check, not an overflow-boundary one: `wrapping_rem` must still match
     # `checked_rem` for every representable input, run through the BinLocalLocal-fused local/local `%`.
     total := 0
-    for i in range(1, 6):
+    for i in 1..6:
         x := 17
         total = total + (x % i)
     assert total == 17 % 1 + 17 % 2 + 17 % 3 + 17 % 4 + 17 % 5

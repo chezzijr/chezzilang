@@ -135,7 +135,7 @@ test fn large_write_bytes_returns_the_full_count():
     p := scratch("large")
     defer fs.remove_file(p)
     ba := bytearray()
-    for i in range(200000):
+    for i in 0..200000:
         ba.push(255)
     big := bytes(ba)
     match io.create(p):

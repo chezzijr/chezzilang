@@ -192,16 +192,16 @@ struct Alloc:
 
 test fn an_allocating_eq_survives_the_probe():
     xs: List[Alloc] = []
-    for i in range(0, 200):
+    for i in 0..200:
         xs.push(Alloc(i % 7))
     assert xs.unique().len() == 7
     m: Map[Alloc, int] = {}
-    for i in range(0, 200):
+    for i in 0..200:
         m[Alloc(i % 7)] = i
     assert m.len() == 7
     assert m[Alloc(3)] == 199 - ((199 - 3) % 7)
     s := Set[Alloc]([])
-    for i in range(0, 200):
+    for i in 0..200:
         s.add(Alloc(i % 7))
     assert s.len() == 7
     assert (Alloc(5) in s) == true
@@ -242,7 +242,7 @@ fn mut_reset(n: int):
     mut_set = Set([])
     while mut_armed.len() > 0:
         mut_armed.remove_at(0)
-    for i in range(0, n):
+    for i in 0..n:
         mut_map[Mut(i)] = i * 11
         mut_set.add(Mut(i))
     mut_armed.push(1)

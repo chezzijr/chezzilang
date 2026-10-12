@@ -1981,18 +1981,6 @@ impl Checker {
                 }
                 Some(Ty::Unknown)
             }
-            "range" => {
-                for a in args {
-                    self.expect_int_val(a);
-                }
-                if args.is_empty() || args.len() > 3 {
-                    self.error(
-                        span,
-                        "range() expects range(end), range(start, end), or range(start, end, step)",
-                    );
-                }
-                Some(Ty::list(Ty::Int))
-            }
             "int" => {
                 self.check_arity("int", 1, args, span);
                 if let Some(a) = args.first() {
@@ -4931,10 +4919,6 @@ impl Checker {
         } else if t != Ty::Int && !t.is_unknown() {
             self.error(e.span, format!("index must be int, found {t}"));
         }
-    }
-
-    pub(super) fn expect_int_val(&mut self, e: &Expr) {
-        self.expect_int(e, "argument");
     }
 
     // ===== generics & protocols =====
