@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_enum_match_arm)]
 //! TICKET-181 (wave 16 Family 2, "Blocking contexts"): each blocking op decides for itself whether
 //! it may block in the current execution context. These are the named red cells before the fix;
 //! the plan extends this file into the full op × context grid. Each cell runs a fresh process

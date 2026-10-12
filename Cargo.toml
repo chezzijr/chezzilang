@@ -44,3 +44,6 @@ split-debuginfo = "unpacked"
 [profile.test]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
+
+[lints.clippy]
+wildcard_enum_match_arm = "deny"

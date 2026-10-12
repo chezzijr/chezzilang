@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_enum_match_arm)]
 //! TICKET-195 (W18 Family B2): a party is either unwinding its OWN fault or it is CUT by another
 //! party's (a cancel, a child's fault, a job's fault). Every rule keyed on that answer — which
 //! fault is reported, whose trace prints, which work is stopped — reads one record, `Vm::cut`.

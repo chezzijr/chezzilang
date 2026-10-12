@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
 //! Unattended panic-fuzzer for the Chezzi front-end (bug-discovery lever #1): feeds adversarial /
 //! malformed inputs to `chezzi check` over a seed range and reports any input that makes the
 //! front-end **crash** — a Rust panic (`panicked at` on stderr) or a signal kill (SIGSEGV /

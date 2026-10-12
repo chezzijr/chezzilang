@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_enum_match_arm)]
 //! Panic-fuzz harness — CI gate (bug-discovery lever #1).
 //!
 //! Shares the engine with `src/bin/panicfuzz.rs` via a `#[path]` include (the fuzz engine is not

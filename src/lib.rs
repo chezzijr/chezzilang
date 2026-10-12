@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
 //! Chezzi as a library — the compiler **front-end** and the engine, exposed as the crate of record.
 //!
 //! This is the real crate root: both binaries are thin shims that link this library. `src/main.rs`

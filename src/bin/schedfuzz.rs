@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
 //! Unattended seeded-scheduler fuzzer (TICKET-167, `docs/future.md` §2b). Runs `tests/chz` and the
 //! concurrency-flavored `examples/*.chz` under a seed range at one or more worker counts and flags
 //! a hang, a panic, a changed exit code, or (where schedule-independent) a changed stdout.

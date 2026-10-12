@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_enum_match_arm)]
 //! TICKET-239 — the expected type of an expression has ONE channel, so every slot kind gives a
 //! value the same verdict, at module scope and in a fn body. Three generated grids, one program
 //! per cell, run through the built binary:

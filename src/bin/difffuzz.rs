@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
 //! Unattended differential fuzzer: runs the CPython oracle over a seed range and reports any
 //! divergence (with reproducing sources). The CI-gate variant lives in `tests/difftest.rs`;
 //! both share the engine under `src/difftest/` via a `#[path]` include.

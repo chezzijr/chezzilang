@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_enum_match_arm)]
 //! TICKET-236 (wave 22 family B): the Executor reader grid. Reader x wait x job end x cutter x
 //! worker count. `tests/executor_stop_grid.rs` always reads the handle from main; this grid moves
 //! the reader. Each cell is a generated program run through the built binary.

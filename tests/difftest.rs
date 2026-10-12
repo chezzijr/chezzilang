@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_enum_match_arm)]
 //! CPython differential oracle — CI gate.
 //!
 //! Shares the engine with `src/bin/difffuzz.rs` via a `#[path]` include (the diff engine is not

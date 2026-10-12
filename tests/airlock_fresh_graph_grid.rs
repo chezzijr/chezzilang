@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_enum_match_arm)]
 //! TICKET-240 (wave 22 Family D, "Airlock"): freshness is a property of the value graph that
 //! crosses, decided once by `Checker::fresh_shape`. The grid is wrapper path x inner value x write
 //! depth. Every cell does its write inside `recover:` in the task and sends `runs` or `faults`;

@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_enum_match_arm)]
 //! TICKET-219 (wave 21 family E2): an Executor job has one owner. After a job calls `os.exit`,
 //! a held job (Executor(1), second job queued) must never start. Ancestors: CPython
 //! `ThreadPoolExecutor(1)` + `os._exit`, Go semaphore + `os.Exit` -- nothing runs after the exit.
