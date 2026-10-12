@@ -3442,11 +3442,7 @@ impl Parser {
     /// On any other head the type reading is tried only to name the mistake: a type list that
     /// parses where the subscript does not (`1[T, U]`) reports [`TYPE_LIST_HEAD`].
     fn parse_bracket(&mut self, obj: Expr, span: Span) -> PResult<Expr> {
-        let headed = match &obj.kind {
-            ExprKind::Ident(_) => true,
-            ExprKind::Field { name, .. } => !crate::ast::is_tuple_index(name),
-            _ => false,
-        };
+        let headed = obj.kind.is_named_head();
         let save = self.pos;
         // `parse_type` bumps `self.depth` and only unwinds it on success; restore on backtrack.
         // `fold_depth` rides along for the same reason (see `MAX_AST_DEPTH`).
@@ -3577,11 +3573,7 @@ impl Parser {
         save_depth: usize,
         save_fold: usize,
     ) -> Option<Box<Expr>> {
-        let headed = match &callee.kind {
-            ExprKind::Ident(_) => true,
-            ExprKind::Field { name, .. } => !crate::ast::is_tuple_index(name),
-            _ => false,
-        };
+        let headed = callee.kind.is_named_head();
         if !headed || type_args.len() != 1 {
             return None;
         }

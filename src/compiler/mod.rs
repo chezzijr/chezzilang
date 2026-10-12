@@ -5224,12 +5224,7 @@ impl Compiler {
         let Some(app) = crate::ast::type_application(e) else {
             return Ok(false);
         };
-        let named_head = match &app.head.kind {
-            ExprKind::Ident(_) => true,
-            ExprKind::Field { name, .. } => !crate::ast::is_tuple_index(name),
-            _ => false,
-        };
-        if !named_head {
+        if !app.head.kind.is_named_head() {
             return Ok(false);
         }
         let res = self.resolution(app.head)?.clone();

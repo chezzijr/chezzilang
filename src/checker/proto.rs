@@ -2208,7 +2208,7 @@ impl Checker {
                 return Err(format!("type {ty} does not satisfy Iterable"));
             }
             // A declared type iterates through its own hook, not through an intrinsic grant.
-            return if self.declared_methods(ty).is_some() {
+            return if self.nominal_method_table(ty).is_some() {
                 Ok(Grant::no_intrinsic_method())
             } else {
                 self.grant_intrinsic(protocol, ty)
@@ -2486,7 +2486,7 @@ impl Checker {
                 }
             }
         }
-        let methods = self.declared_methods(ty).ok_or(HookMiss::Absent)?;
+        let methods = self.nominal_method_table(ty).ok_or(HookMiss::Absent)?;
         let actual = methods.get(method).ok_or(HookMiss::Absent)?;
         let pinfo = self.protocol_shape(protocol).ok_or(HookMiss::Absent)?;
         let (_, req) = pinfo
@@ -2623,7 +2623,7 @@ impl Checker {
     /// its readers need the candidate's own `where` bounds, and ask [`Self::hook_method`] for the
     /// verdict.
     pub(super) fn hook_candidate(&self, ty: &Ty, hook: Hook) -> Option<FnSig> {
-        self.declared_methods(ty)?.get(hook.method()).cloned()
+        self.nominal_method_table(ty)?.get(hook.method()).cloned()
     }
 
     /// TICKET-250 — the near-miss warning. A receiver-first method that [`Self::hook_verdict`]
@@ -3054,16 +3054,6 @@ impl Checker {
             "'.sum()' element",
             span,
         );
-    }
-
-    /// The methods a struct/enum DECLARES (`None` for anything else) — for diagnostics that
-    /// need to ask "did the user write this method at all?", which conformance alone can't answer.
-    fn declared_methods(&self, ty: &Ty) -> Option<&HashMap<String, FnSig>> {
-        match ty {
-            Ty::Struct(name, _) => self.struct_shape(name).map(|i| &i.methods),
-            Ty::Enum(name, _) => self.enum_methods_of(name),
-            _ => None,
-        }
     }
 
     /// Own methods OR anything an embed requires (M22) — so `protocol Ord2: Comparable` makes
@@ -4244,7 +4234,9 @@ impl Checker {
     /// tables `satisfies_args_d`'s struct/enum arms feed to `satisfies_methods`, including
     /// their miss-only identity-key fallbacks (gap #4). A builtin/native or existential witness
     /// returns `None`: those satisfy through `satisfies_native` / `protocol_method_sig`, whose
-    /// signatures are not the user method table this recovery unifies against.
+    /// signatures are not the user method table this recovery unifies against. It is also the
+    /// methods a struct/enum DECLARES (`None` for anything else), for diagnostics that ask "did the
+    /// user write this method at all?", which conformance alone can't answer.
     fn nominal_method_table(&self, ty: &Ty) -> Option<&HashMap<String, FnSig>> {
         match ty {
             Ty::Struct(k, _) => self.struct_shape(k).map(|i| &i.methods),

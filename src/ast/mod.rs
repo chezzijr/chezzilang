@@ -1218,6 +1218,44 @@ pub enum ExprKind {
 }
 
 impl ExprKind {
+    /// Whether this expression can head a type application `head[T]`: a bare name, or a member
+    /// access that is not a tuple index (`a.0`). Every other kind answers `false`.
+    pub fn is_named_head(&self) -> bool {
+        match self {
+            ExprKind::Ident(_) => true,
+            ExprKind::Field { name, .. } => !is_tuple_index(name),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => false,
+        }
+    }
+
     /// The name when this expression is a bare identifier. Every other kind answers `None`.
     pub fn as_ident(&self) -> Option<&String> {
         match self {
@@ -1913,6 +1951,37 @@ mod tests {
         };
         assert_ne!(id(&a), id(&b));
         assert_eq!(a, b);
+    }
+
+    fn first_expr(src: &str) -> Expr {
+        match parse_module(src).stmts.remove(0).kind {
+            StmtKind::Expr(e) => e,
+            other => panic!("not an expression statement: {other:?}"),
+        }
+    }
+
+    /// TICKET-251 — a name or a named member heads a type application; a tuple index, a literal,
+    /// a call and an index do not.
+    #[test]
+    fn named_head_is_a_name_or_a_named_member() {
+        assert!(first_expr("a\n").kind.is_named_head());
+        assert!(first_expr("a.b\n").kind.is_named_head());
+        assert!(!first_expr("a.0\n").kind.is_named_head());
+        assert!(!first_expr("1\n").kind.is_named_head());
+        assert!(!first_expr("f()\n").kind.is_named_head());
+        assert!(!first_expr("a[0]\n").kind.is_named_head());
+    }
+
+    /// TICKET-251 — the accessors answer `Some` for their own kind and `None` for every other.
+    #[test]
+    fn accessors_answer_only_their_own_kind() {
+        let ident = first_expr("a\n");
+        assert_eq!(ident.kind.as_ident().map(String::as_str), Some("a"));
+        assert!(first_expr("a.b\n").kind.as_ident().is_none());
+        let stmt = parse_module("a\n").stmts.remove(0);
+        assert!(stmt.kind.as_expr().is_some());
+        let stmt = parse_module("pass\n").stmts.remove(0);
+        assert!(stmt.kind.as_expr().is_none());
     }
 
     /// TICKET-180 — a statement placed twice shares every id of its subtree.
