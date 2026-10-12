@@ -30,12 +30,12 @@ test fn chr_round_trips_ord():
     assert chr(233) == "é"
     assert ord(chr(1114111)) == 1114111
 
-test fn chr_faults_outside_the_unicode_range():
-    # CPython: ValueError: chr() arg not in range(0x110000) for both.
+test fn chr_faults_outside_the_unicode_codepoint_range():
+    # CPython: ValueError: chr() arg not in the range 0..0x110000 for both.
     for bad in [-1, 1114112]:
         r := recover: chr(bad)
         match r:
-            ?_:  assert false, "chr() must reject a codepoint outside range(0x110000)"
+            ?_:  assert false, "chr() must reject a codepoint outside the range 0..0x110000"
             !e: assert e.message().contains("not a valid Unicode codepoint")
     # DIVERGENCE, recorded not fixed (docs/stdlib.md): CPython returns a lone surrogate here,
     # Chezzi faults — `str` is UTF-8 and cannot hold one. A loud fault, not a wrong value.

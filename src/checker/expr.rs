@@ -2104,10 +2104,10 @@ impl Checker {
                 Some(Ty::Str)
             }
             // `list(it)` → a list from ANY iterable VALUE (list/set/str/bytes/bytearray/map-keys/
-            // Iterator). The element type flows through `iter_elem`. NB a bare RANGE is not one: it
-            // has no runtime value, so `List(0..3)` is rejected (see `RANGE_NOT_A_VALUE`) — the
-            // `range(a, b)` builtin is the materializer, and `List(range(0, 3))` works. The argument
-            // is REQUIRED: an empty list is the `[]` literal (zero args can't infer T).
+            // Iterator, a `Range` value). The element type flows through `iter_elem`; `List(0..3)` is
+            // `[0, 1, 2]` and `List(5..)` runs until memory ends, as `List(g())` does for an endless
+            // generator (TICKET-253). The argument is REQUIRED: an empty list is the `[]` literal
+            // (zero args can't infer T).
             "List" => {
                 // `List[T]()` — explicit element type (turbofish), bare `List()` — empty list whose
                 // element type comes from the expected type on its own statement (mirrors `Set()`), and

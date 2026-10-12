@@ -24,7 +24,7 @@ test fn huge_step_under_recover_is_a_value_not_a_crash():
     r := recover: [0, 1, 2, 3][Range(1, None, 9223372036854775807)]
     assert r == ?[1]
 
-test fn huge_step_on_a_range():
+test fn huge_step_on_a_range_value():
     r := List(0..10)
     assert r[Range(1, 2, 9223372036854775807)] == [1]
     assert r[Range(None, None, 9223372036854775807)] == [0]
