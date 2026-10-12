@@ -537,7 +537,22 @@ impl Checker {
             // `Eq` arm below can grant it — every OTHER protocol row in `INTRINSIC_PROTO_METHODS`
             // still excludes `"protocol"` (no row registered), so this does not widen anything but Eq.
             Ty::Protocol(..) => "protocol",
-            _ => "?",
+            Ty::Param(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => "?",
         }
     }
 
@@ -559,7 +574,31 @@ impl Checker {
             Ty::Int => Some("int"),
             Ty::Float => Some("float"),
             Ty::Bool => Some("bool"),
-            _ => None,
+            Ty::Nil
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -1079,7 +1118,39 @@ impl Checker {
         };
         elems.iter().find_map(|e| match e {
             Ty::Tuple(_) => self.unhashable_tuple_elem(e),
-            _ => self.satisfies(e, "Hashable").is_err().then(|| e.clone()),
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => self.satisfies(e, "Hashable").is_err().then(|| e.clone()),
         })
     }
 
@@ -1771,7 +1842,7 @@ impl Checker {
                     None
                 }
             }
-            _ => None,
+            Type::Generic(..) | Type::Tuple(_) | Type::Nil(_) => None,
         }
     }
 
@@ -1902,7 +1973,39 @@ impl Checker {
                     // Don't cascade off an unresolved operand (mirrors the `Ty::Unknown` arm below).
                     Ty::Unknown => Ok(Grant::no_intrinsic_method()),
                     _ if *ty == expected => Ok(Grant::no_intrinsic_method()),
-                    _ => Err(format!("expected {expected}, found {ty}")),
+                    Ty::Int
+                    | Ty::Float
+                    | Ty::Bool
+                    | Ty::Str
+                    | Ty::Bytes
+                    | Ty::ByteArray
+                    | Ty::Nil
+                    | Ty::List(_)
+                    | Ty::Map(..)
+                    | Ty::Set(_)
+                    | Ty::Func { .. }
+                    | Ty::BuiltinFn { .. }
+                    | Ty::Tuple(_)
+                    | Ty::Struct(..)
+                    | Ty::Enum(..)
+                    | Ty::Param(_)
+                    | Ty::Result(..)
+                    | Ty::Option(_)
+                    | Ty::Channel(_)
+                    | Ty::Shared(_)
+                    | Ty::Atomic(_)
+                    | Ty::AtomicInt
+                    | Ty::RwShared(_)
+                    | Ty::Executor
+                    | Ty::Socket
+                    | Ty::Listener
+                    | Ty::Writer
+                    | Ty::Reader
+                    | Ty::Ptr
+                    | Ty::Width(_)
+                    | Ty::Protocol(..)
+                    | Ty::Module(_)
+                    | Ty::Var(_) => Err(format!("expected {expected}, found {ty}")),
                 };
             }
             // A `where T: List/Map/Set` constructor-kind bound: `ty`'s HEAD must equal the container.
@@ -1910,7 +2013,39 @@ impl Checker {
                 return match ty {
                     Ty::Unknown => Ok(Grant::no_intrinsic_method()),
                     _ if ok => Ok(Grant::no_intrinsic_method()),
-                    _ => Err(format!("expected {protocol_display}[...], found {ty}")),
+                    Ty::Int
+                    | Ty::Float
+                    | Ty::Bool
+                    | Ty::Str
+                    | Ty::Bytes
+                    | Ty::ByteArray
+                    | Ty::Nil
+                    | Ty::List(_)
+                    | Ty::Map(..)
+                    | Ty::Set(_)
+                    | Ty::Func { .. }
+                    | Ty::BuiltinFn { .. }
+                    | Ty::Tuple(_)
+                    | Ty::Struct(..)
+                    | Ty::Enum(..)
+                    | Ty::Param(_)
+                    | Ty::Result(..)
+                    | Ty::Option(_)
+                    | Ty::Channel(_)
+                    | Ty::Shared(_)
+                    | Ty::Atomic(_)
+                    | Ty::AtomicInt
+                    | Ty::RwShared(_)
+                    | Ty::Executor
+                    | Ty::Socket
+                    | Ty::Listener
+                    | Ty::Writer
+                    | Ty::Reader
+                    | Ty::Ptr
+                    | Ty::Width(_)
+                    | Ty::Protocol(..)
+                    | Ty::Module(_)
+                    | Ty::Var(_) => Err(format!("expected {protocol_display}[...], found {ty}")),
                 };
             }
             return Err(format!("unknown protocol '{protocol_display}'"));
@@ -1935,7 +2070,36 @@ impl Checker {
             let admitted = match ty {
                 Ty::Int | Ty::Float | Ty::Param(_) => true,
                 Ty::Protocol(p, pargs) => self.protocol_provides(p, pargs, protocol, args),
-                _ => false,
+                Ty::Bool
+                | Ty::Str
+                | Ty::Bytes
+                | Ty::ByteArray
+                | Ty::Nil
+                | Ty::List(_)
+                | Ty::Map(..)
+                | Ty::Set(_)
+                | Ty::Func { .. }
+                | Ty::BuiltinFn { .. }
+                | Ty::Tuple(_)
+                | Ty::Struct(..)
+                | Ty::Enum(..)
+                | Ty::Result(..)
+                | Ty::Option(_)
+                | Ty::Channel(_)
+                | Ty::Shared(_)
+                | Ty::Atomic(_)
+                | Ty::AtomicInt
+                | Ty::RwShared(_)
+                | Ty::Executor
+                | Ty::Socket
+                | Ty::Listener
+                | Ty::Writer
+                | Ty::Reader
+                | Ty::Ptr
+                | Ty::Width(_)
+                | Ty::Module(_)
+                | Ty::Unknown
+                | Ty::Var(_) => false,
             };
             if !admitted {
                 return Err(format!(
@@ -2007,7 +2171,37 @@ impl Checker {
             let elems: Option<Vec<&Ty>> = match ty {
                 Ty::Tuple(es) => Some(es.iter().collect()),
                 Ty::List(e) | Ty::Option(e) => Some(vec![&**e]),
-                _ => None,
+                Ty::Int
+                | Ty::Float
+                | Ty::Bool
+                | Ty::Str
+                | Ty::Bytes
+                | Ty::ByteArray
+                | Ty::Nil
+                | Ty::Map(..)
+                | Ty::Set(_)
+                | Ty::Func { .. }
+                | Ty::BuiltinFn { .. }
+                | Ty::Struct(..)
+                | Ty::Enum(..)
+                | Ty::Param(_)
+                | Ty::Result(..)
+                | Ty::Channel(_)
+                | Ty::Shared(_)
+                | Ty::Atomic(_)
+                | Ty::AtomicInt
+                | Ty::RwShared(_)
+                | Ty::Executor
+                | Ty::Socket
+                | Ty::Listener
+                | Ty::Writer
+                | Ty::Reader
+                | Ty::Ptr
+                | Ty::Width(_)
+                | Ty::Protocol(..)
+                | Ty::Module(_)
+                | Ty::Unknown
+                | Ty::Var(_) => None,
             };
             if let Some(elems) = elems {
                 // A protocol VALUE whose protocol takes `Self` (object safety) is not orderable:
@@ -2015,7 +2209,39 @@ impl Checker {
                 // values, which may hold two different witnesses.
                 let unorderable = |e: &Ty| match e {
                     Ty::Protocol(p, _) => self.protocol_self_param_method(p).is_some(),
-                    _ => false,
+                    Ty::Int
+                    | Ty::Float
+                    | Ty::Bool
+                    | Ty::Str
+                    | Ty::Bytes
+                    | Ty::ByteArray
+                    | Ty::Nil
+                    | Ty::List(_)
+                    | Ty::Map(..)
+                    | Ty::Set(_)
+                    | Ty::Func { .. }
+                    | Ty::BuiltinFn { .. }
+                    | Ty::Tuple(_)
+                    | Ty::Struct(..)
+                    | Ty::Enum(..)
+                    | Ty::Param(_)
+                    | Ty::Result(..)
+                    | Ty::Option(_)
+                    | Ty::Channel(_)
+                    | Ty::Shared(_)
+                    | Ty::Atomic(_)
+                    | Ty::AtomicInt
+                    | Ty::RwShared(_)
+                    | Ty::Executor
+                    | Ty::Socket
+                    | Ty::Listener
+                    | Ty::Writer
+                    | Ty::Reader
+                    | Ty::Ptr
+                    | Ty::Width(_)
+                    | Ty::Module(_)
+                    | Ty::Unknown
+                    | Ty::Var(_) => false,
                 };
                 if elems
                     .iter()
@@ -2345,7 +2571,39 @@ impl Checker {
             // iff its `methods` map carries every protocol method with a matching signature. This
             // unlocks Stringable/Hashable/Add/Sub/Mul/Comparable for enums and protocol-bound generics.
             // A carrier that no intrinsic arm above granted reads its (empty) method table here too.
-            _ => match ty.as_enum() {
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => match ty.as_enum() {
                 Some((ename, _)) => {
                     // MISS-ONLY identity-key fallback (gap #4): resolve a named-fn-imported enum
                     // value's method table from the owning `ModuleSig` on a local-table miss (see
@@ -2459,7 +2717,38 @@ impl Checker {
                 Ty::Struct(key.clone(), own(&self.struct_shape(key)?.type_params))
             }
             Ty::Enum(key, _) => Ty::enum_ty(key.clone(), own(self.enum_type_params_of(key)?)),
-            _ => return None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => return None,
         };
         (decl != *ty).then_some(decl)
     }
@@ -2540,7 +2829,32 @@ impl Checker {
                     methods,
                     ..
                 } => (name, type_params, methods, false),
-                _ => continue,
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Protocol { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => continue,
             };
             let saved = self.enter_type_params(type_params);
             let ty = if is_struct {
@@ -2793,7 +3107,39 @@ impl Checker {
                 m.insert("Self".to_string(), ty.clone());
                 m
             }
-            _ => self.nominal_param_map(ty),
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => self.nominal_param_map(ty),
         };
         let Some((_, msig)) = pinfo.methods.iter().find(|(n, _)| n == mname) else {
             return Ok(());
@@ -3097,7 +3443,39 @@ impl Checker {
                     let p = self.tyvars.borrow().present_payload(v);
                     p.is_none_or(|p| self.sendable_rec(&p, stack))
                 }
-                t => self.sendable_rec(&t, stack),
+                t @ Ty::Int
+                | t @ Ty::Float
+                | t @ Ty::Bool
+                | t @ Ty::Str
+                | t @ Ty::Bytes
+                | t @ Ty::ByteArray
+                | t @ Ty::Nil
+                | t @ Ty::List(_)
+                | t @ Ty::Map(..)
+                | t @ Ty::Set(_)
+                | t @ Ty::Func { .. }
+                | t @ Ty::BuiltinFn { .. }
+                | t @ Ty::Tuple(_)
+                | t @ Ty::Struct(..)
+                | t @ Ty::Enum(..)
+                | t @ Ty::Param(_)
+                | t @ Ty::Result(..)
+                | t @ Ty::Option(_)
+                | t @ Ty::Channel(_)
+                | t @ Ty::Shared(_)
+                | t @ Ty::Atomic(_)
+                | t @ Ty::AtomicInt
+                | t @ Ty::RwShared(_)
+                | t @ Ty::Executor
+                | t @ Ty::Socket
+                | t @ Ty::Listener
+                | t @ Ty::Writer
+                | t @ Ty::Reader
+                | t @ Ty::Ptr
+                | t @ Ty::Width(_)
+                | t @ Ty::Protocol(..)
+                | t @ Ty::Module(_)
+                | t @ Ty::Unknown => self.sendable_rec(&t, stack),
             },
             // A `Shared[T]` handle always crosses — that's its whole point (one box, many tasks);
             // its element type is *not* a constraint (the value never crosses, only the handle).
@@ -3349,7 +3727,31 @@ impl Checker {
                 stack.pop();
                 hit
             }
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -3405,7 +3807,31 @@ impl Checker {
                 stack.pop();
                 hit
             }
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::BuiltinFn { .. }
+            | Ty::Param(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -3774,7 +4200,7 @@ impl Checker {
             // protocol arm now closes the hole one step earlier, at the erasure itself, via
             // [`Self::eq_where_bounds_unsatisfied`], so an unsatisfied witness is refused there and
             // never reaches this arm's runtime defer at all.
-            _ => None,
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Nil | Ty::Func { .. } | Ty::BuiltinFn { .. } | Ty::Param(_) | Ty::Channel(_) | Ty::Shared(_) | Ty::Atomic(_) | Ty::AtomicInt | Ty::RwShared(_) | Ty::Executor | Ty::Socket | Ty::Listener | Ty::Writer | Ty::Reader | Ty::Ptr | Ty::Width(_) | Ty::Protocol(..) | Ty::Module(_) | Ty::Unknown | Ty::Var(_) => None,
         }
     }
 
@@ -3888,7 +4314,35 @@ impl Checker {
             Ty::List(e) => self.builtin_param_map("List", &[(**e).clone()]),
             Ty::Set(e) => self.builtin_param_map("Set", &[(**e).clone()]),
             Ty::Map(k, v) => self.builtin_param_map("Map", &[(**k).clone(), (**v).clone()]),
-            _ => HashMap::new(),
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => HashMap::new(),
         }
     }
 
@@ -4241,7 +4695,38 @@ impl Checker {
         match ty {
             Ty::Struct(k, _) => self.struct_shape(k).map(|i| &i.methods),
             Ty::Enum(k, _) => self.enum_methods_of(k),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -4505,7 +4990,38 @@ impl Checker {
     pub(super) fn enclosing_type_declaring(&self, t: &str) -> Option<String> {
         let key = match self.current_self_ty.as_ref()? {
             Ty::Struct(k, _) | Ty::Enum(k, _) => k,
-            _ => return None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => return None,
         };
         let tps = self
             .struct_shape(key)
@@ -5606,7 +6122,27 @@ fn ty_mentions_error_existential(ty: &Ty) -> bool {
         Ty::Tuple(xs) | Ty::Struct(_, xs) | Ty::Enum(_, xs) => {
             xs.iter().any(ty_mentions_error_existential)
         }
-        _ => false,
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Str
+        | Ty::Bytes
+        | Ty::ByteArray
+        | Ty::Nil
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Param(_)
+        | Ty::AtomicInt
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => false,
     }
 }
 

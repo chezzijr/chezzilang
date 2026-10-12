@@ -114,7 +114,35 @@ impl Checker {
             ExprKind::Field { obj, name, .. } if !crate::ast::is_tuple_index(name) => {
                 self.classify_field(obj, name)
             }
-            _ => None,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => None,
         }
     }
 

@@ -482,7 +482,37 @@ impl Ty {
             Ty::Option(t) => Some(("Option", vec![(**t).clone()])),
             Ty::Result(t, e) => Some(("Result", vec![(**t).clone(), (**e).clone()])),
             Ty::Enum(k, a) => Some((k.as_str(), a.clone())),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Param(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
     pub fn channel(inner: Ty) -> Ty {
@@ -508,7 +538,38 @@ impl Ty {
         match self {
             Ty::Option(p) => Some((crate::checker::Wrap::Some, p, None)),
             Ty::Result(p, e) => Some((crate::checker::Wrap::Ok, p, Some(e))),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -527,7 +588,39 @@ impl Ty {
     pub fn width(&self) -> Option<&crate::native::cffi::CType> {
         match self {
             Ty::Width(c) => Some(c),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -539,7 +632,39 @@ impl Ty {
         match self {
             Ty::Width(crate::native::cffi::CType::Float32) => &FLOAT,
             Ty::Width(_) => &INT,
-            other => other,
+            other @ Ty::Int
+            | other @ Ty::Float
+            | other @ Ty::Bool
+            | other @ Ty::Str
+            | other @ Ty::Bytes
+            | other @ Ty::ByteArray
+            | other @ Ty::Nil
+            | other @ Ty::List(_)
+            | other @ Ty::Map(..)
+            | other @ Ty::Set(_)
+            | other @ Ty::Func { .. }
+            | other @ Ty::BuiltinFn { .. }
+            | other @ Ty::Tuple(_)
+            | other @ Ty::Struct(..)
+            | other @ Ty::Enum(..)
+            | other @ Ty::Param(_)
+            | other @ Ty::Result(..)
+            | other @ Ty::Option(_)
+            | other @ Ty::Channel(_)
+            | other @ Ty::Shared(_)
+            | other @ Ty::Atomic(_)
+            | other @ Ty::AtomicInt
+            | other @ Ty::RwShared(_)
+            | other @ Ty::Executor
+            | other @ Ty::Socket
+            | other @ Ty::Listener
+            | other @ Ty::Writer
+            | other @ Ty::Reader
+            | other @ Ty::Ptr
+            | other @ Ty::Protocol(..)
+            | other @ Ty::Module(_)
+            | other @ Ty::Unknown
+            | other @ Ty::Var(_) => other,
         }
     }
 
@@ -570,7 +695,25 @@ impl Ty {
                 Ty::Struct(_, a) | Ty::Enum(_, a) | Ty::Protocol(_, a) => a.iter().any(open),
                 Ty::Tuple(ts) => ts.iter().any(open),
                 Ty::Func { params, ret, .. } => params.iter().any(open) || open(ret),
-                _ => false,
+                Ty::Int
+                | Ty::Float
+                | Ty::Bool
+                | Ty::Str
+                | Ty::Bytes
+                | Ty::ByteArray
+                | Ty::Nil
+                | Ty::BuiltinFn { .. }
+                | Ty::Param(_)
+                | Ty::AtomicInt
+                | Ty::Executor
+                | Ty::Socket
+                | Ty::Listener
+                | Ty::Writer
+                | Ty::Reader
+                | Ty::Ptr
+                | Ty::Width(_)
+                | Ty::Module(_)
+                | Ty::Var(_) => false,
             }
         }
         !self.is_unknown() && open(self)
@@ -582,7 +725,38 @@ impl Ty {
     pub fn fn_parts(&self) -> Option<(&[Ty], &Ty)> {
         match self {
             Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => Some((params, ret)),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 }
@@ -766,7 +940,37 @@ impl fmt::Display for Operand<'_> {
         let parens = match self.0 {
             Ty::Func { .. } | Ty::BuiltinFn { .. } => true,
             Ty::Result(_, e) => has_explicit_error(e),
-            _ => false,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => false,
         };
         if parens {
             write!(f, "({})", Named(self.0, self.1))
@@ -870,7 +1074,25 @@ impl Ty {
                 out.insert(n.clone());
                 args.iter().for_each(|t| t.collect_nominal_keys(out));
             }
-            _ => {}
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::Param(_)
+            | Ty::AtomicInt
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => {}
         }
     }
 

@@ -71,7 +71,37 @@ fn dom_of_ty(chk: &Checker, ty: &Ty) -> Dom {
             None => Dom::Open,
         },
         Ty::Bool => Dom::Bool,
-        _ => match (ty.as_enum(), chk.variants_of(ty)) {
+        Ty::Int
+        | Ty::Float
+        | Ty::Str
+        | Ty::Bytes
+        | Ty::ByteArray
+        | Ty::Nil
+        | Ty::List(_)
+        | Ty::Map(..)
+        | Ty::Set(_)
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Enum(..)
+        | Ty::Param(_)
+        | Ty::Result(..)
+        | Ty::Option(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => match (ty.as_enum(), chk.variants_of(ty)) {
             (Some((key, _)), Some(vmap)) => chk.sum_dom(key, vmap),
             _ => Dom::Open,
         },
@@ -110,7 +140,7 @@ fn render_wit(w: &Wit) -> String {
             let head = &tag.pattern_text()[..1];
             match **w {
                 Wit::Carrier(..) => format!("{head}({})", render_wit(w)),
-                _ => format!("{head}{}", render_wit(w)),
+                Wit::Wild | Wit::Ctor(..) => format!("{head}{}", render_wit(w)),
             }
         }
     }
@@ -217,7 +247,7 @@ impl Checker {
                         .iter()
                         .filter_map(|key| Self::carrier_variant_of_key(*tag, key))
                         .find_map(|v| members.iter().find(|(n, tys)| n == v && tys.len() == 1)),
-                    _ => None,
+                    Dom::Prod(..) | Dom::Bool | Dom::Open => None,
                 };
                 match member {
                     Some((vname, tys)) => {
@@ -230,7 +260,7 @@ impl Checker {
                 Dom::Prod(p, tys) if p.is_empty() && tys.len() == subs.len() => {
                     self.exh_product("", subs, tys, depth)
                 }
-                _ => vec![Pat::Never],
+                Dom::Sum(..) | Dom::Prod(..) | Dom::Bool | Dom::Open => vec![Pat::Never],
             },
             Pattern::Variant {
                 id: _,
@@ -268,7 +298,7 @@ impl Checker {
                         }
                     }
                 },
-                _ => {
+                Dom::Prod(..) | Dom::Bool | Dom::Open => {
                     if enum_name.is_none()
                         && module_name.is_none()
                         && bindings.is_empty()
@@ -422,7 +452,7 @@ fn dom_label(dom: &Dom) -> &str {
 fn ctor_display(dom: &Dom, name: &str) -> String {
     match dom {
         Dom::Prod(_, _) => crate::compiler::bare_display(name),
-        _ => display_of(dom_label(dom), name),
+        Dom::Sum(..) | Dom::Bool | Dom::Open => display_of(dom_label(dom), name),
     }
 }
 

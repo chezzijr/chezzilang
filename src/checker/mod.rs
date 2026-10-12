@@ -365,7 +365,11 @@ fn describe_extern_type(t: &Type) -> String {
             Some(Type::Named { name: inner, .. }) => format!("{inner}?"),
             _ => "str?".to_string(),
         },
-        _ => "owned_str".to_string(),
+        Type::Qualified { .. }
+        | Type::Generic(..)
+        | Type::Func { .. }
+        | Type::Tuple(_)
+        | Type::Nil(_) => "owned_str".to_string(),
     }
 }
 
@@ -1744,7 +1748,35 @@ pub fn witness_key_span(callee: &Expr, call_span: Span) -> Span {
     match &callee.kind {
         ExprKind::Field { name_span, .. } => *name_span,
         ExprKind::Ident(_) => callee.span,
-        _ => call_span,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => call_span,
     }
 }
 
@@ -1768,7 +1800,31 @@ fn entry_module_binds(stmts: &[Stmt], imports: &[ResolvedImport], name: &str) ->
             StmtKind::Fn(d) => d.name == name,
             StmtKind::Extern { fns, .. } => fns.iter().any(|f| f.name == name),
             StmtKind::Let { names, .. } => name != "_" && names.iter().any(|n| n == name),
-            _ => false,
+            StmtKind::Assign { .. }
+            | StmtKind::Struct { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::If { .. }
+            | StmtKind::For { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Match { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Yield(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Parallel { .. }
+            | StmtKind::Spawn(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. }
+            | StmtKind::Assert { .. }
+            | StmtKind::Expr(_) => false,
         })
 }
 
@@ -2128,7 +2184,34 @@ impl Checker {
             {
                 let decl = lm.ast.stmts.iter().find_map(|s| match &s.kind {
                     StmtKind::Fn(d) if d.name == f => Some((d, s.span)),
-                    _ => None,
+                    StmtKind::Let { .. }
+                    | StmtKind::Assign { .. }
+                    | StmtKind::Fn(_)
+                    | StmtKind::Struct { .. }
+                    | StmtKind::Protocol { .. }
+                    | StmtKind::Enum { .. }
+                    | StmtKind::TypeAlias { .. }
+                    | StmtKind::If { .. }
+                    | StmtKind::For { .. }
+                    | StmtKind::While { .. }
+                    | StmtKind::Match { .. }
+                    | StmtKind::Return(_)
+                    | StmtKind::Yield(_)
+                    | StmtKind::Defer(_)
+                    | StmtKind::Parallel { .. }
+                    | StmtKind::Spawn(_)
+                    | StmtKind::Wait { .. }
+                    | StmtKind::Break
+                    | StmtKind::Continue
+                    | StmtKind::Pass
+                    | StmtKind::Import(_)
+                    | StmtKind::Extern { .. }
+                    | StmtKind::Native(_)
+                    | StmtKind::NativeStruct { .. }
+                    | StmtKind::NativeEnum { .. }
+                    | StmtKind::NativeType { .. }
+                    | StmtKind::Assert { .. }
+                    | StmtKind::Expr(_) => None,
                 });
                 let span = decl.map_or(Span::RUNTIME, |(_, sp)| sp);
                 // Two ways the zero-argument call cannot be satisfied, one message. The DECLARED
@@ -3514,7 +3597,27 @@ fn ty_all_holes(ty: &Ty, ok: &dyn Fn(&Ty) -> bool) -> bool {
         Ty::Struct(_, a) | Ty::Enum(_, a) | Ty::Protocol(_, a) => all(a),
         Ty::Tuple(ts) => all(ts),
         Ty::Func { params, ret, .. } => all(params) && ty_all_holes(ret, ok),
-        _ => true,
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Str
+        | Ty::Bytes
+        | Ty::ByteArray
+        | Ty::Nil
+        | Ty::BuiltinFn { .. }
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Module(_) => true,
     }
 }
 
@@ -3619,7 +3722,39 @@ fn pin_generic_fn_value(
     let refined = subst(&renamed, &map);
     if !ty_all_holes(&refined, &|h| match h {
         Ty::Param(n) => rigid(n),
-        _ => true,
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Str
+        | Ty::Bytes
+        | Ty::ByteArray
+        | Ty::Nil
+        | Ty::List(_)
+        | Ty::Map(..)
+        | Ty::Set(_)
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Tuple(_)
+        | Ty::Struct(..)
+        | Ty::Enum(..)
+        | Ty::Result(..)
+        | Ty::Option(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => true,
     }) {
         return FnValuePin::Undetermined;
     }
@@ -3759,7 +3894,25 @@ fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
         Ty::Protocol(n, args) => {
             Ty::Protocol(n.clone(), args.iter().map(|t| subst(t, map)).collect())
         }
-        other => other.clone(),
+        other @ Ty::Int
+        | other @ Ty::Float
+        | other @ Ty::Bool
+        | other @ Ty::Str
+        | other @ Ty::Bytes
+        | other @ Ty::ByteArray
+        | other @ Ty::Nil
+        | other @ Ty::BuiltinFn { .. }
+        | other @ Ty::AtomicInt
+        | other @ Ty::Executor
+        | other @ Ty::Socket
+        | other @ Ty::Listener
+        | other @ Ty::Writer
+        | other @ Ty::Reader
+        | other @ Ty::Ptr
+        | other @ Ty::Width(_)
+        | other @ Ty::Module(_)
+        | other @ Ty::Unknown
+        | other @ Ty::Var(_) => other.clone(),
     }
 }
 
@@ -4023,7 +4176,39 @@ fn mask_closure_ret(actual: &Ty) -> Ty {
             ret: Box::new(Ty::Unknown),
             labels: labels.clone(),
         },
-        other => other.clone(),
+        other @ Ty::Int
+        | other @ Ty::Float
+        | other @ Ty::Bool
+        | other @ Ty::Str
+        | other @ Ty::Bytes
+        | other @ Ty::ByteArray
+        | other @ Ty::Nil
+        | other @ Ty::List(_)
+        | other @ Ty::Map(..)
+        | other @ Ty::Set(_)
+        | other @ Ty::BuiltinFn { .. }
+        | other @ Ty::Tuple(_)
+        | other @ Ty::Struct(..)
+        | other @ Ty::Enum(..)
+        | other @ Ty::Param(_)
+        | other @ Ty::Result(..)
+        | other @ Ty::Option(_)
+        | other @ Ty::Channel(_)
+        | other @ Ty::Shared(_)
+        | other @ Ty::Atomic(_)
+        | other @ Ty::AtomicInt
+        | other @ Ty::RwShared(_)
+        | other @ Ty::Executor
+        | other @ Ty::Socket
+        | other @ Ty::Listener
+        | other @ Ty::Writer
+        | other @ Ty::Reader
+        | other @ Ty::Ptr
+        | other @ Ty::Width(_)
+        | other @ Ty::Protocol(..)
+        | other @ Ty::Module(_)
+        | other @ Ty::Unknown
+        | other @ Ty::Var(_) => other.clone(),
     }
 }
 
@@ -4138,7 +4323,25 @@ fn ty_collect_params(
             }
             ty_collect_params(ret, wanted, out);
         }
-        _ => {}
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Str
+        | Ty::Bytes
+        | Ty::ByteArray
+        | Ty::Nil
+        | Ty::BuiltinFn { .. }
+        | Ty::AtomicInt
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => {}
     }
 }
 
@@ -4193,7 +4396,7 @@ fn op_sym(op: BinaryOp) -> &'static str {
         Shl => "<<",
         Shr => ">>",
         In => "in",
-        _ => "?",
+        Lt | LtEq | Gt | GtEq | Eq | NotEq | And | Or => "?",
     }
 }
 
@@ -4309,7 +4512,36 @@ fn mutates_receiver(recv: &Ty, method: &str) -> bool {
         Ty::Map(..) => "Map",
         Ty::Set(_) => "Set",
         Ty::ByteArray => "bytearray",
-        _ => return false,
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Str
+        | Ty::Bytes
+        | Ty::Nil
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Tuple(_)
+        | Ty::Struct(..)
+        | Ty::Enum(..)
+        | Ty::Param(_)
+        | Ty::Result(..)
+        | Ty::Option(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => return false,
     };
     crate::vm::is_mutating_native_kind(kind, method)
 }

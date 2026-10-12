@@ -166,8 +166,50 @@ pub(super) fn stmt(s: &Stmt, diverges: &dyn Fn(&Expr) -> bool) -> Flow {
                     ..Flow::NEXT
                 }
             }
-            _ => Flow::NEXT,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::Ident(_)
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_) => Flow::NEXT,
         },
-        _ => Flow::NEXT,
+        StmtKind::Assign { .. }
+        | StmtKind::Struct { .. }
+        | StmtKind::Protocol { .. }
+        | StmtKind::Enum { .. }
+        | StmtKind::TypeAlias { .. }
+        | StmtKind::Yield(_)
+        | StmtKind::Pass
+        | StmtKind::Import(_)
+        | StmtKind::Extern { .. }
+        | StmtKind::Native(_)
+        | StmtKind::NativeStruct { .. }
+        | StmtKind::NativeEnum { .. }
+        | StmtKind::NativeType { .. }
+        | StmtKind::Assert { .. } => Flow::NEXT,
     }
 }

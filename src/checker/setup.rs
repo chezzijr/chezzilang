@@ -278,7 +278,38 @@ impl Checker {
         let known = match ty {
             Ty::Struct(k, _) => self.struct_shape(k).is_some(),
             Ty::Enum(k, _) => self.enums.contains_key(k) || self.owning_enum_def(k).is_some(),
-            _ => false,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => false,
         };
         known.then(|| ty.clone())
     }
@@ -331,7 +362,40 @@ impl Checker {
                     }
                 }
             }
-            _ => {}
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => {}
         }
     }
 
@@ -348,7 +412,39 @@ impl Checker {
     pub(super) fn alias_struct_head(&self, name: &str) -> Option<(String, Vec<Ty>)> {
         match self.alias_body_ty(name)? {
             Ty::Struct(k, targs) => Some((k, targs)),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -444,7 +540,40 @@ impl Checker {
         if let Some(body) = self.aliases.get(name) {
             return match self.resolve_ty_ro(body) {
                 Ty::Protocol(key, args) if args.is_empty() => Some(key),
-                _ => None,
+                Ty::Int
+                | Ty::Float
+                | Ty::Bool
+                | Ty::Str
+                | Ty::Bytes
+                | Ty::ByteArray
+                | Ty::Nil
+                | Ty::List(_)
+                | Ty::Map(..)
+                | Ty::Set(_)
+                | Ty::Func { .. }
+                | Ty::BuiltinFn { .. }
+                | Ty::Tuple(_)
+                | Ty::Struct(..)
+                | Ty::Enum(..)
+                | Ty::Param(_)
+                | Ty::Result(..)
+                | Ty::Option(_)
+                | Ty::Channel(_)
+                | Ty::Shared(_)
+                | Ty::Atomic(_)
+                | Ty::AtomicInt
+                | Ty::RwShared(_)
+                | Ty::Executor
+                | Ty::Socket
+                | Ty::Listener
+                | Ty::Writer
+                | Ty::Reader
+                | Ty::Ptr
+                | Ty::Width(_)
+                | Ty::Protocol(..)
+                | Ty::Module(_)
+                | Ty::Unknown
+                | Ty::Var(_) => None,
             };
         }
         let head = name.to_string();
@@ -1756,7 +1885,29 @@ impl Checker {
                 | StmtKind::Enum { name, .. }
                 | StmtKind::TypeAlias { name, .. }
                 | StmtKind::Protocol { name, .. } => name,
-                _ => continue,
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => continue,
             };
             if !self.imported_modules.contains_key(name) && !variant_binds.contains(name) {
                 continue;
@@ -2534,7 +2685,30 @@ impl Checker {
                         Self::export_protocol(&mut sig, name, info, doc);
                     }
                 }
-                _ => {}
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
         sig
@@ -2789,7 +2963,35 @@ impl Checker {
                 Some(m) => self.qualified_type_head(m, name),
                 None => None,
             },
-            _ => None,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => None,
         }
     }
     /// The bare half of [`Checker::type_head`]: a declared type, else a type alias of one.
@@ -2906,7 +3108,39 @@ impl Checker {
     pub(super) fn unify_arg(&mut self, decl: &Ty, actual: &Ty, map: &mut HashMap<String, Ty>) {
         let open = match super::subst(decl, map) {
             Ty::Func { params, ret, .. } => ret.has_hole() || params.iter().any(Ty::has_hole),
-            want => want.has_hole(),
+            want @ Ty::Int
+            | want @ Ty::Float
+            | want @ Ty::Bool
+            | want @ Ty::Str
+            | want @ Ty::Bytes
+            | want @ Ty::ByteArray
+            | want @ Ty::Nil
+            | want @ Ty::List(_)
+            | want @ Ty::Map(..)
+            | want @ Ty::Set(_)
+            | want @ Ty::BuiltinFn { .. }
+            | want @ Ty::Tuple(_)
+            | want @ Ty::Struct(..)
+            | want @ Ty::Enum(..)
+            | want @ Ty::Param(_)
+            | want @ Ty::Result(..)
+            | want @ Ty::Option(_)
+            | want @ Ty::Channel(_)
+            | want @ Ty::Shared(_)
+            | want @ Ty::Atomic(_)
+            | want @ Ty::AtomicInt
+            | want @ Ty::RwShared(_)
+            | want @ Ty::Executor
+            | want @ Ty::Socket
+            | want @ Ty::Listener
+            | want @ Ty::Writer
+            | want @ Ty::Reader
+            | want @ Ty::Ptr
+            | want @ Ty::Width(_)
+            | want @ Ty::Protocol(..)
+            | want @ Ty::Module(_)
+            | want @ Ty::Unknown
+            | want @ Ty::Var(_) => want.has_hole(),
         };
         if open {
             let actual = self.pinning_value_ty(actual);
@@ -3188,7 +3422,34 @@ impl Checker {
             ExprKind::Index { obj, .. } => {
                 self.checked_link_ty(&self.checked_chain_ty(obj)?, &ChainLink::Index)
             }
-            _ => None,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => None,
         }
     }
 
@@ -3201,7 +3462,34 @@ impl Checker {
                 Some(Ty::Struct(key, _)) => self.method_writes_self(&key, "set_index"),
                 _ => false,
             },
-            _ => false,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => false,
         }
     }
 
@@ -3228,7 +3516,35 @@ impl Checker {
                 .get(&(self.graph_module_idx, body.span))
                 .cloned()
                 .unwrap_or_default(),
-            _ => Vec::new(),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => Vec::new(),
         }
     }
 
@@ -3441,7 +3757,35 @@ impl Checker {
                 let free = crate::compiler::free_names_of_expr(body, &bound);
                 self.local_captures_of(&free)
             }
-            _ => Vec::new(),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => Vec::new(),
         }
     }
 
@@ -3527,7 +3871,31 @@ impl Checker {
                         }
                     }
                 }
-                _ => {}
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Protocol { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
     }
@@ -3563,7 +3931,34 @@ impl Checker {
                         self.name_docs.insert(n.clone(), d.clone());
                     }
                 }
-                _ => {}
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Struct { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::Enum { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
     }
@@ -4152,7 +4547,27 @@ impl Checker {
                         self.imported_ffi_types.insert(name.clone());
                     }
                 }
-                _ => {}
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
         // M24-2 — index the MEMBER names some declaration takes a witness for BEFORE either loop
@@ -4164,7 +4579,32 @@ impl Checker {
         for s in stmts {
             let methods = match &s.kind {
                 StmtKind::Struct { methods, .. } | StmtKind::Enum { methods, .. } => methods,
-                _ => continue,
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Protocol { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => continue,
             };
             for m in methods {
                 if !self.static_bounded_type_params(m).is_empty() {
@@ -4200,7 +4640,33 @@ impl Checker {
             .iter()
             .filter_map(|s| match &s.kind {
                 StmtKind::Fn(d) => Some(d),
-                _ => None,
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Struct { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::Enum { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => None,
             })
             .collect();
         for _ in 0..fn_decls.len() {
@@ -4235,7 +4701,32 @@ impl Checker {
                 StmtKind::Struct { name, methods, .. } | StmtKind::Enum { name, methods, .. } => {
                     (methods, self.bare_key(name))
                 }
-                _ => continue,
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Protocol { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => continue,
             };
             for m in methods {
                 let w = self.witness_params_of(m);
@@ -4244,7 +4735,33 @@ impl Checker {
                         .structs
                         .get_mut(&key)
                         .and_then(|s| s.methods.get_mut(&m.name)),
-                    _ => self
+                    StmtKind::Let { .. }
+                    | StmtKind::Assign { .. }
+                    | StmtKind::Fn(_)
+                    | StmtKind::Protocol { .. }
+                    | StmtKind::Enum { .. }
+                    | StmtKind::TypeAlias { .. }
+                    | StmtKind::If { .. }
+                    | StmtKind::For { .. }
+                    | StmtKind::While { .. }
+                    | StmtKind::Match { .. }
+                    | StmtKind::Return(_)
+                    | StmtKind::Yield(_)
+                    | StmtKind::Defer(_)
+                    | StmtKind::Parallel { .. }
+                    | StmtKind::Spawn(_)
+                    | StmtKind::Wait { .. }
+                    | StmtKind::Break
+                    | StmtKind::Continue
+                    | StmtKind::Pass
+                    | StmtKind::Import(_)
+                    | StmtKind::Extern { .. }
+                    | StmtKind::Native(_)
+                    | StmtKind::NativeStruct { .. }
+                    | StmtKind::NativeEnum { .. }
+                    | StmtKind::NativeType { .. }
+                    | StmtKind::Assert { .. }
+                    | StmtKind::Expr(_) => self
                         .enum_methods
                         .get_mut(&key)
                         .and_then(|ms| ms.get_mut(&m.name)),
@@ -4430,7 +4947,11 @@ impl Checker {
                 matches!(inner, Type::Named { name: s, .. } if s == "str" || s == "owned_str")
                     || self.is_return_only_extern_type_seen(inner, seen)
             }),
-            _ => false,
+            Type::Qualified { .. }
+            | Type::Generic(..)
+            | Type::Func { .. }
+            | Type::Tuple(_)
+            | Type::Nil(_) => false,
         }
     }
 
@@ -4599,7 +5120,35 @@ pub(super) fn c_vararg_ctype(ty: &Ty) -> Option<CType> {
         Ty::Bool => Some(CType::Bool),
         Ty::Str => Some(CType::Str),
         Ty::Ptr => Some(CType::Ptr),
-        _ => None,
+        Ty::Bytes
+        | Ty::ByteArray
+        | Ty::Nil
+        | Ty::List(_)
+        | Ty::Map(..)
+        | Ty::Set(_)
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Tuple(_)
+        | Ty::Struct(..)
+        | Ty::Enum(..)
+        | Ty::Param(_)
+        | Ty::Result(..)
+        | Ty::Option(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => None,
     }
     .and_then(|c| c.vararg_promoted())
 }
@@ -4632,7 +5181,36 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
                 segs.push(match &index.kind {
                     ExprKind::Int(i) if *i >= 0 => PathSeg::Int(*i),
                     ExprKind::Str(s) => PathSeg::Str((**s).to_owned()),
-                    _ => PathSeg::Dynamic,
+                    ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Interp(_)
+                    | ExprKind::Bytes(_)
+                    | ExprKind::RawStr(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::NoneLit
+                    | ExprKind::Pass
+                    | ExprKind::Ident(_)
+                    | ExprKind::List(..)
+                    | ExprKind::Tuple(_)
+                    | ExprKind::Map(_)
+                    | ExprKind::Set(_)
+                    | ExprKind::Comprehension { .. }
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Compare { .. }
+                    | ExprKind::Range { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Slice { .. }
+                    | ExprKind::Try(_)
+                    | ExprKind::OptChain { .. }
+                    | ExprKind::NullCoalesce { .. }
+                    | ExprKind::Closure { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::IfElse { .. }
+                    | ExprKind::Recover(_)
+                    | ExprKind::ElseGuard { .. } => PathSeg::Dynamic,
                 });
                 e = obj;
             }
@@ -4640,7 +5218,35 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
                 segs.reverse();
                 return Some((name, e.span, segs));
             }
-            _ => return None,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => return None,
         }
     }
 }
@@ -4674,7 +5280,39 @@ fn variant_import_binds(stmts: &[Stmt]) -> Vec<(String, String, String, Span)> {
 fn alias_type_head(name: &str, spelled: String, body: Ty) -> Option<TypeHead> {
     let (kind, key, args) = match body {
         Ty::Struct(k, a) => (TypeHeadKind::Struct, k, a),
-        other => {
+        other @ Ty::Int
+        | other @ Ty::Float
+        | other @ Ty::Bool
+        | other @ Ty::Str
+        | other @ Ty::Bytes
+        | other @ Ty::ByteArray
+        | other @ Ty::Nil
+        | other @ Ty::List(_)
+        | other @ Ty::Map(..)
+        | other @ Ty::Set(_)
+        | other @ Ty::Func { .. }
+        | other @ Ty::BuiltinFn { .. }
+        | other @ Ty::Tuple(_)
+        | other @ Ty::Enum(..)
+        | other @ Ty::Param(_)
+        | other @ Ty::Result(..)
+        | other @ Ty::Option(_)
+        | other @ Ty::Channel(_)
+        | other @ Ty::Shared(_)
+        | other @ Ty::Atomic(_)
+        | other @ Ty::AtomicInt
+        | other @ Ty::RwShared(_)
+        | other @ Ty::Executor
+        | other @ Ty::Socket
+        | other @ Ty::Listener
+        | other @ Ty::Writer
+        | other @ Ty::Reader
+        | other @ Ty::Ptr
+        | other @ Ty::Width(_)
+        | other @ Ty::Protocol(..)
+        | other @ Ty::Module(_)
+        | other @ Ty::Unknown
+        | other @ Ty::Var(_) => {
             let (k, a) = other.as_enum()?;
             (TypeHeadKind::Enum, k.to_string(), a)
         }
@@ -4728,7 +5366,25 @@ fn open_binding_message(name: &str, t: &Ty, site: BindSite) -> String {
                 ret: b(ret),
                 labels: labels.clone(),
             },
-            other => other.clone(),
+            other @ Ty::Int
+            | other @ Ty::Float
+            | other @ Ty::Bool
+            | other @ Ty::Str
+            | other @ Ty::Bytes
+            | other @ Ty::ByteArray
+            | other @ Ty::Nil
+            | other @ Ty::BuiltinFn { .. }
+            | other @ Ty::Param(_)
+            | other @ Ty::AtomicInt
+            | other @ Ty::Executor
+            | other @ Ty::Socket
+            | other @ Ty::Listener
+            | other @ Ty::Writer
+            | other @ Ty::Reader
+            | other @ Ty::Ptr
+            | other @ Ty::Width(_)
+            | other @ Ty::Module(_)
+            | other @ Ty::Var(_) => other.clone(),
         }
     }
     let f = filled(t);
@@ -4745,7 +5401,29 @@ fn open_binding_message(name: &str, t: &Ty, site: BindSite) -> String {
         Ty::Option(_) => format!("cannot infer the type of `{name}` from `None`"),
         Ty::Result(..) => format!("cannot infer the success type of `{name}`"),
         Ty::Struct(..) | Ty::Enum(..) => format!("cannot infer the type arguments of `{name}`"),
-        _ => format!("cannot infer the type of `{name}`"),
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Str
+        | Ty::Bytes
+        | Ty::ByteArray
+        | Ty::Nil
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Tuple(_)
+        | Ty::Param(_)
+        | Ty::AtomicInt
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => format!("cannot infer the type of `{name}`"),
     };
     let tail = match (site, t) {
         (BindSite::Other, _) => {

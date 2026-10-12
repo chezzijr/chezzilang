@@ -285,7 +285,39 @@ impl Checker {
                     .iter()
                     .filter_map(|t| match t {
                         Ty::Param(p) => Some(p.clone()),
-                        _ => None,
+                        Ty::Int
+                        | Ty::Float
+                        | Ty::Bool
+                        | Ty::Str
+                        | Ty::Bytes
+                        | Ty::ByteArray
+                        | Ty::Nil
+                        | Ty::List(_)
+                        | Ty::Map(..)
+                        | Ty::Set(_)
+                        | Ty::Func { .. }
+                        | Ty::BuiltinFn { .. }
+                        | Ty::Tuple(_)
+                        | Ty::Struct(..)
+                        | Ty::Enum(..)
+                        | Ty::Result(..)
+                        | Ty::Option(_)
+                        | Ty::Channel(_)
+                        | Ty::Shared(_)
+                        | Ty::Atomic(_)
+                        | Ty::AtomicInt
+                        | Ty::RwShared(_)
+                        | Ty::Executor
+                        | Ty::Socket
+                        | Ty::Listener
+                        | Ty::Writer
+                        | Ty::Reader
+                        | Ty::Ptr
+                        | Ty::Width(_)
+                        | Ty::Protocol(..)
+                        | Ty::Module(_)
+                        | Ty::Unknown
+                        | Ty::Var(_) => None,
                     })
                     .collect();
                 (format!("{bare}.{}", decl.name), Some(bare), tps)
@@ -400,7 +432,32 @@ impl Checker {
                     hoisted.insert(&d.name);
                 }
                 StmtKind::Extern { fns, .. } => hoisted.extend(fns.iter().map(|f| f.name.as_str())),
-                _ => {}
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Struct { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::Enum { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
         let mut seen: HashSet<&str> = HashSet::new();
@@ -470,7 +527,40 @@ impl Checker {
                     } else {
                         match &val_ty {
                             Ty::Tuple(ts) if ts.len() == names.len() => ts[i].clone(),
-                            _ => Ty::Unknown,
+                            Ty::Int
+                            | Ty::Float
+                            | Ty::Bool
+                            | Ty::Str
+                            | Ty::Bytes
+                            | Ty::ByteArray
+                            | Ty::Nil
+                            | Ty::List(_)
+                            | Ty::Map(..)
+                            | Ty::Set(_)
+                            | Ty::Func { .. }
+                            | Ty::BuiltinFn { .. }
+                            | Ty::Tuple(_)
+                            | Ty::Struct(..)
+                            | Ty::Enum(..)
+                            | Ty::Param(_)
+                            | Ty::Result(..)
+                            | Ty::Option(_)
+                            | Ty::Channel(_)
+                            | Ty::Shared(_)
+                            | Ty::Atomic(_)
+                            | Ty::AtomicInt
+                            | Ty::RwShared(_)
+                            | Ty::Executor
+                            | Ty::Socket
+                            | Ty::Listener
+                            | Ty::Writer
+                            | Ty::Reader
+                            | Ty::Ptr
+                            | Ty::Width(_)
+                            | Ty::Protocol(..)
+                            | Ty::Module(_)
+                            | Ty::Unknown
+                            | Ty::Var(_) => Ty::Unknown,
                         }
                     };
                     // TICKET-225: a seeded global type outlives this walk.
@@ -569,7 +659,34 @@ impl Checker {
             && sig.ret == Ty::Unknown
             && let Some(decl) = stmts.iter().find_map(|s| match &s.kind {
                 StmtKind::Fn(d) if &d.name == f => Some(d),
-                _ => None,
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Struct { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::Enum { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => None,
             })
         {
             let probe = format!("${x}");
@@ -674,7 +791,33 @@ impl Checker {
                     |app| self.path_fn(app.head).is_some(),
                 )
                 .then(Vec::new),
-            _ => None,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => None,
         }
     }
 
@@ -692,7 +835,32 @@ impl Checker {
                         .filter(|m| m.ret.is_none() && m.inline_expr_body)
                         .count();
                 }
-                _ => {}
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Protocol { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
         n
@@ -793,7 +961,32 @@ impl Checker {
                     }
                     self.exit_type_params(saved);
                 }
-                _ => {}
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Protocol { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
         changed
@@ -1573,7 +1766,26 @@ impl Checker {
                 .iter()
                 .find_map(|p| self.first_static_ctor_protocol(p))
                 .or_else(|| self.first_static_ctor_protocol(ret)),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::BuiltinFn { .. }
+            | Ty::Param(_)
+            | Ty::AtomicInt
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -2500,7 +2712,37 @@ impl Checker {
                         Fresh::Marked
                     }
                 }
-                _ => match self
+                ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Interp(_)
+                | ExprKind::Bytes(_)
+                | ExprKind::RawStr(_)
+                | ExprKind::Bool(_)
+                | ExprKind::NoneLit
+                | ExprKind::Pass
+                | ExprKind::Ident(_)
+                | ExprKind::List(..)
+                | ExprKind::Tuple(_)
+                | ExprKind::Map(_)
+                | ExprKind::Set(_)
+                | ExprKind::Comprehension { .. }
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Compare { .. }
+                | ExprKind::Range { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Field { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Slice { .. }
+                | ExprKind::Try(_)
+                | ExprKind::OptChain { .. }
+                | ExprKind::NullCoalesce { .. }
+                | ExprKind::Closure { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::IfElse { .. }
+                | ExprKind::Recover(_)
+                | ExprKind::ElseGuard { .. } => match self
                     .resolutions
                     .get(&(self.graph_module_idx, callee.id.0))
                     .cloned()
@@ -2529,7 +2771,23 @@ impl Checker {
                     _ => Fresh::Marked,
                 },
             },
-            _ => Fresh::Marked,
+            ExprKind::Interp(_)
+            | ExprKind::Pass
+            | ExprKind::Ident(_)
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => Fresh::Marked,
         };
         // The implicit wrap at a typed slot is one more object around the value. The compiler
         // emits it from this same record.
@@ -3253,9 +3511,69 @@ impl Checker {
                                  print(...) call, not a deferred one",
                             );
                         }
-                        _ => {} // a name bound to a callable, or an arbitrary value-producing callee
+                        ExprKind::Int(_)
+                        | ExprKind::Float(_)
+                        | ExprKind::Str(_)
+                        | ExprKind::Interp(_)
+                        | ExprKind::Bytes(_)
+                        | ExprKind::RawStr(_)
+                        | ExprKind::Bool(_)
+                        | ExprKind::NoneLit
+                        | ExprKind::Pass
+                        | ExprKind::Ident(_)
+                        | ExprKind::List(..)
+                        | ExprKind::Tuple(_)
+                        | ExprKind::Map(_)
+                        | ExprKind::Set(_)
+                        | ExprKind::Comprehension { .. }
+                        | ExprKind::Unary { .. }
+                        | ExprKind::Binary { .. }
+                        | ExprKind::Compare { .. }
+                        | ExprKind::Range { .. }
+                        | ExprKind::Call { .. }
+                        | ExprKind::Index { .. }
+                        | ExprKind::Slice { .. }
+                        | ExprKind::Try(_)
+                        | ExprKind::OptChain { .. }
+                        | ExprKind::NullCoalesce { .. }
+                        | ExprKind::Closure { .. }
+                        | ExprKind::Match { .. }
+                        | ExprKind::IfElse { .. }
+                        | ExprKind::Recover(_)
+                        | ExprKind::ElseGuard { .. } => {} // a name bound to a callable, or an arbitrary value-producing callee
                     },
-                    _ => self.error(e.span, "defer requires a function or method call"),
+                    ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Str(_)
+                    | ExprKind::Interp(_)
+                    | ExprKind::Bytes(_)
+                    | ExprKind::RawStr(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::NoneLit
+                    | ExprKind::Pass
+                    | ExprKind::Ident(_)
+                    | ExprKind::List(..)
+                    | ExprKind::Tuple(_)
+                    | ExprKind::Map(_)
+                    | ExprKind::Set(_)
+                    | ExprKind::Comprehension { .. }
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Compare { .. }
+                    | ExprKind::Range { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Slice { .. }
+                    | ExprKind::Try(_)
+                    | ExprKind::OptChain { .. }
+                    | ExprKind::NullCoalesce { .. }
+                    | ExprKind::Closure { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::IfElse { .. }
+                    | ExprKind::Recover(_)
+                    | ExprKind::ElseGuard { .. } => {
+                        self.error(e.span, "defer requires a function or method call")
+                    }
                 }
                 // Type-check the call (and its args); the result is discarded, like an expr stmt.
                 self.infer(e);
@@ -3353,7 +3671,36 @@ impl Checker {
                                          print(...) call, not a spawned one",
                                     );
                                 }
-                                _ => {}
+                                ExprKind::Int(_)
+                                | ExprKind::Float(_)
+                                | ExprKind::Str(_)
+                                | ExprKind::Interp(_)
+                                | ExprKind::Bytes(_)
+                                | ExprKind::RawStr(_)
+                                | ExprKind::Bool(_)
+                                | ExprKind::NoneLit
+                                | ExprKind::Pass
+                                | ExprKind::Ident(_)
+                                | ExprKind::List(..)
+                                | ExprKind::Tuple(_)
+                                | ExprKind::Map(_)
+                                | ExprKind::Set(_)
+                                | ExprKind::Comprehension { .. }
+                                | ExprKind::Unary { .. }
+                                | ExprKind::Binary { .. }
+                                | ExprKind::Compare { .. }
+                                | ExprKind::Range { .. }
+                                | ExprKind::Call { .. }
+                                | ExprKind::Index { .. }
+                                | ExprKind::Slice { .. }
+                                | ExprKind::Try(_)
+                                | ExprKind::OptChain { .. }
+                                | ExprKind::NullCoalesce { .. }
+                                | ExprKind::Closure { .. }
+                                | ExprKind::Match { .. }
+                                | ExprKind::IfElse { .. }
+                                | ExprKind::Recover(_)
+                                | ExprKind::ElseGuard { .. } => {}
                             }
                         }
                         // Full type-check of the call (callee, arity, args) — the single source of
@@ -3415,7 +3762,36 @@ impl Checker {
                             // stores the shapes; the runtime walks them.
                             let receiver = match &callee.kind {
                                 ExprKind::Field { obj, .. } => Some(&**obj),
-                                _ => None,
+                                ExprKind::Int(_)
+                                | ExprKind::Float(_)
+                                | ExprKind::Str(_)
+                                | ExprKind::Interp(_)
+                                | ExprKind::Bytes(_)
+                                | ExprKind::RawStr(_)
+                                | ExprKind::Bool(_)
+                                | ExprKind::NoneLit
+                                | ExprKind::Pass
+                                | ExprKind::Ident(_)
+                                | ExprKind::List(..)
+                                | ExprKind::Tuple(_)
+                                | ExprKind::Map(_)
+                                | ExprKind::Set(_)
+                                | ExprKind::Comprehension { .. }
+                                | ExprKind::Unary { .. }
+                                | ExprKind::Binary { .. }
+                                | ExprKind::Compare { .. }
+                                | ExprKind::Range { .. }
+                                | ExprKind::Call { .. }
+                                | ExprKind::Index { .. }
+                                | ExprKind::Slice { .. }
+                                | ExprKind::Try(_)
+                                | ExprKind::OptChain { .. }
+                                | ExprKind::NullCoalesce { .. }
+                                | ExprKind::Closure { .. }
+                                | ExprKind::Match { .. }
+                                | ExprKind::IfElse { .. }
+                                | ExprKind::Recover(_)
+                                | ExprKind::ElseGuard { .. } => None,
                             };
                             let slots = self.bound_slots(e.id, args, named);
                             let crossing = self.call_crossing(receiver, &slots);
@@ -3885,7 +4261,38 @@ impl Checker {
                     }
                 }
             }
-            other => {
+            other @ Ty::Int
+            | other @ Ty::Float
+            | other @ Ty::Bool
+            | other @ Ty::Str
+            | other @ Ty::Bytes
+            | other @ Ty::ByteArray
+            | other @ Ty::Nil
+            | other @ Ty::List(_)
+            | other @ Ty::Map(..)
+            | other @ Ty::Set(_)
+            | other @ Ty::Func { .. }
+            | other @ Ty::BuiltinFn { .. }
+            | other @ Ty::Struct(..)
+            | other @ Ty::Enum(..)
+            | other @ Ty::Param(_)
+            | other @ Ty::Result(..)
+            | other @ Ty::Option(_)
+            | other @ Ty::Channel(_)
+            | other @ Ty::Shared(_)
+            | other @ Ty::Atomic(_)
+            | other @ Ty::AtomicInt
+            | other @ Ty::RwShared(_)
+            | other @ Ty::Executor
+            | other @ Ty::Socket
+            | other @ Ty::Listener
+            | other @ Ty::Writer
+            | other @ Ty::Reader
+            | other @ Ty::Ptr
+            | other @ Ty::Width(_)
+            | other @ Ty::Protocol(..)
+            | other @ Ty::Module(_)
+            | other @ Ty::Var(_) => {
                 self.error(
                     span,
                     format!("cannot destructure non-tuple value of type {other}"),
@@ -4070,7 +4477,34 @@ impl Checker {
                             self.error(target.span, format!("cannot index-assign into {name}"));
                         }
                     }
-                    other => {
+                    other @ Ty::Int
+                    | other @ Ty::Float
+                    | other @ Ty::Bool
+                    | other @ Ty::Bytes
+                    | other @ Ty::Nil
+                    | other @ Ty::Set(_)
+                    | other @ Ty::Func { .. }
+                    | other @ Ty::BuiltinFn { .. }
+                    | other @ Ty::Tuple(_)
+                    | other @ Ty::Struct(..)
+                    | other @ Ty::Enum(..)
+                    | other @ Ty::Result(..)
+                    | other @ Ty::Option(_)
+                    | other @ Ty::Channel(_)
+                    | other @ Ty::Shared(_)
+                    | other @ Ty::Atomic(_)
+                    | other @ Ty::AtomicInt
+                    | other @ Ty::RwShared(_)
+                    | other @ Ty::Executor
+                    | other @ Ty::Socket
+                    | other @ Ty::Listener
+                    | other @ Ty::Writer
+                    | other @ Ty::Reader
+                    | other @ Ty::Ptr
+                    | other @ Ty::Width(_)
+                    | other @ Ty::Protocol(..)
+                    | other @ Ty::Module(_)
+                    | other @ Ty::Var(_) => {
                         // A struct satisfying `IndexSet` (has `index` + `set_index`) is mutable by index.
                         if let Some((set_k, set_v)) = self.index_set_kv(&other) {
                             // `x OP= v` is EXACTLY `x = x OP v` (docs/syntax.md §3), and the compiler
@@ -4182,7 +4616,38 @@ impl Checker {
                             ),
                         );
                     }
-                    other => self.error(
+                    other @ Ty::Int
+                    | other @ Ty::Float
+                    | other @ Ty::Bool
+                    | other @ Ty::Str
+                    | other @ Ty::Bytes
+                    | other @ Ty::ByteArray
+                    | other @ Ty::Nil
+                    | other @ Ty::List(_)
+                    | other @ Ty::Map(..)
+                    | other @ Ty::Set(_)
+                    | other @ Ty::Func { .. }
+                    | other @ Ty::BuiltinFn { .. }
+                    | other @ Ty::Tuple(_)
+                    | other @ Ty::Enum(..)
+                    | other @ Ty::Param(_)
+                    | other @ Ty::Result(..)
+                    | other @ Ty::Option(_)
+                    | other @ Ty::Channel(_)
+                    | other @ Ty::Shared(_)
+                    | other @ Ty::Atomic(_)
+                    | other @ Ty::AtomicInt
+                    | other @ Ty::RwShared(_)
+                    | other @ Ty::Executor
+                    | other @ Ty::Socket
+                    | other @ Ty::Listener
+                    | other @ Ty::Writer
+                    | other @ Ty::Reader
+                    | other @ Ty::Ptr
+                    | other @ Ty::Width(_)
+                    | other @ Ty::Protocol(..)
+                    | other @ Ty::Module(_)
+                    | other @ Ty::Var(_) => self.error(
                         target.span,
                         format!("cannot assign to field '{name}' of {other}"),
                     ),
@@ -4218,7 +4683,34 @@ impl Checker {
                     self.check_assign(t, AssignOp::Eq, ety, None, span);
                 }
             }
-            _ => self.error(
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => self.error(
                 target.span,
                 "invalid assignment target (only variables can be assigned)",
             ),
@@ -4291,7 +4783,13 @@ impl Checker {
                     AssignOp::MinusEq => "Sub",
                     AssignOp::StarEq => "Mul",
                     AssignOp::SlashEq => "Div",
-                    _ => "Mod",
+                    AssignOp::Eq
+                    | AssignOp::PercentEq
+                    | AssignOp::AmpEq
+                    | AssignOp::PipeEq
+                    | AssignOp::CaretEq
+                    | AssignOp::ShlEq
+                    | AssignOp::ShrEq => "Mod",
                 };
                 let overload_ok = self
                     .op_overload_result(target_ty, val_ty, proto)
@@ -4303,7 +4801,13 @@ impl Checker {
                         AssignOp::MinusEq => "-=",
                         AssignOp::StarEq => "*=",
                         AssignOp::SlashEq => "/=",
-                        _ => "%=",
+                        AssignOp::Eq
+                        | AssignOp::PercentEq
+                        | AssignOp::AmpEq
+                        | AssignOp::PipeEq
+                        | AssignOp::CaretEq
+                        | AssignOp::ShlEq
+                        | AssignOp::ShrEq => "%=",
                     };
                     let [target_s, val_s] = Ty::render_distinct([target_ty, val_ty]);
                     self.error(
@@ -4333,7 +4837,13 @@ impl Checker {
                         AssignOp::PipeEq => "|=",
                         AssignOp::CaretEq => "^=",
                         AssignOp::ShlEq => "<<=",
-                        _ => ">>=",
+                        AssignOp::Eq
+                        | AssignOp::PlusEq
+                        | AssignOp::MinusEq
+                        | AssignOp::StarEq
+                        | AssignOp::SlashEq
+                        | AssignOp::PercentEq
+                        | AssignOp::ShrEq => ">>=",
                     };
                     let [target_s, val_s] = Ty::render_distinct([target_ty, val_ty]);
                     self.error(
@@ -4493,7 +5003,26 @@ impl Checker {
                         self.check_generator_restrictions(&a.body);
                     }
                 }
-                _ => {}
+                StmtKind::Let { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::Fn(_)
+                | StmtKind::Struct { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::Enum { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
     }
@@ -4669,9 +5198,66 @@ impl Checker {
                 ExprKind::Field { name, .. } => {
                     (format!("the `{t}` value returned by '{name}'"), "…".into())
                 }
-                _ => (format!("the `{t}` value here"), "…".to_string()),
+                ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Str(_)
+                | ExprKind::Interp(_)
+                | ExprKind::Bytes(_)
+                | ExprKind::RawStr(_)
+                | ExprKind::Bool(_)
+                | ExprKind::NoneLit
+                | ExprKind::Pass
+                | ExprKind::List(..)
+                | ExprKind::Tuple(_)
+                | ExprKind::Map(_)
+                | ExprKind::Set(_)
+                | ExprKind::Comprehension { .. }
+                | ExprKind::Unary { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Compare { .. }
+                | ExprKind::Range { .. }
+                | ExprKind::Call { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Slice { .. }
+                | ExprKind::Try(_)
+                | ExprKind::OptChain { .. }
+                | ExprKind::NullCoalesce { .. }
+                | ExprKind::Closure { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::IfElse { .. }
+                | ExprKind::Recover(_)
+                | ExprKind::ElseGuard { .. } => (format!("the `{t}` value here"), "…".to_string()),
             },
-            _ => (format!("the `{t}` value here"), "…".to_string()),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::Ident(_)
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => (format!("the `{t}` value here"), "…".to_string()),
         };
         self.warn(
             e.span,
@@ -4748,7 +5334,40 @@ impl Checker {
                 Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
                     Some(args[0].clone())
                 }
-                _ => {
+                Ty::Int
+                | Ty::Float
+                | Ty::Bool
+                | Ty::Str
+                | Ty::Bytes
+                | Ty::ByteArray
+                | Ty::Nil
+                | Ty::List(_)
+                | Ty::Map(..)
+                | Ty::Set(_)
+                | Ty::Func { .. }
+                | Ty::BuiltinFn { .. }
+                | Ty::Tuple(_)
+                | Ty::Struct(..)
+                | Ty::Enum(..)
+                | Ty::Param(_)
+                | Ty::Result(..)
+                | Ty::Option(_)
+                | Ty::Channel(_)
+                | Ty::Shared(_)
+                | Ty::Atomic(_)
+                | Ty::AtomicInt
+                | Ty::RwShared(_)
+                | Ty::Executor
+                | Ty::Socket
+                | Ty::Listener
+                | Ty::Writer
+                | Ty::Reader
+                | Ty::Ptr
+                | Ty::Width(_)
+                | Ty::Protocol(..)
+                | Ty::Module(_)
+                | Ty::Unknown
+                | Ty::Var(_) => {
                     let span = decl.body.first().map(|s| s.span);
                     if let Some(span) = span {
                         self.error(
@@ -5111,7 +5730,39 @@ impl Checker {
     pub(super) fn next_ret_elem(ret: Ty) -> Option<Ty> {
         match ret {
             Ty::Option(inner) => Some(*inner),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -5119,7 +5770,40 @@ impl Checker {
     pub(super) fn iter_ret_elem(ret: Ty) -> Option<Ty> {
         match ret {
             Ty::Struct(name, mut args) if name == "Iterator" && args.len() == 1 => args.pop(),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -5168,7 +5852,34 @@ impl Checker {
             Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
                 Some(args[0].clone())
             }
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Nil
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -5193,7 +5904,40 @@ impl Checker {
             {
                 Some(args[0].clone())
             }
-            _ => self.struct_iter_elem(ty),
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => self.struct_iter_elem(ty),
         }
     }
 
@@ -5220,7 +5964,32 @@ impl Checker {
                 }
                 Some((subst(&sig.params[1], &map), subst(&sig.ret, &map)))
             }
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Nil
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -5312,7 +6081,35 @@ impl Checker {
                     None => self.infer(target),
                 }
             }
-            _ => self.infer(target),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::Ident(_)
+            | ExprKind::List(..)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => self.infer(target),
         }
     }
 
@@ -5360,7 +6157,33 @@ impl Checker {
                 }
                 Some(subst(&sig.ret, &map))
             }
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Nil
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -5432,7 +6255,38 @@ impl Checker {
                 Some(vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect())
             }
             Ty::Unknown => Some(vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect()),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Var(_) => None,
         }
     }
 
@@ -5572,7 +6426,31 @@ impl Checker {
                 }
                 unknowns(vars)
             }
-            other => {
+            other @ Ty::Int
+            | other @ Ty::Float
+            | other @ Ty::Bool
+            | other @ Ty::Nil
+            | other @ Ty::Func { .. }
+            | other @ Ty::BuiltinFn { .. }
+            | other @ Ty::Tuple(_)
+            | other @ Ty::Struct(..)
+            | other @ Ty::Enum(..)
+            | other @ Ty::Result(..)
+            | other @ Ty::Option(_)
+            | other @ Ty::Shared(_)
+            | other @ Ty::Atomic(_)
+            | other @ Ty::AtomicInt
+            | other @ Ty::RwShared(_)
+            | other @ Ty::Executor
+            | other @ Ty::Socket
+            | other @ Ty::Listener
+            | other @ Ty::Writer
+            | other @ Ty::Reader
+            | other @ Ty::Ptr
+            | other @ Ty::Width(_)
+            | other @ Ty::Protocol(..)
+            | other @ Ty::Module(_)
+            | other @ Ty::Var(_) => {
                 let note = self.iter_hook_note(other);
                 self.error(iter.span, format!("cannot iterate over {other}{note}"));
                 unknowns(vars)
@@ -5620,7 +6498,35 @@ impl Checker {
             // known enum or are literals — so the normal coverage check applies. Genuinely unknowable
             // cases still fall back to `Skip`.
             Ty::Unknown => self.reconstruct_unknown_kind(patterns, scrutinee.span),
-            other => {
+            other @ Ty::Float
+            | other @ Ty::Bytes
+            | other @ Ty::ByteArray
+            | other @ Ty::Nil
+            | other @ Ty::List(_)
+            | other @ Ty::Map(..)
+            | other @ Ty::Set(_)
+            | other @ Ty::Func { .. }
+            | other @ Ty::BuiltinFn { .. }
+            | other @ Ty::Struct(..)
+            | other @ Ty::Enum(..)
+            | other @ Ty::Param(_)
+            | other @ Ty::Result(..)
+            | other @ Ty::Option(_)
+            | other @ Ty::Channel(_)
+            | other @ Ty::Shared(_)
+            | other @ Ty::Atomic(_)
+            | other @ Ty::AtomicInt
+            | other @ Ty::RwShared(_)
+            | other @ Ty::Executor
+            | other @ Ty::Socket
+            | other @ Ty::Listener
+            | other @ Ty::Writer
+            | other @ Ty::Reader
+            | other @ Ty::Ptr
+            | other @ Ty::Width(_)
+            | other @ Ty::Protocol(..)
+            | other @ Ty::Module(_)
+            | other @ Ty::Var(_) => {
                 self.error(
                     scrutinee.span,
                     format!("cannot match on non-enum type {other}"),
@@ -5656,7 +6562,13 @@ impl Checker {
         for p in patterns {
             match p {
                 Pattern::Or(alts) => heads.extend(alts.iter()),
-                other => heads.push(other),
+                other @ Pattern::Ident(..)
+                | other @ Pattern::Variant { .. }
+                | other @ Pattern::Tuple(_)
+                | other @ Pattern::Literal(_)
+                | other @ Pattern::Range { .. }
+                | other @ Pattern::Wildcard
+                | other @ Pattern::Carrier { .. } => heads.push(other),
             }
         }
         let mut lit_ty: Option<Ty> = None;
@@ -5697,7 +6609,8 @@ impl Checker {
                     structural.get_or_insert("variant");
                 }
                 // Ident/Wildcard/(nested Or) — no structural or literal signal.
-                _ => {}
+                Pattern::Ident(..) | Pattern::Range { .. } | Pattern::Wildcard | Pattern::Or(_) => {
+                }
             }
         }
         if let Some(kind) = structural {
@@ -5881,7 +6794,35 @@ fn bare_head_name(kind: &ExprKind) -> Option<&str> {
             Some(n) => Some(n),
             None => None,
         },
-        _ => None,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => None,
     }
 }
 
@@ -5890,14 +6831,72 @@ fn bare_head_name(kind: &ExprKind) -> Option<&str> {
 fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
     let field = match kind {
         ExprKind::Index { obj, .. } => &obj.kind,
-        k => k,
+        k @ ExprKind::Int(_)
+        | k @ ExprKind::Float(_)
+        | k @ ExprKind::Str(_)
+        | k @ ExprKind::Interp(_)
+        | k @ ExprKind::Bytes(_)
+        | k @ ExprKind::RawStr(_)
+        | k @ ExprKind::Bool(_)
+        | k @ ExprKind::NoneLit
+        | k @ ExprKind::Pass
+        | k @ ExprKind::Ident(_)
+        | k @ ExprKind::List(..)
+        | k @ ExprKind::Tuple(_)
+        | k @ ExprKind::Map(_)
+        | k @ ExprKind::Set(_)
+        | k @ ExprKind::Comprehension { .. }
+        | k @ ExprKind::Unary { .. }
+        | k @ ExprKind::Binary { .. }
+        | k @ ExprKind::Compare { .. }
+        | k @ ExprKind::Range { .. }
+        | k @ ExprKind::Call { .. }
+        | k @ ExprKind::Field { .. }
+        | k @ ExprKind::Slice { .. }
+        | k @ ExprKind::Try(_)
+        | k @ ExprKind::OptChain { .. }
+        | k @ ExprKind::NullCoalesce { .. }
+        | k @ ExprKind::Closure { .. }
+        | k @ ExprKind::Match { .. }
+        | k @ ExprKind::IfElse { .. }
+        | k @ ExprKind::Recover(_)
+        | k @ ExprKind::ElseGuard { .. } => k,
     };
     match field {
         ExprKind::Field { obj, name, .. } => match obj.kind.as_ident() {
             Some(m) => Some((m, name)),
             None => None,
         },
-        _ => None,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => None,
     }
 }
 
@@ -5926,7 +6925,38 @@ impl Checker {
         let methods = match ty {
             Ty::Struct(name, _) => self.structs.get(name).map(|info| &info.methods),
             Ty::Enum(name, _) => self.enum_methods_of(name),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         };
         methods
             .and_then(|ms| ms.get(method))
@@ -5952,7 +6982,39 @@ impl Checker {
 fn min_arity(ty: &Ty) -> usize {
     match ty {
         Ty::Func { params, labels, .. } => labels.min_or(params.len()),
-        _ => 0,
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Str
+        | Ty::Bytes
+        | Ty::ByteArray
+        | Ty::Nil
+        | Ty::List(_)
+        | Ty::Map(..)
+        | Ty::Set(_)
+        | Ty::BuiltinFn { .. }
+        | Ty::Tuple(_)
+        | Ty::Struct(..)
+        | Ty::Enum(..)
+        | Ty::Param(_)
+        | Ty::Result(..)
+        | Ty::Option(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => 0,
     }
 }
 

@@ -116,7 +116,33 @@ pub(super) fn aliases_operand(kind: &ExprKind) -> OperandAlias {
         },
         ExprKind::Compare { .. } => OperandAlias::Fresh,
         ExprKind::NullCoalesce { .. } => OperandAlias::Child,
-        _ => OperandAlias::Holds,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => OperandAlias::Holds,
     }
 }
 
@@ -173,7 +199,32 @@ pub(super) fn ret_may_hold_receiver(ret: &Ty, own: &Ty) -> bool {
         Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::Nil => false,
         Ty::Option(t) => ret_may_hold_receiver(t, own),
         Ty::Result(t, e) => ret_may_hold_receiver(t, own) || ret_may_hold_receiver(e, own),
-        _ => true,
+        Ty::ByteArray
+        | Ty::List(_)
+        | Ty::Map(..)
+        | Ty::Set(_)
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Tuple(_)
+        | Ty::Struct(..)
+        | Ty::Enum(..)
+        | Ty::Param(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => true,
     }
 }
 
@@ -186,7 +237,34 @@ pub(super) fn native_receiver(t: &Ty) -> Option<(&'static str, Ty)> {
         Ty::Str => Some(("str", Ty::Str)),
         Ty::Bytes => Some(("bytes", Ty::Bytes)),
         Ty::ByteArray => Some(("bytearray", Ty::ByteArray)),
-        _ => None,
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Nil
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Tuple(_)
+        | Ty::Struct(..)
+        | Ty::Enum(..)
+        | Ty::Param(_)
+        | Ty::Result(..)
+        | Ty::Option(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => None,
     }
 }
 
@@ -209,7 +287,34 @@ impl UseWalk<'_> {
         match &e.kind {
             ExprKind::Ident(n) => Some(self.aliases.get(n).unwrap_or(n).clone()),
             ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => self.view_root(obj),
-            _ => None,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => None,
         }
     }
 
@@ -248,7 +353,35 @@ impl UseWalk<'_> {
                 }
             }
             ExprKind::Ident(n) if self.aliases.contains_key(n) => {}
-            _ => self.value(e),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::Ident(_)
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => self.value(e),
         }
     }
 
@@ -284,12 +417,68 @@ impl UseWalk<'_> {
                             value: Box::new(value.clone()),
                             index: match &target.kind {
                                 ExprKind::Index { index, .. } => index.clone(),
-                                _ => None,
+                                ExprKind::Int(_)
+                                | ExprKind::Float(_)
+                                | ExprKind::Str(_)
+                                | ExprKind::Interp(_)
+                                | ExprKind::Bytes(_)
+                                | ExprKind::RawStr(_)
+                                | ExprKind::Bool(_)
+                                | ExprKind::NoneLit
+                                | ExprKind::Pass
+                                | ExprKind::Ident(_)
+                                | ExprKind::List(..)
+                                | ExprKind::Tuple(_)
+                                | ExprKind::Map(_)
+                                | ExprKind::Set(_)
+                                | ExprKind::Comprehension { .. }
+                                | ExprKind::Unary { .. }
+                                | ExprKind::Binary { .. }
+                                | ExprKind::Compare { .. }
+                                | ExprKind::Range { .. }
+                                | ExprKind::Call { .. }
+                                | ExprKind::Field { .. }
+                                | ExprKind::Slice { .. }
+                                | ExprKind::Try(_)
+                                | ExprKind::OptChain { .. }
+                                | ExprKind::NullCoalesce { .. }
+                                | ExprKind::Closure { .. }
+                                | ExprKind::Match { .. }
+                                | ExprKind::IfElse { .. }
+                                | ExprKind::Recover(_)
+                                | ExprKind::ElseGuard { .. } => None,
                             },
                         });
                         self.path(target);
                     }
-                    _ => self.escape_free(target),
+                    ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Str(_)
+                    | ExprKind::Interp(_)
+                    | ExprKind::Bytes(_)
+                    | ExprKind::RawStr(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::NoneLit
+                    | ExprKind::Pass
+                    | ExprKind::List(..)
+                    | ExprKind::Tuple(_)
+                    | ExprKind::Map(_)
+                    | ExprKind::Set(_)
+                    | ExprKind::Comprehension { .. }
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Compare { .. }
+                    | ExprKind::Range { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Slice { .. }
+                    | ExprKind::Try(_)
+                    | ExprKind::OptChain { .. }
+                    | ExprKind::NullCoalesce { .. }
+                    | ExprKind::Closure { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::IfElse { .. }
+                    | ExprKind::Recover(_)
+                    | ExprKind::ElseGuard { .. } => self.escape_free(target),
                 }
                 self.value(value);
             }
@@ -330,7 +519,34 @@ impl UseWalk<'_> {
                 match &iter.kind {
                     ExprKind::Ident(n) => self.keep(n, RootUse::Iter),
                     ExprKind::Field { .. } | ExprKind::Index { .. } => self.path(iter),
-                    _ => self.value(iter),
+                    ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Str(_)
+                    | ExprKind::Interp(_)
+                    | ExprKind::Bytes(_)
+                    | ExprKind::RawStr(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::NoneLit
+                    | ExprKind::Pass
+                    | ExprKind::List(..)
+                    | ExprKind::Tuple(_)
+                    | ExprKind::Map(_)
+                    | ExprKind::Set(_)
+                    | ExprKind::Comprehension { .. }
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Compare { .. }
+                    | ExprKind::Range { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Slice { .. }
+                    | ExprKind::Try(_)
+                    | ExprKind::OptChain { .. }
+                    | ExprKind::NullCoalesce { .. }
+                    | ExprKind::Closure { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::IfElse { .. }
+                    | ExprKind::Recover(_)
+                    | ExprKind::ElseGuard { .. } => self.value(iter),
                 }
                 self.block(body);
             }
@@ -368,13 +584,27 @@ impl UseWalk<'_> {
             StmtKind::Parallel { body } => self.block(body),
             StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue | StmtKind::Pass => {}
             // A nested fn, `spawn`, `defer`, `wait` or anything else: every name it reads escapes.
-            _ => self
-                .uses
-                .escaped
-                .extend(crate::compiler::free_names_of_block(
-                    std::slice::from_ref(stmt),
-                    &HashSet::new(),
-                )),
+            StmtKind::Fn(_)
+            | StmtKind::Struct { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::Defer(_)
+            | StmtKind::Spawn(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. } => {
+                self.uses
+                    .escaped
+                    .extend(crate::compiler::free_names_of_block(
+                        std::slice::from_ref(stmt),
+                        &HashSet::new(),
+                    ))
+            }
         }
     }
 
@@ -444,12 +674,68 @@ impl UseWalk<'_> {
                             self.path(obj);
                             None
                         }
-                        _ => {
+                        ExprKind::Int(_)
+                        | ExprKind::Float(_)
+                        | ExprKind::Str(_)
+                        | ExprKind::Interp(_)
+                        | ExprKind::Bytes(_)
+                        | ExprKind::RawStr(_)
+                        | ExprKind::Bool(_)
+                        | ExprKind::NoneLit
+                        | ExprKind::Pass
+                        | ExprKind::List(..)
+                        | ExprKind::Tuple(_)
+                        | ExprKind::Map(_)
+                        | ExprKind::Set(_)
+                        | ExprKind::Comprehension { .. }
+                        | ExprKind::Unary { .. }
+                        | ExprKind::Binary { .. }
+                        | ExprKind::Compare { .. }
+                        | ExprKind::Range { .. }
+                        | ExprKind::Call { .. }
+                        | ExprKind::Slice { .. }
+                        | ExprKind::Try(_)
+                        | ExprKind::OptChain { .. }
+                        | ExprKind::NullCoalesce { .. }
+                        | ExprKind::Closure { .. }
+                        | ExprKind::Match { .. }
+                        | ExprKind::IfElse { .. }
+                        | ExprKind::Recover(_)
+                        | ExprKind::ElseGuard { .. } => {
                             self.value(obj);
                             None
                         }
                     },
-                    _ => {
+                    ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Str(_)
+                    | ExprKind::Interp(_)
+                    | ExprKind::Bytes(_)
+                    | ExprKind::RawStr(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::NoneLit
+                    | ExprKind::Pass
+                    | ExprKind::Ident(_)
+                    | ExprKind::List(..)
+                    | ExprKind::Tuple(_)
+                    | ExprKind::Map(_)
+                    | ExprKind::Set(_)
+                    | ExprKind::Comprehension { .. }
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Compare { .. }
+                    | ExprKind::Range { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Slice { .. }
+                    | ExprKind::Try(_)
+                    | ExprKind::OptChain { .. }
+                    | ExprKind::NullCoalesce { .. }
+                    | ExprKind::Closure { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::IfElse { .. }
+                    | ExprKind::Recover(_)
+                    | ExprKind::ElseGuard { .. } => {
                         self.value(callee);
                         None
                     }
@@ -506,7 +792,11 @@ impl UseWalk<'_> {
                 self.block(body);
             }
             // A closure, comprehension, interpolation, `?`, `?.` or anything else.
-            _ => self.escape_free(e),
+            ExprKind::Interp(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::Closure { .. } => self.escape_free(e),
         }
     }
 
@@ -636,7 +926,34 @@ pub(super) fn chain(expr: &Expr) -> Option<(String, Vec<ChainLink>)> {
             path.push(ChainLink::Index);
             Some((root, path))
         }
-        _ => None,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => None,
     }
 }
 
@@ -691,7 +1008,27 @@ impl Scan {
                         self.collect_locals(&arm.body);
                     }
                 }
-                _ => {}
+                StmtKind::Assign { .. }
+                | StmtKind::Struct { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::Enum { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::Extern { .. }
+                | StmtKind::Native(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
     }
@@ -756,7 +1093,35 @@ impl Scan {
                 let op = match &target.kind {
                     ExprKind::Field { name, .. } => name.clone(),
                     ExprKind::Index { .. } => "set_index".to_string(),
-                    _ => "assign".to_string(),
+                    ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Str(_)
+                    | ExprKind::Interp(_)
+                    | ExprKind::Bytes(_)
+                    | ExprKind::RawStr(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::NoneLit
+                    | ExprKind::Pass
+                    | ExprKind::Ident(_)
+                    | ExprKind::List(..)
+                    | ExprKind::Tuple(_)
+                    | ExprKind::Map(_)
+                    | ExprKind::Set(_)
+                    | ExprKind::Comprehension { .. }
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Compare { .. }
+                    | ExprKind::Range { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Slice { .. }
+                    | ExprKind::Try(_)
+                    | ExprKind::OptChain { .. }
+                    | ExprKind::NullCoalesce { .. }
+                    | ExprKind::Closure { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::IfElse { .. }
+                    | ExprKind::Recover(_)
+                    | ExprKind::ElseGuard { .. } => "assign".to_string(),
                 };
                 self.record(target, WriteKind::Store, op);
                 self.expr(value);
@@ -863,7 +1228,21 @@ impl Scan {
                 let child = scan_with_visible(decl, self.visible_fns.clone());
                 self.nested.insert(key, child);
             }
-            _ => {}
+            StmtKind::Struct { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. } => {}
         }
     }
 
@@ -903,7 +1282,36 @@ impl Scan {
                             });
                         }
                     }
-                    _ => {}
+                    ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Str(_)
+                    | ExprKind::Interp(_)
+                    | ExprKind::Bytes(_)
+                    | ExprKind::RawStr(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::NoneLit
+                    | ExprKind::Pass
+                    | ExprKind::Ident(_)
+                    | ExprKind::List(..)
+                    | ExprKind::Tuple(_)
+                    | ExprKind::Map(_)
+                    | ExprKind::Set(_)
+                    | ExprKind::Comprehension { .. }
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Compare { .. }
+                    | ExprKind::Range { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Slice { .. }
+                    | ExprKind::Try(_)
+                    | ExprKind::OptChain { .. }
+                    | ExprKind::NullCoalesce { .. }
+                    | ExprKind::Closure { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::IfElse { .. }
+                    | ExprKind::Recover(_)
+                    | ExprKind::ElseGuard { .. } => {}
                 }
                 for arg in args {
                     self.expr(arg);
@@ -957,7 +1365,24 @@ impl Scan {
                 }
             }
             ExprKind::Closure { .. } => {}
-            _ => {}
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::Ident(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::OptChain { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => {}
         }
     }
 }
@@ -1188,7 +1613,35 @@ impl Checker {
                     None
                 }
             }
-            _ => None,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => None,
         }
     }
 
@@ -1262,7 +1715,11 @@ impl Checker {
             .filter(|(n, _)| n == name)
             .any(|(_, u)| match u {
                 RootUse::Arg(c, j) => callee(c, *j),
-                _ => tys.iter().any(|t| !self.use_keeps_root(u, t)),
+                RootUse::Recv(_)
+                | RootUse::Field(_)
+                | RootUse::Index
+                | RootUse::Op
+                | RootUse::Iter => tys.iter().any(|t| !self.use_keeps_root(u, t)),
             })
     }
 
@@ -1338,7 +1795,38 @@ impl Checker {
                 Ty::Struct(key, _) => self
                     .struct_shape(key)
                     .is_some_and(|info| info.fields.iter().any(|(n, _)| n == f)),
-                _ => false,
+                Ty::Int
+                | Ty::Float
+                | Ty::Bool
+                | Ty::Str
+                | Ty::Bytes
+                | Ty::ByteArray
+                | Ty::Nil
+                | Ty::List(_)
+                | Ty::Map(..)
+                | Ty::Set(_)
+                | Ty::Func { .. }
+                | Ty::BuiltinFn { .. }
+                | Ty::Enum(..)
+                | Ty::Param(_)
+                | Ty::Result(..)
+                | Ty::Option(_)
+                | Ty::Channel(_)
+                | Ty::Shared(_)
+                | Ty::Atomic(_)
+                | Ty::AtomicInt
+                | Ty::RwShared(_)
+                | Ty::Executor
+                | Ty::Socket
+                | Ty::Listener
+                | Ty::Writer
+                | Ty::Reader
+                | Ty::Ptr
+                | Ty::Width(_)
+                | Ty::Protocol(..)
+                | Ty::Module(_)
+                | Ty::Unknown
+                | Ty::Var(_) => false,
             },
             RootUse::Index => matches!(
                 t,

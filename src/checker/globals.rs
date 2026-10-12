@@ -85,7 +85,7 @@ impl GlobalBinding {
         self.decls.iter().any(|(k, _)| match k {
             DeclKind::ConstLet => true,
             DeclKind::Import(f) => f.is_const,
-            _ => false,
+            DeclKind::Let | DeclKind::Fn | DeclKind::Hoisted => false,
         })
     }
     /// A from-import of a slot its home module declares more than once.
@@ -172,7 +172,30 @@ impl Checker {
                     }
                 }
                 StmtKind::Native(d) => add(&d.name, DeclKind::Hoisted),
-                _ => {}
+                StmtKind::Assign { .. }
+                | StmtKind::Struct { .. }
+                | StmtKind::Protocol { .. }
+                | StmtKind::Enum { .. }
+                | StmtKind::TypeAlias { .. }
+                | StmtKind::If { .. }
+                | StmtKind::For { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Match { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Yield(_)
+                | StmtKind::Defer(_)
+                | StmtKind::Parallel { .. }
+                | StmtKind::Spawn(_)
+                | StmtKind::Wait { .. }
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Pass
+                | StmtKind::Import(_)
+                | StmtKind::NativeStruct { .. }
+                | StmtKind::NativeEnum { .. }
+                | StmtKind::NativeType { .. }
+                | StmtKind::Assert { .. }
+                | StmtKind::Expr(_) => {}
             }
         }
         // Module const-ness is decided here, once per slot: a module global is one storage slot,
@@ -187,7 +210,7 @@ impl Checker {
                 let first_const = match g.decls[0].0 {
                     DeclKind::ConstLet => true,
                     DeclKind::Import(f) => f.is_const,
-                    _ => false,
+                    DeclKind::Let | DeclKind::Fn | DeclKind::Hoisted => false,
                 };
                 let msg = if first_const {
                     format!("cannot re-declare const binding '{name}' (a const cannot be rebound — not even with ':=' or a new typed let)")

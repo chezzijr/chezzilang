@@ -137,7 +137,37 @@ impl Scan {
                     // A plain `x = e` writes `x` and reads nothing; `_ = e` names no binding.
                     ExprKind::Ident(_) if *op == crate::ast::AssignOp::Eq => {}
                     // `x += e` reads `x` (Go counts it as a use); `p.f = e` / `xs[i] = e` read `p`/`xs`.
-                    _ => self.expr(target),
+                    ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::Str(_)
+                    | ExprKind::Interp(_)
+                    | ExprKind::Bytes(_)
+                    | ExprKind::RawStr(_)
+                    | ExprKind::Bool(_)
+                    | ExprKind::NoneLit
+                    | ExprKind::Pass
+                    | ExprKind::Ident(_)
+                    | ExprKind::List(..)
+                    | ExprKind::Tuple(_)
+                    | ExprKind::Map(_)
+                    | ExprKind::Set(_)
+                    | ExprKind::Comprehension { .. }
+                    | ExprKind::Unary { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Compare { .. }
+                    | ExprKind::Range { .. }
+                    | ExprKind::Call { .. }
+                    | ExprKind::Field { .. }
+                    | ExprKind::Index { .. }
+                    | ExprKind::Slice { .. }
+                    | ExprKind::Try(_)
+                    | ExprKind::OptChain { .. }
+                    | ExprKind::NullCoalesce { .. }
+                    | ExprKind::Closure { .. }
+                    | ExprKind::Match { .. }
+                    | ExprKind::IfElse { .. }
+                    | ExprKind::Recover(_)
+                    | ExprKind::ElseGuard { .. } => self.expr(target),
                 }
             }
             StmtKind::Fn(d) => {
@@ -232,7 +262,17 @@ impl Scan {
                 }
             }
             // Returns/break/pass, and type/import/native/extern declarations, read no local.
-            _ => {}
+            StmtKind::Protocol { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. } => {}
         }
     }
 

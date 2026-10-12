@@ -597,7 +597,9 @@ impl Checker {
         if self.hover_probe.is_some() && matches!(obj.kind, ExprKind::Ident(_)) {
             let ty = match th.kind {
                 TypeHeadKind::Enum => Ty::enum_ty(th.key.clone(), Vec::new()),
-                _ => Ty::Struct(th.key.clone(), Vec::new()),
+                TypeHeadKind::Struct | TypeHeadKind::Protocol => {
+                    Ty::Struct(th.key.clone(), Vec::new())
+                }
             };
             self.hover_record_at(obj.span, &ty, HoverKind::Other, None);
         }
@@ -700,7 +702,24 @@ impl Checker {
             Resolution::StructCtor(key) => {
                 Some(self.infer_struct_ctor_call(name, key, args, targs, span, expected))
             }
-            _ => Some(self.infer_fn_call(name, args, targs, callee.span, span, expected)),
+            Resolution::Local
+            | Resolution::Global { .. }
+            | Resolution::Fn { .. }
+            | Resolution::Provider
+            | Resolution::ParamMethodFn { .. }
+            | Resolution::IndexCall
+            | Resolution::Variant { .. }
+            | Resolution::MethodFn { .. }
+            | Resolution::VariantFn { .. }
+            | Resolution::WitnessStatic(_)
+            | Resolution::ModuleMember { .. }
+            | Resolution::Module(_)
+            | Resolution::Member
+            | Resolution::PatBinding
+            | Resolution::PatStruct(_)
+            | Resolution::Decode(_) => {
+                Some(self.infer_fn_call(name, args, targs, callee.span, span, expected))
+            }
         }
     }
 
@@ -842,7 +861,37 @@ impl Checker {
                 );
                 Ty::Unknown
             }
-            other => {
+            other @ Ty::Int
+            | other @ Ty::Float
+            | other @ Ty::Bool
+            | other @ Ty::Str
+            | other @ Ty::Bytes
+            | other @ Ty::ByteArray
+            | other @ Ty::Nil
+            | other @ Ty::List(_)
+            | other @ Ty::Map(..)
+            | other @ Ty::Set(_)
+            | other @ Ty::Tuple(_)
+            | other @ Ty::Struct(..)
+            | other @ Ty::Enum(..)
+            | other @ Ty::Param(_)
+            | other @ Ty::Result(..)
+            | other @ Ty::Option(_)
+            | other @ Ty::Channel(_)
+            | other @ Ty::Shared(_)
+            | other @ Ty::Atomic(_)
+            | other @ Ty::AtomicInt
+            | other @ Ty::RwShared(_)
+            | other @ Ty::Executor
+            | other @ Ty::Socket
+            | other @ Ty::Listener
+            | other @ Ty::Writer
+            | other @ Ty::Reader
+            | other @ Ty::Ptr
+            | other @ Ty::Width(_)
+            | other @ Ty::Protocol(..)
+            | other @ Ty::Module(_)
+            | other @ Ty::Var(_) => {
                 for a in args {
                     self.infer(a);
                 }
@@ -1005,7 +1054,38 @@ impl Checker {
         match recv {
             Ty::Struct(k, _) => self.struct_shape(k)?.methods.get(method)?.slots.clone(),
             Ty::Enum(k, _) => self.enum_methods_of(k)?.get(method)?.slots.clone(),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -1185,7 +1265,38 @@ impl Checker {
                 .and_then(|sig| sig.member(member))
                 .filter(|m| !m.holds_fn())
                 .map(|m| m.ty.clone()),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
         }
     }
 
@@ -1210,7 +1321,36 @@ impl Checker {
                 self.diag_rollback(mark);
                 self.data_member_ty(&recv, name).is_some()
             }
-            _ => false,
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => false,
         }
     }
 
@@ -1623,7 +1763,17 @@ impl Checker {
             Ty::Writer => "Writer",
             Ty::Reader => "Reader",
             Ty::Ptr => "ptr",
-            _ => return,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Nil
+            | Ty::Param(_)
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => return,
         };
         self.error(
             span,
@@ -1655,7 +1805,21 @@ impl Checker {
                 .module_idx_of
                 .iter()
                 .any(|(id, i)| *i == *module && is_diverging_native(id, name)),
-            _ => false,
+            Resolution::Local
+            | Resolution::Global { .. }
+            | Resolution::StructCtor(_)
+            | Resolution::Provider
+            | Resolution::ParamMethodFn { .. }
+            | Resolution::IndexCall
+            | Resolution::Variant { .. }
+            | Resolution::MethodFn { .. }
+            | Resolution::VariantFn { .. }
+            | Resolution::WitnessStatic(_)
+            | Resolution::Module(_)
+            | Resolution::Member
+            | Resolution::PatBinding
+            | Resolution::PatStruct(_)
+            | Resolution::Decode(_) => false,
         }
     }
 
@@ -1708,10 +1872,12 @@ impl Checker {
                     name: name.to_string(),
                 },
             },
-            _ => Resolution::Global {
-                module: self.graph_module_idx,
-                name: name.to_string(),
-            },
+            HeadBinding::TypeParam | HeadBinding::Global | HeadBinding::Unbound => {
+                Resolution::Global {
+                    module: self.graph_module_idx,
+                    name: name.to_string(),
+                }
+            }
         }
     }
 
@@ -1772,7 +1938,40 @@ impl Checker {
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
                         Ty::Str | Ty::Unknown => {}
-                        other => self.error(a.span, format!("panic() expects a str, got {other}")),
+                        other @ Ty::Int
+                        | other @ Ty::Float
+                        | other @ Ty::Bool
+                        | other @ Ty::Bytes
+                        | other @ Ty::ByteArray
+                        | other @ Ty::Nil
+                        | other @ Ty::List(_)
+                        | other @ Ty::Map(..)
+                        | other @ Ty::Set(_)
+                        | other @ Ty::Func { .. }
+                        | other @ Ty::BuiltinFn { .. }
+                        | other @ Ty::Tuple(_)
+                        | other @ Ty::Struct(..)
+                        | other @ Ty::Enum(..)
+                        | other @ Ty::Param(_)
+                        | other @ Ty::Result(..)
+                        | other @ Ty::Option(_)
+                        | other @ Ty::Channel(_)
+                        | other @ Ty::Shared(_)
+                        | other @ Ty::Atomic(_)
+                        | other @ Ty::AtomicInt
+                        | other @ Ty::RwShared(_)
+                        | other @ Ty::Executor
+                        | other @ Ty::Socket
+                        | other @ Ty::Listener
+                        | other @ Ty::Writer
+                        | other @ Ty::Reader
+                        | other @ Ty::Ptr
+                        | other @ Ty::Width(_)
+                        | other @ Ty::Protocol(..)
+                        | other @ Ty::Module(_)
+                        | other @ Ty::Var(_) => {
+                            self.error(a.span, format!("panic() expects a str, got {other}"))
+                        }
                     }
                 }
                 Some(Ty::Unknown)
@@ -1830,7 +2029,40 @@ impl Checker {
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
                         Ty::Str | Ty::Unknown => {}
-                        other => self.error(a.span, format!("ord() expects a str, got {other}")),
+                        other @ Ty::Int
+                        | other @ Ty::Float
+                        | other @ Ty::Bool
+                        | other @ Ty::Bytes
+                        | other @ Ty::ByteArray
+                        | other @ Ty::Nil
+                        | other @ Ty::List(_)
+                        | other @ Ty::Map(..)
+                        | other @ Ty::Set(_)
+                        | other @ Ty::Func { .. }
+                        | other @ Ty::BuiltinFn { .. }
+                        | other @ Ty::Tuple(_)
+                        | other @ Ty::Struct(..)
+                        | other @ Ty::Enum(..)
+                        | other @ Ty::Param(_)
+                        | other @ Ty::Result(..)
+                        | other @ Ty::Option(_)
+                        | other @ Ty::Channel(_)
+                        | other @ Ty::Shared(_)
+                        | other @ Ty::Atomic(_)
+                        | other @ Ty::AtomicInt
+                        | other @ Ty::RwShared(_)
+                        | other @ Ty::Executor
+                        | other @ Ty::Socket
+                        | other @ Ty::Listener
+                        | other @ Ty::Writer
+                        | other @ Ty::Reader
+                        | other @ Ty::Ptr
+                        | other @ Ty::Width(_)
+                        | other @ Ty::Protocol(..)
+                        | other @ Ty::Module(_)
+                        | other @ Ty::Var(_) => {
+                            self.error(a.span, format!("ord() expects a str, got {other}"))
+                        }
                     }
                 }
                 Some(Ty::Int)
@@ -1840,7 +2072,40 @@ impl Checker {
                 if let Some(a) = args.first() {
                     match self.infer_value(a) {
                         Ty::Int | Ty::Unknown => {}
-                        other => self.error(a.span, format!("chr() expects an int, got {other}")),
+                        other @ Ty::Float
+                        | other @ Ty::Bool
+                        | other @ Ty::Str
+                        | other @ Ty::Bytes
+                        | other @ Ty::ByteArray
+                        | other @ Ty::Nil
+                        | other @ Ty::List(_)
+                        | other @ Ty::Map(..)
+                        | other @ Ty::Set(_)
+                        | other @ Ty::Func { .. }
+                        | other @ Ty::BuiltinFn { .. }
+                        | other @ Ty::Tuple(_)
+                        | other @ Ty::Struct(..)
+                        | other @ Ty::Enum(..)
+                        | other @ Ty::Param(_)
+                        | other @ Ty::Result(..)
+                        | other @ Ty::Option(_)
+                        | other @ Ty::Channel(_)
+                        | other @ Ty::Shared(_)
+                        | other @ Ty::Atomic(_)
+                        | other @ Ty::AtomicInt
+                        | other @ Ty::RwShared(_)
+                        | other @ Ty::Executor
+                        | other @ Ty::Socket
+                        | other @ Ty::Listener
+                        | other @ Ty::Writer
+                        | other @ Ty::Reader
+                        | other @ Ty::Ptr
+                        | other @ Ty::Width(_)
+                        | other @ Ty::Protocol(..)
+                        | other @ Ty::Module(_)
+                        | other @ Ty::Var(_) => {
+                            self.error(a.span, format!("chr() expects an int, got {other}"))
+                        }
                     }
                 }
                 Some(Ty::Str)
@@ -2017,7 +2282,39 @@ impl Checker {
                                 (parts[0].clone(), parts[1].clone())
                             }
                             Ty::Unknown => (Ty::Unknown, Ty::Unknown),
-                            other => {
+                            other @ Ty::Int
+                            | other @ Ty::Float
+                            | other @ Ty::Bool
+                            | other @ Ty::Str
+                            | other @ Ty::Bytes
+                            | other @ Ty::ByteArray
+                            | other @ Ty::Nil
+                            | other @ Ty::List(_)
+                            | other @ Ty::Map(..)
+                            | other @ Ty::Set(_)
+                            | other @ Ty::Func { .. }
+                            | other @ Ty::BuiltinFn { .. }
+                            | other @ Ty::Tuple(_)
+                            | other @ Ty::Struct(..)
+                            | other @ Ty::Enum(..)
+                            | other @ Ty::Param(_)
+                            | other @ Ty::Result(..)
+                            | other @ Ty::Option(_)
+                            | other @ Ty::Channel(_)
+                            | other @ Ty::Shared(_)
+                            | other @ Ty::Atomic(_)
+                            | other @ Ty::AtomicInt
+                            | other @ Ty::RwShared(_)
+                            | other @ Ty::Executor
+                            | other @ Ty::Socket
+                            | other @ Ty::Listener
+                            | other @ Ty::Writer
+                            | other @ Ty::Reader
+                            | other @ Ty::Ptr
+                            | other @ Ty::Width(_)
+                            | other @ Ty::Protocol(..)
+                            | other @ Ty::Module(_)
+                            | other @ Ty::Var(_) => {
                                 self.error(
                                     args[0].span,
                                     format!("Map() expects an iterable of (key, value) 2-tuples, found element {other}"),
@@ -2076,7 +2373,7 @@ impl Checker {
                     1 => match self.infer_value(&args[0]) {
                         Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                         Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
-                        other => self.error(
+                        other @ Ty::Float | other @ Ty::Bool | other @ Ty::Str | other @ Ty::Nil | other @ Ty::List(_) | other @ Ty::Map(..) | other @ Ty::Set(_) | other @ Ty::Func { .. } | other @ Ty::BuiltinFn { .. } | other @ Ty::Tuple(_) | other @ Ty::Struct(..) | other @ Ty::Enum(..) | other @ Ty::Param(_) | other @ Ty::Result(..) | other @ Ty::Option(_) | other @ Ty::Channel(_) | other @ Ty::Shared(_) | other @ Ty::Atomic(_) | other @ Ty::AtomicInt | other @ Ty::RwShared(_) | other @ Ty::Executor | other @ Ty::Socket | other @ Ty::Listener | other @ Ty::Writer | other @ Ty::Reader | other @ Ty::Ptr | other @ Ty::Width(_) | other @ Ty::Protocol(..) | other @ Ty::Module(_) | other @ Ty::Var(_) => self.error(
                             args[0].span,
                             format!("bytearray() expects an int size, a bytes, a bytearray, or a List[int], got {other}"),
                         ),
@@ -2093,7 +2390,37 @@ impl Checker {
                     1 => match self.infer_value(&args[0]) {
                         Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                         Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
-                        other => self.error(
+                        other @ Ty::Int
+                        | other @ Ty::Float
+                        | other @ Ty::Bool
+                        | other @ Ty::Str
+                        | other @ Ty::Nil
+                        | other @ Ty::List(_)
+                        | other @ Ty::Map(..)
+                        | other @ Ty::Set(_)
+                        | other @ Ty::Func { .. }
+                        | other @ Ty::BuiltinFn { .. }
+                        | other @ Ty::Tuple(_)
+                        | other @ Ty::Struct(..)
+                        | other @ Ty::Enum(..)
+                        | other @ Ty::Param(_)
+                        | other @ Ty::Result(..)
+                        | other @ Ty::Option(_)
+                        | other @ Ty::Channel(_)
+                        | other @ Ty::Shared(_)
+                        | other @ Ty::Atomic(_)
+                        | other @ Ty::AtomicInt
+                        | other @ Ty::RwShared(_)
+                        | other @ Ty::Executor
+                        | other @ Ty::Socket
+                        | other @ Ty::Listener
+                        | other @ Ty::Writer
+                        | other @ Ty::Reader
+                        | other @ Ty::Ptr
+                        | other @ Ty::Width(_)
+                        | other @ Ty::Protocol(..)
+                        | other @ Ty::Module(_)
+                        | other @ Ty::Var(_) => self.error(
                             args[0].span,
                             format!(
                                 "bytes() expects a bytes, a bytearray, or a List[int], got {other}"
@@ -2497,14 +2824,54 @@ impl Checker {
                     Ty::Socket => "Socket",
                     Ty::Listener => "Listener",
                     Ty::Writer => "Writer",
-                    _ => "Reader",
+                    Ty::Int
+                    | Ty::Float
+                    | Ty::Bool
+                    | Ty::Str
+                    | Ty::Bytes
+                    | Ty::ByteArray
+                    | Ty::Nil
+                    | Ty::Func { .. }
+                    | Ty::BuiltinFn { .. }
+                    | Ty::Tuple(_)
+                    | Ty::Struct(..)
+                    | Ty::Enum(..)
+                    | Ty::Param(_)
+                    | Ty::Result(..)
+                    | Ty::Option(_)
+                    | Ty::Channel(_)
+                    | Ty::Reader
+                    | Ty::Ptr
+                    | Ty::Width(_)
+                    | Ty::Protocol(..)
+                    | Ty::Module(_)
+                    | Ty::Unknown
+                    | Ty::Var(_) => "Reader",
                 };
                 self.structs
                     .get(bare)
                     .and_then(|info| info.methods.get(method))
                     .is_some_and(|sig| !sig.type_params.is_empty())
             }
-            _ => false,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Unknown
+            | Ty::Var(_) => false,
         }
     }
 
@@ -3395,7 +3762,7 @@ impl Checker {
                         match self.infer_value(a) {
                             Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                             Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
-                            other => self.error(
+                            other @ Ty::Int | other @ Ty::Float | other @ Ty::Bool | other @ Ty::Str | other @ Ty::Nil | other @ Ty::List(_) | other @ Ty::Map(..) | other @ Ty::Set(_) | other @ Ty::Func { .. } | other @ Ty::BuiltinFn { .. } | other @ Ty::Tuple(_) | other @ Ty::Struct(..) | other @ Ty::Enum(..) | other @ Ty::Param(_) | other @ Ty::Result(..) | other @ Ty::Option(_) | other @ Ty::Channel(_) | other @ Ty::Shared(_) | other @ Ty::Atomic(_) | other @ Ty::AtomicInt | other @ Ty::RwShared(_) | other @ Ty::Executor | other @ Ty::Socket | other @ Ty::Listener | other @ Ty::Writer | other @ Ty::Reader | other @ Ty::Ptr | other @ Ty::Width(_) | other @ Ty::Protocol(..) | other @ Ty::Module(_) | other @ Ty::Var(_) => self.error(
                                 a.span,
                                 format!("extend() expects a bytes, a bytearray, or a List[int], got {other}"),
                             ),
@@ -3651,7 +4018,37 @@ impl Checker {
                             }
                         }
                     }
-                    _ => {}
+                    Ty::Int
+                    | Ty::Float
+                    | Ty::Bool
+                    | Ty::Str
+                    | Ty::Bytes
+                    | Ty::ByteArray
+                    | Ty::Nil
+                    | Ty::Func { .. }
+                    | Ty::BuiltinFn { .. }
+                    | Ty::Tuple(_)
+                    | Ty::Struct(..)
+                    | Ty::Enum(..)
+                    | Ty::Param(_)
+                    | Ty::Result(..)
+                    | Ty::Option(_)
+                    | Ty::Channel(_)
+                    | Ty::Shared(_)
+                    | Ty::Atomic(_)
+                    | Ty::AtomicInt
+                    | Ty::RwShared(_)
+                    | Ty::Executor
+                    | Ty::Socket
+                    | Ty::Listener
+                    | Ty::Writer
+                    | Ty::Reader
+                    | Ty::Ptr
+                    | Ty::Width(_)
+                    | Ty::Protocol(..)
+                    | Ty::Module(_)
+                    | Ty::Unknown
+                    | Ty::Var(_) => {}
                 }
                 match self.resolve_native_handle_method(
                     "RwShared",
@@ -3908,7 +4305,18 @@ impl Checker {
                 self.infer_all(args);
                 Ty::Unknown
             }
-            other => {
+            other @ Ty::Int
+            | other @ Ty::Float
+            | other @ Ty::Bool
+            | other @ Ty::Nil
+            | other @ Ty::Func { .. }
+            | other @ Ty::BuiltinFn { .. }
+            | other @ Ty::Tuple(_)
+            | other @ Ty::Result(..)
+            | other @ Ty::Option(_)
+            | other @ Ty::Ptr
+            | other @ Ty::Width(_)
+            | other @ Ty::Var(_) => {
                 self.infer_all(args);
                 self.error(name_span, format!("type {other} has no method '{method}'"));
                 Ty::Unknown
@@ -4734,7 +5142,36 @@ pub(super) fn callable_slots(
 fn type_apply_param_head(obj: &Expr) -> Option<String> {
     match &obj.kind {
         ExprKind::Index { obj: tobj, .. } => tobj.kind.as_ident().cloned(),
-        _ => None,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::Ident(_)
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => None,
     }
 }
 
@@ -4780,7 +5217,36 @@ impl Checker {
                         .into_iter()
                         .collect()
                 }),
-            _ => self.value_writes(task),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::Ident(_)
+            | ExprKind::List(..)
+            | ExprKind::Tuple(_)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(_)
+            | ExprKind::ElseGuard { .. } => self.value_writes(task),
         };
         writes.sort();
         if let Some(written) = writes.first() {

@@ -141,7 +141,39 @@ impl TyVars {
                 Some(b) => self.zonk(b),
                 None => x.clone(),
             }),
-            _ => None,
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Nil
+            | Ty::List(_)
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Param(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Protocol(..)
+            | Ty::Module(_)
+            | Ty::Unknown => None,
         })
     }
 
@@ -206,7 +238,25 @@ pub(super) fn map_ty(t: &Ty, f: &mut dyn FnMut(&Ty) -> Option<Ty>) -> Ty {
             params: all(params, f),
             ret: Box::new(map_ty(ret, f)),
         },
-        other => other.clone(),
+        other @ Ty::Int
+        | other @ Ty::Float
+        | other @ Ty::Bool
+        | other @ Ty::Str
+        | other @ Ty::Bytes
+        | other @ Ty::ByteArray
+        | other @ Ty::Nil
+        | other @ Ty::Param(_)
+        | other @ Ty::AtomicInt
+        | other @ Ty::Executor
+        | other @ Ty::Socket
+        | other @ Ty::Listener
+        | other @ Ty::Writer
+        | other @ Ty::Reader
+        | other @ Ty::Ptr
+        | other @ Ty::Width(_)
+        | other @ Ty::Module(_)
+        | other @ Ty::Unknown
+        | other @ Ty::Var(_) => other.clone(),
     }
 }
 
@@ -253,7 +303,39 @@ impl Checker {
                 let has_leak = |t: &Ty| {
                     !ty_all_holes(t, &|h| match h {
                         Ty::Param(n) => self.rigid_param(n, &[]),
-                        _ => true,
+                        Ty::Int
+                        | Ty::Float
+                        | Ty::Bool
+                        | Ty::Str
+                        | Ty::Bytes
+                        | Ty::ByteArray
+                        | Ty::Nil
+                        | Ty::List(_)
+                        | Ty::Map(..)
+                        | Ty::Set(_)
+                        | Ty::Func { .. }
+                        | Ty::BuiltinFn { .. }
+                        | Ty::Tuple(_)
+                        | Ty::Struct(..)
+                        | Ty::Enum(..)
+                        | Ty::Result(..)
+                        | Ty::Option(_)
+                        | Ty::Channel(_)
+                        | Ty::Shared(_)
+                        | Ty::Atomic(_)
+                        | Ty::AtomicInt
+                        | Ty::RwShared(_)
+                        | Ty::Executor
+                        | Ty::Socket
+                        | Ty::Listener
+                        | Ty::Writer
+                        | Ty::Reader
+                        | Ty::Ptr
+                        | Ty::Width(_)
+                        | Ty::Protocol(..)
+                        | Ty::Module(_)
+                        | Ty::Unknown
+                        | Ty::Var(_) => true,
                     })
                 };
                 let leaked = has_leak(t);
@@ -549,10 +631,76 @@ impl Checker {
                 }
                 // A var another compare bound to `Unknown` (`ys := [y]; ys = []`) pinned
                 // nothing: the `?x` keeps the unpinned default, an optional.
-                z if z.is_unknown() => {
+                z @ Ty::Int
+                | z @ Ty::Float
+                | z @ Ty::Bool
+                | z @ Ty::Str
+                | z @ Ty::Bytes
+                | z @ Ty::ByteArray
+                | z @ Ty::Nil
+                | z @ Ty::List(_)
+                | z @ Ty::Map(..)
+                | z @ Ty::Set(_)
+                | z @ Ty::Func { .. }
+                | z @ Ty::BuiltinFn { .. }
+                | z @ Ty::Tuple(_)
+                | z @ Ty::Struct(..)
+                | z @ Ty::Enum(..)
+                | z @ Ty::Param(_)
+                | z @ Ty::Result(..)
+                | z @ Ty::Option(_)
+                | z @ Ty::Channel(_)
+                | z @ Ty::Shared(_)
+                | z @ Ty::Atomic(_)
+                | z @ Ty::AtomicInt
+                | z @ Ty::RwShared(_)
+                | z @ Ty::Executor
+                | z @ Ty::Socket
+                | z @ Ty::Listener
+                | z @ Ty::Writer
+                | z @ Ty::Reader
+                | z @ Ty::Ptr
+                | z @ Ty::Width(_)
+                | z @ Ty::Protocol(..)
+                | z @ Ty::Module(_)
+                | z @ Ty::Unknown
+                    if z.is_unknown() =>
+                {
                     self.record_wrap(c.node, crate::checker::Wrap::Some, c.span);
                 }
-                z => {
+                z @ Ty::Int
+                | z @ Ty::Float
+                | z @ Ty::Bool
+                | z @ Ty::Str
+                | z @ Ty::Bytes
+                | z @ Ty::ByteArray
+                | z @ Ty::Nil
+                | z @ Ty::List(_)
+                | z @ Ty::Map(..)
+                | z @ Ty::Set(_)
+                | z @ Ty::Func { .. }
+                | z @ Ty::BuiltinFn { .. }
+                | z @ Ty::Tuple(_)
+                | z @ Ty::Struct(..)
+                | z @ Ty::Enum(..)
+                | z @ Ty::Param(_)
+                | z @ Ty::Result(..)
+                | z @ Ty::Option(_)
+                | z @ Ty::Channel(_)
+                | z @ Ty::Shared(_)
+                | z @ Ty::Atomic(_)
+                | z @ Ty::AtomicInt
+                | z @ Ty::RwShared(_)
+                | z @ Ty::Executor
+                | z @ Ty::Socket
+                | z @ Ty::Listener
+                | z @ Ty::Writer
+                | z @ Ty::Reader
+                | z @ Ty::Ptr
+                | z @ Ty::Width(_)
+                | z @ Ty::Protocol(..)
+                | z @ Ty::Module(_)
+                | z @ Ty::Unknown => {
                     let p = z.slot_payload().clone();
                     self.error(c.span, super::wrap_payload_mismatch(&p, &t))
                 }
@@ -577,7 +725,39 @@ impl Checker {
                     None => "_".to_string(),
                 }
             }
-            t => t.to_string(),
+            t @ Ty::Int
+            | t @ Ty::Float
+            | t @ Ty::Bool
+            | t @ Ty::Str
+            | t @ Ty::Bytes
+            | t @ Ty::ByteArray
+            | t @ Ty::Nil
+            | t @ Ty::List(_)
+            | t @ Ty::Map(..)
+            | t @ Ty::Set(_)
+            | t @ Ty::Func { .. }
+            | t @ Ty::BuiltinFn { .. }
+            | t @ Ty::Tuple(_)
+            | t @ Ty::Struct(..)
+            | t @ Ty::Enum(..)
+            | t @ Ty::Param(_)
+            | t @ Ty::Result(..)
+            | t @ Ty::Option(_)
+            | t @ Ty::Channel(_)
+            | t @ Ty::Shared(_)
+            | t @ Ty::Atomic(_)
+            | t @ Ty::AtomicInt
+            | t @ Ty::RwShared(_)
+            | t @ Ty::Executor
+            | t @ Ty::Socket
+            | t @ Ty::Listener
+            | t @ Ty::Writer
+            | t @ Ty::Reader
+            | t @ Ty::Ptr
+            | t @ Ty::Width(_)
+            | t @ Ty::Protocol(..)
+            | t @ Ty::Module(_)
+            | t @ Ty::Unknown => t.to_string(),
         }
     }
 
