@@ -5,7 +5,7 @@
 //!
 //! Everything derives `Debug` so `chezzi ast` can pretty-print a tree with `{:#?}`.
 
-pub use crate::lexer::{Span, StrLit};
+pub use crate::lexer::Span;
 
 pub mod consteval;
 
@@ -1048,7 +1048,7 @@ pub struct Expr {
 /// `{expr}` / `{expr:spec}` fragment (the format spec is parsed at compile time; `None` for a bare
 /// `{expr}`). The third field holds the spec's nested `{expr}` fields (`{s:<{w}}`, `{x:.{p}f}`), width
 /// before precision — the order they evaluate in, after the value. Empty without a nested field.
-/// Built by [`crate::interpolation::parse_interpolation`].
+/// Built by the parser (`Parser::interp_chunks`) from the holes the lexer found.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Chunk {
     Lit(String),
@@ -1059,20 +1059,14 @@ pub enum Chunk {
 pub enum ExprKind {
     Int(i64),
     Float(f64),
-    /// A string literal's raw (post-escape) contents. The PARSER always produces this; the
-    /// [`desugar`](crate::desugar) pass rewrites any literal carrying a `{…}` interpolation into
-    /// [`ExprKind::Interp`], so what survives here is a brace-free literal — or one whose
-    /// interpolation failed to parse, left intact so the checker/compiler report it.
-    ///
-    /// The payload is a [`StrLit`]: the contents plus the lexer's content-index → source-position
-    /// map, which is what lets a re-lexed `{…}` fragment carry real physical spans. It `Deref`s to
-    /// `str`, so read it like the `String` it used to be.
-    Str(StrLit),
-    /// An interpolated string literal, split into literal/expression [`Chunk`]s. **Produced by
-    /// `desugar`, never by the parser**: the fragments must become real AST children BEFORE call
-    /// arguments are normalized, or named/default/variadic arguments never reach a fragment call
-    /// (`docs/gaps.md` §W7-24) — and every later walker sees the fragments as ordinary children
-    /// instead of having to re-parse the raw text.
+    /// A string literal with no hole: its final text, escapes resolved and `{{` / `}}` folded.
+    /// A literal with a hole is [`ExprKind::Interp`]. Nothing interpolates a `Str` later, so a
+    /// synthesized `Str` that holds a brace is literal text.
+    Str(String),
+    /// An interpolated string literal, split into literal/expression [`Chunk`]s. **Produced by the
+    /// parser** from the holes the lexer found, so every fragment is an ordinary AST child from
+    /// the start: `desugar` normalizes call arguments inside a fragment like anywhere else
+    /// (`docs/gaps.md` §W7-24), and no later walker re-parses text.
     Interp(Vec<Chunk>),
     /// `b"..."` — a byte-string literal: the resolved raw bytes. No interpolation (unlike `Str`).
     Bytes(Vec<u8>),
@@ -1490,8 +1484,8 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         | ExprKind::Pass
         | ExprKind::Ident(_) => {}
         // An interpolation fragment is an ordinary expression, so walk it like any other child.
-        // (No fragment can currently hold a `recover:` — `split_spec` claims its `:` — so this arm
-        // is a structural completeness guard, not a live path.)
+        // (No fragment can currently hold a `recover:` — the first `:` at hole depth starts the
+        // spec — so this arm is a structural completeness guard, not a live path.)
         ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
             if let Chunk::Expr(e, _, fields) = c {
                 expr_recover_blocks(e, out);

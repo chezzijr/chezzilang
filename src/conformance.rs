@@ -401,6 +401,10 @@ fn parser_rules_match_fns() {
         // `parse_recv_chan` parses the RHS of a recv `wait:` arm (the bare `chan.recv()`) — a
         // structural helper of `parse_wait`, part of the `<waitArm>` rule, no distinct rule of its own.
         "parse_recv_chan",
+        // `parse_hole` parses the tokens of one interpolation hole (or one nested spec field) as a
+        // single `<expr>` on the surrounding parser; the lexer found the hole, so the grammar has no
+        // rule for it beyond `<expr>` itself.
+        "parse_hole",
     ]
     .into_iter()
     .collect();

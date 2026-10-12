@@ -18,8 +18,8 @@ pub enum Token {
     /// Larger magnitudes (`9223372036854775809`+) still error at lex time and never reach here.
     IntMinMagnitude,
     Float(f64),
-    /// Contents only, quotes stripped, plus the [`PosMap`] a re-lexed interpolation fragment needs
-    /// to report real source positions. `Deref<Target = str>` — read it like the `String` it was.
+    /// A `str` literal: its text parts (escapes resolved once, quotes stripped) and its
+    /// interpolation holes, already lexed. See [`StrLit`].
     Str(StrLit),
     /// A `b"..."` byte-string literal: the resolved raw bytes (escapes applied, quotes stripped).
     /// Lexer-only, like the radix-prefixed int literals — no interpolation, no `\u`.
@@ -261,181 +261,138 @@ pub fn render_snippet(span: Span, source: &str) -> Option<String> {
     ))
 }
 
-/// A sparse map from a string literal's CONTENT char index (an index into the post-escape,
-/// delimiter-stripped payload) to that char's **physical source [`Span`]**.
-///
-/// It exists because `raw` is lossy: escapes are already resolved and the delimiters are gone, so a
-/// `\n` escape and a real source newline are indistinguishable downstream, and a `\u{1F600}` is nine
-/// source chars wearing one content char's clothes. An interpolation fragment is re-lexed out of
-/// `raw`, so without this map its token spans can only be an *offset* from the literal's start
-/// (`docs/gaps.md` M24-6). With it they are real positions.
-///
-/// **Injectivity on `[0, raw_len)` is the load-bearing property, not the diagnostics.** A `Span` is
-/// a cross-half TABLE KEY (`WitnessKey`/`CarrierKey` — see [`Span`]), so two fragments
-/// that share a span silently share a table entry: a wrong value under a green `chezzi check`
-/// (measured 2026-08-10, commit `2a27697e`). Proof that `at` is injective here:
-///
-/// * every checkpoint `Span` is `Lexer::span_at(self.pos)` taken at a strictly increasing `self.pos`
-///   of the SAME lexer, so checkpoints are distinct, increasing physical positions;
-/// * between two checkpoints `note` fired and declined, which is exactly the statement that each
-///   intermediate char sits one column right of its predecessor on one line — so the interpolated
-///   run is a contiguous, strictly increasing column range;
-/// * therefore `at(idx)` is the true physical position of content char `idx`, and distinct content
-///   chars occupy distinct source chars.
-///
-/// Corollary: distinct fragments of one literal occupy disjoint `raw` sub-ranges → distinct spans; a
-/// fragment of a NESTED literal is physically inside its parent's extent at a strictly later
-/// position → distinct again; there are no zero-width escapes (`\` + newline is a `LexError`); and
-/// `{{`/`}}` are consumed as ordinary content chars, so a fragment's `raw` index stays true.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PosMap {
-    /// Where content char 0 sits. Held INLINE rather than as `pts[0]` so the overwhelmingly common
-    /// literal — no escapes, no newlines — leaves `pts` empty, and an empty `Vec` does not heap-
-    /// allocate. That is what makes the zero-cost claim on [`str_token`] true rather than aspirational.
-    start: Span,
-    /// Checkpoints AFTER content char 0, strictly increasing in `.0`. One per discontinuity (an
-    /// escape or a real newline), so a literal's cost is proportional to its escapes, not its length.
-    pts: Vec<(usize, Span)>,
+/// One piece of a `str` literal: text with its escapes resolved, or an interpolation hole.
+#[derive(Clone, PartialEq)]
+pub enum StrPart {
+    Text(String),
+    Hole(Hole),
 }
 
-impl PosMap {
-    /// A map that says only "content char 0 is at `first`" — i.e. the affine fallback
-    /// `col = first.col + idx` on one line. This is the EXACT truth for a single-delimiter,
-    /// escape-free, newline-free literal, not an approximation of it. Allocation-free.
-    pub fn flat(first: Span) -> Self {
-        PosMap {
-            start: first,
-            pts: Vec::new(),
-        }
-    }
-
-    /// Record that content char `idx` sits at `at` — but ONLY if that is not what the previous
-    /// checkpoint already implies. This is the whole rule.
-    ///
-    /// Called once more with `idx == <content length>` and the CLOSING DELIMITER's span, so
-    /// [`Self::at`] answers one-past-the-end with a real source position too. That position is what
-    /// the "unterminated `{`" diagnostic reports, and extrapolating it instead put the caret past the
-    /// end of the last content char's line — a column that does not exist — whenever the literal's
-    /// final content char was a real newline.
-    ///
-    /// **Call it for EVERY content char, and do not "optimise" it into a switch on escape kinds.**
-    /// The reason is composition, not tidiness: a nested literal inside a fragment builds its own
-    /// map out of `span_at`, which routes through the PARENT's map, so a parent `\t`/`\r`/`\0`/
-    /// `\u{…}` escape shows up to the inner lexer as an ordinary char with a column jump under it.
-    /// A switch on escape kinds cannot see that jump and would put `{g()}` in
-    /// `"{ f('a\tb{g()}c') }"` one column left of the truth — the aliasing class above, wearing the
-    /// costume of a harmless optimisation.
-    fn note(&mut self, idx: usize, at: Span) {
-        // O(1): `note` is called with non-decreasing `idx`, so the governing checkpoint is the last
-        // — or `start` while none has been pushed yet.
-        let (i0, s0) = self.pts.last().copied().unwrap_or((0, self.start));
-        if s0.line != at.line || s0.col + (idx - i0) as u32 != at.col {
-            self.pts.push((idx, at));
-        }
-    }
-
-    /// The physical source position of content char `idx`. `idx == <content length>` is the literal's
-    /// CLOSING DELIMITER — a real checkpoint the lexer records, not an extrapolation. Past that it
-    /// does extrapolate from the final checkpoint (the fragment lexer's EOF span lands there).
-    pub fn at(&self, idx: usize) -> Span {
-        let (i0, s0) = match self.pts.partition_point(|(i, _)| *i <= idx) {
-            0 => (0, self.start),
-            k => self.pts[k - 1],
-        };
-        Span {
-            line: s0.line,
-            col: s0.col + (idx - i0) as u32,
-            file: s0.file,
-        }
-    }
+/// One `{expr}` / `{expr:spec}` hole of an interpolated literal. The lexer finds it while it scans
+/// the literal ([`Lexer::quoted`]) and lexes its code once, in place, one bracket deep: `tokens`
+/// carry their real source spans and end with an `Eof` token. Nothing re-reads the hole's text.
+#[derive(Clone, PartialEq)]
+pub struct Hole {
+    /// The hole's expression tokens, then `Eof`.
+    pub tokens: Vec<Tok>,
+    /// The format spec after the first `:` at hole depth, `None` for a bare `{expr}`.
+    pub spec: Option<Vec<SpecPart>>,
+    /// Where the spec's first char sits (the position a spec error reports).
+    pub spec_at: Span,
 }
 
-/// The payload of a `str` literal: its post-escape contents plus, when the literal carries a `{`/`}`
-/// (so a fragment may be re-lexed out of it), the [`PosMap`] that turns a content index back into a
-/// real source position.
+/// One piece of a format spec: literal text (escapes resolved once) or a nested `{expr}` field,
+/// lexed like a hole's code (tokens, then `Eof`).
+#[derive(Clone, PartialEq)]
+pub enum SpecPart {
+    Text(String),
+    Field(Vec<Tok>),
+}
+
+/// The payload of a `str` literal: its parts, in source order, and its extent in the source.
 ///
-/// `Deref<Target = str>` means every existing `raw.contains('{')` / `&raw` / `raw == "x"` site keeps
-/// working, and `PartialEq` compares only `raw` so the lexer's `vec![Token::Str("…".into())]` tests
-/// stay one `.into()` away from what they were.
+/// A literal with no hole holds zero parts (`""`) or one `Text`; adjacent text always merges, so
+/// two literals that spell the same value are equal. `PartialEq` compares `parts` only.
 ///
-/// `Debug` is hand-written to print **exactly what a `String` would**, so `chezzi tokens` and
-/// `chezzi ast` — which dump derived `Debug` (`src/main.rs`) — stay byte-identical to what they were
-/// before the map existed. The map is lexer machinery, not literal content: a derived `Debug` turned
-/// one interpolated literal into a screenful of `Span` blocks under `{:#?}`, one per checkpoint.
+/// `Debug` prints a literal with no hole exactly as the `String` it holds, so `chezzi tokens`
+/// output of a plain literal stays what it was.
 #[derive(Clone, Default)]
 pub struct StrLit {
-    /// The literal's contents: escapes resolved, delimiters stripped.
-    pub raw: String,
-    /// `None` means "the affine fallback from the literal's own span is EXACT" — not "unknown".
-    /// It is `None` for every brace-free literal (nothing will ever re-lex a fragment out of it)
-    /// and for a synthesized `ExprKind::Str`, which by construction has no interesting geometry.
-    pub map: Option<std::sync::Arc<PosMap>>,
+    pub parts: Vec<StrPart>,
+    /// The literal's length in source chars, delimiters included. `0` for a synthesized literal.
+    pub len: usize,
 }
 
-impl std::ops::Deref for StrLit {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.raw
+impl StrLit {
+    /// The literal's text when it holds no hole, `None` otherwise.
+    pub fn plain(&self) -> Option<&str> {
+        match self.parts.as_slice() {
+            [] => Some(""),
+            [StrPart::Text(t)] => Some(t),
+            _ => None,
+        }
     }
 }
 
 impl PartialEq for StrLit {
     fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw
-    }
-}
-
-impl PartialEq<str> for StrLit {
-    fn eq(&self, other: &str) -> bool {
-        self.raw == other
+        self.parts == other.parts
     }
 }
 
 impl From<&str> for StrLit {
     fn from(s: &str) -> Self {
-        StrLit {
-            raw: s.to_string(),
-            map: None,
-        }
+        StrLit::from(s.to_string())
     }
 }
 
 impl From<String> for StrLit {
-    fn from(raw: String) -> Self {
-        StrLit { raw, map: None }
+    fn from(text: String) -> Self {
+        let parts = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![StrPart::Text(text)]
+        };
+        StrLit { parts, len: 0 }
     }
 }
 
-impl fmt::Display for StrLit {
+impl fmt::Debug for StrPart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.raw)
+        match self {
+            StrPart::Text(t) => fmt::Debug::fmt(t, f),
+            StrPart::Hole(h) => f
+                .debug_struct("Hole")
+                .field(
+                    "tokens",
+                    &h.tokens.iter().map(|t| &t.kind).collect::<Vec<_>>(),
+                )
+                .field("spec", &h.spec)
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for SpecPart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SpecPart::Text(t) => fmt::Debug::fmt(t, f),
+            SpecPart::Field(toks) => f
+                .debug_tuple("Field")
+                .field(&toks.iter().map(|t| &t.kind).collect::<Vec<_>>())
+                .finish(),
+        }
     }
 }
 
 impl fmt::Debug for StrLit {
-    /// Prints as the bare `String` it wraps — see the type's doc for why the map is deliberately
-    /// invisible here (`chezzi tokens` / `chezzi ast` dump derived `Debug`).
+    /// A literal with no hole prints as the bare `String` (see the type's doc); one with holes
+    /// prints its parts.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.raw, f)
+        match self.plain() {
+            Some(text) => fmt::Debug::fmt(text, f),
+            None => f.debug_list().entries(&self.parts).finish(),
+        }
     }
 }
 
-/// Finish a scanned `str` literal. The map rides along only when the literal can actually spawn a
-/// fragment — the same `contains('{') || contains('}')` guard `desugar` uses to decide whether to
-/// call `parse_interpolation` at all.
-///
-/// Cost, stated exactly rather than optimistically: a literal with **no escapes and no newlines**
-/// builds a [`PosMap`] whose `pts` stays empty, so it allocates NOTHING and this guard just drops a
-/// 12-byte `Span`. A literal WITH escapes or newlines pushes one checkpoint per discontinuity, and
-/// this guard discards that `Vec` if the literal turns out to be brace-free — work proportional to
-/// escapes, thrown away. Building the map only for brace-carrying literals would need a second,
-/// escape-aware pre-scan to find the closing delimiter; not worth it until a profile says so.
-// ponytail: brace-free escape-heavy literals build a checkpoint vec and drop it. Pre-scan for
-// `{`/`}` before scanning if lexing ever shows up in a profile.
-fn str_token(text: String, map: PosMap) -> Token {
-    let map = (text.contains('{') || text.contains('}')).then(|| std::sync::Arc::new(map));
-    Token::Str(StrLit { raw: text, map })
-}
+/// The escapes a literal's text and a format spec's text accept after a backslash, each with the
+/// char it stands for. `\u{HEX}` is the eighth, read by [`Lexer::escape`] itself. This table is the
+/// one source of "which letters are escapes": [`Lexer::escape`] reads it and the interpolation grid
+/// test enumerates it.
+pub const ESCAPES: [(char, char); 7] = [
+    ('n', '\n'),
+    ('t', '\t'),
+    ('r', '\r'),
+    ('\\', '\\'),
+    ('"', '"'),
+    ('\'', '\''),
+    ('0', '\0'),
+];
+
+/// The deepest chain of interpolated literals nested in holes (`"{"{"{x}"}"}"` is three). CPython
+/// 3.14.7 accepts 149 levels and rejects 150 ("too many nested f-strings or t-strings").
+pub const MAX_HOLE_NEST: usize = 149;
 
 /// A token paired with where it came from. The lexer emits these; the `Token` payload is the
 /// `kind`. (`tokens` CLI output prints only `kind`, so M1 output is unchanged.)
@@ -669,25 +626,23 @@ pub struct Lexer {
     chars: Vec<char>,
     pos: usize,  // index of the next char to read
     line: usize, // current line, 1-based (for error messages)
-    /// Set only when this lexer is re-lexing a string-interpolation FRAGMENT: the enclosing
-    /// literal's [`PosMap`] plus this fragment's content offset within that literal. When it is set,
-    /// [`Lexer::span_at`] asks the map instead of counting columns, so every fragment token span is
-    /// a real physical source position — which is what makes it a safe cross-half table key (see
-    /// [`Span`]) as well as an honest diagnostic (`docs/gaps.md` M24-6).
-    ///
-    /// It COMPOSES: a literal nested inside a fragment builds its own map out of `span_at`, i.e. out
-    /// of the parent's map, so positions stay true at any nesting depth. `None` → normal lexing, and
-    /// `span_at`'s formula is byte-identical to what it always was.
-    origin: Option<(std::sync::Arc<PosMap>, usize)>,
     /// Module id stamped into every emitted span's [`Span::file`] (default 0 = standalone /
     /// synthesized). Assigned by the one production graph lex seam, `resolver::Builder::parse`.
-    /// Ignored while `origin` is set — a fragment inherits its literal's file through the map.
     file: u32,
     line_start: usize, // char index where the current line begins (for column tracking)
     indents: Vec<usize>, // the indentation stack. Starts as vec![0].
     at_line_start: bool, // true when the next char begins a fresh logical line
     pending: VecDeque<Tok>, // layout tokens computed together but emitted one-per-call (Dedents)
     bracket_depth: usize, // nesting depth of (), [], {}; >0 suppresses layout (multi-line literals)
+    /// `bracket_depth` of the innermost hole whose code is being lexed, `0` outside every hole.
+    /// A `:` at this depth is the format-spec separator, so it never munches into `:=`; a backslash
+    /// at any depth while this is set is an error (hole text is code, and code has no escapes).
+    hole_base: usize,
+    /// How many holes enclose the cursor, bounded by [`MAX_HOLE_NEST`].
+    hole_nest: usize,
+    /// Where the first `#` of the current hole sits. A `#` comments out the rest of its line,
+    /// including the hole's closing `}`, which is what an unterminated hole reports.
+    hole_comment: Option<Span>,
     /// Side-channel for doc-comments: `(line, stripped_text)` for every comment-ONLY line
     /// (a `#` line with no preceding tokens). Inline trailing comments (STEP B) are NOT recorded,
     /// so they can never become docs. The token stream is unaffected — this is a pure side table the
@@ -700,27 +655,25 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
-        Lexer::new_in(strip_bom(source), 0, None)
+        Lexer::new_file(source, 0)
     }
 
     /// Like [`Lexer::new`] but stamps every emitted span with the module id `file` (see
     /// [`Span::file`]). `0` is identical to [`Lexer::new`].
     pub fn new_file(source: &str, file: u32) -> Self {
-        Lexer::new_in(strip_bom(source), file, None)
-    }
-
-    fn new_in(source: &str, file: u32, origin: Option<(std::sync::Arc<PosMap>, usize)>) -> Self {
         Lexer {
-            chars: source.chars().collect(),
+            chars: strip_bom(source).chars().collect(),
             pos: 0,
             line: 1,
-            origin,
             file,
             line_start: 0,
             indents: vec![0],
             at_line_start: true,
             pending: VecDeque::new(),
             bracket_depth: 0,
+            hole_base: 0,
+            hole_nest: 0,
+            hole_comment: None,
             doc_comments: Vec::new(),
             pipe_cont: None,
         }
@@ -728,16 +681,12 @@ impl Lexer {
 
     /// The span pointing at character index `pos` on the current line.
     fn span_at(&self, pos: usize) -> Span {
-        match &self.origin {
-            // A fragment: ask the enclosing literal's map for the char's REAL position.
-            Some((map, off)) => map.at(off + pos),
-            None => Span {
-                // `as u32`: both are 1-based source counters bounded by the source length — a file
-                // with 4 billion lines (or a line with 4 billion columns) is not reachable.
-                line: self.line as u32,
-                col: (pos - self.line_start + 1) as u32,
-                file: self.file,
-            },
+        Span {
+            // `as u32`: both are 1-based source counters bounded by the source length — a file
+            // with 4 billion lines (or a line with 4 billion columns) is not reachable.
+            line: self.line as u32,
+            col: (pos - self.line_start + 1) as u32,
+            file: self.file,
         }
     }
 
@@ -929,6 +878,9 @@ impl Lexer {
                         self.advance();
                     }
                     '#' => {
+                        if self.hole_base > 0 && self.hole_comment.is_none() {
+                            self.hole_comment = Some(self.span_at(self.pos));
+                        }
                         // comment runs to end of line; leave the '\n' for the newline rule below
                         while !self.is_at_end() && self.peek() != '\n' {
                             self.advance();
@@ -1039,7 +991,9 @@ impl Lexer {
                     }
                 }
                 ':' => {
-                    if self.match_char('=') {
+                    // At hole depth a `:` is the format-spec separator: `"{x:=5}"` is spec `=5`.
+                    let spec_colon = self.hole_base > 0 && self.bracket_depth == self.hole_base;
+                    if !spec_colon && self.match_char('=') {
                         Token::Walrus
                     } else {
                         Token::Colon
@@ -1170,10 +1124,10 @@ impl Lexer {
                 '"' | '\'' if self.peek() == c && self.peek_next() == c => {
                     self.advance(); // second quote
                     self.advance(); // third quote
-                    self.triple_string(c)?
+                    self.quoted(c, true)?
                 }
-                '"' => self.string('"')?,
-                '\'' => self.string('\'')?,
+                '"' => self.quoted('"', false)?,
+                '\'' => self.quoted('\'', false)?,
                 // `b"..."` / `b'...'` byte-string literal — fire ONLY when the `b`/`B` is immediately
                 // followed by a quote (mirrors how `number()` detects the `0x` radix prefix). A bare
                 // `b` (e.g. `b + 1`, `by = 2`) falls through to `identifier()` unchanged.
@@ -1204,6 +1158,14 @@ impl Lexer {
                 c if c.is_ascii_digit() => self.number(start)?,
                 c if c.is_alphabetic() || c == '_' => self.identifier(start),
 
+                // Hole text is code, and code has no escapes: the quote of a nested literal is
+                // written directly (`"{d["k"]}"`), never escaped.
+                '\\' if self.hole_base > 0 => {
+                    return Err(self.error_at(
+                        start,
+                        "a backslash is not allowed in interpolation hole code; write the quote directly, as in \"{d[\"k\"]}\"",
+                    ));
+                }
                 // `start`, not the cursor: the char was consumed at the top of this match.
                 other => {
                     return Err(self.error_at(start, &format!("unexpected character {other:?}")));
@@ -1523,160 +1485,267 @@ impl Lexer {
         }
     }
 
-    /// (1d) Scan a string literal. The opening `quote` (`"` or `'`) is already consumed.
+    /// True when the cursor sits on the literal's closing delimiter: the `quote`, or three of it
+    /// for a triple-quoted literal.
+    fn at_close(&self, quote: char, triple: bool) -> bool {
+        self.peek() == quote
+            && (!triple
+                || (self.peek_next() == quote && self.chars.get(self.pos + 2) == Some(&quote)))
+    }
+
+    /// Consume one escape and return the char it stands for. The cursor sits on the backslash.
+    /// This is the ONLY reader of an escape: a literal's text and a format spec's text both call it,
+    /// and hole code never does (a backslash in hole code is an error, see `next_token`). `open` is
+    /// the literal's opener, which a trailing backslash reports.
+    fn escape(&mut self, open: Span) -> Result<char, LexError> {
+        self.advance(); // consume the backslash
+        if self.is_at_end() {
+            return Err(self.error_span(open, "unterminated string literal (trailing '\\')"));
+        }
+        let esc = self.advance();
+        // `\u{HEX}` — 1-6 hex digits naming a Unicode scalar value.
+        if esc == 'u' {
+            return self.unicode_escape();
+        }
+        if let Some((_, resolved)) = ESCAPES.iter().find(|(letter, _)| *letter == esc) {
+            return Ok(*resolved);
+        }
+        if esc == '\n' || esc == '\r' {
+            // The `\` (2 back: the backslash and the newline are both consumed).
+            return Err(self.error_at(
+                self.pos - 2,
+                "line continuations are not supported; close the string or use \\n",
+            ));
+        }
+        // The escape CHAR, not the `\` before it (rustc points here).
+        Err(self.error_at(self.pos - 1, &format!("unknown escape '\\{esc}'")))
+    }
+
+    /// Scan a `str` literal. The opening delimiter (`quote`, or three of it when `triple`) is
+    /// already consumed. This is the ONE owner of "what did the user write in this hole, and where
+    /// does it end": it reads the literal's text (escapes resolved once, by [`escape`]), and on a
+    /// `{` it lexes the hole's code in place with [`hole`], so the hole's text is never read again.
     ///
-    /// Munches up to the matching closing `quote`, translating backslash escapes
-    /// (`\n \t \r \\ \" \' \0 \u{HEX}`). An unknown escape, or a `\` at end-of-input, is a
-    /// `LexError`. Both quote styles produce the same `Token::Str` and share all escape
-    /// handling, so `'…'` and `"…"` are interchangeable: in a single-quoted string `"` is a
-    /// literal char and `\'` escapes the quote; in a double-quoted string `'` is a literal char
-    /// and `\"` escapes the quote (both `\'` and `\"` are accepted in either style). The stored
-    /// contents are the *processed* text (escapes resolved, quotes stripped); brace
-    /// interpolation (`{…}`) is a separate, later pass — not handled here.
-    fn string(&mut self, quote: char) -> Result<Token, LexError> {
+    /// * `{{` / `}}` are one literal brace; a lone `}` is an error.
+    /// * `{` + ASCII digits + `}` is text as written (DEC-018): a regex quantifier `\d{4}` stays.
+    /// * An unterminated literal points at its OPENER, which may be lines behind the cursor, so the
+    ///   span is captured up front.
+    ///
+    /// [`escape`]: Lexer::escape
+    /// [`hole`]: Lexer::hole
+    fn quoted(&mut self, quote: char, triple: bool) -> Result<Token, LexError> {
+        let width = if triple { 3 } else { 1 };
+        let start = self.pos - width;
+        let open = self.span_at(start);
+        let mut parts: Vec<StrPart> = Vec::new();
         let mut text = String::new();
-        // An unterminated literal points at its OPENER, which by then may be lines behind the
-        // cursor — so capture the SPAN now, while the opener is still on the current line.
-        let open = self.span_at(self.pos - 1);
-        // Checkpoint 0 is taken HERE, where `self.pos` already sits past the opening delimiter — so
-        // the map is right for `'…'` and `"""…"""` alike with no delimiter-width arithmetic.
-        let mut map = PosMap::flat(self.span_at(self.pos));
-        let mut n = 0usize;
-        while !self.is_at_end() && self.peek() != quote {
-            // Exactly one content char is produced per iteration (the `\u` arm `continue`s after
-            // pushing one). See `PosMap::note` for why this is per-char and not per-escape.
-            map.note(n, self.span_at(self.pos));
-            n += 1;
-            if self.peek() == '\\' {
-                self.advance(); // consume the backslash
-                if self.is_at_end() {
-                    return Err(
-                        self.error_span(open, "unterminated string literal (trailing '\\')")
-                    );
-                }
-                let esc = self.advance();
-                let translated = match esc {
-                    'n' => '\n',
-                    't' => '\t',
-                    'r' => '\r',
-                    '\\' => '\\',
-                    '"' => '"',
-                    '\'' => '\'',
-                    '0' => '\0',
-                    // `\u{HEX}` — 1-6 hex digits naming a Unicode scalar value.
-                    'u' => {
-                        text.push(self.unicode_escape()?);
-                        continue;
-                    }
-                    // The `\` (2 back: the backslash and the newline are both consumed).
-                    '\n' | '\r' => {
-                        return Err(self.error_at(
-                            self.pos - 2,
-                            "line continuations are not supported; close the string or use \\n",
-                        ));
-                    }
-                    // The escape CHAR, not the `\` before it (rustc points here).
-                    other => {
-                        return Err(
-                            self.error_at(self.pos - 1, &format!("unknown escape '\\{other}'"))
-                        );
-                    }
+        loop {
+            if self.is_at_end() {
+                let message = if triple {
+                    "unterminated triple-quoted string literal"
+                } else {
+                    "unterminated string literal"
                 };
-                text.push(translated);
+                return Err(self.error_span(open, message));
+            }
+            if self.at_close(quote, triple) {
+                break;
+            }
+            let c = self.peek();
+            if c == '\\' {
+                text.push(self.escape(open)?);
+            } else if (c == '{' || c == '}') && self.peek_next() == c {
+                self.advance();
+                self.advance();
+                text.push(c);
+            } else if c == '{' {
+                if let Some(end) = self.digit_hole() {
+                    text.extend(&self.chars[self.pos..=end]);
+                    self.pos = end + 1;
+                } else {
+                    if !text.is_empty() {
+                        parts.push(StrPart::Text(std::mem::take(&mut text)));
+                    }
+                    parts.push(StrPart::Hole(self.hole(quote, triple)?));
+                }
+            } else if c == '}' {
+                return Err(self.error("unmatched '}' in string (use '}}' for a literal brace)"));
             } else {
-                if self.peek() == '\n' {
+                if c == '\n' {
                     self.line += 1; // a *literal* newline → multi-line string; keep line count honest
                     self.line_start = self.pos + 1; // next char begins the new line
                 }
                 text.push(self.advance());
             }
         }
-        if self.is_at_end() {
-            return Err(self.error_span(open, "unterminated string literal"));
+        for _ in 0..width {
+            self.advance(); // the closing delimiter
         }
-        // The CLOSING DELIMITER's own position, recorded at index `n` (one past the last content
-        // char). See `PosMap::note` — without it `at(n)` extrapolates a column off the end of
-        // whatever line the last content char sat on, which for a literal ending in a real newline is
-        // a column that does not exist in the file.
-        map.note(n, self.span_at(self.pos));
-        self.advance(); // consume the closing quote
-        Ok(str_token(text, map))
+        if !text.is_empty() {
+            parts.push(StrPart::Text(text));
+        }
+        Ok(Token::Str(StrLit {
+            parts,
+            len: self.pos - start,
+        }))
     }
 
-    /// (1d′) Scan a *triple-quoted* string literal (`"""…"""` or `'''…'''`). The opening triple
-    /// `quote` is already consumed. Identical to [`string`] — same backslash escapes, `\u{…}`, and
-    /// literal-newline handling, leaving `{…}` interpolation to the later pass — except the
-    /// terminator is a triple of `quote`, so a single or double `quote` inside is an ordinary char.
-    /// Produces a normal `Token::Str`.
-    fn triple_string(&mut self, quote: char) -> Result<Token, LexError> {
+    /// The index of the `}` when the cursor sits on `{` + one or more ASCII digits + `}` (a digit
+    /// hole, DEC-018), else `None`.
+    fn digit_hole(&self) -> Option<usize> {
+        let mut i = self.pos + 1;
+        while self.chars.get(i).is_some_and(char::is_ascii_digit) {
+            i += 1;
+        }
+        (i > self.pos + 1 && self.chars.get(i) == Some(&'}')).then_some(i)
+    }
+
+    /// The error for a hole that ran to the end of the input. When the hole held a `#`, the comment
+    /// swallowed the rest of its line, so that is the diagnosis; otherwise the `{` is unclosed.
+    fn unterminated_hole(&self, brace: Span) -> LexError {
+        match self.hole_comment {
+            Some(hash) => self.error_span(
+                hash,
+                "'#' starts a comment inside an interpolation hole and the comment runs to the end of the line, so this hole's closing '}' is commented out",
+            ),
+            None => self.error_span(brace, "unterminated '{' in interpolated string"),
+        }
+    }
+
+    /// Scan one hole. The cursor sits on its `{`; the literal's delimiter is `quote` / `triple`.
+    /// Returns with the cursor past the hole's closing `}`.
+    fn hole(&mut self, quote: char, triple: bool) -> Result<Hole, LexError> {
+        let brace = self.span_at(self.pos);
+        self.advance(); // the `{`
+        if self.hole_nest >= MAX_HOLE_NEST {
+            return Err(self.error_span(brace, "too many nested interpolated strings"));
+        }
+        self.hole_nest += 1;
+        let outer_comment = self.hole_comment.take();
+        let result = self.hole_body(brace, quote, triple);
+        self.hole_nest -= 1;
+        self.hole_comment = outer_comment;
+        result
+    }
+
+    /// The body of [`hole`]: the code, then the spec when the code ended on a `:`.
+    ///
+    /// [`hole`]: Lexer::hole
+    fn hole_body(&mut self, brace: Span, quote: char, triple: bool) -> Result<Hole, LexError> {
+        let (tokens, has_spec) = self.hole_code(brace)?;
+        if !has_spec {
+            return Ok(Hole {
+                tokens,
+                spec: None,
+                spec_at: brace,
+            });
+        }
+        // Past the first `:` at hole depth the rest is the FORMAT SPEC: literal text, so a quote,
+        // a bracket or a `#` is a fill char (`"{x:'>5}"`, `"{x:(>5}"`). Only a `{` (a nested
+        // field), a backslash (an escape) and the closing `}` mean anything. The literal's own
+        // delimiter ends the literal, so it ends the spec too.
+        let spec_at = self.span_at(self.pos);
+        let mut spec: Vec<SpecPart> = Vec::new();
         let mut text = String::new();
-        // See `string()`: the opener (here 3 chars wide) may be lines behind the cursor by the time
-        // an unterminated literal is detected, so capture its span up front.
-        let open = self.span_at(self.pos - 3);
-        // `self.pos` is already past the opening `"""`, so checkpoint 0 is right.
-        let mut map = PosMap::flat(self.span_at(self.pos));
-        let mut n = 0usize;
-        // Closes only when the next THREE chars are all `quote`.
-        while !(self.peek() == quote
-            && self.peek_next() == quote
-            && self.chars.get(self.pos + 2) == Some(&quote))
-        {
-            if self.is_at_end() {
-                return Err(self.error_span(open, "unterminated triple-quoted string literal"));
+        loop {
+            if self.is_at_end() || self.at_close(quote, triple) {
+                return Err(self.unterminated_hole(brace));
             }
-            map.note(n, self.span_at(self.pos));
-            n += 1;
-            if self.peek() == '\\' {
-                self.advance(); // consume the backslash
-                if self.is_at_end() {
-                    return Err(
-                        self.error_span(open, "unterminated string literal (trailing '\\')")
-                    );
+            let c = self.peek();
+            if c == '}' {
+                self.advance();
+                break;
+            } else if c == '{' {
+                if !text.is_empty() {
+                    spec.push(SpecPart::Text(std::mem::take(&mut text)));
                 }
-                let esc = self.advance();
-                let translated = match esc {
-                    'n' => '\n',
-                    't' => '\t',
-                    'r' => '\r',
-                    '\\' => '\\',
-                    '"' => '"',
-                    '\'' => '\'',
-                    '0' => '\0',
-                    'u' => {
-                        text.push(self.unicode_escape()?);
-                        continue;
-                    }
-                    // The `\` (2 back: the backslash and the newline are both consumed).
-                    '\n' | '\r' => {
-                        return Err(self.error_at(
-                            self.pos - 2,
-                            "line continuations are not supported; close the string or use \\n",
-                        ));
-                    }
-                    // The escape CHAR, not the `\` before it.
-                    other => {
-                        return Err(
-                            self.error_at(self.pos - 1, &format!("unknown escape '\\{other}'"))
-                        );
-                    }
-                };
-                text.push(translated);
+                let field = self.span_at(self.pos);
+                self.advance();
+                let (field_tokens, nested_spec) = self.hole_code(field)?;
+                if nested_spec {
+                    return Err(self.error_span(
+                        field,
+                        "format spec: a nested field cannot carry its own format spec",
+                    ));
+                }
+                spec.push(SpecPart::Field(field_tokens));
+            } else if c == '\\' {
+                text.push(self.escape(brace)?);
             } else {
-                if self.peek() == '\n' {
-                    self.line += 1; // keep the line count honest across embedded newlines
+                if c == '\n' {
+                    self.line += 1;
                     self.line_start = self.pos + 1;
                 }
                 text.push(self.advance());
             }
         }
-        // The closing triple's FIRST quote, at index `n` — see `string()` for why one-past-the-end
-        // is a recorded checkpoint and not an extrapolation.
-        map.note(n, self.span_at(self.pos));
-        // consume the closing triple
-        self.advance();
-        self.advance();
-        self.advance();
-        Ok(str_token(text, map))
+        if !text.is_empty() {
+            spec.push(SpecPart::Text(text));
+        }
+        Ok(Hole {
+            tokens,
+            spec: Some(spec),
+            spec_at,
+        })
+    }
+
+    /// Lex a hole's code in place. The cursor sits just past the `{` (`brace`). The hole counts as
+    /// one bracket level, like `()`, `[]` and `{}`, so layout is off inside it: a line break is
+    /// white space, never a `Newline`. Returns the tokens (ending in `Eof`) and whether the code
+    /// ended on the first `:` at hole depth (the spec separator) instead of on the closing `}`.
+    /// Either way the cursor sits past the token that ended the code.
+    fn hole_code(&mut self, brace: Span) -> Result<(Vec<Tok>, bool), LexError> {
+        self.bracket_depth += 1;
+        let base = self.bracket_depth;
+        let outer_base = std::mem::replace(&mut self.hole_base, base);
+        let result = self.hole_tokens(brace, base);
+        self.hole_base = outer_base;
+        result
+    }
+
+    fn hole_tokens(&mut self, brace: Span, base: usize) -> Result<(Vec<Tok>, bool), LexError> {
+        let mut tokens = Vec::new();
+        loop {
+            let tok = match self.next_token() {
+                Ok(tok) => tok,
+                // A nested literal that ran to the end of the input: the hole never closed.
+                Err(_) if self.is_at_end() => return Err(self.unterminated_hole(brace)),
+                Err(e) => return Err(e),
+            };
+            let kind = &tok.kind;
+            // Layout tokens appear only when the input ends (layout is off inside the hole).
+            if *kind == Token::Eof
+                || *kind == Token::Newline
+                || *kind == Token::Indent
+                || *kind == Token::Dedent
+            {
+                return Err(self.unterminated_hole(brace));
+            }
+            let closed_hole = self.bracket_depth < base;
+            // The `Eof` that ends the tokens sits where the code ended: on the `}` or the `:`.
+            if closed_hole && *kind == Token::RBrace {
+                tokens.push(Tok {
+                    kind: Token::Eof,
+                    span: tok.span,
+                });
+                return Ok((tokens, false));
+            }
+            if closed_hole && (*kind == Token::RParen || *kind == Token::RBracket) {
+                return Err(self.error_span(
+                    tok.span,
+                    "unmatched closing bracket in an interpolation hole",
+                ));
+            }
+            if *kind == Token::Colon && self.bracket_depth == base {
+                self.bracket_depth -= 1;
+                tokens.push(Tok {
+                    kind: Token::Eof,
+                    span: tok.span,
+                });
+                return Ok((tokens, true));
+            }
+            tokens.push(tok);
+        }
     }
 
     /// Scan an `r"..."` / `r'...'` raw-string literal. The `r`/`R` prefix and the opening `quote`
@@ -1922,19 +1991,6 @@ pub fn tokenize(source: &str) -> Result<Vec<Tok>, LexError> {
     Lexer::new(source).tokenize()
 }
 
-/// Re-lex a string-interpolation FRAGMENT: `source` is the fragment's expression text, `map` the
-/// enclosing literal's [`PosMap`] and `off` the fragment's content offset within that literal. Every
-/// emitted span is the real physical source position of the char it points at — the fragment's file
-/// comes along inside the map's spans, so nothing has to re-stamp it.
-pub fn tokenize_frag(
-    source: &str,
-    map: std::sync::Arc<PosMap>,
-    off: usize,
-) -> Result<Vec<Tok>, LexError> {
-    let file = map.at(off).file;
-    Lexer::new_in(source, file, Some((map, off))).tokenize()
-}
-
 /// Convenience free function: `lexer::tokenize_with_comments(src)` — tokens plus the doc-comment
 /// side table, with every span stamped with the module id `file` ([`Span::file`]). The token stream
 /// is identical to [`tokenize`] modulo that stamp. This is the graph lex seam (`resolver`).
@@ -2015,12 +2071,19 @@ mod tests {
 
     #[test]
     fn triple_string_newline_and_interp() {
-        // `\n` escape is a real newline; a literal newline is preserved; `{x}` is left
-        // un-processed (interpolation is a later pass, same as regular strings).
-        assert_eq!(
-            kinds("\"\"\"a\\nb {x}\"\"\""),
-            vec![Token::Str("a\nb {x}".into()), Token::Newline, Token::Eof]
-        );
+        // `\n` escape is a real newline; a literal newline is preserved; `{x}` is a hole, lexed
+        // in place (the text before it keeps its resolved escape).
+        let ks = kinds("\"\"\"a\\nb {x}\"\"\"");
+        let [Token::Str(lit), Token::Newline, Token::Eof] = &ks[..] else {
+            panic!("unexpected tokens {ks:?}");
+        };
+        let [StrPart::Text(text), StrPart::Hole(hole)] = &lit.parts[..] else {
+            panic!("expected text then a hole, got {lit:?}");
+        };
+        assert_eq!(text, "a\nb ");
+        let hole_kinds: Vec<&Token> = hole.tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(hole_kinds, vec![&Token::Ident("x".into()), &Token::Eof]);
+        assert!(hole.spec.is_none());
         // Literal newline inside the triple string is preserved verbatim.
         assert_eq!(
             kinds("\"\"\"a\nb\"\"\""),
@@ -2938,11 +3001,21 @@ mod tests {
     fn string_braces_not_counted() {
         let toks = tokenize("\"x{y}z\"\n").unwrap();
         let ks: Vec<&Token> = toks.iter().map(|t| &t.kind).collect();
-        assert_eq!(
-            ks,
-            vec![&Token::Str("x{y}z".into()), &Token::Newline, &Token::Eof]
-        );
+        assert!(matches!(
+            ks[..],
+            [Token::Str(_), Token::Newline, Token::Eof]
+        ));
         assert!(!ks.contains(&&Token::LBrace) && !ks.contains(&&Token::RBrace));
+        // The hole's own tokens sit inside the literal's payload, and its braces are not among them.
+        let Token::Str(lit) = ks[0] else {
+            panic!("a str token");
+        };
+        let [StrPart::Text(x), StrPart::Hole(hole), StrPart::Text(z)] = &lit.parts[..] else {
+            panic!("expected text, hole, text, got {lit:?}");
+        };
+        assert_eq!((x.as_str(), z.as_str()), ("x", "z"));
+        let hole_kinds: Vec<&Token> = hole.tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(hole_kinds, vec![&Token::Ident("y".into()), &Token::Eof]);
     }
 
     /// Newlines/Indent/Dedent inside `[...]` are suppressed; a Newline appears after the closer.
@@ -3291,180 +3364,191 @@ mod tests {
         assert_eq!(std::mem::size_of::<Span>(), 12);
     }
 
-    /// A fragment may contain a REAL newline (brackets suppress layout), and so may the literal
-    /// around it. Every token span the fragment produces is the **true physical source position**.
-    ///
-    /// That is a strictly stronger statement than what this test used to assert. The old lexer took
-    /// a base COLUMN that kept counting past a newline, on purpose: resetting it put two sibling
-    /// fragments' second lines both on `(line, 1)` — one witness-table key for two call sites, the
-    /// second silently taking the first's type (`2a27697e`). Real positions get the non-aliasing
-    /// property for free, from a property of the FILE rather than of an offset we chose, and without
-    /// a column that runs off the end of its line (`docs/gaps.md` M24-6).
+    /// The one `str` token of `src`, as the lexer built it.
+    fn str_lit(src: &str) -> StrLit {
+        tokenize(src)
+            .unwrap()
+            .into_iter()
+            .find_map(|t| match t.kind {
+                Token::Str(s) => Some(s),
+                _ => None,
+            })
+            .expect("one str token")
+    }
+
+    /// Every identifier token in `lit`'s holes (and nested spec fields) as `(name, line, col)`.
+    fn hole_idents(lit: &StrLit) -> Vec<(String, u32, u32)> {
+        let mut out = Vec::new();
+        let mut take = |toks: &[Tok]| {
+            for t in toks {
+                if let Token::Ident(n) = &t.kind {
+                    out.push((n.clone(), t.span.line, t.span.col));
+                }
+            }
+        };
+        for part in &lit.parts {
+            if let StrPart::Hole(h) = part {
+                take(&h.tokens);
+                for sp in h.spec.iter().flatten() {
+                    if let SpecPart::Field(toks) = sp {
+                        take(toks);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A hole may contain a REAL newline (a hole is one bracket deep, so layout is off), and so may
+    /// the literal around it. Every token span the hole produces is the **true physical source
+    /// position**, after escapes and real newlines alike: the lexer lexed it in place, so there is
+    /// no map to compose. Two holes never share a span (a span is a cross-half TABLE KEY, see
+    /// [`Span`]). Columns are hand-counted absolutes.
     #[test]
-    fn a_fragment_spanning_a_newline_gets_real_source_positions() {
+    fn hole_tokens_are_lexed_in_place_with_real_spans() {
         // line 1:  s = """{[          line 2:  a, bb]}"""
         // cols:    1234567890                  1234567890
-        let src = "s = \"\"\"{[\na, bb]}\"\"\"\n";
-        let lit = tokenize(src)
-            .unwrap()
-            .into_iter()
-            .find_map(|t| match t.kind {
-                Token::Str(s) => Some(s),
-                _ => None,
-            })
-            .expect("one str token");
-        assert_eq!(lit.raw, "{[\na, bb]}");
-        let map = lit.map.clone().expect("a braced literal carries a map");
-
-        // The fragment is `[\na, bb]`, starting at content index 1 (past its `{`).
-        let toks = tokenize_frag("[\na, bb]", map.clone(), 1).unwrap();
-        let spans: Vec<(u32, u32)> = toks
-            .iter()
-            .filter(|t| matches!(t.kind, Token::Ident(_)))
-            .map(|t| (t.span.line, t.span.col))
-            .collect();
-        assert_eq!(spans, vec![(2, 1), (2, 4)], "hand-counted from the source");
-
-        // …and two fragments of ONE literal cannot collide, even on a line they share: content
-        // index 3 is `a` at (2,1) and index 6 is the first `b` at (2,4) — distinct source chars.
-        let a = tokenize_frag("a", map.clone(), 3).unwrap();
-        let b = tokenize_frag("a", map.clone(), 6).unwrap();
-        assert_ne!(a[0].span, b[0].span, "two fragments must stay distinct");
-    }
-
-    /// The only `str` token that carries a map is one that can actually spawn a fragment. This is
-    /// the zero-cost claim, verified rather than asserted: an ordinary literal — including a
-    /// multi-line triple-quoted one, whose map would be the least trivial — allocates nothing.
-    #[test]
-    fn pos_map_is_absent_for_a_plain_literal() {
-        let one_map = |src: &str| {
-            tokenize(src)
-                .unwrap()
-                .into_iter()
-                .find_map(|t| match t.kind {
-                    Token::Str(s) => Some(s),
-                    _ => None,
-                })
-                .expect("one str token")
-                .map
-        };
-        assert!(one_map("x = \"abc\"\n").is_none(), "plain literal");
-        assert!(
-            one_map("x = \"\"\"a\nb\"\"\"\n").is_none(),
-            "brace-free triple-quoted literal"
+        let lit = str_lit("s = \"\"\"{[\na, bb]}\"\"\"\n");
+        assert_eq!(
+            hole_idents(&lit),
+            vec![("a".into(), 2, 1), ("bb".into(), 2, 4)],
+            "hand-counted from the source"
         );
-        // …and the moment a brace appears, the map is there.
-        assert!(one_map("x = \"a{b}\"\n").is_some(), "braced literal");
-    }
-
-    /// `PosMap::at` is exact at the geometry `raw` throws away: the opening `"""` width, each escape
-    /// width (`\u{1F600}` is NINE source chars for one content char), and a real newline resetting
-    /// the column. Columns are hand-counted absolutes, not deltas — a uniformly-wrong-by-one map
-    /// reads as correct to a human.
-    #[test]
-    fn pos_map_tracks_delimiter_escape_and_newline_widths() {
         // line 1:  s = """a\tb{p}          line 2:  c\u{1F600}d{q}"""
         // cols:    1234567890123                    1234567890123456789
-        let src = "s = \"\"\"a\\tb{p}\nc\\u{1F600}d{q}\"\"\"\n";
-        let lit = tokenize(src)
-            .unwrap()
-            .into_iter()
-            .find_map(|t| match t.kind {
-                Token::Str(s) => Some(s),
-                _ => None,
-            })
-            .expect("one str token");
-        assert_eq!(lit.raw, "a\tb{p}\nc\u{1F600}d{q}");
-        let m = lit.map.expect("a braced literal carries a map");
-
-        // content 0 = `a`, at col 8 (`s`,` `,`=`,` `,`"`,`"`,`"` are cols 1-7) — the `"""` width
-        // costs nothing because checkpoint 0 is taken past the delimiter.
-        assert_eq!((m.at(0).line, m.at(0).col), (1, 8));
-        // content 1 = the tab, written `\t` at cols 9-10; content 2 = `b` at col 11.
-        assert_eq!((m.at(1).line, m.at(1).col), (1, 9));
-        assert_eq!((m.at(2).line, m.at(2).col), (1, 11));
-        // content 3 = `{`, 4 = `p`, 5 = `}` at cols 12-14; content 6 is the real newline at col 15.
-        assert_eq!((m.at(4).line, m.at(4).col), (1, 13));
-        assert_eq!((m.at(6).line, m.at(6).col), (1, 15));
-        // …and the next char restarts at column 1 of line 2.
-        assert_eq!((m.at(7).line, m.at(7).col), (2, 1));
-        // content 8 = 😀, written `\u{1F600}` at cols 2-10; content 9 = `d` at col 11.
-        assert_eq!((m.at(8).line, m.at(8).col), (2, 2));
-        assert_eq!((m.at(9).line, m.at(9).col), (2, 11));
-        // content 11 = `q`, physically at col 13.
-        assert_eq!((m.at(11).line, m.at(11).col), (2, 13));
+        let lit = str_lit("s = \"\"\"a\\tb{p}\nc\\u{1F600}d{q}\"\"\"\n");
+        assert_eq!(
+            hole_idents(&lit),
+            vec![("p".into(), 1, 13), ("q".into(), 2, 13)],
+            "after a `\\t`, a real newline and a nine-char escape"
+        );
+        // s = "a\\b\"c{q}"   `"`=5 `a`=6 `\`=7 `\`=8 `b`=9 `\`=10 `"`=11 `c`=12 `{`=13 `q`=14
+        let lit = str_lit("s = \"a\\\\b\\\"c{q}\"\n");
+        assert_eq!(hole_idents(&lit), vec![("q".into(), 1, 14)]);
+        // Columns are 1-based CHAR columns: `é` costs one, `\u{1F600}` its nine source chars, and a
+        // literal 😀 one.
+        let lit = str_lit("s = \"héllo {nope}\"\n");
+        assert_eq!(hole_idents(&lit), vec![("nope".into(), 1, 13)]);
+        let lit = str_lit("s = \"\\u{1F600}{nope}\"\n");
+        assert_eq!(hole_idents(&lit), vec![("nope".into(), 1, 16)]);
+        let lit = str_lit("s = \"😀{nope}\"\n");
+        assert_eq!(hole_idents(&lit), vec![("nope".into(), 1, 8)]);
+        // Two holes of one literal, and a nested literal's hole, are three distinct positions.
+        let lit = str_lit("s = \"{a}{b}{'{c}'}\"\n");
+        let at: Vec<_> = hole_idents(&lit).iter().map(|h| (h.1, h.2)).collect();
+        assert_eq!(at.len(), 2, "the nested literal's hole is inside a token");
+        assert_ne!(at[0], at[1]);
     }
 
-    /// The two-source-char escapes, in one literal, each costing exactly its own width: `\\` and
-    /// `\"` join `\t` (above) — they are the ones an "offset into `raw`" column got wrong by one
-    /// apiece, cumulatively.
+    /// A hole is one bracket level: a line break inside it is white space, never a `Newline`, and
+    /// the hole's tokens carry no layout token at all (they end with `Eof`).
     #[test]
-    fn pos_map_tracks_two_char_escape_widths() {
-        // s = "a\\b\"c{q}"
-        // cols: 1234567890123456
-        // `"`=5 `a`=6 `\`=7 `\`=8 `b`=9 `\`=10 `"`=11 `c`=12 `{`=13 `q`=14
-        let src = "s = \"a\\\\b\\\"c{q}\"\n";
-        let lit = tokenize(src)
+    fn a_hole_is_one_bracket_deep() {
+        for src in [
+            "s = \"{x +\n 1}\"\n",
+            "s = \"\"\"{x\n + 1}\"\"\"\n",
+            "s = \"{x\n  .f()\n  .g()}\"\n",
+        ] {
+            let lit = str_lit(src);
+            let [StrPart::Hole(h)] = &lit.parts[..] else {
+                panic!("one hole in {src:?}, got {lit:?}");
+            };
+            for t in &h.tokens {
+                assert!(
+                    !matches!(t.kind, Token::Newline | Token::Indent | Token::Dedent),
+                    "layout token {:?} in a hole of {src:?}",
+                    t.kind
+                );
+            }
+            assert_eq!(h.tokens.last().map(|t| &t.kind), Some(&Token::Eof));
+        }
+        // …and the line AFTER the literal still starts a fresh logical line.
+        let kinds: Vec<Token> = tokenize("s = \"{x\n}\"\nt = 1\n")
             .unwrap()
             .into_iter()
-            .find_map(|t| match t.kind {
-                Token::Str(s) => Some(s),
-                _ => None,
-            })
-            .expect("one str token");
-        assert_eq!(lit.raw, "a\\b\"c{q}");
-        let m = lit.map.expect("a braced literal carries a map");
-        assert_eq!((m.at(0).line, m.at(0).col), (1, 6), "`a`");
-        assert_eq!((m.at(1).line, m.at(1).col), (1, 7), "the `\\\\` backslash");
-        assert_eq!((m.at(2).line, m.at(2).col), (1, 9), "`b`");
-        assert_eq!((m.at(3).line, m.at(3).col), (1, 10), "the `\\\"` quote");
-        assert_eq!((m.at(4).line, m.at(4).col), (1, 12), "`c`");
-        assert_eq!((m.at(6).line, m.at(6).col), (1, 14), "`q`");
+            .map(|t| t.kind)
+            .collect();
+        assert_eq!(
+            kinds.iter().filter(|k| **k == Token::Newline).count(),
+            2,
+            "one Newline per statement, none from the hole: {kinds:?}"
+        );
     }
 
-    /// Columns are 1-based CHAR columns, not byte offsets — the lexer counts `chars`, and the map
-    /// inherits that. A multi-byte char written literally (`é`, 2 bytes) and one written as an
-    /// escape (`😀`, 4 bytes / 9 source chars) both cost exactly their SOURCE-char width.
+    /// A literal with no hole is plain (one `Text` or none); one with a hole is not, and adjacent
+    /// text merges so equal values are equal tokens. The extent counts the delimiters.
     #[test]
-    fn unicode_columns_are_chars_not_bytes() {
-        let cols = |src: &str, n: usize| {
-            let m = tokenize(src)
-                .unwrap()
-                .into_iter()
-                .find_map(|t| match t.kind {
-                    Token::Str(s) => s.map,
-                    _ => None,
-                })
-                .expect("a braced literal carries a map");
-            (m.at(n).line, m.at(n).col)
+    fn a_literal_without_a_hole_is_plain() {
+        assert_eq!(str_lit("x = \"abc\"\n").plain(), Some("abc"));
+        assert_eq!(str_lit("x = \"\"\n").plain(), Some(""));
+        assert_eq!(str_lit("x = \"\"\"a\nb\"\"\"\n").plain(), Some("a\nb"));
+        // `{{`, `}}` and an all-digit hole (DEC-018) are text, merged with their neighbours.
+        assert_eq!(str_lit("x = \"a{{b}}c{4}d\"\n").plain(), Some("a{b}c{4}d"));
+        assert!(str_lit("x = \"a{b}\"\n").plain().is_none());
+        assert_eq!(str_lit("x = \"abc\"\n").len, 5);
+        assert_eq!(str_lit("x = \"\"\"a\\nb\"\"\"\n").len, 10);
+        assert_eq!(str_lit("x = \"a{'}}'}\"\n").len, 9);
+    }
+
+    /// A hole may nest another interpolated literal, to [`MAX_HOLE_NEST`] levels and no deeper.
+    #[test]
+    fn hole_nesting_is_capped() {
+        let nested = |levels: usize| {
+            let mut src = String::from("x");
+            for _ in 0..levels {
+                src = format!("\"{{{src}}}\"");
+            }
+            format!("s = {src}\n")
         };
-        // s = "héllo {nope}"   — `"`=5 `h`=6 `é`=7 `l`=8 `l`=9 `o`=10 ` `=11 `{`=12 `n`=13
-        assert_eq!(
-            cols("s = \"héllo {nope}\"\n", 7),
-            (1, 13),
-            "`é` costs one col"
+        assert!(
+            tokenize(&nested(MAX_HOLE_NEST)).is_ok(),
+            "{MAX_HOLE_NEST} levels"
         );
-        // s = "\u{1F600}{nope}" — `"`=5, the escape is cols 6-14, `{`=15, `n`=16
+        let e = tokenize(&nested(MAX_HOLE_NEST + 1)).unwrap_err();
+        assert_eq!(e.message, "too many nested interpolated strings");
+    }
+
+    /// The `:` that starts a format spec is the first one at hole depth; inside a bracket, a
+    /// nested literal or a nested field it is not, and `:=` at hole depth is spec `=`.
+    #[test]
+    fn a_spec_starts_at_the_first_colon_at_hole_depth() {
+        let spec_of = |src: &str| -> Option<Vec<SpecPart>> {
+            let lit = str_lit(src);
+            let [StrPart::Hole(h)] = &lit.parts[..] else {
+                panic!("one hole in {src:?}");
+            };
+            h.spec.clone()
+        };
+        assert_eq!(spec_of("s = \"{x}\"\n"), None);
+        assert_eq!(spec_of("s = \"{x[1:2]}\"\n"), None);
+        assert_eq!(spec_of("s = \"{m[':']}\"\n"), None);
         assert_eq!(
-            cols("s = \"\\u{1F600}{nope}\"\n", 2),
-            (1, 16),
-            "the escape costs its nine SOURCE chars"
+            spec_of("s = \"{x:>4}\"\n"),
+            Some(vec![SpecPart::Text(">4".into())])
         );
-        // …and a 😀 written literally costs exactly one column: `"`=5 `😀`=6 `{`=7 `n`=8
         assert_eq!(
-            cols("s = \"😀{nope}\"\n", 2),
-            (1, 8),
-            "a literal astral char costs one col"
+            spec_of("s = \"{x:=5}\"\n"),
+            Some(vec![SpecPart::Text("=5".into())]),
+            "`:=` at hole depth is a spec, not a walrus"
+        );
+        // Quotes and brackets in a spec are fill chars; an escape resolves once.
+        assert_eq!(
+            spec_of("s = \"{x:'>4}\"\n"),
+            Some(vec![SpecPart::Text("'>4".into())])
+        );
+        assert_eq!(
+            spec_of("s = \"{x:\\u{7B}>4}\"\n"),
+            Some(vec![SpecPart::Text("{>4".into())])
         );
     }
 
     // W7-49 — `Span::file` is a cross-half TABLE KEY component (`WitnessKey`/
     // `CarrierKey`), so what the stamp must guarantee is: `tokenize` (standalone/synthesized) is 0,
-    // the base-position form carries whatever the caller assigned, and a re-lexed interpolation
-    // fragment INHERITS its enclosing literal's file (a fragment belongs to its literal's module by
-    // definition — if it reset to 0 the fragment keys would alias across modules again).
+    // the base-position form carries whatever the caller assigned, and a hole's tokens carry the
+    // module's file too (a hole belongs to its literal's module by definition — if it reset to 0
+    // the fragment keys would alias across modules again).
     #[test]
-    fn span_file_is_stamped_by_the_base_position_lex_and_inherited_by_fragments() {
+    fn span_file_is_stamped_by_the_lex_and_carried_by_hole_tokens() {
         let src = "x := 1\nfn f() -> int:\n    return x\n";
 
         // plain `tokenize` — the standalone/synthesized sentinel, 0 everywhere.
@@ -3481,26 +3565,28 @@ mod tests {
             assert_eq!(t.span.file, 5, "tokenize_with_comments must stamp its file");
         }
 
-        // An interpolation fragment inherits the enclosing literal's file.
-        let lit_span = Span {
-            line: 4,
-            col: 11,
-            file: 9,
-        };
-        let chunks =
-            crate::interpolation::parse_interpolation(&StrLit::from("v={a + b}!"), lit_span)
-                .expect("fragment should parse");
-        let mut saw_expr = false;
-        for c in &chunks {
-            if let crate::ast::Chunk::Expr(e, _, _) = c {
-                saw_expr = true;
-                assert_eq!(
-                    e.span.file, 9,
-                    "fragment expr span must inherit the literal's file"
-                );
+        // A hole's tokens come from the same lexer, so they carry the module's file.
+        let (toks, _) = tokenize_with_comments("s = \"v={a + b}!\"\n", 9).unwrap();
+        let lit = toks
+            .into_iter()
+            .find_map(|t| match t.kind {
+                Token::Str(s) => Some(s),
+                _ => None,
+            })
+            .expect("one str token");
+        let mut saw_hole = false;
+        for part in &lit.parts {
+            if let StrPart::Hole(h) = part {
+                saw_hole = true;
+                for t in &h.tokens {
+                    assert_eq!(
+                        t.span.file, 9,
+                        "hole token {t:?} must carry the literal's file"
+                    );
+                }
             }
         }
-        assert!(saw_expr, "expected one Expr chunk");
+        assert!(saw_hole, "expected one hole");
     }
 
     /// A `LexError` points at the offending CHARACTER, on both axes (`docs/gaps.md` M24-7).
@@ -3690,25 +3776,16 @@ mod tests {
         assert_eq!((e.line, e.col), (1, 1));
     }
 
-    /// `tokenize_frag` re-lexes an in-memory interpolation fragment, not a file — a BOM there is
-    /// program text a user typed inside `{...}`, so it must stay a lex error even though the file
-    /// that contains it was stripped once at entry.
+    /// A hole is lexed in place, not as a file — a BOM there is program text a user typed inside
+    /// `{...}`, so it stays a lex error even though the file that contains it was stripped once at
+    /// entry.
     #[test]
-    fn an_interpolation_fragment_keeps_its_bom_error() {
-        let src = "s = \"{\u{feff}x}\"\n";
-        let lit = tokenize(src)
-            .unwrap()
-            .into_iter()
-            .find_map(|t| match t.kind {
-                Token::Str(s) => Some(s),
-                _ => None,
-            })
-            .expect("one str token");
-        let map = lit.map.clone().expect("a braced literal carries a map");
-        let frag = tokenize_frag("\u{feff}x", map, 1);
+    fn a_bom_inside_a_hole_is_still_a_lex_error() {
+        let e = tokenize("s = \"{\u{feff}x}\"\n").expect_err("a BOM in a hole must lex-error");
         assert!(
-            frag.is_err(),
-            "expected the fragment's own BOM to stay a lex error, got {frag:?}"
+            e.message.starts_with("unexpected character"),
+            "{}",
+            e.message
         );
     }
 

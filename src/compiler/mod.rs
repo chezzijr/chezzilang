@@ -12,12 +12,11 @@
 //!      forward references resolve) and one proto per `fn` / method / closure.
 
 use crate::ast::{
-    AssignOp, BinaryOp, Block, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl, Import,
-    LitPattern, MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type,
-    UnaryOp, WaitArm, WaitArmKind, WaitTarget,
+    AssignOp, BinaryOp, Block, Chunk, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
+    Import, LitPattern, MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind,
+    Type, UnaryOp, WaitArm, WaitArmKind, WaitTarget,
 };
 use crate::checker::Resolution;
-use crate::interpolation::{Chunk, parse_interpolation};
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ResolvedImport};
 use crate::vm::op::{
@@ -3604,11 +3603,12 @@ impl Compiler {
                     self.emit_new_enum(fc, &enum_key, &variant, 0, expr.span);
                 }
             }
-            ExprKind::Str(raw) => self.compile_str(fc, raw, expr.span)?,
-            // The desugared form: fragments are already-parsed, already-normalized children.
+            // Final text: the lexer resolved the escapes and folded `{{` / `}}`.
+            ExprKind::Str(s) => fc.emit(Op::ConstStr(s.clone()), expr.span),
+            // Fragments are parsed, already-normalized children.
             ExprKind::Interp(chunks) => self.compile_interp(fc, chunks, expr.span)?,
-            // Raw string: emit the literal directly — does NOT go through `compile_str` /
-            // `parse_interpolation`, so braces stay literal and backslashes are verbatim.
+            // Raw string: emit the literal directly, so braces stay literal and backslashes are
+            // verbatim.
             ExprKind::RawStr(s) => fc.emit(Op::ConstStr(s.clone()), expr.span),
             ExprKind::Bytes(b) => fc.emit(Op::ConstBytes(b.clone().into_boxed_slice()), expr.span),
             ExprKind::Ident(_) => self.compile_ident(fc, expr)?,
@@ -5938,24 +5938,8 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile a string literal, splitting `{expr}` interpolations (pre-parsed at compile time)
-    /// from literal text. `{{`/`}}` are literal braces. A literal-only string is a single
-    /// `ConstStr`; an interpolated one builds its chunks and concatenates with `BuildStr`.
-    fn compile_str(
-        &mut self,
-        fc: &mut FnComp,
-        raw: &crate::ast::StrLit,
-        span: Span,
-    ) -> Result<(), CompileError> {
-        let chunks = parse_interpolation(raw, span).map_err(|e| CompileError {
-            message: e.message,
-            span: e.span,
-        })?;
-        self.compile_interp(fc, &chunks, span)
-    }
-
-    /// Emit an already-parsed interpolation — the desugared [`ExprKind::Interp`] path, and the body
-    /// of [`Self::compile_str`]'s fallback for a literal `desugar` left un-parsed.
+    /// Emit an interpolated literal ([`ExprKind::Interp`]): literal text and `{expr}` fragments,
+    /// concatenated with `BuildStr`. A literal-only chunk list is a single `ConstStr`.
     fn compile_interp(
         &mut self,
         fc: &mut FnComp,
@@ -6463,9 +6447,7 @@ fn find_boundary_free_block(stmts: &[Stmt], out: &mut HashSet<String>) {
     }
 }
 
-/// The fragment expressions of an already-parsed interpolation (`ExprKind::Interp`) — the desugared
-/// counterpart of [`interp_exprs`], with no re-parse. This is the path a compiled program actually
-/// takes; `interp_exprs` below remains for a literal `desugar` left un-parsed.
+/// The fragment expressions of an interpolated literal (`ExprKind::Interp`).
 pub(crate) fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
     // The value, then the spec's nested width/precision fields — a name read ONLY inside a nested
     // field (`"{s:<{w}}"`) must still be seen as a free variable.
@@ -6473,24 +6455,6 @@ pub(crate) fn chunk_exprs(chunks: &[Chunk]) -> impl Iterator<Item = &Expr> {
         Chunk::Expr(e, _, fields) => Some(e).into_iter().chain(fields.iter()),
         Chunk::Lit(_) => None.into_iter().chain([].iter()),
     })
-}
-
-/// Best-effort: the interpolation sub-expressions of a string literal (`"a{x}b"` → the `x` expr).
-/// Used by the capture pre-pass so a name referenced ONLY inside a `{…}` interpolation is still seen
-/// as a free variable (and therefore boxed) — in an un-desugared `Str` the interpolation exprs are
-/// embedded in the raw text, so the AST walk would otherwise miss them. A malformed interpolation
-/// yields no exprs here; the real `compile_str` surfaces that error.
-pub(crate) fn interp_exprs(raw: &crate::ast::StrLit) -> Vec<Expr> {
-    match parse_interpolation(raw, Span::RUNTIME) {
-        Ok(chunks) => chunks
-            .into_iter()
-            .flat_map(|c| match c {
-                Chunk::Expr(e, _, fields) => std::iter::once(e).chain(fields).collect(),
-                Chunk::Lit(_) => Vec::new(),
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
 }
 
 /// Walk `e`, and at each closure boundary add its FREE names to `out` (stopping at the closure).
@@ -6501,12 +6465,7 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
             let bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
             out.extend(free_names_of_expr(body, &bound));
         }
-        // A string literal may carry `{…}` interpolation exprs (a closure could nest in one).
-        ExprKind::Str(raw) => {
-            for ie in interp_exprs(raw) {
-                find_boundary_free_expr(&ie, out);
-            }
-        }
+        // A `{…}` fragment is an ordinary child (a closure could nest in one).
         ExprKind::Interp(chunks) => {
             for ie in chunk_exprs(chunks) {
                 find_boundary_free_expr(ie, out);
@@ -6514,6 +6473,7 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
         }
         ExprKind::Int(_)
         | ExprKind::Float(_)
+        | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
@@ -7142,13 +7102,8 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
                 out.names.insert(n.clone());
             }
         }
-        // A string literal's `{…}` interpolation exprs reference names too (parsed at compile time,
-        // so absent from the AST) — collect their free names or a capture-via-interpolation is missed.
-        ExprKind::Str(raw) => {
-            for ie in interp_exprs(raw) {
-                free_names_expr(&ie, bound, out);
-            }
-        }
+        // A `{…}` fragment references names too — collect their free names or a
+        // capture-via-interpolation is missed.
         ExprKind::Interp(chunks) => {
             for ie in chunk_exprs(chunks) {
                 free_names_expr(ie, bound, out);
@@ -7156,6 +7111,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
         }
         ExprKind::Int(_)
         | ExprKind::Float(_)
+        | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
@@ -7306,11 +7262,6 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) {
         ExprKind::Closure { .. } => {}
         // A `{…}` interpolation expr may itself bind (a `match`/comprehension expression); its binds
         // land in this frame (the interpolation is compiled inline).
-        ExprKind::Str(raw) => {
-            for ie in interp_exprs(raw) {
-                collect_frame_binds_expr(&ie, out);
-            }
-        }
         ExprKind::Interp(chunks) => {
             for ie in chunk_exprs(chunks) {
                 collect_frame_binds_expr(ie, out);
@@ -7318,6 +7269,7 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) {
         }
         ExprKind::Int(_)
         | ExprKind::Float(_)
+        | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
@@ -8351,124 +8303,6 @@ impl FnComp {
             }
         }
         entries
-    }
-}
-
-#[cfg(test)]
-mod interp_tests {
-    use super::*;
-    use crate::ast::StrLit;
-
-    fn sp() -> Span {
-        Span::RUNTIME
-    }
-
-    // The compiler's standalone-path `ctype_of`/`ctype_of_visiting` second resolver was DELETED in
-    // fix5 (the single-resolver redesign); extern C types now come VERBATIM from the checker's
-    // `resolve_extern_signatures{,_standalone}`. Its behavioral coverage (widths, owned/nullable str,
-    // flat struct, cyclic-alias-no-overflow) lives in `checker::tests::resolve_extern_ctype`.
-
-    #[test]
-    fn parse_interpolation_attaches_spec() {
-        let chunks = parse_interpolation(&StrLit::from("{x:>5}"), sp()).unwrap();
-        match &chunks[..] {
-            [Chunk::Expr(_, Some(spec), _)] => {
-                assert_eq!(spec.width, 5);
-                assert_eq!(spec.align, Some(crate::fmtspec::Align::Right));
-            }
-            _ => panic!("expected one spec'd expr chunk"),
-        }
-    }
-
-    #[test]
-    fn parse_interpolation_nested_fields_are_exprs() {
-        let lit_span = Span {
-            line: 4,
-            col: 11,
-            file: 9,
-        };
-        let chunks =
-            parse_interpolation(&StrLit::from("{x:{w}.{p}f}"), lit_span).expect("should parse");
-        let [Chunk::Expr(value, Some(spec), fields)] = &chunks[..] else {
-            panic!("expected one spec'd expr chunk, got {chunks:?}");
-        };
-        assert!(spec.dyn_width && spec.dyn_precision);
-        assert_eq!(spec.ty, Some('f'));
-        assert_eq!(fields.len(), 2, "width then precision");
-        assert!(matches!(&fields[0].kind, ExprKind::Ident(n) if n == "w"));
-        assert!(matches!(&fields[1].kind, ExprKind::Ident(n) if n == "p"));
-        // `{x:{w}.{p}f}`: `w` sits 3 chars after `x`, `p` 7 (a real source column, like any fragment).
-        assert_eq!(fields[0].span.col, value.span.col + 3);
-        assert_eq!(fields[1].span.col, value.span.col + 7);
-        assert_eq!(fields[0].span.line, value.span.line);
-        assert_eq!(fields[0].span.file, 9);
-        // Padding inside the nested braces is insignificant, as around the value.
-        let chunks = parse_interpolation(&StrLit::from("{x:<{ w }}"), lit_span).unwrap();
-        let [Chunk::Expr(value, Some(_), fields)] = &chunks[..] else {
-            panic!("expected one spec'd expr chunk");
-        };
-        assert_eq!(fields[0].span.col, value.span.col + 5);
-        // A literal spec carries no nested field.
-        let chunks = parse_interpolation(&StrLit::from("{x:>5}"), lit_span).unwrap();
-        assert!(matches!(&chunks[..], [Chunk::Expr(_, Some(_), f)] if f.is_empty()));
-    }
-
-    #[test]
-    fn parse_interpolation_bare_expr_has_no_spec() {
-        let chunks = parse_interpolation(&StrLit::from("{x}"), sp()).unwrap();
-        assert!(matches!(&chunks[..], [Chunk::Expr(_, None, _)]));
-    }
-
-    #[test]
-    fn parse_interpolation_width_cap_is_compile_error() {
-        let err = parse_interpolation(&StrLit::from("{x:>99999999}"), sp()).unwrap_err();
-        assert!(
-            err.message.contains("exceeds maximum 4096"),
-            "got: {}",
-            err.message
-        );
-    }
-
-    #[test]
-    fn parse_interpolation_colon_inside_index_not_a_separator() {
-        // The `:` inside the string-key index is NOT the spec separator; only the trailing one is.
-        let chunks = parse_interpolation(&StrLit::from("{m[\"a:b\"]:>3}"), sp()).unwrap();
-        match &chunks[..] {
-            [Chunk::Expr(_, Some(spec), _)] => assert_eq!(spec.width, 3),
-            _ => panic!("expected spec'd expr"),
-        }
-        // And with no trailing spec, the inner `:` stays part of the expression.
-        let chunks = parse_interpolation(&StrLit::from("{m[\"a:b\"]}"), sp()).unwrap();
-        assert!(matches!(&chunks[..], [Chunk::Expr(_, None, _)]));
-    }
-
-    #[test]
-    fn parse_interpolation_scanner_is_quote_and_depth_aware() {
-        // A `}` inside a nested string literal does NOT close the fragment.
-        let chunks = parse_interpolation(&StrLit::from("v={d['a}}b']}"), sp()).unwrap();
-        assert!(matches!(
-            &chunks[..],
-            [Chunk::Lit(l), Chunk::Expr(_, None, _)] if l == "v="
-        ));
-        // Nor does one nested inside `{`/`[`/`(` — the set literal's brace is at depth 1.
-        let chunks = parse_interpolation(&StrLit::from("{ {1, 2}.len() }"), sp()).unwrap();
-        assert!(matches!(&chunks[..], [Chunk::Expr(_, None, _)]));
-        // Padding around a fragment is insignificant (CPython allows `f"{ x }"`).
-        let chunks = parse_interpolation(&StrLit::from("{ x }"), sp()).unwrap();
-        assert!(matches!(&chunks[..], [Chunk::Expr(_, None, _)]));
-        // A depth-0 `}` still terminates, and an unclosed fragment is still an error.
-        assert!(
-            parse_interpolation(&StrLit::from("{x"), sp())
-                .unwrap_err()
-                .message
-                .contains("unterminated '{'")
-        );
-        assert!(
-            parse_interpolation(&StrLit::from("a}b"), sp())
-                .unwrap_err()
-                .message
-                .contains("unmatched '}'")
-        );
     }
 }
 

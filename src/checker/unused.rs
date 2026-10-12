@@ -15,7 +15,7 @@ use crate::ast::{
     Block, DeferTarget, Expr, ExprKind, FnDecl, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind,
     WaitArmKind, WaitTarget,
 };
-use crate::compiler::{chunk_exprs, interp_exprs, pattern_binds};
+use crate::compiler::{chunk_exprs, pattern_binds};
 use std::collections::HashSet;
 
 struct Binding {
@@ -279,12 +279,6 @@ impl Scan {
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
             ExprKind::Ident(n) => self.read(n),
-            // A test source is not desugared, so its `{x}` fragments are still raw text.
-            ExprKind::Str(raw) => {
-                for ie in interp_exprs(raw) {
-                    self.expr(&ie);
-                }
-            }
             ExprKind::Interp(chunks) => {
                 for ie in chunk_exprs(chunks) {
                     self.expr(ie);
@@ -292,6 +286,7 @@ impl Scan {
             }
             ExprKind::Int(_)
             | ExprKind::Float(_)
+            | ExprKind::Str(_)
             | ExprKind::Bytes(_)
             | ExprKind::RawStr(_)
             | ExprKind::Bool(_)

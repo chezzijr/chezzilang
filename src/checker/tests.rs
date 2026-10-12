@@ -58,6 +58,27 @@ fn rejects(src: &str, needle: &str) {
     );
 }
 
+/// The first error the lexer or the parser reports for `src`, as `(line, col, message)`. A hole is
+/// lexed and parsed with its literal, so a malformed hole fails here, before the checker runs.
+fn front_err(src: &str) -> (usize, usize, String) {
+    match lexer::tokenize(src) {
+        Err(e) => (e.line, e.col, e.message),
+        Ok(tokens) => match parser::parse(tokens) {
+            Err(e) => (e.span.line as usize, e.span.col as usize, e.message),
+            Ok(_) => panic!("expected a lex or parse error, got none for {src:?}"),
+        },
+    }
+}
+
+/// Assert the lexer or the parser rejects `src` with a message containing `needle`.
+fn front_rejects(src: &str, needle: &str) {
+    let (_, _, message) = front_err(src);
+    assert!(
+        message.contains(needle),
+        "expected an error containing {needle:?}, got: {message:?}"
+    );
+}
+
 /// Assert the source fails to PARSE with a message containing `needle`.
 fn parse_rejects(src: &str, needle: &str) {
     let tokens = lexer::tokenize(src).expect("lex should succeed");
@@ -2111,21 +2132,22 @@ print("{s:<{nope}}")
 fn interpolation_spec_nested_field_positions() {
     // A nested field is legal ONLY as the width or the precision.
     let slots = "allowed only as the width or the precision";
-    rejects(
+    // The spec's shape is the parser's to check now: the lexer found the fields, `fmtspec` places them.
+    front_rejects(
         r#"w := 3
 s := "ab"
 print("{s:{w}<3}")
 "#,
         slots,
     );
-    rejects(
+    front_rejects(
         r#"w := 3
 n := 7
 print("{n:>5{w}}")
 "#,
         slots,
     );
-    rejects(
+    front_rejects(
         r#"s := "ab"
 print("{s:<{}}")
 "#,
@@ -29078,12 +29100,12 @@ fn interpolation_fragment_respects_local_shadowing() {
     );
 }
 
-/// The un-desugared `Str` fallback still type-checks its fragments (this is the path a caller that
-/// skips `desugar::run` takes, and the one a malformed interpolation stays on).
+/// The parser builds `ExprKind::Interp` itself, so a caller that skips `desugar::run` still
+/// type-checks its fragments; a malformed interpolation fails in the lexer, before the checker.
 #[test]
 fn interpolation_fragment_checked_without_desugar() {
     rejects("print(\"{nope}\")\n", "unknown name 'nope'");
-    rejects("print(\"a}b\")\n", "unmatched '}'");
+    front_rejects("print(\"a}b\")\n", "unmatched '}'");
 }
 
 // ===== M24 slice A — static-witness passing: a protocol's STATIC (no-`self`) requirement is
@@ -30296,83 +30318,59 @@ fn padded_fragment_column_points_past_the_padding() {
     assert_eq!((e.span.line, e.span.col), (1, 12));
 }
 
-/// A LEX error inside a fragment reports the fragment's REAL line AND column. The fragment lexer's
-/// own `self.line` is 1 — it is lexing a substring — so `LexError` built from it said `line 1` no
-/// matter where in the file the literal sat. It asks `span_at` now, which routes through the
-/// literal's `PosMap`; both axes compose through it (`docs/gaps.md` M24-6 + M24-7).
+/// A LEX error inside a hole reports its REAL line AND column (`docs/gaps.md` M24-6 + M24-7). The
+/// lexer lexes the hole in place, so the position is the lexer's own; there is no second lexer
+/// whose cursor says line 1.
 #[test]
 fn a_lex_error_inside_a_fragment_reports_its_real_line() {
-    // The `\u{ZZ}` is not a valid escape, and it is inside a NESTED literal so the interpolation
-    // scanner hands the whole thing to the fragment lexer rather than tripping on the braces.
-    // Source line 3 is:  s := "ab {'\\u{ZZ}'}"   — the doubled backslash keeps the OUTER lexer out
-    // of it, so `\u{ZZ}` reaches the fragment lexer intact.
-    let errs = check_src("print(1)\nprint(2)\ns := \"ab {'\\\\u{ZZ}'}\"\n");
-    let e = errs
-        .iter()
-        .find(|e| e.message.contains("lex error"))
-        .unwrap_or_else(|| panic!("expected a lex error, got: {errs:?}"));
-    // Column 16 is hand-counted off source line 3 — `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `b`8 ` `9
-    // `{`10 `'`11 `\`12 `\`13 `u`14 `{`15 `Z`←16 — i.e. the physical position of the first `Z`,
-    // which only the literal's `PosMap` knows (the fragment's own cursor says col 5).
-    //
-    // The assertion that matters is on `e.span`: that is the OUTER position — what the LSP
-    // squiggles and what `--errors=json` emits. It used to be the string literal's own span
-    // (col 6, the opening quote), which threw away the column the lexer had just worked out.
+    // The `\u{ZZ}` is not a valid escape, and it is inside a NESTED literal. One backslash: the
+    // nested literal's text is read once, so `\u{ZZ}` reaches the escape reader as written.
+    // Source line 3 is:  s := "ab {'\u{ZZ}'}"
+    let (line, col, message) = front_err("print(1)\nprint(2)\ns := \"ab {'\\u{ZZ}'}\"\n");
+    // Column 15 is hand-counted off source line 3 — `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `b`8 ` `9
+    // `{`10 `'`11 `\`12 `u`13 `{`14 `Z`←15 — the physical position of the first `Z`. That is what
+    // the LSP squiggles and what `--errors=json` emits.
     assert_eq!(
-        (e.span.line, e.span.col),
-        (3, 16),
-        "the squiggled position must be the offending char, got: {}",
-        e.message
+        (line, col),
+        (3, 15),
+        "the squiggled position must be the offending char, got: {message}"
     );
-    // …and the message names the phase without re-printing the position the caller just rendered.
-    assert_eq!(
-        e.message, "lex error: invalid hex digit in unicode escape",
-        "the message must not stutter the position"
-    );
+    assert_eq!(message, "invalid hex digit in unicode escape");
 }
 
-/// The PARSE half of the same seam. `tokenize_frag` already gives every fragment token — EOF
-/// included — its real physical span, so `ParseError.span` was correct all along and only
-/// `parse_expr_str` threw it away for the string literal's own span. CPython 3.14 puts the caret
-/// inside the fragment too (`compile('y = f"a\tb{1 + }c"', …)` → `offset=14`, the `+`).
+/// The PARSE half of the same seam. A hole's tokens carry their real physical spans — the code's
+/// end-of-input token sits on the `}` — so `ParseError.span` points inside the hole. CPython 3.14
+/// puts the caret inside the fragment too (`compile('y = f"a\tb{1 + }c"', …)` → `offset=14`, `+`).
 #[test]
 fn a_parse_error_inside_a_fragment_reports_the_fragments_own_position() {
     // Source line 3 is:  s := "a\tb{1 + }c"   — a REAL `\t` escape (two source columns, one content
-    // char) sits before the fragment, so a column counted off the post-escape content instead of
-    // composed through the literal's `PosMap` lands one to the left and this test fails.
-    // `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `\`8 `t`9 `b`10 `{`11 `1`12 ` `13 `+`14 ` `←15 `}`16
-    // — col 15 is one past the last token the fragment parser consumed, which is exactly where the
-    // TOP-LEVEL parser points for the same message (`y := 1 + ` → col 10). One rule, two contexts.
-    let errs = check_src("print(1)\nprint(2)\ns := \"a\\tb{1 + }c\"\n");
-    let e = errs
-        .iter()
-        .find(|e| e.message.contains("unexpected end of line"))
-        .unwrap_or_else(|| panic!("expected a parse error, got: {errs:?}"));
+    // char) sits before the hole, so a column counted off the post-escape content lands one to the
+    // left and this test fails.
+    // `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `\`8 `t`9 `b`10 `{`11 `1`12 ` `13 `+`14 ` `15 `}`←16
+    // — the end of the code is the closing `}`.
+    let (line, col, message) = front_err("print(1)\nprint(2)\ns := \"a\\tb{1 + }c\"\n");
     assert_eq!(
-        (e.span.line, e.span.col),
-        (3, 15),
-        "the squiggled position must be inside the fragment, got: {}",
-        e.message
+        (line, col),
+        (3, 16),
+        "the squiggled position must be inside the hole, got: {message}"
     );
-    // The literal's own span is col 6 (the opening quote) — the position this used to report, and
-    // the one that is useless the moment a literal holds two fragments.
-    assert_ne!(e.span.col, 6, "must not fall back to the opening quote");
-    // Nothing prefixes the position the caller is about to render.
-    assert_eq!(e.message, "unexpected end of line in expression");
+    // The literal's own span is col 6 (the opening quote) — useless the moment a literal holds two
+    // holes.
+    assert_ne!(col, 6, "must not fall back to the opening quote");
+    assert_eq!(message, "unexpected end of input in expression");
 }
 
-/// The three remaining interpolation errors that are ABOUT the literal's shape rather than about a
-/// fragment expression. Each has a char it can name, so each names it — and each is measured against
-/// CPython 3.14, which points at the same char (the third has no CPython analogue: a format spec is
-/// a runtime concern there, so the rule is simply "the spec's first char").
+/// The interpolation errors that are ABOUT the literal's shape rather than about a hole's
+/// expression. Each has a char it can name, so each names it (the third has no CPython analogue: a
+/// format spec is a runtime concern there, so the rule is simply "the spec's first char").
 #[test]
 fn literal_shape_errors_point_at_their_own_char() {
     // Every case carries a `\t` before the offending char, so a raw-content count is off by one.
     // `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `\`8 `t`9 `b`10 …
     for (src, want_col, needle) in [
-        // `s := "a\tb{1 + c"` — `{`11 `1`12 ` `13 `+`14 ` `15 `c`16 `"`←17.
-        // CPython: `f"a\tb{1 + c"` → offset 17, the closing quote.
-        ("s := \"a\\tb{1 + c\"\n", 17, "unterminated '{'"),
+        // `s := "a\tb{1 + c"` — `{`←11. CPython points at the closing quote (offset 17); the
+        // lexer reads on past it as code, so an unclosed hole names its own `{`.
+        ("s := \"a\\tb{1 + c\"\n", 11, "unterminated '{'"),
         // `s := "a\tb}c"` — `}`←11. CPython: offset 11, the `}` itself.
         ("s := \"a\\tb}c\"\n", 11, "unmatched '}'"),
         // `s := "a\tb{x:>99999999}c"` — `{`11 `x`12 `:`13 `>`←14, the spec's first char.
@@ -30380,16 +30378,12 @@ fn literal_shape_errors_point_at_their_own_char() {
         // `s := "a\tb{x # c}"` — `{`11 `x`12 ` `13 `#`←14, the comment that swallowed the `}`
         ("s := \"a\\tb{x # c}\"\n", 14, "'#'"),
     ] {
-        let errs = check_src(src);
-        let e = errs
-            .iter()
-            .find(|e| e.message.contains(needle))
-            .unwrap_or_else(|| panic!("expected {needle:?}, got: {errs:?}"));
+        let (line, col, message) = front_err(src);
+        assert!(message.contains(needle), "{needle:?}: got {message:?}");
         assert_eq!(
-            (e.span.line, e.span.col),
+            (line, col),
             (1, want_col),
-            "{needle}: wrong position ({})",
-            e.message
+            "{needle}: wrong position ({message})"
         );
     }
 }
@@ -30399,53 +30393,40 @@ fn literal_shape_errors_point_at_their_own_char() {
 /// hole's comment ends at the real line break. W12-19.
 #[test]
 fn hash_comment_in_a_hole_runs_to_the_real_end_of_line() {
-    rejects("x := 1\ny := \"{x # c}\"\n", "'#'");
-    rejects("x := 1\ny := \"{x # c\\n}\"\n", "'#'"); // an escaped newline does not end the comment
+    front_rejects("x := 1\ny := \"{x # c}\"\n", "'#'");
+    front_rejects("x := 1\ny := \"{x # c\\n}\"\n", "'#'"); // an escaped newline does not end the comment
     ok("x := 1\ny := \"\"\"{x # note: y\n}\"\"\"\n");
     ok("d := {\"#\": 1}\ny := \"{d['#']}{'#'}\"\n");
     ok("n := 255\ny := \"{n:#x}\"\n");
 }
 
-/// …and the position it names must EXIST IN THE FILE. "Unterminated `{`" points at the literal's
-/// closing delimiter, which the lexer checkpoints; extrapolating it from the last content char
-/// instead ran off the end of THAT char's line whenever the literal ended in a real newline, so a
-/// two-character line was reported at col 4 and a run of blank lines drifted the caret onto one of
-/// them. A confidently wrong column is worse than a coarse one.
+/// …and the position it names must EXIST IN THE FILE. An unclosed hole points at its own `{`: the
+/// lexer reads the hole as code, so it runs on past the literal's closing quote, and the `{` is the
+/// one position that names the hole. (CPython points at the closing quote.)
 #[test]
-fn unterminated_fragment_points_at_the_real_closing_delimiter() {
-    // `x`1 ` `2 `:`3 `=`4 ` `5 `"`6 `"`7 `"`8 `a`9 / line 2 `{b` / line 3 `"""` ← the delimiter.
+fn unterminated_hole_points_at_its_opening_brace() {
+    // `x`1 ` `2 `:`3 `=`4 ` `5 `"`6 `"`7 `"`8 `a`9 / line 2 `{b` ← the `{` is col 1.
     for (src, want) in [
-        ("x := \"\"\"a\n{b\n\"\"\"\n", (3, 1)),
-        // …with blank lines before the terminator, which is where the drift was visible
-        ("x := \"\"\"a\n{b\n\n\n\n\"\"\"\n", (6, 1)),
-        // …a single-line literal is unchanged: the delimiter is one past the last content char
-        // (`s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `{`8 `b`9 `"`←10)
-        ("s := \"a{b\"\n", (1, 10)),
-        // …and a `\n` ESCAPE is one content char on one line, so the delimiter is still to its right
-        // (`s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `{`7 `a`8 `\`9 `n`10 `"`←11)
-        ("s := \"{a\\nb\"\n", (1, 12)),
+        ("x := \"\"\"a\n{b\n\"\"\"\n", (2, 1)),
+        // …with blank lines before the terminator
+        ("x := \"\"\"a\n{b\n\n\n\n\"\"\"\n", (2, 1)),
+        // `s`1 ` `2 `:`3 `=`4 ` `5 `"`6 `a`7 `{`←8
+        ("s := \"a{b\"\n", (1, 8)),
+        // …a `\n` ESCAPE before the brace costs two columns: `"`6 `a`7 `\`8 `n`9 `b`10 `{`←11
+        ("s := \"a\\nb{c\"\n", (1, 11)),
     ] {
-        let errs = check_src(src);
-        let e = errs
-            .iter()
-            .find(|e| e.message.contains("unterminated '{'"))
-            .unwrap_or_else(|| panic!("expected an unterminated-brace error, got: {errs:?}"));
-        assert_eq!(
-            (e.span.line, e.span.col),
-            want,
-            "must point at the literal's closing delimiter"
-        );
+        let (line, col, message) = front_err(src);
+        assert!(message.contains("unterminated '{'"), "got: {message}");
+        assert_eq!((line, col), want, "must point at the hole's `{{`");
         // …and, independently of the expected value: the position must be a real one — a column no
         // further than one past the end of a line the file actually has.
-        let line = src
+        let text = src
             .lines()
-            .nth(e.span.line as usize - 1)
-            .unwrap_or_else(|| panic!("line {} is past the end of the file", e.span.line));
+            .nth(line - 1)
+            .unwrap_or_else(|| panic!("line {line} is past the end of the file"));
         assert!(
-            (e.span.col as usize) <= line.chars().count() + 1,
-            "col {} does not exist on line {} ({line:?})",
-            e.span.col,
-            e.span.line
+            col <= text.chars().count() + 1,
+            "col {col} does not exist on line {line} ({text:?})"
         );
     }
 }
@@ -30456,7 +30437,7 @@ fn unterminated_fragment_points_at_the_real_closing_delimiter() {
 #[test]
 fn two_witness_calls_in_one_fragment_keep_their_own_witness_ok() {
     entry_ok(&format!(
-        "{FWD_HEAD}fn main():\n    print(\"{{reset(reset(Counter(1))).n}} {{reset(Tag(\\\"x\\\")).s}}\")\nmain()\n"
+        "{FWD_HEAD}fn main():\n    print(\"{{reset(reset(Counter(1))).n}} {{reset(Tag(\"x\")).s}}\")\nmain()\n"
     ));
 }
 
@@ -33144,8 +33125,14 @@ fn int_never_widens_dot_zero_spellings_check() {
 fn holed_string_pattern_is_a_compile_error() {
     // W14-22: `"{x}"` in pattern position was accepted and silently never matched. The check is
     // in the PARSER now (a pattern is decoded like the same literal), so parse the source directly.
-    fn parse_src(src: &str) -> Result<crate::ast::Module, crate::parser::ParseError> {
-        parser::parse(lexer::tokenize(src).expect("lex should succeed"))
+    // The malformed `{` fails in the lexer now, so both phases report as one message.
+    #[derive(Debug)]
+    struct Rejected {
+        message: String,
+    }
+    fn parse_src(src: &str) -> Result<crate::ast::Module, Rejected> {
+        let tokens = lexer::tokenize(src).map_err(|e| Rejected { message: e.message })?;
+        parser::parse(tokens).map_err(|e| Rejected { message: e.message })
     }
     fn prog(pat: &str) -> String {
         format!(

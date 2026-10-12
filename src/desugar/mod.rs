@@ -145,8 +145,8 @@ pub(crate) enum Dflt {
 ///
 /// Deliberately an allow-list and deliberately narrower than "resolves to the same value": when in
 /// doubt the default becomes a provider, which is always correct and one call slower. In particular
-/// a `Str` carrying `{`/`}` is NOT inline — this same pass turns it into an `Interp` holding
-/// arbitrary sub-expressions. Excluding every `Call`/`Field`/`Ident` is also what keeps W7-49's
+/// a literal with a hole is NOT inline: it is an `Interp` holding arbitrary sub-expressions, and a
+/// `Str` is final text with no hole in it. Excluding every `Call`/`Field`/`Ident` is also what keeps W7-49's
 /// span-keyed side tables injective: an inline default records no keyword/carrier/witness entry, so
 /// two clones of it cannot resolve two ways under one key.
 fn is_inline_default(e: &Expr) -> bool {
@@ -160,7 +160,7 @@ fn is_inline_default(e: &Expr) -> bool {
         // move it to a provider: a callee-filled `b: T? = None` then breaks every call that fills
         // a later parameter.
         ExprKind::NoneLit => true,
-        ExprKind::Str(s) => !s.contains('{') && !s.contains('}'),
+        ExprKind::Str(_) => true,
         ExprKind::Unary { expr, .. } => is_inline_default(expr),
         ExprKind::Binary { lhs, rhs, .. } => is_inline_default(lhs) && is_inline_default(rhs),
         ExprKind::Range { start, end } => is_inline_default(start) && is_inline_default(end),
@@ -781,30 +781,15 @@ pub(crate) fn check_provider_cycles_in(
 fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut(&Type)) {
     match &e.kind {
         ExprKind::Ident(n) => f(n),
-        // A STILL-RAW interpolated literal. `dflt_for` runs BEFORE the `Str -> Interp` rewrite, so
-        // the only way to see the references a fragment makes is to parse it here. A parse failure
-        // is ignored: the real parse reports it.
-        ExprKind::Str(raw) => {
-            if raw.contains('{')
-                && let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span)
-            {
-                for c in &chunks {
-                    if let Chunk::Expr(inner, _, fields) = c {
-                        walk_idents_and_types(inner, f, tf);
-                        fields.iter().for_each(|x| walk_idents_and_types(x, f, tf));
-                    }
-                }
-            }
-        }
         ExprKind::Int(_)
         | ExprKind::Float(_)
+        | ExprKind::Str(_)
         | ExprKind::Bytes(_)
         | ExprKind::RawStr(_)
         | ExprKind::Bool(_)
         | ExprKind::NoneLit
         | ExprKind::Pass => {}
-        // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend. Reached once
-        // `desugar` has rewritten the literal; before that the raw-`Str` arm above parses it.
+        // A fragment identifier IS a reference (`"{a}"` reads `a`), so descend.
         ExprKind::Interp(chunks) => chunks.iter().for_each(|c| {
             if let Chunk::Expr(e, _, fields) = c {
                 walk_idents_and_types(e, f, tf);
@@ -1310,55 +1295,17 @@ impl Walker<'_> {
         Ok(())
     }
 
-    /// **THE GLOBAL AST-DEPTH BOUND** (W7-50). [`crate::parser::MAX_AST_DEPTH`] is enforced by the
-    /// `Parser` that builds a tree, and an interpolated `{…}` fragment is built by a *different*
-    /// `Parser` — `interpolation::parse_expr_str` re-lexes the fragment text and calls
-    /// [`crate::parser::parse_expr`], whose `depth`/`fold_depth` start at zero. So before this guard
-    /// the budgets **composed**: each nesting level of `"{ <15 985 deep> }".len()` bought a fresh
-    /// 16 000, and three levels type-checked clean at ~46 000 AST nodes — past the measured ~33 100
-    /// node cliff of the binding walker, i.e. an uncatchable SIGABRT on a well-typed program
-    /// (`chezzi run`, debug, on the 384 MiB [`crate::vm::VM_STACK_BYTES`] worker).
+    /// **THE GLOBAL AST-DEPTH BOUND** (W7-50). [`crate::parser::MAX_AST_DEPTH`] bounds the tree
+    /// the recursive front-end walkers descend. A `{…}` hole is parsed by the SAME `Parser` as the
+    /// code around it (`Parser::parse_hole`), so its `depth` and `fold_depth` carry on and the
+    /// budgets cannot compose: `"{ <15 985 deep> }".len()` nested three times is refused at the
+    /// parser, as one expression is. (Until TICKET-252 a hole was re-lexed and re-parsed by a
+    /// second `Parser` that started at zero, and each level bought a fresh 16 000.) This counter
+    /// stays as the backstop on the tree the checker and compiler descend: every front-end path
+    /// routes through here, because `resolver::build_graph` ends in [`run`].
     ///
-    /// [`Self::walk_expr_inner`] is the seam where that composition physically happens: its
-    /// `ExprKind::Str` arm calls `parse_interpolation` and then **re-enters this walk on the
-    /// fragment's subtree**, so one `Walker` descends the whole composed tree. Measured on the
-    /// three-level fixture, pre-guard: peak `walk_expr` depth 15 000 / 30 000 / 45 000 for one, two
-    /// and three levels — exactly the sum. That makes this counter the depth of the tree the checker
-    /// and the compiler descend afterwards, not a per-parse estimate of it, which is why the bound
-    /// lives here rather than as a remaining-budget parameter threaded through the re-parse: there is
-    /// one number, and no caller can forget to pass it. Measured after: total accepted depth is
-    /// ~16 000 at one, two, three and four nesting levels alike, where it used to be L × 16 000.
-    ///
-    /// **Every front-end path routes through here.** `resolver::build_graph` ends in
-    /// [`run`], and `chezzi check` / `run` / `test` and the LSP all go through `build_graph` — for
-    /// `chezzi run` on the VM thread too, *before* the compile walk. (`chezzi ast` and the LSP's
-    /// `semantic_overlay` parse without the resolver, but both treat `ExprKind::Str` as a LEAF, so
-    /// they never descend a fragment at all.) The three other `parse_interpolation` callers —
-    /// `checker::check_interpolation`, `checker::scan_expr_for_pin`, `compiler::compile_str` /
-    /// `interp_exprs` — fire only on an `ExprKind::Str` this walk did not convert.
-    ///
-    /// **The W7-50 residual is CLOSED by W7-51 — measured, not argued.** Until then there was one
-    /// way an *un-converted but well-formed* `Str` could survive to those callers: a default
-    /// argument spliced in on the driver's **second pass**, after this walk had gone past it, with
-    /// no third pass to catch it. There is now no such splice. A non-literal default is never
-    /// cloned at all (the call site gets a call to its provider, whose body is walked as an
-    /// ordinary top-level `fn`), and the literal class that IS cloned excludes any `Str` carrying
-    /// `{`/`}` *and* is filled from the declaration node anyway.
-    ///
-    /// Measured on the same fixture the residual was recorded with —
-    /// `fn g(a: int = "{ 1+1×15990 }".len())` / `fn h(b: int = g())` / `x := h()+1×15990` — with a
-    /// temporary probe on `checker::check_interpolation`'s success arm (which fires exactly when a
-    /// well-formed `Str` reached the checker un-converted): **`925dd0f7`: 1 hit**, peak walk depth
-    /// 15 995, i.e. the ~31 986-node composed tree. **Here: 0 hits**, peak walk depth 15 994, and
-    /// `chezzi run` prints `15995`. The counter is therefore now an upper bound on the tree the
-    /// checker and compiler descend, which is what the bound was for.
-    ///
-    /// **Non-interpolated programs are unaffected**, bisected before and after: double fold *k* = 16,
-    /// flat fold 15 997, postfix 15 996, composed `f(g(…)+1×99)` 127, parens 254 — all identical. An
-    /// interpolated literal is now charged for the nodes it hangs beneath (`.len()`, the `Interp`
-    /// itself), so a fragment within ~4 nodes of the ceiling is refused where the parser alone
-    /// accepted it; that is the bound doing its job, not slack. Statement nesting cannot compose (a
-    /// `{…}` fragment holds an expression, never a block) and is bounded by `parser::MAX_DEPTH`.
+    /// Statement nesting cannot compose (a `{…}` hole holds an expression, never a block) and is
+    /// bounded by `parser::MAX_DEPTH`.
     fn walk_expr(&mut self, expr: &mut Expr) -> Result<(), ResolveError> {
         if self.depth >= crate::parser::MAX_AST_DEPTH {
             return Err(err(
@@ -1523,26 +1470,10 @@ impl Walker<'_> {
                 }
             }
             ExprKind::Ident(_) => {}
-            // A string literal carrying `{…}` is PARSED HERE, once, into `ExprKind::Interp` — before
-            // the normalization below runs. That is the whole point: a fragment call gets named
-            // args / defaults / variadic sweeping exactly like any other call, in THIS scope (so a
-            // local shadowing a fn name still wins), instead of being re-parsed after the pass by
-            // each consumer. A malformed interpolation stays an `ExprKind::Str`, so the checker and
-            // compiler still report it with their existing message and span.
-            ExprKind::Str(raw) if raw.contains('{') || raw.contains('}') => {
-                if let Ok(chunks) = crate::interpolation::parse_interpolation(raw, expr.span) {
-                    expr.kind = ExprKind::Interp(chunks);
-                    // `walk_expr_inner`, NOT `walk_expr`: this is a re-entry on the SAME node, which
-                    // occupies one AST level, not two. Going back through the depth guard charged an
-                    // extra level per interpolation and measurably over-rejected — a lone
-                    // `x := "{ 1+1×15997 }".len()` at the parser's own flat ceiling stopped building.
-                    return self.walk_expr_inner(expr);
-                }
-            }
             ExprKind::Interp(chunks) => {
-                // No re-anchoring to the string literal: a fragment is re-lexed against the
-                // literal's `PosMap`, so its own span is the real physical source position (and the
-                // one the checker and compiler report too). See `interpolation::parse_interpolation`.
+                // A fragment is an ordinary child: the lexer gave its tokens their real source
+                // positions, so its own span is the one the checker and compiler report too. The
+                // parser built the chunks, so calls in a fragment are normalized like any other.
                 for c in chunks.iter_mut() {
                     if let crate::ast::Chunk::Expr(e, _, fields) = c {
                         self.walk_expr(e)?;

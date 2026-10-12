@@ -47,7 +47,6 @@ pub mod checker;
 pub mod compiler;
 pub mod desugar;
 pub mod fmtspec;
-pub mod interpolation;
 pub mod json_decode;
 pub mod lexer;
 pub mod manifest;
@@ -103,17 +102,13 @@ mod conformance;
 /// writeups put the old ceiling at 7 500 and at 15 000 and called the change a no-regression; both
 /// undercounted, having measured shapes that spend only one fold loop per level.)
 ///
-/// **Both numbers hold across the interpolation re-parse only because a SECOND enforcement point
-/// exists.** A `Parser` bounds the tree *it* builds, and an interpolated `{…}` fragment is built by
-/// another one, so the budgets used to compose (measured: three nested levels type-checked clean at
-/// ~46 000 nodes and SIGABRTed debug `chezzi run`). `desugar::Walker::walk_expr` re-enters its own
-/// walk on a parsed fragment's subtree, so its recursion depth is the composed tree's depth, and it
-/// refuses at `MAX_AST_DEPTH` too. That is now unconditional: the one seam it did not cover — an
-/// interpolated literal inside a default argument spliced on `desugar`'s *second* pass, never
-/// walked, reaching ~31 986 nodes — closed with W7-51, which deleted both the second pass and the
-/// spliced default *expression*. Re-measured on `ed4830b3` with a probe on
-/// `checker::check_interpolation`'s success arm: `925dd0f7` 1 hit / peak walk depth 15 995,
-/// `ed4830b3` **0 hits** / peak 15 994. See that method and `parser::MAX_AST_DEPTH`.
+/// **Both numbers hold across an interpolated `{…}` hole because the hole is parsed by the SAME
+/// `Parser`** as the code around it (`Parser::parse_hole`), so `depth` and `fold_depth` carry on and
+/// the budgets do not compose. (Until TICKET-252 a second `Parser` re-parsed the hole text from zero:
+/// three nested levels type-checked clean at ~46 000 nodes and SIGABRTed debug `chezzi run`.)
+/// `desugar::Walker::walk_expr` stays as the backstop: its recursion depth is the depth of the tree
+/// the checker and compiler descend, and it refuses at `MAX_AST_DEPTH` too. See
+/// `parser::MAX_AST_DEPTH`.
 pub const FRONTEND_STACK_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Run a front-end pass on a dedicated [`FRONTEND_STACK_BYTES`] stack; see that constant for why.

@@ -10,7 +10,8 @@
 //! a single inline statement on the same line (used by `match` arms like `Circle(r): return …`).
 
 use crate::ast::*;
-use crate::lexer::{Span, Tok, Token};
+use crate::fmtspec::SpecItem;
+use crate::lexer::{Span, SpecPart, StrLit, StrPart, Tok, Token};
 use std::fmt;
 
 /// Parsed call arguments: the positional args, then the named (`name = expr`) args, in source order.
@@ -168,25 +169,6 @@ pub fn parse_with_docs(
     let mut p = Parser::new(tokens);
     p.docs = comments.into_iter().collect();
     p.parse_module()
-}
-
-/// Parse a token stream containing exactly one expression into an `Expr`.
-///
-/// Used to parse the inner `{…}` fragments of an interpolated string
-/// by reusing the real lexer + Pratt parser. Tolerates surrounding `Newline`s; anything other
-/// than a single expression followed by `Eof` is a `ParseError`.
-pub fn parse_expr(tokens: Vec<Tok>) -> PResult<Expr> {
-    let mut p = Parser::new(tokens);
-    p.skip_newlines();
-    let expr = p.parse_expr()?;
-    p.skip_newlines();
-    if !p.check(&Token::Eof) {
-        return Err(p.err(format!(
-            "unexpected {} after expression",
-            describe_unexpected(p.peek())
-        )));
-    }
-    Ok(expr)
 }
 
 /// Parses one `<item>`: the parser [`Parser::item_keyword`] pairs with an item keyword.
@@ -842,7 +824,10 @@ impl Parser {
     fn expect_str(&mut self) -> PResult<String> {
         match self.peek() {
             Token::Str(_) | Token::RawStr(_) => match self.advance().kind {
-                Token::Str(s) => Ok(s.raw),
+                Token::Str(s) => match s.plain() {
+                    Some(text) => Ok(text.to_string()),
+                    None => Err(self.err("an extern library name cannot interpolate".to_string())),
+                },
                 Token::RawStr(s) => Ok(s),
                 Token::Int(_)
                 | Token::IntMinMagnitude
@@ -3393,28 +3378,12 @@ impl Parser {
             // it never interpolates. This must stay HERE: `Token::RawStr` below lands in the same
             // `LitPattern::Str`, so no later phase can tell `r"{x}"` from a holed `"{x}"`.
             Token::Str(s) => {
-                let s = s.clone();
-                let span = self.cur_span();
-                let chunks = match crate::interpolation::parse_interpolation(&s, span) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return Err(ParseError {
-                            message: e.message,
-                            span: e.span,
-                        });
-                    }
+                let Some(text) = s.plain() else {
+                    return Err(self.err(
+                        "a string pattern cannot interpolate: `{...}` is a hole, not text; write `{{` and `}}` for literal braces, or bind the value and compare it in a guard".to_string(),
+                    ));
                 };
-                let mut text = String::new();
-                for chunk in chunks {
-                    match chunk {
-                        Chunk::Lit(l) => text.push_str(&l),
-                        Chunk::Expr(..) => {
-                            return Err(self.err(
-                                "a string pattern cannot interpolate: `{...}` is a hole, not text; write `{{` and `}}` for literal braces, or bind the value and compare it in a guard".to_string(),
-                            ));
-                        }
-                    }
-                }
+                let text = text.to_string();
                 self.advance();
                 return Ok(Pattern::Literal(LitPattern::Str(text)));
             }
@@ -5124,7 +5093,10 @@ impl Parser {
                 });
             }
             Token::Float(f) => ExprKind::Float(f),
-            Token::Str(s) => ExprKind::Str(s),
+            Token::Str(s) => match s.plain() {
+                Some(text) => ExprKind::Str(text.to_string()),
+                None => ExprKind::Interp(self.interp_chunks(s)?),
+            },
             Token::Bytes(b) => ExprKind::Bytes(b),
             Token::RawStr(s) => ExprKind::RawStr(s),
             Token::True => ExprKind::Bool(true),
@@ -5349,6 +5321,93 @@ impl Parser {
             kind,
             span,
         })
+    }
+
+    /// Build the chunks of an interpolated literal from what the lexer found: its text parts and
+    /// its holes. The lexer owns where a hole starts and ends (`Lexer::quoted`); this only parses
+    /// the tokens it handed over, so nothing here reads a brace, a quote or a colon.
+    fn interp_chunks(&mut self, s: StrLit) -> PResult<Vec<Chunk>> {
+        let mut chunks = Vec::with_capacity(s.parts.len());
+        for part in s.parts {
+            match part {
+                StrPart::Text(text) => chunks.push(Chunk::Lit(text)),
+                StrPart::Hole(hole) => {
+                    let expr = self.parse_hole(hole.tokens).map_err(|mut e| {
+                        if hole.spec.is_some() {
+                            e.message.push_str(
+                                "; the first ':' outside brackets starts the format spec, so wrap an expression that contains ':' in parentheses",
+                            );
+                        }
+                        e
+                    })?;
+                    let (spec, fields) = match hole.spec {
+                        None => (None, Vec::new()),
+                        Some(parts) => {
+                            let mut items = Vec::new();
+                            let mut fields = Vec::new();
+                            for part in parts {
+                                match part {
+                                    SpecPart::Text(text) => {
+                                        items.extend(text.chars().map(SpecItem::Ch));
+                                    }
+                                    SpecPart::Field(tokens) => {
+                                        if let [only] = &tokens[..] {
+                                            return Err(ParseError {
+                                                message: "format spec: a nested field needs an expression, e.g. '{w}'".to_string(),
+                                                span: only.span,
+                                            });
+                                        }
+                                        items.push(SpecItem::Field);
+                                        fields.push(self.parse_hole(tokens)?);
+                                    }
+                                }
+                            }
+                            let spec = crate::fmtspec::parse_nested(&items).map_err(|message| {
+                                ParseError {
+                                    message,
+                                    span: hole.spec_at,
+                                }
+                            })?;
+                            (Some(spec), fields)
+                        }
+                    };
+                    chunks.push(Chunk::Expr(expr, spec, fields));
+                }
+            }
+        }
+        Ok(chunks)
+    }
+
+    /// Parse the tokens of one hole (or one nested spec field) as exactly one expression, on this
+    /// parser: `depth` and `fold_depth` carry on, so a hole counts against the same bounds as the
+    /// code around it. The hole's tokens stand in for the module's while it parses; token-indexed
+    /// state (`if_line`, `bang_eq`) belongs to the module's tokens and is set aside.
+    fn parse_hole(&mut self, tokens: Vec<Tok>) -> PResult<Expr> {
+        let outer_toks = std::mem::replace(&mut self.toks, tokens);
+        let outer_pos = std::mem::replace(&mut self.pos, 0);
+        let outer_if_line = self.if_line.take();
+        let outer_inline = std::mem::replace(&mut self.stmt_inline, false);
+        let outer_bang = self.bang_eq.take();
+        let result = self.hole_expr();
+        self.toks = outer_toks;
+        self.pos = outer_pos;
+        self.if_line = outer_if_line;
+        self.stmt_inline = outer_inline;
+        self.bang_eq = outer_bang;
+        result
+    }
+
+    fn hole_expr(&mut self) -> PResult<Expr> {
+        self.skip_newlines();
+        let expr = self.parse_expr()?;
+        self.skip_newlines();
+        if !self.check(&Token::Eof) {
+            return Err(self.err(format!(
+                "unexpected {} after expression",
+                describe_unexpected(self.peek())
+            )));
+        }
+        Ok(expr)
     }
 
     /// `fn(params) [-> ret]: expr` — the `fn` keyword has already been consumed.
@@ -11183,5 +11242,147 @@ fn g():
             expect(src, "expected 'else', found end of line", false);
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// The chunks of the first `x := <literal>` statement of `src`, as the parser built them.
+    fn chunks_of(src: &str) -> Vec<Chunk> {
+        let module = parse_ok(src);
+        for stmt in module.stmts {
+            let StmtKind::Let { value, .. } = stmt.kind else {
+                continue;
+            };
+            let ExprKind::Interp(chunks) = value.kind else {
+                panic!("expected an Interp in {src:?}, got {:?}", value.kind);
+            };
+            return chunks;
+        }
+        panic!("no binding in {src:?}");
+    }
+
+    /// TICKET-252 -- the parser builds `ExprKind::Interp` from the holes the lexer found, and every
+    /// hole expression carries its real source position: a literal with a hole is never an
+    /// `ExprKind::Str`, so nothing downstream re-reads text.
+    #[test]
+    fn a_holed_literal_parses_to_interp_with_real_spans() {
+        // line 1: x := "a\tb{p}c{q:>5}"   `"`6 `a`7 `\`8 `t`9 `b`10 `{`11 `p`12 `}`13 `c`14 `{`15 `q`16
+        let chunks = chunks_of("x := \"a\\tb{p}c{q:>5}\"\n");
+        let [
+            Chunk::Lit(a),
+            Chunk::Expr(p, None, _),
+            Chunk::Lit(c),
+            Chunk::Expr(q, Some(spec), _),
+        ] = &chunks[..]
+        else {
+            panic!("unexpected chunks {chunks:?}");
+        };
+        assert_eq!((a.as_str(), c.as_str()), ("a\tb", "c"));
+        assert_eq!((p.span.line, p.span.col), (1, 12));
+        assert_eq!((q.span.line, q.span.col), (1, 16));
+        assert_eq!(spec.width, 5);
+        assert_eq!(spec.align, Some(crate::fmtspec::Align::Right));
+        // A literal with no hole stays a plain `Str` of its final text.
+        let module = parse_ok("x := \"a{{b}}\"\n");
+        let StmtKind::Let { value, .. } = &module.stmts[0].kind else {
+            panic!("a binding");
+        };
+        assert_eq!(value.kind, ExprKind::Str("a{b}".to_string()));
+    }
+
+    /// Where a spec starts and what a nested field is: the lexer decides, the parser hands the
+    /// pieces to `fmtspec`. Ported from the `parse_interpolation_*` tests of the deleted scanner.
+    #[test]
+    fn hole_specs_and_nested_fields_parse_as_expressions() {
+        let chunks = chunks_of("x := \"{x:{w}.{p}f}\"\n");
+        let [Chunk::Expr(value, Some(spec), fields)] = &chunks[..] else {
+            panic!("expected one spec'd expr chunk, got {chunks:?}");
+        };
+        assert!(spec.dyn_width && spec.dyn_precision);
+        assert_eq!(spec.ty, Some('f'));
+        assert_eq!(fields.len(), 2, "width then precision");
+        assert!(matches!(&fields[0].kind, ExprKind::Ident(n) if n == "w"));
+        assert!(matches!(&fields[1].kind, ExprKind::Ident(n) if n == "p"));
+        // `{x:{w}.{p}f}`: `w` sits 3 chars after `x`, `p` 7 (a real source column, like any hole).
+        assert_eq!(fields[0].span.col, value.span.col + 3);
+        assert_eq!(fields[1].span.col, value.span.col + 7);
+        // Padding inside the nested braces is insignificant, as around the value.
+        let chunks = chunks_of("x := \"{x:<{ w }}\"\n");
+        let [Chunk::Expr(value, Some(_), fields)] = &chunks[..] else {
+            panic!("expected one spec'd expr chunk");
+        };
+        assert_eq!(fields[0].span.col, value.span.col + 5);
+        // A literal spec carries no nested field; a bare hole carries no spec.
+        assert!(
+            matches!(&chunks_of("x := \"{x:>5}\"\n")[..], [Chunk::Expr(_, Some(_), f)] if f.is_empty())
+        );
+        assert!(matches!(
+            &chunks_of("x := \"{x}\"\n")[..],
+            [Chunk::Expr(_, None, _)]
+        ));
+        // A colon inside an index, a nested literal or a bracket is not the separator.
+        let chunks = chunks_of("x := \"{m[\"a:b\"]:>3}\"\n");
+        assert!(matches!(&chunks[..], [Chunk::Expr(_, Some(s), _)] if s.width == 3));
+        assert!(matches!(
+            &chunks_of("x := \"{m[\"a:b\"]}\"\n")[..],
+            [Chunk::Expr(_, None, _)]
+        ));
+        assert!(matches!(
+            &chunks_of("x := \"{a[1:2]}\"\n")[..],
+            [Chunk::Expr(_, None, _)]
+        ));
+        // A `}` inside a nested literal or a bracket does not close the hole; padding is insignificant.
+        let chunks = chunks_of("x := \"v={d['a}}b']}\"\n");
+        assert!(matches!(&chunks[..], [Chunk::Lit(l), Chunk::Expr(_, None, _)] if l == "v="));
+        assert!(matches!(
+            &chunks_of("x := \"{ {1, 2}.len() }\"\n")[..],
+            [Chunk::Expr(_, None, _)]
+        ));
+        assert!(matches!(
+            &chunks_of("x := \"{ x }\"\n")[..],
+            [Chunk::Expr(_, None, _)]
+        ));
+    }
+
+    /// A malformed hole is a parse error with the hole's own message, and a hole that held a
+    /// spec colon says where the spec starts.
+    #[test]
+    fn a_malformed_hole_is_a_parse_error_inside_the_hole() {
+        let e = parse_err("x := \"{x:>99999999}\"\n");
+        assert!(e.message.contains("exceeds maximum 4096"), "{}", e.message);
+        let e = parse_err("x := \"{if c: 1 else: 2}\"\n");
+        assert!(
+            e.message
+                .contains("wrap an expression that contains ':' in parentheses"),
+            "{}",
+            e.message
+        );
+        // The hint belongs to a hole that has a spec: a plain bad hole does not get it.
+        let e = parse_err("x := \"{1 +}\"\n");
+        assert!(!e.message.contains("parentheses"), "{}", e.message);
+        let e = parse_err("x := \"{x y}\"\n");
+        assert!(e.message.contains("after expression"), "{}", e.message);
+    }
+
+    /// A hole parses on the same parser as the code around it, so its nesting counts against the
+    /// same `depth` budget. 150 parentheses fit alone (the bound is about 260 levels), and 150 more
+    /// inside a hole's code do not fit on top of 150 outside it: a second parser that started at
+    /// depth zero would have accepted both halves.
+    #[test]
+    fn nested_holes_share_the_parser_depth_budget() {
+        let parens = |n: usize| ("(".repeat(n), ")".repeat(n));
+        let (open_150, close_150) = parens(150);
+        let alone = format!("y := {open_150}1{close_150}\n");
+        let composed =
+            format!("x := 1\ny := {open_150}\"{{{open_150}x{close_150}}}\"{close_150}\n");
+        let (alone_ok, composed_err) = crate::on_frontend_stack(move || {
+            let alone_ok = parse(lexer::tokenize(&alone).unwrap()).is_ok();
+            let composed_err = parse(lexer::tokenize(&composed).unwrap()).err();
+            (alone_ok, composed_err.map(|e| e.message))
+        });
+        assert!(alone_ok, "150 parentheses must parse on their own");
+        assert_eq!(
+            composed_err.as_deref(),
+            Some("expression nested too deeply"),
+            "a hole shares its parser's depth budget"
+        );
     }
 }

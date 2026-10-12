@@ -13032,7 +13032,7 @@ fn golden_multiline_literals_chz_matches_expected_and_interp() {
 fn fmt_specs_parity() {
     let src = "\
 m := {\"a:b\": 7}
-print(\"[{m[\\\"a:b\\\"]:>4}]\")
+print(\"[{m[\"a:b\"]:>4}]\")
 print(\"|{42:>6}|{42:<6}|{42:^6}|\")
 print(\"z={42:06}|{-7:06}\")
 print(\"f={3.14159:.2f}|e={2.5:e}|p={0.1357:.1%}\")
@@ -13047,14 +13047,14 @@ print(\"bare={5.0}|fmt={5.0:.2f}|w={5.0:>8}\")
     assert_eq!(run_capture(src).expect("vm run"), expected);
 }
 
-/// Regression: an interpolated ternary `{if b: a else: b}` has top-level colons that are NOT a
-/// format-spec separator — it must run (not be mis-split), and a parenthesized ternary CAN carry
-/// a spec. Byte-identical across the VM and `--parallel`.
+/// An interpolated ternary is written in parentheses: the first `:` at hole depth starts the format
+/// spec, so a parenthesized ternary runs and CAN carry a spec, and a bare `{if b: a else: b}` is an
+/// error that says so (TICKET-252, owner answer 2b).
 #[test]
 fn fmt_interpolated_ternary_parity() {
     let src = "\
 b := true
-print(\"val={if b: 10 else: 20}\")
+print(\"val={(if b: 10 else: 20)}\")
 print(\"fmt={(if b: 1 else: 2):>5}\")
 ";
     let vm_out = run_capture(src).expect("vm run");
@@ -23367,11 +23367,148 @@ fn interpolation_hole_text_is_read_once() {
         ("x := 5\nprint(\"\\u{7B}x\\u{7D}\")\n", "{x}\n"),
         ("x := 5\nprint(\"\"\"{x +\n 1}\"\"\")\n", "6\n"),
     ];
+    let run = |src: &str| match run_capture(src) {
+        Ok(o) => o,
+        Err(e) => e.message,
+    };
     for (src, expect) in cells {
-        let got = match run_capture(src) {
-            Ok(o) => o,
-            Err(e) => e.message,
+        assert_eq!(run(src), expect, "src: {src}");
+    }
+
+    // Every expected value below is CPython 3.14.7 f-string output (python3 run on the equivalent
+    // f-string, the same cell in all four literal kinds). Deliberate differences, each on its row:
+    // DEC-018 (`a{4}b`), every literal interpolates (`'}}'`), a Chezzi `str` has no `\x` escape, and
+    // a hole is code, so a backslash there is an error.
+    //
+    // In a hole template `¤` is the quote other than the literal's own, `§` is the literal's own
+    // quote and `↵` is a real line break. `¤` in an expected value is the other quote too.
+    const PRELUDE: &str = "x := 5\nw := 4\nc := true\nd := {\"k\": 7}\nxs := [\"a\", \"b\"]\n";
+    // (open, close, the other quote)
+    const KINDS: [(&str, &str, &str); 4] = [
+        ("\"", "\"", "'"),
+        ("'", "'", "\""),
+        ("\"\"\"", "\"\"\"", "'"),
+        ("'''", "'''", "\""),
+    ];
+
+    // HOLE axis x KIND axis: content, layout and spec of one hole.
+    let holes: Vec<(&str, &str)> = vec![
+        (r#"x"#, "5"),
+        (r#"¤\\n¤.len()"#, "2"),
+        (r#"¤\n¤.len()"#, "1"),
+        (r#"¤\\\\¤.len()"#, "2"),
+        (r#"¤a\\tb¤.len()"#, "4"),
+        (r#"¤it\¤s¤"#, "it¤s"),
+        (r#"¤\u{41}¤"#, "A"),
+        (r#"r¤\\d¤.len()"#, "3"),
+        (r#"r¤\d¤.len()"#, "2"),
+        (r#"b¤\\x41¤"#, "b'\\\\x41'"),
+        // A Chezzi `str` has no `\x`; a `b` literal has it, so CPython's `b'A'` holds here.
+        (r#"b¤\x41¤"#, "b'A'"),
+        (r#"d[§k§]"#, "7"),
+        (r#"§{x}§"#, "5"),
+        (r#"¤#¤"#, "#"),
+        (r#"¤:¤"#, ":"),
+        // DELIBERATE: every Chezzi literal interpolates, a nested one included, so it writes `}}`
+        // where CPython writes `'}'`.
+        (r#"¤}}¤"#, "}"),
+        (r#" {¤a¤: 1}[¤a¤] "#, "1"),
+        (r#"[y * 2 for y in [1, 2]]"#, "[2, 4]"),
+        (r#"xs[0:1].len()"#, "1"),
+        (r#"(if c: 1 else: 2)"#, "1"),
+        (r#"(fn(): 1)()"#, "1"),
+        (r#"x + 1"#, "6"),
+        (r#"x +↵ 1"#, "6"),
+        (r#"x↵ + 1"#, "6"),
+        (r#"(x +↵ 1)"#, "6"),
+        (r#"x + 1 # c↵"#, "6"),
+        (r#"xs↵ .len()↵ .str()"#, "2"),
+        (r#"x:>4"#, "   5"),
+        (r#"x:>{w}"#, "   5"),
+        (r#"x:\u{3E}4"#, "   5"),
+        (r#"x:\u{7B}>4"#, "{{{5"),
+        (r#"x:¤>4"#, "¤¤¤5"),
+        (r#"d[§k§]:>{w}"#, "   7"),
+    ];
+    for (open, close, other) in KINDS {
+        let own = &open[..1];
+        for (hole, expect) in &holes {
+            let hole = hole
+                .replace('¤', other)
+                .replace('§', own)
+                .replace('↵', "\n");
+            let expect = expect.replace('¤', other);
+            let src = format!("{PRELUDE}print({open}{{{hole}}}{close})\n");
+            assert_eq!(run(&src), format!("{expect}\n"), "src: {src}");
+        }
+    }
+
+    // OUTER axis: an escaped special in the literal's own text is text, not syntax.
+    let outers: Vec<(&str, &str)> = vec![
+        (r#"\u{7B}x\u{7D}"#, "{x}"),
+        (r#"a\u{7B}{x}\u{7D}b"#, "a{5}b"),
+        (r#"a\u{7D}"#, "a}"),
+        (r#"\u{7B}"#, "{"),
+        (r#"\\{x}"#, "\\5"),
+        (r#"{{x}} {{{x}}}"#, "{x} {5}"),
+        // DELIBERATE (DEC-018): a hole of ASCII digits is text. CPython prints `a4b`.
+        (r#"a{4}b"#, "a{4}b"),
+    ];
+    for (open, close, _) in KINDS {
+        for (text, expect) in &outers {
+            let src = format!("{PRELUDE}print({open}{text}{close})\n");
+            assert_eq!(run(&src), format!("{expect}\n"), "src: {src}");
+        }
+    }
+
+    // KIND axis: raw and bytes literals do not interpolate.
+    assert_eq!(run(&format!("{PRELUDE}print(r\"{{x}}\")\n")), "{x}\n");
+    assert_eq!(run(&format!("{PRELUDE}print(b\"{{x}}\")\n")), "b'{x}'\n");
+
+    // ESCAPE axis: each escape resolves once. CPython 3.14.7: `len('\L') == 1`, `'\L' == "\L"` and
+    // `len('\\L') == 2` for the seven letters.
+    for (letter, _) in crate::lexer::ESCAPES {
+        let escaped = format!("'\\{letter}'");
+        let written = if letter == '\\' || letter == '\'' {
+            format!("'\\\\\\{letter}'")
+        } else {
+            format!("'\\\\{letter}'")
         };
-        assert_eq!(got, expect, "src: {src}");
+        let src = format!("print(\"{{{escaped}.len()}}\", {escaped} == \"\\{letter}\")\n");
+        assert_eq!(run(&src), "1 true\n", "src: {src}");
+        let src = format!("print(\"{{{written}.len()}}\")\n");
+        assert_eq!(run(&src), "2\n", "src: {src}");
+    }
+
+    // ERROR axis: (literal, a substring of the message). CPython rejects each one except the two
+    // marked: `'}'` (DELIBERATE, see above) and `\x41` (a Chezzi `str` has no `\x`).
+    let errors: Vec<(&str, &str)> = vec![
+        (r##""{d[\"k\"]}""##, "backslash"),
+        (r##""{x\t+ 1}""##, "backslash"),
+        (r##""{x\u{3A}>4}""##, "backslash"),
+        (r##""{x \u{23} tail}""##, "backslash"),
+        (r##""{if c: 1 else: 2}""##, "parentheses"),
+        (r##""{1 + if c: 1 else: 2}""##, "parentheses"),
+        (r##""{fn(): 1}""##, "parentheses"),
+        (r##""{x # c}""##, "'#' starts a comment"),
+        (r##""a{x""##, "unterminated '{'"),
+        (
+            r##""{x:{w:3}}""##,
+            "nested field cannot carry its own format spec",
+        ),
+        (r##""{x)}""##, "unmatched"),
+        (r##""{'}'}""##, "unmatched '}'"),
+        (r##""{'\x41'}""##, "unknown escape"),
+    ];
+    for (lit, expect) in errors {
+        let src = format!("{PRELUDE}print({lit})\n");
+        match run_capture(&src) {
+            Ok(o) => panic!("src: {src} ran: {o:?}"),
+            Err(e) => assert!(
+                e.message.contains(expect),
+                "src: {src} message: {}",
+                e.message
+            ),
+        }
     }
 }

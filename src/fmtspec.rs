@@ -1,9 +1,9 @@
 //! Shared Python-style format mini-language for `{expr:spec}` string interpolation.
 //!
-//! ONE source of truth used by the VM (`compiler`/`vm`): it does
-//! only (a) the `:`-split of the interpolation inner text ([`split_spec`]) and (b) classifying its
-//! own runtime `Value` into the neutral [`FmtArg`]. Spec parsing ([`parse`]) and rendering
-//! ([`apply`]) live here so there is a single source of truth.
+//! ONE source of truth used by the VM (`compiler`/`vm`): it classifies its own runtime `Value` into
+//! the neutral [`FmtArg`]. Spec parsing ([`parse`]) and rendering ([`apply`]) live here so there is
+//! a single source of truth. Where a spec starts and ends is the lexer's business, not this module's
+//! (`Lexer::hole`).
 //!
 //! Supported mini-language (a coherent subset of Python's): `[[fill]align][sign][z][#][0][width][grouping][.precision][type]`
 //!  - align: `<` left, `>` right, `^` center; an optional `fill` char may precede the align.
@@ -95,106 +95,72 @@ pub enum FmtArg<'a> {
     Other(&'a str),
 }
 
-/// Split an interpolation's inner text on the FIRST top-level `:` into `(expr, Some(spec))`, or
-/// `(expr, None)` if there is no spec. A `:` inside `()[]{}` or inside a `"`/`'` string literal is
-/// NOT a separator (so `{m["a:b"]:>5}` splits only at the final colon, and `{m["a:b"]}` not at all).
-/// True when `inner` opens with Chezzi's ternary `if cond: a else: b`, whose top-level colons are
-/// STRUCTURAL rather than format-spec separators. Shared with the interpolation scanner
-/// (`crate::interpolation`), which must make the same call to know whether a top-level `:` starts
-/// the literal spec text — one rule, one place, or the two layers disagree about where the
-/// expression ends.
-pub(crate) fn is_ternary_head(inner: &str) -> bool {
-    inner
-        .trim_start()
-        .strip_prefix("if")
-        .is_some_and(|rest| rest.starts_with(|c: char| c.is_whitespace() || c == '('))
-}
-
-pub fn split_spec(inner: &str) -> (&str, Option<&str>) {
-    // Chezzi's ternary `if cond: a else: b` is an expression whose top-level colons are structural,
-    // NOT format-spec separators. A bare top-level ternary therefore carries no spec — splitting on
-    // its first colon would corrupt the expression. To attach a spec to a ternary, parenthesize it
-    // (`{(if b: 1 else: 2):>5}`), which pushes the inner colons to depth > 0 so only the trailing
-    // top-level colon splits.
-    if is_ternary_head(inner) {
-        return (inner, None);
-    }
-    let mut depth: i32 = 0;
-    let mut in_str: Option<char> = None;
-    for (i, c) in inner.char_indices() {
-        if let Some(q) = in_str {
-            if c == q {
-                in_str = None;
-            }
-            continue;
-        }
-        match c {
-            '"' | '\'' => in_str = Some(c),
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            ':' if depth == 0 => {
-                return (&inner[..i], Some(&inner[i + 1..]));
-            }
-            _ => {}
-        }
-    }
-    (inner, None)
-}
-
 /// Parse a format spec (the text after the `:`). Width/precision are bounded by [`MAX_FIELD`] at
 /// parse time — the digit accumulator bails to an error the instant it would exceed the cap, so the
 /// parsed integer itself never grows pathologically and NO allocation occurs. A nested `{expr}`
 /// field is bounded later, when its value is known ([`field_from_int`]).
 pub fn parse(spec: &str) -> Result<FormatSpec, String> {
-    parse_nested(spec).map(|(s, _)| s)
+    let items: Vec<SpecItem> = spec.chars().map(SpecItem::Ch).collect();
+    parse_nested(&items)
 }
 
-/// A nested `{expr}` field found in the width or precision slot of a spec. `at` is the char index
-/// of its `{` inside the spec text and `src` the text between its braces (untrimmed).
-#[derive(Debug, Clone, PartialEq)]
-pub struct NestedField {
-    pub at: usize,
-    pub src: String,
+/// One element of a format spec as the lexer found it: a char of spec text, or a nested `{expr}`
+/// field. The lexer decides where a field starts and ends (`Lexer::hole`), so this parser never
+/// scans for a brace: a `{` that is a `Ch` is a fill char, nothing more.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpecItem {
+    Ch(char),
+    Field,
 }
 
 const NESTED_SLOTS: &str =
     "format spec: a nested field is allowed only as the width or the precision";
 
-/// [`parse`], also returning the nested fields in evaluation order (width before precision).
-pub fn parse_nested(spec: &str) -> Result<(FormatSpec, Vec<NestedField>), String> {
+/// [`parse`] over the lexer's items. A [`SpecItem::Field`] sets `dyn_width` in the width slot and
+/// `dyn_precision` in the precision slot; anywhere else it is an error. The caller reads the fields
+/// out of its own copy of the items, in the same order (width before precision).
+pub fn parse_nested(items: &[SpecItem]) -> Result<FormatSpec, String> {
     let mut out = FormatSpec::default();
-    let mut fields: Vec<NestedField> = Vec::new();
-    // Char index just past the most recent nested field's `}`.
+    // Index just past the most recent nested field.
     let mut field_end: Option<usize> = None;
-    let chars: Vec<char> = spec.chars().collect();
+    // The char at `i`, `None` for a field or past the end.
+    let ch = |i: usize| match items.get(i) {
+        Some(SpecItem::Ch(c)) => Some(*c),
+        Some(SpecItem::Field) | None => None,
+    };
+    let is_field = |i: usize| items.get(i) == Some(&SpecItem::Field);
     let mut i = 0;
     let mut fill_explicit = false;
 
     // [[fill]align] — an align char at position 0 or 1. If char 1 is an align, char 0 is the fill.
-    if chars.len() >= 2 && is_align(chars[1]) {
-        out.fill = chars[0];
-        fill_explicit = true;
-        out.align = Some(to_align(chars[1]));
-        i = 2;
-    } else if !chars.is_empty() && is_align(chars[0]) {
-        out.align = Some(to_align(chars[0]));
-        i = 1;
+    match (ch(0), ch(1)) {
+        (Some(fill), Some(align)) if is_align(align) => {
+            out.fill = fill;
+            fill_explicit = true;
+            out.align = Some(to_align(align));
+            i = 2;
+        }
+        (Some(align), _) if is_align(align) => {
+            out.align = Some(to_align(align));
+            i = 1;
+        }
+        _ => {}
     }
 
     // [sign]
-    if i < chars.len() && matches!(chars[i], '+' | '-' | ' ') {
-        out.sign = Some(chars[i]);
+    if let Some(sign) = ch(i).filter(|c| matches!(c, '+' | '-' | ' ')) {
+        out.sign = Some(sign);
         i += 1;
     }
 
     // [z] negative-zero coercion (CPython 3.11; its slot is after the sign, before `#`).
-    if i < chars.len() && chars[i] == 'z' {
+    if ch(i) == Some('z') {
         out.zero_coerce = true;
         i += 1;
     }
 
     // [#] alternate form.
-    if i < chars.len() && chars[i] == '#' {
+    if ch(i) == Some('#') {
         out.alt = true;
         i += 1;
     }
@@ -205,7 +171,7 @@ pub fn parse_nested(spec: &str) -> Result<(FormatSpec, Vec<NestedField>), String
     // written at all; `apply` encodes that default itself (`align.is_none()`) rather than `parse`
     // mutating `out.align` here, because a string's zero-pad reject must still report
     // `zero-pad '0' not allowed on a string`, not `'=' alignment not allowed on a string`.
-    if i < chars.len() && chars[i] == '0' {
+    if ch(i) == Some('0') {
         out.zero_pad = true;
         if !fill_explicit {
             out.fill = '0';
@@ -216,45 +182,43 @@ pub fn parse_nested(spec: &str) -> Result<(FormatSpec, Vec<NestedField>), String
     // [width]
     let mut width: usize = 0;
     let mut saw_width = false;
-    if i < chars.len() && chars[i] == '{' {
-        let (f, next) = take_field(&chars, i)?;
-        fields.push(f);
+    if is_field(i) {
         out.dyn_width = true;
-        field_end = Some(next);
-        i = next;
-    }
-    while !out.dyn_width && i < chars.len() && chars[i].is_ascii_digit() {
-        saw_width = true;
-        width = bump(width, chars[i], "width")?;
         i += 1;
+        field_end = Some(i);
+    } else {
+        while let Some(digit) = ch(i).filter(char::is_ascii_digit) {
+            saw_width = true;
+            width = bump(width, digit, "width")?;
+            i += 1;
+        }
     }
     if saw_width {
         out.width = width;
     }
 
     // [grouping] — `,` or `_`, CPython's slot between width and precision.
-    if i < chars.len() && matches!(chars[i], ',' | '_') {
-        out.group = Some(chars[i]);
+    if let Some(group) = ch(i).filter(|c| matches!(c, ',' | '_')) {
+        out.group = Some(group);
         i += 1;
     }
 
     // [.precision]
-    if i < chars.len() && chars[i] == '.' {
+    if ch(i) == Some('.') {
         i += 1;
         let mut prec: usize = 0;
         let mut saw = false;
-        if i < chars.len() && chars[i] == '{' {
-            let (f, next) = take_field(&chars, i)?;
-            fields.push(f);
+        if is_field(i) {
             out.dyn_precision = true;
-            field_end = Some(next);
-            i = next;
-            saw = true;
-        }
-        while !out.dyn_precision && i < chars.len() && chars[i].is_ascii_digit() {
-            saw = true;
-            prec = bump(prec, chars[i], "precision")?;
             i += 1;
+            field_end = Some(i);
+            saw = true;
+        } else {
+            while let Some(digit) = ch(i).filter(char::is_ascii_digit) {
+                saw = true;
+                prec = bump(prec, digit, "precision")?;
+                i += 1;
+            }
         }
         if !saw {
             return Err("format spec: '.' must be followed by a precision".to_string());
@@ -264,57 +228,34 @@ pub fn parse_nested(spec: &str) -> Result<(FormatSpec, Vec<NestedField>), String
     }
 
     // [type]
-    if i < chars.len() {
-        let t = chars[i];
-        if is_type(t) {
-            out.ty = Some(t);
-            i += 1;
-        } else if t == '{' || (field_end == Some(i) && is_align(t)) {
-            return Err(NESTED_SLOTS.to_string());
-        } else {
-            return Err(format!("format spec: unknown type char '{t}'"));
+    if i < items.len() {
+        match ch(i) {
+            Some(t) if is_type(t) => {
+                out.ty = Some(t);
+                i += 1;
+            }
+            Some(t) if field_end == Some(i) && is_align(t) => {
+                return Err(NESTED_SLOTS.to_string());
+            }
+            Some(t) => return Err(format!("format spec: unknown type char '{t}'")),
+            None => return Err(NESTED_SLOTS.to_string()),
         }
     }
 
-    if i != chars.len() {
-        if chars[i..].contains(&'{') {
+    if i != items.len() {
+        if items[i..].contains(&SpecItem::Field) {
             return Err(NESTED_SLOTS.to_string());
         }
+        let spec: String = items
+            .iter()
+            .map(|item| match item {
+                SpecItem::Ch(c) => c.to_string(),
+                SpecItem::Field => "{}".to_string(),
+            })
+            .collect();
         return Err(format!("format spec: trailing characters in '{spec}'"));
     }
-    Ok((out, fields))
-}
-
-/// Read the nested field whose `{` is at `chars[start]`: scan brace depth to the matching `}`.
-/// Returns the field and the index just past its `}`.
-fn take_field(chars: &[char], start: usize) -> Result<(NestedField, usize), String> {
-    let mut depth = 0usize;
-    for (k, &c) in chars.iter().enumerate().skip(start) {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    let src: String = chars[start + 1..k].iter().collect();
-                    if src.trim().is_empty() {
-                        return Err(
-                            "format spec: a nested field needs an expression, e.g. '{w}'"
-                                .to_string(),
-                        );
-                    }
-                    if split_spec(&src).1.is_some() {
-                        return Err(
-                            "format spec: a nested field cannot carry its own format spec"
-                                .to_string(),
-                        );
-                    }
-                    return Ok((NestedField { at: start, src }, k + 1));
-                }
-            }
-            _ => {}
-        }
-    }
-    Err("format spec: unterminated nested field".to_string())
+    Ok(out)
 }
 
 /// Turn a nested field's runtime value into a width/precision. `None` (not an int) is an error, as
@@ -1096,36 +1037,6 @@ mod tests {
     }
 
     #[test]
-    fn split_spec_edge_cases() {
-        assert_eq!(split_spec("x"), ("x", None));
-        assert_eq!(split_spec("x:>5"), ("x", Some(">5")));
-        assert_eq!(split_spec("m[\"a:b\"]"), ("m[\"a:b\"]", None));
-        assert_eq!(split_spec("m[\"a:b\"]:>8"), ("m[\"a:b\"]", Some(">8")));
-        assert_eq!(split_spec("a[1:2]"), ("a[1:2]", None)); // slice colon is inside brackets
-        assert_eq!(split_spec("f(x):.2f"), ("f(x)", Some(".2f")));
-    }
-
-    #[test]
-    fn split_spec_bare_ternary_has_no_spec() {
-        // Chezzi's ternary `if cond: a else: b` is an expression whose top-level colons are NOT
-        // format-spec separators. A bare top-level ternary therefore carries no spec (regression
-        // guard: `{if b: 10 else: 20}` must keep working, not be mis-split into expr `if b`).
-        assert_eq!(split_spec("if b: 10 else: 20"), ("if b: 10 else: 20", None));
-        assert_eq!(
-            split_spec("if x > 0: a else: b"),
-            ("if x > 0: a else: b", None)
-        );
-        // A parenthesized ternary CAN carry a spec — the inner colons are bracketed (depth > 0),
-        // so only the trailing top-level colon splits.
-        assert_eq!(
-            split_spec("(if b: 1 else: 2):>5"),
-            ("(if b: 1 else: 2)", Some(">5"))
-        );
-        // `if` as a leading substring of an identifier is not the keyword — still splits normally.
-        assert_eq!(split_spec("iffy:>5"), ("iffy", Some(">5")));
-    }
-
-    #[test]
     fn general_format_matches_cpython() {
         assert_eq!(ok_apply("g", FmtArg::Float(1234.5)), "1234.5");
         assert_eq!(ok_apply("g", FmtArg::Float(1234567.0)), "1.23457e+06");
@@ -1373,49 +1284,61 @@ mod tests {
         assert_eq!(ok_apply(">08.2f", FmtArg::Int(-42)), "00-42.00");
     }
 
+    /// The items a spec string spells, with `{}` standing for one nested field.
+    fn items(spec: &str) -> Vec<SpecItem> {
+        let mut out = Vec::new();
+        let mut chars = spec.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '{' && chars.peek() == Some(&'}') {
+                chars.next();
+                out.push(SpecItem::Field);
+            } else {
+                out.push(SpecItem::Ch(c));
+            }
+        }
+        out
+    }
+
     #[test]
     fn nested_field_slots_parse() {
-        let (s, f) = parse_nested("<{w}").unwrap();
+        let s = parse_nested(&items("<{}")).unwrap();
         assert!(s.dyn_width && !s.dyn_precision);
         assert_eq!(s.align, Some(Align::Left));
-        assert_eq!(
-            f,
-            vec![NestedField {
-                at: 1,
-                src: "w".to_string()
-            }]
-        );
 
-        let (s, f) = parse_nested("{w}.{p}f").unwrap();
+        let s = parse_nested(&items("{}.{}f")).unwrap();
         assert!(s.dyn_width && s.dyn_precision);
         assert_eq!(s.ty, Some('f'));
         assert_eq!(s.precision, Some(0));
-        assert_eq!(
-            f.iter().map(|x| x.src.as_str()).collect::<Vec<_>>(),
-            ["w", "p"]
-        );
-        assert_eq!(f[1].at, 4);
 
-        // A literal spec carries no fields and `parse` is unchanged.
-        let (s, f) = parse_nested(">8.2f").unwrap();
-        assert!(!s.dyn_width && !s.dyn_precision && f.is_empty());
+        // A literal spec carries no fields and `parse` is the same function.
+        let s = parse_nested(&items(">8.2f")).unwrap();
+        assert!(!s.dyn_width && !s.dyn_precision);
         assert_eq!(parse(">8.2f").unwrap(), s);
 
         let slots = "format spec: a nested field is allowed only as the width or the precision";
-        for bad in ["{w}<3", ">5{t}", "{w}{p}", "d{w}"] {
-            assert_eq!(parse_nested(bad).unwrap_err(), slots, "{bad}");
+        for bad in ["{}<3", ">5{}", "{}{}", "d{}"] {
+            assert_eq!(parse_nested(&items(bad)).unwrap_err(), slots, "{bad}");
         }
+    }
+
+    /// The lexer decides where a nested field sits; a `{` that is plain spec text is a fill char.
+    #[test]
+    fn nested_field_is_an_item_not_a_brace_scan() {
+        use SpecItem::{Ch, Field};
+        let s = parse_nested(&[Ch('<'), Field]).unwrap();
+        assert!(s.dyn_width);
+        let s = parse_nested(&[Ch('{'), Ch('>'), Ch('4')]).unwrap();
+        assert_eq!((s.fill, s.align, s.width), ('{', Some(Align::Right), 4));
+        assert!(!s.dyn_width);
+        // A text `{` outside the fill slot is an unknown type char, not a field.
         assert_eq!(
-            parse_nested("<{}").unwrap_err(),
-            "format spec: a nested field needs an expression, e.g. '{w}'"
+            parse_nested(&[Ch('{')]).unwrap_err(),
+            "format spec: unknown type char '{'"
         );
+        // A field in the fill slot is not a fill char.
         assert_eq!(
-            parse_nested("<{w:3}").unwrap_err(),
-            "format spec: a nested field cannot carry its own format spec"
-        );
-        assert_eq!(
-            parse_nested("<{w").unwrap_err(),
-            "format spec: unterminated nested field"
+            parse_nested(&[Field, Ch('>'), Ch('4')]).unwrap_err(),
+            "format spec: a nested field is allowed only as the width or the precision"
         );
     }
 

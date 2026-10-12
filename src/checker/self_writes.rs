@@ -2,7 +2,7 @@
 
 use super::ChainLink;
 use crate::ast::{DeferTarget, Expr, ExprKind, SpawnTarget, Stmt, StmtKind, WaitArmKind};
-use crate::compiler::{chunk_exprs, interp_exprs};
+use crate::compiler::chunk_exprs;
 
 #[derive(Clone, Debug)]
 pub(super) enum SelfOp {
@@ -159,11 +159,6 @@ impl Scan {
 
     fn expr(&mut self, expr: &Expr) {
         match &expr.kind {
-            ExprKind::Str(raw) => {
-                for expr in interp_exprs(raw) {
-                    self.expr(&expr);
-                }
-            }
             ExprKind::Interp(chunks) => {
                 for expr in chunk_exprs(chunks) {
                     self.expr(expr);
@@ -171,6 +166,7 @@ impl Scan {
             }
             ExprKind::Int(_)
             | ExprKind::Float(_)
+            | ExprKind::Str(_)
             | ExprKind::Bytes(_)
             | ExprKind::RawStr(_)
             | ExprKind::Bool(_)

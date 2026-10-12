@@ -1710,39 +1710,15 @@ impl Checker {
 
     // ===== expression inference =====
 
-    /// Type-check an interpolated string literal's `{...}` fragment expressions. The string is
-    /// parsed into chunks by the SHARED `crate::interpolation` parser (the very one the compiler
-    /// emits from — so the checker and the compiler can never disagree on how a string is chunked),
-    /// and every fragment `Expr` is run through the normal `infer_value` path: undefined names,
-    /// type/method/arity mismatches, and void-call fragments all surface here as compile errors
-    /// instead of slipping past `check` to panic the compiler (`global_slot`) or fault at runtime.
-    ///
-    /// A malformed interpolation (unterminated `{`, bad format spec) is reported as an error; we
-    /// then stop (the compiler treats the same malformed string as fatal). Format-spec *validation*
-    /// stays the compiler's job — we discard the parsed spec and only infer the expression.
-    ///
-    /// Span: a fragment expr is parsed from the `{…}` substring via `lexer::tokenize_frag`, which
-    /// re-lexes it against the literal's `PosMap` — so every fragment token span is the char's REAL
-    /// physical source position (line and column), past real newlines, `\n` escapes and any nesting
-    /// depth alike. Nothing is re-anchored on the way out: a fragment error points at the EXPRESSION
-    /// (where CPython carets inside an f-string), and two fragments can never share a
-    /// witness/keyword/carrier table key, because two distinct source chars are two distinct
-    /// positions by construction. Always returns `Ty::Str`.
-    pub(super) fn check_interpolation(&mut self, raw: &crate::ast::StrLit, span: Span) -> Ty {
-        match crate::interpolation::parse_interpolation(raw, span) {
-            Ok(chunks) => self.check_interp_chunks(&chunks, span),
-            Err(e) => {
-                // `e.span`, not `span`: a fragment's lex error carries the offending char's real
-                // position, and that is the one an editor squiggles. Errors about the literal as a
-                // whole set `e.span == span` anyway, so this is a strict improvement (M24-7).
-                self.error(e.span, e.message);
-                Ty::Str
-            }
-        }
-    }
-
-    /// Check an already-parsed interpolation's chunks — the desugared [`ExprKind::Interp`] path, and
-    /// the body of [`Self::check_interpolation`]'s fallback. Always returns `Ty::Str`.
+    /// Type-check an interpolated string literal's chunks ([`ExprKind::Interp`], built by the parser
+    /// from the holes the lexer found). Every fragment `Expr` is run through the normal
+    /// `infer_value` path: undefined names, type/method/arity mismatches and void-call fragments all
+    /// surface here as compile errors instead of slipping past `check` to panic the compiler
+    /// (`global_slot`) or fault at runtime. A fragment's span is the real physical position of its
+    /// first char (the lexer lexed it in place), so a fragment error points at the EXPRESSION, where
+    /// CPython carets inside an f-string, and two fragments never share a witness/keyword/carrier
+    /// table key. Format-spec *validation* against the value's type stays below. Always returns
+    /// `Ty::Str`.
     pub(super) fn check_interp_chunks(&mut self, chunks: &[crate::ast::Chunk], span: Span) -> Ty {
         // A value+keyword call inside a `{…}` fragment is keyed by (string span, fragment ordinal).
         // That pair used to be what kept two fragments whose first named-arg value shared a
@@ -2105,9 +2081,8 @@ impl Checker {
         match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
             ExprKind::Float(_) => Ty::Float,
-            ExprKind::Str(raw) => self.check_interpolation(raw, expr.span),
-            // The desugared form: fragments are real children, already normalized (named/default/
-            // variadic args). `Str` above is only the brace-free or malformed remainder.
+            ExprKind::Str(_) => Ty::Str,
+            // Fragments are real children, normalized (named/default/variadic args) by `desugar`.
             ExprKind::Interp(chunks) => self.check_interp_chunks(chunks, expr.span),
             ExprKind::RawStr(_) => Ty::Str, // verbatim `str`, no interpolation to check
             ExprKind::Bytes(_) => Ty::Bytes,
@@ -6451,24 +6426,7 @@ impl Checker {
                 self.scan_expr_for_pin(name, then, match_pin, member_pin);
                 self.scan_expr_for_pin(name, els, match_pin, member_pin);
             }
-            // String interpolation: the `{…}` fragment expressions are not stored as child `Expr`s —
-            // they live inside the raw text and are produced on demand by the shared interpolation
-            // parser (the same one `check_interpolation` uses). Parse + scan them so a param pinned
-            // ONLY by a member access inside an interpolation (`"{x.f}"`) resolves via source #3. A
-            // malformed interpolation is ignored here (it is diagnosed by `check_interpolation`).
-            ExprKind::Str(raw) => {
-                if let Ok(chunks) = crate::interpolation::parse_interpolation(raw, e.span) {
-                    for chunk in &chunks {
-                        if let crate::ast::Chunk::Expr(frag, _, fields) = chunk {
-                            self.scan_expr_for_pin(name, frag, match_pin, member_pin);
-                            for f in fields {
-                                self.scan_expr_for_pin(name, f, match_pin, member_pin);
-                            }
-                        }
-                    }
-                }
-            }
-            // The desugared form — the fragments are already parsed children here.
+            // The fragments are ordinary children: scan them like any other expression.
             ExprKind::Interp(chunks) => {
                 for chunk in chunks {
                     if let crate::ast::Chunk::Expr(frag, _, fields) = chunk {
@@ -6486,6 +6444,7 @@ impl Checker {
             // have no child to scan.
             ExprKind::Int(_)
             | ExprKind::Float(_)
+            | ExprKind::Str(_)
             | ExprKind::Bytes(_)
             | ExprKind::RawStr(_)
             | ExprKind::Bool(_)
