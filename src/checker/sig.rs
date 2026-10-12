@@ -810,7 +810,6 @@ impl Checker {
             | ExprKind::Compare { .. }
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -2734,7 +2733,6 @@ impl Checker {
                 | ExprKind::Call { .. }
                 | ExprKind::Field { .. }
                 | ExprKind::Index { .. }
-                | ExprKind::Slice { .. }
                 | ExprKind::Try(_)
                 | ExprKind::OptChain { .. }
                 | ExprKind::NullCoalesce { .. }
@@ -2779,7 +2777,6 @@ impl Checker {
             | ExprKind::Range { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -3532,7 +3529,6 @@ impl Checker {
                         | ExprKind::Range { .. }
                         | ExprKind::Call { .. }
                         | ExprKind::Index { .. }
-                        | ExprKind::Slice { .. }
                         | ExprKind::Try(_)
                         | ExprKind::OptChain { .. }
                         | ExprKind::NullCoalesce { .. }
@@ -3563,7 +3559,6 @@ impl Checker {
                     | ExprKind::Range { .. }
                     | ExprKind::Field { .. }
                     | ExprKind::Index { .. }
-                    | ExprKind::Slice { .. }
                     | ExprKind::Try(_)
                     | ExprKind::OptChain { .. }
                     | ExprKind::NullCoalesce { .. }
@@ -3692,7 +3687,6 @@ impl Checker {
                                 | ExprKind::Range { .. }
                                 | ExprKind::Call { .. }
                                 | ExprKind::Index { .. }
-                                | ExprKind::Slice { .. }
                                 | ExprKind::Try(_)
                                 | ExprKind::OptChain { .. }
                                 | ExprKind::NullCoalesce { .. }
@@ -3783,7 +3777,6 @@ impl Checker {
                                 | ExprKind::Range { .. }
                                 | ExprKind::Call { .. }
                                 | ExprKind::Index { .. }
-                                | ExprKind::Slice { .. }
                                 | ExprKind::Try(_)
                                 | ExprKind::OptChain { .. }
                                 | ExprKind::NullCoalesce { .. }
@@ -4702,7 +4695,6 @@ impl Checker {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -5218,7 +5210,6 @@ impl Checker {
                 | ExprKind::Range { .. }
                 | ExprKind::Call { .. }
                 | ExprKind::Index { .. }
-                | ExprKind::Slice { .. }
                 | ExprKind::Try(_)
                 | ExprKind::OptChain { .. }
                 | ExprKind::NullCoalesce { .. }
@@ -5249,7 +5240,6 @@ impl Checker {
             | ExprKind::Range { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -6101,7 +6091,6 @@ impl Checker {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -6140,6 +6129,11 @@ impl Checker {
         Some((sig.params.get(1)?.clone(), sig.params.get(2)?.clone()))
     }
 
+    /// The type of a `Range` value: the prelude struct every module sees (TICKET-253).
+    pub(super) fn range_ty(&self) -> Ty {
+        Ty::Struct(self.bare_key("Range"), Vec::new())
+    }
+
     /// The result type of `obj[a..b]` — the `Slice` protocol's arg. `list[T] → list[T]`, `str → str`;
     /// a user struct via `slice(self, int, int) -> R`. `None` ⇒ not sliceable.
     pub(super) fn slice_result(&self, ty: &Ty) -> Option<Ty> {
@@ -6151,8 +6145,7 @@ impl Checker {
             // A protocol existential that IS or embeds `Slice[R]` (M22) — same signature rule.
             Ty::Protocol(..) => {
                 let (sig, map) = self.protocol_op_sig(ty, "slice")?;
-                let opt_int = Ty::option(Ty::Int);
-                if sig.params.len() != 4 || sig.params[1..=3].iter().any(|p| *p != opt_int) {
+                if sig.params.len() != 2 || sig.params[1] != self.range_ty() {
                     return None;
                 }
                 Some(subst(&sig.ret, &map))
@@ -6819,7 +6812,6 @@ fn bare_head_name(kind: &ExprKind) -> Option<&str> {
         | ExprKind::Range { .. }
         | ExprKind::Call { .. }
         | ExprKind::Field { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }
@@ -6857,7 +6849,6 @@ fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
         | k @ ExprKind::Range { .. }
         | k @ ExprKind::Call { .. }
         | k @ ExprKind::Field { .. }
-        | k @ ExprKind::Slice { .. }
         | k @ ExprKind::Try(_)
         | k @ ExprKind::OptChain { .. }
         | k @ ExprKind::NullCoalesce { .. }
@@ -6893,7 +6884,6 @@ fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
         | ExprKind::Range { .. }
         | ExprKind::Call { .. }
         | ExprKind::Index { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }

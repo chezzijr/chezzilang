@@ -500,7 +500,7 @@ impl Vm {
             | Op::MakeClosure(..)
             | Op::GetField { .. }
             | Op::GetIndex
-            | Op::GetSlice
+            | Op::SliceRange
             | Op::SetField { .. }
             | Op::SetIndex
             | Op::Dup
@@ -637,7 +637,7 @@ impl Vm {
                 | Op::MakeClosure(..)
                 | Op::GetField { .. }
                 | Op::GetIndex
-                | Op::GetSlice
+                | Op::SliceRange
                 | Op::SetField { .. }
                 | Op::SetIndex
                 | Op::Dup
@@ -763,7 +763,7 @@ impl Vm {
                 | Op::MakeClosure(..)
                 | Op::GetField { .. }
                 | Op::GetIndex
-                | Op::GetSlice
+                | Op::SliceRange
                 | Op::SetField { .. }
                 | Op::SetIndex
                 | Op::Dup
@@ -1149,7 +1149,7 @@ impl Vm {
             | Op::MakeClosure(..)
             | Op::GetField { .. }
             | Op::GetIndex
-            | Op::GetSlice
+            | Op::SliceRange
             | Op::SetField { .. }
             | Op::SetIndex
             | Op::Dup
@@ -1280,7 +1280,7 @@ impl Vm {
             | Op::MakeClosure(..)
             | Op::GetField { .. }
             | Op::GetIndex
-            | Op::GetSlice
+            | Op::SliceRange
             | Op::SetField { .. }
             | Op::SetIndex
             | Op::Dup
@@ -1420,7 +1420,7 @@ impl Vm {
                 | Op::MakeClosure(..)
                 | Op::GetField { .. }
                 | Op::GetIndex
-                | Op::GetSlice
+                | Op::SliceRange
                 | Op::SetField { .. }
                 | Op::SetIndex
                 | Op::Dup
@@ -1551,7 +1551,7 @@ impl Vm {
                         | Op::MakeClosure(..)
                         | Op::GetField { .. }
                         | Op::GetIndex
-                        | Op::GetSlice
+                        | Op::SliceRange
                         | Op::SetField { .. }
                         | Op::SetIndex
                         | Op::Dup
@@ -1845,7 +1845,7 @@ impl Vm {
                     | Op::MakeClosure(..)
                     | Op::GetField { .. }
                     | Op::GetIndex
-                    | Op::GetSlice
+                    | Op::SliceRange
                     | Op::SetField { .. }
                     | Op::SetIndex
                     | Op::Dup
@@ -1999,7 +1999,7 @@ impl Vm {
                 | Op::MakeClosure(..)
                 | Op::GetField { .. }
                 | Op::GetIndex
-                | Op::GetSlice
+                | Op::SliceRange
                 | Op::SetField { .. }
                 | Op::SetIndex
                 | Op::Dup
@@ -2124,7 +2124,7 @@ impl Vm {
                     | Op::MakeClosure(..)
                     | Op::GetField { .. }
                     | Op::GetIndex
-                    | Op::GetSlice
+                    | Op::SliceRange
                     | Op::SetField { .. }
                     | Op::SetIndex
                     | Op::Dup
@@ -2266,7 +2266,7 @@ impl Vm {
             | Op::MakeClosure(..)
             | Op::GetField { .. }
             | Op::GetIndex
-            | Op::GetSlice
+            | Op::SliceRange
             | Op::SetField { .. }
             | Op::SetIndex
             | Op::Dup

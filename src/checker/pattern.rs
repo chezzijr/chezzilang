@@ -1939,7 +1939,6 @@ impl Checker {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -2134,24 +2133,12 @@ impl Checker {
             ExprKind::Unary { op, expr: inner } => self.infer_unary(expr, *op, inner),
             ExprKind::Binary { op, lhs, rhs } => self.infer_binary(*op, lhs, rhs),
             ExprKind::Compare { operands, ops } => self.infer_compare_chain(operands, ops),
-            ExprKind::Slice {
-                obj,
-                start,
-                end,
-                step,
-            } => self.infer_slice(
-                obj,
-                start.as_deref(),
-                end.as_deref(),
-                step.as_deref(),
-                expr.span,
-            ),
             // TICKET-253: a range is a VALUE of the prelude struct `Range`; its bounds are `int`s.
             ExprKind::Range { start, end, .. } => {
                 for bound in [start, end].into_iter().flatten() {
                     self.expect_int(bound, "range bound");
                 }
-                Ty::Struct(self.bare_key("Range"), Vec::new())
+                self.range_ty()
             }
             ExprKind::Call {
                 callee,
@@ -2332,7 +2319,7 @@ impl Checker {
             ExprKind::Field { name_span, .. } => {
                 self.hover_record_at(*name_span, ty, HoverKind::Field, None);
             }
-            ExprKind::Pass | ExprKind::List(..) | ExprKind::Tuple(_) | ExprKind::Map(_) | ExprKind::Set(_) | ExprKind::Comprehension { .. } | ExprKind::Unary { .. } | ExprKind::Binary { .. } | ExprKind::Compare { .. } | ExprKind::Range { .. } | ExprKind::Call { .. } | ExprKind::Index { .. } | ExprKind::Slice { .. } | ExprKind::Try(_) | ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } | ExprKind::Closure { .. } | ExprKind::Match { .. } | ExprKind::IfElse { .. } | ExprKind::Recover(_) | ExprKind::ElseGuard { .. } => {}
+            ExprKind::Pass | ExprKind::List(..) | ExprKind::Tuple(_) | ExprKind::Map(_) | ExprKind::Set(_) | ExprKind::Comprehension { .. } | ExprKind::Unary { .. } | ExprKind::Binary { .. } | ExprKind::Compare { .. } | ExprKind::Range { .. } | ExprKind::Call { .. } | ExprKind::Index { .. } | ExprKind::Try(_) | ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } | ExprKind::Closure { .. } | ExprKind::Match { .. } | ExprKind::IfElse { .. } | ExprKind::Recover(_) | ExprKind::ElseGuard { .. } => {}
         }
     }
 
@@ -3041,7 +3028,6 @@ impl Checker {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -5223,6 +5209,17 @@ impl Checker {
         if self.errors.len() > mark && type_shaped {
             return Ty::Unknown;
         }
+        // TICKET-253 — a subscript whose index is a `Range` is a slice or a key lookup, decided
+        // here once (a map keyed by `Range` looks the key up; everything else slices). The index is
+        // typed on a probe; when it is no `Range` the probe's reports are dropped and the arms below
+        // type it again as before.
+        if !matches!(obj_ty, Ty::Map(..)) && !matches!(index.kind, ExprKind::Int(_)) {
+            let probe = self.errors.len();
+            if self.infer_value(index) == self.range_ty() {
+                return self.range_subscript(&obj_ty, obj, index);
+            }
+            self.errors.truncate(probe);
+        }
         // Map keys are NOT int — infer the object first and check the index against the key type.
         match obj_ty {
             Ty::Map(k, v) => {
@@ -5306,6 +5303,65 @@ impl Checker {
         }
     }
 
+    /// `obj[r]` where `r` is a `Range`: the ONE place that decides whether the subscript is a slice
+    /// or an index. Order: the `Slice` bound of a type parameter, the built-in containers and a
+    /// type's `slice` hook (`slice_result`), then an `index` whose key is `Range`. The choice rides
+    /// the hook-call table to the compiler, which emits the opcode the checker chose; the VM never
+    /// chooses again by value.
+    fn range_subscript(&mut self, obj_ty: &Ty, obj: &Expr, index: &Expr) -> Ty {
+        if obj_ty.is_unknown() {
+            return Ty::Unknown;
+        }
+        let range = self.range_ty();
+        if let Ty::Param(name) = obj_ty {
+            if let Some(bound) = self
+                .type_params
+                .get(name)
+                .and_then(|bs| bs.iter().find(|b| b.name == "Slice").cloned())
+            {
+                self.record_subscript_slice(index);
+                return bound.args.first().cloned().unwrap_or(Ty::Unknown);
+            }
+            if let Some((k, v)) = self.param_index_kv(name)
+                && self.assignable(&k, &range)
+            {
+                return v;
+            }
+            self.error(obj.span, format!("cannot slice {name}"));
+            return Ty::Unknown;
+        }
+        if let Some(r) = self.slice_result(obj_ty) {
+            self.record_subscript_slice(index);
+            return r;
+        }
+        if let Some((k, v)) = self.index_kv(obj_ty)
+            && k == range
+        {
+            return v;
+        }
+        let note = self.hook_name_note(obj_ty, "Slice", "slice");
+        self.error(obj.span, format!("cannot slice {obj_ty}{note}"));
+        Ty::Unknown
+    }
+
+    /// Record that the subscript whose index expression is `index` reads as a slice.
+    fn record_subscript_slice(&mut self, index: &Expr) {
+        let key = crate::checker::carrier_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            index.span,
+        );
+        crate::checker::record_call_table_entry(
+            &mut self.hook_calls,
+            &mut self.table_conflicts,
+            key,
+            crate::checker::Hook::Slice,
+            "subscript",
+            index.span,
+        );
+    }
+
     /// The `(K, V)` of a bounded type parameter's `Index`/`IndexSet` bound, resolved with the
     /// surrounding params in scope. `None` ⇒ the param has no indexing bound.
     pub(super) fn param_index_kv(&mut self, name: &str) -> Option<(Ty, Ty)> {
@@ -5332,45 +5388,6 @@ impl Checker {
         let k = bound.args.first().cloned().unwrap_or(Ty::Unknown);
         let v = bound.args.get(1).cloned().unwrap_or(Ty::Unknown);
         Some((k, v))
-    }
-
-    /// Type `obj[start:end:step]`. Each *present* component must be `int`; the result type follows the
-    /// `Slice` protocol — `list[T] → list[T]`, `str → str`, or a struct's
-    /// `slice(self, int?, int?, int?) -> R`.
-    pub(super) fn infer_slice(
-        &mut self,
-        obj: &Expr,
-        start: Option<&Expr>,
-        end: Option<&Expr>,
-        step: Option<&Expr>,
-        span: Span,
-    ) -> Ty {
-        // Only the *present* components are constrained to int; an omitted bound/step is `None`.
-        for comp in [start, end, step].into_iter().flatten() {
-            self.expect_int(comp, "slice bound");
-        }
-        let obj_ty = self.infer_value(obj);
-        if obj_ty.is_unknown() {
-            return Ty::Unknown;
-        }
-        // A bounded `[C: Slice[R]]` type parameter is sliceable inside the generic body; its result
-        // type is the bound's `R` arg (resolved with sibling params in scope).
-        if let Ty::Param(name) = &obj_ty
-            && let Some(bound) = self
-                .type_params
-                .get(name)
-                .and_then(|bs| bs.iter().find(|b| b.name == "Slice").cloned())
-        {
-            return bound.args.first().cloned().unwrap_or(Ty::Unknown);
-        }
-        match self.slice_result(&obj_ty) {
-            Some(r) => r,
-            None => {
-                let note = self.hook_name_note(&obj_ty, "Slice", "slice");
-                self.error(span, format!("cannot slice {obj_ty}{note}"));
-                Ty::Unknown
-            }
-        }
     }
 
     /// W7-43 — bind a fresh scratch local to `t` (a carrier operand's ALREADY-inferred type) and hand
@@ -5623,7 +5640,6 @@ impl Checker {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
@@ -6384,17 +6400,6 @@ impl Checker {
                 self.scan_expr_for_pin(name, obj, match_pin, member_pin);
                 if let Some(index) = index {
                     self.scan_expr_for_pin(name, index, match_pin, member_pin);
-                }
-            }
-            ExprKind::Slice {
-                obj,
-                start,
-                end,
-                step,
-            } => {
-                self.scan_expr_for_pin(name, obj, match_pin, member_pin);
-                for c in [start, end, step].into_iter().flatten() {
-                    self.scan_expr_for_pin(name, c, match_pin, member_pin);
                 }
             }
             ExprKind::Try(inner) => self.scan_expr_for_pin(name, inner, match_pin, member_pin),

@@ -135,7 +135,6 @@ pub(super) fn aliases_operand(kind: &ExprKind) -> OperandAlias {
         | ExprKind::Call { .. }
         | ExprKind::Field { .. }
         | ExprKind::Index { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::Closure { .. }
@@ -306,7 +305,6 @@ impl UseWalk<'_> {
             | ExprKind::Compare { .. }
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -373,7 +371,6 @@ impl UseWalk<'_> {
             | ExprKind::Compare { .. }
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -438,7 +435,6 @@ impl UseWalk<'_> {
                                 | ExprKind::Range { .. }
                                 | ExprKind::Call { .. }
                                 | ExprKind::Field { .. }
-                                | ExprKind::Slice { .. }
                                 | ExprKind::Try(_)
                                 | ExprKind::OptChain { .. }
                                 | ExprKind::NullCoalesce { .. }
@@ -470,7 +466,6 @@ impl UseWalk<'_> {
                     | ExprKind::Compare { .. }
                     | ExprKind::Range { .. }
                     | ExprKind::Call { .. }
-                    | ExprKind::Slice { .. }
                     | ExprKind::Try(_)
                     | ExprKind::OptChain { .. }
                     | ExprKind::NullCoalesce { .. }
@@ -538,7 +533,6 @@ impl UseWalk<'_> {
                     | ExprKind::Compare { .. }
                     | ExprKind::Range { .. }
                     | ExprKind::Call { .. }
-                    | ExprKind::Slice { .. }
                     | ExprKind::Try(_)
                     | ExprKind::OptChain { .. }
                     | ExprKind::NullCoalesce { .. }
@@ -697,7 +691,6 @@ impl UseWalk<'_> {
                         | ExprKind::Compare { .. }
                         | ExprKind::Range { .. }
                         | ExprKind::Call { .. }
-                        | ExprKind::Slice { .. }
                         | ExprKind::Try(_)
                         | ExprKind::OptChain { .. }
                         | ExprKind::NullCoalesce { .. }
@@ -731,7 +724,6 @@ impl UseWalk<'_> {
                     | ExprKind::Range { .. }
                     | ExprKind::Call { .. }
                     | ExprKind::Index { .. }
-                    | ExprKind::Slice { .. }
                     | ExprKind::Try(_)
                     | ExprKind::OptChain { .. }
                     | ExprKind::NullCoalesce { .. }
@@ -762,19 +754,6 @@ impl UseWalk<'_> {
             ExprKind::Field { .. } | ExprKind::Index { .. } => {
                 self.deep_use(e, || DeepUse::Read { view: e.id });
                 self.path(e);
-            }
-            ExprKind::Slice {
-                obj,
-                start,
-                end,
-                step,
-            } => {
-                // A slice of a view is a new container over the view's children.
-                self.deep_use(obj, || DeepUse::Read { view: e.id });
-                self.indexed(obj);
-                for b in [start, end, step].into_iter().flatten() {
-                    self.value(b);
-                }
             }
             ExprKind::IfElse { cond, then, els } => {
                 self.value(cond);
@@ -826,13 +805,6 @@ impl UseWalk<'_> {
                 self.keep(n, RootUse::Op)
             }
             None => self.value(e),
-        }
-    }
-
-    fn indexed(&mut self, obj: &Expr) {
-        match obj.kind.as_ident() {
-            Some(n) => self.keep(n, RootUse::Index),
-            None => self.value(obj),
         }
     }
 }
@@ -949,7 +921,6 @@ pub(super) fn chain(expr: &Expr) -> Option<(String, Vec<ChainLink>)> {
         | ExprKind::Compare { .. }
         | ExprKind::Range { .. }
         | ExprKind::Call { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }
@@ -1117,7 +1088,6 @@ impl Scan {
                     | ExprKind::Compare { .. }
                     | ExprKind::Range { .. }
                     | ExprKind::Call { .. }
-                    | ExprKind::Slice { .. }
                     | ExprKind::Try(_)
                     | ExprKind::OptChain { .. }
                     | ExprKind::NullCoalesce { .. }
@@ -1307,7 +1277,6 @@ impl Scan {
                     | ExprKind::Range { .. }
                     | ExprKind::Call { .. }
                     | ExprKind::Index { .. }
-                    | ExprKind::Slice { .. }
                     | ExprKind::Try(_)
                     | ExprKind::OptChain { .. }
                     | ExprKind::NullCoalesce { .. }
@@ -1381,7 +1350,6 @@ impl Scan {
             | ExprKind::Ident(_)
             | ExprKind::Comprehension { .. }
             | ExprKind::Range { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::OptChain { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
@@ -1637,7 +1605,6 @@ impl Checker {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }

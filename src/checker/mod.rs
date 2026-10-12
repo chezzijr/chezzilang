@@ -1471,7 +1471,7 @@ pub const HOOKS: &[HookRow] = &[
         hook: Hook::Slice,
         protocol: "Slice",
         method: "slice",
-        operator: "x[a:b]",
+        operator: "x[a..b]",
         total: false,
     },
     HookRow {
@@ -1771,7 +1771,6 @@ pub fn witness_key_span(callee: &Expr, call_span: Span) -> Span {
         | ExprKind::Range { .. }
         | ExprKind::Call { .. }
         | ExprKind::Index { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }
@@ -3518,15 +3517,9 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
             embeds: Vec::new(),
             methods: vec![(
                 "slice".to_string(),
-                // Python-style: three `Option[int]` components (start/end/step), each `None` when
-                // omitted. The runtime always passes all three explicitly.
+                // TICKET-253: the one argument is the `Range` value (`std.prelude`'s struct, bare key).
                 FnSig::plain(
-                    vec![
-                        Ty::Unknown,
-                        Ty::option(Ty::Int),
-                        Ty::option(Ty::Int),
-                        Ty::option(Ty::Int),
-                    ],
+                    vec![Ty::Unknown, Ty::Struct("Range".into(), Vec::new())],
                     Ty::Param("R".into()),
                 ),
             )],

@@ -106,7 +106,7 @@ fn bin_kind(op: &Op) -> Option<BinKind> {
         | Op::MakeClosure(..)
         | Op::GetField { .. }
         | Op::GetIndex
-        | Op::GetSlice
+        | Op::SliceRange
         | Op::SetField { .. }
         | Op::SetIndex
         | Op::Dup
@@ -233,7 +233,7 @@ fn jump_target(op: &Op) -> Option<usize> {
         | Op::MakeClosure(..)
         | Op::GetField { .. }
         | Op::GetIndex
-        | Op::GetSlice
+        | Op::SliceRange
         | Op::SetField { .. }
         | Op::SetIndex
         | Op::Dup
@@ -358,7 +358,7 @@ fn jump_target_mut(op: &mut Op) -> Option<&mut usize> {
         | Op::MakeClosure(..)
         | Op::GetField { .. }
         | Op::GetIndex
-        | Op::GetSlice
+        | Op::SliceRange
         | Op::SetField { .. }
         | Op::SetIndex
         | Op::Dup
@@ -493,7 +493,7 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
             | Op::MakeClosure(..)
             | Op::GetField { .. }
             | Op::GetIndex
-            | Op::GetSlice
+            | Op::SliceRange
             | Op::SetField { .. }
             | Op::SetIndex
             | Op::Dup

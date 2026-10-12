@@ -338,10 +338,12 @@ protocol IndexSet[K, V]:
     fn index(self, k: K) -> V
     fn set_index(self, k: K, v: V) -> None
 
-# Python-style slicing: three `int?` components (start/end/step), each None when omitted;
-# the VM always passes all three explicitly. `R` is the slice result type, recovered at call sites.
+# Slicing: `xs[a..b]`, `xs[a..]`, `xs[..b]`, `xs[..]` and `xs[Range(a, b, step)]` hand the `Range` value
+# to `slice`; a built-in container resolves it with the same rules (a negative bound counts from the
+# end, an inclusive end adds one after that, both bounds clamp). `R` is the slice result type,
+# recovered at call sites.
 protocol Slice[R]:
-    fn slice(self, start: int?, end: int?, step: int?) -> R
+    fn slice(self, r: Range) -> R
 
 # `Convert[S]` — the extensible type-conversion protocol (Rust `From`, target-keyed). Its sole method
 # `convert(x: S) -> Self` is STATIC (first param is `x`, NOT `self`), so it is called `Target.convert(src)`

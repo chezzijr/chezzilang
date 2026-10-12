@@ -49,7 +49,6 @@ fn self_chain(expr: &Expr) -> Option<Vec<ChainLink>> {
         | ExprKind::Compare { .. }
         | ExprKind::Range { .. }
         | ExprKind::Call { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }
@@ -237,17 +236,6 @@ impl Scan {
                 self.expr(obj);
                 if let Some(index) = index {
                     self.expr(index);
-                }
-            }
-            ExprKind::Slice {
-                obj,
-                start,
-                end,
-                step,
-            } => {
-                self.expr(obj);
-                for expr in [start, end, step].into_iter().flatten() {
-                    self.expr(expr);
                 }
             }
             // A closure owns a different capture frame. Rule 3 summarizes it separately.

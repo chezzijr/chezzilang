@@ -181,7 +181,6 @@ fn is_inline_default(e: &Expr) -> bool {
         | ExprKind::Call { .. }
         | ExprKind::Field { .. }
         | ExprKind::Index { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }
@@ -864,17 +863,6 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
             }
             types.iter().for_each(tf);
         }
-        ExprKind::Slice {
-            obj,
-            start,
-            end,
-            step,
-        } => {
-            walk_idents_and_types(obj, f, tf);
-            for c in [start, end, step].iter().filter_map(|c| c.as_deref()) {
-                walk_idents_and_types(c, f, tf);
-            }
-        }
         ExprKind::Try(x) => walk_idents_and_types(x, f, tf),
         ExprKind::OptChain { obj, call, .. } => {
             walk_idents_and_types(obj, f, tf);
@@ -1371,17 +1359,6 @@ impl Walker<'_> {
                     self.walk_expr(index)?;
                 }
             }
-            ExprKind::Slice {
-                obj,
-                start,
-                end,
-                step,
-            } => {
-                self.walk_expr(obj)?;
-                for c in [start, end, step].into_iter().flatten() {
-                    self.walk_expr(c)?;
-                }
-            }
             ExprKind::Try(inner) => self.walk_expr(inner)?,
             ExprKind::Closure { params, body, .. } => {
                 self.push_scope();
@@ -1714,7 +1691,6 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
         | other @ ExprKind::Call { .. }
         | other @ ExprKind::Field { .. }
         | other @ ExprKind::Index { .. }
-        | other @ ExprKind::Slice { .. }
         | other @ ExprKind::Try(_)
         | other @ ExprKind::Closure { .. }
         | other @ ExprKind::Match { .. }

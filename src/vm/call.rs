@@ -3234,7 +3234,7 @@ impl Vm {
     ///
     /// EVERY arm **delegates** to the exact primitive the operator form uses — `arith` for
     /// `add`..`mod`, `neg_value` for `neg`, `hash_value` (the Map/Set key hash) for `hash`,
-    /// `compare` for `compare`, `get_index`/`set_index`/`get_slice` for the indexing trio — so
+    /// `compare` for `compare`, `get_index`/`set_index`/`slice_range` for the indexing trio — so
     /// `a.add(b)` ≡ `a + b` and `c.index(k)` ≡ `c[k]` by CONSTRUCTION: same value, same int/float
     /// coercion, same overflow / divide-by-zero / out-of-bounds fault text. Nothing is
     /// reimplemented here.
@@ -3407,43 +3407,15 @@ impl Vm {
                 self.set_index(span)?;
                 Ok(Some(Value::nil()))
             }
-            // `Slice[R]`'s components are `int?` (`Option[int]`) VALUES, while `get_slice` reads the
-            // raw `Nil`/`Int` form pushed for `c[a:b:c]` — so unwrap each `Some(n)`/`None`
-            // (by the FIXED native variant ids, never a name compare, mirroring `stmt.rs`'s `opt`
-            // closure inverted). A non-Option component is left as-is so `get_slice` raises its own
-            // `expected int, found X`.
-            ("slice", 3) => {
+            // `Slice[R]`'s one argument is the `Range` value; `c.slice(r)` is `c[r]` read as a slice.
+            ("slice", 1) => {
                 self.push(recv);
-                for a in args {
-                    let c = self.unwrap_opt_int(*a);
-                    self.push(c);
-                }
-                self.get_slice(span)?;
+                self.push(args[0]);
+                self.slice_range(span)?;
                 Ok(Some(self.pop()))
             }
             _ => Ok(None),
         }
-    }
-
-    /// `Option[int]` → the raw `Nil`/`Int` slice component `Vm::get_slice` expects. Gated on the
-    /// fixed `VID_SOME`/`VID_NONE_VARIANT` ids (a user enum shadowing `Some`/`None` gets its own
-    /// ids), mirroring `src/vm/stmt.rs`'s `opt` closure in reverse.
-    fn unwrap_opt_int(&self, v: Value) -> Value {
-        use crate::vm::op::{VID_NONE_VARIANT, VID_SOME};
-        if let Some(h) = v.as_obj()
-            && let Obj::Enum {
-                variant_id,
-                payload,
-            } = self.heap.get(h)
-        {
-            if *variant_id == VID_SOME && payload.len() == 1 {
-                return payload[0];
-            }
-            if *variant_id == VID_NONE_VARIANT {
-                return Value::nil();
-            }
-        }
-        v
     }
 
     pub(super) fn core_method(

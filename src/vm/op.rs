@@ -415,9 +415,11 @@ pub enum Op {
     },
     /// Stack `[obj, index]` (index already `AsInt`-checked).
     GetIndex,
-    /// Stack `[obj, start, end, step]` → `[slice]` — Python-style slice of a list/str, or a
-    /// struct's `slice`. Each of `start`/`end`/`step` is `Nil` when its component was omitted.
-    GetSlice,
+    /// Stack `[obj, range]` → `[slice]` — the slice of a list/str/bytes/bytearray the `Range` value
+    /// selects (`crate::slice::range_indices`), or a struct's `slice` hook. The compiler emits it
+    /// where the checker chose the `Slice` reading of `obj[range]` (TICKET-253); every other
+    /// subscript is `GetIndex`.
+    SliceRange,
     /// Stack `[obj, value]` → `[]` — mutate a struct field in place. `ic`: see [`Op::GetField`].
     SetField {
         name: String,

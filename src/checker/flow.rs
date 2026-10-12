@@ -188,7 +188,6 @@ pub(super) fn stmt(s: &Stmt, diverges: &dyn Fn(&Expr) -> bool) -> Flow {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }

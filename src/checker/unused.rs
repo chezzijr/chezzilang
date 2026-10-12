@@ -159,7 +159,6 @@ impl Scan {
                     | ExprKind::Call { .. }
                     | ExprKind::Field { .. }
                     | ExprKind::Index { .. }
-                    | ExprKind::Slice { .. }
                     | ExprKind::Try(_)
                     | ExprKind::OptChain { .. }
                     | ExprKind::NullCoalesce { .. }
@@ -352,17 +351,6 @@ impl Scan {
                 self.expr(obj);
                 if let Some(index) = index {
                     self.expr(index);
-                }
-            }
-            ExprKind::Slice {
-                obj,
-                start,
-                end,
-                step,
-            } => {
-                self.expr(obj);
-                for o in [start, end, step].into_iter().flatten() {
-                    self.expr(o);
                 }
             }
             ExprKind::Closure { params, body, .. } => self.scoped(|s| {

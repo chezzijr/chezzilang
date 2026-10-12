@@ -784,29 +784,21 @@ impl Vm {
         }
     }
 
-    /// `obj[start:end:step]` — Python-style slice copy of a list/str, or a struct's `slice`. Each
-    /// component arrives as `Nil` (omitted → `None`) or `Int`; the shared `slice::slice_indices`
-    /// resolver owns all the clamp/step/reverse math.
-    pub(super) fn get_slice(&mut self, span: Span) -> Result<(), RuntimeError> {
-        let step = self.pop();
-        let end = self.pop();
-        let start = self.pop();
+    /// `obj[range]` read as a SLICE (TICKET-253): a copy of the elements of a list, `str`, `bytes` or
+    /// `bytearray` that the `Range` value selects, or the result of a struct's `slice` hook. The
+    /// shared `slice::range_indices` resolver owns all the clamp/step/reverse math. The checker chose
+    /// this reading for the subscript; the VM does not choose again.
+    pub(super) fn slice_range(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let key = self.pop();
         let obj = self.pop();
-        // Each component is `Nil` (omitted) → `None`, or an `Int` → `Some`. Anything else faults.
-        let comp = |vm: &Vm, v: Value| -> Result<Option<i64>, RuntimeError> {
-            if v.is_nil() {
-                Ok(None)
-            } else if let Some(n) = vm.int_val(v) {
-                Ok(Some(n))
-            } else {
-                Err(vm.err(format!("expected int, found {}", vm.type_name(v)), span))
-            }
-        };
-        let s = comp(self, start)?;
-        let e = comp(self, end)?;
-        let st = comp(self, step)?;
         let Some(h) = obj.as_obj() else {
             return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span));
+        };
+        let Some(parts) = self.as_range(key) else {
+            return Err(self.err(
+                format!("cannot slice by {}: expected a Range", self.type_name(key)),
+                span,
+            ));
         };
         // Snapshot the result kind without holding the heap borrow across the alloc / method call.
         enum Sliced {
@@ -818,35 +810,34 @@ impl Vm {
         }
         let sliced = match self.heap.get(h) {
             Obj::List(items) => {
-                let idxs = crate::slice::slice_indices(s, e, st, items.len())
+                let idxs = crate::slice::range_indices(&parts, items.len())
                     .map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::List(idxs.iter().map(|&i| items[i]).collect())
             }
-            // ASCII arm: a byte index IS a codepoint index. The `None` arm is the pre-change
-            // code verbatim and stays O(n) per slice for non-ASCII text.
+            // ASCII arm: a byte index IS a codepoint index. The `None` arm stays O(n) per slice for
+            // non-ASCII text (DEC-072).
             Obj::Str(string) => match string.ascii_bytes() {
                 Some(b) => {
-                    let idxs = crate::slice::slice_indices(s, e, st, b.len())
+                    let idxs = crate::slice::range_indices(&parts, b.len())
                         .map_err(|m| self.err(m.to_string(), span))?;
                     Sliced::Str(idxs.iter().map(|&i| b[i] as char).collect())
                 }
                 None => {
                     let chars: Vec<char> = string.chars().collect();
-                    let idxs = crate::slice::slice_indices(s, e, st, chars.len())
+                    let idxs = crate::slice::range_indices(&parts, chars.len())
                         .map_err(|m| self.err(m.to_string(), span))?;
                     Sliced::Str(idxs.iter().map(|&i| chars[i]).collect())
                 }
             },
-            // `bytes[a:b:c]` slices over BYTE offsets and yields a new `bytes` (open bounds / step /
-            // reverse / negative all via the shared `slice_indices`, exactly like list/str).
+            // `bytes[r]` slices over BYTE offsets and yields a new `bytes`.
             Obj::Bytes(b) => {
-                let idxs = crate::slice::slice_indices(s, e, st, b.len())
+                let idxs = crate::slice::range_indices(&parts, b.len())
                     .map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::Bytes(idxs.iter().map(|&i| b[i]).collect())
             }
-            // `bytearray[a:b:c]` slices over BYTE offsets and yields a NEW `bytearray` (mutable copy).
+            // `bytearray[r]` slices over BYTE offsets and yields a NEW `bytearray` (mutable copy).
             Obj::ByteArray(b) => {
-                let idxs = crate::slice::slice_indices(s, e, st, b.len())
+                let idxs = crate::slice::range_indices(&parts, b.len())
                     .map_err(|m| self.err(m.to_string(), span))?;
                 Sliced::ByteArray(idxs.iter().map(|&i| b[i]).collect())
             }
@@ -901,24 +892,8 @@ impl Vm {
                 self.push(Value::obj(nh));
             }
             Sliced::Struct => {
-                // The `slice` protocol takes three `Option[int]` components — pass real `Option`
-                // values (`None`/`Some(n)`) so the user body can `match`/`??` them. Root `obj`
-                // across the enum allocs (it's the only reference keeping the receiver alive).
-                self.push(obj);
-                let opt = |vm: &mut Vm, c: Option<i64>| match c {
-                    None => vm.alloc_enum("Option", "None", Vec::new()),
-                    Some(n) => {
-                        // `n` comes from `int_val` (may be a boxed BigInt) → box if wide.
-                        let nv = vm.make_int(n);
-                        vm.alloc_enum("Option", "Some", vec![nv])
-                    }
-                };
-                let s_v = opt(self, s);
-                let e_v = opt(self, e);
-                let st_v = opt(self, st);
-                self.pop();
                 let Some(v) =
-                    self.reentered(|vm| vm.invoke_hook(Hook::Slice, obj, &[s_v, e_v, st_v], span))?
+                    self.reentered(|vm| vm.invoke_hook(Hook::Slice, obj, &[key], span))?
                 else {
                     return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span));
                 };

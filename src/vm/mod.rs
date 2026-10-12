@@ -6860,6 +6860,7 @@ pub(crate) use call::is_mutating_native_kind;
 mod exec;
 mod fileio;
 mod netio;
+mod range;
 mod sched;
 mod stmt;
 pub(crate) use boxctx::CROSSING_CLOSURE_METHODS;

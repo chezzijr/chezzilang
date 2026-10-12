@@ -134,7 +134,6 @@ impl Checker {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }

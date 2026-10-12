@@ -3353,17 +3353,20 @@ impl Vm {
                     None => self.alloc_enum("Option", "None", vec![]),
                 })
             }
-            // `slice(lo, hi)` is ONE crossing that returns a container, like `get`: the elements
-            // are encoded with one memo, so two that alias one node land on one object.
+            // `slice(r)` is ONE crossing that returns a container, like `get`: the elements
+            // are encoded with one memo, so two that alias one node land on one object. The `Range`
+            // is read before the lock and resolved against the length INSIDE the read, with the same
+            // `range_indices` every other slice site calls.
             "_slice" => {
-                self.arity_err(method, args, 2, span)?;
-                let (lo, hi) = (self.int_of(args[0]), self.int_of(args[1]));
+                self.arity_err(method, args, 1, span)?;
+                let Some(parts) = self.as_range(args[0]) else {
+                    return Err(self.err("RwShared._slice requires a Range".into(), span));
+                };
                 let ws =
                     self.rwshared_read(&core, span, |vm, ctx| match boxctx::state_obj(ctx) {
                         Some(Obj::List(items)) => {
-                            let idxs =
-                                crate::slice::slice_indices(Some(lo), Some(hi), None, items.len())
-                                    .map_err(|e| vm.err(e.to_string(), span))?;
+                            let idxs = crate::slice::range_indices(&parts, items.len())
+                                .map_err(|e| vm.err(e.to_string(), span))?;
                             let picked: Vec<Value> = idxs.into_iter().map(|i| items[i]).collect();
                             vm.box_copy_pieces(ctx, &picked, span)
                         }

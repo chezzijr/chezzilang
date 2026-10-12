@@ -1183,15 +1183,6 @@ pub enum ExprKind {
         index: Option<Box<Expr>>,
         types: Vec<Type>,
     },
-    /// `obj[start:end:step]` — Python-style slice. Emitted when the subscript holds at least one
-    /// `:` (distinct from `Index` so the `Slice` protocol dispatches separately). Each of
-    /// `start`/`end`/`step` is `None` when the component is omitted (`xs[:]`, `xs[1:]`, `xs[::2]`).
-    Slice {
-        obj: Box<Expr>,
-        start: Option<Box<Expr>>,
-        end: Option<Box<Expr>>,
-        step: Option<Box<Expr>>,
-    },
     /// postfix `expr?` — error propagation.
     Try(Box<Expr>),
     /// Optional chaining `obj?.name` (field) or `obj?.name(args)` (method). `obj` is an `Option[T]`:
@@ -1291,7 +1282,6 @@ impl ExprKind {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -1328,7 +1318,6 @@ impl ExprKind {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -1455,7 +1444,6 @@ pub fn type_application(e: &Expr) -> Option<TypeApplication<'_>> {
         | ExprKind::Call { .. }
         | ExprKind::Field { .. }
         | ExprKind::Index { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }
@@ -1547,17 +1535,6 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
         ExprKind::Index { obj, index, .. } => {
             go(obj);
             index.iter().for_each(|i| go(i));
-        }
-        ExprKind::Slice {
-            obj,
-            start,
-            end,
-            step,
-        } => {
-            go(obj);
-            for c in [start, end, step].into_iter().flatten() {
-                expr_recover_blocks(c, out);
-            }
         }
         ExprKind::OptChain { obj, call, .. } => {
             go(obj);
@@ -1914,7 +1891,6 @@ pub fn id_width(kind: &ExprKind) -> u32 {
         | ExprKind::Call { .. }
         | ExprKind::Field { .. }
         | ExprKind::Index { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
@@ -2013,17 +1989,6 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
             go(obj, f);
             if let Some(i) = index {
                 go(i, f);
-            }
-        }
-        ExprKind::Slice {
-            obj,
-            start,
-            end,
-            step,
-        } => {
-            go(obj, f);
-            for x in [start, end, step].into_iter().flatten() {
-                go(x, f);
             }
         }
         ExprKind::OptChain { obj, call, .. } => {

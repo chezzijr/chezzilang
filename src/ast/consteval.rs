@@ -145,7 +145,6 @@ pub fn eval(e: &Expr, visits: &mut usize) -> Fold {
         | ExprKind::Call { .. }
         | ExprKind::Field { .. }
         | ExprKind::Index { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }

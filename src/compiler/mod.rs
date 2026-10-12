@@ -1921,7 +1921,6 @@ impl Compiler {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -2268,7 +2267,6 @@ impl Compiler {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -2369,7 +2367,6 @@ impl Compiler {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -3883,30 +3880,21 @@ impl Compiler {
                 };
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, index)?;
-                // No `AsInt`: the index may be a map key (str/bool), not just a list/str int.
-                // `GetIndex` validates int-ness in its list/str arm at runtime.
-                fc.emit(Op::GetIndex, expr.span);
-            }
-            ExprKind::Slice {
-                obj,
-                start,
-                end,
-                step,
-            } => {
-                // Slicing a range literal `(a..b)[start:end:step]` materializes the (ascending,
-                // step-1) range to a `List[int]` first (via the `range` builtin), then slices that
-                // list through the shared `GetSlice` path — reusing the `::step` machinery, not a
-                // parallel one. A bare range still has no value anywhere else (the error below fires
-                // for `let x = 0..10`); only this slice-receiver position is unblocked.
-                self.compile_expr(fc, obj)?;
-                // Each omitted component compiles to `nil` (mapped to `None`/default at runtime).
-                for comp in [start, end, step] {
-                    match comp {
-                        Some(e) => self.compile_expr(fc, e)?,
-                        None => fc.emit(Op::Nil, expr.span),
-                    }
+                // TICKET-253: the checker decided once whether this subscript reads as a slice (a
+                // `Range` index on a sliceable receiver); the opcode follows its record.
+                let slice_key = crate::checker::carrier_key(
+                    self.current_module_idx,
+                    self.kw_frag_ctx,
+                    self.kw_frag_ord,
+                    index.span,
+                );
+                if self.hook_calls.get(&slice_key) == Some(&crate::checker::Hook::Slice) {
+                    fc.emit(Op::SliceRange, expr.span);
+                } else {
+                    // No `AsInt`: the index may be a map key (str/bool), not just a list/str int.
+                    // `GetIndex` validates int-ness in its list/str arm at runtime.
+                    fc.emit(Op::GetIndex, expr.span);
                 }
-                fc.emit(Op::GetSlice, expr.span);
             }
             ExprKind::Try(inner) => {
                 self.compile_expr(fc, inner)?;
@@ -4754,7 +4742,6 @@ impl Compiler {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -4970,7 +4957,6 @@ impl Compiler {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -5680,7 +5666,6 @@ impl Compiler {
                 | ExprKind::Range { .. }
                 | ExprKind::Call { .. }
                 | ExprKind::Index { .. }
-                | ExprKind::Slice { .. }
                 | ExprKind::Try(_)
                 | ExprKind::OptChain { .. }
                 | ExprKind::NullCoalesce { .. }
@@ -6577,17 +6562,6 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
                 find_boundary_free_expr(index, out);
             }
         }
-        ExprKind::Slice {
-            obj,
-            start,
-            end,
-            step,
-        } => {
-            find_boundary_free_expr(obj, out);
-            for o in [start, end, step].into_iter().flatten() {
-                find_boundary_free_expr(o, out);
-            }
-        }
         ExprKind::Match { scrutinee, arms } => {
             find_boundary_free_expr(scrutinee, out);
             for arm in arms {
@@ -6756,7 +6730,6 @@ fn record_call_site(
                 | ExprKind::Call { .. }
                 | ExprKind::Field { .. }
                 | ExprKind::Index { .. }
-                | ExprKind::Slice { .. }
                 | ExprKind::Try(_)
                 | ExprKind::OptChain { .. }
                 | ExprKind::NullCoalesce { .. }
@@ -6791,7 +6764,6 @@ fn record_call_site(
         | ExprKind::Range { .. }
         | ExprKind::Call { .. }
         | ExprKind::Index { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }
@@ -6906,7 +6878,6 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -6928,7 +6899,6 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
         | ExprKind::Range { .. }
         | ExprKind::Field { .. }
         | ExprKind::Index { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }
@@ -7235,17 +7205,6 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
                 free_names_expr(index, bound, out);
             }
         }
-        ExprKind::Slice {
-            obj,
-            start,
-            end,
-            step,
-        } => {
-            free_names_expr(obj, bound, out);
-            for o in [start, end, step].into_iter().flatten() {
-                free_names_expr(o, bound, out);
-            }
-        }
         ExprKind::Closure { params, body, .. } => {
             let mut b = bound.clone();
             b.extend(params.iter().map(|p| p.name.clone()));
@@ -7384,17 +7343,6 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) {
                 collect_frame_binds_expr(index, out);
             }
         }
-        ExprKind::Slice {
-            obj,
-            start,
-            end,
-            step,
-        } => {
-            collect_frame_binds_expr(obj, out);
-            for o in [start, end, step].into_iter().flatten() {
-                collect_frame_binds_expr(o, out);
-            }
-        }
         ExprKind::Match { scrutinee, arms } => {
             collect_frame_binds_expr(scrutinee, out);
             for arm in arms {
@@ -7521,18 +7469,6 @@ fn expr_has_bare_spawn(e: &Expr) -> bool {
         }
         ExprKind::Index { obj, index, .. } => {
             expr_has_bare_spawn(obj) || index.as_deref().is_some_and(expr_has_bare_spawn)
-        }
-        ExprKind::Slice {
-            obj,
-            start,
-            end,
-            step,
-        } => {
-            expr_has_bare_spawn(obj)
-                || [start, end, step]
-                    .into_iter()
-                    .flatten()
-                    .any(|o| expr_has_bare_spawn(o))
         }
         ExprKind::Match { scrutinee, arms } => {
             expr_has_bare_spawn(scrutinee)
@@ -8014,7 +7950,7 @@ impl FnComp {
             | other @ Op::MakeClosure(..)
             | other @ Op::GetField { .. }
             | other @ Op::GetIndex
-            | other @ Op::GetSlice
+            | other @ Op::SliceRange
             | other @ Op::SetField { .. }
             | other @ Op::SetIndex
             | other @ Op::Dup
@@ -8162,7 +8098,7 @@ impl FnComp {
             | other @ Op::MakeClosure(..)
             | other @ Op::GetField { .. }
             | other @ Op::GetIndex
-            | other @ Op::GetSlice
+            | other @ Op::SliceRange
             | other @ Op::SetField { .. }
             | other @ Op::SetIndex
             | other @ Op::Dup

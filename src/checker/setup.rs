@@ -2983,7 +2983,6 @@ impl Checker {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -3441,7 +3440,6 @@ impl Checker {
             | ExprKind::Compare { .. }
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -3481,7 +3479,6 @@ impl Checker {
             | ExprKind::Compare { .. }
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -3537,7 +3534,6 @@ impl Checker {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -3778,7 +3774,6 @@ impl Checker {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -5218,7 +5213,6 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
                     | ExprKind::Call { .. }
                     | ExprKind::Field { .. }
                     | ExprKind::Index { .. }
-                    | ExprKind::Slice { .. }
                     | ExprKind::Try(_)
                     | ExprKind::OptChain { .. }
                     | ExprKind::NullCoalesce { .. }
@@ -5254,7 +5248,6 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
             | ExprKind::Range { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }

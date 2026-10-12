@@ -1342,7 +1342,6 @@ impl Checker {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
@@ -3953,7 +3952,8 @@ impl Checker {
                                 return Ty::option(e);
                             }
                             "_slice" => {
-                                self.check_args_range("_slice", &[Ty::Int, Ty::Int], 2, args, span);
+                                let range = self.range_ty();
+                                self.check_args_range("_slice", &[range], 1, args, span);
                                 return Ty::list(e);
                             }
                             _ => {
@@ -5166,7 +5166,6 @@ fn type_apply_param_head(obj: &Expr) -> Option<String> {
         | ExprKind::Range { .. }
         | ExprKind::Call { .. }
         | ExprKind::Field { .. }
-        | ExprKind::Slice { .. }
         | ExprKind::Try(_)
         | ExprKind::OptChain { .. }
         | ExprKind::NullCoalesce { .. }
@@ -5242,7 +5241,6 @@ impl Checker {
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
             | ExprKind::Index { .. }
-            | ExprKind::Slice { .. }
             | ExprKind::Try(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }

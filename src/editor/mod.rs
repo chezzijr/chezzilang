@@ -993,7 +993,6 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
                 | ExprKind::Range { .. }
                 | ExprKind::Call { .. }
                 | ExprKind::Index { .. }
-                | ExprKind::Slice { .. }
                 | ExprKind::Try(_)
                 | ExprKind::OptChain { .. }
                 | ExprKind::NullCoalesce { .. }
@@ -1082,17 +1081,6 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
             overlay_expr(obj, map);
             if let Some(index) = index {
                 overlay_expr(index, map);
-            }
-        }
-        ExprKind::Slice {
-            obj,
-            start,
-            end,
-            step,
-        } => {
-            overlay_expr(obj, map);
-            for c in [start, end, step].into_iter().flatten() {
-                overlay_expr(c, map);
             }
         }
         ExprKind::Try(e) => overlay_expr(e, map),

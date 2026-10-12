@@ -65,62 +65,60 @@ pub fn range_values(start: i64, end: i64, step: i64) -> Result<Vec<i64>, String>
     Ok(out)
 }
 
-/// Resolve a Python slice `start:end:step` against a length-`len` sequence into the concrete list of
-/// indices to materialize, in order. `None` components take their direction-dependent defaults.
-/// Returns `Err` only for a zero step (the message is the runtime fault text, byte-identical across
-/// engines). Mirrors CPython's `slice.indices` + the stepping loop.
-pub fn slice_indices(
-    start: Option<i64>,
-    end: Option<i64>,
-    step: Option<i64>,
-    len: usize,
-) -> Result<Vec<usize>, &'static str> {
-    let step = step.unwrap_or(1);
-    if step == 0 {
+/// The four fields of a `Range` value (`std/prelude.chz`), read for a slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RangeParts {
+    pub start: Option<i64>,
+    pub end: Option<i64>,
+    pub step: i64,
+    pub inclusive: bool,
+}
+
+/// Resolve a `Range` against a length-`len` sequence into the concrete list of indices to select, in
+/// order (TICKET-253). The ONE function every slice site calls: `List`, `str`, `bytes`, `bytearray`,
+/// the native `ConcurrentList` read and a user type that wants the standard result.
+///
+/// The rules, in order: (1) a missing start is 0 and a missing end is `len` (for a negative step:
+/// `len - 1` and "before index 0", as CPython); (2) a negative bound `b` becomes `b + len`; (3) an
+/// inclusive end moves one position further in the step's direction, AFTER step 2; (4) both bounds
+/// clamp to the valid positions; (5) a start at or past the end gives an empty result. A zero step is
+/// the one error. For an exclusive range the result equals CPython's `slice.indices` + stepping loop.
+pub fn range_indices(r: &RangeParts, len: usize) -> Result<Vec<usize>, &'static str> {
+    if r.step == 0 {
         return Err("slice step cannot be zero");
     }
-    let len_i = len as i64;
-
-    // Clamp a raw bound into the valid range for the step direction, after normalizing negatives.
-    // Positive step: index in [0, len]. Negative step: index in [-1, len-1] (-1 = "before start").
-    let clamp = |b: i64, is_start: bool| -> i64 {
-        let mut b = if b < 0 { b + len_i } else { b };
-        if step > 0 {
-            b = b.clamp(0, len_i);
-        } else {
-            // For a negative step the lower sentinel is -1 (one before index 0).
-            let _ = is_start;
-            b = b.clamp(-1, len_i - 1);
-        }
-        b
-    };
-
-    let (lo, hi) = if step > 0 {
-        let s = start.map(|b| clamp(b, true)).unwrap_or(0);
-        let e = end.map(|b| clamp(b, false)).unwrap_or(len_i);
-        (s, e)
-    } else {
-        let s = start.map(|b| clamp(b, true)).unwrap_or(len_i - 1);
-        let e = end.map(|b| clamp(b, false)).unwrap_or(-1);
-        (s, e)
-    };
-
+    let n = len as i64;
+    let norm = |b: i64| if b < 0 { b.saturating_add(n) } else { b };
+    let up = r.step > 0;
+    // Positive step: positions in [0, n]. Negative step: [-1, n - 1] (-1 = "before index 0").
+    let (lo_c, hi_c) = if up { (0, n) } else { (-1, n - 1) };
+    let lo = r
+        .start
+        .map(norm)
+        .unwrap_or(if up { 0 } else { n - 1 })
+        .clamp(lo_c, hi_c);
+    let hi = r
+        .end
+        .map(|b| {
+            let b = norm(b);
+            if !r.inclusive {
+                b
+            } else if up {
+                b.saturating_add(1)
+            } else {
+                b.saturating_sub(1)
+            }
+        })
+        .unwrap_or(if up { n } else { -1 })
+        .clamp(lo_c, hi_c);
     let mut out = Vec::new();
     let mut i = lo;
-    if step > 0 {
-        while i < hi {
-            out.push(i as usize);
-            // A step near `i64::MAX` would wrap `i` negative (and past `hi`'s check) in release;
-            // an overflowing step is simply past the end, as in CPython's `slice.indices`.
-            match i.checked_add(step) {
-                Some(next) => i = next,
-                None => break,
-            }
-        }
-    } else {
-        while i > hi {
-            out.push(i as usize);
-            i += step; // step is negative
+    while (up && i < hi) || (!up && i > hi) {
+        out.push(i as usize);
+        // A step near `i64::MAX` would wrap `i`; an overflowing step is past the end, as in CPython.
+        match i.checked_add(r.step) {
+            Some(next) => i = next,
+            None => break,
         }
     }
     Ok(out)
@@ -278,43 +276,52 @@ mod tests {
         assert_eq!(bytearray_repr(&[0x00, 0xFF]), "bytearray(b'\\x00\\xff')");
     }
 
+    fn parts(start: Option<i64>, end: Option<i64>, step: i64, inclusive: bool) -> RangeParts {
+        RangeParts {
+            start,
+            end,
+            step,
+            inclusive,
+        }
+    }
+
     fn idx(start: Option<i64>, end: Option<i64>, step: Option<i64>, len: usize) -> Vec<usize> {
-        slice_indices(start, end, step, len).unwrap()
+        range_indices(&parts(start, end, step.unwrap_or(1), false), len).unwrap()
     }
 
     #[test]
     fn basic_forward() {
-        // xs[1:3] on len 5 -> [1, 2]
+        // xs[1..3] on len 5 -> [1, 2]
         assert_eq!(idx(Some(1), Some(3), None, 5), vec![1, 2]);
-        // xs[1:] -> [1,2,3,4]
+        // xs[1..] -> [1,2,3,4]
         assert_eq!(idx(Some(1), None, None, 5), vec![1, 2, 3, 4]);
-        // xs[:3] -> [0,1,2]
+        // xs[..3] -> [0,1,2]
         assert_eq!(idx(None, Some(3), None, 5), vec![0, 1, 2]);
-        // xs[:] -> all
+        // xs[..] -> all
         assert_eq!(idx(None, None, None, 5), vec![0, 1, 2, 3, 4]);
-        // xs[1:99] clamps end
+        // xs[1..99] clamps end
         assert_eq!(idx(Some(1), Some(99), None, 5), vec![1, 2, 3, 4]);
-        // xs[3:1] -> empty
+        // xs[3..1] -> empty
         assert_eq!(idx(Some(3), Some(1), None, 5), Vec::<usize>::new());
     }
 
     #[test]
     fn step_and_reverse() {
-        // xs[0:5:2] -> [0,2,4]
+        // Range(0, 5, 2) -> [0,2,4]
         assert_eq!(idx(Some(0), Some(5), Some(2), 5), vec![0, 2, 4]);
-        // xs[::-1] -> [4,3,2,1,0]
+        // Range(None, None, -1) -> [4,3,2,1,0]
         assert_eq!(idx(None, None, Some(-1), 5), vec![4, 3, 2, 1, 0]);
-        // xs[4:0:-1] -> [4,3,2,1]
+        // Range(4, 0, -1) -> [4,3,2,1]
         assert_eq!(idx(Some(4), Some(0), Some(-1), 5), vec![4, 3, 2, 1]);
     }
 
     #[test]
     fn negative_bounds_clamp() {
-        // xs[-100:] clamps start to 0 (no fault on slices)
+        // xs[-100..] clamps start to 0 (no fault on slices)
         assert_eq!(idx(Some(-100), None, None, 5), vec![0, 1, 2, 3, 4]);
-        // xs[-2:] -> [3,4]
+        // xs[-2..] -> [3,4]
         assert_eq!(idx(Some(-2), None, None, 5), vec![3, 4]);
-        // xs[:-1] -> [0,1,2,3]
+        // xs[..-1] -> [0,1,2,3]
         assert_eq!(idx(None, Some(-1), None, 5), vec![0, 1, 2, 3]);
         // negative-step over-range start clamps to len-1
         assert_eq!(idx(Some(100), None, Some(-1), 5), vec![4, 3, 2, 1, 0]);
@@ -329,8 +336,42 @@ mod tests {
     #[test]
     fn zero_step_errs() {
         assert_eq!(
-            slice_indices(None, None, Some(0), 5),
+            range_indices(&parts(None, None, 0, false), 5),
             Err("slice step cannot be zero")
+        );
+    }
+
+    /// Owner answer B: a negative bound counts from the end in every form, inclusive included, and
+    /// an inclusive end adds one AFTER the negative bound is normalized. `xs = [10, 20, 30]`.
+    #[test]
+    fn inclusive_and_negative_bounds_follow_answer_b() {
+        let xs = [10, 20, 30];
+        let at = |p: RangeParts| -> Vec<i32> {
+            range_indices(&p, 3)
+                .unwrap()
+                .into_iter()
+                .map(|i| xs[i])
+                .collect()
+        };
+        assert_eq!(at(parts(Some(-2), None, 1, false)), vec![20, 30]);
+        assert_eq!(at(parts(Some(0), Some(-1), 1, true)), vec![10, 20, 30]);
+        assert_eq!(at(parts(Some(2), Some(1), 1, false)), Vec::<i32>::new());
+        assert_eq!(at(parts(Some(-1), Some(0), 1, false)), Vec::<i32>::new());
+        assert_eq!(at(parts(Some(1), Some(99), 1, false)), vec![20, 30]);
+        assert_eq!(at(parts(Some(-99), Some(2), 1, false)), vec![10, 20]);
+        assert_eq!(at(parts(None, Some(-1), 1, false)), vec![10, 20]);
+        assert_eq!(at(parts(None, None, -1, false)), vec![30, 20, 10]);
+        // A negative step with an inclusive end moves the end down by one.
+        assert_eq!(at(parts(Some(2), Some(0), -1, true)), vec![30, 20, 10]);
+        assert_eq!(at(parts(Some(0), Some(-10), 1, true)), Vec::<i32>::new());
+        assert_eq!(
+            at(parts(Some(0), Some(i64::MAX), 1, true)),
+            vec![10, 20, 30]
+        );
+        // Adding 1 BEFORE the negative-bound step would read `xs[0..=-10]` on 8 elements as `xs[0..7]`.
+        assert_eq!(
+            range_indices(&parts(Some(0), Some(-10), 1, true), 8).unwrap(),
+            Vec::<usize>::new()
         );
     }
 

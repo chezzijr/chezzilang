@@ -1679,7 +1679,7 @@ impl Vm {
                 | other @ Op::MakeCffi(_)
                 | other @ Op::MakeClosure(..)
                 | other @ Op::GetField { .. }
-                | other @ Op::GetSlice
+                | other @ Op::SliceRange
                 | other @ Op::SetField { .. }
                 | other @ Op::Dup
                 | other @ Op::Dup2
@@ -2996,7 +2996,7 @@ impl Vm {
             }
             Op::GetField { name, ic } => self.get_field(name, *ic, span)?,
             Op::GetIndex => self.get_index(span)?,
-            Op::GetSlice => self.get_slice(span)?, // Phase 4
+            Op::SliceRange => self.slice_range(span)?,
             Op::SetField { name, ic } => self.set_field(name, *ic, span)?,
             Op::SetIndex => self.set_index(span)?,
             Op::Dup => {
