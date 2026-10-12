@@ -545,7 +545,36 @@ impl Vm {
                         Obj::Closure { captured, .. } => {
                             captured.get(parent_slot as usize).copied()
                         }
-                        _ => None,
+                        Obj::Str(_)
+                        | Obj::Bytes(_)
+                        | Obj::ByteArray(_)
+                        | Obj::BigInt(_)
+                        | Obj::FloatBox(_)
+                        | Obj::Iter { .. }
+                        | Obj::List(_)
+                        | Obj::Tuple(_)
+                        | Obj::Map(_)
+                        | Obj::Set(_)
+                        | Obj::Struct { .. }
+                        | Obj::Enum { .. }
+                        | Obj::Cell(_)
+                        | Obj::Func { .. }
+                        | Obj::Module(_)
+                        | Obj::Native { .. }
+                        | Obj::Builtin(_)
+                        | Obj::Cffi(_)
+                        | Obj::Ptr(_)
+                        | Obj::Channel(_)
+                        | Obj::Shared(_)
+                        | Obj::RwShared(_)
+                        | Obj::Atomic(_)
+                        | Obj::AtomicInt(_)
+                        | Obj::Executor(_)
+                        | Obj::Socket(_)
+                        | Obj::Listener(_)
+                        | Obj::Writer(_)
+                        | Obj::Reader(_)
+                        | Obj::Generator(_) => None,
                     })
                     .unwrap_or(Value::nil()),
             };
@@ -1841,7 +1870,9 @@ impl Vm {
         let finish =
             |op: crate::vm::core::PendingOp, r: Result<RecvStep, RuntimeError>| match op.settle() {
                 crate::vm::core::Settled::Got(_, w) => Ok(RecvStep::Filled(w)),
-                _ => r,
+                crate::vm::core::Settled::Cancelled
+                | crate::vm::core::Settled::Closed
+                | crate::vm::core::Settled::Sent(_) => r,
             };
         // 1. Account running → a registered waiter AND register the channel (#1 fix), under core lock A, then
         //    notify so an idle puller sitting in an untimed `take_runnable` `cv.wait` re-evaluates the
@@ -3337,7 +3368,36 @@ impl Vm {
             // channel handle. Fail loud (matching `channel_core` above) rather than silently filing
             // the park under a sentinel key `wake_on_send` would never match — a silent mis-key
             // would mis-report a `deadlock` (review: Incident Response Commander).
-            _ => unreachable!("channel_core_ptr on a non-channel park handle"),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => unreachable!("channel_core_ptr on a non-channel park handle"),
         }
     }
 
@@ -4478,7 +4538,32 @@ impl Vm {
             Obj::Enum { payload, .. } => (payload.len(), true),
             Obj::Struct { fields, .. } => (fields.as_slice().len(), true),
             Obj::Map(m) => (m.entries.len(), false),
-            _ => return,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Set(_)
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => return,
         };
         for i in 0..len {
             let kid = match kids {
@@ -4492,7 +4577,32 @@ impl Vm {
                 Obj::Enum { payload, .. } => payload.get(i).copied(),
                 Obj::Struct { fields, .. } => fields.get(i).copied(),
                 Obj::Map(m) => m.entries.get(i).map(|e| e.2),
-                _ => None,
+                Obj::Str(_)
+                | Obj::Bytes(_)
+                | Obj::ByteArray(_)
+                | Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::Set(_)
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => None,
             };
             if let Some(child) = child {
                 self.unmark_fresh(child, kid);
@@ -4524,7 +4634,30 @@ impl Vm {
                     .flatten()
                     .collect(),
                 Obj::ByteArray(_) => Vec::new(),
-                _ => continue,
+                Obj::Str(_)
+                | Obj::Bytes(_)
+                | Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => continue,
             };
             self.heap.unset_copied(h);
             stack.extend(kids);
@@ -4685,7 +4818,36 @@ impl Vm {
                 let cloned = self.rebuild_items(items, rebuild, |x| x);
                 match self.heap.get_mut(h) {
                     Obj::Iter { items, .. } => *items = cloned,
-                    _ => unreachable!("placeholder was alloc'd as Obj::Iter"),
+                    Obj::Str(_)
+                    | Obj::Bytes(_)
+                    | Obj::ByteArray(_)
+                    | Obj::BigInt(_)
+                    | Obj::FloatBox(_)
+                    | Obj::List(_)
+                    | Obj::Tuple(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::Struct { .. }
+                    | Obj::Enum { .. }
+                    | Obj::Cell(_)
+                    | Obj::Func { .. }
+                    | Obj::Closure { .. }
+                    | Obj::Module(_)
+                    | Obj::Native { .. }
+                    | Obj::Builtin(_)
+                    | Obj::Cffi(_)
+                    | Obj::Ptr(_)
+                    | Obj::Channel(_)
+                    | Obj::Shared(_)
+                    | Obj::RwShared(_)
+                    | Obj::Atomic(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Executor(_)
+                    | Obj::Socket(_)
+                    | Obj::Listener(_)
+                    | Obj::Writer(_)
+                    | Obj::Reader(_)
+                    | Obj::Generator(_) => unreachable!("placeholder was alloc'd as Obj::Iter"),
                 }
                 Value::obj(h)
             }
@@ -4764,7 +4926,36 @@ impl Vm {
                 let cloned = self.rebuild_items(fields, rebuild, |(_, val)| val);
                 match self.heap.get_mut(h) {
                     Obj::Struct { fields, .. } => *fields = Fields::from_vec(cloned),
-                    _ => unreachable!("placeholder was alloc'd as Obj::Struct"),
+                    Obj::Str(_)
+                    | Obj::Bytes(_)
+                    | Obj::ByteArray(_)
+                    | Obj::BigInt(_)
+                    | Obj::FloatBox(_)
+                    | Obj::Iter { .. }
+                    | Obj::List(_)
+                    | Obj::Tuple(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::Enum { .. }
+                    | Obj::Cell(_)
+                    | Obj::Func { .. }
+                    | Obj::Closure { .. }
+                    | Obj::Module(_)
+                    | Obj::Native { .. }
+                    | Obj::Builtin(_)
+                    | Obj::Cffi(_)
+                    | Obj::Ptr(_)
+                    | Obj::Channel(_)
+                    | Obj::Shared(_)
+                    | Obj::RwShared(_)
+                    | Obj::Atomic(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Executor(_)
+                    | Obj::Socket(_)
+                    | Obj::Listener(_)
+                    | Obj::Writer(_)
+                    | Obj::Reader(_)
+                    | Obj::Generator(_) => unreachable!("placeholder was alloc'd as Obj::Struct"),
                 }
                 Value::obj(h)
             }
@@ -4788,7 +4979,36 @@ impl Vm {
                 // `Arc<Program>`), so it is replayed as-is — no lossy name re-resolution.
                 match self.heap.get_mut(h) {
                     Obj::Enum { payload, .. } => *payload = cloned,
-                    _ => unreachable!("placeholder was alloc'd as Obj::Enum"),
+                    Obj::Str(_)
+                    | Obj::Bytes(_)
+                    | Obj::ByteArray(_)
+                    | Obj::BigInt(_)
+                    | Obj::FloatBox(_)
+                    | Obj::Iter { .. }
+                    | Obj::List(_)
+                    | Obj::Tuple(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::Struct { .. }
+                    | Obj::Cell(_)
+                    | Obj::Func { .. }
+                    | Obj::Closure { .. }
+                    | Obj::Module(_)
+                    | Obj::Native { .. }
+                    | Obj::Builtin(_)
+                    | Obj::Cffi(_)
+                    | Obj::Ptr(_)
+                    | Obj::Channel(_)
+                    | Obj::Shared(_)
+                    | Obj::RwShared(_)
+                    | Obj::Atomic(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Executor(_)
+                    | Obj::Socket(_)
+                    | Obj::Listener(_)
+                    | Obj::Writer(_)
+                    | Obj::Reader(_)
+                    | Obj::Generator(_) => unreachable!("placeholder was alloc'd as Obj::Enum"),
                 }
                 Value::obj(h)
             }
@@ -4884,7 +5104,36 @@ impl Vm {
                     Obj::Closure { captured, .. } => {
                         *captured = cap;
                     }
-                    _ => unreachable!("placeholder was alloc'd as Obj::Closure"),
+                    Obj::Str(_)
+                    | Obj::Bytes(_)
+                    | Obj::ByteArray(_)
+                    | Obj::BigInt(_)
+                    | Obj::FloatBox(_)
+                    | Obj::Iter { .. }
+                    | Obj::List(_)
+                    | Obj::Tuple(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::Struct { .. }
+                    | Obj::Enum { .. }
+                    | Obj::Cell(_)
+                    | Obj::Func { .. }
+                    | Obj::Module(_)
+                    | Obj::Native { .. }
+                    | Obj::Builtin(_)
+                    | Obj::Cffi(_)
+                    | Obj::Ptr(_)
+                    | Obj::Channel(_)
+                    | Obj::Shared(_)
+                    | Obj::RwShared(_)
+                    | Obj::Atomic(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Executor(_)
+                    | Obj::Socket(_)
+                    | Obj::Listener(_)
+                    | Obj::Writer(_)
+                    | Obj::Reader(_)
+                    | Obj::Generator(_) => unreachable!("placeholder was alloc'd as Obj::Closure"),
                 }
                 Value::obj(h)
             }
@@ -4947,7 +5196,9 @@ impl Vm {
                     WireGenState::Done | WireGenState::Unsendable(_) => {
                         let state = match state {
                             WireGenState::Unsendable(m) => GenState::Unsendable(m),
-                            _ => GenState::Done,
+                            WireGenState::Pending(..)
+                            | WireGenState::Suspended { .. }
+                            | WireGenState::Done => GenState::Done,
                         };
                         let core = GeneratorCore {
                             proto,
@@ -5703,7 +5954,36 @@ impl Vm {
             // parent and worker agree on slot↔name regardless of any hash ordering.
             let (name, globals): (Box<str>, Vec<(String, Value)>) = match self.heap.get(pm) {
                 Obj::Module(m) => (m.name.clone(), module_slot_pairs(&m.slots, &m.index)),
-                _ => ("<worker>".into(), Vec::new()),
+                Obj::Str(_)
+                | Obj::Bytes(_)
+                | Obj::ByteArray(_)
+                | Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::List(_)
+                | Obj::Tuple(_)
+                | Obj::Map(_)
+                | Obj::Set(_)
+                | Obj::Struct { .. }
+                | Obj::Enum { .. }
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => ("<worker>".into(), Vec::new()),
             };
             // Fallible: a module global that is a frame-holding generator faults here (graceful,
             // re-stamped with the nursery span by `ensure_snapshot`) instead of panicking in `to_snap`.

@@ -80,7 +80,7 @@ impl Fresh {
     pub fn values(k: Fresh) -> Fresh {
         match k {
             Fresh::Marked => Fresh::root(),
-            k => Fresh::Node(Kids::Each(Box::new(k))),
+            k @ Fresh::Node(_) | k @ Fresh::All => Fresh::Node(Kids::Each(Box::new(k))),
         }
     }
 

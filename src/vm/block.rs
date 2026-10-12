@@ -140,7 +140,15 @@ pub(super) fn mode(ctx: BlockCtx, spec: WaitSpec) -> BlockMode {
             // demotes; changed cell (c), X1: an Executor join cannot snapshot-park (the join loop
             // holds its state on the host stack), so it hands its runner slot over.
             W::Stdin | W::Guard | W::Join => Demote,
-            _ => Park,
+            W::Recv
+            | W::Timer
+            | W::Send
+            | W::Wait { .. }
+            | W::Sleep
+            | W::Offload
+            | W::Socket
+            | W::Connect
+            | W::Nursery => Park,
         },
         BlockCtx::Demote => match spec {
             W::Connect => InPlace,

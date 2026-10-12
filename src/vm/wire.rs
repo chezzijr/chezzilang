@@ -509,7 +509,28 @@ impl WireValue {
                         WireGenState::Done | WireGenState::Unsendable(_) => false,
                     }
             }
-            _ => false,
+            WireValue::Int(_)
+            | WireValue::Float(_)
+            | WireValue::Bool(_)
+            | WireValue::Nil
+            | WireValue::Str(_)
+            | WireValue::Bytes(_)
+            | WireValue::ByteArray(_)
+            | WireValue::Channel(_)
+            | WireValue::Shared(_)
+            | WireValue::RwShared(_)
+            | WireValue::Atomic(_)
+            | WireValue::AtomicInt(_)
+            | WireValue::Executor(_)
+            | WireValue::Socket(_)
+            | WireValue::Listener(_)
+            | WireValue::Writer(_)
+            | WireValue::Reader(_)
+            | WireValue::Ptr(_)
+            | WireValue::Builtin(_)
+            | WireValue::Native { .. }
+            | WireValue::Cffi(_)
+            | WireValue::Func { .. } => false,
         }
     }
 }

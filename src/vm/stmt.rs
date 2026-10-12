@@ -44,7 +44,37 @@ impl<'a> BoxCore<'a> {
             WireValue::Shared(c) => Some(BoxCore::Shared(c)),
             WireValue::RwShared(c) => Some(BoxCore::RwShared(c)),
             WireValue::Atomic(c) => Some(BoxCore::Atomic(c)),
-            _ => None,
+            WireValue::Int(_)
+            | WireValue::Float(_)
+            | WireValue::Bool(_)
+            | WireValue::Nil
+            | WireValue::List { .. }
+            | WireValue::Tuple { .. }
+            | WireValue::Map { .. }
+            | WireValue::Set { .. }
+            | WireValue::Str(_)
+            | WireValue::Bytes(_)
+            | WireValue::ByteArray(_)
+            | WireValue::Iter { .. }
+            | WireValue::Struct { .. }
+            | WireValue::Enum { .. }
+            | WireValue::Cell { .. }
+            | WireValue::Backref(_)
+            | WireValue::Handle(_)
+            | WireValue::Channel(_)
+            | WireValue::AtomicInt(_)
+            | WireValue::Executor(_)
+            | WireValue::Socket(_)
+            | WireValue::Listener(_)
+            | WireValue::Writer(_)
+            | WireValue::Reader(_)
+            | WireValue::Ptr(_)
+            | WireValue::Builtin(_)
+            | WireValue::Native { .. }
+            | WireValue::Cffi(_)
+            | WireValue::Closure { .. }
+            | WireValue::Func { .. }
+            | WireValue::Generator { .. } => None,
         }
     }
 
@@ -337,9 +367,38 @@ impl Vm {
                     variant_id,
                     payload,
                 } => Some((*variant_id, payload.len(), payload.first().copied())),
-                _ => None,
+                Obj::Str(_)
+                | Obj::Bytes(_)
+                | Obj::ByteArray(_)
+                | Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::List(_)
+                | Obj::Tuple(_)
+                | Obj::Map(_)
+                | Obj::Set(_)
+                | Obj::Struct { .. }
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => None,
             },
-            _ => None,
+            ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => None,
         };
         // M19 lever #2 — gate on the fixed native variant ids (`VID_OK`/`VID_SOME` unwrap, `VID_ERR`/
         // `VID_NONE_VARIANT` propagate), NOT a name compare. A user enum shadowing `Ok`/`Err`/`Some`/
@@ -571,7 +630,36 @@ impl Vm {
                             || (*inner == crate::vm::op::VID_SOME
                                 && self.carrier_prefix(*inner, inner_payload) == Some("?"))
                     }
-                    _ => false,
+                    Obj::Str(_)
+                    | Obj::Bytes(_)
+                    | Obj::ByteArray(_)
+                    | Obj::BigInt(_)
+                    | Obj::FloatBox(_)
+                    | Obj::Iter { .. }
+                    | Obj::List(_)
+                    | Obj::Tuple(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::Struct { .. }
+                    | Obj::Cell(_)
+                    | Obj::Func { .. }
+                    | Obj::Closure { .. }
+                    | Obj::Module(_)
+                    | Obj::Native { .. }
+                    | Obj::Builtin(_)
+                    | Obj::Cffi(_)
+                    | Obj::Ptr(_)
+                    | Obj::Channel(_)
+                    | Obj::Shared(_)
+                    | Obj::RwShared(_)
+                    | Obj::Atomic(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Executor(_)
+                    | Obj::Socket(_)
+                    | Obj::Listener(_)
+                    | Obj::Writer(_)
+                    | Obj::Reader(_)
+                    | Obj::Generator(_) => false,
                 })
         })
     }
@@ -727,7 +815,34 @@ impl Vm {
                 }
                 None => Err(self.err(format!("module '{}' has no member '{name}'", m.name), span)),
             },
-            _ => Err(self.err(
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => Err(self.err(
                 format!("cannot read field '{name}' of {}", self.type_name(obj)),
                 span,
             )),
@@ -801,7 +916,33 @@ impl Vm {
                 Sliced::ByteArray(idxs.iter().map(|&i| b[i]).collect())
             }
             Obj::Struct { .. } | Obj::Enum { .. } => Sliced::Struct,
-            _ => return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span)),
+            Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => {
+                return Err(self.err(format!("cannot slice {}", self.type_name(obj)), span));
+            }
         };
         match sliced {
             Sliced::List(slice) => {
@@ -920,7 +1061,33 @@ impl Vm {
                         None => Err(self.err(format!("key not found: {n}"), span)),
                     };
                 }
-                _ => {}
+                Obj::Str(_)
+                | Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::Tuple(_)
+                | Obj::Set(_)
+                | Obj::Struct { .. }
+                | Obj::Enum { .. }
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => {}
             }
         }
         // Require an int index for list/str (the message matches the old `AsInt` exactly, for parity).
@@ -1031,7 +1198,32 @@ impl Vm {
                 self.push(v);
                 Ok(())
             }
-            _ => Err(self.err(format!("cannot index {}", self.type_name(obj)), span)),
+            Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Tuple(_)
+            | Obj::Set(_)
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => {
+                Err(self.err(format!("cannot index {}", self.type_name(obj)), span))
+            }
         }
     }
 
@@ -1070,7 +1262,36 @@ impl Vm {
         // BEFORE the mutable heap borrow, then write the flat `fields` slot by index.
         let stid = match self.heap.get(h) {
             Obj::Struct { tid, .. } => Some(*tid),
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         };
         let idx = stid
             .map(|t| self.struct_name_of_tid(t))
@@ -1091,7 +1312,36 @@ impl Vm {
                     }
                 }
             }
-            _ => {
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => {
                 return Err(self.err(
                     format!("cannot assign field '{name}' of {}", self.type_name(obj)),
                     span,
@@ -1228,7 +1478,38 @@ impl Vm {
                     Err(self.err(format!("index {idx} out of bounds (len {len})"), span))
                 }
             },
-            _ => Err(self.err(format!("cannot index {}", self.type_name(obj)), span)),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => {
+                Err(self.err(format!("cannot index {}", self.type_name(obj)), span))
+            }
         }
     }
 
@@ -1256,7 +1537,36 @@ impl Vm {
                 variant_id: vid,
                 payload,
             } => (*vid == variant_id, *vid, payload.clone()),
-            _ => unreachable!("scrutinee ensured to be an enum"),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => unreachable!("scrutinee ensured to be an enum"),
         };
         // SCRUTINEE-DRIVEN fallback on an id MISS. The compile-time `variant_id` can be the WRONG
         // module's id when a bare match-pattern enum qualifier (`Color.Red`) is reachable only via a
@@ -1543,7 +1853,31 @@ impl Vm {
                     return Ok(chars.into_iter().map(|c| self.alloc_char(c)).collect());
                 }
                 // (`Obj::Iter` cursors are handled above by the consume-in-place guard.)
-                _ => {}
+                Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::Tuple(_)
+                | Obj::Struct { .. }
+                | Obj::Enum { .. }
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => {}
             }
         }
         // Re-entrant paths (generator / user struct iterator): run user `.next()` until `None`, rooting
@@ -1559,7 +1893,38 @@ impl Vm {
         let step = match self.heap.get(h) {
             Obj::Generator(_) => Step::Generator,
             Obj::Struct { .. } | Obj::Enum { .. } if self.hook_of(v, Hook::Next) => Step::NextHook,
-            _ => return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span)),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_) => {
+                return Err(self.err(format!("cannot iterate over {}", self.type_name(v)), span));
+            }
         };
         // Root the source + the growing accumulator list across the re-entrant calls.
         let acc = self.heap.alloc(Obj::List(Vec::new()));
@@ -2092,7 +2457,36 @@ impl Vm {
     pub(super) fn slot_index(&self, module: GcRef, name: &str) -> Option<u32> {
         match self.heap.get(module) {
             Obj::Module(m) => m.index.get(name).copied(),
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -2115,7 +2509,36 @@ impl Vm {
         }
         let v = match self.heap.get(module) {
             Obj::Module(m) => m.slots[slot as usize],
-            _ => Value::nil(),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => Value::nil(),
         };
         if v.is_uninit() {
             return Err(self.uninit_read_err(module, slot, v, span));
@@ -2131,7 +2554,36 @@ impl Vm {
                 .iter()
                 .find(|&(_, &i)| i == slot)
                 .map(|(n, _)| n.to_string()),
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -2206,7 +2658,36 @@ impl Vm {
     pub(super) fn module_name(&self, module: GcRef) -> String {
         match self.heap.get(module) {
             Obj::Module(m) => m.name.to_string(),
-            _ => String::new(),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => String::new(),
         }
     }
 
@@ -2842,7 +3323,36 @@ impl Vm {
         {
             let s = match self.heap.get(h) {
                 Obj::Str(s) => s.clone(),
-                _ => unreachable!(),
+                Obj::Bytes(_)
+                | Obj::ByteArray(_)
+                | Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::List(_)
+                | Obj::Tuple(_)
+                | Obj::Map(_)
+                | Obj::Set(_)
+                | Obj::Struct { .. }
+                | Obj::Enum { .. }
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => unreachable!(),
             };
             crate::fmtspec::apply(spec, crate::fmtspec::FmtArg::Str(&s), &mut out)
                 .map_err(|m| self.err(m, span))?;
@@ -3100,7 +3610,34 @@ impl Vm {
                     Obj::Shared(c) => WireValue::Shared(Arc::clone(c)),
                     Obj::RwShared(c) => WireValue::RwShared(Arc::clone(c)),
                     Obj::Atomic(c) => WireValue::Atomic(Arc::clone(c)),
-                    _ => unreachable!("matched a box above"),
+                    Obj::Str(_)
+                    | Obj::Bytes(_)
+                    | Obj::ByteArray(_)
+                    | Obj::BigInt(_)
+                    | Obj::FloatBox(_)
+                    | Obj::Iter { .. }
+                    | Obj::List(_)
+                    | Obj::Tuple(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::Struct { .. }
+                    | Obj::Enum { .. }
+                    | Obj::Cell(_)
+                    | Obj::Func { .. }
+                    | Obj::Closure { .. }
+                    | Obj::Module(_)
+                    | Obj::Native { .. }
+                    | Obj::Builtin(_)
+                    | Obj::Cffi(_)
+                    | Obj::Ptr(_)
+                    | Obj::Channel(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Executor(_)
+                    | Obj::Socket(_)
+                    | Obj::Listener(_)
+                    | Obj::Writer(_)
+                    | Obj::Reader(_)
+                    | Obj::Generator(_) => unreachable!("matched a box above"),
                 };
                 let core = BoxCore::of_wire(&root).expect("a box handle");
                 let snaps = self.box_snapshots(core, span)?;

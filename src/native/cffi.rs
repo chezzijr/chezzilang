@@ -156,7 +156,17 @@ impl CType {
             CType::UInt16 => (0, u16::MAX as i128),
             CType::UInt32 => (0, u32::MAX as i128),
             CType::UInt64 => (0, u64::MAX as i128),
-            _ => return None,
+            CType::Int
+            | CType::Float
+            | CType::Bool
+            | CType::Str
+            | CType::Ptr
+            | CType::Struct { .. }
+            | CType::OwnedStr
+            | CType::OptStr
+            | CType::OptOwnedStr
+            | CType::Float32
+            | CType::Callback { .. } => return None,
         })
     }
 
@@ -201,7 +211,19 @@ impl CType {
             CType::UInt8 => v as u8 as i64,
             CType::UInt16 => v as u16 as i64,
             CType::UInt32 => v as u32 as i64,
-            _ => v,
+            CType::Int
+            | CType::Float
+            | CType::Bool
+            | CType::Str
+            | CType::Ptr
+            | CType::Struct { .. }
+            | CType::OwnedStr
+            | CType::OptStr
+            | CType::OptOwnedStr
+            | CType::Int64
+            | CType::UInt64
+            | CType::Float32
+            | CType::Callback { .. } => v,
         }
     }
 
@@ -219,7 +241,20 @@ impl CType {
         let shown = match v {
             NativeRet::Int(n) if !self.fits_int(*n, false) => n.to_string(),
             NativeRet::Float(f) if !self.fits_f64(*f) => format!("{f:e}"),
-            _ => return Ok(()),
+            NativeRet::Int(_)
+            | NativeRet::Float(_)
+            | NativeRet::Bool(_)
+            | NativeRet::Str(_)
+            | NativeRet::Bytes(_)
+            | NativeRet::List(_)
+            | NativeRet::Struct { .. }
+            | NativeRet::Map(_)
+            | NativeRet::Ok(_)
+            | NativeRet::Err(_)
+            | NativeRet::Some(_)
+            | NativeRet::None
+            | NativeRet::Nil
+            | NativeRet::Ptr(_) => return Ok(()),
         };
         Err(HostError {
             message: format!("value {shown} does not fit {name} {}", self.range_text()),
@@ -383,7 +418,19 @@ pub(crate) fn write_field(
     ct.check_fits(v)?;
     let want_int = |v: &NativeRet| match v {
         NativeRet::Int(n) => Ok(*n),
-        other => Err(HostError {
+        other @ NativeRet::Float(_)
+        | other @ NativeRet::Bool(_)
+        | other @ NativeRet::Str(_)
+        | other @ NativeRet::Bytes(_)
+        | other @ NativeRet::List(_)
+        | other @ NativeRet::Struct { .. }
+        | other @ NativeRet::Map(_)
+        | other @ NativeRet::Ok(_)
+        | other @ NativeRet::Err(_)
+        | other @ NativeRet::Some(_)
+        | other @ NativeRet::None
+        | other @ NativeRet::Nil
+        | other @ NativeRet::Ptr(_) => Err(HostError {
             message: format!("struct field marshal: expected int, got {other:?}"),
         }),
     };
@@ -407,7 +454,18 @@ pub(crate) fn write_field(
             let f = match v {
                 NativeRet::Float(f) => *f,
                 NativeRet::Int(n) => *n as f64,
-                other => {
+                other @ NativeRet::Bool(_)
+                | other @ NativeRet::Str(_)
+                | other @ NativeRet::Bytes(_)
+                | other @ NativeRet::List(_)
+                | other @ NativeRet::Struct { .. }
+                | other @ NativeRet::Map(_)
+                | other @ NativeRet::Ok(_)
+                | other @ NativeRet::Err(_)
+                | other @ NativeRet::Some(_)
+                | other @ NativeRet::None
+                | other @ NativeRet::Nil
+                | other @ NativeRet::Ptr(_) => {
                     return Err(HostError {
                         message: format!("struct field marshal: expected float, got {other:?}"),
                     });
@@ -417,7 +475,19 @@ pub(crate) fn write_field(
         }
         CType::Float32 => match v {
             NativeRet::Float(f) => put!((*f as f32)),
-            other => {
+            other @ NativeRet::Int(_)
+            | other @ NativeRet::Bool(_)
+            | other @ NativeRet::Str(_)
+            | other @ NativeRet::Bytes(_)
+            | other @ NativeRet::List(_)
+            | other @ NativeRet::Struct { .. }
+            | other @ NativeRet::Map(_)
+            | other @ NativeRet::Ok(_)
+            | other @ NativeRet::Err(_)
+            | other @ NativeRet::Some(_)
+            | other @ NativeRet::None
+            | other @ NativeRet::Nil
+            | other @ NativeRet::Ptr(_) => {
                 return Err(HostError {
                     message: format!("struct field marshal: expected float, got {other:?}"),
                 });
@@ -426,7 +496,19 @@ pub(crate) fn write_field(
         CType::Bool => {
             let b = match v {
                 NativeRet::Bool(b) => *b,
-                other => {
+                other @ NativeRet::Int(_)
+                | other @ NativeRet::Float(_)
+                | other @ NativeRet::Str(_)
+                | other @ NativeRet::Bytes(_)
+                | other @ NativeRet::List(_)
+                | other @ NativeRet::Struct { .. }
+                | other @ NativeRet::Map(_)
+                | other @ NativeRet::Ok(_)
+                | other @ NativeRet::Err(_)
+                | other @ NativeRet::Some(_)
+                | other @ NativeRet::None
+                | other @ NativeRet::Nil
+                | other @ NativeRet::Ptr(_) => {
                     return Err(HostError {
                         message: format!("struct field marshal: expected bool, got {other:?}"),
                     });
@@ -438,7 +520,19 @@ pub(crate) fn write_field(
         CType::Ptr => {
             let a = match v {
                 NativeRet::Ptr(a) => *a,
-                other => {
+                other @ NativeRet::Int(_)
+                | other @ NativeRet::Float(_)
+                | other @ NativeRet::Bool(_)
+                | other @ NativeRet::Str(_)
+                | other @ NativeRet::Bytes(_)
+                | other @ NativeRet::List(_)
+                | other @ NativeRet::Struct { .. }
+                | other @ NativeRet::Map(_)
+                | other @ NativeRet::Ok(_)
+                | other @ NativeRet::Err(_)
+                | other @ NativeRet::Some(_)
+                | other @ NativeRet::None
+                | other @ NativeRet::Nil => {
                     return Err(HostError {
                         message: format!("struct field marshal: expected ptr, got {other:?}"),
                     });
@@ -579,7 +673,12 @@ unsafe fn read_c_arg(slot: *const c_void, ct: &CType) -> NativeRet {
         CType::Bool => NativeRet::Bool(rd!(u8) != 0),
         CType::Ptr => NativeRet::Ptr(rd!(usize)),
         // Non-scalar parts are checker-rejected; default defensively to Nil.
-        _ => NativeRet::Nil,
+        CType::Str
+        | CType::Struct { .. }
+        | CType::OwnedStr
+        | CType::OptStr
+        | CType::OptOwnedStr
+        | CType::Callback { .. } => NativeRet::Nil,
     }
 }
 
@@ -597,7 +696,18 @@ unsafe fn write_c_result(slot: *mut c_void, ct: &CType, v: &NativeRet) {
     let as_int = |v: &NativeRet| match v {
         NativeRet::Int(n) => *n,
         NativeRet::Bool(b) => i64::from(*b),
-        _ => 0,
+        NativeRet::Float(_)
+        | NativeRet::Str(_)
+        | NativeRet::Bytes(_)
+        | NativeRet::List(_)
+        | NativeRet::Struct { .. }
+        | NativeRet::Map(_)
+        | NativeRet::Ok(_)
+        | NativeRet::Err(_)
+        | NativeRet::Some(_)
+        | NativeRet::None
+        | NativeRet::Nil
+        | NativeRet::Ptr(_) => 0,
     };
     // SAFETY (all arms): `slot` is libffi's result buffer, >= register width and aligned (caller
     // contract). Sub-register integral returns widen to a full `ffi_arg`/`ffi_sarg` register word.
@@ -617,7 +727,18 @@ unsafe fn write_c_result(slot: *mut c_void, ct: &CType, v: &NativeRet) {
                 let f = match v {
                     NativeRet::Float(f) => *f,
                     NativeRet::Int(n) => *n as f64,
-                    _ => 0.0,
+                    NativeRet::Bool(_)
+                    | NativeRet::Str(_)
+                    | NativeRet::Bytes(_)
+                    | NativeRet::List(_)
+                    | NativeRet::Struct { .. }
+                    | NativeRet::Map(_)
+                    | NativeRet::Ok(_)
+                    | NativeRet::Err(_)
+                    | NativeRet::Some(_)
+                    | NativeRet::None
+                    | NativeRet::Nil
+                    | NativeRet::Ptr(_) => 0.0,
                 };
                 *(slot as *mut f64) = f;
             }
@@ -625,7 +746,18 @@ unsafe fn write_c_result(slot: *mut c_void, ct: &CType, v: &NativeRet) {
                 let f = match v {
                     NativeRet::Float(f) => *f,
                     NativeRet::Int(n) => *n as f64,
-                    _ => 0.0,
+                    NativeRet::Bool(_)
+                    | NativeRet::Str(_)
+                    | NativeRet::Bytes(_)
+                    | NativeRet::List(_)
+                    | NativeRet::Struct { .. }
+                    | NativeRet::Map(_)
+                    | NativeRet::Ok(_)
+                    | NativeRet::Err(_)
+                    | NativeRet::Some(_)
+                    | NativeRet::None
+                    | NativeRet::Nil
+                    | NativeRet::Ptr(_) => 0.0,
                 };
                 *(slot as *mut f32) = f as f32;
             }
@@ -633,12 +765,28 @@ unsafe fn write_c_result(slot: *mut c_void, ct: &CType, v: &NativeRet) {
                 let a = match v {
                     NativeRet::Ptr(a) => *a,
                     NativeRet::Int(n) => *n as usize,
-                    _ => 0,
+                    NativeRet::Float(_)
+                    | NativeRet::Bool(_)
+                    | NativeRet::Str(_)
+                    | NativeRet::Bytes(_)
+                    | NativeRet::List(_)
+                    | NativeRet::Struct { .. }
+                    | NativeRet::Map(_)
+                    | NativeRet::Ok(_)
+                    | NativeRet::Err(_)
+                    | NativeRet::Some(_)
+                    | NativeRet::None
+                    | NativeRet::Nil => 0,
                 };
                 *(slot as *mut *mut c_void) = a as *mut c_void;
             }
             // Non-scalar returns are checker-rejected; zero the register word defensively.
-            _ => *(slot as *mut libffi::raw::ffi_arg) = 0,
+            CType::Str
+            | CType::Struct { .. }
+            | CType::OwnedStr
+            | CType::OptStr
+            | CType::OptOwnedStr
+            | CType::Callback { .. } => *(slot as *mut libffi::raw::ffi_arg) = 0,
         }
     }
 }
@@ -752,7 +900,16 @@ fn collect_ptr_addrs(r: &NativeRet, out: &mut Vec<usize>) {
                 collect_ptr_addrs(v, out);
             }
         }
-        _ => {}
+        NativeRet::Int(_)
+        | NativeRet::Float(_)
+        | NativeRet::Bool(_)
+        | NativeRet::Str(_)
+        | NativeRet::Bytes(_)
+        | NativeRet::List(_)
+        | NativeRet::Map(_)
+        | NativeRet::Err(_)
+        | NativeRet::None
+        | NativeRet::Nil => {}
     }
 }
 
@@ -1123,7 +1280,15 @@ pub fn vararg_ctype_of(v: &NativeRet) -> Option<CType> {
         NativeRet::Bool(_) => CType::Bool,
         NativeRet::Str(_) => CType::Str,
         NativeRet::Ptr(_) => CType::Ptr,
-        _ => return None,
+        NativeRet::Bytes(_)
+        | NativeRet::List(_)
+        | NativeRet::Struct { .. }
+        | NativeRet::Map(_)
+        | NativeRet::Ok(_)
+        | NativeRet::Err(_)
+        | NativeRet::Some(_)
+        | NativeRet::None
+        | NativeRet::Nil => return None,
     }
     .vararg_promoted()
 }

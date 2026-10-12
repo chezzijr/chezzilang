@@ -60,7 +60,12 @@ fn ctype_width(ct: &super::cffi::CType) -> usize {
         CType::Float => 8,
         CType::Ptr => std::mem::size_of::<usize>(),
         // Non-scalar variants never reach the deref builtins (no public fn maps to them).
-        _ => 0,
+        CType::Str
+        | CType::Struct { .. }
+        | CType::OwnedStr
+        | CType::OptStr
+        | CType::OptOwnedStr
+        | CType::Callback { .. } => 0,
     }
 }
 
@@ -472,7 +477,21 @@ fn store_value(
         CType::Bool => NativeRet::Bool(h.arg_bool(vi)?),
         CType::Ptr => NativeRet::Ptr(h.arg_ptr(vi)?),
         // every integer width (Int + fixed widths) reads an i64; write_field truncates to the C width.
-        _ => NativeRet::Int(h.arg_int(vi)?),
+        CType::Int
+        | CType::Str
+        | CType::Struct { .. }
+        | CType::OwnedStr
+        | CType::OptStr
+        | CType::OptOwnedStr
+        | CType::Int8
+        | CType::Int16
+        | CType::Int32
+        | CType::Int64
+        | CType::UInt8
+        | CType::UInt16
+        | CType::UInt32
+        | CType::UInt64
+        | CType::Callback { .. } => NativeRet::Int(h.arg_int(vi)?),
     })
 }
 

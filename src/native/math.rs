@@ -267,7 +267,7 @@ fn parse_int_base_impl(s: &str, base: i64) -> Result<i64, String> {
         std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => format!(
             "parse_int_base: '{s}' in base {radix} overflows i64 (range -9223372036854775808..=9223372036854775807)"
         ),
-        _ => format!("parse_int_base: cannot parse '{s}' in base {radix}"),
+        std::num::IntErrorKind::Empty | std::num::IntErrorKind::InvalidDigit | std::num::IntErrorKind::Zero | _ => format!("parse_int_base: cannot parse '{s}' in base {radix}"),
     })
 }
 

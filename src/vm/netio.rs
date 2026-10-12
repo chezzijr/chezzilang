@@ -248,7 +248,36 @@ impl Vm {
     pub(super) fn channel_core(&self, h: GcRef) -> Arc<ChannelCore> {
         match self.heap.get(h) {
             Obj::Channel(core) => Arc::clone(core),
-            _ => unreachable!("channel_core on non-channel"),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => unreachable!("channel_core on non-channel"),
         }
     }
 
@@ -478,7 +507,36 @@ impl Vm {
     pub(super) fn socket_core(&self, h: GcRef) -> Arc<SocketCore> {
         match self.heap.get(h) {
             Obj::Socket(core) => Arc::clone(core),
-            _ => unreachable!("socket_core on non-socket"),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => unreachable!("socket_core on non-socket"),
         }
     }
 
@@ -1046,7 +1104,7 @@ impl Vm {
                     true => None,
                     false => match Self::decode_carry(&mut carry, &[], false) {
                         Decoded::NeedMore => None,
-                        d => Some(d),
+                        d @ Decoded::Text(_) | d @ Decoded::Fail(_) => Some(d),
                     },
                 };
                 match decided {
@@ -1129,7 +1187,7 @@ impl Vm {
                                     true => None,
                                     false => match Vm::decode_carry(&mut carry, &[], false) {
                                         Decoded::NeedMore => None,
-                                        d => Some(d),
+                                        d @ Decoded::Text(_) | d @ Decoded::Fail(_) => Some(d),
                                     },
                                 };
                                 match decided {
@@ -1812,7 +1870,7 @@ impl Vm {
             // Unbounded — never blocks.
             return match self.send_commit(h, &core, w, None) {
                 SendOutcome::Closed => Err(self.err(CLOSED_SEND.to_string(), span)),
-                _ => Ok(SendStep::Sent),
+                SendOutcome::Sent | SendOutcome::Offered | SendOutcome::Full => Ok(SendStep::Sent),
             };
         }
         // The table decides how this send blocks; a `Refuse` context publishes no offer.

@@ -422,7 +422,119 @@ impl Vm {
             Op::Mul => "Mul",
             Op::Div => "Div",
             Op::Mod => "Mod",
-            _ => unreachable!(),
+            Op::ConstInt(_)
+            | Op::ConstFloat(_)
+            | Op::ConstStr(_)
+            | Op::ConstBytes(_)
+            | Op::True
+            | Op::False
+            | Op::Nil
+            | Op::Pop
+            | Op::StampGen(_)
+            | Op::Assert { .. }
+            | Op::LoadBuiltin(_)
+            | Op::GetLocal(_)
+            | Op::SetLocal(_)
+            | Op::GetGlobalSlot(_)
+            | Op::DefineGlobalSlot(_)
+            | Op::SetGlobalSlot(_)
+            | Op::GetCaptured(_)
+            | Op::AddInPlace
+            | Op::Neg
+            | Op::Not
+            | Op::Lt
+            | Op::LtEq
+            | Op::Gt
+            | Op::GtEq
+            | Op::Eq
+            | Op::NotEq
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::Shl
+            | Op::Shr
+            | Op::Contains
+            | Op::AsBool
+            | Op::AsInt
+            | Op::BinLocalLocal { .. }
+            | Op::BinLocalConst { .. }
+            | Op::IncLocal { .. }
+            | Op::Jump(_)
+            | Op::JumpIfFalse(_)
+            | Op::JumpIfFalseKeep(_)
+            | Op::JumpIfTrueKeep(_)
+            | Op::PushHandler(_)
+            | Op::PopHandler
+            | Op::Call(_)
+            | Op::CallMethod { .. }
+            | Op::CallHook { .. }
+            | Op::CallStatic { .. }
+            | Op::CallStaticDyn { .. }
+            | Op::CallBuiltin(..)
+            | Op::CallPrint(_)
+            | Op::CallPrintSep { .. }
+            | Op::Return
+            | Op::Yield
+            | Op::DeferCall(_)
+            | Op::DeferMethod(..)
+            | Op::EnterDeferScope
+            | Op::LeaveDeferScope
+            | Op::DrainHandlerDefers
+            | Op::Try
+            | Op::JsonDecode(_)
+            | Op::JsonToValue
+            | Op::NewList(_)
+            | Op::NewTuple(_)
+            | Op::NewMap(_)
+            | Op::NewSet(_)
+            | Op::NewStruct(..)
+            | Op::NewCell
+            | Op::CellLoad
+            | Op::CellStore
+            | Op::NewEnum { .. }
+            | Op::MakeFunc(_)
+            | Op::MakeFuncIn(_)
+            | Op::MakeMethodFunc { .. }
+            | Op::JumpIfProvided(..)
+            | Op::MakeCffi(_)
+            | Op::MakeClosure(..)
+            | Op::GetField { .. }
+            | Op::GetIndex
+            | Op::GetSlice
+            | Op::SetField { .. }
+            | Op::SetIndex
+            | Op::Dup
+            | Op::Dup2
+            | Op::ToStr
+            | Op::ToStrFmt(_)
+            | Op::BuildStr(_)
+            | Op::ListClone
+            | Op::ArrLen
+            | Op::HasNextHook
+            | Op::IsGenerator
+            | Op::IsCursor
+            | Op::IterableToCursor
+            | Op::IsMap
+            | Op::IsChannel
+            | Op::ChanRecvOrClosed
+            | Op::EnsureEnum(_)
+            | Op::MatchArm { .. }
+            | Op::MatchNoArm(_)
+            | Op::EnterNursery
+            | Op::JoinNursery
+            | Op::ReclaimNursery
+            | Op::SpawnCall(..)
+            | Op::SpawnRecv(..)
+            | Op::SpawnBlock(..)
+            | Op::WaitPoll(_)
+            | Op::NewChannel(_)
+            | Op::NewShared
+            | Op::NewRwShared
+            | Op::NewAtomic
+            | Op::NewAtomicInt
+            | Op::NewTimer
+            | Op::NewExecutor
+            | Op::NewExecutorN => unreachable!(),
         };
         let result = if self.is_integral(l) && self.is_integral(r) {
             let (a, b) = (self.int_of(l), self.int_of(r));
@@ -447,7 +559,119 @@ impl Vm {
                 // `wrapping_rem` never overflows past the `b == 0` guard above (see `fast_int_bin`'s
                 // `BinKind::Mod` arm) — wrap in `Some` so this shared overflow check never fires for Mod.
                 Op::Mod => Some(a.wrapping_rem(b)),
-                _ => unreachable!(),
+                Op::ConstInt(_)
+                | Op::ConstFloat(_)
+                | Op::ConstStr(_)
+                | Op::ConstBytes(_)
+                | Op::True
+                | Op::False
+                | Op::Nil
+                | Op::Pop
+                | Op::StampGen(_)
+                | Op::Assert { .. }
+                | Op::LoadBuiltin(_)
+                | Op::GetLocal(_)
+                | Op::SetLocal(_)
+                | Op::GetGlobalSlot(_)
+                | Op::DefineGlobalSlot(_)
+                | Op::SetGlobalSlot(_)
+                | Op::GetCaptured(_)
+                | Op::AddInPlace
+                | Op::Neg
+                | Op::Not
+                | Op::Lt
+                | Op::LtEq
+                | Op::Gt
+                | Op::GtEq
+                | Op::Eq
+                | Op::NotEq
+                | Op::BitAnd
+                | Op::BitOr
+                | Op::BitXor
+                | Op::Shl
+                | Op::Shr
+                | Op::Contains
+                | Op::AsBool
+                | Op::AsInt
+                | Op::BinLocalLocal { .. }
+                | Op::BinLocalConst { .. }
+                | Op::IncLocal { .. }
+                | Op::Jump(_)
+                | Op::JumpIfFalse(_)
+                | Op::JumpIfFalseKeep(_)
+                | Op::JumpIfTrueKeep(_)
+                | Op::PushHandler(_)
+                | Op::PopHandler
+                | Op::Call(_)
+                | Op::CallMethod { .. }
+                | Op::CallHook { .. }
+                | Op::CallStatic { .. }
+                | Op::CallStaticDyn { .. }
+                | Op::CallBuiltin(..)
+                | Op::CallPrint(_)
+                | Op::CallPrintSep { .. }
+                | Op::Return
+                | Op::Yield
+                | Op::DeferCall(_)
+                | Op::DeferMethod(..)
+                | Op::EnterDeferScope
+                | Op::LeaveDeferScope
+                | Op::DrainHandlerDefers
+                | Op::Try
+                | Op::JsonDecode(_)
+                | Op::JsonToValue
+                | Op::NewList(_)
+                | Op::NewTuple(_)
+                | Op::NewMap(_)
+                | Op::NewSet(_)
+                | Op::NewStruct(..)
+                | Op::NewCell
+                | Op::CellLoad
+                | Op::CellStore
+                | Op::NewEnum { .. }
+                | Op::MakeFunc(_)
+                | Op::MakeFuncIn(_)
+                | Op::MakeMethodFunc { .. }
+                | Op::JumpIfProvided(..)
+                | Op::MakeCffi(_)
+                | Op::MakeClosure(..)
+                | Op::GetField { .. }
+                | Op::GetIndex
+                | Op::GetSlice
+                | Op::SetField { .. }
+                | Op::SetIndex
+                | Op::Dup
+                | Op::Dup2
+                | Op::ToStr
+                | Op::ToStrFmt(_)
+                | Op::BuildStr(_)
+                | Op::ListClone
+                | Op::ArrLen
+                | Op::HasNextHook
+                | Op::IsGenerator
+                | Op::IsCursor
+                | Op::IterableToCursor
+                | Op::IsMap
+                | Op::IsChannel
+                | Op::ChanRecvOrClosed
+                | Op::EnsureEnum(_)
+                | Op::MatchArm { .. }
+                | Op::MatchNoArm(_)
+                | Op::EnterNursery
+                | Op::JoinNursery
+                | Op::ReclaimNursery
+                | Op::SpawnCall(..)
+                | Op::SpawnRecv(..)
+                | Op::SpawnBlock(..)
+                | Op::WaitPoll(_)
+                | Op::NewChannel(_)
+                | Op::NewShared
+                | Op::NewRwShared
+                | Op::NewAtomic
+                | Op::NewAtomicInt
+                | Op::NewTimer
+                | Op::NewExecutor
+                | Op::NewExecutorN => unreachable!(),
             };
             let n = v.ok_or_else(|| self.err(format!("integer overflow in {name}"), span))?;
             self.make_int(n)
@@ -461,7 +685,119 @@ impl Vm {
                 Op::Mul => x * y,
                 Op::Div => x / y,
                 Op::Mod => x % y,
-                _ => unreachable!(),
+                Op::ConstInt(_)
+                | Op::ConstFloat(_)
+                | Op::ConstStr(_)
+                | Op::ConstBytes(_)
+                | Op::True
+                | Op::False
+                | Op::Nil
+                | Op::Pop
+                | Op::StampGen(_)
+                | Op::Assert { .. }
+                | Op::LoadBuiltin(_)
+                | Op::GetLocal(_)
+                | Op::SetLocal(_)
+                | Op::GetGlobalSlot(_)
+                | Op::DefineGlobalSlot(_)
+                | Op::SetGlobalSlot(_)
+                | Op::GetCaptured(_)
+                | Op::AddInPlace
+                | Op::Neg
+                | Op::Not
+                | Op::Lt
+                | Op::LtEq
+                | Op::Gt
+                | Op::GtEq
+                | Op::Eq
+                | Op::NotEq
+                | Op::BitAnd
+                | Op::BitOr
+                | Op::BitXor
+                | Op::Shl
+                | Op::Shr
+                | Op::Contains
+                | Op::AsBool
+                | Op::AsInt
+                | Op::BinLocalLocal { .. }
+                | Op::BinLocalConst { .. }
+                | Op::IncLocal { .. }
+                | Op::Jump(_)
+                | Op::JumpIfFalse(_)
+                | Op::JumpIfFalseKeep(_)
+                | Op::JumpIfTrueKeep(_)
+                | Op::PushHandler(_)
+                | Op::PopHandler
+                | Op::Call(_)
+                | Op::CallMethod { .. }
+                | Op::CallHook { .. }
+                | Op::CallStatic { .. }
+                | Op::CallStaticDyn { .. }
+                | Op::CallBuiltin(..)
+                | Op::CallPrint(_)
+                | Op::CallPrintSep { .. }
+                | Op::Return
+                | Op::Yield
+                | Op::DeferCall(_)
+                | Op::DeferMethod(..)
+                | Op::EnterDeferScope
+                | Op::LeaveDeferScope
+                | Op::DrainHandlerDefers
+                | Op::Try
+                | Op::JsonDecode(_)
+                | Op::JsonToValue
+                | Op::NewList(_)
+                | Op::NewTuple(_)
+                | Op::NewMap(_)
+                | Op::NewSet(_)
+                | Op::NewStruct(..)
+                | Op::NewCell
+                | Op::CellLoad
+                | Op::CellStore
+                | Op::NewEnum { .. }
+                | Op::MakeFunc(_)
+                | Op::MakeFuncIn(_)
+                | Op::MakeMethodFunc { .. }
+                | Op::JumpIfProvided(..)
+                | Op::MakeCffi(_)
+                | Op::MakeClosure(..)
+                | Op::GetField { .. }
+                | Op::GetIndex
+                | Op::GetSlice
+                | Op::SetField { .. }
+                | Op::SetIndex
+                | Op::Dup
+                | Op::Dup2
+                | Op::ToStr
+                | Op::ToStrFmt(_)
+                | Op::BuildStr(_)
+                | Op::ListClone
+                | Op::ArrLen
+                | Op::HasNextHook
+                | Op::IsGenerator
+                | Op::IsCursor
+                | Op::IterableToCursor
+                | Op::IsMap
+                | Op::IsChannel
+                | Op::ChanRecvOrClosed
+                | Op::EnsureEnum(_)
+                | Op::MatchArm { .. }
+                | Op::MatchNoArm(_)
+                | Op::EnterNursery
+                | Op::JoinNursery
+                | Op::ReclaimNursery
+                | Op::SpawnCall(..)
+                | Op::SpawnRecv(..)
+                | Op::SpawnBlock(..)
+                | Op::WaitPoll(_)
+                | Op::NewChannel(_)
+                | Op::NewShared
+                | Op::NewRwShared
+                | Op::NewAtomic
+                | Op::NewAtomicInt
+                | Op::NewTimer
+                | Op::NewExecutor
+                | Op::NewExecutorN => unreachable!(),
             };
             self.box_float(f)
         } else {
@@ -735,7 +1071,119 @@ impl Vm {
             Op::Mul => Hook::Mul,
             Op::Div => Hook::Div,
             Op::Mod => Hook::Mod,
-            _ => unreachable!("struct_arith only handles + - * / %"),
+            Op::ConstInt(_)
+            | Op::ConstFloat(_)
+            | Op::ConstStr(_)
+            | Op::ConstBytes(_)
+            | Op::True
+            | Op::False
+            | Op::Nil
+            | Op::Pop
+            | Op::StampGen(_)
+            | Op::Assert { .. }
+            | Op::LoadBuiltin(_)
+            | Op::GetLocal(_)
+            | Op::SetLocal(_)
+            | Op::GetGlobalSlot(_)
+            | Op::DefineGlobalSlot(_)
+            | Op::SetGlobalSlot(_)
+            | Op::GetCaptured(_)
+            | Op::AddInPlace
+            | Op::Neg
+            | Op::Not
+            | Op::Lt
+            | Op::LtEq
+            | Op::Gt
+            | Op::GtEq
+            | Op::Eq
+            | Op::NotEq
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::Shl
+            | Op::Shr
+            | Op::Contains
+            | Op::AsBool
+            | Op::AsInt
+            | Op::BinLocalLocal { .. }
+            | Op::BinLocalConst { .. }
+            | Op::IncLocal { .. }
+            | Op::Jump(_)
+            | Op::JumpIfFalse(_)
+            | Op::JumpIfFalseKeep(_)
+            | Op::JumpIfTrueKeep(_)
+            | Op::PushHandler(_)
+            | Op::PopHandler
+            | Op::Call(_)
+            | Op::CallMethod { .. }
+            | Op::CallHook { .. }
+            | Op::CallStatic { .. }
+            | Op::CallStaticDyn { .. }
+            | Op::CallBuiltin(..)
+            | Op::CallPrint(_)
+            | Op::CallPrintSep { .. }
+            | Op::Return
+            | Op::Yield
+            | Op::DeferCall(_)
+            | Op::DeferMethod(..)
+            | Op::EnterDeferScope
+            | Op::LeaveDeferScope
+            | Op::DrainHandlerDefers
+            | Op::Try
+            | Op::JsonDecode(_)
+            | Op::JsonToValue
+            | Op::NewList(_)
+            | Op::NewTuple(_)
+            | Op::NewMap(_)
+            | Op::NewSet(_)
+            | Op::NewStruct(..)
+            | Op::NewCell
+            | Op::CellLoad
+            | Op::CellStore
+            | Op::NewEnum { .. }
+            | Op::MakeFunc(_)
+            | Op::MakeFuncIn(_)
+            | Op::MakeMethodFunc { .. }
+            | Op::JumpIfProvided(..)
+            | Op::MakeCffi(_)
+            | Op::MakeClosure(..)
+            | Op::GetField { .. }
+            | Op::GetIndex
+            | Op::GetSlice
+            | Op::SetField { .. }
+            | Op::SetIndex
+            | Op::Dup
+            | Op::Dup2
+            | Op::ToStr
+            | Op::ToStrFmt(_)
+            | Op::BuildStr(_)
+            | Op::ListClone
+            | Op::ArrLen
+            | Op::HasNextHook
+            | Op::IsGenerator
+            | Op::IsCursor
+            | Op::IterableToCursor
+            | Op::IsMap
+            | Op::IsChannel
+            | Op::ChanRecvOrClosed
+            | Op::EnsureEnum(_)
+            | Op::MatchArm { .. }
+            | Op::MatchNoArm(_)
+            | Op::EnterNursery
+            | Op::JoinNursery
+            | Op::ReclaimNursery
+            | Op::SpawnCall(..)
+            | Op::SpawnRecv(..)
+            | Op::SpawnBlock(..)
+            | Op::WaitPoll(_)
+            | Op::NewChannel(_)
+            | Op::NewShared
+            | Op::NewRwShared
+            | Op::NewAtomic
+            | Op::NewAtomicInt
+            | Op::NewTimer
+            | Op::NewExecutor
+            | Op::NewExecutorN => unreachable!("struct_arith only handles + - * / %"),
         };
         match self.reentered(|vm| vm.invoke_hook(hook, l, &[r], span))? {
             Some(v) => Ok(v),
@@ -754,7 +1202,119 @@ impl Vm {
             Op::BitXor => "BitXor",
             Op::Shl => "Shl",
             Op::Shr => "Shr",
-            _ => unreachable!(),
+            Op::ConstInt(_)
+            | Op::ConstFloat(_)
+            | Op::ConstStr(_)
+            | Op::ConstBytes(_)
+            | Op::True
+            | Op::False
+            | Op::Nil
+            | Op::Pop
+            | Op::StampGen(_)
+            | Op::Assert { .. }
+            | Op::LoadBuiltin(_)
+            | Op::GetLocal(_)
+            | Op::SetLocal(_)
+            | Op::GetGlobalSlot(_)
+            | Op::DefineGlobalSlot(_)
+            | Op::SetGlobalSlot(_)
+            | Op::GetCaptured(_)
+            | Op::Add
+            | Op::AddInPlace
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Neg
+            | Op::Not
+            | Op::Lt
+            | Op::LtEq
+            | Op::Gt
+            | Op::GtEq
+            | Op::Eq
+            | Op::NotEq
+            | Op::Contains
+            | Op::AsBool
+            | Op::AsInt
+            | Op::BinLocalLocal { .. }
+            | Op::BinLocalConst { .. }
+            | Op::IncLocal { .. }
+            | Op::Jump(_)
+            | Op::JumpIfFalse(_)
+            | Op::JumpIfFalseKeep(_)
+            | Op::JumpIfTrueKeep(_)
+            | Op::PushHandler(_)
+            | Op::PopHandler
+            | Op::Call(_)
+            | Op::CallMethod { .. }
+            | Op::CallHook { .. }
+            | Op::CallStatic { .. }
+            | Op::CallStaticDyn { .. }
+            | Op::CallBuiltin(..)
+            | Op::CallPrint(_)
+            | Op::CallPrintSep { .. }
+            | Op::Return
+            | Op::Yield
+            | Op::DeferCall(_)
+            | Op::DeferMethod(..)
+            | Op::EnterDeferScope
+            | Op::LeaveDeferScope
+            | Op::DrainHandlerDefers
+            | Op::Try
+            | Op::JsonDecode(_)
+            | Op::JsonToValue
+            | Op::NewList(_)
+            | Op::NewTuple(_)
+            | Op::NewMap(_)
+            | Op::NewSet(_)
+            | Op::NewStruct(..)
+            | Op::NewCell
+            | Op::CellLoad
+            | Op::CellStore
+            | Op::NewEnum { .. }
+            | Op::MakeFunc(_)
+            | Op::MakeFuncIn(_)
+            | Op::MakeMethodFunc { .. }
+            | Op::JumpIfProvided(..)
+            | Op::MakeCffi(_)
+            | Op::MakeClosure(..)
+            | Op::GetField { .. }
+            | Op::GetIndex
+            | Op::GetSlice
+            | Op::SetField { .. }
+            | Op::SetIndex
+            | Op::Dup
+            | Op::Dup2
+            | Op::ToStr
+            | Op::ToStrFmt(_)
+            | Op::BuildStr(_)
+            | Op::ListClone
+            | Op::ArrLen
+            | Op::HasNextHook
+            | Op::IsGenerator
+            | Op::IsCursor
+            | Op::IterableToCursor
+            | Op::IsMap
+            | Op::IsChannel
+            | Op::ChanRecvOrClosed
+            | Op::EnsureEnum(_)
+            | Op::MatchArm { .. }
+            | Op::MatchNoArm(_)
+            | Op::EnterNursery
+            | Op::JoinNursery
+            | Op::ReclaimNursery
+            | Op::SpawnCall(..)
+            | Op::SpawnRecv(..)
+            | Op::SpawnBlock(..)
+            | Op::WaitPoll(_)
+            | Op::NewChannel(_)
+            | Op::NewShared
+            | Op::NewRwShared
+            | Op::NewAtomic
+            | Op::NewAtomicInt
+            | Op::NewTimer
+            | Op::NewExecutor
+            | Op::NewExecutorN => unreachable!(),
         };
         let result = if self.is_integral(l) && self.is_integral(r) {
             let (a, b) = (self.int_of(l), self.int_of(r));
@@ -782,7 +1342,119 @@ impl Vm {
                         a >> (b as u32)
                     }
                 }
-                _ => unreachable!(),
+                Op::ConstInt(_)
+                | Op::ConstFloat(_)
+                | Op::ConstStr(_)
+                | Op::ConstBytes(_)
+                | Op::True
+                | Op::False
+                | Op::Nil
+                | Op::Pop
+                | Op::StampGen(_)
+                | Op::Assert { .. }
+                | Op::LoadBuiltin(_)
+                | Op::GetLocal(_)
+                | Op::SetLocal(_)
+                | Op::GetGlobalSlot(_)
+                | Op::DefineGlobalSlot(_)
+                | Op::SetGlobalSlot(_)
+                | Op::GetCaptured(_)
+                | Op::Add
+                | Op::AddInPlace
+                | Op::Sub
+                | Op::Mul
+                | Op::Div
+                | Op::Mod
+                | Op::Neg
+                | Op::Not
+                | Op::Lt
+                | Op::LtEq
+                | Op::Gt
+                | Op::GtEq
+                | Op::Eq
+                | Op::NotEq
+                | Op::Contains
+                | Op::AsBool
+                | Op::AsInt
+                | Op::BinLocalLocal { .. }
+                | Op::BinLocalConst { .. }
+                | Op::IncLocal { .. }
+                | Op::Jump(_)
+                | Op::JumpIfFalse(_)
+                | Op::JumpIfFalseKeep(_)
+                | Op::JumpIfTrueKeep(_)
+                | Op::PushHandler(_)
+                | Op::PopHandler
+                | Op::Call(_)
+                | Op::CallMethod { .. }
+                | Op::CallHook { .. }
+                | Op::CallStatic { .. }
+                | Op::CallStaticDyn { .. }
+                | Op::CallBuiltin(..)
+                | Op::CallPrint(_)
+                | Op::CallPrintSep { .. }
+                | Op::Return
+                | Op::Yield
+                | Op::DeferCall(_)
+                | Op::DeferMethod(..)
+                | Op::EnterDeferScope
+                | Op::LeaveDeferScope
+                | Op::DrainHandlerDefers
+                | Op::Try
+                | Op::JsonDecode(_)
+                | Op::JsonToValue
+                | Op::NewList(_)
+                | Op::NewTuple(_)
+                | Op::NewMap(_)
+                | Op::NewSet(_)
+                | Op::NewStruct(..)
+                | Op::NewCell
+                | Op::CellLoad
+                | Op::CellStore
+                | Op::NewEnum { .. }
+                | Op::MakeFunc(_)
+                | Op::MakeFuncIn(_)
+                | Op::MakeMethodFunc { .. }
+                | Op::JumpIfProvided(..)
+                | Op::MakeCffi(_)
+                | Op::MakeClosure(..)
+                | Op::GetField { .. }
+                | Op::GetIndex
+                | Op::GetSlice
+                | Op::SetField { .. }
+                | Op::SetIndex
+                | Op::Dup
+                | Op::Dup2
+                | Op::ToStr
+                | Op::ToStrFmt(_)
+                | Op::BuildStr(_)
+                | Op::ListClone
+                | Op::ArrLen
+                | Op::HasNextHook
+                | Op::IsGenerator
+                | Op::IsCursor
+                | Op::IterableToCursor
+                | Op::IsMap
+                | Op::IsChannel
+                | Op::ChanRecvOrClosed
+                | Op::EnsureEnum(_)
+                | Op::MatchArm { .. }
+                | Op::MatchNoArm(_)
+                | Op::EnterNursery
+                | Op::JoinNursery
+                | Op::ReclaimNursery
+                | Op::SpawnCall(..)
+                | Op::SpawnRecv(..)
+                | Op::SpawnBlock(..)
+                | Op::WaitPoll(_)
+                | Op::NewChannel(_)
+                | Op::NewShared
+                | Op::NewRwShared
+                | Op::NewAtomic
+                | Op::NewAtomicInt
+                | Op::NewTimer
+                | Op::NewExecutor
+                | Op::NewExecutorN => unreachable!(),
             };
             self.make_int(v)
         } else {
@@ -798,7 +1470,122 @@ impl Vm {
                     let set_op = match op {
                         Op::BitOr => SetOp::Union,
                         Op::BitAnd => SetOp::Intersection,
-                        _ => SetOp::SymmetricDifference,
+                        Op::ConstInt(_)
+                        | Op::ConstFloat(_)
+                        | Op::ConstStr(_)
+                        | Op::ConstBytes(_)
+                        | Op::True
+                        | Op::False
+                        | Op::Nil
+                        | Op::Pop
+                        | Op::StampGen(_)
+                        | Op::Assert { .. }
+                        | Op::LoadBuiltin(_)
+                        | Op::GetLocal(_)
+                        | Op::SetLocal(_)
+                        | Op::GetGlobalSlot(_)
+                        | Op::DefineGlobalSlot(_)
+                        | Op::SetGlobalSlot(_)
+                        | Op::GetCaptured(_)
+                        | Op::Add
+                        | Op::AddInPlace
+                        | Op::Sub
+                        | Op::Mul
+                        | Op::Div
+                        | Op::Mod
+                        | Op::Neg
+                        | Op::Not
+                        | Op::Lt
+                        | Op::LtEq
+                        | Op::Gt
+                        | Op::GtEq
+                        | Op::Eq
+                        | Op::NotEq
+                        | Op::BitXor
+                        | Op::Shl
+                        | Op::Shr
+                        | Op::Contains
+                        | Op::AsBool
+                        | Op::AsInt
+                        | Op::BinLocalLocal { .. }
+                        | Op::BinLocalConst { .. }
+                        | Op::IncLocal { .. }
+                        | Op::Jump(_)
+                        | Op::JumpIfFalse(_)
+                        | Op::JumpIfFalseKeep(_)
+                        | Op::JumpIfTrueKeep(_)
+                        | Op::PushHandler(_)
+                        | Op::PopHandler
+                        | Op::Call(_)
+                        | Op::CallMethod { .. }
+                        | Op::CallHook { .. }
+                        | Op::CallStatic { .. }
+                        | Op::CallStaticDyn { .. }
+                        | Op::CallBuiltin(..)
+                        | Op::CallPrint(_)
+                        | Op::CallPrintSep { .. }
+                        | Op::Return
+                        | Op::Yield
+                        | Op::DeferCall(_)
+                        | Op::DeferMethod(..)
+                        | Op::EnterDeferScope
+                        | Op::LeaveDeferScope
+                        | Op::DrainHandlerDefers
+                        | Op::Try
+                        | Op::JsonDecode(_)
+                        | Op::JsonToValue
+                        | Op::NewList(_)
+                        | Op::NewTuple(_)
+                        | Op::NewMap(_)
+                        | Op::NewSet(_)
+                        | Op::NewStruct(..)
+                        | Op::NewCell
+                        | Op::CellLoad
+                        | Op::CellStore
+                        | Op::NewEnum { .. }
+                        | Op::MakeFunc(_)
+                        | Op::MakeFuncIn(_)
+                        | Op::MakeMethodFunc { .. }
+                        | Op::JumpIfProvided(..)
+                        | Op::MakeCffi(_)
+                        | Op::MakeClosure(..)
+                        | Op::GetField { .. }
+                        | Op::GetIndex
+                        | Op::GetSlice
+                        | Op::SetField { .. }
+                        | Op::SetIndex
+                        | Op::Dup
+                        | Op::Dup2
+                        | Op::ToStr
+                        | Op::ToStrFmt(_)
+                        | Op::BuildStr(_)
+                        | Op::ListClone
+                        | Op::ArrLen
+                        | Op::HasNextHook
+                        | Op::IsGenerator
+                        | Op::IsCursor
+                        | Op::IterableToCursor
+                        | Op::IsMap
+                        | Op::IsChannel
+                        | Op::ChanRecvOrClosed
+                        | Op::EnsureEnum(_)
+                        | Op::MatchArm { .. }
+                        | Op::MatchNoArm(_)
+                        | Op::EnterNursery
+                        | Op::JoinNursery
+                        | Op::ReclaimNursery
+                        | Op::SpawnCall(..)
+                        | Op::SpawnRecv(..)
+                        | Op::SpawnBlock(..)
+                        | Op::WaitPoll(_)
+                        | Op::NewChannel(_)
+                        | Op::NewShared
+                        | Op::NewRwShared
+                        | Op::NewAtomic
+                        | Op::NewAtomicInt
+                        | Op::NewTimer
+                        | Op::NewExecutor
+                        | Op::NewExecutorN => SetOp::SymmetricDifference,
                     };
                     self.set_op(set_op, ha, hb, span)?
                 }
@@ -882,7 +1669,36 @@ impl Vm {
                     };
                     let sub = match self.heap.get(nh) {
                         Obj::Str(sub) => sub.to_string(),
-                        _ => {
+                        Obj::Bytes(_)
+                        | Obj::ByteArray(_)
+                        | Obj::BigInt(_)
+                        | Obj::FloatBox(_)
+                        | Obj::Iter { .. }
+                        | Obj::List(_)
+                        | Obj::Tuple(_)
+                        | Obj::Map(_)
+                        | Obj::Set(_)
+                        | Obj::Struct { .. }
+                        | Obj::Enum { .. }
+                        | Obj::Cell(_)
+                        | Obj::Func { .. }
+                        | Obj::Closure { .. }
+                        | Obj::Module(_)
+                        | Obj::Native { .. }
+                        | Obj::Builtin(_)
+                        | Obj::Cffi(_)
+                        | Obj::Ptr(_)
+                        | Obj::Channel(_)
+                        | Obj::Shared(_)
+                        | Obj::RwShared(_)
+                        | Obj::Atomic(_)
+                        | Obj::AtomicInt(_)
+                        | Obj::Executor(_)
+                        | Obj::Socket(_)
+                        | Obj::Listener(_)
+                        | Obj::Writer(_)
+                        | Obj::Reader(_)
+                        | Obj::Generator(_) => {
                             return Err(self.err(
                                 format!(
                                     "substring `in` requires a str on the left, found {}",
@@ -897,14 +1713,40 @@ impl Vm {
                     };
                     hay.contains(sub.as_str())
                 }
-                _ => {
+                Obj::Bytes(_)
+                | Obj::ByteArray(_)
+                | Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::Tuple(_)
+                | Obj::Struct { .. }
+                | Obj::Enum { .. }
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => {
                     return Err(self.err(
                         format!("cannot use `in` on {}", self.type_name(container)),
                         span,
                     ));
                 }
             },
-            _ => {
+            ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => {
                 return Err(self.missing_hook(container, Hook::Contains, span));
             }
         };
@@ -924,7 +1766,120 @@ impl Vm {
                     Op::LtEq => ord.is_le(),
                     Op::Gt => ord.is_gt(),
                     Op::GtEq => ord.is_ge(),
-                    _ => unreachable!(),
+                    Op::ConstInt(_)
+                    | Op::ConstFloat(_)
+                    | Op::ConstStr(_)
+                    | Op::ConstBytes(_)
+                    | Op::True
+                    | Op::False
+                    | Op::Nil
+                    | Op::Pop
+                    | Op::StampGen(_)
+                    | Op::Assert { .. }
+                    | Op::LoadBuiltin(_)
+                    | Op::GetLocal(_)
+                    | Op::SetLocal(_)
+                    | Op::GetGlobalSlot(_)
+                    | Op::DefineGlobalSlot(_)
+                    | Op::SetGlobalSlot(_)
+                    | Op::GetCaptured(_)
+                    | Op::Add
+                    | Op::AddInPlace
+                    | Op::Sub
+                    | Op::Mul
+                    | Op::Div
+                    | Op::Mod
+                    | Op::Neg
+                    | Op::Not
+                    | Op::Eq
+                    | Op::NotEq
+                    | Op::BitAnd
+                    | Op::BitOr
+                    | Op::BitXor
+                    | Op::Shl
+                    | Op::Shr
+                    | Op::Contains
+                    | Op::AsBool
+                    | Op::AsInt
+                    | Op::BinLocalLocal { .. }
+                    | Op::BinLocalConst { .. }
+                    | Op::IncLocal { .. }
+                    | Op::Jump(_)
+                    | Op::JumpIfFalse(_)
+                    | Op::JumpIfFalseKeep(_)
+                    | Op::JumpIfTrueKeep(_)
+                    | Op::PushHandler(_)
+                    | Op::PopHandler
+                    | Op::Call(_)
+                    | Op::CallMethod { .. }
+                    | Op::CallHook { .. }
+                    | Op::CallStatic { .. }
+                    | Op::CallStaticDyn { .. }
+                    | Op::CallBuiltin(..)
+                    | Op::CallPrint(_)
+                    | Op::CallPrintSep { .. }
+                    | Op::Return
+                    | Op::Yield
+                    | Op::DeferCall(_)
+                    | Op::DeferMethod(..)
+                    | Op::EnterDeferScope
+                    | Op::LeaveDeferScope
+                    | Op::DrainHandlerDefers
+                    | Op::Try
+                    | Op::JsonDecode(_)
+                    | Op::JsonToValue
+                    | Op::NewList(_)
+                    | Op::NewTuple(_)
+                    | Op::NewMap(_)
+                    | Op::NewSet(_)
+                    | Op::NewStruct(..)
+                    | Op::NewCell
+                    | Op::CellLoad
+                    | Op::CellStore
+                    | Op::NewEnum { .. }
+                    | Op::MakeFunc(_)
+                    | Op::MakeFuncIn(_)
+                    | Op::MakeMethodFunc { .. }
+                    | Op::JumpIfProvided(..)
+                    | Op::MakeCffi(_)
+                    | Op::MakeClosure(..)
+                    | Op::GetField { .. }
+                    | Op::GetIndex
+                    | Op::GetSlice
+                    | Op::SetField { .. }
+                    | Op::SetIndex
+                    | Op::Dup
+                    | Op::Dup2
+                    | Op::ToStr
+                    | Op::ToStrFmt(_)
+                    | Op::BuildStr(_)
+                    | Op::ListClone
+                    | Op::ArrLen
+                    | Op::HasNextHook
+                    | Op::IsGenerator
+                    | Op::IsCursor
+                    | Op::IterableToCursor
+                    | Op::IsMap
+                    | Op::IsChannel
+                    | Op::ChanRecvOrClosed
+                    | Op::EnsureEnum(_)
+                    | Op::MatchArm { .. }
+                    | Op::MatchNoArm(_)
+                    | Op::EnterNursery
+                    | Op::JoinNursery
+                    | Op::ReclaimNursery
+                    | Op::SpawnCall(..)
+                    | Op::SpawnRecv(..)
+                    | Op::SpawnBlock(..)
+                    | Op::WaitPoll(_)
+                    | Op::NewChannel(_)
+                    | Op::NewShared
+                    | Op::NewRwShared
+                    | Op::NewAtomic
+                    | Op::NewAtomicInt
+                    | Op::NewTimer
+                    | Op::NewExecutor
+                    | Op::NewExecutorN => unreachable!(),
                 },
                 None => false, // a NaN element pair: every ordered compare is false
             };
@@ -965,7 +1920,120 @@ impl Vm {
                 Op::LtEq => ord.is_le(),
                 Op::Gt => ord.is_gt(),
                 Op::GtEq => ord.is_ge(),
-                _ => unreachable!(),
+                Op::ConstInt(_)
+                | Op::ConstFloat(_)
+                | Op::ConstStr(_)
+                | Op::ConstBytes(_)
+                | Op::True
+                | Op::False
+                | Op::Nil
+                | Op::Pop
+                | Op::StampGen(_)
+                | Op::Assert { .. }
+                | Op::LoadBuiltin(_)
+                | Op::GetLocal(_)
+                | Op::SetLocal(_)
+                | Op::GetGlobalSlot(_)
+                | Op::DefineGlobalSlot(_)
+                | Op::SetGlobalSlot(_)
+                | Op::GetCaptured(_)
+                | Op::Add
+                | Op::AddInPlace
+                | Op::Sub
+                | Op::Mul
+                | Op::Div
+                | Op::Mod
+                | Op::Neg
+                | Op::Not
+                | Op::Eq
+                | Op::NotEq
+                | Op::BitAnd
+                | Op::BitOr
+                | Op::BitXor
+                | Op::Shl
+                | Op::Shr
+                | Op::Contains
+                | Op::AsBool
+                | Op::AsInt
+                | Op::BinLocalLocal { .. }
+                | Op::BinLocalConst { .. }
+                | Op::IncLocal { .. }
+                | Op::Jump(_)
+                | Op::JumpIfFalse(_)
+                | Op::JumpIfFalseKeep(_)
+                | Op::JumpIfTrueKeep(_)
+                | Op::PushHandler(_)
+                | Op::PopHandler
+                | Op::Call(_)
+                | Op::CallMethod { .. }
+                | Op::CallHook { .. }
+                | Op::CallStatic { .. }
+                | Op::CallStaticDyn { .. }
+                | Op::CallBuiltin(..)
+                | Op::CallPrint(_)
+                | Op::CallPrintSep { .. }
+                | Op::Return
+                | Op::Yield
+                | Op::DeferCall(_)
+                | Op::DeferMethod(..)
+                | Op::EnterDeferScope
+                | Op::LeaveDeferScope
+                | Op::DrainHandlerDefers
+                | Op::Try
+                | Op::JsonDecode(_)
+                | Op::JsonToValue
+                | Op::NewList(_)
+                | Op::NewTuple(_)
+                | Op::NewMap(_)
+                | Op::NewSet(_)
+                | Op::NewStruct(..)
+                | Op::NewCell
+                | Op::CellLoad
+                | Op::CellStore
+                | Op::NewEnum { .. }
+                | Op::MakeFunc(_)
+                | Op::MakeFuncIn(_)
+                | Op::MakeMethodFunc { .. }
+                | Op::JumpIfProvided(..)
+                | Op::MakeCffi(_)
+                | Op::MakeClosure(..)
+                | Op::GetField { .. }
+                | Op::GetIndex
+                | Op::GetSlice
+                | Op::SetField { .. }
+                | Op::SetIndex
+                | Op::Dup
+                | Op::Dup2
+                | Op::ToStr
+                | Op::ToStrFmt(_)
+                | Op::BuildStr(_)
+                | Op::ListClone
+                | Op::ArrLen
+                | Op::HasNextHook
+                | Op::IsGenerator
+                | Op::IsCursor
+                | Op::IterableToCursor
+                | Op::IsMap
+                | Op::IsChannel
+                | Op::ChanRecvOrClosed
+                | Op::EnsureEnum(_)
+                | Op::MatchArm { .. }
+                | Op::MatchNoArm(_)
+                | Op::EnterNursery
+                | Op::JoinNursery
+                | Op::ReclaimNursery
+                | Op::SpawnCall(..)
+                | Op::SpawnRecv(..)
+                | Op::SpawnBlock(..)
+                | Op::WaitPoll(_)
+                | Op::NewChannel(_)
+                | Op::NewShared
+                | Op::NewRwShared
+                | Op::NewAtomic
+                | Op::NewAtomicInt
+                | Op::NewTimer
+                | Op::NewExecutor
+                | Op::NewExecutorN => unreachable!(),
             }),
             // Both numeric ⇒ NaN is involved ⇒ false for all four ops.
             None if self.is_numeric(a) && self.is_numeric(b) => Ok(false),
@@ -977,7 +2045,120 @@ impl Vm {
                     Op::LtEq => "LtEq",
                     Op::Gt => "Gt",
                     Op::GtEq => "GtEq",
-                    _ => unreachable!(),
+                    Op::ConstInt(_)
+                    | Op::ConstFloat(_)
+                    | Op::ConstStr(_)
+                    | Op::ConstBytes(_)
+                    | Op::True
+                    | Op::False
+                    | Op::Nil
+                    | Op::Pop
+                    | Op::StampGen(_)
+                    | Op::Assert { .. }
+                    | Op::LoadBuiltin(_)
+                    | Op::GetLocal(_)
+                    | Op::SetLocal(_)
+                    | Op::GetGlobalSlot(_)
+                    | Op::DefineGlobalSlot(_)
+                    | Op::SetGlobalSlot(_)
+                    | Op::GetCaptured(_)
+                    | Op::Add
+                    | Op::AddInPlace
+                    | Op::Sub
+                    | Op::Mul
+                    | Op::Div
+                    | Op::Mod
+                    | Op::Neg
+                    | Op::Not
+                    | Op::Eq
+                    | Op::NotEq
+                    | Op::BitAnd
+                    | Op::BitOr
+                    | Op::BitXor
+                    | Op::Shl
+                    | Op::Shr
+                    | Op::Contains
+                    | Op::AsBool
+                    | Op::AsInt
+                    | Op::BinLocalLocal { .. }
+                    | Op::BinLocalConst { .. }
+                    | Op::IncLocal { .. }
+                    | Op::Jump(_)
+                    | Op::JumpIfFalse(_)
+                    | Op::JumpIfFalseKeep(_)
+                    | Op::JumpIfTrueKeep(_)
+                    | Op::PushHandler(_)
+                    | Op::PopHandler
+                    | Op::Call(_)
+                    | Op::CallMethod { .. }
+                    | Op::CallHook { .. }
+                    | Op::CallStatic { .. }
+                    | Op::CallStaticDyn { .. }
+                    | Op::CallBuiltin(..)
+                    | Op::CallPrint(_)
+                    | Op::CallPrintSep { .. }
+                    | Op::Return
+                    | Op::Yield
+                    | Op::DeferCall(_)
+                    | Op::DeferMethod(..)
+                    | Op::EnterDeferScope
+                    | Op::LeaveDeferScope
+                    | Op::DrainHandlerDefers
+                    | Op::Try
+                    | Op::JsonDecode(_)
+                    | Op::JsonToValue
+                    | Op::NewList(_)
+                    | Op::NewTuple(_)
+                    | Op::NewMap(_)
+                    | Op::NewSet(_)
+                    | Op::NewStruct(..)
+                    | Op::NewCell
+                    | Op::CellLoad
+                    | Op::CellStore
+                    | Op::NewEnum { .. }
+                    | Op::MakeFunc(_)
+                    | Op::MakeFuncIn(_)
+                    | Op::MakeMethodFunc { .. }
+                    | Op::JumpIfProvided(..)
+                    | Op::MakeCffi(_)
+                    | Op::MakeClosure(..)
+                    | Op::GetField { .. }
+                    | Op::GetIndex
+                    | Op::GetSlice
+                    | Op::SetField { .. }
+                    | Op::SetIndex
+                    | Op::Dup
+                    | Op::Dup2
+                    | Op::ToStr
+                    | Op::ToStrFmt(_)
+                    | Op::BuildStr(_)
+                    | Op::ListClone
+                    | Op::ArrLen
+                    | Op::HasNextHook
+                    | Op::IsGenerator
+                    | Op::IsCursor
+                    | Op::IterableToCursor
+                    | Op::IsMap
+                    | Op::IsChannel
+                    | Op::ChanRecvOrClosed
+                    | Op::EnsureEnum(_)
+                    | Op::MatchArm { .. }
+                    | Op::MatchNoArm(_)
+                    | Op::EnterNursery
+                    | Op::JoinNursery
+                    | Op::ReclaimNursery
+                    | Op::SpawnCall(..)
+                    | Op::SpawnRecv(..)
+                    | Op::SpawnBlock(..)
+                    | Op::WaitPoll(_)
+                    | Op::NewChannel(_)
+                    | Op::NewShared
+                    | Op::NewRwShared
+                    | Op::NewAtomic
+                    | Op::NewAtomicInt
+                    | Op::NewTimer
+                    | Op::NewExecutor
+                    | Op::NewExecutorN => unreachable!(),
                 };
                 Err(self.err(
                     format!(
@@ -1006,7 +2187,120 @@ impl Vm {
             Op::LtEq => ord.is_le(),
             Op::Gt => ord.is_gt(),
             Op::GtEq => ord.is_ge(),
-            _ => unreachable!(),
+            Op::ConstInt(_)
+            | Op::ConstFloat(_)
+            | Op::ConstStr(_)
+            | Op::ConstBytes(_)
+            | Op::True
+            | Op::False
+            | Op::Nil
+            | Op::Pop
+            | Op::StampGen(_)
+            | Op::Assert { .. }
+            | Op::LoadBuiltin(_)
+            | Op::GetLocal(_)
+            | Op::SetLocal(_)
+            | Op::GetGlobalSlot(_)
+            | Op::DefineGlobalSlot(_)
+            | Op::SetGlobalSlot(_)
+            | Op::GetCaptured(_)
+            | Op::Add
+            | Op::AddInPlace
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Neg
+            | Op::Not
+            | Op::Eq
+            | Op::NotEq
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::Shl
+            | Op::Shr
+            | Op::Contains
+            | Op::AsBool
+            | Op::AsInt
+            | Op::BinLocalLocal { .. }
+            | Op::BinLocalConst { .. }
+            | Op::IncLocal { .. }
+            | Op::Jump(_)
+            | Op::JumpIfFalse(_)
+            | Op::JumpIfFalseKeep(_)
+            | Op::JumpIfTrueKeep(_)
+            | Op::PushHandler(_)
+            | Op::PopHandler
+            | Op::Call(_)
+            | Op::CallMethod { .. }
+            | Op::CallHook { .. }
+            | Op::CallStatic { .. }
+            | Op::CallStaticDyn { .. }
+            | Op::CallBuiltin(..)
+            | Op::CallPrint(_)
+            | Op::CallPrintSep { .. }
+            | Op::Return
+            | Op::Yield
+            | Op::DeferCall(_)
+            | Op::DeferMethod(..)
+            | Op::EnterDeferScope
+            | Op::LeaveDeferScope
+            | Op::DrainHandlerDefers
+            | Op::Try
+            | Op::JsonDecode(_)
+            | Op::JsonToValue
+            | Op::NewList(_)
+            | Op::NewTuple(_)
+            | Op::NewMap(_)
+            | Op::NewSet(_)
+            | Op::NewStruct(..)
+            | Op::NewCell
+            | Op::CellLoad
+            | Op::CellStore
+            | Op::NewEnum { .. }
+            | Op::MakeFunc(_)
+            | Op::MakeFuncIn(_)
+            | Op::MakeMethodFunc { .. }
+            | Op::JumpIfProvided(..)
+            | Op::MakeCffi(_)
+            | Op::MakeClosure(..)
+            | Op::GetField { .. }
+            | Op::GetIndex
+            | Op::GetSlice
+            | Op::SetField { .. }
+            | Op::SetIndex
+            | Op::Dup
+            | Op::Dup2
+            | Op::ToStr
+            | Op::ToStrFmt(_)
+            | Op::BuildStr(_)
+            | Op::ListClone
+            | Op::ArrLen
+            | Op::HasNextHook
+            | Op::IsGenerator
+            | Op::IsCursor
+            | Op::IterableToCursor
+            | Op::IsMap
+            | Op::IsChannel
+            | Op::ChanRecvOrClosed
+            | Op::EnsureEnum(_)
+            | Op::MatchArm { .. }
+            | Op::MatchNoArm(_)
+            | Op::EnterNursery
+            | Op::JoinNursery
+            | Op::ReclaimNursery
+            | Op::SpawnCall(..)
+            | Op::SpawnRecv(..)
+            | Op::SpawnBlock(..)
+            | Op::WaitPoll(_)
+            | Op::NewChannel(_)
+            | Op::NewShared
+            | Op::NewRwShared
+            | Op::NewAtomic
+            | Op::NewAtomicInt
+            | Op::NewTimer
+            | Op::NewExecutor
+            | Op::NewExecutorN => unreachable!(),
         };
         self.push(Value::bool(b));
         Ok(())
@@ -1046,7 +2340,35 @@ impl Vm {
             {
                 Some(2)
             }
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -1193,7 +2515,31 @@ impl Vm {
                     })
                 }
                 Obj::Str(_) | Obj::Bytes(_) | Obj::BigInt(_) => Ok(self.scalar_hash(v)),
-                _ => Err(self.err(
+                Obj::ByteArray(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::List(_)
+                | Obj::Map(_)
+                | Obj::Set(_)
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => Err(self.err(
                     format!(
                         "{} is not hashable (cannot be a map/set key)",
                         self.type_name(v)
@@ -1212,7 +2558,35 @@ impl Vm {
         let Some(h) = v.as_obj() else { unreachable!() };
         match self.heap.get(h) {
             Obj::Struct { .. } | Obj::Enum { .. } => self.declared_hash(v, span),
-            _ => unreachable!("hash_user receiver is a struct or enum"),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => unreachable!("hash_user receiver is a struct or enum"),
         }
     }
 
@@ -1251,7 +2625,33 @@ impl Vm {
                 // above) — mandatory for the "behaves like inline" invariant.
                 Obj::BigInt(n) => (if *n == 0 { 0.0 } else { *n as f64 }).to_bits(),
                 Obj::FloatBox(f) => (if *f == 0.0 { 0.0 } else { *f }).to_bits(),
-                _ => 0,
+                Obj::ByteArray(_)
+                | Obj::Iter { .. }
+                | Obj::List(_)
+                | Obj::Tuple(_)
+                | Obj::Map(_)
+                | Obj::Set(_)
+                | Obj::Struct { .. }
+                | Obj::Enum { .. }
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => 0,
             },
         }
     }
@@ -1354,7 +2754,7 @@ impl Vm {
                 let mut visited = super::fxhash::FxHashMap::default();
                 self.snapshot_value(key, &mut visited, 0)
             }
-            _ => key,
+            ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil | ValueView::Obj(_) => key,
         }
     }
 
@@ -1413,7 +2813,31 @@ impl Vm {
                 .flat_map(|(_, k, val)| [*k, *val])
                 .collect(),
             Obj::Set(s) => s.entries.iter().map(|(_, e)| *e).collect(),
-            _ => {
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => {
                 done.insert(h, ()); // leaf / by-reference object: never descended when copying
                 return false;
             }
@@ -1558,7 +2982,30 @@ impl Vm {
             // Everything else (immutable `Str`/`Bytes`/`Ptr`/`Builtin` + all identity-compared
             // by-reference objects) is kept BY REFERENCE — a copy would break `values_equal` for the
             // identity arms and needlessly duplicate the immutable ones.
-            _ => v,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => v,
         }
     }
 
@@ -2343,6 +3790,6 @@ pub(super) fn cmp_int_f64(v: i64, w: f64) -> Option<std::cmp::Ordering> {
     let fi = fl as i64;
     Some(match v.cmp(&fi) {
         Ordering::Equal if w > fl => Ordering::Less,
-        other => other,
+        other @ Ordering::Less | other @ Ordering::Equal | other @ Ordering::Greater => other,
     })
 }

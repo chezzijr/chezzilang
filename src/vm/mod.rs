@@ -3122,7 +3122,11 @@ impl SchedCore {
                     }
                 }
             }
-            _ => w.satisfiable(),
+            quiesce::PartyWait::Recv(..)
+            | quiesce::PartyWait::Send(_)
+            | quiesce::PartyWait::Wait(..)
+            | quiesce::PartyWait::Nursery(_)
+            | quiesce::PartyWait::Guard(..) => w.satisfiable(),
         }) || self.parked.values().flatten().any(ParkedEntry::satisfiable)
     }
 
@@ -6406,7 +6410,7 @@ impl SchedCore {
                             }
                         }
                     }
-                    other => {
+                    other @ ParkedEntry::Recv(_) | other @ ParkedEntry::Send(_) => {
                         keep.push(other); // outside every joined leaf: stays parked
                         continue;
                     }
@@ -6525,7 +6529,7 @@ impl SchedCore {
                     }
                 }
                 ParkedEntry::Recv(f) if member(f.scope_id) => recv_fibers.push(f),
-                _ => {}
+                ParkedEntry::Recv(_) | ParkedEntry::Send(_) => {}
             }
         }
         // Every member scope's undone tasks must be accounted for by a PARKED RECV fiber of that
@@ -7377,7 +7381,10 @@ pub(crate) fn parse_i64_pep515(s: &str) -> Result<i64, IntParseErr> {
         std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
             IntParseErr::Overflow
         }
-        _ => IntParseErr::Malformed,
+        std::num::IntErrorKind::Empty
+        | std::num::IntErrorKind::InvalidDigit
+        | std::num::IntErrorKind::Zero
+        | _ => IntParseErr::Malformed,
     })
 }
 

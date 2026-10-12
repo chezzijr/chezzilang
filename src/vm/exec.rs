@@ -810,7 +810,35 @@ impl Vm {
             Obj::Func { proto, .. } | Obj::Closure { proto, .. } => {
                 Some(self.program.protos[*proto].decl_span)
             }
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -1590,7 +1618,101 @@ impl Vm {
                 ),
                 Op::Eq => self.q_eq(self.quicken_base[pid] as usize + ip, false, span),
                 Op::NotEq => self.q_eq(self.quicken_base[pid] as usize + ip, true, span),
-                other => self.step(other, span),
+                other @ Op::ConstInt(_)
+                | other @ Op::ConstFloat(_)
+                | other @ Op::ConstStr(_)
+                | other @ Op::ConstBytes(_)
+                | other @ Op::True
+                | other @ Op::False
+                | other @ Op::Nil
+                | other @ Op::Pop
+                | other @ Op::StampGen(_)
+                | other @ Op::Assert { .. }
+                | other @ Op::LoadBuiltin(_)
+                | other @ Op::GetGlobalSlot(_)
+                | other @ Op::DefineGlobalSlot(_)
+                | other @ Op::SetGlobalSlot(_)
+                | other @ Op::GetCaptured(_)
+                | other @ Op::Neg
+                | other @ Op::Not
+                | other @ Op::BitAnd
+                | other @ Op::BitOr
+                | other @ Op::BitXor
+                | other @ Op::Shl
+                | other @ Op::Shr
+                | other @ Op::Contains
+                | other @ Op::AsBool
+                | other @ Op::AsInt
+                | other @ Op::JumpIfFalseKeep(_)
+                | other @ Op::JumpIfTrueKeep(_)
+                | other @ Op::PushHandler(_)
+                | other @ Op::PopHandler
+                | other @ Op::CallMethod { .. }
+                | other @ Op::CallHook { .. }
+                | other @ Op::CallStatic { .. }
+                | other @ Op::CallStaticDyn { .. }
+                | other @ Op::CallBuiltin(..)
+                | other @ Op::CallPrint(_)
+                | other @ Op::CallPrintSep { .. }
+                | other @ Op::Yield
+                | other @ Op::DeferCall(_)
+                | other @ Op::DeferMethod(..)
+                | other @ Op::EnterDeferScope
+                | other @ Op::LeaveDeferScope
+                | other @ Op::DrainHandlerDefers
+                | other @ Op::Try
+                | other @ Op::JsonDecode(_)
+                | other @ Op::JsonToValue
+                | other @ Op::NewList(_)
+                | other @ Op::NewTuple(_)
+                | other @ Op::NewMap(_)
+                | other @ Op::NewSet(_)
+                | other @ Op::NewStruct(..)
+                | other @ Op::NewCell
+                | other @ Op::CellLoad
+                | other @ Op::CellStore
+                | other @ Op::NewEnum { .. }
+                | other @ Op::MakeFunc(_)
+                | other @ Op::MakeFuncIn(_)
+                | other @ Op::MakeMethodFunc { .. }
+                | other @ Op::JumpIfProvided(..)
+                | other @ Op::MakeCffi(_)
+                | other @ Op::MakeClosure(..)
+                | other @ Op::GetField { .. }
+                | other @ Op::GetSlice
+                | other @ Op::SetField { .. }
+                | other @ Op::Dup
+                | other @ Op::Dup2
+                | other @ Op::ToStr
+                | other @ Op::ToStrFmt(_)
+                | other @ Op::BuildStr(_)
+                | other @ Op::ListClone
+                | other @ Op::ArrLen
+                | other @ Op::HasNextHook
+                | other @ Op::IsGenerator
+                | other @ Op::IsCursor
+                | other @ Op::IterableToCursor
+                | other @ Op::IsMap
+                | other @ Op::IsChannel
+                | other @ Op::ChanRecvOrClosed
+                | other @ Op::EnsureEnum(_)
+                | other @ Op::MatchArm { .. }
+                | other @ Op::MatchNoArm(_)
+                | other @ Op::EnterNursery
+                | other @ Op::JoinNursery
+                | other @ Op::ReclaimNursery
+                | other @ Op::SpawnCall(..)
+                | other @ Op::SpawnRecv(..)
+                | other @ Op::SpawnBlock(..)
+                | other @ Op::WaitPoll(_)
+                | other @ Op::NewChannel(_)
+                | other @ Op::NewShared
+                | other @ Op::NewRwShared
+                | other @ Op::NewAtomic
+                | other @ Op::NewAtomicInt
+                | other @ Op::NewTimer
+                | other @ Op::NewExecutor
+                | other @ Op::NewExecutorN => self.step(other, span),
             };
             if let Err(rte) = step_result {
                 self.on_step_fault(base_level, rte)?;
@@ -2428,7 +2550,36 @@ impl Vm {
                 let (clo, home) = (frame.closure, frame.home);
                 let v = clo.and_then(|h| match self.heap.get(h) {
                     Obj::Closure { captured, .. } => captured.get(*slot as usize).copied(),
-                    _ => None,
+                    Obj::Str(_)
+                    | Obj::Bytes(_)
+                    | Obj::ByteArray(_)
+                    | Obj::BigInt(_)
+                    | Obj::FloatBox(_)
+                    | Obj::Iter { .. }
+                    | Obj::List(_)
+                    | Obj::Tuple(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::Struct { .. }
+                    | Obj::Enum { .. }
+                    | Obj::Cell(_)
+                    | Obj::Func { .. }
+                    | Obj::Module(_)
+                    | Obj::Native { .. }
+                    | Obj::Builtin(_)
+                    | Obj::Cffi(_)
+                    | Obj::Ptr(_)
+                    | Obj::Channel(_)
+                    | Obj::Shared(_)
+                    | Obj::RwShared(_)
+                    | Obj::Atomic(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Executor(_)
+                    | Obj::Socket(_)
+                    | Obj::Listener(_)
+                    | Obj::Writer(_)
+                    | Obj::Reader(_)
+                    | Obj::Generator(_) => None,
                 });
                 match v {
                     Some(v) => self.push(v),
@@ -2801,7 +2952,36 @@ impl Vm {
                                 Obj::Closure { captured, .. } => {
                                     captured.get(parent_slot as usize).copied()
                                 }
-                                _ => None,
+                                Obj::Str(_)
+                                | Obj::Bytes(_)
+                                | Obj::ByteArray(_)
+                                | Obj::BigInt(_)
+                                | Obj::FloatBox(_)
+                                | Obj::Iter { .. }
+                                | Obj::List(_)
+                                | Obj::Tuple(_)
+                                | Obj::Map(_)
+                                | Obj::Set(_)
+                                | Obj::Struct { .. }
+                                | Obj::Enum { .. }
+                                | Obj::Cell(_)
+                                | Obj::Func { .. }
+                                | Obj::Module(_)
+                                | Obj::Native { .. }
+                                | Obj::Builtin(_)
+                                | Obj::Cffi(_)
+                                | Obj::Ptr(_)
+                                | Obj::Channel(_)
+                                | Obj::Shared(_)
+                                | Obj::RwShared(_)
+                                | Obj::Atomic(_)
+                                | Obj::AtomicInt(_)
+                                | Obj::Executor(_)
+                                | Obj::Socket(_)
+                                | Obj::Listener(_)
+                                | Obj::Writer(_)
+                                | Obj::Reader(_)
+                                | Obj::Generator(_) => None,
                             })
                             .unwrap_or(Value::nil()),
                     };
@@ -2904,12 +3084,35 @@ impl Vm {
                             let nh = self.heap.alloc(Obj::List(cloned));
                             self.push(Value::obj(nh));
                         }
-                        _ => {
+                        Obj::BigInt(_)
+                        | Obj::FloatBox(_)
+                        | Obj::Tuple(_)
+                        | Obj::Struct { .. }
+                        | Obj::Enum { .. }
+                        | Obj::Cell(_)
+                        | Obj::Func { .. }
+                        | Obj::Closure { .. }
+                        | Obj::Module(_)
+                        | Obj::Native { .. }
+                        | Obj::Builtin(_)
+                        | Obj::Cffi(_)
+                        | Obj::Ptr(_)
+                        | Obj::Channel(_)
+                        | Obj::Shared(_)
+                        | Obj::RwShared(_)
+                        | Obj::Atomic(_)
+                        | Obj::AtomicInt(_)
+                        | Obj::Executor(_)
+                        | Obj::Socket(_)
+                        | Obj::Listener(_)
+                        | Obj::Writer(_)
+                        | Obj::Reader(_)
+                        | Obj::Generator(_) => {
                             return Err(self
                                 .err(format!("cannot iterate over {}", self.type_name(v)), span));
                         }
                     },
-                    _ => {
+                    ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => {
                         return Err(
                             self.err(format!("cannot iterate over {}", self.type_name(v)), span)
                         );
@@ -2923,7 +3126,9 @@ impl Vm {
                         Some(items) => items.len() as i64,
                         None => unreachable!("ArrLen on non-list"),
                     },
-                    _ => unreachable!("ArrLen on non-list"),
+                    ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => {
+                        unreachable!("ArrLen on non-list")
+                    }
                 };
                 self.push(Value::int(len));
             }
@@ -3034,9 +3239,38 @@ impl Vm {
                 let id = match v.view() {
                     ValueView::Obj(h) => match self.heap.get(h) {
                         Obj::Enum { variant_id, .. } => Some(*variant_id),
-                        _ => None,
+                        Obj::Str(_)
+                        | Obj::Bytes(_)
+                        | Obj::ByteArray(_)
+                        | Obj::BigInt(_)
+                        | Obj::FloatBox(_)
+                        | Obj::Iter { .. }
+                        | Obj::List(_)
+                        | Obj::Tuple(_)
+                        | Obj::Map(_)
+                        | Obj::Set(_)
+                        | Obj::Struct { .. }
+                        | Obj::Cell(_)
+                        | Obj::Func { .. }
+                        | Obj::Closure { .. }
+                        | Obj::Module(_)
+                        | Obj::Native { .. }
+                        | Obj::Builtin(_)
+                        | Obj::Cffi(_)
+                        | Obj::Ptr(_)
+                        | Obj::Channel(_)
+                        | Obj::Shared(_)
+                        | Obj::RwShared(_)
+                        | Obj::Atomic(_)
+                        | Obj::AtomicInt(_)
+                        | Obj::Executor(_)
+                        | Obj::Socket(_)
+                        | Obj::Listener(_)
+                        | Obj::Writer(_)
+                        | Obj::Reader(_)
+                        | Obj::Generator(_) => None,
                     },
-                    _ => None,
+                    ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => None,
                 };
                 // A carrier is named by the pattern that would match it, a user variant by name.
                 let message = match id.and_then(Self::carrier_pattern_text) {

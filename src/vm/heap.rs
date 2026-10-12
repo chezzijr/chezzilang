@@ -397,7 +397,36 @@ impl Obj {
     pub fn as_list(&self) -> Option<&Vec<Value>> {
         match self {
             Obj::List(v) => Some(v),
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -406,7 +435,36 @@ impl Obj {
     pub fn as_map(&self) -> Option<&MapData> {
         match self {
             Obj::Map(m) => Some(m),
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -415,7 +473,36 @@ impl Obj {
     pub fn as_set(&self) -> Option<&SetData> {
         match self {
             Obj::Set(s) => Some(s),
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -500,7 +587,25 @@ fn obj_bytes_shallow(obj: &Obj) -> usize {
         // Map/Set: entries + the index cost; approximate by entries backing only.
         Obj::Map(m) => m.entries.capacity() * std::mem::size_of::<(u64, Value, Value)>(),
         Obj::Set(s) => s.entries.capacity() * std::mem::size_of::<(u64, Value)>(),
-        _ => 0,
+        Obj::BigInt(_)
+        | Obj::FloatBox(_)
+        | Obj::Cell(_)
+        | Obj::Func { .. }
+        | Obj::Native { .. }
+        | Obj::Builtin(_)
+        | Obj::Cffi(_)
+        | Obj::Ptr(_)
+        | Obj::Channel(_)
+        | Obj::Shared(_)
+        | Obj::RwShared(_)
+        | Obj::Atomic(_)
+        | Obj::AtomicInt(_)
+        | Obj::Executor(_)
+        | Obj::Socket(_)
+        | Obj::Listener(_)
+        | Obj::Writer(_)
+        | Obj::Reader(_)
+        | Obj::Generator(_) => 0,
     }
 }
 
@@ -1388,7 +1493,37 @@ impl Heap {
                 // `Obj` variant cannot be counted here and forgotten at the `alloc`/`get_mut`
                 // charges. A core arm whose guard above failed (already counted for this heap, or
                 // `include_cores == false`) lands here too and correctly scores 0.
-                other => obj_bytes_shallow(other),
+                other @ Obj::Str(_)
+                | other @ Obj::Bytes(_)
+                | other @ Obj::ByteArray(_)
+                | other @ Obj::BigInt(_)
+                | other @ Obj::FloatBox(_)
+                | other @ Obj::Iter { .. }
+                | other @ Obj::List(_)
+                | other @ Obj::Tuple(_)
+                | other @ Obj::Map(_)
+                | other @ Obj::Set(_)
+                | other @ Obj::Struct { .. }
+                | other @ Obj::Enum { .. }
+                | other @ Obj::Cell(_)
+                | other @ Obj::Func { .. }
+                | other @ Obj::Closure { .. }
+                | other @ Obj::Module(_)
+                | other @ Obj::Native { .. }
+                | other @ Obj::Builtin(_)
+                | other @ Obj::Cffi(_)
+                | other @ Obj::Ptr(_)
+                | other @ Obj::Channel(_)
+                | other @ Obj::Shared(_)
+                | other @ Obj::RwShared(_)
+                | other @ Obj::Atomic(_)
+                | other @ Obj::AtomicInt(_)
+                | other @ Obj::Executor(_)
+                | other @ Obj::Socket(_)
+                | other @ Obj::Listener(_)
+                | other @ Obj::Writer(_)
+                | other @ Obj::Reader(_)
+                | other @ Obj::Generator(_) => obj_bytes_shallow(other),
             };
         }
         total

@@ -56,7 +56,33 @@ fn is_mutating_native(obj: &Obj, method: &str) -> bool {
         Obj::Map(_) => "Map",
         Obj::Set(_) => "Set",
         Obj::ByteArray(_) => "bytearray",
-        _ => return false,
+        Obj::Str(_)
+        | Obj::Bytes(_)
+        | Obj::BigInt(_)
+        | Obj::FloatBox(_)
+        | Obj::Iter { .. }
+        | Obj::Tuple(_)
+        | Obj::Struct { .. }
+        | Obj::Enum { .. }
+        | Obj::Cell(_)
+        | Obj::Func { .. }
+        | Obj::Closure { .. }
+        | Obj::Module(_)
+        | Obj::Native { .. }
+        | Obj::Builtin(_)
+        | Obj::Cffi(_)
+        | Obj::Ptr(_)
+        | Obj::Channel(_)
+        | Obj::Shared(_)
+        | Obj::RwShared(_)
+        | Obj::Atomic(_)
+        | Obj::AtomicInt(_)
+        | Obj::Executor(_)
+        | Obj::Socket(_)
+        | Obj::Listener(_)
+        | Obj::Writer(_)
+        | Obj::Reader(_)
+        | Obj::Generator(_) => return false,
     };
     is_mutating_native_kind(kind, method)
 }
@@ -74,7 +100,35 @@ impl Vm {
             let kind = match self.heap.get(h) {
                 Obj::Func { proto, home } => Some((*proto, *home, None)),
                 Obj::Closure { proto, home, .. } => Some((*proto, *home, Some(h))),
-                _ => None,
+                Obj::Str(_)
+                | Obj::Bytes(_)
+                | Obj::ByteArray(_)
+                | Obj::BigInt(_)
+                | Obj::FloatBox(_)
+                | Obj::Iter { .. }
+                | Obj::List(_)
+                | Obj::Tuple(_)
+                | Obj::Map(_)
+                | Obj::Set(_)
+                | Obj::Struct { .. }
+                | Obj::Enum { .. }
+                | Obj::Cell(_)
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => None,
             };
             if let Some((proto, home, clo)) = kind {
                 // Arity check BEFORE disturbing the stack — identical messages to `invoke_value`, and
@@ -397,7 +451,12 @@ impl Vm {
                         }
                     })
                 }
-                _ => Some(OffloadReq {
+                Kind::Inline
+                | Kind::Blocking
+                | Kind::InterceptIo
+                | Kind::InterceptNet
+                | Kind::HostWait
+                | Kind::InterceptAirlock => Some(OffloadReq {
                     func,
                     args: nargs,
                     span,
@@ -587,7 +646,33 @@ impl Vm {
                         }
                         Some(A::List(out))
                     }
-                    _ => None,
+                    Obj::ByteArray(_)
+                    | Obj::BigInt(_)
+                    | Obj::FloatBox(_)
+                    | Obj::Iter { .. }
+                    | Obj::Tuple(_)
+                    | Obj::Set(_)
+                    | Obj::Struct { .. }
+                    | Obj::Enum { .. }
+                    | Obj::Cell(_)
+                    | Obj::Func { .. }
+                    | Obj::Closure { .. }
+                    | Obj::Module(_)
+                    | Obj::Native { .. }
+                    | Obj::Builtin(_)
+                    | Obj::Cffi(_)
+                    | Obj::Ptr(_)
+                    | Obj::Channel(_)
+                    | Obj::Shared(_)
+                    | Obj::RwShared(_)
+                    | Obj::Atomic(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Executor(_)
+                    | Obj::Socket(_)
+                    | Obj::Listener(_)
+                    | Obj::Writer(_)
+                    | Obj::Reader(_)
+                    | Obj::Generator(_) => None,
                 }
             })
             .collect()
@@ -644,7 +729,34 @@ impl Vm {
                 .map(|f| self.c_value_of(*f))
                 .collect::<Option<Vec<_>>>()
                 .map(N::List),
-            _ => None,
+            Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -813,7 +925,36 @@ impl Vm {
                 let (ty, variant) = self.enum_names(*variant_id);
                 Some((ty.to_string(), variant.to_string(), payload.clone()))
             }
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -1192,7 +1333,31 @@ impl Vm {
                         _ => Err(format!("json.encode: cannot encode enum {ty}")),
                     }
                 }
-                _ => Err(format!("json.encode: cannot encode {}", self.type_name(v))),
+                Obj::Bytes(_)
+                | Obj::ByteArray(_)
+                | Obj::Iter { .. }
+                | Obj::Set(_)
+                | Obj::Cell(_)
+                | Obj::Func { .. }
+                | Obj::Closure { .. }
+                | Obj::Module(_)
+                | Obj::Native { .. }
+                | Obj::Builtin(_)
+                | Obj::Cffi(_)
+                | Obj::Ptr(_)
+                | Obj::Channel(_)
+                | Obj::Shared(_)
+                | Obj::RwShared(_)
+                | Obj::Atomic(_)
+                | Obj::AtomicInt(_)
+                | Obj::Executor(_)
+                | Obj::Socket(_)
+                | Obj::Listener(_)
+                | Obj::Writer(_)
+                | Obj::Reader(_)
+                | Obj::Generator(_) => {
+                    Err(format!("json.encode: cannot encode {}", self.type_name(v)))
+                }
             },
         }
     }
@@ -1202,7 +1367,36 @@ impl Vm {
         let h = v.as_obj()?;
         match self.heap.get(h) {
             Obj::Str(s) => Some(s.to_string()),
-            _ => None,
+            Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -1332,7 +1526,35 @@ impl Vm {
         let set = match self.heap.get(h) {
             Obj::Struct { tid, .. } => self.program.hooks_struct.get(*tid as usize),
             Obj::Enum { variant_id, .. } => self.program.hooks_enum.get(*variant_id as usize),
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         };
         set.is_some_and(|bits| bits & hook.bit() != 0)
     }
@@ -1353,7 +1575,35 @@ impl Vm {
                 let proto = *self.program.enum_methods.get(key)?.get(hook.method())?;
                 Some((proto, self.module_objs[self.enum_home_module(key)]))
             }
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         }
     }
 
@@ -1402,7 +1652,35 @@ impl Vm {
                 let key = self.enum_names(*variant_id).0.to_string();
                 Self::enum_subject(*variant_id, &key, |n| format!("enum '{n}'"))
             }
-            _ => self.type_name(recv).to_string(),
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => self.type_name(recv).to_string(),
         };
         self.err(format!("{who} has no '{method}' method"), span)
     }
@@ -1662,7 +1940,28 @@ impl Vm {
             Obj::Listener(_) => Some("Listener"),
             Obj::Writer(_) => Some("Writer"),
             Obj::Reader(_) => Some("Reader"),
-            _ => None,
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Generator(_) => None,
         };
         if let Some(key) = handle_key {
             if self.try_native_bodied_method(key, method, recv, &args, argc, ic, span)? {
@@ -1762,7 +2061,31 @@ impl Vm {
             Obj::Str(_) | Obj::List(_) | Obj::Map(_) | Obj::Set(_) => Some(Container::Core),
             Obj::Bytes(_) => Some(Container::Bytes),
             Obj::ByteArray(_) => Some(Container::ByteArray),
-            _ => None,
+            Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Tuple(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
         };
         if let Some(container) = container {
             let dispatched = match container {
@@ -1998,7 +2321,34 @@ impl Vm {
             // W6-3 — a BOXED scalar (`Obj::BigInt`, and any other Obj-tagged scalar) is Obj-tagged, so
             // it never reaches the inline-scalar miss above and lands here instead: it must answer the
             // same intrinsic arith/`Hashable`/`Comparable` methods its inline twin does.
-            _ => {
+            Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Set(_)
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => {
                 if let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)? {
                     self.push(v);
                     return Ok(());
@@ -3047,7 +3397,34 @@ impl Vm {
                     Obj::Str(s) => s.as_bytes().to_vec(),
                     Obj::Bytes(_) => return Ok(Some(recv)),
                     Obj::ByteArray(b) => b.clone(),
-                    _ => return Ok(None),
+                    Obj::BigInt(_)
+                    | Obj::FloatBox(_)
+                    | Obj::Iter { .. }
+                    | Obj::List(_)
+                    | Obj::Tuple(_)
+                    | Obj::Map(_)
+                    | Obj::Set(_)
+                    | Obj::Struct { .. }
+                    | Obj::Enum { .. }
+                    | Obj::Cell(_)
+                    | Obj::Func { .. }
+                    | Obj::Closure { .. }
+                    | Obj::Module(_)
+                    | Obj::Native { .. }
+                    | Obj::Builtin(_)
+                    | Obj::Cffi(_)
+                    | Obj::Ptr(_)
+                    | Obj::Channel(_)
+                    | Obj::Shared(_)
+                    | Obj::RwShared(_)
+                    | Obj::Atomic(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Executor(_)
+                    | Obj::Socket(_)
+                    | Obj::Listener(_)
+                    | Obj::Writer(_)
+                    | Obj::Reader(_)
+                    | Obj::Generator(_) => return Ok(None),
                 };
                 let r = self.heap.alloc(Obj::Bytes(raw.into()));
                 Ok(Some(Value::obj(r)))
@@ -4118,7 +4495,35 @@ impl Vm {
                 }
                 _ => Err(self.err(format!("type set has no method '{method}'"), span)),
             },
-            _ => unreachable!("core_method dispatched a non-str/list/map/set receiver"),
+            Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::Tuple(_)
+            | Obj::Struct { .. }
+            | Obj::Enum { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => {
+                unreachable!("core_method dispatched a non-str/list/map/set receiver")
+            }
         }
     }
 

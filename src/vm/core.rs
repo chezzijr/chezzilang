@@ -1302,7 +1302,10 @@ pub(super) fn halt_over_backlog(
             },
             true,
         ),
-        other => (other, false),
+        other @ T::CancelledFault { .. }
+        | other @ T::Exit { .. }
+        | other @ T::Fault { .. }
+        | other @ T::Deadlocked { .. } => (other, false),
     }
 }
 
@@ -1541,7 +1544,35 @@ pub fn drain_pending_cores(
                 }
             }
             // `pending` only ever receives the five core variants above.
-            _ => {}
+            WireValue::Int(_)
+            | WireValue::Float(_)
+            | WireValue::Bool(_)
+            | WireValue::Nil
+            | WireValue::List { .. }
+            | WireValue::Tuple { .. }
+            | WireValue::Map { .. }
+            | WireValue::Set { .. }
+            | WireValue::Str(_)
+            | WireValue::Bytes(_)
+            | WireValue::ByteArray(_)
+            | WireValue::Iter { .. }
+            | WireValue::Struct { .. }
+            | WireValue::Enum { .. }
+            | WireValue::Cell { .. }
+            | WireValue::Backref(_)
+            | WireValue::Handle(_)
+            | WireValue::AtomicInt(_)
+            | WireValue::Socket(_)
+            | WireValue::Listener(_)
+            | WireValue::Writer(_)
+            | WireValue::Reader(_)
+            | WireValue::Ptr(_)
+            | WireValue::Builtin(_)
+            | WireValue::Native { .. }
+            | WireValue::Cffi(_)
+            | WireValue::Closure { .. }
+            | WireValue::Func { .. }
+            | WireValue::Generator { .. } => {}
         }
         // The guard above is dropped HERE, before the next core is locked. That is the whole fix.
     }
@@ -1914,7 +1945,35 @@ pub fn drain_pending_core_bytes(
                 acc += value_core_bytes_structural(&c.summary, &g, seen, pending);
             }
             // `pending` only ever receives the five core variants above.
-            _ => {}
+            WireValue::Int(_)
+            | WireValue::Float(_)
+            | WireValue::Bool(_)
+            | WireValue::Nil
+            | WireValue::List { .. }
+            | WireValue::Tuple { .. }
+            | WireValue::Map { .. }
+            | WireValue::Set { .. }
+            | WireValue::Str(_)
+            | WireValue::Bytes(_)
+            | WireValue::ByteArray(_)
+            | WireValue::Iter { .. }
+            | WireValue::Struct { .. }
+            | WireValue::Enum { .. }
+            | WireValue::Cell { .. }
+            | WireValue::Backref(_)
+            | WireValue::Handle(_)
+            | WireValue::AtomicInt(_)
+            | WireValue::Socket(_)
+            | WireValue::Listener(_)
+            | WireValue::Writer(_)
+            | WireValue::Reader(_)
+            | WireValue::Ptr(_)
+            | WireValue::Builtin(_)
+            | WireValue::Native { .. }
+            | WireValue::Cffi(_)
+            | WireValue::Closure { .. }
+            | WireValue::Func { .. }
+            | WireValue::Generator { .. } => {}
         }
         // Guard dropped HERE, before the next core is locked.
     }
