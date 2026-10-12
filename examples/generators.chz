@@ -10,7 +10,7 @@ fn count_up(n: int) -> Iterator[int]:
         i = i + 1
 
 # Generator as a struct method.
-struct Range:
+struct Countdown:
     lo: int
     hi: int
 
@@ -34,7 +34,7 @@ fn main():
         print(x)
 
     # 2) for-loop over a struct-method generator
-    for y in Range(10, 13).each():
+    for y in Countdown(10, 13).each():
         print(y)
 
     # 3) explicit `.next()` — ?v per yield, then None once exhausted

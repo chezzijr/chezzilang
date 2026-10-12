@@ -813,6 +813,23 @@ impl Builder {
             module: opt_label(dotted),
             path: None,
         })?;
+        // TICKET-253: `Range` is a struct of `std.prelude` that every module sees with no `import`
+        // line. The one seam that makes it so: each module but the prelude itself gets the statement
+        // `import Range from std.prelude` as its first line, so the checker, compiler and VM carry the
+        // type through the ordinary from-import path.
+        if dotted != ["std".to_string(), "prelude".to_string()] {
+            ast.stmts.insert(
+                0,
+                crate::ast::Stmt {
+                    kind: StmtKind::Import(Import::From {
+                        path: vec!["std".to_string(), "prelude".to_string()],
+                        names: vec![("Range".to_string(), None)],
+                        name_spans: vec![Span::default()],
+                    }),
+                    span: Span::default(),
+                },
+            );
+        }
         let std_root = &self.std_root;
         let project_root = &self.project_root;
         // A std file never probes the project root: a user `Option.chz` must not turn the

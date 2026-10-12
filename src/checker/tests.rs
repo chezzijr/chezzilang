@@ -39821,3 +39821,13 @@ fn an_atomic_payload_parameter_must_carry_structural_eq() {
 fn range_is_a_value_bound_to_a_name_and_passed_as_iterable() {
     ok("fn total(r: Iterable[int]) -> int:\n    return 0\nr := 0..3\nx := total(0..3)\n");
 }
+
+#[test]
+fn range_struct_is_in_scope_with_no_import() {
+    ok("r := Range(0, 3)\nfn f(q: Range) -> int:\n    return q.step\n");
+}
+
+#[test]
+fn a_user_struct_named_range_is_reserved() {
+    rejects("struct Range:\n    a: int\n", "reserved");
+}

@@ -366,3 +366,129 @@ protocol Contains[Item]:
 # both has no method ambiguity.
 protocol PathLike:
     fn as_path(self) -> bytes
+
+# `Range` — a range of ints as a VALUE (TICKET-253). `a..b`, `a..=b`, `..b`, `a..` and `..` build one; so
+# does `Range(a, b)` / `Range(a, b, step)` (the constructor is the only place for a step; a negative step
+# counts down). It is an ordinary struct: `iter` makes it `Iterable[int]` (NOT an `Iterator`: one value
+# iterates any number of times), `contains` makes it `Contains[int]`, `hash` + structural `==` make it a
+# map key, `str` is the source form. A slice takes a `Range`: `xs[a..b]`, `xs[Range(0, 10, 2)]`.
+struct Range:
+    start: int?
+    end: int?
+    step: int = 1
+    inclusive: bool = false
+
+    # True when `cur` is inside the end bound `e` for this direction.
+    fn _in(self, cur: int, e: int) -> bool:
+        if self.inclusive and cur == e:
+            return true
+        if self.step > 0:
+            return cur < e
+        return cur > e
+
+    # True when `cur + step` is inside the end bound. No expression here can overflow:
+    # opposite signs add toward zero, equal signs subtract toward zero.
+    fn _has_next(self, cur: int, e: int) -> bool:
+        if self.step > 0:
+            if cur < 0 and e > 0:
+                return self._in(cur + self.step, e)
+            gap := e - cur
+            return gap - self.step > 0 or (self.inclusive and gap - self.step == 0)
+        if cur > 0 and e < 0:
+            return self._in(cur + self.step, e)
+        gap := cur - e
+        return gap + self.step > 0 or (self.inclusive and gap + self.step == 0)
+
+    fn iter(self) -> Iterator[int]:
+        if self.step == 0:
+            panic("Range() step cannot be zero")
+        cur := 0
+        match self.start:
+            ?s:
+                cur = s
+            None:
+                panic("a range with no start cannot be iterated")
+        match self.end:
+            ?e:
+                if self._in(cur, e):
+                    yield cur
+                    while self._has_next(cur, e):
+                        cur = cur + self.step
+                        yield cur
+            None:
+                while true:
+                    yield cur
+                    cur = cur + self.step
+
+    fn len(self) -> int:
+        n := 0
+        match self.end:
+            ?e:
+                match self.start:
+                    ?s:
+                        if self.step == 0:
+                            panic("Range() step cannot be zero")
+                        if self._in(s, e):
+                            span := e - s
+                            if self.step < 0:
+                                span = s - e
+                            mag := self.step
+                            if mag < 0:
+                                mag = 0 - mag
+                            n = span / mag
+                            if span % mag != 0 or self.inclusive:
+                                n = n + 1
+                    None:
+                        panic("len() needs a range with a start and an end")
+            None:
+                panic("len() needs a range with a start and an end")
+        return n
+
+    fn contains(self, item: int) -> bool:
+        if self.step == 0:
+            panic("Range() step cannot be zero")
+        up := self.step > 0
+        match self.start:
+            ?s:
+                if (up and item < s) or (not up and item > s):
+                    return false
+                if self.step != 1 and self.step != -1 and (item - s) % self.step != 0:
+                    return false
+            None:
+                pass
+        match self.end:
+            ?e:
+                return self._in(item, e)
+            None:
+                return true
+
+    fn hash(self) -> int:
+        h := (self.start ?? 0) ^ (self.end ?? 0) ^ self.step
+        if self.inclusive:
+            h = h ^ 1
+        return h
+
+    fn str(self) -> str:
+        a := ""
+        match self.start:
+            ?s:
+                a = "{s}"
+            None:
+                pass
+        b := ""
+        match self.end:
+            ?e:
+                b = "{e}"
+            None:
+                pass
+        if self.step == 1 and self.inclusive:
+            return "{a}..={b}"
+        if self.step == 1:
+            return "{a}..{b}"
+        if a == "":
+            a = "None"
+        if b == "":
+            b = "None"
+        if self.inclusive:
+            return "Range({a}, {b}, {self.step}, true)"
+        return "Range({a}, {b}, {self.step})"

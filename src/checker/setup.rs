@@ -4096,7 +4096,8 @@ impl Checker {
                     // Genuine GLOBAL reserved types (`int`/`Channel`/`Result`/…), reserved protocols,
                     // and FFI width types are one-way-ratchet names — a `struct` decl of one is a
                     // `reserved (builtin)` violation.
-                    if is_reserved_type(name)
+                    // A std file declares the reserved struct it owns (`Range`, TICKET-253).
+                    if (is_reserved_type(name) && !self.current_module_is_stdlib)
                         || is_reserved_protocol(name)
                         || crate::native::ffi::is_width(name)
                     {
@@ -4906,6 +4907,21 @@ impl Checker {
             }
         }
         self.adopt_reserved_protocol_labels(&module);
+        // TICKET-253 — `Range` is a struct of the prelude that every module sees with no `import`
+        // (the resolver adds `import Range from std.prelude` on the graph path). The graph-less path
+        // hoists its declaration straight into this checker so `Range(0, 3)` resolves here too.
+        let range_decl: Vec<Stmt> = module
+            .stmts
+            .iter()
+            .filter(|s| matches!(&s.kind, StmtKind::Struct { name, .. } if name == "Range"))
+            .cloned()
+            .collect();
+        let outer = std::mem::replace(&mut self.current_module_is_stdlib, true);
+        self.hoist(&range_decl);
+        self.current_module_is_stdlib = outer;
+        if let Some(info) = self.structs.get("Range").cloned() {
+            self.bind_imported_struct_name("Range", "Range", &info);
+        }
     }
 
     /// Is this surface extern `Type` a RETURN-ONLY marshalling form (`owned_str`, `str?`, or

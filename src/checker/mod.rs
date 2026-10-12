@@ -227,6 +227,9 @@ fn is_reserved_type(name: &str) -> bool {
         || name == "Map"
         || name == "Channel"
         || name == "range"
+        // TICKET-253: `Range` is the struct of `std.prelude` that every module sees; a user type of that
+        // name would shadow it.
+        || name == "Range"
         // `tuple` is the global structural tuple type (values exist only via `(a, b)` literals /
         // destructuring, never a from-nothing ctor). It carries no resolvable bare-type or ctor, so a
         // user `struct tuple` shadows nothing reachable — but it's a documented global (CLAUDE.md's
