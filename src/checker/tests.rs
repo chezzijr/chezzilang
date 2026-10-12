@@ -39816,3 +39816,8 @@ fn an_atomic_payload_parameter_must_carry_structural_eq() {
         "payload defines its own 'eq'",
     );
 }
+
+#[test]
+fn range_is_a_value_bound_to_a_name_and_passed_as_iterable() {
+    ok("fn total(r: Iterable[int]) -> int:\n    return 0\nr := 0..3\nx := total(0..3)\n");
+}
