@@ -916,46 +916,10 @@ impl Vm {
     /// The enum type, variant name, and (copied) payload of an enum value; `None` if not an enum.
     pub(super) fn enum_parts(&self, v: Value) -> Option<(String, String, Vec<Value>)> {
         let h = v.as_obj()?;
-        match self.heap.get(h) {
-            Obj::Enum {
-                variant_id,
-                payload,
-            } => {
-                // M19 lever #2 — cold path: resolve the type + variant names from the id.
-                let (ty, variant) = self.enum_names(*variant_id);
-                Some((ty.to_string(), variant.to_string(), payload.clone()))
-            }
-            Obj::Str(_)
-            | Obj::Bytes(_)
-            | Obj::ByteArray(_)
-            | Obj::BigInt(_)
-            | Obj::FloatBox(_)
-            | Obj::Iter { .. }
-            | Obj::List(_)
-            | Obj::Tuple(_)
-            | Obj::Map(_)
-            | Obj::Set(_)
-            | Obj::Struct { .. }
-            | Obj::Cell(_)
-            | Obj::Func { .. }
-            | Obj::Closure { .. }
-            | Obj::Module(_)
-            | Obj::Native { .. }
-            | Obj::Builtin(_)
-            | Obj::Cffi(_)
-            | Obj::Ptr(_)
-            | Obj::Channel(_)
-            | Obj::Shared(_)
-            | Obj::RwShared(_)
-            | Obj::Atomic(_)
-            | Obj::AtomicInt(_)
-            | Obj::Executor(_)
-            | Obj::Socket(_)
-            | Obj::Listener(_)
-            | Obj::Writer(_)
-            | Obj::Reader(_)
-            | Obj::Generator(_) => None,
-        }
+        let (variant_id, payload) = self.heap.get(h).as_enum()?;
+        // M19 lever #2 — cold path: resolve the type + variant names from the id.
+        let (ty, variant) = self.enum_names(variant_id);
+        Some((ty.to_string(), variant.to_string(), payload.clone()))
     }
 
     /// Run a missing field's default thunk, as `S(...)` runs it for an omitted field: afresh each

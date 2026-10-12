@@ -361,45 +361,13 @@ impl Vm {
         let v = self.pop();
         // Extract (variant_id, payload-arity, first-payload) up front so the heap borrow is released
         // before we mutate the stack / unwind a frame.
-        let info = match v.view() {
-            ValueView::Obj(h) => match self.heap.get(h) {
-                Obj::Enum {
-                    variant_id,
-                    payload,
-                } => Some((*variant_id, payload.len(), payload.first().copied())),
-                Obj::Str(_)
-                | Obj::Bytes(_)
-                | Obj::ByteArray(_)
-                | Obj::BigInt(_)
-                | Obj::FloatBox(_)
-                | Obj::Iter { .. }
-                | Obj::List(_)
-                | Obj::Tuple(_)
-                | Obj::Map(_)
-                | Obj::Set(_)
-                | Obj::Struct { .. }
-                | Obj::Cell(_)
-                | Obj::Func { .. }
-                | Obj::Closure { .. }
-                | Obj::Module(_)
-                | Obj::Native { .. }
-                | Obj::Builtin(_)
-                | Obj::Cffi(_)
-                | Obj::Ptr(_)
-                | Obj::Channel(_)
-                | Obj::Shared(_)
-                | Obj::RwShared(_)
-                | Obj::Atomic(_)
-                | Obj::AtomicInt(_)
-                | Obj::Executor(_)
-                | Obj::Socket(_)
-                | Obj::Listener(_)
-                | Obj::Writer(_)
-                | Obj::Reader(_)
-                | Obj::Generator(_) => None,
-            },
-            ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => None,
-        };
+        let info =
+            match v.view() {
+                ValueView::Obj(h) => self.heap.get(h).as_enum().map(|(variant_id, payload)| {
+                    (variant_id, payload.len(), payload.first().copied())
+                }),
+                ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => None,
+            };
         // M19 lever #2 — gate on the fixed native variant ids (`VID_OK`/`VID_SOME` unwrap, `VID_ERR`/
         // `VID_NONE_VARIANT` propagate), NOT a name compare. A user enum shadowing `Ok`/`Err`/`Some`/
         // `None` gets distinct ids, so it is correctly NOT treated as a Result/Option by `?`.
@@ -618,49 +586,16 @@ impl Vm {
         payload: &[Value],
     ) -> Option<&'static str> {
         Self::carrier_prefix_of(variant_id, || {
-            payload
-                .first()
-                .and_then(|v| v.as_obj())
-                .is_some_and(|h| match self.heap.get(h) {
-                    Obj::Enum {
-                        variant_id: inner,
-                        payload: inner_payload,
-                    } => {
-                        *inner == crate::vm::op::VID_NONE_VARIANT
-                            || (*inner == crate::vm::op::VID_SOME
-                                && self.carrier_prefix(*inner, inner_payload) == Some("?"))
+            payload.first().and_then(|v| v.as_obj()).is_some_and(|h| {
+                match self.heap.get(h).as_enum() {
+                    Some((inner, inner_payload)) => {
+                        inner == crate::vm::op::VID_NONE_VARIANT
+                            || (inner == crate::vm::op::VID_SOME
+                                && self.carrier_prefix(inner, inner_payload) == Some("?"))
                     }
-                    Obj::Str(_)
-                    | Obj::Bytes(_)
-                    | Obj::ByteArray(_)
-                    | Obj::BigInt(_)
-                    | Obj::FloatBox(_)
-                    | Obj::Iter { .. }
-                    | Obj::List(_)
-                    | Obj::Tuple(_)
-                    | Obj::Map(_)
-                    | Obj::Set(_)
-                    | Obj::Struct { .. }
-                    | Obj::Cell(_)
-                    | Obj::Func { .. }
-                    | Obj::Closure { .. }
-                    | Obj::Module(_)
-                    | Obj::Native { .. }
-                    | Obj::Builtin(_)
-                    | Obj::Cffi(_)
-                    | Obj::Ptr(_)
-                    | Obj::Channel(_)
-                    | Obj::Shared(_)
-                    | Obj::RwShared(_)
-                    | Obj::Atomic(_)
-                    | Obj::AtomicInt(_)
-                    | Obj::Executor(_)
-                    | Obj::Socket(_)
-                    | Obj::Listener(_)
-                    | Obj::Writer(_)
-                    | Obj::Reader(_)
-                    | Obj::Generator(_) => false,
-                })
+                    None => false,
+                }
+            })
         })
     }
 
@@ -1532,41 +1467,9 @@ impl Vm {
         };
         // M19 lever #2 — dispatch is a pure-int compare of the instance's stamped `variant_id` against
         // the arm's compile-time id (no variant-name string compare). `variant` is only the cold error.
-        let (mut matches, vid, payload) = match self.heap.get(h) {
-            Obj::Enum {
-                variant_id: vid,
-                payload,
-            } => (*vid == variant_id, *vid, payload.clone()),
-            Obj::Str(_)
-            | Obj::Bytes(_)
-            | Obj::ByteArray(_)
-            | Obj::BigInt(_)
-            | Obj::FloatBox(_)
-            | Obj::Iter { .. }
-            | Obj::List(_)
-            | Obj::Tuple(_)
-            | Obj::Map(_)
-            | Obj::Set(_)
-            | Obj::Struct { .. }
-            | Obj::Cell(_)
-            | Obj::Func { .. }
-            | Obj::Closure { .. }
-            | Obj::Module(_)
-            | Obj::Native { .. }
-            | Obj::Builtin(_)
-            | Obj::Cffi(_)
-            | Obj::Ptr(_)
-            | Obj::Channel(_)
-            | Obj::Shared(_)
-            | Obj::RwShared(_)
-            | Obj::Atomic(_)
-            | Obj::AtomicInt(_)
-            | Obj::Executor(_)
-            | Obj::Socket(_)
-            | Obj::Listener(_)
-            | Obj::Writer(_)
-            | Obj::Reader(_)
-            | Obj::Generator(_) => unreachable!("scrutinee ensured to be an enum"),
+        let (mut matches, vid, payload) = match self.heap.get(h).as_enum() {
+            Some((vid, payload)) => (vid == variant_id, vid, payload.clone()),
+            None => unreachable!("scrutinee ensured to be an enum"),
         };
         // SCRUTINEE-DRIVEN fallback on an id MISS. The compile-time `variant_id` can be the WRONG
         // module's id when a bare match-pattern enum qualifier (`Color.Red`) is reachable only via a

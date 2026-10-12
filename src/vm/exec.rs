@@ -3237,39 +3237,7 @@ impl Vm {
             Op::MatchNoArm(slot) => {
                 let v = self.stack[self.base() + *slot];
                 let id = match v.view() {
-                    ValueView::Obj(h) => match self.heap.get(h) {
-                        Obj::Enum { variant_id, .. } => Some(*variant_id),
-                        Obj::Str(_)
-                        | Obj::Bytes(_)
-                        | Obj::ByteArray(_)
-                        | Obj::BigInt(_)
-                        | Obj::FloatBox(_)
-                        | Obj::Iter { .. }
-                        | Obj::List(_)
-                        | Obj::Tuple(_)
-                        | Obj::Map(_)
-                        | Obj::Set(_)
-                        | Obj::Struct { .. }
-                        | Obj::Cell(_)
-                        | Obj::Func { .. }
-                        | Obj::Closure { .. }
-                        | Obj::Module(_)
-                        | Obj::Native { .. }
-                        | Obj::Builtin(_)
-                        | Obj::Cffi(_)
-                        | Obj::Ptr(_)
-                        | Obj::Channel(_)
-                        | Obj::Shared(_)
-                        | Obj::RwShared(_)
-                        | Obj::Atomic(_)
-                        | Obj::AtomicInt(_)
-                        | Obj::Executor(_)
-                        | Obj::Socket(_)
-                        | Obj::Listener(_)
-                        | Obj::Writer(_)
-                        | Obj::Reader(_)
-                        | Obj::Generator(_) => None,
-                    },
+                    ValueView::Obj(h) => self.heap.get(h).as_enum().map(|(id, _)| id),
                     ValueView::Int(_) | ValueView::Bool(_) | ValueView::Nil => None,
                 };
                 // A carrier is named by the pattern that would match it, a user variant by name.

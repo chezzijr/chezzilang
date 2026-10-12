@@ -468,6 +468,48 @@ impl Obj {
         }
     }
 
+    /// The variant id and payload when this object is an enum value. Every other kind answers
+    /// `None`.
+    #[inline]
+    pub fn as_enum(&self) -> Option<(u32, &Vec<Value>)> {
+        match self {
+            Obj::Enum {
+                variant_id,
+                payload,
+            } => Some((*variant_id, payload)),
+            Obj::Set(_)
+            | Obj::Str(_)
+            | Obj::Bytes(_)
+            | Obj::ByteArray(_)
+            | Obj::BigInt(_)
+            | Obj::FloatBox(_)
+            | Obj::Iter { .. }
+            | Obj::List(_)
+            | Obj::Tuple(_)
+            | Obj::Map(_)
+            | Obj::Struct { .. }
+            | Obj::Cell(_)
+            | Obj::Func { .. }
+            | Obj::Closure { .. }
+            | Obj::Module(_)
+            | Obj::Native { .. }
+            | Obj::Builtin(_)
+            | Obj::Cffi(_)
+            | Obj::Ptr(_)
+            | Obj::Channel(_)
+            | Obj::Shared(_)
+            | Obj::RwShared(_)
+            | Obj::Atomic(_)
+            | Obj::AtomicInt(_)
+            | Obj::Executor(_)
+            | Obj::Socket(_)
+            | Obj::Listener(_)
+            | Obj::Writer(_)
+            | Obj::Reader(_)
+            | Obj::Generator(_) => None,
+        }
+    }
+
     /// The table when this object is a set. Every other kind answers `None`.
     #[inline]
     pub fn as_set(&self) -> Option<&SetData> {
@@ -1569,6 +1611,18 @@ impl Heap {
 #[cfg(test)]
 mod iter_obj_tests {
     use super::*;
+
+    /// TICKET-251 — `as_enum` answers an enum value's variant id and payload, and `None` for any
+    /// other kind.
+    #[test]
+    fn as_enum_answers_only_enum_values() {
+        let e = Obj::Enum {
+            variant_id: 7,
+            payload: Vec::new(),
+        };
+        assert_eq!(e.as_enum().map(|(id, p)| (id, p.len())), Some((7, 0)));
+        assert!(Obj::List(Vec::new()).as_enum().is_none());
+    }
 
     /// `Obj::Iter` must stay within the 64B cap (Vec 24B + usize 8B = 32B; `MapData`/`SetData` at
     /// 56B of payload + the 8B enum discriminant set the cap now that `Module`'s payload is boxed).
