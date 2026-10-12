@@ -2460,9 +2460,9 @@ impl Checker {
             }
             // Always infer every arm's trailing expr (surfaces intra-arm errors); only the CROSS-arm
             // fold is gated on `uniform` so heterogeneous arms fall back to nil instead of erroring.
-            let t = match &last.kind {
-                StmtKind::Expr(e) => self.infer_branch_tail(beside, &mut sib, e),
-                _ => {
+            let t = match last.kind.as_expr() {
+                Some(e) => self.infer_branch_tail(beside, &mut sib, e),
+                None => {
                     self.check_stmt(last);
                     Ty::Nil
                 }
@@ -2548,9 +2548,9 @@ impl Checker {
             for stmt in init {
                 self.check_stmt(stmt);
             }
-            match &last.kind {
-                StmtKind::Expr(e) => (self.infer_branch_tail(beside, sib, e), last.span),
-                _ => {
+            match last.kind.as_expr() {
+                Some(e) => (self.infer_branch_tail(beside, sib, e), last.span),
+                None => {
                     self.check_stmt(last);
                     (Ty::Nil, last.span)
                 }
@@ -4784,9 +4784,9 @@ impl Checker {
                     // the compiler lowers a field-read to a plain field load. The method named
                     // through its TYPE (`Bx[int].get`, receiver first) is the value form.
                     if info.methods.contains_key(name) {
-                        let recv = match &obj.kind {
-                            ExprKind::Ident(n) => n.as_str(),
-                            _ => "x",
+                        let recv = match obj.kind.as_ident() {
+                            Some(n) => n.as_str(),
+                            None => "x",
                         };
                         self.error(
                             name_span,

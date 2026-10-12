@@ -2785,9 +2785,9 @@ impl Checker {
     pub(super) fn type_head(&self, head: &Expr) -> Option<TypeHead> {
         match &head.kind {
             ExprKind::Ident(n) => self.bare_type_head(n),
-            ExprKind::Field { obj, name, .. } => match &obj.kind {
-                ExprKind::Ident(m) => self.qualified_type_head(m, name),
-                _ => None,
+            ExprKind::Field { obj, name, .. } => match obj.kind.as_ident() {
+                Some(m) => self.qualified_type_head(m, name),
+                None => None,
             },
             _ => None,
         }

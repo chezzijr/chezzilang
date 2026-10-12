@@ -5877,9 +5877,9 @@ fn method_binders(methods: &[FnDecl], owner: &str) -> Vec<(String, Span, String)
 fn bare_head_name(kind: &ExprKind) -> Option<&str> {
     match kind {
         ExprKind::Ident(n) => Some(n),
-        ExprKind::Index { obj, .. } => match &obj.kind {
-            ExprKind::Ident(n) => Some(n),
-            _ => None,
+        ExprKind::Index { obj, .. } => match obj.kind.as_ident() {
+            Some(n) => Some(n),
+            None => None,
         },
         _ => None,
     }
@@ -5893,9 +5893,9 @@ fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
         k => k,
     };
     match field {
-        ExprKind::Field { obj, name, .. } => match &obj.kind {
-            ExprKind::Ident(m) => Some((m, name)),
-            _ => None,
+        ExprKind::Field { obj, name, .. } => match obj.kind.as_ident() {
+            Some(m) => Some((m, name)),
+            None => None,
         },
         _ => None,
     }

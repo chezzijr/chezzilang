@@ -910,9 +910,9 @@ impl Vm {
                 if variant != "Arr" {
                     return Err(mismatch("array").into());
                 }
-                let items = match self.heap.get(self.as_obj(payload[0])) {
-                    Obj::List(items) => items.clone(),
-                    _ => return Err(mismatch("array").into()),
+                let items = match self.heap.get(self.as_obj(payload[0])).as_list() {
+                    Some(items) => items.clone(),
+                    None => return Err(mismatch("array").into()),
                 };
                 // Each decoded element is rooted on the operand stack until the list owns it: a
                 // later element's field default can collect (`json_decode` truncates on a failure).
@@ -928,9 +928,9 @@ impl Vm {
                 if variant != "Arr" {
                     return Err(mismatch("array").into());
                 }
-                let items = match self.heap.get(self.as_obj(payload[0])) {
-                    Obj::List(items) => items.clone(),
-                    _ => return Err(mismatch("array").into()),
+                let items = match self.heap.get(self.as_obj(payload[0])).as_list() {
+                    Some(items) => items.clone(),
+                    None => return Err(mismatch("array").into()),
                 };
                 if items.len() != elems.len() {
                     return Err(format!(
@@ -953,9 +953,9 @@ impl Vm {
                 if variant != "Obj" {
                     return Err(mismatch("object").into());
                 }
-                let entries = match self.heap.get(self.as_obj(payload[0])) {
-                    Obj::Map(m) => m.entries.clone(),
-                    _ => return Err(mismatch("object").into()),
+                let entries = match self.heap.get(self.as_obj(payload[0])).as_map() {
+                    Some(m) => m.entries.clone(),
+                    None => return Err(mismatch("object").into()),
                 };
                 // Values are rooted on the operand stack, as in the list arm; the keys belong to
                 // the parsed tree, which `json_decode` keeps rooted.
@@ -982,9 +982,9 @@ impl Vm {
                     // ROOT REDESIGN — error text shows the BARE display name, never the identity key.
                     return Err(mismatch(&format!("object for {display}")).into());
                 }
-                let entries = match self.heap.get(self.as_obj(payload[0])) {
-                    Obj::Map(m) => m.entries.clone(),
-                    _ => return Err(mismatch("object").into()),
+                let entries = match self.heap.get(self.as_obj(payload[0])).as_map() {
+                    Some(m) => m.entries.clone(),
+                    None => return Err(mismatch("object").into()),
                 };
                 // Positional layout: `fields` (the type descriptor) is already in the struct's
                 // declaration order (see `json_decode::struct_descriptor`), so push values in order.
@@ -2117,16 +2117,16 @@ impl Vm {
         // sequence nor indexes past the live (now-shorter) Vec. The snapshot is heap-allocated and
         // rooted on the operand stack so its elements survive the callback's collections.
         let snap_h = {
-            let elems = match self.heap.get(src_h) {
-                Obj::List(v) => v.clone(),
-                _ => unreachable!("list_hof on non-list"),
+            let elems = match self.heap.get(src_h).as_list() {
+                Some(v) => v.clone(),
+                None => unreachable!("list_hof on non-list"),
             };
             self.heap.alloc(Obj::List(elems))
         };
         self.push(Value::obj(snap_h)); // ROOT the snapshot
-        let n = match self.heap.get(snap_h) {
-            Obj::List(v) => v.len(),
-            _ => unreachable!(),
+        let n = match self.heap.get(snap_h).as_list() {
+            Some(v) => v.len(),
+            None => unreachable!(),
         };
         match method {
             "map" | "filter" => {
@@ -2146,9 +2146,9 @@ impl Vm {
                 for i in 0..n {
                     // Read from the rooted SNAPSHOT, not the live receiver: a callback that shrinks
                     // the receiver must not affect this index (stays valid, no OOB).
-                    let elem = match self.heap.get(snap_h) {
-                        Obj::List(v) => v[i],
-                        _ => unreachable!(),
+                    let elem = match self.heap.get(snap_h).as_list() {
+                        Some(v) => v[i],
+                        None => unreachable!(),
                     };
                     // May GC; source, snapshot, and result lists are rooted, so elements survive.
                     let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
@@ -2201,9 +2201,9 @@ impl Vm {
                 for i in 0..n {
                     // Read from the rooted SNAPSHOT (see map/filter): OOB-safe under a shrinking
                     // callback.
-                    let elem = match self.heap.get(snap_h) {
-                        Obj::List(v) => v[i],
-                        _ => unreachable!(),
+                    let elem = match self.heap.get(snap_h).as_list() {
+                        Some(v) => v[i],
+                        None => unreachable!(),
                     };
                     let acc = self.stack[acc_slot];
                     let new = self.guarded(|vm| vm.invoke_value(f, vec![acc, elem], span))?;
@@ -2231,9 +2231,9 @@ impl Vm {
                 self.push(Value::obj(res_h)); // ROOT the result list
                 let mut cut = n; // first index where pred is false (n = all-true)
                 for i in 0..n {
-                    let elem = match self.heap.get(snap_h) {
-                        Obj::List(v) => v[i],
-                        _ => unreachable!(),
+                    let elem = match self.heap.get(snap_h).as_list() {
+                        Some(v) => v[i],
+                        None => unreachable!(),
                     };
                     let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
                     match out.as_bool() {
@@ -2263,9 +2263,9 @@ impl Vm {
                 if is_drop {
                     // Collect the snapshot suffix from the first non-matching index.
                     for i in cut..n {
-                        let elem = match self.heap.get(snap_h) {
-                            Obj::List(v) => v[i],
-                            _ => unreachable!(),
+                        let elem = match self.heap.get(snap_h).as_list() {
+                            Some(v) => v[i],
+                            None => unreachable!(),
                         };
                         if let Obj::List(items) = self.heap.get_mut(res_h) {
                             items.push(elem);
@@ -2293,9 +2293,9 @@ impl Vm {
                 let mut count = 0_i64;
                 let mut found: Option<usize> = None;
                 for i in 0..n {
-                    let elem = match self.heap.get(snap_h) {
-                        Obj::List(v) => v[i],
-                        _ => unreachable!(),
+                    let elem = match self.heap.get(snap_h).as_list() {
+                        Some(v) => v[i],
+                        None => unreachable!(),
                     };
                     let out = self.guarded(|vm| vm.invoke_value(f, vec![elem], span))?;
                     match out.as_bool() {
@@ -2391,16 +2391,16 @@ impl Vm {
         // write-back. The snapshot list is itself heap-allocated and rooted on the operand stack so
         // its elements survive the comparator's collections.
         let snap_h = {
-            let elems = match self.heap.get(src_h) {
-                Obj::List(v) => v.clone(),
-                _ => unreachable!("list_sort_by on non-list"),
+            let elems = match self.heap.get(src_h).as_list() {
+                Some(v) => v.clone(),
+                None => unreachable!("list_sort_by on non-list"),
             };
             self.heap.alloc(Obj::List(elems))
         };
         self.push(Value::obj(snap_h)); // ROOT the snapshot
-        let n = match self.heap.get(snap_h) {
-            Obj::List(v) => v.len(),
-            _ => unreachable!(),
+        let n = match self.heap.get(snap_h).as_list() {
+            Some(v) => v.len(),
+            None => unreachable!(),
         };
         let order = match self.msort_indices(snap_h, (0..n).collect(), cmp, span) {
             Ok(o) => o,
@@ -2416,9 +2416,9 @@ impl Vm {
             return Err(e);
         }
         // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
-        let reordered: Vec<Value> = match self.heap.get(snap_h) {
-            Obj::List(v) => order.iter().map(|&i| v[i]).collect(),
-            _ => unreachable!(),
+        let reordered: Vec<Value> = match self.heap.get(snap_h).as_list() {
+            Some(v) => order.iter().map(|&i| v[i]).collect(),
+            None => unreachable!(),
         };
         if let Obj::List(v) = self.heap.get_mut(src_h) {
             *v = reordered;
@@ -2448,13 +2448,13 @@ impl Vm {
         let mut out = Vec::with_capacity(n);
         let (mut li, mut ri) = (0, 0);
         while li < left.len() && ri < right.len() {
-            let a = match self.heap.get(src_h) {
-                Obj::List(v) => v[left[li]],
-                _ => unreachable!(),
+            let a = match self.heap.get(src_h).as_list() {
+                Some(v) => v[left[li]],
+                None => unreachable!(),
             };
-            let b = match self.heap.get(src_h) {
-                Obj::List(v) => v[right[ri]],
-                _ => unreachable!(),
+            let b = match self.heap.get(src_h).as_list() {
+                Some(v) => v[right[ri]],
+                None => unreachable!(),
             };
             // `<= 0` keeps the left element first on ties → stable.
             if self.compare_with(cmp, a, b, span)? <= 0 {
@@ -2511,25 +2511,25 @@ impl Vm {
         let f = args.swap_remove(0);
         self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
-            let elems = match self.heap.get(src_h) {
-                Obj::List(v) => v.clone(),
-                _ => unreachable!("list_sort_by_key on non-list"),
+            let elems = match self.heap.get(src_h).as_list() {
+                Some(v) => v.clone(),
+                None => unreachable!("list_sort_by_key on non-list"),
             };
             self.heap.alloc(Obj::List(elems))
         };
         self.push(Value::obj(snap_h)); // ROOT the snapshot
-        let n = match self.heap.get(snap_h) {
-            Obj::List(v) => v.len(),
-            _ => unreachable!(),
+        let n = match self.heap.get(snap_h).as_list() {
+            Some(v) => v.len(),
+            None => unreachable!(),
         };
         // Compute keys once per element into a rooted list. Each `invoke_value` may GC; already-pushed
         // keys survive because `keys_h` is rooted (a `Vec::push` into it does not itself GC).
         let keys_h = self.heap.alloc(Obj::List(Vec::with_capacity(n)));
         self.push(Value::obj(keys_h)); // ROOT the keys
         for i in 0..n {
-            let e = match self.heap.get(snap_h) {
-                Obj::List(v) => v[i],
-                _ => unreachable!(),
+            let e = match self.heap.get(snap_h).as_list() {
+                Some(v) => v[i],
+                None => unreachable!(),
             };
             match self.guarded(|vm| vm.invoke_value(f, vec![e], span)) {
                 Ok(k) => {
@@ -2561,9 +2561,9 @@ impl Vm {
             return Err(e);
         }
         // No extractor/compare calls remain, so no GC: reorder the snapshot and write back.
-        let reordered: Vec<Value> = match self.heap.get(snap_h) {
-            Obj::List(v) => order.iter().map(|&i| v[i]).collect(),
-            _ => unreachable!(),
+        let reordered: Vec<Value> = match self.heap.get(snap_h).as_list() {
+            Some(v) => order.iter().map(|&i| v[i]).collect(),
+            None => unreachable!(),
         };
         if let Obj::List(v) = self.heap.get_mut(src_h) {
             *v = reordered;
@@ -2587,9 +2587,9 @@ impl Vm {
         is_max: bool,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let n = match self.heap.get(src_h) {
-            Obj::List(v) => v.len(),
-            _ => unreachable!("list_reduce_extreme on non-list"),
+        let n = match self.heap.get(src_h).as_list() {
+            Some(v) => v.len(),
+            None => unreachable!("list_reduce_extreme on non-list"),
         };
         if n == 0 {
             return Ok(self.alloc_enum("Option", "None", vec![]));
@@ -2600,9 +2600,9 @@ impl Vm {
         // survive `order_key`'s struct-compare allocations.
         self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
-            let elems = match self.heap.get(src_h) {
-                Obj::List(v) => v.clone(),
-                _ => unreachable!(),
+            let elems = match self.heap.get(src_h).as_list() {
+                Some(v) => v.clone(),
+                None => unreachable!(),
             };
             self.heap.alloc(Obj::List(elems))
         };
@@ -2610,9 +2610,9 @@ impl Vm {
         let mut best = 0usize;
         let mut err = None;
         for i in 1..n {
-            let (cur, best_v) = match self.heap.get(snap_h) {
-                Obj::List(v) => (v[i], v[best]),
-                _ => unreachable!(),
+            let (cur, best_v) = match self.heap.get(snap_h).as_list() {
+                Some(v) => (v[i], v[best]),
+                None => unreachable!(),
             };
             match self.order_key(cur, best_v, span) {
                 // min: strict `<` displaces; max: strict `>` displaces. Equal never displaces → first-seen.
@@ -2627,9 +2627,9 @@ impl Vm {
                 }
             }
         }
-        let result = match self.heap.get(snap_h) {
-            Obj::List(v) => v[best],
-            _ => unreachable!(),
+        let result = match self.heap.get(snap_h).as_list() {
+            Some(v) => v[best],
+            None => unreachable!(),
         };
         if let Some(e) = err {
             self.pop(); // unroot snapshot
@@ -2671,18 +2671,18 @@ impl Vm {
             ));
         }
         let f = args.swap_remove(0);
-        let n = match self.heap.get(src_h) {
-            Obj::List(v) => v.len(),
-            _ => unreachable!("list_min_max_by on non-list"),
+        let n = match self.heap.get(src_h).as_list() {
+            Some(v) => v.len(),
+            None => unreachable!("list_min_max_by on non-list"),
         };
         if n == 0 {
             return Ok(self.alloc_enum("Option", "None", vec![]));
         }
         self.push(Value::obj(src_h)); // ROOT the source list
         let snap_h = {
-            let elems = match self.heap.get(src_h) {
-                Obj::List(v) => v.clone(),
-                _ => unreachable!(),
+            let elems = match self.heap.get(src_h).as_list() {
+                Some(v) => v.clone(),
+                None => unreachable!(),
             };
             self.heap.alloc(Obj::List(elems))
         };
@@ -2690,9 +2690,9 @@ impl Vm {
         let keys_h = self.heap.alloc(Obj::List(Vec::with_capacity(n)));
         self.push(Value::obj(keys_h)); // ROOT the keys
         for i in 0..n {
-            let e = match self.heap.get(snap_h) {
-                Obj::List(v) => v[i],
-                _ => unreachable!(),
+            let e = match self.heap.get(snap_h).as_list() {
+                Some(v) => v[i],
+                None => unreachable!(),
             };
             match self.guarded(|vm| vm.invoke_value(f, vec![e], span)) {
                 Ok(k) => {
@@ -2712,9 +2712,9 @@ impl Vm {
         let mut best = 0usize;
         let mut err = None;
         for i in 1..n {
-            let (cur, best_k) = match self.heap.get(keys_h) {
-                Obj::List(v) => (v[i], v[best]),
-                _ => unreachable!(),
+            let (cur, best_k) = match self.heap.get(keys_h).as_list() {
+                Some(v) => (v[i], v[best]),
+                None => unreachable!(),
             };
             match self.order_key(cur, best_k, span) {
                 Ok(ord) => {
@@ -2728,9 +2728,9 @@ impl Vm {
                 }
             }
         }
-        let result = match self.heap.get(snap_h) {
-            Obj::List(v) => v[best],
-            _ => unreachable!(),
+        let result = match self.heap.get(snap_h).as_list() {
+            Some(v) => v[best],
+            None => unreachable!(),
         };
         if let Some(e) = err {
             self.pop(); // unroot keys
@@ -2766,13 +2766,13 @@ impl Vm {
         let mut out = Vec::with_capacity(n);
         let (mut li, mut ri) = (0, 0);
         while li < left.len() && ri < right.len() {
-            let a = match self.heap.get(keys_h) {
-                Obj::List(v) => v[left[li]],
-                _ => unreachable!(),
+            let a = match self.heap.get(keys_h).as_list() {
+                Some(v) => v[left[li]],
+                None => unreachable!(),
             };
-            let b = match self.heap.get(keys_h) {
-                Obj::List(v) => v[right[ri]],
-                _ => unreachable!(),
+            let b = match self.heap.get(keys_h).as_list() {
+                Some(v) => v[right[ri]],
+                None => unreachable!(),
             };
             // `<= Equal` keeps the left element first on ties → stable.
             if self.order_key(a, b, span)?.is_le() {
@@ -3963,9 +3963,9 @@ impl Vm {
                         // by reference. The receiver's own keys are already unique, so they need no
                         // dedup; the argument's entries upsert (last-wins). `snapshot_key` is pure
                         // alloc (no GC), so the local `out`'s contents stay valid across it.
-                        let mine = match self.heap.get(h) {
-                            Obj::Map(m) => m.entries.clone(),
-                            _ => unreachable!(),
+                        let mine = match self.heap.get(h).as_map() {
+                            Some(m) => m.entries.clone(),
+                            None => unreachable!(),
                         };
                         // Root BOTH source maps: `out` is a Rust local and its snapshot keys are
                         // reachable only from it, so the receiver + argument (whose entries every
@@ -4062,9 +4062,9 @@ impl Vm {
                     // the cached hashes confirmed by `elem_equal` (which since M23 may dispatch a user
                     // `eq` and re-enter the VM; `mine`/`other`/`out` are Rust locals holding elements
                     // reachable only through the two source sets, so both are rooted).
-                    let mine = match self.heap.get(h) {
-                        Obj::Set(s) => s.entries.clone(),
-                        _ => unreachable!(),
+                    let mine = match self.heap.get(h).as_set() {
+                        Some(s) => s.entries.clone(),
+                        None => unreachable!(),
                     };
                     let other = self.set_arg(args[0], method, span)?;
                     let add = |vm: &mut Vm,

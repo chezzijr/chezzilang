@@ -643,13 +643,13 @@ impl Vm {
         hb: GcRef,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let mine = match self.heap.get(ha) {
-            Obj::Set(s) => s.entries.clone(),
-            _ => unreachable!(),
+        let mine = match self.heap.get(ha).as_set() {
+            Some(s) => s.entries.clone(),
+            None => unreachable!(),
         };
-        let other = match self.heap.get(hb) {
-            Obj::Set(s) => s.entries.clone(),
-            _ => unreachable!(),
+        let other = match self.heap.get(hb).as_set() {
+            Some(s) => s.entries.clone(),
+            None => unreachable!(),
         };
         // Dedup-insert: propagate a cyclic-key depth fault (`?`) instead of swallowing it — the
         // membership `==` here is the same one `s.add`/`|` are DEFINED by, so it must fault alike.
@@ -1578,16 +1578,16 @@ impl Vm {
         // before the write-back.
         self.push(Value::obj(src_h));
         let snap_h = {
-            let elems = match self.heap.get(src_h) {
-                Obj::List(v) => v.clone(),
-                _ => unreachable!("list_sort on non-list"),
+            let elems = match self.heap.get(src_h).as_list() {
+                Some(v) => v.clone(),
+                None => unreachable!("list_sort on non-list"),
             };
             self.heap.alloc(Obj::List(elems))
         };
         self.push(Value::obj(snap_h)); // ROOT the snapshot across the comparator calls
-        let n = match self.heap.get(snap_h) {
-            Obj::List(v) => v.len(),
-            _ => unreachable!(),
+        let n = match self.heap.get(snap_h).as_list() {
+            Some(v) => v.len(),
+            None => unreachable!(),
         };
         let order = match self.msort_indices_structs(snap_h, (0..n).collect(), span) {
             Ok(o) => o,
@@ -1603,9 +1603,9 @@ impl Vm {
             return Err(e);
         }
         // No comparator calls remain, so no GC: read the rooted snapshot and write the result back.
-        let reordered: Vec<Value> = match self.heap.get(snap_h) {
-            Obj::List(v) => order.iter().map(|&i| v[i]).collect(),
-            _ => unreachable!(),
+        let reordered: Vec<Value> = match self.heap.get(snap_h).as_list() {
+            Some(v) => order.iter().map(|&i| v[i]).collect(),
+            None => unreachable!(),
         };
         if let Obj::List(v) = self.heap.get_mut(src_h) {
             *v = reordered;
@@ -1642,13 +1642,13 @@ impl Vm {
         let mut out = Vec::with_capacity(n);
         let (mut li, mut ri) = (0, 0);
         while li < left.len() && ri < right.len() {
-            let a = match self.heap.get(src_h) {
-                Obj::List(v) => v[left[li]],
-                _ => unreachable!(),
+            let a = match self.heap.get(src_h).as_list() {
+                Some(v) => v[left[li]],
+                None => unreachable!(),
             };
-            let b = match self.heap.get(src_h) {
-                Obj::List(v) => v[right[ri]],
-                _ => unreachable!(),
+            let b = match self.heap.get(src_h).as_list() {
+                Some(v) => v[right[ri]],
+                None => unreachable!(),
             };
             // `<= Equal` keeps the left element first on ties → stable.
             if self.order_key(a, b, span)?.is_le() {
@@ -1869,15 +1869,15 @@ impl Vm {
             'restart: loop {
                 let mut i = 0;
                 loop {
-                    let (p, hs, stored) = match vm.heap.get(mh) {
-                        Obj::Map(m) => match m.candidates(hk).get(i) {
+                    let (p, hs, stored) = match vm.heap.get(mh).as_map() {
+                        Some(m) => match m.candidates(hk).get(i) {
                             Some(&p) => match m.entries.get(p) {
                                 Some(&(h, k, _)) => (p, h, k),
                                 None => return Ok(None),
                             },
                             None => return Ok(None),
                         },
-                        _ => unreachable!("map_probe on non-map"),
+                        None => unreachable!("map_probe on non-map"),
                     };
                     let eq = vm.elem_equal(stored, key, 0, span)?;
                     // Position still holding the key we just compared? (The entry's VALUE may have
@@ -1885,12 +1885,12 @@ impl Vm {
                     // hash and the key are checked.) If not, the map was structurally mutated and
                     // every position, `p` included, is stale: start over.
                     let live = !reenter
-                        || match vm.heap.get(mh) {
-                            Obj::Map(m) => m
+                        || match vm.heap.get(mh).as_map() {
+                            Some(m) => m
                                 .entries
                                 .get(p)
                                 .is_some_and(|&(h, k, _)| h == hs && k == stored),
-                            _ => unreachable!("map_probe on non-map"),
+                            None => unreachable!("map_probe on non-map"),
                         };
                     if !live {
                         continue 'restart;
@@ -1922,24 +1922,24 @@ impl Vm {
             'restart: loop {
                 let mut i = 0;
                 loop {
-                    let (p, hs, stored) = match vm.heap.get(sh) {
-                        Obj::Set(s) => match s.candidates(he).get(i) {
+                    let (p, hs, stored) = match vm.heap.get(sh).as_set() {
+                        Some(s) => match s.candidates(he).get(i) {
                             Some(&p) => match s.entries.get(p) {
                                 Some(&(h, e)) => (p, h, e),
                                 None => return Ok(None),
                             },
                             None => return Ok(None),
                         },
-                        _ => unreachable!("set_probe on non-set"),
+                        None => unreachable!("set_probe on non-set"),
                     };
                     let eq = vm.elem_equal(stored, elem, 0, span)?;
                     let live = !reenter
-                        || match vm.heap.get(sh) {
-                            Obj::Set(s) => s
+                        || match vm.heap.get(sh).as_set() {
+                            Some(s) => s
                                 .entries
                                 .get(p)
                                 .is_some_and(|&(h, e)| h == hs && e == stored),
-                            _ => unreachable!("set_probe on non-set"),
+                            None => unreachable!("set_probe on non-set"),
                         };
                     if !live {
                         continue 'restart;

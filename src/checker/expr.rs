@@ -119,8 +119,8 @@ impl Checker {
         {
             let crossing = self.call_crossing(None, &slots);
             let call = (self.graph_module_idx, call_id.0);
-            match &callee.kind {
-                ExprKind::Ident(name) => {
+            match callee.kind.as_ident() {
+                Some(name) => {
                     if let Ok(key) = self.labels_certain(name) {
                         let pending = (key, super::globals::KwUse::GenStamp(call, crossing, span));
                         if !self.kw_pending.contains(&pending) {
@@ -128,7 +128,7 @@ impl Checker {
                         }
                     }
                 }
-                _ => crate::checker::record_call_table_entry(
+                None => crate::checker::record_call_table_entry(
                     &mut self.gen_crossings.calls,
                     &mut self.table_conflicts,
                     call,
@@ -358,9 +358,9 @@ impl Checker {
         }
         // A value-call (closure / arbitrary expr) cannot take explicit type arguments.
         if !targs.is_empty() {
-            let label = match &callee.kind {
-                ExprKind::Ident(n) => format!("'{n}'"),
-                _ => "this expression".to_string(),
+            let label = match callee.kind.as_ident() {
+                Some(n) => format!("'{n}'"),
+                None => "this expression".to_string(),
             };
             self.error(span, format!("{label} takes no type arguments"));
         }
@@ -734,9 +734,9 @@ impl Checker {
                 // `ren`. Only a `kw_certain` `Ident` binding keeps keyword calls; everything else
                 // is a compile error (positional calls are unaffected).
                 // TICKET-186: `labels_certain` is the one decider, shared with the by-name path.
-                let key = match &callee.kind {
-                    ExprKind::Ident(n) => self.labels_certain(n),
-                    _ => Err(super::globals::KwDeny::NotOneFn),
+                let key = match callee.kind.as_ident() {
+                    Some(n) => self.labels_certain(n),
+                    None => Err(super::globals::KwDeny::NotOneFn),
                 };
                 self.consume_named();
                 let key = match key {
@@ -748,10 +748,7 @@ impl Checker {
                         for (_, v) in named {
                             self.infer(v);
                         }
-                        let name = match &callee.kind {
-                            ExprKind::Ident(n) => Some(n.as_str()),
-                            _ => None,
-                        };
+                        let name = callee.kind.as_ident().map(|n| n.as_str());
                         self.error(span, super::globals::kw_deny_msg(name, deny));
                         return *ret;
                     }
@@ -4736,10 +4733,7 @@ pub(super) fn callable_slots(
 /// the whole body, and `g[0]` under `fn h[g](…)` is the parameter — Go answers the same.
 fn type_apply_param_head(obj: &Expr) -> Option<String> {
     match &obj.kind {
-        ExprKind::Index { obj: tobj, .. } => match &tobj.kind {
-            ExprKind::Ident(n) => Some(n.clone()),
-            _ => None,
-        },
+        ExprKind::Index { obj: tobj, .. } => tobj.kind.as_ident().cloned(),
         _ => None,
     }
 }

@@ -311,6 +311,16 @@ pub enum StmtKind {
     Expr(Expr),
 }
 
+impl StmtKind {
+    /// The expression when this statement is a bare expression. Every other kind answers `None`.
+    pub fn as_expr(&self) -> Option<&Expr> {
+        match self {
+            StmtKind::Expr(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 /// Does this statement block end in a value-producing trailing statement (a bare [`StmtKind::Expr`])?
 /// The single source of truth shared by the checker and the compiler for deciding whether a
 /// `recover:` block's trailing statement-form `match`/`if` is the block's value expression — so the
@@ -1205,6 +1215,16 @@ pub enum ExprKind {
         err: Option<(String, Span)>,
         body: Block,
     },
+}
+
+impl ExprKind {
+    /// The name when this expression is a bare identifier. Every other kind answers `None`.
+    pub fn as_ident(&self) -> Option<&String> {
+        match self {
+            ExprKind::Ident(n) => Some(n),
+            _ => None,
+        }
+    }
 }
 
 /// The call part of an optional-chained method call `obj?.name(args)` — see [`ExprKind::OptChain`].

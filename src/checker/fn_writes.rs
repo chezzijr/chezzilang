@@ -234,14 +234,14 @@ impl UseWalk<'_> {
     /// keeps its `Field`/`Index` use, an index expression is a value, an alias keeps nothing.
     fn path(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Field { obj, name, .. } => match &obj.kind {
-                ExprKind::Ident(n) => self.keep(n, RootUse::Field(name.clone())),
-                _ => self.path(obj),
+            ExprKind::Field { obj, name, .. } => match obj.kind.as_ident() {
+                Some(n) => self.keep(n, RootUse::Field(name.clone())),
+                None => self.path(obj),
             },
             ExprKind::Index { obj, index, .. } => {
-                match &obj.kind {
-                    ExprKind::Ident(n) => self.keep(n, RootUse::Index),
-                    _ => self.path(obj),
+                match obj.kind.as_ident() {
+                    Some(n) => self.keep(n, RootUse::Index),
+                    None => self.path(obj),
                 }
                 if let Some(index) = index {
                     self.value(index);
@@ -524,21 +524,21 @@ impl UseWalk<'_> {
     }
 
     fn operand(&mut self, e: &Expr) {
-        match &e.kind {
-            ExprKind::Ident(n) => {
+        match e.kind.as_ident() {
+            Some(n) => {
                 if self.aliases.contains_key(n) {
                     self.deep_use(e, || DeepUse::Read { view: e.id });
                 }
                 self.keep(n, RootUse::Op)
             }
-            _ => self.value(e),
+            None => self.value(e),
         }
     }
 
     fn indexed(&mut self, obj: &Expr) {
-        match &obj.kind {
-            ExprKind::Ident(n) => self.keep(n, RootUse::Index),
-            _ => self.value(obj),
+        match obj.kind.as_ident() {
+            Some(n) => self.keep(n, RootUse::Index),
+            None => self.value(obj),
         }
     }
 }

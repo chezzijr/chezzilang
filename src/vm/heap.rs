@@ -392,6 +392,33 @@ pub enum Identity {
 pub struct CoreKey(std::mem::Discriminant<Obj>, usize);
 
 impl Obj {
+    /// The elements when this object is a list. Every other kind answers `None`.
+    #[inline]
+    pub fn as_list(&self) -> Option<&Vec<Value>> {
+        match self {
+            Obj::List(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The table when this object is a map. Every other kind answers `None`.
+    #[inline]
+    pub fn as_map(&self) -> Option<&MapData> {
+        match self {
+            Obj::Map(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// The table when this object is a set. Every other kind answers `None`.
+    #[inline]
+    pub fn as_set(&self) -> Option<&SetData> {
+        match self {
+            Obj::Set(s) => Some(s),
+            _ => None,
+        }
+    }
+
     pub fn identity(&self) -> Identity {
         let core = |addr: usize| Identity::Core(CoreKey(std::mem::discriminant(self), addr));
         match self {

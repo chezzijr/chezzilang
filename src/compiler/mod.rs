@@ -4084,9 +4084,9 @@ impl Compiler {
         for stmt in init {
             self.compile_stmt(fc, stmt)?;
         }
-        match &last.kind {
-            StmtKind::Expr(e) => self.compile_expr(fc, e)?, // trailing value
-            _ => {
+        match last.kind.as_expr() {
+            Some(e) => self.compile_expr(fc, e)?, // trailing value
+            None => {
                 self.compile_stmt(fc, last)?;
                 fc.emit(Op::Nil, last.span);
             }

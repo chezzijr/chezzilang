@@ -2919,9 +2919,9 @@ impl Vm {
             Op::ArrLen => {
                 let v = self.pop();
                 let len = match v.view() {
-                    ValueView::Obj(h) => match self.heap.get(h) {
-                        Obj::List(items) => items.len() as i64,
-                        _ => unreachable!("ArrLen on non-list"),
+                    ValueView::Obj(h) => match self.heap.get(h).as_list() {
+                        Some(items) => items.len() as i64,
+                        None => unreachable!("ArrLen on non-list"),
                     },
                     _ => unreachable!("ArrLen on non-list"),
                 };
