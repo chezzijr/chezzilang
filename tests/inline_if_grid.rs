@@ -377,7 +377,7 @@ fn recover_inline_grid() {
         ("xs := [recover: 1]", "!expected end of line, found ']'"),
         ("m := {recover: 1}", "!expected end of line, found '}'"),
         (
-            "xs := [1]\nprint(xs[recover..0])",
+            "xs := [1]\nprint(xs[recover: 0])",
             "!expected end of line, found ']'",
         ),
         (
