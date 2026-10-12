@@ -33,12 +33,12 @@ test fn three_nesting_levels_still_render():
     # and three deep levels SIGABRTed `chezzi run`). Shallow here on purpose — the depth REFUSAL is
     # a compile-time resolve error, which `recover:` cannot catch, so it is pinned in Rust by
     # `check_errors_json::composed_interp_depth_is_bounded_globally`. What this pins is that the
-    # walk that now carries the counter still renders every level. Each level needs its own quote
-    # style, or the fragment fails to lex.
+    # walk that now carries the counter still renders every level. A nested literal may reuse the
+    # enclosing quote, so no level needs an escape.
     n := 5
-    assert "L1 {'L2 {\"L3 {n}\"}'}" == "L1 L2 L3 5"
+    assert "L1 {'L2 {"L3 {n}"}'}" == "L1 L2 L3 5"
     # …and the value still flows back out as an int through `.len()`, the shape the depth fixture uses.
-    assert "{ \"{ 1+1 }\".len() }" == "1"
+    assert "{ "{ 1+1 }".len() }" == "1"
 
 test fn set_literal_in_fragment():
     assert "{ {1, 2}.len() }" == "2"

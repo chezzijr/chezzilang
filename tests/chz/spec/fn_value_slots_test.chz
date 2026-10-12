@@ -42,6 +42,6 @@ test fn a_nested_fn_alias_fills_defaults_and_packs_a_variadic():
 
 test fn a_turbofish_value_fills_defaults_and_packs_a_variadic():
     t := g[str]
-    assert t("x") == 10, "got {t(\"x\")}"
-    assert t("x", 1, 2, 3) == 3, "got {t(\"x\", 1, 2, 3)}"
-    assert t("x", b=4) == 4, "got {t(\"x\", b=4)}"
+    assert t("x") == 10, "got {t("x")}"
+    assert t("x", 1, 2, 3) == 3, "got {t("x", 1, 2, 3)}"
+    assert t("x", b=4) == 4, "got {t("x", b=4)}"

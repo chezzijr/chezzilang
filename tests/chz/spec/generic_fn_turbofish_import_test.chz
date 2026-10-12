@@ -17,7 +17,7 @@ test fn a_from_import_turbofish_value_returns_its_argument():
 
 test fn a_module_member_turbofish_value_returns_its_argument():
     j := generic_fn_turbofish_import_lib.idt[str]
-    assert j("x") == "x", "got {j(\"x\")}"
+    assert j("x") == "x", "got {j("x")}"
     m := [1, 2].map(generic_fn_turbofish_import_lib.idt[int])
     assert m == [1, 2], "got {m}"
     assert run_s() == "s", "got {run_s()}"

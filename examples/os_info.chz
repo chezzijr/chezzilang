@@ -3,7 +3,7 @@ import std.os
 
 print("pid: {os.getpid()}")
 print("platform: {os.platform()}")
-print("hostname: {os.hostname() ?? \"<unknown>\"}")
+print("hostname: {os.hostname() ?? "<unknown>"}")
 print("temp_dir: {os.temp_dir()}")
 print("cwd: {os.getcwd()}")
 
@@ -16,7 +16,7 @@ os.setenv("CHEZZI_DEMO", "42")
 match os.env("CHEZZI_DEMO"):
     ?v: print("env CHEZZI_DEMO: {v}")
     None:    print("env CHEZZI_DEMO: (unset)")
-print("environ CHEZZI_DEMO: {os.environ()[\"CHEZZI_DEMO\"]}")
+print("environ CHEZZI_DEMO: {os.environ()["CHEZZI_DEMO"]}")
 
 # chdir mutates the real (process-global) cwd.
 match os.chdir(os.temp_dir()):

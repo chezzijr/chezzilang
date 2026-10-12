@@ -30,16 +30,16 @@ enum R2[T, U]:
 
 test fn multi_arg_turbofish_value_in_every_position():
     p := pair[str, int]
-    assert p("a", 1) == ("a", 1), "got {p(\"a\", 1)}"
+    assert p("a", 1) == ("a", 1), "got {p("a", 1)}"
     q: fn(str, int) -> (str, int) = pair[str, int]
-    assert q("a", 1) == ("a", 1), "got {q(\"a\", 1)}"
+    assert q("a", 1) == ("a", 1), "got {q("a", 1)}"
     assert ap(pair[str, int]) == ("a", 1), "got {ap(pair[str, int])}"
-    assert give()("a", 1) == ("a", 1), "got {give()(\"a\", 1)}"
+    assert give()("a", 1) == ("a", 1), "got {give()("a", 1)}"
     assert dflt() == ("a", 1), "got {dflt()}"
-    assert p(b=1, a="a") == ("a", 1), "got {p(b=1, a=\"a\")}"
+    assert p(b=1, a="a") == ("a", 1), "got {p(b=1, a="a")}"
     t := tri[str, int, bool]
-    assert t("a", 1, true) == ("a", 1, true), "got {t(\"a\", 1, true)}"
-    assert '{pair[str, int]("a", 1)}' == "('a', 1)", "got {pair[str, int](\"a\", 1)}"
+    assert t("a", 1, true) == ("a", 1, true), "got {t("a", 1, true)}"
+    assert '{pair[str, int]("a", 1)}' == "('a', 1)", "got {pair[str, int]("a", 1)}"
 
 test fn type_path_values_are_fns():
     mk := Bx[int].make
@@ -50,7 +50,7 @@ test fn type_path_values_are_fns():
     l := R2[int, str].L
     assert '{l(1)}' == "L(1)", "got {l(1)}"
     r: fn(str) -> R2[int, str] = R2.R
-    assert '{r("x")}' == "R('x')", "got {r(\"x\")}"
+    assert '{r("x")}' == "R('x')", "got {r("x")}"
     ch := Channel[str](1)
     parallel:
         spawn:

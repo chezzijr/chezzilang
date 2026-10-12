@@ -10,26 +10,26 @@ fs.bool_flag("verbose", false, "chatty output")
 
 match fs.parse(["--name", "alice", "--count=3", "--verbose", "--", "--extra", "pos"]):
     ?pos:
-        print("name    = {fs.get_str(\"name\")}")
-        print("count   = {fs.get_int(\"count\")}")
-        print("verbose = {fs.get_bool(\"verbose\")}")
-        print("pos     = {\" \".join(pos)}")
+        print("name    = {fs.get_str("name")}")
+        print("count   = {fs.get_int("count")}")
+        print("verbose = {fs.get_bool("verbose")}")
+        print("pos     = {" ".join(pos)}")
     !e:
         print("parse failed: {e.message()}")
 
 # get_* reads the LIVE value; usage() reads the registered default
-print("live name = {fs.get_str(\"name\")}")   # still "alice" after the parse above
+print("live name = {fs.get_str("name")}")   # still "alice" after the parse above
 
 # bool `=`-form accepts the Go strconv.ParseBool set (1/t/T/TRUE/True, 0/f/F/FALSE/False).
 v1 := flag.new()
 v1.bool_flag("verbose", false, "v")
 match v1.parse(["--verbose=1"]):
-    ?p: print("verbose=1 -> {v1.get_bool(\"verbose\")}")
+    ?p: print("verbose=1 -> {v1.get_bool("verbose")}")
     !e: print("err: {e.message()}")
 v0 := flag.new()
 v0.bool_flag("verbose", true, "v")
 match v0.parse(["--verbose=F"]):
-    ?p: print("verbose=F -> {v0.get_bool(\"verbose\")}")
+    ?p: print("verbose=F -> {v0.get_bool("verbose")}")
     !e: print("err: {e.message()}")
 
 # ----- error paths (a clean an error, never a fault) -----

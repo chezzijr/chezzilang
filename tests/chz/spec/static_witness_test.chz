@@ -320,29 +320,31 @@ test fn an_interpolation_fragment_root_is_a_real_call_site():
 # last-one-wins alias cannot pass by coincidence.
 
 fn sib_in_generic[T: Default](x: T, c: Counter) -> str:
-    return "{ \"{reset(c)}\" }{ \"{T.default()}\" }"
+    return "{ "{reset(c)}" }{ "{T.default()}" }"
 
 test fn two_sibling_nested_fragments_keep_their_own_witness():
     c := Counter(5)
     t := Tag("z")
-    assert "{ \"{reset(c)}\" }{ \"{reset(t)}\" }" == "Counter(n=0)Tag(s='none')"
-    assert "{ \"{reset(t)}\" }{ \"{reset(c)}\" }" == "Tag(s='none')Counter(n=0)"
+    assert "{ "{reset(c)}" }{ "{reset(t)}" }" == "Counter(n=0)Tag(s='none')"
+    assert "{ "{reset(t)}" }{ "{reset(c)}" }" == "Tag(s='none')Counter(n=0)"
 
 test fn a_double_nested_fragment_keeps_its_own_witness():
     c := Counter(5)
     t := Tag("z")
-    assert "{ \"{ \\\"{reset(c)}\\\" }\" }{ \"{reset(t)}\" }" == "Counter(n=0)Tag(s='none')"
+    assert "{ "{ "{reset(c)}" }" }{ "{reset(t)}" }" == "Counter(n=0)Tag(s='none')"
 
 test fn sibling_nested_fragments_inside_a_generic_fn():
     assert sib_in_generic(Tag("z"), Counter(5)) == "Counter(n=0)Tag(s='none')"
 
 test fn a_nested_fragment_past_a_newline_keeps_its_own_witness():
-    # A fragment may span a newline — brackets suppress layout, so this lexes and runs. The two
-    # inner literals sit on the same physical line here (the `\n` is an ESCAPE, one content char),
-    # at different columns, so they key apart. Under the old fragment-relative column both second
-    # halves landed on `(line + 1, col 1)`, shared a `WitnessTable` key, and both printed the last
-    # one's type. Same silent-wrong-value class as the sibling case above, one line further in.
-    assert "{['x',\n'{reset(Counter(5)).n}']}{['x',\n'{reset(Tag(\"z\")).s}']}" == "['x', '0']['x', 'none']"
+    # A hole may span a newline — a hole is one bracket deep, so layout is off and this lexes and
+    # runs. The two inner literals sit on different physical lines, so they key apart. Under the old
+    # fragment-relative column both second halves landed on `(line + 1, col 1)`, shared a
+    # `WitnessTable` key, and both printed the last one's type. Same silent-wrong-value class as the
+    # sibling case above, one line further in.
+    assert "{['x',
+'{reset(Counter(5)).n}']}{['x',
+'{reset(Tag("z")).s}']}" == "['x', '0']['x', 'none']"
 
 test fn sibling_nested_fragments_separated_by_an_escape_keep_their_own_witness():
     # M24-6: an ESCAPE between two siblings is where a "record a position at newlines only" map
@@ -351,8 +353,8 @@ test fn sibling_nested_fragments_separated_by_an_escape_keep_their_own_witness()
     # nested fragment lands on a neighbour's key. Both orders, for the same reason as above.
     c := Counter(5)
     t := Tag("z")
-    assert "{ \"{reset(c)}\" }\t{ \"{reset(t)}\" }" == "Counter(n=0)\tTag(s='none')"
-    assert "{ \"{reset(t)}\" }\t{ \"{reset(c)}\" }" == "Tag(s='none')\tCounter(n=0)"
+    assert "{ "{reset(c)}" }\t{ "{reset(t)}" }" == "Counter(n=0)\tTag(s='none')"
+    assert "{ "{reset(t)}" }\t{ "{reset(c)}" }" == "Tag(s='none')\tCounter(n=0)"
 
 test fn sibling_nested_fragments_across_a_real_newline_keep_their_own_witness():
     # …and a REAL newline between two siblings inside a `"""` literal: the second sibling's column
@@ -368,8 +370,8 @@ test fn sibling_nested_fragments_across_a_real_newline_keep_their_own_witness():
 
 test fn a_keyword_argument_survives_a_nested_fragment():
     # the call plan is keyed by NodeId, so a re-lexed fragment's keyword call keeps its own entry
-    assert "{ \"{greet(1, b=2)}\" }" == "1-2"
-    assert "{ \"{greet(1, b=2)}\" }{ \"{greet(3, b=4)}\" }" == "1-23-4"
+    assert "{ "{greet(1, b=2)}" }" == "1-2"
+    assert "{ "{greet(1, b=2)}" }{ "{greet(3, b=4)}" }" == "1-23-4"
 
 # ---- two witness calls in ONE interpolation fragment ----
 #
@@ -938,13 +940,13 @@ test fn the_shadow_rule_leaves_every_unshadowed_position_alone():
 
 test fn a_witness_call_inside_a_nested_interpolation_keeps_its_key():
     c := Counter(1)
-    assert "{ \"{reset(c).n}\" }" == "0"
+    assert "{ "{reset(c).n}" }" == "0"
     # the same shape one level deeper still — the anchor is saved/restored per nesting level
-    assert "{ \"{ \\\"{reset(c).n}\\\" }\" }" == "0"
+    assert "{ "{ "{reset(c).n}" }" }" == "0"
 
 test fn a_keyword_call_inside_a_nested_interpolation_keeps_its_key():
     # the call-plan twin of the case above — one nesting level deeper
-    assert "{ \"{greet(1, b=2)}\" }" == "1-2"
+    assert "{ "{greet(1, b=2)}" }" == "1-2"
 
 # ---- M24-5b: a STATIC-METHOD head is an ordinary `defer` / `spawn` statement target ----
 #
