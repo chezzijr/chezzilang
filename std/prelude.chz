@@ -465,6 +465,27 @@ struct Range:
                 panic("len() needs a range with a start and an end")
         return n
 
+    # True when `item` is `s` plus a whole number of steps. Both operands are reduced by `step` first:
+    # `item - s` overflows for an item and a start of opposite signs, and the two remainders cannot.
+    # A remainder keeps the sign of its operand. Remainders of opposite signs match when they differ
+    # by exactly one step; `a + step` and `b + step` below add opposite signs, so they cannot overflow.
+    fn _aligned(self, item: int, s: int) -> bool:
+        if self.step == 1 or self.step == -1:
+            return true
+        a := item % self.step
+        b := s % self.step
+        if a == b:
+            return true
+        if a > 0 and b < 0:
+            if self.step > 0:
+                return a == b + self.step
+            return a + self.step == b
+        if a < 0 and b > 0:
+            if self.step > 0:
+                return b == a + self.step
+            return b + self.step == a
+        return false
+
     fn contains(self, item: int) -> bool:
         if self.step == 0:
             panic("Range() step cannot be zero")
@@ -485,7 +506,7 @@ struct Range:
                 pass
         match self.start:
             ?s:
-                return self.step == 1 or self.step == -1 or (item - s) % self.step == 0
+                return self._aligned(item, s)
             None:
                 return true
 

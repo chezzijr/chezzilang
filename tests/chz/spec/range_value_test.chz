@@ -153,3 +153,151 @@ test fn contains_tests_the_bounds_before_the_step_alignment():
     assert 3 in Range(-1, 5, 2)
     assert not (4 in Range(-1, 5, 2))
     assert not (top in Range(5, -1, -2))
+
+test fn contains_never_overflows_for_an_item_inside_the_bounds():
+    assert (9223372036854775807 in Range((-1), None, 2)) == true
+    assert ((-9223372036854775807 - 1) in Range((-1), None, 2)) == false
+    assert (9223372036854775806 in Range((-1), None, 2)) == false
+    assert ((-9223372036854775807) in Range((-1), None, 2)) == false
+    assert (0 in Range((-1), None, 2)) == false
+    assert ((-1) in Range((-1), None, 2)) == true
+    assert (9223372036854775807 in Range((-9223372036854775807 - 1), None, 3)) == true
+    assert ((-9223372036854775807 - 1) in Range((-9223372036854775807 - 1), None, 3)) == true
+    assert (9223372036854775806 in Range((-9223372036854775807 - 1), None, 3)) == false
+    assert ((-9223372036854775807) in Range((-9223372036854775807 - 1), None, 3)) == false
+    assert (0 in Range((-9223372036854775807 - 1), None, 3)) == false
+    assert ((-1) in Range((-9223372036854775807 - 1), None, 3)) == false
+    assert (9223372036854775807 in Range((-1), 9223372036854775807, 2, true)) == true
+    assert ((-9223372036854775807 - 1) in Range((-1), 9223372036854775807, 2, true)) == false
+    assert (9223372036854775806 in Range((-1), 9223372036854775807, 2, true)) == false
+    assert ((-9223372036854775807) in Range((-1), 9223372036854775807, 2, true)) == false
+    assert (0 in Range((-1), 9223372036854775807, 2, true)) == false
+    assert ((-1) in Range((-1), 9223372036854775807, 2, true)) == true
+    assert (9223372036854775807 in Range((-9223372036854775807 - 1), 9223372036854775807, 2)) == false
+    assert ((-9223372036854775807 - 1) in Range((-9223372036854775807 - 1), 9223372036854775807, 2)) == true
+    assert (9223372036854775806 in Range((-9223372036854775807 - 1), 9223372036854775807, 2)) == true
+    assert ((-9223372036854775807) in Range((-9223372036854775807 - 1), 9223372036854775807, 2)) == false
+    assert (0 in Range((-9223372036854775807 - 1), 9223372036854775807, 2)) == true
+    assert ((-1) in Range((-9223372036854775807 - 1), 9223372036854775807, 2)) == false
+    assert (9223372036854775807 in Range((-9223372036854775807 - 1), 9223372036854775807, 2, true)) == false
+    assert ((-9223372036854775807 - 1) in Range((-9223372036854775807 - 1), 9223372036854775807, 2, true)) == true
+    assert (9223372036854775806 in Range((-9223372036854775807 - 1), 9223372036854775807, 2, true)) == true
+    assert ((-9223372036854775807) in Range((-9223372036854775807 - 1), 9223372036854775807, 2, true)) == false
+    assert (0 in Range((-9223372036854775807 - 1), 9223372036854775807, 2, true)) == true
+    assert ((-1) in Range((-9223372036854775807 - 1), 9223372036854775807, 2, true)) == false
+    assert (9223372036854775807 in Range(0, None, -2)) == false
+    assert ((-9223372036854775807 - 1) in Range(0, None, -2)) == true
+    assert (9223372036854775806 in Range(0, None, -2)) == false
+    assert ((-9223372036854775807) in Range(0, None, -2)) == false
+    assert (0 in Range(0, None, -2)) == true
+    assert ((-1) in Range(0, None, -2)) == false
+    assert (9223372036854775807 in Range(9223372036854775807, None, -3)) == true
+    assert ((-9223372036854775807 - 1) in Range(9223372036854775807, None, -3)) == true
+    assert (9223372036854775806 in Range(9223372036854775807, None, -3)) == false
+    assert ((-9223372036854775807) in Range(9223372036854775807, None, -3)) == false
+    assert (0 in Range(9223372036854775807, None, -3)) == false
+    assert ((-1) in Range(9223372036854775807, None, -3)) == false
+    assert (9223372036854775807 in Range(9223372036854775807, (-9223372036854775807 - 1), -2, true)) == true
+    assert ((-9223372036854775807 - 1) in Range(9223372036854775807, (-9223372036854775807 - 1), -2, true)) == false
+    assert (9223372036854775806 in Range(9223372036854775807, (-9223372036854775807 - 1), -2, true)) == false
+    assert ((-9223372036854775807) in Range(9223372036854775807, (-9223372036854775807 - 1), -2, true)) == true
+    assert (0 in Range(9223372036854775807, (-9223372036854775807 - 1), -2, true)) == false
+    assert ((-1) in Range(9223372036854775807, (-9223372036854775807 - 1), -2, true)) == true
+    assert (9223372036854775807 in Range(1, None, 1)) == true
+    assert ((-9223372036854775807 - 1) in Range(1, None, 1)) == false
+    assert (9223372036854775806 in Range(1, None, 1)) == true
+    assert ((-9223372036854775807) in Range(1, None, 1)) == false
+    assert (0 in Range(1, None, 1)) == false
+    assert ((-1) in Range(1, None, 1)) == false
+
+test fn contains_with_a_step_as_wide_as_int_never_overflows():
+    assert (9223372036854775807 in Range((-1), None, 4611686018427387904)) == true
+    assert ((-9223372036854775807 - 1) in Range((-1), None, 4611686018427387904)) == false
+    assert (0 in Range((-1), None, 4611686018427387904)) == false
+    assert (4611686018427387903 in Range((-1), None, 4611686018427387904)) == true
+    assert (4611686018427387905 in Range((-1), None, 4611686018427387904)) == false
+    assert ((-4611686018427387905) in Range((-1), None, 4611686018427387904)) == false
+    assert (9223372036854775805 in Range((-1), None, 4611686018427387904)) == false
+    assert ((-9223372036854775807) in Range((-1), None, 4611686018427387904)) == false
+    assert ((-1) in Range((-1), None, 4611686018427387904)) == true
+    assert (1 in Range((-1), None, 4611686018427387904)) == false
+    assert (9223372036854775807 in Range(1, None, 4611686018427387904)) == false
+    assert ((-9223372036854775807 - 1) in Range(1, None, 4611686018427387904)) == false
+    assert (0 in Range(1, None, 4611686018427387904)) == false
+    assert (4611686018427387903 in Range(1, None, 4611686018427387904)) == false
+    assert (4611686018427387905 in Range(1, None, 4611686018427387904)) == true
+    assert ((-4611686018427387905) in Range(1, None, 4611686018427387904)) == false
+    assert (9223372036854775805 in Range(1, None, 4611686018427387904)) == false
+    assert ((-9223372036854775807) in Range(1, None, 4611686018427387904)) == false
+    assert ((-1) in Range(1, None, 4611686018427387904)) == false
+    assert (1 in Range(1, None, 4611686018427387904)) == true
+    assert (9223372036854775807 in Range((-3), None, 9223372036854775807)) == false
+    assert ((-9223372036854775807 - 1) in Range((-3), None, 9223372036854775807)) == false
+    assert (0 in Range((-3), None, 9223372036854775807)) == false
+    assert (4611686018427387903 in Range((-3), None, 9223372036854775807)) == false
+    assert (4611686018427387905 in Range((-3), None, 9223372036854775807)) == false
+    assert ((-4611686018427387905) in Range((-3), None, 9223372036854775807)) == false
+    assert (9223372036854775805 in Range((-3), None, 9223372036854775807)) == false
+    assert ((-9223372036854775807) in Range((-3), None, 9223372036854775807)) == false
+    assert ((-1) in Range((-3), None, 9223372036854775807)) == false
+    assert (1 in Range((-3), None, 9223372036854775807)) == false
+    assert (9223372036854775807 in Range(3, None, 9223372036854775807)) == false
+    assert ((-9223372036854775807 - 1) in Range(3, None, 9223372036854775807)) == false
+    assert (0 in Range(3, None, 9223372036854775807)) == false
+    assert (4611686018427387903 in Range(3, None, 9223372036854775807)) == false
+    assert (4611686018427387905 in Range(3, None, 9223372036854775807)) == false
+    assert ((-4611686018427387905) in Range(3, None, 9223372036854775807)) == false
+    assert (9223372036854775805 in Range(3, None, 9223372036854775807)) == false
+    assert ((-9223372036854775807) in Range(3, None, 9223372036854775807)) == false
+    assert ((-1) in Range(3, None, 9223372036854775807)) == false
+    assert (1 in Range(3, None, 9223372036854775807)) == false
+    assert (9223372036854775807 in Range(9223372036854775807, None, (-4611686018427387904))) == true
+    assert ((-9223372036854775807 - 1) in Range(9223372036854775807, None, (-4611686018427387904))) == false
+    assert (0 in Range(9223372036854775807, None, (-4611686018427387904))) == false
+    assert (4611686018427387903 in Range(9223372036854775807, None, (-4611686018427387904))) == true
+    assert (4611686018427387905 in Range(9223372036854775807, None, (-4611686018427387904))) == false
+    assert ((-4611686018427387905) in Range(9223372036854775807, None, (-4611686018427387904))) == true
+    assert (9223372036854775805 in Range(9223372036854775807, None, (-4611686018427387904))) == false
+    assert ((-9223372036854775807) in Range(9223372036854775807, None, (-4611686018427387904))) == false
+    assert ((-1) in Range(9223372036854775807, None, (-4611686018427387904))) == true
+    assert (1 in Range(9223372036854775807, None, (-4611686018427387904))) == false
+    assert (9223372036854775807 in Range((-1), None, (-9223372036854775807 - 1))) == false
+    assert ((-9223372036854775807 - 1) in Range((-1), None, (-9223372036854775807 - 1))) == false
+    assert (0 in Range((-1), None, (-9223372036854775807 - 1))) == false
+    assert (4611686018427387903 in Range((-1), None, (-9223372036854775807 - 1))) == false
+    assert (4611686018427387905 in Range((-1), None, (-9223372036854775807 - 1))) == false
+    assert ((-4611686018427387905) in Range((-1), None, (-9223372036854775807 - 1))) == false
+    assert (9223372036854775805 in Range((-1), None, (-9223372036854775807 - 1))) == false
+    assert ((-9223372036854775807) in Range((-1), None, (-9223372036854775807 - 1))) == false
+    assert ((-1) in Range((-1), None, (-9223372036854775807 - 1))) == true
+    assert (1 in Range((-1), None, (-9223372036854775807 - 1))) == false
+    assert (9223372036854775807 in Range(0, None, (-9223372036854775807 - 1))) == false
+    assert ((-9223372036854775807 - 1) in Range(0, None, (-9223372036854775807 - 1))) == true
+    assert (0 in Range(0, None, (-9223372036854775807 - 1))) == true
+    assert (4611686018427387903 in Range(0, None, (-9223372036854775807 - 1))) == false
+    assert (4611686018427387905 in Range(0, None, (-9223372036854775807 - 1))) == false
+    assert ((-4611686018427387905) in Range(0, None, (-9223372036854775807 - 1))) == false
+    assert (9223372036854775805 in Range(0, None, (-9223372036854775807 - 1))) == false
+    assert ((-9223372036854775807) in Range(0, None, (-9223372036854775807 - 1))) == false
+    assert ((-1) in Range(0, None, (-9223372036854775807 - 1))) == false
+    assert (1 in Range(0, None, (-9223372036854775807 - 1))) == false
+    assert (9223372036854775807 in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == true
+    assert ((-9223372036854775807 - 1) in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == false
+    assert (0 in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == false
+    assert (4611686018427387903 in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == false
+    assert (4611686018427387905 in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == false
+    assert ((-4611686018427387905) in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == false
+    assert (9223372036854775805 in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == false
+    assert ((-9223372036854775807) in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == false
+    assert ((-1) in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == true
+    assert (1 in Range(9223372036854775807, None, (-9223372036854775807 - 1))) == false
+    assert (9223372036854775807 in Range(9223372036854775807, None, (-9223372036854775807))) == true
+    assert ((-9223372036854775807 - 1) in Range(9223372036854775807, None, (-9223372036854775807))) == false
+    assert (0 in Range(9223372036854775807, None, (-9223372036854775807))) == true
+    assert (4611686018427387903 in Range(9223372036854775807, None, (-9223372036854775807))) == false
+    assert (4611686018427387905 in Range(9223372036854775807, None, (-9223372036854775807))) == false
+    assert ((-4611686018427387905) in Range(9223372036854775807, None, (-9223372036854775807))) == false
+    assert (9223372036854775805 in Range(9223372036854775807, None, (-9223372036854775807))) == false
+    assert ((-9223372036854775807) in Range(9223372036854775807, None, (-9223372036854775807))) == true
+    assert ((-1) in Range(9223372036854775807, None, (-9223372036854775807))) == false
+    assert (1 in Range(9223372036854775807, None, (-9223372036854775807))) == false

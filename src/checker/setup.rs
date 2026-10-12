@@ -203,6 +203,7 @@ impl Checker {
             imported_net: std::collections::HashSet::new(),
             imported_io: std::collections::HashSet::new(),
             imported_builtin_types: std::collections::HashSet::new(),
+            implicit_import_names: std::collections::HashSet::new(),
             current_module_label: None,
             loop_depth: 0,
             capture_floors: Vec::new(),
@@ -454,7 +455,19 @@ impl Checker {
     /// bare-visible as a TYPE (`struct_names`/`bare_types`), and — for a Builtin-origin std struct —
     /// reserves the bind name against a same-named user `struct` decl (`imported_builtin_types`),
     /// else a user layout could silently overwrite a native shape.
-    fn bind_imported_struct_name(&mut self, bind: &str, key: &str, info: &StructInfo) {
+    ///
+    /// `implicit` is true for the import no one wrote (`Span::NOWHERE`): the bind name joins
+    /// `implicit_import_names`, the one fact a same-named `fn` collides with.
+    fn bind_imported_struct_name(
+        &mut self,
+        bind: &str,
+        key: &str,
+        info: &StructInfo,
+        implicit: bool,
+    ) {
+        if implicit {
+            self.implicit_import_names.insert(bind.to_string());
+        }
         self.structs.insert(key.to_string(), info.clone());
         self.struct_names.insert(bind.to_string());
         self.bare_types.insert(bind.to_string(), key.to_string());
@@ -1756,6 +1769,7 @@ impl Checker {
         self.imported_net.clear();
         self.imported_io.clear(); // R2/R2b — Writer + Reader licensing
         self.imported_builtin_types.clear();
+        self.implicit_import_names.clear();
         // Types are MODULE-SCOPED: a type declared in module A is NOT visible bare in module B (it
         // must be imported). Clear the per-module type tables so a prior module's types don't leak.
         // The synthetic stdlib structs (`Match`/`Response`) and pre-seeded protocols are global, so
@@ -1856,7 +1870,13 @@ impl Checker {
     /// bound by an earlier import in this module — the caller then emits the duplicate-import error
     /// and skips re-binding. Spans across ALL import namespaces (values/functions/modules/types) so a
     /// value-then-fn or fn-then-fn collision is caught (which the separate tables otherwise miss).
+    ///
+    /// An import no one wrote (`Span::NOWHERE`) has no entry: every message that names an import
+    /// reads this registry, and that import has no line to name.
     pub(super) fn note_import_bind(&mut self, bind: &str, span: Span) -> bool {
+        if span.is_nowhere() {
+            return false;
+        }
         if self.import_binds.contains_key(bind) {
             self.error(span, format!("'{bind}' is already imported"));
             return true;
@@ -2141,7 +2161,7 @@ impl Checker {
             // signatures + a value's `Ty`), and make it BARE-VISIBLE under the bind
             // name via `struct_names`/`bare_types` so `S(...)`/`x: S` resolve here.
             let key = self.type_key(&imp.target, member);
-            self.bind_imported_struct_name(bind, &key, info);
+            self.bind_imported_struct_name(bind, &key, info, imp.span.is_nowhere());
             // Editor hover (Tier C): the imported type's doc — its own decl docstring
             // carried across the boundary, else a `kind (from module)` fallback. Seed
             // `name_docs[bind]` so a later bare/annotation/generic-head use surfaces it
@@ -4062,11 +4082,13 @@ impl Checker {
                     // A user `fn` named after a runtime constructor / builtin op (`timer`, `Channel`,
                     // `range`, …) is silently SHADOWED: `infer_named_call` / the backends resolve the
                     // builtin arm before a plain named call, so the user fn is dead code. Reject the
-                    // collision with a clear `reserved` error (mirrors the extern-name guard).
-                    // A reserved TYPE name (`Range`, which every module imports from the prelude) is
-                    // no function name either.
+                    // collision with a clear `reserved` error.
+                    // A name the implicit prelude import binds (`Range`) is no function name either.
+                    // The extern-name sweep below rejects it through `struct_names`. This guard reads
+                    // the narrower `implicit_import_names`: `struct S` beside `fn S` in one module
+                    // stays legal, as on main.
                     if is_reserved_name(&decl.name)
-                        || (is_reserved_type(&decl.name) && !self.current_module_is_stdlib)
+                        || self.implicit_import_names.contains(&decl.name)
                     {
                         self.error(
                             s.span,
@@ -4924,7 +4946,7 @@ impl Checker {
         self.hoist(&range_decl);
         self.current_module_is_stdlib = outer;
         if let Some(info) = self.structs.get("Range").cloned() {
-            self.bind_imported_struct_name("Range", "Range", &info);
+            self.bind_imported_struct_name("Range", "Range", &info, true);
         }
     }
 

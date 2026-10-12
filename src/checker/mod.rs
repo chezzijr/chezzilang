@@ -2893,6 +2893,10 @@ struct Checker {
     /// legal bare-decl case — only the import EVENT licenses the name, so it's tracked separately.
     /// Per-module: cleared in `begin_module`.
     imported_builtin_types: std::collections::HashSet<String>,
+    /// Names bound by the import no one wrote (`Range`, from `Span::NOWHERE`). A same-module `fn`
+    /// of such a name would sit beside the struct constructor. Per-module: cleared in
+    /// `begin_module`.
+    implicit_import_names: std::collections::HashSet<String>,
     /// Label of the module currently being checked (`None` = entry); prefixes its error messages.
     current_module_label: Option<String>,
     /// How many enclosing `for`/`while` loops we're inside *within the current function body*.

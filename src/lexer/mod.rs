@@ -191,6 +191,19 @@ impl Span {
         col: 1,
         file: 0,
     };
+
+    /// The span of an import no one wrote (the `import Range from std.prelude` the resolver adds to
+    /// every module): no source position, and no editor probe, equals it. No registry that a message
+    /// reads may hold it, so no message prints a line the file does not have.
+    pub const NOWHERE: Span = Span {
+        line: u32::MAX,
+        col: u32::MAX,
+        file: 0,
+    };
+
+    pub fn is_nowhere(self) -> bool {
+        self == Span::NOWHERE
+    }
 }
 
 impl fmt::Display for Span {
