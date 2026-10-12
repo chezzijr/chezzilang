@@ -320,7 +320,7 @@ impl Use {
             Use::IterParam => "    return \"{head_sum_dyn(r)}\"\n",
             Use::In => "    return \"{[3 in r, 7 in r, 0 in r]}\"\n",
             Use::Len => "    return \"{r.len()}\"\n",
-            Use::Fields => "    return \"{[r.start, r.end, r.step, r.inclusive]}\"\n",
+            Use::Fields => "    return \"[{r.start}, {r.end}, {r.step}, {r.inclusive}]\"\n",
             Use::Twice => {
                 "    a := r\n    first: List[int] = []\n    second: List[int] = []\n    for i in a:\n        first.push(i)\n        if first.len() == 3:\n            break\n    for i in a:\n        second.push(i)\n        if second.len() == 3:\n            break\n    return \"{first} {second}\"\n"
             }
@@ -466,7 +466,7 @@ impl Pos {
             Pos::Return => "    r := mk()\n".to_string(),
             Pos::Field => format!("    r := Holder({x}).r\n"),
             Pos::Default => "    r := dflt()\n".to_string(),
-            Pos::Hole => format!("    print(\"hole {{{x}}}\")\n    r := 0..1\n"),
+            Pos::Hole => format!("    print(\"hole {{{x}}}\")\n"),
         }
     }
 }
