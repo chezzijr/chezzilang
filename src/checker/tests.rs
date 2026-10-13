@@ -39888,3 +39888,21 @@ fn a_list_built_from_an_endless_literal_range_type_checks() {
     // `List(g())` does for an endless generator.
     ok("xs := List(5..)\n");
 }
+
+#[test]
+fn range_slice_and_range_index_on_one_type_is_a_declaration_error() {
+    // TICKET-254 part A: a type takes a range as a slice or as a key, not both.
+    rejects(
+        "struct Both:\n    data: List[int]\n    fn slice(self, r: Range) -> List[int]:\n        return self.data[r]\n    fn index(self, k: Range) -> str:\n        return \"i\"\nb := Both([1, 2, 3, 4])\nprint(b[1..3])\n",
+        "a type takes a range as a slice or as a key, not both",
+    );
+}
+
+#[test]
+fn mutating_call_on_a_builtin_slice_temporary_warns() {
+    // TICKET-254 part B.1: `g[0..2]` builds a fresh list, so the push changes a dropped copy.
+    warns(
+        "g := [[1], [2], [3]]\ng[0..2].push([9])\nprint(g)\n",
+        "changes a temporary copy",
+    );
+}
