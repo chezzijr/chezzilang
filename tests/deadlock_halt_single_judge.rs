@@ -561,3 +561,59 @@ fn deadlock_verdict_grid_ends_at_the_first_party_site() {
         bad[0]
     );
 }
+
+/// TICKET-256 — a guard wait that starts while the sched judge cuts the task that holds the guard.
+/// `started` orders the two tasks without a sleep: the body asks for the guard the moment the
+/// holder is inside its `update` closure. Under the `party` pin the sched judge latches no verdict
+/// (the body has no registered site yet), cuts the holder, and the body's `update` runs and prints
+/// `AFTER`. The cell count is large because the window is a few ms wide; the measured rate on a
+/// 28-core box is about 4 in 100 cells.
+#[test]
+fn guard_deadlock_with_handshake_never_runs_the_body_after_the_verdict() {
+    let row = Row {
+        name: "sp_guard_handshake",
+        src: r#"import std.concurrency
+fn main():
+    s := Shared(0)
+    c := Channel[int](0)
+    started := Channel[int](1)
+    fn hold(x: int) -> int:
+        started.send(1)
+        return x + c.recv()
+    parallel:
+        spawn: s.update(hold)
+        _ := started.recv()
+        s.update(fn(x: int) -> int: x + 1)
+        print("AFTER")
+main()
+"#,
+        site: "9:5",
+        after_ok: false,
+        test_mode: false,
+    };
+    let dir = std::env::temp_dir().join(format!("chz-ticket256-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create fixture dir");
+    let path = dir.join(format!("{}.chz", row.name));
+    std::fs::write(&path, row.src).expect("write fixture");
+    let bad = std::sync::Mutex::new(Vec::new());
+    let total = 8 * 24;
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| {
+                for seed in (1..=8u32).cycle().take(24) {
+                    if let Some(b) = run_cell(&path, &row, "1", seed, Some("party")) {
+                        bad.lock().unwrap().push(b);
+                    }
+                }
+            });
+        }
+    });
+    let mut bad = bad.into_inner().unwrap();
+    bad.sort_by_key(|b| !b.contains("AFTER"));
+    assert!(
+        bad.is_empty(),
+        "guard handshake: {} bad cells of {total}; first: {}",
+        bad.len(),
+        bad[0]
+    );
+}
