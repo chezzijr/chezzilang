@@ -172,6 +172,7 @@ impl Checker {
             deferred_obligations: None,
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
+            fresh_subscripts: Default::default(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             crossings: crate::checker::CrossingTable::new(),
             gen_crossings: crate::checker::GenCrossings::default(),
@@ -1849,6 +1850,7 @@ impl Checker {
         }
         self.infer_returns(stmts);
         self.record_hook_table(stmts);
+        self.pretype_place_subscripts(stmts);
         for stmt in stmts {
             self.check_stmt(stmt);
         }
@@ -3342,25 +3344,17 @@ impl Checker {
             }
             path.extend(effect.path.iter().cloned());
             let root_ty = self.lookup(&name).or_else(|| effect.global_ty.clone());
-            let Some(mut ty) = root_ty else {
+            let Some(ty) = root_ty else {
                 continue;
             };
-            let mut valid = true;
             let prefix_len = if matches!(effect.kind, fn_writes::WriteKind::Store) {
                 path.len().saturating_sub(1)
             } else {
                 path.len()
             };
-            for link in path.iter().take(prefix_len) {
-                let Some(next) = self.checked_link_ty(&ty, link) else {
-                    valid = false;
-                    break;
-                };
-                ty = next;
-            }
-            if !valid {
+            let Some(ty) = self.place_ty(&ty, &path[..prefix_len]) else {
                 continue;
-            }
+            };
             let proven = match &effect.kind {
                 fn_writes::WriteKind::Method(method) => self.call_writes_receiver(&ty, method),
                 fn_writes::WriteKind::Store => match path.last() {
@@ -3368,7 +3362,7 @@ impl Checker {
                     Some(ChainLink::Field(field)) => self
                         .checked_link_ty(&ty, &ChainLink::Field(field.clone()))
                         .is_some(),
-                    Some(ChainLink::Index) => {
+                    Some(ChainLink::Index(_) | ChainLink::Element | ChainLink::Slice) => {
                         matches!(ty, Ty::List(_) | Ty::Map(..) | Ty::ByteArray)
                             || matches!(&ty, Ty::Struct(key, _) if self.method_writes_self(key, "set_index"))
                     }
@@ -3413,7 +3407,7 @@ impl Checker {
     }
 
     fn checked_link_ty(&self, recv: &Ty, link: &ChainLink) -> Option<Ty> {
-        match (recv, link) {
+        match (recv, &self.resolve_link(link)) {
             (Ty::Struct(key, targs), ChainLink::Field(field)) => {
                 let info = self.struct_shape(key)?;
                 (info.origin == StructOrigin::User).then_some(())?;
@@ -3425,57 +3419,140 @@ impl Checker {
                     .clone();
                 Some(subst(&ty, &struct_param_map(info, targs)))
             }
-            (Ty::List(elem), ChainLink::Index) => Some((**elem).clone()),
-            (Ty::Map(_, value), ChainLink::Index) => Some((**value).clone()),
-            (Ty::ByteArray, ChainLink::Index) => Some(Ty::Int),
+            (Ty::List(_) | Ty::ByteArray, ChainLink::Slice) => Some(recv.clone()),
+            (Ty::List(elem), ChainLink::Element) => Some((**elem).clone()),
+            (Ty::Map(_, value), ChainLink::Element) => Some((**value).clone()),
+            (Ty::ByteArray, ChainLink::Element) => Some(Ty::Int),
             _ => None,
         }
     }
 
+    /// The one decider of "is this subscript a place or a new container": a syntactic `Index` link
+    /// resolves through [`Self::is_fresh_subscript`], which only the module that typed the subscript
+    /// may ask. Every other link is already resolved.
+    pub(super) fn resolve_link(&self, link: &ChainLink) -> ChainLink {
+        match link {
+            ChainLink::Index(span) if self.is_fresh_subscript(*span) => ChainLink::Slice,
+            ChainLink::Index(_) => ChainLink::Element,
+            ChainLink::Field(_) | ChainLink::Element | ChainLink::Slice => link.clone(),
+        }
+    }
+
     fn checked_chain_ty(&self, expr: &Expr) -> Option<Ty> {
-        match &expr.kind {
-            ExprKind::Ident(name) => self.lookup(name),
-            ExprKind::Field { obj, name, .. } => self.checked_link_ty(
-                &self.checked_chain_ty(obj)?,
-                &ChainLink::Field(name.clone()),
-            ),
-            ExprKind::Index { obj, .. } => {
-                self.checked_link_ty(&self.checked_chain_ty(obj)?, &ChainLink::Index)
+        let (root, links) = fn_writes::chain(expr)?;
+        self.place_ty(&self.lookup(&root)?, &links)
+    }
+
+    pub(super) fn subscript_key(&self, index_span: Span) -> crate::checker::CarrierKey {
+        crate::checker::carrier_key(
+            self.graph_module_idx,
+            self.kw_frag_ctx,
+            self.kw_frag_ord,
+            index_span,
+        )
+    }
+
+    pub(super) fn is_fresh_subscript(&self, index_span: Span) -> bool {
+        self.fresh_subscripts
+            .contains(&self.subscript_key(index_span))
+    }
+
+    fn place_ty(&self, root: &Ty, links: &[ChainLink]) -> Option<Ty> {
+        let mut ty = root.clone();
+        for link in links {
+            ty = self.checked_link_ty(&ty, link)?;
+        }
+        if links
+            .last()
+            .is_some_and(|link| self.resolve_link(link) == ChainLink::Slice)
+        {
+            return None;
+        }
+        Some(ty)
+    }
+
+    /// TICKET-254 — does the write summary of this declaration hold a subscript link? The summaries
+    /// run before any body is typed, so they call every subscript a place; only a typed body can
+    /// tell a builtin slice from an index. A declaration with such a link is typed once ahead of
+    /// the pass ([`Self::pretype_place_subscripts`]).
+    fn holds_subscript_write(stmt: &Stmt) -> bool {
+        match &stmt.kind {
+            StmtKind::Fn(decl) => fn_writes::has_subscript_write(decl),
+            StmtKind::Struct { methods, .. } => methods.iter().any(|m| {
+                fn_writes::has_subscript_write(m)
+                    || super::self_writes::self_ops(&m.body)
+                        .iter()
+                        .any(|op| match op {
+                            super::self_writes::SelfOp::Store(links)
+                            | super::self_writes::SelfOp::Call(links, _) => {
+                                links.iter().any(|l| matches!(l, ChainLink::Index(_)))
+                            }
+                        })
+            }),
+            StmtKind::Let { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::If { .. }
+            | StmtKind::For { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Match { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Yield(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Parallel { .. }
+            | StmtKind::Spawn(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. }
+            | StmtKind::Assert { .. }
+            | StmtKind::Expr(_) => false,
+        }
+    }
+
+    /// TICKET-254 — the second phase of the write summaries. Type each top-level declaration whose
+    /// summary holds a subscript link, with every diagnostic rolled back; that records which
+    /// subscripts are builtin slices in `fresh_subscripts`. Then run both summaries again, now
+    /// resolving a subscript link to `Element` or `Slice` ([`Self::resolve_link`]).
+    pub(super) fn pretype_place_subscripts(&mut self, stmts: &[Stmt]) {
+        let mut any = false;
+        for s in stmts.iter().filter(|s| Self::holds_subscript_write(s)) {
+            any = true;
+            let mark = self.diag_mark();
+            let saved = std::mem::replace(&mut self.resolving_returns, true);
+            self.check_stmt(s);
+            self.resolving_returns = saved;
+            self.diag_rollback(mark);
+        }
+        if any && !self.fresh_subscripts.is_empty() {
+            for s in stmts {
+                if let StmtKind::Struct { name, .. } = &s.kind {
+                    let key = self.bare_key(name);
+                    if let Some(info) = self.structs.get_mut(&key) {
+                        info.self_writers.clear();
+                    }
+                }
             }
-            ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Str(_)
-            | ExprKind::Interp(_)
-            | ExprKind::Bytes(_)
-            | ExprKind::RawStr(_)
-            | ExprKind::Bool(_)
-            | ExprKind::NoneLit
-            | ExprKind::Pass
-            | ExprKind::List(..)
-            | ExprKind::Tuple(_)
-            | ExprKind::Map(_)
-            | ExprKind::Set(_)
-            | ExprKind::Comprehension { .. }
-            | ExprKind::Unary { .. }
-            | ExprKind::Binary { .. }
-            | ExprKind::Compare { .. }
-            | ExprKind::Range { .. }
-            | ExprKind::Call { .. }
-            | ExprKind::Try(_)
-            | ExprKind::OptChain { .. }
-            | ExprKind::NullCoalesce { .. }
-            | ExprKind::Closure { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
-            | ExprKind::ElseGuard { .. } => None,
+            self.infer_self_writers(stmts);
+            self.infer_fn_writers(stmts);
         }
     }
 
     fn assign_is_checked_write(&self, target: &Expr) -> bool {
         match &target.kind {
             ExprKind::Ident(_) => true,
-            ExprKind::Field { .. } => self.checked_chain_ty(target).is_some(),
+            ExprKind::Field { obj, name, .. } => self.checked_chain_ty(obj).is_some_and(|t| {
+                self.checked_link_ty(&t, &ChainLink::Field(name.clone()))
+                    .is_some()
+            }),
             ExprKind::Index { obj, .. } => match self.checked_chain_ty(obj) {
                 Some(Ty::List(_) | Ty::Map(..) | Ty::ByteArray) => true,
                 Some(Ty::Struct(key, _)) => self.method_writes_self(&key, "set_index"),
@@ -3606,23 +3683,20 @@ impl Checker {
                             let Some((last, prefix)) = links.split_last() else {
                                 continue;
                             };
-                            let mut recv = self_ty.clone();
-                            let mut resolved = true;
-                            for link in prefix {
-                                let Some(next) = self.checked_link_ty(&recv, link) else {
-                                    resolved = false;
-                                    break;
-                                };
-                                recv = next;
-                            }
-                            if !resolved {
+                            let Some(recv) = self.place_ty(&self_ty, prefix) else {
                                 continue;
-                            }
+                            };
                             match (last, &recv) {
-                                (ChainLink::Index, Ty::Struct(target, _)) => {
+                                (
+                                    ChainLink::Index(_) | ChainLink::Element | ChainLink::Slice,
+                                    Ty::Struct(target, _),
+                                ) => {
                                     edges.push((target.clone(), "set_index".to_string()));
                                 }
-                                (ChainLink::Index, Ty::List(_) | Ty::Map(..) | Ty::ByteArray) => {
+                                (
+                                    ChainLink::Index(_) | ChainLink::Element | ChainLink::Slice,
+                                    Ty::List(_) | Ty::Map(..) | Ty::ByteArray,
+                                ) => {
                                     direct = true;
                                 }
                                 (ChainLink::Field(_), _) => {
@@ -3632,18 +3706,9 @@ impl Checker {
                             }
                         }
                         super::self_writes::SelfOp::Call(links, called) => {
-                            let mut recv = self_ty.clone();
-                            let mut resolved = true;
-                            for link in &links {
-                                let Some(next) = self.checked_link_ty(&recv, link) else {
-                                    resolved = false;
-                                    break;
-                                };
-                                recv = next;
-                            }
-                            if !resolved {
+                            let Some(recv) = self.place_ty(&self_ty, &links) else {
                                 continue;
-                            }
+                            };
                             if mutates_receiver(&recv, &called) {
                                 direct = true;
                             }

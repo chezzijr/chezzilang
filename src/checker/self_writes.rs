@@ -24,9 +24,11 @@ fn self_chain(expr: &Expr) -> Option<Vec<ChainLink>> {
             links.push(ChainLink::Field(name.clone()));
             Some(links)
         }
-        ExprKind::Index { obj, .. } => {
+        ExprKind::Index { obj, index, .. } => {
             let mut links = self_chain(obj)?;
-            links.push(ChainLink::Index);
+            links.push(ChainLink::Index(
+                index.as_ref().map_or(expr.span, |i| i.span),
+            ));
             Some(links)
         }
         ExprKind::Int(_)

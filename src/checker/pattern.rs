@@ -5316,15 +5316,21 @@ impl Checker {
     }
 
     /// `obj[r]` where `r` is a `Range`: the ONE place that decides whether the subscript is a slice
-    /// or an index. Order: the `Slice` bound of a type parameter, the built-in containers and a
-    /// type's `slice` hook (`slice_result`), then an `index` whose key is `Range`. The choice rides
-    /// the hook-call table to the compiler, which emits the opcode the checker chose; the VM never
-    /// chooses again by value.
+    /// or an index. A type takes a range as a slice or as a key, never both
+    /// ([`Self::range_key_conflict`]), so there is no precedence order: the `Slice` bound of a type
+    /// parameter, the built-in containers and a type's `slice` hook (`slice_result`) make a slice;
+    /// an `index` whose key accepts a `Range` makes an index. The choice rides the hook-call table
+    /// to the compiler, which emits the opcode the checker chose; the VM never chooses again by
+    /// value.
     fn range_subscript(&mut self, obj_ty: &Ty, obj: &Expr, index: &Expr) -> Ty {
         if obj_ty.is_unknown() {
             return Ty::Unknown;
         }
         let range = self.range_ty();
+        if self.range_key_conflict(obj_ty) {
+            self.error(obj.span, Self::range_key_conflict_text(&obj_ty.to_string()));
+            return Ty::Unknown;
+        }
         if let Ty::Param(name) = obj_ty {
             if let Some(bound) = self
                 .type_params
@@ -5344,6 +5350,10 @@ impl Checker {
         }
         if let Some(r) = self.slice_result(obj_ty) {
             self.record_subscript_slice(index);
+            if matches!(obj_ty, Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray) {
+                let key = self.subscript_key(index.span);
+                self.fresh_subscripts.insert(key);
+            }
             return r;
         }
         if let Some((k, v)) = self.index_kv(obj_ty)
@@ -5354,6 +5364,62 @@ impl Checker {
         let note = self.hook_name_note(obj_ty, "Slice", "slice");
         self.error(obj.span, format!("cannot slice {obj_ty}{note}"));
         Ty::Unknown
+    }
+
+    /// TICKET-254 — a type that takes a `Range` as a `slice` argument and also as an `index` key is
+    /// ambiguous at `x[a..b]`: declaring it or subscripting it is an error. A built-in container has
+    /// no user `index(Range)`, and a `Map` has no `slice`, so `m[0..3]` stays a key lookup.
+    pub(super) fn range_key_conflict(&mut self, ty: &Ty) -> bool {
+        let range = self.range_ty();
+        let (slices, key) = match ty {
+            Ty::Param(name) => (
+                self.type_params
+                    .get(name)
+                    .is_some_and(|bs| bs.iter().any(|b| b.name == "Slice")),
+                self.param_index_kv(name).map(|(k, _)| k),
+            ),
+            Ty::Struct(..) | Ty::Enum(..) | Ty::Protocol(..) => (
+                self.slice_result(ty).is_some(),
+                self.index_kv(ty).map(|(k, _)| k),
+            ),
+            Ty::List(_)
+            | Ty::Str
+            | Ty::Bytes
+            | Ty::ByteArray
+            | Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Nil
+            | Ty::Map(..)
+            | Ty::Set(_)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Tuple(_)
+            | Ty::Result(..)
+            | Ty::Option(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => return false,
+        };
+        slices && key.is_some_and(|k| self.assignable(&k, &range))
+    }
+
+    pub(super) fn range_key_conflict_text(name: &str) -> String {
+        format!(
+            "'{name}' declares 'slice' and an 'index' that takes a Range: a type takes a range as a slice or as a key, not both"
+        )
     }
 
     /// Record that the subscript whose index expression is `index` reads as a slice.

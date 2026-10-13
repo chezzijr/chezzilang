@@ -38867,7 +38867,7 @@ fn fresh_shape_grid() {
         ("x: List[int]", "mk()", "[Marked]"),
         ("x: List[int]", "s.a", "[Marked]"),
         ("x: List[int]", "ks[0].log", "[Marked]"),
-        ("x: List[int]", "xs + xs", "[Marked]"),
+        ("x: List[int]", "xs + xs", "[Node(Marked)]"),
         // Slots: a pack is a list built at the call, a default is a literal or a provider call.
         ("...x: List[int]", "[], xs", "[Node(At([All, Marked]))]"),
         ("...x: List[int]", "[], []", "[All]"),

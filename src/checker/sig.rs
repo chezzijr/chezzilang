@@ -5,6 +5,18 @@ use super::proto::HookMiss;
 use super::setup::{BindSite, HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
+/// TICKET-254 — what [`Checker::temporary_write`] found: the text of the warning follows.
+enum TempWrite {
+    /// The write lands on the deep copy a `Shared`/`RwShared`/`Atomic` read returns (TICKET-089).
+    BoxRead {
+        name: String,
+        reader: &'static str,
+        fix: &'static str,
+    },
+    /// The write lands on any other fresh value.
+    Copy,
+}
+
 /// Where a spelled type sits: `None` ("returns nothing") is a type only in a `Void` position.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum TypePos {
@@ -2606,6 +2618,78 @@ impl Checker {
         self.pop_scope();
     }
 
+    /// The type of `e`, inferred under a diagnostic window that is rolled back: a probe, no report.
+    fn probe_ty(&mut self, e: &Expr) -> Ty {
+        let mark = self.diag_mark();
+        let ty = self.infer(e);
+        self.diag_rollback(mark);
+        ty
+    }
+
+    /// TICKET-247 — both operands of a node `aliases_operand` calls `Fresh` have a type with no
+    /// user operator, so the result is a new value that holds no operand.
+    fn operands_keep_root(&mut self, left: &Expr, right: &Expr) -> bool {
+        let (l, r) = (self.probe_ty(left), self.probe_ty(right));
+        let op = fn_writes::RootUse::Op;
+        self.use_keeps_root(&op, &l) && self.use_keeps_root(&op, &r)
+    }
+
+    /// TICKET-254 — `obj.name(..)` is a native method of a `List`/`Map`/`Set`/`bytearray` whose
+    /// declared return type is a container of those four kinds: the result is a new object (no
+    /// native method returns its receiver or a view of it;
+    /// `native_container_results_are_new_objects` runs every one). Its elements are the receiver's,
+    /// so the shape is `Fresh::root()` (DEC-160).
+    fn native_method_returns_container(&mut self, obj: &Expr, name: &str) -> bool {
+        let recv = self.probe_ty(obj);
+        fn_writes::native_receiver(recv.scalar()).is_some_and(|(key, _)| {
+            self.structs
+                .get(key)
+                .and_then(|info| info.methods.get(name))
+                .is_some_and(|sig| {
+                    matches!(
+                        sig.ret,
+                        Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray
+                    )
+                })
+        })
+    }
+
+    /// `e` is a call `obj.method(..)`: its receiver and method name. A shape test, not a
+    /// classifier: every other expression kind is "not a method call".
+    fn method_call_parts(e: &Expr) -> Option<(&Expr, &str)> {
+        if let ExprKind::Call { callee, .. } = &e.kind
+            && let ExprKind::Field { obj, name, .. } = &callee.kind
+        {
+            Some((obj, name))
+        } else {
+            None
+        }
+    }
+
+    /// TICKET-254 — the one decider of "a write to `written` changes a value no name holds": the
+    /// warning on a mutating call and on a store read it, with the box read as one of its rows.
+    /// `written` is the object the mutating call or the store lands on. Peel its place links
+    /// ([`fn_writes::place_base`]): with none, the object itself is the base and any fresh shape
+    /// loses the write; with one or more, the write lands on a part of the base, so only a base
+    /// that is fresh at every level (`Fresh::All`) loses it (`xs.copy()[0].push(1)` writes an
+    /// element `xs` shares).
+    fn temporary_write(&mut self, written: &Expr) -> Option<TempWrite> {
+        let (base, links) = fn_writes::place_base(written, &|span| self.is_fresh_subscript(span));
+        let shape = self.fresh_shape(base, 0, true);
+        let fresh = if links == 0 {
+            !shape.is_marked()
+        } else {
+            shape.is_all()
+        };
+        if !fresh {
+            return None;
+        }
+        Some(match self.read_temporary_of_box(base) {
+            Some((name, reader, _, fix)) => TempWrite::BoxRead { name, reader, fix },
+            None => TempWrite::Copy,
+        })
+    }
+
     /// D4 (TICKET-240): what a crossing leaves marked in the value graph `e` builds. The one
     /// decider of "can the parent still reach this object", recursive over the expression. A
     /// constructor-like node is fresh and each child is judged by the same rule: a list, tuple,
@@ -2622,6 +2706,19 @@ impl Checker {
         }
         let d = depth + 1;
         let shape = match &e.kind {
+            ExprKind::Index { index: Some(i), .. } if self.is_fresh_subscript(i.span) => {
+                Fresh::root()
+            }
+            ExprKind::Binary {
+                lhs: left,
+                rhs: right,
+                ..
+            } if live
+                && fn_writes::aliases_operand(&e.kind) == fn_writes::OperandAlias::Fresh
+                && self.operands_keep_root(left, right) =>
+            {
+                Fresh::root()
+            }
             ExprKind::Int(..)
             | ExprKind::Float(..)
             | ExprKind::Str(..)
@@ -2697,19 +2794,11 @@ impl Checker {
                 named,
                 ..
             } => match &callee.kind {
+                ExprKind::Field { .. } if self.read_temporary_of_box(e).is_some() => Fresh::All,
                 ExprKind::Field { obj, name, .. }
-                    if name == "copy" && args.is_empty() && named.is_empty() =>
+                    if live && self.native_method_returns_container(obj, name) =>
                 {
-                    if live
-                        && matches!(
-                            self.infer(obj),
-                            Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray
-                        )
-                    {
-                        Fresh::root()
-                    } else {
-                        Fresh::Marked
-                    }
+                    Fresh::root()
                 }
                 ExprKind::Int(_)
                 | ExprKind::Float(_)
@@ -3112,22 +3201,18 @@ impl Checker {
                     }
                 }
                 self.check_assign(target, *op, val_ty, Some(value), span);
-                // TICKET-089 — `b.get().v = 9` / `s.get()[0] = 9` write into the deep copy a box read
-                // returns, so the write is lost. Walk the target down to its innermost base.
-                let mut base = target;
-                while let ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } = &base.kind {
-                    base = obj;
-                }
-                if !std::ptr::eq(base, target)
-                    && let Some((bx, reader, _, fix)) = self.read_temporary_of_box(base)
+                // TICKET-089 / TICKET-254 — `b.get().v = 9`, `xs.copy()[0] = 9`, `g[0..2][0] = v`
+                // store into a value no name holds, so the store is dropped.
+                if let Some(obj) = fn_writes::place_parent(target)
+                    && let Some(temp) = self.temporary_write(obj)
                 {
-                    self.warn(
-                        target.span,
-                        format!(
-                            "this write lands on the copy returned by '{bx}.{reader}()', so it is \
-                             discarded — write through '{bx}.{fix}(…)' instead"
+                    let text = match temp {
+                        TempWrite::BoxRead { name, reader, fix } => format!(
+                            "this write lands on the copy returned by '{name}.{reader}()', so it is discarded — write through '{name}.{fix}(…)' instead"
                         ),
-                    );
+                        TempWrite::Copy => "this write changes a temporary copy; the result is dropped: bind the value to a name first, or write to the source".to_string(),
+                    };
+                    self.warn(target.span, text);
                 }
             }
             StmtKind::Fn(decl) => {
@@ -5149,21 +5234,22 @@ impl Checker {
         // mutates a deep copy and drops it: the write is lost. Returns BEFORE the carrier
         // match — `s.get().remove(k)` / `.pop()` also return a carrier, and the lost-write
         // message is the more actionable one, so one statement never carries both.
-        if let ExprKind::Call { callee, .. } = &e.kind
-            && let ExprKind::Field {
-                obj, name: method, ..
-            } = &callee.kind
-            && let Some((bx, reader, payload, fix)) = self.read_temporary_of_box(obj)
-            && mutates_receiver(&payload, method)
+        if let Some((obj, method)) = Self::method_call_parts(e)
+            && let Some(temp) = self.temporary_write(obj)
         {
-            self.warn(
-                e.span,
-                format!(
-                    "'{method}' mutates the copy returned by '{bx}.{reader}()', so the write \
-                     is discarded — write through '{bx}.{fix}(…)' instead"
-                ),
-            );
-            return;
+            let recv = self.probe_ty(obj);
+            if mutates_receiver(&recv, method) {
+                let text = match temp {
+                    TempWrite::BoxRead { name, reader, fix } => format!(
+                        "'{method}' mutates the copy returned by '{name}.{reader}()', so the write is discarded — write through '{name}.{fix}(…)' instead"
+                    ),
+                    TempWrite::Copy => format!(
+                        "'{method}' changes a temporary copy; the result is dropped: bind the value to a name first, or call '{method}' on the source"
+                    ),
+                };
+                self.warn(e.span, text);
+                return;
+            }
         }
         // `Unknown` lands here too: an already-reported expression must not cascade.
         if !matches!(t, Ty::Result(..) | Ty::Option(_)) {

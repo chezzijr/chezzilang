@@ -897,9 +897,11 @@ pub(super) fn chain(expr: &Expr) -> Option<(String, Vec<ChainLink>)> {
             path.push(ChainLink::Field(name.clone()));
             Some((root, path))
         }
-        ExprKind::Index { obj, .. } => {
+        ExprKind::Index { obj, index, .. } => {
             let (root, mut path) = chain(obj)?;
-            path.push(ChainLink::Index);
+            path.push(ChainLink::Index(
+                index.as_ref().map_or(expr.span, |i| i.span),
+            ));
             Some((root, path))
         }
         ExprKind::Int(_)
@@ -930,6 +932,102 @@ pub(super) fn chain(expr: &Expr) -> Option<(String, Vec<ChainLink>)> {
         | ExprKind::Recover(_)
         | ExprKind::ElseGuard { .. } => None,
     }
+}
+
+/// TICKET-254 — peel the place links (`.f`, `[i]`) off `expr` and return the value the chain reads
+/// from, with the count of links peeled. A subscript `is_slice` calls a builtin slice is no place
+/// link: it builds a new value, so the peel stops there and that value is the base.
+pub(super) fn place_base<'a>(
+    expr: &'a Expr,
+    is_slice: &impl Fn(crate::ast::Span) -> bool,
+) -> (&'a Expr, usize) {
+    match &expr.kind {
+        ExprKind::Field { obj, .. } => {
+            let (base, n) = place_base(obj, is_slice);
+            (base, n + 1)
+        }
+        ExprKind::Index { obj, index, .. } => {
+            if index.as_ref().is_some_and(|i| is_slice(i.span)) {
+                (expr, 0)
+            } else {
+                let (base, n) = place_base(obj, is_slice);
+                (base, n + 1)
+            }
+        }
+        ExprKind::Ident(_)
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => (expr, 0),
+    }
+}
+
+/// The object a place link (`.f`, `[i]`) reads from, or `None` when `expr` is no place link.
+pub(super) fn place_parent(expr: &Expr) -> Option<&Expr> {
+    match &expr.kind {
+        ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => Some(obj),
+        ExprKind::Ident(_)
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => None,
+    }
+}
+
+pub(super) fn has_subscript_write(decl: &FnDecl) -> bool {
+    fn any(s: &Scan) -> bool {
+        s.direct
+            .iter()
+            .any(|w| w.path.iter().any(|l| matches!(l, ChainLink::Index(_))))
+            || s.nested.values().any(any)
+    }
+    any(&scan(decl))
 }
 
 pub(super) fn scan(decl: &FnDecl) -> Scan {
@@ -1379,7 +1477,14 @@ impl Checker {
         let saved_body_facts = std::mem::replace(&mut self.body_facts_pass, true);
         let summaries = self.infer_scan_writes(&scans, &HashMap::new(), true);
         self.body_facts_pass = saved_body_facts;
-        for (name, summary) in summaries {
+        for (name, mut summary) in summaries {
+            // The summary leaves this module (an importer reads it), so each subscript link is
+            // resolved here, where the checker typed it: `Index(span)` is a span of this module.
+            for write in &mut summary.writes {
+                for link in &mut write.path {
+                    *link = self.resolve_link(link);
+                }
+            }
             if let Some(sig) = self.functions.get_mut(&name) {
                 sig.summary = summary;
             }

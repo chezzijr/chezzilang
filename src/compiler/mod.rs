@@ -9151,7 +9151,7 @@ hesc := fn(xs: List[int]) -> int: hpush(xs)
             ("g18", 0),
             ("g19", 0b1),
             ("g20", 0),
-            ("g21", 0b1),
+            ("g21", 0b11),
             ("g22", 0),
             ("g23", 0b1),
             ("g24", 0b1),
@@ -9361,9 +9361,9 @@ c := d6([xs])
             // a param key, an operator, a named callee, a slice, a scalar name in the literal.
             ("n7", 0b10, 0),
             ("n8", 0b10, 0),
-            ("n10", 0b1, 0),
+            ("n10", 0b11, 0),
             ("n11", 0b1, 0),
-            ("n12", 0b1, 0),
+            ("n12", 0b11, 0),
             ("n13", 0b10, 0),
             // A ceiling: the checker's verdict is `All`, but the local takes the slot the
             // comprehension's hidden loop slots left, and a reused slot is the AND of its claims.

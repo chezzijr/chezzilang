@@ -2880,6 +2880,13 @@ impl Checker {
                     Err(HookMiss::Absent | HookMiss::Static) => {}
                 }
             }
+            if self.range_key_conflict(&ty) {
+                let span = methods
+                    .iter()
+                    .find(|m| m.name == "index")
+                    .map_or(s.span, |m| m.name_span);
+                self.error(span, Self::range_key_conflict_text(name));
+            }
             self.exit_type_params(saved);
             if let Ty::Struct(key, _) | Ty::Enum(key, _) = ty {
                 self.hook_table.insert((self.graph_module_idx, key), set);

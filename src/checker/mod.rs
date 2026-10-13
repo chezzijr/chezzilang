@@ -2738,6 +2738,7 @@ struct Checker {
     hook_table: HookTable,
     /// TICKET-250 — the call sites typed through a reserved requirement. See [`HookCallTable`].
     hook_calls: HookCallTable,
+    fresh_subscripts: HashSet<CarrierKey>,
     /// Which `.sum()` sites sum a `List[float]` and so need a `0.0` seed, keyed by
     /// [`carrier_key`] on the method-name token and consumed verbatim by the compiler (which cannot
     /// re-derive it: the decision is the ELEMENT's type, and an empty list carries none at runtime).
@@ -3144,7 +3145,15 @@ pub(super) enum PathSeg {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum ChainLink {
     Field(String),
-    Index,
+    /// A subscript as the syntax walkers see it, before the checker has typed the body. The span is
+    /// the index expression's, the key of [`Checker::fresh_subscripts`] in the module that owns the
+    /// body. [`Checker::resolve_link`] turns it into `Element` or `Slice`.
+    Index(Span),
+    /// A subscript the checker resolved to one element of its container: a place.
+    Element,
+    /// A subscript the checker resolved to a builtin slice: a new container, no place. A summary
+    /// carries this form across modules, so a reader needs no span lookup in another module.
+    Slice,
 }
 
 mod exhaust;
