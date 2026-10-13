@@ -8827,6 +8827,28 @@ mod file_id_tests {
         crate::resolver::build_graph(&entry).expect("graph should build")
     }
 
+    /// TICKET-255 — a program that holds no range value must not compile the prelude's `Range`
+    /// methods. Every `chezzi run` pays for each proto compiled before the first user statement.
+    #[test]
+    fn program_without_a_range_compiles_no_prelude_fn_protos() {
+        let t = TmpDir::new();
+        t.write("chezzi.toml", "[project]\nname = \"g\"\n");
+        let entry = t.write("main.chz", "print(1)\n");
+        let graph = crate::resolver::build_graph(&entry).expect("graph should build");
+        let program = compile_graph(&graph).expect("compile");
+        let range_protos: Vec<&str> = program
+            .protos
+            .iter()
+            .map(|p| p.name.as_str())
+            .filter(|n| !n.starts_with('<'))
+            .collect();
+        assert!(
+            range_protos.is_empty(),
+            "print(1) compiled {} prelude fn protos: {range_protos:?}",
+            range_protos.len()
+        );
+    }
+
     #[test]
     fn module_protos_carry_their_graph_file_ids() {
         let graph = build_diamond();
