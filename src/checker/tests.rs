@@ -39906,3 +39906,529 @@ fn mutating_call_on_a_builtin_slice_temporary_warns() {
         "changes a temporary copy",
     );
 }
+
+// ===== TICKET-254: one answer for a mutating call on a fresh temporary, in every context =====
+
+/// `(errors, warnings)` of a program, each as `message` plus `help`, through `build_graph` so that
+/// `import std.concurrency` and a two-file program resolve. When `T254_DUMP` names a directory, the
+/// program is also written there as `<name>.chz` (the run-time column of the grid is measured on the
+/// built binary, not here).
+fn t254_diags(name: &str, files: &[(&str, String)], main: &str) -> (Vec<String>, Vec<String>) {
+    let t = TmpDir::new();
+    for (file, body) in files {
+        t.write(file, body);
+    }
+    let entry = t.write("main.chz", main);
+    if let Ok(dir) = std::env::var("T254_DUMP") {
+        std::fs::write(format!("{dir}/{name}.chz"), main).expect("dump");
+        for (file, body) in files {
+            std::fs::write(format!("{dir}/{file}"), body).expect("dump");
+        }
+    }
+    let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let (res, warns) = check_graph_diags(&graph, None);
+    let text = |d: &CheckError| format!("{} {}", d.message, d.help.clone().unwrap_or_default());
+    (
+        res.err().unwrap_or_default().iter().map(text).collect(),
+        warns.iter().map(text).collect(),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum T254Ctx {
+    Top,
+    Fn,
+    SpawnedFn,
+    SpawnBlock,
+    ExecutorJob,
+    BoxClosure,
+    ImportedFn,
+}
+
+impl T254Ctx {
+    const ALL: [T254Ctx; 7] = [
+        T254Ctx::Top,
+        T254Ctx::Fn,
+        T254Ctx::SpawnedFn,
+        T254Ctx::SpawnBlock,
+        T254Ctx::ExecutorJob,
+        T254Ctx::BoxClosure,
+        T254Ctx::ImportedFn,
+    ];
+}
+
+struct T254Shape {
+    name: &'static str,
+    /// Declarations placed before the program.
+    decls: &'static str,
+    params: &'static str,
+    args: &'static str,
+    root: &'static str,
+    rows: &'static [T254Row],
+}
+
+/// `fresh`: the receiver is a fresh temporary, so the write is dropped and the program warns.
+/// `writes`: statement templates; `@` is the receiver, `$` the element value.
+struct T254Row {
+    name: &'static str,
+    recv: &'static str,
+    a: &'static str,
+    fresh: bool,
+    writes: &'static [&'static str],
+}
+
+const T254_LIST_WRITES: &[&str] = &["@.push($)", "@.extend([$])", "@.sort()", "@[0] = $"];
+
+const T254_SHAPES: &[T254Shape] = &[
+    T254Shape {
+        name: "list",
+        decls: "",
+        params: "g: List[List[int]], r: Range",
+        args: "g, r",
+        root: "g := [[1], [2], [3]]\nr := 0..2\n",
+        rows: &[
+            T254Row {
+                name: "slice_lit",
+                recv: "g[0..2]",
+                a: "[9]",
+                fresh: true,
+                writes: T254_LIST_WRITES,
+            },
+            T254Row {
+                name: "slice_var",
+                recv: "g[r]",
+                a: "[9]",
+                fresh: true,
+                writes: T254_LIST_WRITES,
+            },
+            T254Row {
+                name: "slice_step",
+                recv: "g[Range(0, 3, 2)]",
+                a: "[9]",
+                fresh: true,
+                writes: T254_LIST_WRITES,
+            },
+            T254Row {
+                name: "reversed",
+                recv: "g.reversed()",
+                a: "[9]",
+                fresh: true,
+                writes: T254_LIST_WRITES,
+            },
+            T254Row {
+                name: "copy",
+                recv: "g.copy()",
+                a: "[9]",
+                fresh: true,
+                writes: T254_LIST_WRITES,
+            },
+            T254Row {
+                name: "operator",
+                recv: "(g + [[4]])",
+                a: "[9]",
+                fresh: true,
+                writes: T254_LIST_WRITES,
+            },
+            T254Row {
+                name: "comprehension",
+                recv: "[x for x in g]",
+                a: "[9]",
+                fresh: true,
+                writes: T254_LIST_WRITES,
+            },
+            T254Row {
+                name: "literal",
+                recv: "[[1]]",
+                a: "[9]",
+                fresh: true,
+                writes: T254_LIST_WRITES,
+            },
+            T254Row {
+                name: "index",
+                recv: "g[0]",
+                a: "9",
+                fresh: false,
+                writes: T254_LIST_WRITES,
+            },
+            T254Row {
+                name: "name",
+                recv: "g",
+                a: "[9]",
+                fresh: false,
+                writes: T254_LIST_WRITES,
+            },
+        ],
+    },
+    T254Shape {
+        name: "map",
+        decls: "",
+        params: "g: Map[str, int]",
+        args: "g",
+        root: "g := {\"a\": 1}\n",
+        rows: &[
+            T254Row {
+                name: "copy",
+                recv: "g.copy()",
+                a: "2",
+                fresh: true,
+                writes: &["@.update({\"z\": $})", "@[\"z\"] = $"],
+            },
+            T254Row {
+                name: "literal",
+                recv: "({\"a\": 1})",
+                a: "2",
+                fresh: true,
+                writes: &["@.update({\"z\": $})", "@[\"z\"] = $"],
+            },
+            T254Row {
+                name: "name",
+                recv: "g",
+                a: "2",
+                fresh: false,
+                writes: &["@.update({\"z\": $})", "@[\"z\"] = $"],
+            },
+        ],
+    },
+    T254Shape {
+        name: "set",
+        decls: "",
+        params: "g: Set[int]",
+        args: "g",
+        root: "g := {1, 2}\n",
+        rows: &[
+            T254Row {
+                name: "copy",
+                recv: "g.copy()",
+                a: "3",
+                fresh: true,
+                writes: &["@.add($)"],
+            },
+            T254Row {
+                name: "name",
+                recv: "g",
+                a: "3",
+                fresh: false,
+                writes: &["@.add($)"],
+            },
+        ],
+    },
+    T254Shape {
+        name: "bytearray",
+        decls: "",
+        params: "g: bytearray",
+        args: "g",
+        root: "g := bytearray()\ng.push(97)\n",
+        rows: &[
+            T254Row {
+                name: "copy",
+                recv: "g.copy()",
+                a: "1",
+                fresh: true,
+                writes: &["@.push($)", "@[0] = $"],
+            },
+            T254Row {
+                name: "name",
+                recv: "g",
+                a: "1",
+                fresh: false,
+                writes: &["@.push($)", "@[0] = $"],
+            },
+        ],
+    },
+    T254Shape {
+        name: "struct",
+        decls: "struct P:\n    x: int\n    items: List[int]\n",
+        params: "g: P",
+        args: "g",
+        root: "g := P(1, [1])\n",
+        rows: &[
+            T254Row {
+                name: "ctor_store",
+                recv: "P(2, [2])",
+                a: "5",
+                fresh: true,
+                writes: &["@.x = $"],
+            },
+            T254Row {
+                name: "name_store",
+                recv: "g",
+                a: "5",
+                fresh: false,
+                writes: &["@.x = $"],
+            },
+            T254Row {
+                name: "field_push",
+                recv: "g.items",
+                a: "3",
+                fresh: false,
+                writes: &["@.push($)"],
+            },
+        ],
+    },
+];
+
+/// The cells with no legal program: a struct declared in the entry file is not visible to `lib.chz`.
+fn t254_applies(shape: &T254Shape, ctx: T254Ctx) -> bool {
+    match ctx {
+        T254Ctx::ImportedFn => shape.decls.is_empty(),
+        T254Ctx::Top
+        | T254Ctx::Fn
+        | T254Ctx::SpawnedFn
+        | T254Ctx::SpawnBlock
+        | T254Ctx::ExecutorJob
+        | T254Ctx::BoxClosure => true,
+    }
+}
+
+fn t254_program(
+    shape: &T254Shape,
+    ctx: T254Ctx,
+    stmt: &str,
+) -> (Vec<(&'static str, String)>, String) {
+    let (decls, params, args, root) = (shape.decls, shape.params, shape.args, shape.root);
+    let work = format!("fn work({params}):\n    {stmt}\n");
+    let mut files = Vec::new();
+    let main = match ctx {
+        T254Ctx::Top => format!("{decls}{root}{stmt}\nprint(g)\n"),
+        T254Ctx::Fn => format!("{decls}{work}{root}work({args})\nprint(g)\n"),
+        T254Ctx::SpawnedFn => {
+            format!("{decls}{work}{root}parallel:\n    spawn work({args})\nprint(g)\n")
+        }
+        T254Ctx::SpawnBlock => {
+            format!("{decls}{root}parallel:\n    spawn:\n        {stmt}\nprint(g)\n")
+        }
+        T254Ctx::ExecutorJob => format!(
+            "import std.concurrency\n{decls}{work}{root}ex := Executor()\nex.submit(fn(): work({args}))\nex.shutdown()\nprint(g)\n"
+        ),
+        T254Ctx::BoxClosure => format!(
+            "import std.concurrency\n{decls}{work}fn wrap({params}, x: int) -> int:\n    work({args})\n    return x\n{root}s := Shared(0)\ns.update(fn(x: int) -> int: wrap({args}, x))\nprint(g)\n"
+        ),
+        T254Ctx::ImportedFn => {
+            files.push(("lib.chz", work));
+            format!("import lib\n{root}parallel:\n    spawn lib.work({args})\nprint(g)\n")
+        }
+    };
+    (files, main)
+}
+
+/// Does a D4 error ("this task's copy") belong to a plain-name or plain-index write in `ctx`?
+/// Measured on the base binary with `T254_DUMP`: a spawned fn, a `spawn:` block and a fn of another
+/// module are errors; a plain call, the top level, a box closure and an `Executor` job are not.
+fn t254_control_errors(ctx: T254Ctx) -> bool {
+    match ctx {
+        T254Ctx::SpawnedFn | T254Ctx::SpawnBlock | T254Ctx::ImportedFn => true,
+        T254Ctx::Top | T254Ctx::Fn | T254Ctx::ExecutorJob | T254Ctx::BoxClosure => false,
+    }
+}
+
+#[test]
+fn fresh_temporary_grid() {
+    let mut bad = Vec::new();
+    for shape in T254_SHAPES {
+        for row in shape.rows {
+            for ctx in T254Ctx::ALL {
+                if !t254_applies(shape, ctx) {
+                    continue;
+                }
+                for (wi, write) in row.writes.iter().enumerate() {
+                    let stmt = write.replace('@', row.recv).replace('$', row.a);
+                    let cell = format!("{}_{}_{:?}_w{wi}", shape.name, row.name, ctx);
+                    let (files, main) = t254_program(shape, ctx, &stmt);
+                    let (errs, warns) = t254_diags(&cell, &files, &main);
+                    let warned = warns.iter().any(|w| w.contains("changes a temporary copy"));
+                    let errored = errs.iter().any(|e| e.contains("this task's copy"));
+                    let (want_warn, want_err) = if row.fresh {
+                        (true, false)
+                    } else {
+                        (false, t254_control_errors(ctx))
+                    };
+                    let stray = errs.len() != usize::from(want_err);
+                    if warned != want_warn || errored != want_err || stray {
+                        bad.push(format!(
+                            "{cell}: stmt `{stmt}` warned={warned} (want {want_warn}) errored={errored} (want {want_err}) errs={errs:?}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} red cells:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum T254Owner {
+    Struct,
+    Enum,
+    Generic,
+    /// `G[K]` whose `index` takes its own parameter, used as `G[Range]`.
+    Keyed,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum T254Declares {
+    SliceOnly,
+    IndexRangeOnly,
+    Both,
+    IndexIntAndSlice,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum T254Use {
+    Literal,
+    Variable,
+    SliceBound,
+    IndexBound,
+}
+
+#[test]
+fn range_subscript_ambiguity_grid() {
+    let owners = [
+        T254Owner::Struct,
+        T254Owner::Enum,
+        T254Owner::Generic,
+        T254Owner::Keyed,
+    ];
+    let declares = [
+        T254Declares::SliceOnly,
+        T254Declares::IndexRangeOnly,
+        T254Declares::Both,
+        T254Declares::IndexIntAndSlice,
+    ];
+    let uses = [
+        T254Use::Literal,
+        T254Use::Variable,
+        T254Use::SliceBound,
+        T254Use::IndexBound,
+    ];
+    let both_text = "a type takes a range as a slice or as a key, not both";
+    let mut bad = Vec::new();
+    for owner in owners {
+        for decl in declares {
+            for usage in uses {
+                let (head, elem, key_int, make) = match owner {
+                    T254Owner::Struct => (
+                        "struct S:\n    data: List[int]\n",
+                        "int",
+                        "int",
+                        "x := S([1, 2, 3])\n",
+                    ),
+                    T254Owner::Enum => (
+                        "enum S:\n    A(List[int])\n    B\n",
+                        "int",
+                        "int",
+                        "x := S.A([1, 2, 3])\n",
+                    ),
+                    T254Owner::Generic => (
+                        "struct S[T]:\n    data: List[T]\n",
+                        "T",
+                        "int",
+                        "x := S([1, 2, 3])\n",
+                    ),
+                    T254Owner::Keyed => (
+                        "struct S[K]:\n    data: List[int]\n",
+                        "int",
+                        "K",
+                        "x: S[Range] = S([1, 2, 3])\n",
+                    ),
+                };
+                let make = if matches!(
+                    (owner, decl),
+                    (T254Owner::Keyed, T254Declares::IndexIntAndSlice)
+                ) {
+                    "x: S[int] = S([1, 2, 3])\n"
+                } else {
+                    make
+                };
+                // An enum has no field: its bodies build the result.
+                let (slice_body, index_body) = match owner {
+                    T254Owner::Enum => ("[1]", "1"),
+                    T254Owner::Struct | T254Owner::Generic | T254Owner::Keyed => {
+                        ("self.data[r]", "self.data[0]")
+                    }
+                };
+                let slice = format!(
+                    "    fn slice(self, r: Range) -> List[{elem}]:\n        return {slice_body}\n"
+                );
+                let index_range = format!(
+                    "    fn index(self, k: {}) -> {elem}:\n        return {index_body}\n",
+                    if matches!(owner, T254Owner::Keyed) {
+                        "K"
+                    } else {
+                        "Range"
+                    }
+                );
+                let index_int = format!(
+                    "    fn index(self, k: {key_int}) -> {elem}:\n        return {index_body}\n"
+                );
+                let methods = match decl {
+                    T254Declares::SliceOnly => slice,
+                    T254Declares::IndexRangeOnly => index_range,
+                    T254Declares::Both => format!("{slice}{index_range}"),
+                    T254Declares::IndexIntAndSlice => format!("{slice}{index_int}"),
+                };
+                let tail = match usage {
+                    T254Use::Literal => "print(x[1..3])\n".to_string(),
+                    T254Use::Variable => "r := 1..3\nprint(x[r])\n".to_string(),
+                    T254Use::SliceBound => {
+                        "fn f[C: Slice[R], R](c: C) -> R:\n    return c[1..2]\nprint(f(x))\n"
+                            .to_string()
+                    }
+                    T254Use::IndexBound => {
+                        "fn f[C: Index[Range, V], V](c: C) -> V:\n    return c[1..2]\nprint(f(x))\n"
+                            .to_string()
+                    }
+                };
+                let src = format!("{head}{methods}{make}{tail}");
+                let errs = check_src(&src);
+                let both_err = errs.iter().any(|e| e.message.contains(both_text));
+                let any_err = !errs.is_empty();
+                // The keyed owner declares `index(k: K)`: legal on its own, an error where `K` is a Range.
+                let want_both = match (owner, decl, usage) {
+                    (
+                        T254Owner::Keyed,
+                        T254Declares::Both,
+                        T254Use::Literal | T254Use::Variable,
+                    ) => true,
+                    (
+                        T254Owner::Keyed,
+                        T254Declares::Both,
+                        T254Use::SliceBound | T254Use::IndexBound,
+                    ) => false,
+                    (_, T254Declares::Both, _) => true,
+                    (
+                        _,
+                        T254Declares::SliceOnly
+                        | T254Declares::IndexRangeOnly
+                        | T254Declares::IndexIntAndSlice,
+                        _,
+                    ) => false,
+                };
+                // Without `Both`, only a bound the type does not satisfy is an error.
+                let want_other_err = match (decl, usage) {
+                    (T254Declares::Both, _) => false,
+                    (
+                        T254Declares::SliceOnly | T254Declares::IndexIntAndSlice,
+                        T254Use::IndexBound,
+                    ) => true,
+                    (T254Declares::IndexRangeOnly, T254Use::SliceBound) => true,
+                    (T254Declares::SliceOnly | T254Declares::IndexIntAndSlice, _) => false,
+                    (T254Declares::IndexRangeOnly, _) => false,
+                };
+                if both_err != want_both || (!want_both && any_err != want_other_err) {
+                    bad.push(format!("{owner:?} {decl:?} {usage:?}: both_err={both_err} (want {want_both}) any_err={any_err} (want other {want_other_err}) errs={errs:?}\n{src}"));
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} red cells:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}
