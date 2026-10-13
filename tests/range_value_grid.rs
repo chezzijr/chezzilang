@@ -745,17 +745,36 @@ fn a_plain_index_stays_strict_and_a_range_key_stays_a_key() {
 }
 
 #[test]
-fn a_struct_with_slice_and_index_agrees_between_check_and_run() {
-    // One decider: the checker picks `slice` for a `Range` subscript, the compiler emits what it picked.
-    let src = "struct Both:\n    n: int\n\n    fn slice(self, r: Range) -> List[int]:\n        return [1, 2]\n\n    fn index(self, k: Range) -> str:\n        return \"idx\"\n\n\
+fn a_struct_with_slice_or_index_agrees_between_check_and_run() {
+    // One decider: the checker picks `slice` or `index` for a `Range` subscript, the compiler emits what it picked.
+    // A type with ONE of the two hooks is legal; a type with both is the declaration error below.
+    let src = "struct Sl:\n    n: int\n\n    fn slice(self, r: Range) -> List[int]:\n        return [1, 2]\n\n\
+        struct Ix:\n    n: int\n\n    fn index(self, k: Range) -> str:\n        return \"idx\"\n\n\
         fn via_slice[T: Slice[List[int]]](x: T) -> List[int]:\n    return x[0..1]\n\n\
         fn via_index[T: Index[Range, str]](x: T) -> str:\n    return x[0..1]\n\n\
         fn via_value(x: Index[Range, str]) -> str:\n    return x[0..1]\n\n\
-        fn main():\n    b := Both(0)\n    print(b[0..1])\n    print(via_slice(b))\n    print(via_index(b))\n    print(via_value(b))\n\nmain()\n";
-    let f = write("both.chz", src);
+        fn main():\n    s := Sl(0)\n    i := Ix(0)\n    print(s[0..1])\n    print(via_slice(s))\n    print(i[0..1])\n    print(via_index(i))\n    print(via_value(i))\n\nmain()\n";
+    let f = write("slice_or_index.chz", src);
     let (ok, text) = chezzi(&["check"], &f, None);
     assert!(ok, "{text}");
     let (ok, text) = chezzi(&["run"], &f, None);
     assert!(ok, "{text}");
-    assert_eq!(text, "[1, 2]\n[1, 2]\nidx\nidx\n");
+    assert_eq!(text, "[1, 2]\n[1, 2]\nidx\nidx\nidx\n");
+}
+
+#[test]
+fn a_struct_with_slice_and_range_index_is_a_declaration_error_naming_both() {
+    // Owner decision 2026-10-13 (TICKET-254): a type takes a range as a slice or as a key, not both.
+    let src = "struct Both:\n    n: int\n\n    fn slice(self, r: Range) -> List[int]:\n        return [1, 2]\n\n    fn index(self, k: Range) -> str:\n        return \"idx\"\n\n\
+        fn main():\n    b := Both(0)\n    print(b[0..1])\n\nmain()\n";
+    let f = write("both.chz", src);
+    for sub in [&["check"][..], &["run"][..]] {
+        let (ok, text) = chezzi(sub, &f, None);
+        assert!(
+            !ok && text.contains("'slice'")
+                && text.contains("'index'")
+                && text.contains("a type takes a range as a slice or as a key, not both"),
+            "{sub:?}: {text}"
+        );
+    }
 }
