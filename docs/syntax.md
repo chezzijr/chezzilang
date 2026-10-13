@@ -601,26 +601,42 @@ fn; it captures the enclosing scope exactly like a closure value:
   (`f()`, `obj.m()`, `lib.f()`, `lib.K.f()`, a function value); a parameter the callee rebinds
   before writing it (`ys = [1, 2]; ys.push(3)`) is not a task copy (TICKET-189).
 
-  A slice does not change that rule (TICKET-253). The write walkers run before any body is checked, so
-  they read a subscript as one place link and cannot tell `grid[0]` from `grid[0..2]` or from `grid[r]`
-  (a `Range` value, or a key of a `Map[Range, V]`). So a mutating call on a slice of a captured nested
-  container, inside a function that a `spawn` calls, is the same D4 type error as `grid[0].push(9)`:
+  A builtin slice is a new value, not a place (TICKET-254). `grid[0..2]` builds a new list whose
+  elements are the elements of `grid`, so a mutating call or a store on it changes a copy that the
+  program drops. It is no write to `grid`: inside a function that a `spawn` calls it is no D4 error
+  either, and the checker warns instead (see "A mutating call on a temporary" below):
 
   ```
   fn t(grid: List[List[int]]):
       grid[0..2].push([9])
 
   grid := [[1], [2], [3]]
-  spawn t(grid)
+  parallel:
+      spawn t(grid)
+  print(grid)
   ```
 
   ```
-  type error (d4.chz:5:7): 'grid' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()
-  help: call to 't' writes 'grid' through 'push'
+  warning (d4.chz:2:5): 'push' changes a temporary copy; the result is dropped: bind the value to a name first, or call 'push' on the source
+  [[1], [2], [3]]
   ```
 
-  Before TICKET-253 the colon spelling `grid[0:2].push([9])` gave no report, and the statement changed a
-  temporary that the program dropped. The new error names a write that was lost.
+  A write that goes on through an element of the slice (`grid[0..2][0].push(9)`) or through an index
+  (`grid[0].push(9)`) is a real write to `grid` and stays the D4 error in a spawned function. A
+  `Map[Range, V]` key (`m[0..3].push(9)`) is an index, so it stays a place. A user `slice` hook may
+  return a value that aliases the receiver, so its result is never judged a temporary.
+
+  **A mutating call on a temporary.** The checker warns, on the same channel as the `Shared` read
+  temporary of `docs/concurrency.md` §6, when a mutating builtin call (`push`, `extend`, `sort`, `add`,
+  `remove`, `update`, ...) or a field or index store lands on a value that no name holds and the
+  program drops: a slice of a builtin (`g[0..2]`, `g[r]`), `.reversed()`, `.copy()`, any other native
+  `List`/`Map`/`Set`/`bytearray` method that returns a container, an operator result (`xs + ys`), a
+  comprehension, a literal, a struct or variant constructor, and a `Shared`/`RwShared`/`Atomic` read
+  (`s.get()`). The text is `'push' changes a temporary copy; the result is dropped: bind the value
+  to a name first, or call 'push' on the source`; the box read keeps its own text. A write that goes
+  on through an element of a shallow copy (`xs.copy()[0].push(1)`) is silent: the element is shared
+  with `xs`. Three ceilings stay silent: a user struct method on a temporary (it can do I/O), a user
+  `slice` hook, and a builtin constructor call (`List[int]().push(1)`).
 
 `fn` is the only declaration allowed inside a block. `struct`, `enum`, `protocol`, `type`, `test fn`, `import`, `extern` and `native` are top-level only; inside any block each is a parse error (`struct must be a top-level declaration`).
 
@@ -1800,7 +1816,7 @@ the sequence; (5) a start at or past the end gives an empty result. So with `xs 
 is `[20, 30]`. A plain index stays strict: `xs[-4]` faults. A `step` of `0` cannot be built
 (`Range() step cannot be zero`). The colon slice `xs[a:b]` / `xs[a:b:c]` / `xs[::-1]` is REMOVED; the
 parser's error names the replacement. A subscript by a `Range` is a slice, or — on a `Map[Range, V]` —
-a key lookup: the checker decides once (`Slice` before `Index`) and the compiler emits that choice.
+a key lookup. A type takes a range as a slice or as a key, not both: a type that declares both a range `slice` and an `index` whose key accepts a `Range` is the declaration error `a type takes a range as a slice or as a key, not both`, and a `Map` has no `slice`, so `m[0..3]` stays a key lookup. The checker decides once and the compiler emits that choice.
 `xs[a..b] = v` is the check error `cannot assign to a slice`.
 
 **Negative indexing** counts from the end (`xs[-1]` is the last element) for plain indexing *and*

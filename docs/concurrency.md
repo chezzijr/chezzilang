@@ -704,6 +704,11 @@ fn bump(s: Shared[int]):
 > builtin containers), `RwShared.read(fn(xs): xs.push(1))` (prints `0`), and `defer s.get().push(1)`
 > (prints `0`). A `get()` whose value is used (`print(s.get().len())`) never warns. Only a bare-name
 > box receiver matches: `boxes[0].get().push(1)` stays silent.
+>
+> The box read is one row of a wider rule (TICKET-254): a mutating call or a store on ANY fresh value
+> that no name holds (`g[0..2].push(1)`, `xs.copy().push(1)`, `(xs + ys).sort()`) changes a dropped
+> copy, and `docs/syntax.md` (slices) lists the rows. A field or index store through a box read
+> (`s.get().xs.push(1)`) warns for the same reason.
 
 **The ladder:** bare value (copied) → a mutable in-task `struct`/collection → `Shared[T]` (cross-task
 box). An in-task mutable value (a one-field `struct`, a `List`, …) is a shared reference *within one

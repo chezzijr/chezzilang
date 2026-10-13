@@ -40432,3 +40432,165 @@ fn range_subscript_ambiguity_grid() {
         bad.join("\n")
     );
 }
+
+/// TICKET-254 — the `fresh_shape` row for a native method that returns a container reads the DECLARED
+/// return type. That is sound only while no such method returns its receiver or a view of it
+/// (DEC-190 item 6). Every native method of `List`/`Map`/`Set`/`bytearray` whose declared return type
+/// is one of those four runs here: the program mutates the result and asserts the receiver printed
+/// the same. A new method with such a return type and no row fails the completeness check first.
+#[test]
+fn native_container_results_are_new_objects() {
+    // (kind, receiver setup, call, a mutation of the result `r` that changes it whenever `r` is
+    // the receiver or shares its storage)
+    let rows: &[(&str, &str, &str, &str)] = &[
+        ("List", "x := [3, 1, 1, 2]", "reversed()", "r.pop()"),
+        ("List", "x := [3, 1, 1, 2]", "concat([4])", "r.pop()"),
+        ("List", "x := [3, 1, 1, 2]", "map(fn(a): a + 1)", "r.pop()"),
+        (
+            "List",
+            "x := [3, 1, 1, 2]",
+            "filter(fn(a): a > 0)",
+            "r.pop()",
+        ),
+        ("List", "x := [3, 1, 1, 2]", "unique()", "r.pop()"),
+        ("List", "x := [3, 1, 1, 2]", "dedup()", "r.pop()"),
+        ("List", "x := [3, 1, 1, 2]", "chunk(2)", "r.pop()"),
+        ("List", "x := [3, 1, 1, 2]", "windows(2)", "r.pop()"),
+        (
+            "List",
+            "x := [3, 1, 1, 2]",
+            "take_while(fn(a): a > 0)",
+            "r.pop()",
+        ),
+        (
+            "List",
+            "x := [3, 1, 1, 2]",
+            "drop_while(fn(a): a > 5)",
+            "r.pop()",
+        ),
+        ("List", "x := [3, 1, 1, 2]", "copy()", "r.pop()"),
+        ("Map", "x := {\"a\": 1, \"b\": 2}", "keys()", "r.pop()"),
+        ("Map", "x := {\"a\": 1, \"b\": 2}", "values()", "r.pop()"),
+        ("Map", "x := {\"a\": 1, \"b\": 2}", "items()", "r.pop()"),
+        (
+            "Map",
+            "x := {\"a\": 1, \"b\": 2}",
+            "merge({\"c\": 3})",
+            "r.remove(\"a\")",
+        ),
+        (
+            "Map",
+            "x := {\"a\": 1, \"b\": 2}",
+            "copy()",
+            "r.remove(\"a\")",
+        ),
+        ("Set", "x := {1, 2}", "union({9})", "r.remove(1)"),
+        ("Set", "x := {1, 2}", "intersection({1, 2})", "r.remove(1)"),
+        ("Set", "x := {1, 2}", "difference({9})", "r.remove(1)"),
+        ("Set", "x := {1, 2}", "copy()", "r.remove(1)"),
+        (
+            "bytearray",
+            "x := bytearray()\nx.push(97)\nx.push(98)",
+            "copy()",
+            "r.pop()",
+        ),
+        (
+            "bytearray",
+            "x := bytearray()\nx.push(97)\nx.push(98)",
+            "reversed()",
+            "r.pop()",
+        ),
+    ];
+    let c = prelude_container_checker();
+    let mut bad: Vec<String> = Vec::new();
+    for kind in ["List", "Map", "Set", "bytearray"] {
+        let info = c.structs.get(kind).expect("seeded container struct");
+        for (name, sig) in &info.methods {
+            let container = matches!(
+                sig.ret,
+                Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray
+            );
+            let sampled = rows
+                .iter()
+                .any(|(k, _, call, _)| *k == kind && call.split('(').next() == Some(name.as_str()));
+            if container && !sampled {
+                bad.push(format!("{kind}.{name}: returns a container, has no row"));
+            }
+            if !container && sampled {
+                bad.push(format!("{kind}.{name}: has a row, returns no container"));
+            }
+        }
+    }
+    for (kind, setup, call, mutate) in rows {
+        let src = format!(
+            "{setup}\nbefore := \"{{x}}\"\nr := x.{call}\n{mutate}\nprint(\"{{x}}\" == before)\n"
+        );
+        match crate::vm::run_capture(&src) {
+            Ok(out) if out.trim() == "true" => {}
+            Ok(out) => bad.push(format!("{kind}.{call}: the receiver changed: {out:?}")),
+            Err(e) => bad.push(format!("{kind}.{call}: {}", e.message)),
+        }
+    }
+    assert!(bad.is_empty(), "native container results: {bad:#?}");
+}
+
+/// TICKET-254 — a write whose LAST place link is a builtin slice changes a new container, so it is no
+/// write to the root; a write that goes on through an element of the slice, or through a `Map` key
+/// that is a `Range`, still reaches the root and stays a D4 error in a spawned fn.
+#[test]
+fn a_slice_is_no_place_but_an_element_of_it_and_a_range_key_are() {
+    let spawn = |params: &str, root: &str, stmt: &str| {
+        format!("fn work({params}):\n    {stmt}\n{root}parallel:\n    spawn work(g)\nprint(g)\n")
+    };
+    let list = ("g: List[List[int]]", "g := [[1], [2], [3]]\n");
+    let map = ("g: Map[Range, List[int]]", "g := {0..3: [1]}\n");
+    // (params and root, statement, is it a D4 error?)
+    let cells = [
+        (list, "g[0..2].push([9])", false),
+        (list, "g[0..2][0] = [9]", false),
+        (list, "g[0..2][0].push(9)", true),
+        (list, "g[0].push(9)", true),
+        (list, "g.push([9])", true),
+        (map, "g[0..3].push(9)", true),
+    ];
+    for ((params, root), stmt, errors) in cells {
+        let (errs, _) = t254_diags("slice_place", &[], &spawn(params, root, stmt));
+        let got = errs.iter().any(|e| e.contains("this task's copy"));
+        assert_eq!(got, errors, "`{stmt}`: errors={errs:?}");
+    }
+}
+
+/// TICKET-254 ceiling, measured: a user `slice` hook may return its own field (`st.chz` prints
+/// `[1, 2, 3, 9]` for the alias), so a mutating call on its result is not a proven temporary write.
+/// The warning stays silent for a hook that returns a fresh list as well: it is not a builtin slice.
+#[test]
+fn a_user_slice_hook_result_is_no_fresh_temporary() {
+    for body in ["return self.xs", "return [1, 2]"] {
+        let src = format!(
+            "struct S:\n    xs: List[int]\n    fn slice(self, r: Range) -> List[int]:\n        {body}\ns := S([1, 2, 3])\ns[0..2].push(9)\nprint(s.xs)\n"
+        );
+        no_warn(&src);
+    }
+}
+
+/// TICKET-254 — the freshness of a subscript travels with the write summary, so a spawned callee in
+/// ANOTHER module (a fn, or a method of a struct that module declares) is judged by the module that
+/// typed it. A read of the record by key in the caller's module would miss it.
+#[test]
+fn a_slice_write_in_an_imported_callee_is_no_task_write() {
+    let lib = "struct Board:\n    rows: List[List[int]]\n    fn poke(self):\n        self.rows[0..2].push([9])\n    fn real(self):\n        self.rows[0].push(9)\nfn work(g: List[List[int]]):\n    g[0..2].push([9])\nfn deep(g: List[List[int]]):\n    g[0..2][0].push(9)\n".to_string();
+    let main = |call: &str| {
+        format!(
+            "import lib\nb := lib.Board([[1], [2], [3]])\ng := [[1], [2], [3]]\nparallel:\n    spawn {call}\nprint(g)\n"
+        )
+    };
+    for (call, errors) in [
+        ("lib.work(g)", false),
+        ("b.poke()", false),
+        ("lib.deep(g)", true),
+    ] {
+        let (errs, _) = t254_diags("imported_slice", &[("lib.chz", lib.clone())], &main(call));
+        let got = errs.iter().any(|e| e.contains("this task's copy"));
+        assert_eq!(got, errors, "`spawn {call}`: errors={errs:?}");
+    }
+}

@@ -62,30 +62,50 @@ the fact that a write lost to it is silent.
    Shared/Channel, or make a task-local copy with .copy()`.
    It replaces the W8-3/W11-13 warning, which becomes redundant.
 
-   **A slice is one place link (TICKET-253).** The walkers that find these writes (`chain`, `view_root`,
-   `path` in `src/checker/fn_writes.rs`; `self_chain` in `src/checker/self_writes.rs`; `chain_path` in
-   `src/checker/setup.rs`) run before any body is checked, so they read syntax only. With a `Range` as
-   the subscript, the syntax does not hold the fact "this subscript slices": `xs[r]` holds a value, and
-   `Map[Range, V][0..3]` is a key lookup. So every subscript is one link, and `grid[0..2]` gets the
-   answer `grid[0]` gets. Program, run on the release binary:
+   **A builtin slice is no place link; the write summaries run in two phases (TICKET-254, which
+   replaces the TICKET-253 text "a slice is one place link").** The walkers that find these writes
+   (`chain`, `place_base` in `src/checker/fn_writes.rs`; `self_chain` in
+   `src/checker/self_writes.rs`) read syntax only, so they cannot tell `xs[r]` (a `Range` value) from
+   an index, or `Map[Range, V][0..3]` from a slice. They still emit one link per subscript,
+   `ChainLink::Index(span)`. The checker decides, in `range_subscript`, which subscripts are builtin
+   slices (`List`, `str`, `bytes`, `bytearray`) and records them in `Checker::fresh_subscripts`. The
+   pass order is:
+
+   1. `infer_self_writers` and `infer_fn_writers` run on syntax alone (every subscript is a place).
+   2. `record_hook_table`, then `pretype_place_subscripts`: each top-level `fn` and struct whose
+      summary holds a subscript link is typed once with every diagnostic rolled back. That fills
+      `fresh_subscripts`.
+   3. If it holds an entry, both summaries run again. `infer_fn_writers` resolves each link of a
+      summary with `resolve_link` into `Element` (a place) or `Slice` (a new container) before it
+      stores the summary, so an importing module reads the fact from the summary and never looks up
+      a span of another module.
+
+   `place_ty` is the one walk over a link path: a write whose LAST link is a `Slice` changes a new
+   container and is no write to the root, so there is no D4 error; a write that goes on through an
+   element (`g[0..2][0].push(9)`) or through a `Map[Range, V]` key still reaches the root. The warning
+   "changes a temporary copy" (`temporary_write` in `src/checker/sig.rs`) is the one message for the
+   dropped write. A write through an INDEX (`grid[0].push(9)`) is unchanged: type error in a spawned
+   fn, run-time fault when the spawn argument hides the name. Program, run on the debug binary of the
+   ticket:
 
    ```
    fn t(grid: List[List[int]]):
        grid[0..2].push([9])
 
    grid := [[1], [2], [3]]
-   spawn t(grid)
+   parallel:
+       spawn t(grid)
+   print(grid)
    ```
 
    ```
-   type error (d4.chz:5:7): 'grid' is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()
-   help: call to 't' writes 'grid' through 'push'
+   warning (d4.chz:2:5): 'push' changes a temporary copy; the result is dropped: bind the value to a name first, or call 'push' on the source
+   [[1], [2], [3]]
    ```
 
-   The colon spelling `grid[0:2].push([9])` gave no report before, although the statement changed a
-   temporary that the program dropped. The new error is true, and 0 of 713 tracked `.chz` files
-   change (prototype of the ticket). Do not add a syntactic "is this a range" test to a walker: it
-   would be wrong in both directions.
+   The colon spelling gave no report before TICKET-253, and TICKET-253 made it a D4 error whose reason
+   was false: the write is lost because the slice is a copy, with or without the join. Do not add a
+   syntactic "is this a range" test to a walker: it would be wrong in both directions.
 2. **Runtime fault: a spawned task writes a module global.** This covers rows 3–4. The checker cannot
    see these writes, because they happen inside an ordinary `fn` that is also legal on the main task.
    The runtime can: the task knows it is not the root task. Both a global store (`n = 5`) and a

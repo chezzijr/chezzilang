@@ -1,0 +1,155 @@
+# TICKET-254: a mutating call on a fresh temporary changes a value no name holds, in a task or
+# not. The checker warns ("changes a temporary copy"); it is never the D4 error "is this task's
+# copy". Each test runs the write in a task and asserts the root after the join.
+import std.concurrency
+
+fn push_lit(g: List[List[int]]):
+    g[0..2].push([9])
+
+fn push_var(g: List[List[int]], r: Range):
+    g[r].push([9])
+
+fn push_step(g: List[List[int]]):
+    g[Range(0, 3, 2)].push([9])
+
+fn push_reversed(g: List[List[int]]):
+    g.reversed().push([9])
+
+fn push_copy(g: List[List[int]]):
+    g.copy().push([9])
+
+fn push_operator(g: List[List[int]]):
+    (g + [[4]]).push([9])
+
+fn push_comprehension(g: List[List[int]]):
+    [x for x in g].push([9])
+
+fn push_literal(g: List[List[int]]):
+    [[1]].push([9])
+
+fn store_in_slice(g: List[List[int]]):
+    g[0..2][0] = [7]
+
+fn sort_slice(g: List[List[int]]):
+    g[0..2].sort()
+
+test fn a_slice_literal_push_in_a_spawned_fn_leaves_the_root():
+    g := [[1], [2], [3]]
+    parallel:
+        spawn push_lit(g)
+    assert g == [[1], [2], [3]]
+
+test fn a_slice_variable_push_in_a_spawned_fn_leaves_the_root():
+    g := [[1], [2], [3]]
+    r := 0..2
+    parallel:
+        spawn push_var(g, r)
+    assert g == [[1], [2], [3]]
+
+test fn a_stepped_slice_push_in_a_spawned_fn_leaves_the_root():
+    g := [[1], [2], [3]]
+    parallel:
+        spawn push_step(g)
+    assert g == [[1], [2], [3]]
+
+test fn a_reversed_push_in_a_spawned_fn_leaves_the_root():
+    g := [[1], [2], [3]]
+    parallel:
+        spawn push_reversed(g)
+    assert g == [[1], [2], [3]]
+
+test fn a_copy_push_in_a_spawned_fn_leaves_the_root():
+    g := [[1], [2], [3]]
+    parallel:
+        spawn push_copy(g)
+    assert g == [[1], [2], [3]]
+
+test fn an_operator_result_push_in_a_spawned_fn_leaves_the_root():
+    g := [[1], [2], [3]]
+    parallel:
+        spawn push_operator(g)
+    assert g == [[1], [2], [3]]
+
+test fn a_comprehension_push_in_a_spawned_fn_leaves_the_root():
+    g := [[1], [2], [3]]
+    parallel:
+        spawn push_comprehension(g)
+    assert g == [[1], [2], [3]]
+
+test fn a_literal_push_in_a_spawned_fn_leaves_the_root():
+    g := [[1], [2], [3]]
+    parallel:
+        spawn push_literal(g)
+    assert g == [[1], [2], [3]]
+
+test fn a_store_into_a_slice_in_a_spawned_fn_leaves_the_root():
+    g := [[1], [2], [3]]
+    parallel:
+        spawn store_in_slice(g)
+    assert g == [[1], [2], [3]]
+
+test fn a_sorted_slice_in_a_spawned_fn_leaves_the_root():
+    g := [[3], [2], [1]]
+    parallel:
+        spawn sort_slice(g)
+    assert g == [[3], [2], [1]]
+
+test fn a_slice_push_in_a_spawn_block_leaves_the_root():
+    g := [[1], [2], [3]]
+    parallel:
+        spawn:
+            g[0..2].push([9])
+    assert g == [[1], [2], [3]]
+
+test fn a_slice_push_in_an_executor_job_leaves_the_root():
+    g := [[1], [2], [3]]
+    ex := Executor()
+    ex.submit(fn(): push_lit(g))
+    ex.shutdown()
+    assert g == [[1], [2], [3]]
+
+test fn a_copy_push_in_an_executor_job_leaves_the_root():
+    g := [[1], [2], [3]]
+    ex := Executor()
+    ex.submit(fn(): push_copy(g))
+    ex.shutdown()
+    assert g == [[1], [2], [3]]
+
+test fn a_slice_push_at_the_top_level_leaves_the_root():
+    g := [[1], [2], [3]]
+    g[0..2].push([9])
+    assert g == [[1], [2], [3]]
+
+# A slice is a new container whose ELEMENTS are the root's: a write that goes on through one is real.
+test fn a_push_through_an_element_of_a_slice_changes_the_root():
+    g := [[1], [2], [3]]
+    g[0..2][0].push(9)
+    assert g == [[1, 9], [2], [3]]
+
+# A fresh argument is a hand-off no name in the parent reaches: the task may write it.
+fn push_param(xs: List[int]):
+    xs.push(9)
+
+test fn a_fresh_operator_argument_may_be_written_by_the_task():
+    a := [1]
+    parallel:
+        spawn push_param(a + [3])
+    assert a == [1]
+
+test fn a_fresh_slice_argument_may_be_written_by_the_task():
+    a := [1, 2]
+    parallel:
+        spawn push_param(a[0..1])
+    assert a == [1, 2]
+
+test fn a_fresh_reversed_argument_may_be_written_by_the_task():
+    a := [1, 2]
+    parallel:
+        spawn push_param(a.reversed())
+    assert a == [1, 2]
+
+test fn a_box_read_argument_may_be_written_by_the_task():
+    s := Shared([1])
+    parallel:
+        spawn push_param(s.get())
+    assert s.get() == [1]
