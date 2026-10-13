@@ -17,10 +17,6 @@ struct Model {
 }
 
 impl Model {
-    fn bounded(&self) -> bool {
-        self.start.is_some() && self.end.is_some()
-    }
-
     fn in_end(&self, cur: i64, e: i64) -> bool {
         (self.incl && cur == e) || if self.step > 0 { cur < e } else { cur > e }
     }
