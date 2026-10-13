@@ -2645,25 +2645,16 @@ impl Checker {
             self.structs
                 .get(key)
                 .and_then(|info| info.methods.get(name))
-                .is_some_and(|sig| {
-                    matches!(
-                        sig.ret,
-                        Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray
-                    )
-                })
+                .is_some_and(|sig| fn_writes::native_container(&sig.ret))
         })
     }
 
-    /// `e` is a call `obj.method(..)`: its receiver and method name. A shape test, not a
-    /// classifier: every other expression kind is "not a method call".
-    fn method_call_parts(e: &Expr) -> Option<(&Expr, &str)> {
-        if let ExprKind::Call { callee, .. } = &e.kind
-            && let ExprKind::Field { obj, name, .. } = &callee.kind
-        {
-            Some((obj, name))
-        } else {
-            None
-        }
+    /// TICKET-254 — the store `obj.f = v` or `obj[i] = v` is made by the engine itself, not by user
+    /// code: a field store always is; a subscript store is when `obj` is a native container. A user
+    /// `set_index` hook may do I/O, so a store through one is no write the warning can call lost
+    /// (the ceiling of DEC-089 item 2, the same one the call site keeps with `mutates_receiver`).
+    fn store_is_native(&mut self, obj: &Expr, is_index: bool) -> bool {
+        !is_index || fn_writes::native_receiver(self.probe_ty(obj).scalar()).is_some()
     }
 
     /// TICKET-254 — the one decider of "a write to `written` changes a value no name holds": the
@@ -3203,7 +3194,8 @@ impl Checker {
                 self.check_assign(target, *op, val_ty, Some(value), span);
                 // TICKET-089 / TICKET-254 — `b.get().v = 9`, `xs.copy()[0] = 9`, `g[0..2][0] = v`
                 // store into a value no name holds, so the store is dropped.
-                if let Some(obj) = fn_writes::place_parent(target)
+                if let Some((obj, is_index)) = fn_writes::place_parent(target)
+                    && self.store_is_native(obj, is_index)
                     && let Some(temp) = self.temporary_write(obj)
                 {
                     let text = match temp {
@@ -5234,7 +5226,7 @@ impl Checker {
         // mutates a deep copy and drops it: the write is lost. Returns BEFORE the carrier
         // match — `s.get().remove(k)` / `.pop()` also return a carrier, and the lost-write
         // message is the more actionable one, so one statement never carries both.
-        if let Some((obj, method)) = Self::method_call_parts(e)
+        if let Some((obj, method)) = fn_writes::method_call_parts(e)
             && let Some(temp) = self.temporary_write(obj)
         {
             let recv = self.probe_ty(obj);

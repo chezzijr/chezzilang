@@ -39964,20 +39964,118 @@ struct T254Shape {
     params: &'static str,
     args: &'static str,
     root: &'static str,
+    /// The expression the program prints at the end: the root after the write.
+    show: &'static str,
     rows: &'static [T254Row],
 }
 
-/// `fresh`: the receiver is a fresh temporary, so the write is dropped and the program warns.
-/// `writes`: statement templates; `@` is the receiver, `$` the element value.
+/// What a cell must show. The three columns are the warning, the check error and the root printed
+/// after the write.
+#[derive(Clone, Copy)]
+enum T254Expect {
+    /// The receiver is a fresh temporary: the warning (its text for a call, its text for a store),
+    /// no error, the root unchanged.
+    Warns(&'static str, &'static str),
+    /// A fresh temporary the warning declines (a ceiling): no warning, no error, the root unchanged.
+    Silent,
+    /// A write that reaches the root, as a D4 control: no warning, the error of `t254_control_errors`.
+    /// In a context that checks clean, the run follows `t254_control_faults`.
+    Control,
+    /// A write the checker cannot see reaches the root (a user `slice` hook that returns its own
+    /// field): no warning, no error, and the run follows `t254_control_faults`: the D4 fault, never
+    /// a silent lost write.
+    Declined,
+}
+
+const T254_COPY_TEXT: T254Expect =
+    T254Expect::Warns("changes a temporary copy", "changes a temporary copy");
+
+/// `kind`: the native method table the receiver belongs to (`""` for none). Every method of it with
+/// `crate::vm::is_mutating_native_kind` true is a write of the row ([`t254_native_calls`]).
+/// `writes`: the other statements (stores); `@` is the receiver, `$` the element value.
 struct T254Row {
     name: &'static str,
     recv: &'static str,
     a: &'static str,
-    fresh: bool,
+    expect: T254Expect,
+    kind: &'static str,
     writes: &'static [&'static str],
 }
 
-const T254_LIST_WRITES: &[&str] = &["@.push($)", "@.extend([$])", "@.sort()", "@[0] = $"];
+const fn t254_row(
+    name: &'static str,
+    recv: &'static str,
+    a: &'static str,
+    expect: T254Expect,
+    kind: &'static str,
+    writes: &'static [&'static str],
+) -> T254Row {
+    T254Row {
+        name,
+        recv,
+        a,
+        expect,
+        kind,
+        writes,
+    }
+}
+
+/// One call for each mutating native method of the four mutable containers. A mutating method of
+/// the table with no entry here fails `t254_native_calls`.
+const T254_CALLS: &[(&str, &str, &str)] = &[
+    ("List", "push", "push($)"),
+    ("List", "pop", "pop()"),
+    ("List", "reverse", "reverse()"),
+    ("List", "sort", "sort()"),
+    ("List", "sort_by", "sort_by(fn(a, b): 0)"),
+    ("List", "sort_by_key", "sort_by_key(fn(a): 0)"),
+    ("List", "extend", "extend([$])"),
+    ("List", "insert", "insert(0, $)"),
+    ("List", "remove_at", "remove_at(0)"),
+    ("Map", "remove", "remove(\"a\")"),
+    ("Map", "update", "update({\"z\": $})"),
+    ("Set", "add", "add($)"),
+    ("Set", "remove", "remove($)"),
+    ("bytearray", "push", "push($)"),
+    ("bytearray", "pop", "pop()"),
+    ("bytearray", "extend", "extend(b\"c\")"),
+    ("bytearray", "reverse", "reverse()"),
+];
+
+/// The call templates of every method of `kind` that `is_mutating_native_kind` flags, read from the
+/// prelude method table, so a new mutating method is a cell the day it lands.
+fn t254_native_calls(kind: &str) -> Vec<String> {
+    if kind.is_empty() {
+        return Vec::new();
+    }
+    let c = prelude_container_checker();
+    let mut methods: Vec<String> = c
+        .structs
+        .get(kind)
+        .unwrap_or_else(|| panic!("seeded {kind} struct"))
+        .methods
+        .keys()
+        .cloned()
+        .collect();
+    if kind == "bytearray" {
+        methods.push("extend".to_string());
+    }
+    methods.sort();
+    methods.dedup();
+    methods
+        .iter()
+        .filter(|m| crate::vm::is_mutating_native_kind(kind, m))
+        .map(|m| {
+            let (_, _, call) = T254_CALLS
+                .iter()
+                .find(|(k, name, _)| *k == kind && name == m)
+                .unwrap_or_else(|| {
+                    panic!("{kind}.{m} is a mutating method with no T254_CALLS row")
+                });
+            (*call).to_string()
+        })
+        .collect()
+}
 
 const T254_SHAPES: &[T254Shape] = &[
     T254Shape {
@@ -39986,77 +40084,97 @@ const T254_SHAPES: &[T254Shape] = &[
         params: "g: List[List[int]], r: Range",
         args: "g, r",
         root: "g := [[1], [2], [3]]\nr := 0..2\n",
+        show: "g",
         rows: &[
-            T254Row {
-                name: "slice_lit",
-                recv: "g[0..2]",
-                a: "[9]",
-                fresh: true,
-                writes: T254_LIST_WRITES,
-            },
-            T254Row {
-                name: "slice_var",
-                recv: "g[r]",
-                a: "[9]",
-                fresh: true,
-                writes: T254_LIST_WRITES,
-            },
-            T254Row {
-                name: "slice_step",
-                recv: "g[Range(0, 3, 2)]",
-                a: "[9]",
-                fresh: true,
-                writes: T254_LIST_WRITES,
-            },
-            T254Row {
-                name: "reversed",
-                recv: "g.reversed()",
-                a: "[9]",
-                fresh: true,
-                writes: T254_LIST_WRITES,
-            },
-            T254Row {
-                name: "copy",
-                recv: "g.copy()",
-                a: "[9]",
-                fresh: true,
-                writes: T254_LIST_WRITES,
-            },
-            T254Row {
-                name: "operator",
-                recv: "(g + [[4]])",
-                a: "[9]",
-                fresh: true,
-                writes: T254_LIST_WRITES,
-            },
-            T254Row {
-                name: "comprehension",
-                recv: "[x for x in g]",
-                a: "[9]",
-                fresh: true,
-                writes: T254_LIST_WRITES,
-            },
-            T254Row {
-                name: "literal",
-                recv: "[[1]]",
-                a: "[9]",
-                fresh: true,
-                writes: T254_LIST_WRITES,
-            },
-            T254Row {
-                name: "index",
-                recv: "g[0]",
-                a: "9",
-                fresh: false,
-                writes: T254_LIST_WRITES,
-            },
-            T254Row {
-                name: "name",
-                recv: "g",
-                a: "[9]",
-                fresh: false,
-                writes: T254_LIST_WRITES,
-            },
+            t254_row(
+                "slice_lit",
+                "g[0..2]",
+                "[9]",
+                T254_COPY_TEXT,
+                "List",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "slice_var",
+                "g[r]",
+                "[9]",
+                T254_COPY_TEXT,
+                "List",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "slice_step",
+                "g[Range(0, 3, 2)]",
+                "[9]",
+                T254_COPY_TEXT,
+                "List",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "reversed",
+                "g.reversed()",
+                "[9]",
+                T254_COPY_TEXT,
+                "List",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "copy",
+                "g.copy()",
+                "[9]",
+                T254_COPY_TEXT,
+                "List",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "operator",
+                "(g + [[4]])",
+                "[9]",
+                T254_COPY_TEXT,
+                "List",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "comprehension",
+                "[x for x in g]",
+                "[9]",
+                T254_COPY_TEXT,
+                "List",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "literal",
+                "[[1]]",
+                "[9]",
+                T254_COPY_TEXT,
+                "List",
+                &["@[0] = $"],
+            ),
+            // A builtin constructor call is not in `fresh_shape`: the warning declines (ceiling).
+            t254_row(
+                "ctor",
+                "List([5])",
+                "9",
+                T254Expect::Silent,
+                "List",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "index",
+                "g[0]",
+                "9",
+                T254Expect::Control,
+                "List",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "name",
+                "g",
+                "[9]",
+                T254Expect::Control,
+                "List",
+                &["@[0] = $"],
+            ),
         ],
     },
     T254Shape {
@@ -40065,28 +40183,32 @@ const T254_SHAPES: &[T254Shape] = &[
         params: "g: Map[str, int]",
         args: "g",
         root: "g := {\"a\": 1}\n",
+        show: "g",
         rows: &[
-            T254Row {
-                name: "copy",
-                recv: "g.copy()",
-                a: "2",
-                fresh: true,
-                writes: &["@.update({\"z\": $})", "@[\"z\"] = $"],
-            },
-            T254Row {
-                name: "literal",
-                recv: "({\"a\": 1})",
-                a: "2",
-                fresh: true,
-                writes: &["@.update({\"z\": $})", "@[\"z\"] = $"],
-            },
-            T254Row {
-                name: "name",
-                recv: "g",
-                a: "2",
-                fresh: false,
-                writes: &["@.update({\"z\": $})", "@[\"z\"] = $"],
-            },
+            t254_row(
+                "copy",
+                "g.copy()",
+                "2",
+                T254_COPY_TEXT,
+                "Map",
+                &["@[\"z\"] = $"],
+            ),
+            t254_row(
+                "literal",
+                "({\"a\": 1})",
+                "2",
+                T254_COPY_TEXT,
+                "Map",
+                &["@[\"z\"] = $"],
+            ),
+            t254_row(
+                "name",
+                "g",
+                "2",
+                T254Expect::Control,
+                "Map",
+                &["@[\"z\"] = $"],
+            ),
         ],
     },
     T254Shape {
@@ -40095,21 +40217,10 @@ const T254_SHAPES: &[T254Shape] = &[
         params: "g: Set[int]",
         args: "g",
         root: "g := {1, 2}\n",
+        show: "g",
         rows: &[
-            T254Row {
-                name: "copy",
-                recv: "g.copy()",
-                a: "3",
-                fresh: true,
-                writes: &["@.add($)"],
-            },
-            T254Row {
-                name: "name",
-                recv: "g",
-                a: "3",
-                fresh: false,
-                writes: &["@.add($)"],
-            },
+            t254_row("copy", "g.copy()", "1", T254_COPY_TEXT, "Set", &[]),
+            t254_row("name", "g", "1", T254Expect::Control, "Set", &[]),
         ],
     },
     T254Shape {
@@ -40117,22 +40228,33 @@ const T254_SHAPES: &[T254Shape] = &[
         decls: "",
         params: "g: bytearray",
         args: "g",
-        root: "g := bytearray()\ng.push(97)\n",
+        root: "g := bytearray()\ng.push(97)\ng.push(98)\n",
+        show: "g",
         rows: &[
-            T254Row {
-                name: "copy",
-                recv: "g.copy()",
-                a: "1",
-                fresh: true,
-                writes: &["@.push($)", "@[0] = $"],
-            },
-            T254Row {
-                name: "name",
-                recv: "g",
-                a: "1",
-                fresh: false,
-                writes: &["@.push($)", "@[0] = $"],
-            },
+            t254_row(
+                "slice_lit",
+                "g[0..1]",
+                "1",
+                T254_COPY_TEXT,
+                "bytearray",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "copy",
+                "g.copy()",
+                "1",
+                T254_COPY_TEXT,
+                "bytearray",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "name",
+                "g",
+                "1",
+                T254Expect::Control,
+                "bytearray",
+                &["@[0] = $"],
+            ),
         ],
     },
     T254Shape {
@@ -40141,42 +40263,123 @@ const T254_SHAPES: &[T254Shape] = &[
         params: "g: P",
         args: "g",
         root: "g := P(1, [1])\n",
+        show: "g",
         rows: &[
-            T254Row {
-                name: "ctor_store",
-                recv: "P(2, [2])",
-                a: "5",
-                fresh: true,
-                writes: &["@.x = $"],
-            },
-            T254Row {
-                name: "name_store",
-                recv: "g",
-                a: "5",
-                fresh: false,
-                writes: &["@.x = $"],
-            },
-            T254Row {
-                name: "field_push",
-                recv: "g.items",
-                a: "3",
-                fresh: false,
-                writes: &["@.push($)"],
-            },
+            t254_row(
+                "ctor_store",
+                "P(2, [2])",
+                "5",
+                T254_COPY_TEXT,
+                "",
+                &["@.x = $"],
+            ),
+            t254_row(
+                "name_store",
+                "g",
+                "5",
+                T254Expect::Control,
+                "",
+                &["@.x = $"],
+            ),
+            t254_row(
+                "field_push",
+                "g.items",
+                "3",
+                T254Expect::Control,
+                "List",
+                &[],
+            ),
         ],
+    },
+    // A user `set_index` hook runs user code on a temporary: the warning declines.
+    T254Shape {
+        name: "set_index_hook",
+        decls: "struct Log:\n    n: int\n    fn index(self, k: int) -> int:\n        return self.n\n    fn set_index(self, k: int, v: int):\n        print(\"set {k}={v}\")\n",
+        params: "g: Log",
+        args: "g",
+        root: "g := Log(0)\n",
+        show: "g.n",
+        rows: &[
+            t254_row(
+                "ctor_store",
+                "Log(0)",
+                "5",
+                T254Expect::Silent,
+                "",
+                &["@[0] = $"],
+            ),
+            t254_row(
+                "name_store",
+                "g",
+                "5",
+                T254Expect::Silent,
+                "",
+                &["@[0] = $"],
+            ),
+        ],
+    },
+    // A user `slice` hook may return a fresh list or its own field; the warning declines either way.
+    T254Shape {
+        name: "slice_hook_fresh",
+        decls: "struct H:\n    data: List[int]\n    fn slice(self, r: Range) -> List[int]:\n        return [7, 8]\n",
+        params: "g: H",
+        args: "g",
+        root: "g := H([1, 2, 3])\n",
+        show: "g.data",
+        rows: &[t254_row(
+            "hook_fresh",
+            "g[0..2]",
+            "9",
+            T254Expect::Silent,
+            "List",
+            &["@[0] = $"],
+        )],
+    },
+    T254Shape {
+        name: "slice_hook_alias",
+        decls: "struct A:\n    data: List[int]\n    fn slice(self, r: Range) -> List[int]:\n        return self.data\n",
+        params: "g: A",
+        args: "g",
+        root: "g := A([1, 2, 3])\n",
+        show: "g.data",
+        rows: &[t254_row(
+            "hook_alias",
+            "g[0..2]",
+            "9",
+            T254Expect::Declined,
+            "List",
+            &["@[0] = $"],
+        )],
+    },
+    // A `Shared` read is a deep copy (TICKET-089): the box rows are rows of the same rule.
+    T254Shape {
+        name: "box",
+        decls: "import std.concurrency\n",
+        params: "g: Shared[List[int]]",
+        args: "g",
+        root: "g := Shared([1, 2])\n",
+        show: "g.get()",
+        rows: &[t254_row(
+            "box_read",
+            "g.get()",
+            "9",
+            T254Expect::Warns(
+                "mutates the copy returned by",
+                "this write lands on the copy returned by",
+            ),
+            "List",
+            &["@[0] = $"],
+        )],
     },
 ];
 
-/// The cells with no legal program: a struct declared in the entry file is not visible to `lib.chz`.
+/// The cells with no legal program: a struct declared in the entry file is not visible to `lib.chz`,
+/// and the box shape imports `std.concurrency` itself, as the `Executor` and box-closure programs do.
 fn t254_applies(shape: &T254Shape, ctx: T254Ctx) -> bool {
     match ctx {
         T254Ctx::ImportedFn => shape.decls.is_empty(),
-        T254Ctx::Top
-        | T254Ctx::Fn
-        | T254Ctx::SpawnedFn
-        | T254Ctx::SpawnBlock
-        | T254Ctx::ExecutorJob
-        | T254Ctx::BoxClosure => true,
+        T254Ctx::ExecutorJob | T254Ctx::BoxClosure => !shape.decls.starts_with("import"),
+        T254Ctx::Top | T254Ctx::Fn | T254Ctx::SpawnedFn | T254Ctx::SpawnBlock => true,
     }
 }
 
@@ -40186,26 +40389,27 @@ fn t254_program(
     stmt: &str,
 ) -> (Vec<(&'static str, String)>, String) {
     let (decls, params, args, root) = (shape.decls, shape.params, shape.args, shape.root);
+    let show = shape.show;
     let work = format!("fn work({params}):\n    {stmt}\n");
     let mut files = Vec::new();
     let main = match ctx {
-        T254Ctx::Top => format!("{decls}{root}{stmt}\nprint(g)\n"),
-        T254Ctx::Fn => format!("{decls}{work}{root}work({args})\nprint(g)\n"),
+        T254Ctx::Top => format!("{decls}{root}{stmt}\nprint({show})\n"),
+        T254Ctx::Fn => format!("{decls}{work}{root}work({args})\nprint({show})\n"),
         T254Ctx::SpawnedFn => {
-            format!("{decls}{work}{root}parallel:\n    spawn work({args})\nprint(g)\n")
+            format!("{decls}{work}{root}parallel:\n    spawn work({args})\nprint({show})\n")
         }
         T254Ctx::SpawnBlock => {
-            format!("{decls}{root}parallel:\n    spawn:\n        {stmt}\nprint(g)\n")
+            format!("{decls}{root}parallel:\n    spawn:\n        {stmt}\nprint({show})\n")
         }
         T254Ctx::ExecutorJob => format!(
-            "import std.concurrency\n{decls}{work}{root}ex := Executor()\nex.submit(fn(): work({args}))\nex.shutdown()\nprint(g)\n"
+            "import std.concurrency\n{decls}{work}{root}ex := Executor()\nex.submit(fn(): work({args}))\nex.shutdown()\nprint({show})\n"
         ),
         T254Ctx::BoxClosure => format!(
-            "import std.concurrency\n{decls}{work}fn wrap({params}, x: int) -> int:\n    work({args})\n    return x\n{root}s := Shared(0)\ns.update(fn(x: int) -> int: wrap({args}, x))\nprint(g)\n"
+            "import std.concurrency\n{decls}{work}fn wrap({params}, x: int) -> int:\n    work({args})\n    return x\n{root}s := Shared(0)\ns.update(fn(x: int) -> int: wrap({args}, x))\nprint({show})\n"
         ),
         T254Ctx::ImportedFn => {
             files.push(("lib.chz", work));
-            format!("import lib\n{root}parallel:\n    spawn lib.work({args})\nprint(g)\n")
+            format!("import lib\n{root}parallel:\n    spawn lib.work({args})\nprint({show})\n")
         }
     };
     (files, main)
@@ -40221,31 +40425,93 @@ fn t254_control_errors(ctx: T254Ctx) -> bool {
     }
 }
 
+/// A write that reaches the root, run in `ctx` where the program checks clean: the top level and a
+/// plain call write the root; a task, an `Executor` job and a box closure run on a copy, and the run
+/// ends with the D4 fault `this value is this task's copy`. Measured on the base binary: the same
+/// table.
+fn t254_control_faults(ctx: T254Ctx) -> bool {
+    match ctx {
+        T254Ctx::Top | T254Ctx::Fn => false,
+        T254Ctx::SpawnedFn
+        | T254Ctx::SpawnBlock
+        | T254Ctx::ExecutorJob
+        | T254Ctx::BoxClosure
+        | T254Ctx::ImportedFn => true,
+    }
+}
+
+/// The last line a program printed, or the fault it ended with. The program runs through
+/// `run_file`, so the checker's hook and slice tables reach the compiler (`run_capture` has none).
+fn t254_last_line(src: &str) -> String {
+    let t = TmpDir::new();
+    let entry = t.write("main.chz", src);
+    let (out, _err, result, _code) = crate::vm::run_file(&entry);
+    match result {
+        Ok(()) => out.lines().last().unwrap_or_default().to_string(),
+        Err(e) => format!("fault: {e}"),
+    }
+}
+
+fn t254_any_temporary_warning(warns: &[String]) -> bool {
+    warns.iter().any(|w| {
+        w.contains("temporary copy")
+            || w.contains("mutates the copy returned by")
+            || w.contains("lands on the copy returned by")
+    })
+}
+
 #[test]
 fn fresh_temporary_grid() {
     let mut bad = Vec::new();
     for shape in T254_SHAPES {
+        let baseline = t254_last_line(&format!(
+            "{}{}print({})\n",
+            shape.decls, shape.root, shape.show
+        ));
         for row in shape.rows {
+            let mut writes: Vec<(String, bool)> = t254_native_calls(row.kind)
+                .into_iter()
+                .map(|call| (format!("@.{call}"), true))
+                .collect();
+            writes.extend(row.writes.iter().map(|w| ((*w).to_string(), false)));
             for ctx in T254Ctx::ALL {
                 if !t254_applies(shape, ctx) {
                     continue;
                 }
-                for (wi, write) in row.writes.iter().enumerate() {
+                for (wi, (write, is_call)) in writes.iter().enumerate() {
                     let stmt = write.replace('@', row.recv).replace('$', row.a);
                     let cell = format!("{}_{}_{:?}_w{wi}", shape.name, row.name, ctx);
                     let (files, main) = t254_program(shape, ctx, &stmt);
                     let (errs, warns) = t254_diags(&cell, &files, &main);
-                    let warned = warns.iter().any(|w| w.contains("changes a temporary copy"));
                     let errored = errs.iter().any(|e| e.contains("this task's copy"));
-                    let (want_warn, want_err) = if row.fresh {
-                        (true, false)
-                    } else {
-                        (false, t254_control_errors(ctx))
+                    let (want_warn, want_err) = match row.expect {
+                        T254Expect::Warns(call, store) => {
+                            let text = if *is_call { call } else { store };
+                            (Some(text), false)
+                        }
+                        T254Expect::Silent | T254Expect::Declined => (None, false),
+                        T254Expect::Control => (None, t254_control_errors(ctx)),
+                    };
+                    let warned = match want_warn {
+                        Some(text) => warns.iter().any(|w| w.contains(text)),
+                        None => t254_any_temporary_warning(&warns),
                     };
                     let stray = errs.len() != usize::from(want_err);
-                    if warned != want_warn || errored != want_err || stray {
+                    // The run-time column: a fresh or declined write leaves the root as it was.
+                    let ran = (errs.is_empty() && ctx != T254Ctx::ImportedFn)
+                        .then(|| t254_last_line(&main));
+                    let run_bad = match (&ran, row.expect) {
+                        (Some(got), T254Expect::Warns(..) | T254Expect::Silent) => *got != baseline,
+                        (Some(got), T254Expect::Control | T254Expect::Declined) => {
+                            let d4 = got.starts_with("fault:") && got.contains("this task's copy");
+                            let other_fault = got.starts_with("fault:") && !d4;
+                            d4 != t254_control_faults(ctx) || other_fault
+                        }
+                        (None, _) => false,
+                    };
+                    if warned != want_warn.is_some() || errored != want_err || stray || run_bad {
                         bad.push(format!(
-                            "{cell}: stmt `{stmt}` warned={warned} (want {want_warn}) errored={errored} (want {want_err}) errs={errs:?}"
+                            "{cell}: stmt `{stmt}` warned={warned} (want {want_warn:?}) errored={errored} (want {want_err}) errs={errs:?} ran={ran:?} baseline={baseline:?}"
                         ));
                     }
                 }
@@ -40500,16 +40766,17 @@ fn native_container_results_are_new_objects() {
             "reversed()",
             "r.pop()",
         ),
+        // A `str` receiver is immutable; its container results are new lists all the same.
+        ("str", "x := \"a,b\"", "split(\",\")", "r.pop()"),
+        ("str", "x := \"a,b\"", "chars()", "r.pop()"),
+        ("str", "x := \"a\\nb\"", "split_lines()", "r.pop()"),
     ];
     let c = prelude_container_checker();
     let mut bad: Vec<String> = Vec::new();
-    for kind in ["List", "Map", "Set", "bytearray"] {
+    for kind in ["List", "Map", "Set", "bytearray", "str", "bytes"] {
         let info = c.structs.get(kind).expect("seeded container struct");
         for (name, sig) in &info.methods {
-            let container = matches!(
-                sig.ret,
-                Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray
-            );
+            let container = fn_writes::native_container(&sig.ret);
             let sampled = rows
                 .iter()
                 .any(|(k, _, call, _)| *k == kind && call.split('(').next() == Some(name.as_str()));
@@ -40592,5 +40859,36 @@ fn a_slice_write_in_an_imported_callee_is_no_task_write() {
         let (errs, _) = t254_diags("imported_slice", &[("lib.chz", lib.clone())], &main(call));
         let got = errs.iter().any(|e| e.contains("this task's copy"));
         assert_eq!(got, errors, "`spawn {call}`: errors={errs:?}");
+    }
+}
+
+/// TICKET-254 — `fn_writes::builtin_slice` (the types whose `x[a..b]` builds a new value) and
+/// `slice_result` (the types that slice at all) name the same four built-in sequence types. A type
+/// `slice_result` slices into itself that the classifier misses stays a place link: the old false
+/// D4 error.
+#[test]
+fn builtin_slice_matches_what_slice_result_slices() {
+    let c = Checker::new();
+    let rows = [
+        (Ty::List(Box::new(Ty::Int)), true),
+        (Ty::Str, true),
+        (Ty::Bytes, true),
+        (Ty::ByteArray, true),
+        (Ty::Map(Box::new(Ty::Str), Box::new(Ty::Int)), false),
+        (Ty::Set(Box::new(Ty::Int)), false),
+        (Ty::Int, false),
+        (Ty::Tuple(vec![Ty::Int]), false),
+    ];
+    for (ty, builtin) in rows {
+        assert_eq!(
+            fn_writes::builtin_slice(&ty),
+            builtin,
+            "builtin_slice({ty})"
+        );
+        assert_eq!(
+            c.slice_result(&ty) == Some(ty.clone()),
+            builtin,
+            "slice_result({ty})"
+        );
     }
 }

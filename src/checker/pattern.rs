@@ -5350,7 +5350,7 @@ impl Checker {
         }
         if let Some(r) = self.slice_result(obj_ty) {
             self.record_subscript_slice(index);
-            if matches!(obj_ty, Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray) {
+            if super::fn_writes::builtin_slice(obj_ty) {
                 let key = self.subscript_key(index.span);
                 self.fresh_subscripts.insert(key);
             }

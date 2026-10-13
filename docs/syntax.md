@@ -635,8 +635,9 @@ fn; it captures the enclosing scope exactly like a closure value:
   (`s.get()`). The text is `'push' changes a temporary copy; the result is dropped: bind the value
   to a name first, or call 'push' on the source`; the box read keeps its own text. A write that goes
   on through an element of a shallow copy (`xs.copy()[0].push(1)`) is silent: the element is shared
-  with `xs`. Three ceilings stay silent: a user struct method on a temporary (it can do I/O), a user
-  `slice` hook, and a builtin constructor call (`List[int]().push(1)`).
+  with `xs`. Four ceilings stay silent: a user struct method on a temporary (it can do I/O), a store
+  through a user `set_index` hook (it runs user code), a user `slice` hook, and a builtin constructor
+  call (`List[int]().push(1)`).
 
 `fn` is the only declaration allowed inside a block. `struct`, `enum`, `protocol`, `type`, `test fn`, `import`, `extern` and `native` are top-level only; inside any block each is a parse error (`struct must be a top-level declaration`).
 

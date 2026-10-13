@@ -3419,7 +3419,7 @@ impl Checker {
                     .clone();
                 Some(subst(&ty, &struct_param_map(info, targs)))
             }
-            (Ty::List(_) | Ty::ByteArray, ChainLink::Slice) => Some(recv.clone()),
+            (slice, ChainLink::Slice) if fn_writes::builtin_slice(slice) => Some(recv.clone()),
             (Ty::List(elem), ChainLink::Element) => Some((**elem).clone()),
             (Ty::Map(_, value), ChainLink::Element) => Some((**value).clone()),
             (Ty::ByteArray, ChainLink::Element) => Some(Ty::Int),
@@ -3469,6 +3469,40 @@ impl Checker {
             return None;
         }
         Some(ty)
+    }
+
+    /// The name `stmt` declares when it is a `struct` declaration.
+    fn struct_decl_name(stmt: &Stmt) -> Option<&str> {
+        match &stmt.kind {
+            StmtKind::Struct { name, .. } => Some(name),
+            StmtKind::Fn(_)
+            | StmtKind::Let { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::Protocol { .. }
+            | StmtKind::Enum { .. }
+            | StmtKind::TypeAlias { .. }
+            | StmtKind::If { .. }
+            | StmtKind::For { .. }
+            | StmtKind::While { .. }
+            | StmtKind::Match { .. }
+            | StmtKind::Return(_)
+            | StmtKind::Yield(_)
+            | StmtKind::Defer(_)
+            | StmtKind::Parallel { .. }
+            | StmtKind::Spawn(_)
+            | StmtKind::Wait { .. }
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Pass
+            | StmtKind::Import(_)
+            | StmtKind::Extern { .. }
+            | StmtKind::Native(_)
+            | StmtKind::NativeStruct { .. }
+            | StmtKind::NativeEnum { .. }
+            | StmtKind::NativeType { .. }
+            | StmtKind::Assert { .. }
+            | StmtKind::Expr(_) => None,
+        }
     }
 
     /// TICKET-254 — does the write summary of this declaration hold a subscript link? The summaries
@@ -3533,12 +3567,10 @@ impl Checker {
             self.diag_rollback(mark);
         }
         if any && !self.fresh_subscripts.is_empty() {
-            for s in stmts {
-                if let StmtKind::Struct { name, .. } = &s.kind {
-                    let key = self.bare_key(name);
-                    if let Some(info) = self.structs.get_mut(&key) {
-                        info.self_writers.clear();
-                    }
+            for name in stmts.iter().filter_map(Self::struct_decl_name) {
+                let key = self.bare_key(name);
+                if let Some(info) = self.structs.get_mut(&key) {
+                    info.self_writers.clear();
                 }
             }
             self.infer_self_writers(stmts);

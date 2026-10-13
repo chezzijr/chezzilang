@@ -267,6 +267,83 @@ pub(super) fn native_receiver(t: &Ty) -> Option<(&'static str, Ty)> {
     }
 }
 
+/// TICKET-254 — `t[a..b]` on `t` builds a NEW value of the same type, so a mutating call on it
+/// changes a copy: the built-in sequence types. A type with a `slice` hook is no row: the hook may
+/// return its own field (measured, `a_user_slice_hook_result_is_no_fresh_temporary`).
+pub(super) fn builtin_slice(t: &Ty) -> bool {
+    match t {
+        Ty::List(_) | Ty::Str | Ty::Bytes | Ty::ByteArray => true,
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Nil
+        | Ty::Map(..)
+        | Ty::Set(_)
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Tuple(_)
+        | Ty::Struct(..)
+        | Ty::Enum(..)
+        | Ty::Param(_)
+        | Ty::Result(..)
+        | Ty::Option(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => false,
+    }
+}
+
+/// TICKET-254 — `t` is one of the four mutable native containers (`List`, `Map`, `Set`,
+/// `bytearray`). A native method that returns one of them returns a new object.
+pub(super) fn native_container(t: &Ty) -> bool {
+    match t {
+        Ty::List(_) | Ty::Map(..) | Ty::Set(_) | Ty::ByteArray => true,
+        Ty::Str
+        | Ty::Bytes
+        | Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Nil
+        | Ty::Func { .. }
+        | Ty::BuiltinFn { .. }
+        | Ty::Tuple(_)
+        | Ty::Struct(..)
+        | Ty::Enum(..)
+        | Ty::Param(_)
+        | Ty::Result(..)
+        | Ty::Option(_)
+        | Ty::Channel(_)
+        | Ty::Shared(_)
+        | Ty::Atomic(_)
+        | Ty::AtomicInt
+        | Ty::RwShared(_)
+        | Ty::Executor
+        | Ty::Socket
+        | Ty::Listener
+        | Ty::Writer
+        | Ty::Reader
+        | Ty::Ptr
+        | Ty::Width(_)
+        | Ty::Protocol(..)
+        | Ty::Module(_)
+        | Ty::Unknown
+        | Ty::Var(_) => false,
+    }
+}
+
 /// Collects [`Uses`] for one body. `bound` holds every name the function binds (params, lets, loop
 /// and pattern variables, nested fns), so a callee outside it names a top-level fn or a module.
 struct UseWalk<'a> {
@@ -985,10 +1062,84 @@ pub(super) fn place_base<'a>(
     }
 }
 
-/// The object a place link (`.f`, `[i]`) reads from, or `None` when `expr` is no place link.
-pub(super) fn place_parent(expr: &Expr) -> Option<&Expr> {
+/// TICKET-254 — `expr` is a call `obj.method(..)`: its receiver and method name.
+pub(super) fn method_call_parts(expr: &Expr) -> Option<(&Expr, &str)> {
     match &expr.kind {
-        ExprKind::Field { obj, .. } | ExprKind::Index { obj, .. } => Some(obj),
+        ExprKind::Call { callee, .. } => field_parts(callee),
+        ExprKind::Ident(_)
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => None,
+    }
+}
+
+/// `expr` is a field read `obj.name`: its object and the field name.
+fn field_parts(expr: &Expr) -> Option<(&Expr, &str)> {
+    match &expr.kind {
+        ExprKind::Field { obj, name, .. } => Some((obj, name)),
+        ExprKind::Ident(_)
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::List(..)
+        | ExprKind::Tuple(_)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(_)
+        | ExprKind::ElseGuard { .. } => None,
+    }
+}
+
+/// The object a place link (`.f`, `[i]`) reads from, and whether the link is a subscript, or `None`
+/// when `expr` is no place link.
+pub(super) fn place_parent(expr: &Expr) -> Option<(&Expr, bool)> {
+    match &expr.kind {
+        ExprKind::Field { obj, .. } => Some((obj, false)),
+        ExprKind::Index { obj, .. } => Some((obj, true)),
         ExprKind::Ident(_)
         | ExprKind::Int(_)
         | ExprKind::Float(_)
