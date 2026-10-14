@@ -20764,14 +20764,14 @@ main()
 /// `tests/chz/spec/intrinsic_proto_methods_test.chz`.
 #[test]
 fn intrinsic_grants_all_have_vm_arms() {
-    use crate::checker::proto::{INTRINSIC_PROTO_METHODS, INTRINSIC_UNPAIRED};
+    use crate::checker::proto::{INTRINSIC_PROTO_METHODS, INTRINSIC_UNPAIRED, RecvKind};
     /// One receiver per kind `Checker::intrinsic_recv_kind` can classify a grant as — the value to
     /// probe with, plus the literals/types the parameterized bounds need. `"-"` = the kind has no
     /// grant needing that column. `struct` needs ONE struct satisfying all three struct-granted
     /// protocols at once: zero fields and no `hash` (intrinsic `Hashable`) plus `next(self) -> int?`
     /// (`Iterator`, and `Iterable` through it).
     struct Recv {
-        kind: &'static str,
+        kind: RecvKind,
         prelude: &'static str,
         lit: &'static str,
         key: &'static str,
@@ -20793,15 +20793,33 @@ fn intrinsic_grants_all_have_vm_arms() {
         slice_ty,
     };
     let recvs: &[Recv] = &[
-        r("int", "", "7", "-", "-", "-", "-", "-", "-"),
-        r("float", "", "1.5", "-", "-", "-", "-", "-", "-"),
-        r("bool", "", "true", "-", "-", "-", "-", "-", "-"),
-        r("str", "", "\"abc\"", "0", "-", "str", "int", "str", "str"),
+        r(RecvKind::Int, "", "7", "-", "-", "-", "-", "-", "-"),
+        r(RecvKind::Float, "", "1.5", "-", "-", "-", "-", "-", "-"),
+        r(RecvKind::Bool, "", "true", "-", "-", "-", "-", "-", "-"),
         r(
-            "bytes", "", "b\"abc\"", "0", "-", "int", "int", "int", "bytes",
+            RecvKind::Str,
+            "",
+            "\"abc\"",
+            "0",
+            "-",
+            "str",
+            "int",
+            "str",
+            "str",
         ),
         r(
-            "bytearray",
+            RecvKind::Bytes,
+            "",
+            "b\"abc\"",
+            "0",
+            "-",
+            "int",
+            "int",
+            "int",
+            "bytes",
+        ),
+        r(
+            RecvKind::ByteArray,
             "",
             "bytearray(b\"abc\")",
             "0",
@@ -20812,7 +20830,7 @@ fn intrinsic_grants_all_have_vm_arms() {
             "bytearray",
         ),
         r(
-            "list",
+            RecvKind::List,
             "",
             "[1, 2, 3]",
             "0",
@@ -20822,9 +20840,19 @@ fn intrinsic_grants_all_have_vm_arms() {
             "int",
             "List[int]",
         ),
-        r("set", "", "Set([1, 2])", "-", "-", "int", "-", "-", "-"),
         r(
-            "map",
+            RecvKind::Set,
+            "",
+            "Set([1, 2])",
+            "-",
+            "-",
+            "int",
+            "-",
+            "-",
+            "-",
+        ),
+        r(
+            RecvKind::Map,
             "",
             "{\"a\": 1}",
             "\"a\"",
@@ -20835,7 +20863,7 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
         ),
         r(
-            "struct",
+            RecvKind::Struct,
             "struct Cur:\n    fn next(self) -> int?:\n        return None\n",
             "Cur()",
             "-",
@@ -20847,9 +20875,9 @@ fn intrinsic_grants_all_have_vm_arms() {
         ),
         // D1 — the kinds the widened `Eq` grant added. `enum`/`option`/`result` are ONE runtime
         // shape (`Obj::Enum`), so their probes are what pin the `Obj::Enum` dispatch fallback.
-        r("tuple", "", "(1, 2)", "-", "-", "-", "-", "-", "-"),
+        r(RecvKind::Tuple, "", "(1, 2)", "-", "-", "-", "-", "-", "-"),
         r(
-            "enum",
+            RecvKind::Enum,
             "enum En:\n    A\n    B\n",
             "En.A",
             "-",
@@ -20860,7 +20888,7 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
         ),
         r(
-            "option",
+            RecvKind::Option,
             "fn ho() -> int?:\n    return 1\n",
             "ho()",
             "-",
@@ -20871,7 +20899,7 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
         ),
         r(
-            "result",
+            RecvKind::Result,
             "fn hr() -> int!str:\n    return 1\n",
             "hr()",
             "-",
@@ -20884,7 +20912,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         // W7-54 — a function value's `Eq` grant. Only the `eq` template applies; it uses no other
         // column.
         r(
-            "func",
+            RecvKind::Func,
             "fn g(x: int) -> int:\n    return x\n",
             "g",
             "-",
@@ -20902,13 +20930,13 @@ fn intrinsic_grants_all_have_vm_arms() {
         // not `Func` would get no cell at all. `accepted` is deduped, so the shared ("Eq", "func")
         // cell still matches `registered` exactly once; `recv_of` returns the FIRST row, so the
         // runtime probe below stays the `Ty::Func` one.
-        r("func", "", "ord", "-", "-", "-", "-", "-", "-"),
+        r(RecvKind::Func, "", "ord", "-", "-", "-", "-", "-", "-"),
         // W7-52 — a protocol-typed (existential) value's `Eq` grant. Can't write `a: Sized_ =
         // Tag(1)` (the probe template is a bare `a := {lit}`, no annotation), so the prelude carries
         // a factory whose RETURN type is the protocol — `a := mkp()` then really infers `a: Ty::
         // Protocol("Sized_", [])`, not `Ty::Struct("Tag", [])`. Only the `eq` template applies.
         r(
-            "protocol",
+            RecvKind::Protocol,
             "protocol Sized_:\n    fn size(self) -> int\nstruct Tag:\n    n: int\n    fn size(self) -> int:\n        return self.n\nfn mkp() -> Sized_:\n    return Tag(1)\n",
             "mkp()",
             "-",
@@ -20918,7 +20946,70 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
             "-",
         ),
+        // TICKET-257 — the built-in cursor (`Iterator[T]`) and the four handle kinds.
+        r(
+            RecvKind::Cursor,
+            "",
+            "[1, 2].iter()",
+            "-",
+            "-",
+            "int",
+            "-",
+            "-",
+            "-",
+        ),
+        r(
+            RecvKind::Channel,
+            "import std.concurrency\n",
+            "Channel[int](1)",
+            "-",
+            "-",
+            "int",
+            "-",
+            "-",
+            "-",
+        ),
+        r(
+            RecvKind::Shared,
+            "import std.concurrency\n",
+            "Shared(1)",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ),
+        r(
+            RecvKind::RwShared,
+            "import std.concurrency\n",
+            "RwShared(1)",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ),
+        r(
+            RecvKind::Atomic,
+            "import std.concurrency\n",
+            "Atomic(1)",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+        ),
     ];
+    // Every `RecvKind` has a receiver (`func` has two: `Ty::Func` and `Ty::BuiltinFn`).
+    for k in RecvKind::ALL {
+        assert!(
+            recvs.iter().any(|r| r.kind == k),
+            "RecvKind::{k} has no receiver in intrinsic_grants_all_have_vm_arms"
+        );
+    }
     // (method, call template) — `{r}` is the receiver, `{k}`/`{v}` the index key/value.
     let calls: &[(&str, &str)] = &[
         ("compare", "{r}.compare(b)"),
@@ -20941,8 +21032,8 @@ fn intrinsic_grants_all_have_vm_arms() {
     ];
     // Build the probe for a row, or `None` if the tables can't express it (which the assertions
     // below turn into a failure — a row must never be silently skipped).
-    let recv_of = |kind: &str| recvs.iter().find(|r| r.kind == kind);
-    let probe = |method: &str, kind: &str| -> Option<String> {
+    let recv_of = |kind: RecvKind| recvs.iter().find(|r| r.kind == kind);
+    let probe = |method: &str, kind: RecvKind| -> Option<String> {
         let rv = recv_of(kind)?;
         let (_, tmpl) = *calls.iter().find(|(m, _)| *m == method)?;
         // An unfilled ("-") column the template needs = a missing table entry, not a skip.
@@ -20956,7 +21047,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         // TICKET-250 — a `next` owner is its own cursor for `iter` only where the call is typed
         // through the `Iterable` requirement (`Op::CallHook`); a concrete `a.iter()` on it is a
         // check error (`has no method 'iter'`). So this one row is probed through a bound.
-        if method == "iter" && kind == "struct" {
+        if method == "iter" && kind == RecvKind::Struct {
             return Some(format!(
                 "{}fn via[S: Iterable[int]](s: S) -> Iterator[int]:\n    return s.iter()\na := {}\nb := {}\nres := via(a)\n",
                 rv.prelude, rv.lit, rv.lit
@@ -20974,7 +21065,7 @@ fn intrinsic_grants_all_have_vm_arms() {
     // for that (protocol, receiver-kind) really EXISTS, so a stale row fails, and (b) is what actually
     // executes `Checker::grant_intrinsic`, whose `debug_assert` fires when a grant has no row — i.e.
     // this loop is what makes widening a grant to one more TYPE a test failure.
-    let bound_probe = |protocol: &str, kind: &str| -> String {
+    let bound_probe = |protocol: &str, kind: RecvKind| -> String {
         let rv = recv_of(kind).expect("every kind has a receiver");
         // A parameterized protocol's bound must state its type args (arity is checked), so spell them
         // from the receiver's own element/key/value/slice types. A `"-"` column means the kind has no
@@ -21018,7 +21109,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         ps.dedup();
         ps
     };
-    let mut accepted: Vec<(&str, &str)> = Vec::new();
+    let mut accepted: Vec<(&str, RecvKind)> = Vec::new();
     for p in &protocols {
         for rv in recvs {
             let src = bound_probe(p, rv.kind);
@@ -21039,7 +21130,7 @@ fn intrinsic_grants_all_have_vm_arms() {
             }
         }
     }
-    let mut registered: Vec<(&str, &str)> = INTRINSIC_PROTO_METHODS
+    let mut registered: Vec<(&str, RecvKind)> = INTRINSIC_PROTO_METHODS
         .iter()
         .chain(INTRINSIC_UNPAIRED)
         .map(|(p, _, k)| (*p, *k))
@@ -21055,7 +21146,7 @@ fn intrinsic_grants_all_have_vm_arms() {
          the row AND make the method callable at runtime (W6-3)"
     );
     for (p, m, kind) in INTRINSIC_PROTO_METHODS {
-        let src = probe(m, kind).unwrap_or_else(|| {
+        let src = probe(m, *kind).unwrap_or_else(|| {
             panic!(
                 "no probe for intrinsic grant ({p}, {m}, {kind}) — add its receiver literal / call \
                  template to intrinsic_grants_all_have_vm_arms (W6-3)"
@@ -21081,7 +21172,7 @@ fn intrinsic_grants_all_have_vm_arms() {
     // collection `Iterator` grant was narrowed away), so this loop and the disjointness loop below are
     // currently no-ops; they stay so the ratchet re-arms the moment a new unpairable grant is added.
     for (p, m, kind) in INTRINSIC_UNPAIRED {
-        let src = probe(m, kind)
+        let src = probe(m, *kind)
             .unwrap_or_else(|| panic!("no probe for unpaired grant ({p}, {m}, {kind})"));
         let Err(err) = run_capture(&src) else {
             panic!("({p}, {m}, {kind}) is the documented carve-out — it must still fault");

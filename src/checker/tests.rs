@@ -40901,3 +40901,38 @@ fn builtin_list_satisfies_contains_bound_like_the_in_operator() {
         "fn has[C: Contains[int]](c: C) -> bool:\n    return 2 in c\n\nfn main():\n    print(has([1, 2]))\n",
     );
 }
+
+/// TICKET-257 — `RecvKind::ALL` lists every variant, in declaration order. The exhaustive `match`
+/// has no wildcard, so a new variant fails the build here until it gets an index.
+#[test]
+fn recv_kind_all_lists_every_variant() {
+    use super::proto::RecvKind;
+    let index = |k: RecvKind| match k {
+        RecvKind::Int => 0,
+        RecvKind::Float => 1,
+        RecvKind::Bool => 2,
+        RecvKind::Str => 3,
+        RecvKind::Bytes => 4,
+        RecvKind::ByteArray => 5,
+        RecvKind::List => 6,
+        RecvKind::Map => 7,
+        RecvKind::Set => 8,
+        RecvKind::Tuple => 9,
+        RecvKind::Struct => 10,
+        RecvKind::Cursor => 11,
+        RecvKind::Enum => 12,
+        RecvKind::Option => 13,
+        RecvKind::Result => 14,
+        RecvKind::Func => 15,
+        RecvKind::Protocol => 16,
+        RecvKind::Channel => 17,
+        RecvKind::Shared => 18,
+        RecvKind::RwShared => 19,
+        RecvKind::Atomic => 20,
+    };
+    let max = RecvKind::ALL.iter().map(|k| index(*k)).max().unwrap();
+    assert_eq!(RecvKind::ALL.len(), max + 1, "ALL misses a variant");
+    for k in RecvKind::ALL {
+        assert_eq!(RecvKind::ALL[index(k)], k);
+    }
+}

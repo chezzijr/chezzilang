@@ -304,15 +304,15 @@ impl Drop for EqObligation {
 /// a row key here (every row key is one of the ~20 [`RESERVED_PROTOCOLS`](super::RESERVED_PROTOCOLS)
 /// names), and the method behind that grant is a REAL native method with a runtime arm already, not
 /// a promise this ratchet needs to police.
-pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
+pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     // Comparable — int/float/str scalars.
-    ("Comparable", "compare", "int"),
-    ("Comparable", "compare", "float"),
-    ("Comparable", "compare", "str"),
+    ("Comparable", "compare", RecvKind::Int),
+    ("Comparable", "compare", RecvKind::Float),
+    ("Comparable", "compare", RecvKind::Str),
     // A tuple / List / Option is Comparable exactly when every element type is (TICKET-146).
-    ("Comparable", "compare", "tuple"),
-    ("Comparable", "compare", "list"),
-    ("Comparable", "compare", "option"),
+    ("Comparable", "compare", RecvKind::Tuple),
+    ("Comparable", "compare", RecvKind::List),
+    ("Comparable", "compare", RecvKind::Option),
     // Eq — D1: EVERY receiver kind whose `==` this table can key a row on except `nil` (not
     // spellable as a value). Most rows are the structural derive (`Vm::values_equal`): the four
     // scalars are all here because `==` is defined on `bool` too, unlike `Comparable`;
@@ -335,84 +335,174 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
     // `[T: Stringable]`/`[T: Hashable]`/… at `T = <protocol>` all still reject, because `Eq` is the one
     // protocol whose grant means exactly what `==` already accepts, and `==` already accepts a
     // protocol-typed operand (`may_be_equal`'s `(Protocol, Protocol)`/`(Protocol, concrete)` arms).
-    ("Eq", "eq", "int"),
-    ("Eq", "eq", "float"),
-    ("Eq", "eq", "str"),
-    ("Eq", "eq", "bool"),
-    ("Eq", "eq", "bytes"),
-    ("Eq", "eq", "bytearray"),
-    ("Eq", "eq", "list"),
-    ("Eq", "eq", "set"),
-    ("Eq", "eq", "map"),
-    ("Eq", "eq", "tuple"),
-    ("Eq", "eq", "struct"),
-    ("Eq", "eq", "enum"),
-    ("Eq", "eq", "option"),
-    ("Eq", "eq", "result"),
-    ("Eq", "eq", "func"),
-    ("Eq", "eq", "protocol"),
+    ("Eq", "eq", RecvKind::Int),
+    ("Eq", "eq", RecvKind::Float),
+    ("Eq", "eq", RecvKind::Str),
+    ("Eq", "eq", RecvKind::Bool),
+    ("Eq", "eq", RecvKind::Bytes),
+    ("Eq", "eq", RecvKind::ByteArray),
+    ("Eq", "eq", RecvKind::List),
+    ("Eq", "eq", RecvKind::Set),
+    ("Eq", "eq", RecvKind::Map),
+    ("Eq", "eq", RecvKind::Tuple),
+    ("Eq", "eq", RecvKind::Struct),
+    ("Eq", "eq", RecvKind::Enum),
+    ("Eq", "eq", RecvKind::Option),
+    ("Eq", "eq", RecvKind::Result),
+    ("Eq", "eq", RecvKind::Func),
+    ("Eq", "eq", RecvKind::Protocol),
     // Stringable — all four scalars.
-    ("Stringable", "str", "int"),
-    ("Stringable", "str", "float"),
-    ("Stringable", "str", "bool"),
-    ("Stringable", "str", "str"),
+    ("Stringable", "str", RecvKind::Int),
+    ("Stringable", "str", RecvKind::Float),
+    ("Stringable", "str", RecvKind::Bool),
+    ("Stringable", "str", RecvKind::Str),
     // Hashable — the scalar key types + a zero-field struct with no own `hash`.
-    ("Hashable", "hash", "int"),
-    ("Hashable", "hash", "str"),
-    ("Hashable", "hash", "bytes"),
-    ("Hashable", "hash", "bool"),
-    ("Hashable", "hash", "struct"),
+    ("Hashable", "hash", RecvKind::Int),
+    ("Hashable", "hash", RecvKind::Str),
+    ("Hashable", "hash", RecvKind::Bytes),
+    ("Hashable", "hash", RecvKind::Bool),
+    ("Hashable", "hash", RecvKind::Struct),
     // A tuple is Hashable exactly when every element type is (TICKET-161; CPython's rule).
-    ("Hashable", "hash", "tuple"),
+    ("Hashable", "hash", RecvKind::Tuple),
     // Error — `str`'s message is itself (Go model).
-    ("Error", "message", "str"),
+    ("Error", "message", RecvKind::Str),
     // PathLike (W7-8) — the three byte-ish scalars a path can be spelled as. None of them HAS an
     // `as_path` method, so the grant is the only seam; `path.Path` conforms structurally instead.
-    ("PathLike", "as_path", "str"),
-    ("PathLike", "as_path", "bytes"),
-    ("PathLike", "as_path", "bytearray"),
+    ("PathLike", "as_path", RecvKind::Str),
+    ("PathLike", "as_path", RecvKind::Bytes),
+    ("PathLike", "as_path", RecvKind::ByteArray),
     // Iterable — everything `iterable_elem` accepts.
-    ("Iterable", "iter", "list"),
-    ("Iterable", "iter", "set"),
-    ("Iterable", "iter", "map"),
-    ("Iterable", "iter", "str"),
-    ("Iterable", "iter", "bytes"),
-    ("Iterable", "iter", "bytearray"),
-    ("Iterable", "iter", "struct"),
+    ("Iterable", "iter", RecvKind::List),
+    ("Iterable", "iter", RecvKind::Set),
+    ("Iterable", "iter", RecvKind::Map),
+    ("Iterable", "iter", RecvKind::Str),
+    ("Iterable", "iter", RecvKind::Bytes),
+    ("Iterable", "iter", RecvKind::ByteArray),
+    ("Iterable", "iter", RecvKind::Struct),
+    ("Iterable", "iter", RecvKind::Cursor),
     // Iterator — only a struct/cursor holds the position `next` needs (W6-3b: a raw collection does
     // NOT satisfy `Iterator`, only `Iterable`).
-    ("Iterator", "next", "struct"),
+    ("Iterator", "next", RecvKind::Struct),
+    ("Iterator", "next", RecvKind::Cursor),
     // Index / IndexSet / Slice — the built-in containers `index_kv`/`slice_result` accept
     // (`IndexSet` excludes the immutable `str`/`bytes`; `Slice` excludes `map`).
-    ("Index", "index", "list"),
-    ("Index", "index", "map"),
-    ("Index", "index", "str"),
-    ("Index", "index", "bytes"),
-    ("Index", "index", "bytearray"),
-    ("IndexSet", "index", "list"),
-    ("IndexSet", "index", "map"),
-    ("IndexSet", "index", "bytearray"),
-    ("IndexSet", "set_index", "list"),
-    ("IndexSet", "set_index", "map"),
-    ("IndexSet", "set_index", "bytearray"),
-    ("Slice", "slice", "list"),
-    ("Slice", "slice", "str"),
-    ("Slice", "slice", "bytes"),
-    ("Slice", "slice", "bytearray"),
+    ("Index", "index", RecvKind::List),
+    ("Index", "index", RecvKind::Map),
+    ("Index", "index", RecvKind::Str),
+    ("Index", "index", RecvKind::Bytes),
+    ("Index", "index", RecvKind::ByteArray),
+    ("IndexSet", "index", RecvKind::List),
+    ("IndexSet", "index", RecvKind::Map),
+    ("IndexSet", "index", RecvKind::ByteArray),
+    ("IndexSet", "set_index", RecvKind::List),
+    ("IndexSet", "set_index", RecvKind::Map),
+    ("IndexSet", "set_index", RecvKind::ByteArray),
+    ("Slice", "slice", RecvKind::List),
+    ("Slice", "slice", RecvKind::Str),
+    ("Slice", "slice", RecvKind::Bytes),
+    ("Slice", "slice", RecvKind::ByteArray),
     // The operator protocols — int/float natively.
-    ("Add", "add", "int"),
-    ("Add", "add", "float"),
-    ("Sub", "sub", "int"),
-    ("Sub", "sub", "float"),
-    ("Mul", "mul", "int"),
-    ("Mul", "mul", "float"),
-    ("Div", "div", "int"),
-    ("Div", "div", "float"),
-    ("Mod", "mod", "int"),
-    ("Mod", "mod", "float"),
-    ("Neg", "neg", "int"),
-    ("Neg", "neg", "float"),
+    ("Add", "add", RecvKind::Int),
+    ("Add", "add", RecvKind::Float),
+    ("Sub", "sub", RecvKind::Int),
+    ("Sub", "sub", RecvKind::Float),
+    ("Mul", "mul", RecvKind::Int),
+    ("Mul", "mul", RecvKind::Float),
+    ("Div", "div", RecvKind::Int),
+    ("Div", "div", RecvKind::Float),
+    ("Mod", "mod", RecvKind::Int),
+    ("Mod", "mod", RecvKind::Float),
+    ("Neg", "neg", RecvKind::Int),
+    ("Neg", "neg", RecvKind::Float),
 ];
+
+/// The one list of receiver kinds [`INTRINSIC_PROTO_METHODS`] is indexed by: the granted `Ty`'s
+/// built-in shape, at the granularity the runtime dispatches on. [`RecvKind::ALL`] drives the VM
+/// probe and the operator/bound grid; `recv_kind_all_lists_every_variant` pins it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RecvKind {
+    Int,
+    Float,
+    Bool,
+    Str,
+    Bytes,
+    ByteArray,
+    List,
+    Map,
+    Set,
+    Tuple,
+    Struct,
+    Cursor,
+    Enum,
+    Option,
+    Result,
+    Func,
+    Protocol,
+    Channel,
+    Shared,
+    RwShared,
+    Atomic,
+}
+
+impl RecvKind {
+    #[cfg(test)]
+    pub const ALL: [RecvKind; 21] = [
+        RecvKind::Int,
+        RecvKind::Float,
+        RecvKind::Bool,
+        RecvKind::Str,
+        RecvKind::Bytes,
+        RecvKind::ByteArray,
+        RecvKind::List,
+        RecvKind::Map,
+        RecvKind::Set,
+        RecvKind::Tuple,
+        RecvKind::Struct,
+        RecvKind::Cursor,
+        RecvKind::Enum,
+        RecvKind::Option,
+        RecvKind::Result,
+        RecvKind::Func,
+        RecvKind::Protocol,
+        RecvKind::Channel,
+        RecvKind::Shared,
+        RecvKind::RwShared,
+        RecvKind::Atomic,
+    ];
+
+    pub fn name(self) -> &'static str {
+        // Display below reads this; keep the match exhaustive.
+        match self {
+            RecvKind::Int => "int",
+            RecvKind::Float => "float",
+            RecvKind::Bool => "bool",
+            RecvKind::Str => "str",
+            RecvKind::Bytes => "bytes",
+            RecvKind::ByteArray => "bytearray",
+            RecvKind::List => "list",
+            RecvKind::Map => "map",
+            RecvKind::Set => "set",
+            RecvKind::Tuple => "tuple",
+            RecvKind::Struct => "struct",
+            RecvKind::Cursor => "cursor",
+            RecvKind::Enum => "enum",
+            RecvKind::Option => "option",
+            RecvKind::Result => "result",
+            RecvKind::Func => "func",
+            RecvKind::Protocol => "protocol",
+            RecvKind::Channel => "channel",
+            RecvKind::Shared => "shared",
+            RecvKind::RwShared => "rwshared",
+            RecvKind::Atomic => "atomic",
+        }
+    }
+}
+
+impl std::fmt::Display for RecvKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
 
 /// Intrinsic grants that have NO runtime arm and CANNOT get one — a KNOWN check-OK/run-fault, kept
 /// here (rather than silently absent) so the carve-out is asserted instead of rotting.
@@ -427,7 +517,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, &str)] = &[
 /// grant is added: registering a row here (instead of in [`INTRINSIC_PROTO_METHODS`]) is the only way to
 /// ship a grant with no runtime arm, and `vm::tests::intrinsic_grants_all_have_vm_arms` then asserts the
 /// row is still granted and STILL faults.
-pub const INTRINSIC_UNPAIRED: &[(&str, &str, &str)] = &[];
+pub const INTRINSIC_UNPAIRED: &[(&str, &str, RecvKind)] = &[];
 
 /// Proof that a conformance decision went through one of [`Checker::satisfies_args_d`]'s documented
 /// grant paths — the compile-time half of the W6-3 ratchet. The field is private to this module, so a
@@ -500,49 +590,49 @@ impl ReqMiss {
 
 impl Checker {
     /// The receiver-KIND key [`INTRINSIC_PROTO_METHODS`] is indexed by — the granted `Ty`'s built-in
-    /// shape, at the granularity the runtime dispatches on. `"?"` for anything unclassified, which
+    /// shape, at the granularity the runtime dispatches on. `None` for anything unclassified, which
     /// matches no row and therefore trips `grant_intrinsic`'s assert (classify it and add its rows
     /// rather than widening this catch-all).
-    fn intrinsic_recv_kind(ty: &Ty) -> &'static str {
+    fn intrinsic_recv_kind(ty: &Ty) -> Option<RecvKind> {
         match ty.scalar() {
-            Ty::Int => "int",
-            Ty::Float => "float",
-            Ty::Bool => "bool",
-            Ty::Str => "str",
-            Ty::Bytes => "bytes",
-            Ty::ByteArray => "bytearray",
-            Ty::Nil => "None",
-            Ty::List(_) => "list",
-            Ty::Map(_, _) => "map",
-            Ty::Set(_) => "set",
-            Ty::Tuple(_) => "tuple",
-            Ty::Struct(..) => "struct",
-            Ty::Enum(..) => "enum",
+            Ty::Int => Some(RecvKind::Int),
+            Ty::Float => Some(RecvKind::Float),
+            Ty::Bool => Some(RecvKind::Bool),
+            Ty::Str => Some(RecvKind::Str),
+            Ty::Bytes => Some(RecvKind::Bytes),
+            Ty::ByteArray => Some(RecvKind::ByteArray),
+            Ty::Nil => None,
+            Ty::List(_) => Some(RecvKind::List),
+            Ty::Map(_, _) => Some(RecvKind::Map),
+            Ty::Set(_) => Some(RecvKind::Set),
+            Ty::Tuple(_) => Some(RecvKind::Tuple),
+            Ty::Struct(n, a) if n == "Iterator" && a.len() == 1 => Some(RecvKind::Cursor),
+            Ty::Struct(..) => Some(RecvKind::Struct),
+            Ty::Enum(..) => Some(RecvKind::Enum),
             // `Option`/`Result` are their OWN `Ty`s but ONE runtime shape with `enum` (`Obj::Enum`);
             // they are kinds of their own here because the ratchet keys the CHECKER's grant set, and
             // the checker distinguishes them.
-            Ty::Option(_) => "option",
-            Ty::Result(..) => "result",
+            Ty::Option(_) => Some(RecvKind::Option),
+            Ty::Result(..) => Some(RecvKind::Result),
             // `BuiltinFn` (`ord`/`chr`/`panic`/first-class `print`) renders identically to `Ty::Func`
             // ("fn(...) -> ..." — see `impl Display for Ty`) and compares by the same runtime
             // identity (`Obj::Builtin` name-equality, `vm/arith.rs`'s `(Obj::Builtin(a),
             // Obj::Builtin(b))` arm); it is a DISTINCT `Ty` variant only for sendability
             // (`docs/syntax.md`: all four universe builtins are sendable, a plain closure is not), so
             // it shares `Ty::Func`'s kind rather than minting a second one (W7-54 follow-up).
-            Ty::Func { .. } | Ty::BuiltinFn { .. } => "func",
+            Ty::Func { .. } | Ty::BuiltinFn { .. } => Some(RecvKind::Func),
             // A protocol EXISTENTIAL — at runtime this is always its concrete witness object, so
             // `.eq()`/`==`/`[T: Eq]` on it defers to whatever the witness's own `eq` dispatch does
             // (structural derive or a declared `eq`), exactly as Go's interface `==` defers to the
             // dynamic type and panics if that type is uncomparable (W7-52). Classified ONLY so the D1
             // `Eq` arm below can grant it — every OTHER protocol row in `INTRINSIC_PROTO_METHODS`
             // still excludes `"protocol"` (no row registered), so this does not widen anything but Eq.
-            Ty::Protocol(..) => "protocol",
+            Ty::Protocol(..) => Some(RecvKind::Protocol),
+            Ty::Channel(_) => Some(RecvKind::Channel),
+            Ty::Shared(_) => Some(RecvKind::Shared),
+            Ty::RwShared(_) => Some(RecvKind::RwShared),
+            Ty::Atomic(_) | Ty::AtomicInt => Some(RecvKind::Atomic),
             Ty::Param(_)
-            | Ty::Channel(_)
-            | Ty::Shared(_)
-            | Ty::Atomic(_)
-            | Ty::AtomicInt
-            | Ty::RwShared(_)
             | Ty::Executor
             | Ty::Socket
             | Ty::Listener
@@ -552,7 +642,7 @@ impl Checker {
             | Ty::Width(_)
             | Ty::Module(_)
             | Ty::Unknown
-            | Ty::Var(_) => "?",
+            | Ty::Var(_) => None,
         }
     }
 
@@ -622,8 +712,8 @@ impl Checker {
             INTRINSIC_PROTO_METHODS
                 .iter()
                 .chain(INTRINSIC_UNPAIRED)
-                .any(|(p, _, k)| *p == protocol && *k == kind),
-            "intrinsic conformance granted for ({protocol}, {kind}) with no row in \
+                .any(|(p, _, k)| *p == protocol && Some(*k) == kind),
+            "intrinsic conformance granted for ({protocol}, {kind:?}) with no row in \
              INTRINSIC_PROTO_METHODS — add the (protocol, method, kind) row AND make the method \
              callable at runtime (`Vm::intrinsic_proto_method`), or register the row in \
              INTRINSIC_UNPAIRED (W6-3)"
@@ -2311,7 +2401,12 @@ impl Checker {
         // (W7-41's actual defect). Its `Some` is the refusal, and **its `None` is this grant**, which
         // is why every "cannot tell" inside it answers `Some`.
         if protocol == "Eq"
-            && !matches!(Self::intrinsic_recv_kind(ty), "?" | "None")
+            && Self::intrinsic_recv_kind(ty).is_some_and(|k| {
+                !matches!(
+                    k,
+                    RecvKind::Channel | RecvKind::Shared | RecvKind::RwShared | RecvKind::Atomic
+                )
+            })
             && !Self::is_cursor_ty(ty)
             && self.hook_method(ty, "Eq", "eq").is_none()
         {
