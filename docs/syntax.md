@@ -266,8 +266,7 @@ PI = 3.0                      # ✗ type error: cannot reassign const binding 'P
 ANSWER += 1                   # ✗ every compound form is caught too
 ```
 
-`xs += ys` on a `const List[int]` is the one exception: it extends the receiver in place (see the
-`+=` note above) rather than rebinding the name, so it's allowed through a `const` binding.
+Every compound form rebinds the name, so a `const List[int]` rejects `xs += ys` too. Extend it in place with `xs.extend(ys)`: `const` is shallow.
 
 - **Shallow.** `const` freezes the binding, not the object it points at. A `const` container's own
   contents stay mutable — only the name can't be rebound:
@@ -848,19 +847,23 @@ Highest → lowest. Same row = same precedence, left-associative unless noted.
 > - `Set[T] | Set[T]` → union (= `.union`), `& ` → intersection (= `.intersection`), `-` → difference
 >   (= `.difference`), `^` → symmetric-difference (no method form). The result preserves insertion order.
 >
-> The compound-assign forms work too, but `+=` is the odd one out: `xs += ys` EXTENDS the receiver
-> **in place** and every alias sees it, matching CPython's `list.__iadd__` — it does not rebind the
-> local to a fresh list. `xs *= n` (list) and the set forms `s |= t` / `s &= t` / `s ^= t` / `s -= t`
-> still build a new collection and rebind, identical to their binary form. That asymmetry is
-> deliberate: `xs + ys` and `xs * n` always copy; only `+=` mutates. Because `xs += ys` never
-> rebinds, it works through a **loop variable** and a `const` binding, where every other compound
-> form (`*=`, or `+=` on a scalar) still rejects the rebind.
+> The compound-assign forms work too, and every one is `x = x OP v`: an operator returns a new
+> value and never mutates an operand (owner rule U15). `xs += ys` builds a new list and rebinds
+> `xs`; an alias taken before the statement keeps its old value. This departs from CPython, whose
+> `list.__iadd__` and `set.__ior__` mutate in place. To change a collection in place, call a method:
+> `xs.push(v)`, `xs.extend(ys)`. A user type's operator hook can still mutate `self`; for user
+> types the rule is a convention, not a check. The checker types `x OP= v` exactly as
+> `x = x OP v`, so a loop variable and a `const` binding reject every compound form, `+=` on a
+> list included, and `int += float` is rejected as `x = 1.5` is.
 >
->     fn add(xs: List[int]):
->         xs += [9]
->     ys := [1]
->     add(ys)
->     print(ys)        # [1, 9] — the caller's list, mutated through the parameter
+>     xs := [1]
+>     ys := xs
+>     xs += [2]
+>     print(ys)        # [1]: `+=` built a new list
+>     s := {1}
+>     t := s
+>     s |= {2}
+>     print(t)         # {1}
 >
 > Plain bitwise (`& ^ | << >>`) on **int** operands is unchanged; `<< >>` are int-only (no set form),
 > and a float operand is still a type error.
@@ -5436,7 +5439,7 @@ for i8`):
 - A **constant** — a literal or a constant expression (`1 << 8`, `127 | (127 + 1)`, `3e38 + 3e38`) —
   is **untyped** until it meets a slot (Go's model, TICKET-225), and outside the slot's range it is a
   **compile error** wherever the slot is a width: extern/fn/method params, struct fields, enum
-  payloads, annotated locals, assignments and `op=`, returns, defaults, closure bodies, `yield`, map
+  payloads, annotated locals, assignments, returns, defaults, closure bodies, `yield`, map
   keys (`m[300] = "a"` on a `Map[int8, str]`), type arguments (`List[int8] = [300]`,
   `int8? = ?300`, `b: Bx[int8] = Bx(300)`), a generic return pinned by the expected type
   (`y: int8 = id(300)`), the branches of `if`/`match` and the right side of `??`:
@@ -5459,7 +5462,7 @@ for i8`):
 
 **A width is a tag on `int`/`float`, not a distinct type.** An `int8` value is usable wherever `int` is;
 arithmetic on width values yields plain `int`/`float`; `List[int8]` and `List[int]` are interchangeable.
-Only a constant flowing into an `int8` slot is checked. Two embedded protocols that require
+Only a constant flowing into an `int8` slot is checked. A compound operand meets no slot: `x += 300` on an `int8` is `x = x + 300`, plain `int` arithmetic (TICKET-258). Two embedded protocols that require
 `m(self, x: int8)` and `m(self, x: int)` conflict (Go: `duplicate method M`).
 
 A **return sign-extends** (signed) or **zero-extends** (unsigned) the C value back to i64: `int32`

@@ -6,6 +6,22 @@ re-stamp this table when the runtime changes. The optimization backlog these num
 justify lives in **[`future.md §4`](future.md)**; the scheduled work is roadmap **M19**
 (`spec.md` / `PROGRESS.md`).
 
+## TICKET-258 — `xs += ys` builds a new list (2026-10-14)
+
+Owner rule U15: `x OP= v` is `x = x OP v`. `Op::AddInPlace` extended the left list in place; it is
+deleted, so a loop of `xs += [i]` copies the list each time and is O(n^2). No fast path is kept:
+the VM has no reference count, so it cannot prove that no alias observes an in-place extend.
+`push` and `extend` are unchanged. `i += 1` and `total += i` still fuse to `IncLocal` and
+`BinLocalLocal{Add}`, so integer loops are unchanged.
+
+Release binaries, base `ea315b1c` against the prototype, 20000 appends, three runs each, load
+average 9.61 (seconds):
+
+| loop | base | branch |
+|---|---|---|
+| `xs += [i]` | 0.0083 to 0.0106 | 0.667 to 0.691 |
+| `ys.push(j)` | 0.0067 to 0.0070 | 0.0066 to 0.0068 |
+
 ## 2026-10-13 — TICKET-253: a range is a value
 
 Release binary, `uptime` load average 6.4 (a cargo test run had just stopped), wall clock of `chezzi run benches/chz/<name>.chz`, five runs each, milliseconds.
