@@ -41490,3 +41490,38 @@ fn bytes_order_and_handles_compare_through_protocols() {
         "import std.concurrency\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nch := Channel[int](1)\nx := same(ch, ch)\n",
     );
 }
+
+/// TICKET-259 (U10) — a type name is never a value. One grid: type-name kind x value position,
+/// every cell the same "is a type, not a value" error.
+#[test]
+fn type_name_is_never_a_value_grid() {
+    let kinds = ["P", "E.V", "str", "int", "float", "bool", "bytes"];
+    let positions = [
+        "print([1, 2].map(T).len())\n",
+        "v := T\n",
+        "fn f():\n    return T\n",
+        "xs := [T]\n",
+        "t := (T, 1)\n",
+        "m := {1: T}\n",
+        "g := fn(e): T\n",
+    ];
+    let mut missed = Vec::new();
+    for kind in kinds {
+        for pos in positions {
+            let body = pos.replace('T', kind);
+            let src = format!("struct P:\n    x: int\nenum E:\n    V(int)\n{body}");
+            let errs = check_src(&src);
+            if !errs
+                .iter()
+                .any(|e| e.message.contains("is a type, not a value"))
+            {
+                missed.push(format!("{kind} in {pos:?}: {errs:?}"));
+            }
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "type name read as a value was not rejected as a type:\n{}",
+        missed.join("\n")
+    );
+}
