@@ -1,2 +1,2 @@
 # rule: primary
-print(1 + recover: 1)
+print(?1 == recover: 1)

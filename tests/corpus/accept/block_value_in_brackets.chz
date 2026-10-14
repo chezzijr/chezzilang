@@ -3,7 +3,10 @@ fn f(y: int = 2, x: int = match 1:
         1: 5
         _: 6) -> int:
     return x + y
-print(f(fn(z): match z:
+fn app(g: fn(int) -> int) -> int:
+    return g(1)
+print(f())
+print(app(fn(z): match z:
     1: 5
     _: 6
 ))

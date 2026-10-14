@@ -7,12 +7,13 @@ fn f(n: int) -> int:
         _: o()
     else:
         return 7
-    y := recover:
-        1 / 0
+    y := match n:
+        1: o()
+        _: o()
     else:
         return 8
     recover:
-        1 / 0
+        print(1 / 0)
     else e:
         return 9
     return x + y

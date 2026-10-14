@@ -208,7 +208,7 @@ const WHERE_BOUND: &str = "a `where` entry needs a bound (`where T: Proto`)";
 const TYPE_LIST_HEAD: &str = "a type list in brackets needs a name before the '[' (`Name[T, U]`); on any other value '[' takes one index";
 
 /// Each position where a whole value starts, and so where a block expression may start (rule U8).
-/// [`Parser::parse_value`] is the only way to open one; a position that is not listed here rejects a
+/// [`Parser::open_value`] is the only way to open one (`parse_value` and `parse_fn` call it); a position that is not listed here rejects a
 /// block expression with [`BLOCK_VALUE`]. The grid test `tests/block_value_position_grid.rs` writes
 /// one row per variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2145,7 +2145,7 @@ impl Parser {
         // An inline body is one statement; a body that starts with `if` or `match` is an expression
         // statement (`parse_stmt_in`), and the first body token starts a whole value.
         if inline {
-            self.value_start = Some(self.pos + 1);
+            self.open_value(ValueSite::FnBody, self.pos + 1);
         }
         let body = self.parse_block()?;
         let is_generator = body_contains_yield(&body);
@@ -4381,9 +4381,15 @@ impl Parser {
 
     /// Parse an expression that starts a whole value at `_site`: the one place a block expression may
     /// start ([`Parser::block_ok`]).
-    fn parse_value(&mut self, _site: ValueSite) -> PResult<Expr> {
-        self.value_start = Some(self.pos);
+    fn parse_value(&mut self, site: ValueSite) -> PResult<Expr> {
+        self.open_value(site, self.pos);
         self.parse_expr()
+    }
+
+    /// Mark the token at `at` as the start of a whole value at `site`: the one writer of
+    /// `value_start`. `parse_fn` calls it for an inline body, whose first token is not `self.pos`.
+    fn open_value(&mut self, _site: ValueSite, at: usize) {
+        self.value_start = Some(at);
     }
 
     /// May the block expression whose keyword is the token at `kw` start here? Only the token where a

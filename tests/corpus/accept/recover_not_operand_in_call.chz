@@ -1,2 +1,0 @@
-# rule: primary
-print(not recover: true)

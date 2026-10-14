@@ -1,7 +1,6 @@
 # rule: recoverBlock
 fn main():
-    r := recover:
-        [1, 2][9]
+    r := recover: [1, 2][9]
     match r:
         ?v: print(v)
         !e: print(e.message())

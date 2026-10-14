@@ -14,9 +14,9 @@ fn g(n: int) -> Iterator[int]:
     yield match n:
         1: 10
         _: 20
-fn r() -> int!Error:
+fn r() -> !:
     return recover:
-        1 / 0
+        print(1)
 struct S:
     a: int = match n:
         1: 10

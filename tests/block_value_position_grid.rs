@@ -174,6 +174,18 @@ fn rows() -> Vec<Row> {
         ("tuple element", &["primary"], 0, "t := ({F}, 1)\n"),
         ("map value", &["mapEntry"], 0, "m := {\"a\": {F}}\n"),
         ("parenthesized value", &["primary"], 0, "y := ({F})\n"),
+        (
+            "interpolation hole",
+            &["primary"],
+            0,
+            "print(\"{({F})}\")\n",
+        ),
+        (
+            "interpolation hole in a value",
+            &["primary"],
+            0,
+            "y := \"{({F})}\"\nprint(y)\n",
+        ),
         ("binary operand", &["primary"], 0, "y := 1 + {F}\n"),
         ("prefix operand", &["primary"], 0, "y := -{F}\n"),
         ("index", &["subscript"], 0, "y := xs[{F}]\n"),

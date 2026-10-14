@@ -6,12 +6,11 @@ a := match n:
 h := fn(): match n:
     1: 10
     _: 20
-i := match n:
+i: int! = match n:
     1: match n:
         1: 7
         _: 8
-    _: recover:
-        1 / 0
+    _: recover: 1 / 0
 j := ?1 == recover: 1
 k := fn(): fn(): match n:
     1: 10
@@ -20,6 +19,8 @@ fn f(x: int = match 1:
         1: 5
         _: 6) -> int:
     return x
+fn map_all(g: fn(int) -> int) -> int:
+    return g(1)
 print(map_all(fn(y): match y:
     1: 5
     _: 6
