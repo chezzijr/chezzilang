@@ -1,0 +1,145 @@
+# tests/chz/spec/builtin_protocols_test.chz — builtin types satisfy the protocol of every operator
+# they accept (TICKET-257, owner rule U5): the operator form and the bound form agree.
+import std.concurrency
+
+fn has_i[C: Contains[int]](c: C, e: int) -> bool:
+    return e in c
+
+fn has_b[C: Contains[bytes]](c: C, e: bytes) -> bool:
+    return e in c
+
+fn has_ba[C: Contains[bytearray]](c: C, e: bytearray) -> bool:
+    return e in c
+
+fn add[T: Add](a: T, b: T) -> T:
+    return a + b
+
+fn sub[T: Sub](a: T, b: T) -> T:
+    return a - b
+
+fn orr[T: BitOr](a: T, b: T) -> T:
+    return a | b
+
+fn same[T: Eq](a: T, b: T) -> bool:
+    return a == b
+
+fn show[T: Stringable](x: T) -> str:
+    return x.str()
+
+fn lt[T: Comparable](a: T, b: T) -> bool:
+    return a < b
+
+fn fill(ch: Channel[int], n: int, m: int):
+    i := 0
+    while i < n:
+        ch.send(i % m)
+        i += 1
+    ch.close()
+
+struct Flags:
+    n: int
+    fn bitor(self, other: Self) -> Self:
+        return Flags(self.n + other.n)
+
+test fn bytes_concat_and_order():
+    assert b"a" + b"b" == b"ab"
+    assert bytearray(b"a") + b"b" == bytearray(b"ab")
+    assert b"a" < b"b"
+    assert bytearray(b"a") < bytearray(b"b")
+    assert not (b"b" < b"a")
+
+test fn bytes_membership_takes_an_int_byte_or_a_subsequence():
+    assert 98 in b"abc"
+    assert 98 in bytearray(b"abc")
+    assert b"b" in b"abc"
+    assert bytearray(b"b") in b"abc"
+    assert b"bc" in bytearray(b"abc")
+    assert not (b"ac" in b"abc")
+    assert not (120 in b"abc")
+    assert b"" in b"abc"
+
+test fn bytes_membership_bound_forms():
+    assert has_i(b"abc", 98)
+    assert has_b(bytearray(b"abc"), b"bc")
+    assert has_ba(b"abc", bytearray(b"b"))
+    assert not has_b(b"abc", b"ac")
+
+test fn int_in_a_float_list_follows_equality():
+    assert 1 in [1.0]
+    assert [1.0].contains(1)
+    assert not (3 in [1.0])
+
+test fn set_and_map_contains():
+    assert {1, 2}.contains(1)
+    assert {"a": 1}.contains("a")
+    assert not {"a": 1}.contains("b")
+
+test fn builtin_types_satisfy_add_and_sub_bounds():
+    assert add("a", "b") == "ab"
+    assert add([1], [2]) == [1, 2]
+    assert add(b"a", b"b") == b"ab"
+    assert sub({1, 2}, {2}) == {1}
+    assert add(1, 2) == 3
+
+test fn bit_operator_protocols():
+    assert orr({1}, {2}) == {1, 2}
+    assert orr(1, 2) == 3
+    assert (Flags(1) | Flags(2)).n == 3
+    assert orr(Flags(3), Flags(4)).n == 7
+
+test fn handles_and_cursors_are_eq_by_identity():
+    ch := Channel[int](1)
+    other := Channel[int](1)
+    assert same(ch, ch)
+    assert not same(ch, other)
+    it := [1, 2].iter()
+    assert same(it, it)
+
+test fn every_kind_is_stringable():
+    assert show([1, 2]) == "[1, 2]"
+    assert show({"a": 1}) == str({"a": 1})
+    assert show((1, "x")) == str((1, "x"))
+    assert show(Flags(1)) == str(Flags(1))
+
+test fn bytes_and_str_are_comparable_through_the_bound():
+    assert lt("a", "b")
+    assert lt(b"a", b"b")
+    assert lt(bytearray(b"a"), bytearray(b"b"))
+
+test fn comprehension_over_a_closed_channel():
+    ch := Channel[int](4)
+    ch.send(1)
+    ch.send(2)
+    ch.close()
+    assert [v * 10 for v in ch] == [10, 20]
+
+test fn list_of_a_channel_drains_until_it_is_closed():
+    ch := Channel[int](1)
+    n := 0
+    parallel:
+        spawn fill(ch, 50, 1000)
+        n = List(ch).len()
+    assert n == 50
+
+test fn set_of_a_rendezvous_channel():
+    ch := Channel[int](0)
+    got := Set([9])
+    parallel:
+        spawn fill(ch, 20, 3)
+        got = Set(ch)
+    assert got == {0, 1, 2}
+
+test fn list_of_a_closed_empty_channel_is_empty():
+    ch := Channel[int](1)
+    ch.close()
+    assert List(ch) == []
+
+test fn two_names_destructure_a_channel_of_tuples():
+    ch := Channel[(int, str)](2)
+    ch.send((1, "x"))
+    ch.close()
+    seen := 0
+    for n, s in ch:
+        assert s == "x"
+        seen += n
+    assert seen == 1
