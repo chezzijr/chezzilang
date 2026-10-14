@@ -1467,9 +1467,9 @@ fn getf() -> fn(int) -> int:
 ```
 
 **Path values (Rust's rule, TICKET-204).** A type path is a value when it names something callable:
-a payload variant (a constructor fn), a static method, and an instance method named through its type
+a static method and an instance method named through its type
 (the receiver is the first argument, keyword `self`), at any type-argument arity, bare, imported or
-module-qualified. An alias head pins its own type arguments; one that fixes them takes no more
+module-qualified. A payload variant is no path value: see rule U10 below. An alias head pins its own type arguments; one that fixes them takes no more
 (`type BI = Bx[int]`: `BI[str].make`, `x: BI[str]` → *already fixes its type arguments*). A call
 through a path is the path's value applied (`P.get(p)`, `(Bx[int].get)(b)`), and a caller's type
 parameter pins a generic fn value like a concrete type: inside `fn o[U]`, `h: fn(U) -> U = ident`,
@@ -1477,7 +1477,6 @@ parameter pins a generic fn value like a concrete type: inside `fn o[U]`, `h: fn
 accept, whatever `ident`'s own parameter is spelled (TICKET-210).
 
 ```chezzi
-f := R1[int].L                       # fn(int) -> R1[int]
 m := Bx[int].make                    # fn(int) -> Bx[int]
 g := Bx[int].get   # g(b): the receiver is the first argument
 type B = Bx[int]
@@ -1488,8 +1487,34 @@ Three paths are refused, each with its own message: a bound method `b.get` (`a b
 a value`), a type `Bx[int]` (`'Bx' is a type, not a value — constructors are not values`), and a
 protocol method `Show.show` (`a protocol method is not a value`). A reserved native handle's method
 (`io.Reader.close`) is not a value either (`a native method is not a value`): it has no compiled body
-to point at. A bare generic path nothing pins (`f := R1.L`) is the same `not determined here` error
-as `g := ident`.
+to point at.
+
+**A type name is never a value (U10, TICKET-259).** A struct, an enum, a protocol, an alias of any
+type, a payload variant and a builtin type name (`int`, `str`, `List`, `Shared`, `int32`, `Self`)
+are types. Each one read in value position gives one error. Rust and CPython accept a constructor as a
+value; Chezzi does not, by owner decision. Call the constructor, or wrap it in a closure:
+
+```chezzi
+struct P:
+    x: int
+enum E:
+    V(int)
+    A
+[1, 2].map(P)                  # error: 'P' is a type, not a value
+[1, 2].map(E.V)                # error: 'E.V' is a type, not a value
+[1, 2].map(str)                # error: 'str' is a type, not a value
+[1, 2].map(fn(e): E.V(e))      # ok: [V(1), V(2)]
+```
+
+The message for a name that has a constructor reads `'E.V' is a type, not a value — constructors are
+not values: call it (`E.V(…)`) or wrap it in a closure (`fn(e): E.V(e)`)`. An alias of any type
+(`type C = int`) and a builtin type give the same error. These stay values: a payload-less variant
+(`E.A`), a top-level fn, a method through its type (`P.mk`), a lambda and a nested fn.
+
+Ancestors, measured 2026-10-15. Rust 1.98.1: `[1, 2].map(E::V)` prints `[V(1), V(2)]` and
+`[1, 2].map(P)` prints `[P(1), P(2)]`. CPython 3.14.7: `len(list(map(P, [1, 2])))` prints `2` and
+`list(map(str, [1, 2]))` prints `['1', '2']`. Both accept a constructor as a value; Chezzi does not,
+by owner decision.
 
 The pin is checked strictly: an **unsatisfiable** target (`g: fn(str) -> int = ident` — `ident` can't be
 both) is a type error, a **bound violation** (`addone[str]` where `str` is not `Add`) is rejected, a
