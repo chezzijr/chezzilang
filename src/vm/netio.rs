@@ -2540,7 +2540,7 @@ impl Vm {
         // sched worker's judge shares. The latched verdict is a run halt, so this party ends through
         // `run_exit_err` with the report of the first registered party's site, whichever judge
         // decided first.
-        if self.block_ctx().judged() && self.quiesce.decide(quiesce::Judge::Party, None) {
+        if self.block_ctx().judged() && self.quiesce.decide(quiesce::Judge::Party).stands() {
             // TICKET-134 — the child can record its fault and complete between the rung above and
             // this verdict. A verdict that saw the nursery complete took the SchedCore lock after the
             // child's fault-slot write, so this re-read sees the fault.

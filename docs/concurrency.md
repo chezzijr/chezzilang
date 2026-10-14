@@ -507,10 +507,12 @@ c := bch.cap()             # capacity: 2 here; 0 for a rendezvous Channel[T](0);
   `MnSched::latch_own_verdict`: it latches the verdict first, then faults the parked tasks. Before,
   five sites faulted the tasks with no latch. A faulted task unwound and freed the `Shared` guard
   it held, main took the guard and ran on: `print("AFTER")` ran past the deadlock in 27 to 67 of
-  600 runs (`tests/deadlock_verdict_stress.rs`). The latched report of a scheduler's own verdict is
-  that scheduler's text (`deadlock: every task in this parallel: block is blocked …` at the block),
-  not the waiting party's site: main ends with the child's fault or with the latched report,
-  whichever it reads first, and the two are now one text. A wait registers as a blocked party
+  600 runs (`tests/deadlock_verdict_stress.rs`). The latched report is the first blocked party's
+  own site, whichever judge decides first (TICKET-256, owner decision 2026-10-14): a `parallel:`
+  body that waits at `s.update` reports `update guard wait: deadlock …` at that line, and the
+  `parallel:` line reports only when the body waits at the join. The scheduler writes the same
+  report into the tasks it faults, so main ends with one text whichever it reads first. Go
+  agrees: its trace lists main at its `Lock` first, and nothing after the lock runs. A wait registers as a blocked party
   before it marks its body blocked, so a judge never sees a blocked body with no party.
 
   **Every blocked thing is asked, and a verdict stands only inside one epoch (TICKET-236).** Two

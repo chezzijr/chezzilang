@@ -4287,7 +4287,8 @@ impl MnSched {
                 let e0 = self.quiesce.left();
                 let verdict = self
                     .quiesce
-                    .decide_since(e0, crate::vm::quiesce::Judge::Sched, None);
+                    .decide_since(e0, crate::vm::quiesce::Judge::Sched)
+                    .stands();
                 c = self.lock();
                 if verdict && self.is_deadlocked_ignoring_jobs(&c) && self.quiesce.left() == e0 {
                     // TICKET-103 — same leaf-first flag as above. TICKET-129 — same declined-verdict
@@ -4478,7 +4479,8 @@ impl MnSched {
     /// never spin (a bare `continue` here would busy-loop on the same unproven verdict).
     fn flag_leaves_and_wake(&self, c: &mut SchedCore) -> Option<bool> {
         let ok = c.victims_proven() || self.may_fault_unproven();
-        let done = c.flag_deadlock_leaves(&self.deadlock_err, ok)?;
+        let err = self.verdict_err();
+        let done = c.flag_deadlock_leaves(&err, ok)?;
         if !done {
             self.wake_completed_joins(c);
         }
@@ -5523,15 +5525,17 @@ impl MnSched {
     /// 1. the verdict and its licence, under the sched lock. If either fails, or a waker left
     ///    the counts since `e0`, nothing is latched. A latch never un-latches (DEC-232), so a
     ///    verdict latched ahead of a licence that then declined halted a healthy run.
-    /// 2. [`quiesce::QuiesceState::decide_since`], with this sched's own report: the verdict is
+    /// 2. [`quiesce::QuiesceState::decide_since`], which latches the first party's site: the verdict is
     ///    a run halt before any victim is cut (DEC-232). A flagged leaf unwinds and frees what it
     ///    holds, and a party that then takes it (a ready wait outranks a halt, DEC-194) is
     ///    stopped by the halt.
     /// 3. the verdict, the licence and the epoch again under a fresh lock; the guard is handed
     ///    back when all three still hold.
     ///
-    /// The answer of `decide_since` is not read: a party inside a callback is never registered
-    /// (`BlockCtx::judged`), so a strict judge would hang its deadlock.
+    /// `Declined` is not read: a party inside a callback is never registered (`BlockCtx::judged`),
+    /// so a strict judge would hang its deadlock. `Held` returns `None`: the test pin gives the
+    /// first decision to the party judge, and a cut here would free a guard before any verdict is
+    /// latched (TICKET-256).
     fn latch_own_verdict(
         &self,
         licence: impl Fn(&SchedCore) -> bool,
@@ -5545,13 +5549,25 @@ impl MnSched {
                 return None;
             }
         }
-        self.quiesce.decide_since(
-            e0,
-            crate::vm::quiesce::Judge::Sched,
-            Some((&self.deadlock_err.message, self.deadlock_err.span)),
-        );
+        match self
+            .quiesce
+            .decide_since(e0, crate::vm::quiesce::Judge::Sched)
+        {
+            crate::vm::quiesce::Decision::Held => return None,
+            crate::vm::quiesce::Decision::Stands | crate::vm::quiesce::Decision::Declined => {}
+        }
         let c = self.lock();
         holds(&c).then_some(c)
+    }
+
+    /// TICKET-256 — the fault this sched writes into a victim: the latched report when a verdict
+    /// is latched (the first blocked party's own site), else this sched's `deadlock_err`. Takes the
+    /// `deadlock` cell under the caller's `SchedCore` lock, the order `run_halt` already uses.
+    pub(super) fn verdict_err(&self) -> RuntimeError {
+        match self.quiesce.deadlock_report() {
+            Some((msg, span)) => self.deadlock_err.at_site(&msg, span),
+            None => self.deadlock_err.clone(),
+        }
     }
 
     /// TICKET-232 — a wait that detects this sched's deadlock in place: latch the verdict
@@ -5560,7 +5576,8 @@ impl MnSched {
     /// wait calls this, never `SchedCore::flag_deadlock`.
     pub(super) fn fault_own_deadlock(&self) {
         if let Some(mut c) = self.latch_own_verdict(|_| true) {
-            c.flag_deadlock(&self.deadlock_err);
+            let err = self.verdict_err();
+            c.flag_deadlock(&err);
             drop(c);
             self.notify_waiters();
         }
