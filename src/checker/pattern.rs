@@ -1,8 +1,8 @@
 // checker::pattern — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Pattern / match-arm binding and or-pattern consistency.
 
-use super::resolve::PathPos;
-use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
+use super::resolve::{BUILTIN_CALLEES, PathPos};
+use super::setup::{HeadBinding, TypeHead, TypeHeadKind, TypeRead};
 use super::*;
 use crate::ast::CarrierTag;
 use crate::ast::consteval;
@@ -3309,7 +3309,6 @@ impl Checker {
             Some(
                 r @ (Resolution::Fn { .. }
                 | Resolution::MethodFn { .. }
-                | Resolution::VariantFn { .. }
                 | Resolution::ParamMethodFn { .. }),
             ) => {
                 let pf = self.path_fn(head)?;
@@ -3443,9 +3442,14 @@ impl Checker {
                 };
                 Some(Ty::enum_ty(key, args))
             }
-            Some(Resolution::MethodFn { .. } | Resolution::VariantFn { .. }) => {
+            Some(Resolution::MethodFn { .. }) => {
                 let pf = self.type_member_fn(&th, head_args, name)?;
                 Some(self.path_fn_value_ty(obj.id, pf, None, name_span))
+            }
+            // U10: a payload variant is a constructor, never a value.
+            Some(Resolution::VariantFn { .. }) => {
+                self.type_not_value(&TypeRead::Variant(format!("{spelled}.{name}")), name_span);
+                Some(Ty::Unknown)
             }
             // A miss on an enum: no such variant. A struct's miss reads `obj` as a value below,
             // which reports the type.
@@ -3469,23 +3473,39 @@ impl Checker {
     }
 
     /// The one message for a type name read as a value, bare, imported, qualified or type-applied
-    /// (TICKET-204). It decides nothing about the head; it formats from `th`.
-    fn type_not_value(&mut self, th: &TypeHead, span: Span) {
-        let spelled = &th.spelled;
-        let msg = if th.native_handle {
-            format!("'{spelled}' is a type, not a value")
-        } else {
-            match th.kind {
-                TypeHeadKind::Struct => format!(
-                    "'{spelled}' is a type, not a value — constructors are not values: call it \
-                      (`{spelled}(…)`) or wrap it in a closure"
-                ),
-                TypeHeadKind::Enum => format!(
-                    "'{spelled}' is a type, not a value — use one of its variants \
-                      (`{spelled}.<Variant>`)"
-                ),
-                TypeHeadKind::Protocol => format!("'{spelled}' is a protocol, not a value"),
+    /// (TICKET-204, U10). It decides nothing about the name; it formats from `read`.
+    fn type_not_value(&mut self, read: &TypeRead, span: Span) {
+        let ctor = |s: &str| {
+            format!(
+                "'{s}' is a type, not a value — constructors are not values: call it \
+                  (`{s}(…)`) or wrap it in a closure (`fn(e): {s}(e)`)"
+            )
+        };
+        let msg = match read {
+            TypeRead::Head(th) if th.native_handle => {
+                format!("'{}' is a type, not a value", th.spelled)
             }
+            TypeRead::Head(th) => {
+                let spelled = &th.spelled;
+                match th.kind {
+                    TypeHeadKind::Struct => ctor(spelled),
+                    TypeHeadKind::Enum => format!(
+                        "'{spelled}' is a type, not a value — use one of its variants \
+                          (`{spelled}.<Variant>`)"
+                    ),
+                    TypeHeadKind::Protocol => {
+                        format!(
+                            "'{spelled}' is a type, not a value — a protocol has no constructor"
+                        )
+                    }
+                }
+            }
+            TypeRead::Variant(s) => ctor(s),
+            TypeRead::Builtin(n) if BUILTIN_CALLEES.contains(&n.as_str()) => ctor(n),
+            TypeRead::Alias(s) | TypeRead::Builtin(s) => {
+                format!("'{s}' is a type, not a value")
+            }
+            TypeRead::SelfType => "'Self' is a type, not a value".to_string(),
         };
         self.error(span, msg);
     }
@@ -3732,14 +3752,15 @@ impl Checker {
         if let Resolution::Variant { enum_key, .. } = &res {
             return self.enum_ty_unknown_args(enum_key);
         }
-        if let Resolution::VariantFn { .. } = res
-            && let Some(pf) = self.path_fn(e)
-        {
-            return self.path_fn_value_ty(e.id, pf, None, span);
-        }
-        // A type name read as a value (`f := Box`, TICKET-204).
-        if let Some(th) = self.bare_type_head(name) {
-            self.type_not_value(&th, span);
+        // A type name read as a value (`f := Box`, TICKET-204; U10: a payload variant, an alias of
+        // any body and a builtin type too).
+        let read = if let Resolution::VariantFn { .. } = res {
+            Some(TypeRead::Variant(name.to_string()))
+        } else {
+            self.bare_type_read(name)
+        };
+        if let Some(read) = read {
+            self.type_not_value(&read, span);
             return Ty::Unknown;
         }
         // A bare user-variant name used as a value (`Red`, `Leaf`) is no longer allowed — variants are
@@ -5035,9 +5056,9 @@ impl Checker {
                     Some(Some(ty)) => ty,
                     _ => {
                         if let ExprKind::Ident(m) = &obj.kind
-                            && let Some(th) = self.qualified_type_head(m, name)
+                            && let Some(read) = self.qualified_type_read(m, name)
                         {
-                            self.type_not_value(&th, name_span);
+                            self.type_not_value(&read, name_span);
                         } else {
                             let names = self.module_member_names(mname);
                             self.error_help(
@@ -5122,7 +5143,7 @@ impl Checker {
                 )
                 .is_some()
             {
-                self.type_not_value(&th, e.span);
+                self.type_not_value(&TypeRead::Head(th), e.span);
             }
             return Ty::Unknown;
         }

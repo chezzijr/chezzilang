@@ -88,6 +88,21 @@ pub(super) struct TypeHead {
     pub native_handle: bool,
 }
 
+/// U10 (TICKET-259): the type a name read in value position names.
+#[derive(Debug, Clone)]
+pub(super) enum TypeRead {
+    /// A struct, enum or protocol, a native handle, or a nominal alias of one.
+    Head(TypeHead),
+    /// An alias of any other body (`type C = int`), spelled as written.
+    Alias(String),
+    /// A payload variant, spelled as written (`E.V`, `V`): a constructor, never a value.
+    Variant(String),
+    /// A builtin type name (`BuiltinType`, a `std.ffi` type).
+    Builtin(String),
+    /// `Self` inside an inherent method.
+    SelfType,
+}
+
 impl Checker {
     pub(super) fn new() -> Self {
         let mut c = Checker {
@@ -3039,6 +3054,39 @@ impl Checker {
             pinned: None,
             native_handle: false,
         })
+    }
+    /// U10: THE answer to "does bare `name`, read as a value, name a type". An alias is a type
+    /// whatever its body; `Self` is the enclosing type of an inherent method.
+    pub(super) fn bare_type_read(&self, name: &str) -> Option<TypeRead> {
+        if let Some(th) = self.bare_type_head(name) {
+            return Some(TypeRead::Head(th));
+        }
+        if self.head_hides_type(name) {
+            return None;
+        }
+        if self.aliases.contains_key(name) || self.imported_alias_tys.contains_key(name) {
+            return Some(TypeRead::Alias(name.to_string()));
+        }
+        if name == "Self" && self.current_self_ty.is_some() {
+            return Some(TypeRead::SelfType);
+        }
+        is_builtin_type_name(name).then(|| TypeRead::Builtin(name.to_string()))
+    }
+    /// U10: the `module.Name` half of [`Checker::bare_type_read`]: a type the whole-module import
+    /// declares, else an exported alias of any body.
+    pub(super) fn qualified_type_read(&self, module: &str, name: &str) -> Option<TypeRead> {
+        if let Some(th) = self.qualified_type_head(module, name) {
+            return Some(TypeRead::Head(th));
+        }
+        if self.head_is_value(module) {
+            return None;
+        }
+        let mid = self.imported_modules.get(module)?;
+        self.module_sigs
+            .get(mid)?
+            .type_aliases
+            .contains_key(name)
+            .then(|| TypeRead::Alias(format!("{module}.{name}")))
     }
     /// The `module.Name` half of [`Checker::type_head`]: a type the whole-module import `module`
     /// declares, else an exported alias of one.

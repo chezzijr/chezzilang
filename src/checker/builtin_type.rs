@@ -181,3 +181,8 @@ impl BuiltinType {
         }
     }
 }
+
+/// U10: a `BuiltinType` or a type `std.ffi` declares (`ptr`, the widths).
+pub(crate) fn is_builtin_type_name(name: &str) -> bool {
+    BuiltinType::from_name(name).is_some() || crate::native::ffi::is_declared_type(name)
+}

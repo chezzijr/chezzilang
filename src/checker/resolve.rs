@@ -16,7 +16,7 @@ use super::setup::{HeadBinding, TypeHeadKind};
 use super::*;
 
 /// The builtin constructors and fns a bare call names (`infer_named_call`'s builtin arms).
-const BUILTIN_CALLEES: &[&str] = &[
+pub(super) const BUILTIN_CALLEES: &[&str] = &[
     "print",
     "panic",
     "range",

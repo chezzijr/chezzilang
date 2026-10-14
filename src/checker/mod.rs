@@ -18,7 +18,7 @@ use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-pub(crate) use builtin_type::BuiltinType;
+pub(crate) use builtin_type::{BuiltinType, is_builtin_type_name};
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,

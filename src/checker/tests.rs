@@ -41581,8 +41581,10 @@ enum F:
         }
     }
 
-    // `Self` is a type inside an inherent method body.
-    for pos in positions {
+    // `Self` is a type inside an inherent method body. A nested fn body resets it
+    // (`check_fn_body` sets `current_self_ty` to `None`), so `x: Self` there is `unknown type`
+    // too and the `fn f():` position is no cell.
+    for pos in positions.iter().filter(|p| !p.starts_with("fn f()")) {
         let indented: String = pos
             .replace('T', "Self")
             .lines()
