@@ -2200,7 +2200,7 @@ fn compound_div_rejects_float_into_int_slot() {
     // `/=` inherits the true-division rule: `int /= float` would widen to float — rejected for an int slot.
     rejects(
         "fn main():\n    x: int = 5\n    x /= 2.0\nmain()\n",
-        "cannot apply",
+        "cannot assign float to int",
     );
 }
 
@@ -7638,7 +7638,7 @@ fn assign_to_undeclared_rejected() {
 
 #[test]
 fn plus_eq_on_bool_rejected() {
-    rejects("x := true\nx += 1\n", "cannot apply += to bool and int");
+    rejects("x := true\nx += 1\n", "cannot apply + to bool and int");
 }
 
 #[test]
@@ -7650,19 +7650,19 @@ fn typed_let_ok() {
 
 #[test]
 fn plus_eq_float_into_int_var_rejected() {
-    rejects("x: int = 5\nx += 1.5\n", "cannot apply += to int and float");
+    rejects("x: int = 5\nx += 1.5\n", "cannot assign float to int");
 }
 
 #[test]
 fn minus_eq_float_into_int_var_rejected() {
-    rejects("x: int = 5\nx -= 1.5\n", "cannot apply -= to int and float");
+    rejects("x: int = 5\nx -= 1.5\n", "cannot assign float to int");
 }
 
 #[test]
 fn plus_eq_float_into_int_index_rejected() {
     rejects(
         "xs := [1, 2, 3]\nxs[0] += 1.5\n",
-        "cannot apply += to int and float",
+        "cannot assign float to int",
     );
 }
 
@@ -7670,7 +7670,7 @@ fn plus_eq_float_into_int_index_rejected() {
 fn plus_eq_float_into_int_field_rejected() {
     rejects(
         "struct P:\n    x: int\np := P(1)\np.x += 1.5\n",
-        "cannot apply += to int and float",
+        "cannot assign float to int",
     );
 }
 
@@ -10058,7 +10058,7 @@ fn set_compound_assign_ops_ok() {
 fn list_plus_eq_mismatched_element_rejected() {
     rejects(
         "xs := [1, 2]\nxs += [\"a\"]\n",
-        "cannot apply += to List[int] and List[str]",
+        "cannot apply + to List[int] and List[str]",
     );
 }
 
@@ -10066,7 +10066,7 @@ fn list_plus_eq_mismatched_element_rejected() {
 fn set_pipe_eq_mismatched_element_rejected() {
     rejects(
         "a: Set[int] = {1}\nb: Set[str] = {\"a\"}\na |= b\n",
-        "bitwise operator |= requires int operands or two sets",
+        "bitwise operator | requires int operands or two sets",
     );
 }
 
@@ -23742,7 +23742,7 @@ fn nested_width_reads_as_its_scalar() {
 /// arguments, literals and branches included; its in-range neighbours check clean. Go, run 2026-10-06:
 /// `cannot use 300 (untyped int constant) as int8 value in variable declaration (overflows)`, and the
 /// same for argument, return, array/slice, map and struct literals; Rust: `literal out of range for
-/// `i8`` for `Some(300)`, `if c { 300 } else { 1 }` and `x += 300`.
+/// `i8`` for `Some(300)` and `if c { 300 } else { 1 }`.
 #[test]
 fn ffi_width_constant_grid() {
     use crate::native::cffi::{CType, width_ctype};
@@ -23783,8 +23783,8 @@ fn ffi_width_constant_grid() {
         "o: int? = None\nx: {w} = o ?? {k}\n",
         "ffi.store_{w}(ffi.null(), {k})\n",
     ];
-    // Integer-only: compound assignment and `Set` (a float is not Hashable).
-    let int_sites: &[&str] = &["x: {w} = 0\nx += {k}\n", "s := Set[{w}]([{k}])\n"];
+    // Integer-only: `Set` (a float is not Hashable). A compound operand meets no slot (TICKET-258).
+    let int_sites: &[&str] = &["s := Set[{w}]([{k}])\n"];
     let mut red: Vec<String> = Vec::new();
     for d in crate::native::ffi::declared_types() {
         if d.scalar.is_none() {
@@ -27214,7 +27214,7 @@ fn compound_assign_rejected_no_overload() {
     // Struct with no `add` → `a += W(..)` rejected (mirrors `a = a + W(..)` failing).
     entry_rejects(
         "struct W:\n    x: int\nfn main():\n    a := W(1)\n    a += W(2)\nmain()\n",
-        "cannot apply +=",
+        "cannot apply + to",
     );
 }
 
@@ -27223,7 +27223,7 @@ fn compound_assign_rejected_heterogeneous() {
     // `V += int` where `V + int` is a type error → still rejected.
     entry_rejects(
         "struct V:\n    x: int\n    fn add(self, other: V) -> V:\n        return V(self.x + other.x)\nfn main():\n    a := V(1)\n    a += 5\nmain()\n",
-        "cannot apply +=",
+        "cannot apply + to",
     );
 }
 
@@ -28154,20 +28154,18 @@ s := S([\"a\", \"b\"])
 
 #[test]
 fn index_set_incoherent_rejected() {
-    // Exactly ONE error, and it names the incoherence (no "cannot apply += to str and int" cascade,
-    // no bogus "index must be int" from the not-indexable path).
+    // TICKET-258 (U15): `s[0] += 1` is `s[0] = s[0] + 1`, so the error is the desugar's. Exactly ONE
+    // error (no bogus "index must be int" from the not-indexable path).
     let errs = check_entry(&format!("{INCOHERENT_V}s[0] += 1\n"));
     assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
     assert!(
-        errs[0]
-            .message
-            .contains("does not satisfy IndexSet (index returns str but set_index's val is int)"),
+        errs[0].message.contains("cannot apply + to str and int"),
         "unexpected error: {errs:?}"
     );
-    // K mismatch is a compound-path incoherence too: the read keys by int, the write-back by str.
+    // K mismatch: the write-back keys by str, so the int key meets `set_index`'s key as `=` does.
     entry_rejects(
         "struct S:\n    d: List[str]\n    fn index(self, k: int) -> str:\n        return self.d[k]\n    fn set_index(self, k: str, v: str):\n        print(\"set {v}\")\ns := S([\"a\", \"b\"])\ns[0] += \"x\"\n",
-        "does not satisfy IndexSet (index's key is int but set_index's key is str)",
+        "index must be str, found int",
     );
     // A NON-int key routes through the same arm — no spurious "index must be int" companion.
     let errs = check_entry(
@@ -28175,9 +28173,18 @@ fn index_set_incoherent_rejected() {
     );
     assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
     assert!(
-        errs[0].message.contains("does not satisfy IndexSet"),
+        errs[0].message.contains("cannot apply + to str and int"),
         "unexpected error: {errs:?}"
     );
+}
+
+// TICKET-258 (U15): the compound path types `x OP v` from `index`'s return and stores the result
+// through `set_index`'s `val`, exactly as the desugar does. No compound-only coherence rule exists.
+#[test]
+fn index_set_split_pair_compound_equals_its_desugar() {
+    let pair = "struct S:\n    f: float\n    fn index(self, k: int) -> int:\n        return int(self.f)\n    fn set_index(self, k: int, v: float):\n        self.f = v\ns := S(1.0)\n";
+    entry_ok(&format!("{pair}s[0] = s[0] + 1.5\n"));
+    entry_ok(&format!("{pair}s[0] += 1.5\n"));
 }
 
 #[test]

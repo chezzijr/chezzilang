@@ -4581,54 +4581,39 @@ impl Checker {
                     | other @ Ty::Var(_) => {
                         // A struct satisfying `IndexSet` (has `index` + `set_index`) is mutable by index.
                         if let Some((set_k, set_v)) = self.index_set_kv(&other) {
-                            // `x OP= v` is EXACTLY `x = x OP v` (docs/syntax.md §3), and the compiler
-                            // lowers it that way (Dup2 → GetIndex → op → SetIndex). So a COMPOUND
-                            // assign's LHS is typed from `index`'s RETURN, not from `set_index`'s
-                            // `val` — reading it off the write slot let an incoherent pair
-                            // (`index -> str` / `set_index(_, val: int)`) check OK and then fault at
-                            // runtime with "cannot apply Add to str and int". A plain `=` never reads,
-                            // so it keeps typing against the write slot (an asymmetric pair — a
-                            // safe-read `index -> V?`, a widening writer — stays legal there).
+                            // `x OP= v` is `x = x OP v` (owner rule U15), and the compiler lowers it
+                            // that way (Dup2 -> GetIndex -> op -> SetIndex). A compound reads through
+                            // `index`, so `x OP v` is typed from `index`'s RETURN; the result is then
+                            // stored through `set_index`, so it meets `set_index`'s `val` exactly as
+                            // `=` does. A plain `=` never reads.
                             let read = if op == AssignOp::Eq {
                                 None
                             } else {
                                 self.index_kv(&other)
                             };
-                            let (k, v) = read.clone().unwrap_or((set_k.clone(), set_v.clone()));
+                            let (read_k, read_v) = read.unwrap_or((set_k.clone(), set_v.clone()));
                             let idx_ty = self.infer(index);
-                            if !idx_ty.is_unknown() && !self.assignable(&k, &idx_ty) {
-                                let [k_s, idx_s] = Ty::render_distinct([&k, &idx_ty]);
-                                self.error(
-                                    index.span,
-                                    format!("index must be {k_s}, found {idx_s}"),
-                                );
+                            let mut keys = vec![set_k.clone()];
+                            if read_k != set_k {
+                                keys.push(read_k);
                             }
-                            // A compound reads through `index` and writes the result back through
-                            // `set_index`, so the two must agree — the same `IndexSet[K, V]`
-                            // coherence the bounded `[C: IndexSet[K, V]]` path already demands. On a
-                            // mismatch report only that (a cascading "cannot apply += to …" would
-                            // just restate it).
-                            let incoherent = read.as_ref().and_then(|(rk, rv)| {
-                                if !self.assignable(&set_v, rv) {
-                                    Some(format!(
-                                        "type {other} does not satisfy IndexSet (index returns \
-                                         {rv} but set_index's val is {set_v})"
-                                    ))
-                                } else if !self.assignable(&set_k, rk) {
-                                    Some(format!(
-                                        "type {other} does not satisfy IndexSet (index's key is \
-                                         {rk} but set_index's key is {set_k})"
-                                    ))
-                                } else {
-                                    None
-                                }
-                            });
-                            match incoherent {
-                                Some(msg) => self.error(target.span, msg),
-                                None => {
-                                    self.check_assign_value(&v, op, &val_ty, value, target.span)
+                            for k in &keys {
+                                if !idx_ty.is_unknown() && !self.assignable(k, &idx_ty) {
+                                    let [k_s, idx_s] = Ty::render_distinct([k, &idx_ty]);
+                                    self.error(
+                                        index.span,
+                                        format!("index must be {k_s}, found {idx_s}"),
+                                    );
                                 }
                             }
+                            self.check_assign_read_write(
+                                &read_v,
+                                &set_v,
+                                op,
+                                &val_ty,
+                                value,
+                                target.span,
+                            );
                         } else {
                             self.expect_int(index, "index");
                             let note = self.hook_name_note(&other, "IndexSet", "set_index");
@@ -4798,133 +4783,50 @@ impl Checker {
         value: Option<&Expr>,
         span: Span,
     ) {
-        // A constant meets the target's width, for `=` and a compound operand (Go: `300 (untyped
-        // int constant) overflows int8`), except a shift count.
-        if let Some(v) = value
-            && !matches!(op, AssignOp::ShlEq | AssignOp::ShrEq)
+        self.check_assign_read_write(target_ty, target_ty, op, val_ty, value, span);
+    }
+
+    /// Check `target OP= v`, or `target = v`. `read_ty` is the type a compound reads the target as;
+    /// `slot_ty` is the type the result is stored into. They differ only for an `index`/`set_index`
+    /// hook pair.
+    pub(super) fn check_assign_read_write(
+        &mut self,
+        read_ty: &Ty,
+        slot_ty: &Ty,
+        op: AssignOp,
+        val_ty: &Ty,
+        value: Option<&Expr>,
+        span: Span,
+    ) {
+        // A constant meets the target's width (Go: `300 (untyped int constant) overflows int8`).
+        // A compound operand meets no slot: it is an operand of `x OP v`, and arithmetic on a width
+        // value yields plain `int` (DEC-218).
+        if op == AssignOp::Eq
+            && let Some(v) = value
         {
-            self.const_meets_slot(v, Some(target_ty));
+            self.const_meets_slot(v, Some(slot_ty));
         }
-        let target_ty = target_ty.scalar();
-        match op {
-            AssignOp::Eq => {
-                if !self.assignable(target_ty, val_ty) {
-                    let note = self.protocol_note(target_ty, val_ty);
-                    let [val_s, target_s] = Ty::render_distinct([val_ty, target_ty]);
-                    self.error(
-                        span,
-                        format!(
-                            "cannot assign {val_s} to {target_s}{}{note}{}",
-                            crate::checker::ty::fn_arity_note(target_ty, val_ty),
-                            float_fix_note(target_ty, val_ty)
-                        ),
-                    );
-                }
+        let target_ty = slot_ty.scalar();
+        // `x OP= v` is `x = x OP v` (owner rule U15): type `x OP v` with the binary-operator rules,
+        // then judge the result as `=` would. No compound-only rule exists; the no-widening rule
+        // (`int += float`) is `=`'s (`x = 1.5` into an `int` slot).
+        let val_ty = match op.to_binop() {
+            None => val_ty.clone(),
+            Some(bin) => {
+                self.binary_result(bin, read_ty.scalar().clone(), val_ty.clone(), span, span)
             }
-            // Numeric compound ops `+= -= *= /= %=` (and str+str for `+=`). No implicit widening:
-            // `int <op> float` yields a float, which can't flow back into a concrete int slot —
-            // reject it (gap #9), mirroring strict `=` (`x = 1.5`). `/=` inherits this rule, so
-            // `int /= float` is rejected (true division would widen the slot).
-            AssignOp::PlusEq
-            | AssignOp::MinusEq
-            | AssignOp::StarEq
-            | AssignOp::SlashEq
-            | AssignOp::PercentEq => {
-                let str_ok = op == AssignOp::PlusEq && *target_ty == Ty::Str && *val_ty == Ty::Str;
-                let widens = *target_ty == Ty::Int && *val_ty == Ty::Float;
-                let num_ok = target_ty.is_numeric() && val_ty.is_numeric() && !widens;
-                // Collection forms mirror `infer_binary`: `list += list` (concat), `list *= int`
-                // (repeat), `set -= set` (difference). Compound-assign lowers through the same
-                // `Op::Add`/`Op::Mul`/`Op::Sub` opcodes the binary form uses, so the runtime already
-                // handles these — only the checker had to be taught to accept them.
-                let coll_ok = match (op, target_ty, val_ty) {
-                    (AssignOp::PlusEq, Ty::List(a), Ty::List(b)) => self.join_ty(a, b),
-                    (AssignOp::StarEq, Ty::List(_), Ty::Int) => true,
-                    (AssignOp::MinusEq, Ty::Set(a), Ty::Set(b)) => self.join_ty(a, b),
-                    _ => false,
-                };
-                // A struct/enum whose matching operator overload makes the binary `a OP b`
-                // type-check must accept `a OP= b` too — `x OP= v` is defined as `x = x OP v`, and the
-                // runtime already lowers both through the same `Op::Add`/`Sub`/… opcodes. Reuse the
-                // SAME `op_overload_result` the binary-operator checker (`infer_binary`) consults, then
-                // require the result be assignable back to the target (mirrors `a = a OP b` failing if
-                // the result type can't flow into `a`). `op_overload_result` returns `Some` only for
-                // same-typed operands satisfying the operator protocol, so a no-overload struct / `V += int` / `Box[int] += Box[str]` stay
-                // rejected — no blanket compound-assign acceptance.
-                let proto = match op {
-                    AssignOp::PlusEq => "Add",
-                    AssignOp::MinusEq => "Sub",
-                    AssignOp::StarEq => "Mul",
-                    AssignOp::SlashEq => "Div",
-                    AssignOp::Eq
-                    | AssignOp::PercentEq
-                    | AssignOp::AmpEq
-                    | AssignOp::PipeEq
-                    | AssignOp::CaretEq
-                    | AssignOp::ShlEq
-                    | AssignOp::ShrEq => "Mod",
-                };
-                let overload_ok = self
-                    .op_overload_result(target_ty, val_ty, proto)
-                    .is_some_and(|res| self.assignable(target_ty, &res));
-                let known = !target_ty.is_unknown() && !val_ty.is_unknown();
-                if known && !str_ok && !num_ok && !coll_ok && !overload_ok {
-                    let sym = match op {
-                        AssignOp::PlusEq => "+=",
-                        AssignOp::MinusEq => "-=",
-                        AssignOp::StarEq => "*=",
-                        AssignOp::SlashEq => "/=",
-                        AssignOp::Eq
-                        | AssignOp::PercentEq
-                        | AssignOp::AmpEq
-                        | AssignOp::PipeEq
-                        | AssignOp::CaretEq
-                        | AssignOp::ShlEq
-                        | AssignOp::ShrEq => "%=",
-                    };
-                    let [target_s, val_s] = Ty::render_distinct([target_ty, val_ty]);
-                    self.error(
-                        span,
-                        format!(
-                            "cannot apply {sym} to {target_s} and {val_s}{}",
-                            float_fix_note_join(target_ty, val_ty)
-                        ),
-                    );
-                }
-            }
-            // Bitwise/shift compound ops `&= |= ^= <<= >>=` — int-only, EXCEPT `&= |= ^=` also do
-            // set algebra on two `set[T]` (mirrors `infer_binary`'s bitwise arm; `<<= >>=` stay
-            // strictly int). Lowers through the same `Op::BitOr`/etc opcodes as the binary form.
-            AssignOp::AmpEq
-            | AssignOp::PipeEq
-            | AssignOp::CaretEq
-            | AssignOp::ShlEq
-            | AssignOp::ShrEq => {
-                let int_ok = *target_ty == Ty::Int && *val_ty == Ty::Int;
-                let set_ok = matches!(op, AssignOp::AmpEq | AssignOp::PipeEq | AssignOp::CaretEq)
-                    && matches!((target_ty, val_ty), (Ty::Set(a), Ty::Set(b)) if self.join_ty(a, b));
-                let known = !target_ty.is_unknown() && !val_ty.is_unknown();
-                if known && !int_ok && !set_ok {
-                    let sym = match op {
-                        AssignOp::AmpEq => "&=",
-                        AssignOp::PipeEq => "|=",
-                        AssignOp::CaretEq => "^=",
-                        AssignOp::ShlEq => "<<=",
-                        AssignOp::Eq
-                        | AssignOp::PlusEq
-                        | AssignOp::MinusEq
-                        | AssignOp::StarEq
-                        | AssignOp::SlashEq
-                        | AssignOp::PercentEq
-                        | AssignOp::ShrEq => ">>=",
-                    };
-                    let [target_s, val_s] = Ty::render_distinct([target_ty, val_ty]);
-                    self.error(
-                        span,
-                        format!("bitwise operator {sym} requires int operands or two sets, found {target_s} and {val_s}"),
-                    );
-                }
-            }
+        };
+        if !self.assignable(target_ty, &val_ty) {
+            let note = self.protocol_note(target_ty, &val_ty);
+            let [val_s, target_s] = Ty::render_distinct([&val_ty, target_ty]);
+            self.error(
+                span,
+                format!(
+                    "cannot assign {val_s} to {target_s}{}{note}{}",
+                    crate::checker::ty::fn_arity_note(target_ty, &val_ty),
+                    float_fix_note(target_ty, &val_ty)
+                ),
+            );
         }
     }
 

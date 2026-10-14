@@ -4255,7 +4255,6 @@ impl Checker {
     }
 
     pub(super) fn infer_binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Ty {
-        use BinaryOp::*;
         // `infer_call` drains the single `expected_hint` slot via `take()` (src/checker/expr.rs:33),
         // so without re-installing it the second-inferred operand loses the hint a generic call
         // there would need to pin its type parameter. Same hop `infer_if_else_chain` makes per
@@ -4269,6 +4268,21 @@ impl Checker {
         self.expected_hint = hint;
         let r = self.infer_value(rhs);
         self.expected_hint = None;
+        self.binary_result(op, l, r, lhs.span, rhs.span)
+    }
+
+    /// The type of `l OP r` for two inferred operand types; a bad pair reports at `lspan`. The one
+    /// owner of the binary-operator typing rules: `infer_binary` calls it, and so does a compound
+    /// assignment, because `x OP= v` is `x = x OP v` (owner rule U15).
+    pub(super) fn binary_result(
+        &mut self,
+        op: BinaryOp,
+        l: Ty,
+        r: Ty,
+        lspan: Span,
+        rspan: Span,
+    ) -> Ty {
+        use BinaryOp::*;
         // TICKET-239: an operand that is a same-statement type variable (`?1 < ?2`) is read here.
         // A comparison joins its two operands first (`?2 == f()` with `f() -> int!`); arithmetic
         // does not, so `1 + ?5` stays an error about `int?`.
@@ -4284,16 +4298,10 @@ impl Checker {
         match op {
             And | Or => {
                 if l != Ty::Bool && !l.is_unknown() {
-                    self.error(
-                        lhs.span,
-                        format!("logical operator expects bool, found {l}"),
-                    );
+                    self.error(lspan, format!("logical operator expects bool, found {l}"));
                 }
                 if r != Ty::Bool && !r.is_unknown() {
-                    self.error(
-                        rhs.span,
-                        format!("logical operator expects bool, found {r}"),
-                    );
+                    self.error(rspan, format!("logical operator expects bool, found {r}"));
                 }
                 Ty::Bool
             }
@@ -4317,7 +4325,7 @@ impl Checker {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                     let note = self.hook_name_note(&l, "Add", "add");
                     self.error(
-                        lhs.span,
+                        lspan,
                         format!(
                             "cannot apply + to {l_s} and {r_s}{}{note}",
                             float_fix_note_join(&l, &r)
@@ -4346,7 +4354,7 @@ impl Checker {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                     let note = self.hook_name_note(&l, proto, &proto.to_lowercase());
                     self.error(
-                        lhs.span,
+                        lspan,
                         format!(
                             "cannot apply {} to {l_s} and {r_s}{}{note}",
                             op_sym(op),
@@ -4370,7 +4378,7 @@ impl Checker {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
                     let note = self.hook_name_note(&l, proto, &proto.to_lowercase());
                     self.error(
-                        lhs.span,
+                        lspan,
                         format!(
                             "cannot apply {} to {l_s} and {r_s}{}{note}",
                             op_sym(op),
@@ -4380,9 +4388,7 @@ impl Checker {
                     Ty::Unknown
                 }
             }
-            Lt | LtEq | Gt | GtEq | Eq | NotEq | In => {
-                self.compare_pair(op, &l, &r, lhs.span, rhs.span)
-            }
+            Lt | LtEq | Gt | GtEq | Eq | NotEq | In => self.compare_pair(op, &l, &r, lspan, rspan),
             // Bitwise/shift ops are int-only (gap #13), EXCEPT `| & ^` also do set algebra
             // (gap #3): union / intersection / symmetric-difference on two `set[T]`. Shifts
             // (`<< >>`) stay strictly int-only.
@@ -4401,7 +4407,7 @@ impl Checker {
                         self.hook_name_note(&l, p, &p.to_lowercase())
                     });
                     self.error(
-                        lhs.span,
+                        lspan,
                         format!(
                             "bitwise operator {} requires int operands or two sets, found {l_s} and {r_s}{note}",
                             op_sym(op)
