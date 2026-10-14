@@ -41651,3 +41651,10 @@ fn recover_block_tail_value_is_rejected() {
 fn recover_block_is_none_bang() {
     ok("s := recover:\n    x := 1\n    x + 1\nt: ! = s\nprint(t)\n");
 }
+
+/// TICKET-261 (U9): `for a, b in X` unpacks X's element for every iterable X, so a Set of
+/// 2-tuples binds `a` and `b` as CPython does. `for_bindings` demands a map today.
+#[test]
+fn for_pair_unpacks_a_set_of_tuples() {
+    ok("fn main():\n    for a, b in {(1, \"x\")}:\n        print(a, b)\n");
+}
