@@ -3710,8 +3710,10 @@ s := show(Point(1, 2))
 }
 
 #[test]
-fn stringable_wrong_signature_rejected() {
-    // `str` returns int, not str ⇒ does not satisfy Stringable.
+fn stringable_wrong_signature_is_invisible_to_the_bound() {
+    // `str` returns int, not str: it is not the hook, so `print` and the bound ignore it (the type
+    // is graded like one with no `str`; TICKET-257, pinned by `hook_conformance_grid`). The run
+    // prints the default display, never the int.
     let src = "\
 struct Bad:
     n: int
@@ -3721,7 +3723,7 @@ fn show[T: Stringable](v: T) -> str:
     return v.str()
 x := show(Bad(1))
 ";
-    rejects(src, "does not satisfy Stringable");
+    ok(src);
 }
 
 #[test]
