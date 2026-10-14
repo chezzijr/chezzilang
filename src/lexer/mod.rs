@@ -417,6 +417,105 @@ pub const ONE_LINE_HOLE_NEST: usize = 8;
 pub struct Tok {
     pub kind: Token,
     pub span: Span,
+    /// The count of leading spaces of the physical line, set only on the first token of a line whose
+    /// leading whitespace is spaces only. The parser reads it through [`open_layout`].
+    pub indent: Option<u32>,
+}
+
+/// One step of the indent stack for a content line at column `width`: `[Indent]` when deeper,
+/// one `Dedent` per closed level when shallower, `[]` at the same level. `scan_indentation` and
+/// [`open_layout`] share it, so the layout rule has one owner.
+fn indent_step(indents: &mut Vec<usize>, width: usize) -> Result<Vec<Token>, &'static str> {
+    let top = *indents.last().unwrap();
+    if width > top {
+        indents.push(width);
+        return Ok(vec![Token::Indent]);
+    }
+    if width == top {
+        return Ok(Vec::new());
+    }
+    let mut dedents = Vec::new();
+    while *indents.last().unwrap() > width {
+        indents.pop();
+        dedents.push(Token::Dedent);
+    }
+    // the new width must line up with some outer level we landed on
+    if *indents.last().unwrap() != width {
+        return Err("inconsistent dedent — does not match any outer indentation level");
+    }
+    Ok(dedents)
+}
+
+/// Open layout for a block whose line-ending `:` is `toks[colon]`, inside brackets where the lexer
+/// emitted none. The parser asks for it, so a map literal `{"a":` + newline + `1}` never gets layout.
+/// Returns `Ok(false)` and leaves `toks` unchanged when the next token is on the same line or is
+/// not indented deeper than the opener's line. Otherwise it splices `Newline` / `Indent` / `Dedent`
+/// tokens up to the block's end: a closer at its own bracket depth, `Eof`, or a line indented no
+/// deeper than the opener's line.
+pub fn open_layout(toks: &mut Vec<Tok>, colon: usize) -> Result<bool, LexError> {
+    let first = colon + 1;
+    let Some(first_indent) = toks.get(first).and_then(|t| t.indent) else {
+        return Ok(false);
+    };
+    let Some(base) = toks[..=colon].iter().rev().find_map(|t| t.indent) else {
+        return Ok(false);
+    };
+    let (base, first_indent) = (base as usize, first_indent as usize);
+    if first_indent <= base {
+        return Ok(false);
+    }
+    let mut stack = vec![base];
+    let mut depth = 0usize;
+    let mut out: Vec<Tok> = Vec::new();
+    let mut j = first;
+    let mk = |kind: Token, at: &Tok| Tok {
+        kind,
+        span: at.span,
+        indent: None,
+    };
+    loop {
+        let t = &toks[j];
+        let closer = matches!(t.kind, Token::RParen | Token::RBracket | Token::RBrace);
+        if t.kind == Token::Eof || (closer && depth == 0) {
+            out.push(mk(Token::Newline, t));
+            for _ in 1..stack.len() {
+                out.push(mk(Token::Dedent, t));
+            }
+            break;
+        }
+        if depth == 0
+            && t.kind != Token::Pipe
+            && let Some(w) = t.indent
+        {
+            let w = w as usize;
+            out.push(mk(Token::Newline, t));
+            if w <= base {
+                for _ in 1..stack.len() {
+                    out.push(mk(Token::Dedent, t));
+                }
+                break;
+            }
+            match indent_step(&mut stack, w) {
+                Ok(layout) => out.extend(layout.into_iter().map(|k| mk(k, t))),
+                Err(msg) => {
+                    return Err(LexError {
+                        line: t.span.line as usize,
+                        col: t.span.col as usize,
+                        message: msg.to_string(),
+                    });
+                }
+            }
+        }
+        if matches!(t.kind, Token::LParen | Token::LBracket | Token::LBrace) {
+            depth += 1;
+        } else if closer {
+            depth -= 1;
+        }
+        out.push(t.clone());
+        j += 1;
+    }
+    toks.splice(first..j, out);
+    Ok(true)
 }
 
 /// A captured doc-comment line: its 1-based source `line` and the stripped comment text (the chars
@@ -918,6 +1017,7 @@ impl Lexer {
                     return Ok(Tok {
                         kind: Token::Newline,
                         span,
+                        indent: None,
                     });
                 }
                 // 2. ...then emit one Dedent per still-open indent level...
@@ -926,12 +1026,14 @@ impl Lexer {
                     return Ok(Tok {
                         kind: Token::Dedent,
                         span,
+                        indent: None,
                     });
                 }
                 // 3. ...and finally Eof.
                 return Ok(Tok {
                     kind: Token::Eof,
                     span,
+                    indent: None,
                 });
             }
 
@@ -962,6 +1064,7 @@ impl Lexer {
                 return Ok(Tok {
                     kind: Token::Newline,
                     span,
+                    indent: None,
                 });
             }
 
@@ -969,6 +1072,9 @@ impl Lexer {
             self.at_line_start = false;
             let start = self.pos; // index of the first char of this lexeme
             let span = self.span_at(start);
+            // the first token of a physical line with spaces-only leading whitespace carries its width
+            let lead = &self.chars[self.line_start..start];
+            let indent = lead.iter().all(|&c| c == ' ').then_some(lead.len() as u32);
             let c = self.advance();
             let kind = match c {
                 // single- and two-char operators (LEARN: match_char does the 2-char lookahead)
@@ -1192,7 +1298,7 @@ impl Lexer {
                     return Err(self.error_at(start, &format!("unexpected character {other:?}")));
                 }
             };
-            return Ok(Tok { kind, span });
+            return Ok(Tok { kind, span, indent });
         }
     }
 
@@ -1294,35 +1400,19 @@ impl Lexer {
 
             // 5. a real content line at column `width` — compare against the indent stack
             let span = self.span_at(self.pos);
-            let top = *self.indents.last().unwrap();
-            if width > top {
-                // deeper → open one level
-                self.indents.push(width);
-                return Ok(Some(vec![Tok {
-                    kind: Token::Indent,
-                    span,
-                }]));
-            } else if width < top {
-                // shallower → close as many levels as needed, one Dedent each
-                let mut dedents = Vec::new();
-                while *self.indents.last().unwrap() > width {
-                    self.indents.pop();
-                    dedents.push(Tok {
-                        kind: Token::Dedent,
-                        span,
-                    });
-                }
-                // the new width must line up with some outer level we landed on
-                if *self.indents.last().unwrap() != width {
-                    return Err(self.error(
-                        "inconsistent dedent — does not match any outer indentation level",
-                    ));
-                }
-                return Ok(Some(dedents));
-            } else {
-                // same level → no layout token
-                return Ok(Some(Vec::new()));
-            }
+            return match indent_step(&mut self.indents, width) {
+                Ok(layout) => Ok(Some(
+                    layout
+                        .into_iter()
+                        .map(|kind| Tok {
+                            kind,
+                            span,
+                            indent: None,
+                        })
+                        .collect(),
+                )),
+                Err(msg) => Err(self.error(msg)),
+            };
         }
     }
 
@@ -1746,6 +1836,7 @@ impl Lexer {
                 tokens.push(Tok {
                     kind: Token::Eof,
                     span: tok.span,
+                    indent: None,
                 });
                 return Ok((tokens, false));
             }
@@ -1760,6 +1851,7 @@ impl Lexer {
                 tokens.push(Tok {
                     kind: Token::Eof,
                     span: tok.span,
+                    indent: None,
                 });
                 return Ok((tokens, true));
             }
@@ -2045,6 +2137,72 @@ mod tests {
     /// assertions below readable now that the lexer emits `Tok { kind, span }`.
     fn kinds(src: &str) -> Vec<Token> {
         tokenize(src).unwrap().into_iter().map(|t| t.kind).collect()
+    }
+
+    /// The `open_layout` result and the kinds after the first `Colon` of `src`.
+    fn after_first_colon(src: &str) -> (Result<bool, LexError>, Vec<Token>) {
+        let mut toks = tokenize(src).unwrap();
+        let colon = toks.iter().position(|t| t.kind == Token::Colon).unwrap();
+        let r = open_layout(&mut toks, colon);
+        let rest = toks[colon + 1..].iter().map(|t| t.kind.clone()).collect();
+        (r, rest)
+    }
+
+    #[test]
+    fn open_layout_opens_a_block_inside_parens() {
+        let (r, rest) = after_first_colon("f(match 1:\n    1: 5\n    _: 6)");
+        assert_eq!(r, Ok(true));
+        assert_eq!(
+            rest,
+            vec![
+                Token::Newline,
+                Token::Indent,
+                Token::Int(1),
+                Token::Colon,
+                Token::Int(5),
+                Token::Newline,
+                Token::Ident("_".into()),
+                Token::Colon,
+                Token::Int(6),
+                Token::Newline,
+                Token::Dedent,
+                Token::RParen,
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn open_layout_closes_at_a_dedented_line() {
+        let (r, rest) = after_first_colon("f(x = match 1:\n    _: 6\n)");
+        assert_eq!(r, Ok(true));
+        let tail: Vec<Token> = rest[rest.len() - 5..].to_vec();
+        assert_eq!(
+            tail,
+            vec![
+                Token::Newline,
+                Token::Dedent,
+                Token::RParen,
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn open_layout_declines_a_same_line_body() {
+        let mut toks = tokenize("f(match 1: 2)").unwrap();
+        let before = toks.clone();
+        let colon = toks.iter().position(|t| t.kind == Token::Colon).unwrap();
+        assert_eq!(open_layout(&mut toks, colon), Ok(false));
+        assert_eq!(toks, before);
+    }
+
+    #[test]
+    fn map_literal_line_end_colon_has_no_layout() {
+        let ks = kinds("m := {\"a\":\n    1}");
+        assert!(!ks.contains(&Token::Indent), "{ks:?}");
     }
 
     // GUIDING TESTS — make these pass one at a time. They define "correct" for M1.

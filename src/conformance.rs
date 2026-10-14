@@ -645,6 +645,7 @@ fn sample_tokens(names: &[String]) -> Vec<crate::lexer::Tok> {
                 col: k as u32 + 1,
                 file: 0,
             },
+            indent: None,
         })
         .collect()
 }
