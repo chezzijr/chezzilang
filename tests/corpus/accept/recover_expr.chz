@@ -1,4 +1,4 @@
-# rule: recoverBlock
+# rule: primary
 fn main():
     r := recover: [1, 2][9]
     match r:

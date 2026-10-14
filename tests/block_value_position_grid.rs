@@ -188,6 +188,8 @@ fn rows() -> Vec<Row> {
         ),
         ("binary operand", &["primary"], 0, "y := 1 + {F}\n"),
         ("prefix operand", &["primary"], 0, "y := -{F}\n"),
+        ("not operand", &["primary"], 0, "y := not {F}\n"),
+        ("not operand in a call", &["primary"], 0, "print(not {F})\n"),
         ("index", &["subscript"], 0, "y := xs[{F}]\n"),
         ("lvalue index", &["lvalue"], 0, "xs[{F}] = 1\n"),
         ("inline if body", &["inlineStmt"], 0, "if true: {F}\n"),

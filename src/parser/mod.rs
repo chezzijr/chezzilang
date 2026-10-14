@@ -11571,6 +11571,7 @@ fn g():
             "a := 1 + recover:\n    pass\n",
             "print(recover:\n    pass\n)\n",
             "if c: recover:\n    pass\n",
+            "y := \"{f(match n: _: 1)}\"\n",
         ] {
             let e = parse(crate::lexer::tokenize(src).unwrap())
                 .expect_err(&format!("{src:?} must be rejected"));
