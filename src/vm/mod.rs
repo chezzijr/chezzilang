@@ -7586,7 +7586,6 @@ pub fn run_file_counting_runners(
                 None,
                 None,
                 false,
-                None,
             ));
             let (peak, denials, spawns, permits) = RUN_PEAK_RUNNERS.with(|p| p.get());
             (out, peak, denials, spawns, permits)
@@ -7614,7 +7613,6 @@ pub fn run_file_counting(
                 None,
                 None,
                 false,
-                None,
             ));
             (out, counter.with(|c| c.get()))
         })
@@ -7892,7 +7890,7 @@ fn to_str_output((out, err, res, code): RunOutputRaw) -> RunOutput {
 /// CLI calls [`run_file_with_entry`] directly so a `module:function` entrypoint can name a function.
 #[cfg(test)]
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
-    to_str_output(run_file_engine(entry, cfg, None, None, false, None))
+    to_str_output(run_file_engine(entry, cfg, None, None, false))
 }
 
 /// Resolve, compile, and run a program from its entry path on the dedicated VM thread, then — if

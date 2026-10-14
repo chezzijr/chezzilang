@@ -4034,3 +4034,54 @@ binary, taken twice (base, tip, base, tip). Load average 2.87.
 No measurable change: the two base medians (346, 311) bracket the two tip medians (331, 338).
 `Vm::invoke_hook` enters the hook's proto itself. `==` on a type with no `eq` hook tests one
 program-wide flag (`Program::any_eq_hook`) and one dense table entry, as `eq_struct` did.
+
+## TICKET-255 — startup of `chezzi run` after TICKET-253 (2026-10-14)
+
+TICKET-253 put the `Range` struct and its methods in `std/prelude.chz`. Every `chezzi run` then parsed
+the prelude 2 times, checked it 3 times and compiled the `Range` methods, whether or not the program
+held a range. The fix has three parts: the checker and the compiler skip the prelude `Range` method
+bodies when `ModuleGraph::range_used` is false; `chezzi run` builds one graph (the pre-run check hands
+it to the VM); `compile_graph` runs one checker pass instead of two.
+
+**Which command the startup rows time.** The 0.79-0.84 ms rows above come from `benches/run.chz`
+(`hyperfine`, the `empty` bench). `hyperfine` is not installed on the machine of this ticket, so those
+rows were not re-measured. The table below times `chezzi run one.chz` (`print(1)`) as a process, which
+includes `check`, graph build, compile and VM start, and reads about 6.5 ms before TICKET-253.
+
+Release binaries, 300 interleaved runs per binary, median us (p10..p90). Load average about 7
+(`uptime` before the run: 6.84).
+
+| program | pre-253 `902b678c` | main `30aa7e2b` | fix |
+|---|---|---|---|
+| `print(1)` | 6600 (5969..7539) | 10646 (9656..12028) | 6504 (5929..7423) |
+| `for i in 0..10` sum | 7062 (6647..7564) | 11311 (10516..12071) | 6973 (6512..7493) |
+| `print(Range(0, 10).len())` | no `Range` | 9942 (9400..23080) | 7565 (7025..19048) |
+
+Debug binaries (the test suite runs these), `print(1)`, 200 interleaved runs, median us (p10..p90),
+load average about 12:
+
+| pre-253 | main | fix |
+|---|---|---|
+| 21221 (20001..23743) | 43429 (40629..49141) | 19024 (17804..21350) |
+
+Where the 3.6 ms went (planning, instrumented release binary, median us of 200 runs of `print(1)`):
+
+| phase | full prelude | no `Range` methods | cost of the methods |
+|---|---|---|---|
+| lex + parse prelude, check build | 1485 | 919 | 566 |
+| desugar, check build | 52 | 17 | 35 |
+| `check_graph` | 2279 | 1457 | 822 |
+| lex + parse prelude, run build | 1146 | 687 | 459 |
+| desugar, run build | 48 | 13 | 35 |
+| `resolve_extern_signatures` | 1591 | 849 | 742 |
+| `resolve_call_tables` | 1534 | 797 | 737 |
+| compile prelude module | 240 | 17 | 223 |
+
+The rows sum to 3619 us of a wall delta of 3962 us. VM construction, module init and bind were not
+timed. Run-time of the benches did not move: `benches/chz/loop.chz` 1949090 (main) against 1946255
+(fix) us, `list.chz` 791812 against 778249 us, 12 interleaved runs each.
+
+The count gate is `range_free_graph_checks_no_prelude_fn_bodies` and
+`program_without_a_range_compiles_no_prelude_fn_protos` (`src/compiler/mod.rs`): protos compiled and
+fn bodies checked for a program with no range value. Each prelude fn proto is one parse, check and
+compile per run, so the count tracks the cost without a clock.
