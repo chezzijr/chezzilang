@@ -1364,12 +1364,28 @@ pub fn resolve_call_tables(graph: &ModuleGraph) -> CallTables {
 /// [`resolve_call_tables`] with the nested-fn return memo (`Checker::ret_memo`) switchable, so a test
 /// can run the SAME graph both ways. Production always passes `true`.
 fn resolve_call_tables_with(graph: &ModuleGraph, memo_enabled: bool) -> CallTables {
+    compile_tables_pass(graph, memo_enabled, false).1
+}
+
+/// TICKET-255 — the one checker pass `compile_graph` runs: the extern C signatures and every call table
+/// together, where the compiler once ran two passes over the same graph. Production always passes
+/// `true` for both flags through this entry.
+pub fn resolve_compile_tables(graph: &ModuleGraph) -> (ExternTable, CallTables) {
+    compile_tables_pass(graph, true, true)
+}
+
+fn compile_tables_pass(
+    graph: &ModuleGraph,
+    memo_enabled: bool,
+    harvest_externs: bool,
+) -> (ExternTable, CallTables) {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
         c.memo_enabled = memo_enabled;
         c.harvest_keywords = true;
-        c.run_graph_pass(graph, false);
-        (
+        c.run_graph_pass(graph, harvest_externs);
+        let externs = std::mem::take(&mut c.extern_sigs);
+        let tables = (
             std::mem::take(&mut c.call_plans),
             std::mem::take(&mut c.witnesses),
             std::mem::take(&mut c.carriers),
@@ -1384,7 +1400,8 @@ fn resolve_call_tables_with(graph: &ModuleGraph, memo_enabled: bool) -> CallTabl
             std::mem::take(&mut c.wraps),
             std::mem::take(&mut c.hook_table),
             std::mem::take(&mut c.hook_calls),
-        )
+        );
+        (externs, tables)
     })
 }
 

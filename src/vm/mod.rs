@@ -7914,26 +7914,23 @@ pub fn run_file_with_entry(
     to_str_output(run_file_bytes(entry, cfg, entry_fn, root))
 }
 
-/// Like [`run_file_with_entry`], but the entry source is supplied in-memory (`Some`) instead of being
-/// re-read from disk on the VM thread. The CLI reads a one-shot fd (a pipe, `/dev/stdin`) exactly ONCE
-/// via `main.rs::read_source` and passes the bytes here — a second read of the same fd returns empty,
-/// which is the read-once fix for `chezzi run` on a pipe. `None` behaves exactly like
-/// [`run_file_with_entry`] (reads the entry from disk).
-pub fn run_file_with_entry_source(
-    entry: &std::path::Path,
+/// TICKET-255 — run a graph the CLI already built and checked. `chezzi run` builds the graph one time
+/// for its pre-run check and hands it here, so the prelude and every import parse once. The entry
+/// source the CLI read from a one-shot fd (a pipe, `/dev/stdin`) is already inside the graph.
+pub fn run_graph_with_entry(
+    graph: crate::resolver::ModuleGraph,
     cfg: crate::native::HostConfig,
     entry_fn: Option<&str>,
-    root: Option<std::path::PathBuf>,
-    entry_source: Option<String>,
 ) -> RunOutput {
-    to_str_output(run_file_engine(
-        entry,
-        cfg,
-        entry_fn.map(str::to_string),
-        root,
-        false,
-        entry_source,
-    ))
+    let entry_fn = entry_fn.map(str::to_string);
+    to_str_output(
+        std::thread::Builder::new()
+            .stack_size(VM_STACK_BYTES)
+            .spawn(move || run_graph_inner(&graph, cfg, entry_fn.as_deref(), false))
+            .expect("failed to spawn VM thread")
+            .join()
+            .expect("VM thread panicked"),
+    )
 }
 
 /// [`run_file_with_entry`] without the lossy decode — the entry point for any caller that needs the
@@ -7944,7 +7941,7 @@ pub fn run_file_bytes(
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
 ) -> RunOutputRaw {
-    run_file_engine(entry, cfg, entry_fn.map(str::to_string), root, false, None)
+    run_file_engine(entry, cfg, entry_fn.map(str::to_string), root, false)
 }
 
 /// W7-4a — a MULTI-FILE run under GC stress (collect at every safepoint). The single-source
@@ -7958,7 +7955,6 @@ pub fn run_file_stress(entry: &std::path::Path) -> RunOutput {
         None,
         None,
         true,
-        None,
     ))
 }
 
@@ -7968,12 +7964,11 @@ fn run_file_engine(
     entry_fn: Option<String>,
     root: Option<std::path::PathBuf>,
     stress: bool,
-    entry_source: Option<String>,
 ) -> RunOutputRaw {
     let entry = entry.to_path_buf();
     std::thread::Builder::new()
         .stack_size(VM_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry, cfg, entry_fn.as_deref(), root, stress, entry_source))
+        .spawn(move || run_file_inner(&entry, cfg, entry_fn.as_deref(), root, stress))
         .expect("failed to spawn VM thread")
         .join()
         .expect("VM thread panicked")
@@ -7985,9 +7980,8 @@ fn run_file_inner(
     entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
     stress: bool,
-    entry_source: Option<String>,
 ) -> RunOutputRaw {
-    let build = crate::resolver::build_graph_with_entry_source_and_root(entry, entry_source, root);
+    let build = crate::resolver::build_graph_with_entry_source_and_root(entry, None, root);
     let graph = match build {
         Ok(g) => g,
         Err(e) => {
@@ -8007,7 +8001,18 @@ fn run_file_inner(
             );
         }
     };
-    let program = match crate::compiler::compile_graph(&graph) {
+    run_graph_inner(&graph, cfg, entry_fn, stress)
+}
+
+/// Compile `graph` and run it on the current (VM-sized) stack. The one body behind [`run_file_inner`]
+/// and [`run_graph_with_entry`].
+fn run_graph_inner(
+    graph: &crate::resolver::ModuleGraph,
+    cfg: crate::native::HostConfig,
+    entry_fn: Option<&str>,
+    stress: bool,
+) -> RunOutputRaw {
+    let program = match crate::compiler::compile_graph(graph) {
         Ok(p) => p,
         Err(e) => {
             return (

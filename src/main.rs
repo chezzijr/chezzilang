@@ -215,7 +215,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
     // this file IS the declared entry module (`manifest::entry_fn_for`), so a static check of an
     // entry module a project cannot start reports it.
     let entry_path = std::path::Path::new(&path);
-    let (outcome, warns, files) =
+    let (outcome, warns, files, _graph) =
         type_check(&path, None, EntryGate::FromManifest, Some(source.clone()));
     // `check`'s stdout IS the diagnostic document, so in machine mode the warnings ride the single
     // array the arms below print; in plain text they precede the verdict on stderr. Exactly one of
@@ -364,7 +364,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
         None => EntryGate::Script,
     };
     let entry_path = std::path::Path::new(&path);
-    let (outcome, warns, files) =
+    let (outcome, warns, files, graph) =
         type_check(&path, root_override.as_deref(), gate, Some(source.clone()));
     // In JSON mode `run`'s warnings ride the one stdout array, the same shape `check --errors=json`
     // uses, since stdout's first line is always the document a consumer reads. In plain text they
@@ -373,11 +373,13 @@ fn cmd_run(args: &[String]) -> ExitCode {
     if !json {
         report_check_warnings(&warns, &files, Some((entry_path, &source)));
     }
-    match outcome {
+    let graph = match outcome {
         CheckOutcome::Ok => {
             if json {
                 chezzi::outln!("{}", diags_json(&warns, &files));
             }
+            // `type_check` returns the graph exactly when the outcome is `Ok`.
+            graph.expect("a checked run carries its graph")
         }
         CheckOutcome::Errors(errs) => {
             report_check_errors(&errs, &warns, &files, json, Some((entry_path, &source)));
@@ -398,24 +400,17 @@ fn cmd_run(args: &[String]) -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
-    }
+    };
 
     // The CLI STREAMS: the VM writes each `print` straight to the real stdout as it happens (see
     // `HostConfig::stream`), so a prompt appears before its `read_line`, a long-running program is
     // not silent, and a spawned task's log is visible before its nursery joins. The lib helpers keep
     // the buffered sink instead, so `out`/`err` come back empty here. The native std modules read
     // args/env/stdin from a process-backed config.
-    let p = std::path::Path::new(&path);
     let mut cfg = native::HostConfig::from_process(prog_args);
     cfg.stream = true;
     let (errored, exit_code) = {
-        let (_out, _err, result, code) = vm::run_file_with_entry_source(
-            p,
-            cfg,
-            entry_fn.as_deref(),
-            root_override.clone(),
-            Some(source),
-        );
+        let (_out, _err, result, code) = vm::run_graph_with_entry(graph, cfg, entry_fn.as_deref());
         (result.err().map(|e| vm::format_trace(&e)), code)
     };
     // Drain + flush the stream writers before ANY exit path, so a trailing `print(…, end="")`, an
@@ -1001,17 +996,15 @@ enum CheckOutcome {
 /// will run against; `None` (explicit `chezzi run FILE`) derives it by walking up from the file.
 /// Returns the outcome, the pass's non-fatal warnings (empty on a `Fatal`, which never reaches the
 /// checker), and a `Span::file` id → source path table (same shape as `vm::RunError::files`) so a
-/// caller can attribute every diagnostic's `file` key without re-deriving the module graph.
+/// caller can attribute every diagnostic's `file` key without re-deriving the module graph. The fourth
+/// element is the checked graph, present exactly when the outcome is `Ok` (TICKET-255: `chezzi run`
+/// hands it to the VM instead of building a second one).
 fn type_check(
     path: &str,
     root: Option<&std::path::Path>,
     entry_fn: EntryGate<'_>,
     entry_source: Option<String>,
-) -> (
-    CheckOutcome,
-    Vec<checker::CheckError>,
-    Vec<(u32, std::path::PathBuf)>,
-) {
+) -> TypeChecked {
     // Resolve + desugar + type-check on the dedicated front-end stack: the recursive AST walkers can
     // overflow the caller's (main-thread) stack on a deep-but-valid AST — see `chezzi::on_frontend_stack`.
     let path = path.to_string();
@@ -1056,11 +1049,7 @@ fn type_check_inner(
     root: Option<&std::path::Path>,
     entry_fn: EntryGate<'_>,
     entry_source: Option<String>,
-) -> (
-    CheckOutcome,
-    Vec<checker::CheckError>,
-    Vec<(u32, std::path::PathBuf)>,
-) {
+) -> TypeChecked {
     let entry = std::path::Path::new(path);
     // M24 — the manifest-entrypoint gate reaches EVERY consumer that checks this file, not just bare
     // `chezzi run` (which passes the name it already resolved). `chezzi check src/main.chz` used to
@@ -1100,6 +1089,7 @@ fn type_check_inner(
                 },
                 Vec::new(),
                 files,
+                None,
             );
         }
     };
@@ -1113,7 +1103,8 @@ fn type_check_inner(
         .iter()
         .map(|m| (m.file, m.id.0.clone()))
         .collect();
-    (outcome, warns, files)
+    let graph = matches!(outcome, CheckOutcome::Ok).then_some(graph);
+    (outcome, warns, files, graph)
 }
 
 /// Pull the file path (first non-flag arg) and `--errors=json` out of a command's args. Returns
@@ -1847,3 +1838,11 @@ mod init_tests {
         );
     }
 }
+
+/// What [`type_check`] returns: outcome, warnings, file-id table, and the checked graph on `Ok`.
+type TypeChecked = (
+    CheckOutcome,
+    Vec<checker::CheckError>,
+    Vec<(u32, std::path::PathBuf)>,
+    Option<chezzi::resolver::ModuleGraph>,
+);

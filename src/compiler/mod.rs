@@ -83,7 +83,8 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // FFI ROOT FIX (fix4): resolve every extern fn's C signature ONCE in the checker (module-scoped,
     // every alias spelling), then lower each extern from that table — never re-resolving alias names
     // in the backend's flat bare map (the collision whack-a-mole's root). Keyed by graph module idx.
-    c.extern_sigs = crate::checker::resolve_extern_signatures(graph);
+    let (externs, tables) = crate::checker::resolve_compile_tables(graph);
+    c.extern_sigs = externs;
     // Swift-style keyword args through a function VALUE: the checker resolves each value+keyword call
     // to a positional slot permutation (module-scoped, keyed like extern sigs); the value path lowers
     // it to a plain positional `Op::Call`, so the runtime ABI stays positional.
@@ -91,8 +92,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) =
-        crate::checker::resolve_call_tables(graph);
+    let (kw, wt, ct, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) = tables;
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
     c.hook_calls = hc;
