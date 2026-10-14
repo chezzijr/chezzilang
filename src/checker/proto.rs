@@ -2548,16 +2548,16 @@ impl Checker {
         // all four stringify (int/float/bool/str), so a `[T: Stringable]` generic accepts them (the
         // erased body's `v.str()` is dispatched by the scalar `str` branch in `Vm::do_method_call`).
         // Note the membership is all FOUR scalars — unlike Comparable (no Bool) / Hashable (no Float).
-        // Structs/enums still fall through to the structural `satisfies_methods` below (a type
-        // WITHOUT a `str(self) -> str` method stays correctly rejected).
         // TICKET-257 (owner rule U5): `print`, `str()` and `"{x}"` accept every value, so every kind a
-        // `RecvKind` names is `Stringable`. A type that declares a `str` method (a conforming hook, or
-        // one whose shape the protocol rejects) is decided by that method below, as before.
+        // `RecvKind` names is `Stringable`. A method that is not the hook is invisible to `print`, so
+        // a type whose `str` has the wrong shape is graded like one with no `str` (the hook grid pins
+        // this). Only the hook itself (`Ok`) and a hook failing its own `where` bound (`Bound`) fall
+        // through to the structural `satisfies_methods` below.
         if protocol == "Stringable"
             && Self::intrinsic_recv_kind(ty).is_some()
             && matches!(
                 self.hook_verdict(ty, "Stringable", "str"),
-                Err(HookMiss::Absent | HookMiss::Static)
+                Err(HookMiss::Absent | HookMiss::Static | HookMiss::Shape(_))
             )
         {
             return self.grant_intrinsic(protocol, ty);

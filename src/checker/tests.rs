@@ -3725,10 +3725,10 @@ x := show(Bad(1))
 }
 
 #[test]
-fn stringable_wrong_shape_method_rejected_and_bare_struct_accepted() {
+fn stringable_bare_struct_and_non_hook_str_accepted() {
     // TICKET-257 (owner rule U5): `print`, `str()` and `"{x}"` accept every value, so a struct with
-    // NO `str` method satisfies `Stringable`. A struct whose own `str` has the wrong shape is
-    // decided by that method and stays rejected.
+    // NO `str` method satisfies `Stringable`, and so does one whose `str` is not the hook (a method
+    // that is not the hook is invisible to `print`; `hook_conformance_grid` pins the same).
     let bare = "\
 struct Bare:
     a: int
@@ -3746,7 +3746,7 @@ fn show[T: Stringable](v: T) -> str:
     return v.str()
 x := show(Bad(1))
 ";
-    rejects(wrong, "does not satisfy Stringable");
+    ok(wrong);
 }
 
 #[test]
