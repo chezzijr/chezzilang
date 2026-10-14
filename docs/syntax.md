@@ -3966,7 +3966,7 @@ parentheses to end it earlier (`(recover: a) + b`). A statement is no body: writ
 (`recover:` then an indented line) for an assignment, an `assert` or a `return`.
 
 The block form has **no tail value** (TICKET-260, rule U8): its type is `!` (`None!`), the error or
-nothing, like Rust's `Result<(), Error>`. The last statement of the block is an ordinary statement:
+nothing, like a Rust function that returns `()` or an error. The last statement of the block is an ordinary statement:
 `x / 2` there is discarded. To take a value out of a block, assign inside it (`v := 0`, then
 `v = <value>` in the block) and read `v` after the boundary. Reading the block as a `T` is a type
 error, and the message names the rule: `` expected int!, found ! — this value has type `!`: a

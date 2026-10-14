@@ -1086,7 +1086,7 @@ fn f():
         r#"
     print(pick(2))
 "#,
-        R(r#"a nested block must be indented, not written inline after ':'"#),
+        P(r#"7"#),
     ),
     row(
         "cells/insert",
@@ -4078,7 +4078,7 @@ const CLO2_ROWS: &[Row] = &[
     ),
 ];
 
-// `recover:` tails and arms with binders.
+// Inline `recover:` bodies (a block has no tail value) and arms with binders.
 const REC_ROWS: &[Row] = &[
     row(
         "rec/rdirect_typed",
@@ -4089,8 +4089,7 @@ const REC_ROWS: &[Row] = &[
     n := 1
     w: int? = 5
     ws: str? = "s"
-    r: int?!Error = recover:
-        {V}
+    r: int?!Error = recover: {V}
     match r:
         ?v: show(v)
         !e: print("err")
@@ -4110,129 +4109,7 @@ const REC_ROWS: &[Row] = &[
     n := 1
     w: int? = 5
     ws: str? = "s"
-    r := recover:
-        if c:
-            None
-        else:
-            {V}
-    match r:
-        ?v: show(v)
-        !e: print("err")
-"#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
-    ),
-    row(
-        "rec/rif3_c",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r := recover:
-        if c:
-            None
-        elif d:
-            {V}
-        else:
-            {C}
-    print(r)
-"#,
-        [
-            P(r#"7"#),
-            R(r#"'?' value: expected int, found str"#),
-            P(r#"5"#),
-        ],
-    ),
-    row(
-        "rec/rif3_r",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r := recover:
-        if c:
-            None
-        elif c:
-            {V}
-        else:
-            {C}
-    match r:
-        ?v: show(v)
-        !e: print("err")
-"#,
-        [
-            R(r#"expression returns no value (None) and cannot be used as a value"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"expression returns no value (None) and cannot be used as a value"#),
-        ],
-    ),
-    row(
-        "rec/rif_hetero",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r := recover:
-        if c:
-            print("a")
-        else:
-            {V}
-    print(r)
-"#,
-        [P(r#"7"#), P(r#"7"#), P(r#"5"#)],
-    ),
-    row(
-        "rec/rif_init",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r := recover:
-        if c:
-            print("a")
-            None
-        else:
-            print("b")
-            {V}
-    match r:
-        ?v: show(v)
-        !e: print("err")
-"#,
-        [
-            P(r#"b
-8"#),
-            P(r#"b
-8"#),
-            P(r#"b
-6"#),
-        ],
-    ),
-    row(
-        "rec/rif_local",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r := recover:
-        if c:
-            None
-        else:
-            x := {V}
-            x
+    r := recover: if c: None else: {V}
     match r:
         ?v: show(v)
         !e: print("err")
@@ -4246,11 +4123,7 @@ const REC_ROWS: &[Row] = &[
     c := false
     d := true
     n := 1
-    r := recover:
-        if c:
-            None
-        else:
-            None
+    r := recover: if c: None else: None
     print(r)
 "#,
         R(r#"cannot infer the"#),
@@ -4264,11 +4137,7 @@ const REC_ROWS: &[Row] = &[
     n := 1
     w: int? = 5
     ws: str? = "s"
-    r := recover:
-        if c:
-            None
-        else:
-            {V}
+    r := recover: if c: None else: {V}
     print(r)
 "#,
         [P(r#"7"#), P(r#"7"#), P(r#"5"#)],
@@ -4282,167 +4151,7 @@ const REC_ROWS: &[Row] = &[
     n := 1
     w: int? = 5
     ws: str? = "s"
-    r := recover:
-        if d:
-            {V}
-        else:
-            None
-    match r:
-        ?v: show(v)
-        !e: print("err")
-"#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
-    ),
-    one(
-        "rec/rif_strint",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    r := recover:
-        if c:
-            "s"
-        else:
-            7
-    print(r)
-"#,
-        P(r#"7"#),
-    ),
-    row(
-        "rec/rif_typed",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r: int?!Error = recover:
-        if c:
-            None
-        else:
-            {V}
-    match r:
-        ?v: show(v)
-        !e: print("err")
-"#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
-    ),
-    row(
-        "rec/rmatch2",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r := recover:
-        match n:
-            0: None
-            _: {V}
-    match r:
-        ?v: show(v)
-        !e: print("err")
-"#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
-    ),
-    row(
-        "rec/rmatch2_rev",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r := recover:
-        match n:
-            1: {V}
-            _: None
-    match r:
-        ?v: show(v)
-        !e: print("err")
-"#,
-        [P(r#"8"#), P(r#"8"#), P(r#"6"#)],
-    ),
-    row(
-        "rec/rmatch3_c",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r := recover:
-        match n:
-            0: None
-            1: {V}
-            _: {C}
-    print(r)
-"#,
-        [
-            P(r#"7"#),
-            R(r#"'?' value: expected int, found str"#),
-            P(r#"5"#),
-        ],
-    ),
-    row(
-        "rec/rmatch3_r",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r := recover:
-        match n:
-            0: {V}
-            2: None
-            _: {C}
-    match r:
-        ?v: show(v)
-        !e: print("err")
-"#,
-        [
-            R(r#"expression returns no value (None) and cannot be used as a value"#),
-            R(r#"'?' value: expected int, found str"#),
-            R(r#"expression returns no value (None) and cannot be used as a value"#),
-        ],
-    ),
-    one(
-        "rec/rmatch_bindk",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    r := recover:
-        match n:
-            0: None
-            k: k + 6
-    match r:
-        ?v: show(v)
-        !e: print("err")
-"#,
-        P(r#"8"#),
-    ),
-    row(
-        "rec/rmatch_typed",
-        SHOW,
-        r#"
-    c := false
-    d := true
-    n := 1
-    w: int? = 5
-    ws: str? = "s"
-    r: int?!Error = recover:
-        match n:
-            0: None
-            _: {V}
+    r := recover: if d: {V} else: None
     match r:
         ?v: show(v)
         !e: print("err")

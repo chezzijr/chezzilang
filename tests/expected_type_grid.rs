@@ -441,23 +441,12 @@ fn construct(k: &str, p: &Pair) -> Option<Vec<String>> {
             let lhs = p.coalesce_lhs?;
             vec![format!("o: {lhs} = None"), format!("x := o ?? {b}")]
         }
-        "recover" => {
-            let mut s = vec![
-                "x := recover:".to_string(),
-                "    if c:".to_string(),
-                format!("        {a}"),
-            ];
-            if let Some(c) = c {
-                s.push("    elif n == 1:".to_string());
-                s.push(format!("        {b}"));
-                s.push("    else:".to_string());
-                s.push(format!("        {c}"));
-            } else {
-                s.push("    else:".to_string());
-                s.push(format!("        {b}"));
-            }
-            s
-        }
+        "recover" => match c {
+            None => vec![format!("x := recover: if c: {a} else: {b}")],
+            Some(c) => vec![format!(
+                "x := recover: if c: {a} elif n == 1: {b} else: {c}"
+            )],
+        },
         _ => unreachable!(),
     })
 }
@@ -465,7 +454,7 @@ fn construct(k: &str, p: &Pair) -> Option<Vec<String>> {
 /// The verdict of construct `k` over pair `p`: the type `x` gets, or the fragments of its rejection.
 fn verdict(k: &str, p: &Pair) -> Result<String, Vec<&'static str>> {
     let own = match k {
-        "if" | "match" => "branches have incompatible types",
+        "if" | "match" | "recover" => "branches have incompatible types",
         "list" => "list elements differ",
         "map" => "map values differ",
         "??" => "'??' sides have incompatible types",
@@ -480,10 +469,9 @@ fn verdict(k: &str, p: &Pair) -> Result<String, Vec<&'static str>> {
         ("set", Join::Ty(t)) => Ok(format!("Set[{t}]")),
         ("list", Join::Ty(t)) => Ok(format!("List[{t}]")),
         ("map", Join::Ty(t)) => Ok(format!("Map[str, {t}]")),
-        // A `recover:` tail is `T!`; a failed join drops the value (DEC-054) and the type is `!`.
+        // An inline `recover:` body is `T!`; the body is one `if` expression, so a failed join is the `if` rejection.
         ("recover", Join::Ty(t)) if t.contains('!') => Ok(format!("({t})!")),
         ("recover", Join::Ty(t)) => Ok(format!("{t}!")),
-        ("recover", Join::No(_)) => Ok("!".to_string()),
         (_, Join::Ty(t)) => Ok(t.to_string()),
         (_, Join::No(extra)) => Err(std::iter::once(own).chain(extra).collect()),
     }
