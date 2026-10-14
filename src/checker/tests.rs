@@ -40936,3 +40936,349 @@ fn recv_kind_all_lists_every_variant() {
         assert_eq!(RecvKind::ALL[index(k)], k);
     }
 }
+
+/// TICKET-257 — one sample receiver per kind for the operator/bound grid.
+struct GridSample {
+    prelude: &'static str,
+    lit: &'static str,
+    /// Needles that must pass `in` / `Contains[TY]`: (literal, type).
+    items: &'static [(&'static str, &'static str)],
+    /// One needle that must fail.
+    bad_item: Option<(&'static str, &'static str)>,
+    /// What `for v in a` yields.
+    elem: Option<&'static str>,
+    /// (key literal, K, V) of `a[k]`.
+    index: Option<(&'static str, &'static str, &'static str)>,
+    /// A value literal for `a[k] = v`.
+    set_val: Option<&'static str>,
+    /// The result type of `a[0..1]`.
+    slice: Option<&'static str>,
+}
+
+const GRID_BARE: GridSample = GridSample {
+    prelude: "",
+    lit: "",
+    items: &[],
+    bad_item: None,
+    elem: None,
+    index: None,
+    set_val: None,
+    slice: None,
+};
+
+/// Exhaustive over `RecvKind` (no wildcard): a new kind fails the build until it has a sample.
+fn grid_samples(k: super::proto::RecvKind) -> Vec<GridSample> {
+    use super::proto::RecvKind;
+    const CONC: &str = "import std.concurrency\n";
+    match k {
+        RecvKind::Int => vec![GridSample {
+            lit: "7",
+            ..GRID_BARE
+        }],
+        RecvKind::Float => vec![GridSample {
+            lit: "1.5",
+            ..GRID_BARE
+        }],
+        RecvKind::Bool => vec![GridSample {
+            lit: "true",
+            ..GRID_BARE
+        }],
+        RecvKind::Str => vec![GridSample {
+            lit: r#""abc""#,
+            items: &[(r#""b""#, "str")],
+            bad_item: Some(("98", "int")),
+            elem: Some("str"),
+            index: Some(("0", "int", "str")),
+            slice: Some("str"),
+            ..GRID_BARE
+        }],
+        RecvKind::Bytes => vec![GridSample {
+            lit: r#"b"abc""#,
+            items: &[
+                ("98", "int"),
+                (r#"b"b""#, "bytes"),
+                (r#"bytearray(b"b")"#, "bytearray"),
+            ],
+            bad_item: Some((r#""b""#, "str")),
+            elem: Some("int"),
+            index: Some(("0", "int", "int")),
+            slice: Some("bytes"),
+            ..GRID_BARE
+        }],
+        RecvKind::ByteArray => vec![GridSample {
+            lit: r#"bytearray(b"abc")"#,
+            items: &[
+                ("98", "int"),
+                (r#"b"bc""#, "bytes"),
+                (r#"bytearray(b"b")"#, "bytearray"),
+            ],
+            bad_item: Some((r#""b""#, "str")),
+            elem: Some("int"),
+            index: Some(("0", "int", "int")),
+            set_val: Some("1"),
+            slice: Some("bytearray"),
+            ..GRID_BARE
+        }],
+        RecvKind::List => vec![GridSample {
+            lit: "[1, 2]",
+            items: &[("1", "int")],
+            bad_item: Some((r#""x""#, "str")),
+            elem: Some("int"),
+            index: Some(("0", "int", "int")),
+            set_val: Some("5"),
+            slice: Some("List[int]"),
+            ..GRID_BARE
+        }],
+        RecvKind::Set => vec![GridSample {
+            lit: "{1, 2}",
+            items: &[("1", "int")],
+            bad_item: Some((r#""x""#, "str")),
+            elem: Some("int"),
+            ..GRID_BARE
+        }],
+        RecvKind::Map => vec![GridSample {
+            lit: r#"{"a": 1}"#,
+            items: &[(r#""a""#, "str")],
+            bad_item: Some(("1", "int")),
+            elem: Some("(str, int)"),
+            index: Some((r#""a""#, "str", "int")),
+            set_val: Some("5"),
+            ..GRID_BARE
+        }],
+        RecvKind::Tuple => vec![GridSample {
+            lit: "(1, 2)",
+            ..GRID_BARE
+        }],
+        RecvKind::Struct => vec![
+            GridSample {
+                prelude: "struct P:\n    x: int\n",
+                lit: "P(1)",
+                ..GRID_BARE
+            },
+            GridSample {
+                lit: "0..3",
+                items: &[("1", "int")],
+                bad_item: Some((r#""x""#, "str")),
+                elem: Some("int"),
+                ..GRID_BARE
+            },
+        ],
+        RecvKind::Cursor => vec![GridSample {
+            lit: "[1].iter()",
+            elem: Some("int"),
+            ..GRID_BARE
+        }],
+        RecvKind::Enum => vec![GridSample {
+            prelude: "enum En:\n    A\n    B\n",
+            lit: "En.A",
+            ..GRID_BARE
+        }],
+        RecvKind::Option => vec![GridSample {
+            prelude: "fn ho() -> int?:\n    return 1\n",
+            lit: "ho()",
+            ..GRID_BARE
+        }],
+        RecvKind::Result => vec![GridSample {
+            prelude: "fn hr() -> int!str:\n    return 1\n",
+            lit: "hr()",
+            ..GRID_BARE
+        }],
+        RecvKind::Func => vec![GridSample {
+            prelude: "fn g(x: int) -> int:\n    return x\n",
+            lit: "g",
+            ..GRID_BARE
+        }],
+        RecvKind::Protocol => vec![GridSample {
+            prelude: "protocol Sized_:\n    fn size(self) -> int\nstruct Tag:\n    n: int\n    fn size(self) -> int:\n        return self.n\nfn mkp() -> Sized_:\n    return Tag(1)\n",
+            lit: "mkp()",
+            ..GRID_BARE
+        }],
+        RecvKind::Channel => vec![GridSample {
+            prelude: CONC,
+            lit: "Channel[int](1)",
+            elem: Some("int"),
+            ..GRID_BARE
+        }],
+        RecvKind::Shared => vec![GridSample {
+            prelude: CONC,
+            lit: "Shared(1)",
+            ..GRID_BARE
+        }],
+        RecvKind::RwShared => vec![GridSample {
+            prelude: CONC,
+            lit: "RwShared(1)",
+            ..GRID_BARE
+        }],
+        RecvKind::Atomic => vec![GridSample {
+            prelude: CONC,
+            lit: "Atomic(1)",
+            ..GRID_BARE
+        }],
+    }
+}
+
+/// The operator form and the bound form of one protocol on one sample, one pair per needle for
+/// `Contains`. Each entry is (label, operator program, bound program, expected answer if any).
+fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String, Option<bool>)> {
+    let head = format!("{}a := {}\n", s.prelude, s.lit);
+    let bin = |p: &str, op: &str, ret: &str| {
+        (
+            protocol.to_string(),
+            format!("{head}r := a {op} a\n"),
+            format!(
+                "{}fn f[T: {p}](x: T, y: T) -> {ret}:\n    return x {op} y\na := {}\nf(a, a)\n",
+                s.prelude, s.lit
+            ),
+            None,
+        )
+    };
+    let one = |label: &str, op_stmt: &str, bound_decl: &str, call: &str, want: Option<bool>| {
+        (
+            label.to_string(),
+            format!("{head}{op_stmt}\n"),
+            format!("{}{bound_decl}a := {}\n{call}\n", s.prelude, s.lit),
+            want,
+        )
+    };
+    match protocol {
+        "Add" => vec![bin("Add", "+", "T")],
+        "Sub" => vec![bin("Sub", "-", "T")],
+        "Mul" => vec![bin("Mul", "*", "T")],
+        "Div" => vec![bin("Div", "/", "T")],
+        "Mod" => vec![bin("Mod", "%", "T")],
+        "Eq" => vec![bin("Eq", "==", "bool")],
+        "Comparable" => vec![bin("Comparable", "<", "bool")],
+        "Neg" => vec![one(
+            "Neg",
+            "r := -a",
+            "fn f[T: Neg](x: T) -> T:\n    return -x\n",
+            "f(a)",
+            None,
+        )],
+        "Stringable" => vec![one(
+            "Stringable",
+            "r := str(a)",
+            "fn f[T: Stringable](x: T) -> str:\n    return x.str()\n",
+            "f(a)",
+            None,
+        )],
+        "Hashable" => vec![one(
+            "Hashable",
+            "r := {a: 1}",
+            "fn f[T: Hashable](x: T):\n    pass\n",
+            "f(a)",
+            None,
+        )],
+        "Contains" => {
+            let mut v = Vec::new();
+            let mut needles: Vec<((&str, &str), bool)> =
+                s.items.iter().map(|n| (*n, true)).collect();
+            match s.bad_item {
+                Some(n) => needles.push((n, false)),
+                None => needles.push((("1", "int"), false)),
+            }
+            for ((lit, ty), want) in needles {
+                v.push(one(
+                    &format!("Contains[{ty}] {lit}"),
+                    &format!("r := {lit} in a"),
+                    &format!(
+                        "fn f[C: Contains[{ty}]](c: C, e: {ty}) -> bool:\n    return e in c\n"
+                    ),
+                    &format!("f(a, {lit})"),
+                    Some(want),
+                ));
+            }
+            v
+        }
+        "Iterable" | "Iterator" => {
+            let e = s.elem.unwrap_or("int");
+            vec![one(
+                protocol,
+                &format!("for v in a:\n    e: {e} = v"),
+                &format!("fn f[C: {protocol}[{e}]](c: C):\n    for v in c:\n        e: {e} = v\n"),
+                "f(a)",
+                if protocol == "Iterable" {
+                    Some(s.elem.is_some())
+                } else {
+                    None
+                },
+            )]
+        }
+        "Index" => {
+            let (key, kt, vt) = s.index.unwrap_or(("0", "int", "int"));
+            vec![one(
+                "Index",
+                &format!("k: {kt} = {key}\nr := a[k]"),
+                &format!("fn f[C: Index[{kt}, {vt}]](c: C, k: {kt}) -> {vt}:\n    return c[k]\n"),
+                &format!("f(a, {key})"),
+                Some(s.index.is_some()),
+            )]
+        }
+        "IndexSet" => {
+            let (key, kt, vt) = s.index.unwrap_or(("0", "int", "int"));
+            let val = s.set_val.unwrap_or("1");
+            vec![one(
+                "IndexSet",
+                &format!("a[{key}] = {val}"),
+                &format!("fn f[C: IndexSet[{kt}, {vt}]](c: C, k: {kt}, v: {vt}):\n    c[k] = v\n"),
+                &format!("f(a, {key}, {val})"),
+                Some(s.set_val.is_some()),
+            )]
+        }
+        "Slice" => {
+            let r = s.slice.unwrap_or("int");
+            vec![one(
+                "Slice",
+                "r := a[0..1]",
+                &format!("fn f[C: Slice[{r}]](c: C) -> {r}:\n    return c[0..1]\n"),
+                "f(a)",
+                Some(s.slice.is_some()),
+            )]
+        }
+        other => panic!("grid has no template for protocol {other}"),
+    }
+}
+
+/// TICKET-257 (owner rule U5) — an operator accepts a type exactly when the type satisfies the
+/// operator's protocol. Every cell of `RecvKind::ALL` x `HOOKS` runs the operator form and the bound
+/// form and requires the same answer, plus the expected answer where the sample states one.
+#[test]
+fn builtin_operator_and_bound_agree_grid() {
+    use super::proto::RecvKind;
+    let mut red: Vec<String> = Vec::new();
+    for row in HOOKS {
+        for kind in RecvKind::ALL {
+            for sample in grid_samples(kind) {
+                for (label, op, bound, want) in grid_programs(row.protocol, &sample) {
+                    let op_ok = check_src(&op).is_empty();
+                    let bound_ok = check_src(&bound).is_empty();
+                    let agree = if row.protocol == "Iterator" {
+                        !bound_ok || op_ok
+                    } else {
+                        op_ok == bound_ok
+                    };
+                    let want_ok = want.is_none_or(|w| w == bound_ok);
+                    if !agree || !want_ok {
+                        let f = |b: bool| if b { "ok" } else { "err" };
+                        red.push(format!(
+                            "{} x {} x {} [{}]: operator={} bound={} want={}",
+                            row.protocol,
+                            kind,
+                            label,
+                            sample.lit,
+                            f(op_ok),
+                            f(bound_ok),
+                            want.map_or("-", f),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "{} red cells:\n{}",
+        red.len(),
+        red.join("\n")
+    );
+}
