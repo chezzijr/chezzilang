@@ -17,6 +17,7 @@ fn t179_try(xs: List[int], p: T179G, op: str) -> str:
             xs.push(9)
         if op == "index":
             xs[0] = 9
+        # U15 (TICKET-258): `+=` rebinds this task's own parameter, so it writes nothing the parent sees.
         if op == "pluseq":
             xs += [9]
         if op == "field":
@@ -46,7 +47,7 @@ test fn grid_spawn_arg_named():
     out := Channel[str](1)
     parallel:
         spawn t179_row(xs, p, out)
-    assert out.recv() == "ok,fault,fault,fault,fault"
+    assert out.recv() == "ok,fault,fault,ok,fault"
     assert xs == [1]
 
 test fn grid_spawn_arg_fresh_literal():
@@ -77,7 +78,7 @@ test fn grid_spawn_arg_call_result():
     out := Channel[str](1)
     parallel:
         spawn t179_row(t179_id(xs), T179G(x=1), out)
-    assert out.recv() == "ok,fault,fault,fault,ok"
+    assert out.recv() == "ok,fault,fault,ok,ok"
     assert xs == [1]
 
 test fn grid_spawn_receiver_named():
@@ -101,7 +102,7 @@ test fn grid_module_global():
     parallel:
         spawn:
             t179_row(t179_glist, T179G(x=1), out)
-    assert out.recv() == "ok,fault,fault,fault,ok"
+    assert out.recv() == "ok,fault,fault,ok,ok"
     assert t179_glist == [1]
 
 fn t179_call(f: fn() -> None, out: Channel[str]):

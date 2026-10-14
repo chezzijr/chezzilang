@@ -395,15 +395,15 @@ test fn a_generic_fn_argument_to_a_generic_hof():
     assert applyg(gid, "s").upper() == "S"
     assert twop(gtext, 5).upper() == "5"
 
-# ---- W8-27: `+=` on a List must mutate in place through an aliased name, not rebind it ----
+# ---- U15 (TICKET-258): `+=` rebinds; an in-place append is `extend`, which every alias sees ----
 
-test fn compound_assign_extends_in_place_through_alias():
+test fn extend_mutates_through_a_parameter():
     fn add(xs: List[int]):
-        xs += [9]
+        xs.extend([9])
         xs.push(7)
     ys := [1]
     add(ys)
-    assert ys == [1, 9, 7], "+= must mutate List in place like push, not rebind the local"
+    assert ys == [1, 9, 7], "extend must mutate the caller's list"
 
 # ---- W8-4: a sort_by_key callback that mutates the list being sorted must fault, not vanish ----
 
@@ -417,7 +417,7 @@ test fn sort_by_key_rejects_mutation_during_sort():
         ?_: assert false, "sort_by_key silently dropped a mutation during sort instead of faulting"
         !_: assert true
 
-# ---- W8-27 / W8-4 follow-up coverage: += through more alias shapes, and sort faulting on
+# ---- W8-4 follow-up coverage: extend through more alias shapes, and sort faulting on
 # both a plain element write and a struct's compare re-entering a mutation ----
 
 w84_ns := [W84N(2), W84N(1)]
@@ -433,16 +433,16 @@ struct W84N:
     fn eq(self, other: W84N) -> bool:
         return self.n == other.n
 
-test fn compound_assign_extends_through_a_map_value():
+test fn extend_through_a_map_value():
     inner := [1]
     m := {"k": inner}
-    m["k"] += [2]
+    m["k"].extend([2])
     assert inner == [1, 2], "map value"
 
-test fn compound_assign_extends_through_a_struct_field():
+test fn extend_through_a_struct_field():
     inner := [1]
     b := W84Box(inner)
-    b.xs += [2]
+    b.xs.extend([2])
     assert inner == [1, 2], "field"
 
 test fn compound_assign_self_extend_terminates():
@@ -477,18 +477,18 @@ test fn sort_rejects_mutation_from_a_struct_compare():
         ?_: assert false, "struct sort with a mutating compare did not fault"
         !e: assert e.message().contains("list modified during 'sort'"), e.message()
 
-# TICKET-107 (W12-14): `List += List` extends in place (DEC-015), so it never rebinds the name —
-# it must pass through a loop variable and a `const` binding, unlike every other compound form.
-test fn plus_equals_extends_through_a_loop_variable():
+# `extend` mutates through a loop variable and a `const` binding; `+=` rebinds, so the checker rejects
+# it there (`checker::tests::list_plus_equals_rejected_*`).
+test fn extend_mutates_through_a_loop_variable():
     lst := [[1], [2]]
     for row in lst:
-        row += [0]
+        row.extend([0])
     assert str(lst) == "[[1, 0], [2, 0]]"
 
-test fn plus_equals_extends_through_a_const_binding():
+test fn extend_mutates_through_a_const_binding():
     xs: const List[int] = [1]
     alias := xs
-    xs += [3]
+    xs.extend([3])
     assert str(alias) == "[1, 3]"
 
 # W13-10: `[] * n` on an EMPTY source still loops `n` times (each iteration extends nothing), so
