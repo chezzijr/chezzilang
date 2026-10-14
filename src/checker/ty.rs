@@ -1374,13 +1374,9 @@ pub enum Resolution {
     /// `Pt.getx`); `Op::MakeMethodFunc`. An instance method takes its receiver as the first
     /// argument.
     MethodFn { type_key: String, method: String },
-    /// A payload variant read as a VALUE (`R1[int].L`); a synthesized constructor fn,
-    /// `Op::MakeFunc`.
-    VariantFn {
-        enum_key: String,
-        variant: String,
-        arity: usize,
-    },
+    /// A payload variant, called (`E.V(1)`, `Op::NewEnum`). A read as a value is a type error
+    /// (U10), so the compiler never lowers it as one.
+    VariantFn { enum_key: String, variant: String },
     /// A static-witness call `T.m()` on the named type parameter (`Op::CallStaticDyn`).
     WitnessStatic(String),
     /// A member of a whole-module import reached as `m.x` (`Op::CallMethod` / `Op::GetField` on

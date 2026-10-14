@@ -189,11 +189,7 @@ impl Checker {
             return Some(if arity == 0 {
                 Resolution::Variant { enum_key, variant }
             } else {
-                Resolution::VariantFn {
-                    enum_key,
-                    variant,
-                    arity,
-                }
+                Resolution::VariantFn { enum_key, variant }
             });
         }
         if n == "print" || is_firstclass_builtin_fn(n) || BUILTIN_CALLEES.contains(&n) {

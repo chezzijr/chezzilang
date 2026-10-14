@@ -3089,7 +3089,6 @@ impl Checker {
                     let res = Resolution::VariantFn {
                         enum_key: key.clone(),
                         variant: name.to_string(),
-                        arity: v.payload.len(),
                     };
                     let mut sig = FnSig::plain(v.payload.clone(), recv);
                     sig.type_params = tps.clone();

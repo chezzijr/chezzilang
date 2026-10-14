@@ -236,8 +236,6 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
 /// [`Compiler::synth_fn_proto`]; never a per-kind memo beside it.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum SynthFn {
-    /// A payload variant read as a value (`R1[int].L`, TICKET-204): its constructor fn.
-    Variant { enum_key: String, variant: String },
     /// A bound's instance method read through a type parameter (`T.get`): one per (method, arity).
     ParamMethod { method: String, arity: usize },
     /// `json.decode[T]` read as a value (TICKET-214), keyed by the target's shape.
@@ -3822,12 +3820,6 @@ impl Compiler {
                         )?;
                         fc.emit(Op::MakeFunc(p), expr.span);
                     }
-                    // A payload variant read as a value (`R1[int].L`): its constructor fn.
-                    Resolution::VariantFn {
-                        enum_key,
-                        variant,
-                        arity,
-                    } => self.emit_variant_fn_value(fc, &enum_key, &variant, arity, expr.span)?,
                     // std.json's decode read as a value (TICKET-214).
                     Resolution::Decode(desc) => {
                         self.compile_decode_fn_value(fc, obj, &desc, expr.span)?
@@ -3855,7 +3847,9 @@ impl Compiler {
                     | other @ Resolution::WitnessStatic(_)
                     | other @ Resolution::Module(_)
                     | other @ Resolution::PatBinding
-                    | other @ Resolution::PatStruct(_) => {
+                    | other @ Resolution::PatStruct(_)
+                    // U10: the checker rejects a payload variant read as a value.
+                    | other @ Resolution::VariantFn { .. } => {
                         return Err(CompileError {
                             message: format!("internal: a value field resolved to {other:?}"),
                             span: expr.span,
@@ -4355,12 +4349,6 @@ impl Compiler {
             Resolution::Variant { enum_key, variant } => {
                 self.emit_new_enum(fc, &enum_key, &variant, 0, e.span);
             }
-            // A bare imported payload variant read as a value (`f := Some`): its constructor fn.
-            Resolution::VariantFn {
-                enum_key,
-                variant,
-                arity,
-            } => self.emit_variant_fn_value(fc, &enum_key, &variant, arity, e.span)?,
             Resolution::Builtin(b) => fc.emit(Op::LoadBuiltin(b), e.span),
             Resolution::Local
             | Resolution::Global { .. }
@@ -4376,7 +4364,9 @@ impl Compiler {
             | other @ Resolution::Member
             | other @ Resolution::PatBinding
             | other @ Resolution::PatStruct(_)
-            | other @ Resolution::Decode(_) => {
+            | other @ Resolution::Decode(_)
+            // U10: the checker rejects a payload variant read as a value.
+            | other @ Resolution::VariantFn { .. } => {
                 return Err(CompileError {
                     message: format!("internal: a value name resolved to {other:?}"),
                     span: e.span,
@@ -4628,27 +4618,6 @@ impl Compiler {
         }
         self.compile_args(fc, args)?;
         self.emit_new_enum(fc, enum_key, variant, args.len(), span);
-        Ok(())
-    }
-
-    /// A payload variant read as a value (`R1[int].L`, a bare imported `Some`): its constructor
-    /// fn, through the one memo of variant fn values (DEC-226).
-    fn emit_variant_fn_value(
-        &mut self,
-        fc: &mut FnComp,
-        enum_key: &str,
-        variant: &str,
-        arity: usize,
-        span: Span,
-    ) -> Result<(), CompileError> {
-        let p = self.synth_fn_proto(
-            SynthFn::Variant {
-                enum_key: enum_key.to_string(),
-                variant: variant.to_string(),
-            },
-            |c| Ok(c.build_variant_fn(enum_key, variant, arity)),
-        )?;
-        fc.emit(Op::MakeFunc(p), span);
         Ok(())
     }
 
@@ -5590,23 +5559,6 @@ impl Compiler {
         self.finish(vf)
     }
 
-    /// A payload variant has no proto of its own; its value is this constructor fn (Rust
-    /// `E::<T>::V`), memoised per `(enum key, variant)` by [`Compiler::synth_fn_proto`].
-    fn build_variant_fn(&mut self, enum_key: &str, variant: &str, arity: usize) -> ProtoId {
-        let mut vf = FnComp::new(
-            format!("{}.{variant}", bare_display(enum_key)),
-            arity,
-            false,
-        );
-        for i in 0..arity {
-            let slot = vf.add_local(format!("$v{i}"));
-            vf.emit_get_local_raw(slot, Span::RUNTIME);
-        }
-        self.emit_new_enum(&mut vf, enum_key, variant, arity, Span::RUNTIME);
-        vf.emit(Op::Return, Span::RUNTIME);
-        self.finish(vf)
-    }
-
     /// TICKET-180 — what the name head `e` denotes: the checker's recorded [`Resolution`], the
     /// ONLY source. A miss is an internal error: a checker arm returned without recording, so fix
     /// that arm and never add a fallback here. A compiler-synthesized node
@@ -5617,12 +5569,11 @@ impl Compiler {
     /// The position rule: the compiler calls this only on a node it lowers as a name.
     /// (1) A call callee `Ident`. (2) A call callee `Field`, and the `Field` inside a callee
     /// `Index { obj: Field }` (`Type[T].m[U](..)`, `Type.m[U](..)`, `m.f[int](..)`). (3) An `Ident`
-    /// it compiles as a value. (4) A value `Field`, including `MethodFn` and `VariantFn` (a type
-    /// path's method or payload variant read as a value). (5) The `obj` of a `Field` is compiled,
+    /// it compiles as a value. (4) A value `Field`, including `MethodFn` (a type path's method
+    /// read as a value; a payload variant read as a value is a type error, U10). (5) The `obj` of a `Field` is compiled,
     /// and so falls under (3), only when that `Field`'s entry is `Member`, `ModuleMember` or `Fn`.
     /// (6) The `Ident` or `Field` head of a type-applied fn value `Index`
-    /// (`m.f[int]`, `pair[str, int]`, `Bx[int].put[str]`), recorded as `Fn`, `MethodFn` or
-    /// `VariantFn`. It never asks
+    /// (`m.f[int]`, `pair[str, int]`, `Bx[int].put[str]`), recorded as `Fn` or `MethodFn`. It never asks
     /// about a type head (`T` in `T.m()`, `E` in `E.V`, `Box` in `Box[int].of()`) or a type
     /// argument, because it never lowers them. No `ast` shape predicate can state this rule:
     /// `xs[i].k` and `Box[int].k` share one shape.
