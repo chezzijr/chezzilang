@@ -49,7 +49,6 @@ test fn a_range_with_no_start_cannot_be_iterated():
         n := 0
         for i in r:
             n += i
-        n
     match out:
         ?_: assert false, "no start must fault"
         !e: assert e.message() == "a range with no start cannot be iterated"
@@ -128,7 +127,6 @@ test fn an_open_range_faults_at_the_top_of_int_as_plus_does():
         n := 0
         for _i in 9223372036854775806..:
             n += 1
-        n
     match r:
         ?_: assert false, "must overflow"
         !e: assert e.message().contains("integer overflow")

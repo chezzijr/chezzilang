@@ -14,11 +14,13 @@ test fn comparison_assert_shows_operands():
 
 test fn comparison_assert_keeps_custom_message():
     x := 1
-    r := recover: assert x == 2, "x must be two"
+    r := recover:
+        assert x == 2, "x must be two"
     assert fault_msg(r) == "assertion failed: x must be two (1 == 2)"
 
 test fn non_comparison_assert_message_unchanged():
-    r := recover: assert false, "boom"
+    r := recover:
+        assert false, "boom"
     assert fault_msg(r) == "assertion failed: boom"
 
 test fn comparison_assert_in_a_loop_still_passes():

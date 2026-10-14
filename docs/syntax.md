@@ -1532,7 +1532,7 @@ A **bare** generic fn value — `g := ident`, with no turbofish and no expected 
 where it is bound (TICKET-238): inference never reads a later statement, so a later `g(5)` does not
 pin it. Inside ONE statement the value still solves: an argument (`apply(ident, 5)`), a typed
 binding (`f: fn(int) -> int = ident`), or a **join** with a sibling — `if`/`elif`/`match` branches,
-`??`, a list/map literal, `==`, `in`, list `+`, a `recover:` tail. `(o ?? g)(5)` with
+`??`, a list/map literal, `==`, `in`, list `+`, an inline `recover: expr`. `(o ?? g)(5)` with
 `o: (fn(int) -> int)?` pins `T = int`, and so does `if c: inc else: g`. The read is rejected at its
 own span with the instantiate hint:
 
@@ -3650,7 +3650,7 @@ value of its own, so a `T?` or `T!E` branch still gets the discarded-value warni
 branch, naming the callee). Wherever the value is USED the branches must still have one type, as
 the next paragraph says: `x := if …`, `_ := if …`, a call argument, a `return` value, an inline fn
 body (`fn f(c: bool): if c: a() else: b()` returns the value), a closure body, a match-expression
-arm, and the trailing expression of a `recover:` block.
+arm, and an inline `recover: expr`.
 
 All arms (and both `if` branches) must agree on a type — there is NO numeric adaptation (rule D3, §3):
 an `int` branch beside a `float` branch is a type error (`x := if c: 1 else: 2.5` →
@@ -3747,7 +3747,7 @@ rs: List[int!str] = [1, !"disk", 3]   # [1, !disk, 3]
   ``a `!` value needs its type from an annotation: add `-> T!E` to the function, or annotate the binding, e.g. `w: int!str = !e` ``.
 - **A `None` needs its type on its own statement** (TICKET-238). `z := None` is an error on that
   line: write `z: int? = None`. A literal `None` beside a value joins to that value's optional in a
-  list or map literal, an `if`/`match` expression, an inline body and a `recover:` tail:
+  list or map literal, an `if`/`match` expression, an inline body and an inline `recover: expr`:
   `[None, 7]` is `List[int?]`. No message prints an open type: `a: int = None` reads
   `cannot assign None to variable of type int`.
 - **Set elements and map keys** never wrap in effect: no carrier is `Hashable`.
@@ -3895,8 +3895,8 @@ included, since the runtime no longer checks a top-level drop.
 
 The warning fires wherever the statement's own type is a carrier, so it also skips the positions where
 a bare carrier expression isn't a drop at all: an inline-expr body (`fn f() -> T!: g()`, an implicit
-return), the trailing expression of a `recover:` block or a value-`match`/value-`if` (that expression
-*is* the block's value), and `g()?` / `x ?? d` (which yield the unwrapped payload). `o()?.len()` *does*
+return), the trailing expression of a value-`match`/value-`if` (that expression
+*is* the block's value; the last statement of a `recover:` block is an ordinary statement), and `g()?` / `x ?? d` (which yield the unwrapped payload). `o()?.len()` *does*
 warn — optional chaining re-wraps, so the result is still a `T?`.
 
 **`defer` is deliberately excluded.** `defer f.close()` never warns even though `close` returns a
@@ -3925,14 +3925,15 @@ there too. It is a known limit of the rule, not a defect.
 `T!E`/`?` handle *expected* errors. A **runtime fault** — index-out-of-bounds, divide-by-zero,
 integer overflow, a missing map key — is a *panic*: by default it terminates the program. A
 `recover:` block is a boundary that **catches any panic occurring transitively beneath it** (no need
-to pre-mark risky code) and yields a `T!Error`:
+to pre-mark risky code) and yields a `!` (the error or nothing):
 
 ```chezzi
+total := 0
 r := recover:
     rows := parse(file)       # may panic deep inside
-    rows[0] / rows[1]         # OOB / divide-by-zero is caught here
+    total = rows[0] / rows[1] # OOB / divide-by-zero is caught here
 match r:
-    ?v:  print(v)          # success wraps the block's trailing-expression value
+    ?_:  print(total)      # success: the block ran to its end
     !e: print("recovered: {e.message()}")   # a fault becomes !message
 ```
 
@@ -3943,18 +3944,14 @@ extends to the right like a lambda body, so `recover: a + b` recovers `a + b`; w
 parentheses to end it earlier (`(recover: a) + b`). A statement is no body: write the block form
 (`recover:` then an indented line) for an assignment, an `assert` or a `return`.
 
-The block's value is its **trailing expression**. A trailing statement-form `match`/`if` counts too:
-when every arm/branch produces a value (a total `match`; an `if` with an `else`, every branch ending
-in a value), the whole construct is the block's value expression and `?v` wraps its unified arm/branch
-type — so `recover: … ; match x: 3: 100; _: 200` is `int!`, not `None!`. A literal `None`
-branch beside a value joins as it does in an `if`/`match` expression: a tail `if c:` / `None` / `else:`
-/ `7` makes the block an `int?!` (TICKET-234); a tail whose branches still do not join keeps the
-fallback below. A tail that
-does *not* uniformly produce a value has no single value type, so the block falls back to `None!`
-(value dropped, consumed only via `?_`) — never an error. This covers a trailing `let`, a non-total
-`match`, an `else`-less `if`, **and** a `match`/`if` whose arms produce genuinely *different* types (a
-`str` arm next to an `int` arm, or a void `print(...)` arm mixed with a value arm). (A tail that provably
-*diverges* — every arm `panic`s — is bottom, matching a direct `recover: panic(…)`.)
+The block form has **no tail value** (TICKET-260, rule U8): its type is `!` (`None!`), the error or
+nothing, like Rust's `Result<(), Error>`. The last statement of the block is an ordinary statement:
+`x / 2` there is discarded. To take a value out of a block, assign inside it (`v := 0`, then
+`v = <value>` in the block) and read `v` after the boundary. Reading the block as a `T` is a type
+error, and the message names the rule: `` expected int!, found ! — this value has type `!`: a
+`recover:` block has no tail value; assign inside it (`v := 0`, then `v = <value>` in the block) ``.
+The inline form `recover: expr` keeps the value: its type is `T!`, and a body that provably
+diverges (`recover: panic(…)`) is bottom-typed.
 
 It behaves like a **try-block**: a `?` inside the block short-circuits to the boundary (the `!e`
 lands in `r`), so one `recover:` handles *both* panics and propagated `T!E` errors. Because `?`
@@ -3963,11 +3960,11 @@ not return a `T!E`.
 
 ```chezzi
 fn run() -> str:                       # not a `T!E`-returning function
+    n := 0
     r := recover:
-        n := parse_int(input)?         # an error here lands in `r`, not propagated out of run()
-        n * 2
+        n = parse_int(input)? * 2      # an error here lands in `r`, not propagated out of run()
     match r:
-        ?v:  return "got {v}"
+        ?_:  return "got {n}"
         !e: return "failed: {e.message()}"
 ```
 
@@ -3990,10 +3987,10 @@ of a branch (no explicit `return` needed), or in an expression (`x := if ok: v e
 takes `v`'s type).
 
 ```chezzi
-r: int!Error = recover:           # the body yields no value, so the binding names the type
+r := recover:
     panic("boom")                 # raised here, caught at the boundary
 match r:
-    ?v:  print(v)
+    ?_:  print("ok")
     !e: print("recovered: {e.message()}")   # → recovered: boom
 ```
 

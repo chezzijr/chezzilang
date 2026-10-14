@@ -14,33 +14,26 @@ fn main():
     lo := -big - 1                      # i64::MIN (its literal can't be written — it overflows the lexer)
 
     # Each op that has no representable result is caught at the boundary.
-    a := recover:
-        big + 1
+    a := recover: big + 1
     show("add", a)
 
-    m := recover:
-        big * 2
+    m := recover: big * 2
     show("mul", m)
 
-    n := recover:
-        -lo
+    n := recover: -lo
     show("neg", n)
 
-    d := recover:
-        lo / -1
+    d := recover: lo / -1
     show("div", d)
 
-    ab := recover:
-        math.abs(lo)
+    ab := recover: math.abs(lo)
     show("abs", ab)
 
     # `List.sum()` accumulates with the same checked add as `+` — overflow faults, never wraps.
-    s := recover:
-        [big, 1].sum()
+    s := recover: [big, 1].sum()
     show("sum", s)
 
     # The non-overflowing case still works — recovered into success.
-    ok := recover:
-        math.abs(-5)
+    ok := recover: math.abs(-5)
     show("abs ok", ok)
 main()

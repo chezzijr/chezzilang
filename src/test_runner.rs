@@ -2521,7 +2521,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "rectimeout_test.chz",
-            "test fn t():\n    r: int! = recover:\n        while true:\n            pass\n    assert false\n",
+            "test fn t():\n    r: ! = recover:\n        while true:\n            pass\n    assert false\n",
         );
         let report = run_tests_timed(&f, 0, 50);
         assert!(!report.passed, "report:\n{}", report.text);
@@ -2546,7 +2546,7 @@ struct Suite:
         let d = TmpDir::new();
         let f = d.write(
             "recdefertimeout_test.chz",
-            "test fn t():\n    defer:\n        r: int! = recover:\n            while true:\n                pass\n        assert false, \"SWALLOWED-{r}\"\n    while true:\n        pass\n",
+            "test fn t():\n    defer:\n        r: ! = recover:\n            while true:\n                pass\n        assert false, \"SWALLOWED-{r}\"\n    while true:\n        pass\n",
         );
         let report = run_tests_timed(&f, 0, 50);
         assert!(!report.passed, "report:\n{}", report.text);

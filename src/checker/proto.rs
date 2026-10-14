@@ -4704,7 +4704,7 @@ impl Checker {
                         span,
                         format!(
                             "{name}[{t_s}]() expected element type {t_s}, found {inferred_s}{note}{}",
-                            float_fix_note(&t, &inferred)
+                            slot_note(&t, &inferred)
                         ),
                     );
                 }

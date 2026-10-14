@@ -7,8 +7,7 @@
 
 # A faulting thunk runner: prints "label: ok V" on success or "label: <message>" on a caught fault.
 fn probe(label: str, f: fn() -> int):
-    r := recover:
-        f()
+    r := recover: f()
     match r:
         ?v: print("{label}: ok {v}")
         !e: print("{label}: {e.message()}")
@@ -207,11 +206,12 @@ fn defer_q() -> int!:
 fn defers():
     print("-- defer --")
     defer_lifo()
+    r_v := 0
     r := recover:
         n := defer_q()?
-        n
+        r_v = n
     match r:
-        ?v: print("ok {v}")
+        ?_: print("ok {r_v}")
         !e: print("caught {e.message()}")
 
 # ---- comprehensions ----------------------------------------------------------------------------

@@ -161,8 +161,7 @@ test fn a_nested_element_push_faults():
     assert r.recv() != "no-fault"
 
 fn faults[T](f: fn() -> T) -> bool:
-    res := recover:
-        f()
+    res := recover: f()
     match res:
         ?_: return false
         !_: return true

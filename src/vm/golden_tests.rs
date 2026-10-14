@@ -2130,29 +2130,6 @@ fn parity_large_int_map_keys_distinct() {
 }
 
 #[test]
-fn recover_tail_stmt_match_value_run_parity() {
-    // A `recover:` whose TAIL is a statement-form `match` with value-producing arms yields
-    // `Ok(<arm value>)` — the value is NOT dropped (the old bug wrapped `Ok(nil)`). v=100.
-    let src = "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3: 100\n            _: 200\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()";
-    assert_golden_out(src, "v=100\n");
-}
-
-#[test]
-fn recover_tail_stmt_if_value_run_parity() {
-    // Trailing statement-form `if/else` analog: the taken branch's value is the `Ok` payload.
-    let src = "fn main():\n    r := recover:\n        x := 3\n        if x == 3:\n            100\n        else:\n            200\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()";
-    assert_golden_out(src, "v=100\n");
-}
-
-#[test]
-fn recover_tail_stmt_match_value_defer_in_arm_run_parity() {
-    // A `defer` inside a value-producing tail-match arm must run for effect WITHOUT clobbering the
-    // trailing value that becomes the `Ok` payload (defers touch frame.deferred, never the stack).
-    let src = "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3:\n                defer print(\"cleanup\")\n                100\n            _: 200\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()";
-    assert_golden_out(src, "cleanup\nv=100\n");
-}
-
-#[test]
 fn recover_tail_match_value_catches_fault_is_err() {
     // Must-not-break: even though the block is now value-typed, a fault raised BEFORE the tail-match
     // is still caught and converted to `Err` (single-Result stack invariant preserved).
@@ -10500,13 +10477,14 @@ main()";
 fn generator_recover_suspended_resumes_both() {
     let src = "\
 fn gen() -> Iterator[int]:
+    v := 0
     r := recover:
         yield 1
         yield 2
-        99
+        v = 99
     yield 3
     match r:
-        ?v: yield v
+        ?_: yield v
         !e: yield -1
 fn main():
     it := gen()

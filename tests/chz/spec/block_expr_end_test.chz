@@ -27,19 +27,19 @@ test fn some_arm_after_a_nested_match_arm_runs():
     assert f(7, 2) == 1
 
 test fn some_arm_after_a_nested_recover_arm_runs():
-    fn f(n: int, m: int) -> int!:
-        r: int! = match opt(n):
+    fn f(n: int, m: int) -> str:
+        q := 0
+        r := match opt(n):
             None: recover:
-                10 / m
-            ?_: 77
-        return r
-    fn show(r: int!) -> str:
+                q = 10 / m
+            ?_: recover:
+                q = 77
         match r:
             !e: return e.message()
-            v: return "ok {v}"
-    assert show(f(0, 0)) == "division by zero"
-    assert show(f(0, 5)) == "ok 2"
-    assert show(f(3, 5)) == "ok 77"
+            _: return "ok {q}"
+    assert f(0, 0) == "division by zero"
+    assert f(0, 5) == "ok 2"
+    assert f(3, 5) == "ok 77"
 
 test fn parenthesized_line_after_a_match_value_is_a_statement():
     c := Ctr(0)
@@ -89,25 +89,26 @@ test fn negative_arm_after_an_inline_statement_arm():
     assert f(5, 0) == 40
 
 test fn negative_literal_line_after_a_nested_recover():
-    fn f() -> int!:
-        x := recover:
+    fn f() -> int:
+        n := 0
+        r := recover:
             _y := recover:
-                1
+                n = 1
             -1
-        return x
-    fn show(r: int!) -> str:
+            n = 2
         match r:
-            !e: return e.message()
-            v: return "ok {v}"
-    assert show(f()) == "ok -1"
+            !_: return -9
+            _: return n
+    assert f() == 2
 
 test fn else_after_an_inline_wait_arm_block_is_the_waits():
     fn drain(ch: Channel[int]) -> int:
         n := 0
+        q := 0
         while true:
             wait:
                 v := ch.recv(): _r := recover:
-                    10 / v
+                    q = 10 / v
                 else: break
             n += 1
         return n

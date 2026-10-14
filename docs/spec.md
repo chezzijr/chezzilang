@@ -764,7 +764,7 @@ struct Meters:
 > solved inside its frame — ONE statement, or one bound operand (TICKET-238: inference never reads a
 > later statement, so `g := ident` is an error where it is bound) — by
 > an argument, a typed binding, or a join with a sibling (`if`/`match` branches, `??`,
-> list/map literals, `==`, `in`, list `+`/`+=`, a `recover:` tail). Only `assignable` and
+> list/map literals, `==`, `in`, list `+`/`+=`, an inline `recover: expr`). Only `assignable` and
 > `Checker::join_ty` bind a variable (`src/checker/tyvar.rs`). A read still unpinned when its frame
 > closes is rejected at the read, named parameters and both working spellings in the message.
 > ARGUMENT position is the same case: `[1,2,3].filter(pred)` / `.map(mk)` are errors when nothing

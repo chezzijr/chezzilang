@@ -43,8 +43,7 @@ fn main():
     print(m[b"k2"])
 
     # An out-of-range index faults recoverably (catchable by recover:).
-    r := recover:
-        b[99]
+    r := recover: b[99]
     match r:
         ?v: print(v)
         !e: print("caught out-of-range")

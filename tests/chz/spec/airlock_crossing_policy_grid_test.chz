@@ -23,16 +23,17 @@ fn must[T](r: T!) -> T:
         ?v: return v
         !e: panic(e.message())
 
-fn t189_out(res: int!) -> str:
+fn t189_out(res: !, got: int) -> str:
     match res:
-        ?n: return "ok {n}"
+        ?_: return "ok {got}"
         !_: return "fault"
 
 fn t189_try(xs: List[int]) -> str:
+    got := 0
     res := recover:
         xs.push(3)
-        xs.len()
-    return t189_out(res)
+        got = xs.len()
+    return t189_out(res, got)
 
 fn t189_w(xs: List[int], out: Channel[str]):
     out.send(t189_try(xs))
@@ -41,24 +42,27 @@ fn t189_dflt(out: Channel[str], acc: List[int] = []):
     out.send(t189_try(acc))
 
 fn t189_pack(out: Channel[str], ...rest: int):
+    got := 0
     res := recover:
         rest.push(3)
-        rest.len()
-    out.send(t189_out(res))
+        got = rest.len()
+    out.send(t189_out(res, got))
 
 fn t189_nested(xss: List[List[int]], out: Channel[str]):
+    got := 0
     res := recover:
         xss.push([2])
-        xss.len()
-    out.send(t189_out(res))
+        got = xss.len()
+    out.send(t189_out(res, got))
     out.send(t189_try(xss[0]))
 
 fn t189_cond(xs: List[int], out: Channel[str], c: bool):
+    got := 0
     res := recover:
         if c:
             xs.push(3)
-        xs.len()
-    out.send(t189_out(res))
+        got = xs.len()
+    out.send(t189_out(res, got))
 
 fn t189_id(xs: List[int]) -> List[int]:
     return xs
@@ -83,10 +87,11 @@ struct T189C:
     n: int
 
     fn bump(self, out: Channel[str]):
+        got := 0
         res := recover:
             self.n += 1
-            self.n
-        out.send(t189_out(res))
+            got = self.n
+        out.send(t189_out(res, got))
 
 fn t189_mk() -> T189C:
     return T189C(n=1)
@@ -257,10 +262,11 @@ test fn grid_policy_r29_receiver_constructor():
 struct T190H:
     xs: List[int]
     fn push_inner(self, out: Channel[str]):
+        got := 0
         res := recover:
             self.xs.push(2)
-            self.xs.len()
-        out.send(t189_out(res))
+            got = self.xs.len()
+        out.send(t189_out(res, got))
 
 test fn grid_policy_r29b_constructor_holding_a_named_list():
     xs := [1]
@@ -524,9 +530,10 @@ test fn grid_policy_r22_module_global():
 
 fn t189_call(c: Channel[fn() -> int], out: Channel[str]):
     f := c.recv()
+    got := 0
     res := recover:
-        f()
-    out.send(t189_out(res))
+        got = f()
+    out.send(t189_out(res, got))
 
 test fn grid_policy_r19_closure_other_heap():
     xs := [1]

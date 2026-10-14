@@ -13,11 +13,12 @@ a.next.push(b)
 b.next.push(a)            # a -> b -> a  (cycle)
 
 # print of a cyclic value renders the re-entered object as `...` (CPython's dataclass repr).
+pr_v := ""
 pr := recover:
     print(a)
-    "printed"
+    pr_v = "printed"
 match pr:
-    ?v:  print("print ok: {v}")
+    ?_:  print("print ok: {pr_v}")
     !e: print("print caught: {e.message()}")
 
 # == of two distinct-but-equal cycles is now catchable.
@@ -25,8 +26,7 @@ c := Node(1, [])
 d := Node(2, [])
 c.next.push(d)
 d.next.push(c)
-eq := recover:
-    a == c
+eq := recover: a == c
 match eq:
     ?v:  print("eq ok")
     !e: print("eq caught: {e.message()}")
@@ -35,8 +35,7 @@ match eq:
 print(a == a)                # true (identity fast-path)
 
 # `.contains` over a cyclic list is depth-guarded too — degrades gracefully, never crashes.
-ct := recover:
-    a.next.contains(a)       # a.next = [b]; b != a structurally → walks the cycle → guarded
+ct := recover: a.next.contains(a)       # a.next = [b]; b != a structurally → walks the cycle → guarded
 match ct:
     ?v:  print("contains ok: {v}")
     !e: print("contains caught: {e.message()}")
@@ -46,9 +45,10 @@ match ct:
 chain := Node(0, [])
 for i in 1..50:
     chain = Node(i, [chain])
+ok_v := ""
 ok := recover:
     print(chain.val)         # walks/holds a 50-deep acyclic graph; no fault
-    "walked"
+    ok_v = "walked"
 match ok:
-    ?v:  print("deep ok: {v}")
+    ?_:  print("deep ok: {ok_v}")
     !e: print("deep caught: {e.message()}")

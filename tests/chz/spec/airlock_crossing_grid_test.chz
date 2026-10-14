@@ -22,7 +22,6 @@ fn t179_try(xs: List[int], p: T179G, op: str) -> str:
             xs += [9]
         if op == "field":
             p.x = 9
-        0
     match res:
         ?_: return "ok"
         !_: return "fault"
@@ -36,7 +35,7 @@ fn t179_row(xs: List[int], p: T179G, out: Channel[str]):
 fn t179_id(xs: List[int]) -> List[int]:
     return xs
 
-fn t179_outcome(res: int!) -> str:
+fn t179_outcome(res: !) -> str:
     match res:
         ?_: return "ok"
         !_: return "fault"
@@ -86,7 +85,6 @@ test fn grid_spawn_receiver_named():
     r := recover:
         parallel:
             spawn xs.push(9)
-        0
     assert t179_outcome(r) == "fault"
     assert xs == [1]
 
@@ -94,7 +92,6 @@ test fn grid_spawn_receiver_fresh():
     r := recover:
         parallel:
             spawn [1].push(9)
-        0
     assert t179_outcome(r) == "ok"
 
 test fn grid_module_global():
@@ -108,7 +105,6 @@ test fn grid_module_global():
 fn t179_call(f: fn() -> None, out: Channel[str]):
     res := recover:
         f()
-        0
     out.send(t179_outcome(res))
 
 test fn grid_closure_capture():
@@ -138,14 +134,11 @@ test fn grid_shared_handle():
 
 fn t179_map_row(m: Map[str, int], out: Channel[str]):
     a := recover:
-        n := m.merge({"b": 2})
-        n.len()
+        _ := m.merge({"b": 2})
     b := recover:
         m.update({"c": 3})
-        0
     c := recover:
         _ := m.remove("a")
-        0
     out.send("{t179_outcome(a)},{t179_outcome(b)},{t179_outcome(c)}")
 
 test fn grid_map_methods_on_a_copy():
@@ -163,11 +156,12 @@ fn t179_gen_ops(op: str) -> Iterator[str]:
     yield t179_try(acc, p, op)
 
 fn t179_second(g: Iterator[str], out: Channel[str]):
+    res_v := ""
     res := recover:
         v := g.next() ?? "none"
-        v
+        res_v = v
     match res:
-        ?v: out.send(v)
+        ?_: out.send(res_v)
         !_: out.send("fault")
 
 test fn grid_generator_suspended_private_frame():
@@ -192,7 +186,6 @@ fn t179_drain_lists(g: Iterator[List[int]], out: Channel[str]):
         n := 0
         for v in g:
             n += v.len()
-        n
     out.send(t179_outcome(res))
 
 test fn grid_generator_suspended_yielded_and_held():
@@ -209,13 +202,14 @@ fn t179_pend(xs: List[int]) -> Iterator[int]:
     yield xs.len()
 
 fn t179_drain_ints(g: Iterator[int], out: Channel[str]):
+    res_v := 0
     res := recover:
         n := 0
         for v in g:
             n += v
-        n
+        res_v = n
     match res:
-        ?n: out.send("{n}")
+        ?_: out.send("{res_v}")
         !_: out.send("fault")
 
 test fn grid_generator_pending_fresh_arg():

@@ -480,14 +480,16 @@ fn counted_cells() -> Vec<(String, String, usize, Vec<&'static str>)> {
         1,
         vec![],
     ));
+    // TICKET-260: a `recover:` block has no tail value, so `r` is `!` and never open; each cell below
+    // keeps the nested statement and reports only the poisoned `xs` (once).
     out.push((
         "(j) a nested read does not silence the outer binding".into(),
         in_main(
             "",
             "    r := recover:\n        for e in []:\n            print(e)\n        []\n    print(r)\n",
         ),
-        1,
-        vec!["r"],
+        0,
+        vec![],
     ));
     out.push((
         "(j) a nested poisoned read".into(),
@@ -495,8 +497,8 @@ fn counted_cells() -> Vec<(String, String, usize, Vec<&'static str>)> {
             "",
             "    xs := []\n    r := recover:\n        print(xs)\n        []\n    print(r)\n",
         ),
-        2,
-        vec!["xs", "r"],
+        1,
+        vec!["xs"],
     ));
     // A poisoned read at nesting depth 2..4 below the statement that binds `r`: the read never
     // counts for `r`'s statement, at any depth.
@@ -517,8 +519,8 @@ fn counted_cells() -> Vec<(String, String, usize, Vec<&'static str>)> {
                 "",
                 &format!("    xs := []\n    r := recover:\n{body}        []\n    print(r)\n"),
             ),
-            2,
-            vec!["xs", "r"],
+            1,
+            vec!["xs"],
         ));
     }
     for (label, body) in [
@@ -536,8 +538,8 @@ fn counted_cells() -> Vec<(String, String, usize, Vec<&'static str>)> {
                     "    xs := []\n    r := recover:\n        fn g() -> int:\n{body}            return 1\n        print(g())\n        []\n    print(r)\n"
                 ),
             ),
-            2,
-            vec!["xs", "r"],
+            1,
+            vec!["xs"],
         ));
     }
     out.push((
@@ -546,8 +548,8 @@ fn counted_cells() -> Vec<(String, String, usize, Vec<&'static str>)> {
             "",
             "    xs := []\n    for i in 0..1:\n        if i == 0:\n            r := recover:\n                print(xs)\n                []\n            print(r)\n",
         ),
-        2,
-        vec!["xs", "r"],
+        1,
+        vec!["xs"],
     ));
     out.push((
         "(k) uses of a rejected binding do not cascade".into(),

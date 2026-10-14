@@ -347,38 +347,6 @@ impl StmtKind {
     }
 }
 
-/// Does this statement block end in a value-producing trailing statement (a bare [`StmtKind::Expr`])?
-/// The single source of truth shared by the checker and the compiler for deciding whether a
-/// `recover:` block's trailing statement-form `match`/`if` is the block's value expression — so the
-/// two stages can never disagree on which tail counts as a value. A DIRECT trailing `StmtKind::Expr`
-/// only: a nested statement-`match`/`if` tail is not itself an `Expr`, so it does not count (no
-/// recursion). An empty block produces no value.
-pub fn block_produces_value(block: &[Stmt]) -> bool {
-    matches!(block.last().map(|s| &s.kind), Some(StmtKind::Expr(_)))
-}
-
-/// Is a statement-form `match` in `recover:` TAIL position a value expression? True iff it is total
-/// (at least one arm) AND every arm's body block ends in a value-producing trailing statement
-/// (see [`block_produces_value`]). A `match` with a statement/divergent tail in any arm is not.
-pub fn match_tail_is_value(arms: &[MatchArm]) -> bool {
-    !arms.is_empty() && arms.iter().all(|a| block_produces_value(&a.body))
-}
-
-/// Is a statement-form `if` in `recover:` TAIL position a value expression? True iff it is total
-/// (has an `else`, so control always reaches a branch) AND at least one `if`/`elif` branch, and
-/// every branch body AND the `else` body ends in a value-producing trailing statement
-/// (see [`block_produces_value`]).
-pub fn if_tail_is_value(branches: &[(Expr, Block)], else_block: &Option<Block>) -> bool {
-    match else_block {
-        Some(eb) => {
-            !branches.is_empty()
-                && block_produces_value(eb)
-                && branches.iter().all(|(_, b)| block_produces_value(b))
-        }
-        None => false,
-    }
-}
-
 /// A single C function signature inside an `extern "lib":` block — like a body-less [`FnDecl`],
 /// mirroring [`MethodSig`] but carrying its own [`Span`] (for per-fn marshallability errors).
 #[derive(Debug, Clone, PartialEq)]

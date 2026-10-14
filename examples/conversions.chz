@@ -29,8 +29,7 @@ fn main():
     print(ba.decode())         # hi
 
     # --- invalid UTF-8 decode faults RECOVERABLY (catchable by recover:) ---
-    r := recover:
-        b"\xff\xfe".decode()
+    r := recover: b"\xff\xfe".decode()
     match r:
         ?v: print(v)
         !e: print("caught")

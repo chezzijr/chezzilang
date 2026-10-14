@@ -430,17 +430,26 @@ fn a_carrier_that_is_not_discarded_does_not_warn() {
     no_warn(&format!(
         "{g}fn f() -> int!Error:\n    return g()\nprint(f())\n"
     ));
-    // 2. The trailing expression of a `recover:` block IS the block's value (`infer_recover`).
-    no_warn(&format!(
-        "{g}fn f():\n    r := recover:\n        g()\n    print(r)\nf()\n"
-    ));
-    // …and its two value-tail siblings, a trailing value-`match` and a trailing value-`if`.
-    no_warn(&format!(
-        "{g}fn f(n: int):\n    r := recover:\n        match n:\n            0: g()\n            _: g()\n    print(r)\nf(0)\n"
-    ));
-    no_warn(&format!(
-        "{g}fn f(n: int):\n    r := recover:\n        if n == 0:\n            g()\n        else:\n            g()\n    print(r)\nf(0)\n"
-    ));
+    // 2. A `recover:` block has no tail value (TICKET-260), so its last statement is an ordinary
+    //    statement: a carrier dropped there warns like any other, in a plain tail, a `match` arm
+    //    and an `if` branch.
+    let dropped = "the `int!` value returned by 'g' is discarded";
+    warns(
+        &format!("{g}fn f():\n    r := recover:\n        g()\n    print(r)\nf()\n"),
+        dropped,
+    );
+    warns(
+        &format!(
+            "{g}fn f(n: int):\n    r := recover:\n        match n:\n            0: g()\n            _: g()\n    print(r)\nf(0)\n"
+        ),
+        dropped,
+    );
+    warns(
+        &format!(
+            "{g}fn f(n: int):\n    r := recover:\n        if n == 0:\n            g()\n        else:\n            g()\n    print(r)\nf(0)\n"
+        ),
+        dropped,
+    );
     // The order matters: a carrier in a NON-final position of the same block is a real drop.
     warns(
         &format!("{g}fn f():\n    r := recover:\n        g()\n        1\n    print(r)\nf()\n"),
@@ -14794,14 +14803,14 @@ fn struct_error_without_message_rejected_as_error() {
 fn recover_yields_result_of_block_value() {
     // `recover:` evaluates to Result[T, Error]; matching Ok/Err is well-typed.
     ok(
-        "fn main():\n    r := recover:\n        [1, 2][0]\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nmain()\n",
+        "fn main():\n    r := recover: [1, 2][0]\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nmain()\n",
     );
 }
 
 #[test]
 fn recover_value_composes_with_question_mark() {
     // The recover result is an ordinary Result, usable with `?`.
-    ok("fn run() -> int!:\n    r := recover:\n        99\n    v := r?\n    return ?v\n");
+    ok("fn run() -> int!:\n    r := recover: 99\n    v := r?\n    return ?v\n");
 }
 
 #[test]
@@ -14824,7 +14833,7 @@ fn recover_block_rejects_escaping_break() {
 fn recover_allows_inner_loop_break() {
     // A break that targets a loop *inside* the recover block is fine.
     ok(
-        "fn main():\n    r := recover:\n        for i in 0..3:\n            if i == 1: break\n        42\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nmain()\n",
+        "fn main():\n    r := recover:\n        for i in 0..3:\n            if i == 1: break\n    match r:\n        ?_: print(1)\n        !e: print(e.message())\nmain()\n",
     );
 }
 
@@ -14844,28 +14853,17 @@ fn recover_question_mark_on_option_rejected() {
     );
 }
 
-// A `recover:` whose tail statement provably diverges (here a statement-form `match` whose every
-// arm `panic`s) yields no normal value, so its `Ok` payload is bottom (`Unknown`), not `nil` — and
-// `Ok(v)`'s `v` must be usable in value position (e.g. interpolated), exactly like a direct
-// `recover: panic(...)`. Pins the Never/bottom-payload inconsistency fix.
-#[test]
-fn recover_diverging_match_tail_payload_is_bottom() {
-    entry_ok(
-        "fn main():\n    r: int! = recover:\n        match 1:\n            _: panic(\"boom\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
-    );
-}
-
 // The consistency invariant the bug violated: a direct-panic recover and a match-all-panic recover
 // must both accept (both have a bottom `Ok` payload). Pre-fix the second was rejected at (1,1).
 #[test]
 fn recover_payload_consistent_direct_vs_match_panic() {
-    // r1: direct panic tail (already accepted pre-fix).
+    // r1: the inline form's payload is bottom, so it binds to `int!`.
     entry_ok(
-        "fn main():\n    r: int! = recover:\n        panic(\"x\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
+        "fn main():\n    r: int! = recover: panic(\"x\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
     );
-    // r2: panic reached through an extra statement-form match layer (rejected pre-fix).
+    // r2: the block form has no tail value (TICKET-260): it is `!`, so it binds to `!` and not `int!`.
     entry_ok(
-        "fn main():\n    r: int! = recover:\n        match 1:\n            _: panic(\"boom\")\n    match r:\n        ?v: print(\"got {v}\")\n        !e: print(\"err\")\nmain()\n",
+        "fn main():\n    r: ! = recover:\n        match 1:\n            _: panic(\"boom\")\n    match r:\n        ?_: print(\"got\")\n        !e: print(\"err\")\nmain()\n",
     );
 }
 
@@ -14876,37 +14874,11 @@ fn recover_payload_consistent_direct_vs_match_panic() {
 fn recover_non_never_value_unaffected() {
     // Concrete value tail -> Ok payload is `int`, interpolation accepts.
     entry_ok(
-        "fn main():\n    r := recover:\n        5\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()\n",
+        "fn main():\n    r := recover: 5\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()\n",
     );
     // Non-diverging statement tail (a `let`) -> Ok payload stays nil -> value use rejected.
     entry_rejects(
         "fn main():\n    r := recover:\n        x := 5\n    match r:\n        ?v: print(\"{v}\")\n        !e: print(\"err\")\nmain()\n",
-        "expression returns no value (None) and cannot be used as a value",
-    );
-}
-
-// A `recover:` whose TAIL is a statement-form `match` with value-producing arms is typed by the
-// unified arm type (`Result[int]` here), not `Result[nil]` — so binding `Ok(v)` gives `v: int` and
-// using it as a value (interpolation) is accepted instead of nil-banned. (Result has no `is_ok()`
-// method in Chezzi — it is consumed via `match`; the task's `r.is_ok()` was just illustrating that
-// the block type was wrong. The sound observable is that `v` is the arm value type, not nil.)
-#[test]
-fn recover_tail_stmt_match_value_is_result_of_arm_type() {
-    entry_ok(
-        "fn main():\n    r := recover:\n        x := 3\n        match x:\n            3: 100\n            _: 200\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()\n",
-    );
-}
-
-// A `recover:` whose TAIL is a statement-form `if/else` with value-producing branches is typed by
-// the unified branch type — same as the trailing-`match` analog.
-#[test]
-fn recover_tail_stmt_if_value_is_result_of_branch_type() {
-    entry_ok(
-        "fn main():\n    r := recover:\n        x := 3\n        if x == 3:\n            100\n        else:\n            200\n    match r:\n        ?v: print(\"v={v}\")\n        !e: print(\"err\")\nmain()\n",
-    );
-    // A trailing `if` WITHOUT an `else` is not total -> stays `Result[nil]` (value use rejected).
-    entry_rejects(
-        "fn main():\n    r := recover:\n        x := 3\n        if x == 3:\n            100\n    match r:\n        ?v: print(\"{v}\")\n        !e: print(\"err\")\nmain()\n",
         "expression returns no value (None) and cannot be used as a value",
     );
 }
@@ -34852,12 +34824,12 @@ fn ticket184_flow_grid() {
         ),
         (
             "T2",
-            "fn f(c: Channel[int]):\n    r: int! = recover:\n        wait:\n            v := c.recv():\n                panic(\"x\")\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nf(Channel[int](1))\n",
+            "fn f(c: Channel[int]):\n    r: ! = recover:\n        wait:\n            v := c.recv():\n                panic(\"x\")\n    match r:\n        ?_: print(1)\n        !e: print(e.message())\nf(Channel[int](1))\n",
             "ok",
         ),
         (
             "T3",
-            "fn f():\n    r: int! = recover:\n        panic(\"x\")\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nf()\n",
+            "fn f():\n    r: int! = recover: panic(\"x\")\n    match r:\n        ?v: print(v)\n        !e: print(e.message())\nf()\n",
             "ok",
         ),
         (
@@ -36800,16 +36772,6 @@ fn generic_value_join_grid() {
         (
             "list +=",
             "xs := [{A}]\n    xs += [{B}]\n    print(xs[0]{P})\n",
-            false,
-        ),
-        (
-            "recover if",
-            "r := recover:\n        if c:\n            {A}\n        else:\n            {B}\n    match r:\n        ?f: print(f{P})\n        !e: print(e.message())\n",
-            false,
-        ),
-        (
-            "recover match",
-            "r := recover:\n        match k:\n            1: {A}\n            _: {B}\n    match r:\n        ?f: print(f{P})\n        !e: print(e.message())\n",
             false,
         ),
         ("in", "print({A} in [{B}])\n", false),
@@ -39004,6 +38966,8 @@ fn one_line_if_statement_branches_need_not_join() {
         "a := false\nb := true\nif a: 1 elif b: \"s\" else: [1]\n",
         "a := false\nb := false\nif a: 1 else: if b: \"s\" else: print(0)\n",
         "c := false\n(if c: print(1) else: 2)\n",
+        // a `recover:` block has no tail value: its last statement is a discarded one-line `if`
+        "c := false\nr := recover:\n    if c: 1 else: \"a\"\n",
     ] {
         ok(src);
     }
@@ -39013,7 +38977,6 @@ fn one_line_if_statement_branches_need_not_join() {
         "fn f(c: bool) -> int: if c: 1 else: \"a\"\n",
         "fn f(c: bool) -> int:\n    return if c: 1 else: \"a\"\n",
         "c := false\nn := 1\nx := match n:\n    1: if c: 1 else: \"a\"\n    _: 2\n",
-        "c := false\nr := recover:\n    if c: 1 else: \"a\"\n",
         "c := false\nf := fn(): if c: pi() else: ps()\n",
         "fn f(c: bool): if c: 1 else: \"a\"\n",
         "c := false\n_ := if c: 1 else: \"a\"\n",
@@ -41678,7 +41641,13 @@ enum F:
 #[test]
 fn recover_block_tail_value_is_rejected() {
     rejects(
-        "s := recover:\n    x := 10\n    x / 2\nprint(s)\n",
+        "s := recover:\n    x := 10\n    x / 2\nt: int! = s\nprint(t)\n",
         "has type `!`",
     );
+}
+
+// TICKET-260 (U8): the block form is `!` -- the error or nothing -- so it binds to a `!` slot.
+#[test]
+fn recover_block_is_none_bang() {
+    ok("s := recover:\n    x := 1\n    x + 1\nt: ! = s\nprint(t)\n");
 }

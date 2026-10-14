@@ -3,12 +3,13 @@
 # observe, so it must not fault. Go/Python run each of these.
 
 fn t179_work(acc: List[int], out: Channel[str]):
+    res_v := 0
     res := recover:
         acc.push(1)
         acc.push(2)
-        acc.len()
+        res_v = acc.len()
     match res:
-        ?k: out.send("{k}")
+        ?_: out.send("{res_v}")
         !e: out.send(e.message())
 
 test fn fresh_list_literal_spawn_arg_is_writable():
@@ -22,11 +23,12 @@ test fn map_merge_inside_spawn_is_not_a_write():
     r := Channel[str](1)
     parallel:
         spawn:
+            res_v := 0
             res := recover:
                 n := m.merge({"b": 2})
-                n.len()
+                res_v = n.len()
             match res:
-                ?k: r.send("{k}")
+                ?_: r.send("{res_v}")
                 !e: r.send(e.message())
     assert r.recv() == "2"
 
@@ -42,12 +44,13 @@ test fn started_generator_drained_in_spawn_runs():
     r := Channel[str](1)
     parallel:
         spawn:
+            res_v := 0
             res := recover:
                 total := 0
                 for v in g:
                     total += v
-                total
+                res_v = total
             match res:
-                ?t: r.send("{t}")
+                ?_: r.send("{res_v}")
                 !e: r.send(e.message())
     assert r.recv() == "5"

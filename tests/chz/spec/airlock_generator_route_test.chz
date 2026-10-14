@@ -18,13 +18,14 @@ fn t190_gen() -> Iterator[int]:
         yield acc.len()
 
 fn t190_drain(g: Iterator[int]) -> str:
+    res_v := 0
     res := recover:
         total := 0
         for v in g:
             total += v
-        total
+        res_v = total
     match res:
-        ?t: return "{t}"
+        ?_: return "{res_v}"
         !e: return e.message()
 
 test fn started_generator_drained_in_executor_job_runs():
@@ -59,13 +60,14 @@ test fn generator_crossing_cost_is_independent_of_parent_heap():
 # Atomic) gives the generator away, so every write runs.
 
 fn t190_cell(g: Iterator[int]) -> str:
+    res_v := 0
     res := recover:
         total := 0
         for v in g:
             total += v
-        total
+        res_v = total
     match res:
-        ?t: return "{t}"
+        ?_: return "{res_v}"
         !_: return "fault"
 
 fn t190_push(xs: List[int], v: int):

@@ -4837,7 +4837,7 @@ impl Checker {
                 // method name `add` also names `Atomic.add` (a handle), whose float mismatch must NOT
                 // show the collection hint — gate on the receiver actually being a collection.
                 let pnote = self.protocol_note(pt, &at);
-                // An int at a `float` slot is not a mixed collection, so `float_fix_note` names
+                // An int at a `float` slot is not a mixed collection, so `slot_note` names
                 // the fix instead.
                 let coll_mismatch_is_float_widen = matches!((pt, &at), (Ty::Float, Ty::Int));
                 let hint = if !pnote.is_empty() {
@@ -4868,7 +4868,7 @@ impl Checker {
                         )
                     }
                 } else {
-                    float_fix_note(pt, &at).to_string()
+                    slot_note(pt, &at).to_string()
                 };
                 self.error(
                     arg.span,

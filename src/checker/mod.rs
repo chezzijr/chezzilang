@@ -267,17 +267,30 @@ fn int_where_float(expected: &Ty, actual: &Ty) -> bool {
     }
 }
 
+/// U8 (TICKET-260): the note for a `!` value (a `recover:` block, or a fn that returns `!`) read where
+/// a `T!` is expected. The block has no tail value; the fix is to assign inside it.
+pub(crate) const NO_VALUE_NOTE: &str = " — this value has type `!`: a `recover:` block has no tail value; assign inside it (`v := 0`, then `v = <value>` in the block)";
+
+/// Is `actual` a `!` (`Result[nil, _]`) where `expected` is a `Result` that carries a value? It only
+/// picks whether a failed slot check carries [`NO_VALUE_NOTE`]; it never decides what is accepted.
+fn no_value_where_value(expected: &Ty, actual: &Ty) -> bool {
+    matches!((expected, actual), (Ty::Result(q, _), Ty::Result(p, _)) if **p == Ty::Nil && **q != Ty::Nil)
+}
+
 /// The note a DIRECTED slot mismatch (an `expected` slot, an `actual` value) appends when the cause is
-/// an int where a `float` is expected. Empty for every other mismatch.
-pub(crate) fn float_fix_note(expected: &Ty, actual: &Ty) -> &'static str {
+/// an int where a `float` is expected, or a `!` where a `T!` is expected. Empty for every other
+/// mismatch. The note is chosen from the two types only.
+pub(crate) fn slot_note(expected: &Ty, actual: &Ty) -> &'static str {
     if int_where_float(expected, actual) {
         FLOAT_FIX_NOTE
+    } else if no_value_where_value(expected, actual) {
+        NO_VALUE_NOTE
     } else {
         ""
     }
 }
 
-/// [`float_fix_note`] for a SYMMETRIC mismatch (two branches, two elements, two operands): the int
+/// [`slot_note`] for a SYMMETRIC mismatch (two branches, two elements, two operands): the int
 /// may sit on either side.
 pub(crate) fn float_fix_note_join(a: &Ty, b: &Ty) -> &'static str {
     if int_where_float(a, b) || int_where_float(b, a) {
@@ -4264,7 +4277,7 @@ fn mask_closure_ret(actual: &Ty) -> Ty {
 fn wrap_payload_mismatch(payload: &Ty, t: &Ty) -> String {
     format!(
         "'?' value: expected {payload}, found {t}{}",
-        float_fix_note(payload, t)
+        slot_note(payload, t)
     )
 }
 

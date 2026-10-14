@@ -2995,7 +2995,7 @@ impl Checker {
                                 format!(
                                     "cannot assign {val_s} to variable of type {expected_s}{}{note}{}",
                                     crate::checker::ty::fn_arity_note(&expected, &val_ty),
-                                    float_fix_note(&expected, &val_ty)
+                                    slot_note(&expected, &val_ty)
                                 ),
                             );
                         }
@@ -3295,7 +3295,7 @@ impl Checker {
                                 format!(
                                     "default value for field '{}': expected {expected_s}, found {actual_s}{note}{}",
                                     field.name,
-                                    float_fix_note(&expected, &actual)
+                                    slot_note(&expected, &actual)
                                 ),
                             );
                         }
@@ -4775,7 +4775,7 @@ impl Checker {
                 format!(
                     "cannot assign {val_s} to {target_s}{}{note}{}",
                     crate::checker::ty::fn_arity_note(target_ty, &val_ty),
-                    float_fix_note(target_ty, &val_ty)
+                    slot_note(target_ty, &val_ty)
                 ),
             );
         }
@@ -4857,7 +4857,7 @@ impl Checker {
                         e.span,
                         format!(
                             "expected return type {ret_s}, found {ty_s}{note}{}",
-                            float_fix_note(&ret, &ty)
+                            slot_note(&ret, &ty)
                         ),
                     );
                 }
@@ -4980,7 +4980,7 @@ impl Checker {
                 e.span,
                 format!(
                     "expected yield type {elem_s}, found {ty_s}{note}{}",
-                    float_fix_note(&elem, &ty)
+                    slot_note(&elem, &ty)
                 ),
             );
         }
@@ -5076,7 +5076,7 @@ impl Checker {
         // Also NOT reached by: `defer f.close()` (its own arm above — Go's canonical
         // unchecked idiom), a `fn f(): g()` inline-expr body (an implicit return, inferred
         // off `check_fn_body`), and a value-block's trailing expression (inferred directly
-        // by `infer_recover` / the value-`match`/`if` tails). `?`/`??`/`?.` already yield
+        // by the value-`match`/`if` tails; a `recover:` block ends in an ordinary statement). `?`/`??`/`?.` already yield
         // the UNWRAPPED payload, so they are not carriers here.
         let t = self.infer(e);
         // TICKET-089 — a bare mutating call on a `Shared`/`RwShared`/`Atomic` read temporary
@@ -5504,7 +5504,7 @@ impl Checker {
                         format!(
                             "default value for parameter '{}': expected {ty_s}, found {actual_s}{note}{}",
                             param.name,
-                            float_fix_note(&ty, &actual)
+                            slot_note(&ty, &actual)
                         ),
                     );
                 }
@@ -5561,7 +5561,7 @@ impl Checker {
                         e.span,
                         format!(
                             "expected return type {ret_s}, found {ty_s}{note}{}",
-                            float_fix_note(&ret, &ty)
+                            slot_note(&ret, &ty)
                         ),
                     );
                 }

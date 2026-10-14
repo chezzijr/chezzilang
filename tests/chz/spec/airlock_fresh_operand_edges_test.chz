@@ -1,7 +1,7 @@
 # TICKET-179 -- edges of the fresh spawn operand rule (D4). A fresh operand crosses with every
 # object the call site built unmarked (TICKET-240); a NAMED child, at any depth, stays a task copy.
 
-fn t179e_outcome(res: int!) -> str:
+fn t179e_outcome(res: !) -> str:
     match res:
         ?_: return "ok"
         !_: return "fault"
@@ -9,10 +9,8 @@ fn t179e_outcome(res: int!) -> str:
 fn t179e_nested(ys: List[List[int]], out: Channel[str]):
     a := recover:
         ys.push([2])
-        0
     b := recover:
         ys[0].push(9)
-        0
     out.send("{t179e_outcome(a)},{t179e_outcome(b)}")
 
 test fn fresh_literal_holding_a_parent_list_keeps_the_child_marked():
@@ -26,7 +24,6 @@ test fn fresh_literal_holding_a_parent_list_keeps_the_child_marked():
 fn t179e_kw(xs: List[int], out: Channel[str]):
     r := recover:
         xs.push(9)
-        0
     out.send(t179e_outcome(r))
 
 test fn keyword_spawn_marks_by_compiled_position():
@@ -73,13 +70,14 @@ struct T179eSink:
     tag: int
 
     fn drain(self, g: Iterator[int], out: Channel[str]):
+        res_v := 0
         res := recover:
             n := 0
             for v in g:
                 n += v
-            n
+            res_v = n
         match res:
-            ?n: out.send("{n}")
+            ?_: out.send("{res_v}")
             !_: out.send("fault")
 
 test fn started_generator_arg_of_a_method_spawn_runs():

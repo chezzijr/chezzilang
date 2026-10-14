@@ -32,7 +32,6 @@ test fn recover_inside_defer_of_cancelled_task_catches():
             spawn:
                 _ := ready.recv()
                 panic("sibling-fault")
-        0
     assert log.get() == "AB", "log={log.get()} outer={outer}"
     assert "{outer}" == "!sibling-fault", "outer={outer}"
 
@@ -53,7 +52,6 @@ test fn recover_outside_defer_cannot_defeat_cancel():
             spawn:
                 _ := ready.recv()
                 panic("sibling-fault")
-        0
     assert log.get() == "D", "log={log.get()} outer={outer}"
 
 # (b2) FENCE — a fault raised INSIDE the defer body (`deferring > 0`) while the only live `recover:`
@@ -79,9 +77,8 @@ test fn recover_outside_defer_cannot_catch_a_fault_raised_inside_it():
             spawn:
                 _ := ready.recv()
                 panic("sibling-fault")
-        0
     assert log.get() == "E", "log={log.get()} outer={outer}"
-    assert "{outer}" != "0", "an outer recover: resumed a CANCELLED task; outer={outer}"
+    assert "{outer}" != "None", "an outer recover: resumed a CANCELLED task; outer={outer}"
 
 # (c) FENCE (N6d): a faulting defer does not swallow the LIFO-next defer of a cancelled task.
 test fn faulting_defer_does_not_swallow_lifo_next():
@@ -101,5 +98,4 @@ test fn faulting_defer_does_not_swallow_lifo_next():
             spawn:
                 _ := ready.recv()
                 panic("sibling-fault")
-        0
     assert log.get() == "21", "log={log.get()} outer={outer}"

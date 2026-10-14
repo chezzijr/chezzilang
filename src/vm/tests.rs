@@ -17973,7 +17973,7 @@ fn defer_break_inside_if_drains_inner_first() {
 #[test]
 fn defer_recover_runs_on_ok_path() {
     assert_defer_scope(
-        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main():\n    r := recover:\n        defer log(\"release\")\n        x := risky(true)?\n        x\n    log(\"got\")\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
+        "fn log(s: str):\n    print(s)\nfn risky(ok: bool) -> int!:\n    if ok:\n        return ?1\n    return !\"boom\"\nfn main():\n    y := 0\n    r := recover:\n        defer log(\"release\")\n        y = risky(true)?\n    log(\"got\")\n    match r:\n        ?_: print(\"ok {y}\")\n        !e: print(\"err {e.message()}\")\nmain()\n",
         "release\ngot\nok 1\n",
     );
 }
@@ -18679,9 +18679,8 @@ fn main():
     r := recover:
         parallel:
             spawn use_it(a)
-        \"done\"
     match r:
-        ?v:  print(\"ok: {v}\")
+        ?_:  print(\"ok: done\")
         !e: print(\"caught: {e.message()}\")
 main()
 ";
@@ -18706,9 +18705,8 @@ fn main():
     r := recover:
         ch := Channel[Node]()
         ch.send(a)
-        \"done\"
     match r:
-        ?v:  print(\"ok: {v}\")
+        ?_:  print(\"ok: done\")
         !e: print(\"caught: {e.message()}\")
 main()
 ";
@@ -18725,9 +18723,8 @@ fn main():
     b.next.push(a)
     r := recover:
         s := Shared(a)
-        \"done\"
     match r:
-        ?v:  print(\"ok: {v}\")
+        ?_:  print(\"ok: done\")
         !e: print(\"caught: {e.message()}\")
 main()
 ";
@@ -19689,9 +19686,8 @@ fn main():
     r := recover:
         parallel:
             spawn worker()
-        \"done\"
     match r:
-        ?v:  print(\"ok: {v}\")
+        ?_:  print(\"ok: done\")
         !e: print(\"caught: {e.message()}\")
 main()
 ";
