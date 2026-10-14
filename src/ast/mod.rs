@@ -1034,6 +1034,25 @@ pub fn is_float_ty(ty: &Type) -> bool {
     matches!(ty, Type::Named { name, .. } if name == "float")
 }
 
+/// The one definition of "this `for` is a counting loop": a single loop variable over a literal range
+/// WITH a start. Returns `(start, end, inclusive)`. The compiler lowers such a loop to counter slots and
+/// builds no `Range` value; the desugar walker reads the same answer to record whether a graph builds one.
+pub fn counting_range<'a>(
+    vars: &[String],
+    iter: &'a Expr,
+) -> Option<(&'a Expr, Option<&'a Expr>, bool)> {
+    if let ExprKind::Range {
+        start: Some(start),
+        end,
+        inclusive,
+    } = &iter.kind
+        && vars.len() == 1
+    {
+        return Some((start, end.as_deref(), *inclusive));
+    }
+    None
+}
+
 /// True iff `name` is a decimal tuple slot (`t.0`): never a method, field or module member.
 pub fn is_tuple_index(name: &str) -> bool {
     name.parse::<usize>().is_ok()

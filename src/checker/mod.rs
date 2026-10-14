@@ -1102,6 +1102,17 @@ pub fn check_counting_fn_body_checks(
     (res, checks)
 }
 
+/// TICKET-255 — the number of fn bodies one checker pass over `graph` enters. The graph twin of
+/// [`check_counting_fn_body_checks`]. The count runs on the checker's own thread, so it is read there.
+#[cfg(test)]
+pub fn check_graph_counting_fn_bodies(graph: &ModuleGraph) -> usize {
+    crate::on_frontend_stack_scoped(move || {
+        let mut c = Checker::new();
+        c.run_graph_pass(graph, false);
+        c.fn_body_checks
+    })
+}
+
 /// [`check`], plus the number of `index_value` entries the pass made (TICKET-253;
 /// `Checker::index_value_checks`): one per subscript when each index is typed once.
 #[cfg(test)]
@@ -1308,6 +1319,7 @@ pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
     let graph = ModuleGraph {
         entry: id.clone(),
+        range_used: true,
         modules: vec![crate::resolver::LoadedModule {
             id,
             dotted: Vec::new(),
@@ -1644,6 +1656,7 @@ fn standalone_graph(stmts: &[Stmt]) -> ModuleGraph {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
     ModuleGraph {
         entry: id.clone(),
+        range_used: true,
         modules: vec![crate::resolver::LoadedModule {
             id,
             dotted: Vec::new(),
@@ -1954,6 +1967,7 @@ impl Checker {
         }
         for (idx, lm) in graph.modules.iter().enumerate() {
             c.module_idx_of.insert(lm.id.clone(), idx);
+            c.skip_range_bodies = graph.skips_range_methods(lm);
             // Keys every checker->compiler table this module's bodies record, the bodied fns of a native
             // std module included (they are checked below, before the AST-module branch sets it).
             c.graph_module_idx = idx;
@@ -3054,6 +3068,9 @@ struct Checker {
     /// prelude), where `builtin_sig` returns `None` for these names — the same as before this table for
     /// hover-only queries; every real program goes through `check_graph` with the prelude linked.
     native_prelude_sigs: HashMap<String, FnSig>,
+    /// TICKET-255 — set per module by `run_graph_pass` from [`ModuleGraph::skips_range_methods`]: the
+    /// prelude `Range` method bodies are not checked, because the graph builds no `Range` value.
+    skip_range_bodies: bool,
     /// Module-scoped types: `(declaring module id, bare type name) → runtime key`. Bare in the
     /// no-collision case; `<dotted>::Name` on a genuine cross-module clash. Built once in
     /// [`check_graph`] with the IDENTICAL graph-order, first-declarer-wins-bare rule as the compiler's

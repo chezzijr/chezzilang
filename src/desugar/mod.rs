@@ -450,9 +450,14 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
             type_params: Vec::new(),
             depth: 0,
             fn_depth: 0,
+            builds_range: false,
+            counting_iterand: false,
         };
         let ast: &mut Module = &mut graph.modules[mi].ast;
         walker.walk_block(&mut ast.stmts)?;
+        if walker.builds_range && graph.modules[mi].dotted != ["std", "prelude"] {
+            graph.range_used = true;
+        }
     }
     Ok(())
 }
@@ -478,6 +483,8 @@ pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
         type_params: Vec::new(),
         depth: 0,
         fn_depth: 0,
+        builds_range: false,
+        counting_iterand: false,
     };
     walker.walk_block(&mut module.stmts)?;
     Ok(())
@@ -934,6 +941,12 @@ struct Walker<'a> {
     /// TICKET-109 — how many `fn` bodies (a top-level or nested `fn`, a `test fn`, or a struct, enum
     /// or native-struct method) enclose the statement being walked. See [`MAX_FN_NESTING`].
     fn_depth: usize,
+    /// TICKET-255 — true once a range literal that builds a `Range` value was walked (a counting-loop
+    /// iterand builds none). Feeds [`ModuleGraph::range_used`].
+    builds_range: bool,
+    /// Set by the `For` arm just before it walks its iterand: that iterand is a counting loop
+    /// ([`crate::ast::counting_range`]), so the `Range` arm must not record a use.
+    counting_iterand: bool,
 }
 
 /// TICKET-109 / W12-12 — how deep `fn` declarations may nest. A top-level `fn`, a `test fn` or a
@@ -1140,6 +1153,7 @@ impl Walker<'_> {
             StmtKind::For {
                 vars, iter, body, ..
             } => {
+                self.counting_iterand = crate::ast::counting_range(vars, iter).is_some();
                 self.walk_expr(iter)?;
                 self.push_scope();
                 for v in vars.iter() {
@@ -1334,6 +1348,9 @@ impl Walker<'_> {
                 }
             }
             ExprKind::Range { start, end, .. } => {
+                if !std::mem::take(&mut self.counting_iterand) {
+                    self.builds_range = true;
+                }
                 if let Some(start) = start {
                     self.walk_expr(start)?;
                 }
@@ -1908,6 +1925,7 @@ mod tests {
         let id = ModuleId(PathBuf::from("<test>"));
         let mut graph = ModuleGraph {
             entry: id.clone(),
+            range_used: true,
             modules: vec![LoadedModule {
                 id,
                 dotted: vec![],
@@ -1926,6 +1944,7 @@ mod tests {
         let id = ModuleId(PathBuf::from("<test>"));
         let mut graph = ModuleGraph {
             entry: id.clone(),
+            range_used: true,
             modules: vec![LoadedModule {
                 id,
                 dotted: vec![],

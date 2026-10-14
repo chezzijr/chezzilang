@@ -219,6 +219,7 @@ impl Checker {
             carrier_seeds: CarrierSeeds::default(),
             imported_variants: HashMap::new(),
             native_prelude_sigs: HashMap::new(),
+            skip_range_bodies: false,
             type_keys: HashMap::new(),
             current_module_id: None,
             bare_types: HashMap::new(),

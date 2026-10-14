@@ -79,6 +79,7 @@ fn reject_table_conflicts(conflicts: crate::checker::TableConflicts) -> Result<(
 /// Compile a whole resolved module graph in dependency order.
 pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     let mut c = Compiler::new();
+    c.range_free = !graph.range_used;
     // FFI ROOT FIX (fix4): resolve every extern fn's C signature ONCE in the checker (module-scoped,
     // every alias spelling), then lower each extern from that table — never re-resolving alias names
     // in the backend's flat bare map (the collision whack-a-mole's root). Keyed by graph module idx.
@@ -253,6 +254,9 @@ fn decode_fn_name(pid: ProtoId) -> String {
 
 struct Compiler {
     program: Program,
+    /// TICKET-255 — the graph recorded no `Range` value ([`ModuleGraph::range_used`] is false): the prelude
+    /// `Range` methods are not compiled, and [`Compiler::emit_new_struct`] stops a build that emits one.
+    range_free: bool,
     /// TICKET-250 — the checker's verdict per declared type, and the call sites it typed through a
     /// reserved protocol requirement. Consumed verbatim; the compiler decides no hook.
     hook_table: crate::checker::HookTable,
@@ -590,6 +594,7 @@ impl Compiler {
         }
         Compiler {
             program,
+            range_free: false,
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
             hook_sets: HashMap::new(),
@@ -988,7 +993,10 @@ impl Compiler {
                 if let Some(set) = self.hook_table.get(&(module_idx, key.clone())) {
                     self.hook_sets.insert(key.clone(), *set);
                 }
-                for m in methods {
+                // TICKET-255 — `Range` methods are compiled only for a graph that builds a `Range` value.
+                let skip =
+                    self.range_free && module_idx == 0 && name == crate::resolver::RANGE_STRUCT;
+                for m in methods.iter().filter(|_| !skip) {
                     self.pending_witnesses = self.member_witnesses(module_idx, &key, &m.name);
                     let pid = self.compile_fn(m, false)?;
                     let def = self.program.structs.get_mut(&key).expect("hoisted");
@@ -1184,6 +1192,26 @@ impl Compiler {
         Ok(self.finish(fc))
     }
 
+    /// TICKET-255 — the one emit of `Op::NewStruct`. A `Range` built in a graph that recorded none stops the
+    /// build: the skipped methods would otherwise fault at run time with a missing method.
+    fn emit_new_struct(
+        &self,
+        fc: &mut FnComp,
+        key: String,
+        argc: usize,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        if self.range_free && key == self.type_key(0, crate::resolver::RANGE_STRUCT) {
+            return Err(CompileError {
+                message: "internal error: this program builds a Range, and ModuleGraph::range_used recorded none"
+                    .into(),
+                span,
+            });
+        }
+        fc.emit(Op::NewStruct(key, argc), span);
+        Ok(())
+    }
+
     /// Emit a synthetic zero-arg constructor thunk for a test suite: `return Suite(<field defaults>)`.
     /// Reuses the ordinary struct-construction op (`NewStruct`) over each field's already-desugared
     /// default expr, so the runner can build the instance via `run_proto` without Rust knowing the
@@ -1214,7 +1242,7 @@ impl Compiler {
         // ROOT REDESIGN — construct under the suite struct's IDENTITY KEY (always qualified), not its
         // bare name; the struct table is keyed by the qualified key. Suites are entry-module only.
         let key = self.type_key(self.current_module_idx, name);
-        fc.emit(Op::NewStruct(key, fields.len()), span);
+        self.emit_new_struct(&mut fc, key, fields.len(), span)?;
         fc.emit(Op::Return, span);
         Ok(self.finish(fc))
     }
@@ -2520,13 +2548,7 @@ impl Compiler {
         // below: the grid of `tests/range_value_grid.rs` runs the literal and the same range bound to a
         // name and asserts both print the same. A literal with no start takes the general path, where
         // `Range.iter` faults (the checker reports the literal earlier).
-        if let ExprKind::Range {
-            start: Some(start),
-            end,
-            inclusive,
-        } = &iter.kind
-            && vars.len() == 1
-        {
+        if let Some((start, end, inclusive)) = crate::ast::counting_range(vars, iter) {
             // The start runs first (U7), then the end; both land in hidden slots before the loop
             // variable exists, so `for i in a..i` reads the OUTER `i`.
             self.compile_expr(fc, start)?;
@@ -2554,7 +2576,7 @@ impl Compiler {
             if let Some(end_slot) = end_slot {
                 fc.emit_get_local_raw(counter, span);
                 fc.emit_hidden_get(end_slot, span);
-                fc.emit(if *inclusive { Op::LtEq } else { Op::Lt }, span);
+                fc.emit(if inclusive { Op::LtEq } else { Op::Lt }, span);
                 exits.push(fc.emit_jump(Op::JumpIfFalse(0), span));
             }
             // Each iteration binds the user var to a fresh cell (when boxed) from the counter's value.
@@ -2563,7 +2585,7 @@ impl Compiler {
             // `continue` must land HERE — on the increment, not the condition (re-testing without
             // advancing `i` would loop forever) and not after it (skipping the advance also hangs).
             let inc_target = fc.here();
-            if let (Some(end_slot), true) = (end_slot, *inclusive) {
+            if let (Some(end_slot), true) = (end_slot, inclusive) {
                 // The last value of `a..=b` is `b`: leave before the increment so `a..=i64::MAX` ends
                 // instead of overflowing.
                 fc.emit_get_local_raw(counter, span);
@@ -3805,7 +3827,12 @@ impl Compiler {
                 }
                 fc.emit(Op::ConstInt(1), expr.span);
                 fc.emit(if *inclusive { Op::True } else { Op::False }, expr.span);
-                fc.emit(Op::NewStruct(self.type_key(0, "Range"), 4), expr.span);
+                self.emit_new_struct(
+                    fc,
+                    self.type_key(0, crate::resolver::RANGE_STRUCT),
+                    4,
+                    expr.span,
+                )?;
             }
             // `type_args` are type-erased — the compiler never sees them (checker already used them).
             ExprKind::Call {
@@ -5353,7 +5380,7 @@ impl Compiler {
             match self.resolution(callee)?.clone() {
                 Resolution::StructCtor(key) => {
                     let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
-                    fc.emit(Op::NewStruct(key, argc), span);
+                    self.emit_new_struct(fc, key, argc, span)?;
                     return Ok(());
                 }
                 Resolution::Variant { enum_key, variant }
@@ -5508,7 +5535,7 @@ impl Compiler {
                 }
                 Resolution::StructCtor(key) => {
                     let argc = self.compile_call_args(fc, call_id, callee, args, named, span)?;
-                    fc.emit(Op::NewStruct(key, argc), span);
+                    self.emit_new_struct(fc, key, argc, span)?;
                     return Ok(());
                 }
                 // A bare imported variant constructor (`Som(5)`, the prelude's `Some(5)`).
@@ -8847,6 +8874,88 @@ mod file_id_tests {
             "print(1) compiled {} prelude fn protos: {range_protos:?}",
             range_protos.len()
         );
+    }
+
+    /// TICKET-255 — programs that build no `Range` value: a counting loop over a literal range takes the
+    /// counter path (`ast::counting_range`) and needs no struct.
+    const LAZY_ROWS: &[&str] = &[
+        "print(1)\n",
+        "for i in 0..3:\n    print(i)\n",
+        "for i in 0..=3:\n    print(i)\n",
+        "for i in 2..:\n    break\n",
+        "n := 3\nwhile n > 0:\n    for i in 0..n:\n        print(i)\n    n -= 1\n",
+    ];
+
+    /// TICKET-255 — programs that build a `Range` value: every one needs the prelude methods.
+    const RANGE_ROWS: &[&str] = &[
+        "r := 0..3\nprint(r.len())\n",
+        "xs := [1, 2, 3]\nprint(xs[0..2])\n",
+        "print(Range(0, 3).len())\n",
+        "print(\"{(0..3).len()}\")\n",
+    ];
+
+    /// TICKET-255 — forms the walker may count either way; each must still compile.
+    const EITHER_ROWS: &[&str] = &[
+        "print([x for x in 0..3])\n",
+        "for i in (0..3):\n    print(i)\n",
+    ];
+
+    fn graph_of(src: &str) -> crate::resolver::ModuleGraph {
+        let t = TmpDir::new();
+        t.write("chezzi.toml", "[project]\nname = \"g\"\n");
+        let entry = t.write("main.chz", src);
+        crate::resolver::build_graph(&entry).expect("graph should build")
+    }
+
+    fn prelude_range_methods(graph: &crate::resolver::ModuleGraph) -> Vec<String> {
+        graph.modules[0]
+            .ast
+            .stmts
+            .iter()
+            .find_map(|s| match &s.kind {
+                StmtKind::Struct { name, methods, .. } if name == crate::resolver::RANGE_STRUCT => {
+                    Some(methods.iter().map(|m| m.name.clone()).collect())
+                }
+                _ => None,
+            })
+            .expect("the prelude declares Range")
+    }
+
+    #[test]
+    fn range_free_graph_checks_no_prelude_fn_bodies() {
+        for src in LAZY_ROWS {
+            let graph = graph_of(src);
+            assert!(!graph.range_used, "{src:?} recorded a Range use");
+            let bodies = crate::checker::check_graph_counting_fn_bodies(&graph);
+            assert_eq!(bodies, 0, "{src:?} checked {bodies} fn bodies");
+        }
+        for src in RANGE_ROWS {
+            let graph = graph_of(src);
+            assert!(graph.range_used, "{src:?} recorded no Range use");
+            let bodies = crate::checker::check_graph_counting_fn_bodies(&graph);
+            let methods = prelude_range_methods(&graph).len();
+            assert!(
+                bodies >= methods,
+                "{src:?} checked {bodies} bodies, below {methods}"
+            );
+        }
+    }
+
+    #[test]
+    fn range_use_grid_matches_the_compiled_methods() {
+        for src in LAZY_ROWS.iter().chain(RANGE_ROWS).chain(EITHER_ROWS) {
+            let graph = graph_of(src);
+            let program =
+                compile_graph(&graph).unwrap_or_else(|e| panic!("{src:?}: {}", e.message));
+            let have: Vec<&String> = program.structs[&program.range_key].methods.keys().collect();
+            if LAZY_ROWS.contains(src) {
+                assert!(have.is_empty(), "{src:?} compiled Range methods {have:?}");
+            } else if RANGE_ROWS.contains(src) {
+                for m in prelude_range_methods(&graph) {
+                    assert!(have.contains(&&m), "{src:?} lacks Range method {m}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -3351,6 +3351,10 @@ impl Checker {
                 // The type's runtime key — the table the members' stored `witness_params` live under.
                 let host_key = self.bare_key(name);
                 for m in methods {
+                    // TICKET-255 — a graph that builds no `Range` skips the prelude `Range` bodies.
+                    if self.skip_range_bodies && name == crate::resolver::RANGE_STRUCT {
+                        continue;
+                    }
                     if m.is_test {
                         self.validate_test_fn_shape(m, Some(&host_key));
                     } else if is_suite && is_lifecycle_hook(&m.name) {

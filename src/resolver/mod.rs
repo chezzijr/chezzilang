@@ -117,11 +117,28 @@ impl LoadedModule {
     }
 }
 
+/// TICKET-255 — the name of the prelude struct every module sees. The one spelling the resolver, checker and
+/// compiler share.
+pub const RANGE_STRUCT: &str = "Range";
+
 /// The whole dependency graph: modules in load order (dependencies first, entry last).
 #[derive(Debug, Clone)]
 pub struct ModuleGraph {
     pub entry: ModuleId,
     pub modules: Vec<LoadedModule>,
+    /// TICKET-255 — the one answer to "can this graph build a `Range` value". True when a module other
+    /// than the prelude spells `Range` in its source, or when `desugar::run` walks a range literal that
+    /// is not a counting-loop iterand, or when the entry IS the prelude. When false, the checker and the
+    /// compiler skip the bodies of the prelude `Range` methods.
+    pub range_used: bool,
+}
+
+impl ModuleGraph {
+    /// TICKET-255 — true when `lm` is the prelude of a graph that builds no `Range` value: the checker
+    /// and the compiler skip the bodies of its `Range` methods (the struct, fields and signatures stay).
+    pub fn skips_range_methods(&self, lm: &LoadedModule) -> bool {
+        !self.range_used && lm.dotted == ["std", "prelude"]
+    }
 }
 
 /// ROOT REDESIGN — the canonical, per-module identity prefix used to qualify EVERY user
@@ -369,6 +386,7 @@ fn build_graph_impl(
         entry_override,
         max_depth: MAX_IMPORT_DEPTH,
         file_seq: std::cell::Cell::new(0),
+        range_named: std::cell::Cell::new(false),
     };
     // ALWAYS-LINK std.prelude: the eight universe builtins' SIGNATURES (`ord`/`chr`/`panic`/`int`/
     // `float`/`str`/`bytes`/`bytearray`, phase 3a) are declared here as `native fn`/`native ctor` decls
@@ -385,9 +403,11 @@ fn build_graph_impl(
     let prelude_id = ModuleId(canonical_or_abs(&prelude_file));
     b.visit(&prelude_id, &prelude_path, Span::RUNTIME)?;
     b.visit(&entry_id, &[], Span::RUNTIME)?;
+    let range_used = b.range_named.get() || entry_id == prelude_id;
     let mut graph = ModuleGraph {
         entry: entry_id,
         modules: b.order,
+        range_used,
     };
     // ENTRY-LAST BACKSTOP: every positional-entry consumer (compiler `entry_idx = modules.len()-1`,
     // the VM's `entry_home() = modules.last()`) derives the entry as the FINAL module, so the
@@ -445,6 +465,8 @@ struct Builder {
     /// Monotonic source of [`LoadedModule::file`] ids. A `Cell` because `parse` runs from `&self`
     /// contexts; the first module lexed gets 1, so 0 stays the synthesized/standalone sentinel.
     file_seq: std::cell::Cell<u32>,
+    /// TICKET-255 — a non-prelude module's source holds the text [`RANGE_STRUCT`]. Feeds [`ModuleGraph::range_used`].
+    range_named: std::cell::Cell<bool>,
     /// If set, `(entry_id, source)` — the entry module reads from this string instead of disk.
     entry_override: Option<(ModuleId, String)>,
     /// Import-chain depth backstop (see [`MAX_IMPORT_DEPTH`]). Fielded so tests can inject a tiny
@@ -698,7 +720,7 @@ impl Builder {
                 target: ModuleId(canonical_or_abs(&file)),
                 import: Import::From {
                     path: prelude_path,
-                    names: vec![("Range".to_string(), None)],
+                    names: vec![(RANGE_STRUCT.to_string(), None)],
                     name_spans: vec![Span::NOWHERE],
                 },
                 span: Span::NOWHERE,
@@ -798,6 +820,9 @@ impl Builder {
         // `Cell`, not `&mut self`: `parse` is called from `&self` contexts.
         let file = self.file_seq.get() + 1;
         self.file_seq.set(file);
+        if dotted != ["std", "prelude"] && source.contains(RANGE_STRUCT) {
+            self.range_named.set(true);
+        }
         // Capture the doc-comment side-channel alongside the tokens, so the AST the checker/hover
         // sees carries each declaration's doc. The token stream is identical to `tokenize` — docs are
         // purely informational (LSP hover) and runtime-inert — so every other resolver behavior is
@@ -1631,6 +1656,7 @@ mod tests {
             entry_override: None,
             max_depth,
             file_seq: std::cell::Cell::new(0),
+            range_named: std::cell::Cell::new(false),
         }
     }
 
