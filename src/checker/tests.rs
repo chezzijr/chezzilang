@@ -28190,7 +28190,7 @@ fn index_set_split_pair_compound_equals_its_desugar() {
 // TICKET-258 (U15): a compound operand gets the target-type hint the desugar's operand gets, so a
 // return-only type parameter pins from the slot in both forms.
 #[test]
-fn compound_operand_gets_the_slot_hint_like_its_desugar() {
+fn compound_rhs_gets_the_slot_hint_like_its_desugar() {
     let mk = "fn mk[T]() -> List[T]:\n    return []\n";
     ok(&format!(
         "{mk}fn main():\n    xs: List[int] = [1]\n    xs = xs + mk()\n    print(xs)\nmain()\n"
@@ -28208,7 +28208,7 @@ fn compound_operand_gets_the_slot_hint_like_its_desugar() {
 
 // TICKET-258 (U15): a compound operand meets the i64 constant-overflow scan the desugar's does.
 #[test]
-fn compound_operand_constant_overflow_rejected() {
+fn compound_rhs_constant_overflow_rejected() {
     let needle = "does not fit in int";
     rejects("x := 1\nx += 1 << 63\n", needle);
     rejects("x := 1\nx *= -(-9223372036854775807 - 1)\n", needle);

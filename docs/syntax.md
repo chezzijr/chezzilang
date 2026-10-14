@@ -217,7 +217,7 @@ evaluates the whole right-hand side first. Both are described below.
 
 **Compound assignment.** `x OP= v` is exactly `x = x OP v`, on variables, list elements, struct
 fields, and map values. The full set is `+= -= *= /= %=` (numeric; `+=` also concatenates `str`)
-and `&= |= ^= <<= >>=` (int-only, mirroring the bitwise operators). Because `x OP= v` is `x = x OP
+and `&= |= ^= <<= >>=` (they follow the bitwise operators: `int`, and `& | ^` on two sets). Because `x OP= v` is `x = x OP
 v`, it also accepts a **struct/enum whose operator overload** (an `add`/`sub`/`mul`/… method)
 makes `x = x OP v` type-check — e.g. `a += V(10)` for a `struct V`
 with `add`. It is rejected exactly when `x OP v` is itself a type error (a type with no matching
@@ -2821,11 +2821,8 @@ protocols, a generic can be bounded by them — `K`/`V`/`R` are recovered at the
 `Iterator[T]`'s element:
 
 `IndexSet[K, V]` **requires `Index[K, V]` too** (as Rust's `IndexMut: Index`). A **compound**
-`obj[k] += v` is `obj[k] = obj[k] OP v` (§3), so it *reads* through `index` and writes the result back
-through `set_index` — the two must be **coherent** there: `index`'s return must fit `set_index`'s
-`val`, and both must key on the same `K`. An incoherent pair used in a compound is a check-time error
-(`type S does not satisfy IndexSet (index returns str but set_index's val is int)`) instead of the
-runtime fault it used to be. A **plain** `obj[k] = v` never reads, so an asymmetric pair (a safe-read
+`obj[k] += v` is `obj[k] = obj[k] OP v` (§3): it types `obj[k] OP v` from `index`'s return, then
+stores the result against `set_index`'s `val`, exactly as `=` does. Both must key on the same `K`. A **plain** `obj[k] = v` never reads, so an asymmetric pair (a safe-read
 `index -> V?`, a widening writer) stays legal there. `index` alone is legal (a read-only type);
 `set_index` alone is not index-assignable.
 
