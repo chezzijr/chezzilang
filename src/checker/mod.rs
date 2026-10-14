@@ -1807,7 +1807,7 @@ pub fn witness_key_span(callee: &Expr, call_span: Span) -> Span {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => call_span,
     }
 }

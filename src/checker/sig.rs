@@ -827,7 +827,7 @@ impl Checker {
             | ExprKind::NullCoalesce { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => None,
         }
     }
@@ -2770,7 +2770,7 @@ impl Checker {
                 | ExprKind::Closure { .. }
                 | ExprKind::Match { .. }
                 | ExprKind::IfElse { .. }
-                | ExprKind::Recover(_)
+                | ExprKind::Recover(..)
                 | ExprKind::ElseGuard { .. } => match self
                     .resolutions
                     .get(&(self.graph_module_idx, callee.id.0))
@@ -2814,7 +2814,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => Fresh::Marked,
         };
         // The implicit wrap at a typed slot is one more object around the value. The compiler
@@ -3573,7 +3573,7 @@ impl Checker {
                         | ExprKind::Closure { .. }
                         | ExprKind::Match { .. }
                         | ExprKind::IfElse { .. }
-                        | ExprKind::Recover(_)
+                        | ExprKind::Recover(..)
                         | ExprKind::ElseGuard { .. } => {} // a name bound to a callable, or an arbitrary value-producing callee
                     },
                     ExprKind::Int(_)
@@ -3603,7 +3603,7 @@ impl Checker {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => {
                         self.error(e.span, "defer requires a function or method call")
                     }
@@ -3731,7 +3731,7 @@ impl Checker {
                                 | ExprKind::Closure { .. }
                                 | ExprKind::Match { .. }
                                 | ExprKind::IfElse { .. }
-                                | ExprKind::Recover(_)
+                                | ExprKind::Recover(..)
                                 | ExprKind::ElseGuard { .. } => {}
                             }
                         }
@@ -3821,7 +3821,7 @@ impl Checker {
                                 | ExprKind::Closure { .. }
                                 | ExprKind::Match { .. }
                                 | ExprKind::IfElse { .. }
-                                | ExprKind::Recover(_)
+                                | ExprKind::Recover(..)
                                 | ExprKind::ElseGuard { .. } => None,
                             };
                             let slots = self.bound_slots(e.id, args, named);
@@ -4718,7 +4718,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => self.error(
                 target.span,
                 "invalid assignment target (only variables can be assigned)",
@@ -5151,7 +5151,7 @@ impl Checker {
                 | ExprKind::Closure { .. }
                 | ExprKind::Match { .. }
                 | ExprKind::IfElse { .. }
-                | ExprKind::Recover(_)
+                | ExprKind::Recover(..)
                 | ExprKind::ElseGuard { .. } => (format!("the `{t}` value here"), "…".to_string()),
             },
             ExprKind::Int(_)
@@ -5181,7 +5181,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => (format!("the `{t}` value here"), "…".to_string()),
         };
         self.warn(
@@ -6035,7 +6035,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => self.infer(target),
         }
     }
@@ -6734,7 +6734,7 @@ fn bare_head_name(kind: &ExprKind) -> Option<&str> {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
     }
 }
@@ -6771,7 +6771,7 @@ fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
         | k @ ExprKind::Closure { .. }
         | k @ ExprKind::Match { .. }
         | k @ ExprKind::IfElse { .. }
-        | k @ ExprKind::Recover(_)
+        | k @ ExprKind::Recover(..)
         | k @ ExprKind::ElseGuard { .. } => k,
     };
     match field {
@@ -6806,7 +6806,7 @@ fn qualified_head_names(kind: &ExprKind) -> Option<(&str, &str)> {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
     }
 }

@@ -1958,7 +1958,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => false,
         };
         if is_arith && !covered {
@@ -2190,7 +2190,7 @@ impl Checker {
             }
             ExprKind::Match { scrutinee, arms } => self.infer_match(scrutinee, arms, owned),
             ExprKind::IfElse { cond, then, els } => self.infer_if_else(cond, then, els, owned),
-            ExprKind::Recover(block) => self.infer_recover(block),
+            ExprKind::Recover(block, _) => self.infer_recover(block),
             ExprKind::ElseGuard { value, err, body } => {
                 self.infer_else_guard(expr, value, err, body)
             }
@@ -2321,7 +2321,7 @@ impl Checker {
             ExprKind::Field { name_span, .. } => {
                 self.hover_record_at(*name_span, ty, HoverKind::Field, None);
             }
-            ExprKind::Pass | ExprKind::List(..) | ExprKind::Tuple(_) | ExprKind::Map(_) | ExprKind::Set(_) | ExprKind::Comprehension { .. } | ExprKind::Unary { .. } | ExprKind::Binary { .. } | ExprKind::Compare { .. } | ExprKind::Range { .. } | ExprKind::Call { .. } | ExprKind::Index { .. } | ExprKind::Try(_) | ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } | ExprKind::Closure { .. } | ExprKind::Match { .. } | ExprKind::IfElse { .. } | ExprKind::Recover(_) | ExprKind::ElseGuard { .. } => {}
+            ExprKind::Pass | ExprKind::List(..) | ExprKind::Tuple(_) | ExprKind::Map(_) | ExprKind::Set(_) | ExprKind::Comprehension { .. } | ExprKind::Unary { .. } | ExprKind::Binary { .. } | ExprKind::Compare { .. } | ExprKind::Range { .. } | ExprKind::Call { .. } | ExprKind::Index { .. } | ExprKind::Try(_) | ExprKind::OptChain { .. } | ExprKind::NullCoalesce { .. } | ExprKind::Closure { .. } | ExprKind::Match { .. } | ExprKind::IfElse { .. } | ExprKind::Recover(..) | ExprKind::ElseGuard { .. } => {}
         }
     }
 
@@ -3036,7 +3036,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => None,
         }
     }
@@ -5680,7 +5680,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {}
         }
         let tmp = self.next_opt_tmp;
@@ -6471,7 +6471,7 @@ impl Checker {
             | ExprKind::Ident(_)
             | ExprKind::OptChain { .. }
             | ExprKind::NullCoalesce { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {}
         }
     }

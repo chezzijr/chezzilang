@@ -1,0 +1,2 @@
+# rule: primary
+print(1 + recover: 1)

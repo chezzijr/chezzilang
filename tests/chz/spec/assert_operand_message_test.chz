@@ -8,7 +8,8 @@ fn fault_msg[T](r: T!Error) -> str:
 
 test fn comparison_assert_shows_operands():
     xs := [1, 2, 3]
-    r := recover: assert xs.len() == 4
+    r := recover:
+        assert xs.len() == 4
     assert fault_msg(r) == "assertion failed: 3 == 4"
 
 test fn comparison_assert_keeps_custom_message():

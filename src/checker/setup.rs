@@ -3023,7 +3023,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => None,
         }
     }
@@ -3661,7 +3661,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => false,
         }
     }
@@ -3715,7 +3715,7 @@ impl Checker {
             | ExprKind::NullCoalesce { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => Vec::new(),
         }
     }
@@ -3943,7 +3943,7 @@ impl Checker {
             | ExprKind::NullCoalesce { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => Vec::new(),
         }
     }
@@ -5394,7 +5394,7 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => PathSeg::Dynamic,
                 });
                 e = obj;
@@ -5429,7 +5429,7 @@ pub(super) fn chain_path(e: &Expr) -> Option<(&String, Span, Vec<PathSeg>)> {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => return None,
         }
     }

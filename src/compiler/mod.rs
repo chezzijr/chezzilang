@@ -1961,7 +1961,7 @@ impl Compiler {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {
                 return Err(CompileError {
                     message: "invalid wait-arm assignment target".to_string(),
@@ -2307,7 +2307,7 @@ impl Compiler {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {
                 return Err(CompileError {
                     message: "invalid assignment target".to_string(),
@@ -2407,7 +2407,7 @@ impl Compiler {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {
                 return Err(CompileError {
                     message: "invalid assignment target".to_string(),
@@ -3989,7 +3989,7 @@ impl Compiler {
                 self.compile_match_expr(fc, scrutinee, arms, expr.span)?
             }
             ExprKind::IfElse { cond, then, els } => self.compile_if_expr(fc, cond, then, els)?,
-            ExprKind::Recover(block) => self.compile_recover(fc, block, expr.span)?,
+            ExprKind::Recover(block, _) => self.compile_recover(fc, block, expr.span)?,
             ExprKind::ElseGuard { value, err, body } => {
                 self.compile_else_guard(fc, expr, value, err, body)?
             }
@@ -4705,7 +4705,7 @@ impl Compiler {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => return Ok(false),
         }
         // A type member, a native ctor or a module member is receiverless; a value's member (a
@@ -4920,7 +4920,7 @@ impl Compiler {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => None,
         })
     }
@@ -5611,7 +5611,7 @@ impl Compiler {
                 | ExprKind::Closure { .. }
                 | ExprKind::Match { .. }
                 | ExprKind::IfElse { .. }
-                | ExprKind::Recover(_)
+                | ExprKind::Recover(..)
                 | ExprKind::ElseGuard { .. } => Err(CompileError {
                     message: "internal: a synthesized node has no name resolution".to_string(),
                     span: e.span,
@@ -6503,7 +6503,7 @@ fn find_boundary_free_expr(e: &Expr, out: &mut HashSet<String>) {
             find_boundary_free_expr(then, out);
             find_boundary_free_expr(els, out);
         }
-        ExprKind::Recover(block) => find_boundary_free_block(block, out),
+        ExprKind::Recover(block, _) => find_boundary_free_block(block, out),
         ExprKind::ElseGuard { value, body, .. } => {
             find_boundary_free_expr(value, out);
             find_boundary_free_block(body, out);
@@ -6663,7 +6663,7 @@ fn record_call_site(
                 | ExprKind::Closure { .. }
                 | ExprKind::Match { .. }
                 | ExprKind::IfElse { .. }
-                | ExprKind::Recover(_)
+                | ExprKind::Recover(..)
                 | ExprKind::ElseGuard { .. } => {
                     out.opaque_calls = true;
                     return;
@@ -6697,7 +6697,7 @@ fn record_call_site(
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => {
             out.opaque_calls = true;
             return;
@@ -6811,7 +6811,7 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => false,
         },
         ExprKind::Ident(_)
@@ -6832,7 +6832,7 @@ fn closed_expr(e: &Expr, bound: &HashSet<String>, heads: &mut Vec<String>) -> bo
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => false,
     }
 }
@@ -7153,7 +7153,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             free_names_expr(then, bound, out);
             free_names_expr(els, bound, out);
         }
-        ExprKind::Recover(block) => free_names_block(block, bound, out),
+        ExprKind::Recover(block, _) => free_names_block(block, bound, out),
         ExprKind::ElseGuard { value, err, body } => {
             free_names_expr(value, bound, out);
             let mut inner = bound.clone();
@@ -7285,7 +7285,7 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) {
             collect_frame_binds_expr(then, out);
             collect_frame_binds_expr(els, out);
         }
-        ExprKind::Recover(block) => collect_frame_binds(block, out),
+        ExprKind::Recover(block, _) => collect_frame_binds(block, out),
         ExprKind::ElseGuard { value, err, body } => {
             collect_frame_binds_expr(value, out);
             out.extend(err.iter().map(|(name, _)| name.clone()));
@@ -7336,7 +7336,7 @@ pub(crate) fn block_has_bare_spawn(stmts: &[Stmt]) -> bool {
 fn expr_has_bare_spawn(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Closure { .. } => false,
-        ExprKind::Recover(block) => block_has_bare_spawn(block),
+        ExprKind::Recover(block, _) => block_has_bare_spawn(block),
         ExprKind::ElseGuard { value, body, .. } => {
             expr_has_bare_spawn(value) || block_has_bare_spawn(body)
         }

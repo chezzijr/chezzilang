@@ -1375,7 +1375,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => false,
         }
     }
@@ -5223,7 +5223,7 @@ fn type_apply_param_head(obj: &Expr) -> Option<String> {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
     }
 }
@@ -5297,7 +5297,7 @@ impl Checker {
             | ExprKind::NullCoalesce { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => self.value_writes(task),
         };
         writes.sort();

@@ -151,7 +151,7 @@ pub fn eval(e: &Expr, visits: &mut usize) -> Fold {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => Fold::NotConst,
     }
 }

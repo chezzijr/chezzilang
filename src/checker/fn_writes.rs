@@ -140,7 +140,7 @@ pub(super) fn aliases_operand(kind: &ExprKind) -> OperandAlias {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => OperandAlias::Holds,
     }
 }
@@ -388,7 +388,7 @@ impl UseWalk<'_> {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => None,
         }
     }
@@ -454,7 +454,7 @@ impl UseWalk<'_> {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => self.value(e),
         }
     }
@@ -518,7 +518,7 @@ impl UseWalk<'_> {
                                 | ExprKind::Closure { .. }
                                 | ExprKind::Match { .. }
                                 | ExprKind::IfElse { .. }
-                                | ExprKind::Recover(_)
+                                | ExprKind::Recover(..)
                                 | ExprKind::ElseGuard { .. } => None,
                             },
                         });
@@ -549,7 +549,7 @@ impl UseWalk<'_> {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => self.escape_free(target),
                 }
                 self.value(value);
@@ -616,7 +616,7 @@ impl UseWalk<'_> {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => self.value(iter),
                 }
                 self.block(body);
@@ -774,7 +774,7 @@ impl UseWalk<'_> {
                         | ExprKind::Closure { .. }
                         | ExprKind::Match { .. }
                         | ExprKind::IfElse { .. }
-                        | ExprKind::Recover(_)
+                        | ExprKind::Recover(..)
                         | ExprKind::ElseGuard { .. } => {
                             self.value(obj);
                             None
@@ -807,7 +807,7 @@ impl UseWalk<'_> {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => {
                         self.value(callee);
                         None
@@ -846,7 +846,7 @@ impl UseWalk<'_> {
                     self.value(&arm.body);
                 }
             }
-            ExprKind::Recover(body) => self.block(body),
+            ExprKind::Recover(body, _) => self.block(body),
             ExprKind::ElseGuard { value, body, .. } => {
                 self.value(value);
                 self.block(body);
@@ -1006,7 +1006,7 @@ pub(super) fn chain(expr: &Expr) -> Option<(String, Vec<ChainLink>)> {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
     }
 }
@@ -1057,7 +1057,7 @@ pub(super) fn place_base<'a>(
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => (expr, 0),
     }
 }
@@ -1093,7 +1093,7 @@ pub(super) fn method_call_parts(expr: &Expr) -> Option<(&Expr, &str)> {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
     }
 }
@@ -1129,7 +1129,7 @@ fn field_parts(expr: &Expr) -> Option<(&Expr, &str)> {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
     }
 }
@@ -1166,7 +1166,7 @@ pub(super) fn place_parent(expr: &Expr) -> Option<(&Expr, bool)> {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
     }
 }
@@ -1343,7 +1343,7 @@ impl Scan {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => "assign".to_string(),
                 };
                 self.record(target, WriteKind::Store, op);
@@ -1532,7 +1532,7 @@ impl Scan {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => {}
                 }
                 for arg in args {
@@ -1607,7 +1607,7 @@ impl Scan {
             | ExprKind::OptChain { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {}
         }
     }
@@ -1872,7 +1872,7 @@ impl Checker {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => None,
         }
     }

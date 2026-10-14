@@ -21963,7 +21963,8 @@ n := 1
 f := fn(x: int) -> int: x * n
 parallel:
     spawn:
-        recover: n = 100
+        recover:
+            n = 100
         print(f(3))
 ";
     let entry = write_temp_chz("ticket016_spawn_own_write_visible", src);
@@ -21993,7 +21994,8 @@ fn outer() -> fn(int) -> int:
     return f
 parallel:
     spawn:
-        recover: n = 100
+        recover:
+            n = 100
         ch.send(outer())
 g := ch.recv()
 print(g(3))
@@ -22020,7 +22022,8 @@ n := 1
 ch := Channel[fn(int) -> int]()
 parallel:
     spawn:
-        recover: n = 100
+        recover:
+            n = 100
         ch.send(fn(x: int) -> int: x * (fn() -> int: n)())
 g := ch.recv()
 print(g(3))
@@ -22052,7 +22055,8 @@ n := 1
 ch := Channel[fn(int) -> int]()
 parallel:
     spawn:
-        recover: n = 100
+        recover:
+            n = 100
         ch.send(fn(x: int) -> int: x * n)
 f := ch.recv()
 print(f(3))
@@ -22081,7 +22085,8 @@ fn main():
     ch := Channel[fn(int) -> int]()
     parallel:
         spawn:
-            recover: n = 100
+            recover:
+                n = 100
             ch.send(fn(x: int) -> int: x * n)
     f := ch.recv()
     print(f(3))

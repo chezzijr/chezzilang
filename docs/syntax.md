@@ -3936,13 +3936,12 @@ match r:
     !e: print("recovered: {e.message()}")   # a fault becomes !message
 ```
 
-**Inside parentheses and call arguments** `recover:` takes one expression (TICKET-242):
-`print(recover: 1 / 0)`, `x := (recover: parse(s))`, `f(a, key=recover: g())`,
-`if (recover: 1) == ?1:`. It must be the WHOLE parenthesized value or the WHOLE argument, and its
-body is an expression (no layout exists inside brackets, so no statement and no block). It is not
-an operand (`print(1 + recover: 1)`), a tuple element (`(recover: 1, 2)`), a list or map element
-(`[recover: 1]`), a closure body or an if-expression branch inside brackets; each of those is a
-parse error. Wrap it in its own parentheses: `print(1 + (recover: 1))` parses.
+**The inline form** `recover: expr` is an ordinary expression of type `T!`, legal in every
+expression position (TICKET-260): `print(recover: 1 / 0)`, `x := (recover: parse(s))`,
+`f(a, key=recover: g())`, `[recover: 1]`, `print(1 + recover: 1)`. Its body is ONE expression that
+extends to the right like a lambda body, so `recover: a + b` recovers `a + b`; wrap it in
+parentheses to end it earlier (`(recover: a) + b`). A statement is no body: write the block form
+(`recover:` then an indented line) for an assignment, an `assert` or a `return`.
 
 The block's value is its **trailing expression**. A trailing statement-form `match`/`if` counts too:
 when every arm/branch produces a value (a total `match`; an `if` with an `else`, every branch ending
@@ -4162,9 +4161,11 @@ fn span(path: str) -> int!str:
   statement belongs to the `if` (`if c: f() else: g()` is the if-expression above). `else e:`, with
   a binder, stays a guard there: `if c: save(p) else e: return`. A bare-`else:` guard on that
   statement needs the indented form; `if c: f() else: return` is
-  `` a one-line `if`/`else` takes an expression in each branch; … ``. A nested inline block on the
-  line keeps its own `else:` guard: in `if c: r := recover: f() else: panic("p")` the guard is on
-  `f()`, inside the `recover:` body, and the same holds inside an `else e:` guard body. A one-line
+  `` a one-line `if`/`else` takes an expression in each branch; … ``. An inline
+  `recover: expr` on the line takes ONE expression, so a same-line `else:` after it belongs to the
+  `if`: `if c: r := recover: f() else: panic("p")` is
+  `` a one-line `if`/`else` takes an expression in each branch; … ``. A guard on the `recover:`
+  value needs the indented form. A one-line
   `elif` takes no `else:` or `elif` after its body:
   ``an `elif` body ends its line; write the next `elif` or `else:` on its own line, and an `else:` guard in an indented body``.
 - `else e:` on a `T?` is an error (absent has no payload): `` `else e:` needs an error to bind, and int? has none; write `else:` ``.

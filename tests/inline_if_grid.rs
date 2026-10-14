@@ -355,40 +355,34 @@ fn recover_inline_grid() {
         ("print(recover: (recover: 1))", "=1"),
         ("print(recover: 1,\n2)", "=1 2"),
         // not a whole value: an operand, a closure body, an if-expression branch, a tuple element
-        ("print(1 + recover: 1)", "!expected end of line, found ')'"),
-        (
-            "y := (?1 == recover: 1)",
-            "!expected end of line, found ')'",
-        ),
+        ("print(1 + recover: 1)", "!cannot apply + to int and int!"),
+        ("y := (?1 == recover: 1)", "="),
         (
             "print(not recover: true)",
-            "!expected end of line, found ')'",
+            "!'not' expects bool, found bool!",
         ),
-        (
-            "calls(fn(): recover: 1 / 0)",
-            "!expected end of line, found ')'",
-        ),
+        ("calls(fn(): recover: 1 / 0)", "=!division by zero"),
         (
             "y := (if t: recover: 1 else: 2)",
-            "!expected end of line, found ')'",
+            "!branches have incompatible types",
         ),
-        ("y := (recover: 1, 2)", "!expected ')', found ','"),
+        ("y := (recover: 1, 2)", "="),
         ("print(recover: x = 1)", "!expected ')', found '='"),
-        ("xs := [recover: 1]", "!expected end of line, found ']'"),
-        ("m := {recover: 1}", "!expected end of line, found '}'"),
+        ("xs := [recover: 1]", "="),
+        (
+            "m := {recover: 1}",
+            "!set element type must implement Hashable",
+        ),
         (
             "xs := [1]\nprint(xs[recover: 0])",
-            "!expected end of line, found ']'",
+            "!index must be int, found int!",
         ),
-        (
-            "print(recover: recover: 1)",
-            "!expected end of line, found ')'",
-        ),
+        ("print(recover: recover: 1)", "=1"),
         (
             "print(2, 1 + recover: 1)",
-            "!expected end of line, found ')'",
+            "!cannot apply + to int and int!",
         ),
-        ("y := (1, recover: 2)", "!expected end of line, found ')'"),
+        ("y := (1, recover: 2)", "="),
         (
             "fn q():\n    y := (recover: return)",
             "!unexpected 'return' in expression",
@@ -427,25 +421,23 @@ fn else_owner_grid() {
             "if f: print(1)\nelif f: return else: return",
             "!an `elif` body ends its line",
         ),
+        // the inline `recover:` is an ordinary expression: these parse, and only the unused `y` warns
         (
             "if t: y := if f: recover: 1 else: 2",
-            "!expected 'else', found end of line",
+            "!unused variable 'y'",
         ),
-        (
-            "y := if t: recover: 1 else: 2",
-            "!expected 'else', found end of line",
-        ),
+        ("y := if t: recover: 1 else: 2", "!unused variable 'y'"),
         (
             "if t: print(if f: recover: 1 else: 2)",
-            "!expected end of line, found ')'",
+            "!branches have incompatible types",
         ),
         (
             "if t: y := (if f: recover: 1 else: 2) else: print(3)",
-            "!expected end of line, found ')'",
+            "!takes an expression in each branch",
         ),
         (
             "if true: r := recover: g() else: return",
-            "!'return' is not allowed inside a recover block",
+            "!takes an expression in each branch",
         ),
         (
             "if true: k() else e: g() else: return",
@@ -464,14 +456,17 @@ fn else_owner_grid() {
             "!takes an expression in each branch",
         ),
         // a nested inline block on the `if` line keeps its own `else:` guard
-        ("if true: _ := recover: g() else: panic(\"p\")", "=after"),
+        (
+            "if true: _ := recover: g() else: panic(\"p\")",
+            "!takes an expression in each branch",
+        ),
         (
             "if false: print(1)\nelif true: r := recover: g() else: panic(\"p\")",
-            "=after",
+            "!an `elif` body ends its line",
         ),
         (
             "if true:\n    r := recover: g() else: panic(\"p\")\n    print(r)",
-            "=!p\nafter",
+            "=None\nafter",
         ),
         (
             "if true: r := recover:\n    g() else: panic(\"p\")\nelif true:\n    print(1)",

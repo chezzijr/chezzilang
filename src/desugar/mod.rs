@@ -187,7 +187,7 @@ fn is_inline_default(e: &Expr) -> bool {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => false,
     }
 }
@@ -914,7 +914,7 @@ fn walk_idents_and_types(e: &Expr, f: &mut impl FnMut(&str), tf: &mut impl FnMut
         }
         // A `recover:` block is never a realistic default expression; its block statements are not
         // walked (conservative under-detection only for this absurd case).
-        ExprKind::Recover(_) => {}
+        ExprKind::Recover(..) => {}
         // The parser builds a guard only as a let's value, never inside a default expression.
         ExprKind::ElseGuard { value, .. } => walk_idents_and_types(value, f, tf),
     }
@@ -1406,7 +1406,7 @@ impl Walker<'_> {
                 self.walk_expr(then)?;
                 self.walk_expr(els)?;
             }
-            ExprKind::Recover(block) => self.walk_block(block)?,
+            ExprKind::Recover(block, _) => self.walk_block(block)?,
             ExprKind::ElseGuard { value, body, .. } => {
                 self.walk_expr(value)?;
                 self.walk_block(body)?;
@@ -1712,7 +1712,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
         | other @ ExprKind::Closure { .. }
         | other @ ExprKind::Match { .. }
         | other @ ExprKind::IfElse { .. }
-        | other @ ExprKind::Recover(_)
+        | other @ ExprKind::Recover(..)
         | other @ ExprKind::ElseGuard { .. } => other, // unreachable: caller guards on the two carrier kinds
     };
 }

@@ -182,7 +182,8 @@ fn set_x(v: int):
 # leaking, for a stronger reason. Also exercises W6-19 (a task whose FIRST module-global access is
 # a WRITE used to panic the M:N pool on an unfaulted module).
 fn nested_worker(out: Shared[int]):
-    _ := recover: tg = 99
+    _ := recover:
+        tg = 99
     parallel:
         spawn: out.set(tg)
 
@@ -224,7 +225,8 @@ eqn: int = 0
 # the isolation assertions below still exercise the shape.
 fn eq_job():
     _ := recover: eq.push(7)
-    _ := recover: eqn = 5
+    _ := recover:
+        eqn = 5
 
 test fn an_executor_jobs_private_mutation_never_reaches_a_nursery_task():
     seenq := Shared(-1)

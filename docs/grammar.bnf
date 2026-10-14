@@ -720,7 +720,7 @@
 # The short form cannot contain its closing quote; the triple form embeds lone quotes (e.g. JSON).
 <primary> ::= "INT" | "FLOAT" | "STR" | "BYTES" | "RAWSTR" | "TRUE" | "FALSE" | "NONEKW" | "IDENT"
             | "LPAREN" <expr> "RPAREN"
-            | "LPAREN" <recoverInline> "RPAREN"
+            | "RECOVER" "COLON" <expr>
             | "LPAREN" <expr> "COMMA" "RPAREN"
             | "LPAREN" <expr> "COMMA" <exprList> "RPAREN"
             | "LPAREN" <expr> "COMMA" <exprList> "COMMA" "RPAREN"
@@ -765,10 +765,10 @@
                 | <pattern> "IF" <expr> "COLON" <exprEnd>
 <ifExpr>    ::= "IF" <expr> "COLON" <expr> <ifExprTail>
 <ifExprTail> ::= "ELSE" "COLON" <expr> | "ELIF" <expr> "COLON" <expr> <ifExprTail>
-# Panic-recovery boundary: runs a block, yields `T!Error` (success = trailing value, error = a
-# caught runtime fault). Reuses <block> (inline or indented). Like <matchExpr> it is the last
-# operand of its statement, not a <primary>.
-<recoverExpr> ::= "RECOVER" <block>
+# Panic-recovery boundary, block form: runs an indented block and yields `!` (no tail value; the
+# error is a caught runtime fault). Like <matchExpr> it is the last operand of its statement, not a
+# <primary>. The inline form `recover: <expr>` (type `T!`) is a <primary>.
+<recoverExpr> ::= <recoverBlock>
 # The end of a simple statement: a NEWLINE, or the DEDENT of a block expression (`match`, or
 # `recover:` with an indented body) that is its LAST operand. The lexer emits no NEWLINE after
 # that DEDENT.
@@ -801,10 +801,6 @@
 <tailIf>      ::= "IF" <expr> "COLON" <expr> <tailIfTail>
 <tailIfTail>  ::= "ELSE" "COLON" <tailExpr> | "ELIF" <expr> "COLON" <expr> <tailIfTail>
 <tailClosure> ::= <closureHead> <tailExpr>
-# `recover: <expr>` as a WHOLE parenthesized value or a WHOLE call argument, expression body only
-# (layout is off inside brackets): `print(recover: 1)`, `(recover: 1 / 0)`. Not an operand, a tuple
-# element, a list element or a map entry.
-<recoverInline> ::= "RECOVER" "COLON" <expr>
 
 <closure> ::= <closureHead> <closureBody>
 <closureHead> ::= "FN" "LPAREN" "RPAREN" "COLON"
@@ -829,6 +825,6 @@
                   | <namedArgList> "COMMA"
                   | <posArgList> "COMMA" <namedArgList> "COMMA"
 <posArgList>    ::= <arg> | <arg> "COMMA" <posArgList>
-<arg>           ::= <expr> | <recoverInline>
+<arg>           ::= <expr>
 <namedArgList>  ::= <namedArg> | <namedArg> "COMMA" <namedArgList>
 <namedArg>      ::= "IDENT" "ASSIGN" <arg>

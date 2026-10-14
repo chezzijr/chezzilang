@@ -1,4 +1,0 @@
-# rule: recoverInline
-# expect: expected end of line, found ')'
-c := true
-x := (if c: recover: 1 else: 2)

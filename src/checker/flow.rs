@@ -194,7 +194,7 @@ pub(super) fn stmt(s: &Stmt, diverges: &dyn Fn(&Expr) -> bool) -> Flow {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_) => Flow::NEXT,
+            | ExprKind::Recover(..) => Flow::NEXT,
         },
         StmtKind::Assign { .. }
         | StmtKind::Struct { .. }

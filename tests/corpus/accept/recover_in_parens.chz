@@ -1,4 +1,4 @@
-# rule: recoverInline
+# rule: primary
 print(recover: 1)
 x := (recover: 1 / 0)
 print(x, sep=recover: " ")

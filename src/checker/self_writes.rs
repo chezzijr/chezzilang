@@ -57,7 +57,7 @@ fn self_chain(expr: &Expr) -> Option<Vec<ChainLink>> {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
     }
 }
@@ -256,7 +256,7 @@ impl Scan {
                 self.expr(then);
                 self.expr(els);
             }
-            ExprKind::Recover(body) => self.block(body),
+            ExprKind::Recover(body, _) => self.block(body),
             ExprKind::ElseGuard { value, body, .. } => {
                 self.expr(value);
                 self.block(body);

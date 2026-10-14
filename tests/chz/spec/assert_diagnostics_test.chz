@@ -10,7 +10,8 @@ fn msg_of[T](r: T!Error, where_: str) -> str:
 
 test fn bare_assert_shows_operands():
     xs := [1, 2, 3]
-    r := recover: assert xs.len() == 4
+    r := recover:
+        assert xs.len() == 4
     msg := msg_of(r, "bare assert")
     assert msg.contains("3"), "expected the left operand 3 in: " + msg
     assert msg.contains("4"), "expected the right operand 4 in: " + msg

@@ -1,3 +1,0 @@
-# rule: recoverInline
-# expect: expected ')', found ','
-x := (recover: 1, 2)

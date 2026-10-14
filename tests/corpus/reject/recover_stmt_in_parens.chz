@@ -1,4 +1,4 @@
-# rule: recoverInline
-# expect: expected ')'
+# rule: primary
+# expect: expected ')', found '='
 x := 0
 print(recover: x = 1)

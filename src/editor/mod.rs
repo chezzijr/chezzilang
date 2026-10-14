@@ -999,7 +999,7 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
                 | ExprKind::Closure { .. }
                 | ExprKind::Match { .. }
                 | ExprKind::IfElse { .. }
-                | ExprKind::Recover(_)
+                | ExprKind::Recover(..)
                 | ExprKind::ElseGuard { .. } => overlay_expr(callee, map),
             }
             for a in args {
@@ -1116,7 +1116,7 @@ fn overlay_expr(expr: &crate::ast::Expr, map: &mut std::collections::HashMap<(us
             overlay_expr(then, map);
             overlay_expr(els, map);
         }
-        ExprKind::Recover(block) => overlay_block(block, map),
+        ExprKind::Recover(block, _) => overlay_block(block, map),
         ExprKind::ElseGuard { value, body, .. } => {
             overlay_expr(value, map);
             overlay_block(body, map);

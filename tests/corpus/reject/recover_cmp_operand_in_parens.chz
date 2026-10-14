@@ -1,3 +1,0 @@
-# rule: recoverInline
-# expect: expected end of line, found ')'
-x := (?1 == recover: 1)

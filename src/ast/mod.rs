@@ -1079,6 +1079,15 @@ pub enum Chunk {
     Expr(Expr, Option<crate::fmtspec::FormatSpec>, Vec<Expr>),
 }
 
+/// Which form of `recover:` the parser read. The parser decides it once; no later phase re-derives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverForm {
+    /// `recover: expr` on one line: an ordinary expression of type `T!`.
+    Inline,
+    /// `recover:` + an indented block: no tail value, type `!`.
+    Block,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Int(i64),
@@ -1262,12 +1271,11 @@ pub enum ExprKind {
         then: Box<Expr>,
         els: Box<Expr>,
     },
-    /// `recover: <block>` — a panic-recovery boundary. Runs the block; any runtime fault occurring
-    /// transitively beneath it is caught and converted to `Err(Error)`, otherwise the block's
-    /// trailing-expression value is wrapped in `Ok`. Evaluates to `Result[T, Error]`. A trailing
-    /// statement-form `match`/`if` whose every arm/branch produces a value (see [`match_tail_is_value`]
-    /// / [`if_tail_is_value`]) is ALSO the block's value expression — its unified arm type becomes `T`.
-    Recover(Block),
+    /// `recover:` — a panic-recovery boundary. Runs the body; any runtime fault occurring
+    /// transitively beneath it is caught and converted to `Err(Error)`. The [`RecoverForm`] says what
+    /// the success side holds: the inline form `recover: expr` wraps the expression in `Ok` (type
+    /// `T!`); the block form has no tail value (type `!`).
+    Recover(Block, RecoverForm),
     /// `value else e: <block>` — the `else` guard (design D4). Evaluates to the present / success
     /// payload of `value`; on an absent or error `value` the block runs, with the error bound to
     /// `err` when named, and must leave (the checker proves it). Built by the parser only as the
@@ -1312,7 +1320,7 @@ impl ExprKind {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => false,
         }
     }
@@ -1348,7 +1356,7 @@ impl ExprKind {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => None,
         }
     }
@@ -1474,7 +1482,7 @@ pub fn type_application(e: &Expr) -> Option<TypeApplication<'_>> {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => None,
     }
 }
@@ -1587,7 +1595,7 @@ pub fn expr_recover_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
             go(els);
         }
         // The one block-carrying expression: record it; the caller recurses into its statements.
-        ExprKind::Recover(block) => out.push(block),
+        ExprKind::Recover(block, _) => out.push(block),
         // The `else` guard carries a block too: its statements run in this frame, so a
         // statement-level walk must see them exactly as it sees a `recover:` block's.
         ExprKind::ElseGuard { value, body, .. } => {
@@ -1919,7 +1927,7 @@ pub fn id_width(kind: &ExprKind) -> u32 {
         | ExprKind::Closure { .. }
         | ExprKind::Match { .. }
         | ExprKind::IfElse { .. }
-        | ExprKind::Recover(_)
+        | ExprKind::Recover(..)
         | ExprKind::ElseGuard { .. } => 1,
     }
 }
@@ -2045,7 +2053,7 @@ fn ids_in_expr(e: &mut Expr, f: &mut dyn FnMut(&mut NodeId, Span, u32)) {
             go(then, f);
             go(els, f);
         }
-        ExprKind::Recover(b) => ids_in_block(b, f),
+        ExprKind::Recover(b, _) => ids_in_block(b, f),
         ExprKind::ElseGuard { value, body, .. } => {
             go(value, f);
             ids_in_block(body, f);

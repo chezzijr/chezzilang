@@ -673,7 +673,7 @@ impl Parser {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => None,
         };
         let mut e = kw
@@ -3278,43 +3278,31 @@ impl Parser {
         Ok(())
     }
 
-    /// `recover: <expr>` as a whole parenthesized value or a whole call argument (`<recoverInline>`),
-    /// when the next two tokens are `recover` `:`. Layout is off inside brackets, so the body is one
-    /// expression; it builds the one-statement block the inline statement form builds.
-    fn recover_inline(&mut self) -> PResult<Option<Expr>> {
-        if !self.check(&Token::Recover) || self.peek_at(1) != &Token::Colon {
-            return Ok(None);
-        }
-        let span = self.cur_span();
-        self.advance(); // 'recover'
-        self.advance(); // ':'
-        let body_span = self.cur_span();
-        let value = self.parse_expr()?;
-        Ok(Some(Expr {
-            id: crate::ast::NodeId::fresh(),
-            kind: ExprKind::Recover(vec![Stmt {
-                kind: StmtKind::Expr(value),
-                span: body_span,
-            }]),
-            span,
-        }))
-    }
-
-    /// One call argument value (`<arg>`): an expression, or a whole-argument `recover: <expr>`.
-    fn call_arg(&mut self) -> PResult<Expr> {
-        match self.recover_inline()? {
-            Some(e) => Ok(e),
-            None => self.parse_expr(),
-        }
-    }
-
-    /// Expression-position `recover:` (keyword already consumed): `recover:` then an inline or
-    /// indented block. Reuses `parse_block`; the block's trailing expression is its `Ok` value.
+    /// Expression-position `recover:` (keyword already consumed). `recover:` then a line break is the
+    /// block form (it has type `!`); `recover:` then an expression on the same line is the inline
+    /// form (`recover: expr`, type `T!`), an ordinary expression that extends to the right like a
+    /// lambda body.
     fn parse_recover_expr(&mut self, span: Span) -> PResult<Expr> {
-        let body = self.parse_block()?;
+        let next = &self.toks[(self.pos + 1).min(self.toks.len() - 1)];
+        let block =
+            self.check(&Token::Colon) && (next.kind == Token::Newline || next.indent.is_some());
+        let (body, form) = if block {
+            (self.parse_block()?, RecoverForm::Block)
+        } else {
+            self.expect(&Token::Colon)?;
+            let body_span = self.cur_span();
+            let value = self.parse_expr()?;
+            (
+                vec![Stmt {
+                    kind: StmtKind::Expr(value),
+                    span: body_span,
+                }],
+                RecoverForm::Inline,
+            )
+        };
         Ok(Expr {
             id: crate::ast::NodeId::fresh(),
-            kind: ExprKind::Recover(body),
+            kind: ExprKind::Recover(body, form),
             span,
         })
     }
@@ -3925,7 +3913,7 @@ impl Parser {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => unreachable!("guarded by the matches! above"),
                 }
             }
@@ -3957,7 +3945,7 @@ impl Parser {
             | ExprKind::Closure { .. }
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
-            | ExprKind::Recover(_)
+            | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => Err(ParseError {
                 message: "a wait arm must `recv` from a channel (`v := ch.recv():`)".to_string(),
                 span: rhs_span,
@@ -4476,7 +4464,7 @@ impl Parser {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => {
                         return Err(
                             self.err("right side of '|>' must be a function call".to_string())
@@ -4964,7 +4952,7 @@ impl Parser {
                     let name = name.clone();
                     self.advance(); // ident
                     self.advance(); // '='
-                    let value = self.call_arg()?;
+                    let value = self.parse_expr()?;
                     named.push((name, value));
                 } else {
                     if !named.is_empty() {
@@ -4972,7 +4960,7 @@ impl Parser {
                             self.err("positional argument after named argument".to_string())
                         );
                     }
-                    args.push(self.call_arg()?);
+                    args.push(self.parse_expr()?);
                 }
                 if !self.eat(&Token::Comma) {
                     break;
@@ -5184,10 +5172,6 @@ impl Parser {
                 // `(e)` is grouping; `(e1, e2, …)` is a tuple; `(e,)` is a parse error.
                 if self.check(&Token::RParen) {
                     return Err(self.err("unexpected ')' in expression".to_string()));
-                }
-                if let Some(value) = self.recover_inline()? {
-                    self.expect(&Token::RParen)?;
-                    return Ok(value);
                 }
                 let first = self.parse_expr()?;
                 if self.eat(&Token::Comma) {
@@ -5906,12 +5890,12 @@ mod tests {
     use crate::lexer;
 
     fn parse_ok(src: &str) -> Module {
-        parse(lexer::tokenize(src).unwrap()).unwrap_or_else(|e| panic!("parse failed: {e}"))
+        parse(crate::lexer::tokenize(src).unwrap()).unwrap_or_else(|e| panic!("parse failed: {e}"))
     }
 
     /// The error from a source that must fail to parse.
     fn parse_err(src: &str) -> ParseError {
-        parse(lexer::tokenize(src).unwrap()).expect_err("expected a parse error")
+        parse(crate::lexer::tokenize(src).unwrap()).expect_err("expected a parse error")
     }
 
     /// `unexpected` reads without an article; `found` keeps it. A string literal in `describe`
@@ -10978,7 +10962,7 @@ mod tests {
             "fn(x: int) -> int: x\n",
             "match 1:\n    1: fn(x: int) -> int: x\n    2: spawn w()\n    _: pass\n",
         ] {
-            if let Err(e) = parse(lexer::tokenize(src).unwrap()) {
+            if let Err(e) = parse(crate::lexer::tokenize(src).unwrap()) {
                 bad.push(format!("{src:?} must parse: {}", e.message));
             }
         }
@@ -10995,7 +10979,7 @@ mod tests {
             "if a: while b: pass\n",
             "if a: match b:\n    _: pass\n",
         ] {
-            match parse(lexer::tokenize(src).unwrap()) {
+            match parse(crate::lexer::tokenize(src).unwrap()) {
                 Ok(_) => bad.push(format!("{src:?} must be rejected, parsed")),
                 Err(e) if e.message != NESTED => bad.push(format!(
                     "{src:?} must give the nested-block text: {}",
@@ -11053,7 +11037,7 @@ print(adder(1)(2))
             "print(xs[a != b])\n",
             "print(f[int](1) != 2)\n",
         ] {
-            if let Err(e) = parse(lexer::tokenize(src).unwrap()) {
+            if let Err(e) = parse(crate::lexer::tokenize(src).unwrap()) {
                 bad.push(format!("{src:?} must parse: {}", e.message));
             }
         }
@@ -11152,7 +11136,7 @@ fn g():
         }
         /// `e` is a `recover:` whose first statement is a guarded call.
         fn guarded_recover(e: &Expr) -> bool {
-            matches!(&e.kind, ExprKind::Recover(block) if guard_on_call(&block[0]))
+            matches!(&e.kind, ExprKind::Recover(block, _) if guard_on_call(&block[0]))
         }
         /// The branches and else block of a statement `if`.
         fn stmt_if(kind: StmtKind) -> (Vec<(Expr, Block)>, Option<Block>) {
@@ -11229,39 +11213,42 @@ fn g():
         assert!(else_block.is_none());
         assert!(guard_on_call(&branches[0].1[0]));
 
-        // a nested block on the `if` line keeps its own `else`
-        for src in [
-            "if true: r := recover: g() else: return\n",
-            "if true: recover: g() else: return\n",
-            "if true: _ := recover: g() else: panic(\"p\")\n",
-            "if true:\n    r := recover: g() else: panic(\"p\")\n",
-            "if true: r := recover:\n    g() else: panic(\"p\")\nelif true:\n    print(1)\n",
-        ] {
-            let (branches, _) = stmt_if(only(src));
-            assert!(guarded_recover(value_of(&branches[0].1[0])), "{src:?}");
-        }
-        let (branches, _) = stmt_if(only(
-            "if false: print(1)\nelif true: r := recover: g() else: panic(\"p\")\n",
-        ));
-        assert!(guarded_recover(value_of(&branches[1].1[0])));
-        let (branches, _) = stmt_if(only(
-            "if true: v := match n:\n    1: recover: g() else: panic(\"p\")\n    _: recover: 1\n",
-        ));
-        let ExprKind::Match { arms, .. } = &value_of(&branches[0].1[0]).kind else {
-            panic!("expected a match expression");
+        // the inline `recover:` body is ONE expression, so a same-line `else:` belongs to the inline
+        // `if` (`if_line_else`), and a statement is no branch of it
+        let rejects = |src: &str, want: &str| match parse(crate::lexer::tokenize(src).unwrap()) {
+            Ok(_) => panic!("{src:?} must be rejected"),
+            Err(e) => assert!(e.message.contains(want), "{src:?}: {}", e.message),
         };
-        assert!(guarded_recover(&arms[0].body));
+        let one_line = "takes an expression in each branch";
+        rejects("if true: r := recover: g() else: return\n", one_line);
+        rejects("if true: recover: g() else: return\n", one_line);
+        rejects("if true: _ := recover: g() else: panic(\"p\")\n", one_line);
+        rejects(
+            "if false: print(1)\nelif true: r := recover: g() else: panic(\"p\")\n",
+            "an `elif` body ends its line",
+        );
+        rejects(
+            "if true: v := match n:\n    1: recover: g() else: panic(\"p\")\n    _: recover: 1\n",
+            "expected end of line, found 'else'",
+        );
+        // in an indented body the `else:` is a guard on the `:=` value
+        let (branches, _) = stmt_if(only("if true:\n    r := recover: g() else: panic(\"p\")\n"));
+        let ExprKind::ElseGuard { value, .. } = &value_of(&branches[0].1[0]).kind else {
+            panic!("expected a guard");
+        };
+        assert!(matches!(value.kind, ExprKind::Recover(..)));
+        // a block-form `recover:` keeps a guard on its own indented line
+        let (branches, _) = stmt_if(only(
+            "if true: r := recover:\n    g() else: panic(\"p\")\nelif true:\n    print(1)\n",
+        ));
+        assert!(guarded_recover(value_of(&branches[0].1[0])));
         let (branches, _) = stmt_if(only("if true: k() else e: g() else: return\n"));
         let ExprKind::ElseGuard { body, .. } = &value_of(&branches[0].1[0]).kind else {
             panic!("expected a guard");
         };
         assert!(guard_on_call(&body[0]));
-        let (branches, else_block) = stmt_if(only("if c: recover: 1 else: 2\n"));
-        assert!(else_block.is_none());
-        assert!(matches!(
-            value_of(&branches[0].1[0]).kind,
-            ExprKind::Recover(_)
-        ));
+        let (_, then, _) = if_expr(only("if c: recover: 1 else: 2\n"));
+        assert!(matches!(then.kind, ExprKind::Recover(..)));
 
         // `recover: <expr>` as a whole parenthesized value or a whole call argument
         let StmtKind::Expr(call) = only("print(recover: 1)\n") else {
@@ -11271,7 +11258,7 @@ fn g():
             panic!("expected a call");
         };
         let one_expr = |e: &Expr| {
-            matches!(&e.kind, ExprKind::Recover(block)
+            matches!(&e.kind, ExprKind::Recover(block, _)
                 if block.len() == 1 && matches!(block[0].kind, StmtKind::Expr(_)))
         };
         assert!(one_expr(&args[0]));
@@ -11281,14 +11268,15 @@ fn g():
         assert!(one_expr(&paren));
 
         let mut bad = Vec::new();
-        let mut expect =
-            |src: &str, want: &str, exact: bool| match parse(lexer::tokenize(src).unwrap()) {
-                Ok(_) => bad.push(format!("{src:?} must be rejected, parsed")),
-                Err(e) if (exact && e.message != want) || !e.message.contains(want) => {
-                    bad.push(format!("{src:?} must give {want:?}: {}", e.message))
-                }
-                Err(_) => {}
-            };
+        let mut expect = |src: &str, want: &str, exact: bool| match parse(
+            crate::lexer::tokenize(src).unwrap(),
+        ) {
+            Ok(_) => bad.push(format!("{src:?} must be rejected, parsed")),
+            Err(e) if (exact && e.message != want) || !e.message.contains(want) => {
+                bad.push(format!("{src:?} must give {want:?}: {}", e.message))
+            }
+            Err(_) => {}
+        };
         for src in [
             "if c: print(1) else: x = 2\n",
             "if c: print(1) else: x := 2\n",
@@ -11341,6 +11329,7 @@ fn g():
         ] {
             expect(src, TYPE_LIST_HEAD, true);
         }
+        // the inline `recover:` is an ordinary expression: it parses in every expression position
         for src in [
             "print(1 + recover: 1)\n",
             "x := (?1 == recover: 1)\n",
@@ -11348,17 +11337,17 @@ fn g():
             "f(fn(): recover: 1 / 0)\n",
             "x := (if c: recover: 1 else: 2)\n",
             "if c: print(if d: recover: 1 else: 2)\n",
-            "if c: x := (if d: recover: 1 else: 2) else: print(3)\n",
-        ] {
-            expect(src, "expected end of line, found ')'", false);
-        }
-        expect("x := (recover: 1, 2)\n", "expected ')', found ','", false);
-        for src in [
+            "x := (recover: 1, 2)\n",
             "if c: y := if d: recover: 1 else: 2\n",
             "x := if c: recover: 1 else: 2\n",
         ] {
-            expect(src, "expected 'else', found end of line", false);
+            parse_ok(src);
         }
+        expect(
+            "if c: x := (if d: recover: 1 else: 2) else: print(3)\n",
+            "takes an expression in each branch",
+            false,
+        );
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 

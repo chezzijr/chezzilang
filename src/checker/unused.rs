@@ -165,7 +165,7 @@ impl Scan {
                     | ExprKind::Closure { .. }
                     | ExprKind::Match { .. }
                     | ExprKind::IfElse { .. }
-                    | ExprKind::Recover(_)
+                    | ExprKind::Recover(..)
                     | ExprKind::ElseGuard { .. } => self.expr(target),
                 }
             }
@@ -374,7 +374,7 @@ impl Scan {
                 self.expr(then);
                 self.expr(els);
             }
-            ExprKind::Recover(b) => self.block(b),
+            ExprKind::Recover(b, _) => self.block(b),
             // The error name binds like a match-arm binding: never reported as unread.
             ExprKind::ElseGuard { value, err, body } => {
                 self.expr(value);

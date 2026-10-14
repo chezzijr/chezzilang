@@ -1107,7 +1107,7 @@ fn executor_submit_module_global_callee_reassign_isolates_parity() {
     // `count = count + 1` now faults instead of reassigning it — the parent's read was always
     // going to see its own frozen `0` regardless.
     let out = golden_entry(
-        "count := 0\nfn bump():\n    recover: count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
+        "count := 0\nfn bump():\n    recover:\n        count = count + 1\nfn main():\n    ex := Executor()\n    ex.submit(fn(): bump())\n    ex.submit(fn(): bump())\n    ex.shutdown()\n    print(count)\nmain()\n",
     );
     assert_eq!(out, "0\n");
 }
@@ -2514,7 +2514,8 @@ ch := Channel[fn() -> fn() -> int](1)
 parallel:
     spawn:
         o := ch.recv()
-        _ := recover: n = 100
+        _ := recover:
+            n = 100
         d := o()
         res.send(d())
         res.send(n)
@@ -2554,7 +2555,8 @@ parallel:
     spawn: ch1.send(mk())
     spawn:
         k := ch1.recv()
-        _ := recover: n = 999
+        _ := recover:
+            n = 999
         ch2.send(k)
     spawn:
         k2 := ch2.recv()
@@ -2591,7 +2593,8 @@ fn mk() -> fn() -> int:
 
 parallel:
     spawn:
-        _ := recover: n = 5
+        _ := recover:
+            n = 5
         k := ch.recv()
         res.send(k())
         res.send(n)
@@ -2634,7 +2637,8 @@ fn mk() -> fn() -> int:
 
 parallel:
     spawn:
-        _ := recover: n = 5
+        _ := recover:
+            n = 5
         k := ch.recv()
         res.send(k())
         res.send(n)
@@ -2743,7 +2747,8 @@ res := Channel[int](1)
 
 parallel:
     spawn:
-        _ := recover: n = 999
+        _ := recover:
+            n = 999
         ch1.send(mk())
     spawn:
         k := ch1.recv()
@@ -2805,7 +2810,8 @@ c1 := Channel[fn() -> int](1)
 c2 := Channel[fn() -> int](1)
 
 fn producer():
-    _ := recover: n = 100
+    _ := recover:
+        n = 100
     c1.send(fn() -> int: helper())
     c2.send(fn() -> int: n)
 
@@ -2842,7 +2848,8 @@ fn bump() -> int:
 c := Channel[fn() -> int](1)
 
 fn producer():
-    _ := recover: n = 100
+    _ := recover:
+        n = 100
     c.send(fn() -> int: bump())
 
 fn main():
@@ -2873,7 +2880,8 @@ c := Channel[fn() -> int](1)
 fn producer():
     fn helper() -> int:
         return n
-    _ := recover: n = 100
+    _ := recover:
+        n = 100
     c.send(fn() -> int: helper())
 
 fn main():
@@ -2903,7 +2911,8 @@ c := Channel[fn() -> int](1)
 c2 := Channel[fn() -> int](1)
 
 fn producer():
-    _ := recover: xs = [1, 2]
+    _ := recover:
+        xs = [1, 2]
     _ := recover: ys.push(2)
     c.send(fn() -> int: xs.len())
     c2.send(fn() -> int: ys.len())
@@ -2941,8 +2950,10 @@ c := Channel[fn() -> int](1)
 c2 := Channel[fn() -> int](1)
 
 fn producer():
-    _ := recover: zs[0] = 9
-    _ := recover: p.v = 9
+    _ := recover:
+        zs[0] = 9
+    _ := recover:
+        p.v = 9
     c.send(fn() -> int: zs[0])
     c2.send(fn() -> int: p.v)
 
@@ -3047,7 +3058,8 @@ c := Channel[fn() -> int](1)
 
 fn producer():
     h := g
-    _ := recover: h.n = 5
+    _ := recover:
+        h.n = 5
     c.send(fn() -> int: g.n)
 
 fn main():
@@ -9054,7 +9066,8 @@ fn nested_fn_spawn_airlock_isolated_parity() {
 fn main():
     x := 0
     fn bump():
-        recover: x = x + 1
+        recover:
+            x = x + 1
     parallel:
         spawn bump()
     print(x)
@@ -12284,7 +12297,7 @@ fn serial_module_global_method_call_mutation_isolates_parity() {
         &[
             (
                 "counter.chz",
-                "count := 0\nfn bump():\n    recover: count = count + 1\nfn get() -> int:\n    return count\n",
+                "count := 0\nfn bump():\n    recover:\n        count = count + 1\nfn get() -> int:\n    return count\n",
             ),
             (
                 "main.chz",
@@ -12413,14 +12426,14 @@ fn serial_module_global_direct_mutation_forms_isolate_parity() {
     // map index-assign
     assert_eq!(
         golden_entry(
-            "m := {1: 2}\nfn main():\n    parallel:\n        spawn:\n            recover: m[1] = 9\n    print(m[1])\nmain()\n"
+            "m := {1: 2}\nfn main():\n    parallel:\n        spawn:\n            recover:\n                m[1] = 9\n    print(m[1])\nmain()\n"
         ),
         "2\n",
     );
     // struct field-assign
     assert_eq!(
         golden_entry(
-            "struct Box:\n    n: int\ns := Box(0)\nfn main():\n    parallel:\n        spawn:\n            recover: s.n = 9\n    print(s.n)\nmain()\n"
+            "struct Box:\n    n: int\ns := Box(0)\nfn main():\n    parallel:\n        spawn:\n            recover:\n                s.n = 9\n    print(s.n)\nmain()\n"
         ),
         "0\n",
     );
@@ -12441,7 +12454,7 @@ fn serial_module_global_direct_mutation_forms_isolate_parity() {
     // bare reassign
     assert_eq!(
         golden_entry(
-            "g := 0\nfn main():\n    parallel:\n        spawn:\n            recover: g = g + 1\n    print(g)\nmain()\n"
+            "g := 0\nfn main():\n    parallel:\n        spawn:\n            recover:\n                g = g + 1\n    print(g)\nmain()\n"
         ),
         "0\n",
     );
@@ -12453,7 +12466,7 @@ fn serial_module_global_direct_mutation_forms_isolate_parity() {
 #[test]
 fn serial_module_global_spawned_callee_mutation_isolates_parity() {
     // TICKET-169 (D4 layer C): `m[1] = 9` now faults (the callee's own module-global copy).
-    let src = "m := {1: 2}\nfn worker():\n    recover: m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\n    print(m[1])\nmain()\n";
+    let src = "m := {1: 2}\nfn worker():\n    recover:\n        m[1] = 9\nfn main():\n    parallel:\n        spawn worker()\n    print(m[1])\nmain()\n";
     assert_eq!(golden_entry(src), "2\n");
 }
 
@@ -12464,7 +12477,7 @@ fn serial_module_global_spawned_callee_mutation_isolates_parity() {
 fn nested_serial_spawn_module_global_isolates_parity() {
     // TICKET-169 (D4 layer C): both writes now fault (each is a spawned task's own module-global
     // copy: `outer` is itself spawned from `main`, and `inner` from `outer`).
-    let src = "g := 0\nfn inner():\n    recover: g = g + 100\nfn outer():\n    parallel:\n        spawn inner()\n    recover: g = g + 1\nfn main():\n    parallel:\n        spawn outer()\n    print(g)\nmain()\n";
+    let src = "g := 0\nfn inner():\n    recover:\n        g = g + 100\nfn outer():\n    parallel:\n        spawn inner()\n    recover:\n        g = g + 1\nfn main():\n    parallel:\n        spawn outer()\n    print(g)\nmain()\n";
     assert_eq!(golden_entry(src), "0\n");
 }
 
@@ -12483,7 +12496,8 @@ fn main():
     ch := Channel[int]()
     parallel:
         spawn:
-            recover: g = g + 1
+            recover:
+                g = g + 1
             v := ch.recv()
             print(\"task sees {g} got {v}\")
         spawn:
@@ -12508,7 +12522,7 @@ fn nested_serial_spawn_mutation_before_nested_reads_fresh_parity() {
     // `g`), so the grandchild's fresh-snapshot read sees the task's UNCHANGED view (`0`) — the
     // property this test guards (a nested nursery sees its parent TASK's current view, not the
     // module's declaration-time one) no longer has a write to demonstrate it with.
-    let src = "g := 0\nfn worker():\n    recover: g = g + 1\n    parallel:\n        spawn:\n            print(g)\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
+    let src = "g := 0\nfn worker():\n    recover:\n        g = g + 1\n    parallel:\n        spawn:\n            print(g)\nfn main():\n    parallel:\n        spawn worker()\nmain()\n";
     assert_eq!(golden_entry(src), "0\n");
 }
 

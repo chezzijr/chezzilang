@@ -1,3 +1,0 @@
-# rule: recoverInline
-# expect: expected end of line, found ')'
-print(not recover: true)
