@@ -3725,15 +3725,28 @@ x := show(Bad(1))
 }
 
 #[test]
-fn stringable_missing_method_rejected() {
-    let src = "\
+fn stringable_wrong_shape_method_rejected_and_bare_struct_accepted() {
+    // TICKET-257 (owner rule U5): `print`, `str()` and `"{x}"` accept every value, so a struct with
+    // NO `str` method satisfies `Stringable`. A struct whose own `str` has the wrong shape is
+    // decided by that method and stays rejected.
+    let bare = "\
 struct Bare:
     a: int
 fn show[T: Stringable](v: T) -> str:
     return v.str()
 x := show(Bare(1))
 ";
-    rejects(src, "does not satisfy Stringable");
+    ok(bare);
+    let wrong = "\
+struct Bad:
+    a: int
+    fn str(self) -> int:
+        return 1
+fn show[T: Stringable](v: T) -> str:
+    return v.str()
+x := show(Bad(1))
+";
+    rejects(wrong, "does not satisfy Stringable");
 }
 
 #[test]
@@ -4466,7 +4479,6 @@ print(generic_eq(a, b))
 #[test]
 fn protocol_typed_value_does_not_satisfy_other_protocols() {
     for (bound, needle) in [
-        ("Stringable", "does not satisfy Stringable"),
         ("Hashable", "does not satisfy Hashable"),
         ("Iterable[int]", "does not satisfy Iterable"),
         ("Add", "does not satisfy Add"),

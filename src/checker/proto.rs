@@ -363,6 +363,23 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     ("Stringable", "str", RecvKind::Float),
     ("Stringable", "str", RecvKind::Bool),
     ("Stringable", "str", RecvKind::Str),
+    ("Stringable", "str", RecvKind::Bytes),
+    ("Stringable", "str", RecvKind::ByteArray),
+    ("Stringable", "str", RecvKind::List),
+    ("Stringable", "str", RecvKind::Map),
+    ("Stringable", "str", RecvKind::Set),
+    ("Stringable", "str", RecvKind::Tuple),
+    ("Stringable", "str", RecvKind::Struct),
+    ("Stringable", "str", RecvKind::Cursor),
+    ("Stringable", "str", RecvKind::Enum),
+    ("Stringable", "str", RecvKind::Option),
+    ("Stringable", "str", RecvKind::Result),
+    ("Stringable", "str", RecvKind::Func),
+    ("Stringable", "str", RecvKind::Protocol),
+    ("Stringable", "str", RecvKind::Channel),
+    ("Stringable", "str", RecvKind::Shared),
+    ("Stringable", "str", RecvKind::RwShared),
+    ("Stringable", "str", RecvKind::Atomic),
     // Hashable — the scalar key types + a zero-field struct with no own `hash`.
     ("Hashable", "hash", RecvKind::Int),
     ("Hashable", "hash", RecvKind::Str),
@@ -2533,7 +2550,16 @@ impl Checker {
         // Note the membership is all FOUR scalars — unlike Comparable (no Bool) / Hashable (no Float).
         // Structs/enums still fall through to the structural `satisfies_methods` below (a type
         // WITHOUT a `str(self) -> str` method stays correctly rejected).
-        if protocol == "Stringable" && matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str) {
+        // TICKET-257 (owner rule U5): `print`, `str()` and `"{x}"` accept every value, so every kind a
+        // `RecvKind` names is `Stringable`. A type that declares a `str` method (a conforming hook, or
+        // one whose shape the protocol rejects) is decided by that method below, as before.
+        if protocol == "Stringable"
+            && Self::intrinsic_recv_kind(ty).is_some()
+            && matches!(
+                self.hook_verdict(ty, "Stringable", "str"),
+                Err(HookMiss::Absent | HookMiss::Static)
+            )
+        {
             return self.grant_intrinsic(protocol, ty);
         }
         // TICKET-161: a tuple is `Hashable` exactly when every element type is (CPython's rule),

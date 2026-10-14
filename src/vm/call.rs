@@ -1820,8 +1820,7 @@ impl Vm {
         }
         // TICKET-257: the handles are `Eq` by identity (`Eq` grant rows for `Channel`, `Shared`,
         // `RwShared`, `Atomic`): `x.eq(y)` is `x == y`. No handle declares an `eq` of its own.
-        if method == "eq"
-            && args.len() == 1
+        if ((method == "eq" && args.len() == 1) || (method == "str" && args.is_empty()))
             && matches!(
                 self.heap.get(h),
                 Obj::Channel(_)
@@ -2100,6 +2099,7 @@ impl Vm {
                             | "eq"
                             | "compare"
                             | "contains"
+                            | "str"
                             | "add"
                             | "sub"
                             | "bitand"
@@ -3361,6 +3361,12 @@ impl Vm {
         }
         match (method, args.len()) {
             ("neg", 0) => Ok(Some(self.neg_value(recv, span)?)),
+            // `Stringable` for a kind with no `str` method of its own: the SAME rendering `print`,
+            // `str()` and `"{x}"` use. Miss-only, so a declared `str` hook is dispatched first.
+            ("str", 0) => {
+                let s = self.stringify(recv, span, 0)?;
+                Ok(Some(Value::obj(self.heap.alloc(Obj::Str(s.into())))))
+            }
             // `Hashable` → the SAME hash a Map/Set key gets, so `x.hash()` can never disagree with
             // `m[x]` / `s.contains(x)` membership. A zero-field struct with no `hash` hook gets
             // `declared_hash`'s constant. `recv` stays rooted across the (possibly re-entrant,
