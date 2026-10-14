@@ -1,5 +1,5 @@
 //! TICKET-242: the one-line `if … else` statement is the if-expression with its value discarded,
-//! and `recover: <expr>` is a whole parenthesized value or a whole call argument. Form {calls,
+//! and the inline `recover: <expr>` is an ordinary expression (TICKET-260 lifted the TICKET-242 position limits). Form {calls,
 //! `elif`, nested, literals, assignment, `return`, guards, `recover:`, block-expression bodies} x
 //! position {top level, fn body, loop body, inline fn body, inline loop body, statement `match`
 //! arm, match-expression arm, parentheses, call argument}. One generated program per cell, run
@@ -88,8 +88,8 @@ const FORMS: &[Form] = &[
         shows: false,
         statement: "=2",
         inline_fn: "=2",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_loop: "=2",
+        stmt_arm: "=2",
         expr_arm: "!expression returns no value (None) and cannot be used as a value",
         paren: "=2",
         arg: "!expression returns no value (None) and cannot be used as a value",
@@ -100,8 +100,8 @@ const FORMS: &[Form] = &[
         shows: false,
         statement: "=2",
         inline_fn: "=2",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_loop: "=2",
+        stmt_arm: "=2",
         expr_arm: "!expression returns no value (None) and cannot be used as a value",
         paren: "=2",
         arg: "!expression returns no value (None) and cannot be used as a value",
@@ -112,8 +112,8 @@ const FORMS: &[Form] = &[
         shows: false,
         statement: "=3",
         inline_fn: "=3",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_loop: "=3",
+        stmt_arm: "=3",
         expr_arm: "!expression returns no value (None) and cannot be used as a value",
         paren: "=3",
         arg: "!expression returns no value (None) and cannot be used as a value",
@@ -124,8 +124,8 @@ const FORMS: &[Form] = &[
         shows: true,
         statement: "=",
         inline_fn: "=2",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_loop: "=",
+        stmt_arm: "=",
         expr_arm: "=2",
         paren: "=2",
         arg: "=2",
@@ -136,8 +136,8 @@ const FORMS: &[Form] = &[
         shows: false,
         statement: "!takes an expression in each branch",
         inline_fn: "!expected 'else', found '='",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_loop: "!expected 'else', found '='",
+        stmt_arm: "!expected 'else', found '='",
         expr_arm: "!expected 'else', found '='",
         paren: "!expected 'else', found '='",
         arg: "!expected 'else', found '='",
@@ -147,9 +147,9 @@ const FORMS: &[Form] = &[
         stmt: "if f: print(1) else: x = 2",
         shows: false,
         statement: "!takes an expression in each branch",
-        inline_fn: "!expected end of line, found '='",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_fn: "!invalid assignment target",
+        inline_loop: "!invalid assignment target",
+        stmt_arm: "!invalid assignment target",
         // the arm ends after the else branch: the arm-end check rejects `= 2`
         expr_arm: "!expected end of line, found '='",
         paren: "!expected ')', found '='",
@@ -161,8 +161,8 @@ const FORMS: &[Form] = &[
         shows: false,
         statement: "!takes an expression in each branch",
         inline_fn: "!takes an expression in each branch",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_loop: "!takes an expression in each branch",
+        stmt_arm: "!takes an expression in each branch",
         expr_arm: "!takes an expression in each branch",
         paren: "!takes an expression in each branch",
         arg: "!takes an expression in each branch",
@@ -173,8 +173,8 @@ const FORMS: &[Form] = &[
         shows: false,
         statement: "!takes an expression in each branch",
         inline_fn: "!takes an expression in each branch",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_loop: "!takes an expression in each branch",
+        stmt_arm: "!takes an expression in each branch",
         expr_arm: "!takes an expression in each branch",
         paren: "!takes an expression in each branch",
         arg: "!takes an expression in each branch",
@@ -185,8 +185,8 @@ const FORMS: &[Form] = &[
         shows: false,
         statement: "!takes an expression in each branch",
         inline_fn: "!takes an expression in each branch",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_loop: "!takes an expression in each branch",
+        stmt_arm: "!takes an expression in each branch",
         expr_arm: "!takes an expression in each branch",
         paren: "!takes an expression in each branch",
         arg: "!takes an expression in each branch",
@@ -198,8 +198,8 @@ const FORMS: &[Form] = &[
         statement: "=k",
         // an if-expression has no guard: its `else` takes a ':'
         inline_fn: "!expected ':', found identifier 'e'",
-        inline_loop: "!a nested block must be indented",
-        stmt_arm: "!a nested block must be indented",
+        inline_loop: "!expected ':', found identifier 'e'",
+        stmt_arm: "!expected ':', found identifier 'e'",
         expr_arm: "!expected ':', found identifier 'e'",
         paren: "!expected ':', found identifier 'e'",
         arg: "!expected ':', found identifier 'e'",
@@ -235,7 +235,7 @@ fn form_by_position_grid() {
             ("fn body", format!("fn h():\n    {s}\nh()"), form.statement),
             (
                 "loop body",
-                format!("for i in 0..1:\n    {s}"),
+                format!("for _i in 0..1:\n    {s}"),
                 form.statement,
             ),
             (
@@ -245,7 +245,7 @@ fn form_by_position_grid() {
             ),
             (
                 "inline loop body",
-                format!("for i in 0..1: {s}"),
+                format!("for _i in 0..1: {s}"),
                 form.inline_loop,
             ),
             (
@@ -339,7 +339,7 @@ fn form_by_position_grid() {
     run_grid("inline-if-form", &cells);
 }
 
-/// Row 5: `recover: <expr>` is a whole parenthesized value or a whole call argument.
+/// Row 5: `recover: <expr>` is an ordinary expression in every position; its body is one expression.
 #[test]
 fn recover_inline_grid() {
     const F: &str = "fn two(a: int!Error, b: int):\n    print(b)\nfn calls(g: fn() -> int!Error):\n    print(g())\n";
@@ -559,7 +559,7 @@ fn mixed_branch_types_grid() {
         (
             "statement in a recover block",
             "c := false\nr := recover:\n    if c: pi() else: ps()\n    3\nprint(r)",
-            "=ps\n3",
+            "=ps\nNone",
         ),
         (
             "inline loop body, parenthesized",
@@ -604,8 +604,8 @@ fn mixed_branch_types_grid() {
         ),
         (
             "recover block tail",
-            "c := false\nr := recover:\n    if c: 1 else: \"a\"",
-            "!branches have incompatible types",
+            "c := false\nr := recover:\n    if c: 1 else: \"a\"\nprint(r)",
+            "=None",
         ),
         (
             "closure body",

@@ -1,0 +1,7 @@
+# rule: value
+# expect: a block expression
+n := 1
+x := 0
+x += match n:
+    1: 10
+    _: 20

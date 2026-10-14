@@ -1,4 +1,4 @@
-# rule: exprEnd
+# rule: value
 # expect: unexpected '|>' in expression
 n := 1
 x := match n:

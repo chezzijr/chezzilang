@@ -1,4 +1,4 @@
-# rule: recoverExpr
+# rule: recoverBlock
 fn main():
     r := recover:
         [1, 2][9]

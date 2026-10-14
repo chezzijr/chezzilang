@@ -33423,10 +33423,10 @@ fn inline_if_without_else_in_fn_body_is_rejected() {
 fn inline_nested_if_statement_block_is_still_rejected() {
     let tokens = lexer::tokenize("fn main():\n    if true: if false: print(1)\n")
         .expect("lex should succeed");
+    // An `if` after an inline `:` is the one-line if-expression (TICKET-260), so it needs its `else`.
     let err = parser::parse(tokens).expect_err("nested inline block must not parse");
     assert!(
-        err.message
-            .contains("a nested block must be indented, not written inline after ':'"),
+        err.message.contains("expected 'else'"),
         "wrong message: {err:?}"
     );
 }

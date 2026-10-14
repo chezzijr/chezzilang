@@ -1,4 +1,4 @@
-# rule: exprEnd, matchExpr, recoverExpr, exprArm
+# rule: value, matchExpr, recoverBlock, exprArm
 fn g() -> int:
     return 7
 n := 1

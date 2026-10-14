@@ -127,6 +127,15 @@ pub fn parse(tokens: Vec<Tok>) -> PResult<Module> {
     Parser::new(tokens).parse_module()
 }
 
+/// Parse a token stream into a `Module`, and return the tokens as the parser left them: the lexer's
+/// tokens plus the layout a block expression inside brackets asked for ([`crate::lexer::open_layout`]).
+/// The conformance test encodes that vector, which is the stream `docs/grammar.bnf` describes.
+pub fn parse_with_tokens(tokens: Vec<Tok>) -> (PResult<Module>, Vec<Tok>) {
+    let mut p = Parser::new(tokens);
+    let module = p.parse_module();
+    (module, p.toks)
+}
+
 /// Parse a token stream into a `Module`, attaching doc-comments from the lexer side-channel.
 ///
 /// `comments` is the `(line, stripped_text)` table from [`crate::lexer::tokenize_with_comments`]:
@@ -193,10 +202,80 @@ const ELSE_GUARD_PLACE: &str =
 
 const IF_BRANCH: &str = "a one-line `if`/`else` takes an expression in each branch; write a statement branch, or an `else:` guard, on its own indented line";
 const ELIF_LINE: &str = "an `elif` body ends its line; write the next `elif` or `else:` on its own line, and an `else:` guard in an indented body";
+/// The one message for a block expression written where no whole value starts (TICKET-260, rule U8).
+const BLOCK_VALUE: &str = "a block expression (a multi-line `match`, a `recover:` block) is a whole value: write it after `:=`, `=`, `return` or `yield`, as a lambda or fn body, or as a default; bind it first: `v := match ...`";
 const WHERE_BOUND: &str = "a `where` entry needs a bound (`where T: Proto`)";
 const TYPE_LIST_HEAD: &str = "a type list in brackets needs a name before the '[' (`Name[T, U]`); on any other value '[' takes one index";
 
+/// Each position where a whole value starts, and so where a block expression may start (rule U8).
+/// [`Parser::parse_value`] is the only way to open one; a position that is not listed here rejects a
+/// block expression with [`BLOCK_VALUE`]. The grid test `tests/block_value_position_grid.rs` writes
+/// one row per variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueSite {
+    /// `name: T = value`.
+    Let,
+    /// `target = value`.
+    Assign,
+    /// `a, b := value`.
+    DestructLet,
+    /// `a, b = value`.
+    TupleAssign,
+    Return,
+    Yield,
+    /// The body of `fn(...): body`.
+    Lambda,
+    /// An inline fn body: `fn f() -> int: body`.
+    FnBody,
+    /// `field: T = value` in a struct.
+    FieldDefault,
+    /// `param: T = value`.
+    ParamDefault,
+    /// A statement that starts its line.
+    Stmt,
+    /// The value of an arm of a `match` expression.
+    MatchArm,
+}
+
+impl ValueSite {
+    /// Every variant. A new variant fails to compile in [`ValueSite::name`] until it is named.
+    pub const ALL: [ValueSite; 12] = [
+        ValueSite::Let,
+        ValueSite::Assign,
+        ValueSite::DestructLet,
+        ValueSite::TupleAssign,
+        ValueSite::Return,
+        ValueSite::Yield,
+        ValueSite::Lambda,
+        ValueSite::FnBody,
+        ValueSite::FieldDefault,
+        ValueSite::ParamDefault,
+        ValueSite::Stmt,
+        ValueSite::MatchArm,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ValueSite::Let => "typed let",
+            ValueSite::Assign => "assignment",
+            ValueSite::DestructLet => "destructuring let",
+            ValueSite::TupleAssign => "tuple assignment",
+            ValueSite::Return => "return",
+            ValueSite::Yield => "yield",
+            ValueSite::Lambda => "lambda body",
+            ValueSite::FnBody => "inline fn body",
+            ValueSite::FieldDefault => "field default",
+            ValueSite::ParamDefault => "parameter default",
+            ValueSite::Stmt => "statement",
+            ValueSite::MatchArm => "match arm value",
+        }
+    }
+}
+
 struct Parser {
+    /// The token index where the value being parsed starts, set by [`Parser::parse_value`]. A block
+    /// expression may start only at this exact token ([`Parser::block_ok`]).
+    value_start: Option<usize>,
     /// The inline body of the `if` / `elif` being parsed: the token index where it starts, and the
     /// `depth` of its one statement.
     if_line: Option<(usize, usize)>,
@@ -245,6 +324,7 @@ impl Parser {
             })
             .collect();
         Parser {
+            value_start: None,
             if_line: None,
             stmt_inline: false,
             toks,
@@ -1548,6 +1628,9 @@ impl Parser {
         let kind = match Self::compound_keyword(self.peek(), self.peek_at(1)) {
             // `if a: if b: x` would make a trailing `else` ambiguous (which `if`?), and a nested
             // block has no indentation to end at. Force such nesting to use an indented block.
+            Some(_) if inline && matches!(self.peek(), Token::If | Token::Match) => {
+                self.parse_line_stmt()?
+            }
             Some(_) if inline => {
                 return Err(self.err(
                     "a nested block must be indented, not written inline after ':'".to_string(),
@@ -1724,7 +1807,7 @@ impl Parser {
             if !self.eat_type_assign() {
                 self.expect(&Token::Assign)?;
             }
-            let value = self.parse_expr()?;
+            let value = self.parse_value(ValueSite::Let)?;
             let value = self.parse_else_guard(value)?;
             return Ok(StmtKind::Let {
                 names: vec![name],
@@ -1736,7 +1819,11 @@ impl Parser {
             });
         }
 
-        let expr = self.parse_expr()?;
+        let expr = if self.stmt_inline {
+            self.parse_expr()?
+        } else {
+            self.parse_value(ValueSite::Stmt)?
+        };
 
         // `f() else e: <block>` -- the guard in statement form: the success value is discarded.
         if self.else_is_guard() {
@@ -1771,7 +1858,7 @@ impl Parser {
             // (`a, b := 1, 2`) is the tuple written without parentheses — Go's/CPython's
             // multi-assignment shape.
             if self.eat_in_line(&Token::Walrus) {
-                let mut values = vec![self.parse_expr()?];
+                let mut values = vec![self.parse_value(ValueSite::DestructLet)?];
                 while self.eat_in_line(&Token::Comma) {
                     values.push(self.parse_expr()?);
                 }
@@ -1845,7 +1932,7 @@ impl Parser {
                 }
             }
             self.advance(); // '='
-            let mut values = vec![self.parse_expr()?];
+            let mut values = vec![self.parse_value(ValueSite::TupleAssign)?];
             while self.eat_in_line(&Token::Comma) {
                 values.push(self.parse_expr()?);
             }
@@ -1888,7 +1975,7 @@ impl Parser {
         let op = match self.peek() {
             Token::Walrus => {
                 self.advance();
-                let value = self.parse_expr()?;
+                let value = self.parse_value(ValueSite::Let)?;
                 let value = self.parse_else_guard(value)?;
                 let name_span = expr.span;
                 let name = self.binder_name(expr, "left side of ':=' must be a name")?;
@@ -2007,7 +2094,11 @@ impl Parser {
             });
         }
         self.advance(); // the assignment operator
-        let value = self.parse_expr()?;
+        let value = if matches!(op, AssignOp::Eq) {
+            self.parse_value(ValueSite::Assign)?
+        } else {
+            self.parse_expr()?
+        };
         self.reject_else_guard()?;
         Ok(StmtKind::Assign {
             target: expr,
@@ -2051,21 +2142,12 @@ impl Parser {
         // token immediately after that colon (an indented block is `Colon Newline Indent …`). `peek`
         // is the body `Colon` here, so `peek_at(1)` is the token right after it.
         let inline = self.peek() == &Token::Colon && self.peek_at(1) != &Token::Newline;
-        // An inline body starting with `if` is an if-EXPRESSION (the closure / `x := if …` form), so
-        // it becomes the implicit return; `parse_block`'s nested-block rule still guards every
-        // other compound statement.
-        let body = if inline && self.peek_at(1) == &Token::If {
-            self.expect(&Token::Colon)?;
-            let span = self.cur_span();
-            let expr = self.parse_expr()?;
-            self.expect_stmt_end()?;
-            vec![Stmt {
-                kind: StmtKind::Expr(expr),
-                span,
-            }]
-        } else {
-            self.parse_block()?
-        };
+        // An inline body is one statement; a body that starts with `if` or `match` is an expression
+        // statement (`parse_stmt_in`), and the first body token starts a whole value.
+        if inline {
+            self.value_start = Some(self.pos + 1);
+        }
+        let body = self.parse_block()?;
         let is_generator = body_contains_yield(&body);
         // An inline body whose single statement is a bare expression implicitly returns that
         // expression (mirroring a closure `fn(x): expr`). Inline non-expr statements (`: x = 5`,
@@ -2681,7 +2763,7 @@ impl Parser {
                     // Any expression is allowed as a default; the desugar pass rejects one that
                     // references another parameter (it is cloned into the caller's scope at the call
                     // site, where parameters are not bound).
-                    let e = self.parse_expr()?;
+                    let e = self.parse_value(ValueSite::ParamDefault)?;
                     Some(e)
                 } else {
                     None
@@ -2760,7 +2842,7 @@ impl Parser {
                 let default = if self.eat_type_assign() {
                     // Any expression is allowed; the desugar pass rejects one that references another
                     // field (it is cloned into the caller's scope at the constructor call site).
-                    let e = self.parse_expr()?;
+                    let e = self.parse_value(ValueSite::FieldDefault)?;
                     Some(e)
                 } else {
                     None
@@ -3032,8 +3114,17 @@ impl Parser {
     /// Expression-position `match` (keyword already consumed): `match scrut:` then indented
     /// `pattern: value-expr` arms. Each arm body is a single expression (not a block).
     fn parse_match_expr(&mut self, span: Span) -> PResult<Expr> {
+        if !self.block_ok(self.pos - 1) {
+            return Err(ParseError {
+                message: BLOCK_VALUE.to_string(),
+                span,
+            });
+        }
         let scrutinee = self.parse_expr()?;
-        self.open_block()?; // ':' Newline Indent
+        self.expect(&Token::Colon)?;
+        self.request_layout(self.pos - 1)?;
+        self.expect(&Token::Newline)?;
+        self.expect(&Token::Indent)?;
         let mut arms = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
@@ -3045,7 +3136,7 @@ impl Parser {
                 None
             };
             self.expect(&Token::Colon)?;
-            let body = self.parse_expr()?;
+            let body = self.parse_value(ValueSite::MatchArm)?;
             self.expect_stmt_end()?;
             arms.push(MatchExprArm {
                 span: arm_span,
@@ -3080,7 +3171,8 @@ impl Parser {
     fn if_branch(&mut self) -> PResult<Expr> {
         let start = self.pos;
         self.parse_expr().map_err(|e| {
-            if self.pos <= start + 1 && e.span == self.toks[start].span {
+            if self.pos <= start + 1 && e.span == self.toks[start].span && e.message != BLOCK_VALUE
+            {
                 ParseError {
                     message: IF_BRANCH.to_string(),
                     span: e.span,
@@ -3283,10 +3375,18 @@ impl Parser {
     /// form (`recover: expr`, type `T!`), an ordinary expression that extends to the right like a
     /// lambda body.
     fn parse_recover_expr(&mut self, span: Span) -> PResult<Expr> {
+        let kw = self.pos - 1;
         let next = &self.toks[(self.pos + 1).min(self.toks.len() - 1)];
         let block =
             self.check(&Token::Colon) && (next.kind == Token::Newline || next.indent.is_some());
         let (body, form) = if block {
+            if !self.block_ok(kw) {
+                return Err(ParseError {
+                    message: BLOCK_VALUE.to_string(),
+                    span,
+                });
+            }
+            self.request_layout(self.pos)?;
             (self.parse_block()?, RecoverForm::Block)
         } else {
             self.expect(&Token::Colon)?;
@@ -3701,7 +3801,7 @@ impl Parser {
         if self.at_line_end() {
             Ok(StmtKind::Return(None))
         } else {
-            let value = self.parse_expr()?;
+            let value = self.parse_value(ValueSite::Return)?;
             self.reject_else_guard()?;
             Ok(StmtKind::Return(Some(value)))
         }
@@ -3710,7 +3810,7 @@ impl Parser {
     /// `yield <expr>` — always carries a value (unlike `return`). Generator syntax (VM-only; shipped).
     fn parse_yield(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Yield)?;
-        Ok(StmtKind::Yield(self.parse_expr()?))
+        Ok(StmtKind::Yield(self.parse_value(ValueSite::Yield)?))
     }
 
     /// `assert <cond>` or `assert <cond>, <msg>` — line-oriented (the caller requires a stmt end).
@@ -4058,6 +4158,24 @@ impl Parser {
         }
     }
 
+    /// The `:` at token `colon` ends a block expression's head. Inside brackets the lexer emitted no
+    /// layout, so ask it to open the block now ([`crate::lexer::open_layout`]); at bracket depth 0 the
+    /// next token is already `Newline`, and a same-line body is left for the caller to reject.
+    fn request_layout(&mut self, colon: usize) -> PResult<()> {
+        if self.toks[colon + 1].kind == Token::Newline {
+            return Ok(());
+        }
+        crate::lexer::open_layout(&mut self.toks, colon).map_err(|e| ParseError {
+            message: e.message,
+            span: Span {
+                line: e.line as u32,
+                col: e.col as u32,
+                file: self.toks[self.pos].span.file,
+            },
+        })?;
+        Ok(())
+    }
+
     /// Open an indented block for declarations whose bodies are not statements (`struct`, `enum`):
     /// consumes `: Newline Indent`. The caller parses members until `Dedent`.
     fn open_block(&mut self) -> PResult<()> {
@@ -4260,6 +4378,19 @@ impl Parser {
     }
 
     // ----- expressions (Pratt) -----
+
+    /// Parse an expression that starts a whole value at `_site`: the one place a block expression may
+    /// start ([`Parser::block_ok`]).
+    fn parse_value(&mut self, _site: ValueSite) -> PResult<Expr> {
+        self.value_start = Some(self.pos);
+        self.parse_expr()
+    }
+
+    /// May the block expression whose keyword is the token at `kw` start here? Only the token where a
+    /// whole value starts qualifies, which excludes every operand, prefix, argument and element.
+    fn block_ok(&self, kw: usize) -> bool {
+        self.value_start == Some(kw)
+    }
 
     fn parse_expr(&mut self) -> PResult<Expr> {
         self.parse_bp(0)
@@ -5445,12 +5576,14 @@ impl Parser {
         let outer_toks = std::mem::replace(&mut self.toks, tokens);
         let outer_pos = std::mem::replace(&mut self.pos, 0);
         let outer_if_line = self.if_line.take();
+        let outer_value = self.value_start.take();
         let outer_inline = std::mem::replace(&mut self.stmt_inline, false);
         let outer_bang = self.bang_eq.take();
         let result = self.hole_expr();
         self.toks = outer_toks;
         self.pos = outer_pos;
         self.if_line = outer_if_line;
+        self.value_start = outer_value;
         self.stmt_inline = outer_inline;
         self.bang_eq = outer_bang;
         result
@@ -5489,7 +5622,7 @@ impl Parser {
                 span: pass_span,
             }
         } else {
-            self.parse_expr()?
+            self.parse_value(ValueSite::Lambda)?
         };
         Ok(Expr {
             id: crate::ast::NodeId::fresh(),
@@ -5982,6 +6115,8 @@ mod tests {
             Split,
             Guard,
             Reject,
+            /// The block head is no whole value (U8): [`BLOCK_VALUE`] on the head's line.
+            BlockValue,
         }
         const ARMS: &[&str] = &["    1: 10", "    _: 20"];
         // (head, body lines one level deeper than the statement)
@@ -6131,6 +6266,9 @@ mod tests {
         }
 
         let want = |pos: &str, kind: usize, tok: &str, arm: Option<&str>| match pos {
+            // an operand, an else branch, or a value no position starts (U8)
+            _ if matches!(kind, 2 | 4 | 5 | 6) => Want::BlockValue,
+            "assert " | "a, " | "wait arm" if kind != 3 => Want::BlockValue,
             "field" | "a, " | "wait arm" => Want::Reject,
             "outer arm" | "statement arm" if arm.is_some() => Want::Split,
             "outer arm" | "statement arm" => Want::Reject,
@@ -6156,7 +6294,12 @@ mod tests {
                         without.remove(at);
                         entries(&parse_ok(&(without.join("\n") + "\n")), pos).len()
                     };
+                    let head_line = at - KINDS[kind].1.len();
                     let problem = match (want, try_parse(&src)) {
+                        (Want::BlockValue, Err((line, msg))) => (line != head_line
+                            || msg != BLOCK_VALUE)
+                            .then(|| format!("error on line {line}, not {head_line}: {msg}")),
+                        (Want::BlockValue, Ok(_)) => Some("parsed".to_string()),
                         (Want::Reject, Err((line, _))) if line == at + 1 => None,
                         (Want::Reject, Err((line, msg))) => {
                             Some(format!("error on line {line}, not {}: {msg}", at + 1))
@@ -6260,6 +6403,20 @@ mod tests {
                             }
                             continue;
                         }
+                        // an inline body is no whole value, and neither is an operand, a compound
+                        // assignment's value or an `assert` operand (U8): the one message, on the
+                        // block's head line, whatever the next line is
+                        if matches!(*stmt, "x += " | "assert " | "1 + " | "") {
+                            let head_line = at - body.len() - 1;
+                            match try_parse(&src) {
+                                Err((line, msg)) if line == head_line && msg == BLOCK_VALUE => {}
+                                Err((line, msg)) => failed.push(format!(
+                                    "{cell}: want BLOCK_VALUE on line {head_line}; got line {line}: {msg}"
+                                )),
+                                Ok(_) => failed.push(format!("{cell}: want BLOCK_VALUE; parsed")),
+                            }
+                            continue;
+                        }
                         // the header's branch count and else block once it owns the next line
                         let owner = match (header, *next) {
                             ("if", "else: pass") => Some((1, true)),
@@ -6299,19 +6456,8 @@ mod tests {
                                     ),
                                     other => panic!("not an `if` or a `wait`: {other:?}"),
                                 };
-                                let inline = bodies
-                                    .get(usize::from(header == "elif"))
-                                    .and_then(|b| b.last())
-                                    .map(|s| &s.kind);
                                 if format!("{bodies:?}").contains("ElseGuard") {
                                     Some("the inline statement took the `else` as a guard".into())
-                                } else if matches!(*stmt, "1 + " | "")
-                                    && !matches!(inline, Some(StmtKind::Expr(_)))
-                                {
-                                    Some(
-                                        "the inline statement is not an expression statement"
-                                            .into(),
-                                    )
                                 } else if len != n || else_block.is_some() != has_else {
                                     Some(format!(
                                         "{len} branches, else block {}",
@@ -9818,8 +9964,9 @@ mod tests {
     /// `else` ambiguous. Force indentation instead.
     #[test]
     fn rejects_inline_nested_block() {
+        // an `if` after an inline `:` is the one-line if-expression, and its `else` is mandatory
         let err = parse_err("fn m():\n    if a: if b: x = 1\n");
-        assert!(err.message.contains("indented"), "{}", err.message);
+        assert!(err.message.contains("expected 'else'"), "{}", err.message);
     }
 
     /// Strengthened golden check: walk into hello.chz bodies, not just top-level shape.
@@ -10974,10 +11121,8 @@ mod tests {
             "if true: defer print(1)\n",
             "fn g(ch: Channel[int]): wait:\n    x := ch.recv(): print(x)\n",
             "parallel: spawn:\n    print(1)\n",
-            "if a: if b: x = 1\n",
             "if a: for i in xs: pass\n",
             "if a: while b: pass\n",
-            "if a: match b:\n    _: pass\n",
         ] {
             match parse(crate::lexer::tokenize(src).unwrap()) {
                 Ok(_) => bad.push(format!("{src:?} must be rejected, parsed")),
@@ -10989,6 +11134,17 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+        // `if` and `match` after an inline `:` are expression statements (U8): the one-line `if`
+        // needs its `else`, and a multi-line `match` is no whole value there
+        assert!(
+            parse_err("if a: if b: x = 1\n")
+                .message
+                .contains("expected 'else'")
+        );
+        assert_eq!(
+            parse_err("if a: match b:\n    _: pass\n").message,
+            BLOCK_VALUE
+        );
         assert_eq!(
             parse_err("fn g(): struct A:\n    x: int\n").message,
             "struct must be a top-level declaration"
@@ -11349,6 +11505,85 @@ fn g():
             false,
         );
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// A multi-line `match` is a parameter default: the parser asks the lexer for layout inside the
+    /// parameter list's parentheses (TICKET-260, rule U8).
+    #[test]
+    fn block_value_param_default_spans_lines() {
+        let StmtKind::Fn(decl) =
+            only("fn f(x: int = match 1:\n    1: 5\n    _: 6) -> int:\n    return x\n")
+        else {
+            panic!("expected a fn");
+        };
+        let Some(default) = &decl.params[0].default else {
+            panic!("expected a default");
+        };
+        assert!(matches!(&default.kind, ExprKind::Match { arms, .. } if arms.len() == 2));
+    }
+
+    /// A multi-line `match` is a lambda body inside a call's parentheses.
+    #[test]
+    fn block_value_lambda_body_in_call_spans_lines() {
+        let StmtKind::Expr(call) = only("print(map_all(fn(x): match x:\n    1: 5\n    _: 6\n))\n")
+        else {
+            panic!("expected a call statement");
+        };
+        let ExprKind::Call { args, .. } = &call.kind else {
+            panic!("expected a call");
+        };
+        let ExprKind::Call { args: inner, .. } = &args[0].kind else {
+            panic!("expected the inner call");
+        };
+        let ExprKind::Closure { body, .. } = &inner[0].kind else {
+            panic!("expected a lambda");
+        };
+        assert!(matches!(body.kind, ExprKind::Match { .. }));
+    }
+
+    /// The lexer opens layout only when a block parser asks, so a map literal that breaks after its
+    /// `:` stays one line.
+    #[test]
+    fn map_literal_line_end_colon_is_unchanged() {
+        let StmtKind::Let { value, .. } = only("m := {\"a\":\n    1}\n") else {
+            panic!("expected a let");
+        };
+        assert!(matches!(&value.kind, ExprKind::Map(entries) if entries.len() == 1));
+    }
+
+    /// A block expression is a whole value. Anywhere else it reports the one message.
+    #[test]
+    fn block_expr_outside_a_value_reports_block_value() {
+        for src in [
+            "a := 1 + match n:\n    1: 2\n    _: 3\n",
+            "print(match n:\n    1: 2\n    _: 3\n)\n",
+            "xs := [match n:\n    1: 2\n    _: 3\n]\n",
+            "x := (match n:\n    1: 2\n    _: 3\n)\n",
+            "x := -match n:\n    1: 2\n    _: 3\n",
+            "assert match n:\n    1: 2\n    _: 3\n",
+            "x += match n:\n    1: 2\n    _: 3\n",
+            "a := 1 + recover:\n    pass\n",
+            "print(recover:\n    pass\n)\n",
+            "if c: recover:\n    pass\n",
+        ] {
+            let e = parse(crate::lexer::tokenize(src).unwrap())
+                .expect_err(&format!("{src:?} must be rejected"));
+            assert_eq!(e.message, BLOCK_VALUE, "{src:?}");
+        }
+        for src in [
+            "a := match n:\n    1: 2\n    _: 3\n",
+            "a: int = match n:\n    1: 2\n    _: 3\n",
+            "a = match n:\n    1: 2\n    _: 3\n",
+            "a, b := match n:\n    1: (2, 3)\n    _: (4, 5)\n",
+            "a, b = match n:\n    1: (2, 3)\n    _: (4, 5)\n",
+            "fn f() -> int:\n    return match n:\n        1: 2\n        _: 3\n",
+            "fn g() -> int: match n:\n    1: 2\n    _: 3\n",
+            "f := fn(): match n:\n    1: 2\n    _: 3\n",
+            "r := recover:\n    pass\n",
+            "recover:\n    pass\n",
+        ] {
+            parse_ok(src);
+        }
     }
 
     /// The chunks of the first `x := <literal>` statement of `src`, as the parser built them.

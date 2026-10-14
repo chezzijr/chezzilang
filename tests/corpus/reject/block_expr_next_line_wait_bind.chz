@@ -1,5 +1,5 @@
 # rule: waitArm
-# expect: expected ':', found ':='
+# expect: a block expression
 ch := Channel[int](1)
 wait:
     recover:

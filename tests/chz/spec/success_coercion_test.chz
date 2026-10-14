@@ -75,9 +75,10 @@ test fn if_expr_mixed_branches_coerce_at_a_result_sink():
     match res_mixed(2):
         ?v: assert v == 2
         _: assert false, "wrong shape"
-    assert match res_mixed(-1):
+    failed := match res_mixed(-1):
         ?_: false
         !_: true
+    assert failed
 
 test fn match_expr_mixed_branches_coerce_the_bare_ones():
     match match_mixed(S.C(7)):

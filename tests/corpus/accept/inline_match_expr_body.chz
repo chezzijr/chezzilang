@@ -1,0 +1,6 @@
+# rule: fnBlock
+fn f(n: int) -> int: match n:
+    1: 10
+    _: 20
+fn g(n: int) -> int: recover:
+    n

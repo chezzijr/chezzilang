@@ -1,0 +1,11 @@
+# rule: valueExpr, blockLambda, value
+fn f(y: int = 2, x: int = match 1:
+        1: 5
+        _: 6) -> int:
+    return x + y
+print(f(fn(z): match z:
+    1: 5
+    _: 6
+))
+m := {"a":
+    1}

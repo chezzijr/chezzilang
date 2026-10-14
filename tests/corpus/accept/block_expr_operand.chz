@@ -1,26 +1,6 @@
-# rule: tailExpr, stmtTail, tailNot, tailUnary, tailIf, tailClosure, exprArm
+# rule: value, blockValue, blockLambda, valueExpr, exprArm
 n := 1
-a := 1 + match n:
-    1: 10
-    _: 20
-b := not match n:
-    1: true
-    _: false
-c := -match n:
-    1: 10
-    _: 20
-d := 10 == match n:
-    1: 10
-    _: 20
-e := true and not match n:
-    1: true
-    _: false
-fn o() -> int?:
-    return None
-f := o() ?? match n:
-    1: 10
-    _: 20
-g := if n == 2: 5 else: match n:
+a := match n:
     1: 10
     _: 20
 h := fn(): match n:
@@ -33,18 +13,14 @@ i := match n:
     _: recover:
         1 / 0
 j := ?1 == recover: 1
-k := 1 * 2 + 3 ?? match n:
+k := fn(): fn(): match n:
     1: 10
     _: 20
-l := ?match n:
-    1: 10
-    _: 20
-1 + match n:
-    1: 10
-    _: 20
-not match n:
-    1: true
-    _: false
-if n == 2: 5 else: match n:
-    1: 10
-    _: 20
+fn f(x: int = match 1:
+        1: 5
+        _: 6) -> int:
+    return x
+print(map_all(fn(y): match y:
+    1: 5
+    _: 6
+))

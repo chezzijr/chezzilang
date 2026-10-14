@@ -1044,11 +1044,12 @@ fn answer() -> int: 42     # annotated inline-expr body is valid (the expr is th
 ```
 
 An inline body may also be an **if-expression** — the same form a closure or `x := if …` uses. It is
-the implicit return, and `else` is required; every other compound statement (`for`, `while`, `match`,
-a statement-`if`) still needs an indented block. On a line of its own, `if c: a() else: b()` is that
-same if-expression used as a statement (see **if-expression** below); as the inline body of another
-block (`for i in xs: if c: a() else: b()`, a statement `match` arm) it is still
-`a nested block must be indented, not written inline after ':'`:
+the implicit return, and `else` is required. On a line of its own, `if c: a() else: b()` is that
+same if-expression used as a statement (see **if-expression** below), and so it is after any `:`
+(`for i in xs: if c: a() else: b()`, a statement `match` arm). An inline `fn` body may also be a
+multi-line `match` or a `recover:` block (`fn g() -> int: match n:` + arms): the body starts a whole
+value, and the block expression rules above apply. Every other compound statement (`for`, `while`, a
+statement-`if` without `else`) still needs an indented block.
 
 ```chezzi
 fn pick(n: int) -> int: if n > 0: 1 else: 2     # pick(5) == 1, pick(-5) == 2
@@ -1063,10 +1064,12 @@ fn adder(n: int) -> fn(int) -> int: fn(x: int) -> int: x + n    # adder(1)(2) ==
 **An inline body is exactly one simple statement.** This holds after every `:` that opens a block
 (a fn, a method, `if`, `for`, `while`, a `match` arm, `parallel:`, an `else` guard). A simple
 statement is a let, an assignment, `return`, `yield`, `break`, `continue`, `pass`, `assert`, an
-expression (a closure literal included) or `spawn f()`. So `if c: spawn f()` is legal: the call
-form of `spawn` is a simple statement. A statement that opens its own block needs an indented line:
-`if`, `for`, `while`, `match`, `fn name`, `parallel:`, `wait:`, `spawn:` and both `defer` forms.
-Written inline, each one is `a nested block must be indented, not written inline after ':'`.
+expression (a closure literal and the one-line `if … else` included) or `spawn f()`. So
+`if c: spawn f()` is legal: the call form of `spawn` is a simple statement. A statement that opens
+its own block needs an indented line: `for`, `while`, `fn name`, `parallel:`, `wait:`, `spawn:` and
+both `defer` forms. Written inline, each one is `a nested block must be indented, not written inline
+after ':'`. An inline `if` is the one-line if-expression and needs its `else`; an inline `match` is
+a block expression, which is no whole value after the `:` of an `if` or `for`.
 
 Only a *bare expression* inline body returns implicitly. An inline **non-expression** statement does
 not: `fn a(): x = 5` (an assignment) returns `None`, and `fn a(): return 10` is an explicit return as
@@ -3623,16 +3626,34 @@ if n > 0: print("pos") else: print("neg")
 if s >= 90: print("A") elif s >= 80: print("B") else: print("F")
 ```
 
+**A block expression is legal where a whole value starts** (TICKET-260, rule U8). A block
+expression is a multi-line `match` used as a value, or a `recover:` followed by an indented block. It
+may be the right side of `:=` and `=` (typed let and destructuring included), a `return` or `yield`
+value, a lambda body, an inline fn body (`fn g() -> int: match n:` + arms), a struct field default, a
+parameter default, a statement that starts its line, or the value of a match-expression arm (a nested
+`match`). Anywhere else it is an error with one message that names the fix: a call argument, a
+list, tuple or map element, `(E)`, an interpolation hole, the body of an inline `if c: E`, an
+operand (`1 + match n:`, `-match n:`, `x ?? match n:`), a branch of the one-line `if … else`, an
+`assert` or `defer` operand, and the value of a compound assignment (`x += match n:`). Bind it first:
+`v := match n: …`, then use `v`. The one-line forms are ordinary expressions and have no such limit:
+the one-line `if a: b else: c`, the inline `recover: expr`, a lambda, and a `match` arm that is an
+expression.
+
+Inside brackets a block expression is legal where a whole value starts there: a parameter default
+(`fn f(x: int = match n:` + arms + `)`) or a lambda body in a call (`f(fn(x): match x:` + arms +
+`)`). The block ends at a closing bracket of its own level, at the end of the file, or at a line
+indented no deeper than the line that opened it; a `,` does not end it. A map literal that breaks
+after `:` stays one line (`{"a":` + newline + `1}`).
+
 A block expression ends at its dedent. The next line is a new statement or a new arm, whatever
 its first token: `(c.bump())`, `[1, 2]`, `-1` or `?g()` after `x := match n:` and its arms is its
 own statement, and an arm `?_: v`, `(x, _): v` or `-1: v` after an arm whose value is a nested
 `match` is an arm of the outer match. A line that starts with a binary operator, `.`, `?.`, `|>`,
 `,` or an assignment operator there is a parse error on that line. Only an `else` guard may
-follow a block-valued binding (`x := match n:` + arms, then `else:`); `elif` or `else:` may follow
-a block that is the first branch of an if-expression. Each match-expression arm ends its line
-(`1: 10 _: 20` on one line is an error). After a block inside an inline body (`if c: x := match n:`
-+ arms) a dedented `else` belongs to the header (`if`, `elif`, a `wait` arm), never to the inline
-statement; it is an error after a `for`, `while` or match-arm header.
+follow a block-valued binding (`x := match n:` + arms, then `else:`). Each match-expression arm
+ends its line (`1: 10 _: 20` on one line is an error). After a block inside an inline body
+(`if c: x := match n:` + arms) a dedented `else` belongs to the header (`if`, `elif`, a `wait`
+arm), never to the inline statement; it is an error after a `for`, `while` or match-arm header.
 
 **The one-line `if … else` statement is the if-expression** (TICKET-242). `if c: a() else: b()` on
 one line is not a third form: it is `if c: a() else: b()` the expression, used as a statement, and

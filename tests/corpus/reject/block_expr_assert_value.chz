@@ -1,0 +1,6 @@
+# rule: value
+# expect: a block expression
+n := 1
+assert match n:
+    1: true
+    _: false

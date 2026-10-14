@@ -233,7 +233,9 @@ fn engine_grammar(chars: &BTreeMap<String, char>) -> bnf::Grammar {
 /// Encode a source string as the engine's symbol stream (one char per token). `None` if it doesn't
 /// even lex (an upstream failure the grammar can't model).
 fn encode(src: &str, chars: &BTreeMap<String, char>) -> Option<String> {
-    let toks = tokenize(src).ok()?;
+    // The grammar describes the stream the parser reads: the lexer's tokens plus the layout
+    // `open_layout` splices in for a block expression inside brackets (TICKET-260).
+    let (_, toks) = crate::parser::parse_with_tokens(tokenize(src).ok()?);
     Some(toks.iter().map(|t| chars[symbol(&t.kind)]).collect())
 }
 
@@ -356,6 +358,7 @@ fn parser_rules_match_fns() {
         ("block", "parse_block"),
         ("type", "parse_type"),
         ("expr", "parse_expr"),
+        ("value", "parse_value"),
     ]
     .into_iter()
     .collect();
@@ -395,6 +398,9 @@ fn parser_rules_match_fns() {
         "parse_recover_expr",
         "parse_ok",
         "parse_err",
+        // `parse_with_tokens` is `parse` that also returns the token vector after every layout request
+        // (`open_layout`), which the conformance test encodes; same grammar as `parse`.
+        "parse_with_tokens",
         // `parse_with_docs` is the doc-comment-carrying entry point (same grammar as `parse`, plus the
         // lexer's doc-comment side-channel); it maps to no distinct grammar rule.
         "parse_with_docs",
@@ -735,66 +741,7 @@ const GRAMMAR_LOOSER: &[(&str, &str, &str)] = &[
         "expected 'fn' or 'ctor' after 'native'",
         "context: the BNF shares <nativeHead> with the contextual `ctor` spelled as IDENT",
     ),
-    (
-        "primary",
-        "a nested block must be indented",
-        "context: an inline body does not start with `if` (DEC-145); the BNF cannot exclude a leftmost primary without a second expression cascade",
-    ),
-    (
-        "stmtTail",
-        "a nested block must be indented",
-        "context: an inline body does not start with `if`",
-    ),
 ];
-
-/// Where `docs/grammar.bnf` and the hand parser disagree on a block expression, `(source, does
-/// the grammar derive it, reason)`. A block expression (`match`, `recover:` with an indented body)
-/// ends at its `DEDENT`; the grammar derives it as the LAST operand of its statement (`<tailExpr>`).
-/// The parser also takes it in a head position (the first branch of an if-expression, a block
-/// header's condition, an operand behind an operator before an `else` guard), which `<tailExpr>`
-/// cannot state. The parser's verdict is the opposite of the grammar's on every entry, so an
-/// entry that stops being true forces itself out.
-const BLOCK_EXPR_DRIFT: &[(&str, bool, &str)] = &[
-    (
-        "n := 1\nx := if n == 1: match n:\n    1: 10\n    _: 20\nelse: 2\n",
-        false,
-        "a block expression as the first branch of an if-expression",
-    ),
-    (
-        "n := 1\nif match n:\n    1: true\n    _: false\n: print(1)\n",
-        false,
-        "a block expression as a block header's condition",
-    ),
-    (
-        "fn f(n: int):\n    x := ?match n:\n        1: 10\n        _: 20\n    else:\n        return\n",
-        false,
-        "an `else` guard after a block expression behind an operator",
-    ),
-];
-
-/// On each [`BLOCK_EXPR_DRIFT`] entry the grammar and the hand parser still disagree, the way the
-/// entry says.
-#[test]
-fn block_expr_drift_entries_hold() {
-    let chars = symbol_chars();
-    let grammar = engine_grammar(&chars);
-    let engine = grammar.build_parser().expect("build Earley parser");
-    for (src, grammar_derives, why) in BLOCK_EXPR_DRIFT {
-        let hand = tokenize(src)
-            .map_err(|e| e.message)
-            .and_then(|t| parse(t).map_err(|e| e.message));
-        let derived = encode(src, &chars).is_some_and(|s| engine.parse_input(&s).next().is_some());
-        assert_eq!(
-            derived, *grammar_derives,
-            "BLOCK_EXPR_DRIFT ({why}): the grammar's verdict changed: remove the entry"
-        );
-        assert_eq!(
-            hand.is_ok(),
-            !*grammar_derives,
-            "BLOCK_EXPR_DRIFT ({why}): the parser's verdict changed ({hand:?}): remove the entry"
-        );
-    }
-}
 
 /// TICKET-241 -- `grammar_and_parser_agree` runs only the hand-written corpus, so a grammar
 /// alternative no corpus file spells is unchecked (an inline closure-literal body was). This

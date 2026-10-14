@@ -5830,7 +5830,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // recover ok-path wraps the value
     (
-        "fn main():\n    r := recover:\n        2 + 3\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err\")\nmain()",
+        "fn main():\n    r := recover: 2 + 3\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(\"err\")\nmain()",
         Ok("ok 5\n"),
     ),
     // a fault three calls deep is caught at the boundary (no per-call wrapping)
@@ -5847,7 +5847,7 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // `?` Ok path inside recover: value unwrapped, trailing expression becomes the Ok result
     (
-        "fn d(b: int) -> int!:\n    return ?(10 / b)\nfn main():\n    r := recover:\n        x := d(2)?\n        x + 1\n    match r:\n        ?v: print(\"ok {v}\")\n        !e: print(e.message())\nmain()",
+        "fn d(b: int) -> int!:\n    return ?(10 / b)\nfn main():\n    y := 0\n    r := recover:\n        x := d(2)?\n        y = x + 1\n    match r:\n        ?_: print(\"ok {y}\")\n        !e: print(e.message())\nmain()",
         Ok("ok 6\n"),
     ),
     // side effects before a caught fault PERSIST (keep semantics)
@@ -5857,12 +5857,12 @@ const PROGRAMS: &[(&str, Result<&str, &str>)] = &[
     ),
     // nested recover: the inner boundary catches, the outer sees a normal value
     (
-        "fn main():\n    r := recover:\n        inner := recover:\n            [1][9]\n        match inner:\n            ?v: v\n            !e: 0\n    match r:\n        ?v: print(\"outer ok {v}\")\n        !e: print(\"outer err\")\nmain()",
+        "fn main():\n    z := 0\n    r := recover:\n        inner := recover:\n            [1][9]\n        match inner:\n            ?v: z = v\n            !e: z = 0\n    match r:\n        ?_: print(\"outer ok {z}\")\n        !e: print(\"outer err\")\nmain()",
         Ok("outer ok 0\n"),
     ),
     // recovered value composes with `?` after the boundary\n
     (
-        "fn run() -> int!:\n    r := recover:\n        [10, 20][0]\n    v := r?\n    return ?(v + 1)\nfn main():\n    match run():\n        ?v: print(v)\n        !e: print(e.message())\nmain()",
+        "fn run() -> int!:\n    r := recover: [10, 20][0]\n    v := r?\n    return ?(v + 1)\nfn main():\n    match run():\n        ?v: print(v)\n        !e: print(e.message())\nmain()",
         Ok("11\n"),
     ),
     (
