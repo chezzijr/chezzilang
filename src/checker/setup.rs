@@ -3082,11 +3082,13 @@ impl Checker {
             return None;
         }
         let mid = self.imported_modules.get(module)?;
-        self.module_sigs
-            .get(mid)?
-            .type_aliases
-            .contains_key(name)
-            .then(|| TypeRead::Alias(format!("{module}.{name}")))
+        let sig = self.module_sigs.get(mid)?;
+        if sig.type_aliases.contains_key(name) {
+            return Some(TypeRead::Alias(format!("{module}.{name}")));
+        }
+        // A `native type` export (`std.ffi`'s `ptr` and widths) is in `sig.types` only.
+        (sig.types.contains(name) && is_builtin_type_name(name))
+            .then(|| TypeRead::Builtin(format!("{module}.{name}")))
     }
     /// The `module.Name` half of [`Checker::type_head`]: a type the whole-module import `module`
     /// declares, else an exported alias of one.

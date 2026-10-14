@@ -41497,6 +41497,7 @@ fn bytes_order_and_handles_compare_through_protocols() {
 #[test]
 fn type_name_is_never_a_value_grid() {
     const PRELUDE: &str = "import am
+import std.ffi
 struct P:
     x: int
     fn mk(a: int) -> P:
@@ -41563,6 +41564,12 @@ enum F:
             .iter()
             .filter(|d| BuiltinType::from_name(&d.name).is_none())
             .map(|d| d.name.clone()),
+    );
+    // A `native type` export read through its module (`ffi.int32`, `ffi.ptr`).
+    kinds.extend(
+        crate::native::ffi::declared_types()
+            .iter()
+            .map(|d| format!("ffi.{}", d.name)),
     );
     kinds.extend(
         ["am.C", "am.L", "am.S", "am.F.W"]

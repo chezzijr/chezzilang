@@ -165,35 +165,45 @@ fn carrier_enum_grid() {
     );
     twin(
         c,
-        "C5 HOF",
-        "print([1, 2].map(Som), [1, 2].map(Opt1.Som), [1, 2].map(Opt1[int].Som))\n",
+        "C5 HOF through a closure",
+        "print([1, 2].map(fn(e): Som(e)), [1, 2].map(fn(e): Opt1.Som(e)), [1, 2].map(fn(e): Opt1[int].Som(e)))\n",
         None,
         PrintsAs(
             "[Som(1), Som(2)] [Som(1), Som(2)] [Som(1), Som(2)]",
             "[1, 2] [1, 2] [1, 2]",
         ),
     );
+    // U10 (TICKET-259): a payload variant is a constructor, never a value.
+    for (i, read) in ["Som", "Opt1.Som", "Opt1[int].Som"].iter().enumerate() {
+        twin(
+            c,
+            &format!("C5b HOF {i}"),
+            &format!("print([1, 2].map({read}))\n"),
+            None,
+            Rejects("is a type, not a value"),
+        );
+    }
     twin(
         c,
         "C6 annotated value",
         "f: fn(int) -> Opt1[int] = Som\nprint(f(3))\n",
         None,
-        PrintsAs("Som(3)", "3"),
+        Rejects("is a type, not a value"),
     );
     twin(
         c,
-        // TICKET-238: a later call does not pin the read; it is rejected where it is bound.
+        // U10 (TICKET-259): the read is rejected as a type before any pin.
         "C7 not pinned by a later use",
         "fn main():\n    f := Som\n    print(f(3))\nmain()\n",
         None,
-        Rejects("is generic and T is not determined here"),
+        Rejects("is a type, not a value"),
     );
     twin(
         c,
         "C8 unpinned value",
         "fn main():\n    f := Som\n    print(1)\nmain()\n",
         None,
-        Rejects("is generic and T is not determined here"),
+        Rejects("is a type, not a value"),
     );
 
     // --- patterns and exhaustiveness ----------------------------------------------------------
@@ -351,9 +361,9 @@ fn carrier_enum_grid() {
     twin(
         c,
         "C26 alias variant as a fn value",
-        "type F = Opt1[int]\nprint([1, 2].map(F.Som))\nf := F.Som\nprint(f(3))\n",
+        "type F = Opt1[int]\nprint([1, 2].map(F.Som))\n",
         None,
-        PrintsAs("[Som(1), Som(2)]\nSom(3)", "[1, 2]\n3"),
+        Rejects("is a type, not a value"),
     );
     twin_lib(
         c,

@@ -3746,8 +3746,8 @@ impl Checker {
                 ret: Box::new(sig.ret),
             };
         }
-        // A bare imported variant: the nullary one is its enum's value, a payload one is the
-        // variant constructor as a fn value (DEC-225 pins or rejects its type parameters).
+        // A bare imported variant: the nullary one is its enum's value. A payload one is a
+        // constructor, rejected below as a type read (U10).
         if let Resolution::Variant { enum_key, .. } = &res {
             return self.enum_ty_unknown_args(enum_key);
         }
