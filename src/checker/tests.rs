@@ -8498,7 +8498,7 @@ fn alias_of_generic_pins_its_type_arguments() {
 
 #[test]
 fn alias_of_scalar_is_not_a_constructor() {
-    rejects("type M = int\nx := M(5)\n", "unknown name 'M'");
+    rejects("type M = int\nx := M(5)\n", "'M' is a type, not a value");
 }
 
 #[test]
@@ -8647,7 +8647,7 @@ fn imported_alias_scalar_is_not_a_constructor() {
             ("aliases.chz", ALIAS_LIB),
             ("main.chz", "import Count from aliases\nx := Count(3)\n"),
         ],
-        "unknown name 'Count'",
+        "'Count' is a type, not a value",
     );
     files_reject(
         &[
@@ -8664,7 +8664,7 @@ fn imported_alias_scalar_is_not_a_constructor() {
                 "import aliases as a\ntype C = a.Count\nx := C(3)\n",
             ),
         ],
-        "unknown name 'C'",
+        "'C' is a type, not a value",
     );
 }
 
@@ -38249,12 +38249,12 @@ fn carrier_alias_is_not_a_variant_head() {
     let (some, okv, errv) = ("Some", "Ok", "Err");
     rejects(
         &format!("{o}x := O.{some}(1)\nprint(x)\n"),
-        "unknown name 'O'",
+        "'O' is a type, not a value",
     );
     parse_rejects(&format!("{o}x: O = O.None\nprint(x)\n"), "reserved keyword");
     rejects(
         &format!("{r}x := R.{errv}(\"a\")\nprint(x)\n"),
-        "unknown name 'R'",
+        "'R' is a type, not a value",
     );
     rejects(
         &format!(

@@ -258,7 +258,13 @@ fn path_cells(out: &mut Vec<Cell>) {
             } else {
                 format!("{imp}\n{body}")
             };
-            out.push(cell(format!("{row}/{pname}"), &body, prints(want)));
+            // U10: a payload variant is a constructor, never a value.
+            let expect = if *row == "variant" && matches!(pname, "let" | "typed" | "hof") {
+                Expect::Rejects("is a type, not a value")
+            } else {
+                prints(want)
+            };
+            out.push(cell(format!("{row}/{pname}"), &body, expect));
         }
     }
 }
@@ -344,17 +350,30 @@ fn extra_cells(out: &mut Vec<Cell>) {
         "type P2 = P\nx: P2[int] = P(1)\nprint(x.n)",
         Expect::Rejects("already fixes its type arguments"),
     ));
-    for (n, b) in [
-        ("static_call", "print(BI[str].make(\"s\").v)"),
-        ("annotation", "x: BI[str] = Bx(1)\nprint(x.v)"),
-        ("variant", "g := RI[str].L\nprint(g)"),
-        ("bare", "g := RI[str]\nprint(g)"),
+    for (n, b, want) in [
+        (
+            "static_call",
+            "print(BI[str].make(\"s\").v)",
+            "already fixes its type arguments",
+        ),
+        (
+            "annotation",
+            "x: BI[str] = Bx(1)\nprint(x.v)",
+            "already fixes its type arguments",
+        ),
+        // U10: a payload variant is a constructor, never a value.
+        (
+            "variant",
+            "g := RI[str].L\nprint(g)",
+            "is a type, not a value",
+        ),
+        (
+            "bare",
+            "g := RI[str]\nprint(g)",
+            "already fixes its type arguments",
+        ),
     ] {
-        out.push(cell(
-            format!("k6/{n}"),
-            b,
-            Expect::Rejects("already fixes its type arguments"),
-        ));
+        out.push(cell(format!("k6/{n}"), b, Expect::Rejects(want)));
     }
 }
 
@@ -679,7 +698,12 @@ type BX = Bx[int]
                     ("a/b.chz".to_string(), GLIB.to_string()),
                     ("main.chz".to_string(), format!("{pre}{body}\nprint({r})\n")),
                 ],
-                expect: prints(want),
+                // U10: a payload variant read as a value is a type error.
+                expect: if h == "variant" && p == "paren_let" {
+                    Expect::Rejects("is a type, not a value")
+                } else {
+                    prints(want)
+                },
             });
         }
     }

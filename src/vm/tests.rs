@@ -803,9 +803,9 @@ fn interned_strings_survive_gc_stress() {
 #[test]
 fn path_values_survive_gc_stress() {
     // TICKET-215: the `fn_values` memo is a GC root — collect-before-every-instruction must not sweep
-    // the one `P.mk` / `E.A` object, or the reused slot (here `xs` / `ys`) answers a later read. The
+    // the one `P.mk` object, or the reused slot (here `xs` / `ys`) answers a later read. The
     // value goes through a helper so no local keeps it alive (`(P.mk)(i)` lowers to a direct call).
-    let src = "struct P:\n    n: int\n    fn mk(n: int) -> P:\n        return P(n)\nenum E:\n    A(int)\n    B\nfn mkn(f: fn(int) -> P, n: int) -> int:\n    return f(n).n\nfn len1(f: fn(int) -> E, n: int) -> int:\n    return [f(n)].len()\ni := 0\ntotal := 0\nwhile i < 20:\n    a := mkn(P.mk, i)\n    xs := [i, i + 1]\n    b := len1(E.A, i)\n    ys := [i]\n    total = total + a + xs[0] + b + ys.len() - 1\n    i = i + 1\nprint(total)\n";
+    let src = "struct P:\n    n: int\n    fn mk(n: int) -> P:\n        return P(n)\nenum E:\n    A(int)\n    B\nfn mkn(f: fn(int) -> P, n: int) -> int:\n    return f(n).n\nfn len1(f: fn(int) -> E, n: int) -> int:\n    return [f(n)].len()\ni := 0\ntotal := 0\nwhile i < 20:\n    a := mkn(P.mk, i)\n    xs := [i, i + 1]\n    b := len1(fn(n: int) -> E: E.A(n), i)\n    ys := [i]\n    total = total + a + xs[0] + b + ys.len() - 1\n    i = i + 1\nprint(total)\n";
     assert_eq!(run_capture_stress(src), "400\n");
 }
 

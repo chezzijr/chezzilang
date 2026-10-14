@@ -281,17 +281,17 @@ fn owner_cells(out: &mut Vec<Cell>) {
             (
                 "var1_val",
                 format!("f := {q}R1[int].L\nprint(f(1))"),
-                prints("L(1)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var2_val",
                 format!("f := {q}R2[int, str].L\nprint(f(1))"),
-                prints("L(1)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var_bare_let",
                 format!("f := {q}R1.L"),
-                Expect::Rejects("not determined here"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var2_nullary",
@@ -525,58 +525,58 @@ fn path_value_cells(out: &mut Vec<Cell>) {
             (
                 "var1",
                 format!("f := {q}R1[int].L\nprint(f(1))"),
-                prints("L(1)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var2",
                 format!("f := {q}R2[int, str].L\nprint(f(1))"),
-                prints("L(1)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var_typed",
                 format!("f: fn(int) -> {q}R1[int] = {q}R1.L\nprint(f(2))"),
-                prints("L(2)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var_hof",
                 format!(
                     "fn ap(f: fn(int) -> {q}R1[int]) -> str:\n    return '{{f(3)}}'\nprint(ap({q}R1.L))"
                 ),
-                prints("L(3)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var_ret",
                 format!(
                     "fn g() -> fn(int) -> {q}R2[int, str]:\n    return {q}R2[int, str].L\nprint(g()(4))"
                 ),
-                prints("L(4)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var_default",
                 format!(
                     "fn g(f: fn(int) -> {q}R1[int] = {q}R1[int].L) -> str:\n    return '{{f(5)}}'\nprint(g())"
                 ),
-                prints("L(5)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var_nongen",
                 format!("f := {q}Col.Rgb\nprint(f(1, 2, 3))"),
-                prints("Rgb(1, 2, 3)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var_spawn",
                 format!("f := {q}R1[int].L\n{}", spawn_block("f(7)")),
-                prints("L(7)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var_let_inf",
                 format!("f := {q}R1.L"),
-                Expect::Rejects("not determined here"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "var_kw",
                 format!("f := {q}R1[int].L\nprint(f(x=1))"),
-                Expect::Rejects("unknown named argument 'x'"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "static1",
@@ -668,7 +668,7 @@ fn path_value_cells(out: &mut Vec<Cell>) {
             (
                 "proto_bare",
                 format!("f := {q}Show"),
-                Expect::Rejects("is a protocol, not a value"),
+                Expect::Rejects("is a type, not a value"),
             ),
         ];
         for (name, body, expect) in rows {
@@ -697,12 +697,12 @@ fn alias_cells(out: &mut Vec<Cell>) {
             (
                 "alias_var",
                 format!("f := {q}A.L\nprint(f(1))"),
-                prints("L(1)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             (
                 "alias_var_typed",
                 format!("f: fn(int) -> {q}R1[int] = {q}A.L\nprint(f(2))"),
-                prints("L(2)"),
+                Expect::Rejects("is a type, not a value"),
             ),
             ("alias_null", format!("print({q}A.N)"), prints("N")),
             ("alias_call", format!("print({q}A.L(1))"), prints("L(1)")),
@@ -801,12 +801,12 @@ fn native_cells(out: &mut Vec<Cell>) {
     out.push(main_only(
         "native_bare",
         "import Reader from std.io\ng := Reader.close",
-        Expect::Rejects("unknown name 'Reader'"),
+        Expect::Rejects("'Reader' is a type, not a value"),
     ));
     out.push(main_only(
         "native_alias",
         "import std.io\ntype W = io.Writer\nf := W.close",
-        Expect::Rejects("unknown name 'W'"),
+        Expect::Rejects("'W' is a type, not a value"),
     ));
     out.push(main_only(
         "native_call",
@@ -1133,10 +1133,14 @@ fn bracket_grid_cells(out: &mut Vec<Cell>) {
                 ),
             ];
             for (p, body) in rows {
-                // A variant is a constructor, which `spawn` never takes as its target.
+                // A variant is a constructor, never a value (U10), and `spawn` never takes it as its
+                // target.
                 let expect = match p {
                     "spawn_target" if head == "variant" => {
                         Expect::Rejects("spawn requires a function or method call")
+                    }
+                    "let" | "typed" | "hof" | "eq" | "default" | "guard" if head == "variant" => {
+                        Expect::Rejects("is a type, not a value")
                     }
                     "eq" => prints("true"),
                     _ => prints(want),
