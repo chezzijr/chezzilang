@@ -1,8 +1,8 @@
 //! `std.concurrency`'s callable members (TICKET-191, TICKET-219, TICKET-220). The module's types (`Shared`, `Executor`, ...)
 //! lower through the compiler's name->opcode dispatch and have no entry here.
 //!
-//! `is_task_copy(v)` reads the airlock's own predicate, `Heap::is_copied`, the one D4's write check
-//! (`Vm::check_copied_write`) reads. It lets std code (`std.concurrency.task`) choose between writing a
+//! `is_task_copy(v)` reads the airlock's own predicate, `Heap::is_copied`, the one every D4 write check
+//! reads before it calls `Vm::copied_write_err`. It lets std code (`std.concurrency.task`) choose between writing a
 //! value and reading through shared state without attempting the write and catching the fault.
 //!
 //! `task_copy_of(v)` (TICKET-220) returns `v` rebuilt as this task's copy under `Route::CopyRead`.

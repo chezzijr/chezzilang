@@ -2213,7 +2213,7 @@ impl Compiler {
                 Some(bin) => {
                     self.emit_load(fc, name, span);
                     self.compile_expr(fc, value)?;
-                    fc.emit(compound_op(op, bin), span);
+                    fc.emit(binary_op(bin), span);
                     self.emit_store(fc, name, span);
                 }
             },
@@ -2233,7 +2233,7 @@ impl Compiler {
                         target.span,
                     );
                     self.compile_expr(fc, value)?;
-                    fc.emit(compound_op(op, bin), span);
+                    fc.emit(binary_op(bin), span);
                     let ic = self.next_field_ic(name);
                     fc.emit(
                         Op::SetField {
@@ -2262,7 +2262,7 @@ impl Compiler {
                     fc.emit(Op::Dup2, span);
                     fc.emit(Op::GetIndex, target.span);
                     self.compile_expr(fc, value)?;
-                    fc.emit(compound_op(op, bin), span);
+                    fc.emit(binary_op(bin), span);
                     fc.emit(Op::SetIndex, span);
                 } else {
                     self.compile_expr(fc, value)?;
@@ -6051,17 +6051,6 @@ fn assert_cmp(op: BinaryOp) -> Option<AssertCmp> {
     }
 }
 
-/// Compound-assignment lowering for one binop: `+=` lowers to `Op::AddInPlace` (extends a `List`
-/// in place at runtime; `arith_in_place` falls through to `Op::Add` for every other type), every
-/// other compound form (`*=`, `-=`, the set/bit forms) lowers through its plain binary opcode.
-fn compound_op(op: AssignOp, bin: BinaryOp) -> Op {
-    if matches!(op, AssignOp::PlusEq) {
-        Op::AddInPlace
-    } else {
-        binary_op(bin)
-    }
-}
-
 fn binary_op(op: BinaryOp) -> Op {
     match op {
         BinaryOp::Add => Op::Add,
@@ -7877,7 +7866,6 @@ impl FnComp {
             | other @ Op::SetGlobalSlot(_)
             | other @ Op::GetCaptured(_)
             | other @ Op::Add
-            | other @ Op::AddInPlace
             | other @ Op::Sub
             | other @ Op::Mul
             | other @ Op::Div
@@ -8024,7 +8012,6 @@ impl FnComp {
             | other @ Op::SetGlobalSlot(_)
             | other @ Op::GetCaptured(_)
             | other @ Op::Add
-            | other @ Op::AddInPlace
             | other @ Op::Sub
             | other @ Op::Mul
             | other @ Op::Div

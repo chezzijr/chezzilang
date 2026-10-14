@@ -10830,8 +10830,8 @@ fn superinstruction_loop_sum_correct() {
 
 #[test]
 fn compound_assign_lowers_to_inc_local_end_to_end() {
-    // `Op::AddInPlace` must not cost the M19 superinstructions: `i += 1` still fuses to
-    // `Op::IncLocal`, and `total += i` still fuses to `Op::BinLocalLocal{AddInPlace}`.
+    // `x OP= v` lowers through the plain binary opcode, so `i += 1` fuses to `Op::IncLocal` and
+    // `total += i` fuses to `Op::BinLocalLocal{Add}` (the M19 superinstructions).
     let src = "fn main():\n    total := 0\n    i := 0\n    while i < 5:\n        total += i\n        i += 1\n    print(total)\nmain()";
     let module = parser::parse(lexer::tokenize(src).unwrap()).unwrap();
     let program = crate::compiler::compile_module_standalone(&module).unwrap();
@@ -10852,11 +10852,11 @@ fn compound_assign_lowers_to_inc_local_end_to_end() {
         main_proto.code.iter().any(|op| matches!(
             op,
             Op::BinLocalLocal {
-                kind: crate::vm::op::BinKind::AddInPlace,
+                kind: crate::vm::op::BinKind::Add,
                 ..
             }
         )),
-        "expected a BinLocalLocal{{AddInPlace}} in {:?}",
+        "expected a BinLocalLocal{{Add}} in {:?}",
         main_proto.code
     );
 }
@@ -18384,8 +18384,7 @@ fn collection_operators_eval_correct() {
 }
 
 /// Compound-assign forms of the collection operators must produce identical values to the binary
-/// forms. `*=`, `|=`, `&=`, `^=` and `-=` lower through their plain binary opcode; `+=` lowers to
-/// `Op::AddInPlace`, which extends a `List` in place instead of allocating a new one (W8-27).
+/// forms. Every compound form lowers through its plain binary opcode (owner rule U15).
 #[test]
 fn collection_compound_assign_eval_correct() {
     let cases = [

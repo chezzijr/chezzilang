@@ -312,8 +312,7 @@ impl Vm {
         // Arithmetic is computed in true i64 (overflow still faults past i64), then `make_int` boxes
         // any result outside ±2^62 — the inline↔box fork, invisible to the program.
         let v = match kind {
-            // An inline int is never a list, so `AddInPlace` behaves exactly as `Add` here.
-            BinKind::Add | BinKind::AddInPlace => {
+            BinKind::Add => {
                 let n = x
                     .checked_add(y)
                     .ok_or_else(|| self.err("integer overflow in Add".to_string(), span))?;
@@ -377,40 +376,7 @@ impl Vm {
             BinKind::LtEq => self.compare_op(&Op::LtEq, span),
             BinKind::Gt => self.compare_op(&Op::Gt, span),
             BinKind::GtEq => self.compare_op(&Op::GtEq, span),
-            BinKind::AddInPlace => self.arith_in_place(span),
         }
-    }
-
-    /// `Op::AddInPlace`'s runtime dispatch, lowered from `xs += ys`. Extends the LEFT list in
-    /// place when both operands are `Obj::List`, and falls through to `Op::Add` otherwise — the
-    /// decision is made here, at runtime, because the compiler is type-blind. Reads both operands
-    /// off the stack WITHOUT popping them first, so they stay GC-rooted across `heap.get_mut`; the
-    /// non-list path hands the untouched stack straight to `arith`, which pops in its own order.
-    pub(super) fn arith_in_place(&mut self, span: Span) -> Result<(), RuntimeError> {
-        let n = self.stack.len();
-        let l = self.stack[n - 2];
-        let r = self.stack[n - 1];
-        if let (Some(lh), Some(rh)) = (l.as_obj(), r.as_obj())
-            && matches!(self.heap.get(lh), Obj::List(_))
-            && matches!(self.heap.get(rh), Obj::List(_))
-        {
-            // D4 layer C (TICKET-169): `xs += ys` extends `xs` in place (DEC-015), so it is a write
-            // site like any other mutating method.
-            self.check_copied_write(lh, span)?;
-            // Snapshot the right side's elements FIRST so `xs += xs` (self-extend) terminates,
-            // mirroring `extend`'s comment (src/vm/call.rs).
-            let Obj::List(right) = self.heap.get(rh) else {
-                unreachable!()
-            };
-            let appended = right.clone();
-            let Obj::List(left) = self.heap.get_mut(lh) else {
-                unreachable!()
-            };
-            left.extend(appended);
-            self.pop();
-            return Ok(());
-        }
-        self.arith(&Op::Add, span)
     }
 
     pub(super) fn arith(&mut self, op: &Op, span: Span) -> Result<(), RuntimeError> {
@@ -439,7 +405,6 @@ impl Vm {
             | Op::DefineGlobalSlot(_)
             | Op::SetGlobalSlot(_)
             | Op::GetCaptured(_)
-            | Op::AddInPlace
             | Op::Neg
             | Op::Not
             | Op::Lt
@@ -575,7 +540,6 @@ impl Vm {
                 | Op::DefineGlobalSlot(_)
                 | Op::SetGlobalSlot(_)
                 | Op::GetCaptured(_)
-                | Op::AddInPlace
                 | Op::Neg
                 | Op::Not
                 | Op::Lt
@@ -700,7 +664,6 @@ impl Vm {
                 | Op::DefineGlobalSlot(_)
                 | Op::SetGlobalSlot(_)
                 | Op::GetCaptured(_)
-                | Op::AddInPlace
                 | Op::Neg
                 | Op::Not
                 | Op::Lt
@@ -1107,7 +1070,6 @@ impl Vm {
             | Op::DefineGlobalSlot(_)
             | Op::SetGlobalSlot(_)
             | Op::GetCaptured(_)
-            | Op::AddInPlace
             | Op::Neg
             | Op::Not
             | Op::Lt
@@ -1233,7 +1195,6 @@ impl Vm {
             | Op::SetGlobalSlot(_)
             | Op::GetCaptured(_)
             | Op::Add
-            | Op::AddInPlace
             | Op::Sub
             | Op::Mul
             | Op::Div
@@ -1372,7 +1333,6 @@ impl Vm {
                 | Op::SetGlobalSlot(_)
                 | Op::GetCaptured(_)
                 | Op::Add
-                | Op::AddInPlace
                 | Op::Sub
                 | Op::Mul
                 | Op::Div
@@ -1507,7 +1467,6 @@ impl Vm {
                         | Op::SetGlobalSlot(_)
                         | Op::GetCaptured(_)
                         | Op::Add
-                        | Op::AddInPlace
                         | Op::Sub
                         | Op::Mul
                         | Op::Div
@@ -1835,7 +1794,6 @@ impl Vm {
                     | Op::SetGlobalSlot(_)
                     | Op::GetCaptured(_)
                     | Op::Add
-                    | Op::AddInPlace
                     | Op::Sub
                     | Op::Mul
                     | Op::Div
@@ -1988,7 +1946,6 @@ impl Vm {
                 | Op::SetGlobalSlot(_)
                 | Op::GetCaptured(_)
                 | Op::Add
-                | Op::AddInPlace
                 | Op::Sub
                 | Op::Mul
                 | Op::Div
@@ -2112,7 +2069,6 @@ impl Vm {
                     | Op::SetGlobalSlot(_)
                     | Op::GetCaptured(_)
                     | Op::Add
-                    | Op::AddInPlace
                     | Op::Sub
                     | Op::Mul
                     | Op::Div
@@ -2253,7 +2209,6 @@ impl Vm {
             | Op::SetGlobalSlot(_)
             | Op::GetCaptured(_)
             | Op::Add
-            | Op::AddInPlace
             | Op::Sub
             | Op::Mul
             | Op::Div

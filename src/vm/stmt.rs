@@ -127,15 +127,6 @@ impl Vm {
         self.err(format!("{subject} {COPY_WRITE_TAIL}{in_box}"), span)
     }
 
-    /// Fault when `h` is an airlock copy (D4 layer C). Called at every write site that has no
-    /// binding name to report.
-    #[inline]
-    pub(super) fn check_copied_write(&self, h: GcRef, span: Span) -> Result<(), RuntimeError> {
-        if self.heap.is_copied(h) {
-            return Err(self.copied_write_err(None, span));
-        }
-        Ok(())
-    }
     /// Drain the current (top) frame's deferred calls, LIFO, popping one at a time from the frame's
     /// own list so the not-yet-run records stay GC-rooted in the frame. Stops once any party's
     /// `std.os.exit` is published, between two `defer`s too (Go: `os.Exit` does not run deferred
