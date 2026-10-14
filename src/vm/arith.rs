@@ -514,7 +514,6 @@ impl Vm {
             | Op::IsGenerator
             | Op::IsCursor
             | Op::IterableToCursor
-            | Op::IsMap
             | Op::IsChannel
             | Op::ChanRecvOrClosed
             | Op::EnsureEnum(_)
@@ -651,7 +650,6 @@ impl Vm {
                 | Op::IsGenerator
                 | Op::IsCursor
                 | Op::IterableToCursor
-                | Op::IsMap
                 | Op::IsChannel
                 | Op::ChanRecvOrClosed
                 | Op::EnsureEnum(_)
@@ -777,7 +775,6 @@ impl Vm {
                 | Op::IsGenerator
                 | Op::IsCursor
                 | Op::IterableToCursor
-                | Op::IsMap
                 | Op::IsChannel
                 | Op::ChanRecvOrClosed
                 | Op::EnsureEnum(_)
@@ -1180,7 +1177,6 @@ impl Vm {
             | Op::IsGenerator
             | Op::IsCursor
             | Op::IterableToCursor
-            | Op::IsMap
             | Op::IsChannel
             | Op::ChanRecvOrClosed
             | Op::EnsureEnum(_)
@@ -1311,7 +1307,6 @@ impl Vm {
             | Op::IsGenerator
             | Op::IsCursor
             | Op::IterableToCursor
-            | Op::IsMap
             | Op::IsChannel
             | Op::ChanRecvOrClosed
             | Op::EnsureEnum(_)
@@ -1451,7 +1446,6 @@ impl Vm {
                 | Op::IsGenerator
                 | Op::IsCursor
                 | Op::IterableToCursor
-                | Op::IsMap
                 | Op::IsChannel
                 | Op::ChanRecvOrClosed
                 | Op::EnsureEnum(_)
@@ -1590,7 +1584,6 @@ impl Vm {
                         | Op::IsGenerator
                         | Op::IsCursor
                         | Op::IterableToCursor
-                        | Op::IsMap
                         | Op::IsChannel
                         | Op::ChanRecvOrClosed
                         | Op::EnsureEnum(_)
@@ -1916,7 +1909,6 @@ impl Vm {
                     | Op::IsGenerator
                     | Op::IsCursor
                     | Op::IterableToCursor
-                    | Op::IsMap
                     | Op::IsChannel
                     | Op::ChanRecvOrClosed
                     | Op::EnsureEnum(_)
@@ -2070,7 +2062,6 @@ impl Vm {
                 | Op::IsGenerator
                 | Op::IsCursor
                 | Op::IterableToCursor
-                | Op::IsMap
                 | Op::IsChannel
                 | Op::ChanRecvOrClosed
                 | Op::EnsureEnum(_)
@@ -2195,7 +2186,6 @@ impl Vm {
                     | Op::IsGenerator
                     | Op::IsCursor
                     | Op::IterableToCursor
-                    | Op::IsMap
                     | Op::IsChannel
                     | Op::ChanRecvOrClosed
                     | Op::EnsureEnum(_)
@@ -2337,7 +2327,6 @@ impl Vm {
             | Op::IsGenerator
             | Op::IsCursor
             | Op::IterableToCursor
-            | Op::IsMap
             | Op::IsChannel
             | Op::ChanRecvOrClosed
             | Op::EnsureEnum(_)

@@ -92,12 +92,11 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) = tables;
+    let (kw, wt, ct, ns, rc, conflicts, fo, rs, nf, gc, wr, ht, hc) = tables;
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
     c.hook_calls = hc;
     c.fall_off = nf;
-    c.for_binds = fb;
     c.call_plans = kw;
     c.witnesses = wt;
     c.carriers = ct;
@@ -190,13 +189,12 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, ns, rc, conflicts, fb, fo, rs, nf, gc, wr, ht, hc) =
+    let (kw, wt, ct, ns, rc, conflicts, fo, rs, nf, gc, wr, ht, hc) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
     c.hook_calls = hc;
     c.fall_off = nf;
-    c.for_binds = fb;
     c.call_plans = kw;
     c.witnesses = wt;
     c.carriers = ct;
@@ -371,10 +369,6 @@ struct Compiler {
     /// TICKET-227 -- the checker's implicit wraps, keyed by (module idx, NodeId). Applied only by
     /// [`Self::compile_expr`].
     wraps: crate::checker::WrapTable,
-    /// TICKET-161 (DEC-113) — the N-name `for` loops the checker says destructure (iterand statically
-    /// `Ty::Param`/`Ty::Protocol`), consumed verbatim; a MISS keeps the runtime `IsMap` test. See
-    /// [`crate::checker::ForBindTable`].
-    for_binds: crate::checker::ForBindTable,
     /// TICKET-054 review fix — which call arguments must widen int→float AT THE CALL SITE (a
     /// W7-43 — counter for the fresh `__optN` temp names the Option lowering mints, mirroring the
     /// checker's own. Frame-local and `__`-prefixed (unwritable by user code), so uniqueness within
@@ -625,7 +619,6 @@ impl Compiler {
             fall_off: crate::checker::FallOffTable::new(),
             ret_coerce: crate::checker::RetCoerceTable::new(),
             wraps: crate::checker::WrapTable::new(),
-            for_binds: crate::checker::ForBindTable::new(),
             next_opt_tmp: 0,
             witness_locals: Vec::new(),
             pending_witnesses: Vec::new(),
@@ -2614,28 +2607,13 @@ impl Compiler {
             //
             // N>1 names (`for a, b, … in xs`) ride the SAME machinery: each path lands one element in
             // the hidden `elem` slot, which is destructured into the names via `GetField(j)` (the
-            // `a, b := t` lowering, generalized to N). The one exception is a MAP, tested at RUNTIME on
-            // `IsMap`: its two names bind (key, value) from a keys + values snapshot indexed in
-            // lockstep, so a body that mutates the map cannot perturb the bindings. The checker admits
-            // N>1 names only over a `Map` or an element that is statically a tuple of that arity. A
-            // tuple IS `Hashable` (TICKET-161), so a Map with tuple keys can reach an `Iterable[(A, B)]`
-            // slot and the runtime `IsMap` test would bind (key, value) there: the checker records
-            // `ForBind::Destructure` for an iterand statically typed `Ty::Param`/`Ty::Protocol`, and
-            // that loop skips the test (DEC-113).
+            // the `a, b := t` lowering, generalized to N). A Map yields `(key, value)` tuples (owner
+            // U9), so `for k, v in m` is the same tuple unpack; the checker admits N>1 names only over
+            // an element that is statically a tuple of that arity.
             let multi = vars.len() > 1;
             self.compile_expr(fc, iter)?;
             let iter_slot = fc.add_hidden();
             fc.emit_hidden_set(iter_slot, span);
-            // Map-ness is read off the iterand as written (`IterableToCursor` passes a map through).
-            let map_mode_slot = if multi && !self.for_destructures(iter.span) {
-                fc.emit_hidden_get(iter_slot, span);
-                fc.emit(Op::IsMap, span);
-                let slot = fc.add_hidden(); // true ⇒ map (key, value) path
-                fc.emit_hidden_set(slot, span);
-                Some(slot)
-            } else {
-                None
-            };
             // ONE-TIME pure-`Iterable` conversion: a struct with `iter()` but no `next()` becomes its
             // cursor here (then drives via the seq path); every other iterand (struct-with-`next`,
             // generator, collection) passes through unchanged, so their fast paths are byte-identical.
@@ -2679,7 +2657,6 @@ impl Compiler {
             let len_slot = fc.add_hidden();
             let idx_slot = fc.add_hidden();
             let opt_slot = fc.add_hidden();
-            let vals_slot = if multi { Some(fc.add_hidden()) } else { None }; // map values snapshot
 
             // Seq init (skipped on BOTH lazy paths): snapshot the iterand to a list, take its length,
             // start the index at 0. Skip when channel OR struct.
@@ -2699,23 +2676,6 @@ impl Compiler {
             fc.emit_hidden_set(len_slot, span);
             fc.emit(Op::ConstInt(0), span);
             fc.emit_hidden_set(idx_slot, span);
-            // Map (N names): snapshot the values beside the keys `ListClone` just took, same order.
-            if let (Some(map_mode), Some(vals)) = (map_mode_slot, vals_slot) {
-                fc.emit_hidden_get(map_mode, span);
-                let not_map = fc.emit_jump(Op::JumpIfFalse(0), span);
-                fc.emit_hidden_get(iter_slot, span);
-                let ic = self.next_method_ic();
-                fc.emit(
-                    Op::CallMethod {
-                        name: "values".to_string(),
-                        argc: 0,
-                        ic,
-                    },
-                    span,
-                );
-                fc.emit_hidden_set(vals, span);
-                fc.patch_jump(not_map);
-            }
             fc.patch_jump(chan_skip_init);
             fc.patch_jump(struct_skip_init);
 
@@ -2788,27 +2748,10 @@ impl Compiler {
             fc.emit_hidden_get(idx_slot, span);
             fc.emit(Op::GetIndex, span);
             fc.emit_set_local_raw(elem, span);
-            // Map (N names): bind (key, value) and skip the tuple destructure.
-            let map_bound = if let (Some(map_mode), Some(vals)) = (map_mode_slot, vals_slot) {
-                fc.emit_hidden_get(map_mode, span);
-                let not_map = fc.emit_jump(Op::JumpIfFalse(0), span);
-                fc.emit_hidden_get(elem, span);
-                fc.emit_set_local_raw(var_raws[0], span);
-                fc.emit_hidden_get(vals, span);
-                fc.emit_hidden_get(idx_slot, span);
-                fc.emit(Op::GetIndex, span);
-                fc.emit_set_local_raw(var_raws[1], span);
-                let bound = fc.emit_jump(Op::Jump(0), span);
-                fc.patch_jump(not_map);
-                Some(bound)
-            } else {
-                None
-            };
-
             fc.patch_jump(to_body);
             if multi {
                 // Destructure the element tuple into each name (var[j] = elem.j). Reached from the lazy
-                // `Some(v)` bind and from the seq read of a non-map.
+                // `Some(v)` bind and from the seq read.
                 for (j, &vr) in var_raws.iter().enumerate() {
                     fc.emit_hidden_get(elem, span);
                     fc.emit(
@@ -2820,9 +2763,6 @@ impl Compiler {
                     ); // tuple element
                     fc.emit_set_local_raw(vr, span);
                 }
-            }
-            if let Some(bound) = map_bound {
-                fc.patch_jump(bound);
             }
             // Fresh cell per iteration for each boxed (captured) loop var (C1); no-op when unboxed.
             for (&vs, &vr) in var_slots.iter().zip(&var_raws) {
@@ -4627,18 +4567,6 @@ impl Compiler {
         match seed {
             crate::checker::SumSeed::Float => fc.emit(Op::ConstFloat(0.0), span),
         }
-    }
-
-    /// TICKET-161 (DEC-113) — does the checker say the N-name `for` over the iterand at `span`
-    /// destructures each element (so the runtime `IsMap` test must be skipped)? A miss keeps it.
-    fn for_destructures(&self, span: Span) -> bool {
-        let key = crate::checker::ret_coerce_key(
-            self.current_module_idx,
-            self.kw_frag_ctx,
-            self.kw_frag_ord,
-            span,
-        );
-        self.for_binds.contains_key(&key)
     }
 
     /// W8-21 — emit the `Op::NewEnum` wrap a declared `T?`/`T!E` return sink's success-coercion
@@ -8023,7 +7951,6 @@ impl FnComp {
             | other @ Op::IsGenerator
             | other @ Op::IsCursor
             | other @ Op::IterableToCursor
-            | other @ Op::IsMap
             | other @ Op::IsChannel
             | other @ Op::ChanRecvOrClosed
             | other @ Op::EnsureEnum(_)
@@ -8171,7 +8098,6 @@ impl FnComp {
             | other @ Op::IsGenerator
             | other @ Op::IsCursor
             | other @ Op::IterableToCursor
-            | other @ Op::IsMap
             | other @ Op::IsChannel
             | other @ Op::ChanRecvOrClosed
             | other @ Op::EnsureEnum(_)

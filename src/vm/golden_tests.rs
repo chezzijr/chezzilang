@@ -1485,7 +1485,7 @@ fn match_range_with_literal_mix_parity() {
 #[test]
 fn for_over_map_keys_parity() {
     assert_golden_out(
-        "m := {\"a\": 1, \"b\": 2, \"c\": 3}\nfor k in m:\n    print(k)\n",
+        "m := {\"a\": 1, \"b\": 2, \"c\": 3}\nfor k in m.keys():\n    print(k)\n",
         "a\nb\nc\n",
     );
 }
@@ -7480,7 +7480,7 @@ fn golden_concat_merge_via_run_file() {
 
 /// Tuple-destructuring `for` + `std.iter` golden: `examples/for_tuple.chz` — destructure a list
 /// of tuples, one-var whole-tuple, triples, `enumerate`/`zip`, comprehension combo. Byte-matches
-/// `.expected`, identical on interp + VM (the `IsMap` runtime split is exercised alongside maps).
+/// `.expected`, identical on every run (a two-name loop over a list of tuples is the ordinary tuple unpack).
 #[test]
 fn golden_for_tuple_via_run_file() {
     let path = fixture("examples/for_tuple.chz");
@@ -9499,7 +9499,7 @@ fn iter_snapshot_order_matches_for() {
     for (coll, want) in [
         ("[1, 2, 3]", "1\n2\n3\n"),
         ("{1, 2, 3}", "1\n2\n3\n"),
-        ("{1: \"a\", 2: \"b\"}", "1\n2\n"), // map → keys
+        ("{1: \"a\", 2: \"b\"}.keys()", "1\n2\n"), // keys()
         ("\"abc\"", "a\nb\nc\n"),
         ("b\"hi\"", "104\n105\n"),
         ("bytearray([7, 8])", "7\n8\n"),

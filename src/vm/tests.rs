@@ -835,7 +835,7 @@ fn fxhash_map_int_keys_insert_lookup_remove() {
     // read, remove (rebuilds the index), then re-insert — all must agree with the interpreter.
     let src = "m := {}\ni := 0\nwhile i < 50:\n    m[i] = i * 2\n    i = i + 1\n\
                    m.remove(10)\nm.remove(20)\nm[10] = 999\n\
-                   acc := 0\nfor k in m:\n    acc = acc + m[k]\nprint(acc)\nprint(m.len())\n";
+                   acc := 0\nfor k in m.keys():\n    acc = acc + m[k]\nprint(acc)\nprint(m.len())\n";
     // sum(2i, i in 0..50) = 2450; drop 20→-40, drop10 then re-add 10→999: 2450-20-40+999 = 3389
     assert_eq!(run_parity(src), "3389\n49\n");
 }
@@ -851,7 +851,7 @@ fn fxhash_map_str_keys() {
         "        counts[w] = counts[w] + 1\n",
         "    else:\n",
         "        counts[w] = 1\n",
-        "for k in counts:\n",
+        "for k in counts.keys():\n",
         "    print(\"{k}={counts[k]}\")\n",
     );
     assert_eq!(run_parity(src), "a=3\nb=2\nc=1\n");
@@ -20882,7 +20882,7 @@ fn intrinsic_grants_all_have_vm_arms() {
             "{\"a\": 1}",
             "\"a\"",
             "9",
-            "str",
+            "(str, int)",
             "str",
             "int",
             "-",

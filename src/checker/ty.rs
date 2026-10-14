@@ -146,19 +146,6 @@ pub enum Wrap {
 /// means "no wrap".
 pub type WrapTable = HashMap<(usize, u32), Wrap>;
 
-/// TICKET-161 (DEC-113) — how an N-name `for` binds its iterand when the choice is STATIC. An N-name
-/// `for` over a runtime `Map` binds (key, value); over anything else it destructures each element.
-/// The compiler used to make that choice at RUNTIME (`IsMap`), which was sound only while no map key
-/// could be a tuple. Now one can, so an iterand statically typed `Ty::Param`/`Ty::Protocol` (the only
-/// static types a runtime `Map` can hide behind) records `Destructure`, and the compiler skips the
-/// `IsMap` test there. A MISS keeps the runtime test — the pre-fix lowering.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ForBind {
-    Destructure,
-}
-
-pub type ForBindTable = HashMap<CarrierKey, ForBind>;
-
 /// Which `.sum()` call sites sum a `List[float]`, keyed exactly like [`CarrierKey`] (the
 /// method-NAME token — see there for why the call node's span aliases across the links of a
 /// postfix/pipe chain).

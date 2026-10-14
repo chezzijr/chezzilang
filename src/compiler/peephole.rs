@@ -120,7 +120,6 @@ fn bin_kind(op: &Op) -> Option<BinKind> {
         | Op::IsGenerator
         | Op::IsCursor
         | Op::IterableToCursor
-        | Op::IsMap
         | Op::IsChannel
         | Op::ChanRecvOrClosed
         | Op::EnsureEnum(_)
@@ -247,7 +246,6 @@ fn jump_target(op: &Op) -> Option<usize> {
         | Op::IsGenerator
         | Op::IsCursor
         | Op::IterableToCursor
-        | Op::IsMap
         | Op::IsChannel
         | Op::ChanRecvOrClosed
         | Op::EnsureEnum(_)
@@ -372,7 +370,6 @@ fn jump_target_mut(op: &mut Op) -> Option<&mut usize> {
         | Op::IsGenerator
         | Op::IsCursor
         | Op::IterableToCursor
-        | Op::IsMap
         | Op::IsChannel
         | Op::ChanRecvOrClosed
         | Op::EnsureEnum(_)
@@ -507,7 +504,6 @@ fn try_fold_tail(out: &[Op]) -> Option<Fold> {
             | Op::IsGenerator
             | Op::IsCursor
             | Op::IterableToCursor
-            | Op::IsMap
             | Op::IsChannel
             | Op::ChanRecvOrClosed
             | Op::EnsureEnum(_)

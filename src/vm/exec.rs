@@ -1692,7 +1692,6 @@ impl Vm {
                 | other @ Op::IsGenerator
                 | other @ Op::IsCursor
                 | other @ Op::IterableToCursor
-                | other @ Op::IsMap
                 | other @ Op::IsChannel
                 | other @ Op::ChanRecvOrClosed
                 | other @ Op::EnsureEnum(_)
@@ -3034,7 +3033,7 @@ impl Vm {
             }
             Op::ListClone => {
                 // Normalise a `for` iterand to an index-iterable list: a list is cloned (so a body
-                // that mutates it doesn't disturb iteration); a map yields its keys (gap #14).
+                // that mutates it doesn't disturb iteration); a map yields its `(key, value)` pairs.
                 let v = self.pop();
                 match v.view() {
                     ValueView::Obj(h) => match self.heap.get(h) {
@@ -3043,9 +3042,9 @@ impl Vm {
                             let nh = self.heap.alloc(Obj::List(cloned));
                             self.push(Value::obj(nh));
                         }
-                        Obj::Map(m) => {
-                            let keys: Vec<Value> = m.entries.iter().map(|(_, k, _)| *k).collect();
-                            let nh = self.heap.alloc(Obj::List(keys));
+                        Obj::Map(_) => {
+                            let pairs = self.map_pairs(h);
+                            let nh = self.heap.alloc(Obj::List(pairs));
                             self.push(Value::obj(nh));
                         }
                         Obj::Set(s) => {
@@ -3163,12 +3162,6 @@ impl Vm {
                 // the request and let `run_until` return to the host `.next()` after this op (the
                 // frame `ip` has already advanced past the `Yield`, so resume continues after it).
                 self.gen_yielding = true;
-            }
-            Op::IsMap => {
-                let v = self.pop();
-                let is_map =
-                    matches!(v.as_obj(), Some(h) if matches!(self.heap.get(h), Obj::Map(_)));
-                self.push(Value::bool(is_map));
             }
             Op::IsChannel => {
                 let v = self.pop();

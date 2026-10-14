@@ -511,7 +511,7 @@ test fn iterable_in_type_position_iterates_every_shape():
     assert sum_it(ones()) == 2, "a generator"
     assert sum_it(Down(3)) == 3, "a struct with next (2 + 1 + 0)"
     assert sum_it(Wrap([4, 5])) == 9, "a struct with only iter"
-    assert count_it({"a": 1, "b": 2}) == 2, "a Map iterates its keys"
+    assert count_it({"a": 1, "b": 2}.keys()) == 2, "a Map's keys"
     assert count_it("abc") == 3, "a str"
     # the same value type drives a comprehension and a `List()` ctor, not just `for`
     assert doubled([1, 2]) == [2, 4]

@@ -194,7 +194,7 @@ fn make_map() -> Map[K, str]:
 fn main():
     m := make_map()
     out := \"\"
-    for k in m:
+    for k in m.keys():
         out = out + m[k]
     print(out)
     print(m.contains(K(3)))
@@ -742,7 +742,7 @@ fn main():
     s.add(c)
     c.n = 92
     ks := \"\"
-    for k in m:
+    for k in m.keys():
         ks = ks + str(k.n)
     print(ks)                                  # 12 (snapshots, not 90/91)
     print(s.difference({K(1), K(2), K(3), K(8)}).len())   # 0 (all present as snapshots)

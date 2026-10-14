@@ -11529,8 +11529,11 @@ fn match_nested_nullary_variant_ok() {
 // ===== map iteration in for (gap #14) =====
 
 #[test]
-fn for_over_map_binds_key() {
-    ok("m := {\"a\": 1}\nfor k in m:\n    s: str = k\n    print(s)\n");
+fn for_over_map_binds_a_pair() {
+    // A Map iterates `(key, value)` pairs (owner U9); `m.keys()` gives the keys.
+    ok("m := {\"a\": 1}\nfor kv in m:\n    p: (str, int) = kv\n    print(p)\n");
+    rejects("m := {\"a\": 1}\nfor k in m:\n    s: str = k\n", "");
+    ok("m := {\"a\": 1}\nfor k in m.keys():\n    s: str = k\n    print(s)\n");
 }
 
 #[test]
@@ -11549,7 +11552,7 @@ fn for_kv_over_list_rejected() {
     // A list of plain ints (not tuples) still can't bind two names.
     rejects(
         "xs := [1,2,3]\nfor a, b in xs:\n    print(a)\n",
-        "requires a map",
+        "requires a tuple element",
     );
 }
 
@@ -20416,9 +20419,11 @@ fn uninferable_closure_param_qualified_ctor_emits_clear_error() {
 fn map_requires_two_tuple() {
     // element not a 2-tuple is a static error.
     rejects("fn main():\n    m := Map([1, 2])\nmain()\n", "");
-    // a map's element is its key (not a 2-tuple) -> static error.
+    // a map's element is its `(key, value)` pair, so `Map(m)` checks (owner U9).
+    ok("fn main():\n    src := {1: \"a\"}\n    m := Map(src)\nmain()\n");
+    // a list of keys is not a list of pairs -> static error.
     rejects(
-        "fn main():\n    src := {1: \"a\"}\n    m := Map(src)\nmain()\n",
+        "fn main():\n    src := {1: \"a\"}\n    m := Map(src.keys())\nmain()\n",
         "",
     );
     // a 3-tuple is not a 2-tuple.
@@ -20442,7 +20447,12 @@ fn iter_method_on_collections_types_as_iterator() {
     // `.iter()` on each collection types as Iterator[elem] (the existing existential cursor type).
     ok("fn main():\n    it := [1, 2, 3].iter()\n    print(it.next())\nmain()\n");
     ok("fn main():\n    it := {1, 2}.iter()\n    x: int? = it.next()\n    print(x)\nmain()\n");
-    ok("fn main():\n    it := {1: \"a\"}.iter()\n    k: int? = it.next()\n    print(k)\nmain()\n");
+    ok(
+        "fn main():\n    it := {1: \"a\"}.iter()\n    k: (int, str)? = it.next()\n    print(k)\nmain()\n",
+    );
+    ok(
+        "fn main():\n    it := {1: \"a\"}.keys().iter()\n    k: int? = it.next()\n    print(k)\nmain()\n",
+    );
     ok("fn main():\n    it := \"ab\".iter()\n    c: str? = it.next()\n    print(c)\nmain()\n");
     ok("fn main():\n    it := b\"hi\".iter()\n    b: int? = it.next()\n    print(b)\nmain()\n");
     ok(
@@ -20512,9 +20522,17 @@ fn iterable_in_type_position_is_for_iterable() {
     ok(
         "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f({1, 2, 3})))\nmain()\n",
     );
-    // Map iterates its KEYS (single-variable `for`), so a Map[str,int] is an Iterable[str].
+    // A Map iterates its `(key, value)` pairs (owner U9), so a Map[str,int] is an
+    // Iterable[(str, int)] and no longer an Iterable[str] (`m.keys()` is).
     ok(
-        "fn f(xs: Iterable[str]) -> int:\n    n := 0\n    for v in xs:\n        n += v.len()\n    return n\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
+        "fn f(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v + k.len()\n    return n\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
+    );
+    rejects(
+        "fn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(str(f({\"a\": 1})))\nmain()\n",
+        "does not satisfy Iterable",
+    );
+    ok(
+        "fn f(xs: Iterable[str]) -> int:\n    return 0\nfn main():\n    print(str(f({\"a\": 1}.keys())))\nmain()\n",
     );
     // str iterates to str
     ok(
@@ -20554,7 +20572,7 @@ fn iterable_type_position_rejects_bad_shapes() {
     // the annotated type — see `two_var_for_over_iterable_annotation_names_the_type`.)
     rejects(
         "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for i, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
-        "`for k, v` requires a map, found Iterable[int]",
+        "`for k, v` requires a tuple element, found Iterable[int]",
     );
     // (c) W6-3b: `Iterable` is NOT `Iterator` — an `Iterable[T]` value still cannot call `.next()`.
     rejects(
@@ -20693,12 +20711,12 @@ fn two_var_for_over_iterable_annotation_names_the_type() {
     );
     rejects(
         "fn kv(xs: Iterable[str]) -> int:\n    n := 0\n    for i, v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(kv([\"a\"])))\nmain()\n",
-        "`for k, v` requires a map, found Iterable[str]",
+        "`for k, v` requires a tuple element, found Iterable[str]",
     );
     // the same for an `[S: Iterable[T]]` BOUND — the other spelling of the same existential.
     rejects(
         "fn g[S: Iterable[int]](xs: S) -> int:\n    for i, v in xs:\n        return v\n    return 0\nfn main():\n    print(str(g([1, 2])))\nmain()\n",
-        "`for k, v` requires a map, found S",
+        "`for k, v` requires a tuple element, found S",
     );
     // a real struct keeps the struct wording.
     rejects(
@@ -32530,13 +32548,13 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
             "{name}: carriers"
         );
         assert_eq!(
-            sorted_debug(&on.13),
-            sorted_debug(&off.13),
+            sorted_debug(&on.12),
+            sorted_debug(&off.12),
             "{name}: hook_calls"
         );
         assert_eq!(
-            sorted_debug(&on.12),
-            sorted_debug(&off.12),
+            sorted_debug(&on.11),
+            sorted_debug(&off.11),
             "{name}: hook_table"
         );
         assert_eq!(
@@ -32549,19 +32567,19 @@ fn the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables() {
             sorted_debug(&off.4),
             "{name}: ret_coerce"
         );
-        assert_eq!(sorted_debug(&on.11), sorted_debug(&off.11), "{name}: wraps");
+        assert_eq!(sorted_debug(&on.10), sorted_debug(&off.10), "{name}: wraps");
         assert_eq!(on.5, off.5, "{name}: table_conflicts");
         assert_eq!(
-            sorted_debug(&on.7),
-            sorted_debug(&off.7),
+            sorted_debug(&on.6),
+            sorted_debug(&off.6),
             "{name}: crossings"
         );
         assert_eq!(
-            sorted_debug(&on.10.calls),
-            sorted_debug(&off.10.calls),
+            sorted_debug(&on.9.calls),
+            sorted_debug(&off.9.calls),
             "{name}: gen_crossings.calls"
         );
-        assert_eq!(on.10.frames, off.10.frames, "{name}: gen_crossings.frames");
+        assert_eq!(on.9.frames, off.9.frames, "{name}: gen_crossings.frames");
     }
 }
 
@@ -34216,7 +34234,7 @@ fn fn_body_keyword_call_through_closure_global_below_checks() {
 fn head_resolution(src: &str, line: u32, col: u32) -> Resolution {
     let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
     crate::desugar::run_standalone(&mut m).expect("desugar");
-    let table = resolve_call_tables_standalone(&m.stmts).8;
+    let table = resolve_call_tables_standalone(&m.stmts).7;
     let hits: Vec<Resolution> = crate::ast::node_ids(&m)
         .into_iter()
         .filter(|(_, sp)| sp.line == line && sp.col == col)
@@ -34357,7 +34375,7 @@ fn resolution_records_every_pattern_head() {
                fn k(n: int) -> int:\n    return match n:\n        1: 1\n        other: other\n";
     let mut m = parser::parse(lexer::tokenize(src).expect("lex")).expect("parse");
     crate::desugar::run_standalone(&mut m).expect("desugar");
-    let table = resolve_call_tables_standalone(&m.stmts).8;
+    let table = resolve_call_tables_standalone(&m.stmts).7;
     let mut got: Vec<String> = crate::ast::node_ids(&m)
         .into_iter()
         .filter_map(|(id, _)| table.get(&(0, id)))
@@ -34413,7 +34431,7 @@ fn decode_target_is_recorded_for_an_imported_alias() {
     );
     let graph = crate::resolver::build_graph(&main).expect("resolve");
     assert!(check_graph(&graph).is_ok(), "{:?}", check_graph(&graph));
-    let table = resolve_call_tables(&graph).8;
+    let table = resolve_call_tables(&graph).7;
     let decodes: Vec<&TypeDescriptor<ArgFill>> = table
         .values()
         .filter_map(|r| match r {
@@ -34467,7 +34485,7 @@ fn decode_descriptor_fills_equal_the_ctor_plan_fills() {
     let plans: Vec<&Vec<ArgFill>> = tables.0.values().filter(|p| p.len() == 2).collect();
     assert_eq!(plans.len(), 1, "{plans:?}");
     let decodes: Vec<&TypeDescriptor<ArgFill>> = tables
-        .8
+        .7
         .values()
         .filter_map(|r| match r {
             Resolution::Decode(d) => Some(d),
@@ -38772,7 +38790,7 @@ fn spawn_crossing(src: &str) -> crate::checker::CallCrossing {
     let mut m = parser::parse(tokens).unwrap_or_else(|e| panic!("parse failed: {e:?}\n{src}"));
     crate::desugar::run_standalone(&mut m).unwrap_or_else(|e| panic!("desugar failed: {e:?}"));
     assert_eq!(format!("{:?}", check_diags(&m)), "(Ok(()), [])", "{src}");
-    let table = crate::checker::resolve_call_tables_standalone(&m.stmts).7;
+    let table = crate::checker::resolve_call_tables_standalone(&m.stmts).6;
     assert_eq!(table.len(), 1, "one spawn per program\n{src}");
     table.into_values().next().unwrap()
 }

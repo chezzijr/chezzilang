@@ -72,8 +72,8 @@ fn main():
     si := {7}.iter()
     print(si.next())                      # 7
 
-    mi := {1: "a", 2: "b"}.iter()
-    print(mi.next())                      # 1  (map iterates KEYS)
+    mi := {1: "a", 2: "b"}.keys().iter()
+    print(mi.next())                      # 1  (keys() iterates the keys)
     print(mi.next())                      # 2
 
     ci := "hi".iter()

@@ -1721,7 +1721,7 @@ impl Vm {
             match self.heap.get(h) {
                 Obj::List(items) => return Ok(items.clone()),
                 Obj::Set(s) => return Ok(s.entries.iter().map(|(_, e)| *e).collect()),
-                Obj::Map(m) => return Ok(m.entries.iter().map(|(_, k, _)| *k).collect()),
+                Obj::Map(_) => return Ok(self.map_pairs(h)),
                 Obj::Bytes(b) => {
                     let bytes = b.clone();
                     return Ok(bytes.iter().map(|&x| Value::int(x as i64)).collect());

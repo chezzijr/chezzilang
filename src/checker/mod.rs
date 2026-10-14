@@ -21,9 +21,9 @@ use std::fmt;
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,
-    FallOff, FallOffTable, FnLabels, ForBind, ForBindTable, Fresh, GenCrossings, Resolution,
-    ResolutionTable, RetCoerce, RetCoerceTable, SlotFresh, SumSeed, SumSeedTable, WitnessCallee,
-    WitnessKey, WitnessSrc, WitnessTable, Wrap, WrapTable,
+    FallOff, FallOffTable, FnLabels, Fresh, GenCrossings, Resolution, ResolutionTable, RetCoerce,
+    RetCoerceTable, SlotFresh, SumSeed, SumSeedTable, WitnessCallee, WitnessKey, WitnessSrc,
+    WitnessTable, Wrap, WrapTable,
 };
 use ty::{compatible, param_invariant};
 
@@ -1397,7 +1397,6 @@ fn compile_tables_pass(
             std::mem::take(&mut c.sum_seeds),
             std::mem::take(&mut c.ret_coerce),
             std::mem::take(&mut c.table_conflicts),
-            std::mem::take(&mut c.for_binds),
             std::mem::take(&mut c.crossings),
             std::mem::take(&mut c.resolutions),
             std::mem::take(&mut c.fall_off),
@@ -1681,7 +1680,6 @@ pub type CallTables = (
     SumSeedTable,
     RetCoerceTable,
     TableConflicts,
-    ForBindTable,
     CrossingTable,
     ResolutionTable,
     FallOffTable,
@@ -2837,10 +2835,6 @@ struct Checker {
     /// TICKET-227 -- the implicit wraps at typed slots; see [`WrapTable`]. Written only by
     /// `record_wrap`.
     wraps: WrapTable,
-    /// TICKET-161 (DEC-113) — the N-name `for` loops whose iterand is statically `Ty::Param` or
-    /// `Ty::Protocol` and so destructure each element, keyed by [`ret_coerce_key`] on the iterand's
-    /// span and consumed verbatim by the compiler. See [`ForBindTable`].
-    for_binds: ForBindTable,
     /// W7-49 — side-table keys that were asked to hold two DIFFERENT decisions at once. Filled by
     /// [`record_call_table_entry`] (never by ordinary type errors) and returned alongside the three
     /// tables, because this pass DISCARDS its type errors — `self.error` would be swallowed here.

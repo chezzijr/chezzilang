@@ -22,8 +22,6 @@ pub(super) struct DiagMark {
     ret_coerce: crate::checker::RetCoerceTable,
     /// TICKET-227 -- the implicit wraps; decided state, same reason as `ret_coerce`.
     wraps: crate::checker::WrapTable,
-    /// TICKET-161 — same reason as `ret_coerce`: decided state, not a diagnostic.
-    for_binds: crate::checker::ForBindTable,
     /// TICKET-142 (W14-33) — the constant-overflow dedupe set is speculative state too: a
     /// speculative pass (return inference of an un-annotated fn, a generic-arg
     /// prepass) records a span, then the rollback discards its error. A rollback that kept the span
@@ -179,7 +177,6 @@ impl Checker {
             gen_frame: None,
             ret_coerce: crate::checker::RetCoerceTable::new(),
             wraps: crate::checker::WrapTable::new(),
-            for_binds: crate::checker::ForBindTable::new(),
             table_conflicts: Vec::new(),
             resolutions: HashMap::new(),
             callee_diverges: HashMap::new(),
@@ -1680,7 +1677,6 @@ impl Checker {
             warnings: self.warnings.len(),
             ret_coerce: self.ret_coerce.clone(),
             wraps: self.wraps.clone(),
-            for_binds: self.for_binds.clone(),
             const_overflow_seen: self.const_overflow_seen.clone(),
             fn_reads: self.fn_reads.clone(),
             tyvars: self.tyvars.borrow().mark(),
@@ -1702,7 +1698,6 @@ impl Checker {
         self.warnings.truncate(m.warnings);
         self.ret_coerce = m.ret_coerce;
         self.wraps = m.wraps;
-        self.for_binds = m.for_binds;
         self.const_overflow_seen = m.const_overflow_seen;
         self.fn_reads = m.fn_reads;
         self.tyvars.borrow_mut().rollback(m.tyvars);

@@ -468,10 +468,6 @@ pub enum Op {
     /// otherwise push the value back UNCHANGED. Emitted once before the loop so a struct-with-`next`
     /// and a generator stay on their existing fast paths byte-for-byte (this op is a no-op for them).
     IterableToCursor,
-    /// Pop a value; push `true` if it is a map, else `false`. Used by the multi-name `for` to pick
-    /// the map (key, value) path vs the list-of-tuples destructuring path at runtime, since the
-    /// compiler is type-erased and can't decide statically.
-    IsMap,
     /// Pop a value; push `true` if it is a `Channel`, else `false`. Used by `for v in ch:` to pick
     /// the blocking channel-iteration path vs the struct/sequence paths at runtime (type-erased).
     IsChannel,

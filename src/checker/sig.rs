@@ -5910,7 +5910,7 @@ impl Checker {
         }
     }
 
-    /// What a BUILTIN receiver yields per step: list/set → element, str → str, map → key,
+    /// What a BUILTIN receiver yields per step: list/set → element, str → str, map → (key, value),
     /// bytes → int, and an `Iterator[T]` cursor its type argument. No declared type and no
     /// protocol existential is answered here.
     pub(super) fn builtin_iter_elem(&self, ty: &Ty) -> Option<Ty> {
@@ -5919,7 +5919,8 @@ impl Checker {
             Ty::Str => Some(Ty::Str),
             // `bytes`/`bytearray` iterate to `int` (0–255), like Python.
             Ty::Bytes | Ty::ByteArray => Some(Ty::Int),
-            Ty::Map(k, _) => Some((**k).clone()),
+            // A Map iterates its `(key, value)` pairs (owner U9); `m.keys()` gives the keys.
+            Ty::Map(k, v) => Some(Ty::Tuple(vec![(**k).clone(), (**v).clone()])),
             // `Iterator[T]` value (a generator result): element type is its single type argument.
             Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
                 Some(args[0].clone())
@@ -6388,27 +6389,7 @@ impl Checker {
         let m = self.tyvar_mark();
         let it = self.infer(iter);
         let it = self.close_operand(m, it);
-        // DEC-113: a runtime Map can only hide behind a type PARAMETER or a protocol existential, and
-        // a tuple is now a legal Map key, so the compiler's runtime `IsMap` test would bind such a
-        // Map's (key, value) where this checker destructures the element. Make the choice static.
-        if vars.len() > 1 && matches!(it, Ty::Param(_) | Ty::Protocol(..)) {
-            self.record_for_bind(iter.span, crate::checker::ForBind::Destructure);
-        }
         match &it {
-            Ty::Map(k, v) => match vars.len() {
-                1 => vec![(vars[0].clone(), (**k).clone())],
-                2 => vec![
-                    (vars[0].clone(), (**k).clone()),
-                    (vars[1].clone(), (**v).clone()),
-                ],
-                _ => {
-                    self.error(
-                        iter.span,
-                        "a `for` over a map binds one (key) or two (key, value) names",
-                    );
-                    unknowns(vars)
-                }
-            },
             // Tuple-destructuring `for`: over a `list[(A, B, …)]` with N>1 names, bind each name to
             // the matching tuple element. One name still binds the whole tuple (the `Ty::List` arm
             // below). A list of non-tuples (or an arity mismatch) with N>1 names is an error.
@@ -6418,7 +6399,7 @@ impl Checker {
                     None => {
                         self.error(
                             iter.span,
-                            format!("`for k, v` requires a map or a list of tuples, found {it}"),
+                            format!("`for k, v` requires a tuple element, found {it}"),
                         );
                         unknowns(vars)
                     }
@@ -6434,7 +6415,10 @@ impl Checker {
                 if matches!(it, Ty::Channel(_)) {
                     self.error(iter.span, "a channel iterator binds a single loop variable");
                 } else {
-                    self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
+                    self.error(
+                        iter.span,
+                        format!("`for k, v` requires a tuple element, found {it}"),
+                    );
                 }
                 unknowns(vars)
             }
@@ -6460,7 +6444,10 @@ impl Checker {
                         {
                             bindings
                         } else {
-                            self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
+                            self.error(
+                                iter.span,
+                                format!("`for k, v` requires a tuple element, found {it}"),
+                            );
                             unknowns(vars)
                         }
                     }
@@ -6502,7 +6489,10 @@ impl Checker {
                 if matches!(it, Ty::Struct(..)) {
                     self.error(iter.span, "a struct iterator binds a single loop variable");
                 } else {
-                    self.error(iter.span, format!("`for k, v` requires a map, found {it}"));
+                    self.error(
+                        iter.span,
+                        format!("`for k, v` requires a tuple element, found {it}"),
+                    );
                 }
                 unknowns(vars)
             }
@@ -6510,6 +6500,7 @@ impl Checker {
             | other @ Ty::Float
             | other @ Ty::Bool
             | other @ Ty::Nil
+            | other @ Ty::Map(..)
             | other @ Ty::Func { .. }
             | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Tuple(_)

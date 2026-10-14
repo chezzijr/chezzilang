@@ -1986,7 +1986,7 @@ impl Vm {
         }
         // `.iter()` on a built-in collection (str/list/map/set/bytes/bytearray) → a FRESH cursor that
         // SNAPSHOTS the current contents in the SAME order/elements as `for x in X` (list/set elems,
-        // map → keys, str → per-char str, bytes/bytearray → per-byte int). Reuses `drain_iterable`
+        // map → (key, value) pairs, str → per-char str, bytes/bytearray → per-byte int). Reuses `drain_iterable`
         // (the for-loop's single source of truth), then wraps the snapshot in an `Obj::Iter`. Placed
         // BEFORE the per-type dispatch so it intercepts `iter` for every collection in one spot; a
         // collection has no user-defined `iter`, so there is no precedence concern.
@@ -2088,6 +2088,14 @@ impl Vm {
                             | "shl"
                             | "shr"
                     ) {
+                        return Err(e);
+                    }
+                    // TICKET-257: `contains` (List/Set/Map/str) and `Set.add` are real methods, so
+                    // their errors are not misses; only bytes/bytearray `contains` and the
+                    // other receivers' `add` are intrinsic. A real method's fault stays as it is.
+                    let own_method = (method == "contains" && matches!(container, Container::Core))
+                        || (method == "add" && matches!(self.heap.get(h), Obj::Set(_)));
+                    if own_method {
                         return Err(e);
                     }
                     match self.intrinsic_proto_method(recv, method, &args, span)? {
@@ -3265,6 +3273,21 @@ impl Vm {
     ///
     /// There is currently NO unpairable grant — `INTRINSIC_UNPAIRED` in `src/checker/proto.rs` is empty
     /// (W6-3b narrowed `Iterator` so a raw collection no longer claims `next`).
+    /// One `(key, value)` tuple per entry of the map `h`, in `entries` order. The one builder of a
+    /// Map's iteration elements (owner U9): `items()`, the `for` snapshot (`Op::ListClone`) and
+    /// `drain_iterable` (`List(m)`, `Set(m)`, `Map(m)`, `.iter()`) all call it. `Heap::alloc` never
+    /// collects, so the tuples need no rooting.
+    pub(super) fn map_pairs(&mut self, h: GcRef) -> Vec<Value> {
+        let Obj::Map(m) = self.heap.get(h) else {
+            unreachable!("map_pairs on a non-map")
+        };
+        let pairs: Vec<(Value, Value)> = m.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
+        pairs
+            .into_iter()
+            .map(|(k, v)| Value::obj(self.heap.alloc(Obj::Tuple(vec![k, v]))))
+            .collect()
+    }
+
     pub(super) fn intrinsic_proto_method(
         &mut self,
         recv: Value,
@@ -4255,12 +4278,7 @@ impl Vm {
                     // so Map(m.items()) == m. Heap::alloc never collects, so the tuples need no rooting
                     // before the list alloc.
                     self.arity_err("items", args, 0, span)?;
-                    let pairs: Vec<(Value, Value)> =
-                        m.entries.iter().map(|(_, k, v)| (*k, *v)).collect();
-                    let out: Vec<Value> = pairs
-                        .into_iter()
-                        .map(|(k, v)| Value::obj(self.heap.alloc(Obj::Tuple(vec![k, v]))))
-                        .collect();
+                    let out = self.map_pairs(h);
                     Ok(Value::obj(self.heap.alloc(Obj::List(out))))
                 }
                 "copy" => {

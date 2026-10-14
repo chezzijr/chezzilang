@@ -44,7 +44,7 @@ test fn map_copy_snapshots_struct_keys():
     m: Map[P, str] = {}
     m[P(1)] = "a"
     n := m.copy()
-    for k in n:
+    for k in n.keys():
         k.x = 5
     assert m.contains(P(1)), "a key reached through the copy must not alias the original's key"
 

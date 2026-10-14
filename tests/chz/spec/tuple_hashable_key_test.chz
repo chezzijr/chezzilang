@@ -44,7 +44,7 @@ test fn a_stored_tuple_key_does_not_alias_its_struct():
     assert m[(1, P(1))] == "a"
 
 test fn a_map_read_as_an_iterable_of_pairs_destructures_its_keys():
-    assert total({(1, 2): "x"}) == 12
+    assert total({(1, 2): "x"}.keys()) == 12
 
 test fn a_map_with_tuple_keys_binds_key_and_value():
     for k, v in {(1, 2): "x"}:
