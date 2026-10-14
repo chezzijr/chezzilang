@@ -69,6 +69,18 @@ const OPERANDS: &[Operands] = &[
         rhs: "(9223372036854775807 + 1)",
     },
     Operands {
+        name: "int8_id",
+        ty: "int8",
+        init: "12",
+        rhs: "id(300)",
+    },
+    Operands {
+        name: "int_id",
+        ty: "int",
+        init: "12",
+        rhs: "id(3)",
+    },
+    Operands {
         name: "int8_const",
         ty: "int8",
         init: "12",
@@ -138,6 +150,8 @@ struct V:
         return V(self.n / other.n)
     fn mod(self, other: V) -> V:
         return V(self.n % other.n)
+fn id[T](v: T) -> T:
+    return v
 struct H[T]:
     v: T
 ";

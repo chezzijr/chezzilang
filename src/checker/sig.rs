@@ -3167,10 +3167,10 @@ impl Checker {
                         if *op == AssignOp::Eq {
                             self.infer_arg(value, Some(&target_ty))
                         } else {
-                            // TICKET-258 (U15): `x OP= v` is `x = x OP v`, whose operand
-                            // `infer_binary` seeds with the slot type. Seed, never wrap. The seed
-                            // is the slot's scalar: a compound operand meets no width slot.
-                            self.infer_arg_seeded(value, target_ty.scalar())
+                            // TICKET-258 (U15): `x OP= v` is `x = x OP v`: the operand is
+                            // inferred by the call `infer_binary` makes for its right operand.
+                            self.scan_const_overflow(value);
+                            self.infer_binary_rhs(value, Some(target_ty))
                         }
                     } else {
                         self.infer_value(value)

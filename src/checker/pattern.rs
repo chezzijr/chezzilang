@@ -1961,19 +1961,8 @@ impl Checker {
             | ExprKind::Recover(_)
             | ExprKind::ElseGuard { .. } => false,
         };
-        if is_arith
-            && !covered
-            && !self.inferring_ret
-            && let consteval::Fold::Overflow(sp, op) =
-                consteval::eval(expr, &mut self.const_scan_visits)
-            && self.const_overflow_seen.insert(sp)
-        {
-            self.error(
-                sp,
-                format!(
-                    "integer overflow in {op}: this constant expression does not fit in int (i64)"
-                ),
-            );
+        if is_arith && !covered {
+            self.scan_const_overflow(expr);
         }
         if !covered {
             self.const_meets_slot(expr, None);
@@ -4265,10 +4254,37 @@ impl Checker {
         let hint = self.expected_hint.take();
         self.expected_hint = hint.clone();
         let l = self.infer_value(lhs);
+        let r = self.infer_binary_rhs(rhs, hint);
+        self.binary_result(op, l, r, lhs.span, rhs.span)
+    }
+
+    /// Report the first i64 overflow in the constant expression `expr`, once per span. The root of an
+    /// arithmetic tree calls it; its children are covered by that scan (`arith_parent`).
+    pub(super) fn scan_const_overflow(&mut self, expr: &Expr) {
+        if !self.inferring_ret
+            && let consteval::Fold::Overflow(sp, op) =
+                consteval::eval(expr, &mut self.const_scan_visits)
+            && self.const_overflow_seen.insert(sp)
+        {
+            self.error(
+                sp,
+                format!(
+                    "integer overflow in {op}: this constant expression does not fit in int (i64)"
+                ),
+            );
+        }
+    }
+
+    /// Infer the right operand of `l OP rhs` under `hint`: the one call both `infer_binary` and a
+    /// compound assignment (`x OP= rhs` is `x = x OP rhs`, owner rule U15) make. The operand is an
+    /// arithmetic child: it gets `hint` as a seed (never wraps) and meets no width slot of its own.
+    pub(super) fn infer_binary_rhs(&mut self, rhs: &Expr, hint: Option<Ty>) -> Ty {
+        let covered = std::mem::replace(&mut self.arith_parent, true);
         self.expected_hint = hint;
         let r = self.infer_value(rhs);
         self.expected_hint = None;
-        self.binary_result(op, l, r, lhs.span, rhs.span)
+        self.arith_parent = covered;
+        r
     }
 
     /// The type of `l OP r` for two inferred operand types; a bad pair reports at `lspan`. The one
