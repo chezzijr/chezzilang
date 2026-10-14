@@ -1612,6 +1612,18 @@ impl Vm {
     /// `#[inline(never)]` keeps `step`'s own stack frame lean (its String/Vec locals would otherwise
     /// bloat the deep-recursion path `step → run_proto → run_until → step`).
     #[inline(never)]
+    /// The bytes of a `bytes` or `bytearray` value; `None` for any other value.
+    fn byte_contents(&self, v: Value) -> Option<Vec<u8>> {
+        let h = v.as_obj()?;
+        if let Obj::Bytes(b) = self.heap.get(h) {
+            Some(b.to_vec())
+        } else if let Obj::ByteArray(b) = self.heap.get(h) {
+            Some(b.clone())
+        } else {
+            None
+        }
+    }
+
     pub(super) fn op_contains(&mut self, span: Span) -> Result<(), RuntimeError> {
         let container = self.pop();
         let needle = self.pop();
@@ -1713,9 +1725,29 @@ impl Vm {
                     };
                     hay.contains(sub.as_str())
                 }
-                Obj::Bytes(_)
-                | Obj::ByteArray(_)
-                | Obj::BigInt(_)
+                // bytes / bytearray: an int needle tests one byte, a bytes or bytearray needle tests
+                // a subsequence (str's substring rule). CPython: `98 in b"abc"`, `b"bc" in b"abc"`.
+                Obj::Bytes(_) | Obj::ByteArray(_) => {
+                    let hay = self.byte_contents(container).unwrap_or_default();
+                    if needle.is_int() {
+                        let n = needle.as_int();
+                        if !(0..=255).contains(&n) {
+                            return Err(self.err("byte must be in range(0, 256)".to_string(), span));
+                        }
+                        hay.contains(&(n as u8))
+                    } else if let Some(sub) = self.byte_contents(needle) {
+                        sub.is_empty() || hay.windows(sub.len()).any(|w| w == sub.as_slice())
+                    } else {
+                        return Err(self.err(
+                            format!(
+                                "a bytes-like object is required, not {}",
+                                self.type_name(needle)
+                            ),
+                            span,
+                        ));
+                    }
+                }
+                Obj::BigInt(_)
                 | Obj::FloatBox(_)
                 | Obj::Iter { .. }
                 | Obj::Tuple(_)

@@ -2072,7 +2072,14 @@ impl Vm {
                     // `compare` (the `Comparable` grant on a tuple / `List`).
                     if !matches!(
                         method,
-                        "index" | "set_index" | "slice" | "hash" | "as_path" | "eq" | "compare"
+                        "index"
+                            | "set_index"
+                            | "slice"
+                            | "hash"
+                            | "as_path"
+                            | "eq"
+                            | "compare"
+                            | "contains"
                     ) {
                         return Err(e);
                     }
@@ -3412,6 +3419,14 @@ impl Vm {
                 self.push(recv);
                 self.push(args[0]);
                 self.slice_range(span)?;
+                Ok(Some(self.pop()))
+            }
+            // `Contains` for bytes / bytearray (the only containers with no `contains` method):
+            // the `in` operator's own worker.
+            ("contains", 1) => {
+                self.push(args[0]);
+                self.push(recv);
+                self.op_contains(span)?;
                 Ok(Some(self.pop()))
             }
             _ => Ok(None),

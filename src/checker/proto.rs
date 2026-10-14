@@ -371,6 +371,14 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     ("PathLike", "as_path", RecvKind::Str),
     ("PathLike", "as_path", RecvKind::Bytes),
     ("PathLike", "as_path", RecvKind::ByteArray),
+    // Contains — one verdict per builtin container (`builtin_contains_verdict`); the bytes rows serve
+    // `Contains[int]`, `Contains[bytes]` and `Contains[bytearray]`.
+    ("Contains", "contains", RecvKind::List),
+    ("Contains", "contains", RecvKind::Set),
+    ("Contains", "contains", RecvKind::Map),
+    ("Contains", "contains", RecvKind::Str),
+    ("Contains", "contains", RecvKind::Bytes),
+    ("Contains", "contains", RecvKind::ByteArray),
     // Iterable — everything `iterable_elem` accepts.
     ("Iterable", "iter", RecvKind::List),
     ("Iterable", "iter", RecvKind::Set),
@@ -1457,6 +1465,97 @@ impl Checker {
         }
     }
 
+    /// TICKET-257 (owner rule U5) — the ONE needle rule for a builtin container's `Contains`: whether
+    /// `item in ty` holds. `x in c`, the `Contains[X]` bound and `c.contains(x)` all read it.
+    /// `None` = not a builtin container (a user type, a param, a protocol: those go through the
+    /// `contains` hook). `Some(Err(Some(why)))` = the needle fits but the element has an unmet `Eq`
+    /// where-bound.
+    ///
+    /// List, Set, Map (its keys) and str use the `==` rule: `1 in [1.0]` holds because `1 == 1.0` does
+    /// (CPython `True`). bytes and bytearray take an int byte or a bytes/bytearray subsequence, as
+    /// str takes a substring; the needle types are exact (CPython raises `TypeError` for `1.0 in b"a"`).
+    pub(super) fn builtin_contains_verdict(
+        &self,
+        ty: &Ty,
+        item: &Ty,
+    ) -> Option<Result<(), Option<String>>> {
+        let fits = |elem: &Ty| {
+            self.may_be_equal(item, elem) || self.join_ty(elem, item) || self.assignable(elem, item)
+        };
+        match ty {
+            Ty::List(e) => Some(if !fits(e) {
+                Err(None)
+            } else if let Some(why) = self.eq_bounds_unsatisfied(e) {
+                Err(Some(why))
+            } else {
+                Ok(())
+            }),
+            Ty::Set(e) => Some(if fits(e) { Ok(()) } else { Err(None) }),
+            Ty::Map(k, _) => Some(if fits(k) { Ok(()) } else { Err(None) }),
+            Ty::Str => Some(if fits(&Ty::Str) { Ok(()) } else { Err(None) }),
+            Ty::Bytes | Ty::ByteArray => Some(match item {
+                Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown | Ty::Param(_) => Ok(()),
+                Ty::Float
+                | Ty::Bool
+                | Ty::Str
+                | Ty::Nil
+                | Ty::List(_)
+                | Ty::Map(..)
+                | Ty::Set(_)
+                | Ty::Func { .. }
+                | Ty::BuiltinFn { .. }
+                | Ty::Tuple(_)
+                | Ty::Struct(..)
+                | Ty::Enum(..)
+                | Ty::Result(..)
+                | Ty::Option(_)
+                | Ty::Channel(_)
+                | Ty::Shared(_)
+                | Ty::Atomic(_)
+                | Ty::AtomicInt
+                | Ty::RwShared(_)
+                | Ty::Executor
+                | Ty::Socket
+                | Ty::Listener
+                | Ty::Writer
+                | Ty::Reader
+                | Ty::Ptr
+                | Ty::Width(_)
+                | Ty::Protocol(..)
+                | Ty::Module(_)
+                | Ty::Var(_) => Err(None),
+            }),
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Nil
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Option(_)
+            | Ty::Result(..)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Protocol(..)
+            | Ty::Param(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => None,
+        }
+    }
+
     /// W8-21 / TICKET-227 (D3) — which implicit wrap (if any) a plain value of type `ty` gets at a
     /// typed slot of type `ret`. `None` means "no wrap" — the slot keeps its existing `assignable`
     /// diagnostic unchanged. Called only by [`Self::meet_slot`].
@@ -2252,6 +2351,16 @@ impl Checker {
                 // registered its own intrinsic grant (or needed none), so this is not itself a grant.
                 return Ok(Grant::no_intrinsic_method());
             }
+        }
+        if protocol == "Contains"
+            && let Some(verdict) =
+                self.builtin_contains_verdict(ty, args.first().unwrap_or(&Ty::Unknown))
+        {
+            return match verdict {
+                Ok(()) => self.grant_intrinsic(protocol, ty),
+                Err(None) => Err(format!("type {ty} does not satisfy Contains")),
+                Err(Some(why)) => Err(format!("type {ty} does not satisfy Contains ({why})")),
+            };
         }
         if protocol == "Comparable" {
             // TICKET-146: a tuple / `List` / `Option` is Comparable when every element type is

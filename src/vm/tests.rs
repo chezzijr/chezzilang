@@ -20792,6 +20792,31 @@ fn intrinsic_grants_all_have_vm_arms() {
         val_ty,
         slice_ty,
     };
+    // The `Contains` column: a needle literal and its type per kind (`"-"` = the kind has no
+    // `Contains` grant, so the bound spells `int` as a stand-in). Every kind is named.
+    let item_of = |kind: RecvKind| -> (&'static str, &'static str) {
+        match kind {
+            RecvKind::List | RecvKind::Set => ("1", "int"),
+            RecvKind::Map => ("\"a\"", "str"),
+            RecvKind::Str => ("\"b\"", "str"),
+            RecvKind::Bytes | RecvKind::ByteArray => ("98", "int"),
+            RecvKind::Int
+            | RecvKind::Float
+            | RecvKind::Bool
+            | RecvKind::Tuple
+            | RecvKind::Struct
+            | RecvKind::Cursor
+            | RecvKind::Enum
+            | RecvKind::Option
+            | RecvKind::Result
+            | RecvKind::Func
+            | RecvKind::Protocol
+            | RecvKind::Channel
+            | RecvKind::Shared
+            | RecvKind::RwShared
+            | RecvKind::Atomic => ("-", "int"),
+        }
+    };
     let recvs: &[Recv] = &[
         r(RecvKind::Int, "", "7", "-", "-", "-", "-", "-", "-"),
         r(RecvKind::Float, "", "1.5", "-", "-", "-", "-", "-", "-"),
@@ -21023,6 +21048,7 @@ fn intrinsic_grants_all_have_vm_arms() {
         ("index", "{r}.index({k})"),
         ("set_index", "{r}.set_index({k}, {v})"),
         ("slice", "{r}.slice(0..1)"),
+        ("contains", "{r}.contains({i})"),
         ("add", "{r}.add(b)"),
         ("sub", "{r}.sub(b)"),
         ("mul", "{r}.mul(b)"),
@@ -21037,13 +21063,17 @@ fn intrinsic_grants_all_have_vm_arms() {
         let rv = recv_of(kind)?;
         let (_, tmpl) = *calls.iter().find(|(m, _)| *m == method)?;
         // An unfilled ("-") column the template needs = a missing table entry, not a skip.
-        if (tmpl.contains("{k}") && rv.key == "-") || (tmpl.contains("{v}") && rv.val == "-") {
+        if (tmpl.contains("{k}") && rv.key == "-")
+            || (tmpl.contains("{v}") && rv.val == "-")
+            || (tmpl.contains("{i}") && item_of(kind).0 == "-")
+        {
             return None;
         }
         let call = tmpl
             .replace("{r}", "a")
             .replace("{k}", rv.key)
-            .replace("{v}", rv.val);
+            .replace("{v}", rv.val)
+            .replace("{i}", item_of(kind).0);
         // TICKET-250 — a `next` owner is its own cursor for `iter` only where the call is typed
         // through the `Iterable` requirement (`Op::CallHook`); a concrete `a.iter()` on it is a
         // check error (`has no method 'iter'`). So this one row is probed through a bound.
@@ -21076,6 +21106,7 @@ fn intrinsic_grants_all_have_vm_arms() {
             "Iterable" | "Iterator" => format!("{protocol}[{}]", t(rv.elem_ty)),
             "Index" | "IndexSet" => format!("{protocol}[{}, {}]", t(rv.key_ty), t(rv.val_ty)),
             "Slice" => format!("Slice[{}]", t(rv.slice_ty)),
+            "Contains" => format!("Contains[{}]", item_of(kind).1),
             _ => protocol.to_string(),
         };
         format!(

@@ -4632,64 +4632,32 @@ impl Checker {
             In => {
                 // (A range RHS needs no special case here: `r = self.infer(rhs)` above types it as
                 // the prelude `Range`, and the `Contains` arm below checks the item against it.)
+                if let Some(verdict) = self.builtin_contains_verdict(r, l) {
+                    // List, Set, Map, str, bytes, bytearray: one needle rule shared with the
+                    // `Contains` bound and `contains()`.
+                    if !either_unknown && let Err(why) = verdict {
+                        let [l_s, r_s] = Ty::render_distinct([l, r]);
+                        let tail = why.map_or(String::new(), |w| format!(" — {w}"));
+                        self.error(
+                            lspan,
+                            format!("cannot test membership of {l_s} in {r_s}{tail}"),
+                        );
+                    }
+                    return Ty::Bool;
+                }
                 match r {
-                    Ty::List(elem) | Ty::Set(elem) => {
-                        if !either_unknown && !self.join_ty(elem, l) && !self.assignable(elem, l) {
-                            let [l_s, r_s] = Ty::render_distinct([l, r]);
-                            self.error(lspan, format!("cannot test membership of {l_s} in {r_s}"));
-                        }
-                        // **W7-45.** `in` runs `values_equal` per element, exactly as `==` does, but
-                        // it is typed by `compatible` — which asks co-inhabitance, not whether the
-                        // elements CAN be compared. So `Box(Tag(1)) in [Box(Tag(2))]` check-cleaned
-                        // and faulted, while its method spelling `.contains(…)` already rejected:
-                        // the same operator-vs-method split W7-41 closed for `==`.
-                        //
-                        // LIST-ONLY: extending this arm to `Ty::Set` would make the ordinary
-                        // `x in Set([...])` report twice, once at the construction site
-                        // (`key_ty_reject`) and once here. Two diagnostics for one bug was judged the
-                        // worse trade. A generic `fn mk[T: Hashable](x: T) -> Set[T]` that constructs
-                        // `Set[T]` inside its own body no longer needs a THIRD site here either (W7-53):
-                        // `key_ty_reject`'s own second conjunct (`eq_bounds_unsatisfied`, non-erased
-                        // since W7-53) already demands `T: Eq` at that construction site — `Hashable`
-                        // does NOT embed `Eq` (measured: embedding it regressed a working ordinary-`eq`-
-                        // method escape hatch, `key_ty_reject`'s doc), so `mk` must spell
-                        // `[T: Hashable + Eq]` for the construction to type-check at all.
-                        else if !either_unknown
-                            && matches!(r, Ty::List(_))
-                            && let Some(why) = self.eq_bounds_unsatisfied(elem)
-                        {
-                            let [l_s, r_s] = Ty::render_distinct([l, r]);
-                            self.error(
-                                lspan,
-                                format!("cannot test membership of {l_s} in {r_s} — {why}"),
-                            );
-                        }
-                    }
-                    Ty::Map(key, _) => {
-                        if !either_unknown && !self.join_ty(key, l) && !self.assignable(key, l) {
-                            let [l_s, r_s] = Ty::render_distinct([l, r]);
-                            self.error(
-                                lspan,
-                                format!(
-                                    "cannot test membership of {l_s} in {r_s} (map `in` tests keys)"
-                                ),
-                            );
-                        }
-                    }
-                    Ty::Str => {
-                        if *l != Ty::Str && !either_unknown {
-                            self.error(
-                                lspan,
-                                format!("substring `in` requires a str on the left, found {l}"),
-                            );
-                        }
+                    Ty::List(_)
+                    | Ty::Set(_)
+                    | Ty::Map(..)
+                    | Ty::Str
+                    | Ty::Bytes
+                    | Ty::ByteArray => {
+                        unreachable!("builtin_contains_verdict decides these")
                     }
                     Ty::Unknown => {}
                     other @ Ty::Int
                     | other @ Ty::Float
                     | other @ Ty::Bool
-                    | other @ Ty::Bytes
-                    | other @ Ty::ByteArray
                     | other @ Ty::Nil
                     | other @ Ty::Func { .. }
                     | other @ Ty::BuiltinFn { .. }

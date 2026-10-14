@@ -3121,6 +3121,25 @@ impl Checker {
         {
             return Ty::Struct("Iterator".to_string(), vec![elem]);
         }
+        // `c.contains(x)` on a builtin container asks the same needle rule as `x in c` and the
+        // `Contains[X]` bound (`builtin_contains_verdict`). bytes and bytearray have no such method.
+        if method == "contains" && args.len() == 1 && !matches!(obj_ty, Ty::Bytes | Ty::ByteArray) {
+            let item = self.infer(&args[0]);
+            if let Some(verdict) = self.builtin_contains_verdict(&obj_ty, &item) {
+                match verdict {
+                    Ok(()) => {}
+                    Err(None) => {
+                        let [i_s, r_s] = Ty::render_distinct([&item, &obj_ty]);
+                        self.error(span, format!("cannot test membership of {i_s} in {r_s}"));
+                    }
+                    Err(Some(why)) => self.error(
+                        span,
+                        format!("contains() compares {obj_ty} elements for equality — {why}"),
+                    ),
+                }
+                return Ty::Bool;
+            }
+        }
         match &obj_ty {
             // `module.fn(args)` is a plain call on the member — no `self`.
             Ty::Module(mname) => {
