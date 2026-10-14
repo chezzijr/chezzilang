@@ -1517,8 +1517,12 @@ impl Checker {
         ty: &Ty,
         item: &Ty,
     ) -> Option<Result<(), Option<String>>> {
+        // A type-parameter needle fits only an element it joins with: `may_be_equal` accepts any
+        // `T` (a generic body is checked once, erased), and the run then faults on `1 in "abc"`.
+        let param_needle = matches!(item, Ty::Param(_));
         let fits = |elem: &Ty| {
-            self.may_be_equal(item, elem) || self.join_ty(elem, item) || self.assignable(elem, item)
+            self.join_ty(elem, item)
+                || (!param_needle && (self.may_be_equal(item, elem) || self.assignable(elem, item)))
         };
         match ty {
             Ty::List(e) => Some(if !fits(e) {
@@ -1532,8 +1536,9 @@ impl Checker {
             Ty::Map(k, _) => Some(if fits(k) { Ok(()) } else { Err(None) }),
             Ty::Str => Some(if fits(&Ty::Str) { Ok(()) } else { Err(None) }),
             Ty::Bytes | Ty::ByteArray => Some(match item {
-                Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown | Ty::Param(_) => Ok(()),
-                Ty::Float
+                Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => Ok(()),
+                Ty::Param(_)
+                | Ty::Float
                 | Ty::Bool
                 | Ty::Str
                 | Ty::Nil

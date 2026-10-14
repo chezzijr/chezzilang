@@ -1623,13 +1623,6 @@ impl Vm {
         Ok(())
     }
 
-    /// `x in container` — membership test. Pops `[x, container]`, pushes a `Bool`. Dispatches on the
-    /// container kind, reusing the same equality / hashing the `.contains`/`.has` methods use: a
-    /// list/set tests element membership, a map tests KEY membership (Python-style), a str tests
-    /// substring. The checker has already type-directed this; the runtime is the fallback.
-    /// `#[inline(never)]` keeps `step`'s own stack frame lean (its String/Vec locals would otherwise
-    /// bloat the deep-recursion path `step → run_proto → run_until → step`).
-    #[inline(never)]
     /// The bytes of a `bytes` or `bytearray` value; `None` for any other value.
     fn byte_contents(&self, v: Value) -> Option<Vec<u8>> {
         let h = v.as_obj()?;
@@ -1642,6 +1635,14 @@ impl Vm {
         }
     }
 
+    /// `x in container` — membership test. Pops `[x, container]`, pushes a `Bool`. Dispatches on the
+    /// container kind, reusing the same equality / hashing the `.contains` methods use: a
+    /// list/set tests element membership, a map tests KEY membership (Python-style), a str tests
+    /// substring, bytes/bytearray test an int byte or a subsequence. The checker has already
+    /// type-directed this; the runtime is the fallback.
+    /// `#[inline(never)]` keeps `step`'s own stack frame lean (its String/Vec locals would otherwise
+    /// bloat the deep-recursion path `step → run_proto → run_until → step`).
+    #[inline(never)]
     pub(super) fn op_contains(&mut self, span: Span) -> Result<(), RuntimeError> {
         let container = self.pop();
         let needle = self.pop();

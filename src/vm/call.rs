@@ -2076,54 +2076,9 @@ impl Vm {
                 Container::Bytes => self.bytes_method(h, method, &args, span),
                 Container::ByteArray => self.bytearray_method(h, method, &args, span),
             };
-            let result = match dispatched {
-                Ok(v) => v,
-                // W6-3 — MISS-only fallback to the intrinsic `Index`/`IndexSet`/`Slice`/`Hashable`
-                // methods the checker grants these built-ins. NAME-GATED because a dispatcher error
-                // is not necessarily a name miss (`Set.add` on a cyclic key, `list.pop` on empty…)
-                // and rewriting an existing fault message would be a regression; none of the three
-                // dispatchers owns any of the gated names, so the gate is exact. Zero cost unless the
-                // dispatch already failed.
-                Err(e) => {
-                    // W7-8 adds `as_path` (the `PathLike` grant on str/bytes/bytearray) to the gate;
-                    // M23 adds `eq` (the `Eq` grant on `str` — the one scalar that is heap-backed and
-                    // so lands in this container dispatcher rather than the inline-scalar path); TICKET-146 adds
-                    // `compare` (the `Comparable` grant on a tuple / `List`).
-                    if !matches!(
-                        method,
-                        "index"
-                            | "set_index"
-                            | "slice"
-                            | "hash"
-                            | "as_path"
-                            | "eq"
-                            | "compare"
-                            | "contains"
-                            | "str"
-                            | "add"
-                            | "sub"
-                            | "bitand"
-                            | "bitor"
-                            | "bitxor"
-                            | "shl"
-                            | "shr"
-                    ) {
-                        return Err(e);
-                    }
-                    // TICKET-257: `contains` (List/Set/Map/str) and `Set.add` are real methods, so
-                    // their errors are not misses; only bytes/bytearray `contains` and the
-                    // other receivers' `add` are intrinsic. A real method's fault stays as it is.
-                    let own_method = (method == "contains" && matches!(container, Container::Core))
-                        || (method == "add" && matches!(self.heap.get(h), Obj::Set(_)));
-                    if own_method {
-                        return Err(e);
-                    }
-                    match self.intrinsic_proto_method(recv, method, &args, span)? {
-                        Some(v) => v,
-                        None => return Err(e),
-                    }
-                }
-            };
+            // A name miss inside a dispatcher falls to the intrinsic protocol methods through
+            // `container_method_miss`; any other error is the dispatcher's own and stays as it is.
+            let result = dispatched?;
             self.push(result);
             return Ok(());
         }
@@ -3506,6 +3461,24 @@ impl Vm {
         }
     }
 
+    /// The miss arm of `core_method`, `bytes_method` and `bytearray_method`: a name no dispatcher
+    /// owns is tried as an intrinsic protocol method the checker grants this built-in (W6-3), and
+    /// only then is a `has no method` fault. Reached from a miss alone, so a real method's fault
+    /// keeps its own message.
+    fn container_method_miss(
+        &mut self,
+        h: GcRef,
+        type_name: &str,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        match self.intrinsic_proto_method(Value::obj(h), method, args, span)? {
+            Some(v) => Ok(v),
+            None => Err(self.err(format!("type {type_name} has no method '{method}'"), span)),
+        }
+    }
+
     pub(super) fn core_method(
         &mut self,
         h: GcRef,
@@ -3924,7 +3897,7 @@ impl Vm {
                             }
                         }
                     }
-                    _ => Err(self.err(format!("type str has no method '{method}'"), span)),
+                    _ => self.container_method_miss(h, "str", method, args, span),
                 }
             }
             Obj::List(items) => {
@@ -4259,7 +4232,7 @@ impl Vm {
                         self.pop(); // unroot outer
                         Ok(Value::obj(outer))
                     }
-                    _ => Err(self.err(format!("type list has no method '{method}'"), span)),
+                    _ => self.container_method_miss(h, "list", method, args, span),
                 }
             }
             Obj::Map(m) => match method {
@@ -4405,7 +4378,7 @@ impl Vm {
                         Ok(Value::nil())
                     }
                 }
-                _ => Err(self.err(format!("type map has no method '{method}'"), span)),
+                _ => self.container_method_miss(h, "map", method, args, span),
             },
             Obj::Set(s) => match method {
                 "len" => {
@@ -4512,7 +4485,7 @@ impl Vm {
                     }
                     Ok(Value::obj(self.heap.alloc(Obj::Set(out))))
                 }
-                _ => Err(self.err(format!("type set has no method '{method}'"), span)),
+                _ => self.container_method_miss(h, "set", method, args, span),
             },
             Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -4650,7 +4623,7 @@ impl Vm {
                 let dup = b.clone();
                 Ok(Value::obj(self.heap.alloc(Obj::ByteArray(dup))))
             }
-            _ => Err(self.err(format!("type bytearray has no method '{method}'"), span)),
+            _ => self.container_method_miss(h, "bytearray", method, args, span),
         }
     }
 
@@ -4701,7 +4674,7 @@ impl Vm {
                 let out: Box<[u8]> = b.iter().rev().copied().collect();
                 Ok(Value::obj(self.heap.alloc(Obj::Bytes(out))))
             }
-            _ => Err(self.err(format!("type bytes has no method '{method}'"), span)),
+            _ => self.container_method_miss(h, "bytes", method, args, span),
         }
     }
 

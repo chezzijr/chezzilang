@@ -3123,7 +3123,10 @@ impl Checker {
         }
         // `c.contains(x)` on a builtin container asks the same needle rule as `x in c` and the
         // `Contains[X]` bound (`builtin_contains_verdict`). bytes and bytearray have no such method.
-        if method == "contains" && args.len() == 1 && !matches!(obj_ty, Ty::Bytes | Ty::ByteArray) {
+        if self.hook_requirement("Contains", method).is_some()
+            && args.len() == 1
+            && !matches!(obj_ty, Ty::Bytes | Ty::ByteArray)
+        {
             let item = self.infer(&args[0]);
             if let Some(verdict) = self.builtin_contains_verdict(&obj_ty, &item) {
                 match verdict {

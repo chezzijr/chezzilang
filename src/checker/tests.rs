@@ -40925,6 +40925,27 @@ fn builtin_list_satisfies_contains_bound_like_the_in_operator() {
     );
 }
 
+/// TICKET-257 review — a type-parameter needle is not a wildcard: `x in s` with `x: T` faulted at run
+/// time on `f("abc", 1)`, and base rejected it. A `T` needle still fits a container of `T`.
+#[test]
+fn type_param_needle_is_rejected_for_a_concrete_container() {
+    rejects(
+        "fn f[T](s: str, x: T) -> bool:\n    return x in s\n\nfn main():\n    print(f(\"abc\", 1))\n",
+        "cannot test membership",
+    );
+    rejects(
+        "fn g[T](b: bytes, x: T) -> bool:\n    return x in b\n\nfn main():\n    print(g(b\"abc\", \"b\"))\n",
+        "cannot test membership",
+    );
+    rejects(
+        "fn h[T](s: Set[int], x: T) -> bool:\n    return x in s\n\nfn main():\n    print(h({1}, 1))\n",
+        "cannot test membership",
+    );
+    ok(
+        "fn k[T: Eq](xs: List[T], x: T) -> bool:\n    return x in xs\n\nfn main():\n    print(k([1], 1))\n",
+    );
+}
+
 /// TICKET-257 — `RecvKind::ALL` lists every variant, in declaration order. The exhaustive `match`
 /// has no wildcard, so a new variant fails the build here until it gets an index.
 #[test]
