@@ -4456,9 +4456,7 @@ impl Checker {
         let either_unknown = l.is_unknown() || r.is_unknown();
         match op {
             Lt | LtEq | Gt | GtEq => {
-                let ok = (l.is_numeric() && r.is_numeric())
-                    || (*l == Ty::Str && *r == Ty::Str)
-                    || self.ordering_allowed(l, r);
+                let ok = (l.is_numeric() && r.is_numeric()) || self.ordering_allowed(l, r);
                 if !ok && !either_unknown {
                     let [l_s, r_s] = Ty::render_distinct([l, r]);
                     let note = self.hook_name_note(l, "Comparable", "compare");

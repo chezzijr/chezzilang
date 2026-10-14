@@ -21120,6 +21120,26 @@ fn intrinsic_grants_all_have_vm_arms() {
         )
     };
     let type_errors = |src: &str| -> Vec<String> {
+        // A probe that imports a native std module (`Shared`, `RwShared`, `Atomic`) resolves only
+        // through `build_graph`, the wire the CLI uses; a single-module check cannot see the type.
+        if src.contains("import std.") {
+            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("chezzi_vm_probe_{}_{}", std::process::id(), n));
+            std::fs::create_dir_all(&dir).unwrap();
+            let entry = dir.join("main.chz");
+            std::fs::write(&entry, src).unwrap();
+            let graph = crate::resolver::build_graph(&entry).expect("probe should resolve");
+            let errs = crate::checker::check_graph(&graph)
+                .err()
+                .unwrap_or_default()
+                .iter()
+                .map(|e| e.message.clone())
+                .collect();
+            let _ = std::fs::remove_dir_all(&dir);
+            return errs;
+        }
         let tokens = crate::lexer::tokenize(src).expect("probe should lex");
         let module = crate::parser::parse(tokens).expect("probe should parse");
         crate::checker::check(&module)

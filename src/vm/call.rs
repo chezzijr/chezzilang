@@ -1818,6 +1818,25 @@ impl Vm {
             self.push(result);
             return Ok(());
         }
+        // TICKET-257: the handles are `Eq` by identity (`Eq` grant rows for `Channel`, `Shared`,
+        // `RwShared`, `Atomic`): `x.eq(y)` is `x == y`. No handle declares an `eq` of its own.
+        if method == "eq"
+            && args.len() == 1
+            && matches!(
+                self.heap.get(h),
+                Obj::Channel(_)
+                    | Obj::Shared(_)
+                    | Obj::RwShared(_)
+                    | Obj::Atomic(_)
+                    | Obj::AtomicInt(_)
+                    | Obj::Iter { .. }
+                    | Obj::Generator(_)
+            )
+            && let Some(v) = self.intrinsic_proto_method(recv, method, &args, span)?
+        {
+            self.push(v);
+            return Ok(());
+        }
         // Concurrency C4: `Channel` / `Shared` methods mutate the heap object in place (and `update`
         // re-enters the VM), so dispatch them directly off the handle, like the core-type methods.
         if matches!(self.heap.get(h), Obj::Channel(_)) && method != "iter" {

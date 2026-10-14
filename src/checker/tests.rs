@@ -4344,14 +4344,14 @@ print(same(Wrap(1), Wrap(2)))
 /// deliberate narrowing of "Eq is what `==` accepts"; **the ancestors agree** — Rust's
 /// `slice::Iter` has no `PartialEq`, and CPython's iterators compare by identity with no protocol.
 #[test]
-fn the_builtin_cursor_does_not_satisfy_eq() {
+fn the_builtin_cursor_satisfies_eq_by_identity() {
+    // TICKET-257 (owner rule U5) reverses the earlier narrowing: `c == d` is accepted on a cursor, so
+    // the `Eq` bound accepts it too. The `Iterator` rows of `INTRINSIC_PROTO_METHODS` promise the
+    // runtime arm (`x.eq(y)` is `x == y`), which `intrinsic_grants_all_have_vm_arms` runs.
     for recv in ["[1, 2].iter()", "gen()"] {
-        entry_rejects(
-            &format!(
-                "fn gen() -> Iterator[int]:\n    yield 1\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm({recv}, {recv}))\n"
-            ),
-            "type Iterator[int] does not satisfy Eq",
-        );
+        entry_ok(&format!(
+            "fn gen() -> Iterator[int]:\n    yield 1\nfn eqm[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(eqm({recv}, {recv}))\n"
+        ));
     }
     // A USER struct with `next` is a genuine `Obj::Struct` at runtime and keeps the grant.
     entry_ok(
@@ -4670,18 +4670,12 @@ fn ho() -> int?:
     ] {
         entry_ok(&format!("{EQB}print(Box({payload}) == Box({payload}))\n"));
     }
-    // A payload Chezzi compares by IDENTITY through a HANDLE — a `Channel` — does NOT satisfy `Eq`,
-    // so `where T: Eq` over it stays rejected. This printed `true` before W7-41 and is a deliberate
-    // BEHAVIOR CHANGE on the `==` path: the METHOD spelling `Box(c).eq(Box(c))` already rejected it,
-    // on the pre-W7-41 binary, with the same reason. Making the operator agree with the method is
-    // precisely what W7-41 is, so this is the inconsistency closing, not a new one. **rustc 1.97.0,
-    // measured:** `Boxy(Sender<i32>) == Boxy(…)` is `error[E0369]` / `note: Sender<i32> does not
-    // implement Eq` — Chezzi says the same thing for the same reason (Go is stricter still:
-    // `invalid operation: f == h (func can only be compared to nil)`).
-    entry_rejects(
-        &format!("{EQB}print(Box(Channel[int](1)) == Box(Channel[int](1)))\n"),
-        "for equality — Box[",
-    );
+    // TICKET-257 (owner rule U5): a payload Chezzi compares by IDENTITY through a HANDLE — a
+    // `Channel` — satisfies `Eq`, exactly as `ch == ch` is accepted, so `where T: Eq` over it holds.
+    // Before this ticket the bound rejected it while the operator accepted it.
+    entry_ok(&format!(
+        "{EQB}print(Box(Channel[int](1)) == Box(Channel[int](1)))\n"
+    ));
     // W7-53: an UNBOUNDED operand is no longer tolerated at either nesting — `f`'s own definition must
     // carry `where T: Eq` (matching rustc's `E0369`/Go's "incomparable types"), so both now reject
     // AT THE DEFINITION instead of type-checking clean and faulting at `f`'s call three lines later
@@ -5347,10 +5341,9 @@ fn use_it(a: HasIt, b: HasIt) -> bool:
     return eqm(a, b)
 ",
     );
-    // The cursor ITSELF is still refused the grant — that is the D1 arm's job, not the walk's.
-    entry_rejects(
+    // The cursor ITSELF satisfies `Eq` by identity (TICKET-257).
+    entry_ok(
         "fn eqm[T: Eq](a: T, b: T) -> bool:\n    return a == b\nprint(eqm([1, 2].iter(), [1, 2].iter()))\n",
-        "type Iterator[int] does not satisfy Eq",
     );
 }
 
@@ -41260,6 +41253,16 @@ fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String,
     }
 }
 
+/// The grid's checker: a program that imports a native std module (`Shared`, `RwShared`, `Atomic`)
+/// resolves only through `build_graph`; every other program uses the single-module check.
+fn grid_check(src: &str) -> Vec<CheckError> {
+    if src.contains("import std.") {
+        check_entry(src)
+    } else {
+        check_src(src)
+    }
+}
+
 /// TICKET-257 (owner rule U5) — an operator accepts a type exactly when the type satisfies the
 /// operator's protocol. Every cell of `RecvKind::ALL` x `HOOKS` runs the operator form and the bound
 /// form and requires the same answer, plus the expected answer where the sample states one.
@@ -41271,8 +41274,8 @@ fn builtin_operator_and_bound_agree_grid() {
         for kind in RecvKind::ALL {
             for sample in grid_samples(kind) {
                 for (label, op, bound, want) in grid_programs(row.protocol, &sample) {
-                    let op_ok = check_src(&op).is_empty();
-                    let bound_ok = check_src(&bound).is_empty();
+                    let op_ok = grid_check(&op).is_empty();
+                    let bound_ok = grid_check(&bound).is_empty();
                     let agree = if row.protocol == "Iterator" {
                         !bound_ok || op_ok
                     } else {
@@ -41354,5 +41357,22 @@ fn bit_operator_protocols_accept_and_reject_boundaries() {
     rejects(
         "fn orr[T: BitOr](a: T, b: T) -> T:\n    return a | b\nx := orr(1.5, 2.5)\n",
         "BitOr",
+    );
+}
+
+/// TICKET-257 — bytes and bytearray order like str, through `Comparable`; handles are `Eq`.
+#[test]
+fn bytes_order_and_handles_compare_through_protocols() {
+    ok(
+        "a := b\"a\" < b\"b\"\nb := bytearray(b\"a\") < bytearray(b\"b\")\nc := b\"a\" < bytearray(b\"b\")\n",
+    );
+    ok(
+        "fn lt[T: Comparable](a: T, b: T) -> bool:\n    return a < b\nx := lt(b\"a\", b\"b\")\ny := lt(bytearray(b\"a\"), bytearray(b\"b\"))\n",
+    );
+    rejects("x := b\"a\" < \"b\"\n", "cannot compare");
+    rejects("x := b\"a\" < 1\n", "cannot compare");
+    rejects("x := \"a\" < b\"b\"\n", "cannot compare");
+    entry_ok(
+        "import std.concurrency\nfn same[T: Eq](a: T, b: T) -> bool:\n    return a == b\nch := Channel[int](1)\nx := same(ch, ch)\n",
     );
 }

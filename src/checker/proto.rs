@@ -309,6 +309,8 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     ("Comparable", "compare", RecvKind::Int),
     ("Comparable", "compare", RecvKind::Float),
     ("Comparable", "compare", RecvKind::Str),
+    ("Comparable", "compare", RecvKind::Bytes),
+    ("Comparable", "compare", RecvKind::ByteArray),
     // A tuple / List / Option is Comparable exactly when every element type is (TICKET-146).
     ("Comparable", "compare", RecvKind::Tuple),
     ("Comparable", "compare", RecvKind::List),
@@ -351,6 +353,11 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     ("Eq", "eq", RecvKind::Result),
     ("Eq", "eq", RecvKind::Func),
     ("Eq", "eq", RecvKind::Protocol),
+    ("Eq", "eq", RecvKind::Channel),
+    ("Eq", "eq", RecvKind::Shared),
+    ("Eq", "eq", RecvKind::RwShared),
+    ("Eq", "eq", RecvKind::Atomic),
+    ("Eq", "eq", RecvKind::Cursor),
     // Stringable — all four scalars.
     ("Stringable", "str", RecvKind::Int),
     ("Stringable", "str", RecvKind::Float),
@@ -2446,7 +2453,12 @@ impl Checker {
                 return self.grant_intrinsic(protocol, ty);
             }
         }
-        if protocol == "Comparable" && matches!(ty, Ty::Int | Ty::Float | Ty::Str) {
+        if protocol == "Comparable"
+            && matches!(
+                ty,
+                Ty::Int | Ty::Float | Ty::Str | Ty::Bytes | Ty::ByteArray
+            )
+        {
             return self.grant_intrinsic(protocol, ty);
         }
         // **D1 — `Eq` satisfaction IS what `==` accepts.** Chezzi's structural `==` is an automatic
@@ -2504,14 +2516,10 @@ impl Checker {
         // equality walk REACHES is a declared `eq` whose `where` bounds fail for this instantiation
         // (W7-41's actual defect). Its `Some` is the refusal, and **its `None` is this grant**, which
         // is why every "cannot tell" inside it answers `Some`.
+        // TICKET-257: the handles (`Channel`/`Shared`/`RwShared`/`Atomic`) and the built-in cursor are
+        // `Eq` by IDENTITY, exactly as `==` already accepts them; each has a `RecvKind` and a row.
         if protocol == "Eq"
-            && Self::intrinsic_recv_kind(ty).is_some_and(|k| {
-                !matches!(
-                    k,
-                    RecvKind::Channel | RecvKind::Shared | RecvKind::RwShared | RecvKind::Atomic
-                )
-            })
-            && !Self::is_cursor_ty(ty)
+            && Self::intrinsic_recv_kind(ty).is_some()
             && self.hook_method(ty, "Eq", "eq").is_none()
         {
             return match self.eq_bounds_unsatisfied(ty) {
@@ -3620,6 +3628,13 @@ impl Checker {
             {
                 self.satisfies(l, protocol).is_ok()
             }
+            // TICKET-257: two str / bytes / bytearray operands ask `Comparable` like any pair of one
+            // kind. The mixed `bytes < bytearray` pair has no `Self`-typed protocol form and stays an
+            // operator form (CPython orders it; so does `compare_op`).
+            (Ty::Str, Ty::Str) | (Ty::Bytes, Ty::Bytes) | (Ty::ByteArray, Ty::ByteArray) => {
+                self.satisfies(l, protocol).is_ok()
+            }
+            (Ty::Bytes, Ty::ByteArray) | (Ty::ByteArray, Ty::Bytes) => true,
             // TICKET-146: a tuple / `List` / `Option` pair orders lexicographically when every
             // element type is Comparable; `compatible` keeps `(int, int) < (int, str)` out.
             (Ty::Tuple(_), Ty::Tuple(_))
