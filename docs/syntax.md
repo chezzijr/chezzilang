@@ -132,8 +132,8 @@ explicit future non-goal). `"héllo".encode().decode() == "héllo"` round-trips 
 char; `b"\xff\xfe".decode()` faults **recoverably** (catchable by `recover:`), never a panic.
 
 `List(it)` / `Set(it)` / `Map(it)` accept **any for-iterable** — exactly what `for x in it` accepts:
-`list`, `set`, `str` (per-char `str`), `bytes`/`bytearray` (per-byte `int`), `map` (its keys),
-a `Range` value, and a user struct with `next(self) -> T?`. They do **not** require a formal
+`list`, `set`, `str` (per-char `str`), `bytes`/`bytearray` (per-byte `int`), `map` (`(key, value)` pairs),
+`Channel` (`List(ch)` drains it until the channel is closed and empty), a `Range` value, and a user struct with `next(self) -> T?`. They do **not** require a formal
 `Iterable[T]` bound — they reuse the same internal iterable union as the `for` loop. The empty
 **container constructors** are first-class: `List[T]()` / `Map[K, V]()` / `Set[T]()` take a
 **turbofish** that pins the element/key/value type, and the bare `List()` / `Map()` / `Set()`
