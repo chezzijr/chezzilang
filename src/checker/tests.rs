@@ -41492,10 +41492,37 @@ fn bytes_order_and_handles_compare_through_protocols() {
 }
 
 /// TICKET-259 (U10) — a type name is never a value. One grid: type-name kind x value position,
-/// every cell the same "is a type, not a value" error.
+/// every cell the same "is a type, not a value" error. The builtin kinds come from
+/// `BuiltinType::ALL` and `std.ffi`'s declared types, not from a hand list.
 #[test]
 fn type_name_is_never_a_value_grid() {
-    let kinds = ["P", "E.V", "str", "int", "float", "bool", "bytes"];
+    const PRELUDE: &str = "import am
+struct P:
+    x: int
+    fn mk(a: int) -> P:
+        return P(a)
+enum E[T]:
+    V(T)
+    A
+protocol Pr:
+    fn name(self) -> str
+type Al = P
+type Ci = int
+type Lt = List[int]
+type Tp = (int, str)
+type Fa = fn(int) -> int
+type Qa = Pr
+import V from E
+fn top(a: int) -> int:
+    return a
+";
+    const LIB: &str = "type C = int
+type L = List[int]
+struct S:
+    x: int
+enum F:
+    W(int)
+";
     let positions = [
         "print([1, 2].map(T).len())\n",
         "v := T\n",
@@ -41505,23 +41532,135 @@ fn type_name_is_never_a_value_grid() {
         "m := {1: T}\n",
         "g := fn(e): T\n",
     ];
+    let run =
+        |body: &str| check_files(&[("am.chz", LIB), ("main.chz", &format!("{PRELUDE}{body}"))]);
+    let is_type_error = |errs: &[CheckError]| {
+        errs.iter()
+            .any(|e| e.message.contains("is a type, not a value"))
+    };
+
+    let mut kinds: Vec<String> = [
+        "P",
+        "E",
+        "Pr",
+        "Al",
+        "Ci",
+        "Lt",
+        "Tp",
+        "Fa",
+        "Qa",
+        "E.V",
+        "E[int].V",
+        "V",
+        "List[int]",
+    ]
+    .iter()
+    .map(|k| k.to_string())
+    .collect();
+    kinds.extend(BuiltinType::ALL.iter().map(|b| b.name().to_string()));
+    kinds.extend(
+        crate::native::ffi::declared_types()
+            .iter()
+            .filter(|d| BuiltinType::from_name(&d.name).is_none())
+            .map(|d| d.name.clone()),
+    );
+    kinds.extend(
+        ["am.C", "am.L", "am.S", "am.F.W"]
+            .iter()
+            .map(|k| k.to_string()),
+    );
+
     let mut missed = Vec::new();
-    for kind in kinds {
+    for kind in &kinds {
         for pos in positions {
             let body = pos.replace('T', kind);
-            let src = format!("struct P:\n    x: int\nenum E:\n    V(int)\n{body}");
-            let errs = check_src(&src);
-            if !errs
-                .iter()
-                .any(|e| e.message.contains("is a type, not a value"))
-            {
+            let errs = run(&body);
+            if !is_type_error(&errs) {
                 missed.push(format!("{kind} in {pos:?}: {errs:?}"));
             }
+        }
+    }
+
+    // `Self` is a type inside an inherent method body.
+    for pos in positions {
+        let indented: String = pos
+            .replace('T', "Self")
+            .lines()
+            .map(|l| format!("        {l}\n"))
+            .collect();
+        // The parser accepts no default method body in a protocol, so the struct method is the one
+        // place `Self` is a type inside a body.
+        let src = format!("struct SS:\n    x: int\n    fn m(self):\n{indented}");
+        let errs = check_src(&src);
+        if !is_type_error(&errs) {
+            missed.push(format!("Self in a struct method, {pos:?}: {errs:?}"));
+        }
+    }
+
+    // Every builtin type still resolves as an annotation: the value rule must not touch a type position.
+    for b in BuiltinType::ALL {
+        let n = b.name();
+        let src = match b {
+            BuiltinType::Int
+            | BuiltinType::Float
+            | BuiltinType::Bool
+            | BuiltinType::Str
+            | BuiltinType::Bytes
+            | BuiltinType::ByteArray
+            | BuiltinType::Range => format!("fn f(x: {n}):\n    pass\n"),
+            BuiltinType::Iterator | BuiltinType::List | BuiltinType::Set | BuiltinType::Channel => {
+                format!("fn f(x: {n}[int]):\n    pass\n")
+            }
+            BuiltinType::Map => "fn f(x: Map[int, int]):\n    pass\n".to_string(),
+            BuiltinType::Socket | BuiltinType::Listener => {
+                format!("import std.net\nfn f(x: {n}):\n    pass\n")
+            }
+            BuiltinType::Writer | BuiltinType::Reader => {
+                format!("import std.io\nfn f(x: {n}):\n    pass\n")
+            }
+            BuiltinType::Ptr => format!("import std.ffi\nfn f(x: {n}):\n    pass\n"),
+            BuiltinType::OwnedStr => {
+                "import std.ffi\nextern \"libc\":\n    fn getenv(name: str) -> owned_str\n"
+                    .to_string()
+            }
+            BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic => {
+                format!("import std.concurrency\nfn f(x: {n}[int]):\n    pass\n")
+            }
+            BuiltinType::AtomicInt | BuiltinType::Executor => {
+                format!("import std.concurrency\nfn f(x: {n}):\n    pass\n")
+            }
+        };
+        let errs = check_files(&[("main.chz", &src)]);
+        if !errs.is_empty() {
+            missed.push(format!("annotation {n}: {errs:?}"));
         }
     }
     assert!(
         missed.is_empty(),
         "type name read as a value was not rejected as a type:\n{}",
         missed.join("\n")
+    );
+
+    // Still values: a payload-less variant, a top-level fn, a method through its type, a lambda, a
+    // nested fn. Other errors (`cannot infer ...`, `declares no return type`) are allowed.
+    let mut wrong = Vec::new();
+    for kind in ["E.A", "P.mk", "top", "fn(e: int) -> int: e"] {
+        for pos in positions {
+            let errs = run(&pos.replace('T', kind));
+            if is_type_error(&errs) {
+                wrong.push(format!("{kind} in {pos:?}: {errs:?}"));
+            }
+        }
+    }
+    let errs = run(
+        "fn outer():\n    fn nf(a: int) -> int:\n        return a\n    v := nf\n    print(v(1))\n",
+    );
+    if is_type_error(&errs) {
+        wrong.push(format!("nested fn: {errs:?}"));
+    }
+    assert!(
+        wrong.is_empty(),
+        "a value was reported as a type:\n{}",
+        wrong.join("\n")
     );
 }
