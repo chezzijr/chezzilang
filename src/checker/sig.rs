@@ -3168,12 +3168,9 @@ impl Checker {
                             self.infer_arg(value, Some(&target_ty))
                         } else {
                             // TICKET-258 (U15): `x OP= v` is `x = x OP v`, whose operand
-                            // `infer_binary` seeds with the slot type. Seed, never wrap.
-                            // The operand is an arithmetic child, so it meets no width slot.
-                            let covered = std::mem::replace(&mut self.arith_parent, true);
-                            let t = self.infer_arg_seeded(value, &target_ty);
-                            self.arith_parent = covered;
-                            t
+                            // `infer_binary` seeds with the slot type. Seed, never wrap. The seed
+                            // is the slot's scalar: a compound operand meets no width slot.
+                            self.infer_arg_seeded(value, target_ty.scalar())
                         }
                     } else {
                         self.infer_value(value)

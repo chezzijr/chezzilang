@@ -28206,6 +28206,15 @@ fn compound_operand_gets_the_slot_hint_like_its_desugar() {
     );
 }
 
+// TICKET-258 (U15): a compound operand meets the i64 constant-overflow scan the desugar's does.
+#[test]
+fn compound_operand_constant_overflow_rejected() {
+    let needle = "does not fit in int";
+    rejects("x := 1\nx += 1 << 63\n", needle);
+    rejects("x := 1\nx *= -(-9223372036854775807 - 1)\n", needle);
+    rejects("x := 1\nx += 9223372036854775807 + 1\n", needle);
+}
+
 #[test]
 fn index_set_asymmetric_plain_write_still_ok() {
     // NO-OVER-REJECTION: a plain `=` NEVER reads through `index`, so an asymmetric pair stays legal

@@ -63,6 +63,12 @@ const OPERANDS: &[Operands] = &[
         rhs: "2.5",
     },
     Operands {
+        name: "int_const_overflow",
+        ty: "int",
+        init: "0",
+        rhs: "(9223372036854775807 + 1)",
+    },
+    Operands {
         name: "int8_const",
         ty: "int8",
         init: "12",
