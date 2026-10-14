@@ -4309,29 +4309,17 @@ impl Checker {
                 Ty::Bool
             }
             Add => {
-                if l == Ty::Str && r == Ty::Str {
-                    Ty::Str
-                } else if l.is_numeric() && r.is_numeric() {
+                if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, "Add") {
                     t
-                } else if let (Ty::List(le), Ty::List(re)) = (&l, &r) {
-                    // List concat (gap #3): `[1,2] + [3,4]` → `list[T]`, identical to `.concat`.
-                    // Element types must be compatible; an empty `[]` side (Unknown elem) is
-                    // joined by `merge_unknown` so `[] + [1]` infers `list[int]`.
-                    if let Some(m) = self.join_fill(le, re) {
-                        Ty::List(Box::new(m))
-                    } else {
-                        let [l_s, r_s] = Ty::render_distinct([&l, &r]);
-                        self.error(
-                            lhs.span,
-                            format!(
-                                "cannot apply + to {l_s} and {r_s}{}",
-                                float_fix_note_join(&l, &r)
-                            ),
-                        );
-                        Ty::Unknown
-                    }
+                } else if matches!(
+                    (&l, &r),
+                    (Ty::Bytes, Ty::ByteArray) | (Ty::ByteArray, Ty::Bytes)
+                ) {
+                    // Mixed bytes/bytearray `+` has no `Self`-typed protocol form; the result is
+                    // the left operand's type (CPython: `b"a" + bytearray(b"b")` is `b"ab"`).
+                    l.clone()
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
@@ -4361,24 +4349,6 @@ impl Checker {
                 } else if op == Mul && matches!((&l, &r), (Ty::Int, Ty::List(_))) {
                     // Commutative, Python-style: `3 * [0]` → `list[T]`.
                     r.clone()
-                } else if op == Sub
-                    && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
-                {
-                    // Set difference (gap #3): `a - b` → `set[T]`, identical to `.difference`.
-                    if let Some(m) = self.join_fill(le, re) {
-                        Ty::Set(Box::new(m))
-                    } else {
-                        let [l_s, r_s] = Ty::render_distinct([&l, &r]);
-                        self.error(
-                            lhs.span,
-                            format!(
-                                "cannot apply {} to {l_s} and {r_s}{}",
-                                op_sym(op),
-                                float_fix_note_join(&l, &r)
-                            ),
-                        );
-                        Ty::Unknown
-                    }
                 } else if either_unknown {
                     Ty::Unknown
                 } else {

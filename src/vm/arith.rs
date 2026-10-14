@@ -820,6 +820,23 @@ impl Vm {
                             let h = self.heap.alloc(Obj::Str(s.into()));
                             Value::obj(h)
                         }
+                        // bytes / bytearray concat: the left operand's type (CPython).
+                        (Obj::Bytes(a), Obj::Bytes(b)) => {
+                            let out: Box<[u8]> = a.iter().chain(b.iter()).copied().collect();
+                            Value::obj(self.heap.alloc(Obj::Bytes(out)))
+                        }
+                        (Obj::ByteArray(a), Obj::ByteArray(b)) => {
+                            let out: Vec<u8> = a.iter().chain(b.iter()).copied().collect();
+                            Value::obj(self.heap.alloc(Obj::ByteArray(out)))
+                        }
+                        (Obj::ByteArray(a), Obj::Bytes(b)) => {
+                            let out: Vec<u8> = a.iter().chain(b.iter()).copied().collect();
+                            Value::obj(self.heap.alloc(Obj::ByteArray(out)))
+                        }
+                        (Obj::Bytes(a), Obj::ByteArray(b)) => {
+                            let out: Box<[u8]> = a.iter().chain(b.iter()).copied().collect();
+                            Value::obj(self.heap.alloc(Obj::Bytes(out)))
+                        }
                         // List concat (gap #3): `[1,2] + [3,4]` — identical to `.concat` (vm:7688).
                         (Obj::List(a), Obj::List(b)) => {
                             let mut out = a.clone();

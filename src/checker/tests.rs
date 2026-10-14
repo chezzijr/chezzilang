@@ -26121,7 +26121,7 @@ fn generic_fn_value_unsatisfiable_rejected() {
 #[test]
 fn generic_fn_value_turbofish_bound_violation_rejected() {
     rejects(
-        "fn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h := addone[str]\n    print(h(\"a\"))\n",
+        "fn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h := addone[bool]\n    print(h(true))\n",
         "Add",
     );
 }
@@ -26129,7 +26129,7 @@ fn generic_fn_value_turbofish_bound_violation_rejected() {
 #[test]
 fn generic_fn_value_annot_bound_violation_rejected() {
     rejects(
-        "fn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h: fn(str) -> str = addone\n",
+        "fn addone[T: Add](x: T) -> T:\n    return x + x\n\nfn main():\n    h: fn(bool) -> bool = addone\n",
         "Add",
     );
 }
@@ -41299,4 +41299,19 @@ fn map_and_set_has_is_a_migration_error_naming_contains() {
         );
     }
     ok("m := {1: 2}\nb := m.contains(1)\ns := {1, 2}\nc := s.contains(1)\n");
+}
+
+/// TICKET-257 — `+` and `-` on builtin types ask `Add` and `Sub`. What the grant must NOT allow:
+/// mixed element types, a set `+`, a str `-`, str + bytes.
+#[test]
+fn builtin_add_sub_accept_and_reject_boundaries() {
+    ok(
+        "a := b\"a\" + bytearray(b\"b\")\nb := bytearray(b\"a\") + b\"b\"\nc := [] + [1]\nd := {1, 2} - {1}\ne := \"a\" + \"b\"\n",
+    );
+    rejects("x := [1] + [\"a\"]\n", "cannot apply + to");
+    rejects("x := {1} + {2}\n", "cannot apply + to");
+    rejects("x := \"a\" - \"b\"\n", "cannot apply - to");
+    rejects("x := b\"a\" + \"b\"\n", "cannot apply + to");
+    rejects("x := \"a\" + 1\n", "cannot apply + to");
+    rejects("x := [1] - [1]\n", "cannot apply - to");
 }

@@ -412,8 +412,13 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     // The operator protocols — int/float natively.
     ("Add", "add", RecvKind::Int),
     ("Add", "add", RecvKind::Float),
+    ("Add", "add", RecvKind::Str),
+    ("Add", "add", RecvKind::Bytes),
+    ("Add", "add", RecvKind::ByteArray),
+    ("Add", "add", RecvKind::List),
     ("Sub", "sub", RecvKind::Int),
     ("Sub", "sub", RecvKind::Float),
+    ("Sub", "sub", RecvKind::Set),
     ("Mul", "mul", RecvKind::Int),
     ("Mul", "mul", RecvKind::Float),
     ("Div", "div", RecvKind::Int),
@@ -2716,12 +2721,9 @@ impl Checker {
                 Err(format!("type {ty} does not satisfy {protocol_display}"))
             };
         }
-        // The numeric operator protocols are satisfied intrinsically by int/float (their `+ - * / %`
-        // and unary `-` are the primitive ops), so a `[T: Add + Mul]` / `[T: Div]` / `[T: Neg]`
-        // generic works over numbers as well as structs.
-        if matches!(protocol, "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg")
-            && matches!(ty, Ty::Int | Ty::Float)
-        {
+        // The operator protocols a BUILTIN type satisfies (`builtin_arith_kind`): int/float natively,
+        // plus `+` on str, bytes, bytearray and List and `-` on Set (TICKET-257, owner rule U5).
+        if Self::builtin_arith_kind(protocol, ty) {
             return self.grant_intrinsic(protocol, ty);
         }
         // A bound type parameter satisfies a protocol if that protocol is among its declared bounds —
@@ -3514,6 +3516,46 @@ impl Checker {
         self.satisfies_methods(ty, protocol, args, pinfo, &table)
     }
 
+    /// Does builtin type `ty` satisfy the arithmetic operator protocol `protocol`? The one table
+    /// behind `+ - * / %` and unary `-` on builtins; `infer_binary` reaches it through
+    /// [`Self::op_overload_result`] and a `[T: Add]` bound reaches it through `satisfies_args_d`.
+    fn builtin_arith_kind(protocol: &str, ty: &Ty) -> bool {
+        match ty {
+            Ty::Int | Ty::Float => {
+                matches!(protocol, "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg")
+            }
+            Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::List(_) => protocol == "Add",
+            Ty::Set(_) => protocol == "Sub",
+            Ty::Bool
+            | Ty::Nil
+            | Ty::Map(..)
+            | Ty::Tuple(_)
+            | Ty::Struct(..)
+            | Ty::Enum(..)
+            | Ty::Option(_)
+            | Ty::Result(..)
+            | Ty::Func { .. }
+            | Ty::BuiltinFn { .. }
+            | Ty::Protocol(..)
+            | Ty::Param(_)
+            | Ty::Channel(_)
+            | Ty::Shared(_)
+            | Ty::Atomic(_)
+            | Ty::AtomicInt
+            | Ty::RwShared(_)
+            | Ty::Executor
+            | Ty::Socket
+            | Ty::Listener
+            | Ty::Writer
+            | Ty::Reader
+            | Ty::Ptr
+            | Ty::Width(_)
+            | Ty::Module(_)
+            | Ty::Unknown
+            | Ty::Var(_) => false,
+        }
+    }
+
     /// Result type of an overloaded arithmetic operator (`+`/`-`/`*`) on two operands of the *same*
     /// struct or type-parameter that satisfies `protocol` (`Add`/`Sub`/`Mul`). The runtime dispatches
     /// to the `add`/`sub`/`mul` method; the result type is that same type. `None` ⇒ not overloadable.
@@ -3524,21 +3566,26 @@ impl Checker {
         // the result `Box[int]` for a value carrying a `Box[str]` (the returned type the checker can't
         // honor → runtime type confusion). `compatible` checks name + pairwise-compatible targs; an
         // `Unknown` targ on a partially-inferred side still unifies (no false rejection there).
-        let same = match (l, r) {
-            (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..)) => self.join_ty(l, r),
-            (Ty::Param(a), Ty::Param(b)) => a == b,
+        let joined: Option<Ty> = match (l, r) {
+            (Ty::Struct(..), Ty::Struct(..)) | (Ty::Enum(..), Ty::Enum(..)) => {
+                self.join_ty(l, r).then(|| l.clone())
+            }
+            (Ty::Param(a), Ty::Param(b)) => (a == b).then(|| l.clone()),
+            // Builtin containers: two operands of one kind are joined (an empty `[]` side takes the
+            // other's element, `[] + [1]` is `List[int]`) and the joined type is asked the protocol.
+            (Ty::Str, Ty::Str) | (Ty::Bytes, Ty::Bytes) | (Ty::ByteArray, Ty::ByteArray) => {
+                Some(l.clone())
+            }
+            (Ty::List(le), Ty::List(re)) => self.join_fill(le, re).map(|m| Ty::List(Box::new(m))),
+            (Ty::Set(le), Ty::Set(re)) => self.join_fill(le, re).map(|m| Ty::Set(Box::new(m))),
             // NOT `(Ty::Protocol, Ty::Protocol)`: every operator protocol's method is
             // `(self, Self) -> Self`, and two values of one protocol need not hold the same witness
             // (`Vecish + Vecish` over a `V` and a `W`), so the pair is un-dispatchable by object
             // safety — see `self_in_param_position`. Bind the operands together with a generic
             // parameter (`[T: Vecish](a: T, b: T)`) and this works, soundly.
-            _ => false,
+            _ => None,
         };
-        if same && self.satisfies(l, protocol).is_ok() {
-            Some(l.clone())
-        } else {
-            None
-        }
+        joined.filter(|t| self.satisfies(t, protocol).is_ok())
     }
 
     /// Are `l < r` etc. allowed? True for same-named comparable type params, or same-named structs

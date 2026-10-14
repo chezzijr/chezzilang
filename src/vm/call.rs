@@ -2080,6 +2080,8 @@ impl Vm {
                             | "eq"
                             | "compare"
                             | "contains"
+                            | "add"
+                            | "sub"
                     ) {
                         return Err(e);
                     }
