@@ -40892,3 +40892,12 @@ fn builtin_slice_matches_what_slice_result_slices() {
         );
     }
 }
+
+#[test]
+fn builtin_list_satisfies_contains_bound_like_the_in_operator() {
+    // U5: `2 in [1, 2]` type-checks, so `List[int]` must satisfy `Contains[int]`.
+    ok("fn main():\n    print(2 in [1, 2])\n");
+    ok(
+        "fn has[C: Contains[int]](c: C) -> bool:\n    return 2 in c\n\nfn main():\n    print(has([1, 2]))\n",
+    );
+}
