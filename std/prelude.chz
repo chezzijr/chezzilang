@@ -314,6 +314,21 @@ protocol Mod:
 protocol Neg:
     fn neg(self) -> Self
 
+protocol BitAnd:
+    fn bitand(self, other: Self) -> Self
+
+protocol BitOr:
+    fn bitor(self, other: Self) -> Self
+
+protocol BitXor:
+    fn bitxor(self, other: Self) -> Self
+
+protocol Shl:
+    fn shl(self, other: Self) -> Self
+
+protocol Shr:
+    fn shr(self, other: Self) -> Self
+
 protocol Arithmetic:
     Add + Sub + Mul + Div
 

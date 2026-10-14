@@ -2082,6 +2082,11 @@ impl Vm {
                             | "contains"
                             | "add"
                             | "sub"
+                            | "bitand"
+                            | "bitor"
+                            | "bitxor"
+                            | "shl"
+                            | "shr"
                     ) {
                         return Err(e);
                     }
@@ -3292,6 +3297,23 @@ impl Vm {
             self.push(recv);
             self.push(args[0]);
             self.arith(&bin, span)?;
+            return Ok(Some(self.pop()));
+        }
+        // `BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr` → the bitwise primitive.
+        let bit = match method {
+            "bitand" => Some(Op::BitAnd),
+            "bitor" => Some(Op::BitOr),
+            "bitxor" => Some(Op::BitXor),
+            "shl" => Some(Op::Shl),
+            "shr" => Some(Op::Shr),
+            _ => None,
+        };
+        if let Some(bit) = bit
+            && args.len() == 1
+        {
+            self.push(recv);
+            self.push(args[0]);
+            self.bitwise(&bit, span)?;
             return Ok(Some(self.pop()));
         }
         match (method, args.len()) {

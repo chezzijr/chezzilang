@@ -1088,6 +1088,11 @@ impl Vm {
             Op::Mul => Hook::Mul,
             Op::Div => Hook::Div,
             Op::Mod => Hook::Mod,
+            Op::BitAnd => Hook::BitAnd,
+            Op::BitOr => Hook::BitOr,
+            Op::BitXor => Hook::BitXor,
+            Op::Shl => Hook::Shl,
+            Op::Shr => Hook::Shr,
             Op::ConstInt(_)
             | Op::ConstFloat(_)
             | Op::ConstStr(_)
@@ -1114,11 +1119,6 @@ impl Vm {
             | Op::GtEq
             | Op::Eq
             | Op::NotEq
-            | Op::BitAnd
-            | Op::BitOr
-            | Op::BitXor
-            | Op::Shl
-            | Op::Shr
             | Op::Contains
             | Op::AsBool
             | Op::AsInt
@@ -1476,6 +1476,14 @@ impl Vm {
             self.make_int(v)
         } else {
             match (l.view(), r.view()) {
+                // Bit-operator overloading: two structs (or enums) dispatch to `bitand`/`bitor`/
+                // `bitxor`/`shl`/`shr` (the `BitAnd`..`Shr` protocols); the checker verified it.
+                (ValueView::Obj(ha), ValueView::Obj(hb))
+                    if matches!(self.heap.get(ha), Obj::Struct { .. } | Obj::Enum { .. })
+                        && matches!(self.heap.get(hb), Obj::Struct { .. } | Obj::Enum { .. }) =>
+                {
+                    self.struct_arith(op, l, r, span)?
+                }
                 // Set algebra (gap #3): `|`→union, `&`→intersection, `^`→symmetric-difference on two
                 // sets. (`<< >>` stay int-only and fall through to the error below.) Identical to the
                 // `.union`/`.intersection` methods; `^` has no method form. Mirrors interp.

@@ -4398,32 +4398,21 @@ impl Checker {
             BitAnd | BitOr | BitXor | Shl | Shr => {
                 if l == Ty::Int && r == Ty::Int {
                     Ty::Int
-                } else if matches!(op, BitAnd | BitOr | BitXor)
-                    && let (Ty::Set(le), Ty::Set(re)) = (&l, &r)
+                } else if let Some(t) =
+                    binary_protocol(op).and_then(|p| self.op_overload_result(&l, &r, p))
                 {
-                    // Set `|`→union, `&`→intersection, `^`→symmetric-difference → `set[T]`,
-                    // identical to the `.union`/`.intersection` methods (`^` has no method form).
-                    if let Some(m) = self.join_fill(le, re) {
-                        Ty::Set(Box::new(m))
-                    } else {
-                        let [l_s, r_s] = Ty::render_distinct([&l, &r]);
-                        self.error(
-                            lhs.span,
-                            format!(
-                                "bitwise operator {} requires int operands or two sets, found {l_s} and {r_s}",
-                                op_sym(op)
-                            ),
-                        );
-                        Ty::Unknown
-                    }
+                    t
                 } else if either_unknown {
                     Ty::Unknown
                 } else {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
+                    let note = binary_protocol(op).map_or(String::new(), |p| {
+                        self.hook_name_note(&l, p, &p.to_lowercase())
+                    });
                     self.error(
                         lhs.span,
                         format!(
-                            "bitwise operator {} requires int operands or two sets, found {l_s} and {r_s}",
+                            "bitwise operator {} requires int operands or two sets, found {l_s} and {r_s}{note}",
                             op_sym(op)
                         ),
                     );

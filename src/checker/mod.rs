@@ -622,6 +622,11 @@ pub(crate) const RESERVED_PROTOCOLS: &[&str] = &[
     "Div",
     "Mod",
     "Neg",
+    "BitAnd",
+    "BitOr",
+    "BitXor",
+    "Shl",
+    "Shr",
     "Arithmetic",
     "Num",
     "Iterator",
@@ -1461,6 +1466,11 @@ pub enum Hook {
     Mod,
     Neg,
     Contains,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 /// One row per hook. `Checker::hook_verdict` decides each row for a declared type; nothing else
@@ -1587,6 +1597,41 @@ pub const HOOKS: &[HookRow] = &[
         protocol: "Contains",
         method: "contains",
         operator: "in",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::BitAnd,
+        protocol: "BitAnd",
+        method: "bitand",
+        operator: "&",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::BitOr,
+        protocol: "BitOr",
+        method: "bitor",
+        operator: "|",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::BitXor,
+        protocol: "BitXor",
+        method: "bitxor",
+        operator: "^",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Shl,
+        protocol: "Shl",
+        method: "shl",
+        operator: "<<",
+        total: false,
+    },
+    HookRow {
+        hook: Hook::Shr,
+        protocol: "Shr",
+        method: "shr",
+        operator: ">>",
         total: false,
     },
 ];
@@ -3411,6 +3456,11 @@ fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
         ("Mul", "mul"),
         ("Div", "div"),
         ("Mod", "mod"),
+        ("BitAnd", "bitand"),
+        ("BitOr", "bitor"),
+        ("BitXor", "bitxor"),
+        ("Shl", "shl"),
+        ("Shr", "shr"),
     ] {
         m.insert(
             proto.to_string(),
@@ -4434,6 +4484,28 @@ fn numeric_result(l: &Ty, r: &Ty) -> Ty {
         Ty::Float
     } else {
         Ty::Int
+    }
+}
+
+/// The reserved protocol an operator asks. The one operator-to-protocol map; `None` for the
+/// short-circuit `and` / `or`. Exhaustive: a new `BinaryOp` fails the build here.
+pub(crate) fn binary_protocol(op: BinaryOp) -> Option<&'static str> {
+    use BinaryOp::*;
+    match op {
+        Add => Some("Add"),
+        Sub => Some("Sub"),
+        Mul => Some("Mul"),
+        Div => Some("Div"),
+        Mod => Some("Mod"),
+        Lt | LtEq | Gt | GtEq => Some("Comparable"),
+        Eq | NotEq => Some("Eq"),
+        In => Some("Contains"),
+        BitAnd => Some("BitAnd"),
+        BitOr => Some("BitOr"),
+        BitXor => Some("BitXor"),
+        Shl => Some("Shl"),
+        Shr => Some("Shr"),
+        And | Or => None,
     }
 }
 

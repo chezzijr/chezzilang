@@ -240,6 +240,11 @@ fn hooks() -> Vec<Hook> {
         arith("mul", "Mul", "*"),
         arith("div", "Div", "/"),
         arith("mod", "Mod", "%"),
+        arith("bitand", "BitAnd", "&"),
+        arith("bitor", "BitOr", "|"),
+        arith("bitxor", "BitXor", "^"),
+        arith("shl", "Shl", "<<"),
+        arith("shr", "Shr", ">>"),
         Hook {
             name: "neg",
             proto: "Neg",
@@ -887,7 +892,8 @@ fn declaration_verdict_failures() -> Vec<String> {
                 ),
             ],
             "neg" => vec![operand("neg(self) -> X[int]".to_string(), "return MK(1)")],
-            "add" | "sub" | "mul" | "div" | "mod" => vec![operand(
+            "add" | "sub" | "mul" | "div" | "mod" | "bitand" | "bitor" | "bitxor" | "shl"
+            | "shr" => vec![operand(
                 format!("{n}(self, other: X[int]) -> X[int]"),
                 "return other",
             )],

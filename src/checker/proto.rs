@@ -427,6 +427,14 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     ("Mod", "mod", RecvKind::Float),
     ("Neg", "neg", RecvKind::Int),
     ("Neg", "neg", RecvKind::Float),
+    ("BitAnd", "bitand", RecvKind::Int),
+    ("BitAnd", "bitand", RecvKind::Set),
+    ("BitOr", "bitor", RecvKind::Int),
+    ("BitOr", "bitor", RecvKind::Set),
+    ("BitXor", "bitxor", RecvKind::Int),
+    ("BitXor", "bitxor", RecvKind::Set),
+    ("Shl", "shl", RecvKind::Int),
+    ("Shr", "shr", RecvKind::Int),
 ];
 
 /// The one list of receiver kinds [`INTRINSIC_PROTO_METHODS`] is indexed by: the granted `Ty`'s
@@ -3521,11 +3529,23 @@ impl Checker {
     /// [`Self::op_overload_result`] and a `[T: Add]` bound reaches it through `satisfies_args_d`.
     fn builtin_arith_kind(protocol: &str, ty: &Ty) -> bool {
         match ty {
-            Ty::Int | Ty::Float => {
-                matches!(protocol, "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg")
-            }
+            Ty::Int => matches!(
+                protocol,
+                "Add"
+                    | "Sub"
+                    | "Mul"
+                    | "Div"
+                    | "Mod"
+                    | "Neg"
+                    | "BitAnd"
+                    | "BitOr"
+                    | "BitXor"
+                    | "Shl"
+                    | "Shr"
+            ),
+            Ty::Float => matches!(protocol, "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg"),
             Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::List(_) => protocol == "Add",
-            Ty::Set(_) => protocol == "Sub",
+            Ty::Set(_) => matches!(protocol, "Sub" | "BitAnd" | "BitOr" | "BitXor"),
             Ty::Bool
             | Ty::Nil
             | Ty::Map(..)

@@ -41146,6 +41146,11 @@ fn grid_programs(protocol: &str, s: &GridSample) -> Vec<(String, String, String,
         "Mul" => vec![bin("Mul", "*", "T")],
         "Div" => vec![bin("Div", "/", "T")],
         "Mod" => vec![bin("Mod", "%", "T")],
+        "BitAnd" => vec![bin("BitAnd", "&", "T")],
+        "BitOr" => vec![bin("BitOr", "|", "T")],
+        "BitXor" => vec![bin("BitXor", "^", "T")],
+        "Shl" => vec![bin("Shl", "<<", "T")],
+        "Shr" => vec![bin("Shr", ">>", "T")],
         "Eq" => vec![bin("Eq", "==", "bool")],
         "Comparable" => vec![bin("Comparable", "<", "bool")],
         "Neg" => vec![one(
@@ -41314,4 +41319,24 @@ fn builtin_add_sub_accept_and_reject_boundaries() {
     rejects("x := b\"a\" + \"b\"\n", "cannot apply + to");
     rejects("x := \"a\" + 1\n", "cannot apply + to");
     rejects("x := [1] - [1]\n", "cannot apply - to");
+}
+
+/// TICKET-257 — the bit operators ask `BitAnd`..`Shr`. A struct with `bitor` gets `|` only.
+#[test]
+fn bit_operator_protocols_accept_and_reject_boundaries() {
+    let decl = "struct B:\n    n: int\n    fn bitor(self, other: Self) -> Self:\n        return B(self.n)\n";
+    ok(&format!(
+        "{decl}x := B(1) | B(2)\ny := {{1}} | {{2}}\nz := 1 << 2\n"
+    ));
+    rejects(&format!("{decl}x := B(1) & B(2)\n"), "bitwise operator &");
+    rejects("x := 1.5 | 2.5\n", "bitwise operator |");
+    rejects("x := \"a\" & \"b\"\n", "bitwise operator &");
+    rejects("x := {1} << {2}\n", "bitwise operator <<");
+    ok(
+        "fn orr[T: BitOr](a: T, b: T) -> T:\n    return a | b\nx := orr({1}, {2})\ny := orr(1, 2)\n",
+    );
+    rejects(
+        "fn orr[T: BitOr](a: T, b: T) -> T:\n    return a | b\nx := orr(1.5, 2.5)\n",
+        "BitOr",
+    );
 }
