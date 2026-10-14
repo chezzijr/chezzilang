@@ -1,0 +1,34 @@
+# TICKET-258 (owner rule U15): `x OP= v` means `x = x OP v` for every type. An operator returns a
+# new value and never mutates an operand, so an alias taken before the statement keeps its value.
+# Run: `cargo run -- test tests/chz/spec/compound_assign_returns_new_value_test.chz`.
+
+test fn list_plus_assign_does_not_change_an_alias():
+    xs := [1]
+    ys := xs
+    xs += [2]
+    assert xs == [1, 2]
+    assert ys == [1]
+
+test fn set_union_assign_does_not_change_an_alias():
+    s := {1}
+    t := s
+    s |= {2}
+    assert s == {1, 2}
+    assert t == {1}
+
+struct Holder:
+    items: List[int]
+
+test fn list_plus_assign_on_a_field_does_not_change_an_alias():
+    h := Holder([1])
+    old := h.items
+    h.items += [2]
+    assert h.items == [1, 2]
+    assert old == [1]
+
+test fn list_plus_assign_on_an_index_does_not_change_an_alias():
+    rows := [[1]]
+    old := rows[0]
+    rows[0] += [2]
+    assert rows[0] == [1, 2]
+    assert old == [1]
