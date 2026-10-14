@@ -3139,8 +3139,9 @@ reinvented; none is scheduled. (B3–B5 itself is planned in [`concurrency-b3.md
   - **`try_send(v) -> bool`** — the non-blocking partner of `send` (mirrors `try_recv` vs `recv`);
     `false` = the send can't proceed: the channel is **closed** OR a **bounded** channel is **full**.
     `true` once queued. (An unbounded channel is never full, so there `false` means only closed.)
-  - `try_recv` unchanged (closed reads as `None`); comprehension-over-channel rejected (use the `for`
-    form). Implementation notes in PROGRESS.md + [`concurrency-tier-d.md`](concurrency-tier-d.md).
+  - `try_recv` unchanged (closed reads as `None`); a `Channel[T]` is an `Iterable[T]` (TICKET-257): `for v in ch`, a
+    comprehension and `List(ch)` / `Set(ch)` drain it until it is closed and empty (Rust
+    `rx.iter().collect()`, Go `for v := range ch`), so `List(ch)` blocks until a sender closes it. Implementation notes in PROGRESS.md + [`concurrency-tier-d.md`](concurrency-tier-d.md).
 
 - **A3b — `Executor.submit` capture sendability gate** *(✅ shipped in B3.6)*.
   `submit` ran the closure in-heap at the drain (no airlock, unlike `spawn`'s deep-clone), so a

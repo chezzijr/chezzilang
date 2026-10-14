@@ -1617,16 +1617,19 @@ for i in Range(10, 0, -1):   # 10, 9, 8, … , 1
 for item in items:     # iterate a list
     print(item)
 
-for k in counts:       # iterate a map → its keys (insertion order)
+for kv in counts:      # iterate a map → (key, value) pairs (insertion order)
+    print(kv)
+
+for k in counts.keys():  # the keys are `counts.keys()`
     print(k)
 
-for k, v in counts:    # iterate a map's entries → key + value
+for k, v in counts:    # two names unpack each (key, value) pair like any tuple element
     print("{k}={v}")
 
 for a, b in pairs:     # destructure a tuple element — N names over any iterable of tupleN: a
     print("{a}:{b}")   #    List[(A, B)], a generator, an .iter() cursor, a `next` struct, a
-                        #    Channel[(A, B)] or an Iterable[(A, B)] value (one name binds the whole
-                        #    tuple; a Map binds key + value instead). enumerate/zip live in std.iter.
+                        #    Channel[(A, B)], a Map or an Iterable[(A, B)] value (one name binds the whole
+                        #    tuple). enumerate/zip live in std.iter.
 
 # `for` over a List/Map/Set iterates a SNAPSHOT of the SPINE, taken once when the loop starts —
 # shallow: the elements are the same objects (mutating a struct element IS visible), but pushing,
@@ -1684,7 +1687,7 @@ total([1, 2, 3])           # 6   (a set, a map's keys, a cursor or a generator w
 pipe := Mapped(Take([10, 20, 30, 40].iter(), 2), fn(x): x * 2)   # a list → Take → Mapped
 for v in pipe:             # 20, 40
     print(v)
-it := {1: "a", 2: "b"}.iter()   # map iterates KEYS; str → 1-char str; bytes/bytearray → int 0..=255
+it := {1: "a", 2: "b"}.iter()   # map iterates (key, value) pairs; str → 1-char str; bytes/bytearray → int 0..=255
 print(it.next())           # 1
 # `Iterable` is the LOOSER sibling of `Iterator`: an `Iterable` only promises `iter()`; an `Iterator`
 # also has `next`. So every `Iterator` IS `Iterable` — `iter()` on a cursor / generator returns SELF
@@ -2910,7 +2913,7 @@ explicitly; only these two recover them.) Recovery unifies **structurally**, so 
 `IntoIterator` vs `Iterator`, or Go's `range` vs an iterator value:
 
 * `[S: Iterable[T], T]` — **anything you can iterate.** Built-in `list`/`set`/`map`/`str`/`bytes`/
-  `bytearray` (str → str, map → its keys) intrinsically, plus a `.iter()` cursor, a generator's
+  `bytearray` (str → str, map → its (key, value) pairs, a Channel → each received value) intrinsically, plus a `.iter()` cursor, a generator's
   `Iterator[T]`, and any struct with `next(self) -> T?`. Use this whenever the body just does
   `for x in xs`. **This is the one you want by default.** (A struct with ONLY `iter` satisfies the
   protocol but does not get `T` recovered — see the mechanics below.)
@@ -4599,13 +4602,14 @@ or enum defining `compare`), stable, in place.
 Map methods: `m.get(k)→V?` `m.contains(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
 `m.items()→List[(K, V)]` (insertion order, so `Map(m.items()) == m`) `m.copy()→map` (shallow);
 `m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,
-→ None); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m`
-/ `for k, v in m`.
+→ None); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. A Map iterates its
+`(key, value)` pairs (`for k, v in m`, `[kv for kv in m]`, `List(m)`, `Iterable[(K, V)]`); the keys
+are `m.keys()`, and `k in m` tests a key (`Contains[K]`).
 
 Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
 set is `Set()`; `Set(list)` builds one from a list). Elements are any `Hashable` type (int/str/bool,
 a struct with `hash(self) -> int`, or a tuple of those).
-Methods: `s.add(x)` `s.remove(x)→bool` `s.contains(x)` `s.len()` `s.union(t)` `s.intersection(t)`
+Methods: `s.add(x)` `s.remove(x)→bool` `s.contains(x)` (Map and Set spell membership `contains`; `has` is removed) `s.len()` `s.union(t)` `s.intersection(t)`
 `s.difference(t)` `s.copy()→set` (shallow); iterate with `for x in s`. `==` is order-independent.
 
 ## 11. Pipe operator `|>`

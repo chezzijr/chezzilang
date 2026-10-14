@@ -999,7 +999,12 @@ guaranteed: equal values hash equally, and it agrees with container membership.
 
 The intrinsic grants and their methods are: `Comparable`→`compare`, `Eq`→`eq`, `Stringable`→`str`,
 `Hashable`→`hash`, `Error`→`message`, `Iterable`→`iter`, `Index`→`index`, `IndexSet`→`index`+`set_index`,
-`Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`/`sub`/`mul`/`div`/`mod`, `Neg`→`neg`. A type that
+`Slice`→`slice`, `Add`/`Sub`/`Mul`/`Div`/`Mod`→`add`/`sub`/`mul`/`div`/`mod`, `Neg`→`neg`,
+`BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr`→`bitand`/`bitor`/`bitxor`/`shl`/`shr`, `Contains`→`contains`.
+**An operator accepts a builtin type exactly when that type satisfies the operator's protocol**
+(TICKET-257, owner rule U5): `"a" + "b"`, `[1] + [2]`, `b"a" + b"b"` ask `Add`; `{1} - {2}` asks
+`Sub`; `{1} | {2}` asks `BitOr`; `98 in b"abc"` asks `Contains`; every value satisfies `Stringable`.
+A type that
 DEFINES the method always gets its own (intrinsic dispatch is a resolution fallback, never a shadow).
 
 `line()`/`col()`/`file()` are callable through the `Error` existential (W8-22) but are **not**
