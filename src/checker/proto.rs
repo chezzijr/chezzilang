@@ -387,6 +387,7 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     ("Iterable", "iter", RecvKind::Bytes),
     ("Iterable", "iter", RecvKind::ByteArray),
     ("Iterable", "iter", RecvKind::Struct),
+    ("Iterable", "iter", RecvKind::Channel),
     ("Iterable", "iter", RecvKind::Cursor),
     // Iterator — only a struct/cursor holds the position `next` needs (W6-3b: a raw collection does
     // NOT satisfy `Iterator`, only `Iterable`).

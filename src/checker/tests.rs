@@ -12936,12 +12936,9 @@ fn nested_comp_guard_after_nonfinal_clause_typechecks() {
 }
 
 #[test]
-fn nested_comp_channel_in_later_clause_rejected() {
-    // The channel-drain rejection must run per clause, not just the first.
-    entry_rejects(
-        "fn main():\n    ch := Channel[int]()\n    xs := [c for x in [1, 2] for c in ch]\n",
-        "a channel cannot be drained in a comprehension",
-    );
+fn nested_comp_channel_in_later_clause_checks() {
+    // A channel in a later clause is an iterable like any other.
+    entry_ok("fn main():\n    ch := Channel[int]()\n    xs := [c for x in [1, 2] for c in ch]\n");
 }
 
 #[test]
@@ -16610,7 +16607,7 @@ fn for_over_channel_binds_element() {
 fn for_over_channel_two_vars_rejected() {
     rejects(
         "fn main():\n    ch := Channel[int]()\n    for k, v in ch:\n        print(k)\nmain()\n",
-        "single loop variable",
+        "requires a tuple element",
     );
 }
 
@@ -16620,12 +16617,13 @@ fn close_on_non_channel_rejected() {
 }
 
 #[test]
-fn comprehension_over_channel_rejected() {
-    // A comprehension over a channel would diverge between engines (VM drains, interp oracle can't);
-    // reject it on both — `for v in ch:` is the channel-draining form.
+fn comprehension_over_channel_checks() {
+    // A Channel[T] is an Iterable[T] (owner U6): a comprehension drains it until it is closed.
+    ok("fn main():\n    ch := Channel[int]()\n    xs := [v for v in ch]\n    print(xs)\nmain()\n");
+    // The element type is the channel's: a str slot rejects an int element.
     rejects(
-        "fn main():\n    ch := Channel[int]()\n    xs := [v for v in ch]\n    print(xs)\nmain()\n",
-        "channel cannot be drained in a comprehension",
+        "fn main():\n    ch := Channel[int]()\n    xs: List[str] = [v for v in ch]\n    print(xs)\nmain()\n",
+        "",
     );
 }
 
@@ -20788,7 +20786,7 @@ fn for_multi_name_rejects_non_tuple_and_wrong_arity() {
     );
     rejects(
         "fn main():\n    ch := Channel[int](1)\n    ch.close()\n    for a, b in ch:\n        print(a)\nmain()\n",
-        "a channel iterator binds a single loop variable",
+        "`for k, v` requires a tuple element, found Channel[int]",
     );
     rejects(
         "fn main():\n    for a, b in 0..3:\n        print(a)\nmain()\n",

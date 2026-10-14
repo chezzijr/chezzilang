@@ -1771,10 +1771,13 @@ impl Vm {
         enum Step {
             Generator,
             NextHook,
+            Channel,
         }
         let step = match self.heap.get(h) {
             Obj::Generator(_) => Step::Generator,
             Obj::Struct { .. } | Obj::Enum { .. } if self.hook_of(v, Hook::Next) => Step::NextHook,
+            // A channel drains until it is closed and empty (Rust `rx.iter().collect()`).
+            Obj::Channel(_) => Step::Channel,
             Obj::Str(_)
             | Obj::Bytes(_)
             | Obj::ByteArray(_)
@@ -1795,7 +1798,6 @@ impl Vm {
             | Obj::Builtin(_)
             | Obj::Cffi(_)
             | Obj::Ptr(_)
-            | Obj::Channel(_)
             | Obj::Shared(_)
             | Obj::RwShared(_)
             | Obj::Atomic(_)
@@ -1815,6 +1817,26 @@ impl Vm {
         let result = (|| {
             loop {
                 let res = match step {
+                    // One value per receive, through the same entry `recv` and `for v in ch` use:
+                    // under `guarded` an M:N fiber demotes (blocks in place) instead of parking,
+                    // so no `ip` rewind replays the surrounding `List(...)` call (DEC-181).
+                    Step::Channel => {
+                        let w = match self.guarded(|vm| vm.recv_step_or_demote(h, span))? {
+                            RecvStep::Got(w) => {
+                                self.wake_senders(h); // freed a slot — wake a parked bounded sender
+                                w
+                            }
+                            RecvStep::Filled(w) => w,
+                            RecvStep::ClosedEmpty => break,
+                            RecvStep::Parked => unreachable!("a re-entered recv never parks"),
+                        };
+                        let item = self.from_wire(w);
+                        let Obj::List(buf) = self.heap.get_mut(acc) else {
+                            unreachable!()
+                        };
+                        buf.push(item);
+                        continue;
+                    }
                     Step::Generator => self.generator_next(h, span)?,
                     Step::NextHook => self
                         .guarded(|vm| vm.invoke_hook(Hook::Next, v, &[], span))?

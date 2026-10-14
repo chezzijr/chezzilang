@@ -5921,6 +5921,9 @@ impl Checker {
             Ty::Bytes | Ty::ByteArray => Some(Ty::Int),
             // A Map iterates its `(key, value)` pairs (owner U9); `m.keys()` gives the keys.
             Ty::Map(k, v) => Some(Ty::Tuple(vec![(**k).clone(), (**v).clone()])),
+            // A channel yields each received value and ends when it is closed and drained (Go's
+            // `for v := range ch`, Rust's `rx.iter()`).
+            Ty::Channel(e) => Some((**e).clone()),
             // `Iterator[T]` value (a generator result): element type is its single type argument.
             Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
                 Some(args[0].clone())
@@ -5937,7 +5940,6 @@ impl Checker {
             | Ty::Param(_)
             | Ty::Result(..)
             | Ty::Option(_)
-            | Ty::Channel(_)
             | Ty::Shared(_)
             | Ty::Atomic(_)
             | Ty::AtomicInt
@@ -6405,21 +6407,11 @@ impl Checker {
                     }
                 }
             }
-            // `for a, b in ch` over a `Channel[(A, B)]`: each received tuple destructures (TICKET-113).
-            Ty::Channel(elem) if vars.len() > 1 && matches!(**elem, Ty::Tuple(_)) => self
-                .for_tuple_bindings(vars, elem, iter.span)
-                .expect("a tuple element always binds"),
-            Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Set(_) | Ty::Channel(_)
-                if vars.len() != 1 =>
-            {
-                if matches!(it, Ty::Channel(_)) {
-                    self.error(iter.span, "a channel iterator binds a single loop variable");
-                } else {
-                    self.error(
-                        iter.span,
-                        format!("`for k, v` requires a tuple element, found {it}"),
-                    );
-                }
+            Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Set(_) if vars.len() != 1 => {
+                self.error(
+                    iter.span,
+                    format!("`for k, v` requires a tuple element, found {it}"),
+                );
                 unknowns(vars)
             }
             Ty::List(inner) => vec![(vars[0].clone(), (**inner).clone())],
@@ -6427,9 +6419,6 @@ impl Checker {
             Ty::Str => vec![(vars[0].clone(), Ty::Str)],
             // `for x in bytes:`/`for x in bytearray:` bind a single `int` (0–255).
             Ty::Bytes | Ty::ByteArray => vec![(vars[0].clone(), Ty::Int)],
-            // `for v in ch:` over a `Channel[T]` blocks for each value and ends when the channel is
-            // closed-and-drained (Go's `for v := range ch`). Binds a single element of type `T`.
-            Ty::Channel(elem) => vec![(vars[0].clone(), (**elem).clone())],
             Ty::Unknown => unknowns(vars),
             Ty::Param(_) => {
                 // A bounded type parameter binds the element `iterable_elem` reads off its bound.
@@ -6508,6 +6497,7 @@ impl Checker {
             | other @ Ty::Enum(..)
             | other @ Ty::Result(..)
             | other @ Ty::Option(_)
+            | other @ Ty::Channel(_)
             | other @ Ty::Shared(_)
             | other @ Ty::Atomic(_)
             | other @ Ty::AtomicInt

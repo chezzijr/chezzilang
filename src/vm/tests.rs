@@ -20985,8 +20985,8 @@ fn intrinsic_grants_all_have_vm_arms() {
         ),
         r(
             RecvKind::Channel,
-            "import std.concurrency\n",
-            "Channel[int](1)",
+            "import std.concurrency\nfn mkc() -> Channel[int]:\n    c := Channel[int](1)\n    c.close()\n    return c\n",
+            "mkc()",
             "-",
             "-",
             "int",

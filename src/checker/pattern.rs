@@ -4106,17 +4106,6 @@ impl Checker {
             // `for_bindings` infers the iter IN the current scope, so later clauses see earlier
             // bindings (the whole point of nesting). Compute before declaring this clause's vars.
             let bindings = self.for_bindings(&clause.vars, &clause.iter);
-            // A comprehension materializes eagerly, but a `Channel` is a blocking iteration form whose
-            // termination depends on `close()`. Draining it into a list/set/map is out of scope; reject
-            // it here instead — the `for v in ch:` statement form is the way to drain a channel.
-            // Checked per clause so a channel in ANY clause is rejected.
-            // Every clause is typed alike (TICKET-253): a range is a value, never a Channel.
-            if matches!(self.infer(&clause.iter), Ty::Channel(_)) {
-                self.error(
-                    clause.iter.span,
-                    "a channel cannot be drained in a comprehension; use the `for v in ch:` statement form",
-                );
-            }
             for (name, ty) in bindings {
                 // Intentionally NOT `mark_loop_var`: a comprehension body is an expression, so its
                 // binding can't be assigned to — no divergence to guard against. If a statement-bearing

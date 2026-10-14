@@ -1820,7 +1820,7 @@ impl Vm {
         }
         // Concurrency C4: `Channel` / `Shared` methods mutate the heap object in place (and `update`
         // re-enters the VM), so dispatch them directly off the handle, like the core-type methods.
-        if matches!(self.heap.get(h), Obj::Channel(_)) {
+        if matches!(self.heap.get(h), Obj::Channel(_)) && method != "iter" {
             self.sched_seed_point();
             let result = self.channel_method(h, method, &args, span)?;
             if self.suspend.is_some() || self.send_suspend.is_some() {
@@ -2000,6 +2000,7 @@ impl Vm {
                     | Obj::Set(_)
                     | Obj::Bytes(_)
                     | Obj::ByteArray(_)
+                    | Obj::Channel(_)
             )
         {
             // `drain_iterable` may alloc (str per-char); root the receiver across the call.
