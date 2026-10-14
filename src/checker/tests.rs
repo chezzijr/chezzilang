@@ -32216,16 +32216,21 @@ fn if_expr_success_coerces_at_option_return_sink() {
     ok("fn opt(n: int) -> int?: (if n > 0: n else: None)\n\nfn main():\n    print(opt(2))\n");
 }
 
+// TICKET-258 (U15): `List += List` rebinds like every compound form, so both guards reject it.
 #[test]
-fn list_plus_equals_ok_through_loop_variable() {
-    ok(
+fn list_plus_equals_rejected_through_loop_variable() {
+    rejects(
         "fn main():\n    lst := [[1], [2]]\n    for row in lst:\n        row += [0]\n    print(lst)\n",
+        "cannot assign to loop variable 'row'",
     );
 }
 
 #[test]
-fn list_plus_equals_ok_through_const_binding() {
-    ok("fn main():\n    xs: const List[int] = [1]\n    xs += [3]\n    print(xs)\n");
+fn list_plus_equals_rejected_through_const_binding() {
+    rejects(
+        "fn main():\n    xs: const List[int] = [1]\n    xs += [3]\n    print(xs)\n",
+        "cannot reassign const binding 'xs'",
+    );
 }
 
 #[test]

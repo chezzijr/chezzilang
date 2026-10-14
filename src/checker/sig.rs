@@ -4426,13 +4426,7 @@ impl Checker {
                 if let Some(s) = self.owning_scope(name) {
                     self.kw_written.insert((s, name.clone()));
                 }
-                // TICKET-107 (W12-14) — `List += List` lowers to `Op::AddInPlace` (DEC-015), which
-                // extends the SAME list and writes the same handle back; it never rebinds the name,
-                // so neither guard below applies. Every other compound form, and `+=` on any other
-                // type, rebinds and stays rejected.
-                let extends_in_place = op == AssignOp::PlusEq
-                    && matches!((&var_ty, &val_ty), (Ty::List(_), Ty::List(_)));
-                if !extends_in_place && self.is_loop_var(name) {
+                if self.is_loop_var(name) {
                     self.error(
                         target.span,
                         format!("cannot assign to loop variable '{name}' (loop variables are rebound each iteration)"),
@@ -4468,7 +4462,7 @@ impl Checker {
                 // every compound `+=`/`-=`/…, which all route through here). Mutating THROUGH it
                 // (`xs.push(v)`, `xs[i] = v`) is a different arm and stays allowed — const is shallow.
                 // A from-imported name never reaches here: the imported-global guard above owns its message, const or not.
-                if !extends_in_place && self.is_const_decl(name) {
+                if self.is_const_decl(name) {
                     self.error(
                         target.span,
                         format!("cannot reassign const binding '{name}'"),
