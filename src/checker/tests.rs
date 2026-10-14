@@ -41750,3 +41750,13 @@ fn recover_block_is_none_bang() {
 fn for_pair_unpacks_a_set_of_tuples() {
     ok("fn main():\n    for a, b in {(1, \"x\")}:\n        print(a, b)\n");
 }
+
+#[test]
+fn width_type_local_annotation_rejected() {
+    // TICKET-262 rule 1: a width type describes the C boundary only. A local annotation is an error
+    // that names the rule and the fix (`int` / `float`).
+    entry_rejects(
+        "import int8 from std.ffi\nfn main():\n    x: int8 = 5\n    print(x)\n",
+        "describes the C boundary only",
+    );
+}
