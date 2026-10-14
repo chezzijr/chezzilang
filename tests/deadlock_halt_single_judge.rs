@@ -10,9 +10,13 @@ import std.time
 fn main():
     s := Shared(0)
     c := Channel[int](0)
+    started := Channel[int](1)
+    fn hold(x: int) -> int:
+        started.send(1)
+        return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): s.update(fn(x: int) -> int: x + c.recv()))
-    time.sleep_ms(50)
+    ex.submit(fn(): s.update(hold))
+    _ := started.recv()
     s.update(fn(x: int) -> int: x + 1)
     print("main: past the guard, s={s.get()}")
     time.sleep_ms(100)
@@ -55,7 +59,7 @@ fn deadlock_on_a_held_guard_ends_the_run_at_the_first_party_site() {
                             .expect("run chezzi");
                         let stdout = String::from_utf8_lossy(&out.stdout);
                         let stderr = String::from_utf8_lossy(&out.stderr);
-                        if stdout.contains("main: past the guard") || !stderr.contains("G.chz:9:5")
+                        if stdout.contains("main: past the guard") || !stderr.contains("G.chz:13:5")
                         {
                             bad.push(format!("run {run}: stdout {stdout:?}"));
                         }
@@ -91,52 +95,61 @@ const ROWS: &[Row] = &[
     Row {
         name: "ex_guard",
         src: r#"import std.concurrency
-import std.time
 fn main():
     s := Shared(0)
     c := Channel[int](0)
+    started := Channel[int](1)
+    fn hold(x: int) -> int:
+        started.send(1)
+        return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): s.update(fn(x: int) -> int: x + c.recv()))
-    time.sleep_ms(50)
+    ex.submit(fn(): s.update(hold))
+    _ := started.recv()
     s.update(fn(x: int) -> int: x + 1)
     print("AFTER")
     ex.shutdown()
 main()
 "#,
-        site: "9:5",
+        site: "12:5",
         after_ok: false,
         test_mode: false,
     },
     Row {
         name: "ex_send",
         src: r#"import std.concurrency
-import std.time
 fn main():
     s := Shared(0)
     c := Channel[int](0)
+    started := Channel[int](1)
+    fn hold(x: int) -> int:
+        started.send(1)
+        return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): s.update(fn(x: int) -> int: x + c.recv()))
-    time.sleep_ms(50)
+    ex.submit(fn(): s.update(hold))
+    _ := started.recv()
     s.update(fn(x: int) -> int: x + 1)
     c.send(1)
     print("AFTER")
     ex.shutdown()
 main()
 "#,
-        site: "9:5",
+        site: "12:5",
         after_ok: false,
         test_mode: false,
     },
     Row {
         name: "ex_rw",
         src: r#"import std.concurrency
-import std.time
 fn main():
     r := RwShared(0)
     c := Channel[int](0)
+    started := Channel[int](1)
+    fn hold(x: int) -> int:
+        started.send(1)
+        return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): r.write(fn(x: int) -> int: x + c.recv()))
-    time.sleep_ms(50)
+    ex.submit(fn(): r.write(hold))
+    _ := started.recv()
     v := r.read(fn(x: int) -> int: x)
     print("AFTER {v}")
     ex.shutdown()
@@ -144,7 +157,7 @@ main()
 "#,
         // TICKET-246: a reader waits for a writer that holds the box, so main is the first party
         // at its `read`, as in `ex_guard`.
-        site: "9:10",
+        site: "12:10",
         after_ok: false,
         test_mode: false,
     },
@@ -208,36 +221,60 @@ main()
     Row {
         name: "sp_guard",
         src: r#"import std.concurrency
-import std.time
 fn main():
     s := Shared(0)
     c := Channel[int](0)
+    started := Channel[int](1)
+    fn hold(x: int) -> int:
+        started.send(1)
+        return x + c.recv()
     parallel:
-        spawn: s.update(fn(x: int) -> int: x + c.recv())
-        time.sleep_ms(50)
+        spawn: s.update(hold)
+        _ := started.recv()
         s.update(fn(x: int) -> int: x + 1)
         print("AFTER")
 main()
 "#,
-        site: "6:5",
+        site: "12:9",
         after_ok: false,
         test_mode: false,
     },
     Row {
         name: "sp_rw",
         src: r#"import std.concurrency
-import std.time
 fn main():
     r := RwShared(0)
     c := Channel[int](0)
+    started := Channel[int](1)
+    fn hold(x: int) -> int:
+        started.send(1)
+        return x + c.recv()
     parallel:
-        spawn: r.write(fn(x: int) -> int: x + c.recv())
-        time.sleep_ms(50)
+        spawn: r.write(hold)
+        _ := started.recv()
         v := r.read(fn(x: int) -> int: x)
         print("AFTER {v}")
 main()
 "#,
-        site: "6:5",
+        site: "12:14",
+        after_ok: false,
+        test_mode: false,
+    },
+    // TICKET-256: the body waits at a full `send` while a spawned task is parked on a channel
+    // nobody sends. The body is the first party, so its `send` line is the report.
+    Row {
+        name: "sp_full_send",
+        src: r#"fn main():
+    a := Channel[int](0)
+    full := Channel[int](1)
+    full.send(0)
+    parallel:
+        spawn: print(a.recv())
+        full.send(1)
+        print("AFTER")
+main()
+"#,
+        site: "7:9",
         after_ok: false,
         test_mode: false,
     },
@@ -279,14 +316,17 @@ main()
     Row {
         name: "ex_guard_test",
         src: r#"import std.concurrency
-import std.time
 
 test fn a_deadlocks():
     s := Shared(0)
     c := Channel[int](0)
+    started := Channel[int](1)
+    fn hold(x: int) -> int:
+        started.send(1)
+        return x + c.recv()
     ex := Executor()
-    ex.submit(fn(): s.update(fn(x: int) -> int: x + c.recv()))
-    time.sleep_ms(50)
+    ex.submit(fn(): s.update(hold))
+    _ := started.recv()
     s.update(fn(x: int) -> int: x + 1)
     print("AFTER")
 
@@ -295,7 +335,7 @@ test fn b_runs():
     ex.submit(fn(): print("B"))
     ex.shutdown()
 "#,
-        site: "10:5",
+        site: "13:5",
         after_ok: false,
         test_mode: true,
     },
@@ -513,6 +553,9 @@ fn run_cell(
 /// The run always ends at the first party's site with one report, and nothing prints after the
 /// verdict (since TICKET-246 a `RwShared.read` waits for a writer too: ex_rw, sp_rw); plus
 /// `CLEANUP_ROWS`, where nothing prints after the verdict and the cause keeps the report.
+/// Since TICKET-256 a `parallel:` body that waits at its own blocking op is the first party, so its
+/// op is the report (`sp_guard`, `sp_rw`, `sp_full_send`); the `parallel:` line reports only when
+/// the body waits at the join (`sp_chan`, `sp_cycle`).
 #[test]
 fn deadlock_verdict_grid_ends_at_the_first_party_site() {
     let dir = std::env::temp_dir().join(format!("chz-ticket223-grid-{}", std::process::id()));
@@ -564,9 +607,9 @@ fn deadlock_verdict_grid_ends_at_the_first_party_site() {
 
 /// TICKET-256 — a guard wait that starts while the sched judge cuts the task that holds the guard.
 /// `started` orders the two tasks without a sleep: the body asks for the guard the moment the
-/// holder is inside its `update` closure. Under the `party` pin the sched judge latches no verdict
-/// (the body has no registered site yet), cuts the holder, and the body's `update` runs and prints
-/// `AFTER`. The cell count is large because the window is a few ms wide; the measured rate on a
+/// holder is inside its `update` closure. Under the `party` pin the sched judge cut the holder
+/// although `decide_since` latched nothing, and the body's `update` ran and printed `AFTER`
+/// (TICKET-256). The cell count is large because the window is a few ms wide; the measured rate on a
 /// 28-core box is about 4 in 100 cells.
 #[test]
 fn guard_deadlock_with_handshake_never_runs_the_body_after_the_verdict() {
@@ -587,7 +630,7 @@ fn main():
         print("AFTER")
 main()
 "#,
-        site: "9:5",
+        site: "12:9",
         after_ok: false,
         test_mode: false,
     };
