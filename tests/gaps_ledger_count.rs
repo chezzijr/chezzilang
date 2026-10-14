@@ -7,7 +7,7 @@
 //! closed row is struck as `| ~~**W<wave>-n**~~ |` and stops matching, and a closed row now lives in
 //! `docs/gaps-archive.md`). The filter was `| **W8-` until 2026-09-20, when the ledger split left it
 //! holding open rows from W8 through W14; a wave-scoped filter would have counted 2 of 11. The two prose counters —
-//! `docs/gaps.md`'s section header and `CLAUDE.md`'s START HERE paragraph — must equal it.
+//! `docs/gaps.md`'s section header and `docs/status-and-roadmap.md`'s ledger paragraph (moved there from `CLAUDE.md`) — must equal it.
 
 use std::fs;
 
@@ -45,9 +45,12 @@ fn open_row_counters_agree_with_the_gaps_table() {
         "docs/gaps.md's section header disagrees with its own table ({rows} unstruck `| **W8-n** |` rows)"
     );
     assert_eq!(
-        claimed(&read("CLAUDE.md"), "CLAUDE.md"),
+        claimed(
+            &read("docs/status-and-roadmap.md"),
+            "docs/status-and-roadmap.md"
+        ),
         rows,
-        "CLAUDE.md's START HERE count disagrees with docs/gaps.md's table ({rows} unstruck rows) — \
+        "docs/status-and-roadmap.md's ledger count disagrees with docs/gaps.md's table ({rows} unstruck rows) — \
          re-derive it with: grep -c '^| \\*\\*W' docs/gaps.md"
     );
 }
