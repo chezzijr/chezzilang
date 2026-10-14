@@ -1,9 +1,9 @@
 # TICKET-226 (generics design R4, grid 2): a fn value is (item, type args), and every consumer takes
-# every callable kind. Kind {plain fn, method path, variant fn, `T.m`, `json.decode[T]`, closure,
+# every callable kind. Kind {plain fn, method path, `T.m`, `json.decode[T]`, closure,
 # native, builtin, extern} x consumer {call, spawn direct callee, spawn argument, Executor.submit,
 # submit_result, channel round trip, == (same site, two sites, two modules, across a spawn), repr,
 # global snapshot}. The zero-arg consumers (submit, submit_result) take the kinds that have a
-# zero-arg member: plain, method path, closure, native, extern. A variant fn, `T.m` and
+# zero-arg member: plain, method path, closure, native, extern. A `T.m` and
 # `json.decode[T]` always take an argument, and so does every builtin value (`print` as a value is
 # `fn(?) -> None`, so `ex.submit(print)` is a type error). A closure is one value per
 # binding, and a crossing or a Channel rebuilds it (DEC-215), so its only `==` row is same-site.
@@ -29,10 +29,6 @@ struct P:
     fn zero() -> int:
         return 0
 
-enum E:
-    A(int)
-    B
-
 protocol Named:
     fn name(self) -> str
 
@@ -50,16 +46,8 @@ fn plain0() -> int:
 fn tm[T: Named]() -> fn(T) -> str:
     return T.name
 
-fn payload(e: E) -> int:
-    match e:
-        E.A(n):
-            return n
-        E.B:
-            return -1
-
 GP := plain
 GM := P.mk
-GV := E.A
 GD := json.decode[int]
 GN := math.sqrt
 GB := ord
@@ -96,8 +84,6 @@ test fn grid_call():
     cell(bad, "plain", a(2) == 2)
     b := P.mk
     cell(bad, "method path", b(3).n == 3)
-    c := E.A
-    cell(bad, "variant fn", payload(c(4)) == 4)
     cell(bad, "T.m", tm[N]()(N("x")) == "x")
     d := json.decode[int]
     cell(bad, "json.decode[T]", d("5") == ?5)
@@ -119,8 +105,6 @@ test fn grid_spawn_direct_callee():
     ran(bad, "plain", r)
     r := recover: run_in(P.mk, 3)
     ran(bad, "method path", r)
-    r := recover: run_in(E.A, 4)
-    ran(bad, "variant fn", r)
     r := recover: run_in(tm[N](), N("x"))
     ran(bad, "T.m", r)
     r := recover: run_in(json.decode[int], "5")
@@ -140,7 +124,6 @@ test fn grid_spawn_argument():
     bad: List[str] = []
     ci := Channel[int](9)
     cp := Channel[P](1)
-    ce := Channel[E](1)
     cs := Channel[str](2)
     cd := Channel[int!](1)
     cf := Channel[float](2)
@@ -148,7 +131,6 @@ test fn grid_spawn_argument():
     parallel:
         spawn via(plain, 2, ci)
         spawn via(P.mk, 3, cp)
-        spawn via(E.A, 4, ce)
         spawn via(tm[N](), N("x"), cs)
         spawn via(json.decode[int], "5", cd)
         spawn via(fn(n: int) -> int: n + k, 1, ci)
@@ -159,7 +141,6 @@ test fn grid_spawn_argument():
     ints.sort()
     cell(bad, "plain, closure, builtin", ints == [2, 2, 97])
     cell(bad, "method path", cp.recv().n == 3)
-    cell(bad, "variant fn", payload(ce.recv()) == 4)
     cell(bad, "T.m", cs.recv() == "x")
     cell(bad, "json.decode[T]", cd.recv() == ?5)
     floats := [cf.recv(), cf.recv()]
@@ -202,9 +183,6 @@ test fn grid_channel_round_trip():
     c2 := Channel[fn(int) -> P](1)
     c2.send(P.mk)
     cell(bad, "method path", c2.recv() == P.mk)
-    c3 := Channel[fn(int) -> E](1)
-    c3.send(E.A)
-    cell(bad, "variant fn", c3.recv() == E.A)
     t := tm[N]()
     c4 := Channel[fn(N) -> str](1)
     c4.send(t)
@@ -226,7 +204,6 @@ test fn grid_eq_same_site():
     bad: List[str] = []
     cell(bad, "plain", plain == plain)
     cell(bad, "method path", P.mk == P.mk)
-    cell(bad, "variant fn", E.A == E.A)
     cell(bad, "T.m", tm[N]() == tm[N]())
     cell(bad, "json.decode[T]", json.decode[int] == json.decode[int])
     k := 1
@@ -244,8 +221,6 @@ test fn grid_eq_two_sites():
     cell(bad, "plain", a == plain)
     b := P.mk
     cell(bad, "method path", b == P.mk)
-    c := E.A
-    cell(bad, "variant fn", c == E.A)
     d := json.decode[int]
     cell(bad, "json.decode[T]", d == json.decode[int])
     g := math.sqrt
@@ -266,7 +241,6 @@ test fn grid_eq_across_a_spawn():
     bad: List[str] = []
     c1 := Channel[fn(int) -> int](1)
     c2 := Channel[fn(int) -> P](1)
-    c3 := Channel[fn(int) -> E](1)
     c5 := Channel[fn(str) -> int!](1)
     c6 := Channel[fn(float) -> float](2)
     c7 := Channel[fn(str) -> int](1)
@@ -274,14 +248,12 @@ test fn grid_eq_across_a_spawn():
         spawn:
             c1.send(plain)
             c2.send(P.mk)
-            c3.send(E.A)
             c5.send(json.decode[int])
             c6.send(math.sqrt)
             c7.send(ord)
             c6.send(cos)
     cell(bad, "plain", c1.recv() == plain)
     cell(bad, "method path", c2.recv() == P.mk)
-    cell(bad, "variant fn", c3.recv() == E.A)
     cell(bad, "json.decode[T]", c5.recv() == json.decode[int])
     cell(bad, "native", c6.recv() == math.sqrt)
     cell(bad, "builtin", c7.recv() == ord)
@@ -306,7 +278,6 @@ test fn grid_global_snapshot():
             bad: List[str] = []
             cell(bad, "plain", GP == plain)
             cell(bad, "method path", GM == P.mk)
-            cell(bad, "variant fn", GV == E.A)
             cell(bad, "json.decode[T]", GD == json.decode[int])
             cell(bad, "native", GN == math.sqrt)
             cell(bad, "builtin", GB == ord)

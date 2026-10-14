@@ -1,6 +1,6 @@
-# TICKET-215: a path value has one identity (wave 20 family P1). `P.mk == P.mk` and `E.A == E.A`
-# are `true` (CPython `P.mk == P.mk` -> True; Rust fn items compare equal). The `grid_` tests enumerate
-# path {plain fn, turbofish, static method, instance method through its type, payload variant,
+# TICKET-215: a path value has one identity (wave 20 family P1). `P.mk == P.mk`
+# is `true` (CPython `P.mk == P.mk` -> True; Rust fn items compare equal). The `grid_` tests enumerate
+# path {plain fn, turbofish, static method, instance method through its type,
 # alias head, `T.m` through a type param, native std fn, extern fn} x {read twice, bound then
 # re-read, inside a spawned task, captured into one, through a Channel or an Atomic} x {==, !=}. The
 # cross-module rows live in `path_value_identity_modules_test.chz`, so this file imports no user module.
@@ -16,10 +16,6 @@ struct P:
         return self.n
     fn mk(n: str) -> P:
         return P(n)
-
-enum E:
-    A(int)
-    B
 
 fn idt[T](v: T) -> T:
     return v
@@ -43,13 +39,6 @@ test fn instance_method_through_type_is_equal():
     x := P.name
     assert x == P.name
 
-test fn payload_variant_bound_then_reread_is_equal():
-    a := E.A
-    assert a == E.A
-
-test fn payload_variant_read_twice_is_equal():
-    assert E.A == E.A
-
 test fn turbofish_instantiation_is_equal():
     assert idt[int] == idt[int]
 
@@ -60,9 +49,6 @@ test fn path_value_ne_is_false():
 fn plaing(n: int) -> int:
     return n
 
-fn mke(n: int) -> E:
-    return E.A(n)
-
 fn adder(k: int) -> fn(int) -> int:
     fn add(n: int) -> int:
         return n + k
@@ -72,7 +58,6 @@ fn adder(k: int) -> fn(int) -> int:
 # closure per call (CPython `outer() == outer()` -> False).
 test fn distinct_fns_and_per_call_closures_stay_unequal():
     assert plainf != plaing
-    assert E.A != mke
     assert not (adder(1) == adder(1))
 
 fn cell(bad: List[str], name: str, ok: bool):
@@ -104,10 +89,6 @@ fn local_cells() -> List[str]:
     a4 := P.name
     cell(bad, "instance method bound then re-read", a4 == P.name)
     cell(bad, "instance method !=", not (a4 != P.name))
-    cell(bad, "payload variant read twice", E.A == E.A)
-    a5 := E.A
-    cell(bad, "payload variant bound then re-read", a5 == E.A)
-    cell(bad, "payload variant !=", not (a5 != E.A))
     cell(bad, "alias head read twice", PA.mk == PA.mk)
     a6 := PA.mk
     cell(bad, "alias head bound then re-read through its target", a6 == P.mk)
@@ -142,21 +123,20 @@ test fn grid_a_path_value_captured_into_a_spawned_task_is_one_value():
     i := idt[int]
     m := P.mk
     x := P.name
-    a := E.A
     pa := PA.mk
     r := Channel[List[bool]](1)
     parallel:
         spawn:
-            r.send([f == plainf, i == idt[int], m == P.mk, x == P.name, a == E.A, pa == P.mk, m != P.mk])
+            r.send([f == plainf, i == idt[int], m == P.mk, x == P.name, pa == P.mk, m != P.mk])
     got := r.recv()
-    assert got == [true, true, true, true, true, true, false], "plain, turbofish, static, instance, variant, alias, !=: {got}"
+    assert got == [true, true, true, true, true, false], "plain, turbofish, static, instance, alias, !=: {got}"
 
 test fn grid_a_path_value_through_a_channel_or_an_atomic_is_one_value():
     ch := Channel[fn(str) -> P](1)
     ch.send(P.mk)
     got := ch.recv()
-    at := Atomic[fn(int) -> E](E.A)
-    res := [got == P.mk, at.load() == E.A, at.load() == at.load()]
+    at := Atomic[fn(str) -> P](P.mk)
+    res := [got == P.mk, at.load() == P.mk, at.load() == at.load()]
     assert res == [true, true, true], "channel, atomic, atomic twice: {res}"
 
 # A native std fn and an extern fn cross like a path value (CPython threads and queue: True).

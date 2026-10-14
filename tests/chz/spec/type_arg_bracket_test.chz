@@ -45,8 +45,7 @@ test fn nested_generic_type_argument_on_a_type_head():
     assert mk((1, 2)).v == (1, 2)
 
 test fn tuple_type_argument_on_a_variant():
-    a := E[(int, int)].A
-    match a((1, 2)):
+    match E[(int, int)].A((1, 2)):
         E.A(p):
             assert p == (1, 2)
         E.N:

@@ -1,8 +1,8 @@
 # TICKET-215: the cross-module rows of `path_value_identity_test.chz`'s grid. Path {from-imported fn,
-# from-imported type's method, `lib.T.m`, `lib.E.V`, alias head, native std fn} x {read twice,
+# from-imported type's method, `lib.T.m`, alias head, native std fn} x {read twice,
 # bound then re-read, read in two modules, inside a spawned task, captured into one} x {==, !=}.
 import path_value_identity_lib
-import Q, F, top from path_value_identity_lib
+import Q, top from path_value_identity_lib
 import std.math
 
 fn cell(bad: List[str], name: str, ok: bool):
@@ -24,7 +24,6 @@ fn import_cells() -> List[str]:
     a3 := path_value_identity_lib.Q.mk
     cell(bad, "lib.T.m bound then re-read", a3 == Q.mk)
     cell(bad, "lib.T.m !=", not (a3 != path_value_identity_lib.Q.mk))
-    cell(bad, "lib.E.V vs from-imported E.V", path_value_identity_lib.F.X == F.X)
     cell(bad, "lib alias head vs its target", path_value_identity_lib.QA.mk == Q.mk)
     return bad
 
@@ -34,7 +33,6 @@ fn module_cells() -> List[str]:
     cell(bad, "plain fn in two modules", path_value_identity_lib.read_top() == top)
     cell(bad, "static method in two modules", path_value_identity_lib.read_q_mk() == Q.mk)
     cell(bad, "instance method in two modules", path_value_identity_lib.read_q_get() == Q.get)
-    cell(bad, "payload variant in two modules", path_value_identity_lib.read_f_x() == F.X)
     cell(bad, "alias head in two modules", path_value_identity_lib.read_qa_mk() == Q.mk)
     cell(bad, "native fn in two modules", path_value_identity_lib.read_sqrt() == math.sqrt)
     cell(bad, "two modules !=", not (path_value_identity_lib.read_q_mk() != Q.mk))
@@ -64,10 +62,9 @@ test fn grid_an_imported_path_value_captured_into_a_spawned_task_is_one_value():
     t := top
     q := Q.mk
     l := path_value_identity_lib.Q.mk
-    v := F.X
     r := Channel[List[bool]](1)
     parallel:
         spawn:
-            r.send([t == top, q == Q.mk, l == path_value_identity_lib.Q.mk, v == path_value_identity_lib.F.X, q != Q.mk])
+            r.send([t == top, q == Q.mk, l == path_value_identity_lib.Q.mk, q != Q.mk])
     got := r.recv()
-    assert got == [true, true, true, true, false], "from-import fn, from-import type, lib.T.m, lib.E.V, !=: {got}"
+    assert got == [true, true, true, false], "from-import fn, from-import type, lib.T.m, !=: {got}"

@@ -26,9 +26,6 @@ fn read_q_mk() -> fn(int) -> Q:
 fn read_q_get() -> fn(Q) -> int:
     return Q.get
 
-fn read_f_x() -> fn(int) -> F:
-    return F.X
-
 fn read_qa_mk() -> fn(int) -> Q:
     return QA.mk
 

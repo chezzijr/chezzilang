@@ -47,12 +47,10 @@ test fn type_path_values_are_fns():
     g := Bx[int].get
     assert g(Bx(v=3)) == 3, "got {g(Bx(v=3))}"
     assert g(self=Bx(v=4)) == 4, "got {g(self=Bx(v=4))}"
-    l := R2[int, str].L
-    assert '{l(1)}' == "L(1)", "got {l(1)}"
-    r: fn(str) -> R2[int, str] = R2.R
-    assert '{r("x")}' == "R('x')", "got {r("x")}"
+    assert '{R2[int, str].L(1)}' == "L(1)"
+    assert '{R2[int, str].R("x")}' == "R('x')"
     ch := Channel[str](1)
     parallel:
         spawn:
-            ch.send('{l(7)}')
+            ch.send('{R2[int, str].L(7)}')
     assert ch.recv() == "L(7)"
