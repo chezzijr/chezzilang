@@ -2887,7 +2887,7 @@ const TWIN3_ROWS: &[Row] = &[
     xs += [7]
     print(xs)
 "#,
-        R(r#"cannot apply + to List[int?] and List[int]"#),
+        P("[None, 7]"),
     ),
 ];
 

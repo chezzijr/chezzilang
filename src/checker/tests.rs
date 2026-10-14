@@ -10058,7 +10058,7 @@ fn set_compound_assign_ops_ok() {
 fn list_plus_eq_mismatched_element_rejected() {
     rejects(
         "xs := [1, 2]\nxs += [\"a\"]\n",
-        "cannot apply + to List[int] and List[str]",
+        "list element: expected int, found str",
     );
 }
 
@@ -28185,6 +28185,25 @@ fn index_set_split_pair_compound_equals_its_desugar() {
     let pair = "struct S:\n    f: float\n    fn index(self, k: int) -> int:\n        return int(self.f)\n    fn set_index(self, k: int, v: float):\n        self.f = v\ns := S(1.0)\n";
     entry_ok(&format!("{pair}s[0] = s[0] + 1.5\n"));
     entry_ok(&format!("{pair}s[0] += 1.5\n"));
+}
+
+// TICKET-258 (U15): a compound operand gets the target-type hint the desugar's operand gets, so a
+// return-only type parameter pins from the slot in both forms.
+#[test]
+fn compound_operand_gets_the_slot_hint_like_its_desugar() {
+    let mk = "fn mk[T]() -> List[T]:\n    return []\n";
+    ok(&format!(
+        "{mk}fn main():\n    xs: List[int] = [1]\n    xs = xs + mk()\n    print(xs)\nmain()\n"
+    ));
+    ok(&format!(
+        "{mk}fn main():\n    xs: List[int] = [1]\n    xs += mk()\n    print(xs)\nmain()\n"
+    ));
+    rejects(
+        &format!(
+            "{mk}fn main():\n    xs: List[int] = [1]\n    xs += mk()\n    xs += [\"a\"]\nmain()\n"
+        ),
+        "list element: expected int, found str",
+    );
 }
 
 #[test]

@@ -3145,14 +3145,13 @@ impl Checker {
                     self.infer_value(value);
                     return;
                 }
-                let val_ty = if *op == AssignOp::Eq
-                    && matches!(
-                        target.kind,
-                        ExprKind::Ident(_)
-                            | ExprKind::Index { .. }
-                            | ExprKind::Field { .. }
-                            | ExprKind::Tuple(_)
-                    ) {
+                let val_ty = if matches!(
+                    target.kind,
+                    ExprKind::Ident(_)
+                        | ExprKind::Index { .. }
+                        | ExprKind::Field { .. }
+                        | ExprKind::Tuple(_)
+                ) {
                     // TICKET-124 (W13-14): the hint that seeds a FRESH literal/call value used to
                     // exist only at DECLARATION (an annotated `let`, a call argument, a return) —
                     // reassignment, index-assign and field-assign have a statically known target
@@ -3160,12 +3159,22 @@ impl Checker {
                     // double-diagnoses.
                     // TICKET-227: the target type is the value's slot, for every value kind, so a
                     // plain value wraps into a carrier target; a tuple literal splits per element
-                    // (`x, y = 5, 0`). Only `=` reaches here: `+=` never wraps (DEC-107).
+                    // (`x, y = 5, 0`). A compound operand is seeded with the slot, never wrapped (DEC-107).
                     let mark = self.diag_mark();
                     let target_ty = self.assign_slot_ty(target);
                     self.diag_rollback(mark);
                     if ty_concrete_but(&target_ty, &|n| self.rigid_param(n, &[])) {
-                        self.infer_arg(value, Some(&target_ty))
+                        if *op == AssignOp::Eq {
+                            self.infer_arg(value, Some(&target_ty))
+                        } else {
+                            // TICKET-258 (U15): `x OP= v` is `x = x OP v`, whose operand
+                            // `infer_binary` seeds with the slot type. Seed, never wrap.
+                            // The operand is an arithmetic child, so it meets no width slot.
+                            let covered = std::mem::replace(&mut self.arith_parent, true);
+                            let t = self.infer_arg_seeded(value, &target_ty);
+                            self.arith_parent = covered;
+                            t
+                        }
                     } else {
                         self.infer_value(value)
                     }
