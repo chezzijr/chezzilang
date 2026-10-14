@@ -1532,8 +1532,18 @@ impl Checker {
             } else {
                 Ok(())
             }),
-            Ty::Set(e) => Some(if fits(e) { Ok(()) } else { Err(None) }),
-            Ty::Map(k, _) => Some(if fits(k) { Ok(()) } else { Err(None) }),
+            // A Set or Map probe hashes the needle at run time, so the needle must be `Hashable`
+            // (CPython: `[1] in {1}` raises `TypeError: unhashable`). One check, `satisfies`.
+            Ty::Set(e) => Some(if fits(e) && self.satisfies(item, "Hashable").is_ok() {
+                Ok(())
+            } else {
+                Err(None)
+            }),
+            Ty::Map(k, _) => Some(if fits(k) && self.satisfies(item, "Hashable").is_ok() {
+                Ok(())
+            } else {
+                Err(None)
+            }),
             Ty::Str => Some(if fits(&Ty::Str) { Ok(()) } else { Err(None) }),
             Ty::Bytes | Ty::ByteArray => Some(match item {
                 Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => Ok(()),

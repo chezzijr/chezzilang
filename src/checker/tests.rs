@@ -40944,6 +40944,28 @@ fn type_param_needle_is_rejected_for_a_concrete_container() {
     ok(
         "fn k[T: Eq](xs: List[T], x: T) -> bool:\n    return x in xs\n\nfn main():\n    print(k([1], 1))\n",
     );
+    // A Set or Map probe hashes the needle: it must satisfy `Hashable`. Both programs faulted at run time.
+    rejects(
+        "fn f[T](s: Set[(int, int)], x: (T, int)) -> bool:\n    return x in s\n\nfn main():\n    print(f({(1, 2)}, ([1], 2)))\n",
+        "cannot test membership",
+    );
+    rejects(
+        "fn h[T: Hashable](s: Set[T], x: List[int]) -> bool:\n    return x in s\n\nfn main():\n    print(h({\"a\"}, [1]))\n",
+        "cannot test membership",
+    );
+    rejects(
+        "fn m(d: Map[int, int], x: List[int]) -> bool:\n    return x in d\n\nfn main():\n    print(m({1: 2}, [1]))\n",
+        "cannot test membership",
+    );
+    ok(
+        "fn f[T: Hashable + Eq](s: Set[(T, int)], x: (T, int)) -> bool:\n    return x in s\n\nfn main():\n    print(f({(1, 2)}, (1, 2)))\n",
+    );
+    ok(
+        "fn g[T: Hashable + Eq](s: List[(T, int)], x: (T, int)) -> bool:\n    return x in s\n\nfn main():\n    print(g([(1, 2)], (1, 2)))\n",
+    );
+    ok(
+        "fn k(s: List[(int, int)], x: (int, int)) -> bool:\n    return x in s\n\nfn main():\n    print(k([(1, 2)], (1, 2)))\n",
+    );
 }
 
 /// TICKET-257 — `RecvKind::ALL` lists every variant, in declaration order. The exhaustive `match`
