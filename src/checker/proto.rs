@@ -1847,15 +1847,7 @@ impl Checker {
         match t {
             Type::Nil(_) => Ty::Nil,
             Type::Named { name: n, .. } => match n.as_str() {
-                s if let Some(t) = Self::scalar_bound_ty(s) => t,
-                "AtomicInt" => Ty::AtomicInt,
-                "Executor" => Ty::Executor,
-                "Socket" => Ty::Socket,
-                "Listener" => Ty::Listener,
-                "Writer" => Ty::Writer,
-                "Reader" => Ty::Reader,
-                "ptr" => Ty::Ptr,
-                "owned_str" => Ty::Str,
+                s if let Some(t) = BuiltinType::from_name(s).and_then(BuiltinType::plain_ty) => t,
                 _ if self.type_params.contains_key(n) => Ty::Param(n.clone()),
                 // An FFI width name resolves to plain `int` (`float` for `float32`); the width is a
                 // marshalling detail. So an exported alias body `type Len = int32` captures
@@ -1874,26 +1866,16 @@ impl Checker {
                 }
                 _ => Ty::Unknown,
             },
-            Type::Generic(n, args, ..) => match (n.as_str(), args.as_slice()) {
-                ("List", [x]) => Ty::list(self.resolve_ty_ro_d(x, depth + 1)),
-                ("Set", [x]) => Ty::set(self.resolve_ty_ro_d(x, depth + 1)),
-                ("Channel", [x]) => Ty::channel(self.resolve_ty_ro_d(x, depth + 1)),
-                ("Shared", [x]) => Ty::shared(self.resolve_ty_ro_d(x, depth + 1)),
-                ("RwShared", [x]) => Ty::rwshared(self.resolve_ty_ro_d(x, depth + 1)),
-                ("Atomic", [x]) => Ty::atomic(self.resolve_ty_ro_d(x, depth + 1)),
-                ("Map", [k, v]) => Ty::map(
-                    self.resolve_ty_ro_d(k, depth + 1),
-                    self.resolve_ty_ro_d(v, depth + 1),
-                ),
-                // `Iterator[T]` is an existential ITERATOR value, represented as `Ty::Struct("Iterator",
-                // [T])` — NOT a protocol. Mirror the mutable `resolve_type` arm (sig.rs) so the two
-                // resolvers agree on identical syntax; without this it would fall to the protocol arm
-                // below and mint `Protocol("Iterator",[T])`, which downstream Iterator logic (keyed on
-                // `Ty::Struct(name=="Iterator")`) would not recognize.
-                ("Iterator", [elem]) => Ty::Struct(
-                    "Iterator".to_string(),
-                    vec![self.resolve_ty_ro_d(elem, depth + 1)],
-                ),
+            Type::Generic(n, args, ..) => match n.as_str() {
+                s if let Some(b) = BuiltinType::from_name(s)
+                    && let Some(t) = b.applied_ty(
+                        args.iter()
+                            .map(|a| self.resolve_ty_ro_d(a, depth + 1))
+                            .collect(),
+                    ) =>
+                {
+                    t
+                }
                 _ if self.struct_names.contains(n) => Ty::Struct(
                     self.bare_key(n),
                     args.iter()
@@ -2180,15 +2162,7 @@ impl Checker {
     /// scalar type (so the caller falls back to the protocol path / an `unknown protocol` error).
     /// This is the one scalar type-name table: `resolve_type` and `resolve_ty_ro_d` read it.
     pub(super) fn scalar_bound_ty(name: &str) -> Option<Ty> {
-        Some(match name {
-            "int" => Ty::Int,
-            "float" => Ty::Float,
-            "bool" => Ty::Bool,
-            "str" => Ty::Str,
-            "bytes" => Ty::Bytes,
-            "bytearray" => Ty::ByteArray,
-            _ => return None,
-        })
+        BuiltinType::from_name(name)?.scalar_ty()
     }
 
     /// A `where T: List/Map/Set` bound names a container CONSTRUCTOR rather than a protocol, making it

@@ -18,6 +18,7 @@ use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+pub(crate) use builtin_type::BuiltinType;
 pub use ty::Ty;
 pub use ty::{
     ArgFill, CallCrossing, CallPlanTable, CarrierKey, CarrierMode, CarrierTable, CrossingTable,
@@ -206,64 +207,11 @@ fn module_label(import: &Import) -> String {
 /// `type 'X' is reserved (builtin)` error `struct Result` already gives. (The fixed-width FFI integer
 /// names like `int32` are reserved via `native::ffi::is_width` at the decl guards, not listed here.)
 fn is_reserved_type(name: &str) -> bool {
-    name == "Result"
-        || name == "Option"
-        || name == "Iterator"
-        // Builtin scalar primitives — a user `struct int` / `enum str` would shadow the scalar arm in
-        // `resolve_type`.
-        || name == "int"
-        || name == "float"
-        || name == "bool"
-        || name == "str"
-        || name == "bytes"
-        || name == "bytearray"
-        // Builtin container/collection type names — recognized by `resolve_type`'s generic arms
-        // (`List[T]`/`Set[T]`/`Map[K,V]`/`Channel[T]`). (List/Map/Set's `CallBuiltin` DISPATCH is
-        // table-sourced — the `Intrinsic::Ctor` PRELUDE rows; their generic TYPE-IDENTITY is HERE +
-        // in `resolve_type`/`infer_named_call`. See the `Intrinsic` doc.) `range` has no ctor any
-        // more (TICKET-253); the name stays reserved only so `range(n)` reports "write `0..n`".
-        || name == "List"
-        || name == "Set"
-        || name == "Map"
-        || name == "Channel"
-        || name == "range"
-        // TICKET-253: `Range` is the struct of `std.prelude` that every module sees; a user type of that
-        // name would shadow it.
-        || name == "Range"
-        // `tuple` is the global structural tuple type (values exist only via `(a, b)` literals /
-        // destructuring, never a from-nothing ctor). It carries no resolvable bare-type or ctor, so a
-        // user `struct tuple` shadows nothing reachable — but it's a documented global (CLAUDE.md's
-        // "global surface", the hover table), and a global reserved name is a one-way ratchet, so it is
-        // reserved at declaration alongside its container siblings for consistency.
-        || name == "tuple"
-        // Runtime handle TYPE names: the std.net TCP handles (`Socket`/`Listener`) and the FFI
-        // marshalling primitives (`ptr` and the return-only `owned_str`). Reserved at declaration even
-        // though their USE is import-gated (std.net / std.ffi) — the two gates are independent, exactly
-        // as for the concurrency ctors below.
-        || name == "Socket"
-        || name == "Listener"
-        // R2 — the std.io `Writer` write-only file/stream handle. Reserved at declaration even though
-        // its USE is import-gated (std.io) — the two gates are independent, like Socket/Listener above.
-        || name == "Writer"
-        // R2b — the std.io `Reader` read-only file handle (the read twin of `Writer`). Same dual gate.
-        || name == "Reader"
+    // Reserved names that are no `BuiltinType`: `Result`/`Option` are removed spellings the resolver
+    // reports; `tuple` resolves no type; `range` (TICKET-253) and `timer` are callables.
+    BuiltinType::from_name(name).is_some()
         || crate::native::ffi::is_opaque_type(name)
-        || name == "owned_str"
-        // The four runtime concurrency ctor/TYPE names stay RESERVED — a user `struct Shared` /
-        // `struct Executor` is rejected at declaration (a clean `reserved` error), NOT silently
-        // shadowed by the builtin ctor. This is SEPARATE from the `import std.concurrency` gate (which
-        // governs USE): the names are reserved AND require the import to use the builtin. (`Executor`
-        // was already reserved here; `Shared`/`RwShared`/`Atomic` join it so all four behave alike.)
-        || name == "Shared"
-        || name == "RwShared"
-        || name == "Atomic"
-        || name == "AtomicInt"
-        || name == "Executor"
-        // `timer` is a runtime ctor/builtin name (not a real type), but it STAYS reserved here so a
-        // user `struct timer` / `enum timer` / `type timer` is rejected at declaration rather than
-        // silently shadowed by the opcode-backed builtin. SEPARATE from the `import std.time` gate
-        // (which governs USE): the name is reserved AND requires the import to call `timer(ms)`.
-        || name == "timer"
+        || matches!(name, "Result" | "Option" | "tuple" | "range" | "timer")
 }
 
 /// D3 (TICKET-138): an int NEVER widens into a `float` slot, at any sink. The fix a diagnostic names.
@@ -3229,6 +3177,7 @@ pub(super) enum ChainLink {
     Slice,
 }
 
+mod builtin_type;
 mod exhaust;
 mod expr;
 mod flow;

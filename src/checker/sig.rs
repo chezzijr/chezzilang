@@ -1357,6 +1357,63 @@ impl Checker {
         self.imported_ffi_types.contains(n) || self.current_module_is_stdlib
     }
 
+    /// U10: the import licence of a bare builtin type name that resolved to `t`. A name outside its
+    /// std module is `unknown type` with the import hint; `owned_str` resolves only in an extern
+    /// signature (a return-only marshalling type).
+    fn builtin_gate(&mut self, b: BuiltinType, t: Ty, span: Span) -> Ty {
+        let n = b.name();
+        let (licensed, module) = match b {
+            BuiltinType::Int
+            | BuiltinType::Float
+            | BuiltinType::Bool
+            | BuiltinType::Str
+            | BuiltinType::Bytes
+            | BuiltinType::ByteArray
+            | BuiltinType::Iterator
+            | BuiltinType::List
+            | BuiltinType::Set
+            | BuiltinType::Map
+            | BuiltinType::Channel
+            | BuiltinType::Range => return t,
+            BuiltinType::OwnedStr => {
+                if self.in_extern_sig {
+                    return t;
+                }
+                self.error(
+                    span,
+                    "'owned_str' is a return-only extern marshalling type and cannot be used as a \
+                     general type annotation"
+                        .to_string(),
+                );
+                return Ty::Unknown;
+            }
+            BuiltinType::Ptr => (
+                self.ffi_type_licensed(n)
+                    || self
+                        .alias_resolving
+                        .last()
+                        .is_some_and(|a| self.ffi_alias_ok.contains(a)),
+                "std.ffi",
+            ),
+            BuiltinType::Shared
+            | BuiltinType::RwShared
+            | BuiltinType::Atomic
+            | BuiltinType::AtomicInt
+            | BuiltinType::Executor => (self.concurrency_licensed(n), "std.concurrency"),
+            BuiltinType::Socket | BuiltinType::Listener => (self.net_licensed(n), "std.net"),
+            BuiltinType::Writer | BuiltinType::Reader => (self.io_licensed(n), "std.io"),
+        };
+        if licensed {
+            t
+        } else {
+            self.error(
+                span,
+                format!("unknown type '{n}' (import it from {module}: `import {module}`)"),
+            );
+            Ty::Unknown
+        }
+    }
+
     /// Map an opaque/native builtin TYPE name (one that lives ONLY in its owning std module's
     /// `sig.types` — reserved, so no user module can export it) to its builtin `Ty`, given already-
     /// resolved type args. This is the additive "make a Rust type reachable by qualified path"
@@ -1368,19 +1425,34 @@ impl Checker {
     /// by both qualified resolvers so the mapping can never drift between them.
     pub(super) fn qualified_builtin_ty(&self, name: &str, args: &[Ty]) -> Option<Ty> {
         let one = || args.first().cloned().unwrap_or(Ty::Unknown);
-        match name {
-            "Shared" => Some(Ty::shared(one())),
-            "RwShared" => Some(Ty::rwshared(one())),
-            "Atomic" => Some(Ty::atomic(one())),
-            "AtomicInt" => Some(Ty::AtomicInt),
-            "Executor" => Some(Ty::Executor),
-            "Socket" => Some(Ty::Socket),
-            "Listener" => Some(Ty::Listener),
-            "Writer" => Some(Ty::Writer),
-            "Reader" => Some(Ty::Reader),
-            "ptr" => Some(Ty::Ptr),
-            _ if crate::native::ffi::is_width(name) => Some(ffi_width_ty(name)),
-            _ => None,
+        let Some(b) = BuiltinType::from_name(name) else {
+            return crate::native::ffi::is_width(name).then(|| ffi_width_ty(name));
+        };
+        match b {
+            BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic => {
+                b.applied_ty(vec![one()])
+            }
+            BuiltinType::AtomicInt
+            | BuiltinType::Executor
+            | BuiltinType::Socket
+            | BuiltinType::Listener
+            | BuiltinType::Writer
+            | BuiltinType::Reader
+            | BuiltinType::Ptr => b.plain_ty(),
+            // Global builtins and `owned_str`: no std module exports them by qualified path.
+            BuiltinType::Int
+            | BuiltinType::Float
+            | BuiltinType::Bool
+            | BuiltinType::Str
+            | BuiltinType::Bytes
+            | BuiltinType::ByteArray
+            | BuiltinType::Iterator
+            | BuiltinType::List
+            | BuiltinType::Set
+            | BuiltinType::Map
+            | BuiltinType::Channel
+            | BuiltinType::Range
+            | BuiltinType::OwnedStr => None,
         }
     }
 
@@ -1928,89 +2000,22 @@ impl Checker {
                     "Self" if self.current_self_ty.is_some() => {
                         self.current_self_ty.clone().unwrap()
                     }
-                    // An opaque C-ABI pointer handle — the marshalling primitive for `extern "lib":`
-                    // signatures. Like the fixed-width FFI integer names below, `ptr` is NOT a global
-                    // builtin: it resolves only in a module that imported `std.ffi` (whole-module
-                    // `import std.ffi` OR selective `import ptr from std.ffi`), OR via a LICENSED
-                    // transparent alias body (`ffi_alias_ok`). Since extern blocks use `ptr` pervasively,
-                    // the hint points at the whole-module form. See `Ty::Ptr`.
-                    "ptr" => {
-                        if self.ffi_type_licensed("ptr")
-                            || self
-                                .alias_resolving
-                                .last()
-                                .is_some_and(|a| self.ffi_alias_ok.contains(a))
-                        {
-                            Ty::Ptr
-                        } else {
-                            self.error(
-                                span,
-                                "unknown type 'ptr' (import it from std.ffi: `import std.ffi`)"
-                                    .to_string(),
-                            );
-                            Ty::Unknown
-                        }
+                    // U10: every bare builtin type name resolves through `BuiltinType`, gated by
+                    // `builtin_gate` (import licence, extern-only `owned_str`). A type parameter or
+                    // `Self` above shadows these.
+                    s if let Some(b) = BuiltinType::from_name(s)
+                        && let Some(t) = b.plain_ty() =>
+                    {
+                        self.builtin_gate(b, t, span)
                     }
-                    // A RETURN-ONLY C-ABI marshalling type name (sibling of `ptr`): an OWNED `char*`
-                    // the runtime copies into a `str` and then frees. To the program it IS a plain `str`
-                    // (the ownership/free is a runtime-only distinction the backends recover via
-                    // `ctype_of`); the return-only-ness is enforced by a surface guard in the extern
-                    // param loop (an `owned_str` parameter is rejected before this collapses to `Str`).
-                    // Bare use OUTSIDE an extern signature is rejected: it is not a general type — left
-                    // ungated it would silently collapse a `fn f(x: owned_str) -> owned_str` to `str`
-                    // with no import (mirrors how `ptr` errors when used without `import std.ffi`).
-                    "owned_str" => {
-                        if self.in_extern_sig {
-                            Ty::Str
-                        } else {
-                            self.error(
-                            span,
-                            "'owned_str' is a return-only extern marshalling type and cannot be \
-                             used as a general type annotation"
-                                .to_string(),
-                        );
-                            Ty::Unknown
-                        }
-                    }
-                    // The C5 escape hatch handle, non-generic (a bare `Executor` type annotation). Like
-                    // `Shared`/`RwShared`/`Atomic` below, `Executor` is NOT a global builtin: it resolves
-                    // only in a module that imported `std.concurrency` (whole-module or per-name). The name
-                    // STAYS reserved (no user `struct Executor`); this is the separate import requirement.
-                    "Executor" => {
-                        if self.concurrency_licensed("Executor") {
-                            Ty::Executor
-                        } else {
-                            self.error(
-                            span,
-                            "unknown type 'Executor' (import it from std.concurrency: `import std.concurrency`)"
-                                .to_string(),
-                        );
-                            Ty::Unknown
-                        }
-                    }
-                    // The monomorphic lock-free int atomic, non-generic (a bare `AtomicInt` annotation).
-                    // Like `Executor`, NOT a global builtin: resolves only after `import std.concurrency`.
-                    "AtomicInt" => {
-                        if self.concurrency_licensed("AtomicInt") {
-                            Ty::AtomicInt
-                        } else {
-                            self.error(
-                            span,
-                            "unknown type 'AtomicInt' (import it from std.concurrency: `import std.concurrency`)"
-                                .to_string(),
-                        );
-                            Ty::Unknown
-                        }
-                    }
-                    // A BARE (no type-arg) `Shared`/`RwShared`/`Atomic` annotation. Like `Executor`
-                    // above these names are NOT global builtins and STAY reserved; but they are generic,
-                    // so a bare write is either unlicensed (→ same import hint the `Shared[T]` arm below
-                    // emits) or licensed-but-missing-its-type-arg (→ the same missing-type-arg message a
-                    // bare user-generic struct/enum gets). Placed before the catch-all so it
-                    // can't fall through to a hint-less "unknown type". (An in-scope type param of the
-                    // same name, e.g. `fn f[Shared]`, was already resolved by the hoisted `type_params`
-                    // arm above this match, so no per-arm guard is needed here.)
-                    n @ ("Shared" | "RwShared" | "Atomic") => {
+                    // A BARE (no type-arg) `Shared`/`RwShared`/`Atomic` annotation: either unlicensed
+                    // (the import hint the `Shared[T]` arm emits) or licensed but missing its type
+                    // argument.
+                    s if let Some(
+                        b @ (BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic),
+                    ) = BuiltinType::from_name(s) =>
+                    {
+                        let n = b.name();
                         if self.concurrency_licensed(n) {
                             self.error(
                                 span,
@@ -2018,67 +2023,13 @@ impl Checker {
                             );
                         } else {
                             self.error(
-                            span,
-                            format!(
-                                "unknown type '{n}' (import it from std.concurrency: `import std.concurrency`)"
-                            ),
-                        );
+                                span,
+                                format!(
+                                    "unknown type '{n}' (import it from std.concurrency: `import std.concurrency`)"
+                                ),
+                            );
                         }
                         Ty::Unknown
-                    }
-                    // D6 — the std.net TCP handles, non-generic (bare `Socket` / `Listener` annotations).
-                    // Like `Executor`/`Shared`/`ptr` above, these are NOT global builtins: they resolve
-                    // only in a module that imported `std.net` (whole-module or per-name). The names STAY
-                    // reserved (no user `struct Socket`); this is the separate import requirement. (An
-                    // in-scope type param of the same name was already resolved by the hoisted `type_params`
-                    // arm above this match.)
-                    n @ ("Socket" | "Listener") => {
-                        if self.net_licensed(n) {
-                            if n == "Socket" {
-                                Ty::Socket
-                            } else {
-                                Ty::Listener
-                            }
-                        } else {
-                            self.error(
-                                span,
-                                format!(
-                                    "unknown type '{n}' (import it from std.net: `import std.net`)"
-                                ),
-                            );
-                            Ty::Unknown
-                        }
-                    }
-                    // R2 — the std.io `Writer` handle, non-generic (bare `Writer` annotation). Like
-                    // `Socket`/`Listener` above, it resolves only in a module that imported `std.io`
-                    // (whole-module or per-name); the name STAYS reserved (no user `struct Writer`).
-                    n @ "Writer" => {
-                        if self.io_licensed(n) {
-                            Ty::Writer
-                        } else {
-                            self.error(
-                                span,
-                                format!(
-                                    "unknown type '{n}' (import it from std.io: `import std.io`)"
-                                ),
-                            );
-                            Ty::Unknown
-                        }
-                    }
-                    // R2b — the std.io `Reader` handle, non-generic (bare `Reader` annotation), the read
-                    // twin of `Writer` above. Import-gated by `imported_io`; the name STAYS reserved.
-                    n @ "Reader" => {
-                        if self.io_licensed(n) {
-                            Ty::Reader
-                        } else {
-                            self.error(
-                                span,
-                                format!(
-                                    "unknown type '{n}' (import it from std.io: `import std.io`)"
-                                ),
-                            );
-                            Ty::Unknown
-                        }
                     }
                     // A transparent type alias resolves to its underlying type (recursively). The
                     // `alias_resolving` stack breaks cycles (`type A = B; type B = A`).
@@ -2259,18 +2210,18 @@ impl Checker {
                 // below turn `List[int]` into `Ty::List(Int)` etc. — NOT expressible as a flat `FnSig`,
                 // so it stays HERE. Their `CallBuiltin` DISPATCH + name-set is table-sourced (the
                 // `Intrinsic::Ctor` PRELUDE rows); `builtin_container_sig` = flat display/placeholder.
-                let resolved = match (n.as_str(), args.as_slice()) {
-                    ("List", [inner]) => Ty::list(self.resolve_type(inner, span)),
+                let resolved = match (BuiltinType::from_name(n), args.as_slice()) {
+                    (Some(BuiltinType::List), [inner]) => Ty::list(self.resolve_type(inner, span)),
                     // `Iterator[T]` as a *value* type — the result of calling a generator function.
                     // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
                     // type `iter_elem` recovers (so `for`-loops and `[S: Iterator[T]]` bounds accept it —
                     // a cursor is exactly what the `Iterator` bound requires).
                     // Experimental: only generators produce these; ordinary code still uses adapter
                     // structs / built-in collections.
-                    ("Iterator", [elem]) => {
+                    (Some(BuiltinType::Iterator), [elem]) => {
                         Ty::Struct("Iterator".to_string(), vec![self.resolve_type(elem, span)])
                     }
-                    ("Channel", [inner]) => {
+                    (Some(BuiltinType::Channel), [inner]) => {
                         let elem = self.resolve_type(inner, span);
                         if !self.sendable(&elem) {
                             let hint = self.sendable_error_hint(&elem);
@@ -2287,7 +2238,7 @@ impl Checker {
                     // builtin: requires `import std.concurrency` (the inner type is still resolved on the
                     // unlicensed path so a nested error surfaces; the name STAYS reserved). Same for the
                     // RwShared/Atomic siblings below.
-                    ("Shared", [inner]) => {
+                    (Some(BuiltinType::Shared), [inner]) => {
                         let elem = self.resolve_type(inner, span);
                         if self.concurrency_licensed("Shared") {
                             Ty::shared(elem)
@@ -2302,7 +2253,7 @@ impl Checker {
                     }
                     // `RwShared[T]` (type annotation): the cross-task read-write box. Like `Shared`, its
                     // element type isn't gated on sendability — the handle is what crosses.
-                    ("RwShared", [inner]) => {
+                    (Some(BuiltinType::RwShared), [inner]) => {
                         let elem = self.resolve_type(inner, span);
                         if self.concurrency_licensed("RwShared") {
                             Ty::rwshared(elem)
@@ -2317,7 +2268,7 @@ impl Checker {
                     }
                     // `Atomic[T]` (type annotation): the cross-task atomic box. Like `Shared`, its element
                     // type isn't gated on sendability — the handle is what crosses.
-                    ("Atomic", [inner]) => {
+                    (Some(BuiltinType::Atomic), [inner]) => {
                         let elem = self.resolve_type(inner, span);
                         if self.concurrency_licensed("Atomic") {
                             // INSIDE the licensing branch — see the ctor site in `expr.rs`.
@@ -2335,7 +2286,7 @@ impl Checker {
                             Ty::Unknown
                         }
                     }
-                    ("Map", [k, v]) => {
+                    (Some(BuiltinType::Map), [k, v]) => {
                         let key = self.resolve_type(k, span);
                         let value = self.resolve_type(v, span);
                         self.conformance_obligation(Obligation::Hashable {
@@ -2345,7 +2296,7 @@ impl Checker {
                         });
                         Ty::map(key, value)
                     }
-                    ("Set", [t]) => {
+                    (Some(BuiltinType::Set), [t]) => {
                         let elem = self.resolve_type(t, span);
                         self.conformance_obligation(Obligation::Hashable {
                             ty: elem.clone(),
