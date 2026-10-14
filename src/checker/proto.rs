@@ -1509,20 +1509,21 @@ impl Checker {
     /// `contains` hook). `Some(Err(Some(why)))` = the needle fits but the element has an unmet `Eq`
     /// where-bound.
     ///
-    /// List, Set, Map (its keys) and str use the `==` rule: `1 in [1.0]` holds because `1 == 1.0` does
-    /// (CPython `True`). bytes and bytearray take an int byte or a bytes/bytearray subsequence, as
-    /// str takes a substring; the needle types are exact (CPython raises `TypeError` for `1.0 in b"a"`).
+    /// One rule per container kind:
+    /// - List compares by `==`: `1 in [1.0]` holds because `1 == 1.0` does (CPython `True`), and a
+    ///   `T` needle fits as `x == e` does.
+    /// - Set and Map (its keys) use the `==` rule and also require the needle to be `Hashable`: the
+    ///   probe hashes it (CPython: `[1] in {1}` raises `TypeError`; `float` is not `Hashable`).
+    /// - str, bytes and bytearray take exact needle types: str a substring (a str), bytes and
+    ///   bytearray an int byte or a bytes/bytearray subsequence (CPython raises `TypeError` for
+    ///   `1.0 in b"a"`).
     pub(super) fn builtin_contains_verdict(
         &self,
         ty: &Ty,
         item: &Ty,
     ) -> Option<Result<(), Option<String>>> {
-        // A type-parameter needle fits only an element it joins with: `may_be_equal` accepts any
-        // `T` (a generic body is checked once, erased), and the run then faults on `1 in "abc"`.
-        let param_needle = matches!(item, Ty::Param(_));
         let fits = |elem: &Ty| {
-            self.join_ty(elem, item)
-                || (!param_needle && (self.may_be_equal(item, elem) || self.assignable(elem, item)))
+            self.join_ty(elem, item) || self.may_be_equal(item, elem) || self.assignable(elem, item)
         };
         match ty {
             Ty::List(e) => Some(if !fits(e) {
@@ -1544,7 +1545,42 @@ impl Checker {
             } else {
                 Err(None)
             }),
-            Ty::Str => Some(if fits(&Ty::Str) { Ok(()) } else { Err(None) }),
+            // str `in` is a substring test, not `==`: the needle is a str exactly.
+            Ty::Str => Some(match item {
+                Ty::Str | Ty::Unknown => Ok(()),
+                Ty::Int
+                | Ty::Float
+                | Ty::Bool
+                | Ty::Bytes
+                | Ty::ByteArray
+                | Ty::Nil
+                | Ty::List(_)
+                | Ty::Map(..)
+                | Ty::Set(_)
+                | Ty::Func { .. }
+                | Ty::BuiltinFn { .. }
+                | Ty::Tuple(_)
+                | Ty::Struct(..)
+                | Ty::Enum(..)
+                | Ty::Param(_)
+                | Ty::Result(..)
+                | Ty::Option(_)
+                | Ty::Channel(_)
+                | Ty::Shared(_)
+                | Ty::Atomic(_)
+                | Ty::AtomicInt
+                | Ty::RwShared(_)
+                | Ty::Executor
+                | Ty::Socket
+                | Ty::Listener
+                | Ty::Writer
+                | Ty::Reader
+                | Ty::Ptr
+                | Ty::Width(_)
+                | Ty::Protocol(..)
+                | Ty::Module(_)
+                | Ty::Var(_) => Err(None),
+            }),
             Ty::Bytes | Ty::ByteArray => Some(match item {
                 Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => Ok(()),
                 Ty::Param(_)

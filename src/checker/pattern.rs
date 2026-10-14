@@ -4300,7 +4300,9 @@ impl Checker {
             Add => {
                 if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
-                } else if let Some(t) = self.op_overload_result(&l, &r, "Add") {
+                } else if let Some(t) =
+                    binary_protocol(op).and_then(|p| self.op_overload_result(&l, &r, p))
+                {
                     t
                 } else if matches!(
                     (&l, &r),
@@ -4327,7 +4329,7 @@ impl Checker {
             // `-`/`*` overload via the `Sub`/`Mul` protocols on same-typed structs; `/`/`%` stay
             // numeric-only (no protocol).
             Sub | Mul => {
-                let proto = if op == Sub { "Sub" } else { "Mul" };
+                let proto = binary_protocol(op).expect("an arithmetic operator has a protocol");
                 if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, proto) {
@@ -4357,7 +4359,7 @@ impl Checker {
             // `/`/`%` overload via the `Div`/`Mod` protocols on same-typed structs/enums/type-params,
             // exactly like `-`/`*` use `Sub`/`Mul` (M22).
             Div | Mod => {
-                let proto = if op == Div { "Div" } else { "Mod" };
+                let proto = binary_protocol(op).expect("an arithmetic operator has a protocol");
                 if l.is_numeric() && r.is_numeric() {
                     numeric_result(&l, &r)
                 } else if let Some(t) = self.op_overload_result(&l, &r, proto) {

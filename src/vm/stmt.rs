@@ -1994,8 +1994,8 @@ impl Vm {
             }
         };
         let it = *one;
-        // `Map(m)` over a map yields a COPY of it, not a re-iteration as 2-tuples (iterating a map
-        // gives keys).
+        // `Map(m)` over a map yields a COPY of it (a map iterates (K, V) pairs, but the copy
+        // does not rebuild from them).
         if let Some(h) = it.as_obj()
             && let Obj::Map(inner) = self.heap.get(h)
         {

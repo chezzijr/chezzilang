@@ -40966,6 +40966,23 @@ fn type_param_needle_is_rejected_for_a_concrete_container() {
     ok(
         "fn k(s: List[(int, int)], x: (int, int)) -> bool:\n    return x in s\n\nfn main():\n    print(k([(1, 2)], (1, 2)))\n",
     );
+    // A List compares by `==`, so a `T` needle fits as `x == e` does; a str `in` is a substring test.
+    ok(
+        "fn f[T](xs: List[int], x: T) -> bool:\n    return x in xs\n\nfn main():\n    print(f([1], 1))\n",
+    );
+    rejects(
+        "fn f[T](s: str, x: T) -> bool:\n    return x in s\n\nfn main():\n    print(f(\"abc\", \"a\"))\n",
+        "cannot test membership",
+    );
+    // `float` is not `Hashable` (owner rule), so a Set or Map probe rejects it although `1 == 1.0`.
+    rejects(
+        "fn main():\n    print(1.0 in {1})\n",
+        "cannot test membership",
+    );
+    rejects(
+        "fn main():\n    print({1: \"a\"}.contains(1.0))\n",
+        "cannot test membership",
+    );
 }
 
 /// TICKET-257 — `RecvKind::ALL` lists every variant, in declaration order. The exhaustive `match`
