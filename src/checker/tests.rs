@@ -41673,3 +41673,12 @@ enum F:
         wrong.join("\n")
     );
 }
+
+// TICKET-260 (U8): a `recover:` block has no tail value; its type is `!`.
+#[test]
+fn recover_block_tail_value_is_rejected() {
+    rejects(
+        "s := recover:\n    x := 10\n    x / 2\nprint(s)\n",
+        "has type `!`",
+    );
+}
