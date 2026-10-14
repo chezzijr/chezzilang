@@ -53,7 +53,7 @@ test fn ci_map_probes_dispatch_eq():
     m: Map[CI, int] = {}
     m[CI("ab")] = 1
     assert m[CI("aB")] == 1, "index"
-    assert m.has(CI("AB")) == true, "has"
+    assert m.contains(CI("AB")) == true, "has"
     assert str(m.get(CI("Ab"))) == "1", "get"
     assert (CI("aB") in m) == true, "`in` on a map probes KEYS"
     # a differently-spelled EQUAL key updates the existing entry rather than adding one
@@ -65,7 +65,7 @@ test fn ci_map_probes_dispatch_eq():
 
 test fn ci_set_probes_dispatch_eq():
     s: Set[CI] = {CI("ab")}
-    assert s.has(CI("AB")) == true
+    assert s.contains(CI("AB")) == true
     assert (CI("Ab") in s) == true
     s.add(CI("aB"))
     assert s.len() == 1, "an EQUAL element is not a new one"
@@ -258,7 +258,7 @@ test fn a_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
     mut_reset(4)
     assert mut_map[Mut(1)] == 11
     mut_reset(4)
-    assert mut_map.has(Mut(1)) == true
+    assert mut_map.contains(Mut(1)) == true
     mut_reset(4)
     assert (Mut(1) in mut_map) == true
     mut_reset(4)
@@ -266,16 +266,16 @@ test fn a_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
     assert mut_map[Mut(1)] == 99, "the insert overwrote the key it matched, not a shifted neighbour"
     mut_reset(4)
     assert mut_map.remove(Mut(1)) == ?11
-    assert mut_map.has(Mut(1)) == false
+    assert mut_map.contains(Mut(1)) == false
 
 test fn a_set_probe_whose_eq_removes_an_earlier_entry_answers_the_new_container():
     mut_reset(2)
-    assert mut_set.has(Mut(1)) == true
+    assert mut_set.contains(Mut(1)) == true
     mut_reset(4)
     assert (Mut(1) in mut_set) == true
     mut_reset(4)
     assert mut_set.remove(Mut(1)) == true
-    assert mut_set.has(Mut(1)) == false
+    assert mut_set.contains(Mut(1)) == false
     # and the removed entry really is gone, i.e. the position named a real element
     mut_reset(4)
     n0 := mut_set.len()
@@ -325,14 +325,14 @@ test fn a_satisfied_conditional_eq_dispatches_from_set_and_map_on_a_collision():
     # every element collides (`hash` is 7), so the container MUST ask `eq` to tell them apart
     s := Set([cond(1), cond(2), cond(1)])
     assert s.len() == 2, "eq is what deduped the colliding elements"
-    assert s.has(cond(2)) == true
+    assert s.contains(cond(2)) == true
     assert (cond(3) in s) == false
     s.add(cond(3))
     assert s.len() == 3
     m := {cond(1): "a", cond(2): "b"}
     assert m.len() == 2
     assert m[cond(2)] == "b"
-    assert m.has(cond(1)) == true
+    assert m.contains(cond(1)) == true
     m[cond(1)] = "z"
     assert m.len() == 2, "the insert matched the colliding key it equals, not a neighbour"
     assert m[cond(1)] == "z"

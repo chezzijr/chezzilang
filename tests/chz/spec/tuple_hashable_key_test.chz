@@ -20,7 +20,7 @@ test fn tuple_is_a_map_key():
 
 test fn tuple_is_a_set_element():
     s := {(1, "x")}
-    assert s.has((1, "x"))
+    assert s.contains((1, "x"))
 
 test fn tuple_of_a_struct_with_hash_is_a_key():
     m := {(1, P(1)): "a"}

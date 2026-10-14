@@ -6,11 +6,32 @@ use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
 
-/// `str` methods that were removed, with what to write instead.
-const REMOVED_STR_METHODS: &[(&str, &str)] = &[(
-    "reverse",
-    "`str.reverse()` is removed; write `s.reversed()`",
-)];
+/// Methods that were removed or renamed: (receiver type, method, what to write instead).
+const REMOVED_METHODS: &[(&str, &str, &str)] = &[
+    (
+        "str",
+        "reverse",
+        "`str.reverse()` is removed; write `s.reversed()`",
+    ),
+    (
+        "Map",
+        "has",
+        "`Map.has()` is renamed; write `m.contains(k)`",
+    ),
+    (
+        "Set",
+        "has",
+        "`Set.has()` is renamed; write `s.contains(v)`",
+    ),
+];
+
+/// The note a removed or renamed method's miss carries, keyed by receiver type name.
+fn removed_method_note(recv: &str, method: &str) -> Option<&'static str> {
+    REMOVED_METHODS
+        .iter()
+        .find(|(r, m, _)| *r == recv && *m == method)
+        .map(|(_, _, text)| *text)
+}
 
 /// Result of resolving a bodied/native method on one of the reserved native handles
 /// (`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/`Reader`). The shared
@@ -3620,8 +3641,8 @@ impl Checker {
                 let names = self.method_names("str");
                 // A removed method names its replacement (TICKET-253: one `reversed` name for every
                 // container that reverses into a new value).
-                let message = match REMOVED_STR_METHODS.iter().find(|(m, _)| *m == method) {
-                    Some((_, text)) => format!("type str has no method '{method}': {text}"),
+                let message = match removed_method_note("str", method) {
+                    Some(text) => format!("type str has no method '{method}': {text}"),
                     None => format!("type str has no method '{method}'"),
                 };
                 self.error_help(name_span, message, suggest::did_you_mean(method, &names));
@@ -3798,11 +3819,11 @@ impl Checker {
                 }
                 self.infer_all(args);
                 let names = self.method_names("Map");
-                self.error_help(
-                    name_span,
-                    format!("type {obj_ty} has no method '{method}'"),
-                    suggest::did_you_mean(method, &names),
-                );
+                let message = match removed_method_note("Map", method) {
+                    Some(text) => format!("type {obj_ty} has no method '{method}': {text}"),
+                    None => format!("type {obj_ty} has no method '{method}'"),
+                };
+                self.error_help(name_span, message, suggest::did_you_mean(method, &names));
                 Ty::Unknown
             }
             Ty::Set(elem) => {
@@ -3818,11 +3839,11 @@ impl Checker {
                 }
                 self.infer_all(args);
                 let names = self.method_names("Set");
-                self.error_help(
-                    name_span,
-                    format!("type {obj_ty} has no method '{method}'"),
-                    suggest::did_you_mean(method, &names),
-                );
+                let message = match removed_method_note("Set", method) {
+                    Some(text) => format!("type {obj_ty} has no method '{method}': {text}"),
+                    None => format!("type {obj_ty} has no method '{method}'"),
+                };
+                self.error_help(name_span, message, suggest::did_you_mean(method, &names));
                 Ty::Unknown
             }
             Ty::Channel(elem) => {

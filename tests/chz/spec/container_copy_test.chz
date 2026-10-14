@@ -46,14 +46,14 @@ test fn map_copy_snapshots_struct_keys():
     n := m.copy()
     for k in n:
         k.x = 5
-    assert m.has(P(1)), "a key reached through the copy must not alias the original's key"
+    assert m.contains(P(1)), "a key reached through the copy must not alias the original's key"
 
 test fn set_copy_snapshots_struct_elements():
     s := {P(1)}
     t := s.copy()
     for e in t:
         e.x = 5
-    assert s.has(P(1))
+    assert s.contains(P(1))
 
 test fn copy_of_empty_containers_is_empty():
     xs: List[int] = []

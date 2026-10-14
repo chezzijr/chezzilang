@@ -3119,7 +3119,7 @@ const METH_ROWS: &[Row] = &[
         METH,
         r#"
     m := {}
-    print(m.has("a"))
+    print(m.contains("a"))
     m[1] = 2
     print(m)
 "#,
@@ -3193,7 +3193,7 @@ const METH_ROWS: &[Row] = &[
     w: int? = 5
     ws: str? = "s"
     m := {"a": None}
-    print(m.has("a"))
+    print(m.contains("a"))
     m["b"] = {V}
     m["c"] = {C}
     print(m)

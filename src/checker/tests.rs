@@ -5117,10 +5117,10 @@ b := Box(Tag(2))
     for tail in [
         "print(Set([a]).len())\n",                        // Set literal-ish ctor
         "s := Set([a])\ns.add(b)\nprint(s.len())\n",      // .add
-        "s := Set([a])\nprint(s.has(b))\n",               // .has
+        "s := Set([a])\nprint(s.contains(b))\n",          // .has
         "s := Set([a])\nprint(b in s)\n",                 // `in` over a set
         "print({a: 1}.len())\n",                          // map literal
-        "m := {a: 1}\nprint(m.has(b))\n",                 // Map.has
+        "m := {a: 1}\nprint(m.contains(b))\n",            // Map.has
         "m := {a: 1}\nprint(m.get(b))\n",                 // Map.get
         "m := {a: 1}\nm[b] = 2\nprint(m.len())\n",        // index write
         "m := {a: 1}\nprint(m[b])\n",                     // index read
@@ -5167,7 +5167,7 @@ b := Box(Tag(2))
     );
     // The SATISFIED instantiation of the very same conditional-`eq` struct, everywhere.
     entry_ok(&format!(
-        "{COND}s := Set([Box(1)])\ns.add(Box(2))\nprint(s.has(Box(1)))\nm := {{Box(1): 1}}\nm[Box(2)] = 2\nprint(m[Box(1)])\nprint(Box(1) in m)\n"
+        "{COND}s := Set([Box(1)])\ns.add(Box(2))\nprint(s.contains(Box(1)))\nm := {{Box(1): 1}}\nm[Box(2)] = 2\nprint(m[Box(1)])\nprint(Box(1) in m)\n"
     ));
     entry_ok(&format!(
         "{COND}s: Set[Box[int]] = Set([])\nm: Map[Box[int], int] = {{}}\nprint(s.len() + m.len())\n"
@@ -12738,7 +12738,7 @@ fn map_get_method_is_option_of_value() {
 
 #[test]
 fn map_has_method_is_bool() {
-    ok("m := {\"a\": 1}\nb: bool = m.has(\"a\")\n");
+    ok("m := {\"a\": 1}\nb: bool = m.contains(\"a\")\n");
 }
 
 #[test]
@@ -13243,11 +13243,11 @@ fn every_native_container_method_is_classified_by_its_return_type() {
         "List.sort",
         "List.sort_by",
         "List.sort_by_key",
-        "Map.has",
+        "Map.contains",
         "Map.len",
         "Map.update",
         "Set.add",
-        "Set.has",
+        "Set.contains",
         "Set.len",
         "Set.remove",
         "bytearray.decode",
@@ -14684,7 +14684,7 @@ fn set_literal_infers_set_of_elem() {
 #[test]
 fn set_methods_typecheck() {
     ok(
-        "s := {1, 2}\nb: bool = s.has(1)\ns.add(3)\nr: bool = s.remove(1)\nu: Set[int] = s.union({4})\nprint(u.len())\n",
+        "s := {1, 2}\nb: bool = s.contains(1)\ns.add(3)\nr: bool = s.remove(1)\nu: Set[int] = s.union({4})\nprint(u.len())\n",
     );
 }
 
@@ -24050,7 +24050,7 @@ fn container_method_sigs_byte_match() {
     assert_eq!(sum_sig.where_bounds[0].bounds[0].name, "Add");
     // Map[Int, Str] — K=Int, V=Str (distinct so the K/V order is pinned).
     chk("Map", "len", &kv(), vec![], Ty::Int);
-    chk("Map", "has", &kv(), vec![Ty::Int], Ty::Bool);
+    chk("Map", "contains", &kv(), vec![Ty::Int], Ty::Bool);
     chk("Map", "get", &kv(), vec![Ty::Int], Ty::option(Ty::Str));
     chk("Map", "keys", &kv(), vec![], Ty::list(Ty::Int));
     chk("Map", "values", &kv(), vec![], Ty::list(Ty::Str));
@@ -24079,7 +24079,7 @@ fn container_method_sigs_byte_match() {
     chk("Map", "copy", &kv(), vec![], Ty::map(Ty::Int, Ty::Str));
     // Set[Int] — the flat methods.
     chk("Set", "len", &int(), vec![], Ty::Int);
-    chk("Set", "has", &int(), vec![Ty::Int], Ty::Bool);
+    chk("Set", "contains", &int(), vec![Ty::Int], Ty::Bool);
     chk("Set", "add", &int(), vec![Ty::Int], Ty::Nil);
     chk("Set", "remove", &int(), vec![Ty::Int], Ty::Bool);
     chk(
@@ -24255,7 +24255,7 @@ fn receiver_write_table_matches_observed_behavior() {
             r#"x := {"a": 1}"#,
             &[
                 "len()",
-                r#"has("a")"#,
+                r#"contains("a")"#,
                 r#"get("a")"#,
                 "keys()",
                 "values()",
@@ -24271,7 +24271,7 @@ fn receiver_write_table_matches_observed_behavior() {
             "x := {1, 2}",
             &[
                 "len()",
-                "has(1)",
+                "contains(1)",
                 "add(3)",
                 "remove(1)",
                 "union({9})",
@@ -41281,4 +41281,22 @@ fn builtin_operator_and_bound_agree_grid() {
         red.len(),
         red.join("\n")
     );
+}
+
+/// TICKET-257 (owner decision U16) — membership has one name, `contains`. `has` on a Map or a Set is
+/// a migration error that names the replacement.
+#[test]
+fn map_and_set_has_is_a_migration_error_naming_contains() {
+    for src in [
+        "m := {1: 2}\nb := m.has(1)\n",
+        "s := {1, 2}\nb := s.has(1)\n",
+    ] {
+        let errs = check_src(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("write") && e.message.contains("contains(")),
+            "expected a migration error naming contains, got: {errs:?}"
+        );
+    }
+    ok("m := {1: 2}\nb := m.contains(1)\ns := {1, 2}\nc := s.contains(1)\n");
 }

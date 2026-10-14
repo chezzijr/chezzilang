@@ -103,7 +103,7 @@ native struct List[T]:
 
 native struct Map[K: Hashable + Eq, V]:
     native fn len(self) -> int
-    native fn has(self, k: K) -> bool
+    native fn contains(self, k: K) -> bool
     native fn get(self, k: K) -> Option[V]
     native fn keys(self) -> List[K]
     native fn values(self) -> List[V]
@@ -116,7 +116,7 @@ native struct Map[K: Hashable + Eq, V]:
 
 native struct Set[T: Hashable + Eq]:
     native fn len(self) -> int
-    native fn has(self, v: T) -> bool
+    native fn contains(self, v: T) -> bool
     native fn add(self, v: T) -> None
     native fn remove(self, v: T) -> bool
     native fn union(self, other: Set[T]) -> Set[T]

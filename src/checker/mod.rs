@@ -4524,11 +4524,11 @@ const LIST_METHODS: &[&str] = &[
     "copy",
 ];
 const MAP_METHODS: &[&str] = &[
-    "len", "has", "get", "keys", "values", "remove", "merge", "update", "items", "copy",
+    "len", "contains", "get", "keys", "values", "remove", "merge", "update", "items", "copy",
 ];
 const SET_METHODS: &[&str] = &[
     "len",
-    "has",
+    "contains",
     "add",
     "remove",
     "union",

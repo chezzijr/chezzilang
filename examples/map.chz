@@ -15,8 +15,8 @@ fn main():
 
     # Methods.
     print(scores.len())
-    print(scores.has("linus"))
-    print(scores.has("ken"))
+    print(scores.contains("linus"))
+    print(scores.contains("ken"))
 
     # Safe accessor returns `V?`.
     match scores.get("grace"):

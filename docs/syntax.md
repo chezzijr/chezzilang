@@ -3198,7 +3198,7 @@ skipping it as "not yet chosen".
 — and corrupt — the stored key. This applies to every insert path: `m[k] = v`, the `{k: v}` and
 `{a, b}` literals, `set.add`, `Map.update` / `Map.merge`, and the `Map(it)` / `Set(it)` constructors.
 **Map values are *not* copied** (mutating a stored value in place is intended); the transient lookup
-key in `m[k]` / `k in m` / `s.has(k)` is not copied either. Scalar keys (`int`/`str`/`bool`/`bytes`)
+key in `m[k]` / `k in m` / `s.contains(k)` is not copied either. Scalar keys (`int`/`str`/`bool`/`bytes`)
 are already immutable value-copies, so they take no extra clone. The snapshot copies only the mutable
 aggregate structure (nested structs/enums/lists/maps/sets); an embedded by-reference sub-value (a
 closure, `Channel`, `Shared`, a live generator, …) stays shared by handle — those are identity-
@@ -4596,7 +4596,7 @@ or enum defining `compare`), stable, in place.
 > mismatch (`argument 1 of 'push': expected int, found str`). For a mixed or protocol collection,
 > annotate with the protocol: `shapes: List[Shape] = []`.
 
-Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
+Map methods: `m.get(k)→V?` `m.contains(k)` `m.keys()` `m.values()` `m.remove(k)` `m.len()`;
 `m.items()→List[(K, V)]` (insertion order, so `Map(m.items()) == m`) `m.copy()→map` (shallow);
 `m.merge(n)→map` (new map, `n` wins on a key clash) and `m.update(n)` (write `n` into `m` in place,
 → None); `m[k]` reads (errors on a missing key), `m[k] = v` inserts/updates. Iterate with `for k in m`
@@ -4605,7 +4605,7 @@ Map methods: `m.get(k)→V?` `m.has(k)` `m.keys()` `m.values()` `m.remove(k)` `m
 Sets: `{a, b, c}` is a set literal (deduped, insertion-ordered; `{}` is the empty *map*, the empty
 set is `Set()`; `Set(list)` builds one from a list). Elements are any `Hashable` type (int/str/bool,
 a struct with `hash(self) -> int`, or a tuple of those).
-Methods: `s.add(x)` `s.remove(x)→bool` `s.has(x)` `s.len()` `s.union(t)` `s.intersection(t)`
+Methods: `s.add(x)` `s.remove(x)→bool` `s.contains(x)` `s.len()` `s.union(t)` `s.intersection(t)`
 `s.difference(t)` `s.copy()→set` (shallow); iterate with `for x in s`. `==` is order-independent.
 
 ## 11. Pipe operator `|>`

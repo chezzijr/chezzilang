@@ -847,7 +847,7 @@ fn fxhash_map_str_keys() {
     let src = concat!(
         "counts := {}\n",
         "for w in [\"a\", \"b\", \"a\", \"c\", \"a\", \"b\"]:\n",
-        "    if counts.has(w):\n",
+        "    if counts.contains(w):\n",
         "        counts[w] = counts[w] + 1\n",
         "    else:\n",
         "        counts[w] = 1\n",
@@ -863,7 +863,7 @@ fn fxhash_constant_hash_collision_still_resolves() {
     // must still find the right entry via structural ==, regardless of the bucket hasher.
     let src = "struct K:\n    v: int\n    fn hash(self) -> int:\n        return 7\n\
                    m := {}\ni := 0\nwhile i < 30:\n    m[K(i)] = i\n    i = i + 1\n\
-                   print(m[K(7)])\nprint(m[K(29)])\nprint(m.has(K(30)))\nprint(m.len())\n";
+                   print(m[K(7)])\nprint(m[K(29)])\nprint(m.contains(K(30)))\nprint(m.len())\n";
     assert_eq!(run_parity(src), "7\n29\nfalse\n30\n");
 }
 
@@ -875,7 +875,7 @@ fn dense_index_collision_upgrade_parity() {
     // still misses. A One-only / single-slot index would drop the second key and diverge.
     let src = "struct K:\n    v: int\n    fn hash(self) -> int:\n        return 42\n\
                    m := {}\nm[K(1)] = \"one\"\nm[K(2)] = \"two\"\n\
-                   print(m[K(1)])\nprint(m[K(2)])\nprint(m.has(K(3)))\nprint(m.len())\n";
+                   print(m[K(1)])\nprint(m[K(2)])\nprint(m.contains(K(3)))\nprint(m.len())\n";
     assert_eq!(run_parity(src), "one\ntwo\nfalse\n2\n");
 }
 

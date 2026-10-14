@@ -45,8 +45,8 @@ test fn missing_key_names_the_key():
 test fn methods():
     m := {"a": 1, "b": 2}
     assert m.len() == 2
-    assert m.has("a") == true
-    assert m.has("z") == false
+    assert m.contains("a") == true
+    assert m.contains("z") == false
     match m.get("a"):
         ?v: assert v == 1
         None: assert false, "present key"
@@ -112,8 +112,8 @@ test fn struct_key_map():
     m[P(1, 2)] = "z"                    # structurally-equal key updates in place
     assert m.len() == 2
     assert m[P(3, 4)] == "b"
-    assert m.has(P(1, 2)) == true
-    assert m.has(P(9, 9)) == false
+    assert m.contains(P(1, 2)) == true
+    assert m.contains(P(9, 9)) == false
     match m.get(P(3, 4)):
         ?v: assert v == "b"
         None: assert false, "present"
@@ -129,9 +129,9 @@ test fn struct_set_algebra():
     assert a.union(b).len() == 4
     assert a.intersection(b).len() == 2
     assert a.difference(b).len() == 1
-    assert a.has(P(2)) == true
+    assert a.contains(P(2)) == true
     a.remove(P(2))
-    assert a.has(P(2)) == false
+    assert a.contains(P(2)) == false
 
 # ---- cyclic-key equality faults recoverably (matches `==` / Python RecursionError) ----
 # A struct with a custom `hash` used as a Set/Map key that holds a genuine reference cycle:
@@ -161,7 +161,7 @@ test fn cyclic_key_faults_everywhere():
     assert_depth_fault(r, "==")
     # Set.has / `in` / Set([...]) collide-construct / add
     s := Set([a1])
-    r := recover: s.has(a2)
+    r := recover: s.contains(a2)
     assert_depth_fault(r, "Set.has")
     r := recover: (a2 in s)
     assert_depth_fault(r, "in Set")
@@ -181,7 +181,7 @@ test fn cyclic_key_faults_everywhere():
     m[a1] = 1
     r := recover: m[a2]
     assert_depth_fault(r, "Map get")
-    r := recover: m.has(a2)
+    r := recover: m.contains(a2)
     assert_depth_fault(r, "Map.has")
     r := recover: (a2 in m)
     assert_depth_fault(r, "in Map")
@@ -206,8 +206,8 @@ fn assign_map(m: Map[Cyc, int], k: Cyc):
 
 test fn noncyclic_controls():
     # plain scalars
-    assert Set([1, 2, 3]).has(2) == true
-    assert Set([1, 2, 3]).has(9) == false
+    assert Set([1, 2, 3]).contains(2) == true
+    assert Set([1, 2, 3]).contains(9) == false
     assert {"a": 1}["a"] == 1
     assert [1, 2, 3].contains(2) == true
     assert [1, 2, 3].index_of(2) == 1
@@ -215,16 +215,16 @@ test fn noncyclic_controls():
     k1 := Cyc(1)
     k2 := Cyc(2)
     s: Set[Cyc] = Set([k1, k2])
-    assert s.has(Cyc(1)) == true
-    assert s.has(Cyc(9)) == false
+    assert s.contains(Cyc(1)) == true
+    assert s.contains(Cyc(9)) == false
     s.add(Cyc(3))
     assert s.len() == 3
     s.remove(Cyc(1))
-    assert s.has(Cyc(1)) == false
+    assert s.contains(Cyc(1)) == false
     m: Map[Cyc, int] = {}
     m[Cyc(1)] = 10
     m[Cyc(1)] = 20
-    assert m.has(Cyc(1)) == true
+    assert m.contains(Cyc(1)) == true
     assert m[Cyc(1)] == 20
     match m.remove(Cyc(1)):
         ?v: assert v == 20

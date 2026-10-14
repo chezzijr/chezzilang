@@ -329,7 +329,7 @@ the freeze.
 - **A data-snapshot `Iterator[T]` crosses by deep copy like a `List`.** Do not "mirror the generator
   pattern" for a cursor — one line (`[1,2,3].iter()`) made a `to_snap` `unreachable!` reachable.
 - **Container key/membership equality must fault like `==`, not swallow.** `values_equal` was
-  `values_equal_guarded(..).unwrap_or(false)`, so `s.has(cyclic)` returned `false` where `a == b`
+  `values_equal_guarded(..).unwrap_or(false)`, so `s.contains(cyclic)` returned `false` where `a == b`
   faulted (CPython raises on both). Every production site now uses the guarded form via the
   `seq_slot`/`set_slot`/`map_slot` helpers and the swallowing wrapper is `#[cfg(test)]`-only, so a new
   miss is a compile error. Grep both `self.values_equal(` and `vm.values_equal(`.

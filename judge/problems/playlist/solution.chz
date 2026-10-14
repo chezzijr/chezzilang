@@ -23,7 +23,7 @@ fn main():
     start := 0
     for i in 0..n:
         v := int(toks[1 + i])
-        if last.has(v) and last[v] >= start:
+        if last.contains(v) and last[v] >= start:
             start = last[v] + 1
         last[v] = i
         cur := i - start + 1

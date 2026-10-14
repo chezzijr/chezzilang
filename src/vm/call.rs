@@ -3288,7 +3288,7 @@ impl Vm {
         match (method, args.len()) {
             ("neg", 0) => Ok(Some(self.neg_value(recv, span)?)),
             // `Hashable` → the SAME hash a Map/Set key gets, so `x.hash()` can never disagree with
-            // `m[x]` / `s.has(x)` membership. A zero-field struct with no `hash` hook gets
+            // `m[x]` / `s.contains(x)` membership. A zero-field struct with no `hash` hook gets
             // `declared_hash`'s constant. `recv` stays rooted across the (possibly re-entrant,
             // possibly allocating) hash + the result box.
             ("hash", 0) => {
@@ -4179,8 +4179,8 @@ impl Vm {
                     self.arity_err("len", args, 0, span)?;
                     Ok(Value::int(m.entries.len() as i64))
                 }
-                "has" => {
-                    self.arity_err("has", args, 1, span)?;
+                "contains" => {
+                    self.arity_err("contains", args, 1, span)?;
                     let key = args[0];
                     let hk = self.hash_key_rooted(key, &[Value::obj(h), key], span)?;
                     let found = self.map_probe(h, hk, key, span)?.is_some();
@@ -4329,8 +4329,8 @@ impl Vm {
                     self.arity_err("len", args, 0, span)?;
                     Ok(Value::int(s.entries.len() as i64))
                 }
-                "has" => {
-                    self.arity_err("has", args, 1, span)?;
+                "contains" => {
+                    self.arity_err("contains", args, 1, span)?;
                     let x = args[0];
                     let hx = self.hash_key_rooted(x, &[Value::obj(h), x], span)?;
                     Ok(Value::bool(self.set_probe(h, hx, x, span)?.is_some()))

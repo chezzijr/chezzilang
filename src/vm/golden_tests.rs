@@ -10870,7 +10870,7 @@ fn main():
     m[a] = "one"
     a.x = 2                    # mutate the live key in place
     print(m[K(1)])             # still resolves — stored key was snapshotted at x=1
-    print(m.has(a))            # a is now K(2), not a stored key -> false (no fault)
+    print(m.contains(a))            # a is now K(2), not a stored key -> false (no fault)
     print(m.get(a))            # None (no fault)
     ks := m.keys()
     print(ks[0].x)             # 1 — the snapshot, not the mutated original
@@ -11005,7 +11005,7 @@ fn main():
     print(s.len())          # 1 — built, not a runtime fault
     m: Map[Node, str] = {}
     m[a] = "x"
-    print(m.has(a))         # true — same held key still resolves
+    print(m.contains(a))         # true — same held key still resolves
 main()
 "#;
     assert_golden_out(src, "1\ntrue\n");
@@ -11026,7 +11026,7 @@ fn main():
     k := K(gen(), 7)
     m: Map[K, str] = {}
     m[k] = "one"
-    print(m.has(k))         # true — was a generator/airlock fault before
+    print(m.contains(k))         # true — was a generator/airlock fault before
     print(m[k])             # one
     s := {k}
     print(s.len())          # 1
@@ -11050,7 +11050,7 @@ fn main():
     m: Map[H, str] = {}
     m[h] = "x"
     print(m[h])             # x — was "key not found" before (fresh-handle closure field)
-    print(m.has(h))         # true
+    print(m.contains(h))         # true
     s := {h}
     print(s.difference({h}).len())   # 0 — same held element compares equal
 main()
@@ -11075,7 +11075,7 @@ fn main():
     m.update(o)
     k := o.keys()[0]
     k.x = 9                 # mutate the SOURCE's stored key
-    print(m.has(K(1)))      # true — m's key was snapshotted, not aliased
+    print(m.contains(K(1)))      # true — m's key was snapshotted, not aliased
     print(m.keys()[0].x)    # 1
     # merge
     o2: Map[K, str] = {}
@@ -11083,7 +11083,7 @@ fn main():
     mm := o2.merge(o2)
     k2 := o2.keys()[0]
     k2.x = 8
-    print(mm.has(K(2)))     # true
+    print(mm.contains(K(2)))     # true
     print(mm.keys()[0].x)   # 2
 main()
 "#;
@@ -11110,7 +11110,7 @@ fn main():
     m: Map[Node, str] = {}
     m[n] = "deep"
     print(m[n])          # deep — held key still resolves past MAX_STRUCTURAL_DEPTH
-    print(m.has(n))      # true
+    print(m.contains(n))      # true
     s := {n}
     print(s.len())       # 1
 main()

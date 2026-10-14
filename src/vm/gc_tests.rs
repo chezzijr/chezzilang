@@ -197,7 +197,7 @@ fn main():
     for k in m:
         out = out + m[k]
     print(out)
-    print(m.has(K(3)))
+    print(m.contains(K(3)))
     print(m.get(K(5)))
     print(make_map().get(K(2)))   # inline-temporary receiver
     print(m.remove(K(0)))
@@ -236,7 +236,7 @@ main()";
 /// `&self`. The receiver, the needle, the wire of a half-built local `SetData`/`MapData`/`Vec` and a
 /// freshly-snapshotted key are all off the operand stack at that moment. `hash` is deliberately
 /// allocation-FREE here so the only re-entry under test is `eq`'s. Inline-temporary receivers
-/// (`make_set().has(..)`) are the sharpest case: nothing but the rooting keeps them alive.
+/// (`make_set().contains(..)`) are the sharpest case: nothing but the rooting keeps them alive.
 #[test]
 fn set_struct_eq_survives_gc_stress() {
     let src = "\
@@ -267,12 +267,12 @@ fn main():
     b := Set([K(3), K(4), K(5)])
     print(a.union(b).len(), a.intersection(b).len(), a.difference(b).len())
     print((a | b).len(), (a ^ b).len())
-    print(make_set().has(K(2)))              # inline-temporary receiver
+    print(make_set().contains(K(2)))              # inline-temporary receiver
     print(K(3) in make_set())
     print(make_list().index_of(K(3)), make_list().unique().len())
     print(K(2) in make_list())
     m := make_map()
-    print(m.has(K(4)), m.get(K(5)), make_map().get(K(2)), m[K(1)])
+    print(m.contains(K(4)), m.get(K(5)), make_map().get(K(2)), m[K(1)])
     print(m.merge(make_map()).len(), m.remove(K(0)), m.len())
     m.update(make_map())
     print(m.len())

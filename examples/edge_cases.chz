@@ -90,7 +90,7 @@ fn collections():
     m["y"] = 2
     print(m.get("x"))                 # 1
     print(m.get("z"))                 # None
-    print(m.has("y"))
+    print(m.contains("y"))
     print(m.remove("x"))              # 1
     print(m.len())
 

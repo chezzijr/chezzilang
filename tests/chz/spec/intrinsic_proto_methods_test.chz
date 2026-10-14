@@ -181,10 +181,10 @@ test fn hash_method_agrees_with_container_hashing():
     # agreement with real container use (the same hash backs Map/Set lookup)
     m: Map[int, int] = {}
     m[5] = 1
-    assert m.has(5)
+    assert m.contains(5)
     assert hash_m(5) == hash_m(5)
     s := Set(["k"])
-    assert s.has("k")
+    assert s.contains("k")
     assert hash_m("k") == hash_m("k")
 
 test fn hash_method_reachable_through_a_protocol_value():
@@ -204,7 +204,7 @@ struct OwnHash:
 test fn zero_field_struct_hash_and_user_hash_control():
     # a zero-field struct is intrinsically Hashable (constant hash, no user method)
     assert hash_m(Unit()) == hash_m(Unit())
-    assert Set([Unit()]).has(Unit()), "self-consistent with Set membership"
+    assert Set([Unit()]).contains(Unit()), "self-consistent with Set membership"
     # control: a struct that DEFINES `hash` still gets ITS method
     assert hash_m(OwnHash()) == 42
     assert OwnHash().hash() == 42

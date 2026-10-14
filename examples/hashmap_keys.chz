@@ -16,7 +16,7 @@ fn main():
     # --- scalar keys still work (regression) ---
     counts: Map[str, int] = {}
     for w in ["a", "b", "a", "c", "a", "b"]:
-        if counts.has(w):
+        if counts.contains(w):
             counts[w] = counts[w] + 1
         else:
             counts[w] = 1
@@ -37,8 +37,8 @@ fn main():
     for p in label:
         print("  {p}: {label[p]}")
     print("at (1,0): {label[Point(1, 0)]}")
-    print("has (0,1): {label.has(Point(0, 1))}")
-    print("has (9,9): {label.has(Point(9, 9))}")
+    print("has (0,1): {label.contains(Point(0, 1))}")
+    print("has (9,9): {label.contains(Point(9, 9))}")
     print("removed (0,0): {label.remove(Point(0, 0))}")
     print("len after remove: {label.len()}")
 

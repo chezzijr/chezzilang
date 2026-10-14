@@ -230,7 +230,7 @@ fn ops_channel(a: Channel[int], b: Channel[int], c: Channel[int]) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -266,7 +266,7 @@ fn ops_shared(a: Shared[int], b: Shared[int], c: Shared[int]) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -302,7 +302,7 @@ fn ops_rwshared(a: RwShared[int], b: RwShared[int], c: RwShared[int]) -> List[st
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -338,7 +338,7 @@ fn ops_atomic(a: Atomic[int], b: Atomic[int], c: Atomic[int]) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -374,7 +374,7 @@ fn ops_atomic_int(a: AtomicInt, b: AtomicInt, c: AtomicInt) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -410,7 +410,7 @@ fn ops_executor(a: Executor, b: Executor, c: Executor) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -446,7 +446,7 @@ fn ops_socket(a: Socket, b: Socket, c: Socket) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -482,7 +482,7 @@ fn ops_listener(a: Listener, b: Listener, c: Listener) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -518,7 +518,7 @@ fn ops_writer(a: Writer, b: Writer, c: Writer) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -554,7 +554,7 @@ fn ops_reader(a: Reader, b: Reader, c: Reader) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")
@@ -590,7 +590,7 @@ fn ops_ptr(a: ptr, b: ptr, c: ptr) -> List[str]:
         bad.push("option")
     if not (HKey(b) in {HKey(a): 1}):
         bad.push("map-probe")
-    if not {HKey(a)}.has(HKey(b)):
+    if not {HKey(a)}.contains(HKey(b)):
         bad.push("set-probe")
     if not Atomic(a).cas(b, a):
         bad.push("cas")

@@ -13875,7 +13875,7 @@ to ~1.1×). Target is CPython 3.14 (specializing interpreter + optional JIT).
   `Map.merge`** (the spec-listed paths the first cut left aliasing — `update`/`merge` now snapshot the
   incoming keys, and `merge` builds fresh instead of `clone()`-aliasing the receiver's keys).
   **Values are never copied** (mutating a stored value in place stays intended); the transient lookup
-  key (`m[k]`, `k in m`, `s.has(k)`) is never snapshotted. **Ceilings** (both match pre-change
+  key (`m[k]`, `k in m`, `s.contains(k)`) is never snapshotted. **Ceilings** (both match pre-change
   behavior, no new fault): a **cyclic** struct/enum key — or one nested deeper than
   `MAX_STRUCTURAL_DEPTH` (10000) — is stored by reference (a value-copy of a cycle can't compare equal
   to the original; a too-deep snapshot would alias its tail then miss on lookup, and the pre-snapshot
@@ -14930,7 +14930,7 @@ branch names) is in the git log.
   operator form already uses — `arith` (which covers the numeric-newtype grant for free via
   `newtype_arith`), a newly extracted `Vm::neg_value` (`Op::Neg`'s body, now single-sourced in
   `src/vm/arith.rs`), `hash_value` (literally the Map/Set key hash, so `x.hash()` can never disagree with
-  `m[x]`/`s.has(x)`), `compare`, and `get_index`/`set_index`/`get_slice` (with the `Option[int]` → raw
+  `m[x]`/`s.contains(x)`), `compare`, and `get_index`/`set_index`/`get_slice` (with the `Option[int]` → raw
   `Nil`/`Int` unwrap `Slice`'s signature needs). Nothing reimplemented ⇒ `a.add(b)` ≡ `a + b` and
   `c.index(k)` ≡ `c[k]` by construction, fault text included. Wired at 5 **miss** sites (inline scalar,
   the merged built-in-container dispatch, struct, newtype, and the catch-all where a boxed `BigInt`

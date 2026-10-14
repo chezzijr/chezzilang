@@ -10,7 +10,7 @@ fn main():
     text := "the quick brown fox the lazy dog the fox jumps the dog"
     counts: Map[str, int] = {}
     for w in text.split(" "):
-        if counts.has(w):
+        if counts.contains(w):
             counts[w] = counts[w] + 1
         else:
             counts[w] = 1
