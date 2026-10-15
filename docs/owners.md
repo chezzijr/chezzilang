@@ -100,7 +100,8 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 
 | Fact | Owner | Notes |
 |---|---|---|
-| Unit-test fixture temp directory | `TmpDir` (`test_support.rs`) | one counter, so two live fixtures never share a path; `main.rs` and `tests/` are other crates and keep their own |
+| Unit-test fixture temp directory | `TmpDir` (`test_support.rs`) | one counter, so two live fixtures never share a path; each crate's tests include the file; `main.rs` and `tests/` keep their own |
+| C callback fixture library | `build_callback_so` (`test_support.rs`) | the native FFI tests and the VM FFI goldens (`vm/golden_tests/ffi.rs`) |
 | VM production sources for a source-text rule | `vm_sources` (`vm/tests/mod.rs`) | |
 
 ## File map
@@ -111,7 +112,9 @@ file at 2,500 lines and a test file at 3,500.
 
 | Area | Files |
 |---|---|
-| Crates | `chezzi-syntax` (`crates/chezzi-syntax/src/lib.rs`) builds `lexer`, `ast`, `parser`, `fmtspec`, `printable` and `slice` from their files under `src/`; the `chezzi` crate (`lib.rs`) re-exports them at their old paths |
+| Crates | One crate per layer, each building its files under `src/` by `#[path]` and re-exporting the layers below at their old paths: `chezzi-syntax` (`lexer`, `ast`, `parser`, `fmtspec`, `printable`, `slice`) ← `chezzi-native` (`native/`) ← `chezzi-base` (`base/`) ← `chezzi-front` (`resolver/`, `desugar/`, `checker/`, `compiler/`) and `chezzi-vm` (`vm/`) ← `chezzi` (`lib.rs`: `run.rs`, `editor/`, `test_runner.rs`, `manifest.rs`, the binaries). `chezzi-vm` never depends on `chezzi-front`; its tests do (dev-dependency) |
+| Source checkout path (std dir, test fixtures) | `checkout_root` (`native/std_embed.rs`) | `resolver::std_root` and every test fixture path read it; never `env!("CARGO_MANIFEST_DIR")`, which names each crate's own directory |
+| Compile and run a program in a front-end test | `run_capture`, `run_file` (`compiler/run_for_tests.rs`) | through `vm::run_built`, the CLI's entry |
 | Lexer | `lexer/mod.rs` (tokens, token extents such as `word_end_col`), `lexer/tests.rs` |
 | Parser | `parser/mod.rs` (entry points, `Parser`, value sites), `parser/cursor.rs` (peek, expect, line and block ends), `parser/stmt.rs` (items, statements, imports), `parser/decl.rs` (fn, protocol, extern, native, struct, enum), `parser/control.rs` (if, for, while, match, else guards), `parser/pattern.rs` (patterns and binding targets), `parser/types.rs` (blocks, types), `parser/expr.rs` (Pratt expressions), `parser/interp.rs` (interpolation, closures), `parser/tests/` |
 | AST | `ast/mod.rs` (node shapes and pure queries), `ast/consteval.rs` |
@@ -125,7 +128,7 @@ file at 2,500 lines and a test file at 3,500.
 | Checker: calls | `checker/expr.rs` (call dispatch), `checker/ctor_call.rs`, `checker/builtin_call.rs`, `checker/fn_call.rs`, `checker/method_call.rs`, `checker/args.rs` |
 | Checker: patterns, names | `checker/pattern.rs`, `checker/exhaust.rs`, `checker/iter_index.rs`, `checker/resolve.rs`, `checker/globals.rs`, `checker/suggest.rs` |
 | Checker tests | `checker/tests/` (one file per topic, helpers in `checker/tests/mod.rs`), `checker/graph_tests.rs` |
-| Compiler | `compiler/mod.rs` (entry, `Compiler`, keys, globals), `compiler/fn_body.rs`, `compiler/stmt.rs`, `compiler/assign.rs`, `compiler/loops.rs`, `compiler/pattern.rs`, `compiler/expr.rs`, `compiler/witness.rs`, `compiler/call.rs`, `compiler/capture.rs` (free variables), `compiler/fncomp.rs`, `compiler/peephole.rs`, `compiler/tests/` |
+| Compiler | `compiler/mod.rs` (entry, `Compiler`, keys, globals), `compiler/fn_body.rs`, `compiler/stmt.rs`, `compiler/assign.rs`, `compiler/loops.rs`, `compiler/pattern.rs`, `compiler/expr.rs`, `compiler/witness.rs`, `compiler/call.rs`, `compiler/capture.rs` (free variables), `compiler/fncomp.rs`, `compiler/peephole.rs`, `compiler/run_for_tests.rs` (compile and run, for the front end's tests), `compiler/tests/` |
 | VM: core | `vm/mod.rs` (types, errors, traces, module declarations), `vm/value.rs`, `vm/heap.rs`, `vm/chzstr.rs`, `vm/entry.rs` (`run_built`, test run helpers), `vm/host.rs` |
 | Base (read by the front end and the VM) | `base/op.rs` (bytecode, `Program`, `CompileError`), `base/crossing.rs`, `base/hooks.rs`, `base/json_desc.rs`, `base/module_id.rs`, `base/provider_name.rs`, `base/words.rs` |
 | Run drivers (front end, then VM) | `run.rs` |

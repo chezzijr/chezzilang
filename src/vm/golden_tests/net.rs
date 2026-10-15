@@ -971,7 +971,7 @@ main()
 /// golden-file comparison. Watchdog-guarded so a regression faults instead of hanging the test binary.
 #[test]
 fn example_socket_timeout_matches_expected() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = crate::native::std_embed::checkout_root();
     let entry = manifest.join("examples/socket_timeout.chz");
     let expected = std::fs::read_to_string(manifest.join("examples/socket_timeout.expected"))
         .expect("read examples/socket_timeout.expected");

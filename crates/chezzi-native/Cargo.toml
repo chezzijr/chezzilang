@@ -1,0 +1,21 @@
+[package]
+name = "chezzi-native"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chezzi-syntax = { path = "../chezzi-syntax" }
+libc = "0.2.186"
+libffi = "3"
+libloading = "0.8"
+regex = "1"
+socket2 = "0.5"
+ureq = "3"
+url = "2"
+
+[features]
+# The locks around process-global native state (RNG, UUID, fs scratch) that the VM's tests take too.
+test-api = []
+
+[lints]
+workspace = true

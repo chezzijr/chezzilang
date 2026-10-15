@@ -111,7 +111,11 @@ version = "0.1.0"
 dependencies = [
  "bnf",
  "cc",
+ "chezzi-base",
+ "chezzi-front",
+ "chezzi-native",
  "chezzi-syntax",
+ "chezzi-vm",
  "libc",
  "libffi",
  "libloading",
@@ -125,8 +129,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "chezzi-base"
+version = "0.1.0"
+dependencies = [
+ "chezzi-native",
+ "chezzi-syntax",
+]
+
+[[package]]
+name = "chezzi-front"
+version = "0.1.0"
+dependencies = [
+ "chezzi-base",
+ "chezzi-native",
+ "chezzi-syntax",
+ "chezzi-vm",
+]
+
+[[package]]
+name = "chezzi-native"
+version = "0.1.0"
+dependencies = [
+ "chezzi-syntax",
+ "libc",
+ "libffi",
+ "libloading",
+ "regex",
+ "socket2",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "chezzi-syntax"
 version = "0.1.0"
+
+[[package]]
+name = "chezzi-vm"
+version = "0.1.0"
+dependencies = [
+ "chezzi-base",
+ "chezzi-front",
+ "chezzi-native",
+ "chezzi-syntax",
+ "libc",
+ "polling",
+]
 
 [[package]]
 name = "concurrent-queue"

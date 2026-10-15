@@ -430,7 +430,7 @@ fn all_shipped_examples_typecheck() {
     // regression on a shipped example would ship FALSELY GREEN. This routes every
     // examples/*.chz through the real checked path (build_graph + check_graph, mirroring
     // `chezzi check`) so example type-errors are caught from now on.
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let dir = crate::native::std_embed::checkout_root().join("examples");
     // NO allow-list: every shipped example type-checks. (Two used to be exempt. `explicit_type_args.chz`
     // was wrongly rejected by a `name_is_generic` keying bug. `panic.chz` bound `Ok(v)` + `{v}` over a
     // `recover:` of a VOID call — that yields `Result[nil, Error]`, so the interpolation was a real
@@ -479,7 +479,7 @@ fn all_std_files_standalone_typecheck() {
             }
         }
     }
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std");
+    let dir = crate::native::std_embed::checkout_root().join("std");
     let mut entries = Vec::new();
     collect_chz(&dir, &mut entries);
     entries.sort();
@@ -510,7 +510,7 @@ fn all_bench_corpus_typecheck() {
     // type annotation (now rejected after the hard list->List/map->Map/set->Set rename) would ship
     // FALSELY GREEN and break the documented perf-measurement entrypoint. Route every bench file
     // through the real checked path so such regressions are caught.
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let dir = crate::native::std_embed::checkout_root()
         .join("benches")
         .join("chz");
     let mut entries: Vec<_> = std::fs::read_dir(&dir)

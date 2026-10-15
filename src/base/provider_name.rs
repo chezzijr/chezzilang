@@ -13,7 +13,7 @@ pub const PROVIDER_PREFIX: &str = "$def$";
 /// (leaking an internal symbol into `--errors=json`, i.e. the editor squiggle). A method's owner
 /// carries a `.` (`S.m`) and a struct/fn name never can, so within one kind the name is injective.
 #[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Slot {
+pub enum Slot {
     /// A parameter of a free fn or a method.
     Param,
     /// A struct field.
@@ -22,7 +22,7 @@ pub(crate) enum Slot {
 
 impl Slot {
     /// One character, so the name stays short and stays unspellable.
-    pub(crate) fn tag(self) -> char {
+    pub fn tag(self) -> char {
         match self {
             Slot::Param => 'p',
             Slot::Field => 'f',
@@ -37,14 +37,14 @@ impl Slot {
 /// function, called by the synthesizer, every registry collector and the checker's decl-site `?`
 /// gate (each passing the result straight into [`dflt_for`]), so they can never drift into naming a
 /// provider that does not exist.
-pub(crate) fn provider_name(file: u32, slot: Slot, owner: &str, param: &str) -> String {
+pub fn provider_name(file: u32, slot: Slot, owner: &str, param: &str) -> String {
     format!("{PROVIDER_PREFIX}{file}${}${owner}.{param}$", slot.tag())
 }
 
 /// [`provider_name`] for a **parameter** slot, for the checker's decl-site `?` gate: it asks whether
 /// the default it is about to infer will be judged again inside a provider body, and the honest way
 /// to answer is to look for the function [`synthesize_providers`] would have emitted.
-pub(crate) fn param_provider_name(file: u32, owner: &str, param: &str) -> String {
+pub fn param_provider_name(file: u32, owner: &str, param: &str) -> String {
     provider_name(file, Slot::Param, owner, param)
 }
 
@@ -66,7 +66,7 @@ pub fn display_fn_name(name: &str) -> std::borrow::Cow<'_, str> {
 /// was measurable (`struct S: n: int = S().n` reported `the default value for parameter 'n' of 'S'
 /// is cyclic`). Total: an unparseable name (impossible for one [`provider_name`] built) degrades to
 /// itself.
-pub(crate) fn provider_label(name: &str) -> String {
+pub fn provider_label(name: &str) -> String {
     let Some(rest) = name
         .strip_prefix(PROVIDER_PREFIX)
         .and_then(|r| r.strip_suffix('$'))

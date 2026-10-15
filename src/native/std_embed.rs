@@ -1,7 +1,7 @@
 //! The stdlib, baked into the binary.
 //!
 //! `std/*.chz` is BUILD-TIME source, not an installed asset: an installed `chezzi` (`cargo install
-//! --path .`) must not depend on the source checkout still existing at `env!("CARGO_MANIFEST_DIR")`.
+//! --path .`) must not depend on the source checkout still existing at [`checkout_root`].
 //! So every `std/**/*.chz` is `include_str!`'d here — the same pattern the CLI already uses for the
 //! `docs/*.md` topics — and [`lookup`] is the fallback source the resolver reads a `std.*` module
 //! from when `$CHEZZI_STD` is unset. See [`super::std_source`] for the priority chain.
@@ -9,6 +9,16 @@
 //! The table is hand-written and would silently rot when a new `std/foo.chz` lands (an absent entry
 //! is invisible in a dev/CI run, where the checkout is right there on disk) — `embedded_std_table_matches_disk`
 //! below is the guard: it walks the on-disk tree and asserts set-equality AND content-equality.
+
+/// The source checkout this binary was built from: the workspace root, two levels above this
+/// crate (`crates/chezzi-native`). The std directory PATH (`resolver::std_root`) and every test
+/// fixture path derive from it; a `std.*` module's TEXT comes from [`STD_FILES`] instead.
+pub fn checkout_root() -> std::path::PathBuf {
+    let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.pop();
+    root.pop();
+    root
+}
 
 /// Every `std/**/*.chz`, keyed by its path relative to `std/` (forward slashes, `.chz` included).
 pub const STD_FILES: &[(&str, &str)] = &[
@@ -86,7 +96,7 @@ mod tests {
     /// live file content.
     #[test]
     fn embedded_std_table_matches_disk() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std");
+        let root = checkout_root().join("std");
         let mut files = Vec::new();
         collect_chz(&root, &mut files);
 

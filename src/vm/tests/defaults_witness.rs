@@ -1310,7 +1310,7 @@ fn a_cross_module_default_is_evaluated_per_call_in_the_definers_module() {
 /// byte-identical. Proves "runs clean, no panic" against a literal golden.
 #[test]
 fn entry_is_always_linked_stub_runs_clean_three_engine() {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest = crate::native::std_embed::checkout_root();
     let entry = manifest.join("std").join("prelude.chz");
     let cfg = crate::native::HostConfig::default;
     let (vo, _ve, vr, _vc) = run_file_with(&entry, cfg());

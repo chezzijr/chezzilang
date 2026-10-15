@@ -1014,7 +1014,7 @@ impl Checker {
     /// The parsed `std/prelude.chz`, for the test-only paths that check a program with no prelude
     /// module in a graph; `seed_native_prelude_sigs` is their one seed.
     /// Same source chain as the resolver ($CHEZZI_STD → embedded) — no reader bypasses it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-api"))]
     fn parse_prelude_source() -> Option<crate::ast::Module> {
         let src = crate::resolver::std_source(&["std".to_string(), "prelude".to_string()]).ok()?;
         let toks = crate::lexer::tokenize(&src).ok()?;
@@ -1030,7 +1030,7 @@ impl Checker {
     /// no prelude in scope, so `ord`/`panic` value-position typing + hover would silently regress.
     /// Reads, parses, and registers only the file's `native` decls; the prelude imports nothing and its
     /// param/return types are reserved primitives (`str`/`int`/`bytes`/…), so no module scope is needed.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-api"))]
     pub(super) fn seed_native_prelude_sigs(&mut self) {
         if !self.native_prelude_sigs.is_empty() {
             return;
@@ -1075,7 +1075,7 @@ impl Checker {
     /// TICKET-253 — `Range` is a struct of the prelude that every module sees with no `import`
     /// (the resolver adds `import Range from std.prelude` on the graph path). The graph-less path
     /// hoists its declaration straight into this checker so `Range(0, 3)` resolves here too.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-api"))]
     pub(super) fn seed_range_struct(&mut self, module: &crate::ast::Module) {
         let range_decl: Vec<Stmt> = module
             .stmts

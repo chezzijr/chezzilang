@@ -416,15 +416,15 @@ impl ScopeCancel {
 /// the worker count under every concurrent parallel test. Same shape and same reason as
 /// `native::rand::TEST_RNG_LOCK`: hold it across the whole set-run-restore sequence. A test that
 /// forces a count must start with [`rerun_in_child`].
-#[cfg(test)]
-pub(crate) static TEST_WORKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(any(test, feature = "test-api"))]
+pub static TEST_WORKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// TICKET-230: `set_worker_count` sets the cap of the process-wide `width::RUNNERS`, so a test that
 /// forces a count throttles every concurrently running lib test. It re-runs itself alone in a child
 /// copy of the test binary, which has its own gate. Returns `true` in the parent (the child already
 /// ran the body) and `false` in the child.
-#[cfg(test)]
-pub(crate) fn rerun_in_child(module: &str, name: &str) -> bool {
+#[cfg(any(test, feature = "test-api"))]
+pub fn rerun_in_child(module: &str, name: &str) -> bool {
     if std::env::var_os("CHEZZI_FORCED_COUNT_CHILD").is_some() {
         return false;
     }
@@ -458,7 +458,7 @@ pub(crate) fn rerun_in_child(module: &str, name: &str) -> bool {
 /// defined point that makes a test's forced count immune to the `CHEZZI_THREADS` baseline racing in
 /// after it, rather than before.
 pub fn set_worker_count(n: usize) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-api"))]
     test_baseline_worker_count();
     WORKER_OVERRIDE.store(n, Ordering::Relaxed);
 }
@@ -496,11 +496,11 @@ pub fn set_worker_count(n: usize) {
 /// still be the FIRST call in the whole process and fire the closure there — at `CHEZZI_THREADS=1`
 /// that clobbered a forced `4` down to `1` mid-test, voiding whatever the forced count existed to
 /// arm.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 static TEST_WORKER_BASELINE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
-#[cfg(test)]
-pub(crate) fn test_baseline_worker_count() -> usize {
+#[cfg(any(test, feature = "test-api"))]
+pub fn test_baseline_worker_count() -> usize {
     *TEST_WORKER_BASELINE.get_or_init(|| {
         let n = match std::env::var("CHEZZI_THREADS") {
             Ok(raw) if !raw.trim().is_empty() => {

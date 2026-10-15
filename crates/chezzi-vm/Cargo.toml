@@ -1,0 +1,23 @@
+[package]
+name = "chezzi-vm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chezzi-syntax = { path = "../chezzi-syntax" }
+chezzi-native = { path = "../chezzi-native" }
+chezzi-base = { path = "../chezzi-base" }
+libc = "0.2.186"
+polling = "3"
+
+[dev-dependencies]
+# The VM's tests compile programs; the VM itself never calls the front end.
+chezzi-front = { path = "../chezzi-front", features = ["test-api"] }
+chezzi-native = { path = "../chezzi-native", features = ["test-api"] }
+
+[features]
+# The worker-count test helpers that the `chezzi test` runner's own tests use.
+test-api = []
+
+[lints]
+workspace = true

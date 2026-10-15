@@ -701,17 +701,6 @@ fn golden_json_decode_via_run_file() {
     assert_eq!(out, expected);
 }
 
-/// M8-M3 golden: `examples/sys.chz` — the native trio std.process/std.fs/std.time, end-to-end
-/// on the VM, byte-identical to `.expected` and the interpreter (deterministic ops only).
-#[test]
-fn golden_sys_via_run_file() {
-    let path = fixture("examples/sys.chz");
-    let expected = std::fs::read_to_string(fixture("examples/sys.expected")).unwrap();
-    let (out, _err, res, _) = run_file(&path);
-    assert!(res.is_ok(), "{res:?}");
-    assert_eq!(out, expected);
-}
-
 /// std.process polish golden: `examples/process_polish.chz` — the structured `run`/`run_args`
 /// forms. Proves (a) a non-zero exit is `Ok(ProcResult)` carrying both streams + code (stdout NOT
 /// discarded), (b) `run_args` runs WITHOUT a shell so `$(...)`/`;`/`&&` are passed literally
@@ -882,13 +871,8 @@ fn stack_trace_reports_call_chain() {
     // Call-site lines, innermost first.
     let lines: Vec<u32> = e.trace.iter().map(|f| f.span.line).collect();
     assert_eq!(lines, vec![15, 18, 20]);
-    let vm_fmt = format_trace(&e);
-    assert_eq!(
-        vm_fmt,
-        "runtime error (examples/stack_trace.chz:12:12): division by zero\n  at divide (called at \
-         examples/stack_trace.chz:15:12)\n  at compute (called at examples/stack_trace.chz:18:11)\n  \
-         at main (called at examples/stack_trace.chz:20:1)"
-    );
+    // The rendered trace names each file relative to the working directory, so its literal golden
+    // is `examples/stack_trace.expected`, which `tests/examples_golden.rs` runs from the repo root.
 }
 
 /// W13-20: a fault raised inside a generator's body, driven by a `for` loop in an OUTER function,

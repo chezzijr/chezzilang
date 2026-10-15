@@ -22,8 +22,8 @@ static ATOMIC_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Serializes the golden tests that drive `examples/fs_mutations.chz`, which all write the single
 /// fixed scratch dir `examples/.fs_scratch`. Held across a whole round-trip so the concurrent VM and
 /// interp goldens can't interleave their mkdir/remove on the shared dir (test-runner parallelism).
-#[cfg(test)]
-pub(crate) static FS_SCRATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(any(test, feature = "test-api"))]
+pub static FS_SCRATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// W7-8 — read argument `i` as RAW OS path bytes. Every path-taking `std.fs`/`std.io`/`std.os` native
 /// takes a `bytes` param now (the public `PathLike` wrapper in the `.chz` calls `p.as_path()` first),
@@ -47,7 +47,7 @@ pub(crate) fn arg_path(h: &mut dyn Host, i: usize) -> Result<std::path::PathBuf,
 
 /// The raw OS bytes of a path, for handing one BACK to Chezzi as `path.Path`'s `raw` field.
 /// Byte-exact on unix — this is the half W7-8 was losing.
-pub(crate) fn path_bytes(p: &Path) -> Vec<u8> {
+pub fn path_bytes(p: &Path) -> Vec<u8> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -322,7 +322,7 @@ fn glob(h: &mut dyn Host) -> Result<NativeRet, HostError> {
 
 /// Raw OS bytes → an owned `PathBuf` (byte-exact on unix, lossy elsewhere). The `&[u8]` twin of
 /// [`arg_path`], for a path already in hand (a glob's scan dir, the VM-intercepted `io` openers).
-pub(crate) fn bytes_path(b: &[u8]) -> std::path::PathBuf {
+pub fn bytes_path(b: &[u8]) -> std::path::PathBuf {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

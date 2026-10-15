@@ -625,7 +625,7 @@ fn width_position_grid() {
     let run = |src: &str| -> Result<String, String> {
         let t = TmpDir::new();
         let entry = t.write("main.chz", src);
-        let (out, _err, result, _code) = crate::vm::run_file(&entry);
+        let (out, _err, result, _code) = crate::compiler::run_for_tests::run_file(&entry);
         match result {
             Ok(()) => Ok(out.trim().to_string()),
             Err(e) => Err(format!("{e}")),
@@ -880,7 +880,7 @@ fn width_field_check_follows_the_identity_key_across_a_name_clash() {
         "main.chz",
         "import lib\n\nstruct S:\n    q: int\n\na := S(300)\nprint(a.q)\nb := lib.S(100)\nfor v in [1, 300]:\n    b.q = v\nprint(\"unreached\")\n",
     );
-    let (out, _err, result, _code) = crate::vm::run_file(&entry);
+    let (out, _err, result, _code) = crate::compiler::run_for_tests::run_file(&entry);
     assert_eq!(out.trim(), "300");
     let fault = format!("{}", result.expect_err("lib.S(int8) must fault on 300"));
     assert!(

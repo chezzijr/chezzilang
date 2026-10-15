@@ -14,24 +14,26 @@ use crate::lexer::{Token, tokenize};
 use crate::parser::parse;
 use std::collections::{BTreeMap, BTreeSet};
 
-const ROOT: &str = env!("CARGO_MANIFEST_DIR");
-
 fn read(rel: &str) -> String {
-    std::fs::read_to_string(format!("{ROOT}/{rel}"))
+    std::fs::read_to_string(crate::native::std_embed::checkout_root().join(rel))
         .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
 }
 
 /// Every production source of the parser: the `.rs` files directly in `src/parser/`, in name order
 /// (its unit tests live in `src/parser/tests/` and are not read).
 fn read_parser_sources() -> String {
-    let dir = format!("{ROOT}/src/parser");
+    let dir = crate::native::std_embed::checkout_root().join("src/parser");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("cannot read {dir}: {e}"))
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|x| x == "rs"))
         .collect();
     files.sort();
-    assert!(!files.is_empty(), "no parser source under {dir}");
+    assert!(
+        !files.is_empty(),
+        "no parser source under {}",
+        dir.display()
+    );
     files
         .iter()
         .map(|p| {
@@ -271,9 +273,11 @@ struct Case {
 
 fn load_corpus(dir: &str) -> Vec<Case> {
     let mut cases = Vec::new();
-    let path = format!("{ROOT}/tests/corpus/{dir}");
+    let path = crate::native::std_embed::checkout_root()
+        .join("tests/corpus")
+        .join(dir);
     let mut entries: Vec<_> = std::fs::read_dir(&path)
-        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|x| x == "chz"))
         .collect();

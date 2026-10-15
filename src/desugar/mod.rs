@@ -380,7 +380,7 @@ pub fn run(graph: &mut ModuleGraph) -> Result<(), ResolveError> {
 /// Desugar a single standalone module (no imports) in place. Used by the test/standalone runners,
 /// which bypass [`build_graph`](crate::resolver::build_graph) and so must apply this pass themselves
 /// to stay consistent with the file-backed graph path.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 pub fn run_standalone(module: &mut Module) -> Result<(), ResolveError> {
     // Mirror [`run`]: synthesize providers into the single module first. Its `file` id is whatever
     // the test's lexer stamped; there is only one module, so any value is unique by construction.

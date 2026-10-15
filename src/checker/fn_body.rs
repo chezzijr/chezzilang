@@ -249,7 +249,7 @@ impl Checker {
     }
 
     pub(super) fn check_fn_body(&mut self, decl: &FnDecl, self_ty: Option<Ty>, sig: FnSig) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-api"))]
         {
             self.fn_body_checks += 1;
         }

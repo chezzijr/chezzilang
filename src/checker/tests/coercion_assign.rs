@@ -174,7 +174,7 @@ fn success_coercion_wraps_in_a_default_provider() {
 /// (`run_capture`), not just `check_src`: the conflict fires in `compile`, past the checker.
 #[test]
 fn success_coercion_survives_a_speculative_return_inference_pass() {
-    let out = crate::vm::run_capture(
+    let out = crate::compiler::run_for_tests::run_capture(
         "fn outer():\n    fn g() -> int?:\n        return h()\n    match g():\n        ?v:\n            print(\"some {v + 0}\")\n        None:\n            print(\"none\")\n\nfn h(): 1\n\nouter()\n",
     )
     .expect("should run clean, not hit the return-coercion table conflict");

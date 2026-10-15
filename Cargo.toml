@@ -4,15 +4,33 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = [".", "crates/chezzi-syntax"]
+members = [
+    ".",
+    "crates/chezzi-syntax",
+    "crates/chezzi-native",
+    "crates/chezzi-base",
+    "crates/chezzi-front",
+    "crates/chezzi-vm",
+]
 # `cargo test` / `cargo nextest run` / `cargo build` at the root cover every crate.
-default-members = [".", "crates/chezzi-syntax"]
+default-members = [
+    ".",
+    "crates/chezzi-syntax",
+    "crates/chezzi-native",
+    "crates/chezzi-base",
+    "crates/chezzi-front",
+    "crates/chezzi-vm",
+]
 
 [workspace.lints.clippy]
 wildcard_enum_match_arm = "deny"
 
 [dependencies]
 chezzi-syntax = { path = "crates/chezzi-syntax" }
+chezzi-native = { path = "crates/chezzi-native" }
+chezzi-base = { path = "crates/chezzi-base" }
+chezzi-front = { path = "crates/chezzi-front" }
+chezzi-vm = { path = "crates/chezzi-vm" }
 libc = "0.2.186"
 libffi = "3"
 libloading = "0.8"
@@ -39,6 +57,7 @@ path = "src/bin/chezzi-lsp.rs"
 required-features = ["lsp"]
 
 [dev-dependencies]
+chezzi-vm = { path = "crates/chezzi-vm", features = ["test-api"] }
 bnf = "0.6.0"
 cc = "1"
 

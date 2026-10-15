@@ -1,0 +1,22 @@
+[package]
+name = "chezzi-front"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chezzi-syntax = { path = "../chezzi-syntax" }
+chezzi-native = { path = "../chezzi-native" }
+chezzi-base = { path = "../chezzi-base" }
+
+[dev-dependencies]
+# The front end's tests run the programs they check (`compiler::run_for_tests`). The VM does not
+# depend on the front end, so this is no cycle.
+chezzi-vm = { path = "../chezzi-vm" }
+
+[features]
+# The single-module compile and check helpers that the VM's own tests drive (`compile_module_standalone`
+# and its table passes). Only `chezzi-vm`'s dev-dependency turns it on.
+test-api = []
+
+[lints]
+workspace = true

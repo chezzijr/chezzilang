@@ -165,7 +165,7 @@ fn parse_args() -> Args {
 fn main() {
     let args = parse_args();
 
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = chezzi::native::std_embed::checkout_root();
     let explicit_programs = !args.programs.is_empty();
     let mut targets = if explicit_programs {
         args.programs.iter().map(|p| target_for(p)).collect()

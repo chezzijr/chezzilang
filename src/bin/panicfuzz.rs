@@ -204,7 +204,7 @@ fn locate_chezzi() -> std::path::PathBuf {
 }
 
 /// Locate `examples/*.chz` by walking up from the executable for a dir containing both `examples/`
-/// and `Cargo.toml` (the project root), falling back to the compile-time `CARGO_MANIFEST_DIR` (so
+/// and `Cargo.toml` (the project root), falling back to the build checkout (`std_embed::checkout_root`) (so
 /// the corpus is still found when `target/` is redirected outside the project). Returns an empty
 /// corpus if not found — strategy-3 (mutation) then degrades to the token sampler.
 fn load_corpus() -> Vec<Vec<u8>> {
@@ -226,7 +226,7 @@ fn find_examples_dir() -> Option<std::path::PathBuf> {
         }
     }
     // Fallback: the project root baked in at compile time.
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let manifest = chezzi::native::std_embed::checkout_root().join("examples");
     if manifest.is_dir() {
         return Some(manifest);
     }

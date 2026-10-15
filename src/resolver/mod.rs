@@ -333,7 +333,7 @@ pub fn find_root_from_dir(start: &Path) -> Option<PathBuf> {
 pub fn std_root() -> PathBuf {
     match std_override_root() {
         Some(p) => p,
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("std"),
+        None => crate::native::std_embed::checkout_root().join("std"),
     }
 }
 
@@ -389,7 +389,7 @@ pub fn std_source(dotted: &[String]) -> Result<String, StdMiss> {
 
 /// The diagnostic for a [`StdMiss`] that isn't [`StdMiss::NotStd`]. Under `$CHEZZI_STD` it names the
 /// override path + the real IO error; otherwise it says the module isn't in the stdlib — and never
-/// prints `env!("CARGO_MANIFEST_DIR")`, which is the BUILD machine's checkout and means nothing to
+/// prints `std_embed::checkout_root()`, which is the BUILD machine's checkout and means nothing to
 /// someone running an installed binary.
 fn std_miss_message(dotted: &[String], miss: &StdMiss) -> String {
     match miss {
@@ -1245,7 +1245,8 @@ mod tests {
         assert!(err.message.contains("std.nope"), "msg: {}", err.message);
         assert!(err.message.contains("stdlib"), "msg: {}", err.message);
         assert!(
-            !err.message.contains(env!("CARGO_MANIFEST_DIR")),
+            !err.message
+                .contains(&*crate::native::std_embed::checkout_root().to_string_lossy()),
             "the diagnostic leaks the build-time checkout path: {}",
             err.message
         );

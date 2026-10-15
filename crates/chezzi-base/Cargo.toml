@@ -1,0 +1,11 @@
+[package]
+name = "chezzi-base"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chezzi-syntax = { path = "../chezzi-syntax" }
+chezzi-native = { path = "../chezzi-native" }
+
+[lints]
+workspace = true

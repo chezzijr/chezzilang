@@ -2,14 +2,14 @@
 
 /// How a diagnostic or a fault names an optional value: its kind in plain words, then its type as
 /// the user writes it. Never `enum`.
-pub(crate) const OPTION_VALUE_WORD: &str = "an optional value (`T?`)";
+pub const OPTION_VALUE_WORD: &str = "an optional value (`T?`)";
 
 /// How a diagnostic or a fault names a result value.
-pub(crate) const RESULT_VALUE_WORD: &str = "a result value (`T!E`)";
+pub const RESULT_VALUE_WORD: &str = "a result value (`T!E`)";
 
 /// `word` (one of the two constants above) with `written` as its quoted type, for a reader that
 /// knows the type the user wrote: ``an optional value (`int?`)``.
-pub(crate) fn carrier_word_for(word: &str, written: &str) -> String {
+pub fn carrier_word_for(word: &str, written: &str) -> String {
     match (word.find('`'), word.rfind('`')) {
         (Some(a), Some(b)) if a < b => format!("{}{written}{}", &word[..=a], &word[b..]),
         _ => word.to_string(),
@@ -18,7 +18,7 @@ pub(crate) fn carrier_word_for(word: &str, written: &str) -> String {
 
 /// D4 layer C (TICKET-169): the one copy of the fault message text, quoted once here so every
 /// write site stays byte-identical. `copied_write_err` prefixes it with `'<name>'` or `this value`.
-pub(crate) const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
+pub const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
 
 /// Maximum structural-recursion depth for value display / equality — a cyclic data structure (e.g.
 /// a struct with a `List[Self]` field forming a cycle) would otherwise recurse unbounded on the
@@ -44,7 +44,7 @@ pub(crate) const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it wou
 /// `recover:`, measured), which is exactly the outcome this constant's first paragraph promises to
 /// prevent. `walk_base` restores the O(1)-frames-per-level assumption by making the budget ONE
 /// shared allowance across the whole nest, matching CPython's single recursion budget.
-pub(crate) const MAX_STRUCTURAL_DEPTH: usize = 10_000;
+pub const MAX_STRUCTURAL_DEPTH: usize = 10_000;
 
 /// M-C implicit nurseries: does this body contain a bare `spawn` that is NOT already inside an
 /// explicit `parallel:` (so it would bind to the *implicit* function/module nursery)? Drives the
@@ -58,6 +58,6 @@ pub(crate) const MAX_STRUCTURAL_DEPTH: usize = 10_000;
 /// through `aliases` first. Everything else (incl. a `None` annotation) returns `None`. The checker
 /// ROOT REDESIGN — strip a qualified identity key `<module-key>::Name` back to its bare `Name` for a
 /// display fallback when no `StructDef` is registered (defensive). Splits on the LAST `::`.
-pub(crate) fn bare_display(key: &str) -> String {
+pub fn bare_display(key: &str) -> String {
     key.rsplit("::").next().unwrap_or(key).to_string()
 }

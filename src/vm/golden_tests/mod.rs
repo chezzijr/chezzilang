@@ -25,7 +25,7 @@ fn assert_golden_out(src: &str, expect: &str) {
 }
 
 fn fixture(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
+    crate::native::std_embed::checkout_root().join(rel)
 }
 
 /// Convenience: a single entry file (the common std-module case).
@@ -202,6 +202,7 @@ mod airlock_parallel;
 mod airlock_values;
 mod captures_data;
 mod examples;
+mod ffi;
 mod io_cancel;
 mod lang_parity;
 mod modules;

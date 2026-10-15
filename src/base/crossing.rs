@@ -238,7 +238,7 @@ pub fn marks(route: Route, enclosing: bool) -> bool {
 /// A new method that runs its closure in another heap gets a row here and encodes through
 /// `cross_closure`; never an `if method == ..` clause. `RwShared.read` has no row: its closure
 /// runs in the reader's heap.
-pub(crate) const CROSSING_CLOSURE_METHODS: &[(&str, &str)] = &[
+pub const CROSSING_CLOSURE_METHODS: &[(&str, &str)] = &[
     ("Executor", "submit"),
     ("Executor", "_submit_settled"),
     ("Shared", "update"),

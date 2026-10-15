@@ -542,7 +542,7 @@ fn t254_control_faults(ctx: T254Ctx) -> bool {
 fn t254_last_line(src: &str) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (out, _err, result, _code) = crate::vm::run_file(&entry);
+    let (out, _err, result, _code) = crate::compiler::run_for_tests::run_file(&entry);
     match result {
         Ok(()) => out.lines().last().unwrap_or_default().to_string(),
         Err(e) => format!("fault: {e}"),
@@ -889,7 +889,7 @@ fn native_container_results_are_new_objects() {
         let src = format!(
             "{setup}\nbefore := \"{{x}}\"\nr := x.{call}\n{mutate}\nprint(\"{{x}}\" == before)\n"
         );
-        match crate::vm::run_capture(&src) {
+        match crate::compiler::run_for_tests::run_capture(&src) {
             Ok(out) if out.trim() == "true" => {}
             Ok(out) => bad.push(format!("{kind}.{call}: the receiver changed: {out:?}")),
             Err(e) => bad.push(format!("{kind}.{call}: {}", e.message)),

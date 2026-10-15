@@ -1,7 +1,7 @@
 //! TICKET-040: `stmt_has_bare_spawn`'s catch-all does not descend into `ExprKind::Recover`'s
 //! `Block`, so a bare `spawn` inside a `recover:` body never triggers `Op::EnterNursery` and
 //! faults at runtime with "spawn must be inside a parallel: block".
-use crate::vm::run_capture;
+use crate::compiler::run_for_tests::run_capture;
 
 #[test]
 fn spawn_inside_recover_block_runs() {

@@ -29,8 +29,8 @@ use std::sync::{Mutex, OnceLock};
 
 /// A process-wide lock serializing every test that draws from the shared global UUID RNG (the unit
 /// tests here AND the run-file golden). Same concurrent-draw limit as `std.rand`'s `TEST_RNG_LOCK`.
-#[cfg(test)]
-pub(crate) static TEST_UUID_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(any(test, feature = "test-api"))]
+pub static TEST_UUID_LOCK: Mutex<()> = Mutex::new(());
 
 /// This module's own process-global PRNG state. Only ever READ on the seeded path, and `uuid_seed`
 /// overwrites it before flipping the switch — so the lazy init value is irrelevant (no auto-seed).

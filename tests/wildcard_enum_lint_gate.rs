@@ -12,8 +12,12 @@ const PINNED_ALLOWS: usize = 0;
 
 /// The crate roots whose TEST build is out of scope for the deny. Each one carries the line
 /// `#![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]`.
-const TEST_SCOPE_ROOTS: [&str; 5] = [
+const TEST_SCOPE_ROOTS: [&str; 9] = [
+    "crates/chezzi-base/src/lib.rs",
+    "crates/chezzi-front/src/lib.rs",
+    "crates/chezzi-native/src/lib.rs",
     "crates/chezzi-syntax/src/lib.rs",
+    "crates/chezzi-vm/src/lib.rs",
     "src/bin/difffuzz.rs",
     "src/bin/panicfuzz.rs",
     "src/bin/schedfuzz.rs",

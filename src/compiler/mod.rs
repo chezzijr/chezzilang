@@ -39,6 +39,8 @@ pub(crate) use capture::*;
 mod fncomp;
 use fncomp::*;
 #[cfg(test)]
+pub(crate) mod run_for_tests;
+#[cfg(test)]
 mod tests;
 
 /// The name a builtin resolves to.
@@ -46,8 +48,8 @@ mod tests;
 /// (standalone / `<main>`) compile + run paths, where there is no module graph to derive a real
 /// label from. The checker, compiler, and VM must all agree on it, so it lives here as one constant. Only
 /// the test-only standalone paths use it (the CLI always runs the module-graph path).
-#[cfg(test)]
-pub(crate) const STANDALONE_MODULE_KEY: &str = "<main>";
+#[cfg(any(test, feature = "test-api"))]
+pub const STANDALONE_MODULE_KEY: &str = "<main>";
 
 /// M24 — the UNSPELLABLE local name holding the runtime type witness for type param `t`. `$` is not
 /// an identifier character, so no source binding can shadow or read it.
@@ -167,7 +169,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
 }
 
 /// Compile a single in-memory module (test helper — no imports, treated as the entry).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileError> {
     // Mirror the file-backed path: normalize named/default call arguments before compiling.
     let mut module = module.clone();

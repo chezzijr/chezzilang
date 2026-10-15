@@ -42,20 +42,9 @@ macro_rules! out {
     }};
 }
 
-pub mod base;
-pub mod checker;
-pub mod compiler;
-pub mod desugar;
 pub mod manifest;
-pub mod native;
-pub mod resolver;
 pub mod run;
 pub mod test_runner;
-// `Obj::Generator` is a `pub` field wrapping the `pub(crate)` `GeneratorCore`; that is fine for the
-// binary (whose `mod vm` is private) but trips `private_interfaces` once `vm` is `pub`. The VM API is
-// not a real public surface here (only `editor` is), so allow it rather than widen `GeneratorCore`.
-#[allow(private_interfaces)]
-pub mod vm;
 
 /// The only intended public surface: the editor-tooling layer consumed by `chezzi-lsp` and the asset
 /// tests.
@@ -67,14 +56,21 @@ pub mod editor;
 #[cfg(test)]
 mod conformance;
 
-// The lib's shared unit-test helpers (`TmpDir`).
+// The shared unit-test helpers (`TmpDir`). Each crate's tests use a different part of them.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod test_support;
 
-// The syntax layer (lexer, AST, parser, format specs, slices) is its own crate, `chezzi-syntax`, so
-// an edit above it never recompiles it. Its sources stay under `src/` and every `crate::lexer::…`
-// path in this crate keeps resolving through these re-exports.
+// Each layer is its own crate, so an edit in one never recompiles a layer it does not reach:
+// `chezzi-syntax` (lexer, AST, parser), `chezzi-native` (natives, FFI, embedded std), `chezzi-base`
+// (bytecode, hooks, crossing marks), `chezzi-front` (resolver, desugar, checker, compiler) and
+// `chezzi-vm`. Their sources stay under `src/`, and every `crate::<module>::…` path in this crate keeps
+// resolving through these re-exports.
+pub use chezzi_base::base;
+pub use chezzi_front::{checker, compiler, desugar, resolver};
+pub use chezzi_native::native;
 pub use chezzi_syntax::{
     FRONTEND_STACK_BYTES, ast, fmtspec, lexer, on_frontend_stack, on_frontend_stack_scoped, parser,
     printable, slice,
 };
+pub use chezzi_vm::vm;

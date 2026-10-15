@@ -189,7 +189,7 @@ fn write_temp_chz(tag: &str, src: &str) -> std::path::PathBuf {
 /// modules (each in-file `#[cfg(test)] mod NAME { .. }` block is removed), as `(file name, text)` in name order. A source-text rule reads these, so a code move
 /// between VM files cannot carry a pattern out of the rule's sight.
 fn vm_sources() -> Vec<(String, String)> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/vm");
+    let dir = crate::native::std_embed::checkout_root().join("src/vm");
     let mut out: Vec<(String, String)> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
         .map(|e| e.unwrap().path())

@@ -1668,10 +1668,10 @@ struct Checker {
     memo_verifying: bool,
     /// TICKET-233 — `check_fn_body` entries of this pass. A cost counted, not timed, so CPU load
     /// cannot move it; read by [`check_counting_fn_body_checks`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-api"))]
     fn_body_checks: usize,
     /// TICKET-253 — `index_value` entries of this pass; read by [`check_counting_index_values`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-api"))]
     index_value_checks: usize,
 }
 
@@ -1736,7 +1736,7 @@ mod infer_ret;
 mod iter_index;
 mod module_imports;
 mod op_sendable;
-pub(crate) mod proto;
+pub mod proto;
 mod resolve_ctype;
 mod resolve_type;
 mod satisfies;

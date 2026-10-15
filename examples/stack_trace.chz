@@ -1,6 +1,6 @@
 # examples/stack_trace.chz — a runtime fault reports a stack trace: the error file:line:col, then
 # the call chain (innermost first) with the file:line:col of each call. Run it from the repo root:
-#
+# golden: stderr
 #   runtime error (examples/stack_trace.chz:12:12): division by zero
 #     at divide (called at examples/stack_trace.chz:15:12)
 #     at compute (called at examples/stack_trace.chz:18:11)

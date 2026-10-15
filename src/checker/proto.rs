@@ -242,7 +242,7 @@ pub enum RecvKind {
 }
 
 impl RecvKind {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-api"))]
     pub const ALL: [RecvKind; 21] = [
         RecvKind::Int,
         RecvKind::Float,

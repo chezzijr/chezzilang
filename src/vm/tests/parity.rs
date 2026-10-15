@@ -80,7 +80,7 @@ fn golden_native_qualified_chz_matches_expected_and_interp() {
     // Imports (`std.concurrency` / `std.time`) require the module-graph path, so drive `run_file`
     // (not `run_capture`, which skips resolution and never populates `imported_modules`). The
     // output must agree byte-for-byte with `.expected`.
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/native_qualified.chz");
     let expected =
         std::fs::read_to_string(base.join("examples/native_qualified.expected")).unwrap();
@@ -103,7 +103,7 @@ fn golden_native_qualified_chz_matches_expected_and_interp() {
 /// NOTHING at runtime (checker-only), so output must agree byte-for-byte with `.expected`.
 #[test]
 fn golden_conditional_method_chz_matches_expected_and_interp() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/conditional_method.chz");
     let expected =
         std::fs::read_to_string(base.join("examples/conditional_method.expected")).unwrap();
@@ -122,7 +122,7 @@ fn golden_conditional_method_chz_matches_expected_and_interp() {
 
 #[test]
 fn golden_where_sort_sum_chz_matches_expected_and_interp() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/where_sort_sum.chz");
     let expected = std::fs::read_to_string(base.join("examples/where_sort_sum.expected")).unwrap();
     let (vm_out, _e1, vm_res, _) = run_file(&path);
@@ -145,7 +145,7 @@ fn golden_where_sort_sum_chz_matches_expected_and_interp() {
 /// must be byte-identical against the `.expected` golden.
 #[test]
 fn golden_variadic_chz_matches_expected_and_interp() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/variadic.chz");
     let expected = std::fs::read_to_string(base.join("examples/variadic.expected")).unwrap();
     let (vm_out, _e1, vm_res, _) = run_file(&path);
@@ -176,7 +176,7 @@ fn golden_std_native_4d_chz_matches_expected_and_interp() {
     let _g = crate::native::rand::TEST_RNG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/std_native_4d.chz");
     let expected = std::fs::read_to_string(base.join("examples/std_native_4d.expected")).unwrap();
     let (vm_out, _e1, vm_res, _) = run_file(&path);
@@ -202,7 +202,7 @@ fn golden_std_native_4d_chz_matches_expected_and_interp() {
 /// address, only the round-tripped payload) — a stronger guard than a pure-checker test.
 #[test]
 fn golden_std_native_4c_chz_matches_expected_and_interp() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/std_native_4c.chz");
     let expected = std::fs::read_to_string(base.join("examples/std_native_4c.expected")).unwrap();
     let (vm_out, _e1, vm_res, _) = run_file(&path);
@@ -227,7 +227,7 @@ fn golden_std_native_4c_chz_matches_expected_and_interp() {
 /// preservation gate — any drift means the file-backed shape decoupled from the Rust wiring.
 #[test]
 fn golden_native_enum_smoke_chz_matches_expected_and_interp() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/native_enum_smoke.chz");
     let expected =
         std::fs::read_to_string(base.join("examples/native_enum_smoke.expected")).unwrap();
@@ -252,7 +252,7 @@ fn golden_native_enum_smoke_chz_matches_expected_and_interp() {
 /// lowering. Multi-file (sibling import) needs the module-graph path, so drive `run_file`.
 #[test]
 fn golden_qualified_static_chz_matches_expected_and_interp() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/qualified_static/main.chz");
     let expected =
         std::fs::read_to_string(base.join("examples/qualified_static/main.expected")).unwrap();
@@ -281,7 +281,7 @@ fn golden_ffi_qualified_chz_via_run_file() {
         eprintln!("SKIP golden_ffi_qualified_chz_via_run_file: {why}");
         return;
     }
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/ffi_qualified.chz");
     let expected = std::fs::read_to_string(base.join("examples/ffi_qualified.expected")).unwrap();
     let (vm_out, _e1, vm_res, _) = run_file(&path);
@@ -314,7 +314,7 @@ fn golden_inline_fn_chz_matches_expected_and_interp() {
 /// the golden — the gate for the feature.
 #[test]
 fn golden_keyword_value_chz_matches_expected_and_interp() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/keyword_value.chz");
     let expected = std::fs::read_to_string(base.join("examples/keyword_value.expected")).unwrap();
     let (vm_out, _e1, vm_res, _) = run_file(&path);
@@ -336,7 +336,7 @@ fn golden_keyword_value_chz_matches_expected_and_interp() {
 /// across module boundaries against a literal golden.
 #[test]
 fn golden_keyword_value_xmod_matches_expected_and_interp() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/keyword_value_xmod/main.chz");
     let expected =
         std::fs::read_to_string(base.join("examples/keyword_value_xmod/main.expected")).unwrap();
@@ -359,7 +359,7 @@ fn golden_keyword_value_xmod_matches_expected_and_interp() {
 /// equivalent prints the same lines this does.
 #[test]
 fn golden_default_xmod_matches_expected_on_all_engines() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/default_xmod/main.chz");
     let expected =
         std::fs::read_to_string(base.join("examples/default_xmod/main.expected")).unwrap();
@@ -379,7 +379,7 @@ fn golden_default_xmod_matches_expected_on_all_engines() {
 /// equivalent CPython program prints.
 #[test]
 fn golden_default_protocol_matches_expected_on_all_engines() {
-    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = crate::native::std_embed::checkout_root();
     let path = base.join("examples/default_protocol/main.chz");
     let expected =
         std::fs::read_to_string(base.join("examples/default_protocol/main.expected")).unwrap();

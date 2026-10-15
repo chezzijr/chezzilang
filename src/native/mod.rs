@@ -631,7 +631,7 @@ impl HostError {
 /// (`dropCR`). `"a\r\r\r\n"` -> `"a\r\r"`, and a final unterminated `"b\r\r"` -> `"b\r"`. Shared by
 /// `io.read_line`/`io.input` (`Stdin::read_line`) and `Reader.read_line`/`Reader.lines()`
 /// (`vm/fileio.rs`) so the two cannot drift; `trim_end_matches` ate EVERY `\r` (W14-7).
-pub(crate) fn strip_eol(line: &str) -> &str {
+pub fn strip_eol(line: &str) -> &str {
     let l = line.strip_suffix('\n').unwrap_or(line);
     l.strip_suffix('\r').unwrap_or(l)
 }
@@ -774,7 +774,7 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)]
 /// warning. A new mutating native goes here and nowhere else:
 /// `checker::tests::receiver_write_table_matches_observed_behavior` runs every native method and
 /// fails until this table agrees with the observed receiver change.
-pub(crate) fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
+pub fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
     match kind {
         "List" => matches!(
             method,

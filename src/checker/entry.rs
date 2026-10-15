@@ -11,14 +11,14 @@ use super::*;
 /// through this fn are no longer the smallest stack in the tree: they now get the same 1 GiB frontend
 /// stack production always had, by construction, instead of whatever the ambient test thread happens
 /// to be sized at.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 pub fn check(module: &crate::ast::Module) -> Result<(), Vec<CheckError>> {
     check_diags(module).0
 }
 
 /// [`check`] plus the non-fatal warnings the pass produced — the single-module twin of
 /// [`check_graph_diags`]. Warnings never affect the `Result`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 pub fn check_diags(module: &crate::ast::Module) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
     let (res, warnings, _, _) = check_diags_with(module, true);
     (res, warnings)
@@ -26,7 +26,7 @@ pub fn check_diags(module: &crate::ast::Module) -> (Result<(), Vec<CheckError>>,
 
 /// [`check`], plus the number of fn bodies the pass checked (TICKET-233;
 /// `Checker::fn_body_checks`).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 pub fn check_counting_fn_body_checks(
     module: &crate::ast::Module,
 ) -> (Result<(), Vec<CheckError>>, usize) {
@@ -36,7 +36,7 @@ pub fn check_counting_fn_body_checks(
 
 /// TICKET-255 — the number of fn bodies one checker pass over `graph` enters. The graph twin of
 /// [`check_counting_fn_body_checks`]. The count runs on the checker's own thread, so it is read there.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 pub fn check_graph_counting_fn_bodies(graph: &ModuleGraph) -> usize {
     crate::on_frontend_stack_scoped(move || {
         let mut c = Checker::new();
@@ -47,7 +47,7 @@ pub fn check_graph_counting_fn_bodies(graph: &ModuleGraph) -> usize {
 
 /// [`check`], plus the number of `index_value` entries the pass made (TICKET-253;
 /// `Checker::index_value_checks`): one per subscript when each index is typed once.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 pub fn check_counting_index_values(
     module: &crate::ast::Module,
 ) -> (Result<(), Vec<CheckError>>, usize) {
@@ -57,7 +57,7 @@ pub fn check_counting_index_values(
 
 /// [`check_diags`] with the nested-fn return memo off (`Checker::ret_memo`), for the twin comparison
 /// in `the_nested_fn_ret_memo_is_invisible_to_diagnostics_and_tables`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 pub fn check_diags_no_memo(
     module: &crate::ast::Module,
 ) -> (Result<(), Vec<CheckError>>, Vec<CheckError>) {
@@ -92,8 +92,8 @@ impl Checker {
     }
 }
 
-#[cfg(test)]
-pub(super) fn check_diags_with(
+#[cfg(any(test, feature = "test-api"))]
+pub fn check_diags_with(
     module: &crate::ast::Module,
     memo_enabled: bool,
 ) -> (Result<(), Vec<CheckError>>, Vec<CheckError>, usize, usize) {
@@ -246,7 +246,7 @@ pub fn resolve_extern_signatures(graph: &ModuleGraph) -> ExternTable {
 /// Test-only: the single-file standalone compile/run path (`compile_module_standalone`)
 /// is `#[cfg(test)]`. The production CLI — single- AND multi-file — always goes
 /// through `build_graph` → `resolve_extern_signatures`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-api"))]
 pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
     let id = crate::base::module_id::ModuleId(std::path::PathBuf::from("<main>"));
     let graph = ModuleGraph {

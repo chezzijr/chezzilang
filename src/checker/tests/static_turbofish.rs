@@ -2042,7 +2042,7 @@ fn receiver_write_table_matches_observed_behavior() {
             let src =
                 format!("{setup}\nbefore := \"{{x}}\"\nx.{call}\nprint(\"{{x}}\" != before)\n");
             let want = crate::native::is_mutating_native_kind(kind, method);
-            match crate::vm::run_capture(&src) {
+            match crate::compiler::run_for_tests::run_capture(&src) {
                 Ok(out) => {
                     let got = out.trim() == "true";
                     if got != want {

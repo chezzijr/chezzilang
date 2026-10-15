@@ -1385,7 +1385,8 @@ fn runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused() {
         ));
     }
     src.push_str(&format!("print(mk{N}() == mk{N}())\n"));
-    let out = crate::vm::run_capture(&src).expect("well within the new cap, should run clean");
+    let out = crate::compiler::run_for_tests::run_capture(&src)
+        .expect("well within the new cap, should run clean");
     assert_eq!(out, "true\n");
 }
 

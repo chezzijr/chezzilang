@@ -25,8 +25,8 @@ use std::sync::{Mutex, OnceLock};
 /// two tests that each `seed()`-then-draw would otherwise interleave on the shared global and
 /// diverge — this is the same concurrent-draw limit documented for `--parallel`, surfacing in the
 /// test runner. Hold it across a whole `seed()`-then-draw sequence to keep that sequence atomic.
-#[cfg(test)]
-pub(crate) static TEST_RNG_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(any(test, feature = "test-api"))]
+pub static TEST_RNG_LOCK: Mutex<()> = Mutex::new(());
 
 /// One SplitMix64 step: advance `state` and return the next mixed `u64`. Pure (no global) so it is
 /// golden-testable in isolation, free of any test-order coupling with the process-global RNG.

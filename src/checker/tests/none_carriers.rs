@@ -88,7 +88,9 @@ mod ticket_231_none_word {
             }
         }
         // The void value prints `None`, as Python's does.
-        let out = crate::vm::run_capture("fn f() -> None!str:\n    return\nprint(f())\n");
+        let out = crate::compiler::run_for_tests::run_capture(
+            "fn f() -> None!str:\n    return\nprint(f())\n",
+        );
         if out.as_deref().ok() != Some("None\n") {
             red.push(format!("void print -> want \"None\", got {out:?}"));
         }
@@ -163,7 +165,7 @@ fn pattern_bare_name_grid() {
         if inferable {
             ok(&fresh);
             assert_eq!(
-                crate::vm::run_capture(&fresh).expect("runs"),
+                crate::compiler::run_for_tests::run_capture(&fresh).expect("runs"),
                 out,
                 "{label}: fresh name"
             );
@@ -571,7 +573,7 @@ fn named_fn_return_grid() {
     let runs = |src: &str, want: &str| {
         ok(src);
         assert_eq!(
-            crate::vm::run_capture(src).expect("accept cell runs"),
+            crate::compiler::run_for_tests::run_capture(src).expect("accept cell runs"),
             want,
             "{src}"
         );
@@ -1008,7 +1010,11 @@ fn carrier_wrap_check_grid() {
         ),
     ] {
         ok(src);
-        assert_eq!(crate::vm::run_capture(src).unwrap(), out, "{src}");
+        assert_eq!(
+            crate::compiler::run_for_tests::run_capture(src).unwrap(),
+            out,
+            "{src}"
+        );
     }
 }
 
@@ -1205,7 +1211,7 @@ print(\"{None}\")
 print([None, ?1])
 ";
     ok(src);
-    let out = crate::vm::run_capture(src);
+    let out = crate::compiler::run_for_tests::run_capture(src);
     assert_eq!(
         out.as_deref().ok(),
         Some("None\ntrue\n4\n11\nv\nbad\nNone\nnone arm\nsome none\nNone\n[None, 1]\n")
