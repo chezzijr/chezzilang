@@ -428,11 +428,15 @@ fn reject_fragment(site: Site, shape: Shape) -> &'static str {
         (Site::Wait, Shape::Struct | Shape::Variant | Shape::List) => {
             "left side of ':=' in a wait arm must be a name"
         }
-        (Site::For | Site::Comp, Shape::ParenBlank) => {
-            "a parenthesized target needs two or more names"
-        }
+        // One answer at every site: `(_)` is the blank target, so reading `_` is the error.
         (
-            Site::Walrus | Site::Assign | Site::Wait | Site::WaitAssign | Site::Match,
+            Site::Walrus
+            | Site::Assign
+            | Site::For
+            | Site::Comp
+            | Site::Wait
+            | Site::WaitAssign
+            | Site::Match,
             Shape::ParenBlank,
         ) => "cannot use '_' as a value",
         (Site::For | Site::Comp, Shape::Struct) => "expected 'in', found '('",
@@ -584,6 +588,21 @@ fn bare_tuple_ends_a_statement() {
                 "assign",
                 "fn main():\n    x := (0, 0)\n    x = 3, 4\n    print(x)",
                 "(3, 4)",
+            ),
+            cell(
+                "grouped name takes a value list",
+                "fn main():\n    (y) := 1, 2\n    print(y)",
+                "(1, 2)",
+            ),
+            cell(
+                "grouped for target",
+                "fn main():\n    for (z) in [1]:\n        print(z)",
+                "1",
+            ),
+            cell(
+                "grouped comprehension target",
+                "fn main():\n    print([z for (z) in [1]])",
+                "[1]",
             ),
             cell(
                 "destructure value list",

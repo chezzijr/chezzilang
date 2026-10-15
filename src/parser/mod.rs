@@ -720,13 +720,6 @@ impl Parser {
         )))
     }
 
-    /// The binding target an already-parsed expression stands for at a `:=` fallback (a grouped
-    /// `(x)`, a keyword name, a wait arm): `binder_name`, then `bind_leaf`, so `_` is a `Wildcard`.
-    fn expr_bind_target(&self, target: Expr, otherwise: &str) -> PResult<Pattern> {
-        let span = target.span;
-        Ok(bind_leaf(self.binder_name(target, otherwise)?, span))
-    }
-
     /// The name a `:=` target binds: an identifier, the one keyword-name error for a literal
     /// keyword (`None`, `true`, `false`), or `otherwise` for any other expression.
     fn binder_name(&self, target: Expr, otherwise: &str) -> PResult<String> {
@@ -1893,8 +1886,9 @@ impl Parser {
                         "expected an identifier on the left of ':=' (destructuring binds names)",
                     )?;
                 }
-                // Every target is a name, so `try_parse_walrus_target` declined a parenthesized one.
-                return Err(self.err("a parenthesized target needs two or more names".to_string()));
+                // Every target is a name, so `try_parse_walrus_target` declined for another reason
+                // (a nesting past `MAX_DEPTH`).
+                return Err(self.err("a binding target is nested too deeply".to_string()));
             }
             // `a, b = b, a` — tuple assignment. Only `=` is allowed (compound `+=`, … with multiple
             // targets is rejected). The checker owns the arity of the right side.
@@ -1932,19 +1926,10 @@ impl Parser {
         }
 
         let op = match self.peek() {
+            // `try_parse_walrus_target` took every valid `:=` target, so this arm only reports.
             Token::Walrus => {
-                self.advance();
-                let value = self.parse_value(ValueSite::Let)?;
-                let value = self.parse_else_guard(value)?;
-                let target = self.expr_bind_target(expr, "left side of ':=' must be a name")?;
-                return Ok(StmtKind::Let {
-                    // The lvalue ident's span IS the binding-name span (single `:=`).
-                    target,
-                    ty: None,
-                    value,
-                    is_const: false,
-                    doc: stmt_doc,
-                });
+                self.binder_name(expr, "left side of ':=' must be a name")?;
+                return Err(self.err("a binding target is nested too deeply".to_string()));
             }
             Token::Assign => AssignOp::Eq,
             Token::PlusEq => AssignOp::PlusEq,
@@ -3754,15 +3739,8 @@ impl Parser {
             return Err(self.err("pattern nested too deeply".to_string()));
         }
         let target = if self.check(&Token::LParen) {
-            let span = self.cur_span();
-            let nested = self.parse_paren_list(Self::parse_bind_target)?;
-            if !matches!(nested, Pattern::Tuple(_)) {
-                return Err(ParseError {
-                    message: "a parenthesized target needs two or more names".to_string(),
-                    span,
-                });
-            }
-            nested
+            // A one-name group `(x)` is that name, as in CPython.
+            self.parse_paren_list(Self::parse_bind_target)?
         } else {
             let span = self.cur_span();
             let name = self.expect_ident()?;
@@ -3802,8 +3780,8 @@ impl Parser {
         }
     }
 
-    /// Speculatively read `<target> :=`. Commits (`Some`, the `:=` eaten) only for a bare name, `_`
-    /// or a top-level comma list; every other shape restores `pos`, `depth` and `fold_depth` and
+    /// Speculatively read `<target> :=`. Commits (`Some`, the `:=` eaten) only for a name, `_` (each
+    /// possibly grouped, `(x)`) or a top-level comma list; every other shape restores `pos`, `depth` and `fold_depth` and
     /// returns `None`, so the expression path reports the error (`binder_name`).
     fn try_parse_walrus_target(&mut self) -> PResult<Option<Pattern>> {
         if !matches!(self.peek(), Token::Ident(_) | Token::LParen) {
@@ -4008,12 +3986,9 @@ impl Parser {
         }
         let lhs_span = lhs.span;
         if self.eat_in_line(&Token::Walrus) {
-            let target =
-                self.expr_bind_target(lhs, "left side of ':=' in a wait arm must be a name")?;
-            return Ok(WaitArmKind::Recv {
-                target,
-                chan: self.parse_recv_chan()?,
-            });
+            // `try_parse_walrus_target` took every valid `:=` target, so this branch only reports.
+            self.binder_name(lhs, "left side of ':=' in a wait arm must be a name")?;
+            return Err(self.err("a binding target is nested too deeply".to_string()));
         }
         if !self.eat_in_line(&Token::Assign) {
             // Bare expr, no `:=`/`=` — a send arm.
@@ -6765,12 +6740,16 @@ mod tests {
             "got: {}",
             e.message
         );
-        let e = parse_err("a, (b) := t\n");
-        assert!(
-            e.message.contains("needs two or more names"),
-            "got: {}",
-            e.message
-        );
+        // A one-name group is that name at every site (CPython: `a, (b) = t`, `for (z) in xs`).
+        for src in [
+            "a, (b) := t\n",
+            "(y) := 1, 2\n",
+            "for (z) in xs:\n    pass\n",
+            "[z for (z) in xs]\n",
+            "wait:\n    (x) := ch.recv():\n        pass\n",
+        ] {
+            parse_ok(src);
+        }
     }
 
     /// A nested binding target spends the pattern depth budget: a target nested past `MAX_DEPTH` is

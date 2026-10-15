@@ -3508,8 +3508,9 @@ The constructor may be written **bare** (`Point(x, y)`, for a local or `from`-im
 Only **user** structs destructure — a native/reserved struct handle (`Socket`, a `regex.Match`)
 does not. A wrong constructor name, a field-count mismatch (`Point(x)` on a two-field struct), a qualifier
 that is not a module (`E.Point`), and a duplicate constructor arm are all clean **checker** errors, never a
-runtime panic. (`let`-destructuring of a struct — `let Point(x, y) = p` — and struct destructuring in
-**fn params** are not yet supported; use a `match`.)
+runtime panic. (A struct unpacks in `match` only, by owner rule U9: `Point(x, y) := p` and a struct
+in a **fn param** are not part of the language. Outside `match` only tuples unpack; use a `match`.)
+A one-name group `(x)` is that name at `:=`, `for`, a comprehension and a wait arm.
 
 **Or-patterns** (`p1 | p2 | ...`) match when **any** alternative matches (first match wins). They
 work at the top of an arm and in sub-positions (`(1 | 2, x)`, `?(1 | 2)`). Every alternative must
