@@ -454,7 +454,7 @@ impl Parser {
                     }
                 }
                 Token::LBracket => {
-                    let headed = matches!(e.kind, ExprKind::Ident(_) | ExprKind::Field { .. });
+                    let headed = e.kind.is_named_head();
                     // `name[Type, …](args)` — explicit call-site type arguments. A bare name can be a
                     // generic fn / struct / variant; ANY member access (`recv.name`, a `Field` over an
                     // arbitrary receiver) can be a method turbofish (`recv.name[U](args)`) — the receiver

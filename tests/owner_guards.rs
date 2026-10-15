@@ -40,6 +40,11 @@ const RULES: &[(&str, &str, &str)] = &[
         "the receiver's name: use `ast::SELF`",
     ),
     (
+        "ExprKind::Ident(_) | ExprKind::Field { .. })",
+        "ast/mod.rs",
+        "may `head[X]` take type arguments: call `ExprKind::is_named_head`",
+    ),
+    (
         "struct TmpDir",
         "test_support.rs",
         "the unit-test fixture directory: use `test_support::TmpDir`",
