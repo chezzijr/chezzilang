@@ -3815,6 +3815,10 @@ impl Parser {
             && (elems.len() > 1 || !matches!(elems[0], Pattern::Tuple(_)))
         {
             self.advance(); // ':='
+            // A removed carrier name is no binder: the expression path rejected it as a primary.
+            for (name, span) in elems.iter().flat_map(Pattern::target_binders) {
+                self.reject_removed_name(name, span)?;
+            }
             return Ok(Some(if elems.len() == 1 {
                 elems.pop().expect("one element")
             } else {
@@ -6727,6 +6731,25 @@ mod tests {
             "got: {}",
             e.message
         );
+    }
+
+    /// A nested binding target spends the pattern depth budget: a target nested past `MAX_DEPTH` is
+    /// a parse error at `:=` and at `for`, never a stack overflow.
+    #[test]
+    fn deeply_nested_bind_target_is_a_parse_error() {
+        crate::on_frontend_stack(deeply_nested_bind_target_body);
+    }
+
+    fn deeply_nested_bind_target_body() {
+        let n = MAX_DEPTH + 100;
+        let target = format!("a, {}x, y{}", "(x, ".repeat(n), ")".repeat(n));
+        for src in [
+            format!("{target} := t\n"),
+            format!("for {target} in xs:\n    pass\n"),
+        ] {
+            let e = parse_err(&src);
+            assert!(e.message.contains("too deeply"), "got: {}", e.message);
+        }
     }
 
     /// A bare tuple ends a statement at `:=`, a typed let, `=`, `return` and `yield`; a block value

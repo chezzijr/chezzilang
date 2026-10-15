@@ -342,6 +342,8 @@ fn parser_rules_match_fns() {
         ("patternPrimary", "parse_pattern_primary"),
         ("subpattern", "parse_subpattern"),
         ("tuplePattern", "parse_tuple_pattern"),
+        ("bindList", "parse_bind_target_list"),
+        ("bindElem", "parse_bind_target"),
         ("returnStmt", "parse_return"),
         ("elseGuard", "parse_else_guard"),
         ("ifExprTail", "parse_if_expr_tail"),
@@ -411,6 +413,16 @@ fn parser_rules_match_fns() {
         // `parse_recv_chan` parses the RHS of a recv `wait:` arm (the bare `chan.recv()`) — a
         // structural helper of `parse_wait`, part of the `<waitArm>` rule, no distinct rule of its own.
         "parse_recv_chan",
+        // `parse_wait_arm_head` parses a wait arm whose head is an expression (a `=` recv arm or a
+        // send arm); the `<waitArm>` rule is `parse_wait`'s.
+        "parse_wait_arm_head",
+        // `parse_paren_list` is the one `( elem, … )` reader behind `<tuplePattern>` and `<bindElem>`;
+        // `parse_loop_target` reads a `for` / comprehension target (`<bindList>` or one name).
+        "parse_paren_list",
+        "parse_loop_target",
+        // `parse_value_list` is `<value>` or the `<exprList> "COMMA" <expr>` tail of a let, `=`,
+        // `return` and `yield`.
+        "parse_value_list",
         // `parse_hole` parses the tokens of one interpolation hole (or one nested spec field) as a
         // single `<expr>` on the surrounding parser; the lexer found the hole, so the grammar has no
         // rule for it beyond `<expr>` itself.

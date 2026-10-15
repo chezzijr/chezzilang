@@ -336,8 +336,8 @@ impl Checker {
                 }
                 // EDITOR HOVER: a pattern binding (`n` in `Col.Val(n)`, `a`/`b` in `(a, b)`) is a
                 // NAME, not an `Expr` the probe visits — record its decl-site hover at the binding
-                // token's OWN span (`bind_span`, not the arm-level `span`), exactly as the for-loop
-                // uses `var_spans`. No-op unless a probe is armed → zero overhead on normal checks.
+                // token's OWN span (`bind_span`, not the arm-level `span`), exactly as a loop
+                // target does. No-op unless a probe is armed → zero overhead on normal checks.
                 self.bind_pattern_name(*id, name, ty.clone(), span, Some(*bind_span))
             }
             Pattern::Or(alts) => self.bind_or_alternatives(alts, ty, span),

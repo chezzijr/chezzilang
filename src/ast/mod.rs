@@ -125,7 +125,7 @@ pub enum StmtKind {
         name: String,
         /// Source span of the declared-NAME token (`P` in `struct P:`). Diagnostic-only (the LSP
         /// records a decl-site hover at the type name); runtime-inert, like `Field.name_span` /
-        /// `For.var_spans`. `Span::default()` for any synthesized decl.
+        /// `Param.name_span`. `Span::default()` for any synthesized decl.
         name_span: Span,
         type_params: Vec<TypeParam>,
         fields: Vec<Field>,
@@ -216,7 +216,7 @@ pub enum StmtKind {
     /// sequential executor the task is registered here and run at the nursery's dedent.
     Spawn(SpawnTarget),
     /// `wait:` — Chezzi's `select`. Race the `recv`s in `arms`: block until whichever channel has a
-    /// value first, bind it (per the arm's [`WaitTarget`]), and run that arm's body. Source-order
+    /// value first, bind it (per the arm's target pattern), and run that arm's body. Source-order
     /// poll (deterministic, not Go-random); a closed+empty arm is skipped; `else_block` (optional,
     /// last) is the non-blocking fallback. Recv-only — unbounded channels never block a `send`. See
     /// `docs/concurrency.md §6d`.
@@ -612,7 +612,7 @@ pub enum Pattern {
     /// `t` in `Cons(h, t)` or the `a`/`b` in `(a, b)`. A bare identifier at the *top* of an arm is a
     /// nullary `Variant` instead (it names a variant like `None`). The `Span` is the binding-name
     /// token's source position — diagnostic-only (the LSP records a decl-site hover there);
-    /// runtime-inert (pattern matching routes by NAME and ignores the span, like `For.var_spans`).
+    /// runtime-inert (pattern matching routes by NAME and ignores the span, like `Param.name_span`).
     Ident(String, Span, NodeId),
     Variant {
         name: String,

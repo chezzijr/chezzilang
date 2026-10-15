@@ -1986,7 +1986,7 @@ impl Compiler {
             | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {
                 return Err(CompileError {
-                    message: "invalid wait-arm assignment target".to_string(),
+                    message: "invalid assignment target".to_string(),
                     span,
                 });
             }
