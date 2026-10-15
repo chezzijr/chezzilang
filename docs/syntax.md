@@ -5514,7 +5514,7 @@ ctypes wraps: `ctypes.c_int8(300).value` is `44`.
 - A **runtime value** that does not fit is a recoverable fault, catchable by `recover:`, with one text
   at every store: `value 300 does not fit int8 (-128..127)`. The struct constructor (`S(big())`), the
   field store (`s.q = big()`) and the compound store (`s.q += 300`, which lowers to `s.q = s.q + 300`)
-  fault; `json.decode[S]` returns an `Err` with the same text, as Go's `json.Unmarshal` does.
+  fault; `json.decode[S]` returns a failed result with the same text.
 - **`uint64`**: a constant must be `0..INT64_MAX`; at run time any int passes as its bit pattern, and a
   value above `INT64_MAX` read back from C arrives negative (`UINT64_MAX` reads as `-1`).
 - **`float32`**: a finite value outside the f32 range is a compile error as a constant and a fault at run
