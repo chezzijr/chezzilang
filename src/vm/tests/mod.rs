@@ -190,6 +190,59 @@ fn write_temp_chz(tag: &str, src: &str) -> std::path::PathBuf {
     path
 }
 
+/// Every production source file of the VM: the `.rs` files directly in `src/vm/` except the test
+/// modules (each in-file `#[cfg(test)] mod NAME { .. }` block is removed), as `(file name, text)` in name order. A source-text rule reads these, so a code move
+/// between VM files cannot carry a pattern out of the rule's sight.
+fn vm_sources() -> Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/vm");
+    let mut out: Vec<(String, String)> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .map(|p| {
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {name}: {e}"));
+            // Production code only: each inline `#[cfg(test)] mod NAME { .. }` block is removed.
+            (name, strip_inline_test_mods(&text))
+        })
+        .filter(|(name, _)| !name.ends_with("tests.rs"))
+        .collect();
+    out.sort();
+    assert!(
+        out.iter().any(|(n, _)| n == "mod.rs"),
+        "src/vm/mod.rs not found"
+    );
+    out
+}
+
+/// `text` without its inline test modules: each `#[cfg(test)]` + `mod NAME {` block, through the
+/// closing `}` at column 0. A `mod NAME;` declaration stays.
+fn strip_inline_test_mods(text: &str) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        if skipping {
+            if line == "}" {
+                skipping = false;
+            }
+            continue;
+        }
+        let opens_test_mod = line == "#[cfg(test)]"
+            && lines
+                .peek()
+                .is_some_and(|next| next.starts_with("mod ") && next.trim_end().ends_with('{'));
+        if opens_test_mod {
+            lines.next();
+            skipping = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 mod autodrain;
 mod channels_wire;
 mod defaults_witness;

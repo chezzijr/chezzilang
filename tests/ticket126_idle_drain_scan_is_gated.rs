@@ -16,10 +16,21 @@ use std::fs;
 
 #[test]
 fn take_runnable_gates_the_idle_cancel_drain_scan() {
-    let src = fs::read_to_string("src/vm/mod.rs").expect("read src/vm/mod.rs");
-    assert!(
-        !src.contains("c.cancelled_scope_awaiting_drain()"),
-        "src/vm/mod.rs: take_runnable still calls `c.cancelled_scope_awaiting_drain()` directly on \
-         every idle pass; it must go through a cancel-generation gate instead (TICKET-126, W13-24)"
-    );
+    // Every production VM source: the scheduler may live in any file of `src/vm/`.
+    let mut read = 0;
+    for entry in fs::read_dir("src/vm").expect("read src/vm") {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".rs") || name.ends_with("tests.rs") {
+            continue;
+        }
+        let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        read += 1;
+        assert!(
+            !src.contains("c.cancelled_scope_awaiting_drain()"),
+            "src/vm/{name}: take_runnable still calls `c.cancelled_scope_awaiting_drain()` directly \
+             on every idle pass; it must go through a cancel-generation gate instead (TICKET-126, W13-24)"
+        );
+    }
+    assert!(read > 0, "found no source under src/vm");
 }

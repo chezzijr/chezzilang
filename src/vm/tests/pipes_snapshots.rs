@@ -1845,12 +1845,7 @@ fn mnsched_drain_scan_reruns_after_a_cancel_generation_bump() {
 /// brings back W13-8's false deadlock for a parked fiber whose ancestor was cancelled.
 #[test]
 fn ticket126_every_cancel_store_goes_through_trip_cancel_flag() {
-    for (name, src) in [
-        ("exec.rs", include_str!("../exec.rs")),
-        ("mod.rs", include_str!("../mod.rs")),
-        ("sched.rs", include_str!("../sched.rs")),
-        ("netio.rs", include_str!("../netio.rs")),
-    ] {
+    for (name, src) in vm_sources() {
         let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
         for bypass in ["cancel.store(true", "c.store(true"] {
             assert_eq!(
@@ -1871,8 +1866,9 @@ fn ticket126_every_cancel_store_goes_through_trip_cancel_flag() {
 /// memory ordering.
 #[test]
 fn ticket126_cancel_gen_bump_is_release_and_the_gate_read_is_acquire() {
-    let flat: String = include_str!("../mod.rs")
-        .chars()
+    let flat: String = vm_sources()
+        .iter()
+        .flat_map(|(_, text)| text.chars())
         .filter(|c| !c.is_whitespace())
         .collect();
     for needed in [
@@ -1881,7 +1877,7 @@ fn ticket126_cancel_gen_bump_is_release_and_the_gate_read_is_acquire() {
     ] {
         assert!(
             flat.contains(needed),
-            "src/vm/mod.rs: {needed} is missing; that release/acquire pair is what orders a cancel-flag store before the gated drain scan"
+            "src/vm: {needed} is missing; that release/acquire pair is what orders a cancel-flag store before the gated drain scan"
         );
     }
     for weak in [
@@ -1890,7 +1886,7 @@ fn ticket126_cancel_gen_bump_is_release_and_the_gate_read_is_acquire() {
     ] {
         assert!(
             !flat.contains(weak),
-            "src/vm/mod.rs: {weak} loses a trip; a scanner can see the bumped generation while the flag it was bumped for still reads false (W13-8)"
+            "src/vm: {weak} loses a trip; a scanner can see the bumped generation while the flag it was bumped for still reads false (W13-8)"
         );
     }
 }
