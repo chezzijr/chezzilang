@@ -355,17 +355,17 @@ fn describe_extern_type(t: &Type) -> String {
 /// compiler resolves these names to a special op *before* a plain named call (`compiler::compile_call`),
 /// so an extern fn with one of these names is silently shadowed — dead code
 /// that the compiler's eager `MakeCffi` would still `dlsym` (aborting on a symbol it can never call).
-/// Mirrors `compiler::is_builtin` + the constructor/`print` special cases. (Struct- and variant-name
-/// collisions are caught separately against the built registries, since those are user-declared.)
+/// (Struct- and variant-name collisions are caught separately against the built registries, since
+/// those are user-declared.)
 /// Every reserved CALLABLE builtin name: the free functions (`print`/`panic`/`range`/`int`/`float`/
 /// `str`/`ord`/`chr`) and the container/runtime constructors (`List`/`Set`/`Map`/`bytes`/`bytearray`/
 /// `Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`). Every name here is CALLED (none is a
 /// pure type marker), so each must have a [`builtin_sig`] entry for editor hover — enforced by the
 /// `reserved_callables_all_have_builtin_sig` drift-guard test. (The generic ctors `Ok`/`Err`/`Some`
 /// are NOT reserved — a user may shadow them — so they are intentionally out of this set and keep
-/// hovering `None` for v1.) Mirrors `compiler::is_builtin` + the constructor/`print` special cases.
+/// hovering `None` for v1.)
 const RESERVED_CALLABLE: &[&str] = &[
-    // builtins (mirrors compiler::is_builtin)
+    // builtin functions
     "int",
     "float",
     "bool",
@@ -454,8 +454,7 @@ pub(crate) enum Intrinsic {
 
 /// One row of the (now HOLLOW) native-prelude METADATA table. Phase 3a split the concern: this table
 /// keeps only the name → intrinsic → first_class METADATA — the single source of truth read by
-/// `compiler::is_builtin` / `is_firstclass_builtin_fn`, which have no module-graph access and need
-/// only intrinsic/first_class, never a `FnSig`. The SIGNATURES of
+/// `prelude_fn` / `is_firstclass_builtin_fn`, which need only intrinsic/first_class, never a `FnSig`. The SIGNATURES of
 /// the eight migrated builtins moved OUT to the always-linked `std/prelude.chz` `native fn`/`native
 /// ctor` decls (harvested into [`Checker::native_prelude_sigs`], read by [`Checker::builtin_sig`]).
 /// `print` is now file-backed too — a variadic `native fn print(...args: Any, sep, end)` decl in
@@ -1678,7 +1677,7 @@ struct Checker {
     /// declarations + bare annotations resolve to THIS module's runtime key. Set per `check_module`.
     current_module_id: Option<ModuleId>,
     /// The CURRENT module's bare-resolvable type names → their runtime key: locally declared +
-    /// `from`-imported + std whole-module. Mirrors the compiler's `bare_types`; resolves a bare-written
+    /// `from`-imported + std whole-module. Resolves a bare-written
     /// type name (annotation / constructor) to the module-scoped runtime key. Rebuilt per module.
     bare_types: HashMap<String, String>,
     /// EDITOR HOVER (LSP): when `Some`, a single-position probe — the 1-based `(line, col)` of the

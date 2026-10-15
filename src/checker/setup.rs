@@ -213,10 +213,6 @@ impl Checker {
         c
     }
 
-    /// The runtime key for a bare-written type name in the CURRENT module: its `bare_types` entry when
-    /// bare-visible (local / `from`-imported / std), else the name itself — which covers the reserved
-    /// built-ins (`Result`/`Option`/`Ref`/…) and a not-bare-visible name (resolution then misses, as
-    /// before). Mirrors the compiler's `enum_bare_key` (shared for structs + enums here).
     /// TICKET-262 — the one writer of [`FieldWidthTable`]: the C width of each field of struct `key`,
     /// read off the resolved field `Ty`. A struct with no width field gets no entry.
     pub(super) fn note_field_widths(&mut self, key: &str, fields: &[(String, Ty)]) {
@@ -226,6 +222,10 @@ impl Checker {
         }
     }
 
+    /// The runtime key for a bare-written type name in the CURRENT module (structs and enums alike):
+    /// its `bare_types` entry when bare-visible (local / `from`-imported / std), else the name itself —
+    /// which covers the reserved built-ins (`Result`/`Option`/`Ref`/…) and a not-bare-visible name
+    /// (resolution then misses, as before).
     pub(super) fn bare_key(&self, name: &str) -> String {
         self.bare_types
             .get(name)
