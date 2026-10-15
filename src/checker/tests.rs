@@ -23700,12 +23700,9 @@ fn nested_width_reads_as_its_scalar() {
     let prefix = "import std.ffi\nimport int8, uint8 from std.ffi\n";
     // TICKET-262: only the struct field is a C position; every other body writes a width type under
     // a payload, an optional, a carrier, a tuple or a list, which is a rule-1 error.
-    for body in [
-        "struct P:\n    a: int8\n    b: int\np := P(1, 2)\nmatch p:\n    P(1, b): print(b)\n    _: print(0)\n",
-    ] {
-        let errs = check_entry(&format!("{prefix}{body}"));
-        assert!(errs.is_empty(), "{body:?}: {errs:?}");
-    }
+    let body = "struct P:\n    a: int8\n    b: int\np := P(1, 2)\nmatch p:\n    P(1, b): print(b)\n    _: print(0)\n";
+    let errs = check_entry(&format!("{prefix}{body}"));
+    assert!(errs.is_empty(), "{body:?}: {errs:?}");
     for body in [
         "enum E:\n    A(int8)\ne := E.A(1)\nmatch e:\n    E.A(1): print(1)\n    E.A(2..5): print(2)\n    E.A(_): print(3)\n",
         "o: int8? = ?1\nmatch o:\n    ?1: print(1)\n    ?2..5: print(2)\n    _: print(3)\n",
