@@ -2218,7 +2218,7 @@ struct Suite:
     #[test]
     fn over_memory_trips_on_an_all_native_task_body() {
         #[rustfmt::skip]
-        let in_parent = crate::vm::rerun_in_child("test_runner::tests::over_memory_trips_on_an_all_native_task_body");
+        let in_parent = crate::vm::rerun_in_child(module_path!(), "over_memory_trips_on_an_all_native_task_body");
         if in_parent {
             return;
         }

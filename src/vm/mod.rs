@@ -451,12 +451,21 @@ pub(crate) static TEST_WORKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new
 /// copy of the test binary, which has its own gate. Returns `true` in the parent (the child already
 /// ran the body) and `false` in the child.
 #[cfg(test)]
-pub(crate) fn rerun_in_child(test_path: &str) -> bool {
+pub(crate) fn rerun_in_child(module: &str, name: &str) -> bool {
     if std::env::var_os("CHEZZI_FORCED_COUNT_CHILD").is_some() {
         return false;
     }
+    // libtest names a test by its path inside the crate: the caller's `module_path!()` without
+    // the crate name, then the fn name.
+    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+    let test_path = format!("{module}::{name}");
     let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
-        .args([test_path, "--exact", "--test-threads=1", "--nocapture"])
+        .args([
+            test_path.as_str(),
+            "--exact",
+            "--test-threads=1",
+            "--nocapture",
+        ])
         .env("CHEZZI_FORCED_COUNT_CHILD", "1")
         .output()
         .expect("spawn forced-count child");
