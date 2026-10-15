@@ -1908,7 +1908,7 @@ impl Parser {
                 kind: ExprKind::Tuple(targets),
                 span: target_span,
             };
-            if !is_assign_target(&target) {
+            if !is_assign_target(&target, true) {
                 return Err(ParseError {
                     message: "invalid assignment target".to_string(),
                     span: target_span,
@@ -2035,7 +2035,7 @@ impl Parser {
             | Token::Eof => return Ok(StmtKind::Expr(expr)),
         };
         // only an assignable place — a name, field, or index — can be on the left of `= += -=`
-        if matches!(expr.kind, ExprKind::Tuple(_)) || !is_assign_target(&expr) {
+        if !is_assign_target(&expr, false) {
             return Err(ParseError {
                 message: "invalid assignment target".to_string(),
                 span: expr.span,
@@ -4018,7 +4018,7 @@ impl Parser {
         }
         let target = if matches!(lhs.kind, ExprKind::Ident(ref n) if n == "_") {
             Pattern::Wildcard
-        } else if (listed || !matches!(lhs.kind, ExprKind::Tuple(_))) && is_assign_target(&lhs) {
+        } else if is_assign_target(&lhs, listed) {
             let id = crate::ast::NodeId::fresh();
             let tmp = format!("$wait{}", id.0);
             let value = Expr {
@@ -5918,13 +5918,16 @@ enum InfixOp {
 /// True for the compound-assignment tokens (`+= -= *= /= %= &= |= ^= <<= >>=`). Used to give a
 /// clear error when one appears with a multi-target list (`a, b += 1`).
 /// True iff `e` is a place `=` can store into: a name, a field, an index, or a parenthesized
-/// tuple of places (`a, (b.f, c[0]) = t`). Every other expression kind is not a place.
-fn is_assign_target(e: &Expr) -> bool {
+/// tuple of places (`a, (b.f, c[0]) = t`). Every other expression kind is not a place. `listed` is
+/// true when `e` is a comma list the statement wrote without outer parentheses (U9: no outer
+/// parentheses): a tuple at the top takes it, a parenthesized top-level tuple `(a, b) = t` does not.
+/// A nested tuple always takes parentheses.
+fn is_assign_target(e: &Expr, listed: bool) -> bool {
     match &e.kind {
         ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { index: Some(_), .. } => {
             true
         }
-        ExprKind::Tuple(elems) => elems.iter().all(is_assign_target),
+        ExprKind::Tuple(elems) => listed && elems.iter().all(|el| is_assign_target(el, true)),
         ExprKind::Index { index: None, .. }
         | ExprKind::Int(_)
         | ExprKind::Float(_)
@@ -6705,6 +6708,29 @@ mod tests {
                 assert!(matches!(&arms[0].body[0].kind, StmtKind::Assign { .. }))
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// U9: `=` takes no outer parentheses either, at a statement and at a wait arm, and a nested
+    /// tuple still parses. One function (`is_assign_target`) owns the rule.
+    #[test]
+    fn assign_outer_parens_rejected_at_every_site() {
+        for src in [
+            "(a, b) = t\n",
+            "wait:\n    (a, b) = ch.recv():\n        pass\n",
+        ] {
+            let e = parse_err(src);
+            assert!(
+                e.message.contains("invalid assignment target"),
+                "{src:?}: {}",
+                e.message
+            );
+        }
+        for src in [
+            "a, (b, c) = t\n",
+            "wait:\n    a, (b, c) = ch.recv():\n        pass\n",
+        ] {
+            parse_ok(src);
         }
     }
 

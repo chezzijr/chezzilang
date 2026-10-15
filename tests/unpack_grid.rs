@@ -20,16 +20,18 @@ enum Site {
     For,
     Comp,
     Wait,
+    WaitAssign,
     Match,
 }
 
 impl Site {
-    const ALL: [Site; 6] = [
+    const ALL: [Site; 7] = [
         Site::Walrus,
         Site::Assign,
         Site::For,
         Site::Comp,
         Site::Wait,
+        Site::WaitAssign,
         Site::Match,
     ];
 
@@ -40,6 +42,7 @@ impl Site {
             Site::For => "for",
             Site::Comp => "comp",
             Site::Wait => "wait",
+            Site::WaitAssign => "wait-assign",
             Site::Match => "match",
         }
     }
@@ -48,7 +51,7 @@ impl Site {
     fn is_loop(self) -> bool {
         match self {
             Site::For | Site::Comp => true,
-            Site::Walrus | Site::Assign | Site::Wait | Site::Match => false,
+            Site::Walrus | Site::Assign | Site::Wait | Site::WaitAssign | Site::Match => false,
         }
     }
 }
@@ -153,7 +156,12 @@ impl Shape {
             Shape::Blank => Some("1"),
             Shape::Struct | Shape::Variant => match site {
                 Site::Match => Some("1 2"),
-                Site::Walrus | Site::Assign | Site::For | Site::Comp | Site::Wait => None,
+                Site::Walrus
+                | Site::Assign
+                | Site::For
+                | Site::Comp
+                | Site::Wait
+                | Site::WaitAssign => None,
             },
             Shape::List | Shape::Rest => None,
         }
@@ -248,6 +256,18 @@ fn element_lines(site: Site, shape: Shape, ty: &str) -> Vec<String> {
             format!("    {} := c.recv():", shape.target()),
             format!("        {print}"),
         ],
+        Site::WaitAssign => {
+            let mut lines: Vec<String> =
+                shape.assign_decls().iter().map(|d| d.to_string()).collect();
+            lines.extend([
+                format!("w := Channel[{ty}](1)"),
+                "w.send(e)".to_string(),
+                "wait:".to_string(),
+                format!("    {} = w.recv():", shape.target()),
+                format!("        {print}"),
+            ]);
+            lines
+        }
         Site::Match => vec![
             "match e:".to_string(),
             format!("    {}:", shape.pattern()),
@@ -269,7 +289,7 @@ fn loop_lines(site: Site, shape: Shape, src: &str) -> Vec<String> {
             interp(shape.vars()),
             shape.target()
         )],
-        Site::Walrus | Site::Assign | Site::Wait | Site::Match => {
+        Site::Walrus | Site::Assign | Site::Wait | Site::WaitAssign | Site::Match => {
             unreachable!("a non-loop site runs per element")
         }
     }
@@ -382,8 +402,12 @@ fn reject_fragment(site: Site, shape: Shape) -> &'static str {
         (Site::Walrus, Shape::Struct | Shape::Variant | Shape::List) => {
             "left side of ':=' must be a name"
         }
-        (Site::Walrus | Site::Assign | Site::Wait, Shape::Rest) => "unexpected '*' in expression",
-        (Site::Assign, Shape::Struct | Shape::Variant | Shape::List) => "invalid assignment target",
+        (Site::Walrus | Site::Assign | Site::Wait | Site::WaitAssign, Shape::Rest) => {
+            "unexpected '*' in expression"
+        }
+        (Site::Assign | Site::WaitAssign, Shape::Struct | Shape::Variant | Shape::List) => {
+            "invalid assignment target"
+        }
         (Site::Wait, Shape::Struct | Shape::Variant | Shape::List) => {
             "left side of ':=' in a wait arm must be a name"
         }
@@ -395,7 +419,13 @@ fn reject_fragment(site: Site, shape: Shape) -> &'static str {
         (Site::Match, Shape::Rest) => "expected identifier, found '*'",
         // The rule accepts these cells, and `unpack_grid` never asks for their rejection.
         (
-            Site::Walrus | Site::Assign | Site::For | Site::Comp | Site::Wait | Site::Match,
+            Site::Walrus
+            | Site::Assign
+            | Site::For
+            | Site::Comp
+            | Site::Wait
+            | Site::WaitAssign
+            | Site::Match,
             Shape::Flat | Shape::Nested | Shape::Blank,
         )
         | (Site::Match, Shape::Struct | Shape::Variant) => {
@@ -488,7 +518,7 @@ fn axes_are_complete() {
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
     }
-    assert_eq!((sites.len(), shapes.len(), sources.len()), (6, 7, 10));
+    assert_eq!((sites.len(), shapes.len(), sources.len()), (7, 7, 10));
 }
 
 /// A bare tuple ends a statement: `return`, `:=`, a typed `:=`, `yield`, `=`. Each prints its tuple
