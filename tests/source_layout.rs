@@ -32,6 +32,18 @@ fn rust_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Every Rust source of the workspace: `src/` and each `crates/*/src/`.
+fn source_files() -> Vec<PathBuf> {
+    let mut out = rust_files(Path::new("src"));
+    for entry in fs::read_dir("crates").expect("read crates") {
+        let src = entry.unwrap().path().join("src");
+        if src.is_dir() {
+            out.extend(rust_files(&src));
+        }
+    }
+    out
+}
+
 fn is_test_file(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == "tests")
         || path
@@ -42,7 +54,7 @@ fn is_test_file(path: &Path) -> bool {
 #[test]
 fn every_source_file_is_under_its_line_cap() {
     let mut over = Vec::new();
-    for path in rust_files(Path::new("src")) {
+    for path in source_files() {
         let lines = fs::read_to_string(&path).unwrap().lines().count();
         let cap = if is_test_file(&path) {
             TEST_MAX_LINES
@@ -63,7 +75,7 @@ fn every_source_file_is_under_its_line_cap() {
 #[test]
 fn every_source_file_opens_with_a_topic_comment() {
     let mut bare = Vec::new();
-    for path in rust_files(Path::new("src")) {
+    for path in source_files() {
         let text = fs::read_to_string(&path).unwrap();
         let first = text.lines().find(|l| !l.starts_with("#!["));
         if !first.is_some_and(|l| l.starts_with("//")) {

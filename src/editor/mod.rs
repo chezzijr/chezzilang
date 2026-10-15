@@ -219,47 +219,9 @@ fn span_diag(source: &str, line1: usize, col1: usize, message: String, severity:
     }
 }
 
-fn is_word(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-/// The 0-based end column of the token starting at 1-based `(line, col)`. Four branches, tested in
-/// this order: a STRING literal (a quote, or a `b`/`r` prefix directly before one — this must come
-/// before the word test, since the prefix letter is a word char), a NUMBER literal, an identifier
-/// word, and otherwise `col` (0-based) + 1. That last branch is also DEC-001's fallback for an
-/// unreadable source (a one-shot fd read returns nothing, so the scan runs on an empty line).
-/// Measures ONE line, so a triple-quoted literal stops at end of line. `pub`: also the
-/// `--errors=json` `end_col` renderer (`main.rs::diags_json`) and the plain-text caret width
-/// (`lexer::render_snippet`) reuse this rather than writing a second scanner — their `line`/`col`
-/// are 1-based, so `diags_json` adds 1 to this fn's 0-based result. Never strips a BOM (DEC-058):
-/// the outermost caller strips once.
-pub fn word_end_col(source: &str, line1: usize, col1: usize) -> u32 {
-    let col0 = col1.saturating_sub(1);
-    let line = source.lines().nth(line1.saturating_sub(1)).unwrap_or("");
-    let chars: Vec<char> = line.chars().collect();
-    let at = |i: usize| chars.get(i).copied();
-    let is_quote = |c: Option<char>| matches!(c, Some('"' | '\''));
-    let end = if is_quote(at(col0)) {
-        // A plain `str` literal may hold holes with nested literals of its own quote, so its
-        // extent is the lexer's: the one place that knows where a hole ends. A literal the lexer
-        // cannot close on this line (unterminated, or a hole that runs on) stops at end of line.
-        let rest: String = chars[col0..].iter().collect();
-        col0 + crate::lexer::literal_len(&rest).unwrap_or(chars.len() - col0)
-    } else if matches!(at(col0), Some('b' | 'B' | 'r' | 'R')) && is_quote(at(col0 + 1)) {
-        col0 + measure_string(&chars, col0)
-    } else if matches!(at(col0), Some(c) if c.is_ascii_digit()) {
-        col0 + measure_number(&chars, col0)
-    } else if matches!(at(col0), Some(c) if is_word(c)) {
-        let mut end = col0;
-        while matches!(at(end), Some(c) if is_word(c)) {
-            end += 1;
-        }
-        end
-    } else {
-        col0 + 1
-    };
-    end as u32
-}
+/// Lives in the lexer, the one owner of where a token ends; re-exported for the editor surface.
+pub use crate::lexer::word_end_col;
+use crate::lexer::{measure_number, measure_string};
 
 // ---------------------------------------------------------------------------
 // Hover (the `K` / `textDocument/hover` path).
@@ -1207,96 +1169,6 @@ fn push_utf16_tokens(
             token_type: ttype,
         });
     }
-}
-
-/// Char-length of the number literal starting at `start` — mirrors the lexer's `number()` extent
-/// (radix prefixes, digit-group `_`, a single fraction, an `e`/`E` exponent), without re-parsing.
-fn measure_number(chars: &[char], start: usize) -> usize {
-    let at = |i: usize| chars.get(i).copied();
-    let mut i = start;
-    // Radix-prefixed integer: 0x / 0b / 0o then alphanumerics + underscores.
-    if at(i) == Some('0') && matches!(at(i + 1), Some('x' | 'X' | 'b' | 'B' | 'o' | 'O')) {
-        i += 2;
-        while matches!(at(i), Some(c) if c.is_ascii_alphanumeric() || c == '_') {
-            i += 1;
-        }
-        return i - start;
-    }
-    while matches!(at(i), Some(c) if c.is_ascii_digit() || c == '_') {
-        i += 1;
-    }
-    // Fraction — only if the dot is followed by a digit (so `1.` and `0..10` are not eaten).
-    if at(i) == Some('.') && matches!(at(i + 1), Some(c) if c.is_ascii_digit()) {
-        i += 1;
-        while matches!(at(i), Some(c) if c.is_ascii_digit() || c == '_') {
-            i += 1;
-        }
-    }
-    // Exponent — `e`/`E`, optional sign, one-or-more digits (else the `e` is not part of the number).
-    if matches!(at(i), Some('e' | 'E')) {
-        let mut probe = i + 1;
-        if matches!(at(probe), Some('+' | '-')) {
-            probe += 1;
-        }
-        if matches!(at(probe), Some(c) if c.is_ascii_digit()) {
-            i = probe;
-            while matches!(at(i), Some(c) if c.is_ascii_digit()) {
-                i += 1;
-            }
-        }
-    }
-    i - start
-}
-
-/// Char-length of the `b"…"` / `r"…"` literal starting at `start`, covering the prefix, single/triple
-/// quotes of either style, and (for a byte string) backslash escapes. An unterminated literal is
-/// measured to end-of-input (or end-of-line for a single-quoted one). Neither kind holds an
-/// interpolation hole, so a quote scan is exact for them; a plain `str` literal's extent is
-/// `StrLit::len`, which only the lexer can know (a hole may nest a literal of the same quote).
-fn measure_string(chars: &[char], start: usize) -> usize {
-    let at = |i: usize| chars.get(i).copied();
-    let mut i = start;
-    let mut raw = false;
-    // Optional b/B (byte) or r/R (raw) prefix immediately before the quote.
-    if matches!(at(i), Some('b' | 'B' | 'r' | 'R')) && matches!(at(i + 1), Some('"' | '\'')) {
-        if matches!(at(i), Some('r' | 'R')) {
-            raw = true;
-        }
-        i += 1;
-    }
-    let quote = match at(i) {
-        Some(q @ ('"' | '\'')) => q,
-        _ => return i - start, // not actually a string; defensive
-    };
-    let triple = at(i + 1) == Some(quote) && at(i + 2) == Some(quote);
-    if triple {
-        i += 3;
-        loop {
-            match at(i) {
-                None => break,
-                Some(c) if c == quote && at(i + 1) == Some(quote) && at(i + 2) == Some(quote) => {
-                    i += 3;
-                    break;
-                }
-                Some('\\') if !raw => i += 2, // skip the escaped char
-                Some(_) => i += 1,
-            }
-        }
-    } else {
-        i += 1;
-        loop {
-            match at(i) {
-                None | Some('\n') => break,
-                Some(c) if c == quote => {
-                    i += 1;
-                    break;
-                }
-                Some('\\') if !raw => i += 2,
-                Some(_) => i += 1,
-            }
-        }
-    }
-    i - start
 }
 
 /// Recover comment tokens (the lexer drops them): every `#` not inside a string literal opens a

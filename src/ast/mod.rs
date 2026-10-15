@@ -947,7 +947,7 @@ impl PartialEq for Import {
 /// **The single source of truth for "how few arguments may this declaration be entered with".**
 ///
 /// A caller that omits trailing defaulted arguments simply pushes fewer values; the callee's own
-/// prologue fills the rest from the declared defaults (`crate::vm::op::Op::JumpIfProvided`). That
+/// prologue fills the rest from the declared defaults (`vm::op::Op::JumpIfProvided`). That
 /// only works for a SUFFIX — a short call cannot express a hole before a supplied argument — and
 /// only when nothing else occupies the trailing slots.
 ///
@@ -1182,7 +1182,7 @@ pub enum ExprKind {
     /// The repo's rule for this failure class (`docs/gaps.md` M24-6, W7-49, W7-43) is **make the
     /// coordinate real, never re-anchor a span** — re-spanning the pack only moves the collision. The
     /// callee's key span is that real coordinate: it is a distinct source token per link in both a
-    /// postfix and a pipe chain, and it is derived by the SAME [`crate::checker::witness_key_span`]
+    /// postfix and a pipe chain, and it is derived by the SAME `checker::witness_key_span`
     /// `WitnessKey`/`CarrierKey` already use, so it inherits their derivation rather than adding one.
     List(Vec<Expr>, Option<Span>),
     /// `(a, b, …)` — a tuple literal (always ≥2 elements).

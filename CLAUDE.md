@@ -43,6 +43,7 @@ cargo test                       # FULL pre-commit suite: lib + goldens + confor
 cargo nextest run                # the same suite, binaries in parallel (~3 min vs ~13; the pipeline's verifying gate uses this)
 cargo test --lib                 # inner loop: the lib unit suite
 cargo test --lib checker::       # scope to the area you edit -> seconds
+cargo test -p chezzi-syntax      # the syntax layer alone (lexer, ast, parser): its own crate
 cargo test conformance           # execute docs/grammar.bnf, differential-test vs the parser
 cargo clippy -- -D warnings      # lint (must be clean before commit)
 cargo run -- check examples/hello.chz   # type-check only; also: run <file>, test <file|dir>

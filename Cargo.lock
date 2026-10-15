@@ -111,6 +111,7 @@ version = "0.1.0"
 dependencies = [
  "bnf",
  "cc",
+ "chezzi-syntax",
  "libc",
  "libffi",
  "libloading",
@@ -122,6 +123,10 @@ dependencies = [
  "ureq",
  "url",
 ]
+
+[[package]]
+name = "chezzi-syntax"
+version = "0.1.0"
 
 [[package]]
 name = "concurrent-queue"

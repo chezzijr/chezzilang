@@ -3,7 +3,16 @@ name = "chezzi"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [".", "crates/chezzi-syntax"]
+# `cargo test` / `cargo nextest run` / `cargo build` at the root cover every crate.
+default-members = [".", "crates/chezzi-syntax"]
+
+[workspace.lints.clippy]
+wildcard_enum_match_arm = "deny"
+
 [dependencies]
+chezzi-syntax = { path = "crates/chezzi-syntax" }
 libc = "0.2.186"
 libffi = "3"
 libloading = "0.8"
@@ -45,5 +54,5 @@ split-debuginfo = "unpacked"
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
-[lints.clippy]
-wildcard_enum_match_arm = "deny"
+[lints]
+workspace = true

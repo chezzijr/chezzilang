@@ -106,7 +106,8 @@ file at 2,500 lines and a test file at 3,500.
 
 | Area | Files |
 |---|---|
-| Lexer | `lexer/mod.rs` (tokens), `lexer/tests.rs` |
+| Crates | `chezzi-syntax` (`crates/chezzi-syntax/src/lib.rs`) builds `lexer`, `ast`, `parser`, `fmtspec`, `printable` and `slice` from their files under `src/`; the `chezzi` crate (`lib.rs`) re-exports them at their old paths |
+| Lexer | `lexer/mod.rs` (tokens, token extents such as `word_end_col`), `lexer/tests.rs` |
 | Parser | `parser/mod.rs` (entry points, `Parser`, value sites), `parser/cursor.rs` (peek, expect, line and block ends), `parser/stmt.rs` (items, statements, imports), `parser/decl.rs` (fn, protocol, extern, native, struct, enum), `parser/control.rs` (if, for, while, match, else guards), `parser/pattern.rs` (patterns and binding targets), `parser/types.rs` (blocks, types), `parser/expr.rs` (Pratt expressions), `parser/interp.rs` (interpolation, closures), `parser/tests/` |
 | AST | `ast/mod.rs` (node shapes and pure queries), `ast/consteval.rs` |
 | Desugar, resolver | `desugar/mod.rs`, `resolver/mod.rs`, `resolver/std_embed.rs` |

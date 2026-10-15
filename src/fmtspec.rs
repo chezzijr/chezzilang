@@ -769,7 +769,7 @@ pub(crate) fn normalize_exp(rust_e: &str, marker: char) -> String {
 /// even candidate can fall outside `x`'s rounding interval — `2f64.powi(-24)` is exactly
 /// `5.9604644775390625e-08`, yet `5.960464477539062e-08` parses to a *different* float, so CPython
 /// keeps the odd `…063` there too.
-pub(crate) fn repr_float(x: f64) -> String {
+pub fn repr_float(x: f64) -> String {
     if !x.is_finite() {
         return format!("{x}");
     }

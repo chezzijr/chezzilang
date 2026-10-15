@@ -1564,9 +1564,8 @@ fn chained_guards_on_one_clause_parse() {
 /// The golden target: the whole touchstone program parses, with the expected top-level shape.
 #[test]
 fn parses_hello_example() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.chz"))
-        .unwrap();
-    let module = parse(lexer::tokenize(&src).unwrap()).expect("hello.chz should parse");
+    let src = include_str!("../../../examples/hello.chz");
+    let module = parse(lexer::tokenize(src).unwrap()).expect("hello.chz should parse");
     // greet, Point, Shape, area, safe_div, main, then the top-level `main()` call
     assert_eq!(module.stmts.len(), 7);
     assert!(matches!(module.stmts[0].kind, StmtKind::Fn(_)));

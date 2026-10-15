@@ -909,9 +909,8 @@ fn rejects_inline_nested_block() {
 /// Strengthened golden check: walk into hello.chz bodies, not just top-level shape.
 #[test]
 fn hello_example_inner_structure() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.chz"))
-        .unwrap();
-    let module = parse(lexer::tokenize(&src).unwrap()).unwrap();
+    let src = include_str!("../../../examples/hello.chz");
+    let module = parse(lexer::tokenize(src).unwrap()).unwrap();
 
     // index 4 = `fn safe_div(...) -> Result[int]:` — check its return type and `?` usage.
     let StmtKind::Fn(safe_div) = &module.stmts[4].kind else {

@@ -1204,3 +1204,63 @@ fn vm_generator_survives_gc_stress() {
     let src = "fn words() -> Iterator[str]:\n    yield \"alpha\"\n    yield \"beta\"\n    yield \"gamma\"\nfn main():\n    for w in words():\n        print(w)\nmain()\n";
     assert_eq!(run_capture_stress(src), "alpha\nbeta\ngamma\n");
 }
+
+/// `int_binop` against the real VM: each op x each operand pair runs as `a OP b` on runtime
+/// values inside `recover:`, and the VM's value or fault must be what `int_binop` predicts.
+#[test]
+fn consteval_matches_vm_arith() {
+    use crate::ast::BinaryOp;
+    use crate::ast::consteval::int_binop;
+    let ops = [
+        (BinaryOp::Add, "+"),
+        (BinaryOp::Sub, "-"),
+        (BinaryOp::Mul, "*"),
+        (BinaryOp::Div, "/"),
+        (BinaryOp::Mod, "%"),
+        (BinaryOp::BitAnd, "&"),
+        (BinaryOp::BitOr, "|"),
+        (BinaryOp::BitXor, "^"),
+        (BinaryOp::Shl, "<<"),
+        (BinaryOp::Shr, ">>"),
+    ];
+    let vals = [0, 1, -1, i64::MAX, i64::MIN, 63, 64];
+    let lit = |v: i64| {
+        if v == i64::MIN {
+            "(0 - 9223372036854775807 - 1)".to_string()
+        } else {
+            v.to_string()
+        }
+    };
+    let mut src = String::new();
+    for (i, (_, sym)) in ops.iter().enumerate() {
+        src += &format!(
+            "fn t{i}(a: int, b: int):\n    r := recover: a {sym} b\n    match r:\n        ?v: print(str(v))\n        !e: print(\"F \" + e.message())\n"
+        );
+    }
+    let mut want = Vec::new();
+    for (i, (op, _)) in ops.iter().enumerate() {
+        for a in vals {
+            for b in vals {
+                src += &format!("t{i}({}, {})\n", lit(a), lit(b));
+                want.push((*op, a, b, int_binop(*op, a, b)));
+            }
+        }
+    }
+    let out = run_capture(&src).expect("the program runs");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), want.len(), "one line per op pair");
+    let mut red = Vec::new();
+    for ((op, a, b, w), got) in want.iter().zip(&lines) {
+        let agrees = match w {
+            Some(Ok(v)) => *got == v.to_string(),
+            Some(Err(name)) => {
+                got.starts_with("F ") && got.contains(&format!("integer overflow in {name}"))
+            }
+            None => got.starts_with("F ") && !got.contains("integer overflow"),
+        };
+        if !agrees {
+            red.push(format!("{op:?}({a}, {b}): int_binop {w:?}, vm {got:?}"));
+        }
+    }
+    assert!(red.is_empty(), "{}", red.join("\n"));
+}
