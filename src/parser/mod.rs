@@ -720,6 +720,13 @@ impl Parser {
         )))
     }
 
+    /// The binding target an already-parsed expression stands for at a `:=` fallback (a grouped
+    /// `(x)`, a keyword name, a wait arm): `binder_name`, then `bind_leaf`, so `_` is a `Wildcard`.
+    fn expr_bind_target(&self, target: Expr, otherwise: &str) -> PResult<Pattern> {
+        let span = target.span;
+        Ok(bind_leaf(self.binder_name(target, otherwise)?, span))
+    }
+
     /// The name a `:=` target binds: an identifier, the one keyword-name error for a literal
     /// keyword (`None`, `true`, `false`), or `otherwise` for any other expression.
     fn binder_name(&self, target: Expr, otherwise: &str) -> PResult<String> {
@@ -1929,11 +1936,10 @@ impl Parser {
                 self.advance();
                 let value = self.parse_value(ValueSite::Let)?;
                 let value = self.parse_else_guard(value)?;
-                let name_span = expr.span;
-                let name = self.binder_name(expr, "left side of ':=' must be a name")?;
+                let target = self.expr_bind_target(expr, "left side of ':=' must be a name")?;
                 return Ok(StmtKind::Let {
                     // The lvalue ident's span IS the binding-name span (single `:=`).
-                    target: bind_leaf(name, name_span),
+                    target,
                     ty: None,
                     value,
                     is_const: false,
@@ -4002,9 +4008,10 @@ impl Parser {
         }
         let lhs_span = lhs.span;
         if self.eat_in_line(&Token::Walrus) {
-            let name = self.binder_name(lhs, "left side of ':=' in a wait arm must be a name")?;
+            let target =
+                self.expr_bind_target(lhs, "left side of ':=' in a wait arm must be a name")?;
             return Ok(WaitArmKind::Recv {
-                target: Pattern::Ident(name, lhs_span, crate::ast::NodeId::fresh()),
+                target,
                 chan: self.parse_recv_chan()?,
             });
         }

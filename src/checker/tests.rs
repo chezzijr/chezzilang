@@ -33264,6 +33264,19 @@ fn blank_identifier_is_not_readable() {
     );
 }
 
+// TICKET-261: a grouped blank `(_)` is the blank at a `:=` and a wait arm; it binds nothing.
+#[test]
+fn grouped_blank_binds_nothing() {
+    rejects("(_) := 7\nprint(_)\n", "cannot use '_' as a value");
+    let wait = |target: &str| {
+        format!(
+            "fn f(ch: Channel[int]):\n    wait:\n        {target} := ch.recv():\n            print(_)\n"
+        )
+    };
+    rejects(&wait("(_)"), "cannot use '_' as a value");
+    rejects(&wait("_"), "cannot use '_' as a value");
+}
+
 // TICKET-261: a typed blank `_: T = e` is a `Pattern::Wildcard` target and still checks `e` against `T`.
 #[test]
 fn typed_blank_let_checks_its_annotation() {

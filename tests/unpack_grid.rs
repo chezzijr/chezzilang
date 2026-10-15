@@ -61,6 +61,7 @@ enum Shape {
     Flat,
     Nested,
     Blank,
+    ParenBlank,
     Struct,
     Variant,
     List,
@@ -68,10 +69,11 @@ enum Shape {
 }
 
 impl Shape {
-    const ALL: [Shape; 7] = [
+    const ALL: [Shape; 8] = [
         Shape::Flat,
         Shape::Nested,
         Shape::Blank,
+        Shape::ParenBlank,
         Shape::Struct,
         Shape::Variant,
         Shape::List,
@@ -83,6 +85,7 @@ impl Shape {
             Shape::Flat => "flat",
             Shape::Nested => "nested",
             Shape::Blank => "blank",
+            Shape::ParenBlank => "paren-blank",
             Shape::Struct => "struct",
             Shape::Variant => "variant",
             Shape::List => "list",
@@ -93,9 +96,12 @@ impl Shape {
     /// The element value and its type.
     fn value(self) -> (&'static str, &'static str) {
         match self {
-            Shape::Flat | Shape::Nested | Shape::Blank | Shape::List | Shape::Rest => {
-                ("(1, (2, 3))", "(int, (int, int))")
-            }
+            Shape::Flat
+            | Shape::Nested
+            | Shape::Blank
+            | Shape::ParenBlank
+            | Shape::List
+            | Shape::Rest => ("(1, (2, 3))", "(int, (int, int))"),
             Shape::Struct => ("P(1, 2)", "P"),
             Shape::Variant => ("E.V(1, 2)", "E"),
         }
@@ -107,6 +113,7 @@ impl Shape {
             Shape::Flat => "a, b",
             Shape::Nested => "a, (b, c)",
             Shape::Blank => "a, _",
+            Shape::ParenBlank => "(_)",
             Shape::Struct => "P(a, b)",
             Shape::Variant => "E.V(a, b)",
             Shape::List => "[a, b]",
@@ -120,6 +127,7 @@ impl Shape {
             Shape::Flat => "(a, b)",
             Shape::Nested => "(a, (b, c))",
             Shape::Blank => "(a, _)",
+            Shape::ParenBlank => "(_)",
             Shape::Struct => "P(a, b)",
             Shape::Variant => "E.V(a, b)",
             Shape::List => "[a, b]",
@@ -133,6 +141,7 @@ impl Shape {
             Shape::Flat | Shape::Struct | Shape::Variant | Shape::List => &["a", "b"],
             Shape::Nested => &["a", "b", "c"],
             Shape::Blank => &["a"],
+            Shape::ParenBlank => &["_"],
             Shape::Rest => &["a", "r"],
         }
     }
@@ -143,6 +152,7 @@ impl Shape {
             Shape::Flat => &["a := 0", "b := (0, 0)"],
             Shape::Nested => &["a := 0", "b := 0", "c := 0"],
             Shape::Blank => &["a := 0"],
+            Shape::ParenBlank => &[],
             Shape::Struct | Shape::Variant | Shape::List => &["a := 0", "b := 0"],
             Shape::Rest => &["a := 0", "r := 0"],
         }
@@ -154,6 +164,8 @@ impl Shape {
             Shape::Flat => Some("1 (2, 3)"),
             Shape::Nested => Some("1 2 3"),
             Shape::Blank => Some("1"),
+            // `(_)` skips the slot and binds nothing, so the cell reads `_` and meets the blank rule.
+            Shape::ParenBlank => None,
             Shape::Struct | Shape::Variant => match site {
                 Site::Match => Some("1 2"),
                 Site::Walrus
@@ -220,7 +232,12 @@ fn not_applicable(site: Site, shape: Shape, source: Source) -> bool {
         // A struct and an enum variant are not `Hashable`, and a Map element is a pair.
         Source::SetOf | Source::Map => match shape {
             Shape::Struct | Shape::Variant => true,
-            Shape::Flat | Shape::Nested | Shape::Blank | Shape::List | Shape::Rest => false,
+            Shape::Flat
+            | Shape::Nested
+            | Shape::Blank
+            | Shape::ParenBlank
+            | Shape::List
+            | Shape::Rest => false,
         },
         Source::ListOf
         | Source::Generator
@@ -411,6 +428,13 @@ fn reject_fragment(site: Site, shape: Shape) -> &'static str {
         (Site::Wait, Shape::Struct | Shape::Variant | Shape::List) => {
             "left side of ':=' in a wait arm must be a name"
         }
+        (Site::For | Site::Comp, Shape::ParenBlank) => {
+            "a parenthesized target needs two or more names"
+        }
+        (
+            Site::Walrus | Site::Assign | Site::Wait | Site::WaitAssign | Site::Match,
+            Shape::ParenBlank,
+        ) => "cannot use '_' as a value",
         (Site::For | Site::Comp, Shape::Struct) => "expected 'in', found '('",
         (Site::For | Site::Comp, Shape::Variant) => "expected 'in', found '.'",
         (Site::For | Site::Comp, Shape::List) => "expected identifier, found '['",
@@ -468,6 +492,7 @@ fn shape_of(p: &Pattern) -> Option<Shape> {
             [Pattern::Ident(..), Pattern::Wildcard] => Some(Shape::Blank),
             _ => None,
         },
+        Pattern::Wildcard => Some(Shape::ParenBlank),
         Pattern::Variant { enum_name, .. } => match enum_name {
             Some(_) => Some(Shape::Variant),
             None => Some(Shape::Struct),
@@ -475,7 +500,6 @@ fn shape_of(p: &Pattern) -> Option<Shape> {
         Pattern::Ident(..)
         | Pattern::Literal(_)
         | Pattern::Range { .. }
-        | Pattern::Wildcard
         | Pattern::Or(_)
         | Pattern::Carrier { .. } => None,
     }
@@ -489,9 +513,12 @@ fn shape_axis_matches_the_parser() {
         let src = format!("match e:\n    {}:\n        pass\n", shape.pattern());
         let parsed = chezzi::parser::parse(chezzi::lexer::tokenize(&src).unwrap());
         let want = match shape {
-            Shape::Flat | Shape::Nested | Shape::Blank | Shape::Struct | Shape::Variant => {
-                Some(shape)
-            }
+            Shape::Flat
+            | Shape::Nested
+            | Shape::Blank
+            | Shape::ParenBlank
+            | Shape::Struct
+            | Shape::Variant => Some(shape),
             Shape::List | Shape::Rest => None,
         };
         let got = match parsed {
@@ -518,7 +545,7 @@ fn axes_are_complete() {
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
     }
-    assert_eq!((sites.len(), shapes.len(), sources.len()), (7, 7, 10));
+    assert_eq!((sites.len(), shapes.len(), sources.len()), (7, 8, 10));
 }
 
 /// A bare tuple ends a statement: `return`, `:=`, a typed `:=`, `yield`, `=`. Each prints its tuple
