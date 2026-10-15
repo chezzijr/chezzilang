@@ -21,6 +21,27 @@ fn read(rel: &str) -> String {
         .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
 }
 
+/// Every production source of the parser: the `.rs` files directly in `src/parser/`, in name order
+/// (its unit tests live in `src/parser/tests/` and are not read).
+fn read_parser_sources() -> String {
+    let dir = format!("{ROOT}/src/parser");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {dir}: {e}"))
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no parser source under {dir}");
+    files
+        .iter()
+        .map(|p| {
+            std::fs::read_to_string(p)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ----- token class name for every Token (exhaustive — the compiler enforces completeness) -----
 
 /// The grammar terminal name for a token. Exhaustive match: adding a `Token` variant without a
@@ -432,7 +453,7 @@ fn parser_rules_match_fns() {
     .collect();
 
     let rules = grammar_rule_names(&normalize_grammar(&read("docs/grammar.bnf")));
-    let src = read("src/parser/mod.rs");
+    let src = read_parser_sources();
     let fns: BTreeSet<String> = src
         .match_indices("fn parse_")
         .map(|(i, _)| {

@@ -2,6 +2,8 @@
 //! placement, native structs, doc comments.
 //! Split out of `src/parser/mod.rs`. `super::*` is the parent module.
 
+use super::cursor::describe;
+use super::cursor::describe_unexpected;
 use super::*;
 
 /// `unexpected` reads without an article; `found` keeps it. A string literal in `describe`
