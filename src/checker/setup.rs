@@ -4086,7 +4086,7 @@ impl Checker {
                     doc: Some(d),
                     ..
                 } => {
-                    for n in target.target_names() {
+                    for n in target.binder_names() {
                         self.name_docs.insert(n, d.clone());
                     }
                 }

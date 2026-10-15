@@ -1858,9 +1858,7 @@ fn entry_module_binds(stmts: &[Stmt], imports: &[ResolvedImport], name: &str) ->
         || stmts.iter().any(|s| match &s.kind {
             StmtKind::Fn(d) => d.name == name,
             StmtKind::Extern { fns, .. } => fns.iter().any(|f| f.name == name),
-            StmtKind::Let { target, .. } => {
-                name != "_" && target.target_names().iter().any(|n| n == name)
-            }
+            StmtKind::Let { target, .. } => target.binder_names().iter().any(|n| n == name),
             StmtKind::Assign { .. }
             | StmtKind::Struct { .. }
             | StmtKind::Protocol { .. }
@@ -4428,25 +4426,6 @@ fn lit_pattern_ty(lit: &LitPattern) -> Ty {
         LitPattern::Int(_) => Ty::Int,
         LitPattern::Str(_) => Ty::Str,
         LitPattern::Bool(_) => Ty::Bool,
-    }
-}
-
-/// Whether a match-arm pattern introduces a binding of `name` (so a free-closure body scan must treat
-/// `name` as shadowed inside that arm — see [`Checker::scan_expr_for_pin`]). Covers a tuple/variant
-/// sub-position `Ident` binding, an or-pattern alternative (all alternatives bind the same set), and a
-/// top-level bare catch-all of the same spelling (parsed as a nullary `Variant`).
-fn pattern_binds(p: &Pattern, name: &str) -> bool {
-    match p {
-        Pattern::Ident(s, _, _) => s == name,
-        // A nullary bare-name pattern (`Variant{ bindings: [] }`) is a catch-all binding when it
-        // names neither a qualified variant nor a payload — scope-conservatively, a same-spelling one
-        // shadows. A payload variant's bindings are sub-positions; recurse.
-        Pattern::Variant {
-            name: vn, bindings, ..
-        } => (bindings.is_empty() && vn == name) || bindings.iter().any(|b| pattern_binds(b, name)),
-        Pattern::Tuple(subs) | Pattern::Or(subs) => subs.iter().any(|s| pattern_binds(s, name)),
-        Pattern::Carrier { inner, .. } => pattern_binds(inner, name),
-        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => false,
     }
 }
 

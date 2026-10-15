@@ -582,7 +582,7 @@ impl UseWalk<'_> {
                 if self.deep
                     && let Some(root) = self.view_root(iter)
                 {
-                    for v in &target.target_names() {
+                    for v in &target.binder_names() {
                         self.alias(v, &root);
                     }
                 }
@@ -639,7 +639,7 @@ impl UseWalk<'_> {
                 for arm in arms {
                     if let Some(root) = &root {
                         let mut binders = HashSet::new();
-                        crate::compiler::pattern_binds(&arm.pattern, &mut binders);
+                        binders.extend(arm.pattern.binder_names());
                         for b in binders {
                             self.alias(&b, root);
                         }
@@ -1205,7 +1205,7 @@ impl Scan {
     fn collect_locals(&mut self, body: &[Stmt]) {
         for stmt in body {
             match &stmt.kind {
-                StmtKind::Let { target, .. } => self.locals.extend(target.target_names()),
+                StmtKind::Let { target, .. } => self.locals.extend(target.binder_names()),
                 StmtKind::Fn(decl) => {
                     self.locals.insert(decl.name.clone());
                 }
@@ -1370,7 +1370,7 @@ impl Scan {
             StmtKind::Let { target, value, .. } => {
                 self.expr(value);
                 if let Some(scope) = self.visible_fns.last_mut() {
-                    for name in target.target_names() {
+                    for name in target.binder_names() {
                         scope.insert(name, None);
                     }
                 }
@@ -1401,7 +1401,7 @@ impl Scan {
             StmtKind::For { target, iter, body } => {
                 self.expr(iter);
                 let prior: Vec<_> = target
-                    .target_names()
+                    .binder_names()
                     .into_iter()
                     .map(|name| {
                         let fresh = self.locals.insert(name.clone());

@@ -33264,6 +33264,16 @@ fn blank_identifier_is_not_readable() {
     );
 }
 
+// TICKET-261: a typed blank `_: T = e` is a `Pattern::Wildcard` target and still checks `e` against `T`.
+#[test]
+fn typed_blank_let_checks_its_annotation() {
+    rejects(
+        "_: int = \"s\"\n",
+        "cannot assign str to variable of type int",
+    );
+    ok("_: int = 1\n_: str = \"x\"\n");
+}
+
 // TICKET-261: one declare policy for the leaves of a binding target. A nested `Unknown` leaves
 // the proven leaves' types in place at every site, and a leaf still meets the const check.
 #[test]

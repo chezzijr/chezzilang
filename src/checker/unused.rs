@@ -15,7 +15,7 @@ use crate::ast::{
     Block, DeferTarget, Expr, ExprKind, FnDecl, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind,
     WaitArmKind,
 };
-use crate::compiler::{chunk_exprs, pattern_binds};
+use crate::compiler::chunk_exprs;
 use std::collections::HashSet;
 
 struct Binding {
@@ -104,7 +104,7 @@ impl Scan {
 
     fn pattern(&mut self, p: &Pattern) {
         let mut names = HashSet::new();
-        pattern_binds(p, &mut names);
+        names.extend(p.binder_names());
         for n in names {
             self.bind(&n, Span::RUNTIME, false);
         }
@@ -120,10 +120,8 @@ impl Scan {
         match &st.kind {
             StmtKind::Let { target, value, .. } => {
                 self.expr(value);
-                for (n, span) in target.target_binders() {
-                    if n != "_" {
-                        self.bind(n, span, true);
-                    }
+                for (n, span) in target.binders() {
+                    self.bind(n, span, true);
                 }
             }
             StmtKind::Assign { target, op, value } => {
@@ -193,10 +191,8 @@ impl Scan {
             StmtKind::For { target, iter, body } => {
                 self.expr(iter);
                 self.scoped(|s| {
-                    for (v, span) in target.target_binders() {
-                        if v != "_" {
-                            s.bind(v, span, true);
-                        }
+                    for (v, span) in target.binders() {
+                        s.bind(v, span, true);
                     }
                     s.block_items(body);
                 });
@@ -230,7 +226,7 @@ impl Scan {
                         match &arm.kind {
                             WaitArmKind::Recv { target, chan } => {
                                 s.expr(chan);
-                                for (n, _) in target.target_binders() {
+                                for (n, _) in target.binders() {
                                     s.bind(n, arm.span, false);
                                 }
                             }
@@ -292,7 +288,7 @@ impl Scan {
             } => self.scoped(|s| {
                 for c in clauses {
                     s.expr(&c.iter);
-                    for (v, _) in c.target.target_binders() {
+                    for (v, _) in c.target.binders() {
                         s.bind(v, Span::RUNTIME, false);
                     }
                     c.guards.iter().for_each(|g| s.expr(g));

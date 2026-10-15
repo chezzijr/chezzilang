@@ -1814,7 +1814,7 @@ impl Parser {
                 self.parse_else_guard(value)?
             };
             return Ok(StmtKind::Let {
-                target: Pattern::Ident(name, name_span, crate::ast::NodeId::fresh()),
+                target: bind_leaf(name, name_span),
                 ty: Some(ty),
                 value,
                 is_const,
@@ -1933,7 +1933,7 @@ impl Parser {
                 let name = self.binder_name(expr, "left side of ':=' must be a name")?;
                 return Ok(StmtKind::Let {
                     // The lvalue ident's span IS the binding-name span (single `:=`).
-                    target: Pattern::Ident(name, name_span, crate::ast::NodeId::fresh()),
+                    target: bind_leaf(name, name_span),
                     ty: None,
                     value,
                     is_const: false,
@@ -3760,11 +3760,7 @@ impl Parser {
         } else {
             let span = self.cur_span();
             let name = self.expect_ident()?;
-            if name == "_" {
-                Pattern::Wildcard
-            } else {
-                Pattern::Ident(name, span, crate::ast::NodeId::fresh())
-            }
+            bind_leaf(name, span)
         };
         self.depth -= 1;
         Ok(target)
@@ -3816,7 +3812,7 @@ impl Parser {
         {
             self.advance(); // ':='
             // A removed carrier name is no binder: the expression path rejected it as a primary.
-            for (name, span) in elems.iter().flat_map(Pattern::target_binders) {
+            for (name, span) in elems.iter().flat_map(Pattern::binders) {
                 self.reject_removed_name(name, span)?;
             }
             return Ok(Some(if elems.len() == 1 {
@@ -5913,6 +5909,17 @@ enum InfixOp {
     Coalesce,
 }
 
+/// The one leaf of a binding target: `_` skips a slot (`Pattern::Wildcard`), any other name binds
+/// (`Pattern::Ident`). Every target the parser builds (`:=`, typed let, `for`, comprehension, wait
+/// arm) goes through it, so a blank is encoded one way.
+fn bind_leaf(name: String, span: Span) -> Pattern {
+    if name == "_" {
+        Pattern::Wildcard
+    } else {
+        Pattern::Ident(name, span, crate::ast::NodeId::fresh())
+    }
+}
+
 /// Map a token to its infix operator and (left, right) binding powers, per `docs/syntax.md` §4.
 /// All operators are left-associative (`right = left + 1`). `None` means "not an infix operator".
 /// True for the compound-assignment tokens (`+= -= *= /= %= &= |= ^= <<= >>=`). Used to give a
@@ -7706,7 +7713,7 @@ mod tests {
     fn destructuring_let_still_walrus() {
         // `a, b := pair()` stays a destructuring Let (not tuple-assign).
         match only("a, b := pair()\n") {
-            StmtKind::Let { target, .. } => assert_eq!(target.target_names().len(), 2),
+            StmtKind::Let { target, .. } => assert_eq!(target.binder_names().len(), 2),
             other => panic!("expected Let, got {other:?}"),
         }
     }
@@ -8451,7 +8458,7 @@ mod tests {
             StmtKind::Let {
                 target, ty, value, ..
             } => {
-                assert_eq!(target.target_names(), vec!["x".to_string()]);
+                assert_eq!(target.binder_names(), vec!["x".to_string()]);
                 assert!(ty.is_none());
                 assert_eq!(value.kind, ExprKind::Int(5));
             }
@@ -8482,7 +8489,7 @@ mod tests {
             StmtKind::Let {
                 target, ty, value, ..
             } => {
-                assert_eq!(target.target_names(), vec!["name".to_string()]);
+                assert_eq!(target.binder_names(), vec!["name".to_string()]);
                 assert_eq!(ty, Some(Type::named("str")));
                 assert_eq!(value.kind, ExprKind::Str("chezzi".into()));
             }
@@ -8623,7 +8630,7 @@ mod tests {
     fn for_over_range_and_list() {
         match only("for i in 0..10:\n    print(i)\n") {
             StmtKind::For { target, iter, .. } => {
-                assert_eq!(target.target_names(), vec!["i".to_string()]);
+                assert_eq!(target.binder_names(), vec!["i".to_string()]);
                 assert!(matches!(iter.kind, ExprKind::Range { .. }));
             }
             other => panic!("{other:?}"),
@@ -9190,7 +9197,7 @@ mod tests {
                 assert!(key.is_none());
                 assert!(matches!(elem.kind, ExprKind::Binary { .. }));
                 assert_eq!(clauses.len(), 1);
-                assert_eq!(clauses[0].target.target_names(), vec!["x".to_string()]);
+                assert_eq!(clauses[0].target.binder_names(), vec!["x".to_string()]);
                 assert!(matches!(clauses[0].iter.kind, ExprKind::Ident(_)));
                 assert_eq!(clauses[0].guards.len(), 1);
             }
@@ -9245,7 +9252,7 @@ mod tests {
                 assert!(matches!(elem.kind, ExprKind::Ident(_)));
                 assert_eq!(clauses.len(), 1);
                 assert_eq!(
-                    clauses[0].target.target_names(),
+                    clauses[0].target.binder_names(),
                     vec!["k".to_string(), "v".to_string()]
                 );
             }
@@ -9262,9 +9269,9 @@ mod tests {
             ExprKind::Comprehension { kind, clauses, .. } => {
                 assert_eq!(kind, CompKind::List);
                 assert_eq!(clauses.len(), 2);
-                assert_eq!(clauses[0].target.target_names(), vec!["x".to_string()]);
+                assert_eq!(clauses[0].target.binder_names(), vec!["x".to_string()]);
                 assert!(clauses[0].guards.is_empty());
-                assert_eq!(clauses[1].target.target_names(), vec!["y".to_string()]);
+                assert_eq!(clauses[1].target.binder_names(), vec!["y".to_string()]);
                 assert!(clauses[1].guards.is_empty());
             }
             other => panic!("{other:?}"),
@@ -10567,7 +10574,7 @@ mod tests {
                 target, ty, value, ..
             } => {
                 assert_eq!(
-                    target.target_names(),
+                    target.binder_names(),
                     vec!["a".to_string(), "b".to_string()]
                 );
                 assert!(ty.is_none());
@@ -11491,7 +11498,7 @@ print(adder(1)(2))
         };
         match &g.body[0].kind {
             StmtKind::Let { target, value, .. } => {
-                assert_eq!(target.target_names().len(), 2);
+                assert_eq!(target.binder_names().len(), 2);
                 assert!(matches!(value.kind, ExprKind::ElseGuard { .. }));
             }
             other => panic!("expected a let, got {other:?}"),

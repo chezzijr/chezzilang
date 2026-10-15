@@ -139,7 +139,7 @@ impl Checker {
                     } else {
                         DeclKind::Let
                     };
-                    for n in &target.target_names() {
+                    for n in &target.binder_names() {
                         add(n, kind);
                     }
                 }

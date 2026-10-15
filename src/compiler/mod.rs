@@ -808,10 +808,9 @@ impl Compiler {
         self.global_let_lines.resize(self.global_slots.len(), 0);
         for stmt in stmts {
             if let StmtKind::Let { target, .. } = &stmt.kind {
-                for name in &target.target_names() {
-                    // TICKET-142 (W14-32): `_` is the blank identifier — it gets no global slot.
+                for name in &target.binder_names() {
                     // TICKET-183: only a slot this let CREATES starts uninitialized at its line.
-                    if name != "_" && !self.globals.contains_key(name) {
+                    if !self.globals.contains_key(name) {
                         add(name.clone(), &mut self.globals, &mut self.global_slots);
                         self.global_let_lines.push(stmt.span.line);
                     }
@@ -1600,7 +1599,6 @@ impl Compiler {
                     // declared, so it has no local slot and no module global slot (the checker
                     // agrees: it never declares `_`).
                     Pattern::Wildcard => fc.emit(Op::Pop, stmt.span),
-                    Pattern::Ident(name, _, _) if name == "_" => fc.emit(Op::Pop, stmt.span),
                     Pattern::Ident(name, _, _) => {
                         if fc.is_global_scope() {
                             fc.emit(Op::DefineGlobalSlot(self.global_slot(name)), stmt.span);
@@ -2689,7 +2687,7 @@ impl Compiler {
             // Where each step's element lands: the one name's mechanism slot, or a hidden temp the
             // N-name destructure reads.
             let var_slots: Vec<usize> = target
-                .target_binders()
+                .binders()
                 .iter()
                 .map(|(v, _)| fc.add_local(v.to_string()))
                 .collect();
@@ -6072,32 +6070,6 @@ fn captured_names_of_body(body: &Block, params: &[crate::ast::Param]) -> HashSet
     captured
 }
 
-/// Collect the binding names of a `match`/tuple/variant [`Pattern`] into `out`.
-pub(crate) fn pattern_binds(p: &Pattern, out: &mut impl Extend<String>) {
-    match p {
-        Pattern::Ident(n, _, _) => {
-            out.extend([n.clone()]);
-        }
-        // TICKET-139/W14-1 + DEC-107: a bare, payload-free, unqualified name (`whole:`) is a
-        // whole-value catch-all binding (or a nullary variant — over-collecting that is harmless),
-        // so capture analysis must see it or the slot is never boxed and the closure's `CellLoad`
-        // reads a raw value.
-        Pattern::Variant {
-            id: _,
-            name,
-            bindings,
-            enum_name: None,
-            module_name: None,
-        } if bindings.is_empty() => {
-            out.extend([name.clone()]);
-        }
-        Pattern::Variant { bindings, .. } => bindings.iter().for_each(|b| pattern_binds(b, out)),
-        Pattern::Tuple(ps) | Pattern::Or(ps) => ps.iter().for_each(|b| pattern_binds(b, out)),
-        Pattern::Carrier { inner, .. } => pattern_binds(inner, out),
-        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
-    }
-}
-
 /// Names bound in THIS frame reachable through `stmts`'s control flow (descends if/for/while/match/
 /// wait/parallel sub-blocks — those share the frame — but STOPS at capture boundaries, whose bodies
 /// are separate frames). Adds let/for/match/wait/nested-fn binding names to `out`: a set for
@@ -6106,7 +6078,7 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>)
     for s in stmts {
         match &s.kind {
             StmtKind::Let { target, value, .. } => {
-                pattern_binds(target, out);
+                out.extend(target.binder_names());
                 // A binding inside the VALUE expression (a `match`/`if`/comprehension/`recover`
                 // expression) is a frame-level local too — collect it so it boxes when captured.
                 collect_frame_binds_expr(value, out);
@@ -6128,7 +6100,7 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>)
                 }
             }
             StmtKind::For { target, iter, body } => {
-                pattern_binds(target, out);
+                out.extend(target.binder_names());
                 collect_frame_binds_expr(iter, out);
                 collect_frame_binds(body, out);
             }
@@ -6139,7 +6111,7 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>)
             StmtKind::Match { scrutinee, arms } => {
                 collect_frame_binds_expr(scrutinee, out);
                 for arm in arms {
-                    pattern_binds(&arm.pattern, out);
+                    out.extend(arm.pattern.binder_names());
                     if let Some(g) = &arm.guard {
                         collect_frame_binds_expr(g, out);
                     }
@@ -6151,7 +6123,7 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>)
                     match &arm.kind {
                         WaitArmKind::Recv { target, chan } => {
                             collect_frame_binds_expr(chan, out);
-                            pattern_binds(target, out);
+                            out.extend(target.binder_names());
                         }
                         WaitArmKind::Send { call } => collect_frame_binds_expr(call, out),
                     }
@@ -6825,7 +6797,7 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
         match &s.kind {
             StmtKind::Let { target, value, .. } => {
                 free_names_expr(value, &b, out);
-                pattern_binds(target, &mut b);
+                b.extend(target.binder_names());
             }
             StmtKind::Assign { target, op, value } => {
                 // TICKET-142 (W14-32): a plain `_ = e` target is the blank identifier, never a
@@ -6874,7 +6846,7 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
             StmtKind::For { target, iter, body } => {
                 free_names_expr(iter, &b, out);
                 let mut b2 = b.clone();
-                pattern_binds(target, &mut b2);
+                b2.extend(target.binder_names());
                 free_names_block(body, &b2, out);
             }
             StmtKind::While { cond, body } => {
@@ -6885,7 +6857,7 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
                 free_names_expr(scrutinee, &b, out);
                 for arm in arms {
                     let mut b2 = b.clone();
-                    pattern_binds(&arm.pattern, &mut b2);
+                    b2.extend(arm.pattern.binder_names());
                     if let Some(g) = &arm.guard {
                         free_names_expr(g, &b2, out);
                     }
@@ -6905,7 +6877,7 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
                     match &arm.kind {
                         WaitArmKind::Recv { target, chan } => {
                             free_names_expr(chan, &b, out);
-                            pattern_binds(target, &mut b2);
+                            b2.extend(target.binder_names());
                         }
                         WaitArmKind::Send { call } => free_names_expr(call, &b, out),
                     }
@@ -6967,7 +6939,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             let mut b = bound.clone();
             for c in clauses {
                 free_names_expr(&c.iter, &b, out);
-                pattern_binds(&c.target, &mut b);
+                b.extend(c.target.binder_names());
                 c.guards.iter().for_each(|g| free_names_expr(g, &b, out));
             }
             if let Some(k) = key {
@@ -7049,7 +7021,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             free_names_expr(scrutinee, bound, out);
             for arm in arms {
                 let mut b = bound.clone();
-                pattern_binds(&arm.pattern, &mut b);
+                b.extend(arm.pattern.binder_names());
                 if let Some(g) = &arm.guard {
                     free_names_expr(g, &b, out);
                 }
@@ -7118,7 +7090,7 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) {
         } => {
             for c in clauses {
                 collect_frame_binds_expr(&c.iter, out);
-                pattern_binds(&c.target, out);
+                out.extend(c.target.binder_names());
                 c.guards
                     .iter()
                     .for_each(|g| collect_frame_binds_expr(g, out));
@@ -7181,7 +7153,7 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) {
         ExprKind::Match { scrutinee, arms } => {
             collect_frame_binds_expr(scrutinee, out);
             for arm in arms {
-                pattern_binds(&arm.pattern, out);
+                out.extend(arm.pattern.binder_names());
                 if let Some(g) = &arm.guard {
                     collect_frame_binds_expr(g, out);
                 }

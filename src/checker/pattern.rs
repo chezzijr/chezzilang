@@ -6135,7 +6135,7 @@ impl Checker {
                     // or a bare catch-all of the same spelling) shadows the closure param inside the
                     // guard + body — a `match <name>:` there reads that binding, not the param, so it
                     // must NOT pin. Skip the shadowed arm's guard/body.
-                    if pattern_binds(&arm.pattern, name) {
+                    if arm.pattern.binders().iter().any(|(n, _)| *n == name) {
                         continue;
                     }
                     if let Some(g) = &arm.guard {
@@ -6183,7 +6183,7 @@ impl Checker {
                     if !shadowed {
                         self.scan_expr_for_pin(name, &c.iter, match_pin, member_pin);
                     }
-                    if c.target.target_binders().iter().any(|(v, _)| *v == name) {
+                    if c.target.binders().iter().any(|(v, _)| *v == name) {
                         shadowed = true;
                     }
                     if !shadowed {

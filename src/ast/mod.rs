@@ -661,39 +661,64 @@ pub enum Pattern {
 }
 
 impl Pattern {
-    /// The names a binding target (`:=`, `for`, comprehension, wait arm) binds, in order, with each
-    /// name's span. `Wildcard` binds none.
-    pub fn target_binders(&self) -> Vec<(&str, Span)> {
+    /// The names a pattern binds, in order, with each name's span: a binding target (`:=`, `for`,
+    /// comprehension, wait arm) and a `match` arm alike. `Wildcard`, `Literal` and `Range` bind
+    /// none. An `Or` lists every alternative.
+    pub fn binders(&self) -> Vec<(&str, Span)> {
         let mut out = Vec::new();
-        self.collect_target_binders(&mut out);
+        self.collect_binders(&mut out);
         out
     }
 
-    fn collect_target_binders<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
+    fn collect_binders<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
         match self {
             Pattern::Ident(name, span, _) => out.push((name.as_str(), *span)),
-            Pattern::Wildcard => {}
-            Pattern::Tuple(subs) => {
-                for sub in subs {
-                    sub.collect_target_binders(out);
+            // TICKET-139/W14-1 + DEC-107: a bare, payload-free, unqualified name (`whole:`) is a
+            // whole-value catch-all binding (or a nullary variant; over-collecting that is
+            // harmless), so capture analysis must see it or the slot is never boxed. The variant
+            // head carries no span.
+            Pattern::Variant {
+                id: _,
+                name,
+                bindings,
+                enum_name: None,
+                module_name: None,
+            } if bindings.is_empty() => out.push((name.as_str(), Span::default())),
+            Pattern::Variant { bindings, .. } => {
+                for sub in bindings {
+                    sub.collect_binders(out);
                 }
             }
-            Pattern::Variant { .. }
-            | Pattern::Literal(_)
-            | Pattern::Range { .. }
-            | Pattern::Or(_)
-            | Pattern::Carrier { .. } => {
-                unreachable!("a binding target holds Ident, Wildcard or Tuple only")
+            Pattern::Tuple(subs) | Pattern::Or(subs) => {
+                for sub in subs {
+                    sub.collect_binders(out);
+                }
             }
+            Pattern::Carrier { inner, .. } => inner.collect_binders(out),
+            Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
         }
     }
 
-    /// The names `target_binders` lists, owned.
-    pub fn target_names(&self) -> Vec<String> {
-        self.target_binders()
+    /// The names `binders` lists, owned.
+    pub fn binder_names(&self) -> Vec<String> {
+        self.binders()
             .into_iter()
             .map(|(name, _)| name.to_string())
             .collect()
+    }
+
+    /// True for a target that binds one slot: a name (`Ident`) or a blank (`Wildcard`). Only such a
+    /// target carries a type annotation or a counting range.
+    pub fn is_one_slot(&self) -> bool {
+        match self {
+            Pattern::Ident(..) | Pattern::Wildcard => true,
+            Pattern::Tuple(_)
+            | Pattern::Variant { .. }
+            | Pattern::Literal(_)
+            | Pattern::Range { .. }
+            | Pattern::Or(_)
+            | Pattern::Carrier { .. } => false,
+        }
     }
 
     /// `Some(name)` only for a single-name target (`Ident`).
@@ -1048,7 +1073,7 @@ pub fn counting_range<'a>(
         end,
         inclusive,
     } = &iter.kind
-        && (target.target_ident().is_some() || matches!(target, Pattern::Wildcard))
+        && target.is_one_slot()
     {
         return Some((start, end.as_deref(), *inclusive));
     }

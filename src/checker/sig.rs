@@ -410,7 +410,7 @@ impl Checker {
             let StmtKind::Let { target, .. } = &s.kind else {
                 continue;
             };
-            let names = target.target_names();
+            let names = target.binder_names();
             let firsts: Vec<usize> = (0..names.len())
                 .filter(|&i| {
                     !names[i + 1..].contains(&names[i])
@@ -482,9 +482,8 @@ impl Checker {
             else {
                 continue;
             };
-            for n in &target.target_names() {
-                if n == "_"
-                    || !seen.insert(n.clone())
+            for n in &target.binder_names() {
+                if !seen.insert(n.clone())
                     || hoisted.contains(n.as_str())
                     || self.scopes[0].contains_key(n)
                     || self.functions.contains_key(n)
@@ -493,7 +492,7 @@ impl Checker {
                 }
                 let mark = self.diag_mark();
                 let t = match ty {
-                    Some(t) if target.target_ident().is_some() => self.resolve_type(t, s.span),
+                    Some(t) if target.is_one_slot() => self.resolve_type(t, s.span),
                     _ => Ty::Unknown,
                 };
                 self.diag_rollback(mark);
@@ -510,9 +509,9 @@ impl Checker {
         self.body_facts_pass = saved_body_facts;
     }
 
-    /// The type of each name a top-level let binds, in `target_binders` order. A single name takes
-    /// its annotation or the value's type. A target list binds through the one binder: a value
-    /// whose tuple shape is not proved gives `Unknown` for every name.
+    /// The type of each name a top-level let binds, in `binders` order. A single name takes
+    /// its annotation or the value's type. A target list binds through the one binder, and each
+    /// name keeps the type the binder collected (`Unknown` only where the shape is not proved).
     fn global_leaf_tys(
         &mut self,
         target: &Pattern,
@@ -551,7 +550,7 @@ impl Checker {
             else {
                 continue;
             };
-            let names = target.target_names();
+            let names = target.binder_names();
             if let Some(idxs) = firsts.get(&s.span) {
                 let (annotated, val_ty) = self.let_value_ty(target, ty, value, s.span);
                 let leaf_tys = self.global_leaf_tys(target, annotated, val_ty, s.span);
@@ -617,7 +616,7 @@ impl Checker {
                     }
                 }
             }
-            for n in &target.target_names() {
+            for n in &target.binder_names() {
                 self.reach_global(n);
             }
         }
@@ -718,7 +717,7 @@ impl Checker {
         // whenever `ty` is `Some`. `hover_record_at` is first-write-wins, so the second call
         // this replaces never contributed a hover record.
         let annotated: Option<Ty> = match ty {
-            Some(t) if target.target_ident().is_some() => Some(self.resolve_type(t, span)),
+            Some(t) if target.is_one_slot() => Some(self.resolve_type(t, span)),
             _ => None,
         };
         // A closure bound to a `fn`-typed annotation is inferred in checking-mode (source #1):
@@ -2944,7 +2943,7 @@ impl Checker {
             } => {
                 let is_const = *is_const;
                 let (annotated, val_ty) = self.let_value_ty(target, ty, value, span);
-                let names = target.target_names();
+                let names = target.binder_names();
                 // TICKET-183: from a seeded module global's first let on, top-level statements see
                 // it. Its seed in scope 0 stays: the first let refines it (`refine_first_let`,
                 // TICKET-186), because the bodies above were typed against it.
@@ -2953,11 +2952,7 @@ impl Checker {
                         self.reach_global(n);
                     }
                 }
-                // `_ := e`: the blank identifier. `e` is evaluated and discarded, nothing is declared.
-                if matches!(target, Pattern::Wildcard) {
-                    return;
-                }
-                if target.target_ident().is_none() {
+                if target.target_ident().is_none() && !matches!(target, Pattern::Wildcard) {
                     // TICKET-190: a destructured name is never a private frame slot.
                     if let Some(acc) = &mut self.gen_frame {
                         for n in &names {
@@ -2968,7 +2963,6 @@ impl Checker {
                     self.check_destructure(target, &val_ty, value.span, span);
                     return;
                 }
-                let name = &names[0];
                 let mut declared = match annotated {
                     Some(expected) => {
                         if !self.assignable(&expected, &val_ty) {
@@ -2987,12 +2981,13 @@ impl Checker {
                     }
                     None => val_ty,
                 };
-                // TICKET-142 (W14-32): `_ := e` is Go's blank identifier — `e` is evaluated and
-                // discarded, `_` is never declared (so no type to freeze, no module global slot,
-                // and it may repeat with any types). The annotation check above still ran.
-                if name == "_" {
+                // TICKET-142 (W14-32): `_ := e` is Go's blank identifier: `e` is evaluated and
+                // discarded, `_` is never declared (so no type to freeze, no module global slot, and it
+                // may repeat with any types). The annotation check above still ran.
+                if matches!(target, Pattern::Wildcard) {
                     return;
                 }
+                let name = &names[0];
                 // TICKET-190: a frame slot is private only if every binding of it is fresh.
                 if self.gen_frame.is_some() {
                     let fresh = self.fresh_shape(value, 0, true);

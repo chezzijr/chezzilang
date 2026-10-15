@@ -1068,7 +1068,7 @@ impl Walker<'_> {
                 doc: _,
             } => {
                 self.walk_expr(value)?;
-                for (n, _) in target.target_binders() {
+                for (n, _) in target.binders() {
                     self.bind(n);
                 }
             }
@@ -1153,7 +1153,7 @@ impl Walker<'_> {
                 self.counting_iterand = crate::ast::counting_range(target, iter).is_some();
                 self.walk_expr(iter)?;
                 self.push_scope();
-                for (v, _) in target.target_binders() {
+                for (v, _) in target.binders() {
                     self.bind(v);
                 }
                 for s in body.iter_mut() {
@@ -1208,7 +1208,7 @@ impl Walker<'_> {
                     match &mut arm.kind {
                         WaitArmKind::Recv { target, chan } => {
                             self.walk_expr(chan)?;
-                            for (name, _) in target.target_binders() {
+                            for (name, _) in target.binders() {
                                 self.bind(name);
                             }
                         }
@@ -1417,7 +1417,7 @@ impl Walker<'_> {
                 for clause in clauses.iter_mut() {
                     self.walk_expr(&mut clause.iter)?;
                     self.push_scope();
-                    for (v, _) in clause.target.target_binders() {
+                    for (v, _) in clause.target.binders() {
                         self.bind(v);
                     }
                     for g in clause.guards.iter_mut() {
@@ -1828,7 +1828,7 @@ fn module_level_names(
     let mut out = HashSet::new();
     for s in stmts {
         match &s.kind {
-            StmtKind::Let { target, .. } => out.extend(target.target_names()),
+            StmtKind::Let { target, .. } => out.extend(target.binder_names()),
             StmtKind::Fn(d) => {
                 out.insert(d.name.clone());
             }
