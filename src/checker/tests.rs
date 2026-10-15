@@ -33264,6 +33264,56 @@ fn blank_identifier_is_not_readable() {
     );
 }
 
+// TICKET-261: one declare policy for the leaves of a binding target. A nested `Unknown` leaves
+// the proven leaves' types in place at every site, and a leaf still meets the const check.
+#[test]
+fn nested_unknown_walrus_keeps_the_proven_leaf_types() {
+    rejects(
+        "fn f(u):\n    a, (b, c) := (1, u)\n    print(a + \"s\", b, c)\n",
+        "int",
+    );
+}
+
+#[test]
+fn nested_unknown_for_keeps_the_proven_leaf_types() {
+    rejects(
+        "fn g(u):\n    for a, (b, c) in [(1, u)]:\n        print(a + \"s\", b, c)\n",
+        "int",
+    );
+}
+
+#[test]
+fn nested_unknown_walrus_meets_the_const_check() {
+    rejects(
+        "fn h(u):\n    X: const int = 1\n    X, (b, c) := (2, u)\n    print(b, c)\n",
+        "cannot re-declare const binding 'X'",
+    );
+}
+
+#[test]
+fn nested_unknown_top_level_keeps_the_proven_leaf_types() {
+    rejects(
+        "fn id(x):\n    return x\nv := id(3)\na, (b, c) := (1, v)\nprint(a + \"s\", b, c)\n",
+        "int",
+    );
+}
+
+#[test]
+fn nested_wait_arm_keeps_the_leaf_types() {
+    rejects(
+        "fn w(ch: Channel[(int, (int, int))]):\n    wait:\n        a, (b, c) := ch.recv():\n            print(a + \"s\", b, c)\n",
+        "int",
+    );
+}
+
+#[test]
+fn nested_unknown_comprehension_keeps_the_proven_leaf_types() {
+    rejects(
+        "fn k(u):\n    print([a + \"s\" for a, (b, c) in [(1, u)]])\n",
+        "int",
+    );
+}
+
 // TICKET-142 (W14-33): an all-constant int expression that overflows i64 is a compile error.
 #[test]
 fn constant_int_overflow_rejected_at_check() {

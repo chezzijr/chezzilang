@@ -1420,9 +1420,7 @@ impl Checker {
                         chan.span,
                         &mut BindMode::Target(&mut leaves),
                     );
-                    for (name, _, ty) in leaves {
-                        self.declare(&name, ty);
-                    }
+                    self.declare_target_leaves(&leaves, chan.span);
                 }
                 WaitArmKind::Send { call } => self.check_wait_send(call),
             }
@@ -3917,12 +3915,10 @@ impl Checker {
             // `for_bindings` infers the iter IN the current scope, so later clauses see earlier
             // bindings (the whole point of nesting). Compute before declaring this clause's vars.
             let bindings = self.for_bindings(&clause.target, &clause.iter);
-            for (name, _, ty) in bindings {
-                // Intentionally NOT `mark_loop_var`: a comprehension body is an expression, so its
-                // binding can't be assigned to — no divergence to guard against. If a statement-bearing
-                // comprehension is ever added, mark these too (see `check_assign` / for-loop handling).
-                self.declare(&name, ty);
-            }
+            // Intentionally NOT `mark_loop_var`: a comprehension body is an expression, so its
+            // binding can't be assigned to — no divergence to guard against. If a statement-bearing
+            // comprehension is ever added, mark these too (see `check_assign` / for-loop handling).
+            self.declare_target_leaves(&bindings, clause.iter.span);
             for g in &clause.guards {
                 self.expect_bool(g, "comprehension guard");
             }

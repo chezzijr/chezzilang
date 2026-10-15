@@ -524,12 +524,8 @@ impl Checker {
             return vec![annotated.unwrap_or(val_ty)];
         }
         let mut leaves = Vec::new();
-        let proven =
-            self.bind_subpattern(target, &val_ty, span, &mut BindMode::Target(&mut leaves));
-        leaves
-            .into_iter()
-            .map(|(_, _, t)| if proven { t } else { Ty::Unknown })
-            .collect()
+        self.bind_subpattern(target, &val_ty, span, &mut BindMode::Target(&mut leaves));
+        leaves.into_iter().map(|(_, _, t)| t).collect()
     }
 
     /// TICKET-183 — one speculative walk over the first let of every seeded global, in source
@@ -3456,14 +3452,12 @@ impl Checker {
             StmtKind::For { target, iter, body } => {
                 let bindings = self.for_bindings(target, iter);
                 self.push_scope();
-                for (name, span, ty) in bindings {
-                    // EDITOR HOVER: the loop binding (`i` in `for i in …`) is a NAME, not an `Expr` the
-                    // probe visits during `infer`; record its decl-site hover here (no-op unless armed).
-                    self.hover_record_at(span, &ty, HoverKind::Local, None);
-                    self.declare(&name, ty);
+                // The declare policy records each name's decl-site hover (`i` in `for i in …`).
+                self.declare_target_leaves(&bindings, iter.span);
+                for (name, _, _) in &bindings {
                     // Loop vars are rebound each iteration → immutable; reassigning one diverges
                     // across engines, so the checker forbids it (see `check_assign`).
-                    self.mark_loop_var(&name);
+                    self.mark_loop_var(name);
                 }
                 self.loop_depth += 1;
                 for stmt in body {
@@ -4182,9 +4176,8 @@ impl Checker {
 
     /// Check a destructuring let `a, (b, c), … := value`. The one binder (`bind_subpattern`, target
     /// mode) matches the target against the value's type and collects each name with its element
-    /// type. When the type proves the shape, each name is declared with its element type; otherwise
-    /// (an `Unknown` value, a reported mismatch) every name is declared `Unknown` so no cascade
-    /// follows.
+    /// type; a leaf under a shape the type does not prove (an `Unknown` value, a reported mismatch)
+    /// carries `Unknown`, so no cascade follows. `declare_target_leaves` then binds them.
     pub(super) fn check_destructure(
         &mut self,
         target: &Pattern,
@@ -4193,22 +4186,17 @@ impl Checker {
         stmt_span: Span,
     ) {
         let mut leaves = Vec::new();
-        let proven = self.bind_subpattern(target, val_ty, span, &mut BindMode::Target(&mut leaves));
-        // TICKET-186: a name whose first let this is refines its seed (`refine_first_let`)
-        // instead of being re-declared.
-        if !proven {
-            for (name, _, _) in &leaves {
-                if !self.refine_first_let(name, Ty::Unknown, stmt_span, BindSite::Other) {
-                    self.declare(name, Ty::Unknown);
-                }
-            }
-            return;
-        }
+        self.bind_subpattern(target, val_ty, span, &mut BindMode::Target(&mut leaves));
+        self.declare_target_leaves(&leaves, stmt_span);
+    }
+
+    /// The one declare policy for the leaves of a binding target (`:=`, `for`, comprehension, wait
+    /// arm), each with the type `bind_subpattern` collected for it.
+    pub(super) fn declare_target_leaves(&mut self, leaves: &[(String, Span, Ty)], stmt_span: Span) {
         let names: Vec<String> = leaves.iter().map(|(name, _, _)| name.clone()).collect();
         // These `declare`s hit the SAME storage slots the single-name let does, so they owe
-        // the same two carve-outs — per name, at that name's own span. Only this path: the
-        // unproven path declares `Ty::Unknown` on an already-errored statement, and the const
-        // branch does not skip `Unknown`.
+        // the same two carve-outs — per name, at that name's own span. An unproven leaf carries
+        // `Unknown`: the const branch does not skip it, the retype branch does.
         // Run every check BEFORE any `declare`, so each name is judged against the binding as
         // it stood before this statement — and skip a name a LATER element rebinds, because a
         // repeated name (`x, x := (1, "s")`) is one slot written twice with no code in
