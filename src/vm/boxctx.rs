@@ -287,7 +287,7 @@ impl Vm {
                     // The result is handed to the caller, so it carries the CALLER's stamp.
                     let mut src = vm.walk_src();
                     src.origin = vm.box_caller_heap_id();
-                    src.to_wire_crossable_memo(v, span, &mut sched::WireMemo::default())
+                    src.to_wire_crossable_memo(v, span, &mut airlock_out::WireMemo::default())
                         .map(Some)
                 }
             });
@@ -303,8 +303,9 @@ impl Vm {
         ctx: &FiberCtx,
         span: Span,
     ) -> Result<WireValue, RuntimeError> {
-        let src = sched::WalkSrc::of_ctx(ctx, &self.program, self.walk_base, self.heap.id());
-        let w = src.to_wire_crossable_memo(ctx.stack[0], span, &mut sched::WireMemo::default())?;
+        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.program, self.walk_base, self.heap.id());
+        let w =
+            src.to_wire_crossable_memo(ctx.stack[0], span, &mut airlock_out::WireMemo::default())?;
         self.charge_wire(&w);
         Ok(w)
     }
@@ -400,7 +401,7 @@ impl Vm {
         span: Span,
         op: impl FnOnce(&mut Vm, Value, &[Value]) -> Result<Option<Value>, RuntimeError>,
     ) -> Result<Option<WireValue>, RuntimeError> {
-        let mut memo = sched::WireMemo::default();
+        let mut memo = airlock_out::WireMemo::default();
         let mut ws = Vec::with_capacity(args.len());
         for &a in args {
             ws.push(self.to_wire_crossable_memo(a, span, &mut memo)?);
@@ -420,7 +421,7 @@ impl Vm {
                 out.map(|v| {
                     let mut src = vm.walk_src();
                     src.origin = vm.box_caller_heap_id();
-                    src.to_wire_crossable_memo(v, span, &mut sched::WireMemo::default())
+                    src.to_wire_crossable_memo(v, span, &mut airlock_out::WireMemo::default())
                 })
                 .transpose()
             });
@@ -444,9 +445,9 @@ impl Vm {
         vals: &[Value],
         span: Span,
     ) -> Result<BoxPieces, RuntimeError> {
-        let src = sched::WalkSrc::of_ctx(ctx, &self.program, self.walk_base, self.heap.id());
+        let src = airlock_out::WalkSrc::of_ctx(ctx, &self.program, self.walk_base, self.heap.id());
         let encode = |prelude: Option<Value>| -> Result<BoxPieces, RuntimeError> {
-            let mut memo = sched::WireMemo::default();
+            let mut memo = airlock_out::WireMemo::default();
             let mut ws = Vec::with_capacity(vals.len() + 1);
             for &v in prelude.iter().chain(vals) {
                 ws.push(src.to_wire_crossable_memo(v, span, &mut memo)?);
