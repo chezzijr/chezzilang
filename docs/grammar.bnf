@@ -86,7 +86,7 @@
 # takes no outer parentheses (`(a, b) := t`, `for (a, b) in xs` are errors, owner rule U9).
 <bindList>  ::= <bindElem> "COMMA" <bindElems>
 <bindElems> ::= <bindElem> | <bindElem> "COMMA" <bindElems>
-<bindElem>  ::= "IDENT" | <groupedName> | "LPAREN" <bindElem> "COMMA" <bindElems> "RPAREN"
+<bindElem>  ::= "IDENT" | "LPAREN" <bindElem> "RPAREN" | "LPAREN" <bindElem> "COMMA" <bindElems> "RPAREN"
 <groupedName> ::= "LPAREN" "IDENT" "RPAREN" | "LPAREN" <groupedName> "RPAREN"
 
 # Assignment target is restricted to a name / field / index (the parser's lvalue guard):
@@ -111,7 +111,7 @@
                | <lvalueList> "ASSIGN" <value>
 # A multi-target list nests like a binding target: an element is an lvalue or a parenthesized list.
 <lvalueList> ::= <lvalueElem> "COMMA" <lvalueElem> | <lvalueElem> "COMMA" <lvalueList>
-<lvalueElem> ::= <lvalue> | "LPAREN" <lvalueList> "RPAREN"
+<lvalueElem> ::= <lvalue> | "LPAREN" <lvalueElem> "RPAREN" | "LPAREN" <lvalueList> "RPAREN"
 <lvalue> ::= "IDENT"
            | <postfix> "DOT" "IDENT"
            | <postfix> "LBRACKET" <expr> "RBRACKET"

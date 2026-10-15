@@ -1,4 +1,4 @@
-# rule: groupedName, bindElem, letLhs, forStmt, compClause
+# rule: groupedName, bindElem, letLhs, forStmt, compClause, lvalueElem
 for (z) in [1]:
     print(z)
 ws := [z for (z) in [1]]
@@ -6,3 +6,7 @@ a, (b) := (1, 2)
 (y) := 1, 2
 for ((z)) in [1]:
     print(z)
+a, ((b, c)) := (1, (2, 3))
+a, ((b, c)) = (1, (2, 3))
+for a, ((b, c)) in [(1, (2, 3))]:
+    print(a, b, c)

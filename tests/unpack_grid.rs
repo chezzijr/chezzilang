@@ -60,6 +60,7 @@ impl Site {
 enum Shape {
     Flat,
     Nested,
+    NestedGroup,
     Blank,
     ParenBlank,
     Struct,
@@ -69,9 +70,10 @@ enum Shape {
 }
 
 impl Shape {
-    const ALL: [Shape; 8] = [
+    const ALL: [Shape; 9] = [
         Shape::Flat,
         Shape::Nested,
+        Shape::NestedGroup,
         Shape::Blank,
         Shape::ParenBlank,
         Shape::Struct,
@@ -84,6 +86,7 @@ impl Shape {
         match self {
             Shape::Flat => "flat",
             Shape::Nested => "nested",
+            Shape::NestedGroup => "nested-group",
             Shape::Blank => "blank",
             Shape::ParenBlank => "paren-blank",
             Shape::Struct => "struct",
@@ -98,6 +101,7 @@ impl Shape {
         match self {
             Shape::Flat
             | Shape::Nested
+            | Shape::NestedGroup
             | Shape::Blank
             | Shape::ParenBlank
             | Shape::List
@@ -112,6 +116,7 @@ impl Shape {
         match self {
             Shape::Flat => "a, b",
             Shape::Nested => "a, (b, c)",
+            Shape::NestedGroup => "a, ((b, c))",
             Shape::Blank => "a, _",
             Shape::ParenBlank => "(_)",
             Shape::Struct => "P(a, b)",
@@ -126,6 +131,7 @@ impl Shape {
         match self {
             Shape::Flat => "(a, b)",
             Shape::Nested => "(a, (b, c))",
+            Shape::NestedGroup => "(a, ((b, c)))",
             Shape::Blank => "(a, _)",
             Shape::ParenBlank => "(_)",
             Shape::Struct => "P(a, b)",
@@ -139,7 +145,7 @@ impl Shape {
     fn vars(self) -> &'static [&'static str] {
         match self {
             Shape::Flat | Shape::Struct | Shape::Variant | Shape::List => &["a", "b"],
-            Shape::Nested => &["a", "b", "c"],
+            Shape::Nested | Shape::NestedGroup => &["a", "b", "c"],
             Shape::Blank => &["a"],
             Shape::ParenBlank => &["_"],
             Shape::Rest => &["a", "r"],
@@ -150,7 +156,7 @@ impl Shape {
     fn assign_decls(self) -> &'static [&'static str] {
         match self {
             Shape::Flat => &["a := 0", "b := (0, 0)"],
-            Shape::Nested => &["a := 0", "b := 0", "c := 0"],
+            Shape::Nested | Shape::NestedGroup => &["a := 0", "b := 0", "c := 0"],
             Shape::Blank => &["a := 0"],
             Shape::ParenBlank => &[],
             Shape::Struct | Shape::Variant | Shape::List => &["a := 0", "b := 0"],
@@ -162,7 +168,7 @@ impl Shape {
     fn accepts(self, site: Site) -> Option<&'static str> {
         match self {
             Shape::Flat => Some("1 (2, 3)"),
-            Shape::Nested => Some("1 2 3"),
+            Shape::Nested | Shape::NestedGroup => Some("1 2 3"),
             Shape::Blank => Some("1"),
             // `(_)` skips the slot and binds nothing, so the cell reads `_` and meets the blank rule.
             Shape::ParenBlank => None,
@@ -234,6 +240,7 @@ fn not_applicable(site: Site, shape: Shape, source: Source) -> bool {
             Shape::Struct | Shape::Variant => true,
             Shape::Flat
             | Shape::Nested
+            | Shape::NestedGroup
             | Shape::Blank
             | Shape::ParenBlank
             | Shape::List
@@ -454,7 +461,7 @@ fn reject_fragment(site: Site, shape: Shape) -> &'static str {
             | Site::Wait
             | Site::WaitAssign
             | Site::Match,
-            Shape::Flat | Shape::Nested | Shape::Blank,
+            Shape::Flat | Shape::Nested | Shape::NestedGroup | Shape::Blank,
         )
         | (Site::Match, Shape::Struct | Shape::Variant) => {
             unreachable!("an accepting cell has no rejection")
@@ -517,6 +524,7 @@ fn shape_axis_matches_the_parser() {
         let src = format!("match e:\n    {}:\n        pass\n", shape.pattern());
         let parsed = chezzi::parser::parse(chezzi::lexer::tokenize(&src).unwrap());
         let want = match shape {
+            Shape::NestedGroup => Some(Shape::Nested),
             Shape::Flat
             | Shape::Nested
             | Shape::Blank
@@ -549,7 +557,7 @@ fn axes_are_complete() {
         sorted.dedup();
         assert_eq!(sorted.len(), names.len());
     }
-    assert_eq!((sites.len(), shapes.len(), sources.len()), (7, 8, 10));
+    assert_eq!((sites.len(), shapes.len(), sources.len()), (7, 9, 10));
 }
 
 /// A bare tuple ends a statement: `return`, `:=`, a typed `:=`, `yield`, `=`. Each prints its tuple
