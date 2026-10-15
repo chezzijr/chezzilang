@@ -1036,7 +1036,7 @@ pub fn is_float_ty(ty: &Type) -> bool {
     matches!(ty, Type::Named { name, .. } if name == "float")
 }
 
-/// The one definition of "this `for` is a counting loop": a single loop variable over a literal range
+/// The one definition of "this `for` is a counting loop": a single loop variable (or `_`) over a literal range
 /// WITH a start. Returns `(start, end, inclusive)`. The compiler lowers such a loop to counter slots and
 /// builds no `Range` value; the desugar walker reads the same answer to record whether a graph builds one.
 pub fn counting_range<'a>(
@@ -1048,7 +1048,7 @@ pub fn counting_range<'a>(
         end,
         inclusive,
     } = &iter.kind
-        && target.target_ident().is_some()
+        && (target.target_ident().is_some() || matches!(target, Pattern::Wildcard))
     {
         return Some((start, end.as_deref(), *inclusive));
     }

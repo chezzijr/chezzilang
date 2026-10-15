@@ -2592,10 +2592,10 @@ impl Compiler {
             } else {
                 None
             };
-            let name = target
-                .target_ident()
-                .expect("a counting loop binds one name");
-            let i_slot = fc.add_local(name.to_string());
+            let i_slot = match target.target_ident() {
+                Some(name) => fc.add_local(name.to_string()),
+                None => fc.add_hidden(), // `counting_range` admits `_` only
+            };
             // The COUNTER is a plain int mutated in place: the user var's own slot when it isn't
             // boxed, else a hidden slot (the boxed user cell is refreshed from it each iteration).
             let counter = fc.loopvar_raw_slot(i_slot);
@@ -8655,6 +8655,7 @@ mod file_id_tests {
         "for i in 0..3:\n    print(i)\n",
         "for i in 0..=3:\n    print(i)\n",
         "for i in 2..:\n    break\n",
+        "for _ in 0..3:\n    print(1)\n",
         "n := 3\nwhile n > 0:\n    for i in 0..n:\n        print(i)\n    n -= 1\n",
     ];
 
