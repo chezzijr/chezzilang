@@ -721,14 +721,6 @@ fn iterator_loop_var_typed_as_element() {
 }
 
 #[test]
-fn iterator_protocol_redeclaration_rejected() {
-    rejects(
-        "protocol Iterator:\n    fn next(self) -> int?\n",
-        "reserved",
-    );
-}
-
-#[test]
 fn iterator_bound_wrong_arity_rejected() {
     rejects(
         "fn f[S: Iterator](xs: S):\n    print(1)\n",

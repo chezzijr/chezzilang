@@ -316,7 +316,6 @@ impl Parser {
         let name_span = self.cur_span();
         let none_kw = self.check(&Token::NoneKw);
         let name = self.expect_ident_or_none()?;
-        self.reject_removed_name(&name, name_span)?;
         // `Enum.Variant` — a qualified variant pattern. The first ident is the enum qualifier; the
         // ident after `.` is the variant. A qualified pattern is always a variant (never a binding),
         // even in a sub-position. A THIRD ident after a second `.` (`module.Enum.Variant`) shifts the
@@ -465,10 +464,6 @@ impl Parser {
             && (elems.len() > 1 || !matches!(elems[0], Pattern::Tuple(_)))
         {
             self.advance(); // ':='
-            // A removed carrier name is no binder: the expression path rejected it as a primary.
-            for (name, span) in elems.iter().flat_map(Pattern::binders) {
-                self.reject_removed_name(name, span)?;
-            }
             return Ok(Some(if elems.len() == 1 {
                 elems.pop().expect("one element")
             } else {

@@ -527,37 +527,19 @@ impl Checker {
         embeds: &[Bound],
         span: Span,
     ) {
-        if is_reserved_protocol(name) {
-            // Phase 5c-protocols — a reserved protocol's SHAPE is now ALSO declared in `std/prelude.chz`
-            // as a plain `protocol` decl (a drift-guarded ADDITIVE mirror; see
-            // `assert_native_protocol_shape_matches`). In a stdlib module that decl is VALIDATE-AND-NO-OP:
-            // do NOT insert (the live source stays `prebuilt_protocols`, seeded at `Checker::new`) and do
-            // NOT error — mirroring the `native struct`/`native enum` stdlib arms. In a USER module the
-            // reserved name stays rejected (a user can't redeclare a builtin protocol).
-            if !self.current_module_is_stdlib {
-                self.error(span, format!("protocol '{name}' is reserved (builtin)"));
-            }
-            return;
-        }
-        // A protocol may not shadow a reserved builtin TYPE name either (`protocol List` / `protocol
-        // int`). Sibling struct/enum/type-alias decl guards all reject `is_reserved_type`;
-        // protocol was the sole decl path that omitted it. Ordered AFTER the reserved-protocol arm so
-        // `Iterator` (both a reserved protocol AND type) is caught once, above, keeping its protocol
-        // wording. The stdlib carve-out mirrors the reserved-protocol arm (no native protocol is named
-        // after a reserved type, so it never fires there, but preserves symmetry).
-        if is_reserved_type(name) {
-            if !self.current_module_is_stdlib {
-                self.error(span, format!("type '{name}' is reserved (builtin)"));
-            }
+        if is_reserved_protocol(name) && self.current_module_is_stdlib {
+            // Phase 5c-protocols — a builtin protocol's SHAPE is also declared in `std/prelude.chz` as
+            // a plain `protocol` decl (a drift-guarded ADDITIVE mirror; see
+            // `assert_native_protocol_shape_matches`). In a stdlib module that decl is
+            // VALIDATE-AND-NO-OP: the live source stays `prebuilt_protocols`. A USER module may
+            // declare a protocol of a builtin's name: only keywords are reserved, and the user
+            // protocol shadows the builtin in its module.
             return;
         }
         let key = self.bare_key(name);
         if self.protocols.contains_key(&key) {
             self.error(span, format!("protocol '{name}' is already defined"));
         }
-        // A protocol's own type param may not be named after a reserved builtin type (`protocol
-        // P[int]`) — same rule as struct/enum/fn params.
-        self.reject_reserved_type_params(type_params);
         let mut saved = self.type_params.clone();
         std::mem::swap(&mut self.type_params, &mut saved); // start clean, with only Self visible
         self.type_params.insert("Self".to_string(), Vec::new());
@@ -630,7 +612,7 @@ impl Checker {
                 embeds: embeds
                     .iter()
                     .map(|b| TyBound {
-                        name: self.protocol_key(&b.name),
+                        name: self.user_protocol_key(&b.name),
                         args: Vec::new(),
                     })
                     .collect(),
@@ -648,7 +630,9 @@ impl Checker {
         embeds: &[Bound],
         span: Span,
     ) {
-        if is_reserved_protocol(name) {
+        // The prelude's mirror of a builtin protocol (a std module); a user protocol of that name is
+        // its own protocol.
+        if is_reserved_protocol(name) && self.current_module_is_stdlib {
             return;
         }
         let own: HashMap<String, Vec<TyBound>> = type_params
@@ -680,12 +664,15 @@ impl Checker {
         embeds: &[Bound],
         span: Span,
     ) {
-        if is_reserved_protocol(name) {
-            return; // builtin (or already errored as a redeclaration / reserved name)
+        if is_reserved_protocol(name) && self.current_module_is_stdlib {
+            return; // the prelude's mirror of a builtin protocol
         }
         // Each embed must name a real protocol.
         for emb in embeds {
-            if self.protocol_shape(&emb.name).is_none() {
+            if self
+                .protocol_shape(&self.user_protocol_key(&emb.name))
+                .is_none()
+            {
                 self.error(
                     span,
                     format!("unknown protocol '{}' embedded in '{name}'", emb.name),

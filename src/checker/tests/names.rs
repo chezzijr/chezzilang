@@ -1369,9 +1369,10 @@ fn native_fn_and_num_protocol_grid() {
             Some("cannot use the protocol value Num as type parameter"),
         ),
         (
-            "num_reserved",
+            // Only keywords are reserved: `enum Num` shadows the builtin protocol in its module.
+            "num_shadowed",
             "enum Num:\n    A\n    B",
-            Some("reserved (builtin)"),
+            None,
         ),
         ("dec_call", "print(json.decode[int](\"5\"))", None),
         (

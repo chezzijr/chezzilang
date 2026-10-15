@@ -19,14 +19,15 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   one-line reason at the site). Test code is out of scope. Do not turn the `match` into `if let` or
   `matches!` on the raw enum to silence the lint. See `docs/lessons.md` §4.
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global
-  reserved namespace.** The global surface stays minimal: scalars, `tuple`, `Range`, `Channel`,
+  namespace.** The global surface stays minimal: scalars, `tuple`, `Range`, `Channel`,
   `T!E`/`T?`/`Iterator`, structural protocols. (`timer(ms)` moved to `import std.time`; `Shared`/
-  `RwShared`/`Atomic`/`Executor` to `import std.concurrency` — all stay reserved names.) Register in the
+  `RwShared`/`Atomic`/`Executor` to `import std.concurrency`. None is reserved: only keywords are, and a module declaration of
+  one of these names shadows the builtin there.) Register in the
   module's `.chz` (`native type` / `native struct`; no Rust-side module sig exists) and gate the bare name behind `import` via the per-module licensing set
   (mirror FFI `imported_ffi_types` / `imported_concurrency` / `imported_time`); keep runtime ctor/opcode
   dispatch unchanged (the gate is checker-only name resolution). A pure type/ctor with no runtime module-member value also needs the `bind_import` skip in
   the vm, or `import X from M` faults at runtime — cover it with a test that RUNS the program.
-  A global reserved name is a one-way ratchet: moving it out later breaks every example + grammar.bnf.
+  A global builtin name is a one-way ratchet: moving it out later breaks every example + grammar.bnf.
 - **A new native fn's `MEMBERS` entry is `(name, fn, Kind)` — the third element is not paperwork.**
   `native::Kind` says how the engine RUNS it: `Inline` (pure CPU, or it touches host stdio/os state),
   `Blocking` (an off-heap-safe syscall — primitive args in, primitive `NativeRet` out, no heap/stdio

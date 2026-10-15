@@ -484,7 +484,7 @@ impl Checker {
                 ..
             } => {
                 if self.hover_probe.is_some() {
-                    let ty = Ty::Protocol(self.protocol_key(name), Vec::new());
+                    let ty = Ty::Protocol(self.user_protocol_key(name), Vec::new());
                     self.hover_record_at(*name_span, &ty, HoverKind::Struct, doc.clone());
                 }
             }

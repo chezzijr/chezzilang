@@ -1810,6 +1810,19 @@ impl NodeId {
     }
 }
 
+/// The private spelling of a prelude name: `$` + `name`. No source can spell it (`$` does not lex),
+/// so only code the compiler writes (desugar) reaches a name bound this way. In a user module the
+/// carriers' variants are bound only so (`Checker::seed_carrier_enums_from`): `Some`, `Ok` and `Err`
+/// are removed from the language, and a user may declare those names for their own use.
+pub fn private_name(name: &str) -> String {
+    format!("${name}")
+}
+
+/// The name a private spelling stands for (`$Option` → `Option`); any other name unchanged.
+pub fn unprivate(name: &str) -> &str {
+    name.strip_prefix('$').unwrap_or(name)
+}
+
 /// THE one owner of "is this name the blank identifier `_`". `_` binds nothing at every binding
 /// site (a pattern, a target, a wait arm, an `else` guard's error binder) and is never a value;
 /// every reader of that fact calls this, never compares with `"_"` itself.

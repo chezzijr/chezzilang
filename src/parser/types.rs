@@ -147,7 +147,6 @@ impl Parser {
         }
         let name_span = self.cur_span();
         let name = self.expect_ident()?;
-        self.reject_removed_name(&name, name_span)?;
         // A module-qualified type `module.Type` (mirrors how `module.func()` is reached): after the
         // first ident, a `.` introduces the type's name in the bound module. A longer path
         // (`pkg.deep.Point`) is the full path of an imported module (TICKET-175): the LAST segment is
@@ -203,6 +202,9 @@ impl Parser {
     /// tree the front-end walkers descend recursively, and this loop bumps neither `self.depth` nor
     /// anything else. The base type's own fold-depth is already in `self.fold_depth` (the caller
     /// [`Self::parse_type`] opened the scope), so the chain SUMS on top of it.
+    /// `T?` and `T!E` name the carriers by their private spelling (`ast::private_name`): they mean
+    /// the prelude's carrier whatever this module declares, and `Option`/`Result` are no names a
+    /// user module sees.
     fn parse_type_postfix(&mut self, mut ty: Type) -> PResult<Type> {
         let mut chain = 0usize;
         loop {
@@ -211,7 +213,7 @@ impl Parser {
             }
             if self.eat(&Token::Question) {
                 chain += 1;
-                ty = Type::Generic("Option".to_string(), vec![ty], Span::default());
+                ty = Type::Generic(private_name("Option"), vec![ty], Span::default());
             } else if self.eat(&Token::Bang) {
                 chain += 1;
                 // An explicit error type follows only if the next token can start one; otherwise
@@ -221,22 +223,22 @@ impl Parser {
                     Token::Ident(_) | Token::LParen | Token::Fn | Token::NoneKw
                 ) {
                     let err = self.parse_type()?;
-                    ty = Type::Generic("Result".to_string(), vec![ty, err], Span::default());
+                    ty = Type::Generic(private_name("Result"), vec![ty, err], Span::default());
                 } else {
-                    ty = Type::Generic("Result".to_string(), vec![ty], Span::default());
+                    ty = Type::Generic(private_name("Result"), vec![ty], Span::default());
                 }
             } else if self.check(&Token::NotEq) && self.bang_eq != Some(self.pos) {
                 // Adjacent `!=` lexes as ONE token: `int!= 6` is `int! = 6`. The token stays; the
                 // position test stops an outer postfix loop wrapping a second time.
                 chain += 1;
                 self.bang_eq = Some(self.pos);
-                ty = Type::Generic("Result".to_string(), vec![ty], Span::default());
+                ty = Type::Generic(private_name("Result"), vec![ty], Span::default());
                 break;
             } else if self.eat(&Token::QuestionQuestion) {
                 // Adjacent `??` lexes as ONE token: `int??` is `Option[Option[int]]`.
                 chain += 2;
-                ty = Type::Generic("Option".to_string(), vec![ty], Span::default());
-                ty = Type::Generic("Option".to_string(), vec![ty], Span::default());
+                ty = Type::Generic(private_name("Option"), vec![ty], Span::default());
+                ty = Type::Generic(private_name("Option"), vec![ty], Span::default());
             } else {
                 break;
             }

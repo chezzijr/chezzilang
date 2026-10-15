@@ -38,9 +38,9 @@ impl Checker {
                     self.struct_names.insert(name.clone());
                 }
                 StmtKind::TypeAlias { name, ty, .. } => {
-                    if is_reserved_type(name) || is_reserved_protocol(name) {
-                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
-                    } else if self.aliases.contains_key(name)
+                    // Only keywords are reserved: an alias named after a builtin type shadows it in
+                    // this module (`tests/shadowing_grid.rs`).
+                    if self.aliases.contains_key(name)
                         || self.struct_names.contains(name)
                         || self.enum_names.contains(name)
                     {
@@ -251,22 +251,10 @@ impl Checker {
         for s in stmts {
             match &s.kind {
                 StmtKind::Fn(decl) => {
-                    // A user `fn` named after a runtime constructor / builtin op (`timer`, `Channel`,
-                    // `range`, …) is silently SHADOWED: `infer_named_call` / the backends resolve the
-                    // builtin arm before a plain named call, so the user fn is dead code. Reject the
-                    // collision with a clear `reserved` error.
-                    // A name the implicit prelude import binds (`Range`) is no function name either.
-                    // The extern-name sweep below rejects it through `struct_names`. This guard reads
-                    // the narrower `implicit_import_names`: `struct S` beside `fn S` in one module
-                    // stays legal, as on main.
-                    if is_reserved_name(&decl.name)
-                        || self.implicit_import_names.contains(&decl.name)
-                    {
-                        self.error(
-                            s.span,
-                            format!("function name '{}' is reserved (builtin)", decl.name),
-                        );
-                    } else if self.functions.contains_key(&decl.name) {
+                    // Only keywords are reserved: a fn named after a builtin fn or constructor (`ord`,
+                    // `range`, `Range`) shadows it in this module; the name resolves to the user fn
+                    // first (`resolve::classify_ident`).
+                    if self.functions.contains_key(&decl.name) {
                         self.error(
                             s.span,
                             format!("function '{}' is already defined", decl.name),
@@ -286,15 +274,8 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    // Genuine GLOBAL reserved types (`int`/`Channel`/`Result`/…), reserved protocols,
-                    // and FFI width types are one-way-ratchet names — a `struct` decl of one is a
-                    // `reserved (builtin)` violation.
-                    // A std file declares the reserved struct it owns (`Range`, TICKET-253).
-                    if (is_reserved_type(name) && !self.current_module_is_stdlib)
-                        || is_reserved_protocol(name)
-                    {
-                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
-                    }
+                    // Only keywords are reserved: a struct named after a builtin type shadows it in
+                    // this module.
                     // `imported_builtin_types`: a name THIS module imported as a Builtin-origin std
                     // struct (Match/Response/ProcResult, …) is a first-class Rust-bridged
                     // module-exported type — NOT reserved (a bare unimported `struct Match` is legal;
@@ -319,9 +300,6 @@ impl Checker {
                     if already_defined {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
-                    // A type PARAMETER may not be named after a reserved builtin type (`struct
-                    // Box[int]`/`[List]`/`[Result]`) — same one-way-ratchet rule as the decl NAME.
-                    self.reject_reserved_type_params(type_params);
                     // The struct's type parameters are in scope across its field and method
                     // signatures (so `first: A` and `fn push(self, x: T)` resolve `A`/`T`).
                     let saved = self.enter_type_params(type_params);
@@ -422,13 +400,6 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    if is_reserved_type(name) || is_reserved_protocol(name) {
-                        self.error(s.span, format!("type '{name}' is reserved (builtin)"));
-                        // A carrier is already registered under this name; keep its tables.
-                        if self.enums.contains_key(&self.bare_key(name)) {
-                            continue;
-                        }
-                    }
                     // The LAYOUT tables (`enums`/`variants`/`enum_type_params`) are keyed by this
                     // module's runtime key (bare unless disambiguated), so a value's `Ty::Enum(key)`
                     // resolves its variants here and across module boundaries. `enum_names`/
@@ -437,8 +408,6 @@ impl Checker {
                     if self.enums.contains_key(&key) {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     }
-                    // A type PARAMETER may not be named after a reserved builtin type (`enum E[int]`).
-                    self.reject_reserved_type_params(type_params);
                     // The enum's type parameters are in scope across its variant payloads (so a
                     // `Node(T, Tree[T])` resolves `T`). Validate each bound names a known protocol.
                     let saved = self.enter_type_params(type_params);
@@ -536,19 +505,8 @@ impl Checker {
                     // C-marshallable (int/float/bool/str, or void return).
                     #[cfg(unix)]
                     for ef in fns {
-                        // An extern fn may not take a builtin/print/constructor name — both backends
-                        // resolve those to a special op before a plain call, so the extern would be
-                        // dead code (and the compiler's eager `MakeCffi` would `dlsym` a symbol it can
-                        // never reach). Struct/variant collisions are checked after the loop.
-                        if is_reserved_name(&ef.name) {
-                            self.error(
-                                ef.span,
-                                format!(
-                                    "'{}' is a builtin/reserved name and cannot be an extern fn",
-                                    ef.name
-                                ),
-                            );
-                        }
+                        // An extern fn named after a builtin shadows it, as a `fn` does. A collision
+                        // with this module's own struct or variant is checked after the loop.
                         extern_names.push((ef.name.clone(), ef.span));
                         if self.functions.contains_key(&ef.name) {
                             self.error(
@@ -990,16 +948,16 @@ impl Checker {
             // very partial-coverage class this sweep exists to close.
             // NOT a collision: an enum/`Result`/`Option` *type* name (not callable in either engine,
             // so `extern fn Foo` alongside `enum Foo` resolves to the extern, exactly as a plain
-            // `fn Foo` does), nor an un-imported stdlib layout name. Keeping this off
-            // `is_reserved_name` also means a reserved-callable name is reported ONCE, by the in-loop
-            // guard above.
-            if self.struct_names.contains(name)
-                || self.variant_owners.contains_key(name)
-                || crate::checker::is_builtin_variant(name)
-            {
+            // `fn Foo` does), nor an un-imported stdlib layout name.
+            // The implicit prelude import (`Range`) is shadowed, not collided with.
+            let own_struct =
+                self.struct_names.contains(name) && !self.implicit_import_names.contains(name);
+            if own_struct || self.variant_owners.contains_key(name) {
                 self.error(
                     *span,
-                    format!("'{name}' is a builtin/reserved name and cannot be an extern fn"),
+                    format!(
+                        "'{name}' already names a struct or variant and cannot be an extern fn"
+                    ),
                 );
             }
         }
@@ -1081,7 +1039,9 @@ impl Checker {
             return;
         };
         // The carriers come first: the native sigs and container tables below name `Option[T]` /
-        // `Result[T, E]`, and those resolve through the enum tables.
+        // `Result[T, E]`, and those resolve through the enum tables. This reads the prelude, a std
+        // module, so the carriers' names are in scope for it.
+        let outer_std = std::mem::replace(&mut self.current_module_is_stdlib, true);
         self.carrier_seeds = self.harvest_native_enums(&module);
         self.seed_carrier_enums();
         self.seed_range_struct(&module);
@@ -1107,6 +1067,9 @@ impl Checker {
             }
         }
         self.adopt_reserved_protocol_labels(&module);
+        self.current_module_is_stdlib = outer_std;
+        // Re-seed under the caller's module, which may be a user module.
+        self.seed_carrier_enums();
     }
 
     /// TICKET-253 — `Range` is a struct of the prelude that every module sees with no `import`
@@ -1163,10 +1126,12 @@ impl Checker {
                 false
             }
             // `str?` / `owned_str?` parse to `Option[inner]`; the inner may itself be an alias.
-            Type::Generic(n, args, ..) if n == "Option" => args.first().is_some_and(|inner| {
-                matches!(inner, Type::Named { name: s, .. } if s == "str" || s == "owned_str")
-                    || self.is_return_only_extern_type_seen(inner, seen)
-            }),
+            Type::Generic(n, args, ..) if crate::ast::unprivate(n) == "Option" => {
+                args.first().is_some_and(|inner| {
+                    matches!(inner, Type::Named { name: s, .. } if s == "str" || s == "owned_str")
+                        || self.is_return_only_extern_type_seen(inner, seen)
+                })
+            }
             Type::Qualified { .. }
             | Type::Generic(..)
             | Type::Func { .. }

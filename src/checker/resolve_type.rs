@@ -86,6 +86,18 @@ impl Checker {
         self.resolve_type_at(t, span, TypePos::Void)
     }
 
+    /// Whether this user module declares or imports a type named `n` (an alias, a struct or an
+    /// enum). Such a name shadows a builtin type of the same name here: only keywords are
+    /// reserved. A std module never shadows: its `native struct str` and the like are the builtin
+    /// types' own method surfaces.
+    pub(super) fn declares_type_here(&self, n: &str) -> bool {
+        !self.current_module_is_stdlib
+            && (self.aliases.contains_key(n)
+                || self.imported_alias_tys.contains_key(n)
+                || self.struct_names.contains(n)
+                || self.enum_names.contains(n))
+    }
+
     /// Resolve a spelled type at `pos`. `resolve_type` is the value-position default, so a new
     /// container or annotation site rejects `None` with no edit.
     pub(super) fn resolve_type_at(&mut self, t: &Type, span: Span, pos: TypePos) -> Ty {
@@ -108,8 +120,16 @@ impl Checker {
                 name: n,
                 span: name_span,
             } => {
+                // Only keywords are reserved: a type parameter in scope, then a type this module
+                // declares or imports, shadow a builtin of the same name.
+                let user_first = self.declares_type_here(n);
                 let resolved = match n.as_str() {
-                    s if let Some(t) = Self::scalar_bound_ty(s) => t,
+                    s if !user_first
+                        && !self.type_params.contains_key(s)
+                        && let Some(t) = Self::scalar_bound_ty(s) =>
+                    {
+                        t
+                    }
                     // A generic type parameter (`T`) or `Self`, in scope while checking a generic fn
                     // signature/body or a protocol method. Resolved BEFORE every reserved/module name
                     // below (ptr / owned_str / Executor / Shared|RwShared|Atomic / Socket / Listener)
@@ -133,7 +153,8 @@ impl Checker {
                     // U10: every bare builtin type name resolves through `BuiltinType`, gated by
                     // `builtin_gate` (import licence, extern-only `owned_str`). A type parameter or
                     // `Self` above shadows these.
-                    s if let Some(b) = BuiltinType::from_name(s)
+                    s if !user_first
+                        && let Some(b) = BuiltinType::from_name(s)
                         && let Some(t) = b.plain_ty() =>
                     {
                         self.builtin_gate(b, t, span)
@@ -141,9 +162,10 @@ impl Checker {
                     // A BARE (no type-arg) `Shared`/`RwShared`/`Atomic` annotation: either unlicensed
                     // (the import hint the `Shared[T]` arm emits) or licensed but missing its type
                     // argument.
-                    s if let Some(
-                        b @ (BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic),
-                    ) = BuiltinType::from_name(s) =>
+                    s if !user_first
+                        && let Some(
+                            b @ (BuiltinType::Shared | BuiltinType::RwShared | BuiltinType::Atomic),
+                        ) = BuiltinType::from_name(s) =>
                     {
                         let n = b.name();
                         if self.concurrency_licensed(n) {
@@ -193,7 +215,7 @@ impl Checker {
                     // width name resolves only in a module that imported it per-name from `std.ffi`
                     // (`import int32 from std.ffi` → `imported_ffi_types`). Otherwise it's an unknown type
                     // with an FFI-specific hint (matches the qualified-variant "write it qualified" style).
-                    _ if crate::native::ffi::is_width(n) => {
+                    _ if !user_first && crate::native::ffi::is_width(n) => {
                         // Accept the width name if THIS module imported it, OR if we reached it by
                         // expanding a LICENSED transparent alias body — one whose defining module
                         // imported the width (`ffi_alias_ok`). A `type Len = int32` is a deliberate
@@ -248,7 +270,7 @@ impl Checker {
                     // A protocol name used as a value type (existential), e.g. `Error`. BUT a protocol
                     // with a STATIC method requirement (`Convert`-style static ctor) is witnessable only
                     // by a static method — a VALUE can't invoke it — so it is BOUND-ONLY, rejected here.
-                    _ if self.protocol_shape(n).is_some() => {
+                    _ if self.protocol_shape(&self.user_protocol_key(n)).is_some() => {
                         if self.protocol_has_static_method(n) {
                             self.error(
                                 span,
@@ -258,7 +280,7 @@ impl Checker {
                             );
                             Ty::Unknown
                         } else {
-                            Ty::Protocol(self.protocol_key(n), Vec::new())
+                            Ty::Protocol(self.user_protocol_key(n), Vec::new())
                         }
                     }
                     _ => {
@@ -346,7 +368,17 @@ impl Checker {
                 // below turn `List[int]` into `Ty::List(Int)` etc. — NOT expressible as a flat `FnSig`,
                 // so it stays HERE. Their `CallBuiltin` DISPATCH + name-set is table-sourced (the
                 // `Intrinsic::Ctor` PRELUDE rows); `builtin_container_sig` = flat display/placeholder.
-                let resolved = match (BuiltinType::from_name(n), args.as_slice()) {
+                // `T?` / `T!E` spell the carrier privately (`$Option`): it is the prelude's carrier.
+                let carrier_key = (crate::ast::unprivate(n) != n)
+                    .then(|| crate::ast::unprivate(n).to_string())
+                    .filter(|k| self.enums.contains_key(k));
+                // A generic type this module declares shadows a builtin of the same name.
+                let builtin = if self.declares_type_here(n) {
+                    None
+                } else {
+                    BuiltinType::from_name(n)
+                };
+                let resolved = match (builtin, args.as_slice()) {
                     (Some(BuiltinType::List), [inner]) => Ty::list(self.resolve_type(inner, span)),
                     // `Iterator[T]` as a *value* type — the result of calling a generator function.
                     // Represented as `Ty::Struct("Iterator", [T])`, an existential iterator whose element
@@ -458,8 +490,8 @@ impl Checker {
                         Ty::Struct(key, resolved)
                     }
                     // A user-defined generic enum instantiated with type arguments: `Tree[int]`.
-                    _ if self.enum_names.contains(n) => {
-                        let key = self.bare_key(n);
+                    _ if carrier_key.is_some() || self.enum_names.contains(n) => {
+                        let key = carrier_key.clone().unwrap_or_else(|| self.bare_key(n));
                         // The success side of a carrier may be `None` (`None!E`; `None?` has
                         // its own reject below).
                         let carrier = key == "Option" || key == "Result";
@@ -499,10 +531,12 @@ impl Checker {
                     // existential. Conformance is witnessed at every store/pass boundary (via
                     // `assignable` → `satisfies_args`); the args are then erased at runtime. Mirrors
                     // the struct/enum parameterized arms above.
-                    _ if self.protocol_shape(n).is_some() => {
+                    _ if self.protocol_shape(&self.user_protocol_key(n)).is_some() => {
                         let resolved: Vec<Ty> =
                             args.iter().map(|a| self.resolve_type(a, span)).collect();
-                        let nparams = self.protocol_shape(n).map_or(0, |p| p.type_params.len());
+                        let nparams = self
+                            .protocol_shape(&self.user_protocol_key(n))
+                            .map_or(0, |p| p.type_params.len());
                         if nparams != resolved.len() {
                             self.error(
                                 span,
@@ -523,7 +557,7 @@ impl Checker {
                             );
                             Ty::Unknown
                         } else {
-                            Ty::Protocol(self.protocol_key(n), resolved)
+                            Ty::Protocol(self.user_protocol_key(n), resolved)
                         }
                     }
                     _ if self.bare_type_head(n).is_some_and(|th| th.pinned.is_some()) => {
@@ -547,7 +581,10 @@ impl Checker {
                         }
                     }
                     _ => {
-                        self.error(span, format!("unknown generic type '{n}'"));
+                        match super::suggest::removed_name_message(n) {
+                            Some(msg) => self.error(span, msg),
+                            None => self.error(span, format!("unknown generic type '{n}'")),
+                        }
                         Ty::Unknown
                     }
                 };

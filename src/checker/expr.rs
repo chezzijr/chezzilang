@@ -718,7 +718,14 @@ impl Checker {
             };
             self.hover_record_at(callee.span, &fty, HoverKind::Func, doc);
         }
-        if !named.is_empty() && self.lookup(name).is_none() && super::is_reserved_name(name) {
+        // A builtin takes no named arguments; a user fn of the same name (it shadows the builtin)
+        // does: the callee's resolution decides.
+        if !named.is_empty()
+            && matches!(
+                self.classify_path(callee, super::resolve::PathPos::Callee),
+                Some(Resolution::Builtin(_))
+            )
+        {
             self.refuse_named(name, named, span);
         }
         if self.reject_item_targs(name, args, targs, span) {

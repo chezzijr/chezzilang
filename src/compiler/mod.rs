@@ -152,7 +152,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.field_ic_sites = c.field_ic_next;
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
-    c.program.range_key = c.type_key(0, "Range");
+    c.program.range_key = crate::resolver::range_key(graph);
     c.program.rebuild_struct_names(&c.field_widths);
     c.build_hooks();
     c.build_provider_table()?;
@@ -238,7 +238,8 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.program.field_ic_sites = c.field_ic_next;
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
-    c.program.range_key = c.type_key(0, "Range");
+    c.program.range_key =
+        crate::resolver::range_key(&crate::checker::standalone_graph(&module.stmts));
     c.program.rebuild_struct_names(&c.field_widths);
     c.build_provider_table()?;
     c.build_hooks();
@@ -1420,7 +1421,7 @@ fn ffi_type_display(ty: Option<&Type>) -> String {
     match ty {
         Some(Type::Named { name: n, .. }) => n.clone(),
         Some(Type::Qualified { module, name, .. }) => format!("{module}.{name}"),
-        Some(Type::Generic(n, ..)) => n.clone(),
+        Some(Type::Generic(n, ..)) => crate::ast::unprivate(n).to_string(),
         Some(_) => "<unsupported>".to_string(),
         None => "None".to_string(),
     }

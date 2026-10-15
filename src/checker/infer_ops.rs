@@ -224,6 +224,10 @@ impl Checker {
             );
             return Ty::Unknown;
         }
+        if let Some(msg) = suggest::removed_name_message(name) {
+            self.error(span, msg);
+            return Ty::Unknown;
+        }
         let names = self.in_scope_names();
         self.error_help(
             span,

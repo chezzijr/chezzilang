@@ -1137,12 +1137,6 @@ fn any_param_accepts_anything() {
     );
 }
 
-/// A user cannot redeclare the reserved `Any` protocol.
-#[test]
-fn any_is_reserved() {
-    rejects("protocol Any:\n    fn foo(self) -> int\n", "reserved");
-}
-
 /// A direct `satisfies` unit check: every scalar satisfies the empty `Any` protocol.
 #[test]
 fn any_satisfied_by_all_scalars_unit() {
@@ -2522,16 +2516,6 @@ fn pathlike_is_satisfied_by_the_three_byte_spellings() {
     rejects(
         "struct Q:\n    n: int\nfn f(p: PathLike) -> bytes:\n    return p.as_path()\nprint(f(Q(1)).len())\n",
         "PathLike",
-    );
-}
-
-/// W7-8 — `PathLike` is a RESERVED universe protocol, so a user redeclaration is a clean compile-time
-/// diagnostic, never an accept-then-runtime-trap (the recorded `is_reserved_type` hole).
-#[test]
-fn pathlike_is_reserved_against_user_redeclaration() {
-    rejects(
-        "protocol PathLike:\n    fn as_path(self) -> bytes\nprint(1)\n",
-        "reserved",
     );
 }
 

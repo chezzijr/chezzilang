@@ -627,72 +627,7 @@ fn method_on_int_rejected() {
 
 // ===== reserved builtin type names =====
 
-#[test]
-fn user_enum_named_result_rejected() {
-    rejects(
-        "enum Result:\n    A\n",
-        "type 'Result' is reserved (builtin)",
-    );
-}
-
-#[test]
-fn user_struct_named_option_rejected() {
-    rejects(
-        "struct Option:\n    x: int\n",
-        "type 'Option' is reserved (builtin)",
-    );
-}
-
-#[test]
-fn user_decl_named_tuple_rejected() {
-    // `tuple` is a reserved global (structural tuple type). No decl form may shadow it — matching its
-    // container siblings (`struct List`/`range`/…). Covers all four decl keywords in one place.
-    rejects(
-        "struct tuple:\n    x: int\n",
-        "type 'tuple' is reserved (builtin)",
-    );
-    rejects("enum tuple:\n    A\n", "type 'tuple' is reserved (builtin)");
-    rejects("type tuple = int\n", "type 'tuple' is reserved (builtin)");
-    rejects(
-        "protocol tuple:\n    fn f(self)\n",
-        "type 'tuple' is reserved (builtin)",
-    );
-    // Regression: reserving the NAME must not touch tuple LITERALS (they never route through the
-    // decl-name guard) — a real tuple value + destructure still type-checks.
-    ok("p := (1, 2)\na, b := p\nprint(a + b)\n");
-}
-
 // ===== M6c: native std module signatures =====
-
-/// Bug 4B — a module bind (aliased OR the un-aliased last path segment) whose name is a reserved
-/// builtin/ctor is REJECTED. That is what makes shadowing the builtin impossible.
-#[test]
-fn reserved_module_bind_rejected() {
-    let int_mod = (
-        "lib/int.chz",
-        "fn twice(n: int) -> int:\n    return n * 2\n",
-    );
-    let geo = ("lib/geo.chz", "struct Point:\n    x: int\n    y: int\n");
-    // un-aliased last path segment == a reserved builtin callable
-    files_reject(
-        &[int_mod, ("main.chz", "import lib.int\nprint(1)\n")],
-        "reserved (builtin)",
-    );
-    files_reject(&[int_mod, ("main.chz", "import lib.int\nprint(1)\n")], "as");
-    // aliased to a builtin VARIANT ctor
-    files_reject(
-        &[geo, ("main.chz", "import lib.geo as Ok\nprint(1)\n")],
-        "import alias 'Ok' is reserved (builtin)",
-    );
-    // un-aliased last path segment == a builtin variant ctor
-    files_reject(
-        &[
-            ("lib/Ok.chz", "fn f() -> int:\n    return 1\n"),
-            ("main.chz", "import lib.Ok\nprint(1)\n"),
-        ],
-        "reserved (builtin)",
-    );
-}
 
 /// The escape hatch + no over-rejection: an aliased reserved-named module works, the builtin it
 /// would have shadowed still works, and a normal module bind is unaffected.
@@ -715,49 +650,6 @@ fn reserved_module_bind_alias_escape_hatch() {
             "import lib.geo\np := geo.Point(1, 2)\nr: int!str = ?5\nprint(p.x)\n",
         ),
     ]);
-}
-
-/// Bug 4B, third door: a FROM-import binds into the same VALUE namespace, so a reserved bound name —
-/// the ALIAS *or* the bare MEMBER name — is rejected there too. Otherwise `import str from lib.sh`
-/// (a module global named `str`) destroys the `str()` ctor in expression position exactly like
-/// `import std.str` did. Only the value/function binds are gated; the TYPE members that license a
-/// reserved builtin (`import Shared from std.concurrency`) are untouched.
-#[test]
-fn reserved_from_import_member_rejected() {
-    let sh = ("lib/sh.chz", "str := 5\nint := 9\n");
-    for member in ["str", "int"] {
-        files_reject(
-            &[
-                sh,
-                (
-                    "main.chz",
-                    &format!("import {member} from lib.sh\nprint(1)\n"),
-                ),
-            ],
-            "reserved (builtin)",
-        );
-    }
-    // A member named by a removed carrier name (`fn Ok` is legal at its decl site) cannot be
-    // imported: the parser rejects the bare name (TICKET-228, `tests/removed_names_grid.rs`).
-    let err = parser::parse(lexer::tokenize("import Ok from lib.fo\n").unwrap()).unwrap_err();
-    assert!(err.message.contains("`Ok(x)` is removed"), "{err}");
-    // escape hatch + no over-rejection: alias it, and the builtins it would have shadowed still work.
-    files_ok(&[
-        sh,
-        (
-            "main.chz",
-            "import str as s, int as k from lib.sh\nprint(s + k)\nprint(str(5))\nr: int!str = int(\"1\")\nprint(r)\n",
-        ),
-    ]);
-    // the reserved TYPE members that LICENSE a builtin still import un-aliased.
-    files_ok(&[(
-        "main.chz",
-        "import Shared from std.concurrency\ns := Shared(1)\nprint(s.get())\n",
-    )]);
-    files_ok(&[(
-        "main.chz",
-        "import timer from std.time\nt := timer(1)\nprint(1)\n",
-    )]);
 }
 
 /// Wave-5 residual 4, DIAGNOSTIC-ONLY: `is_reserved_module_bind` gates the 34 reserved names, so a
@@ -1642,30 +1534,4 @@ fn d3_native_math_float_param_rejects_int() {
         "write 1.0",
     );
     entry_ok("import std.math\nfn main():\n    print(math.sqrt(16.0))\n");
-}
-
-/// One reserved set at every declaration site: a builtin type name (`BuiltinType` or a `std.ffi`
-/// type, widths included) or a removed spelling cannot name a struct, enum, alias, protocol, type
-/// parameter or import alias. `protocol int32` and `import ... as int32` were accepted, because
-/// those two sites read `is_reserved_type` without the width names the other sites added by hand.
-#[test]
-fn reserved_type_names_grid() {
-    let names = ["int", "List", "ptr", "int32", "tuple", "range"];
-    for n in names {
-        let sites = [
-            format!("struct {n}:\n    x: int\n"),
-            format!("enum {n}:\n    A\n"),
-            format!("type {n} = str\n"),
-            format!("protocol {n}:\n    fn f(self) -> int\n"),
-            format!("fn g[{n}](x: {n}) -> int:\n    return 1\n"),
-            format!("import std.math as {n}\n"),
-        ];
-        for src in sites {
-            let errs = check_entry(&src);
-            assert!(
-                errs.iter().any(|e| e.message.contains("reserved")),
-                "{n}: expected a reserved-name error for:\n{src}\ngot: {errs:?}"
-            );
-        }
-    }
 }

@@ -2,6 +2,7 @@
 //! Split out of `src/checker/setup.rs`. `super::*` is the parent module.
 
 use super::setup::variant_import_binds;
+use super::setup::{TypeHead, TypeHeadKind};
 use super::sig::TypePos;
 use super::*;
 
@@ -601,6 +602,11 @@ impl Checker {
     }
 
     fn seed_carrier_enums_from(&mut self, seeds: &CarrierSeeds) {
+        // The carriers behind `T?` and `T!E` are the prelude's own. A user module reaches them only
+        // through that syntax: it gets no bare enum name, no bare variant owner, and the variant binds
+        // only under their private spelling (`ast::private_name`, which desugar writes), except a
+        // keyword (`None`). A std module (the prelude's own signatures) spells them by name.
+        let public = self.current_module_is_stdlib;
         for seed in &seeds.enums {
             let key = seed.name.clone();
             let mut names = Vec::new();
@@ -613,23 +619,52 @@ impl Checker {
                         payload: payload.clone(),
                     },
                 );
-                self.variant_owners
-                    .entry(vname.clone())
-                    .or_default()
-                    .push(key.clone());
+                let owners = self.variant_owners.entry(vname.clone()).or_default();
+                owners.retain(|k| *k != key);
+                if public {
+                    owners.push(key.clone());
+                }
+                if owners.is_empty() {
+                    self.variant_owners.remove(vname);
+                }
             }
             self.enums.insert(key.clone(), names);
             self.enum_type_params
                 .insert(key.clone(), seed.type_params.clone());
             self.enum_methods.insert(key.clone(), HashMap::new());
-            self.enum_names.insert(key);
+            if public {
+                self.enum_names.insert(key);
+            } else {
+                self.enum_names.remove(&key);
+            }
         }
         for (bind, en, variant) in &seeds.imports {
-            if let Some(head) = self.bare_type_head(en) {
+            // The carrier's key is its bare name (a std type keeps it); the head is built from it,
+            // since a user module does not see the bare name.
+            let head = TypeHead {
+                kind: TypeHeadKind::Enum,
+                key: en.clone(),
+                name: en.clone(),
+                spelled: en.clone(),
+                pinned: None,
+                native_handle: false,
+            };
+            let mut binds = vec![crate::ast::private_name(bind)];
+            if public || crate::lexer::is_keyword(bind) {
+                binds.push(bind.clone());
+            } else if self
+                .imported_variants
+                .get(bind)
+                .is_some_and(|iv| iv.prelude)
+            {
+                // A seed for a std module left the public bind; a user module does not see it.
+                self.imported_variants.remove(bind);
+            }
+            for b in binds {
                 self.imported_variants.insert(
-                    bind.clone(),
+                    b,
                     ImportedVariant {
-                        head,
+                        head: head.clone(),
                         variant: variant.clone(),
                         prelude: true,
                     },

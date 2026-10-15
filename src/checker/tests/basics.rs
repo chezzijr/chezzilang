@@ -84,11 +84,6 @@ fn builtin_arity_rejected() {
 }
 
 #[test]
-fn len_not_reserved() {
-    assert!(!is_reserved_name("len"));
-}
-
-#[test]
 fn user_fn_len_ok() {
     // `len` is no longer reserved, so a user may declare a top-level `fn len`.
     ok("fn len(x: int) -> int:\n    return x\nprint(len(5))\n");
@@ -724,16 +719,6 @@ fn nested_fn_shadows_struct_ctor_accepted() {
     entry_ok(
         "struct P:\n    x: int\nfn outer() -> int:\n    fn P() -> int:\n        return 99\n    return P()\nprint(outer())\n",
     );
-}
-
-/// TICKET-228 (D6) — a nested fn may still be DECLARED with a removed carrier name, but the name is
-/// reserved in bare-use position, so calling it bare gets the removal message.
-#[test]
-fn nested_fn_named_after_a_removed_name_cannot_be_called_bare() {
-    let src = "fn outer() -> int:\n    fn Ok() -> int:\n        return 99\n    return Ok()\nprint(outer())\n";
-    let err = parser::parse(lexer::tokenize(src).unwrap()).unwrap_err();
-    assert_eq!(err.span.line, 4, "{err}");
-    assert!(err.message.contains("`Ok(x)` is removed"), "{err}");
 }
 
 // SOUNDNESS: an inferred (un-annotated) struct method return must FLOW to call sites through the

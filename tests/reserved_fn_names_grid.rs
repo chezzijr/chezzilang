@@ -1,16 +1,15 @@
-//! TICKET-253 — which top-level `fn` and `extern fn` names the checker rejects.
-//!
-//! The expected column is the verdict of the `main` binary (commit 902b678c, measured with
-//! `chezzi check` on one file per cell), so a change to the guard that rejects a name `main`
-//! accepts fails here. The one new row is `Range`: the struct of `std.prelude` that every module
-//! binds through an import no one wrote. That import has no source position, so no message may
-//! print one.
+//! TICKET-253, then the owner rule of 2026-10-15: only keywords are reserved. Every builtin name —
+//! a builtin fn (`print`, `ord`), a constructor (`List`, `Channel`, `timer`), a builtin or removed
+//! type name (`int`, `Result`, `ptr`) and the prelude's `Range` — may name a top-level `fn` and an
+//! `extern fn`; the declaration shadows the builtin in its module (`tests/shadowing_grid.rs`). The
+//! position test below keeps the TICKET-253 rule that the import the resolver adds to every module
+//! (it has no source line) never prints a line the file does not have.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Names `main` rejects for both a plain `fn` and an `extern fn`.
-const REJECTED_BOTH: &[&str] = &[
+/// Builtin names: each may name a plain `fn` and an `extern fn`.
+const BUILTIN_NAMES: &[&str] = &[
     "int",
     "float",
     "bool",
@@ -32,10 +31,6 @@ const REJECTED_BOTH: &[&str] = &[
     "chr",
     "print",
     "panic",
-];
-
-/// Reserved TYPE names that are no callable: `main` accepts them for both kinds.
-const ACCEPTED_BOTH: &[&str] = &[
     "Result",
     "Option",
     "Iterator",
@@ -46,6 +41,7 @@ const ACCEPTED_BOTH: &[&str] = &[
     "Reader",
     "ptr",
     "owned_str",
+    "Range",
 ];
 
 fn check(tag: &str, src: &str) -> (bool, String) {
@@ -78,61 +74,16 @@ fn extern_fn(name: &str) -> String {
 }
 
 #[test]
-fn a_fn_name_main_accepts_stays_accepted() {
-    for name in ACCEPTED_BOTH {
+fn a_builtin_name_may_name_a_fn_or_an_extern_fn() {
+    for name in BUILTIN_NAMES {
         for (kind, src) in [("fn", plain_fn(name)), ("extern fn", extern_fn(name))] {
             let (ok, text) = check(&format!("acc-{name}"), &src);
-            assert!(ok, "`{kind} {name}` was accepted on main; now: {text}");
+            assert!(
+                ok,
+                "`{kind} {name}` must be accepted (only keywords are reserved): {text}"
+            );
         }
     }
-}
-
-#[test]
-fn a_fn_name_main_rejects_stays_rejected() {
-    for name in REJECTED_BOTH {
-        let (ok, text) = check(&format!("rej-fn-{name}"), &plain_fn(name));
-        assert!(
-            !ok && text.contains(&format!("function name '{name}' is reserved (builtin)")),
-            "`fn {name}`: {text}"
-        );
-        let (ok, text) = check(&format!("rej-ext-{name}"), &extern_fn(name));
-        assert!(
-            !ok && text.contains(&format!(
-                "'{name}' is a builtin/reserved name and cannot be an extern fn"
-            )),
-            "`extern fn {name}`: {text}"
-        );
-    }
-}
-
-#[test]
-fn range_is_the_one_new_row_and_reports_once() {
-    let (ok, text) = check("range-fn", &plain_fn("Range"));
-    assert!(!ok);
-    assert!(
-        text.contains("function name 'Range' is reserved (builtin)"),
-        "{text}"
-    );
-    assert!(
-        text.contains("chezzi: 1 type error"),
-        "one error only: {text}"
-    );
-    // The same fn, called: the call must not add a second error.
-    let (ok, text) = check(
-        "range-fn-call",
-        "fn Range(a: int) -> int:\n    return a\nprint(Range(5))\n",
-    );
-    assert!(!ok);
-    assert!(
-        text.contains("chezzi: 1 type error"),
-        "one error only: {text}"
-    );
-    let (ok, text) = check("range-ext", &extern_fn("Range"));
-    assert!(!ok);
-    assert!(
-        text.contains("'Range' is a builtin/reserved name and cannot be an extern fn"),
-        "{text}"
-    );
 }
 
 /// A message may print a line the file has. The import the resolver adds to every module has no

@@ -641,32 +641,6 @@ impl Checker {
         Ty::enum_ty(key, args)
     }
 
-    /// Reject a reserved builtin type name used as a generic type-PARAMETER identifier (`struct
-    /// Box[int]` / `[List]` / `[Result]`, a method's own `[U]`, a `protocol P[int]`). A reserved name
-    /// as a param is a one-way-ratchet violation that otherwise type-checks clean and then shadows
-    /// kind-dependently — a scalar param (`int`/`str`/…) is dead/unreferenceable (the scalar wins in
-    /// `resolve_type`), while a container/enum-builtin param (`List`/`Result`/…) silently SHADOWS the
-    /// builtin and acts as a real generic. Mirror the decl-NAME guards (`struct int` →
-    /// `reserved (builtin)`) so the param form errors identically. Predicate = `is_reserved_type` +
-    /// the fixed-width FFI integer names (`int32`/`int64`/…, reserved TYPE names via
-    /// `native::ffi::is_width`). Deliberately NOT `is_reserved_protocol`: a param named after a
-    /// prebuilt protocol (`fn id[Comparable]`) is a protocol-name shadow, not a builtin-TYPE shadow,
-    /// and is kept legal by design (guarded by `protocol_bound_and_typeparam_named_protocol_still_ok`,
-    /// commit b2aa8ac). A param BOUND `[T: Comparable]` is likewise untouched (the bound is a separate
-    /// `Bound` list, not the param name). Called once per decl at the hoist sites (struct/enum/
-    /// fn_sig/protocol), NOT inside `enter_type_params` (which is re-entered during body checking and
-    /// would double-report).
-    pub(super) fn reject_reserved_type_params(&mut self, tps: &[TypeParam]) {
-        for tp in tps {
-            if is_reserved_type(&tp.name) {
-                self.error(
-                    tp.name_span,
-                    format!("type '{}' is reserved (builtin)", tp.name),
-                );
-            }
-        }
-    }
-
     /// Install `tps` as the in-scope generic type parameters, returning the previous map to restore.
     /// The bounds are resolved here, in the declaring scope, by the silent `resolve_bounds`
     /// (TICKET-202).
@@ -721,7 +695,10 @@ impl Checker {
     pub(super) fn check_bounds(&mut self, bounds: &[Bound], param: &str, span: Span) {
         let mut seen_iterator = false;
         for b in bounds {
-            let Some(arity) = self.protocol_shape(&b.name).map(|p| p.type_params.len()) else {
+            let Some(arity) = self
+                .protocol_shape(&self.user_protocol_key(&b.name))
+                .map(|p| p.type_params.len())
+            else {
                 // A module-qualified bound (TICKET-173) that misses: an unimported module reuses the
                 // qualified annotation's text (`src/checker/sig.rs`, `Type::Qualified`). The module
                 // is everything before the LAST dot, so a full path `pkg.deep.P` names `pkg.deep`.
@@ -739,7 +716,9 @@ impl Checker {
                 // a bound: there is no substitution seam to carry `int` into `T`'s bound. Diagnose
                 // this shape by name rather than falling through to the generic "unknown protocol".
                 if let Some(Type::Generic(head, ..)) = self.aliases.get(&b.name).cloned()
-                    && self.protocol_shape(&head).is_some()
+                    && self
+                        .protocol_shape(&self.user_protocol_key(&head))
+                        .is_some()
                 {
                     self.error(
                         span,

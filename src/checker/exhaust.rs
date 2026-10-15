@@ -191,14 +191,16 @@ impl Checker {
                 .get(v)
                 .is_some_and(|iv| iv.head.key == key && iv.variant == *v)
         });
-        let prefix = if all_bare {
+        // A carrier's witnesses print in carrier syntax (`?w`, `!w`, `None`): never a prefix.
+        let carrier = matches!(key, "Option" | "Result");
+        let prefix = if carrier || all_bare {
             String::new()
         } else {
             crate::compiler::bare_display(key)
         };
         let mut members: Vec<(String, Vec<Ty>)> = variants.into_iter().collect();
         members.sort_by(|a, b| a.0.cmp(&b.0));
-        Dom::Sum(prefix, members, matches!(key, "Option" | "Result"))
+        Dom::Sum(prefix, members, carrier)
     }
 
     /// The variant a bare pattern name spells: the variant an `import V from Enum` binds it to,

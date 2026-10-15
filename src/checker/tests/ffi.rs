@@ -323,41 +323,6 @@ fn extern_owned_str_param_via_alias_rejected() {
 }
 
 #[test]
-fn protocol_named_types_rejected_at_decl() {
-    // The prebuilt PROTOCOL names may be used as bounds (`[T: Comparable]`) but must NOT be
-    // redeclared as a struct/enum/type alias — left ungated such a decl silently shadowed
-    // the protocol and produced a self-contradictory diagnostic ("type Comparable does not satisfy
-    // Comparable"). Mirrors the reserved-TYPE-name reservation (Result/Channel/...). The DECL of the
-    // name is reserved; the protocol BOUND of the same name stays legal (see the boundary test).
-    // Driven from `RESERVED_PROTOCOLS` rather than a hand-copied subset, so a 22nd protocol is covered
-    // here the day it is declared.
-    for &name in crate::checker::RESERVED_PROTOCOLS {
-        for src in [
-            format!("struct {name}:\n    x: int\nfn main():\n    print(1)\nmain()\n"),
-            format!("enum {name}:\n    A\nfn main():\n    print(1)\nmain()\n"),
-            format!("type {name} = int\nfn main():\n    print(1)\nmain()\n"),
-        ] {
-            let errs = check_entry(&src);
-            assert!(
-                errs.iter()
-                    .any(|e| e.message.contains(name) && e.message.contains("reserved (builtin)")),
-                "decl of protocol name {name} must be reserved, got: {errs:?}\nsrc: {src}"
-            );
-        }
-    }
-    // The literal repro from the task: a `struct Comparable` shadow used as a bound + ctor. Pre-fix
-    // this mis-errored "type Comparable does not satisfy Comparable (missing method 'compare')".
-    let errs = check_entry(
-        "struct Comparable:\n    x: int\nfn pick[T: Comparable](a: T) -> T:\n    return a\nfn main():\n    c := Comparable(x=5)\n    print(pick(c).x)\nmain()\n",
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("Comparable") && e.message.contains("reserved (builtin)")),
-        "struct Comparable repro must reject as reserved, got: {errs:?}"
-    );
-}
-
-#[test]
 fn convert_bound_binds_and_arity_checked() {
     // Slice 1 of Convert/From: the reserved `Convert[S]` protocol binds as a generic bound. This checks
     // ONLY that the bound RESOLVES (no "unknown protocol") and is arity-checked against its 1 type param.
@@ -1156,26 +1121,14 @@ fn width_name_without_import_rejected() {
 fn ffi_type_import_cannot_be_renamed() {
     // An FFI width type cannot be aliased on import: the backends' `ctype_of` keys off the literal
     // surface name, so a renamed import would resolve to a type the marshaller can't lower. Reject
-    // both `import int32 as W` (name unusable) and `import int8 as int32` (silently wrong width). The
-    // second alias target, `int32`, is a reserved builtin type name, so the reserved-name rule (one
-    // set at every declaration site) rejects it first.
+    // both `import int32 as W` (name unusable) and `import int8 as int32` (silently wrong width).
     entry_rejects(
         "import int32 as W from std.ffi\nfn main():\n    x: W = 5\n    print(x)\n",
         "cannot be renamed on import",
     );
     entry_rejects(
         "import int8 as int32 from std.ffi\nfn main():\n    x: int32 = 5\n    print(x)\n",
-        "reserved (builtin)",
-    );
-}
-
-#[test]
-fn width_name_cannot_be_redefined_as_alias() {
-    // A user `type int32 = str` must not silently shadow the FFI width name (it would flip int32's
-    // meaning from int to str). The name is reserved.
-    rejects(
-        "type int32 = str\nx: int32 = \"hi\"\nprint(x)\n",
-        "reserved",
+        "cannot be renamed on import",
     );
 }
 
@@ -1405,43 +1358,13 @@ fn extern_duplicate_name_rejected() {
 }
 
 #[test]
-fn extern_named_after_builtin_rejected() {
-    // An extern fn named after a builtin (range/int/float/str/ord/chr/set) would be silently
-    // shadowed: `compile_call`/`eval_call` resolve the name to the builtin op before a plain call,
-    // so the extern is dead — and the compiler's eager `MakeCffi` dlsyms a symbol it can never call.
-    // Reject the collision at hoist with a clear message.
-    rejects(
-        "extern \"libc.so.6\":\n    fn List(x: int) -> int\n",
-        "builtin/reserved name",
-    );
-}
-
-#[test]
-fn extern_named_after_constructor_rejected() {
-    // `Channel`/`Shared`/`Atomic`/`timer`/`Executor` are constructor names the backends special-case
-    // before a plain call, so an extern with that name is unreachable. Reject it.
-    rejects(
-        "extern \"libc.so.6\":\n    fn Channel() -> int\n",
-        "builtin/reserved name",
-    );
-}
-
-#[test]
-fn extern_named_after_print_rejected() {
-    rejects(
-        "extern \"libc.so.6\":\n    fn print(x: int) -> int\n",
-        "builtin/reserved name",
-    );
-}
-
-#[test]
 fn extern_named_after_struct_rejected() {
     // A struct registers a same-named constructor the backends resolve before a plain call, so an
     // extern colliding with a struct name is dead. The guard is order-independent: the struct is
     // declared AFTER the extern, yet the collision must still fire.
     rejects(
         "extern \"libc.so.6\":\n    fn S(x: int) -> int\n\nstruct S:\n    a: int\n",
-        "builtin/reserved name",
+        "already names a struct or variant",
     );
 }
 
@@ -1454,11 +1377,11 @@ fn extern_named_after_struct_rejected_entry_path() {
     // Both decl orders, because the sweep runs after the hoist loop.
     entry_rejects(
         "extern \"libc.so.6\":\n    fn strlen(s: str) -> int\n\nstruct strlen:\n    s: str\n",
-        "builtin/reserved name",
+        "already names a struct or variant",
     );
     entry_rejects(
         "struct S:\n    a: int\n\nextern \"libc.so.6\":\n    fn S(x: int) -> int\n",
-        "builtin/reserved name",
+        "already names a struct or variant",
     );
 }
 
@@ -1479,7 +1402,7 @@ fn extern_named_after_imported_native_struct_rejected() {
     // hole open.
     entry_rejects(
         "import std.regex\n\nextern \"libc.so.6\":\n    fn Match(x: int) -> int\n",
-        "builtin/reserved name",
+        "already names a struct or variant",
     );
 }
 
@@ -1488,62 +1411,7 @@ fn extern_named_after_variant_rejected() {
     // An enum variant is keyed globally and resolved as a constructor before a plain call.
     rejects(
         "extern \"libc.so.6\":\n    fn Leaf(x: int) -> int\n\nenum Tree:\n    Leaf\n    Node\n",
-        "builtin/reserved name",
-    );
-}
-
-#[test]
-fn extern_reserved_name_reported_once() {
-    // W6-16 — a name that is BOTH in `RESERVED_CALLABLE` *and* a prelude `native struct` landing in
-    // the module's bare tables (`str`/`bytes`/`bytearray`/`Channel`/`List`/`Map`/`Set`) was reported
-    // by BOTH the in-loop reserved guard and the post-loop collision sweep → doubled diagnostics,
-    // incl. under `--errors=json` (doubled LSP squiggles). Report it exactly once.
-    for n in [
-        "str",
-        "bytes",
-        "bytearray",
-        "Channel",
-        "List",
-        "Map",
-        "Set",
-        // …and the already-single ones stay single.
-        "int",
-        "print",
-    ] {
-        let errs = check_entry(&format!(
-            "extern \"libm.so.6\":\n    fn {n}(x: int) -> int\n"
-        ));
-        assert_eq!(
-            errs.iter()
-                .filter(|e| e.message.contains("builtin/reserved name"))
-                .count(),
-            1,
-            "expected exactly one reserved-name diagnostic for {n:?}, got: {errs:?}"
-        );
-    }
-}
-
-#[test]
-fn extern_named_after_builtin_variant_rejected() {
-    // W6-11 — the four BUILTIN variant ctors (`Result`/`Option`'s) are resolved as ctors before a
-    // plain call exactly like a user enum's variants, but they are absent from `variant_owners`
-    // (their identity stays in `resolve_type`), so the sweep missed them. Probe that filed it:
-    // `extern fn Ok(x: float) -> float` then `y: float = Ok(2.0)` → "cannot assign Result[float] to
-    // variable of type float" — i.e. the call site resolves to the VARIANT, the extern is dead.
-    for v in ["Ok", "Err", "Some"] {
-        rejects(
-            &format!("extern \"libm.so.6\":\n    fn {v}(x: float) -> float\n"),
-            "builtin/reserved name",
-        );
-    }
-    // `None` is a keyword (TICKET-237): the parser rejects the name before the checker sees it.
-    parse_rejects(
-        "extern \"libm.so.6\":\n    fn None(x: float) -> float\n",
-        "reserved keyword",
-    );
-    entry_rejects(
-        "extern \"libm.so.6\":\n    fn Ok(x: float) -> float\n",
-        "builtin/reserved name",
+        "already names a struct or variant",
     );
 }
 

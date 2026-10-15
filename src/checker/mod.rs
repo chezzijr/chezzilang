@@ -204,29 +204,6 @@ fn module_label(import: &Import) -> String {
     path.join(".")
 }
 
-/// `Result`/`Option` are builtin generic types — the `?` operator and the top-level-error logic
-/// key on these literal names, so a user type that shadows them would collide. Reject
-/// the redefinition at declaration. `Iterator` is likewise reserved: as a value type it names the
-/// experimental generator existential (`Ty::Struct("Iterator", [T])`) that `iter_elem` / `.next()`
-/// typing key on, so a user `struct Iterator[T]` would be silently shadowed (and crash at runtime
-/// on a phantom `.next()`).
-///
-/// The same hazard applies to EVERY bare name `resolve_type` maps to a builtin: a user `struct int`
-/// / `enum List` / `struct Socket` would type-check clean (the decl guards only consulted this set)
-/// and then the use-site (`x: int` / `l: List[int]` / `s: Socket`) would silently resolve to the
-/// builtin, yielding an unreachable user type + self-contradictory diagnostics (`expected Socket,
-/// found Socket`). So the builtin SCALAR (`int`/`float`/`bool`/`str`/`bytes`/`bytearray`/`None`),
-/// CONTAINER (`List`/`Set`/`Map`/`Channel`/`range`), and HANDLE (`Socket`/`Listener`/`ptr`/
-/// `owned_str`) type names are all reserved at declaration too — `struct X` is rejected with the same
-/// `type 'X' is reserved (builtin)` error `struct Result` already gives. THE one reserved set for
-/// every declaration site (struct, enum, alias, protocol, type parameter, import alias): every builtin
-/// type name (`is_builtin_type_name`, the `std.ffi` widths and `ptr` included) plus the names below.
-fn is_reserved_type(name: &str) -> bool {
-    // Reserved names that are no builtin type: `Result`/`Option` are removed spellings the resolver
-    // reports; `tuple` resolves no type; `range` (TICKET-253) and `timer` are callables.
-    is_builtin_type_name(name) || matches!(name, "Result" | "Option" | "tuple" | "range" | "timer")
-}
-
 /// D3 (TICKET-138): an int NEVER widens into a `float` slot, at any sink. The fix a diagnostic names.
 pub(crate) const FLOAT_FIX_NOTE: &str = " — write 1.0 (or float(x))";
 
@@ -338,7 +315,7 @@ pub(crate) fn carrier_join_note(a: &Ty, b: &Ty) -> String {
 fn describe_extern_type(t: &Type) -> String {
     match t {
         Type::Named { name: n, .. } => n.clone(),
-        Type::Generic(n, args, ..) if n == "Option" => match args.first() {
+        Type::Generic(n, args, ..) if crate::ast::unprivate(n) == "Option" => match args.first() {
             Some(Type::Named { name: inner, .. }) => format!("{inner}?"),
             _ => "str?".to_string(),
         },
@@ -350,21 +327,12 @@ fn describe_extern_type(t: &Type) -> String {
     }
 }
 
-/// Names an `extern` C fn may NOT take: a builtin (`len`/`range`/`int`/`float`/`str`/`ord`/`chr`/
-/// `set`), `print`, or a runtime constructor (`Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`). The
-/// compiler resolves these names to a special op *before* a plain named call (`compiler::compile_call`),
-/// so an extern fn with one of these names is silently shadowed — dead code
-/// that the compiler's eager `MakeCffi` would still `dlsym` (aborting on a symbol it can never call).
-/// (Struct- and variant-name collisions are caught separately against the built registries, since
-/// those are user-declared.)
-/// Every reserved CALLABLE builtin name: the free functions (`print`/`panic`/`range`/`int`/`float`/
-/// `str`/`ord`/`chr`) and the container/runtime constructors (`List`/`Set`/`Map`/`bytes`/`bytearray`/
-/// `Channel`/`Shared`/`RwShared`/`Atomic`/`timer`/`Executor`). Every name here is CALLED (none is a
-/// pure type marker), so each must have a [`builtin_sig`] entry for editor hover — enforced by the
-/// `reserved_callables_all_have_builtin_sig` drift-guard test. (The generic ctors `Ok`/`Err`/`Some`
-/// are NOT reserved — a user may shadow them — so they are intentionally out of this set and keep
-/// hovering `None` for v1.)
-const RESERVED_CALLABLE: &[&str] = &[
+/// Every builtin callable name: the free functions, `print`, `panic` and the runtime constructors.
+/// Each is called (none is a pure type marker), so each must have a [`builtin_sig`] entry for
+/// editor hover (`builtin_callables_all_have_builtin_sig`). None of them is reserved: only keywords
+/// are, and a user declaration of one shadows it in its module.
+#[cfg(test)]
+const BUILTIN_CALLABLES: &[&str] = &[
     // builtin functions
     "int",
     "float",
@@ -390,47 +358,6 @@ const RESERVED_CALLABLE: &[&str] = &[
     "timer",
     "Executor",
 ];
-
-/// A name that is no longer a builtin but stays reserved so `range(n)` reports its removal
-/// (TICKET-253, owner answer 7 (v)); a user `fn range` or `extern fn range` is rejected like any
-/// reserved name. It has no `builtin_sig`, so it is not in `RESERVED_CALLABLE`.
-const REMOVED_CALLABLE: &[&str] = &["range"];
-
-fn is_reserved_name(name: &str) -> bool {
-    RESERVED_CALLABLE.contains(&name) || REMOVED_CALLABLE.contains(&name)
-}
-
-/// True iff `name` may NOT be an import-alias TARGET — a reserved builtin, whether CALLABLE
-/// (`import x as int`) or a pure reserved TYPE name (`import x as Result`). Aliasing TO either
-/// silently rebinds the builtin (the builtin wins at call/type sites, the import binding is dead),
-/// so both are rejected `reserved (builtin)`, symmetric with the struct/enum/type DECL guard which
-/// already rejects all of these via `is_reserved_type`. Reuses that same predicate — no second list.
-fn is_reserved_alias_target(name: &str) -> bool {
-    is_reserved_name(name) || is_reserved_type(name)
-}
-
-/// The four BUILT-IN variant constructors of `Result`/`Option`. They are NOT in `is_reserved_type`
-/// (a user may deliberately shadow them at a DECL site — see that fn's doc), so they need their own
-/// predicate for the places that must recognize them as builtin ctors.
-pub(super) fn is_builtin_variant(name: &str) -> bool {
-    matches!(name, "Ok" | "Err" | "Some")
-}
-
-/// True iff `name` may NOT be the bound name of a module import — ALIASED (`import lib.geo as Ok`)
-/// or UN-aliased (the last path segment: `import lib.int`). A module bind lands in the VALUE
-/// namespace, where it beats a same-named builtin/ctor in EXPRESSION position (`import std.str` used
-/// to make `str(5)` fail with "module str is not callable"). A RESERVED bound name is therefore
-/// rejected — the module stays usable under a non-reserved alias (`import lib.int as ints`).
-/// Covers reserved CALLABLES + reserved TYPE names (`is_reserved_alias_target`) + the builtin
-/// variant ctors.
-/// The FROM-import path guards the same VALUE namespace with `is_reserved_alias_target ||
-/// is_builtin_variant` (this same predicate) — see `bind_import`.
-/// A module bind colliding with a USER `fn` or type of the same name (`import lib.Point` +
-/// `struct Point`) is not gated here: `Checker::reject_import_decl_collisions` rejects it once the
-/// module's declarations are known ("'Point' is already imported", TICKET-180).
-pub(super) fn is_reserved_module_bind(name: &str) -> bool {
-    is_reserved_alias_target(name) || is_builtin_variant(name)
-}
 
 /// The kind of intrinsic a universe builtin lowers to on a DIRECT call. `Print` → the dedicated
 /// `Op::CallPrint`/`Op::CallPrintSep` opcodes (variadic + `sep=`/`end=`); `Builtin` →
@@ -1259,6 +1186,8 @@ struct Checker {
     /// TICKET-187 — the `std.json` module's id, when the graph holds it. `decode[T](s)` on this
     /// module (and only this one) is JSON decode (`Resolution::Decode`).
     json_module: Option<ModuleId>,
+    /// The runtime key of the `Range` struct `a..b` builds ([`crate::resolver::range_key`]).
+    range_key: String,
     /// Every dotted (2+ segment) whole-module import in the current module, as `(path, bound name,
     /// full path bound)` (TICKET-175). The third field is `false` for `import a.b as c`, which binds
     /// only `c`. Read only by the diagnostics for a full path that does not resolve (`a.b.X` after an

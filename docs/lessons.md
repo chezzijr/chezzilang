@@ -390,7 +390,7 @@ the freeze.
 ## 5. Native surface and stdlib
 
 - **A new builtin type/ctor/fn goes in its owning `std.*` module, import-gated, never the global
-  reserved namespace.** A global name is a one-way ratchet; a five-task cleanup existed only to undo
+  namespace.** A global name is a one-way ratchet; a five-task cleanup existed only to undo
   earlier ones. Gate is checker-only name resolution; a pure type/ctor also needs the `bind_import`
   skip or `import X from M` faults at runtime — cover with a test that *runs*.
 - **Qualified paths are a Go/Python hybrid** (TICKET-175): an un-aliased `import std.net` binds

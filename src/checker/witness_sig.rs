@@ -12,6 +12,9 @@ impl Checker {
     /// (un-imported) module: a type is private to its declaring module and must be imported. Picks
     /// the first declaring module in graph (deps-first) order.
     pub(super) fn unknown_type_msg(&self, n: &str) -> String {
+        if let Some(msg) = super::suggest::removed_name_message(n) {
+            return msg.to_string();
+        }
         if let Some(mods) = self.types_by_name.get(n)
             && let Some(m) = mods.first()
         {

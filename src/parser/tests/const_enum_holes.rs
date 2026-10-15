@@ -291,7 +291,7 @@ print(adder(1)(2))
 #[test]
 fn fused_bang_eq_is_bang_then_assign() {
     fn is_result(ty: &Type) -> bool {
-        matches!(ty, Type::Generic(n, args, _) if n == "Result" && args.len() == 1)
+        matches!(ty, Type::Generic(n, args, _) if *n == crate::ast::private_name("Result") && args.len() == 1)
     }
     match only("y: int!= 6\n") {
         StmtKind::Let { ty: Some(ty), .. } => assert!(is_result(&ty), "{ty:?}"),

@@ -234,7 +234,7 @@ fn optional_type_shorthand() {
     assert_eq!(
         decl.params[0].ty,
         Some(Type::Generic(
-            "Option".into(),
+            crate::ast::private_name("Option"),
             vec![Type::named("int")],
             Span::default()
         ))
@@ -250,7 +250,7 @@ fn result_type_shorthand() {
     assert_eq!(
         decl.ret,
         Some(Type::Generic(
-            "Result".into(),
+            crate::ast::private_name("Result"),
             vec![Type::named("int")],
             Span::default()
         ))
@@ -266,7 +266,7 @@ fn optional_shorthand_on_generic_base() {
     assert_eq!(
         decl.params[0].ty,
         Some(Type::Generic(
-            "Option".into(),
+            crate::ast::private_name("Option"),
             vec![Type::Generic(
                 "List".into(),
                 vec![Type::named("int")],
@@ -920,7 +920,7 @@ fn hello_example_inner_structure() {
     assert_eq!(
         safe_div.ret,
         Some(Type::Generic(
-            "Result".into(),
+            crate::ast::private_name("Result"),
             vec![Type::named("int")],
             Span::default()
         ))

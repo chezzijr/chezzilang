@@ -16,7 +16,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 |---|---|---|
 | Where a block ended (dedent, `else`, EOF) | `ended_at_block` (`parser/cursor.rs`) | Family A |
 | Where a block expression may start (value site) | `parse_value` (`parser/expr.rs`), `open_value` (`parser/expr.rs`) | U8 |
-| A removed spelling used as a bare name | `reject_removed_name` (`parser/mod.rs`) | |
+
 | Constant value of an expression | `eval` (`ast/consteval.rs`) | overflow lint, width check, const |
 | Fewest args a decl may be entered with | `min_callable_params` (`ast/mod.rs`) | DUPLICATE: `optional_tail` (`checker/mod.rs`) and its runtime copy in `native/mod.rs` |
 | Is this name the blank `_` | `is_blank_name` (`ast/mod.rs`) | the parser encodes a blank at every binding site (`Pattern::Wildcard`, an `else _:` binder as no binder); `tests/owner_guards.rs` rejects a `== "_"` anywhere else |
@@ -33,9 +33,11 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | What a name head means (Resolution per NodeId) | `resolve_path` (`checker/resolve.rs`), `classify_path` (`checker/resolve.rs`), `commit_resolution` (`checker/resolve.rs`) | TICKET-180/222 |
 | Module slot facts (kind, fn decl, keyword labels) | `GlobalBinding` (`checker/globals.rs`), `labels_certain` (`checker/globals.rs`) | TICKET-186 |
 | Does a head name a user type, which kind | `type_head` (`checker/scope.rs`) | |
-| Builtin callable names | `PRELUDE` (`checker/mod.rs`) | DUPLICATE: `RESERVED_CALLABLE` (`checker/mod.rs`), `REMOVED_CALLABLE` (`checker/mod.rs`), `BUILTIN_CALLEES` (`checker/resolve.rs`), the arms of `infer_builtin_call` (`checker/builtin_call.rs`), the VM name matches in `do_builtin` (`vm/builtins.rs`) and `invoke_value` (`vm/call.rs`) |
+| Builtin callable names | `PRELUDE` (`checker/mod.rs`) | DUPLICATE: the test-only list `BUILTIN_CALLABLES` (`checker/mod.rs`), `BUILTIN_CALLEES` (`checker/resolve.rs`), the arms of `infer_builtin_call` (`checker/builtin_call.rs`), the VM name matches in `do_builtin` (`vm/builtins.rs`) and `invoke_value` (`vm/call.rs`) |
 | Builtin type names | `is_builtin_type_name` (`checker/builtin_type.rs`), `from_name` (`checker/builtin_type.rs`) | |
-| Names reserved at a declaration site | `is_reserved_type` (`checker/mod.rs`) | every builtin type name plus the removed and callable names; one set at struct, enum, alias, protocol, type-param and import-alias sites (`reserved_type_names_grid`) |
+| Names a program may not declare | `is_keyword` (`lexer/mod.rs`) | keywords only. Every other name a module declares or imports shadows the builtin of that name in the module (`tests/shadowing_grid.rs`); lookup tries this module's own declarations before builtins (`declares_type_here` (`checker/resolve_type.rs`), `classify_ident` (`checker/resolve.rs`), `protocol_key` (`checker/setup.rs`)) |
+| A removed spelling (`Some`, `Result`, `range`, …) used with no declaration of it | `removed_name_message` (`checker/suggest.rs`) | reads `REMOVED_NAMES` (`parser/mod.rs`) |
+| The carriers' own names (`Option`, `Result`, `Some`, `Ok`, `Err`) | `private_name` (`ast/mod.rs`) | a user module reaches the carriers only through `T?`/`T!E`/`?v`/`!e`, which the parser and desugar spell privately; `seed_carrier_enums_from` (`checker/harvest.rs`) binds them so |
 | Is this name / param the receiver `self` | `is_self_name` (`ast/mod.rs`), `SELF` (`ast/mod.rs`) | `Param::is_self` and `FnDecl::takes_self` read it; whether a `self` param is a VALID receiver is `receiver` (`checker/sig.rs`); `tests/owner_guards.rs` rejects a `== "self"` anywhere else |
 | A user type's identity key `<module-key>::Name` | `user_type_keys` (`resolver/mod.rs`) | the checker's and the compiler's `type_keys` tables are both built from it |
 | The names a module binds as run-time globals, in slot order | `module_global_binds` (`resolver/mod.rs`) | the compiler's `collect_globals` builds the slot table from it; the checker's `entry_module_binds` (`checker/tables.rs`) reads it. DUPLICATE still: `collect_module_globals` (`checker/globals.rs`) walks the same statements for its per-slot records |
@@ -91,6 +93,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Hook calls | `invoke_hook` (`vm/method_call.rs`) | DUPLICATE: direct `run_proto` (`vm/frames.rs`) calls in `vm/call.rs`, `vm/method_call.rs` and `vm/step.rs`; waits on Family D |
 | Shared/RwShared box heap | `vm/boxctx.rs` | |
 | Range value at run time | `as_range` (`vm/range.rs`) | |
+| Runtime key of the `Range` struct `a..b` builds | `range_key` (`resolver/mod.rs`) | read by the checker's `range_ty` and `Program::range_key` |
 | How a native fn runs | `Kind` (`native/mod.rs`) | the third element of each `MEMBERS` row |
 
 ## Tests

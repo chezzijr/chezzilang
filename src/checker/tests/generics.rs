@@ -1383,30 +1383,6 @@ fn channel_trip_gated_to_bool() {
     );
 }
 
-#[test]
-fn redeclaring_comparable_rejected() {
-    rejects(
-        "protocol Comparable:\n    fn compare(self, other: Self) -> int\n",
-        "reserved",
-    );
-}
-
-#[test]
-fn redeclaring_convert_rejected() {
-    // `Convert` is a reserved (builtin) protocol (slice 1 of the Convert/From type-conversion work) —
-    // a user `protocol Convert[S]:` redeclaration is rejected, exactly like `Comparable`. Both the
-    // parameterized form (matching the prelude shape) and a bare `protocol Convert:` are reserved on
-    // the name alone.
-    rejects(
-        "protocol Convert[S]:\n    fn convert(x: S) -> Self\n",
-        "reserved",
-    );
-    rejects(
-        "protocol Convert:\n    fn convert(x: int) -> int\n",
-        "reserved",
-    );
-}
-
 // ----- Stringable protocol (M10-G1) -----
 
 #[test]
@@ -1484,14 +1460,6 @@ fn scalar_str_direct_call_is_bound_only() {
     // every sibling intrinsic protocol (none adds a first-class direct scalar method).
     rejects("x := (5).str()\n", "type int has no method 'str'");
     rejects("x := (5).compare(3)\n", "type int has no method 'compare'");
-}
-
-#[test]
-fn redeclaring_stringable_rejected() {
-    rejects(
-        "protocol Stringable:\n    fn str(self) -> str\n",
-        "reserved",
-    );
 }
 
 // ----- Hashable struct keys for map/set (key restriction lifted) -----
@@ -1744,11 +1712,6 @@ fn tuple_key_of_hashable_elements_checks_ok() {
     ok("fn f[T: Hashable](x: T) -> int:\n    return x.hash()\nprint(f((1, 2)))\n");
 }
 
-#[test]
-fn redeclaring_hashable_rejected() {
-    rejects("protocol Hashable:\n    fn hash(self) -> int\n", "reserved");
-}
-
 // ----- numeric operator protocols + multi-bound (M10-G3) -----
 
 const VEC2: &str = "\
@@ -1965,12 +1928,4 @@ fn list_min_max_return_option_and_keep_their_bound() {
     }
     // the `min_by` key type `K` is independent of the element type — `Option[str]` here, from `T`
     ok("xs := [\"bb\", \"a\"]\nv: str? = xs.max_by(fn(s: str) -> int: s.len())\n");
-}
-
-#[test]
-fn redeclaring_add_rejected() {
-    rejects(
-        "protocol Add:\n    fn add(self, other: Self) -> Self\n",
-        "reserved",
-    );
 }

@@ -153,8 +153,9 @@ impl Checker {
             return None;
         }
         match Self::carrier_variant(tag, ty) {
+            // The carrier's variant by its private spelling: no user declaration captures it.
             Ok((_, variant)) => Some(Pattern::Variant {
-                name: variant.to_string(),
+                name: crate::ast::private_name(variant),
                 id,
                 bindings: vec![inner.clone()],
                 enum_name: None,
@@ -225,6 +226,10 @@ impl Checker {
     ) -> Option<String> {
         match self.imported_variants.get(name).filter(|_| bare) {
             Some(iv) => (ekey == Some(iv.head.key.as_str())).then(|| iv.variant.clone()),
+            // A bare head no import binds names a variant only when one of that name is in scope
+            // (its use is then the qualify error); a carrier's variants are in no user module's
+            // scope, so `Some(v)` never reaches the carrier by its spelling.
+            None if bare && !self.variant_owners.contains_key(name) => None,
             None => Some(name.to_string()),
         }
     }
@@ -309,7 +314,10 @@ impl Checker {
                     // compiler routes it by the variant registry (a `MatchArm` test), so it would trap
                     // on the VM. Reject it here at check time instead.
                     if !ty.is_unknown() {
-                        self.error(span, format!("'{name}' is not a variant of {ty}"));
+                        self.error(
+                            span,
+                            format!("'{}' is not a variant of {ty}", crate::ast::unprivate(name)),
+                        );
                         return false;
                     }
                     // Over an un-inferable slot the nullary `None` is still the variant (a
@@ -536,7 +544,8 @@ impl Checker {
                                     self.error(
                                         span,
                                         format!(
-                                            "variant '{name}' binds {} value(s), but {} given",
+                                            "variant '{}' binds {} value(s), but {} given",
+                                            crate::ast::unprivate(name),
                                             payload.len(),
                                             bindings.len()
                                         ),
@@ -551,7 +560,13 @@ impl Checker {
                             }
                             None => {
                                 if !qualifier_reported {
-                                    self.error(span, format!("'{name}' is not a variant of {ty}"));
+                                    self.error(
+                                        span,
+                                        format!(
+                                            "'{}' is not a variant of {ty}",
+                                            crate::ast::unprivate(name)
+                                        ),
+                                    );
                                 }
                                 for b in bindings {
                                     self.bind_subpattern(
@@ -726,7 +741,8 @@ impl Checker {
             let Pattern::Variant { name, .. } = &variant else {
                 unreachable!("carrier_as_variant builds a Variant")
             };
-            let duplicate = covered.remove(name);
+            // `covered` holds variant names, never the private spelling the head carries.
+            let duplicate = covered.remove(crate::ast::unprivate(name));
             if duplicate {
                 self.error(
                     span,
@@ -887,7 +903,13 @@ impl Checker {
                             self.record_variant(*id, &label.clone(), name, span);
                         }
                         if payload.is_none() && !qualifier_reported {
-                            self.error(span, format!("'{name}' is not a variant of {scrut}"));
+                            self.error(
+                                span,
+                                format!(
+                                    "'{}' is not a variant of {scrut}",
+                                    crate::ast::unprivate(name)
+                                ),
+                            );
                         }
                         // Bind the payload FIRST, accumulating whether every sub-pattern is
                         // irrefutable (a wildcard or plain binding). A literal/range/nested-variant
@@ -900,7 +922,8 @@ impl Checker {
                                     self.error(
                                         span,
                                         format!(
-                                            "variant '{name}' binds {} value(s), but {} given",
+                                            "variant '{}' binds {} value(s), but {} given",
+                                            crate::ast::unprivate(name),
                                             payload.len(),
                                             bindings.len()
                                         ),
@@ -926,10 +949,11 @@ impl Checker {
                         // all-irrefutable payload (docs/syntax.md §8: a guarded arm is never
                         // irrefutable). Duplicate-arm detection fires only against a PRIOR fully
                         // closing arm, so a guard-then-fallback on the same variant is legal.
-                        if covered.contains(name) {
-                            self.error(span, format!("duplicate match arm '{name}'"));
+                        let variant = crate::ast::unprivate(name);
+                        if covered.contains(variant) {
+                            self.error(span, format!("duplicate match arm '{variant}'"));
                         } else if !guarded && payload_irref {
-                            covered.insert(name.to_string());
+                            covered.insert(variant.to_string());
                         }
                     }
                     Pattern::Literal(_) => self.error(
@@ -1522,11 +1546,14 @@ impl Checker {
             None => {
                 // A bare variant name in a pattern must be imported (`import V from Enum`, or the
                 // prelude's four) or written qualified.
-                if !self.imported_variants.contains_key(name)
-                    && self.variant_owners.contains_key(name)
-                {
-                    let hint = self.qualify_hint(name);
-                    self.error(span, hint);
+                if !self.imported_variants.contains_key(name) {
+                    if self.variant_owners.contains_key(name) {
+                        let hint = self.qualify_hint(name);
+                        self.error(span, hint);
+                    } else if let Some(msg) = super::suggest::removed_name_message(name) {
+                        // `Some(v)` / `Ok(v)` / `Err(e)`: removed spellings of `?v` / `!e`.
+                        self.error(span, msg);
+                    }
                 }
             }
         }

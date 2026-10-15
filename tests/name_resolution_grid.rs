@@ -188,9 +188,8 @@ const BINDERS: &[&str] = &[
 /// Cells the language rejects by a named declaration rule, with the rule.
 fn named_rejection(binder: &str, k: &Kind) -> Option<&'static str> {
     match (binder, k.tag) {
-        // `is_reserved_alias_target` (src/checker/mod.rs): an import alias may not take a
-        // builtin or reserved-type name.
-        ("import_alias", "builtin_fn" | "builtin_ctor" | "std_ctor") => Some("is reserved"),
+        // Only keywords are reserved (owner rule 2026-10-15): an import alias or a top-level `fn`
+        // named after a builtin shadows it, like every other binder here.
         // Two imports under one name.
         ("import_alias", "imported_fn" | "imported_type" | "module") => Some("already"),
         // A whole-module import and a same-module `fn` or type under one name (owner decisions
@@ -198,8 +197,6 @@ fn named_rejection(binder: &str, k: &Kind) -> Option<&'static str> {
         ("import_alias", "struct" | "enum" | "alias" | "defaulted_fn") => {
             Some("is already imported")
         }
-        // A top-level `fn` may not take a builtin / reserved name (`is_reserved_name`).
-        ("toplevel_fn", "builtin_fn" | "builtin_ctor" | "std_ctor") => Some("is reserved"),
         // Two top-level declarations of one name.
         ("toplevel_fn", "imported_fn" | "defaulted_fn") => Some("is already defined"),
         // A module global's type is frozen at its first declaration (the import).

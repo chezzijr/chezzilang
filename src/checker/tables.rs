@@ -376,7 +376,7 @@ pub fn resolve_call_tables_standalone_no_memo(stmts: &[Stmt]) -> CallTables {
 
 /// The synthetic one-module graph both standalone entry points wrap `stmts` in.
 #[cfg(test)]
-pub(super) fn standalone_graph(stmts: &[Stmt]) -> ModuleGraph {
+pub(crate) fn standalone_graph(stmts: &[Stmt]) -> ModuleGraph {
     let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
     ModuleGraph {
         entry: id.clone(),

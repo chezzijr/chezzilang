@@ -35,8 +35,8 @@ impl Checker {
                 _ if self.imported_alias_tys.contains_key(n) => self.imported_alias_tys[n].clone(),
                 _ if self.struct_names.contains(n) => Ty::strukt(self.bare_key(n)),
                 _ if self.enum_names.contains(n) => Ty::enum_ty(self.bare_key(n), Vec::new()),
-                _ if self.protocol_shape(n).is_some() => {
-                    Ty::Protocol(self.protocol_key(n), Vec::new())
+                _ if self.protocol_shape(&self.user_protocol_key(n)).is_some() => {
+                    Ty::Protocol(self.user_protocol_key(n), Vec::new())
                 }
                 _ => Ty::Unknown,
             },
@@ -56,8 +56,12 @@ impl Checker {
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
                         .collect(),
                 ),
-                _ if self.enum_names.contains(n) => {
-                    let key = self.bare_key(n);
+                _ if crate::ast::unprivate(n) != n.as_str() || self.enum_names.contains(n) => {
+                    let key = if crate::ast::unprivate(n) != n.as_str() {
+                        crate::ast::unprivate(n).to_string()
+                    } else {
+                        self.bare_key(n)
+                    };
                     let resolved = args
                         .iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
@@ -68,8 +72,8 @@ impl Checker {
                 // A parameterized protocol used as a value type (`Container[int]`). Mint the carried
                 // args so the read-only resolver no longer silent-accepts it as `Unknown` (which would
                 // erase the witness). Mirrors the mutable `resolve_type` protocol arm.
-                _ if self.protocol_shape(n).is_some() => Ty::Protocol(
-                    self.protocol_key(n),
+                _ if self.protocol_shape(&self.user_protocol_key(n)).is_some() => Ty::Protocol(
+                    self.user_protocol_key(n),
                     args.iter()
                         .map(|a| self.resolve_ty_ro_d(a, depth + 1))
                         .collect(),
@@ -218,7 +222,9 @@ impl Checker {
             }
             // RETURN-ONLY nullable `char*` (`str?` / `owned_str?`): the inner type decides
             // borrowed (`str` → OptStr) vs owned (`owned_str` → OptOwnedStr).
-            Type::Generic(n, args, ..) if n == "Option" && args.len() == 1 => {
+            Type::Generic(n, args, ..)
+                if crate::ast::unprivate(n) == "Option" && args.len() == 1 =>
+            {
                 match self.resolve_ctype_d(&args[0], depth + 1) {
                     Some(CType::Str) => Some(CType::OptStr),
                     Some(CType::OwnedStr) => Some(CType::OptOwnedStr),

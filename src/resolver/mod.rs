@@ -133,6 +133,16 @@ pub struct ModuleGraph {
     pub range_used: bool,
 }
 
+/// The runtime key of the `Range` struct `a..b` builds: the `Range` that graph module 0 declares.
+/// Module 0 is the prelude (the resolver visits it first), and a std type keeps its bare name. The
+/// test-only standalone graph has one module, which carries the prelude's declaration.
+pub fn range_key(graph: &ModuleGraph) -> String {
+    user_type_keys(graph)
+        .into_iter()
+        .find(|k| k.module == 0 && k.name == RANGE_STRUCT)
+        .map_or_else(|| RANGE_STRUCT.to_string(), |k| k.key)
+}
+
 impl ModuleGraph {
     /// TICKET-255 — true when `lm` is the prelude of a graph that builds no `Range` value: the checker
     /// and the compiler skip the bodies of its `Range` methods (the struct, fields and signatures stay).

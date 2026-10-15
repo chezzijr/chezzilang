@@ -192,7 +192,7 @@ pub const REMOVED_NAMES: [(&str, &str, &str, Option<&str>); 5] = [
 
 /// TICKET-253 -- the message of a call to the removed builtin `range`. `range` stays a reserved
 /// name only so that this message is reachable; nothing builds on it.
-const REMOVED_RANGE: &str = "`range()` is removed; write `0..n`, `a..b` or `Range(a, b, step)`; for a list write `List(0..n)`";
+pub const REMOVED_RANGE: &str = "`range()` is removed; write `0..n`, `a..b` or `Range(a, b, step)`; for a list write `List(0..n)`";
 
 /// TICKET-241 -- the one text for an `else` guard written where none exists (an assignment, a
 /// compound assignment, `return`). [`Parser::reject_else_guard`] is its only user.
@@ -346,19 +346,6 @@ impl Parser {
             ));
         }
         self.err(message)
-    }
-
-    /// TICKET-228 (D6) — reject a removed long carrier name read as a BARE name (expression
-    /// primary, type head, pattern head, import). A name after `.`, a declaration name, a field
-    /// and a keyword-argument label never reach here, so a user variant `Shadow.Some` stays legal.
-    fn reject_removed_name(&self, name: &str, span: Span) -> PResult<()> {
-        match REMOVED_NAMES.iter().find(|row| row.0 == name) {
-            Some(row) if !self.native_enums.iter().any(|n| n == row.1) => Err(ParseError {
-                message: row.2.to_string(),
-                span,
-            }),
-            _ => Ok(()),
-        }
     }
 
     /// The doc-comment attached to a declaration whose keyword sits on `decl_line`: the contiguous

@@ -51,6 +51,19 @@ pub(super) fn score(lookup: &str, cand: &str, limit: usize) -> Option<usize> {
     edit_distance(lookup, cand, limit)
 }
 
+/// The message for a name the language removed (`Some`, `Result`, `range`, …) when a program uses it
+/// and nothing in scope declares it: only keywords are reserved, so a declaration of the name is a
+/// different, ordinary name and never reaches here.
+pub(super) fn removed_name_message(name: &str) -> Option<&'static str> {
+    if name == "range" {
+        return Some(crate::parser::REMOVED_RANGE);
+    }
+    crate::parser::REMOVED_NAMES
+        .iter()
+        .find(|row| row.0 == name)
+        .map(|row| row.2)
+}
+
 /// TICKET-228 (D6) — the help for a near miss of a removed TYPE name (`option`, `Resul`): the
 /// replacement spelling, never the removed word. Reads the parser's one table of removed names.
 pub(super) fn removed_type_hint(lookup: &str) -> Option<String> {

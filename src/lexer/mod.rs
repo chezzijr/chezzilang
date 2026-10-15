@@ -728,6 +728,11 @@ impl Token {
 
 /// Look up whether an identifier is actually a keyword.
 /// HINT (sub-step 1e): call this after you've scanned a whole word.
+/// Whether `word` is a keyword: the only names a program may not declare.
+pub fn is_keyword(word: &str) -> bool {
+    keyword(word).is_some()
+}
+
 fn keyword(word: &str) -> Option<Token> {
     KEYWORDS
         .iter()

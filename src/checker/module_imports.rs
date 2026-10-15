@@ -209,7 +209,9 @@ impl Checker {
                 | StmtKind::Enum { name, .. }
                 | StmtKind::TypeAlias { name, .. }
                 | StmtKind::Protocol { name, .. } = &s.kind
-                    && !(matches!(s.kind, StmtKind::Protocol { .. }) && is_reserved_protocol(name))
+                    && !(matches!(s.kind, StmtKind::Protocol { .. })
+                        && is_reserved_protocol(name)
+                        && self.current_module_is_stdlib)
                 {
                     let key = self.type_key(mid, name);
                     self.bare_types.insert(name.clone(), key);
@@ -346,10 +348,6 @@ impl Checker {
                 if iv.head.name != en || iv.variant != variant {
                     self.error(span, format!("'{bind}' is already imported by the prelude"));
                 }
-                continue;
-            }
-            if crate::checker::is_reserved_alias_target(&bind) {
-                self.error(span, format!("import alias '{bind}' is reserved (builtin)"));
                 continue;
             }
             self.note_import_bind(&bind, span);
@@ -653,27 +651,8 @@ impl Checker {
                 let name = alias
                     .clone()
                     .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                // A whole-module bind lands in the VALUE namespace, where it BEATS a same-named
-                // builtin/ctor in EXPRESSION position (`import std.str` used to make `str(5)` fail with
-                // the confusing `module str is not callable`; `import lib.geo as Ok` kills the `Ok(...)`
-                // variant ctor). So a RESERVED bound name — the alias, or the last path segment when
-                // un-aliased — is REJECTED here; the module stays usable under a non-reserved alias,
-                // which the un-aliased diagnostic names. `is_reserved_module_bind` = reserved CALLABLE +
-                // reserved TYPE names + `nil` + the builtin variant ctors (`Ok`/`Err`/`Some`/`None`).
-                // (A collision with a USER-declared `fn` or type of the same name is rejected by
-                // `reject_import_decl_collisions`.)
-                if crate::checker::is_reserved_module_bind(&name) {
-                    let msg = if alias.is_some() {
-                        format!("import alias '{name}' is reserved (builtin)")
-                    } else {
-                        let path_str = path.join(".");
-                        format!(
-                            "module name '{name}' is reserved (builtin) — alias it: import {path_str} as {name}s"
-                        )
-                    };
-                    self.error(imp.span, msg);
-                    return;
-                }
+                // Only keywords are reserved: a module bound under a builtin's name (`import
+                // std.math as int`) shadows the builtin in this module, as a local binding does.
                 // The resolver's synthetic full-path bind (`a.b` for `import a.b`, TICKET-175).
                 let full = crate::ast::is_full_path_bind(&name);
                 let dotted = path.join(".");
@@ -859,46 +838,6 @@ impl Checker {
                 // anchors the decl-site hover at the bound import name.
                 for ((member, alias), name_span) in names.iter().zip(name_spans.iter()) {
                     let bind = alias.as_ref().unwrap_or(member);
-                    // Aliasing a `from` import TO a reserved builtin name (`import sqrt as int from
-                    // std.math`, or a reserved TYPE `import who as Result from lib`) silently rebinds
-                    // it: the builtin `int()` conversion / `Result` type wins at call/type sites and
-                    // the `as int` binding is DEAD — a silent wrong result with no diagnostic. Reject
-                    // it as `reserved (builtin)`, like `fn int()`. `is_reserved_alias_target` covers
-                    // BOTH reserved CALLABLE and reserved TYPE names (mirrors the decl-site guard). The `a != member`
-                    // guard is CRITICAL: reserved members that are themselves importable
-                    // (`Shared`/`Executor`/`timer`/…) must still import UN-aliased (bind == member) and
-                    // via a redundant self-rename (`as Shared`), so only a genuine RENAME to a reserved
-                    // name is gated here. Fresh non-reserved aliases (`import timer as t2`) are inert to
-                    // this check and fall through to the specialized rename-rejection arms below.
-                    // A from-import alias binds a VALUE, so `nil` stays legal here (a value still works
-                    // as a value — `is_reserved_alias_target`'s carve-out); only the MODULE bind adds
-                    // it. The builtin variant ctors ARE rejected (an alias to `Ok` would kill the
-                    // ctor in expression position).
-                    // The SAME hazard reaches the VALUE namespace through the UN-aliased MEMBER
-                    // spelling too: a module GLOBAL or FUNCTION named `str`/`int`/`Ok` (all legal at
-                    // their decl site) bind here and beat the builtin ctor in EXPRESSION position —
-                    // `import str from lib.sh` made `str(5)` fail with `int is not callable`. So the
-                    // reserved-name reject covers BOTH doors: a genuine RENAME to a reserved name (any
-                    // member kind), and a bare reserved member that BINDS A VALUE/FUNCTION. The
-                    // value/function scoping is what keeps a reserved TYPE member — the LICENSING
-                    // import of the builtin itself (`import Shared from std.concurrency`, `import ptr
-                    // from std.ffi`) — legal un-aliased; it binds no value.
-                    let reserved_bind = crate::checker::is_reserved_alias_target(bind)
-                        || crate::checker::is_builtin_variant(bind);
-                    let binds_value = sig.member(member).is_some();
-                    if reserved_bind && (alias.as_ref().is_some_and(|a| a != member) || binds_value)
-                    {
-                        let msg = if alias.is_some() {
-                            format!("import alias '{bind}' is reserved (builtin)")
-                        } else {
-                            format!(
-                                "imported name '{bind}' is reserved (builtin) — alias it: import {bind} as {bind}_ from {}",
-                                path.join(".")
-                            )
-                        };
-                        self.error(imp.span, msg);
-                        continue;
-                    }
                     // Reject a second import binding the same name (across ALL namespaces), but only
                     // when the member actually exists — a missing member is its own error below, and
                     // shouldn't also claim the name. The bind-name (alias wins) is the collision key,

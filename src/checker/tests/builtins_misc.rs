@@ -102,13 +102,6 @@ fn iterator_value_unknown_method_rejected() {
 }
 
 #[test]
-fn user_struct_named_iterator_rejected() {
-    // `Iterator` is reserved (it names the generator existential value type); a user `struct
-    // Iterator[T]` would be silently shadowed and crash on a phantom `.next()` — reject it.
-    rejects("struct Iterator[T]:\n    val: T\n", "is reserved");
-}
-
-#[test]
 fn yield_outside_generator_rejected() {
     rejects(
         "yield 1\n",
@@ -1196,11 +1189,6 @@ fn inline_diverging_body_infers_nil() {
         "fn boom(): panic(123)\nfn main():\n    boom()\nmain()\n",
         "panic() expects a str",
     );
-}
-
-#[test]
-fn panic_is_reserved_against_extern_shadowing() {
-    assert!(is_reserved_name("panic"));
 }
 
 #[test]

@@ -922,16 +922,7 @@ impl Parser {
             Token::True => ExprKind::Bool(true),
             Token::False => ExprKind::Bool(false),
             Token::NoneKw => ExprKind::NoneLit,
-            Token::Ident(name) => {
-                self.reject_removed_name(&name, span)?;
-                if name == "range" && self.check(&Token::LParen) {
-                    return Err(ParseError {
-                        message: REMOVED_RANGE.to_string(),
-                        span,
-                    });
-                }
-                ExprKind::Ident(name)
-            }
+            Token::Ident(name) => ExprKind::Ident(name),
             Token::LParen => {
                 // `()` stays unchanged (no inner expr → falls through to the error path below);
                 // `(e)` is grouping; `(e1, e2, …)` is a tuple; `(e,)` is a parse error.

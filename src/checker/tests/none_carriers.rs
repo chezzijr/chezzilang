@@ -1242,13 +1242,12 @@ fn a_user_file_cannot_name_none() {
     }
 }
 
-/// TICKET-237 — the prelude-variant clash names no enum: the user cannot write `Option`. Red if
-/// the text is `'Some' is already imported from Option by the prelude` again.
+/// `Some` is no name a user module sees (the carriers are reached only through `?v` / `!e`), so a
+/// user may bind it: `import A as Some from E` is an ordinary import.
 #[test]
-fn prelude_variant_clash_names_no_enum() {
+fn a_user_import_may_bind_the_removed_name_some() {
     let errs = check_entry("enum E:\n    A\n    B\nimport A as Some from E\nprint(1)\n");
-    let texts: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
-    assert_eq!(texts, ["'Some' is already imported by the prelude"]);
+    assert!(errs.is_empty(), "{errs:?}");
 }
 
 #[test]

@@ -6,16 +6,6 @@ use super::*;
 
 // ----- M23 — the `Eq` protocol (checker foundation; the `==` dispatch itself lands later) -----
 
-/// `Eq` is a reserved prebuilt protocol exactly like `Comparable` — a user redeclaration is rejected
-/// on the NAME alone (mirrors `redeclaring_comparable_rejected`).
-#[test]
-fn redeclaring_eq_rejected() {
-    rejects(
-        "protocol Eq:\n    fn eq(self, other: Self) -> bool\n",
-        "reserved",
-    );
-}
-
 /// The intrinsic scalar grant: ALL FOUR scalars satisfy `Eq` with no user method — `==` is defined
 /// on every scalar (unlike `Comparable`, which excludes `bool`). What a NON-scalar does is D1's
 /// question, pinned by `eq_is_satisfied_by_every_type_whose_equality_is_structural` below.
@@ -2055,11 +2045,6 @@ fn type_alias_mismatch_still_rejected() {
 #[test]
 fn type_alias_to_collection_ok() {
     ok("type Scores = Map[str, int]\ns: Scores = {\"a\": 1}\nn: int = s[\"a\"]\n");
-}
-
-#[test]
-fn type_alias_reserved_name_rejected() {
-    rejects("type int = str\n", "reserved");
 }
 
 #[test]

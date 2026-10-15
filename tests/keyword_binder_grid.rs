@@ -1,6 +1,7 @@
 //! TICKET-237 — only a keyword cannot be bound, and `None` is a keyword like `true` and `false`.
-//! Every binder and declaration form rejects a keyword with ONE parse error; a local, a parameter
-//! or a loop variable may still shadow a builtin function or type name (`print := 5`), and RUNS.
+//! Every binder and declaration form rejects a keyword with ONE parse error; every other name —
+//! a builtin fn or type, `len`, a removed spelling (`Some`) — may be bound or declared by every
+//! form and shadows the builtin in its scope (owner rule 2026-10-15: only keywords are reserved).
 //! The grid is binder form x name, each cell pinned to what `chezzi run` prints.
 
 use std::path::{Path, PathBuf};
@@ -45,10 +46,12 @@ enum Cell {
     Runs(&'static str),
     /// Non-zero exit and stderr contains this text.
     Fails(&'static str),
+    /// Exit 0 and nothing on stdout (a declaration shadowed `print`, so `print(1)` prints nothing).
+    Silent,
     /// `Fails` with the one keyword-as-a-name message, naming the cell's keyword.
     Keyword,
 }
-use Cell::{Fails, Keyword, Runs};
+use Cell::{Fails, Keyword, Runs, Silent};
 
 const NAMES: [&str; 11] = [
     "None", "true", "false", "if", "self", "print", "int", "len", "List", "nil", "Some",
@@ -69,7 +72,7 @@ const SELF_PARAM: &str = "'self' is only allowed as the first parameter of a met
 /// (form, template, the cell per name in `NAMES` order). `NAME` in a template is the cell's name.
 #[rustfmt::skip]
 const GRID: [(&str, &str, [Cell; 11]); 26] = [
-    ("T01 walrus", "NAME := 5\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':=' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Fails("`Some(x)` is removed; write `x` or `?x` (pattern `?v`)")]),
+    ("T01 walrus", "NAME := 5\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':=' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T02 typed binding", "NAME: int = 4\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T03 const binding", "NAME: const int = 4\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T04 for destructuring", "for a, NAME in [(1, 2)]:\n    pass\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
@@ -77,24 +80,24 @@ const GRID: [(&str, &str, [Cell; 11]); 26] = [
     ("T06 lambda param", "g := fn(NAME: int) -> int: 1\nprint(g(2))\n", [Keyword, Keyword, Keyword, Keyword, Fails(SELF_PARAM), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T07 for var", "for NAME in [1, 2]:\n    pass\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T08 comprehension var", "print([1 for NAME in [1, 2]])\n", [Keyword, Keyword, Keyword, Keyword, Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]"), Runs("[1, 1]")]),
-    ("T09 tuple pattern", "x: (int, int) = (3, 4)\nmatch x:\n    (NAME, b): print(1)\n", [Fails("variant pattern 'None' cannot match a value of type int"), Fails("literal of type bool cannot match a value of type int"), Fails("literal of type bool cannot match a value of type int"), Keyword, Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Fails("`Some(x)` is removed; write `x` or `?x` (pattern `?v`)")]),
+    ("T09 tuple pattern", "x: (int, int) = (3, 4)\nmatch x:\n    (NAME, b): print(1)\n", [Fails("variant pattern 'None' cannot match a value of type int"), Fails("literal of type bool cannot match a value of type int"), Fails("literal of type bool cannot match a value of type int"), Keyword, Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T10 else binder", "fn r() -> int!str:\n    return 1\nfn m() -> int:\n    v := r() else NAME:\n        return 0\n    return v\nprint(m())\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
-    ("T11 wait arm", "ch := Channel[int](1)\nch.send(1)\nwait:\n    NAME := ch.recv():\n        print(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':=' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Fails("`Some(x)` is removed; write `x` or `?x` (pattern `?v`)")]),
-    ("T12 fn name", "fn NAME(x: int) -> int:\n    return x\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Fails("function name 'NAME' is reserved (builtin)"), Fails("function name 'NAME' is reserved (builtin)"), Runs("1"), Fails("function name 'NAME' is reserved (builtin)"), Runs("1"), Runs("1")]),
+    ("T11 wait arm", "ch := Channel[int](1)\nch.send(1)\nwait:\n    NAME := ch.recv():\n        print(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':=' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T12 fn name", "fn NAME(x: int) -> int:\n    return x\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Silent, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T13 nested fn name", "fn outer() -> int:\n    fn NAME(x: int) -> int:\n        return x\n    return 1\nprint(outer())\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T14 method name", "struct S:\n    x: int\n    fn NAME(self) -> int:\n        return 1\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
-    ("T15 struct name", "struct NAME:\n    x: int\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Runs("1")]),
-    ("T16 enum name", "enum NAME:\n    A\n    B\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Runs("1")]),
-    ("T17 type alias name", "type NAME = int\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Runs("1")]),
-    ("T18 protocol name", "protocol NAME:\n    fn go(self) -> int\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Runs("1")]),
-    ("T19 generic param", "fn f[NAME](x: NAME) -> int:\n    return 1\nprint(f(2))\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Fails("type 'NAME' is reserved (builtin)"), Runs("1"), Fails("`Some(x)` is removed; write `x` or `?x` (pattern `?v`)")]),
+    ("T15 struct name", "struct NAME:\n    x: int\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Silent, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T16 enum name", "enum NAME:\n    A\n    B\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T17 type alias name", "type NAME = int\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T18 protocol name", "protocol NAME:\n    fn go(self) -> int\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T19 generic param", "fn f[NAME](x: NAME) -> int:\n    return 1\nprint(f(2))\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Fails("expected return type int, found int"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T20 field", "struct S:\n    NAME: int\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
     ("T21 variant", "enum E:\n    NAME\n    B\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
-    ("T22 module alias", "import std.math as NAME\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Fails("import alias 'NAME' is reserved (builtin)"), Fails("import alias 'NAME' is reserved (builtin)"), Runs("1"), Fails("import alias 'NAME' is reserved (builtin)"), Runs("1"), Fails("import alias 'NAME' is reserved (builtin)")]),
-    ("T23 import alias", "import sqrt as NAME from std.math\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Fails("import alias 'NAME' is reserved (builtin)"), Fails("import alias 'NAME' is reserved (builtin)"), Runs("1"), Fails("import alias 'NAME' is reserved (builtin)"), Runs("1"), Fails("import alias 'NAME' is reserved (builtin)")]),
-    ("T24 extern fn", "extern \"libm\":\n    fn NAME(x: float) -> float\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Fails("symbol 'NAME' not found in 'libm'"), Fails("'NAME' is a builtin/reserved name and cannot be an extern fn"), Fails("'NAME' is a builtin/reserved name and cannot be an extern fn"), Fails("symbol 'NAME' not found in 'libm'"), Fails("'NAME' is a builtin/reserved name and cannot be an extern fn"), Fails("symbol 'NAME' not found in 'libm'"), Fails("'NAME' is a builtin/reserved name and cannot be an extern fn")]),
-    ("T25 destructuring let, first", "NAME, a := 1, 2\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ',' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Fails("`Some(x)` is removed; write `x` or `?x` (pattern `?v`)")]),
-    ("T26 destructuring let, second", "a, NAME := 1, 2\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':=' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Fails("`Some(x)` is removed; write `x` or `?x` (pattern `?v`)")]),
+    ("T22 module alias", "import std.math as NAME\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Fails("module print is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T23 import alias", "import sqrt as NAME from std.math\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Runs("1"), Fails("argument 1 of 'print': expected float, found int"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T24 extern fn", "extern \"libm\":\n    fn NAME(x: float) -> float\nprint(1)\n", [Keyword, Keyword, Keyword, Keyword, Fails("symbol 'NAME' not found in 'libm'"), Fails("argument 1 of 'print': expected float, found int"), Fails("symbol 'NAME' not found"), Fails("symbol 'NAME' not found in 'libm'"), Fails("symbol 'NAME' not found"), Fails("symbol 'NAME' not found in 'libm'"), Fails("symbol 'NAME' not found")]),
+    ("T25 destructuring let, first", "NAME, a := 1, 2\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ',' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
+    ("T26 destructuring let, second", "a, NAME := 1, 2\nprint(1)\n", [Keyword, Keyword, Keyword, Fails("unexpected ':=' in expression"), Runs("1"), Fails("int is not callable"), Runs("1"), Runs("1"), Runs("1"), Runs("1"), Runs("1")]),
 ];
 
 /// The message of the first diagnostic line of `stderr`, without its `kind (file:line:col): `.
@@ -119,6 +122,10 @@ fn binder_form_by_name_grid() {
                 Runs(t) => (
                     out.status.success() && stdout == format!("{t}\n"),
                     format!("runs and prints {t:?}"),
+                ),
+                Silent => (
+                    out.status.success() && stdout.is_empty(),
+                    "runs and prints nothing".to_string(),
                 ),
                 Fails(t) => {
                     let t = t.replace("NAME", name);

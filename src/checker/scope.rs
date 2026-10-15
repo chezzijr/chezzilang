@@ -143,7 +143,7 @@ impl Checker {
                     // A reserved protocol is never exported: `prebuilt_protocols` stays the live
                     // source for its 21 names (mirrored, drift-guarded, in `std/prelude.chz`), so
                     // exporting it here would put a second, sig-borne copy into `sig.types`.
-                    if !is_reserved_protocol(name)
+                    if !(is_reserved_protocol(name) && self.current_module_is_stdlib)
                         && let Some(info) = self.protocol_shape(name).cloned()
                     {
                         let doc = self.name_docs.get(name).cloned();
@@ -467,13 +467,13 @@ impl Checker {
             TypeHeadKind::Struct
         } else if self.enum_names.contains(name) {
             TypeHeadKind::Enum
-        } else if self.protocols.contains_key(&self.protocol_key(name)) {
+        } else if self.protocols.contains_key(&self.user_protocol_key(name)) {
             TypeHeadKind::Protocol
         } else {
             return alias_type_head(name, name.to_string(), self.alias_body_ty(name)?);
         };
         let key = if kind == TypeHeadKind::Protocol {
-            self.protocol_key(name)
+            self.user_protocol_key(name)
         } else {
             self.bare_key(name)
         };

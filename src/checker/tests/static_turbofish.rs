@@ -488,19 +488,6 @@ fn div_mod_neg_struct_overload_typechecks() {
     );
 }
 
-/// Error must be a reserved protocol name (it's prebuilt) — previously omitted.
-#[test]
-fn error_is_reserved_protocol() {
-    rejects("protocol Error:\n    fn message(self) -> str\n", "reserved");
-}
-
-/// A user cannot REDECLARE the reserved `Any` protocol — even with the new empty-body `pass` form.
-/// The prelude mirror is exempt (validate-and-no-op stdlib hoist); a user module's is rejected.
-#[test]
-fn user_redeclare_of_any_rejected() {
-    rejects("protocol Any:\n    pass\n", "reserved");
-}
-
 /// GENERALIZATION GUARD: a USER empty protocol (`protocol Foo:\n    pass`) is an accept-all top type
 /// byte-identical to the reserved `Any` — accepts scalars + structs as a param and types a
 /// heterogeneous list. The accept-all behaviour is NOT special-cased on the literal name "Any".
@@ -566,21 +553,6 @@ fn empty_struct_with_valid_hash_ok() {
         \x20   seen: Set[S] = {S()}\n\
         \x20   print(seen.len())\n\
         main()\n");
-}
-
-/// Div/Mod/Neg are reserved protocol names.
-#[test]
-fn div_mod_neg_are_reserved_protocols() {
-    rejects(
-        "protocol Div:\n    fn div(self, other: Self) -> Self\n",
-        "reserved",
-    );
-    rejects(
-        "protocol Mod:\n    fn mod(self, other: Self) -> Self\n",
-        "reserved",
-    );
-    rejects("protocol Neg:\n    fn neg(self) -> Self\n", "reserved");
-    rejects("protocol Arithmetic:\n    Add\n", "reserved");
 }
 
 /// `[T: Div]` / `[T: Mod]` / `[T: Neg]` generic bounds flow, with int instantiation.
@@ -966,7 +938,7 @@ fn index_and_slice_on_a_protocol_existential() {
 }
 
 /// Drift guard (editor hover): EVERY reserved callable builtin must have a `builtin_sig` entry, so a
-/// future builtin added to `RESERVED_CALLABLE` can't silently lose hover. The set is exactly the
+/// future builtin added to `BUILTIN_CALLABLES` can't silently lose hover. The set is exactly the
 /// CALLABLE reserved names — the free functions (`print`/`panic`/`range`/`int`/`float`/`str`/`ord`/
 /// `chr`) and the container/runtime constructors (`List`/`Set`/`Map`/`bytes`/`bytearray`/`Channel`/
 /// `Shared`/`RwShared`/`Atomic`/`timer`/`Executor`); none is a pure type marker, so each one is
@@ -974,20 +946,18 @@ fn index_and_slice_on_a_protocol_existential() {
 /// user may shadow them — so they're out of scope and keep hovering `None` for v1.) `is_reserved_name`
 /// is the single source: `builtin_sig` is keyed off the same names.
 #[test]
-fn reserved_callables_all_have_builtin_sig() {
+fn builtin_callables_all_have_builtin_sig() {
     // `builtin_sig` is now a Checker METHOD (phase 3a): the nine migrated universe builtins source
     // their sig from the always-linked std/prelude.chz, seeded here via `seed_native_prelude_sigs`
     // (the single-module `check` path does the same). `print` + the container/runtime ctors stay
     // hard-coded, so they resolve without the seed too.
     let mut c = Checker::new();
     c.seed_native_prelude_sigs();
-    for name in RESERVED_CALLABLE {
+    for name in BUILTIN_CALLABLES {
         assert!(
             c.builtin_sig(name).is_some(),
             "reserved callable builtin '{name}' has no builtin_sig entry → it would lose editor hover"
         );
-        // And the const slice IS the reserved-name set (refactor stayed behavior-identical).
-        assert!(is_reserved_name(name), "'{name}' must be a reserved name");
     }
     // Sanity: a non-reserved name has no builtin sig (no accidental over-coverage).
     assert!(c.builtin_sig("Ok").is_none());
@@ -1058,7 +1028,7 @@ fn prelude_table_is_single_source_of_truth() {
 
     // (2) `is_firstclass_builtin_fn` is the table's `.first_class` view — over the WHOLE reserved
     //     callable universe, so a table row (or its absence) is the one truth for first-classness.
-    for name in RESERVED_CALLABLE {
+    for name in BUILTIN_CALLABLES {
         assert_eq!(
             is_firstclass_builtin_fn(name),
             prelude_fn(name).is_some_and(|p| p.first_class),

@@ -192,11 +192,13 @@ impl Checker {
                 Resolution::VariantFn { enum_key, variant }
             });
         }
-        if n == "print" || is_firstclass_builtin_fn(n) || BUILTIN_CALLEES.contains(&n) {
-            return Some(Resolution::Builtin(n.to_string()));
-        }
+        // A struct this module sees beats a builtin of its name (only keywords are reserved): a
+        // user `struct int` makes `int(4)` its constructor.
         if let Some(key) = ctor {
             return Some(Resolution::StructCtor(key));
+        }
+        if n == "print" || is_firstclass_builtin_fn(n) || BUILTIN_CALLEES.contains(&n) {
+            return Some(Resolution::Builtin(n.to_string()));
         }
         // A value call through a module-level binding outside the scope stack (an imported value).
         Some(Resolution::Global {

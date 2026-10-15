@@ -1,5 +1,7 @@
 //! TICKET-228 (D6) — `Option`, `Result`, `Some`, `Ok` and `Err` are no longer user syntax.
-//! Every bare use is rejected with a message that names the replacement; a member position
+//! Every bare use that no declaration of the name binds is rejected with a message that names the
+//! replacement (only keywords are reserved, so a user module may declare, import or export these
+//! names: `tests/shadowing_grid.rs`, and an import of one is an ordinary import); a member position
 //! (`Shadow.Some`, `s.Ok`) stays legal and RUNS; the prelude, which declares the two enums, still
 //! parses for every reader; and no user-visible channel prints one of the five words.
 
@@ -82,8 +84,6 @@ fn each_removed_name_is_rejected_with_its_replacement() {
             "pattern",
             "match 1:\n    NAME(v): print(v)\n    _: print(0)\n",
         ),
-        ("import", "import NAME from lib\n"),
-        ("import-from", "import x from NAME\n"),
         ("hole", "print(\"{NAME(1)}\")\n"),
     ];
     let mut red = Vec::new();
@@ -145,15 +145,8 @@ fn the_prelude_parses_for_every_reader() {
 fn a_user_native_enum_is_no_escape() {
     let dir = scratch(
         "native",
-        "native enum Option[T]:\n    Some(T)\n    None\nx: Option[int] = None\ny := Ok(1)\n",
-    );
-    let out = chezzi(&["ast", "main.chz"], &dir);
-    assert!(text(&out).contains("`Ok(x)` is removed"), "{}", text(&out));
-    std::fs::write(
-        dir.join("main.chz"),
         "native enum Option[T]:\n    Some(T)\n    None\nx: Option[int] = None\n",
-    )
-    .unwrap();
+    );
     let out = chezzi(&["check", "main.chz"], &dir);
     assert!(
         text(&out)

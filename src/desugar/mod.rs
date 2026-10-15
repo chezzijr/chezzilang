@@ -1582,7 +1582,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
                         span: arm_span,
                         pattern: variant_pat(
                             nid(),
-                            "Some",
+                            &crate::ast::private_name("Some"),
                             vec![Pattern::Ident(c.clone(), Span::default(), nid())],
                         ),
                         guard: None,
@@ -1642,7 +1642,11 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
                 Expr {
                     id: wrap_id,
                     kind: ExprKind::Call {
-                        callee: Box::new(ident_expr_at(some_id, "Some", span)),
+                        callee: Box::new(ident_expr_at(
+                            some_id,
+                            &crate::ast::private_name("Some"),
+                            span,
+                        )),
                         args: vec![access],
                         named: vec![],
                         type_args: vec![],
@@ -1659,7 +1663,7 @@ fn lower_carrier_option_as(expr: &mut Expr, tmp: usize, void: bool) {
                         span: arm_span,
                         pattern: variant_pat(
                             nid(),
-                            "Some",
+                            &crate::ast::private_name("Some"),
                             vec![Pattern::Ident(c, Span::default(), nid())],
                         ),
                         guard: None,
@@ -1742,7 +1746,7 @@ pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
                 span: arm_span,
                 pattern: variant_pat(
                     nid(),
-                    "Ok",
+                    &crate::ast::private_name("Ok"),
                     vec![Pattern::Ident(c.clone(), Span::default(), nid())],
                 ),
                 guard: None,
@@ -1750,7 +1754,11 @@ pub fn lower_carrier_result_coalesce(expr: &mut Expr, tmp: usize) {
             },
             MatchExprArm {
                 span: arm_span,
-                pattern: variant_pat(nid(), "Err", vec![Pattern::Wildcard]),
+                pattern: variant_pat(
+                    nid(),
+                    &crate::ast::private_name("Err"),
+                    vec![Pattern::Wildcard],
+                ),
                 guard: None,
                 body: *rhs,
             },
@@ -2273,13 +2281,13 @@ mod tests {
         let Pattern::Variant { name, bindings, .. } = &arms[0].pattern else {
             panic!("expected a variant pattern, got {:?}", arms[0].pattern)
         };
-        assert_eq!(name, "Ok");
+        assert_eq!(*name, crate::ast::private_name("Ok"));
         assert_eq!(bindings.len(), 1);
         assert!(matches!(&bindings[0], Pattern::Ident(n, _, _) if n == "__opt0"));
         let Pattern::Variant { name, bindings, .. } = &arms[1].pattern else {
             panic!("expected a variant pattern, got {:?}", arms[1].pattern)
         };
-        assert_eq!(name, "Err");
+        assert_eq!(*name, crate::ast::private_name("Err"));
         assert_eq!(bindings.len(), 1);
         assert!(matches!(&bindings[0], Pattern::Wildcard));
     }

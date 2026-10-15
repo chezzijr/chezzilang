@@ -439,7 +439,9 @@ impl Checker {
 
     /// The type of a `Range` value: the prelude struct every module sees (TICKET-253).
     pub(super) fn range_ty(&self) -> Ty {
-        Ty::Struct(self.bare_key("Range"), Vec::new())
+        // The prelude's `Range`, whatever this module declares: `a..b` is syntax, so it means the
+        // struct the compiler builds. A module's own `struct Range` shadows only the NAME.
+        Ty::Struct(self.range_key.clone(), Vec::new())
     }
 
     /// The result type of `obj[a..b]` — the `Slice` protocol's arg. `list[T] → list[T]`, `str → str`;
@@ -493,7 +495,7 @@ impl Checker {
     /// declaration's); a use site never calls this on a stored bound.
     pub(super) fn resolve_bound(&mut self, b: &Bound, span: Span) -> TyBound {
         TyBound {
-            name: self.protocol_key(&b.name),
+            name: self.user_protocol_key(&b.name),
             args: b.args.iter().map(|a| self.resolve_type(a, span)).collect(),
         }
     }

@@ -21,6 +21,7 @@ impl Checker {
                 c.json_module = Some(lm.id.clone());
             }
         }
+        c.range_key = crate::resolver::range_key(graph);
         // ROOT REDESIGN — module-scoped IDENTITY KEYS: scan every non-native module's struct/enum/alias
         // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
         // derivation the compiler uses), so the checker, compiler, and VM agree on every key (parity) and
@@ -28,9 +29,6 @@ impl Checker {
         // Std modules' types are RESERVED/NATIVE and keep their BARE name, so `Iterator`/FFI widths
         // resolve bare, like the synthetic natives (`user_type_keys` skips them).
         for k in crate::resolver::user_type_keys(graph) {
-            if k.is_protocol && is_reserved_protocol(&k.name) {
-                continue;
-            }
             c.type_keys
                 .insert((graph.modules[k.module].id.clone(), k.name), k.key);
         }
@@ -133,8 +131,8 @@ impl Checker {
                 // Gated on actually HAVING an import, so every pure-native module's live-table state is
                 // byte-identical to before this change.
                 if !lm.imports.is_empty() {
-                    c.begin_module(Some(lm.label()));
                     c.current_module_is_stdlib = true;
+                    c.begin_module(Some(lm.label()));
                     c.push_scope(); // `bind_import` declares the bound name — it needs a live scope
                     for imp in &lm.imports {
                         c.bind_import(imp);
@@ -200,8 +198,8 @@ impl Checker {
                         || matches!(&s.kind, StmtKind::NativeStruct { bodied_methods, .. } if !bodied_methods.is_empty())
                 });
                 if has_bodied {
-                    c.begin_module(Some(lm.label()));
                     c.current_module_is_stdlib = true;
+                    c.begin_module(Some(lm.label()));
                     c.push_scope();
                     // Bind this native module's own imports so a bodied fn body can use them (a native
                     // `.chz` may `import` like any other module; deps are checked earlier in graph order,
@@ -295,6 +293,9 @@ impl Checker {
             if c.carrier_seeds.enums.is_empty() && lm.dotted == ["std", "prelude"] {
                 c.carrier_seeds = c.harvest_native_enums(&lm.ast);
             }
+            // Set before `begin_module`: its carrier seed reads it (a user module sees the carriers
+            // only through `T?` / `T!E`).
+            c.current_module_is_stdlib = lm.is_std();
             c.begin_module(label);
             // Stamp the current module's graph index so the extern loop keys its resolved C signatures
             // the SAME way both backends look them up. `None` outside the harvesting pass.
@@ -302,7 +303,6 @@ impl Checker {
             // Maintained on every graph pass (cheap) so a recorded value+keyword call is keyed under
             // the SAME module index the backends derive — mirrors the extern-sig keying.
             c.graph_module_idx = idx;
-            c.current_module_is_stdlib = lm.is_std();
             let mut sig = c.check_module(&lm.ast.stmts, Some(&lm.id), &lm.imports);
             // Phase 5a-containers — capture the always-linked prelude's `List`/`Map`/`Set`/`Channel`
             // native-struct METHOD tables so `seed_stdlib_structs` can re-seed them (bare, method-table

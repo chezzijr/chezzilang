@@ -332,11 +332,11 @@ These types come from the language/runtime; see [`concurrency.md`](concurrency.m
 > **`import std.concurrency` required for `Shared` / `RwShared` / `Atomic` / `AtomicInt` / `Executor`.** These
 > are NOT global builtins — a module must `import std.concurrency` (whole-module licenses all of them) or
 > `import Shared from std.concurrency` (per-name) before it can use them; bare use otherwise is an
-> `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They also
-> stay **reserved names** (a user `struct Shared`/`struct Executor` is rejected). `Channel` stays global
+> `unknown type 'Shared' (import it from std.concurrency: \`import std.concurrency\`)` error. They are not
+> reserved: only keywords are, so a module that declares its own `struct Shared` shadows the builtin there. `Channel` stays global
 > (no import needed). `timer(ms)` now requires **`import std.time`** (whole-module, or `import timer from
 > std.time`) — bare use otherwise is an `unknown function 'timer' (import it from std.time: \`import
-> std.time\`)` error. `timer` stays a reserved name too (no user `struct timer`/`fn timer`).
+> std.time\`)` error.
 >
 > **Qualified / aliased path (additive).** Every import-gated native type above is **also** reachable
 > by the module-member path, exactly like a `.chz` module type or `regex.Match`: after
@@ -466,7 +466,7 @@ The monomorphic-int sibling of `Atomic[T]` — no `[T]`, so it is backed by a ge
 `std::sync::atomic::AtomicI64` (Rust `AtomicI64` / Java `AtomicInteger` / Go `atomic.Int64` style) instead
 of a `Mutex`. Reach for it over `Atomic(0)` for a hot int counter/flag under contention (measured ~2.7×
 faster than the Mutex-backed `Atomic` on an 8-way counter; see [`benchmarks.md`](benchmarks.md)). Same
-import gate + reserved name as `Atomic`. Constructed `AtomicInt(v)` (one int arg; `AtomicInt(3.5)` is a
+import gate as `Atomic`. Constructed `AtomicInt(v)` (one int arg; `AtomicInt(3.5)` is a
 type error).
 
 ### `concurrency.is_task_copy` — is this value an airlock copy?
@@ -629,7 +629,7 @@ works. Details and the residual cases in `docs/gaps.md` (`W7-12r / W7-15`) and `
 - `Listener`: `accept(timeout_ms?: int) -> Socket!` · `addr() -> str!` · `close() -> None`.
   `close()` from another task wakes a task parked in `accept`; that call returns the error `accept on a
   closed listener` (Go's `Close` cancelling a blocked `Accept`).
-- `Socket`/`Listener` are **reserved type names** (no user `struct Socket`) and a bare annotation
+- `Socket`/`Listener` are std type names (a module may declare its own `struct Socket`, which shadows it) and a bare annotation
   requires `import std.net` (whole-module, or `import Socket from std.net`) — they are NOT global
   builtins, matching the `Shared`/`Executor` (std.concurrency) and `ptr` (std.ffi) gates.
 
@@ -1238,7 +1238,7 @@ Non-blocking TCP (scheduler-aware). `connect(addr: "host:port") -> Socket!` ·
 are the `!e`); match or `?` them, the bare handle is never handed back. Socket/Listener methods are in
 §3. See `concurrency.md`.
 The `Socket`/`Listener` TYPE names require `import std.net` to use bare in an annotation (whole-module,
-or `import Socket from std.net`) — they are reserved names, not global builtins.
+or `import Socket from std.net`) — they are not global builtins.
 **Text and binary:** `Socket.read -> str!` decodes UTF-8 and never lossily (see §3) — a split
 codepoint is carried across reads and reassembled exactly, while a **binary** payload is a clear `!e`
 (never silent U+FFFD). For binary, use `Socket.read_bytes` / `write_bytes` (§3): they never decode, and

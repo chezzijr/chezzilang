@@ -157,11 +157,6 @@ impl Checker {
     }
 
     pub(super) fn fn_sig(&mut self, decl: &FnDecl, span: Span, owner: Option<&Ty>) -> FnSig {
-        // A free fn's or method's own type param `[U]` may not be named after a reserved builtin type
-        // (`fn id[int]`). This is the SOLE funnel for free fns AND struct/enum methods (it is
-        // hoist-only, so it fires once per decl — a method's `[U]` is checked here while the struct's
-        // `[T]` is checked at the struct hoist, no overlap).
-        self.reject_reserved_type_params(&decl.type_params);
         // A method's own `[U]` may not reuse a type parameter already in scope (the struct's `[T]`):
         // it would be a confusing double-binding. `self.type_params` is empty for a free fn, so this
         // only fires for methods declared inside a generic struct.

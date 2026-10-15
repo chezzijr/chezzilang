@@ -1258,20 +1258,6 @@ fn import_plus_same_name_enum_still_already_defined() {
     );
 }
 
-// REGRESSION: genuine GLOBAL reserved types stay `reserved (builtin)` — the collision-message fix
-// for imported natives must not touch the true-reserved path.
-#[test]
-fn struct_reserved_global_still_reserved() {
-    entry_rejects(
-        "struct int:\n    x: int\nfn main():\n    print(1)\nmain()\n",
-        "reserved (builtin)",
-    );
-    entry_rejects(
-        "struct Channel:\n    x: int\nfn main():\n    print(1)\nmain()\n",
-        "reserved (builtin)",
-    );
-}
-
 // PHASE-4b BUG: `harvest_native_module` resolves the regex fns' return types (which reference the
 // import-gated `Match`, e.g. `find -> Result[Option[Match]]`) via `resolve_type` while running in the
 // native-module arm WITHOUT `begin_module` — so `self.structs` is LEFTOVER from the previously-checked

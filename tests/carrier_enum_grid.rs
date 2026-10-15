@@ -481,12 +481,12 @@ fn carrier_enum_grid() {
     );
     only(
         c,
-        "V10 a user fn named like a removed name cannot be called bare",
+        "V10 a user fn named like a removed name is an ordinary fn (only keywords are reserved)",
         &[(
             "main.chz",
             "fn Some(x: int) -> int:\n    return x + 1\nprint(Some(1))\n",
         )],
-        Rejects("`Some(x)` is removed; write `x` or `?x`"),
+        Prints("2"),
     );
     only(
         c,
@@ -508,12 +508,12 @@ fn carrier_enum_grid() {
     );
     only(
         c,
-        "V13 an explicit import may not bind a removed name",
+        "V13 an explicit import may bind a removed name",
         &[(
             "main.chz",
-            "enum Mine:\n    Some(int)\n    Nada\nimport Some, Nada from Mine\n",
+            "enum Mine:\n    Some(int)\n    Nada\nimport Some, Nada from Mine\nmatch Some(4):\n    Some(n): print(n)\n    Nada: print(0)\n",
         )],
-        Rejects("`Some(x)` is removed; write `x` or `?x`"),
+        Prints("4"),
     );
     only(
         c,
@@ -559,12 +559,12 @@ fn carrier_enum_grid() {
     );
     only(
         c,
-        "V18 a reserved alias",
+        "V18 an alias named after a builtin fn shadows it",
         &[(
             "main.chz",
-            "enum Color:\n    Red\nimport Red as print from Color\n",
+            "enum Color:\n    Red\nimport Red as print from Color\nx := print\nmatch x:\n    Color.Red: panic(\"red\")\n",
         )],
-        Rejects("import alias 'print' is reserved (builtin)"),
+        Rejects("red"),
     );
     only(
         c,

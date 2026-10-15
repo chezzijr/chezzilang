@@ -562,7 +562,7 @@ impl Checker {
     /// typing. The eight MIGRATED universe builtins (`ord`/`chr`/`panic`/`int`/`float`/`str`/`bytes`/
     /// `bytearray`) source their sig from `std/prelude.chz` via [`Checker::native_prelude_sigs`]; the
     /// still-synthetic `print` + container/runtime ctors fall through to [`builtin_container_sig`].
-    /// Covers exactly [`RESERVED_CALLABLE`] (drift-guarded). Not used for direct-call typing (the
+    /// Covers exactly [`BUILTIN_CALLABLES`] (drift-guarded). Not used for direct-call typing (the
     /// `infer_named_call` arms handle that) — only hover + the first-class value form.
     pub(super) fn builtin_sig(&self, name: &str) -> Option<FnSig> {
         if let Some(sig) = self.native_prelude_sigs.get(name) {

@@ -118,42 +118,6 @@ main()
     );
 }
 
-/// ONE-WAY RATCHET (supersedes commit 9829f94): a reserved builtin TYPE name used as a user
-/// generic type parameter is REJECTED at check time with `type 'X' is reserved (builtin)` — it is
-/// NOT silently shadowed into a usable type param. 9829f94 made these shadow-and-run (the
-/// behavior this guards-against now), which violated the reserved-name discipline (a scalar param
-/// is dead/unreferenceable; a container/enum-builtin param silently shadows the builtin). The
-/// reject happens in `check_graph` (the gate the bare `run_capture` helpers skip), so the program
-/// never reaches the engine at all — there is nothing to run. Asserted via
-/// the full `build_graph` + `check_graph` CLI path.
-#[test]
-fn type_param_named_like_reserved_rejected_at_check() {
-    for name in [
-        "Executor",
-        "ptr",
-        "Socket",
-        "Listener",
-        "Writer",
-        "Reader",
-        "owned_str",
-    ] {
-        let src = format!(
-            "fn id[{name}](x: {name}) -> {name}:\n    return x\nfn main():\n    print(id(1))\nmain()\n"
-        );
-        let t = TmpDir::new();
-        let entry = t.write("main.chz", &src);
-        let graph = crate::resolver::build_graph(&entry).expect("resolve");
-        match crate::checker::check_graph(&graph) {
-            Ok(()) => panic!("type param named {name} must be rejected as reserved (builtin)"),
-            Err(errs) => assert!(
-                errs.iter()
-                    .any(|e| e.message.contains("reserved (builtin)")),
-                "type param named {name} must error reserved (builtin), got: {errs:?}"
-            ),
-        }
-    }
-}
-
 // ----- Task 2 (option a): user protocol existentials cross the airlock -----
 
 /// A concrete struct widened to a user protocol existential rides a `Channel[Proto]` to a spawned

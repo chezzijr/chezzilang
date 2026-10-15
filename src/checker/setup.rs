@@ -121,6 +121,7 @@ impl Checker {
             module_sigs: HashMap::new(),
             imported_modules: HashMap::new(),
             json_module: None,
+            range_key: crate::resolver::RANGE_STRUCT.to_string(),
             import_paths: Vec::new(),
             implicit_binds: HashMap::new(),
             ambiguous_binds: HashMap::new(),
@@ -446,6 +447,11 @@ impl Checker {
         info: &StructInfo,
         implicit: bool,
     ) {
+        // A module's own declaration shadows the import no one wrote (only keywords are reserved):
+        // `struct Range:` in a user module is that module's `Range`.
+        if implicit && self.bare_types.get(bind).is_some_and(|own| own != key) {
+            return;
+        }
         if implicit {
             self.implicit_import_names.insert(bind.to_string());
         }
@@ -466,6 +472,17 @@ impl Checker {
             .unwrap_or_else(|| name.to_string())
     }
 
+    /// The key of a protocol name the USER wrote (a bound, an annotation, an embed): a module's own
+    /// protocol shadows a builtin of the same name (only keywords are reserved). Every other reader
+    /// asks [`Checker::protocol_key`], which gives the builtin.
+    pub(super) fn user_protocol_key(&self, name: &str) -> String {
+        if is_reserved_protocol(name) && self.bare_types.contains_key(name) {
+            self.bare_key(name)
+        } else {
+            self.protocol_key(name)
+        }
+    }
+
     /// The runtime key for a protocol name: unchanged (bare) for a [`RESERVED_PROTOCOLS`] member,
     /// else [`Checker::bare_key`] (mirrors the struct/enum treatment, TICKET-027). Falls back to
     /// [`Checker::protocol_alias_key`] ONLY when `name` misses as a protocol directly — alias-first
@@ -475,6 +492,9 @@ impl Checker {
         if let Some(key) = self.qualified_protocol_key(name) {
             return key;
         }
+        // A builtin protocol's name is its key: the checker's own references (`==` reads `Eq`,
+        // a map key needs `Hashable`) always mean the builtin. A name the USER wrote resolves
+        // through `user_protocol_key`, where a module's own protocol shadows the builtin.
         let key = if is_reserved_protocol(name) {
             name.to_string()
         } else {

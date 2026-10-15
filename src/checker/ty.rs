@@ -1038,17 +1038,29 @@ impl Ty {
         })
     }
 
-    /// Every nominal (struct/enum/protocol) identity key inside `self`, at any depth.
+    /// Every nominal (struct/enum/protocol) identity key inside `self`, at any depth, plus the
+    /// display name of each builtin or type-parameter leaf.
     fn collect_nominal_keys(&self, out: &mut std::collections::BTreeSet<String>) {
         match self {
+            // A builtin container prints its bare head name (`List[int]`), so the head joins the
+            // group of a user type that shadows it, as a leaf does below.
             Ty::List(t)
             | Ty::Set(t)
-            | Ty::Option(t)
             | Ty::Channel(t)
             | Ty::Shared(t)
             | Ty::RwShared(t)
-            | Ty::Atomic(t) => t.collect_nominal_keys(out),
-            Ty::Map(a, b) | Ty::Result(a, b) => {
+            | Ty::Atomic(t) => {
+                let shown = self.to_string();
+                out.insert(shown[..shown.find('[').unwrap_or(shown.len())].to_string());
+                t.collect_nominal_keys(out);
+            }
+            Ty::Map(a, b) => {
+                out.insert("Map".to_string());
+                a.collect_nominal_keys(out);
+                b.collect_nominal_keys(out);
+            }
+            Ty::Option(t) => t.collect_nominal_keys(out),
+            Ty::Result(a, b) => {
                 a.collect_nominal_keys(out);
                 b.collect_nominal_keys(out);
             }
@@ -1061,6 +1073,8 @@ impl Ty {
                 out.insert(n.clone());
                 args.iter().for_each(|t| t.collect_nominal_keys(out));
             }
+            // A builtin or a type parameter prints its bare name, so it joins the group of a
+            // user type that shadows that name: `expected int, found m.int`.
             Ty::Int
             | Ty::Float
             | Ty::Bool
@@ -1076,10 +1090,10 @@ impl Ty {
             | Ty::Writer
             | Ty::Reader
             | Ty::Ptr
-            | Ty::Width(_)
-            | Ty::Module(_)
-            | Ty::Unknown
-            | Ty::Var(_) => {}
+            | Ty::Width(_) => {
+                out.insert(self.to_string());
+            }
+            Ty::Module(_) | Ty::Unknown | Ty::Var(_) => {}
         }
     }
 

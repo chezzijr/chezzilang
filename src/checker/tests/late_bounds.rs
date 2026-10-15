@@ -722,23 +722,6 @@ fn range_struct_is_in_scope_with_no_import() {
     ok("r := Range(0, 3)\nfn f(q: Range) -> int:\n    return q.step\n");
 }
 
-#[test]
-fn a_user_struct_named_range_is_reserved() {
-    rejects("struct Range:\n    a: int\n", "reserved");
-}
-
-/// A user `fn range` stays a reserved name (the name only carries the removal error).
-#[test]
-fn a_user_fn_named_range_is_reserved() {
-    rejects("fn range(n: int) -> int:\n    return n\n", "reserved");
-}
-
-/// A user `fn Range` is rejected where it is declared, not at a use of the injected import.
-#[test]
-fn a_user_fn_named_after_the_range_type_is_reserved() {
-    rejects("fn Range(a: int) -> int:\n    return a\n", "reserved");
-}
-
 /// Each index is typed once: `xs[xs[xs[..i..]]]` costs one `index_value` entry per subscript, so
 /// 24 levels cost at most twice 12 levels plus a constant. Typed twice per level it is 2^depth.
 /// Counted, not timed (`no_new_rust_test_reads_a_wall_clock`).

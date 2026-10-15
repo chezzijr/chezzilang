@@ -987,7 +987,6 @@ impl Parser {
                 } else {
                     self.expect_ident_or_none()?
                 };
-                self.reject_removed_name(&name, member_span)?;
                 let (alias, bound_span) = if self.eat(&Token::As) {
                     let alias_span = self.cur_span();
                     (Some(self.expect_ident()?), alias_span)
@@ -1001,11 +1000,7 @@ impl Parser {
                 }
             }
             self.expect(&Token::From)?;
-            let from_span = self.cur_span();
             let path = self.parse_dotted_path()?;
-            if let Some(first) = path.first() {
-                self.reject_removed_name(first, from_span)?;
-            }
             Ok(Import::From {
                 path,
                 names,

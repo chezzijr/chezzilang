@@ -877,74 +877,6 @@ fn timer_from_import_licenses_and_rejects_rename() {
 }
 
 #[test]
-fn timer_still_reserved() {
-    // The import gate (must-import-to-use) is SEPARATE from the reserved-name gate (can't-shadow):
-    // `timer` STAYS reserved, so a user `struct timer` / `fn timer` is rejected even with the import.
-    entry_rejects(
-        "struct timer:\n    n: int\nfn main():\n    print(1)\nmain()\n",
-        "reserved",
-    );
-    entry_rejects(
-        "fn timer():\n    print(1)\nfn main():\n    print(1)\nmain()\n",
-        "reserved",
-    );
-}
-
-#[test]
-fn import_alias_to_reserved_int_from_rejected() {
-    // `import sqrt as int from std.math` silently rebinds the reserved builtin `int` callable:
-    // at runtime the `int()` conversion wins and the `as int` binding is dead — a SILENT WRONG
-    // RESULT. Aliasing an import TO a reserved builtin name must be rejected as `reserved (builtin)`,
-    // exactly like `fn int()` / an extern named `int`.
-    entry_rejects(
-        "import sqrt as int from std.math\nfn main():\n    print(int(9.0))\nmain()\n",
-        "reserved",
-    );
-}
-
-#[test]
-fn import_module_as_reserved_int_rejected() {
-    // `import std.math as int` was accepted, then `int(9.0)` failed with the confusing
-    // `module int is not callable`. Reject the alias-to-reserved binding up front.
-    entry_rejects(
-        "import std.math as int\nfn main():\n    print(int(9.0))\nmain()\n",
-        "reserved",
-    );
-}
-
-#[test]
-fn import_alias_to_reserved_type_from_rejected() {
-    // Finding B: `import who as Result from lib` silently rebound a reserved TYPE name (Result/
-    // Option/Iterator/Socket/Listener/ptr/owned_str) — the alias guard only covered reserved
-    // CALLABLE names, so the type-name case slipped through while `import who as int` was rejected.
-    // Now symmetric with the decl-site guard (`is_reserved_type`): reject as `reserved (builtin)`.
-    for ty in [
-        "Result",
-        "Option",
-        "Iterator",
-        "Socket",
-        "Listener",
-        "ptr",
-        "owned_str",
-    ] {
-        entry_rejects(
-            &format!("import sqrt as {ty} from std.math\nfn main():\n    print(1)\nmain()\n"),
-            "reserved",
-        );
-    }
-}
-
-#[test]
-fn import_module_as_reserved_type_rejected() {
-    // Same asymmetry on the whole-module aliased path: `import std.math as Result` silently rebound
-    // the reserved TYPE name. Reject it up front, mirroring `import std.math as int`.
-    entry_rejects(
-        "import std.math as Result\nfn main():\n    print(1)\nmain()\n",
-        "reserved",
-    );
-}
-
-#[test]
 fn import_alias_nil_from_accepted() {
     // BOUNDARY: `nil` is an ordinary name (TICKET-231), so it is a legal alias target.
     let t = TmpDir::new();
@@ -1040,14 +972,6 @@ fn executor_is_sendable() {
     // The handle crosses the airlock like Channel/Shared — submitting from a spawned task is legal.
     entry_ok(
         "import std.concurrency\nfn use_ex(ex: Executor):\n    ex.submit(fn(): print(1))\nfn main():\n    ex := Executor()\n    parallel:\n        spawn use_ex(ex)\n    ex.shutdown()\nmain()\n",
-    );
-}
-
-#[test]
-fn executor_user_struct_named_executor_rejected() {
-    rejects(
-        "struct Executor:\n    n: int\nfn main():\n    print(1)\nmain()\n",
-        "reserved",
     );
 }
 
@@ -1153,93 +1077,6 @@ fn bare_concurrency_type_with_import_needs_type_arg() {
 }
 
 #[test]
-fn type_param_named_like_reserved_type_rejected() {
-    // ONE-WAY RATCHET: a reserved builtin TYPE name used as a generic type PARAMETER is rejected with
-    // the same `type 'X' is reserved (builtin)` error `struct int` gives — it is NOT silently
-    // shadowed. Pre-fix these all type-checked clean and shadowed kind-dependently (a scalar param =
-    // dead/unreferenceable, a container/enum-builtin param = real shadowing generic). Covers the
-    // bare-concurrency names (Shared/RwShared/Atomic), the license-gated names (Executor, ptr), and
-    // the runtime-handle names (Socket, Listener, owned_str) — all in `is_reserved_type`.
-    for (src, name) in [
-        (
-            "fn id[Shared](x: Shared) -> Shared:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
-            "Shared",
-        ),
-        (
-            "fn id[RwShared](x: RwShared) -> RwShared:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
-            "RwShared",
-        ),
-        (
-            "fn id[Atomic](x: Atomic) -> Atomic:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
-            "Atomic",
-        ),
-        (
-            "fn id[Executor](x: Executor) -> Executor:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
-            "Executor",
-        ),
-        (
-            "fn id[ptr](x: ptr) -> ptr:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
-            "ptr",
-        ),
-        (
-            "fn id[Socket](x: Socket) -> Socket:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
-            "Socket",
-        ),
-        (
-            "fn id[Listener](x: Listener) -> Listener:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
-            "Listener",
-        ),
-        (
-            // Int arg (not a str literal) so this is a GENUINE red-before-green guard: pre-fix
-            // `owned_str` hijacks to Ty::Str, making `id(1)` an int-vs-str error; the fix makes it a
-            // free type param so `id(1)` type-checks. A str arg would pass in BOTH states (no guard).
-            "fn id[owned_str](x: owned_str) -> owned_str:\n    return x\nfn main():\n    print(id(1))\nmain()\n",
-            "owned_str",
-        ),
-    ] {
-        let errs = check_entry(src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains("reserved (builtin)")),
-            "{name} as a type param must be rejected as reserved (builtin), got: {errs:?}"
-        );
-    }
-}
-
-#[test]
-fn reserved_builtin_type_names_rejected_as_type_params() {
-    // A reserved builtin type name used as a generic type-PARAMETER identifier must be rejected with
-    // the same `type 'X' is reserved (builtin)` error `struct int` produces — across struct, enum,
-    // free fn, struct method (its own `[U]`), protocol, AND the fixed-width FFI integer
-    // names. Pre-fix every one of these type-checked clean (then shadowed kind-dependently). Uses the
-    // real build_graph + check_graph entrypoint path (module-prefixed keys), guarding the CLI path.
-    for (src, name) in [
-        // struct, scalar param (dead/unreferenceable shadow pre-fix)
-        ("struct Box[int]:\n    v: int\n", "int"),
-        // struct, container builtin (real shadowing generic pre-fix)
-        ("struct Box[List]:\n    v: int\n", "List"),
-        // struct, enum builtin
-        ("struct Box[Result]:\n    v: int\n", "Result"),
-        // enum
-        ("enum E[int]:\n    A\n", "int"),
-        // free fn
-        ("fn id[int](x: int) -> int:\n    return x\n", "int"),
-        // struct method's OWN type param (covered at fn_sig, distinct from the struct's `[T]`)
-        (
-            "struct Box[T]:\n    v: T\n    fn get[str](self) -> T:\n        return self.v\n",
-            "str",
-        ),
-        // protocol type param
-        ("protocol P[int]:\n    fn f(self)\n", "int"),
-        // FFI fixed-width name (reserved via native::ffi::is_width)
-        ("struct Box[int32]:\n    v: int\n", "int32"),
-    ] {
-        entry_rejects(src, "reserved (builtin)");
-        let _ = name;
-    }
-}
-
-#[test]
 fn reserved_typeparam_fix_does_not_overreject() {
     // BOUNDARY (must-NOT-over-reject): the reserved-type-param guard checks param NAMES only. A
     // normal `[T]`, multi-param `[K, V]`, a word param, a free generic fn, and a protocol-BOUNDED
@@ -1250,42 +1087,6 @@ fn reserved_typeparam_fix_does_not_overreject() {
     entry_ok("struct Box[Item]:\n    v: Item\n");
     entry_ok("fn id[T](x: T) -> T:\n    return x\n");
     entry_ok("fn pick[T: Comparable](a: T, b: T) -> T:\n    return a\n");
-}
-
-#[test]
-fn bare_reserved_type_without_typeparam_still_errors() {
-    // The hoist of the `type_params` arm must NOT over-shadow a reserved/module name that is NOT an
-    // in-scope type param: a bare annotation with no matching type param still emits its import hint
-    // exactly as before. Guards the behavior-preserving half of the fix.
-    let errs = check_entry("fn f(ex: Executor):\n    print(1)\nfn main():\n    print(1)\nmain()\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("unknown type 'Executor'")
-                && e.message.contains("import std.concurrency")),
-        "bare Executor (no type param) must still emit the std.concurrency import hint, got: {errs:?}"
-    );
-    let errs = check_entry("fn f(p: ptr):\n    print(1)\nfn main():\n    print(1)\nmain()\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("unknown type 'ptr'")
-                && e.message.contains("import std.ffi")),
-        "bare ptr (no type param) must still emit the std.ffi import hint, got: {errs:?}"
-    );
-    // Declaration-site reservedness: `struct Executor` rejected (reserved builtin); `struct Socket` is
-    // ALSO reserved now (Hole A — the std.net handle name can't be shadowed by a user struct, same as
-    // every other builtin TYPE name).
-    let errs = check_entry("struct Executor:\n    x: int\nfn main():\n    print(1)\nmain()\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("Executor") && e.message.contains("reserved")),
-        "struct Executor must stay reserved, got: {errs:?}"
-    );
-    let errs = check_entry("struct Socket:\n    x: int\nfn main():\n    print(1)\nmain()\n");
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("Socket") && e.message.contains("reserved")),
-        "struct Socket must be reserved, got: {errs:?}"
-    );
 }
 
 #[test]
@@ -1330,18 +1131,6 @@ fn concurrency_partial_import_collection_does_not_license() {
 }
 
 #[test]
-fn concurrency_names_still_reserved() {
-    // CRITICAL FIX 1 — the four stay RESERVED names: a user cannot declare a struct over them even
-    // after the import gate landed. This is a SEPARATE gate from the import requirement; both apply.
-    for name in ["Shared", "RwShared", "Atomic", "AtomicInt", "Executor"] {
-        rejects(
-            &format!("struct {name}:\n    n: int\nfn main():\n    print(1)\nmain()\n"),
-            "reserved",
-        );
-    }
-}
-
-#[test]
 fn atomic_int_bare_unlicensed_errors() {
     // AtomicInt is import-gated: a bare `AtomicInt(0)` WITHOUT `import std.concurrency` must emit the
     // std.concurrency import hint (the reserved-name hole check's static half). Both the ctor call and
@@ -1376,126 +1165,6 @@ fn atomic_int_bare_unlicensed_errors() {
 }
 
 // ----- namespace name-leak: builtin TYPE names reserved at declaration -----
-
-#[test]
-fn reserved_builtin_type_names_rejected_at_decl() {
-    // HOLE A — every bare name `resolve_type` maps to a builtin (scalar / container / handle) must be
-    // rejected at the DECLARATION site (`struct X` / `enum X`), not silently shadow the builtin at the
-    // use-site. Previously only `is_reserved_type`'s 8 names were blocked, so `struct int` / `enum List`
-    // / `struct Socket` type-checked clean then mis-resolved the use-site to the builtin.
-    for name in [
-        "int",
-        "float",
-        "bool",
-        "str",
-        "bytes",
-        "bytearray",
-        "List",
-        "Set",
-        "Map",
-        "Channel",
-        "range",
-        "Socket",
-        "Listener",
-        "ptr",
-        "owned_str",
-    ] {
-        let struct_src = format!("struct {name}:\n    x: int\nfn main():\n    print(1)\nmain()\n");
-        let errs = check_entry(&struct_src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains(name) && e.message.contains("reserved (builtin)")),
-            "struct {name} must be rejected as reserved, got: {errs:?}"
-        );
-        let enum_src = format!("enum {name}:\n    A\nfn main():\n    print(1)\nmain()\n");
-        let errs = check_entry(&enum_src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains(name) && e.message.contains("reserved (builtin)")),
-            "enum {name} must be rejected as reserved, got: {errs:?}"
-        );
-    }
-    // `None` is a keyword (TICKET-237), so the parser rejects it as a type name.
-    parse_rejects("struct None:\n    x: int\n", "reserved keyword");
-    parse_rejects("enum None:\n    A\n", "reserved keyword");
-    // An FFI fixed-width type name (`int32`) is reserved too (via native::ffi::is_width) — `struct int32` / `enum
-    // int32` must be rejected, matching the TypeAlias guard.
-    for src in [
-        "struct int32:\n    x: int\nfn main():\n    print(1)\nmain()\n",
-        "enum int32:\n    A\nfn main():\n    print(1)\nmain()\n",
-    ] {
-        let errs = check_entry(src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains("int32") && e.message.contains("reserved (builtin)")),
-            "int32 decl must be rejected as reserved, got: {errs:?}"
-        );
-    }
-}
-
-#[test]
-fn protocol_named_reserved_type_rejected_at_decl() {
-    // A `protocol X` whose name is a reserved builtin TYPE must be rejected at the DECL site, exactly
-    // like `struct X` / `enum X`. Previously the protocol guard only checked `is_reserved_protocol`,
-    // so `protocol List` / `protocol int` type-checked clean then surfaced as a self-contradictory
-    // `type int does not satisfy int` when used as a generic bound.
-    for name in [
-        "int",
-        "float",
-        "bool",
-        "str",
-        "bytes",
-        "bytearray",
-        "List",
-        "Set",
-        "Map",
-        "Channel",
-        "range",
-        "Result",
-        "Option",
-        "Socket",
-        "Shared",
-        "Executor",
-        "Atomic",
-    ] {
-        let src = format!(
-            "protocol {name}:\n    fn foo(self) -> int\nfn main():\n    print(1)\nmain()\n"
-        );
-        let errs = check_entry(&src);
-        assert!(
-            errs.iter()
-                .any(|e| e.message.contains(name) && e.message.contains("reserved (builtin)")),
-            "protocol {name} must be rejected as reserved, got: {errs:?}"
-        );
-    }
-    // `None` is a keyword (TICKET-237), so the parser rejects it as a protocol name.
-    parse_rejects(
-        "protocol None:\n    fn foo(self) -> int\n",
-        "reserved keyword",
-    );
-    // Boundary #2 — a NON-reserved protocol name still type-checks clean (guard is not over-broad).
-    entry_ok("protocol Drawable:\n    fn draw(self)\nfn main():\n    print(1)\nmain()\n");
-    entry_ok("protocol Eqz:\n    fn eqz(self) -> bool\nfn main():\n    print(1)\nmain()\n");
-    // Boundary #3 — `Iterator` is BOTH a reserved protocol and a reserved type; the reserved-protocol
-    // arm wins by ordering, so exactly ONE error fires, keeping the `protocol ...` wording (no double
-    // diagnostic).
-    let errs =
-        check_entry("protocol Iterator:\n    fn next(self)\nfn main():\n    print(1)\nmain()\n");
-    let reserved: Vec<_> = errs
-        .iter()
-        .filter(|e| e.message.contains("reserved (builtin)"))
-        .collect();
-    assert_eq!(
-        reserved.len(),
-        1,
-        "protocol Iterator must give exactly one reserved error, got: {errs:?}"
-    );
-    assert!(
-        reserved[0].message.contains("protocol"),
-        "Iterator keeps protocol wording, got: {:?}",
-        reserved[0].message
-    );
-}
 
 #[test]
 fn bare_net_type_without_import_hints_import() {

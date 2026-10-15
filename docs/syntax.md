@@ -1385,8 +1385,8 @@ type satisfies it (scalars `int`/`float`/`bool`/`str` and `None` included, not j
 is the honest element type of a universal slot such as `print(...args: Any)`, and can annotate any
 binding or parameter (`x: Any = 42`, `fn log(v: Any) -> None`). It is **not** dynamic typing: an `Any`
 value carries no methods, so you can pass it around and display it but not call methods on it (a
-downcast `cast[T]` is a documented future addition — see `docs/future.md`). `Any` is a reserved
-protocol name (a program may not redeclare it). `Any` is now **expressible** as an ordinary empty
+downcast `cast[T]` is a documented future addition — see `docs/future.md`). `Any` is a prebuilt
+protocol name (a module that declares its own `Any` shadows it there). `Any` is now **expressible** as an ordinary empty
 protocol — it is defined in the prelude as `protocol Any:` with a lone `pass` body — and **any**
 user empty protocol behaves identically to it (see [`pass`](#the-pass-keyword) below): an empty
 protocol is a general accept-all top type, not a special case keyed on the name `Any`.
@@ -1752,7 +1752,7 @@ List([5, 6, 7].iter())     # [5, 6, 7]   (a cursor IS an Iterator[T], so List()/
 # but reusing one exhausted cursor yields nothing on a second pass. Driving a NAMED cursor with `for`,
 # `List(it)` or `Set(it)` CONSUMES it in place (advances the shared position, exactly like `.next()`),
 # so a partial `for … break` then leaves the remainder for a later `next()`/`List()`. A cursor IS sendable across
-# `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are reserved type names.
+# `spawn` — it crosses the airlock as a deep copy, like a `list`. `Iterable` / `Iterator` are prebuilt names.
 
 # `yield` / generators (run on the sole M:N VM engine; a live frame-local generator IS sendable across a task airlock — it crosses by value as an independent deep copy of its execution state, incl. one suspended mid-`recover:`; a module-GLOBAL generator crosses by value too — the earlier reach-gate + poison-snapshot model was RETIRED 2026-07-21. D4, TICKET-179: at a `spawn` crossing each frame value is a task copy only when the parent can still reach it — a frame-local list the parent never saw stays writable in the task, a list the generator yielded and the parent still holds faults on write). Any fn that
 # uses `yield` is a generator: calling it returns a suspendable iterator, not a value. It runs lazily,
@@ -1781,7 +1781,7 @@ match g.next():            # 0
 # `return` (bare only) stops a generator early; `defer`/`spawn`/`parallel:`/`wait:` are not allowed
 # inside a generator. Inference REJECTS an un-inferable element (`yield []` alone, or an int-then-float
 # mix — no silent int->float coercion at a `yield`): annotate `-> Iterator[T]` in that case. `Iterator`
-# is a reserved type name. See examples/generators.chz (full showcase), examples/generators_inferred.chz
+# is a prebuilt type name. See examples/generators.chz (full showcase), examples/generators_inferred.chz
 # (inference-only), and examples/generators_basic.chz.
 
 while cond:
@@ -4786,9 +4786,9 @@ fn fetch_all(urls: List[str]):
   or mutate through, use a plain one-field `struct` (a struct is a shared reference). The mutation
   ladder is `value` (copied) → a mutable `struct`/collection (in-task) → `Shared[T]` (cross-task).
   `Shared`/`RwShared`/`Atomic`/`AtomicInt`/`Executor` require `import std.concurrency` (whole-module
-  licenses all; `import Shared from std.concurrency` per-name) — they are NOT global builtins. They stay
-  **reserved names** (no user `struct Shared`/`struct Executor`). `Channel` stays global; `timer` now
-  requires `import std.time` (it stays a reserved name too — see below).
+  licenses all; `import Shared from std.concurrency` per-name) — they are NOT global builtins. Like every
+  builtin name they are not reserved: a module that declares its own `Shared` shadows the builtin there
+  (see "Only keywords are reserved" below). `Channel` stays global; `timer` now requires `import std.time`.
   These import-gated native types are **also reachable by the qualified / aliased module-member path**,
   exactly like a `.chz` module type (`geo.Point`) or `regex.Match`: after `import std.concurrency` you
   may write `concurrency.Shared[int]` / `concurrency.Shared(0)`, and `import std.concurrency as c` gives
@@ -4820,30 +4820,26 @@ fn fetch_all(urls: List[str]):
   blocks ~500ms then yields `true` (level-triggered — ready on any recv at/after the deadline). The
   composable timeout primitive; it races against real channels inside a `wait:` — there is **no separate
   `recv_timeout`** (a `wait` over a channel and a `timer` subsumes it). `timer` requires `import std.time`
-  (whole-module, or `import timer from std.time`) — it is NOT a global builtin, but it stays a **reserved
-  name** (no user `struct timer`/`fn timer`).
+  (whole-module, or `import timer from std.time`) — it is NOT a global builtin.
 - **`Socket` / `Listener`** (`import std.net`) — the TCP handle TYPE names (from `connect`/`listen`).
   Like `Shared`/`Executor`/`timer`, a bare annotation requires `import std.net` (whole-module, or
-  `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
-  `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
-  (`List`/`Set`/`Map`/`Channel`/`Range`), and FFI (`ptr`/`owned_str` and the widths `int8`…`float32`)
-  type names are likewise reserved at every declaration site — struct, enum, type alias, protocol,
-  type parameter and import alias (a `struct int` / `protocol int32` is rejected
-  `type 'X' is reserved (builtin)`). The 22
-  prebuilt PROTOCOL names (`Any`/`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
-  `Neg`/`Arithmetic`/`Num`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`) are reserved the same way — usable
-  as a bound (`[T: Comparable]`) but not as a `struct`/`enum`/`type` decl name (a user
-  `protocol Comparable:` is likewise rejected `reserved (builtin)`). Their SHAPE (method sigs + embeds)
+  `import Socket from std.net`) — they are NOT global builtins. No builtin name is reserved: not a
+  scalar (`int`), a container (`List`), an FFI type (`int32`, `ptr`) or one of the 22 prebuilt
+  PROTOCOL names (`Any`/`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
+  `Neg`/`Arithmetic`/`Num`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`).
+  A prebuilt protocol is usable as a bound (`[T: Comparable]`); a module that declares its own
+  `protocol Comparable:` (or `struct int`) shadows the builtin there (see "Only keywords are reserved"
+  below). Their SHAPE (method sigs + embeds)
   is file-backed in `std/prelude.chz` as plain `protocol` decls (phase 5c) — a drift-guarded mirror of
   the Rust seed — but protocol CONFORMANCE (`int`/`float` satisfying `Add`/`Comparable`/`Neg` intrinsically
   with no method; `Iterator` via `iter_elem`; structural satisfaction for user structs and the
   built-in collections) and OPERATOR
   BINDING (`+`→`add`, `<`→`compare`, `for`→`Iterator`, `[]`→`Index`, `[a..b]`→`Slice`) stay Rust-wired.
-  (All 21 are file-backed — the 20 above plus `Any` (the top type, reserved the same way): `Any` is
+  (All 21 are file-backed — the 20 above plus `Any` (the top type): `Any` is
   `protocol Any:` + `pass` (empty), and
   `Iterable`'s `iter(self) -> Iterator[Elem]` return type resolves to the same `Iterator[T]` value type the
   Rust seed uses, so their shapes mirror cleanly like the rest.) `Convert[S]` (`fn convert(x: S) -> Self`,
-  a STATIC method — the extensible type-conversion protocol, Rust `From`) is **complete**: reserved,
+  a STATIC method — the extensible type-conversion protocol, Rust `From`) is **complete**:
   bound-only (`[T: Convert[str]]`; a value annotation is rejected — a value can't invoke a static
   ctor), structurally witnessed static-slot-aware, and callable through the bound
   (`fn make[T: Convert[int]](seed: T, n: int) -> T: return T.convert(n)`) via M24's witness passing —
@@ -4957,28 +4953,28 @@ error** (`import must be a top-level declaration`) — like every top-level-only
 check clean while being a complete no-op: the resolver only scans module-level statements, so a nested
 import never resolved, never bound, and never ran the module body.)
 
-**A module's bound name may not be a reserved builtin.** The bound name — the alias, or the last path
-segment when un-aliased — lands in the VALUE namespace, where it would beat the builtin of the same
-name in expression position. So a reserved bound name is **rejected**:
+**Only keywords are reserved.** Every other name — a builtin fn (`print`, `ord`), a builtin type
+(`int`, `List`), a std type (`int32`, `Match`), a prebuilt protocol (`Comparable`) or a removed
+spelling (the old carrier names, `range`) — is an ordinary name. A module-level declaration or import of it
+is legal and **shadows** the builtin inside that module, exactly as a local variable already does
+(`print := 5`); Go and Python do the same with their predeclared names:
 
 ```chezzi
-import lib.int              # error: module name 'int' is reserved (builtin) — alias it: import lib.int as ints
-import lib.geo as List      # error: import alias 'List' is reserved (builtin)
-import lib.int as ints      # ok — and `int("5")` keeps working
+struct List:                    # this module's List; the builtin List is not visible here
+    n: int
+l: List = List(3)
+fn ord(c: str) -> int:          # calls to ord() in this module reach this fn
+    return 7
+import std.math as int          # `int` is the module in this file: int.abs(-9)
+fn f[List](x: List) -> List:    # a type parameter shadows inside its fn
+    return x
 ```
 
-The same rule covers a `from` import, which binds into the same namespace — a module global or
-function whose *bound* name is reserved (aliased or not) is rejected; alias it:
-
-```chezzi
-import str from lib.sh          # error: imported name 'str' is reserved (builtin) — alias it
-import str as s from lib.sh     # ok — and `str(5)` keeps working
-import Shared from std.concurrency   # ok — a reserved TYPE member licensing the builtin itself
-```
-
-The reserved set is the builtin callables + reserved type names. (The std string module is
-`std.string` for exactly this reason: `str` is a reserved scalar/ctor name.) A collision with a
-*user-declared* top-level `fn` or type is the next rule.
+Lookup tries the module's own declarations and imports first, then the builtins. Inside a module that
+declares `struct int`, `int` in a type position is that struct. A removed spelling that nothing
+declares is an unknown name with the message that names its replacement
+(`` `range()` is removed; write `0..n` ``): the carriers behind `T?` and `T!E` are reached only
+through that syntax (`?x`, `!e`, `None`).
 
 **A keyword cannot be bound, by any form.** `None`, `true`, `false` and every other keyword are
 rejected by the parser wherever a name is declared — a `:=` or typed binding, a destructuring
@@ -5464,7 +5460,8 @@ A module that uses a width name without importing it gets *unknown type 'int32' 
 std.ffi` is rejected (the backend marshaller keys off the literal name `int32`), as is a wrong-width
 trap (`import int8 as int32`). A redundant **identical** self-rename (`import int32 as int32`) is harmless
 and accepted — it just imports `int32`. You also can't redefine a
-width name as a user alias (`type int32 = …` is reserved). The import is per-module: a struct's int32 field
+width name as a user alias in a module that imports it (`type int32 = …` beside `import int32 from
+std.ffi` is two declarations of one name; without the import, `type int32 = str` is an ordinary alias). The import is per-module: a struct's int32 field
 declared (and resolved) in module A is usable from module B with **no** import in B, but a bare `int32`
 *written in B's own source* needs B's own import. To your program each
 width name is a plain **`int`** (`float32`: a plain **`float`**) — the width/signedness is a
@@ -5558,12 +5555,10 @@ constants are ordinary `NAME: const T = value` lets (`std/math.chz`'s `pi`, `std
 vs LLP64); deferred to a future task. See `examples/ffi_int.chz`.
 
 An `extern "lib":` block is a **top-level declaration only** — it is bound at module init, so nesting
-it inside `if`/`for`/`fn` is a parse error. An extern fn also may **not** be named after a builtin
-(`int`/`float`/`str`/`ord`/`chr`/`set`/`panic`), `print`, a constructor
-(`Channel`/`Shared`/`RwShared`/`Atomic`/`AtomicInt`/`timer`/`Executor`), any of your `struct`/
-enum-variant names, or a **builtin variant ctor** (`?x`/`!e`/`None`) — those resolve to a special op before a
-plain call, so the extern would be silently shadowed; the checker rejects the collision (*'…' is a
-builtin/reserved name*), in either declaration order and reported exactly **once**. A **type** name is
+it inside `if`/`for`/`fn` is a parse error. An extern fn named after a builtin (`print`, `int`,
+`Channel`) shadows it in its module, like a `fn`. It may **not** take the name of one of the module's
+own `struct`s or enum variants (*'…' already names a struct or variant and cannot be an extern fn*),
+in either declaration order, reported exactly **once**. A **type** name is
 *not* a collision and is accepted: an `enum`'s own name, `T!E`/`T?`, and a std-module layout name
 whose module you never imported (`Match`) are not callable, so nothing shadows the extern.
 
@@ -5786,8 +5781,8 @@ A few cross-cutting notes (full detail in `stdlib.md`):
   exposes `Match` bare and as `regex.Match(…)`; or `import Match from std.regex`). The names are free for
   user types **only when the owning module is not imported** — a user `struct Response` without `import
   std.request` is their own type. But importing the type **and** declaring a same-named `struct` in the
-  same module is a collision, rejected at check (`type 'Response' is reserved (builtin)`) — never accept-
-  then-trap: the user layout would shadow the native shape and fault at runtime on a field mismatch. (This applies
+  same module is two declarations of one name, rejected at check (`type 'Response' is already defined`)
+  — never accept-then-trap: the user layout would shadow the native shape and fault at runtime on a field mismatch. (This applies
   to `Match`/`Response`/`ProcResult` and every import-gated std struct.) A merely-similar name (`struct
   ResponseBox`) stays legal.
 

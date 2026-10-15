@@ -63,7 +63,7 @@ read that rule's entry there.
 - Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` → `desugar` → `checker` → `compiler` → `vm` (the engine of record), plus `native` (builtins / std), `resolver` (module paths). Each phase is split into one file per topic: `docs/owners.md` maps each area to its files.
 - Keep modules small and single-purpose: one topic per file, a first line that names it, at most 2,500 lines (3,500 for a test file). `cargo test --test source_layout` enforces it and checks `docs/owners.md`.
 - **No wildcard arm on an enum in library or binary code.**
-- **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global reserved namespace.**
+- **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global namespace.** (No name but a keyword is reserved: a module declaration shadows a builtin.)
 - **A new native fn's `MEMBERS` entry is `(name, fn, Kind)` — the third element is not paperwork.**
 - After merging an auto-task branch (post-gate ships): delete the branch + prune its worktree (`git worktree remove --force <wt>; git worktree prune; git branch -D <branch>`).
 - **Two auto-task runs in parallel MUST NOT share a release target dir.**
