@@ -1205,7 +1205,7 @@ main()
 ";
     let entry = write_temp_chz("t134_owner_fault_window", src);
     let cfg = crate::native::HostConfig::default();
-    // The literal equals `netio::OWNER_FAULT_WINDOW_ENV`. It is spelled out, not imported, so this
+    // The literal equals `blocking::OWNER_FAULT_WINDOW_ENV`. It is spelled out, not imported, so this
     // test still compiles on a base without the seam (the pipeline's red-on-base check copies only
     // this file there). The hook `remove`s the key when it arms, so a key still present after the
     // run means THIS run never reached the window.
@@ -1262,7 +1262,7 @@ main()
 ";
     let entry = write_temp_chz("t134_owner_fault_window_send", src);
     let cfg = crate::native::HostConfig::default();
-    // The literal equals `netio::OWNER_FAULT_WINDOW_ENV`. It is spelled out, not imported, so this
+    // The literal equals `blocking::OWNER_FAULT_WINDOW_ENV`. It is spelled out, not imported, so this
     // test still compiles on a base without the seam (the pipeline's red-on-base check copies only
     // this file there). The hook `remove`s the key when it arms, so a key still present after the
     // run means THIS run never reached the window.

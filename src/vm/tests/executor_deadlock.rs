@@ -1274,7 +1274,7 @@ print(\"main done\")
 /// the sender slept a whole `DEMOTE_POLL_BACKOFF` on a channel that already had room.
 ///
 /// **This asserts on the DEFECT ITSELF, not on how long the pipeline took, and that is what makes it
-/// load-independent.** [`crate::vm::netio::BLOCK_WAITS_SLEPT_WHILE_READY`] counts waits that burned a
+/// load-independent.** [`crate::vm::blocking::BLOCK_WAITS_SLEPT_WHILE_READY`] counts waits that burned a
 /// whole `DEMOTE_POLL_BACKOFF` tick and then woke to find the channel READY — the lost wakeup, in one
 /// number. `wait_timeout_while` re-evaluates the predicate under the guard after each inner wait, so
 /// `timed_out()` implies "still not ready" and that counter is structurally ZERO in a fixed build, on
@@ -1324,8 +1324,8 @@ ex.shutdown()
     let (tx, rx) = std::sync::mpsc::channel();
     let e = entry.clone();
     use std::sync::atomic::Ordering::Relaxed;
-    let waits0 = crate::vm::netio::BLOCK_WAITS.load(Relaxed);
-    let stalls0 = crate::vm::netio::BLOCK_WAITS_SLEPT_WHILE_READY.load(Relaxed);
+    let waits0 = crate::vm::blocking::BLOCK_WAITS.load(Relaxed);
+    let stalls0 = crate::vm::blocking::BLOCK_WAITS_SLEPT_WHILE_READY.load(Relaxed);
     std::thread::spawn(move || {
         let mut bad = Vec::new();
         for _ in 0..30 {
@@ -1349,8 +1349,8 @@ ex.shutdown()
             panic!("the pipeline worker panicked — see the panic above this one")
         }
     };
-    let waits = crate::vm::netio::BLOCK_WAITS.load(Relaxed) - waits0;
-    let stalls = crate::vm::netio::BLOCK_WAITS_SLEPT_WHILE_READY.load(Relaxed) - stalls0;
+    let waits = crate::vm::blocking::BLOCK_WAITS.load(Relaxed) - waits0;
+    let stalls = crate::vm::blocking::BLOCK_WAITS_SLEPT_WHILE_READY.load(Relaxed) - stalls0;
     assert!(
         bad.is_empty(),
         "the pipeline must still be correct: {bad:#?}"
@@ -1486,9 +1486,9 @@ ex.submit(closer)
 /// plain `wait_timeout` revert (W7-13's own defect).
 #[test]
 fn an_eager_wait_block_is_woken_by_its_arm_not_by_the_poll_timeout() {
-    let blocks0 = crate::vm::netio::WAIT_ARM0_BLOCKS.load(std::sync::atomic::Ordering::Relaxed);
+    let blocks0 = crate::vm::blocking::WAIT_ARM0_BLOCKS.load(std::sync::atomic::Ordering::Relaxed);
     let stalls0 =
-        crate::vm::netio::WAIT_ARM0_SLEPT_WHILE_READY.load(std::sync::atomic::Ordering::Relaxed);
+        crate::vm::blocking::WAIT_ARM0_SLEPT_WHILE_READY.load(std::sync::atomic::Ordering::Relaxed);
     // The `gate` handshake is what makes this test exercise the path at all: `cons` announces that it
     // is about to block, and only then does `prod` send. Without it `prod` races ahead, every `wait:`
     // finds its value already queued, and the block branch is never reached — measured: the vacuous
@@ -1531,8 +1531,8 @@ print(s)
         "every arm value must still be received exactly once"
     );
     let blocks =
-        crate::vm::netio::WAIT_ARM0_BLOCKS.load(std::sync::atomic::Ordering::Relaxed) - blocks0;
-    let stalls = crate::vm::netio::WAIT_ARM0_SLEPT_WHILE_READY
+        crate::vm::blocking::WAIT_ARM0_BLOCKS.load(std::sync::atomic::Ordering::Relaxed) - blocks0;
+    let stalls = crate::vm::blocking::WAIT_ARM0_SLEPT_WHILE_READY
         .load(std::sync::atomic::Ordering::Relaxed)
         - stalls0;
     assert!(
