@@ -13,7 +13,7 @@
 
 use crate::ast::{
     Block, DeferTarget, Expr, ExprKind, FnDecl, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind,
-    WaitArmKind, WaitTarget,
+    WaitArmKind,
 };
 use crate::compiler::{chunk_exprs, pattern_binds};
 use std::collections::HashSet;
@@ -118,16 +118,11 @@ impl Scan {
 
     fn stmt(&mut self, st: &Stmt) {
         match &st.kind {
-            StmtKind::Let {
-                names,
-                name_spans,
-                value,
-                ..
-            } => {
+            StmtKind::Let { target, value, .. } => {
                 self.expr(value);
-                for (i, n) in names.iter().enumerate() {
+                for (n, span) in target.target_binders() {
                     if n != "_" {
-                        self.bind(n, name_spans.get(i).copied().unwrap_or(st.span), true);
+                        self.bind(n, span, true);
                     }
                 }
             }
@@ -195,17 +190,12 @@ impl Scan {
                     self.block(b);
                 }
             }
-            StmtKind::For {
-                vars,
-                var_spans,
-                iter,
-                body,
-            } => {
+            StmtKind::For { target, iter, body } => {
                 self.expr(iter);
                 self.scoped(|s| {
-                    for (i, v) in vars.iter().enumerate() {
+                    for (v, span) in target.target_binders() {
                         if v != "_" {
-                            s.bind(v, var_spans.get(i).copied().unwrap_or(st.span), true);
+                            s.bind(v, span, true);
                         }
                     }
                     s.block_items(body);
@@ -240,9 +230,8 @@ impl Scan {
                         match &arm.kind {
                             WaitArmKind::Recv { target, chan } => {
                                 s.expr(chan);
-                                match target {
-                                    WaitTarget::Bind(n) => s.bind(n, arm.span, false),
-                                    WaitTarget::Discard => {}
+                                for (n, _) in target.target_binders() {
+                                    s.bind(n, arm.span, false);
                                 }
                             }
                             WaitArmKind::Send { call } => s.expr(call),
@@ -303,7 +292,7 @@ impl Scan {
             } => self.scoped(|s| {
                 for c in clauses {
                     s.expr(&c.iter);
-                    for v in &c.vars {
+                    for (v, _) in c.target.target_binders() {
                         s.bind(v, Span::RUNTIME, false);
                     }
                     c.guards.iter().for_each(|g| s.expr(g));

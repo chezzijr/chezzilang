@@ -7,6 +7,17 @@ use super::*;
 use crate::ast::consteval;
 use crate::ast::{CarrierTag, RecoverForm};
 
+/// Where `bind_subpattern` sends the names a pattern binds. `Match` declares them in the current
+/// scope under a refutable `match` pattern (a bare name may be a variant or a `const`). `Target`
+/// is an irrefutable binding target (`:=`, `for`, a comprehension clause, a wait arm): it collects
+/// each leaf (name, name span, type) for the caller's own declare policy, treats every `Ident` as a
+/// fresh name, and says nothing over an un-inferable (`Unknown`) type: a wrong shape faults at run
+/// time. In `Target` mode the returned bool means "the type proved the shape".
+pub(super) enum BindMode<'a> {
+    Match,
+    Target(&'a mut Vec<(String, Span, Ty)>),
+}
+
 /// What a bare, payload-free name in a pattern is. `Checker::bare_pattern_name` is the one
 /// classifier; every pattern walker reads it.
 pub(super) enum BareName {
@@ -245,7 +256,30 @@ impl Checker {
     /// its expected type `ty`, declaring any bindings into the current scope. Returns whether the
     /// sub-pattern is **irrefutable** (matches every value of `ty`): a binding/wildcard is, a
     /// literal/variant is not, a tuple is iff all its elements are.
-    pub(super) fn bind_subpattern(&mut self, pattern: &Pattern, ty: &Ty, span: Span) -> bool {
+    pub(super) fn bind_subpattern(
+        &mut self,
+        pattern: &Pattern,
+        ty: &Ty,
+        span: Span,
+        mode: &mut BindMode<'_>,
+    ) -> bool {
+        if let BindMode::Target(leaves) = mode {
+            match pattern {
+                Pattern::Ident(name, bind_span, _) => {
+                    leaves.push((name.clone(), *bind_span, ty.clone()));
+                    return true;
+                }
+                Pattern::Wildcard | Pattern::Tuple(_) => {}
+                Pattern::Variant { .. }
+                | Pattern::Literal(_)
+                | Pattern::Range { .. }
+                | Pattern::Or(_)
+                | Pattern::Carrier { .. } => {
+                    unreachable!("a binding target holds Ident, Wildcard or Tuple only")
+                }
+            }
+        }
+        let target = matches!(mode, BindMode::Target(_));
         match pattern {
             Pattern::Wildcard => true,
             Pattern::Ident(name, bind_span, id) => {
@@ -316,7 +350,7 @@ impl Checker {
                     );
                 }
                 match self.carrier_as_variant(*tag, inner, *id, ty, span) {
-                    Some(variant) => self.bind_subpattern(&variant, ty, span),
+                    Some(variant) => self.bind_subpattern(&variant, ty, span, &mut BindMode::Match),
                     None => {
                         self.declare_pattern_names_unknown(inner);
                         false
@@ -355,10 +389,16 @@ impl Checker {
                                 tys.len()
                             ),
                         );
+                        if target {
+                            for sub in subs {
+                                self.bind_subpattern(sub, &Ty::Unknown, span, &mut *mode);
+                            }
+                            return false;
+                        }
                     }
                     let mut irref = true;
                     for (sub, t) in subs.iter().zip(tys.iter()) {
-                        irref &= self.bind_subpattern(sub, t, span);
+                        irref &= self.bind_subpattern(sub, t, span, &mut *mode);
                     }
                     irref
                 }
@@ -367,14 +407,17 @@ impl Checker {
                     // payload would destructure a value whose shape we can't prove → it traps at
                     // runtime on a wrong shape (a trailing `_` cannot rescue it). Reject; annotate the
                     // enclosing param. Still bind the sub-patterns (as Unknown) so the arm body does
-                    // not cascade into spurious "unknown name" errors.
-                    self.error(
-                        span,
-                        "cannot match a tuple pattern on a value of un-inferable type; annotate it"
-                            .to_string(),
-                    );
+                    // not cascade into spurious "unknown name" errors. A binding target is
+                    // irrefutable and says nothing here (it faults at run time on a wrong shape).
+                    if !target {
+                        self.error(
+                            span,
+                            "cannot match a tuple pattern on a value of un-inferable type; annotate it"
+                                .to_string(),
+                        );
+                    }
                     for sub in subs {
-                        self.bind_subpattern(sub, &Ty::Unknown, span);
+                        self.bind_subpattern(sub, &Ty::Unknown, span, &mut *mode);
                     }
                     false
                 }
@@ -415,7 +458,7 @@ impl Checker {
                         format!("tuple pattern cannot match a value of type {other}"),
                     );
                     for sub in subs {
-                        self.bind_subpattern(sub, &Ty::Unknown, span);
+                        self.bind_subpattern(sub, &Ty::Unknown, span, &mut *mode);
                     }
                     false
                 }
@@ -463,7 +506,7 @@ impl Checker {
                     }
                     let mut sub_irref = true;
                     for (b, t) in bindings.iter().zip(fields.iter()) {
-                        sub_irref &= self.bind_subpattern(b, t, span);
+                        sub_irref &= self.bind_subpattern(b, t, span, &mut BindMode::Match);
                     }
                     return ctor.is_ok() && fields.len() == bindings.len() && sub_irref;
                 }
@@ -504,7 +547,8 @@ impl Checker {
                                 }
                                 let mut sub_irref = true;
                                 for (b, t) in bindings.iter().zip(payload.iter()) {
-                                    sub_irref &= self.bind_subpattern(b, t, span);
+                                    sub_irref &=
+                                        self.bind_subpattern(b, t, span, &mut BindMode::Match);
                                 }
                                 single_variant && sub_irref
                             }
@@ -513,7 +557,12 @@ impl Checker {
                                     self.error(span, format!("'{name}' is not a variant of {ty}"));
                                 }
                                 for b in bindings {
-                                    self.bind_subpattern(b, &Ty::Unknown, span);
+                                    self.bind_subpattern(
+                                        b,
+                                        &Ty::Unknown,
+                                        span,
+                                        &mut BindMode::Match,
+                                    );
                                 }
                                 false
                             }
@@ -531,7 +580,7 @@ impl Checker {
                                 .to_string(),
                         );
                         for b in bindings {
-                            self.bind_subpattern(b, &Ty::Unknown, span);
+                            self.bind_subpattern(b, &Ty::Unknown, span, &mut BindMode::Match);
                         }
                         false
                     }
@@ -541,7 +590,7 @@ impl Checker {
                             format!("variant pattern '{name}' cannot match a value of type {ty}"),
                         );
                         for b in bindings {
-                            self.bind_subpattern(b, &Ty::Unknown, span);
+                            self.bind_subpattern(b, &Ty::Unknown, span, &mut BindMode::Match);
                         }
                         false
                     }
@@ -561,7 +610,7 @@ impl Checker {
         let mut binders: Vec<(usize, std::collections::BTreeMap<String, Ty>)> = Vec::new();
         for (i, alt) in alts.iter().enumerate() {
             self.push_scope();
-            let alt_irref = self.bind_subpattern(alt, ty, span);
+            let alt_irref = self.bind_subpattern(alt, ty, span, &mut BindMode::Match);
             irref |= alt_irref;
             // Snapshot the names this alternative introduced (its scratch scope's top frame).
             let snap: std::collections::BTreeMap<String, Ty> = self
@@ -671,14 +720,7 @@ impl Checker {
         // A carrier pattern is the variant pattern it means over this scrutinee; the variant path
         // below checks it. Only the duplicate-arm text differs: it prints the pattern as written.
         if let Pattern::Carrier { tag, inner, id } = pattern {
-            let scrut = match kind {
-                MatchKind::Variants { scrut, .. } => scrut.clone(),
-                MatchKind::Literal(ty) => ty.clone(),
-                MatchKind::Tuple(tys) => Ty::Tuple(tys.clone()),
-                MatchKind::Struct { label, targs, .. } => Ty::Struct(label.clone(), targs.clone()),
-                // Reported upstream (`reconstruct_unknown_kind`).
-                MatchKind::Skip => Ty::Unknown,
-            };
+            let scrut = kind.scrut_ty();
             let Some(variant) = self.carrier_as_variant(*tag, inner, *id, &scrut, span) else {
                 self.push_scope();
                 self.declare_pattern_names_unknown(inner);
@@ -743,6 +785,12 @@ impl Checker {
             );
         }
         self.reject_empty_range(pattern, span);
+        // A tuple pattern is one rule over every scrutinee: `bind_subpattern` matches it against the
+        // scrutinee's type (a tuple of that arity, or a reported mismatch).
+        if matches!(pattern, Pattern::Tuple(_)) && !matches!(kind, MatchKind::Skip) {
+            self.push_scope();
+            return self.bind_subpattern(pattern, &kind.scrut_ty(), span, &mut BindMode::Match);
+        }
         match kind {
             MatchKind::Skip => {
                 // Un-inferable scrutinee with only binding/`_` arms: accept the pattern shape
@@ -781,12 +829,12 @@ impl Checker {
                         self.record_imported_pattern_variant(*id, enum_name, name, span);
                         covered.insert(name.clone());
                         for b in bindings {
-                            self.bind_subpattern(b, &Ty::Unknown, span);
+                            self.bind_subpattern(b, &Ty::Unknown, span, &mut BindMode::Match);
                         }
                     }
                     Pattern::Tuple(subs) => {
                         for s in subs {
-                            self.bind_subpattern(s, &Ty::Unknown, span);
+                            self.bind_subpattern(s, &Ty::Unknown, span, &mut BindMode::Match);
                         }
                     }
                     Pattern::Carrier { inner, .. } => self.declare_pattern_names_unknown(inner),
@@ -862,12 +910,18 @@ impl Checker {
                                     );
                                 }
                                 for (b, t) in bindings.iter().zip(payload.iter()) {
-                                    payload_irref &= self.bind_subpattern(b, t, span);
+                                    payload_irref &=
+                                        self.bind_subpattern(b, t, span, &mut BindMode::Match);
                                 }
                             }
                             None => {
                                 for b in bindings {
-                                    payload_irref &= self.bind_subpattern(b, &Ty::Unknown, span);
+                                    payload_irref &= self.bind_subpattern(
+                                        b,
+                                        &Ty::Unknown,
+                                        span,
+                                        &mut BindMode::Match,
+                                    );
                                 }
                             }
                         }
@@ -895,18 +949,12 @@ impl Checker {
                             crate::compiler::bare_display(label.as_str())
                         ),
                     ),
-                    Pattern::Tuple(_) => self.error(
-                        span,
-                        format!(
-                            "cannot match a tuple against {}",
-                            crate::compiler::bare_display(label.as_str())
-                        ),
-                    ),
                     Pattern::Ident(..)
                     | Pattern::Wildcard
+                    | Pattern::Tuple(_)
                     | Pattern::Or(_)
                     | Pattern::Carrier { .. } => {
-                        unreachable!("ident/wildcard/or/carrier handled elsewhere")
+                        unreachable!("ident/wildcard/tuple/or/carrier handled elsewhere")
                     }
                 }
             }
@@ -1008,39 +1056,20 @@ impl Checker {
                         // case, where the payload binding is an internal `__opt` temp the user can't
                         // see. (The `cannot match` error already flags the real problem.)
                         for b in bindings {
-                            self.bind_subpattern(b, &Ty::Unknown, span);
+                            self.bind_subpattern(b, &Ty::Unknown, span, &mut BindMode::Match);
                         }
-                    }
-                    Pattern::Tuple(_) => {
-                        self.error(span, format!("cannot match a tuple against {ty}"))
                     }
                     Pattern::Ident(..)
                     | Pattern::Wildcard
+                    | Pattern::Tuple(_)
                     | Pattern::Or(_)
                     | Pattern::Carrier { .. } => {
-                        unreachable!("ident/wildcard/or/carrier handled elsewhere")
+                        unreachable!("ident/wildcard/tuple/or/carrier handled elsewhere")
                     }
                 }
             }
             MatchKind::Tuple(tys) => {
                 self.push_scope();
-                if let Pattern::Tuple(subs) = pattern {
-                    if tys.len() != subs.len() {
-                        self.error(
-                            span,
-                            format!(
-                                "tuple pattern has {} element(s), but the value has {}",
-                                subs.len(),
-                                tys.len()
-                            ),
-                        );
-                    }
-                    let mut irref = true;
-                    for (sub, t) in subs.iter().zip(tys.iter()) {
-                        irref &= self.bind_subpattern(sub, t, span);
-                    }
-                    return irref;
-                }
                 // TICKET-139/W14-36 + DEC-107: a BARE payload-free unqualified non-variant name is a
                 // whole-scrutinee catch-all on a tuple too (`rest:`), the same predicate the struct
                 // arm uses — irrefutable, and the name binds the whole tuple.
@@ -1141,7 +1170,7 @@ impl Checker {
                         // the match; a literal/nested-refutable field (`Point(0, y)`) keeps it open.
                         let mut irref = is_ctor && fields.len() == bindings.len();
                         for (b, t) in bindings.iter().zip(fields.iter()) {
-                            irref &= self.bind_subpattern(b, t, span);
+                            irref &= self.bind_subpattern(b, t, span, &mut BindMode::Match);
                         }
                         // Duplicate-arm detection (bug #3): a struct has ONE constructor, so an
                         // UNGUARDED irrefutable arm CLOSES the match — a later constructor arm is dead
@@ -1163,14 +1192,12 @@ impl Checker {
                     Pattern::Range { .. } => {
                         self.error(span, format!("cannot match a range against {label}"))
                     }
-                    Pattern::Tuple(_) => {
-                        self.error(span, format!("cannot match a tuple against {label}"))
-                    }
                     Pattern::Ident(..)
                     | Pattern::Wildcard
+                    | Pattern::Tuple(_)
                     | Pattern::Or(_)
                     | Pattern::Carrier { .. } => {
-                        unreachable!("ident/wildcard/or/carrier handled elsewhere")
+                        unreachable!("ident/wildcard/tuple/or/carrier handled elsewhere")
                     }
                 }
             }
@@ -1386,9 +1413,15 @@ impl Checker {
                             Ty::Unknown
                         }
                     };
-                    match target {
-                        WaitTarget::Bind(name) => self.declare(name, elem),
-                        WaitTarget::Discard => {}
+                    let mut leaves = Vec::new();
+                    self.bind_subpattern(
+                        target,
+                        &elem,
+                        chan.span,
+                        &mut BindMode::Target(&mut leaves),
+                    );
+                    for (name, _, ty) in leaves {
+                        self.declare(&name, ty);
                     }
                 }
                 WaitArmKind::Send { call } => self.check_wait_send(call),
@@ -3883,8 +3916,8 @@ impl Checker {
         for clause in clauses {
             // `for_bindings` infers the iter IN the current scope, so later clauses see earlier
             // bindings (the whole point of nesting). Compute before declaring this clause's vars.
-            let bindings = self.for_bindings(&clause.vars, &clause.iter);
-            for (name, ty) in bindings {
+            let bindings = self.for_bindings(&clause.target, &clause.iter);
+            for (name, _, ty) in bindings {
                 // Intentionally NOT `mark_loop_var`: a comprehension body is an expression, so its
                 // binding can't be assigned to — no divergence to guard against. If a statement-bearing
                 // comprehension is ever added, mark these too (see `check_assign` / for-loop handling).
@@ -6154,7 +6187,7 @@ impl Checker {
                     if !shadowed {
                         self.scan_expr_for_pin(name, &c.iter, match_pin, member_pin);
                     }
-                    if c.vars.iter().any(|v| v == name) {
+                    if c.target.target_binders().iter().any(|(v, _)| *v == name) {
                         shadowed = true;
                     }
                     if !shadowed {

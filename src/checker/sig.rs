@@ -1,6 +1,7 @@
 // checker::sig — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Function signatures and return-type inference passes.
 
+use super::pattern::BindMode;
 use super::proto::HookMiss;
 use super::setup::{BindSite, HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
@@ -382,8 +383,8 @@ impl Checker {
         // writes. The walk above recorded them per closure literal (`closure_literal_writes` is not
         // in `DiagMark`, so the rollback kept them).
         for (s, firsts) in self.seeded_first_lets(stmts) {
-            if let StmtKind::Let { names, value, .. } = &s.kind
-                && names.len() == 1
+            if let StmtKind::Let { target, value, .. } = &s.kind
+                && let Some(name) = target.target_ident()
                 && firsts.len() == 1
                 && let ExprKind::Closure { body, .. } = &value.kind
                 && let Some(writes) = self
@@ -393,7 +394,7 @@ impl Checker {
             {
                 let mut writes = writes.clone();
                 writes.sort();
-                self.written_captures[0].insert(names[0].clone(), writes);
+                self.written_captures[0].insert(name.to_string(), writes);
             }
         }
         self.report_untyped_globals(stmts);
@@ -406,9 +407,10 @@ impl Checker {
     fn seeded_first_lets<'a>(&self, stmts: &'a [Stmt]) -> Vec<(&'a Stmt, Vec<usize>)> {
         let mut out = Vec::new();
         for s in stmts {
-            let StmtKind::Let { names, .. } = &s.kind else {
+            let StmtKind::Let { target, .. } = &s.kind else {
                 continue;
             };
+            let names = target.target_names();
             let firsts: Vec<usize> = (0..names.len())
                 .filter(|&i| {
                     !names[i + 1..].contains(&names[i])
@@ -472,17 +474,17 @@ impl Checker {
                 | StmtKind::Expr(_) => {}
             }
         }
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
         for s in stmts {
             let StmtKind::Let {
-                names, ty, value, ..
+                target, ty, value, ..
             } = &s.kind
             else {
                 continue;
             };
-            for n in names {
+            for n in &target.target_names() {
                 if n == "_"
-                    || !seen.insert(n.as_str())
+                    || !seen.insert(n.clone())
                     || hoisted.contains(n.as_str())
                     || self.scopes[0].contains_key(n)
                     || self.functions.contains_key(n)
@@ -491,7 +493,7 @@ impl Checker {
                 }
                 let mark = self.diag_mark();
                 let t = match ty {
-                    Some(t) if names.len() == 1 => self.resolve_type(t, s.span),
+                    Some(t) if target.target_ident().is_some() => self.resolve_type(t, s.span),
                     _ => Ty::Unknown,
                 };
                 self.diag_rollback(mark);
@@ -500,12 +502,34 @@ impl Checker {
                 g.seeded = true;
                 g.reached = false;
                 self.scopes[0].insert(n.clone(), t);
-                if let Some(deps) = self.let_holds_one_known_fn(names, ty, value) {
+                if let Some(deps) = self.let_holds_one_known_fn(target, ty, value) {
                     self.kw_certain.insert((0, n.clone()), deps);
                 }
             }
         }
         self.body_facts_pass = saved_body_facts;
+    }
+
+    /// The type of each name a top-level let binds, in `target_binders` order. A single name takes
+    /// its annotation or the value's type. A target list binds through the one binder: a value
+    /// whose tuple shape is not proved gives `Unknown` for every name.
+    fn global_leaf_tys(
+        &mut self,
+        target: &Pattern,
+        annotated: Option<Ty>,
+        val_ty: Ty,
+        span: Span,
+    ) -> Vec<Ty> {
+        if target.target_ident().is_some() {
+            return vec![annotated.unwrap_or(val_ty)];
+        }
+        let mut leaves = Vec::new();
+        let proven =
+            self.bind_subpattern(target, &val_ty, span, &mut BindMode::Target(&mut leaves));
+        leaves
+            .into_iter()
+            .map(|(_, _, t)| if proven { t } else { Ty::Unknown })
+            .collect()
     }
 
     /// TICKET-183 — one speculative walk over the first let of every seeded global, in source
@@ -526,64 +550,25 @@ impl Checker {
             .collect();
         for s in stmts {
             let StmtKind::Let {
-                names, ty, value, ..
+                target, ty, value, ..
             } = &s.kind
             else {
                 continue;
             };
+            let names = target.target_names();
             if let Some(idxs) = firsts.get(&s.span) {
-                let (annotated, val_ty) = self.let_value_ty(names, ty, value, s.span);
+                let (annotated, val_ty) = self.let_value_ty(target, ty, value, s.span);
+                let leaf_tys = self.global_leaf_tys(target, annotated, val_ty, s.span);
                 for &i in idxs {
-                    let t = if names.len() == 1 {
-                        annotated.clone().unwrap_or_else(|| val_ty.clone())
-                    } else {
-                        match &val_ty {
-                            Ty::Tuple(ts) if ts.len() == names.len() => ts[i].clone(),
-                            Ty::Int
-                            | Ty::Float
-                            | Ty::Bool
-                            | Ty::Str
-                            | Ty::Bytes
-                            | Ty::ByteArray
-                            | Ty::Nil
-                            | Ty::List(_)
-                            | Ty::Map(..)
-                            | Ty::Set(_)
-                            | Ty::Func { .. }
-                            | Ty::BuiltinFn { .. }
-                            | Ty::Tuple(_)
-                            | Ty::Struct(..)
-                            | Ty::Enum(..)
-                            | Ty::Param(_)
-                            | Ty::Result(..)
-                            | Ty::Option(_)
-                            | Ty::Channel(_)
-                            | Ty::Shared(_)
-                            | Ty::Atomic(_)
-                            | Ty::AtomicInt
-                            | Ty::RwShared(_)
-                            | Ty::Executor
-                            | Ty::Socket
-                            | Ty::Listener
-                            | Ty::Writer
-                            | Ty::Reader
-                            | Ty::Ptr
-                            | Ty::Width(_)
-                            | Ty::Protocol(..)
-                            | Ty::Module(_)
-                            | Ty::Unknown
-                            | Ty::Var(_) => Ty::Unknown,
-                        }
-                    };
                     // TICKET-225: a seeded global type outlives this walk.
-                    let t = self.settle(&t);
+                    let t = self.settle(&leaf_tys[i]);
                     if self.scopes[0].get(&names[i]) != Some(&t) {
                         self.scopes[0].insert(names[i].clone(), t);
                         changed = true;
                     }
                 }
             }
-            for n in names {
+            for n in &names {
                 self.reach_global(n);
             }
         }
@@ -612,20 +597,19 @@ impl Checker {
         let mut reports: Vec<(Span, String, Span)> = Vec::new();
         for s in stmts {
             let StmtKind::Let {
-                names, ty, value, ..
+                target, ty, value, ..
             } = &s.kind
             else {
                 continue;
             };
             if firsts.contains(&s.span)
-                && names.len() == 1
+                && let Some(x) = target.target_ident()
                 && ty.is_none()
-                && self.scopes[0].get(&names[0]) == Some(&Ty::Unknown)
+                && self.scopes[0].get(x) == Some(&Ty::Unknown)
             {
-                let x = &names[0];
                 let mark = self.diag_mark();
                 self.ret_memo.clear();
-                self.let_value_ty(names, ty, value, s.span);
+                self.let_value_ty(target, ty, value, s.span);
                 let errored = self.errors.len() > mark.errors;
                 self.diag_rollback(mark);
                 if !errored
@@ -637,7 +621,7 @@ impl Checker {
                     }
                 }
             }
-            for n in names {
+            for n in &target.target_names() {
                 self.reach_global(n);
             }
         }
@@ -725,7 +709,7 @@ impl Checker {
     /// `(annotated, val_ty)`.
     pub(super) fn let_value_ty(
         &mut self,
-        names: &[String],
+        target: &Pattern,
         ty: &Option<Type>,
         value: &Expr,
         span: Span,
@@ -734,11 +718,11 @@ impl Checker {
         // Map-key/Set-element Hashable ban at `sig.rs:1753-1767`), so the annotation must be
         // resolved exactly once per statement or every diagnostic it emits doubles. A
         // destructuring `let` cannot carry an annotation (`a, b: T = ...` is the parse error
-        // `expected '=' after a multi-target assignment list`), so `names.len() == 1` holds
+        // `expected '=' after a multi-target assignment list`), so a single name binds
         // whenever `ty` is `Some`. `hover_record_at` is first-write-wins, so the second call
         // this replaces never contributed a hover record.
         let annotated: Option<Ty> = match ty {
-            Some(t) if names.len() == 1 => Some(self.resolve_type(t, span)),
+            Some(t) if target.target_ident().is_some() => Some(self.resolve_type(t, span)),
             _ => None,
         };
         // A closure bound to a `fn`-typed annotation is inferred in checking-mode (source #1):
@@ -758,7 +742,7 @@ impl Checker {
             // A discarded `else` guard (`save(p) else e: ...`, `_ := save(p) else e: ...`) may
             // guard a `None!E` call: its success value is nothing, and nothing binds it.
             None if matches!(value.kind, ExprKind::ElseGuard { .. })
-                && matches!(names, [n] if n == "_") =>
+                && matches!(target, Pattern::Wildcard) =>
             {
                 self.infer(value)
             }
@@ -782,11 +766,11 @@ impl Checker {
     /// `kw_certain` records: a write to any of them voids the binding.
     pub(super) fn let_holds_one_known_fn(
         &self,
-        names: &[String],
+        target: &Pattern,
         ty: &Option<Type>,
         value: &Expr,
     ) -> Option<Vec<(usize, String)>> {
-        if names.len() != 1 || ty.is_some() {
+        if target.target_ident().is_none() || ty.is_some() {
             return None;
         }
         match &value.kind {
@@ -2956,32 +2940,36 @@ impl Checker {
         let span = stmt.span;
         match &stmt.kind {
             StmtKind::Let {
-                names,
-                name_spans,
+                target,
                 ty,
                 value,
                 is_const,
                 ..
             } => {
                 let is_const = *is_const;
-                let (annotated, val_ty) = self.let_value_ty(names, ty, value, span);
+                let (annotated, val_ty) = self.let_value_ty(target, ty, value, span);
+                let names = target.target_names();
                 // TICKET-183: from a seeded module global's first let on, top-level statements see
                 // it. Its seed in scope 0 stays: the first let refines it (`refine_first_let`,
                 // TICKET-186), because the bodies above were typed against it.
                 if self.scopes.len() == 1 {
-                    for n in names {
+                    for n in &names {
                         self.reach_global(n);
                     }
                 }
-                if names.len() > 1 {
+                // `_ := e`: the blank identifier. `e` is evaluated and discarded, nothing is declared.
+                if matches!(target, Pattern::Wildcard) {
+                    return;
+                }
+                if target.target_ident().is_none() {
                     // TICKET-190: a destructured name is never a private frame slot.
                     if let Some(acc) = &mut self.gen_frame {
-                        for n in names {
+                        for n in &names {
                             acc.fresh.insert(n.clone(), Fresh::Marked);
                         }
                     }
-                    // destructuring let `a, b := expr` — `expr` must be a tuple of matching arity.
-                    self.check_destructure(names, name_spans, &val_ty, value.span, span);
+                    // destructuring let `a, (b, c) := expr` — `expr` must be a tuple of matching shape.
+                    self.check_destructure(target, &val_ty, value.span, span);
                     return;
                 }
                 let name = &names[0];
@@ -3045,7 +3033,7 @@ impl Checker {
                     self.reject_redeclare(name, &declared, span);
                 }
                 // Computed BEFORE `declare` so `h := h` cannot see itself.
-                let one_known_fn = self.let_holds_one_known_fn(names, ty, value);
+                let one_known_fn = self.let_holds_one_known_fn(target, ty, value);
                 if !refined {
                     self.declare_at(name, declared, BindSite::Let);
                 }
@@ -3465,20 +3453,13 @@ impl Checker {
                     self.check_block(body);
                 }
             }
-            StmtKind::For {
-                vars,
-                var_spans,
-                iter,
-                body,
-            } => {
-                let bindings = self.for_bindings(vars, iter);
+            StmtKind::For { target, iter, body } => {
+                let bindings = self.for_bindings(target, iter);
                 self.push_scope();
-                // `bindings` is parallel to `vars` (and thus `var_spans`); zip truncates safely if the
-                // lengths ever diverge (a binding's hover is dropped, never a panic).
-                for ((name, ty), span) in bindings.into_iter().zip(var_spans.iter()) {
+                for (name, span, ty) in bindings {
                     // EDITOR HOVER: the loop binding (`i` in `for i in …`) is a NAME, not an `Expr` the
                     // probe visits during `infer`; record its decl-site hover here (no-op unless armed).
-                    self.hover_record_at(*span, &ty, HoverKind::Local, None);
+                    self.hover_record_at(span, &ty, HoverKind::Local, None);
                     self.declare(&name, ty);
                     // Loop vars are rebound each iteration → immutable; reassigning one diverges
                     // across engines, so the checker forbids it (see `check_assign`).
@@ -4199,143 +4180,78 @@ impl Checker {
         }
     }
 
-    /// Check a destructuring let `a, b, … := value`. The value's type must be a tuple whose arity
-    /// matches the binding count; each name is then declared with its element type. An `Unknown`
-    /// value (an already-reported error) declares all names `Unknown` so no cascade follows.
+    /// Check a destructuring let `a, (b, c), … := value`. The one binder (`bind_subpattern`, target
+    /// mode) matches the target against the value's type and collects each name with its element
+    /// type. When the type proves the shape, each name is declared with its element type; otherwise
+    /// (an `Unknown` value, a reported mismatch) every name is declared `Unknown` so no cascade
+    /// follows.
     pub(super) fn check_destructure(
         &mut self,
-        names: &[String],
-        name_spans: &[Span],
+        target: &Pattern,
         val_ty: &Ty,
         span: Span,
         stmt_span: Span,
     ) {
+        let mut leaves = Vec::new();
+        let proven = self.bind_subpattern(target, val_ty, span, &mut BindMode::Target(&mut leaves));
         // TICKET-186: a name whose first let this is refines its seed (`refine_first_let`)
         // instead of being re-declared.
-        match val_ty {
-            Ty::Unknown => {
-                for name in names {
-                    if name != "_"
-                        && !self.refine_first_let(name, Ty::Unknown, stmt_span, BindSite::Other)
-                    {
-                        self.declare(name, Ty::Unknown);
-                    }
+        if !proven {
+            for (name, _, _) in &leaves {
+                if !self.refine_first_let(name, Ty::Unknown, stmt_span, BindSite::Other) {
+                    self.declare(name, Ty::Unknown);
                 }
             }
-            Ty::Tuple(elems) if elems.len() == names.len() => {
-                // These `declare`s hit the SAME storage slots the single-name let does, so they owe
-                // the same two carve-outs — per name, at that name's own span. Only this arm: the
-                // other three declare `Ty::Unknown` on an already-errored statement, and the const
-                // branch does not skip `Unknown`.
-                // Run every check BEFORE any `declare`, so each name is judged against the binding as
-                // it stood before this statement — and skip a name a LATER element rebinds, because a
-                // repeated name (`x, x := (1, "s")`) is one slot written twice with no code in
-                // between: only the last element can ever be read, so the earlier one is a transient
-                // the program cannot observe (CPython prints the last, measured). Judging it fired on
-                // the sound `x := "a"` / `x, x := (1, "b")`; judging only the FIRST occurrence would
-                // instead miss the real retype in `x := 1` / closure `-> int` / `x, x := (2, "s")`.
-                // TICKET-142 (W14-32): a `_` element is the blank identifier — never declared.
-                // TICKET-186: a name whose first let this is, and whose element refines its seed, is
-                // not re-declared (`refine_first_let`); a retype of the seed is judged as before.
-                let refines: Vec<bool> = names
+            return;
+        }
+        let names: Vec<String> = leaves.iter().map(|(name, _, _)| name.clone()).collect();
+        // These `declare`s hit the SAME storage slots the single-name let does, so they owe
+        // the same two carve-outs — per name, at that name's own span. Only this path: the
+        // unproven path declares `Ty::Unknown` on an already-errored statement, and the const
+        // branch does not skip `Unknown`.
+        // Run every check BEFORE any `declare`, so each name is judged against the binding as
+        // it stood before this statement — and skip a name a LATER element rebinds, because a
+        // repeated name (`x, x := (1, "s")`) is one slot written twice with no code in
+        // between: only the last element can ever be read, so the earlier one is a transient
+        // the program cannot observe (CPython prints the last, measured). Judging it fired on
+        // the sound `x := "a"` / `x, x := (1, "b")`; judging only the FIRST occurrence would
+        // instead miss the real retype in `x := 1` / closure `-> int` / `x, x := (2, "s")`.
+        // TICKET-142 (W14-32): a `_` element is the blank identifier — never declared.
+        // TICKET-186: a name whose first let this is, and whose element refines its seed, is
+        // not re-declared (`refine_first_let`); a retype of the seed is judged as before.
+        let refines: Vec<bool> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                !names[i + 1..].contains(name)
+                    && self
+                        .first_let_merge(name, &leaves[i].2, stmt_span)
+                        .is_some()
+            })
+            .collect();
+        for (i, name) in names.iter().enumerate() {
+            if !names[i + 1..].contains(name) && !refines[i] {
+                self.reject_redeclare(name, &leaves[i].2, leaves[i].1);
+            }
+        }
+        for (i, (name, name_span, ty)) in leaves.iter().enumerate() {
+            // EDITOR HOVER: each destructure target (`a`/`b` in `a, b := (1,2)`) is a NAME,
+            // not an `Expr` the probe visits; record its tuple-element type at its own span
+            // (no-op unless a probe is armed → zero overhead on normal checks).
+            self.hover_record_at(*name_span, ty, HoverKind::Local, None);
+            // An earlier occurrence of a refined name is a transient no code observes.
+            let refined_later = names[i + 1..].contains(name)
+                && names
                     .iter()
-                    .enumerate()
-                    .map(|(i, name)| {
-                        !names[i + 1..].contains(name)
-                            && self.first_let_merge(name, &elems[i], stmt_span).is_some()
-                    })
-                    .collect();
-                for (i, name) in names.iter().enumerate() {
-                    if name != "_" && !names[i + 1..].contains(name) && !refines[i] {
-                        self.reject_redeclare(name, &elems[i], name_spans[i]);
-                    }
-                }
-                for (i, ((name, ty), name_span)) in
-                    names.iter().zip(elems).zip(name_spans.iter()).enumerate()
-                {
-                    if name == "_" {
-                        continue;
-                    }
-                    // EDITOR HOVER: each destructure target (`a`/`b` in `a, b := (1,2)`) is a NAME,
-                    // not an `Expr` the probe visits; record its tuple-element type at its own span
-                    // (no-op unless a probe is armed → zero overhead on normal checks).
-                    self.hover_record_at(*name_span, ty, HoverKind::Local, None);
-                    // An earlier occurrence of a refined name is a transient no code observes.
-                    let refined_later = names[i + 1..].contains(name)
-                        && names
-                            .iter()
-                            .rposition(|n| n == name)
-                            .is_some_and(|j| refines[j]);
-                    if refined_later
-                        || (refines[i]
-                            && self.refine_first_let(name, ty.clone(), stmt_span, BindSite::Other))
-                    {
-                        continue;
-                    }
-                    self.declare(name, ty.clone());
-                }
+                    .rposition(|n| n == name)
+                    .is_some_and(|j| refines[j]);
+            if refined_later
+                || (refines[i]
+                    && self.refine_first_let(name, ty.clone(), stmt_span, BindSite::Other))
+            {
+                continue;
             }
-            Ty::Tuple(elems) => {
-                self.error(
-                    span,
-                    format!(
-                        "destructuring binds {} name(s), but the tuple has {} element(s)",
-                        names.len(),
-                        elems.len()
-                    ),
-                );
-                for name in names {
-                    if name != "_"
-                        && !self.refine_first_let(name, Ty::Unknown, stmt_span, BindSite::Other)
-                    {
-                        self.declare(name, Ty::Unknown);
-                    }
-                }
-            }
-            other @ Ty::Int
-            | other @ Ty::Float
-            | other @ Ty::Bool
-            | other @ Ty::Str
-            | other @ Ty::Bytes
-            | other @ Ty::ByteArray
-            | other @ Ty::Nil
-            | other @ Ty::List(_)
-            | other @ Ty::Map(..)
-            | other @ Ty::Set(_)
-            | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
-            | other @ Ty::Struct(..)
-            | other @ Ty::Enum(..)
-            | other @ Ty::Param(_)
-            | other @ Ty::Result(..)
-            | other @ Ty::Option(_)
-            | other @ Ty::Channel(_)
-            | other @ Ty::Shared(_)
-            | other @ Ty::Atomic(_)
-            | other @ Ty::AtomicInt
-            | other @ Ty::RwShared(_)
-            | other @ Ty::Executor
-            | other @ Ty::Socket
-            | other @ Ty::Listener
-            | other @ Ty::Writer
-            | other @ Ty::Reader
-            | other @ Ty::Ptr
-            | other @ Ty::Width(_)
-            | other @ Ty::Protocol(..)
-            | other @ Ty::Module(_)
-            | other @ Ty::Var(_) => {
-                self.error(
-                    span,
-                    format!("cannot destructure non-tuple value of type {other}"),
-                );
-                for name in names {
-                    if name != "_"
-                        && !self.refine_first_let(name, Ty::Unknown, stmt_span, BindSite::Other)
-                    {
-                        self.declare(name, Ty::Unknown);
-                    }
-                }
-            }
+            self.declare(name, ty.clone());
         }
     }
 
@@ -6159,68 +6075,6 @@ impl Checker {
         out
     }
 
-    /// Tuple-destructuring `for a, b, … in xs` (N > 1 names): bind each name to the matching slot of
-    /// a TUPLE element type — the bindings `a, b := t` would give inside a one-name loop, which is
-    /// how `compile_for` lowers it (`GetField(j)` on each element, on every iteration path). `None`
-    /// when the element is not a tuple, so the caller reports it in its own iterand-specific words;
-    /// an arity mismatch is reported here, once for every source (TICKET-113).
-    fn for_tuple_bindings(
-        &mut self,
-        vars: &[String],
-        elem: &Ty,
-        span: Span,
-    ) -> Option<Vec<(String, Ty)>> {
-        match elem {
-            Ty::Tuple(ts) if ts.len() == vars.len() => {
-                Some(vars.iter().cloned().zip(ts.iter().cloned()).collect())
-            }
-            Ty::Tuple(ts) => {
-                self.error(
-                    span,
-                    format!(
-                        "tuple-destructuring `for` binds {} names but the element has {} ({elem})",
-                        vars.len(),
-                        ts.len()
-                    ),
-                );
-                Some(vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect())
-            }
-            Ty::Unknown => Some(vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect()),
-            Ty::Int
-            | Ty::Float
-            | Ty::Bool
-            | Ty::Str
-            | Ty::Bytes
-            | Ty::ByteArray
-            | Ty::Nil
-            | Ty::List(_)
-            | Ty::Map(..)
-            | Ty::Set(_)
-            | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
-            | Ty::Struct(..)
-            | Ty::Enum(..)
-            | Ty::Param(_)
-            | Ty::Result(..)
-            | Ty::Option(_)
-            | Ty::Channel(_)
-            | Ty::Shared(_)
-            | Ty::Atomic(_)
-            | Ty::AtomicInt
-            | Ty::RwShared(_)
-            | Ty::Executor
-            | Ty::Socket
-            | Ty::Listener
-            | Ty::Writer
-            | Ty::Reader
-            | Ty::Ptr
-            | Ty::Width(_)
-            | Ty::Protocol(..)
-            | Ty::Module(_)
-            | Ty::Var(_) => None,
-        }
-    }
-
     /// TICKET-253 — the two faults of `Range`'s own methods, reported early when the checker sees the
     /// range LITERAL as the direct iterand or `.len()` receiver: iterating a range with no start, and
     /// `len` of a range with a missing bound. A range VALUE reaches the same rules at run time, from
@@ -6238,138 +6092,31 @@ impl Checker {
         }
     }
 
-    pub(super) fn for_bindings(&mut self, vars: &[String], iter: &Expr) -> Vec<(String, Ty)> {
-        let unknowns = |vars: &[String]| vars.iter().map(|v| (v.clone(), Ty::Unknown)).collect();
+    /// The names a loop target binds over `iter`, each with its name span and type. The element
+    /// type has one source, `iterable_elem`; the one binder (`bind_subpattern`, target mode)
+    /// matches the target against it, so `for a, (b, c) in xs` unpacks a tuple element of any
+    /// iterable.
+    pub(super) fn for_bindings(
+        &mut self,
+        target: &Pattern,
+        iter: &Expr,
+    ) -> Vec<(String, Span, Ty)> {
         self.range_literal_fault(iter, false);
         let m = self.tyvar_mark();
         let it = self.infer(iter);
         let it = self.close_operand(m, it);
-        match &it {
-            // Tuple-destructuring `for`: over a `list[(A, B, …)]` with N>1 names, bind each name to
-            // the matching tuple element. One name still binds the whole tuple (the `Ty::List` arm
-            // below). A list of non-tuples (or an arity mismatch) with N>1 names is an error.
-            Ty::List(inner) if vars.len() > 1 => {
-                match self.for_tuple_bindings(vars, inner, iter.span) {
-                    Some(bindings) => bindings,
-                    None => {
-                        self.error(
-                            iter.span,
-                            format!("`for k, v` requires a tuple element, found {it}"),
-                        );
-                        unknowns(vars)
-                    }
-                }
-            }
-            Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Set(_) if vars.len() != 1 => {
-                self.error(
-                    iter.span,
-                    format!("`for k, v` requires a tuple element, found {it}"),
-                );
-                unknowns(vars)
-            }
-            Ty::List(inner) => vec![(vars[0].clone(), (**inner).clone())],
-            Ty::Set(elem) => vec![(vars[0].clone(), (**elem).clone())],
-            Ty::Str => vec![(vars[0].clone(), Ty::Str)],
-            // `for x in bytes:`/`for x in bytearray:` bind a single `int` (0–255).
-            Ty::Bytes | Ty::ByteArray => vec![(vars[0].clone(), Ty::Int)],
-            Ty::Unknown => unknowns(vars),
-            Ty::Param(_) => {
-                // A bounded type parameter binds the element `iterable_elem` reads off its bound.
-                let arg = self.iterable_elem(&it);
-                match arg {
-                    Some(t) => {
-                        let elem = t;
-                        if vars.len() == 1 {
-                            vec![(vars[0].clone(), elem)]
-                        } else if let Some(bindings) =
-                            self.for_tuple_bindings(vars, &elem, iter.span)
-                        {
-                            bindings
-                        } else {
-                            self.error(
-                                iter.span,
-                                format!("`for k, v` requires a tuple element, found {it}"),
-                            );
-                            unknowns(vars)
-                        }
-                    }
-                    None => {
-                        let note = self.iter_hook_note(&it);
-                        self.error(iter.span, format!("cannot iterate over {it}{note}"));
-                        unknowns(vars)
-                    }
-                }
-            }
-            // A generator result or `.iter()` cursor `Iterator[T]` binds one element of T, or N names over a tuple T.
-            Ty::Struct(name, args) if name == "Iterator" && args.len() == 1 => {
-                if vars.len() == 1 {
-                    return vec![(vars[0].clone(), args[0].clone())];
-                }
-                if let Some(bindings) = self.for_tuple_bindings(vars, &args[0], iter.span) {
-                    return bindings;
-                }
-                self.error(
-                    iter.span,
-                    "a generator iterator binds a single loop variable",
-                );
-                unknowns(vars)
-            }
-            _ if self.iterable_elem(&it).is_some() => {
-                // Everything else `iterable_elem` admits, binding a single element: a declared type
-                // with the `iter` hook (driven by a one-time `.iter()`), one with the `next` hook,
-                // and an `Iterable[E]` ANNOTATION. `iter` before `next` is `iterable_elem`'s rule.
-                let elem = self.iterable_elem(&it).expect("guarded by the match arm");
-                if vars.len() == 1 {
-                    return vec![(vars[0].clone(), elem)];
-                }
-                // N names destructure a tuple element (TICKET-113). The arm is reached by protocol
-                // EXISTENTIALS too (an `Iterable[E]` annotation), so only an actual struct gets told
-                // it is one when the element is not a tuple; everything else is named.
-                if let Some(bindings) = self.for_tuple_bindings(vars, &elem, iter.span) {
-                    return bindings;
-                }
-                if matches!(it, Ty::Struct(..)) {
-                    self.error(iter.span, "a struct iterator binds a single loop variable");
-                } else {
-                    self.error(
-                        iter.span,
-                        format!("`for k, v` requires a tuple element, found {it}"),
-                    );
-                }
-                unknowns(vars)
-            }
-            other @ Ty::Int
-            | other @ Ty::Float
-            | other @ Ty::Bool
-            | other @ Ty::Nil
-            | other @ Ty::Map(..)
-            | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
-            | other @ Ty::Tuple(_)
-            | other @ Ty::Struct(..)
-            | other @ Ty::Enum(..)
-            | other @ Ty::Result(..)
-            | other @ Ty::Option(_)
-            | other @ Ty::Channel(_)
-            | other @ Ty::Shared(_)
-            | other @ Ty::Atomic(_)
-            | other @ Ty::AtomicInt
-            | other @ Ty::RwShared(_)
-            | other @ Ty::Executor
-            | other @ Ty::Socket
-            | other @ Ty::Listener
-            | other @ Ty::Writer
-            | other @ Ty::Reader
-            | other @ Ty::Ptr
-            | other @ Ty::Width(_)
-            | other @ Ty::Protocol(..)
-            | other @ Ty::Module(_)
-            | other @ Ty::Var(_) => {
-                let note = self.iter_hook_note(other);
-                self.error(iter.span, format!("cannot iterate over {other}{note}"));
-                unknowns(vars)
-            }
-        }
+        let elem = if it.is_unknown() {
+            Ty::Unknown
+        } else if let Some(elem) = self.iterable_elem(&it) {
+            elem
+        } else {
+            let note = self.iter_hook_note(&it);
+            self.error(iter.span, format!("cannot iterate over {it}{note}"));
+            Ty::Unknown
+        };
+        let mut leaves = Vec::new();
+        self.bind_subpattern(target, &elem, iter.span, &mut BindMode::Target(&mut leaves));
+        leaves
     }
 
     /// How a `match` is being checked, derived from the scrutinee's type.

@@ -11568,7 +11568,7 @@ fn for_kv_over_list_rejected() {
     // A list of plain ints (not tuples) still can't bind two names.
     rejects(
         "xs := [1,2,3]\nfor a, b in xs:\n    print(a)\n",
-        "requires a tuple element",
+        "tuple pattern cannot match a value of type int",
     );
 }
 
@@ -11609,7 +11609,7 @@ fn for_tuple_element_types_checked() {
 fn for_kv_over_range_rejected() {
     rejects(
         "for a, b in 0..3:\n    print(a)\n",
-        "binds a single loop variable",
+        "tuple pattern cannot match a value of type int",
     );
 }
 
@@ -12822,10 +12822,26 @@ fn destructure_binds_element_types() {
 }
 
 #[test]
+fn destructuring_value_list_arity_mismatch_is_a_type_error() {
+    rejects(
+        "fn main():\n    a, b := 1, 2, 3\n",
+        "tuple pattern has 2 element(s), but the value has 3",
+    );
+}
+
+#[test]
+fn tuple_assign_value_list_arity_mismatch_is_a_type_error() {
+    rejects(
+        "fn main():\n    a := 0\n    b := 0\n    a, b = 1, 2, 3\n",
+        "assignment has 2 target(s) but the value has 3 element(s)",
+    );
+}
+
+#[test]
 fn destructure_arity_mismatch_rejected() {
     rejects(
         "fn pair() -> (int, int):\n    return (1, 2)\nfn main():\n    a, b, c := pair()\n",
-        "destructuring binds 3",
+        "tuple pattern has 3 element(s), but the value has 2",
     );
 }
 
@@ -12833,7 +12849,7 @@ fn destructure_arity_mismatch_rejected() {
 fn destructure_non_tuple_rejected() {
     rejects(
         "fn main():\n    a, b := 5\n",
-        "cannot destructure non-tuple",
+        "tuple pattern cannot match a value of type int",
     );
 }
 
@@ -14985,7 +15001,7 @@ fn struct_iter_two_vars_rejected() {
     // A struct iterator binds exactly one loop variable (no key/value form).
     rejects(
         "struct Counter:\n    n: int\n    limit: int\n    fn next(self) -> int?:\n        if self.n >= self.limit:\n            return None\n        v := self.n\n        self.n = self.n + 1\n        return ?v\nfn main():\n    for k, v in Counter(0, 5):\n        print(k)\nmain()\n",
-        "single loop variable",
+        "tuple pattern cannot match a value of type int",
     );
 }
 
@@ -16586,7 +16602,7 @@ fn for_over_channel_binds_element() {
 fn for_over_channel_two_vars_rejected() {
     rejects(
         "fn main():\n    ch := Channel[int]()\n    for k, v in ch:\n        print(k)\nmain()\n",
-        "requires a tuple element",
+        "tuple pattern cannot match a value of type int",
     );
 }
 
@@ -20545,11 +20561,11 @@ fn iterable_type_position_rejects_bad_shapes() {
         "fn f(xs: Iterable) -> int:\n    n := 0\n    for v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
         "cannot iterate over Iterable",
     );
-    // (b) the two-variable `for i, v in` form: an existential carries no key/index. (The message names
-    // the annotated type — see `two_var_for_over_iterable_annotation_names_the_type`.)
+    // (b) the two-variable `for i, v in` form: an existential carries no key/index, so the element
+    // (`int`) is not a tuple — see `two_var_for_over_iterable_annotation_names_the_type`.
     rejects(
         "fn f(xs: Iterable[int]) -> int:\n    n := 0\n    for i, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(f([1, 2])))\nmain()\n",
-        "`for k, v` requires a tuple element, found Iterable[int]",
+        "tuple pattern cannot match a value of type int",
     );
     // (c) W6-3b: `Iterable` is NOT `Iterator` — an `Iterable[T]` value still cannot call `.next()`.
     rejects(
@@ -20682,23 +20698,23 @@ fn a_nonconforming_next_is_an_ordinary_method() {
 /// only for actual structs.
 #[test]
 fn two_var_for_over_iterable_annotation_names_the_type() {
-    // A TUPLE element destructures (TICKET-113), so this is accepted now; the non-tuple Iterable[str] below keeps the named-type message.
+    // A TUPLE element destructures (TICKET-113), so this is accepted now; a non-tuple element names its own type in the one tuple message.
     ok(
         "fn pairs(xs: Iterable[(str, int)]) -> int:\n    n := 0\n    for k, v in xs:\n        n += v\n    return n\nfn main():\n    print(str(pairs([(\"a\", 1)])))\nmain()\n",
     );
     rejects(
         "fn kv(xs: Iterable[str]) -> int:\n    n := 0\n    for i, v in xs:\n        n += 1\n    return n\nfn main():\n    print(str(kv([\"a\"])))\nmain()\n",
-        "`for k, v` requires a tuple element, found Iterable[str]",
+        "tuple pattern cannot match a value of type str",
     );
     // the same for an `[S: Iterable[T]]` BOUND — the other spelling of the same existential.
     rejects(
         "fn g[S: Iterable[int]](xs: S) -> int:\n    for i, v in xs:\n        return v\n    return 0\nfn main():\n    print(str(g([1, 2])))\nmain()\n",
-        "`for k, v` requires a tuple element, found S",
+        "tuple pattern cannot match a value of type int",
     );
-    // a real struct keeps the struct wording.
+    // a struct iterator is one more iterable: its element (`int`) is not a tuple.
     rejects(
         "struct Counter:\n    n: int\n    fn next(self) -> int?:\n        return None\nfn main():\n    for k, v in Counter(0):\n        print(str(k))\nmain()\n",
-        "a struct iterator binds a single loop variable",
+        "tuple pattern cannot match a value of type int",
     );
 }
 
@@ -20757,35 +20773,35 @@ fn for_multi_name_over_every_tuple_source_checks() {
 fn for_multi_name_rejects_non_tuple_and_wrong_arity() {
     rejects(
         "fn gen() -> Iterator[int]:\n    yield 1\nfn main():\n    for a, b in gen():\n        print(a)\nmain()\n",
-        "a generator iterator binds a single loop variable",
+        "tuple pattern cannot match a value of type int",
     );
     rejects(
         "fn main():\n    for a, b in [1, 2].iter():\n        print(a)\nmain()\n",
-        "a generator iterator binds a single loop variable",
+        "tuple pattern cannot match a value of type int",
     );
     rejects(
         "fn main():\n    ch := Channel[int](1)\n    ch.close()\n    for a, b in ch:\n        print(a)\nmain()\n",
-        "`for k, v` requires a tuple element, found Channel[int]",
+        "tuple pattern cannot match a value of type int",
     );
     rejects(
         "fn main():\n    for a, b in 0..3:\n        print(a)\nmain()\n",
-        "a struct iterator binds a single loop variable",
+        "tuple pattern cannot match a value of type int",
     );
     rejects(
         "fn trip() -> Iterator[(int, str, float)]:\n    yield (1, \"x\", 2.5)\nfn main():\n    for a, b in trip():\n        print(a)\nmain()\n",
-        "tuple-destructuring `for` binds 2 names but the element has 3",
+        "tuple pattern has 2 element(s), but the value has 3",
     );
     rejects(
         "struct Pairs:\n    n: int\n    fn next(self) -> (int, str)?:\n        return None\nfn main():\n    for a, b, c in Pairs(0):\n        print(a)\nmain()\n",
-        "tuple-destructuring `for` binds 3 names but the element has 2",
+        "tuple pattern has 3 element(s), but the value has 2",
     );
     rejects(
         "fn f(xs: Iterable[(str, int)]) -> int:\n    for a, b, c in xs:\n        return 0\n    return 1\nfn main():\n    print(f([(\"a\", 1)]))\nmain()\n",
-        "tuple-destructuring `for` binds 3 names but the element has 2",
+        "tuple pattern has 3 element(s), but the value has 2",
     );
     rejects(
         "fn main():\n    ch := Channel[(int, str)](1)\n    ch.close()\n    for a, b, c in ch:\n        print(a)\nmain()\n",
-        "tuple-destructuring `for` binds 3 names but the element has 2",
+        "tuple pattern has 3 element(s), but the value has 2",
     );
     rejects(
         "fn pairs() -> Iterator[(int, str)]:\n    yield (1, \"x\")\nfn main():\n    for a, b in pairs():\n        s: str = a\n        print(s)\nmain()\n",
@@ -33242,7 +33258,10 @@ fn blank_identifier_discards_in_every_position() {
 #[test]
 fn blank_identifier_is_not_readable() {
     rejects("_ := 5\nprint(_)\n", "cannot use '_' as a value");
-    ok("for _ in 0..2:\n    print(_)\n");
+    rejects(
+        "for _ in 0..2:\n    print(_)\n",
+        "cannot use '_' as a value",
+    );
 }
 
 // TICKET-142 (W14-33): an all-constant int expression that overflows i64 is a compile error.

@@ -1174,17 +1174,17 @@ impl Checker {
         // std module exports no mutable global.
         for s in &ast.stmts {
             if let StmtKind::Let {
-                names,
+                target,
                 ty,
                 is_const,
                 ..
             } = &s.kind
             {
-                match (names.as_slice(), ty, is_const) {
-                    ([name], Some(t), true) => {
+                match (target.target_ident(), ty, is_const) {
+                    (Some(name), Some(t), true) => {
                         let ty = self.resolve_type(t, s.span);
                         sig.members.insert(
-                            name.clone(),
+                            name.to_string(),
                             MemberSig {
                                 ty,
                                 certain_fn: None,
@@ -4082,12 +4082,12 @@ impl Checker {
                 }
                 // A top-level `let` binds (possibly multiple) names; surface the doc on each.
                 StmtKind::Let {
-                    names,
+                    target,
                     doc: Some(d),
                     ..
                 } => {
-                    for n in names {
-                        self.name_docs.insert(n.clone(), d.clone());
+                    for n in target.target_names() {
+                        self.name_docs.insert(n, d.clone());
                     }
                 }
                 StmtKind::Let { .. }

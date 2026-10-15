@@ -11,7 +11,7 @@ mod ty;
 use crate::ast::{
     AssignOp, BinaryOp, Block, Bound, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
     Import, LitPattern, MethodSig, NativeDecl, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind,
-    Type, TypeParam, UnaryOp, WaitArm, WaitArmKind, WaitTarget,
+    Type, TypeParam, UnaryOp, WaitArm, WaitArmKind,
 };
 use crate::native::cffi::CType;
 use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
@@ -108,6 +108,20 @@ enum MatchKind {
     /// a literal/range arm pins `MatchKind::Literal`. So `Skip` only carries the genuinely-permissive
     /// residue.
     Skip,
+}
+
+impl MatchKind {
+    /// The scrutinee's type, as the one pattern binder reads it.
+    fn scrut_ty(&self) -> Ty {
+        match self {
+            MatchKind::Variants { scrut, .. } => scrut.clone(),
+            MatchKind::Literal(ty) => ty.clone(),
+            MatchKind::Tuple(tys) => Ty::Tuple(tys.clone()),
+            MatchKind::Struct { label, targs, .. } => Ty::Struct(label.clone(), targs.clone()),
+            // Reported upstream (`reconstruct_unknown_kind`).
+            MatchKind::Skip => Ty::Unknown,
+        }
+    }
 }
 
 /// Severity of a checker diagnostic. `Error` fails the build; `Warning` is reported and the build
@@ -1844,7 +1858,9 @@ fn entry_module_binds(stmts: &[Stmt], imports: &[ResolvedImport], name: &str) ->
         || stmts.iter().any(|s| match &s.kind {
             StmtKind::Fn(d) => d.name == name,
             StmtKind::Extern { fns, .. } => fns.iter().any(|f| f.name == name),
-            StmtKind::Let { names, .. } => name != "_" && names.iter().any(|n| n == name),
+            StmtKind::Let { target, .. } => {
+                name != "_" && target.target_names().iter().any(|n| n == name)
+            }
             StmtKind::Assign { .. }
             | StmtKind::Struct { .. }
             | StmtKind::Protocol { .. }

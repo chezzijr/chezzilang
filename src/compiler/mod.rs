@@ -14,7 +14,7 @@
 use crate::ast::{
     AssignOp, BinaryOp, Block, Chunk, CompClause, CompKind, DeferTarget, Expr, ExprKind, FnDecl,
     Import, LitPattern, MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind,
-    Type, UnaryOp, WaitArm, WaitArmKind, WaitTarget,
+    Type, UnaryOp, WaitArm, WaitArmKind,
 };
 use crate::checker::Resolution;
 use crate::native::cffi::CType;
@@ -807,8 +807,8 @@ impl Compiler {
         // Every slot so far holds a hoisted value from the start: no let line.
         self.global_let_lines.resize(self.global_slots.len(), 0);
         for stmt in stmts {
-            if let StmtKind::Let { names, .. } = &stmt.kind {
-                for name in names {
+            if let StmtKind::Let { target, .. } = &stmt.kind {
+                for name in &target.target_names() {
                     // TICKET-142 (W14-32): `_` is the blank identifier — it gets no global slot.
                     // TICKET-183: only a slot this let CREATES starts uninitialized at its line.
                     if name != "_" && !self.globals.contains_key(name) {
@@ -1584,36 +1584,37 @@ impl Compiler {
 
     fn compile_stmt(&mut self, fc: &mut FnComp, stmt: &Stmt) -> Result<(), CompileError> {
         match &stmt.kind {
-            StmtKind::Let { names, value, .. } => {
+            StmtKind::Let { target, value, .. } => {
                 self.compile_expr(fc, value)?;
-                if names.len() > 1 {
-                    // destructuring let `a, b := value`: stash the tuple in a hidden local, then for
-                    // each binding load it and read element `.i` (the tuple-aware `GetField`). No new
-                    // index op — `GetField("i")` on a tuple is the element access.
-                    let tuple_slot = fc.add_hidden();
-                    fc.emit_hidden_set(tuple_slot, stmt.span);
-                    for (i, name) in names.iter().enumerate() {
-                        // TICKET-142 (W14-32): a `_` element is the blank identifier — never bound.
-                        if name == "_" {
-                            continue;
-                        }
-                        fc.emit_hidden_get(tuple_slot, stmt.span);
-                        fc.emit(Op::GetField { name: i.to_string(), ic: NO_IC }, stmt.span); // tuple element
-                        if fc.is_global_scope() {
-                            fc.emit(Op::DefineGlobalSlot(self.global_slot(name)), stmt.span);
-                        } else {
-                            fc.emit_decl_named(name.clone(), stmt.span);
-                        }
+                match target {
+                    // destructuring let `a, (b, c) := value`: stash the tuple in a hidden local; the
+                    // one pattern lowering reads each element (`GetField`) and declares the names.
+                    Pattern::Tuple(_) => {
+                        let tuple_slot = fc.add_hidden();
+                        fc.emit_hidden_set(tuple_slot, stmt.span);
+                        let mut fails = Vec::new();
+                        self.emit_pattern(fc, target, tuple_slot, &mut fails, stmt.span, &mut BindInto::Decl)?;
+                        debug_assert!(fails.is_empty(), "a binding target never tests");
                     }
-                } else if names[0] == "_" {
                     // TICKET-142 (W14-32): `_ := e` evaluates `e` and discards it — `_` is never
                     // declared, so it has no local slot and no module global slot (the checker
                     // agrees: it never declares `_`).
-                    fc.emit(Op::Pop, stmt.span);
-                } else if fc.is_global_scope() {
-                    fc.emit(Op::DefineGlobalSlot(self.global_slot(&names[0])), stmt.span);
-                } else {
-                    fc.emit_decl_frame(names[0].clone(), stmt.span);
+                    Pattern::Wildcard => fc.emit(Op::Pop, stmt.span),
+                    Pattern::Ident(name, _, _) if name == "_" => fc.emit(Op::Pop, stmt.span),
+                    Pattern::Ident(name, _, _) => {
+                        if fc.is_global_scope() {
+                            fc.emit(Op::DefineGlobalSlot(self.global_slot(name)), stmt.span);
+                        } else {
+                            fc.emit_decl_frame(name.clone(), stmt.span);
+                        }
+                    }
+                    Pattern::Variant { .. }
+                    | Pattern::Literal(_)
+                    | Pattern::Range { .. }
+                    | Pattern::Or(_)
+                    | Pattern::Carrier { .. } => {
+                        unreachable!("a binding target holds Ident, Wildcard or Tuple only")
+                    }
                 }
                 Ok(())
             }
@@ -1799,9 +1800,9 @@ impl Compiler {
             StmtKind::Defer(target) => self.compile_defer(fc, target, stmt.span),
             StmtKind::If { branches, else_block } => self.compile_if(fc, branches, else_block.as_deref(), stmt.span),
             StmtKind::While { cond, body } => self.compile_while(fc, cond, body),
-            StmtKind::For {
-                vars, iter, body, ..
-            } => self.compile_for(fc, vars, iter, body, stmt.span),
+            StmtKind::For { target, iter, body } => {
+                self.compile_for(fc, target, iter, body, stmt.span)
+            }
             StmtKind::Match { scrutinee, arms } => self.compile_match(fc, scrutinee, arms, stmt.span),
             // Concurrency C4 — sequential, run-to-completion executor.
             StmtKind::Parallel { body } => self.compile_parallel(fc, body, stmt.span),
@@ -1860,10 +1861,31 @@ impl Compiler {
             match &arm.kind {
                 // The selected value is on the stack top — deliver it per the arm's target.
                 WaitArmKind::Recv { target, .. } => match target {
-                    WaitTarget::Bind(name) => {
+                    Pattern::Ident(name, _, _) => {
                         fc.emit_decl_named(name.clone(), arm.span);
                     }
-                    WaitTarget::Discard => fc.emit(Op::Pop, arm.span),
+                    Pattern::Wildcard => fc.emit(Op::Pop, arm.span),
+                    Pattern::Tuple(_) => {
+                        let slot = fc.add_hidden();
+                        fc.emit_hidden_set(slot, arm.span);
+                        let mut fails = Vec::new();
+                        self.emit_pattern(
+                            fc,
+                            target,
+                            slot,
+                            &mut fails,
+                            arm.span,
+                            &mut BindInto::Decl,
+                        )?;
+                        debug_assert!(fails.is_empty(), "a binding target never tests");
+                    }
+                    Pattern::Variant { .. }
+                    | Pattern::Literal(_)
+                    | Pattern::Range { .. }
+                    | Pattern::Or(_)
+                    | Pattern::Carrier { .. } => {
+                        unreachable!("a binding target holds Ident, Wildcard or Tuple only")
+                    }
                 },
                 // A send arm binds nothing — `take_wait_send_arm` pushes no value, so no prologue.
                 WaitArmKind::Send { .. } => {}
@@ -2345,6 +2367,22 @@ impl Compiler {
                 );
                 self.emit_store(fc, name, span);
             }
+            // A nested target (`a, (b, c) = t`): stash the element, then store each inner element.
+            ExprKind::Tuple(inner) => {
+                fc.emit_hidden_get(tuple_slot, span);
+                fc.emit(
+                    Op::GetField {
+                        name: i.to_string(),
+                        ic: NO_IC,
+                    },
+                    span,
+                );
+                let nested = fc.add_hidden();
+                fc.emit_hidden_set(nested, span);
+                for (j, t) in inner.iter().enumerate() {
+                    self.compile_assign_element(fc, t, nested, j, span)?;
+                }
+            }
             ExprKind::Field { obj, name, .. } => {
                 self.compile_expr(fc, obj)?;
                 fc.emit_hidden_get(tuple_slot, span);
@@ -2391,7 +2429,6 @@ impl Compiler {
             | ExprKind::NoneLit
             | ExprKind::Pass
             | ExprKind::List(..)
-            | ExprKind::Tuple(_)
             | ExprKind::Map(_)
             | ExprKind::Set(_)
             | ExprKind::Comprehension { .. }
@@ -2523,7 +2560,7 @@ impl Compiler {
     fn compile_for(
         &mut self,
         fc: &mut FnComp,
-        vars: &[String],
+        target: &Pattern,
         iter: &Expr,
         body: &[Stmt],
         span: Span,
@@ -2539,7 +2576,7 @@ impl Compiler {
         // below: the grid of `tests/range_value_grid.rs` runs the literal and the same range bound to a
         // name and asserts both print the same. A literal with no start takes the general path, where
         // `Range.iter` faults (the checker reports the literal earlier).
-        if let Some((start, end, inclusive)) = crate::ast::counting_range(vars, iter) {
+        if let Some((start, end, inclusive)) = crate::ast::counting_range(target, iter) {
             // The start runs first (U7), then the end; both land in hidden slots before the loop
             // variable exists, so `for i in a..i` reads the OUTER `i`.
             self.compile_expr(fc, start)?;
@@ -2555,7 +2592,10 @@ impl Compiler {
             } else {
                 None
             };
-            let i_slot = fc.add_local(vars[0].clone());
+            let name = target
+                .target_ident()
+                .expect("a counting loop binds one name");
+            let i_slot = fc.add_local(name.to_string());
             // The COUNTER is a plain int mutated in place: the user var's own slot when it isn't
             // boxed, else a hidden slot (the boxed user cell is refreshed from it each iteration).
             let counter = fc.loopvar_raw_slot(i_slot);
@@ -2603,12 +2643,12 @@ impl Compiler {
             // and struct steps converge on ONE shared `Option` (None ⇒ exit, Some ⇒ bind) decoder —
             // they differ only in how they produce the `Option`.
             //
-            // N>1 names (`for a, b, … in xs`) ride the SAME machinery: each path lands one element in
-            // the hidden `elem` slot, which is destructured into the names via `GetField(j)` (the
-            // the `a, b := t` lowering, generalized to N). A Map yields `(key, value)` tuples (owner
-            // U9), so `for k, v in m` is the same tuple unpack; the checker admits N>1 names only over
-            // an element that is statically a tuple of that arity.
-            let multi = vars.len() > 1;
+            // A tuple target (`for a, (b, c) in xs`) rides the SAME machinery: each path lands one
+            // element in the hidden `elem` slot, which `emit_pattern` unpacks into the loop's raw
+            // slots. A Map yields `(key, value)` tuples (owner U9), so `for k, v in m` is the same
+            // tuple unpack; the checker admits a tuple target only over an element that is
+            // statically a tuple of that shape.
+            let single = target.target_ident().is_some();
             self.compile_expr(fc, iter)?;
             let iter_slot = fc.add_hidden();
             fc.emit_hidden_set(iter_slot, span);
@@ -2648,9 +2688,13 @@ impl Compiler {
             fc.patch_jump(not_cursor);
             // Where each step's element lands: the one name's mechanism slot, or a hidden temp the
             // N-name destructure reads.
-            let var_slots: Vec<usize> = vars.iter().map(|v| fc.add_local(v.clone())).collect();
+            let var_slots: Vec<usize> = target
+                .target_binders()
+                .iter()
+                .map(|(v, _)| fc.add_local(v.to_string()))
+                .collect();
             let var_raws: Vec<usize> = var_slots.iter().map(|&s| fc.loopvar_raw_slot(s)).collect();
-            let elem = if multi { fc.add_hidden() } else { var_raws[0] };
+            let elem = if single { var_raws[0] } else { fc.add_hidden() };
             let lst_slot = fc.add_hidden();
             let len_slot = fc.add_hidden();
             let idx_slot = fc.add_hidden();
@@ -2747,20 +2791,19 @@ impl Compiler {
             fc.emit(Op::GetIndex, span);
             fc.emit_set_local_raw(elem, span);
             fc.patch_jump(to_body);
-            if multi {
-                // Destructure the element tuple into each name (var[j] = elem.j). Reached from the lazy
-                // `Some(v)` bind and from the seq read.
-                for (j, &vr) in var_raws.iter().enumerate() {
-                    fc.emit_hidden_get(elem, span);
-                    fc.emit(
-                        Op::GetField {
-                            name: j.to_string(),
-                            ic: NO_IC,
-                        },
-                        span,
-                    ); // tuple element
-                    fc.emit_set_local_raw(vr, span);
-                }
+            if !single {
+                // Unpack the element into the loop's raw slots. Reached from the lazy `Some(v)` bind
+                // and from the seq read.
+                let mut fails = Vec::new();
+                self.emit_pattern(
+                    fc,
+                    target,
+                    elem,
+                    &mut fails,
+                    span,
+                    &mut BindInto::Loop(var_raws.iter()),
+                )?;
+                debug_assert!(fails.is_empty(), "a binding target never tests");
             }
             // Fresh cell per iteration for each boxed (captured) loop var (C1); no-op when unboxed.
             for (&vs, &vr) in var_slots.iter().zip(&var_raws) {
@@ -2870,10 +2913,7 @@ impl Compiler {
             // Wrap in this clause's `for`. The first clause is compiled last (outermost).
             body = vec![Stmt {
                 kind: StmtKind::For {
-                    vars: clause.vars.clone(),
-                    // Synthesized: comprehension clauses carry no binding spans, so default
-                    // (sentinel) spans — they never collide with a real decl-site hover.
-                    var_spans: vec![Span::default(); clause.vars.len()],
+                    target: clause.target.clone(),
                     iter: (*clause.iter).clone(),
                     body,
                 },
@@ -2885,17 +2925,16 @@ impl Compiler {
         let Stmt {
             kind:
                 StmtKind::For {
-                    vars,
+                    target,
                     iter,
                     body: inner,
-                    ..
                 },
             ..
         } = &body[0]
         else {
             unreachable!("a comprehension always has at least one for clause")
         };
-        self.compile_for(fc, vars, iter, inner, span)?;
+        self.compile_for(fc, target, iter, inner, span)?;
         // The comprehension's value is the finished accumulator.
         fc.emit_get_named(acc_slot, span);
         fc.end_scope();
@@ -3093,7 +3132,14 @@ impl Compiler {
         for arm in arms {
             fc.begin_scope();
             let mut fails = Vec::new();
-            self.emit_pattern(fc, arm.pattern(), scrut, &mut fails, scrutinee.span)?;
+            self.emit_pattern(
+                fc,
+                arm.pattern(),
+                scrut,
+                &mut fails,
+                scrutinee.span,
+                &mut BindInto::Match,
+            )?;
             // The guard runs with the pattern's bindings in scope; a false guard joins `fails` and
             // falls through to the next arm.
             self.emit_guard(fc, arm.guard(), &mut fails)?;
@@ -3168,7 +3214,7 @@ impl Compiler {
                 );
                 let elem = fc.add_hidden();
                 fc.emit_hidden_set(elem, span);
-                self.emit_pattern(fc, b, elem, fails, span)?;
+                self.emit_pattern(fc, b, elem, fails, span, &mut BindInto::Match)?;
             }
             return Ok(());
         }
@@ -3239,7 +3285,7 @@ impl Compiler {
                 | Pattern::Wildcard
                 | Pattern::Or(_)
                 | Pattern::Carrier { .. } => {
-                    self.emit_pattern(fc, b, bind_start + i, fails, span)?
+                    self.emit_pattern(fc, b, bind_start + i, fails, span, &mut BindInto::Match)?
                 }
             }
         }
@@ -3251,6 +3297,9 @@ impl Compiler {
     /// the pattern to a fresh local in the current scope. Recurses for nested tuple/variant
     /// patterns. No new opcodes — reuses `MatchArm` (variant), `GetField` (tuple element), and
     /// `Eq`+`JumpIfFalse` (literal).
+    ///
+    /// `into` says where a name lands (`BindInto`). A binding target (`Decl`, `Loop`) holds only
+    /// `Ident`, `Wildcard` and `Tuple`, so it never pushes onto `fails`.
     fn emit_pattern(
         &mut self,
         fc: &mut FnComp,
@@ -3258,39 +3307,58 @@ impl Compiler {
         scrut: usize,
         fails: &mut Vec<usize>,
         span: Span,
+        into: &mut BindInto<'_>,
     ) -> Result<(), CompileError> {
         match pattern {
             Pattern::Wildcard => {}
-            Pattern::Ident(name, _, _) => {
-                // A nested bare identifier the checker recorded as a NULLARY variant is a
-                // refutable variant match (`Some(None)`); it binds nothing and is tested like a
-                // top-level nullary variant. Otherwise it is a binding capturing the whole
-                // sub-value.
-                let res = self.pat_resolution(pattern, span).transpose()?.cloned();
-                if let Some(Resolution::Variant { enum_key, variant }) = res {
-                    let bind_start = fc.next_slot();
-                    let variant_id = self.variant_id_of_key(&enum_key, &variant);
-                    let arm_op = fc.emit_jump(
-                        Op::MatchArm {
-                            scrut,
-                            variant: name.clone(),
-                            variant_id,
-                            // A nested bare nullary variant is always a BUILT-IN (`None`); user
-                            // variants are qualified. The id compare is sufficient — no fallback key.
-                            enum_name: None,
-                            nbind: 0,
-                            bind_start,
-                            next: 0,
-                        },
-                        span,
-                    );
-                    fails.push(arm_op);
-                } else {
-                    // Bind the whole scrutinee to `name` (a fresh cell when captured).
+            Pattern::Ident(name, _, _) => match into {
+                // A `:=` name: a module global at global scope, else a fresh local.
+                BindInto::Decl => {
                     fc.emit_hidden_get(scrut, span);
-                    fc.emit_decl_named(name.clone(), span);
+                    if fc.is_global_scope() {
+                        fc.emit(Op::DefineGlobalSlot(self.global_slot(name)), span);
+                    } else {
+                        fc.emit_decl_named(name.clone(), span);
+                    }
                 }
-            }
+                // A loop name: the loop's raw slot, in binder order (the loop refreshes a boxed
+                // cell from it each iteration).
+                BindInto::Loop(raws) => {
+                    let slot = *raws.next().expect("one raw slot per binder");
+                    fc.emit_hidden_get(scrut, span);
+                    fc.emit_set_local_raw(slot, span);
+                }
+                BindInto::Match => {
+                    // A nested bare identifier the checker recorded as a NULLARY variant is a
+                    // refutable variant match (`Some(None)`); it binds nothing and is tested like a
+                    // top-level nullary variant. Otherwise it is a binding capturing the whole
+                    // sub-value.
+                    let res = self.pat_resolution(pattern, span).transpose()?.cloned();
+                    if let Some(Resolution::Variant { enum_key, variant }) = res {
+                        let bind_start = fc.next_slot();
+                        let variant_id = self.variant_id_of_key(&enum_key, &variant);
+                        let arm_op = fc.emit_jump(
+                            Op::MatchArm {
+                                scrut,
+                                variant: name.clone(),
+                                variant_id,
+                                // A nested bare nullary variant is always a BUILT-IN (`None`); user
+                                // variants are qualified. The id compare is sufficient — no fallback key.
+                                enum_name: None,
+                                nbind: 0,
+                                bind_start,
+                                next: 0,
+                            },
+                            span,
+                        );
+                        fails.push(arm_op);
+                    } else {
+                        // Bind the whole scrutinee to `name` (a fresh cell when captured).
+                        fc.emit_hidden_get(scrut, span);
+                        fc.emit_decl_named(name.clone(), span);
+                    }
+                }
+            },
             Pattern::Literal(lit) => {
                 fc.emit_hidden_get(scrut, span);
                 emit_lit_const(fc, lit, span);
@@ -3306,6 +3374,10 @@ impl Compiler {
             }
             Pattern::Tuple(subs) => {
                 for (i, sub) in subs.iter().enumerate() {
+                    // A binding target skips a `_` slot: nothing to read.
+                    if !matches!(into, BindInto::Match) && matches!(sub, Pattern::Wildcard) {
+                        continue;
+                    }
                     fc.emit_hidden_get(scrut, span);
                     fc.emit(
                         Op::GetField {
@@ -3316,7 +3388,7 @@ impl Compiler {
                     ); // tuple element `.i`
                     let elem = fc.add_hidden();
                     fc.emit_hidden_set(elem, span);
-                    self.emit_pattern(fc, sub, elem, fails, span)?;
+                    self.emit_pattern(fc, sub, elem, fails, span, &mut *into)?;
                 }
             }
             Pattern::Variant {
@@ -3362,7 +3434,7 @@ impl Compiler {
                     // Scope each alternative's scratch slots so they don't leak between alternatives.
                     fc.begin_scope();
                     let mut alt_fails = Vec::new();
-                    self.emit_pattern(fc, alt, scrut, &mut alt_fails, span)?;
+                    self.emit_pattern(fc, alt, scrut, &mut alt_fails, span, &mut BindInto::Match)?;
                     // Copy this alternative's bindings into the canonical slots, then jump to the
                     // shared matched-label (fall-through past the remaining alternatives). Reading via
                     // `emit_get_named` (CellLoad if the alt's binding is boxed) and writing via
@@ -5946,6 +6018,16 @@ struct LocalVar {
 /// `continue` jumps land at the loop's increment/condition. Both targets are unknown when the
 /// jump is emitted, so we collect placeholder `Op::Jump(0)` indices and patch them once the
 /// targets are known (see `compile_while` / `compile_for`).
+/// Where `emit_pattern` puts a name it binds. `Match` reads the checker's resolution (a refutable
+/// pattern: a bare name may be a nullary variant) and declares a fresh local. The binding targets
+/// never test: `Decl` is a `:=` (a module global at global scope, else a fresh local) and `Loop`
+/// writes a `for` loop's raw slots in binder order.
+enum BindInto<'a> {
+    Match,
+    Decl,
+    Loop(std::slice::Iter<'a, usize>),
+}
+
 struct LoopCtx {
     continue_jumps: Vec<usize>,
     break_jumps: Vec<usize>,
@@ -6023,8 +6105,8 @@ pub(crate) fn pattern_binds(p: &Pattern, out: &mut impl Extend<String>) {
 pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>) {
     for s in stmts {
         match &s.kind {
-            StmtKind::Let { names, value, .. } => {
-                out.extend(names.iter().cloned());
+            StmtKind::Let { target, value, .. } => {
+                pattern_binds(target, out);
                 // A binding inside the VALUE expression (a `match`/`if`/comprehension/`recover`
                 // expression) is a frame-level local too — collect it so it boxes when captured.
                 collect_frame_binds_expr(value, out);
@@ -6045,10 +6127,8 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>)
                     collect_frame_binds(eb, out);
                 }
             }
-            StmtKind::For {
-                vars, iter, body, ..
-            } => {
-                out.extend(vars.iter().cloned());
+            StmtKind::For { target, iter, body } => {
+                pattern_binds(target, out);
                 collect_frame_binds_expr(iter, out);
                 collect_frame_binds(body, out);
             }
@@ -6071,12 +6151,7 @@ pub(crate) fn collect_frame_binds(stmts: &[Stmt], out: &mut impl Extend<String>)
                     match &arm.kind {
                         WaitArmKind::Recv { target, chan } => {
                             collect_frame_binds_expr(chan, out);
-                            match target {
-                                WaitTarget::Bind(n) => {
-                                    out.extend([n.clone()]);
-                                }
-                                WaitTarget::Discard => {}
-                            }
+                            pattern_binds(target, out);
                         }
                         WaitArmKind::Send { call } => collect_frame_binds_expr(call, out),
                     }
@@ -6748,9 +6823,9 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
     let mut b = bound.clone();
     for s in stmts {
         match &s.kind {
-            StmtKind::Let { names, value, .. } => {
+            StmtKind::Let { target, value, .. } => {
                 free_names_expr(value, &b, out);
-                b.extend(names.iter().cloned());
+                pattern_binds(target, &mut b);
             }
             StmtKind::Assign { target, op, value } => {
                 // TICKET-142 (W14-32): a plain `_ = e` target is the blank identifier, never a
@@ -6796,12 +6871,10 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
                     free_names_block(eb, &b, out);
                 }
             }
-            StmtKind::For {
-                vars, iter, body, ..
-            } => {
+            StmtKind::For { target, iter, body } => {
                 free_names_expr(iter, &b, out);
                 let mut b2 = b.clone();
-                b2.extend(vars.iter().cloned());
+                pattern_binds(target, &mut b2);
                 free_names_block(body, &b2, out);
             }
             StmtKind::While { cond, body } => {
@@ -6832,12 +6905,7 @@ pub(crate) fn free_names_block(stmts: &[Stmt], bound: &HashSet<String>, out: &mu
                     match &arm.kind {
                         WaitArmKind::Recv { target, chan } => {
                             free_names_expr(chan, &b, out);
-                            match target {
-                                WaitTarget::Bind(n) => {
-                                    b2.insert(n.clone());
-                                }
-                                WaitTarget::Discard => {}
-                            }
+                            pattern_binds(target, &mut b2);
                         }
                         WaitArmKind::Send { call } => free_names_expr(call, &b, out),
                     }
@@ -6899,7 +6967,7 @@ pub(crate) fn free_names_expr(e: &Expr, bound: &HashSet<String>, out: &mut FreeN
             let mut b = bound.clone();
             for c in clauses {
                 free_names_expr(&c.iter, &b, out);
-                b.extend(c.vars.iter().cloned());
+                pattern_binds(&c.target, &mut b);
                 c.guards.iter().for_each(|g| free_names_expr(g, &b, out));
             }
             if let Some(k) = key {
@@ -7050,7 +7118,7 @@ fn collect_frame_binds_expr(e: &Expr, out: &mut impl Extend<String>) {
         } => {
             for c in clauses {
                 collect_frame_binds_expr(&c.iter, out);
-                out.extend(c.vars.iter().cloned());
+                pattern_binds(&c.target, out);
                 c.guards
                     .iter()
                     .for_each(|g| collect_frame_binds_expr(g, out));

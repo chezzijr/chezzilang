@@ -577,14 +577,12 @@ impl UseWalk<'_> {
                 self.value(cond);
                 self.block(body);
             }
-            StmtKind::For {
-                vars, iter, body, ..
-            } => {
+            StmtKind::For { target, iter, body } => {
                 // TICKET-240: a loop over a view binds views of the same root.
                 if self.deep
                     && let Some(root) = self.view_root(iter)
                 {
-                    for v in vars {
+                    for v in &target.target_names() {
                         self.alias(v, &root);
                     }
                 }
@@ -1207,7 +1205,7 @@ impl Scan {
     fn collect_locals(&mut self, body: &[Stmt]) {
         for stmt in body {
             match &stmt.kind {
-                StmtKind::Let { names, .. } => self.locals.extend(names.iter().cloned()),
+                StmtKind::Let { target, .. } => self.locals.extend(target.target_names()),
                 StmtKind::Fn(decl) => {
                     self.locals.insert(decl.name.clone());
                 }
@@ -1369,11 +1367,11 @@ impl Scan {
                     }
                 }
             }
-            StmtKind::Let { names, value, .. } => {
+            StmtKind::Let { target, value, .. } => {
                 self.expr(value);
                 if let Some(scope) = self.visible_fns.last_mut() {
-                    for name in names {
-                        scope.insert(name.clone(), None);
+                    for name in target.target_names() {
+                        scope.insert(name, None);
                     }
                 }
             }
@@ -1400,13 +1398,15 @@ impl Scan {
                     }
                 });
             }
-            StmtKind::For {
-                vars, iter, body, ..
-            } => {
+            StmtKind::For { target, iter, body } => {
                 self.expr(iter);
-                let prior: Vec<_> = vars
-                    .iter()
-                    .map(|name| (name.clone(), self.locals.insert(name.clone())))
+                let prior: Vec<_> = target
+                    .target_names()
+                    .into_iter()
+                    .map(|name| {
+                        let fresh = self.locals.insert(name.clone());
+                        (name, fresh)
+                    })
                     .collect();
                 self.conditional(|s| s.block(body));
                 for (name, existed) in prior {

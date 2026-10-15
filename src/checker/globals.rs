@@ -132,14 +132,14 @@ impl Checker {
             };
             match &s.kind {
                 StmtKind::Let {
-                    names, is_const, ..
+                    target, is_const, ..
                 } => {
                     let kind = if *is_const {
                         DeclKind::ConstLet
                     } else {
                         DeclKind::Let
                     };
-                    for n in names {
+                    for n in &target.target_names() {
                         add(n, kind);
                     }
                 }

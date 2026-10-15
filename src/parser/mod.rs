@@ -1807,14 +1807,41 @@ impl Parser {
             if !self.eat_type_assign() {
                 self.expect(&Token::Assign)?;
             }
-            let value = self.parse_value(ValueSite::Let)?;
-            let value = self.parse_else_guard(value)?;
+            let (value, listed) = self.parse_value_list(ValueSite::Let)?;
+            let value = if listed {
+                value
+            } else {
+                self.parse_else_guard(value)?
+            };
             return Ok(StmtKind::Let {
-                names: vec![name],
-                name_spans: vec![name_span],
+                target: Pattern::Ident(name, name_span, crate::ast::NodeId::fresh()),
                 ty: Some(ty),
                 value,
                 is_const,
+                doc: stmt_doc,
+            });
+        }
+
+        // `a := v`, `_ := v`, `a, (b, c) := v`: the one binding-target parse. The right side of a
+        // single name is one value (`ValueSite::Let`); a target list takes `DestructLet`. A comma
+        // list is a tuple written without parentheses and takes no `else` guard (DEC-241).
+        if let Some(target) = self.try_parse_walrus_target()? {
+            let site = if matches!(target, Pattern::Tuple(_)) {
+                ValueSite::DestructLet
+            } else {
+                ValueSite::Let
+            };
+            let (value, listed) = self.parse_value_list(site)?;
+            let value = if listed {
+                value
+            } else {
+                self.parse_else_guard(value)?
+            };
+            return Ok(StmtKind::Let {
+                target,
+                ty: None,
+                value,
+                is_const: false,
                 doc: stmt_doc,
             });
         }
@@ -1827,11 +1854,9 @@ impl Parser {
 
         // `f() else e: <block>` -- the guard in statement form: the success value is discarded.
         if self.else_is_guard() {
-            let span = expr.span;
             let value = self.parse_else_guard(expr)?;
             return Ok(StmtKind::Let {
-                names: vec!["_".to_string()],
-                name_spans: vec![span],
+                target: Pattern::Wildcard,
                 ty: None,
                 value,
                 is_const: false,
@@ -1839,10 +1864,10 @@ impl Parser {
             });
         }
 
-        // A comma after the first lvalue introduces a *multi-target* form (a bare-ident list).
-        // Two shapes share this seam:
-        //   - destructuring let `a, b := expr` (all bare idents, `:=`)
-        //   - tuple assignment `a, b = b, a` / `data[0], data[1] = …` (lvalues, `=`; op==Eq only)
+        // A comma after the first lvalue introduces a *multi-target* form. `a, (b, c) := expr`
+        // never reaches here (`try_parse_walrus_target` took it); a `:=` here has a target that is
+        // not a name list, and `binder_name` reports it. The other shape is tuple assignment
+        // `a, b = b, a` / `data[0], (data[1], x.f) = …` (lvalues, `=`; op==Eq only).
         // `for k, v in m:` never reaches here (parse_for handles it); a parenthesized `(a, b)` is a
         // single expr (no top-level comma).
         if self.ended_at_block() {
@@ -1853,58 +1878,19 @@ impl Parser {
             while self.eat_in_line(&Token::Comma) {
                 targets.push(self.parse_expr()?);
             }
-            // `a, b := pair()` — destructuring let. Requires every target to be a bare identifier.
-            // The RHS is a single expression by default; a same-arity, comma-separated value list
-            // (`a, b := 1, 2`) is the tuple written without parentheses — Go's/CPython's
-            // multi-assignment shape.
             if self.eat_in_line(&Token::Walrus) {
-                let mut values = vec![self.parse_value(ValueSite::DestructLet)?];
-                while self.eat_in_line(&Token::Comma) {
-                    values.push(self.parse_expr()?);
-                }
-                let value = if values.len() == 1 {
-                    // `a, b := f() else e:` -- the guard takes the call's own error; a value
-                    // list is a tuple literal, which cannot fail, so it takes none.
-                    self.parse_else_guard(values.into_iter().next().unwrap())?
-                } else {
-                    if values.len() != targets.len() {
-                        return Err(ParseError {
-                            message: format!(
-                                "destructuring binds {} name(s) but {} value(s)",
-                                targets.len(),
-                                values.len()
-                            ),
-                            span: targets[0].span,
-                        });
-                    }
-                    let value_span = values[0].span;
-                    Expr {
-                        id: crate::ast::NodeId::fresh(),
-                        kind: ExprKind::Tuple(values),
-                        span: value_span,
-                    }
-                };
-                let mut names = Vec::with_capacity(targets.len());
-                // Each target ident's span (parallel to `names`) for per-binding decl-site hover.
-                let mut name_spans = Vec::with_capacity(targets.len());
+                let _ = self.parse_value_list(ValueSite::DestructLet)?;
                 for t in targets {
-                    name_spans.push(t.span);
-                    names.push(self.binder_name(
+                    self.binder_name(
                         t,
                         "expected an identifier on the left of ':=' (destructuring binds names)",
-                    )?);
+                    )?;
                 }
-                return Ok(StmtKind::Let {
-                    names,
-                    name_spans,
-                    ty: None,
-                    value,
-                    is_const: false,
-                    doc: stmt_doc,
-                });
+                // Every target is a name, so `try_parse_walrus_target` declined a parenthesized one.
+                return Err(self.err("a parenthesized target needs two or more names".to_string()));
             }
             // `a, b = b, a` — tuple assignment. Only `=` is allowed (compound `+=`, … with multiple
-            // targets is rejected); the RHS must be a value list of equal arity.
+            // targets is rejected). The checker owns the arity of the right side.
             if self.ended_at_block() || self.peek() != &Token::Assign {
                 let msg = if is_compound_assign(self.peek()) {
                     "compound assignment is not allowed with multiple targets; assign each separately"
@@ -1917,56 +1903,22 @@ impl Parser {
                 });
             }
             let target_span = targets[0].span;
-            // Every target must be an assignable place.
-            for t in &targets {
-                if !matches!(
-                    t.kind,
-                    ExprKind::Ident(_)
-                        | ExprKind::Field { .. }
-                        | ExprKind::Index { index: Some(_), .. }
-                ) {
-                    return Err(ParseError {
-                        message: "invalid assignment target".to_string(),
-                        span: t.span,
-                    });
-                }
+            let target = Expr {
+                id: crate::ast::NodeId::fresh(),
+                kind: ExprKind::Tuple(targets),
+                span: target_span,
+            };
+            if !is_assign_target(&target) {
+                return Err(ParseError {
+                    message: "invalid assignment target".to_string(),
+                    span: target_span,
+                });
             }
             self.advance(); // '='
-            let mut values = vec![self.parse_value(ValueSite::TupleAssign)?];
-            while self.eat_in_line(&Token::Comma) {
-                values.push(self.parse_expr()?);
-            }
+            let (value, _) = self.parse_value_list(ValueSite::TupleAssign)?;
             self.reject_else_guard()?;
-            let value_span = values[0].span;
-            // A single RHS expression with multiple targets (`a, b = f()`) destructures a
-            // tuple-valued expression at runtime — the value is passed through as-is (the checker
-            // enforces it's a tuple of matching arity). A comma-list RHS must have equal arity and
-            // is wrapped as a tuple literal.
-            let value = if values.len() == 1 && targets.len() > 1 {
-                values.into_iter().next().unwrap()
-            } else {
-                if values.len() != targets.len() {
-                    return Err(ParseError {
-                        message: format!(
-                            "assignment has {} target(s) but {} value(s)",
-                            targets.len(),
-                            values.len()
-                        ),
-                        span: target_span,
-                    });
-                }
-                Expr {
-                    id: crate::ast::NodeId::fresh(),
-                    kind: ExprKind::Tuple(values),
-                    span: value_span,
-                }
-            };
             return Ok(StmtKind::Assign {
-                target: Expr {
-                    id: crate::ast::NodeId::fresh(),
-                    kind: ExprKind::Tuple(targets),
-                    span: target_span,
-                },
+                target,
                 op: AssignOp::Eq,
                 value,
             });
@@ -1980,9 +1932,8 @@ impl Parser {
                 let name_span = expr.span;
                 let name = self.binder_name(expr, "left side of ':=' must be a name")?;
                 return Ok(StmtKind::Let {
-                    names: vec![name],
                     // The lvalue ident's span IS the binding-name span (single `:=`).
-                    name_spans: vec![name_span],
+                    target: Pattern::Ident(name, name_span, crate::ast::NodeId::fresh()),
                     ty: None,
                     value,
                     is_const: false,
@@ -2084,10 +2035,7 @@ impl Parser {
             | Token::Eof => return Ok(StmtKind::Expr(expr)),
         };
         // only an assignable place — a name, field, or index — can be on the left of `= += -=`
-        if !matches!(
-            expr.kind,
-            ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { index: Some(_), .. }
-        ) {
+        if matches!(expr.kind, ExprKind::Tuple(_)) || !is_assign_target(&expr) {
             return Err(ParseError {
                 message: "invalid assignment target".to_string(),
                 span: expr.span,
@@ -2095,7 +2043,7 @@ impl Parser {
         }
         self.advance(); // the assignment operator
         let value = if matches!(op, AssignOp::Eq) {
-            self.parse_value(ValueSite::Assign)?
+            self.parse_value_list(ValueSite::Assign)?.0
         } else {
             self.parse_expr()?
         };
@@ -3028,43 +2976,33 @@ impl Parser {
 
     fn parse_for(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::For)?;
-        // One binding (`for x in …`), or a comma-separated list (`for k, v in m:`) to destructure a
-        // map's entries. The checker enforces which iterands accept which arities.
-        // Capture each binding-name token's span (parallel to `vars`) for decl-site hover.
-        let mut var_spans = vec![self.cur_span()];
-        let mut vars = vec![self.expect_ident()?];
-        while self.eat(&Token::Comma) {
-            var_spans.push(self.cur_span());
-            vars.push(self.expect_ident()?);
-        }
+        // One binding (`for x in …`), or a comma-separated target (`for k, (a, b) in m:`) that
+        // unpacks each element. The checker enforces which iterands yield which shapes.
+        let target = self.parse_loop_target()?;
         self.expect(&Token::In)?;
         let iter = self.parse_expr()?;
         let body = self.parse_block()?;
-        Ok(StmtKind::For {
-            vars,
-            var_spans,
-            iter,
-            body,
-        })
+        Ok(StmtKind::For { target, iter, body })
     }
 
-    /// Parse one comprehension `for` clause: `for <ident>[, <ident>] in <iter> [if <guard>]…`.
+    /// Parse one comprehension `for` clause: `for <target> in <iter> [if <guard>]…`.
     /// Zero or more `if` guards may follow (Python allows an `if` after any clause, even a chain).
     /// The caller loops this while the next token is `for`, then consumes the closing bracket/brace.
     /// Mirrors `parse_for`'s var/`in`/iter parsing.
     fn parse_comp_clause(&mut self) -> PResult<CompClause> {
         self.expect(&Token::For)?;
-        let mut vars = vec![self.expect_ident()?];
-        while self.eat(&Token::Comma) {
-            vars.push(self.expect_ident()?);
-        }
+        let target = self.parse_loop_target()?;
         self.expect(&Token::In)?;
         let iter = Box::new(self.parse_expr()?);
         let mut guards = Vec::new();
         while self.eat(&Token::If) {
             guards.push(self.parse_expr()?);
         }
-        Ok(CompClause { vars, iter, guards })
+        Ok(CompClause {
+            target,
+            iter,
+            guards,
+        })
     }
 
     /// Parse one or more comprehension `for` clauses (the caller has already parsed the element and
@@ -3782,10 +3720,17 @@ impl Parser {
     /// Parse `( p1, p2, … )`. A single parenthesised pattern `(p)` is grouping (returns `p`);
     /// two-or-more elements form a `Tuple` matching a tuple value of that arity.
     fn parse_tuple_pattern(&mut self) -> PResult<Pattern> {
+        self.parse_paren_list(Self::parse_subpattern)
+    }
+
+    /// Parse `( elem (, elem)* )`, the one parenthesized pattern list (a match tuple pattern and a
+    /// nested binding target share it). One element is grouping and returns it; two or more form a
+    /// `Tuple`.
+    fn parse_paren_list(&mut self, elem: fn(&mut Self) -> PResult<Pattern>) -> PResult<Pattern> {
         self.expect(&Token::LParen)?;
-        let mut elems = vec![self.parse_subpattern()?];
+        let mut elems = vec![elem(self)?];
         while self.eat(&Token::Comma) {
-            elems.push(self.parse_subpattern()?);
+            elems.push(elem(self)?);
         }
         self.expect(&Token::RParen)?;
         if elems.len() == 1 {
@@ -3795,13 +3740,123 @@ impl Parser {
         }
     }
 
+    /// One element of a binding target: a name, `_` (skips a slot), or a parenthesized nested
+    /// target. A keyword in a name slot gets DEC-237's one message from `expect_ident`.
+    fn parse_bind_target(&mut self) -> PResult<Pattern> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err("pattern nested too deeply".to_string()));
+        }
+        let target = if self.check(&Token::LParen) {
+            let span = self.cur_span();
+            let nested = self.parse_paren_list(Self::parse_bind_target)?;
+            if !matches!(nested, Pattern::Tuple(_)) {
+                return Err(ParseError {
+                    message: "a parenthesized target needs two or more names".to_string(),
+                    span,
+                });
+            }
+            nested
+        } else {
+            let span = self.cur_span();
+            let name = self.expect_ident()?;
+            if name == "_" {
+                Pattern::Wildcard
+            } else {
+                Pattern::Ident(name, span, crate::ast::NodeId::fresh())
+            }
+        };
+        self.depth -= 1;
+        Ok(target)
+    }
+
+    /// A comma list of binding-target elements (`a, (b, c)`), as the elements.
+    fn parse_bind_target_list(&mut self) -> PResult<Vec<Pattern>> {
+        let mut elems = vec![self.parse_bind_target()?];
+        while self.eat_in_line(&Token::Comma) {
+            elems.push(self.parse_bind_target()?);
+        }
+        Ok(elems)
+    }
+
+    /// `for` and comprehension targets: a bare name, `_`, or a comma list. A target that is one
+    /// parenthesized tuple (`for (a, b) in xs`) is an error: an unpacking target takes no outer
+    /// parentheses. One element is itself; two or more are a `Tuple`.
+    fn parse_loop_target(&mut self) -> PResult<Pattern> {
+        let span = self.cur_span();
+        let parenthesized = self.check(&Token::LParen);
+        let mut elems = self.parse_bind_target_list()?;
+        if elems.len() == 1 {
+            let only = elems.pop().expect("one element");
+            if parenthesized && matches!(only, Pattern::Tuple(_)) {
+                return Err(ParseError {
+                    message: "an unpacking target takes no outer parentheses; write the names separated by commas".to_string(),
+                    span,
+                });
+            }
+            Ok(only)
+        } else {
+            Ok(Pattern::Tuple(elems))
+        }
+    }
+
+    /// Speculatively read `<target> :=`. Commits (`Some`, the `:=` eaten) only for a bare name, `_`
+    /// or a top-level comma list; every other shape restores `pos`, `depth` and `fold_depth` and
+    /// returns `None`, so the expression path reports the error (`binder_name`).
+    fn try_parse_walrus_target(&mut self) -> PResult<Option<Pattern>> {
+        if !matches!(self.peek(), Token::Ident(_) | Token::LParen) {
+            return Ok(None);
+        }
+        let save = self.pos;
+        let save_depth = self.depth;
+        let save_fold = self.fold_depth;
+        if let Ok(mut elems) = self.parse_bind_target_list()
+            && self.check(&Token::Walrus)
+            && (elems.len() > 1 || !matches!(elems[0], Pattern::Tuple(_)))
+        {
+            self.advance(); // ':='
+            return Ok(Some(if elems.len() == 1 {
+                elems.pop().expect("one element")
+            } else {
+                Pattern::Tuple(elems)
+            }));
+        }
+        self.pos = save;
+        self.depth = save_depth;
+        self.fold_depth = save_fold;
+        Ok(None)
+    }
+
+    /// The right side of `:=`, `=`, `return` and `yield`: one value, or a comma list that is a
+    /// tuple written without parentheses. Only the first value is a value position (DEC-260).
+    /// The bool says the right side was a list.
+    fn parse_value_list(&mut self, site: ValueSite) -> PResult<(Expr, bool)> {
+        let first = self.parse_value(site)?;
+        if self.ended_at_block() || self.peek() != &Token::Comma {
+            return Ok((first, false));
+        }
+        let span = first.span;
+        let mut values = vec![first];
+        while self.eat_in_line(&Token::Comma) {
+            values.push(self.parse_expr()?);
+        }
+        Ok((
+            Expr {
+                id: crate::ast::NodeId::fresh(),
+                kind: ExprKind::Tuple(values),
+                span,
+            },
+            true,
+        ))
+    }
+
     fn parse_return(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Return)?;
         // a bare `return` ends the line — no value
         if self.at_line_end() {
             Ok(StmtKind::Return(None))
         } else {
-            let value = self.parse_value(ValueSite::Return)?;
+            let (value, _) = self.parse_value_list(ValueSite::Return)?;
             self.reject_else_guard()?;
             Ok(StmtKind::Return(Some(value)))
         }
@@ -3810,7 +3865,8 @@ impl Parser {
     /// `yield <expr>` — always carries a value (unlike `return`). Generator syntax (VM-only; shipped).
     fn parse_yield(&mut self) -> PResult<StmtKind> {
         self.expect(&Token::Yield)?;
-        Ok(StmtKind::Yield(self.parse_value(ValueSite::Yield)?))
+        let (value, _) = self.parse_value_list(ValueSite::Yield)?;
+        Ok(StmtKind::Yield(value))
     }
 
     /// `assert <cond>` or `assert <cond>, <msg>` — line-oriented (the caller requires a stmt end).
@@ -3889,65 +3945,15 @@ impl Parser {
                 break;
             }
             let arm_span = self.cur_span();
-            let lhs = self.parse_expr()?;
-            let lhs_span = lhs.span;
-            // A `:=`/`=` after the lhs ⇒ a RECV arm (`x := ch.recv():` / `y = ch.recv():`). No such
-            // operator ⇒ the lhs is a bare SEND-arm candidate (`ch.send(v):`); the parser stays lenient
-            // (any bare expr is accepted) and the CHECKER validates it is exactly `chan.send(value)`.
-            // TICKET-227: `lhs = ch.recv():` is a bind to a fresh `$waitN` plus the ordinary
-            // assignment `lhs = $waitN` as the arm's first statement, so the assigned value has a
-            // node (it can wrap into a carrier target like any assignment).
             let mut assign_first: Option<Stmt> = None;
-            let kind = if self.eat_in_line(&Token::Walrus) {
-                let name =
-                    self.binder_name(lhs, "left side of ':=' in a wait arm must be a name")?;
-                let target = if name == "_" {
-                    WaitTarget::Discard
-                } else {
-                    WaitTarget::Bind(name)
-                };
-                WaitArmKind::Recv {
-                    target,
-                    chan: self.parse_recv_chan()?,
-                }
-            } else if self.eat_in_line(&Token::Assign) {
-                let target = if matches!(lhs.kind, ExprKind::Ident(ref n) if n == "_") {
-                    WaitTarget::Discard
-                } else if matches!(
-                    lhs.kind,
-                    ExprKind::Ident(_)
-                        | ExprKind::Field { .. }
-                        | ExprKind::Index { index: Some(_), .. }
-                ) {
-                    let id = crate::ast::NodeId::fresh();
-                    let tmp = format!("$wait{}", id.0);
-                    let value = Expr {
-                        id: crate::ast::NodeId::fresh(),
-                        kind: ExprKind::Ident(tmp.clone()),
-                        span: lhs_span,
-                    };
-                    assign_first = Some(Stmt {
-                        kind: StmtKind::Assign {
-                            target: lhs,
-                            op: AssignOp::Eq,
-                            value,
-                        },
-                        span: arm_span,
-                    });
-                    WaitTarget::Bind(tmp)
-                } else {
-                    return Err(ParseError {
-                        message: "invalid wait-arm assignment target".to_string(),
-                        span: lhs_span,
-                    });
-                };
+            // `a := ch.recv():`, `_ := …`, `a, (b, c) := …`: the one binding-target parse.
+            let kind = if let Some(target) = self.try_parse_walrus_target()? {
                 WaitArmKind::Recv {
                     target,
                     chan: self.parse_recv_chan()?,
                 }
             } else {
-                // Bare expr, no `:=`/`=` — a send arm. Validated by the checker (`chan.send(value)`).
-                WaitArmKind::Send { call: lhs }
+                self.parse_wait_arm_head(arm_span, &mut assign_first)?
             };
             let mut body = self.parse_block()?;
             if let Some(stmt) = assign_first {
@@ -3965,6 +3971,76 @@ impl Parser {
             return Err(self.err("`wait` needs at least one `recv` arm".to_string()));
         }
         Ok(StmtKind::Wait { arms, else_block })
+    }
+
+    /// A wait arm whose head is an expression: a `:=` with a target that is not a name list (the
+    /// error path, `binder_name` reports it), a `=` recv arm (`y = ch.recv():`, `a, (b.f, c) =
+    /// ch.recv():`), or a bare send arm (`ch.send(v):`).
+    /// A `=` arm binds a fresh `$waitN` and sets `assign_first` to the assignment `lhs = $waitN`
+    /// for the arm body's first statement (TICKET-227), so the assigned value has a node (it can
+    /// wrap into a carrier target like any assignment). The parser stays lenient on a send arm: the
+    /// CHECKER validates it is exactly `chan.send(value)`.
+    fn parse_wait_arm_head(
+        &mut self,
+        arm_span: Span,
+        assign_first: &mut Option<Stmt>,
+    ) -> PResult<WaitArmKind> {
+        let mut lhs = self.parse_expr()?;
+        let mut listed = false;
+        if self.peek() == &Token::Comma {
+            let list_span = lhs.span;
+            let mut places = vec![lhs];
+            while self.eat_in_line(&Token::Comma) {
+                places.push(self.parse_expr()?);
+            }
+            lhs = Expr {
+                id: crate::ast::NodeId::fresh(),
+                kind: ExprKind::Tuple(places),
+                span: list_span,
+            };
+            listed = true;
+        }
+        let lhs_span = lhs.span;
+        if self.eat_in_line(&Token::Walrus) {
+            let name = self.binder_name(lhs, "left side of ':=' in a wait arm must be a name")?;
+            return Ok(WaitArmKind::Recv {
+                target: Pattern::Ident(name, lhs_span, crate::ast::NodeId::fresh()),
+                chan: self.parse_recv_chan()?,
+            });
+        }
+        if !self.eat_in_line(&Token::Assign) {
+            // Bare expr, no `:=`/`=` — a send arm.
+            return Ok(WaitArmKind::Send { call: lhs });
+        }
+        let target = if matches!(lhs.kind, ExprKind::Ident(ref n) if n == "_") {
+            Pattern::Wildcard
+        } else if (listed || !matches!(lhs.kind, ExprKind::Tuple(_))) && is_assign_target(&lhs) {
+            let id = crate::ast::NodeId::fresh();
+            let tmp = format!("$wait{}", id.0);
+            let value = Expr {
+                id: crate::ast::NodeId::fresh(),
+                kind: ExprKind::Ident(tmp.clone()),
+                span: lhs_span,
+            };
+            *assign_first = Some(Stmt {
+                kind: StmtKind::Assign {
+                    target: lhs,
+                    op: AssignOp::Eq,
+                    value,
+                },
+                span: arm_span,
+            });
+            Pattern::Ident(tmp, lhs_span, crate::ast::NodeId::fresh())
+        } else {
+            return Err(ParseError {
+                message: "invalid assignment target".to_string(),
+                span: lhs_span,
+            });
+        };
+        Ok(WaitArmKind::Recv {
+            target,
+            chan: self.parse_recv_chan()?,
+        })
     }
 
     /// The RHS of a recv `wait:` arm: a bare `<chan>.recv()` (no args). Returns the channel expr.
@@ -5837,6 +5913,44 @@ enum InfixOp {
 /// All operators are left-associative (`right = left + 1`). `None` means "not an infix operator".
 /// True for the compound-assignment tokens (`+= -= *= /= %= &= |= ^= <<= >>=`). Used to give a
 /// clear error when one appears with a multi-target list (`a, b += 1`).
+/// True iff `e` is a place `=` can store into: a name, a field, an index, or a parenthesized
+/// tuple of places (`a, (b.f, c[0]) = t`). Every other expression kind is not a place.
+fn is_assign_target(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { index: Some(_), .. } => {
+            true
+        }
+        ExprKind::Tuple(elems) => elems.iter().all(is_assign_target),
+        ExprKind::Index { index: None, .. }
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Str(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::NoneLit
+        | ExprKind::Pass
+        | ExprKind::List(..)
+        | ExprKind::Map(_)
+        | ExprKind::Set(_)
+        | ExprKind::Comprehension { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Compare { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Try(_)
+        | ExprKind::OptChain { .. }
+        | ExprKind::NullCoalesce { .. }
+        | ExprKind::Closure { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::IfElse { .. }
+        | ExprKind::Recover(..)
+        | ExprKind::ElseGuard { .. } => false,
+    }
+}
+
 fn is_compound_assign(tok: &Token) -> bool {
     matches!(
         tok,
@@ -6324,9 +6438,9 @@ mod tests {
                         }
                         (Want::Guard, Ok(m)) => {
                             let guarded = matches!(&m.stmts[1].kind,
-                                StmtKind::Let { names, value, .. }
+                                StmtKind::Let { target, value, .. }
                                     if matches!(value.kind, ExprKind::ElseGuard { .. })
-                                        && (!pos.is_empty() || names[..] == ["_"]));
+                                        && (!pos.is_empty() || matches!(target, Pattern::Wildcard)));
                             if m.stmts.len() != base() {
                                 Some(format!("{} statements, want {}", m.stmts.len(), base()))
                             } else if !guarded {
@@ -6525,14 +6639,113 @@ mod tests {
         parse_err("native type x =\n");
     }
 
-    /// TICKET-108 / W12-17 -- a destructuring `:=` with a value-list RHS must check arity at parse
-    /// time: `a, b := 1, 2, 3` names 2 targets but 3 values.
+    /// The shape of a binding target, as `a,(b,c)`; `_` is a skipped slot.
+    fn target_shape(p: &Pattern) -> String {
+        match p {
+            Pattern::Ident(n, _, _) => n.clone(),
+            Pattern::Wildcard => "_".to_string(),
+            Pattern::Tuple(subs) => format!(
+                "({})",
+                subs.iter().map(target_shape).collect::<Vec<_>>().join(",")
+            ),
+            other => panic!("not a binding target: {other:?}"),
+        }
+    }
+
+    /// U9: one binding-target parser at `:=`, `for`, a comprehension clause, a wait arm and `=`.
     #[test]
-    fn destructuring_value_list_arity_mismatch_is_a_parse_error() {
-        let e = parse_err("a, b := 1, 2, 3\n");
+    fn nested_bind_targets_parse_at_every_site() {
+        match only("a, (b, c) := t\n") {
+            StmtKind::Let { target, .. } => assert_eq!(target_shape(&target), "(a,(b,c))"),
+            other => panic!("{other:?}"),
+        }
+        match only("a, _ := t\n") {
+            StmtKind::Let { target, .. } => assert_eq!(target_shape(&target), "(a,_)"),
+            other => panic!("{other:?}"),
+        }
+        match only("_ := t\n") {
+            StmtKind::Let { target, .. } => assert_eq!(target, Pattern::Wildcard),
+            other => panic!("{other:?}"),
+        }
+        match only("for a, (b, c) in xs:\n    pass\n") {
+            StmtKind::For { target, .. } => assert_eq!(target_shape(&target), "(a,(b,c))"),
+            other => panic!("{other:?}"),
+        }
+        let StmtKind::Expr(e) = only("[a for a, (b, c) in xs]\n") else {
+            panic!("expected an expr stmt");
+        };
+        let ExprKind::Comprehension { clauses, .. } = e.kind else {
+            panic!("expected a comprehension");
+        };
+        assert_eq!(target_shape(&clauses[0].target), "(a,(b,c))");
+        match only("a, (b, c) = t\n") {
+            StmtKind::Assign { target, .. } => {
+                let ExprKind::Tuple(outer) = &target.kind else {
+                    panic!("expected a tuple target");
+                };
+                assert!(matches!(&outer[1].kind, ExprKind::Tuple(inner) if inner.len() == 2));
+            }
+            other => panic!("{other:?}"),
+        }
+        match only("wait:\n    a, (b, c) := ch.recv(): pass\n") {
+            StmtKind::Wait { arms, .. } => match &arms[0].kind {
+                WaitArmKind::Recv { target, .. } => {
+                    assert_eq!(target_shape(target), "(a,(b,c))")
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+        match only("wait:\n    a, (b.f, c[0]) = ch.recv(): pass\n") {
+            StmtKind::Wait { arms, .. } => {
+                assert!(matches!(&arms[0].body[0].kind, StmtKind::Assign { .. }))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// U9: an unpacking target takes no outer parentheses; `(a, b) :=` keeps its own message.
+    #[test]
+    fn for_outer_parens_rejected() {
+        for src in ["for (a, b) in xs:\n    pass\n", "[a for (a, b) in xs]\n"] {
+            let e = parse_err(src);
+            assert!(
+                e.message.contains("takes no outer parentheses"),
+                "{src:?}: {}",
+                e.message
+            );
+        }
+        let e = parse_err("(a, b) := t\n");
         assert!(
+            e.message.contains("left side of ':=' must be a name"),
+            "got: {}",
             e.message
-                .contains("destructuring binds 2 name(s) but 3 value(s)"),
+        );
+        let e = parse_err("a, (b) := t\n");
+        assert!(
+            e.message.contains("needs two or more names"),
+            "got: {}",
+            e.message
+        );
+    }
+
+    /// A bare tuple ends a statement at `:=`, a typed let, `=`, `return` and `yield`; a block value
+    /// followed by `,` keeps DEC-260's end-of-line error and a value list takes no `else` guard.
+    #[test]
+    fn bare_tuple_ends_a_statement_at_parse() {
+        for src in [
+            "x := 1, 2\n",
+            "x: (int, int) = 1, 2\n",
+            "x = 3, 4\n",
+            "fn f():\n    return 1, 2\n",
+            "fn f():\n    yield 1, 2\n",
+        ] {
+            let m = parse(lexer::tokenize(src).unwrap());
+            assert!(m.is_ok(), "{src:?}: {:?}", m.err());
+        }
+        let e = parse_err("a, b := 1, 2 else:\n    pass\n");
+        assert!(
+            e.message.contains("expected end of line, found 'else'"),
             "got: {}",
             e.message
         );
@@ -7441,20 +7654,10 @@ mod tests {
     }
 
     #[test]
-    fn tuple_arity_mismatch_rejected() {
-        let e = parse_err("a, b = 1, 2, 3\n");
-        assert!(
-            e.message.contains("target") || e.message.contains("value"),
-            "got: {}",
-            e.message
-        );
-    }
-
-    #[test]
     fn destructuring_let_still_walrus() {
         // `a, b := pair()` stays a destructuring Let (not tuple-assign).
         match only("a, b := pair()\n") {
-            StmtKind::Let { names, .. } => assert_eq!(names.len(), 2),
+            StmtKind::Let { target, .. } => assert_eq!(target.target_names().len(), 2),
             other => panic!("expected Let, got {other:?}"),
         }
     }
@@ -7721,14 +7924,14 @@ mod tests {
                     other => panic!("expected recv arm, got {other:?}"),
                 };
                 let (t0, c0) = recv(&arms[0]);
-                assert!(matches!(t0, WaitTarget::Bind(ref n) if n == "v"));
+                assert!(matches!(t0, Pattern::Ident(ref n, _, _) if n == "v"));
                 assert!(matches!(&c0.kind, ExprKind::Ident(n) if n == "orders"));
                 // `result = ...` binds a fresh `$waitN`, then assigns it as the body's first statement.
                 let (t1, _) = recv(&arms[1]);
-                assert!(matches!(t1, WaitTarget::Bind(ref n) if n.starts_with("$wait")));
+                assert!(matches!(t1, Pattern::Ident(ref n, _, _) if n.starts_with("$wait")));
                 assert!(matches!(&arms[1].body[0].kind, StmtKind::Assign { .. }));
                 let (t2, c2) = recv(&arms[2]);
-                assert!(matches!(t2, WaitTarget::Discard));
+                assert!(matches!(t2, Pattern::Wildcard));
                 // a timer arm's channel expr is the `timer(500)` call, evaluated once.
                 assert!(matches!(&c2.kind, ExprKind::Call { .. }));
                 assert!(else_block.is_some());
@@ -8197,9 +8400,9 @@ mod tests {
     fn walrus_let() {
         match only("x := 5\n") {
             StmtKind::Let {
-                names, ty, value, ..
+                target, ty, value, ..
             } => {
-                assert_eq!(names, vec!["x".to_string()]);
+                assert_eq!(target.target_names(), vec!["x".to_string()]);
                 assert!(ty.is_none());
                 assert_eq!(value.kind, ExprKind::Int(5));
             }
@@ -8228,9 +8431,9 @@ mod tests {
     fn typed_let() {
         match only("name: str = \"chezzi\"\n") {
             StmtKind::Let {
-                names, ty, value, ..
+                target, ty, value, ..
             } => {
-                assert_eq!(names, vec!["name".to_string()]);
+                assert_eq!(target.target_names(), vec!["name".to_string()]);
                 assert_eq!(ty, Some(Type::named("str")));
                 assert_eq!(value.kind, ExprKind::Str("chezzi".into()));
             }
@@ -8370,8 +8573,8 @@ mod tests {
     #[test]
     fn for_over_range_and_list() {
         match only("for i in 0..10:\n    print(i)\n") {
-            StmtKind::For { vars, iter, .. } => {
-                assert_eq!(vars, vec!["i".to_string()]);
+            StmtKind::For { target, iter, .. } => {
+                assert_eq!(target.target_names(), vec!["i".to_string()]);
                 assert!(matches!(iter.kind, ExprKind::Range { .. }));
             }
             other => panic!("{other:?}"),
@@ -8938,7 +9141,7 @@ mod tests {
                 assert!(key.is_none());
                 assert!(matches!(elem.kind, ExprKind::Binary { .. }));
                 assert_eq!(clauses.len(), 1);
-                assert_eq!(clauses[0].vars, vec!["x".to_string()]);
+                assert_eq!(clauses[0].target.target_names(), vec!["x".to_string()]);
                 assert!(matches!(clauses[0].iter.kind, ExprKind::Ident(_)));
                 assert_eq!(clauses[0].guards.len(), 1);
             }
@@ -8992,7 +9195,10 @@ mod tests {
                 assert!(matches!(key.unwrap().kind, ExprKind::Ident(_)));
                 assert!(matches!(elem.kind, ExprKind::Ident(_)));
                 assert_eq!(clauses.len(), 1);
-                assert_eq!(clauses[0].vars, vec!["k".to_string(), "v".to_string()]);
+                assert_eq!(
+                    clauses[0].target.target_names(),
+                    vec!["k".to_string(), "v".to_string()]
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -9007,9 +9213,9 @@ mod tests {
             ExprKind::Comprehension { kind, clauses, .. } => {
                 assert_eq!(kind, CompKind::List);
                 assert_eq!(clauses.len(), 2);
-                assert_eq!(clauses[0].vars, vec!["x".to_string()]);
+                assert_eq!(clauses[0].target.target_names(), vec!["x".to_string()]);
                 assert!(clauses[0].guards.is_empty());
-                assert_eq!(clauses[1].vars, vec!["y".to_string()]);
+                assert_eq!(clauses[1].target.target_names(), vec!["y".to_string()]);
                 assert!(clauses[1].guards.is_empty());
             }
             other => panic!("{other:?}"),
@@ -10309,9 +10515,12 @@ mod tests {
     fn destructuring_let_parses() {
         match only("a, b := pair()\n") {
             StmtKind::Let {
-                names, ty, value, ..
+                target, ty, value, ..
             } => {
-                assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+                assert_eq!(
+                    target.target_names(),
+                    vec!["a".to_string(), "b".to_string()]
+                );
                 assert!(ty.is_none());
                 assert!(matches!(value.kind, ExprKind::Call { .. }));
             }
@@ -11232,8 +11441,8 @@ print(adder(1)(2))
             panic!("expected a fn");
         };
         match &g.body[0].kind {
-            StmtKind::Let { names, value, .. } => {
-                assert_eq!(names.len(), 2);
+            StmtKind::Let { target, value, .. } => {
+                assert_eq!(target.target_names().len(), 2);
                 assert!(matches!(value.kind, ExprKind::ElseGuard { .. }));
             }
             other => panic!("expected a let, got {other:?}"),

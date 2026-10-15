@@ -92,16 +92,13 @@ pub struct Stmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
-    /// `x := expr` (ty = None) or `name: Type = expr` (ty = Some). `names` holds one binding for a
-    /// plain/typed let, or two-or-more for a destructuring let (`a, b := pair()`); a destructuring
-    /// let always has `ty = None`.
+    /// `x := expr` (ty = None) or `name: Type = expr` (ty = Some). `target` holds one `Ident` for a
+    /// plain/typed let, or a `Tuple` of `Ident`/`Wildcard`/`Tuple` for a destructuring let
+    /// (`a, (b, c) := pair()`); a destructuring let always has `ty = None`. Each `Ident` carries its
+    /// binding-NAME span (diagnostic-only: the LSP records a decl-site hover; `Span::default()` for
+    /// synthesized lets, which never collide with a real hover position).
     Let {
-        names: Vec<String>,
-        /// Source span of each binding-NAME token, parallel to `names` (same order/length).
-        /// Diagnostic-only (the LSP records a decl-site hover at each binding); runtime-inert,
-        /// like `For.var_spans`/`Param.name_span`. `Span::default()` for synthesized lets (e.g.
-        /// comprehension/desugar), which never collide with a real hover position.
-        name_spans: Vec<Span>,
+        target: Pattern,
         ty: Option<Type>,
         value: Expr,
         /// True for a `const T` binding (`PI: const int = 3`) — an immutable binding: the checker
@@ -186,15 +183,10 @@ pub enum StmtKind {
         branches: Vec<(Expr, Block)>,
         else_block: Option<Block>,
     },
-    /// `for var in iter:` — `iter` may be a range (`0..10`) or any iterable expression. `vars` holds
-    /// one binding for the common form, or two (`for k, v in m:`) to destructure a map's entries.
+    /// `for target in iter:` — `iter` may be a range (`0..10`) or any iterable expression. `target`
+    /// is one `Ident`, or a `Tuple` (`for k, (a, b) in m:`) that unpacks each element.
     For {
-        vars: Vec<String>,
-        /// Source span of each binding-NAME token, parallel to `vars` (same order/length).
-        /// Diagnostic-only (the LSP records a decl-site hover at each binding); runtime-inert,
-        /// like `Param.name_span`. `Span::default()` for synthesized bindings (e.g. comprehension
-        /// desugaring), which never collide with a real hover position.
-        var_spans: Vec<Span>,
+        target: Pattern,
         iter: Expr,
         body: Block,
     },
@@ -435,18 +427,9 @@ pub struct WaitArm {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WaitArmKind {
     /// `x := ch.recv():` / `y = ch.recv():` / `_ := ch.recv():` — `chan` is evaluated once.
-    Recv { target: WaitTarget, chan: Expr },
+    Recv { target: Pattern, chan: Expr },
     /// `ch.send(v):` — `call` is the raw `ch.send(v)` Call expr; the checker decomposes + validates it.
     Send { call: Expr },
-}
-
-/// Where a `wait` arm delivers the received value: a fresh arm-scoped binding (`v :=`) or discarded
-/// (`_`). An outer lvalue (`result = ch.recv():`) parses to a bind of a fresh `$waitN` plus the
-/// ordinary assignment `result = $waitN` as the arm body's first statement (TICKET-227).
-#[derive(Debug, Clone, PartialEq)]
-pub enum WaitTarget {
-    Bind(String),
-    Discard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -675,6 +658,57 @@ pub enum Pattern {
         /// Equality-neutral identity of the pattern head; see [`NodeId`].
         id: NodeId,
     },
+}
+
+impl Pattern {
+    /// The names a binding target (`:=`, `for`, comprehension, wait arm) binds, in order, with each
+    /// name's span. `Wildcard` binds none.
+    pub fn target_binders(&self) -> Vec<(&str, Span)> {
+        let mut out = Vec::new();
+        self.collect_target_binders(&mut out);
+        out
+    }
+
+    fn collect_target_binders<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
+        match self {
+            Pattern::Ident(name, span, _) => out.push((name.as_str(), *span)),
+            Pattern::Wildcard => {}
+            Pattern::Tuple(subs) => {
+                for sub in subs {
+                    sub.collect_target_binders(out);
+                }
+            }
+            Pattern::Variant { .. }
+            | Pattern::Literal(_)
+            | Pattern::Range { .. }
+            | Pattern::Or(_)
+            | Pattern::Carrier { .. } => {
+                unreachable!("a binding target holds Ident, Wildcard or Tuple only")
+            }
+        }
+    }
+
+    /// The names `target_binders` lists, owned.
+    pub fn target_names(&self) -> Vec<String> {
+        self.target_binders()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect()
+    }
+
+    /// `Some(name)` only for a single-name target (`Ident`).
+    pub fn target_ident(&self) -> Option<&str> {
+        match self {
+            Pattern::Ident(name, _, _) => Some(name.as_str()),
+            Pattern::Tuple(_)
+            | Pattern::Wildcard
+            | Pattern::Variant { .. }
+            | Pattern::Literal(_)
+            | Pattern::Range { .. }
+            | Pattern::Or(_)
+            | Pattern::Carrier { .. } => None,
+        }
+    }
 }
 
 /// Which side of a carrier a `?p` / `!p` pattern (or an `else` guard) tests.
@@ -1006,7 +1040,7 @@ pub fn is_float_ty(ty: &Type) -> bool {
 /// WITH a start. Returns `(start, end, inclusive)`. The compiler lowers such a loop to counter slots and
 /// builds no `Range` value; the desugar walker reads the same answer to record whether a graph builds one.
 pub fn counting_range<'a>(
-    vars: &[String],
+    target: &Pattern,
     iter: &'a Expr,
 ) -> Option<(&'a Expr, Option<&'a Expr>, bool)> {
     if let ExprKind::Range {
@@ -1014,7 +1048,7 @@ pub fn counting_range<'a>(
         end,
         inclusive,
     } = &iter.kind
-        && vars.len() == 1
+        && target.target_ident().is_some()
     {
         return Some((start, end.as_deref(), *inclusive));
     }
@@ -1358,14 +1392,14 @@ pub enum CompKind {
     Map,
 }
 
-/// One `for` clause of a comprehension: `for <vars> in <iter> [if <guard>]…`. `vars` is one binding
-/// (or two for `for k, v in m` over a map's entries). `guards` holds zero or more `if` filters that
+/// One `for` clause of a comprehension: `for <target> in <iter> [if <guard>]…`. `target` is one binding
+/// (or a tuple pattern for `for k, (a, b) in m`). `guards` holds zero or more `if` filters that
 /// follow this clause (Python allows an `if` after any clause, and even a chain — all must pass).
-/// The clause's `vars` are in scope for every later clause's `iter`/`guards` and for the
+/// The clause's `target` names are in scope for every later clause's `iter`/`guards` and for the
 /// element/key expressions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompClause {
-    pub vars: Vec<String>,
+    pub target: Pattern,
     pub iter: Box<Expr>,
     pub guards: Vec<Expr>,
 }
