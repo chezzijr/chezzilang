@@ -310,7 +310,7 @@ const MAX_CALL_DEPTH: usize = 10_000;
 /// a struct with a `List[Self]` field forming a cycle) would otherwise recurse unbounded on the
 /// HOST stack and SIGABRT (uncatchable). This bound turns that into a recoverable `RuntimeError`.
 ///
-/// `pub(crate)` so `checker::proto::EQ_BOUNDS_MAX_IN_PROGRESS` can tie itself to this value directly
+/// `pub(crate)` so `checker::eq::EQ_BOUNDS_MAX_IN_PROGRESS` can tie itself to this value directly
 /// (W7-55 Important 4) instead of repeating the literal — the checker's `Eq`-bound cap and the
 /// runtime's own equality depth cap must agree BY CONSTRUCTION, or the checker can grant a compare
 /// the VM then can't perform (the `checker-superset-of-compiler` soundness class).

@@ -907,7 +907,7 @@ fn qualified_generic_fn_turbofish_and_hint() {
 
 /// **ONE-OFF PROBE, not a regression test — `#[ignore]`d.** Used by hand (W7-55) to find the eq-walk's
 /// stack-overflow floor on the 1 GiB frontend stack `check_graph_with_entry` now always runs on:
-/// temporarily bump the `EQ_BOUNDS_MAX_IN_PROGRESS` constant in `checker/proto.rs` past whatever depth
+/// temporarily bump the `EQ_BOUNDS_MAX_IN_PROGRESS` constant in `checker/eq.rs` past whatever depth
 /// is under test (no env-var override exists — the cap is a plain `const`, so this means a scratch
 /// edit + rebuild, reverted before committing), then invoke this single test directly
 /// (`cargo test --lib … -- --ignored --exact`) with `CHEZZI_PROBE_SHAPE=cond|plain` and

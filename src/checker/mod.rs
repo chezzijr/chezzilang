@@ -1270,7 +1270,7 @@ pub fn hover_type(
 /// by `(graph module index, fn name)`.
 ///
 /// Runs on [`crate::on_frontend_stack_scoped`]'s dedicated stack — see that fn's doc comment, and
-/// `EQ_BOUNDS_MAX_IN_PROGRESS`'s doc in `checker::proto` for why this one matters: `chezzi run`/
+/// `EQ_BOUNDS_MAX_IN_PROGRESS`'s doc in `checker::eq` for why this one matters: `chezzi run`/
 /// `chezzi test` call this from `compiler::compile_graph`, itself called from INSIDE the VM's own
 /// `VM_STACK_BYTES` thread (384 MiB) — a smaller stack than the checker's other two entry points get,
 /// so the `Eq` walk this pass runs (`run_graph_pass`) needs the same 1 GiB floor they do (W7-55
@@ -3232,17 +3232,25 @@ mod resolve;
 // `pub(crate)` for `proto::INTRINSIC_PROTO_METHODS` — the intrinsic-grant ↔ VM-arm pairing table,
 // which `vm::tests::intrinsic_grants_all_have_vm_arms` reads to assert the pairing (W6-3).
 mod assign;
+mod assignable;
+mod eq;
 mod fn_body;
 mod fresh;
+mod generic_call;
+mod hooks;
 mod infer_ret;
 mod iter_index;
+mod op_sendable;
 pub(crate) mod proto;
+mod resolve_ctype;
 mod resolve_type;
+mod satisfies;
 mod self_writes;
 mod setup;
 mod sig;
 mod stmt;
 pub mod suggest;
+mod targs;
 mod tyvar;
 mod unused;
 mod witness_sig;

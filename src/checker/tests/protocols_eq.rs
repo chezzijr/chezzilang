@@ -1326,11 +1326,11 @@ fn the_budget_refusal_names_the_type_the_walk_started_from() {
     let errs = check_entry(&src);
     let msg = errs
         .iter()
-        .find(|e| e.message.contains(proto::EQ_BUDGET_MARKER))
+        .find(|e| e.message.contains(eq::EQ_BUDGET_MARKER))
         .map(|e| e.message.clone())
         .unwrap_or_else(|| panic!("expected a budget refusal, got: {errs:?}"));
     assert!(
-        msg.contains(&format!("S{N}[Map[int, int]] {}", proto::EQ_BUDGET_MARKER)),
+        msg.contains(&format!("S{N}[Map[int, int]] {}", eq::EQ_BUDGET_MARKER)),
         "the refusal must name the walk's ROOT, not the innermost entry: {msg}"
     );
     assert!(
