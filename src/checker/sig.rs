@@ -25,6 +25,57 @@ pub(super) enum TypePos {
     Value,
     /// A declared return, a fn-type return, the success side of a carrier.
     Void,
+    /// A parameter of an `extern` or `native` fn signature, or of a fn type written in one.
+    CParam,
+    /// The return of an `extern` or `native` fn signature, or of a fn type written in one.
+    CRet,
+    /// A struct field's own type (not its type arguments).
+    Field,
+}
+
+impl TypePos {
+    #[cfg(test)]
+    pub(super) const ALL: [TypePos; 5] = [
+        TypePos::Value,
+        TypePos::Void,
+        TypePos::CParam,
+        TypePos::CRet,
+        TypePos::Field,
+    ];
+
+    /// TICKET-262 — may a `std.ffi` width type be written here? Owner rule 1: only at the C boundary.
+    pub(super) fn width_ok(self) -> bool {
+        match self {
+            TypePos::CParam | TypePos::CRet | TypePos::Field => true,
+            TypePos::Value | TypePos::Void => false,
+        }
+    }
+
+    /// May `None` ("returns nothing") be written here?
+    fn void_ok(self) -> bool {
+        match self {
+            TypePos::Void | TypePos::CRet => true,
+            TypePos::Value | TypePos::CParam | TypePos::Field => false,
+        }
+    }
+
+    /// The positions of the params and the return of a fn type written at `self`: a callback type
+    /// in a C signature stays at the C boundary; anywhere else it is a program fn type.
+    fn func_parts(self) -> (TypePos, TypePos) {
+        match self {
+            TypePos::CParam | TypePos::CRet => (TypePos::CParam, TypePos::CRet),
+            TypePos::Value | TypePos::Void | TypePos::Field => (TypePos::Value, TypePos::Void),
+        }
+    }
+}
+
+/// TICKET-262 — the text of the owner-rule-1 error for the width type `name`.
+pub(super) fn width_outside_c_msg(name: &str) -> String {
+    format!(
+        "'{name}' describes the C boundary only: write it in an extern fn signature or a struct \
+         field, and use `{}` here",
+        ffi_width_ty(name).scalar()
+    )
 }
 
 impl Checker {
@@ -1929,6 +1980,17 @@ impl Checker {
         self.resolve_type_at(t, span, TypePos::Value)
     }
 
+    /// TICKET-262 — the one gate of owner rule 1: the width type `name` is its slot tag where `pos`
+    /// is a C-boundary slot; anywhere else it is an error, and resolves to its plain scalar.
+    fn width_at(&mut self, name: &str, span: Span, pos: TypePos) -> Ty {
+        let ty = ffi_width_ty(name);
+        if pos.width_ok() {
+            return ty;
+        }
+        self.error(span, width_outside_c_msg(name));
+        ty.scalar().clone()
+    }
+
     /// [`Self::resolve_type`] for a position where `None` ("returns nothing") is legal: a declared
     /// return, a fn-type return, the success side of a carrier.
     pub(super) fn resolve_ret_type(&mut self, t: &Type, span: Span) -> Ty {
@@ -1942,7 +2004,7 @@ impl Checker {
             // The one arm that resolves the type `None`: it is no value type, so every value
             // position rejects it here.
             Type::Nil(_) => {
-                if pos == TypePos::Value {
+                if !pos.void_ok() {
                     self.error(
                         span,
                         "'None' is not a value type: None means \"returns nothing\" and is \
@@ -2057,7 +2119,7 @@ impl Checker {
                                 .last()
                                 .is_some_and(|a| self.ffi_alias_ok.contains(a))
                         {
-                            ffi_width_ty(n)
+                            self.width_at(n, span, pos)
                         } else {
                             self.error(
                             span,
@@ -2176,13 +2238,19 @@ impl Checker {
                 params,
                 ret,
                 labels,
-            } => Ty::Func {
-                params: params.iter().map(|p| self.resolve_type(p, span)).collect(),
-                ret: Box::new(self.resolve_ret_type(ret, span)),
-                // Carry the annotation's optional labels onto the type (surface-only), so a value call
-                // through e.g. a HOF param `f: fn(name: str) -> nil` can resolve `f(name="X")`.
-                labels: FnLabels::new(labels.clone()),
-            },
+            } => {
+                let (pp, rp) = pos.func_parts();
+                Ty::Func {
+                    params: params
+                        .iter()
+                        .map(|p| self.resolve_type_at(p, span, pp))
+                        .collect(),
+                    ret: Box::new(self.resolve_type_at(ret, span, rp)),
+                    // Carry the annotation's optional labels onto the type (surface-only), so a value call
+                    // through e.g. a HOF param `f: fn(name: str) -> nil` can resolve `f(name="X")`.
+                    labels: FnLabels::new(labels.clone()),
+                }
+            }
             Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_type(t, span)).collect()),
             Type::Generic(n, args, head_span) => {
                 // TYPE-IDENTITY source for the generic container ctors: the `List`/`Map`/`Set` arms
@@ -2525,7 +2593,11 @@ impl Checker {
                                 ),
                             );
                         }
-                        ty
+                        if crate::native::ffi::is_width(name) {
+                            self.width_at(name, span, pos)
+                        } else {
+                            ty
+                        }
                     } else {
                         self.error(span, format!("module '{module}' has no type '{name}'"));
                         Ty::Unknown
@@ -3256,7 +3328,7 @@ impl Checker {
                 for field in fields {
                     if let Some(def) = &field.default {
                         self.check_default_scope(def, field.name_span);
-                        let expected = self.resolve_type(&field.ty, def.span);
+                        let expected = self.resolve_type_at(&field.ty, def.span, TypePos::Field);
                         // Same seeding, same gate, same reasons as the parameter default above.
                         let fseed = ty_concrete_but(&expected, &|n| self.rigid_param(n, &[]))
                             || self.generic_fn_value_sig(def).is_none();

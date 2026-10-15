@@ -154,15 +154,13 @@ print("va_mixed", vsum("ilds", true, 2, 2.5, "abc"))
 print("va_none", vsum(""))
 "#;
 
-/// `f32_alias_cross_module`: a `float32` alias exported from a sibling module.
-const REAL_DEFS: &str = "import float32 from std.ffi\n\ntype Real = float32\n";
+/// `f32_alias_cross_module`: an extern declared in a sibling module and called across the module
+/// boundary (TICKET-262: a width type is legal in a C signature, never in an alias body).
+const REAL_DEFS: &str =
+    "import float32 from std.ffi\n\nextern \"libm\":\n    fn sqrtf(x: float32) -> float32\n";
 const ALIAS_MAIN: &str = r#"import real_defs
-import Real from real_defs
 
-extern "libm":
-    fn sqrtf(x: Real) -> real_defs.Real
-
-print("f32_alias_cross_module", sqrtf(2.0))
+print("f32_alias_cross_module", real_defs.sqrtf(2.0))
 "#;
 
 /// Reject cells: `(name, program tail after PRELUDE, expected stderr text)`. A tail that must not

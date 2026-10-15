@@ -18462,7 +18462,10 @@ fn ffi_ptr_license_does_not_leak_past_harvest() {
     entry_ok(
         "import ptr from std.ffi\nextern \"libc.so.6\":\n    fn tmpfile() -> ptr\n\nh: ptr = tmpfile()\nprint(1)\n",
     );
-    entry_ok("import int32 from std.ffi\ntype W = int32\nprint(1)\n");
+    entry_rejects(
+        "import int32 from std.ffi\ntype W = int32\nprint(1)\n",
+        "describes the C boundary only",
+    );
     // A multi-module graph where a HELPER imports std.ffi (triggering the harvest + transient license)
     // and the ENTRY does NOT — the entry's bare `ptr` must still be rejected (no cross-module leak).
     let t = TmpDir::new();
@@ -18965,12 +18968,12 @@ fn extern_qualified_struct_and_alias_typecheck() {
     let t = TmpDir::new();
     t.write(
         "cdefs.chz",
-        "import int32 from std.ffi\n\nstruct DivT:\n    quot: int32\n    rem: int32\n\ntype Len = int32\n",
+        "import int32 from std.ffi\n\nstruct DivT:\n    quot: int32\n    rem: int32\n",
     );
     let entry = t.write(
         "main.chz",
         "import cdefs\nimport int32 from std.ffi\n\nextern \"libc.so.6\":\n    \
-         fn div(numer: int32, denom: int32) -> cdefs.DivT\n    fn abs(n: cdefs.Len) -> cdefs.Len\n",
+         fn div(numer: int32, denom: int32) -> cdefs.DivT\n",
     );
     let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
     let errs = match check_graph(&graph) {
@@ -19345,8 +19348,9 @@ fn extern_fixed_width_int_via_alias_ok() {
     // sees a plain int), and the backends' ctype_of resolves the alias one hop to the int32 leaf. The
     // alias's target `int32` is resolved in THIS module, so it only works because int32 is imported
     // here — alias coherence (hazard a): a width alias resolves iff the width name is visible.
-    entry_ok(
+    entry_rejects(
         "import int32 from std.ffi\ntype Len = int32\nextern \"libc.so.6\":\n    fn f(x: Len) -> Len\n\nn: int = f(5)\nprint(n)\n",
+        "describes the C boundary only",
     );
 }
 
@@ -19484,10 +19488,11 @@ fn alias_to_width_resolves_without_bare_import() {
     // a deliberate definition, unlike an accidental bare `int32` in ordinary code, which still needs
     // the import). This keeps a `type Len = int32` usable across modules (alias is program-global; the
     // per-module import set is not).
-    entry_ok(
+    entry_rejects(
         "import int32 from std.ffi\ntype Len = int32\n\
          extern \"libc.so.6\":\n    fn f(x: Len) -> Len\n\
          \nfn main():\n    n: int = f(5)\n    print(n)\n",
+        "describes the C boundary only",
     );
 }
 
@@ -19513,10 +19518,11 @@ fn width_alias_defined_with_import_resolves_in_extern() {
     // not exportable across modules — the alias is program-global but the import licence is what is
     // recorded per-alias at definition time, so any later use, even after the import set is cleared
     // for another module, still resolves.)
-    entry_ok(
+    entry_rejects(
         "import int32 from std.ffi\ntype Len = int32\n\
          extern \"libc.so.6\":\n    fn f(x: Len) -> Len\n\
          \nfn main():\n    n: int = f(5)\n    print(n)\n",
+        "describes the C boundary only",
     );
 }
 
@@ -19539,9 +19545,14 @@ fn composite_width_alias_licensed_cross_module() {
          fn main():\n    print(use_pair(mk()))\n",
     );
     let graph = crate::resolver::build_graph(&entry).expect("resolve should succeed");
+    let errs = match check_graph(&graph) {
+        Ok(()) => Vec::new(),
+        Err(e) => e,
+    };
     assert!(
-        check_graph(&graph).is_ok(),
-        "imported composite width alias must carry its license to the importing use site"
+        errs.iter()
+            .any(|e| e.message.contains("describes the C boundary only")),
+        "a composite alias body carrying a width must be rejected at its declaration, got: {errs:?}"
     );
 }
 
@@ -19579,7 +19590,9 @@ fn width_import_redundant_self_rename_ok() {
     // true rename (`as W`) or a wrong-width trap (`int8 as int32`) still rejects — see
     // `ffi_type_import_cannot_be_renamed`. (Failing-then-green: before, `alias.is_some()` rejected any
     // as-clause, so even the identical name errored "cannot be renamed".)
-    entry_ok("import int32 as int32 from std.ffi\nfn main():\n    x: int32 = 5\n    print(x)\n");
+    entry_ok(
+        "import int32 as int32 from std.ffi\nstruct P:\n    x: int32\nfn main():\n    print(P(5).x)\n",
+    );
 }
 
 #[test]
@@ -23655,34 +23668,28 @@ fn native_module_mutable_global_rejected() {
 #[test]
 fn width_ty_is_a_tag_on_its_scalar() {
     let prefix = "import std.ffi\nimport int8, int32, uint32, float32 from std.ffi\n";
+    // TICKET-262: a width type is legal only in a C signature or a struct field's own type, so a
+    // body that writes one anywhere else is a rule-1 error; a struct field and an extern stay clean.
     for body in [
-        "x: int8 = 5\ny: int = x + 1\nb := x < y\ns := \"{x:4d}\"\nt := str(x)\n",
-        "l: List[int8] = [1, 2]\nn: int = l[0] + 1\nfor v in l:\n    n = n + v\n",
-        "m: Map[uint32, str] = {1: \"a\"}\nprint(m[1])\n",
-        "fn f(x: int8) -> int8:\n    return x\ny := f(3) + 1\n",
         "struct P:\n    a: int8\np := P(1)\nq := p.a + 1\n",
-        "g: float32 = 1.5\nh := g + 1.0\n",
-        "struct Box[T]:\n    v: T\nbx: Box[int8] = Box(1)\nw := bx.v + 1\n",
         "extern \"libc.so.6\":\n    fn abs(x: int32) -> int32\nprint(abs(-3) + 1)\n",
     ] {
         let errs = check_entry(&format!("{prefix}{body}"));
         assert!(errs.is_empty(), "{body:?}: {errs:?}");
     }
-    rejects_entry(
-        &format!("{prefix}x: int8 = \"a\"\n"),
-        "cannot assign str to variable of type int8",
-    );
-    // A local inferred from a width value still rejects a non-int.
-    rejects_entry(
-        &format!("{prefix}x: int8 = 5\ny := x\ny = \"s\"\n"),
-        "cannot assign str to int",
-    );
-    rejects_entry(
-        &format!(
-            "{prefix}protocol A:\n    fn m(self, x: int8) -> None\nprotocol B:\n    fn m(self, x: int) -> None\nprotocol C:\n    A + B\n"
-        ),
-        "conflicting signature",
-    );
+    for body in [
+        "x: int8 = 5\ny: int = x + 1\nb := x < y\ns := \"{x:4d}\"\nt := str(x)\n",
+        "l: List[int8] = [1, 2]\nn: int = l[0] + 1\nfor v in l:\n    n = n + v\n",
+        "m: Map[uint32, str] = {1: \"a\"}\nprint(m[1])\n",
+        "fn f(x: int8) -> int8:\n    return x\ny := f(3) + 1\n",
+        "g: float32 = 1.5\nh := g + 1.0\n",
+        "struct Box[T]:\n    v: T\nbx: Box[int8] = Box(1)\nw := bx.v + 1\n",
+        "x: int8 = \"a\"\n",
+        "x: int8 = 5\ny := x\ny = \"s\"\n",
+        "protocol A:\n    fn m(self, x: int8) -> None\nprotocol B:\n    fn m(self, x: int) -> None\nprotocol C:\n    A + B\n",
+    ] {
+        rejects_entry(&format!("{prefix}{body}"), "describes the C boundary only");
+    }
 }
 
 /// TICKET-218 — a width NESTED in a slot type (a payload, a tuple element, a list element) reads as
@@ -23691,22 +23698,28 @@ fn width_ty_is_a_tag_on_its_scalar() {
 #[test]
 fn nested_width_reads_as_its_scalar() {
     let prefix = "import std.ffi\nimport int8, uint8 from std.ffi\n";
+    // TICKET-262: only the struct field is a C position; every other body writes a width type under
+    // a payload, an optional, a carrier, a tuple or a list, which is a rule-1 error.
+    for body in [
+        "struct P:\n    a: int8\n    b: int\np := P(1, 2)\nmatch p:\n    P(1, b): print(b)\n    _: print(0)\n",
+    ] {
+        let errs = check_entry(&format!("{prefix}{body}"));
+        assert!(errs.is_empty(), "{body:?}: {errs:?}");
+    }
     for body in [
         "enum E:\n    A(int8)\ne := E.A(1)\nmatch e:\n    E.A(1): print(1)\n    E.A(2..5): print(2)\n    E.A(_): print(3)\n",
         "o: int8? = ?1\nmatch o:\n    ?1: print(1)\n    ?2..5: print(2)\n    _: print(3)\n",
         "r: int8!str = ?1\nmatch r:\n    ?1: print(1)\n    ?_: print(2)\n    !e: print(e)\n",
         "t: (int8, int) = (1, 2)\nmatch t:\n    (1, _): print(1)\n    _: print(2)\n",
-        "struct P:\n    a: int8\n    b: int\np := P(1, 2)\nmatch p:\n    P(1, b): print(b)\n    _: print(0)\n",
         "l: List[uint8] = [1, 2]\nb := bytes(l)\n",
         "l: List[uint8] = [1, 2]\nba := bytearray(l)\nba.extend(l)\n",
     ] {
-        let errs = check_entry(&format!("{prefix}{body}"));
-        assert!(errs.is_empty(), "{body:?}: {errs:?}");
+        rejects_entry(&format!("{prefix}{body}"), "describes the C boundary only");
     }
     // Must still fail: a non-int literal or a non-int element is still rejected, naming the slot.
     rejects_entry(
         &format!("{prefix}o: int8? = ?1\nmatch o:\n    ?\"a\": print(1)\n    _: print(2)\n"),
-        "literal of type str cannot match a value of type int8",
+        "describes the C boundary only",
     );
     rejects_entry(
         &format!("{prefix}o: str? = ?\"a\"\nmatch o:\n    ?1..3: print(1)\n    _: print(2)\n"),
@@ -23734,22 +23747,27 @@ fn nested_width_reads_as_its_scalar() {
 #[test]
 fn ffi_width_constant_grid() {
     use crate::native::cffi::{CType, width_ctype};
-    // `{w}` is the width, `{k}` the constant.
-    let sites: &[&str] = &[
+    // `{w}` is the width, `{k}` the constant. TICKET-262: a width is legal at the C positions only (an
+    // extern signature, a struct field's own type), and the constant meets its slot there.
+    let c_sites: &[&str] = &[
         "extern \"libc.so.6\":\n    fn idw(x: {w}) -> {w}\nidw({k})\n",
+        "struct S:\n    f: {w}\ns := S({k})\n",
+        "struct S:\n    f: {w}\ns := S(0)\ns.f = {k}\n",
+        "struct S:\n    f: {w} = {k}\n",
+        "ffi.store_{w}(ffi.null(), {k})\n",
+    ];
+    // Every other position rejects the width type itself, whatever the constant.
+    let sites: &[&str] = &[
         "fn f(x: {w}) -> None:\n    pass\nf({k})\n",
         "struct S:\n    n: int\n    fn m(self, x: {w}) -> None:\n        pass\ns := S(1)\ns.m({k})\n",
         "protocol P:\n    fn m(self, x: {w}) -> None\nfn h(q: P) -> None:\n    q.m({k})\n",
         "protocol P:\n    fn m(self, x: {w}) -> None\nfn g[T: P](t: T) -> None:\n    t.m({k})\n",
-        "struct S:\n    f: {w}\ns := S({k})\n",
         "enum E:\n    A({w})\ne := E.A({k})\n",
         "enum G[T]:\n    B({w}, T)\ng := G.B({k}, 1)\n",
-        "struct S:\n    f: {w}\ns := S(0)\ns.f = {k}\n",
         "l: List[{w}] = [0]\nl[0] = {k}\n",
         "x: {w} = {k}\n",
         "x: {w} = 0\nx = {k}\n",
         "fn g(x: {w} = {k}) -> None:\n    pass\n",
-        "struct S:\n    f: {w} = {k}\n",
         "fn setg() -> None:\n    G = {k}\nG: {w} = 0\n",
         "fn r() -> {w}:\n    return {k}\n",
         "fn r() -> {w}: {k}\n",
@@ -23769,7 +23787,6 @@ fn ffi_width_constant_grid() {
         "c := true\nx: {w} = if c: 0 else: {k}\n",
         "n := 1\nx: {w} = match n:\n    1: {k}\n    _: 0\n",
         "o: int? = None\nx: {w} = o ?? {k}\n",
-        "ffi.store_{w}(ffi.null(), {k})\n",
     ];
     // Integer-only: `Set` (a float is not Hashable). A compound operand meets no slot (TICKET-258).
     let int_sites: &[&str] = &["s := Set[{w}]([{k}])\n"];
@@ -23808,12 +23825,20 @@ fn ffi_width_constant_grid() {
             }
         };
         let float = ct == CType::Float32;
-        let all: Vec<&&str> = sites
+        let all: Vec<(&&str, bool)> = c_sites
             .iter()
-            .chain(int_sites.iter().filter(|_| !float))
+            .map(|s| (s, true))
+            .chain(
+                sites
+                    .iter()
+                    .chain(int_sites.iter().filter(|_| !float))
+                    .map(|s| (s, false)),
+            )
             .collect();
-        for site in all {
+        for (site, at_c) in all {
             for (k, want) in &ks {
+                let rule1 = Some("describes the C boundary only".to_string());
+                let want = if at_c { want } else { &rule1 };
                 // A float site with a `0` default/branch needs a float zero.
                 let body = site.replace("{w}", w).replace("{k}", k);
                 let body = if float {
@@ -23860,7 +23885,10 @@ fn ffi_width_constant_grid() {
         red.push(format!("qualified ctor: got {errs:?}"));
     }
     let errs = check_entry("import int8 from std.ffi\nx: int8 = 5\ny := x\ny = 1000\n");
-    if !errs.is_empty() {
+    if !errs
+        .iter()
+        .any(|e| e.message.contains("describes the C boundary only"))
+    {
         red.push(format!("inferred local: got {errs:?}"));
     }
     assert!(
@@ -25309,8 +25337,12 @@ fn qualified_native_type_annotation_resolves() {
     // net.Socket / net.Listener (type-only, no ctor).
     entry_ok("import std.net\nfn f(s: net.Socket):\n    print(\"ok\")\n");
     entry_ok("import std.net\nfn f(s: net.Listener):\n    print(\"ok\")\n");
-    // ffi width + ptr in annotation position.
-    entry_ok("import std.ffi\nfn f(x: ffi.int32) -> ffi.ptr:\n    return ffi.null()\n");
+    // ffi ptr in annotation position; a qualified width there is a rule-1 error (TICKET-262).
+    entry_ok("import std.ffi\nfn f(x: ffi.ptr) -> ffi.ptr:\n    return x\n");
+    entry_rejects(
+        "import std.ffi\nfn f(x: ffi.int32) -> ffi.ptr:\n    return ffi.null()\n",
+        "describes the C boundary only",
+    );
     // NEGATIVE: qualified access with NO import still rejects (gate stays sound).
     entry_rejects(
         "fn f(s: concurrency.Shared[int]):\n    print(\"x\")\n",
@@ -36711,7 +36743,9 @@ fn extern_float32_requires_import() {
 
 #[test]
 fn extern_float32_alias_is_float_across_modules() {
-    // An exported `type Real = float32` must cross as `float` (its `Ty`), matching its `CType`.
+    // TICKET-262: `type Real = float32` is a width type in an alias body, so the alias decl is a
+    // rule-1 error, and the extern use of the exported alias cannot launder it. The remaining error
+    // is the program's own `s: str = sqrtf(2.0)`, so the alias still reads as `float`.
     let t = TmpDir::new();
     t.write(
         "cdefs.chz",
@@ -36727,11 +36761,15 @@ fn extern_float32_alias_is_float_across_modules() {
         Ok(()) => Vec::new(),
         Err(e) => e,
     };
-    assert_eq!(errs.len(), 1, "expected exactly one error, got: {errs:?}");
     assert!(
-        errs[0]
+        errs.iter()
+            .any(|e| e.message.contains("describes the C boundary only")),
+        "expected the rule-1 error for the alias body, got: {errs:?}"
+    );
+    assert!(
+        errs.iter().any(|e| e
             .message
-            .contains("cannot assign float to variable of type str"),
+            .contains("cannot assign float to variable of type str")),
         "got: {errs:?}"
     );
 }
@@ -36814,8 +36852,13 @@ fn extern_c_variadic_requires_the_fixed_args() {
 #[test]
 fn ffi_width_constant_out_of_range_rejected() {
     rejects_entry(
-        "import int8 from std.ffi\nx: int8 = 1000\nprint(x)\n",
+        "import int8 from std.ffi\nstruct S:\n    q: int8\ns := S(1000)\nprint(s.q)\n",
         "does not fit int8 (-128..127)",
+    );
+    // A local annotation is a rule-1 error (TICKET-262), whatever the constant.
+    rejects_entry(
+        "import int8 from std.ffi\nx: int8 = 1000\nprint(x)\n",
+        "describes the C boundary only",
     );
 }
 
@@ -37038,7 +37081,16 @@ fn untyped_constant_width_grid() {
         ("1.5 + 1.5", 3.0),
     ];
     let mut red: Vec<String> = Vec::new();
+    // TICKET-262: the struct field is the one slot here that is a C position, so only it meets its
+    // constant; every other slot rejects the width type itself, whatever the constant.
+    let rule1 = "describes the C boundary only";
+    let at_c = |slot: &str| slot.starts_with("struct S:\n    v: {W}");
     let mut run = |w: &str, slot: &str, k: &str, want: Option<String>| {
+        let want = if at_c(slot) {
+            want
+        } else {
+            Some(rule1.to_string())
+        };
         let body = slot.replace("{W}", w).replace("{K}", k);
         let src = format!("import std.ffi\nimport {w} from std.ffi\n{body}");
         let errs = check_entry(&src);
@@ -37076,7 +37128,8 @@ fn untyped_constant_width_grid() {
             run("float32", &slot, k, want);
         }
     }
-    // Neighbours: a non-constant int into a width slot stays accepted.
+    // Neighbours: a non-constant int into a width slot is no constant error (the width type itself is
+    // the rule-1 error, TICKET-262).
     for body in [
         "x: int8 = [300].len()\nprint(x)\n",
         "x: int8 = str(300).len()\nprint(x)\n",
@@ -38002,7 +38055,9 @@ fn carrier_wrap_check_grid() {
 
     // Width: the reference slot and every wrap site.
     const W: &str = "import std.ffi\nimport int8 from std.ffi\nimport float32 from std.ffi\n";
-    let fit = "constant 300 does not fit int8 (-128..127)";
+    // TICKET-262: `int8?` puts the width under a type argument, which is no C position, so every
+    // cell built on `W` is a rule-1 error whatever the constant.
+    let r1 = || Has("describes the C boundary only".to_string());
     for prog in [
         "o: int8 = 300\n",
         "o: int8? = ?300\n",
@@ -38026,21 +38081,14 @@ fn carrier_wrap_check_grid() {
         "struct S:\n    v: int8?\ns := S(?300)\n",
         "o: int8? = 100 + 200\n",
     ] {
-        cells.push((format!("{W}{prog}"), one(fit)));
+        cells.push((format!("{W}{prog}"), r1()));
     }
-    let lo = "constant -129 does not fit int8 (-128..127)";
-    cells.push((format!("{W}o: int8? = -129\n"), one(lo)));
-    cells.push((format!("{W}o: int8? = ?(-129)\n"), one(lo)));
-    cells.push((
-        format!("{W}o: float32? = ?1e39\n"),
-        one("constant 1e39 does not fit float32"),
-    ));
-    cells.push((
-        format!("{W}o: int8?? = 300\n"),
-        one("cannot assign int to variable of type int8??"),
-    ));
-    cells.push((format!("{W}o: int8? = 127\nprint(o)\n"), Clean));
-    cells.push((format!("{W}o: int8? = ?127\nprint(o)\n"), Clean));
+    cells.push((format!("{W}o: int8? = -129\n"), r1()));
+    cells.push((format!("{W}o: int8? = ?(-129)\n"), r1()));
+    cells.push((format!("{W}o: float32? = ?1e39\n"), r1()));
+    cells.push((format!("{W}o: int8?? = 300\n"), r1()));
+    cells.push((format!("{W}o: int8? = 127\nprint(o)\n"), r1()));
+    cells.push((format!("{W}o: int8? = ?127\nprint(o)\n"), r1()));
 
     // TICKET-238 -- inference never reads a later statement, so the payload-pin rows were deleted:
     // their subject was a later use fixing an open payload (first-use pin, pin-miss texts, `??`
@@ -38625,7 +38673,7 @@ fn annotation_only_generic_call_meets_the_width_and_wraps() {
     // `entry_rejects`: only the graph wire resolves a `std.ffi` import.
     entry_rejects(
         &format!("import int8 from std.ffi\n{id}b: int8? = id(300)\n"),
-        "constant 300 does not fit int8",
+        "describes the C boundary only",
     );
     ok("struct Box[T]:\n    v: T\nc: Box[int?] = Box(5)\n");
     ok(&format!("{id}r: int? = id(?5)\n"));

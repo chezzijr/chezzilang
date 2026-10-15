@@ -1,6 +1,7 @@
 // checker::setup — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Checker construction; stdlib/struct/enum seeding; signature harvesting.
 
+use super::sig::TypePos;
 use super::*;
 
 /// A snapshot of the lengths of BOTH diagnostic channels, taken by [`Checker::diag_mark`] and undone
@@ -1001,7 +1002,12 @@ impl Checker {
                 let saved = self.enter_type_params(type_params);
                 let harvested_fields: Vec<(String, Ty)> = fields
                     .iter()
-                    .map(|f| (f.name.clone(), self.resolve_type(&f.ty, *span)))
+                    .map(|f| {
+                        (
+                            f.name.clone(),
+                            self.resolve_type_at(&f.ty, *span, TypePos::Field),
+                        )
+                    })
                     .collect();
                 self.exit_type_params(saved);
                 let info = StructInfo {
@@ -1262,13 +1268,17 @@ impl Checker {
             .skip(skip)
             .map(|p| match &p.ty {
                 // A variadic `...xs: T` collapses to the slot type `List[T]` (same as user `fn_sig`).
-                Some(t) if p.is_variadic => Ty::List(Box::new(self.resolve_type(t, decl.span))),
-                Some(t) => self.resolve_type(t, decl.span),
+                Some(t) if p.is_variadic => Ty::List(Box::new(self.resolve_type_at(
+                    t,
+                    decl.span,
+                    TypePos::CParam,
+                ))),
+                Some(t) => self.resolve_type_at(t, decl.span, TypePos::CParam),
                 None => Ty::Unknown,
             })
             .collect();
         let ret = match &decl.ret {
-            Some(t) => self.resolve_ret_type(t, decl.span),
+            Some(t) => self.resolve_type_at(t, decl.span, TypePos::CRet),
             None => Ty::Unknown,
         };
         // TICKET-202: resolve the bounds BEFORE the scope closes, while the enclosing native
@@ -4010,23 +4020,12 @@ impl Checker {
                         self.error(s.span, format!("type '{name}' is already defined"));
                     } else {
                         self.aliases.insert(name.clone(), ty.clone());
-                        // PRECISE width-alias opt-in: if this alias's body references fixed-width FFI
-                        // type names (`int8`..`uint64`) — directly (`type Len = int32`) or embedded in
-                        // a composite (`type Pair = (int32, int32)`, `type Buf = list[uint8]`) — and
-                        // EVERY such width was imported per-name from `std.ffi` by THIS (the defining)
-                        // module, record the alias as licensed. `resolve_type` then lets those widths
-                        // resolve through the alias anywhere, including cross-module with no re-import.
-                        // A `type Len = int32` whose module never imported int32 is NOT licensed, so it
-                        // can't launder the bare width past the import gate. Requiring ALL embedded
-                        // widths imported keeps it precise: a `type Mixed = (int32, int64)` that imported
-                        // only int32 stays unlicensed, so int64 can't ride in on int32's opt-in.
-                        // `collect_names` runs after `bind_import`, so `imported_ffi_types` is populated.
+                        // TICKET-262: a width type describes the C boundary only, and an alias body
+                        // expands at any use, so an alias body never carries one.
                         let mut widths = Vec::new();
                         Self::collect_width_names(ty, &mut widths);
-                        if !widths.is_empty()
-                            && widths.iter().all(|w| self.imported_ffi_types.contains(w))
-                        {
-                            self.ffi_alias_ok.insert(name.clone());
+                        for w in widths {
+                            self.error(s.span, super::sig::width_outside_c_msg(&w));
                         }
                     }
                 }
@@ -4149,9 +4148,11 @@ impl Checker {
                     Self::collect_width_names(e, out);
                 }
             }
-            // A module-qualified type's head is a user type (never a bare width); only its type
-            // arguments could carry a width name written in THIS module.
-            Type::Qualified { args, .. } => {
+            // A module-qualified head can be a width (`ffi.int8`); its type arguments are walked too.
+            Type::Qualified { name, args, .. } => {
+                if crate::native::ffi::is_width(name) {
+                    out.push(name.clone());
+                }
                 for a in args {
                     Self::collect_width_names(a, out);
                 }
@@ -4334,7 +4335,12 @@ impl Checker {
                         .collect();
                     let fields: Vec<(String, Ty)> = fields
                         .iter()
-                        .map(|f| (f.name.clone(), self.resolve_type(&f.ty, s.span)))
+                        .map(|f| {
+                            (
+                                f.name.clone(),
+                                self.resolve_type_at(&f.ty, s.span, TypePos::Field),
+                            )
+                        })
                         .collect();
                     // `Self` in a method sig resolves to this concrete struct (parameterized by its
                     // own type params — the layout isn't inserted yet, so build the self-ty directly
@@ -4552,7 +4558,7 @@ impl Checker {
                                             ),
                                         );
                                     }
-                                    let ty = self.resolve_type(t, ef.span);
+                                    let ty = self.resolve_type_at(t, ef.span, TypePos::CParam);
                                     // A parameter must be a real C scalar — `nil` (void) is a
                                     // return-only sentinel and would panic the backend's `ctype_of`.
                                     // Deferred to the post-loop sweep (a by-value struct param may be
@@ -4579,7 +4585,7 @@ impl Checker {
                             .collect();
                         let ret = match &ef.ret {
                             Some(t) => {
-                                let ty = self.resolve_ret_type(t, ef.span);
+                                let ty = self.resolve_type_at(t, ef.span, TypePos::CRet);
                                 // The return slot may be `nil` (void) in addition to the C scalars.
                                 // Deferred to the post-loop sweep (a by-value struct return may be
                                 // declared after this extern block).
@@ -4998,13 +5004,17 @@ impl Checker {
             .map(|p| match &p.ty {
                 // A variadic `...args: T` collapses to the slot type `List[T]` (mirrors `fn_sig` /
                 // `harvest_native_fn_sig`), so `print`'s harvested sig reads as `fn(List[Any], str, str)`.
-                Some(t) if p.is_variadic => Ty::List(Box::new(self.resolve_type(t, decl.span))),
-                Some(t) => self.resolve_type(t, decl.span),
+                Some(t) if p.is_variadic => Ty::List(Box::new(self.resolve_type_at(
+                    t,
+                    decl.span,
+                    TypePos::CParam,
+                ))),
+                Some(t) => self.resolve_type_at(t, decl.span, TypePos::CParam),
                 None => Ty::Unknown,
             })
             .collect();
         let ret = match &decl.ret {
-            Some(t) => self.resolve_ret_type(t, decl.span),
+            Some(t) => self.resolve_type_at(t, decl.span, TypePos::CRet),
             None => Ty::Unknown,
         };
         self.exit_type_params(saved_tps);

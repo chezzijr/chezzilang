@@ -293,7 +293,7 @@ fn in_main(decls: &str, body: &[&str]) -> String {
 /// The inline-only rows of the ticket's second table.
 fn extra_cells() -> Vec<Cell> {
     const INT8: &str = "import int8 from std.ffi\n";
-    const TOO_WIDE: &str = "constant 300 does not fit int8";
+    const TOO_WIDE: &str = "describes the C boundary only";
     let p = |name: &str, src: String, want: &str| main_only(name.to_string(), src, prints(want));
     let r = |name: &str, src: String, frag: &'static str| {
         main_only(name.to_string(), src, Expect::Rejects(frag))
@@ -458,10 +458,10 @@ fn extra_cells() -> Vec<Cell> {
             format!("{INT8}t: List[int8]? = [300]\nprint(t)\n"),
             TOO_WIDE,
         ),
-        p(
+        r(
             "h8/tuple-under-optional-fits",
             format!("{INT8}t: (int8, int)? = (100, 1)\nprint(t)\n"),
-            "(100, 1)",
+            TOO_WIDE,
         ),
     ]
 }

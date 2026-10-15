@@ -169,7 +169,7 @@ const SHOW_OPT_W: &str = "fn show(x: int8?):\n    match x:\n        ?v:\n       
 const SHOW_LIST: &str = "fn show(x: List[int]):\n    print(x.len())\n";
 const SHOW_OPT_LIST: &str = "fn show(x: List[int]?):\n    match x:\n        ?v:\n            print(\"some {v.len()}\")\n        None:\n            print(\"none\")\n";
 
-const WIDTH: Out = Out::Rejects("constant 300 does not fit int8");
+const WIDTH: Out = Out::Rejects("describes the C boundary only");
 
 const VALS: &[Val] = &[
     Val {

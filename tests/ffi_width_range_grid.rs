@@ -216,12 +216,12 @@ fn cells() -> Vec<Cell> {
     );
     cell(
         "callback_ret_in".into(),
-        "cb8(fn(x: int8) -> int8: v(5))".into(),
+        "cb8(fn(x: int) -> int: v(5))".into(),
         "ok 5".into(),
     );
     cell(
         "callback_ret_beyond".into(),
-        "cb8(fn(x: int8) -> int8: v(300))".into(),
+        "cb8(fn(x: int) -> int: v(300))".into(),
         fault(&i8t, "300"),
     );
     // DEC-217: no width reaches a vararg — an int vararg is a C long, so 300 passes unchanged.
@@ -235,9 +235,7 @@ fn cells() -> Vec<Cell> {
 
 fn program(prelude: &str, cells: &[Cell]) -> String {
     let mut src = prelude.to_string();
-    src.push_str(
-        "fn vararg_width() -> float:\n    x: int8 = v(300)\n    return vsum(\"l\", x)\n\n",
-    );
+    src.push_str("fn vararg_width() -> float:\n    x: int = v(300)\n    return vsum(\"l\", x)\n\n");
     for (i, c) in cells.iter().enumerate() {
         src.push_str(&format!(
             "r{i} := recover: {}\nmatch r{i}:\n    ?x: print(\"{} ok \" + str(x))\n    \

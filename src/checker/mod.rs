@@ -5062,8 +5062,8 @@ mod graph_tests {
         );
     }
 
-    // Cross-module width-alias transparency: `type Len = int32` in module m, imported into entry and
-    // used in an extern signature — the FFI width license carries cross-module.
+    // TICKET-262: a width type is legal only in a C signature or a struct field, so `type Len = int32`
+    // in module m is rejected at its declaration, and the extern use in the entry cannot launder it.
     #[test]
     fn cross_module_width_alias_transparent() {
         let t = TmpDir::new();
@@ -5072,10 +5072,11 @@ mod graph_tests {
             "main.chz",
             "import Len from m\nextern \"libc.so.6\":\n    fn strlen(s: str) -> Len\n",
         );
+        let errs = errors(&entry);
         assert!(
-            check_entry(&entry).is_ok(),
-            "cross-module width alias should check: {:?}",
-            errors(&entry)
+            errs.iter()
+                .any(|m| m.contains("describes the C boundary only")),
+            "expected the rule-1 error for the alias body: {errs:?}"
         );
     }
 
