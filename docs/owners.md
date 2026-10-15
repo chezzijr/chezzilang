@@ -51,7 +51,9 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Does a type satisfy a protocol | `satisfies` (`checker/satisfies.rs`) | |
 | Does the run time dispatch a hook | `declares_hook` (`checker/hooks.rs`) | |
 | Operator hooks (hook → protocol → method) | `HOOKS` (`checker/tables.rs`), `Hook` (`checker/tables.rs`) | |
-| Operator → protocol name | DUPLICATE: `binary_protocol` (`checker/ty_util.rs`), `RESERVED_PROTOCOLS` (`checker/mod.rs`), the seed loop in `prebuilt_protocols` (`checker/ty_util.rs`), `INTRINSIC_PROTO_METHODS` (`checker/proto.rs`), `builtin_arith_kind` (`checker/op_sendable.rs`), literals in `infer_unary` (`checker/infer_ops.rs`), the VM label maps in `vm/arith.rs`, `vm/method_call.rs` and `vm/shared_methods.rs` | target: `HOOKS` rows carry the operator |
+| Operator → hook → protocol and method | `of_binary` (`checker/tables.rs`), `HOOKS` (`checker/tables.rs`) | `binary_protocol` (`checker/ty_util.rs`), the protocol seeds in `prebuilt_protocols` (`checker/ty_util.rs`) and the operator typing in `checker/infer_ops.rs` derive from it. DUPLICATE still: the protocol names in `RESERVED_PROTOCOLS` (`checker/mod.rs`) and the method column of `INTRINSIC_PROTO_METHODS` (`checker/proto.rs`) |
+| Which builtin type satisfies which operator protocol | `INTRINSIC_PROTO_METHODS` (`checker/proto.rs`) | `builtin_arith_kind` (`checker/op_sendable.rs`) derives from it (`builtin_operator_protocol_grid`) |
+| Overflow fault label of an arithmetic op | DUPLICATE: `checked` in `ast/consteval.rs`, the op labels in `vm/arith.rs` and `vm/shared_methods.rs` | |
 | What an Iterable yields | DUPLICATE: `iterable_elem` (`checker/iter_index.rs`), `iter_elem` (`checker/iter_index.rs`), `struct_iter_elem` (`checker/iter_index.rs`), `struct_iterable_elem` (`checker/iter_index.rs`), `for_bindings` (`checker/iter_index.rs`), the for-lowering in `compiler/loops.rs` | waits on the U6 design |
 | Does a write change a value no name holds | `temporary_write` (`checker/fresh.rs`) | TICKET-254 |
 | Can an operator result alias an operand | `aliases_operand` (`checker/fn_writes.rs`) | Family C |

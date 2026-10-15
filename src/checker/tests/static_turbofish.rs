@@ -2166,3 +2166,61 @@ fn module_fn_docs_all_resolve() {
         }
     }
 }
+
+/// The builtin × operator-protocol grid, written out (the table `builtin_arith_kind` held before it
+/// was derived from `HOOKS` + `INTRINSIC_PROTO_METHODS`). One row per receiver kind.
+#[test]
+fn builtin_operator_protocol_grid() {
+    const ARITH: [&str; 11] = [
+        "Add", "Sub", "Mul", "Div", "Mod", "Neg", "BitAnd", "BitOr", "BitXor", "Shl", "Shr",
+    ];
+    let grid: Vec<(Ty, &[&str])> = vec![
+        (Ty::Int, &ARITH),
+        (Ty::Float, &["Add", "Sub", "Mul", "Div", "Mod", "Neg"]),
+        (Ty::Str, &["Add"]),
+        (Ty::Bytes, &["Add"]),
+        (Ty::ByteArray, &["Add"]),
+        (Ty::List(Box::new(Ty::Int)), &["Add"]),
+        (
+            Ty::Set(Box::new(Ty::Int)),
+            &["Sub", "BitAnd", "BitOr", "BitXor"],
+        ),
+        (Ty::Bool, &[]),
+        (Ty::Map(Box::new(Ty::Str), Box::new(Ty::Int)), &[]),
+        (Ty::Tuple(vec![Ty::Int, Ty::Int]), &[]),
+        (Ty::Option(Box::new(Ty::Int)), &[]),
+        (Ty::Nil, &[]),
+    ];
+    for (ty, yes) in &grid {
+        for p in ARITH {
+            assert_eq!(
+                Checker::builtin_arith_kind(p, ty),
+                yes.contains(&p),
+                "{ty} {p}"
+            );
+        }
+        // A non-arithmetic protocol never passes through this table, even with a grant row.
+        for p in ["Contains", "Index", "Eq", "Comparable", "Iterable"] {
+            assert!(!Checker::builtin_arith_kind(p, ty), "{ty} {p}");
+        }
+    }
+}
+
+/// Every `Hook` has exactly one `HOOKS` row, which `Hook::row` relies on.
+#[test]
+fn every_hook_has_one_row() {
+    for row in HOOKS {
+        assert_eq!(
+            HOOKS.iter().filter(|r| r.hook == row.hook).count(),
+            1,
+            "{:?}",
+            row.hook
+        );
+    }
+    use crate::ast::BinaryOp as B;
+    for op in [B::Add, B::Lt, B::Eq, B::In, B::Shr] {
+        let hook = Hook::of_binary(op).expect("an operator hook");
+        assert_eq!(binary_protocol(op), Some(hook.row().protocol));
+    }
+    assert_eq!(binary_protocol(B::And), None);
+}

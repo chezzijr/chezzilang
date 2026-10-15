@@ -594,10 +594,13 @@ impl Checker {
             UnaryOp::Neg => {
                 // int/float negate natively; a struct/type-param negates via the `Neg`
                 // protocol (method `neg(self) -> Self`) — the unary mirror of how `+` consults `Add`.
-                if t.is_numeric() || t.is_unknown() || self.satisfies(&t, "Neg").is_ok() {
+                if t.is_numeric()
+                    || t.is_unknown()
+                    || self.satisfies(&t, Hook::Neg.protocol()).is_ok()
+                {
                     t
                 } else {
-                    let note = self.hook_name_note(&t, "Neg", "neg");
+                    let note = self.hook_name_note(&t, Hook::Neg.protocol(), Hook::Neg.method());
                     self.error(inner.span, format!("cannot negate {t}{note}"));
                     Ty::Unknown
                 }
@@ -777,7 +780,7 @@ impl Checker {
                     Ty::Unknown
                 } else {
                     let [l_s, r_s] = Ty::render_distinct([&l, &r]);
-                    let note = self.hook_name_note(&l, "Add", "add");
+                    let note = self.hook_name_note(&l, Hook::Add.protocol(), Hook::Add.method());
                     self.error(
                         lspan,
                         format!(

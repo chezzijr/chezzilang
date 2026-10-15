@@ -205,18 +205,11 @@ pub(super) fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     // (method `add`/`sub`/`mul`/`div`/`mod`(self, other: Self) -> Self) overloads `+`/`-`/`*`/`/`/`%`.
     // `Self` for `other` and the return makes them binary same-type operators (mirrors `Comparable`'s
     // `compare`).
-    for (proto, method) in [
-        ("Add", "add"),
-        ("Sub", "sub"),
-        ("Mul", "mul"),
-        ("Div", "div"),
-        ("Mod", "mod"),
-        ("BitAnd", "bitand"),
-        ("BitOr", "bitor"),
-        ("BitXor", "bitxor"),
-        ("Shl", "shl"),
-        ("Shr", "shr"),
-    ] {
+    for row in HOOKS
+        .iter()
+        .filter(|row| row.hook.is_arithmetic() && row.hook != Hook::Neg)
+    {
+        let (proto, method) = (row.protocol, row.method);
         m.insert(
             proto.to_string(),
             ProtocolInfo {
@@ -236,12 +229,12 @@ pub(super) fn prebuilt_protocols() -> HashMap<String, ProtocolInfo> {
     // `neg(self) -> Self`, one param `self` only, no `other`) overloads unary `-`. int/float satisfy
     // it intrinsically (their native negation). Mirrors `Stringable`'s single-`self`-param shape.
     m.insert(
-        "Neg".to_string(),
+        Hook::Neg.protocol().to_string(),
         ProtocolInfo {
             type_params: Vec::new(),
             embeds: Vec::new(),
             methods: vec![(
-                "neg".to_string(),
+                Hook::Neg.method().to_string(),
                 FnSig::plain(vec![Ty::Unknown], Ty::Param("Self".into())),
             )],
         },
@@ -1229,23 +1222,7 @@ pub(super) fn numeric_result(l: &Ty, r: &Ty) -> Ty {
 /// The reserved protocol an operator asks. The one operator-to-protocol map; `None` for the
 /// short-circuit `and` / `or`. Exhaustive: a new `BinaryOp` fails the build here.
 pub(crate) fn binary_protocol(op: BinaryOp) -> Option<&'static str> {
-    use BinaryOp::*;
-    match op {
-        Add => Some("Add"),
-        Sub => Some("Sub"),
-        Mul => Some("Mul"),
-        Div => Some("Div"),
-        Mod => Some("Mod"),
-        Lt | LtEq | Gt | GtEq => Some("Comparable"),
-        Eq | NotEq => Some("Eq"),
-        In => Some("Contains"),
-        BitAnd => Some("BitAnd"),
-        BitOr => Some("BitOr"),
-        BitXor => Some("BitXor"),
-        Shl => Some("Shl"),
-        Shr => Some("Shr"),
-        And | Or => None,
-    }
+    Hook::of_binary(op).map(Hook::protocol)
 }
 
 pub(super) fn op_sym(op: BinaryOp) -> &'static str {

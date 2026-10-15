@@ -6,56 +6,22 @@ use super::proto::ty_mentions_error_existential;
 use super::*;
 
 impl Checker {
-    /// Does builtin type `ty` satisfy the arithmetic operator protocol `protocol`? The one table
-    /// behind `+ - * / %` and unary `-` on builtins; `infer_binary` reaches it through
-    /// [`Self::op_overload_result`] and a `[T: Add]` bound reaches it through `satisfies_args_d`.
+    /// Does builtin type `ty` satisfy the arithmetic operator protocol `protocol`? `infer_binary`
+    /// reaches it through [`Self::op_overload_result`] and a `[T: Add]` bound through
+    /// `satisfies_args_d`. Derived: an arithmetic hook (`Hook::is_arithmetic`) whose
+    /// `(protocol, receiver kind)` row is in `INTRINSIC_PROTO_METHODS`, the one builtin grant table.
+    /// A width type reads as its scalar here, as everywhere a width value is read (TICKET-262).
     pub(super) fn builtin_arith_kind(protocol: &str, ty: &Ty) -> bool {
-        match ty {
-            Ty::Int => matches!(
-                protocol,
-                "Add"
-                    | "Sub"
-                    | "Mul"
-                    | "Div"
-                    | "Mod"
-                    | "Neg"
-                    | "BitAnd"
-                    | "BitOr"
-                    | "BitXor"
-                    | "Shl"
-                    | "Shr"
-            ),
-            Ty::Float => matches!(protocol, "Add" | "Sub" | "Mul" | "Div" | "Mod" | "Neg"),
-            Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::List(_) => protocol == "Add",
-            Ty::Set(_) => matches!(protocol, "Sub" | "BitAnd" | "BitOr" | "BitXor"),
-            Ty::Bool
-            | Ty::Nil
-            | Ty::Map(..)
-            | Ty::Tuple(_)
-            | Ty::Struct(..)
-            | Ty::Enum(..)
-            | Ty::Option(_)
-            | Ty::Result(..)
-            | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
-            | Ty::Protocol(..)
-            | Ty::Param(_)
-            | Ty::Channel(_)
-            | Ty::Shared(_)
-            | Ty::Atomic(_)
-            | Ty::AtomicInt
-            | Ty::RwShared(_)
-            | Ty::Executor
-            | Ty::Socket
-            | Ty::Listener
-            | Ty::Writer
-            | Ty::Reader
-            | Ty::Ptr
-            | Ty::Width(_)
-            | Ty::Module(_)
-            | Ty::Unknown
-            | Ty::Var(_) => false,
-        }
+        let arithmetic = HOOKS
+            .iter()
+            .any(|row| row.protocol == protocol && row.hook.is_arithmetic());
+        let Some(kind) = Self::intrinsic_recv_kind(ty) else {
+            return false;
+        };
+        arithmetic
+            && super::proto::INTRINSIC_PROTO_METHODS
+                .iter()
+                .any(|(p, _, k)| *p == protocol && *k == kind)
     }
 
     /// Result type of an overloaded arithmetic operator (`+`/`-`/`*`) on two operands of the *same*

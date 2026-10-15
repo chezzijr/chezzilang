@@ -235,12 +235,73 @@ impl Hook {
         1 << (self as u32)
     }
 
-    /// The method name of this hook's `HOOKS` row.
-    pub fn method(self) -> &'static str {
+    /// This hook's `HOOKS` row. Every `Hook` has exactly one (`every_hook_has_one_row`).
+    pub fn row(self) -> &'static HookRow {
         HOOKS
             .iter()
             .find(|row| row.hook == self)
-            .map_or("", |row| row.method)
+            .expect("every Hook has a HOOKS row")
+    }
+
+    /// The method name of this hook's `HOOKS` row.
+    pub fn method(self) -> &'static str {
+        self.row().method
+    }
+
+    /// The reserved protocol of this hook's `HOOKS` row.
+    pub fn protocol(self) -> &'static str {
+        self.row().protocol
+    }
+
+    /// The hook a binary operator calls, `None` for `and`/`or` (no hook). THE one map from a
+    /// binary operator to its protocol and method: `binary_protocol` and the checker's operator
+    /// typing read it.
+    pub fn of_binary(op: crate::ast::BinaryOp) -> Option<Hook> {
+        use crate::ast::BinaryOp as B;
+        match op {
+            B::Add => Some(Hook::Add),
+            B::Sub => Some(Hook::Sub),
+            B::Mul => Some(Hook::Mul),
+            B::Div => Some(Hook::Div),
+            B::Mod => Some(Hook::Mod),
+            B::Lt | B::LtEq | B::Gt | B::GtEq => Some(Hook::Compare),
+            B::Eq | B::NotEq => Some(Hook::Eq),
+            B::In => Some(Hook::Contains),
+            B::BitAnd => Some(Hook::BitAnd),
+            B::BitOr => Some(Hook::BitOr),
+            B::BitXor => Some(Hook::BitXor),
+            B::Shl => Some(Hook::Shl),
+            B::Shr => Some(Hook::Shr),
+            B::And | B::Or => None,
+        }
+    }
+
+    /// The arithmetic and bitwise operator hooks: the binary `+ - * / % & | ^ << >>` and unary
+    /// `-`. Their protocols take `(self, other: Self) -> Self` (`neg` takes `self` only).
+    pub fn is_arithmetic(self) -> bool {
+        match self {
+            Hook::Add
+            | Hook::Sub
+            | Hook::Mul
+            | Hook::Div
+            | Hook::Mod
+            | Hook::Neg
+            | Hook::BitAnd
+            | Hook::BitOr
+            | Hook::BitXor
+            | Hook::Shl
+            | Hook::Shr => true,
+            Hook::Iter
+            | Hook::Next
+            | Hook::Index
+            | Hook::SetIndex
+            | Hook::Slice
+            | Hook::Str
+            | Hook::Eq
+            | Hook::Hash
+            | Hook::Compare
+            | Hook::Contains => false,
+        }
     }
 }
 
