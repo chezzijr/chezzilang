@@ -923,13 +923,13 @@ fn method_value_sig(msig: &FnSig, tps: &[TyParam], recv: Ty) -> FnSig {
             *p = recv;
         }
         if let Some(l) = sig.labels.first_mut() {
-            *l = Some("self".to_string());
+            *l = Some(crate::ast::SELF.to_string());
         }
         if let Some(slots) = &mut sig.slots {
             slots.insert(
                 0,
                 crate::desugar::SlotSpec {
-                    name: Some("self".to_string()),
+                    name: Some(crate::ast::SELF.to_string()),
                     default: None,
                     is_variadic: false,
                 },

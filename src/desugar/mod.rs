@@ -370,7 +370,7 @@ pub(crate) fn param_slots(
     host_tps: &[String],
 ) -> Vec<SlotSpec> {
     let tps = tp_names(decl, host_tps);
-    let skip = usize::from(decl.params.first().is_some_and(|p| p.name == "self"));
+    let skip = usize::from(decl.takes_self());
     decl.params
         .iter()
         .skip(skip)

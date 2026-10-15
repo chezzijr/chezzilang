@@ -562,6 +562,31 @@ pub struct Param {
     pub is_variadic: bool,
 }
 
+/// The receiver's name. THE one owner of "is this the receiver `self`" as a spelling: a parameter,
+/// an identifier or a label named `self` is tested with [`is_self_name`] and built from this.
+pub const SELF: &str = "self";
+
+/// Whether `name` is the receiver `self`. Whether a `self` parameter is a VALID receiver (first,
+/// no default, owner-typed) is the checker's `receiver`.
+pub fn is_self_name(name: &str) -> bool {
+    name == SELF
+}
+
+impl Param {
+    /// Whether this parameter is named `self`.
+    pub fn is_self(&self) -> bool {
+        is_self_name(&self.name)
+    }
+}
+
+impl FnDecl {
+    /// Whether the first parameter is named `self`: a method with a receiver. No such parameter
+    /// means a static (associated) method or a free fn.
+    pub fn takes_self(&self) -> bool {
+        self.params.first().is_some_and(Param::is_self)
+    }
+}
+
 /// A struct field: `name: Type`, optionally with a default (`name: Type = expr`). A defaulted field
 /// is filled in by the desugar pass when a constructor call omits it. The default may be any
 /// expression that does not reference another field.

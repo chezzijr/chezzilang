@@ -118,7 +118,7 @@ impl Checker {
     ) -> Result<Option<Ty>, String> {
         let mut found = None;
         for (i, p) in params.iter().enumerate() {
-            if p.name != "self" {
+            if !p.is_self() {
                 continue;
             }
             let ok = match owner {
@@ -295,7 +295,7 @@ impl Checker {
             .params
             .iter()
             .map(|p| {
-                if p.name == "self" {
+                if p.is_self() {
                     None
                 } else {
                     Some(p.name.clone())

@@ -1035,7 +1035,7 @@ impl Checker {
         let span = Self::fn_span(decl);
         self.reject_witness_runner_target(decl, host, "a `test fn`", span);
         if host.is_some() {
-            let ok = decl.params.len() == 1 && decl.params[0].name == "self";
+            let ok = decl.params.len() == 1 && decl.params[0].is_self();
             if !ok {
                 self.error(span, "test method must take only self".to_string());
             }
@@ -1094,7 +1094,7 @@ impl Checker {
     pub(super) fn validate_lifecycle_hook(&mut self, decl: &FnDecl, host: &str) {
         let span = Self::fn_span(decl);
         self.reject_witness_runner_target(decl, Some(host), "a suite lifecycle hook", span);
-        let ok = decl.params.len() == 1 && decl.params[0].name == "self";
+        let ok = decl.params.len() == 1 && decl.params[0].is_self();
         if !ok {
             self.error(
                 span,

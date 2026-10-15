@@ -18,7 +18,7 @@ pub(super) fn self_ops(body: &[Stmt]) -> Vec<SelfOp> {
 
 fn self_chain(expr: &Expr) -> Option<Vec<ChainLink>> {
     match &expr.kind {
-        ExprKind::Ident(name) if name == "self" => Some(Vec::new()),
+        ExprKind::Ident(name) if crate::ast::is_self_name(name) => Some(Vec::new()),
         ExprKind::Field { obj, name, .. } => {
             let mut links = self_chain(obj)?;
             links.push(ChainLink::Field(name.clone()));

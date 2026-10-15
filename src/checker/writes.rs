@@ -523,11 +523,7 @@ impl Checker {
                     .collect(),
             );
             for method in methods {
-                if method
-                    .params
-                    .first()
-                    .is_none_or(|param| param.name != "self")
-                {
+                if !method.takes_self() {
                     continue;
                 }
                 let mut direct = false;

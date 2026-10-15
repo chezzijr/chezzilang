@@ -930,7 +930,7 @@ impl Checker {
 pub(super) fn protocol_labels(params: &[crate::ast::Param]) -> Vec<Option<String>> {
     params
         .iter()
-        .map(|p| (p.name != "self").then(|| p.name.clone()))
+        .map(|p| (!p.is_self()).then(|| p.name.clone()))
         .collect()
 }
 

@@ -420,10 +420,10 @@ struct Compiler {
 /// gets its `tid` from `structs.len()`). Keeps `variants` (`(enum, variant)`→def) and `variants_by_id`
 /// (id→def) in lockstep so cold-path id→names resolution is O(1). The map is keyed by the
 /// `(enum, variant)` pair, so two enums may share a variant name yet get distinct ids.
-/// The "no self ⇒ static" classification primitive (must match the checker exactly): a method whose
-/// FIRST param is not named `self` — or which has no params — is a STATIC (associated) method.
+/// The "no self ⇒ static" classification: a method whose FIRST param is not named `self`, or which
+/// has no params, is a STATIC (associated) method (`FnDecl::takes_self`).
 fn is_static_method(m: &FnDecl) -> bool {
-    m.params.first().is_none_or(|p| p.name != "self")
+    !m.takes_self()
 }
 
 /// Key into [`Compiler::static_methods`]: the type's runtime key + the method name, joined by a

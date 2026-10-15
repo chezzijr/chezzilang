@@ -342,7 +342,7 @@ impl Parser {
         // it so the method-table sig is byte-identical to the pre-`self` spelling. A module-level
         // `native fn`/`native ctor` is a free function and must NOT take `self`. `self` is a plain
         // identifier, detected here by name — and it is valid ONLY as the first parameter.
-        let first_is_self = matches!(params.first(), Some(p) if p.name == "self");
+        let first_is_self = params.first().is_some_and(Param::is_self);
         if in_struct {
             if kind == NativeKind::Fn && !first_is_self {
                 return Err(ParseError {
@@ -359,7 +359,7 @@ impl Parser {
             });
         }
         // `self` is the receiver and is valid ONLY as the first parameter (mirror user struct rules).
-        if let Some(p) = params.iter().skip(1).find(|p| p.name == "self") {
+        if let Some(p) = params.iter().skip(1).find(|p| p.is_self()) {
             return Err(ParseError {
                 message: "`self` is only valid as the first parameter".to_string(),
                 span: p.name_span,

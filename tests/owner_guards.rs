@@ -25,6 +25,21 @@ const RULES: &[(&str, &str, &str)] = &[
         "is this name the blank `_`: call `ast::is_blank_name`",
     ),
     (
+        "== \"self\"",
+        "ast/mod.rs",
+        "is this the receiver `self`: call `ast::is_self_name` / `Param::is_self` / `FnDecl::takes_self`",
+    ),
+    (
+        "!= \"self\"",
+        "ast/mod.rs",
+        "is this the receiver `self`: call `ast::is_self_name` / `Param::is_self` / `FnDecl::takes_self`",
+    ),
+    (
+        "\"self\".to_string()",
+        "ast/mod.rs",
+        "the receiver's name: use `ast::SELF`",
+    ),
+    (
         "struct TmpDir",
         "test_support.rs",
         "the unit-test fixture directory: use `test_support::TmpDir`",
@@ -84,7 +99,8 @@ fn production_code(text: &str) -> String {
 }
 
 /// One line without its `//` comment; a string literal keeps its quotes and loses its contents,
-/// except a one-character literal, which is the fact spellings this test looks for.
+/// except a short identifier-like literal (`"_"`, `"self"`, `"Add"`): the fact spellings this test
+/// looks for are names, never prose.
 fn strip_line(line: &str) -> String {
     let mut out = String::new();
     let chars: Vec<char> = line.chars().collect();
@@ -110,7 +126,10 @@ fn strip_line(line: &str) -> String {
             }
             let body: String = chars[start + 1..i.min(chars.len())].iter().collect();
             out.push('"');
-            if body.chars().count() == 1 {
+            let is_name = body.chars().count() <= 16
+                && !body.is_empty()
+                && body.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if is_name {
                 out.push_str(&body);
             }
             out.push('"');
@@ -165,4 +184,7 @@ fn the_scan_reads_code_only() {
         production_code("#[cfg(test)]\nmod tests {\n    fn f() { x == \"_\" }\n}\nfn g() {}\n");
     assert!(!gated.contains("== \"_\""), "{gated}");
     assert!(gated.contains("fn g()"), "{gated}");
+    let named =
+        production_code("if p.name == \"self\" {}\nlet m = \"say p == \\\"self\\\" here\";\n");
+    assert_eq!(named.matches("== \"self\"").count(), 1, "{named}");
 }
