@@ -3,7 +3,6 @@
 //! Split out of `src/parser/mod.rs`. `super::*` is the parent module.
 
 use super::pattern::bind_leaf;
-use super::pattern::is_assign_target;
 use super::pattern::is_compound_assign;
 use super::*;
 use crate::lexer::{Span, Token};
@@ -559,7 +558,7 @@ impl Parser {
                 kind: ExprKind::Tuple(targets),
                 span: target_span,
             };
-            if !is_assign_target(&target, true) {
+            if !target.kind.is_place(true) {
                 return Err(ParseError {
                     message: "invalid assignment target".to_string(),
                     span: target_span,
@@ -675,7 +674,7 @@ impl Parser {
             | Token::Eof => return Ok(StmtKind::Expr(expr)),
         };
         // only an assignable place — a name, field, or index — can be on the left of `= += -=`
-        if !is_assign_target(&expr, false) {
+        if !expr.kind.is_place(false) {
             return Err(ParseError {
                 message: "invalid assignment target".to_string(),
                 span: expr.span,
@@ -858,7 +857,7 @@ impl Parser {
         }
         let target = if lhs.is_blank() {
             Pattern::Wildcard
-        } else if is_assign_target(&lhs, listed) {
+        } else if lhs.kind.is_place(listed) {
             let id = crate::ast::NodeId::fresh();
             let tmp = format!("$wait{}", id.0);
             let value = Expr {

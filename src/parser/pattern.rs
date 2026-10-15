@@ -516,51 +516,8 @@ pub(super) fn bind_leaf(name: String, span: Span) -> Pattern {
     }
 }
 
-/// Map a token to its infix operator and (left, right) binding powers, per `docs/syntax.md` §4.
-/// All operators are left-associative (`right = left + 1`). `None` means "not an infix operator".
 /// True for the compound-assignment tokens (`+= -= *= /= %= &= |= ^= <<= >>=`). Used to give a
 /// clear error when one appears with a multi-target list (`a, b += 1`).
-/// True iff `e` is a place `=` can store into: a name, a field, an index, or a parenthesized
-/// tuple of places (`a, (b.f, c[0]) = t`). Every other expression kind is not a place. `listed` is
-/// true when `e` is a comma list the statement wrote without outer parentheses (U9: no outer
-/// parentheses): a tuple at the top takes it, a parenthesized top-level tuple `(a, b) = t` does not.
-/// A nested tuple always takes parentheses.
-pub(super) fn is_assign_target(e: &Expr, listed: bool) -> bool {
-    match &e.kind {
-        ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { index: Some(_), .. } => {
-            true
-        }
-        ExprKind::Tuple(elems) => listed && elems.iter().all(|el| is_assign_target(el, true)),
-        ExprKind::Index { index: None, .. }
-        | ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::Str(_)
-        | ExprKind::Interp(_)
-        | ExprKind::Bytes(_)
-        | ExprKind::RawStr(_)
-        | ExprKind::Bool(_)
-        | ExprKind::NoneLit
-        | ExprKind::Pass
-        | ExprKind::List(..)
-        | ExprKind::Map(_)
-        | ExprKind::Set(_)
-        | ExprKind::Comprehension { .. }
-        | ExprKind::Unary { .. }
-        | ExprKind::Binary { .. }
-        | ExprKind::Compare { .. }
-        | ExprKind::Range { .. }
-        | ExprKind::Call { .. }
-        | ExprKind::Try(_)
-        | ExprKind::OptChain { .. }
-        | ExprKind::NullCoalesce { .. }
-        | ExprKind::Closure { .. }
-        | ExprKind::Match { .. }
-        | ExprKind::IfElse { .. }
-        | ExprKind::Recover(..)
-        | ExprKind::ElseGuard { .. } => false,
-    }
-}
-
 pub(super) fn is_compound_assign(tok: &Token) -> bool {
     matches!(
         tok,

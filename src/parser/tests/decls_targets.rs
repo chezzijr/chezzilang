@@ -551,7 +551,7 @@ fn nested_bind_targets_parse_at_every_site() {
 }
 
 /// U9: `=` takes no outer parentheses either, at a statement and at a wait arm, and a nested
-/// tuple still parses. One function (`is_assign_target`) owns the rule.
+/// tuple still parses. One function (`ExprKind::is_place`) owns the rule.
 #[test]
 fn assign_outer_parens_rejected_at_every_site() {
     for src in [

@@ -127,8 +127,10 @@ impl Compiler {
             | ExprKind::IfElse { .. }
             | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {
+                // The parser admits only places (`ExprKind::is_place`).
                 return Err(CompileError {
-                    message: "invalid assignment target".to_string(),
+                    message: "internal: a non-place assignment target passed the parser"
+                        .to_string(),
                     span,
                 });
             }
@@ -242,8 +244,10 @@ impl Compiler {
             | ExprKind::IfElse { .. }
             | ExprKind::Recover(..)
             | ExprKind::ElseGuard { .. } => {
+                // The parser admits only places (`ExprKind::is_place`).
                 return Err(CompileError {
-                    message: "invalid assignment target".to_string(),
+                    message: "internal: a non-place assignment target passed the parser"
+                        .to_string(),
                     span,
                 });
             }

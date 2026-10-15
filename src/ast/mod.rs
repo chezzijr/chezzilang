@@ -1315,6 +1315,47 @@ pub enum ExprKind {
 }
 
 impl ExprKind {
+    /// THE one owner of "is this expression a place `=` can store into" (a name, a field, an index,
+    /// or a parenthesized tuple of places, `a, (b.f, c[0]) = t`). The parser admits only places; the
+    /// checker and compiler never decide it again. `listed` is true when `e` is a comma list the
+    /// statement wrote without outer parentheses (U9: no outer parentheses): a tuple at the top takes
+    /// it, a parenthesized top-level tuple `(a, b) = t` does not. A nested tuple always takes parentheses.
+    pub fn is_place(&self, listed: bool) -> bool {
+        match self {
+            ExprKind::Ident(_)
+            | ExprKind::Field { .. }
+            | ExprKind::Index { index: Some(_), .. } => true,
+            ExprKind::Tuple(elems) => listed && elems.iter().all(|el| el.kind.is_place(true)),
+            ExprKind::Index { index: None, .. }
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Str(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Bytes(_)
+            | ExprKind::RawStr(_)
+            | ExprKind::Bool(_)
+            | ExprKind::NoneLit
+            | ExprKind::Pass
+            | ExprKind::List(..)
+            | ExprKind::Map(_)
+            | ExprKind::Set(_)
+            | ExprKind::Comprehension { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Compare { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Call { .. }
+            | ExprKind::Try(_)
+            | ExprKind::OptChain { .. }
+            | ExprKind::NullCoalesce { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::IfElse { .. }
+            | ExprKind::Recover(..)
+            | ExprKind::ElseGuard { .. } => false,
+        }
+    }
+
     /// Whether this expression can head a type application `head[T]`: a bare name, or a member
     /// access that is not a tuple index (`a.0`). Every other kind answers `false`.
     pub fn is_named_head(&self) -> bool {

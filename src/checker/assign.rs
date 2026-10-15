@@ -455,9 +455,10 @@ impl Checker {
             | ExprKind::Match { .. }
             | ExprKind::IfElse { .. }
             | ExprKind::Recover(..)
+            // The parser admits only places (`ExprKind::is_place`); reaching here is a front-end bug.
             | ExprKind::ElseGuard { .. } => self.error(
                 target.span,
-                "invalid assignment target (only variables can be assigned)",
+                "internal: a non-place assignment target passed the parser (`ExprKind::is_place`)",
             ),
         }
     }
