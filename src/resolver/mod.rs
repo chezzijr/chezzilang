@@ -141,6 +141,132 @@ impl ModuleGraph {
     }
 }
 
+/// What gives a module global its slot (see [`module_global_binds`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlobalSource {
+    Import,
+    Fn,
+    /// A `native fn` the runtime injects by name into a hybrid native module (`std.fs`'s `_exists`).
+    Native,
+    Extern,
+    /// A top-level `let` binder; `line` is the `let`'s source line.
+    Let {
+        line: u32,
+    },
+}
+
+/// THE one list of the names a module binds as run-time globals, in slot order: imports (the alias,
+/// else the last path segment or the member), then in source order each top-level `fn`, each injected
+/// `native fn` of a hybrid native module (`native` names the module), each `extern` fn, then every
+/// top-level `let` binder. A name can appear more than once (a `let` rebinding a fn); its slot is its
+/// first appearance. The compiler builds its slot table from this list, and the checker asks it
+/// whether the entry module binds a name (TICKET-150).
+pub fn module_global_binds(
+    imports: &[ResolvedImport],
+    stmts: &[crate::ast::Stmt],
+    native: Option<&str>,
+) -> Vec<(String, GlobalSource)> {
+    let mut out = Vec::new();
+    for imp in imports {
+        match &imp.import {
+            Import::Module { path, alias, .. } => {
+                let name = alias
+                    .clone()
+                    .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                out.push((name, GlobalSource::Import));
+            }
+            // The resolver never resolves a variant import.
+            Import::Variants { .. } => {}
+            Import::From { names, .. } => {
+                for (member, alias) in names {
+                    out.push((
+                        alias.clone().unwrap_or_else(|| member.clone()),
+                        GlobalSource::Import,
+                    ));
+                }
+            }
+        }
+    }
+    for stmt in stmts {
+        if let StmtKind::Fn(decl) = &stmt.kind {
+            out.push((decl.name.clone(), GlobalSource::Fn));
+        }
+        // W7-8 — only names the runtime injects (`native_members`): an OPCODE-backed decl
+        // (`std.time.timer`) gets no slot, and a `native ctor` is not first-class.
+        if let Some(nat) = native
+            && let StmtKind::Native(d) = &stmt.kind
+            && d.kind == crate::ast::NativeKind::Fn
+            && crate::native::native_members(nat)
+                .iter()
+                .any(|(n, _, _)| *n == d.name)
+        {
+            out.push((d.name.clone(), GlobalSource::Native));
+        }
+        if let StmtKind::Extern { fns, .. } = &stmt.kind {
+            for ef in fns {
+                out.push((ef.name.clone(), GlobalSource::Extern));
+            }
+        }
+    }
+    for stmt in stmts {
+        if let StmtKind::Let { target, .. } = &stmt.kind {
+            for name in target.binder_names() {
+                out.push((
+                    name,
+                    GlobalSource::Let {
+                        line: stmt.span.line,
+                    },
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// One user type's identity key (see [`user_type_keys`]).
+pub struct UserTypeKey {
+    /// The declaring module's index in `graph.modules`.
+    pub module: usize,
+    pub name: String,
+    /// `<module-key>::Name`.
+    pub key: String,
+    /// A protocol (no runtime layout) rather than a struct, enum or alias.
+    pub is_protocol: bool,
+}
+
+/// THE one derivation of a user type's identity key, `<module-key>::Name` over [`module_keys`]: every
+/// struct, enum, alias and protocol declared in a user module. Std and native modules declare none
+/// here (their types keep their bare names). The checker keys all of them; the compiler keys the
+/// three kinds with a runtime layout.
+pub fn user_type_keys(graph: &ModuleGraph) -> Vec<UserTypeKey> {
+    let mkeys = module_keys(graph);
+    let mut out = Vec::new();
+    for (idx, lm) in graph.modules.iter().enumerate() {
+        if lm.native.is_some() || lm.is_std() {
+            continue;
+        }
+        for s in &lm.ast.stmts {
+            let (name, is_protocol) = if let StmtKind::Struct { name, .. }
+            | StmtKind::Enum { name, .. }
+            | StmtKind::TypeAlias { name, .. } = &s.kind
+            {
+                (name, false)
+            } else if let StmtKind::Protocol { name, .. } = &s.kind {
+                (name, true)
+            } else {
+                continue;
+            };
+            out.push(UserTypeKey {
+                module: idx,
+                name: name.clone(),
+                key: format!("{}::{name}", mkeys[idx]),
+                is_protocol,
+            });
+        }
+    }
+    out
+}
+
 /// ROOT REDESIGN — the canonical, per-module identity prefix used to qualify EVERY user
 /// struct/enum/variant/type-alias runtime key (`<module-key>::<Name>`). The single source of truth
 /// for the checker, compiler, and VM, so they derive byte-identical keys.

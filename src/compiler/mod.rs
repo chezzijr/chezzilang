@@ -653,7 +653,6 @@ impl Compiler {
     /// type members) and `module_types` (per-module declared names, deps-first).
     fn assign_type_keys(&mut self, graph: &ModuleGraph) {
         self.module_types = vec![std::collections::HashSet::new(); graph.modules.len()];
-        let mkeys = crate::resolver::module_keys(graph);
         for (idx, lm) in graph.modules.iter().enumerate() {
             if let Some(nat) = lm.native {
                 // A native std module has no AST, but `std.regex`/`std.request`/`std.process` each own
@@ -682,7 +681,6 @@ impl Compiler {
             }
             // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (no qualified
             // key entry → `type_key` falls back to bare), so `Iterator`/FFI widths resolve bare.
-            let is_std = lm.is_std();
             for s in &lm.ast.stmts {
                 if let StmtKind::Struct { name, .. }
                 | StmtKind::Enum { name, .. }
@@ -690,10 +688,6 @@ impl Compiler {
                 {
                     self.module_types[idx].insert(name.clone());
                     self.program.type_names.insert(name.clone());
-                    if !is_std {
-                        self.type_keys
-                            .insert((idx, name.clone()), format!("{}::{name}", mkeys[idx]));
-                    }
                 }
                 // A protocol has NO runtime representation, so only its NAME is registered — for
                 // `Vm::bind_import`'s skip — deliberately NOT `module_types`/`type_keys`, which key
@@ -701,6 +695,12 @@ impl Compiler {
                 if let StmtKind::Protocol { name, .. } = &s.kind {
                     self.program.type_names.insert(name.clone());
                 }
+            }
+        }
+        // A protocol has no runtime layout, so it gets no key here.
+        for k in crate::resolver::user_type_keys(graph) {
+            if !k.is_protocol {
+                self.type_keys.insert((k.module, k.name), k.key);
             }
         }
     }
@@ -759,7 +759,7 @@ impl Compiler {
         stmts: &[Stmt],
         native: Option<&'static str>,
     ) {
-        use crate::ast::Import;
+        use crate::resolver::GlobalSource;
         self.globals.clear();
         self.global_slots.clear();
         self.global_let_lines.clear();
@@ -770,71 +770,29 @@ impl Compiler {
                 slots.push(name);
             }
         };
-        for imp in imports {
-            match &imp.import {
-                Import::Module { path, alias, .. } => {
-                    let name = alias
-                        .clone()
-                        .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+        // Every slot before the first `let` holds a hoisted value from the start: no let line.
+        for (name, source) in crate::resolver::module_global_binds(imports, stmts, native) {
+            match source {
+                GlobalSource::Import | GlobalSource::Native | GlobalSource::Extern => {
                     add(name, &mut self.globals, &mut self.global_slots);
                 }
-                // The resolver never resolves a variant import, so none reaches here.
-                Import::Variants { .. } => {}
-                Import::From { names, .. } => {
-                    for (member, alias) in names {
-                        add(
-                            alias.clone().unwrap_or_else(|| member.clone()),
-                            &mut self.globals,
-                            &mut self.global_slots,
-                        );
-                    }
+                GlobalSource::Fn => {
+                    // Same-module top-level fn — licenses the generic-fn-as-value turbofish erase.
+                    // A native fn does not.
+                    self.fn_names.insert(name.clone());
+                    add(name, &mut self.globals, &mut self.global_slots);
                 }
-            }
-        }
-        for stmt in stmts {
-            if let StmtKind::Fn(decl) = &stmt.kind {
-                add(decl.name.clone(), &mut self.globals, &mut self.global_slots);
-                // Same-module top-level fn — licenses the generic-fn-as-value turbofish erase below.
-                self.fn_names.insert(decl.name.clone());
-            }
-            // W7-8 — a `native fn` in a HYBRID native module (`std.fs`'s `_exists`) is a module global
-            // too: `Vm::run_module` injects its Rust `NativeFn` BY NAME and `module_define` reuses an
-            // existing index, so reserving the slot here is exactly what lets a BODIED sibling in the
-            // same file call it (`fs.exists`'s `PathLike` wrapper calling `_exists`). Without the slot
-            // the call compiled to `global_slot` → the "global has no slot" panic.
-            // Restricted to names the runtime actually injects (`native_members`), so an OPCODE-backed
-            // decl (`std.time.timer`) still gets no slot and no nil global; `native ctor` is not
-            // first-class and never takes one. NOT added to `self.fn_names` — that licenses the
-            // generic-fn-as-value turbofish erase, which a native fn is not.
-            if let Some(nat) = native
-                && let StmtKind::Native(d) = &stmt.kind
-                && d.kind == crate::ast::NativeKind::Fn
-                && crate::native::native_members(nat)
-                    .iter()
-                    .any(|(n, _, _)| *n == d.name)
-            {
-                add(d.name.clone(), &mut self.globals, &mut self.global_slots);
-            }
-            // Each extern C fn is a module global bound at init (like a top-level `fn`).
-            if let StmtKind::Extern { fns, .. } = &stmt.kind {
-                for ef in fns {
-                    add(ef.name.clone(), &mut self.globals, &mut self.global_slots);
-                }
-            }
-        }
-        // Every slot so far holds a hoisted value from the start: no let line.
-        self.global_let_lines.resize(self.global_slots.len(), 0);
-        for stmt in stmts {
-            if let StmtKind::Let { target, .. } = &stmt.kind {
-                for name in &target.binder_names() {
+                GlobalSource::Let { line } => {
                     // TICKET-183: only a slot this let CREATES starts uninitialized at its line.
-                    if !self.globals.contains_key(name) {
-                        add(name.clone(), &mut self.globals, &mut self.global_slots);
-                        self.global_let_lines.push(stmt.span.line);
+                    if !self.globals.contains_key(&name) {
+                        self.global_let_lines.resize(self.global_slots.len(), 0);
+                        add(name, &mut self.globals, &mut self.global_slots);
+                        self.global_let_lines.push(line);
                     }
                 }
             }
         }
+        self.global_let_lines.resize(self.global_slots.len(), 0);
         debug_assert_eq!(self.global_let_lines.len(), self.global_slots.len());
     }
 

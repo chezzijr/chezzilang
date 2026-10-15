@@ -25,29 +25,14 @@ impl Checker {
         // names and key EACH one `<module-key>::Name` (via the shared `resolver::module_keys`, the SAME
         // derivation the compiler uses), so the checker, compiler, and VM agree on every key (parity) and
         // every user type is unique by construction (a cross-module name clash is just two distinct keys).
-        {
-            let mkeys = crate::resolver::module_keys(graph);
-            for (idx, lm) in graph.modules.iter().enumerate() {
-                // ROOT REDESIGN — std modules' types are RESERVED/NATIVE: keep their BARE name (skip the
-                // qualified key), so `Ref`/`Iterator`/FFI widths resolve bare, like the synthetic natives.
-                if lm.native.is_some() || lm.is_std() {
-                    continue;
-                }
-                for s in &lm.ast.stmts {
-                    if let StmtKind::Struct { name, .. }
-                    | StmtKind::Enum { name, .. }
-                    | StmtKind::TypeAlias { name, .. }
-                    | StmtKind::Protocol { name, .. } = &s.kind
-                        && !(matches!(s.kind, StmtKind::Protocol { .. })
-                            && is_reserved_protocol(name))
-                    {
-                        c.type_keys.insert(
-                            (lm.id.clone(), name.clone()),
-                            format!("{}::{name}", mkeys[idx]),
-                        );
-                    }
-                }
+        // Std modules' types are RESERVED/NATIVE and keep their BARE name, so `Iterator`/FFI widths
+        // resolve bare, like the synthetic natives (`user_type_keys` skips them).
+        for k in crate::resolver::user_type_keys(graph) {
+            if k.is_protocol && is_reserved_protocol(&k.name) {
+                continue;
             }
+            c.type_keys
+                .insert((graph.modules[k.module].id.clone(), k.name), k.key);
         }
         // FFI ROOT FIX (fix4): when harvesting extern signatures, gather every user struct's AST field
         // types up front, keyed by IDENTITY KEY (`<module-key>::Name`, the SAME derivation), so

@@ -528,50 +528,12 @@ pub fn witness_key_span(callee: &Expr, call_span: Span) -> Span {
     }
 }
 
-/// Whether the entry module binds `name` as a module global at run time. MUST stay in lockstep
-/// with the binding sources of `Compiler::collect_globals` (`src/compiler/mod.rs`): an import (its
-/// alias, else the last path segment / the member), a top-level `fn`, an `extern` fn, and a
-/// top-level `let` (except `_`). `Vm::invoke_entrypoint` looks the manifest entrypoint up in exactly
-/// that slot table, so a name absent here can never be invoked (TICKET-150, W14-35c).
+/// Whether the entry module binds `name` as a module global at run time: one of the names
+/// `resolver::module_global_binds` lists, the list the compiler builds the slot table from.
+/// `Vm::invoke_entrypoint` looks the manifest entrypoint up in exactly that slot table, so a name
+/// absent here can never be invoked (TICKET-150, W14-35c).
 pub(super) fn entry_module_binds(stmts: &[Stmt], imports: &[ResolvedImport], name: &str) -> bool {
-    let imported = imports.iter().any(|imp| match &imp.import {
-        Import::Module { path, alias, .. } => {
-            alias.as_deref().or(path.last().map(String::as_str)) == Some(name)
-        }
-        Import::Variants { .. } => false,
-        Import::From { names, .. } => names
-            .iter()
-            .any(|(member, alias)| alias.as_deref().unwrap_or(member) == name),
-    });
-    imported
-        || stmts.iter().any(|s| match &s.kind {
-            StmtKind::Fn(d) => d.name == name,
-            StmtKind::Extern { fns, .. } => fns.iter().any(|f| f.name == name),
-            StmtKind::Let { target, .. } => target.binder_names().iter().any(|n| n == name),
-            StmtKind::Assign { .. }
-            | StmtKind::Struct { .. }
-            | StmtKind::Protocol { .. }
-            | StmtKind::Enum { .. }
-            | StmtKind::TypeAlias { .. }
-            | StmtKind::If { .. }
-            | StmtKind::For { .. }
-            | StmtKind::While { .. }
-            | StmtKind::Match { .. }
-            | StmtKind::Return(_)
-            | StmtKind::Yield(_)
-            | StmtKind::Defer(_)
-            | StmtKind::Parallel { .. }
-            | StmtKind::Spawn(_)
-            | StmtKind::Wait { .. }
-            | StmtKind::Break
-            | StmtKind::Continue
-            | StmtKind::Pass
-            | StmtKind::Import(_)
-            | StmtKind::Native(_)
-            | StmtKind::NativeStruct { .. }
-            | StmtKind::NativeEnum { .. }
-            | StmtKind::NativeType { .. }
-            | StmtKind::Assert { .. }
-            | StmtKind::Expr(_) => false,
-        })
+    crate::resolver::module_global_binds(imports, stmts, None)
+        .iter()
+        .any(|(bound, _)| bound == name)
 }
