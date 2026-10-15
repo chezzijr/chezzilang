@@ -10,6 +10,7 @@
 //! opcode lost.
 
 use crate::ast::Span;
+use crate::native::cffi::CType;
 use crate::resolver::{ModuleId, ResolvedImport};
 use std::collections::HashMap;
 
@@ -750,6 +751,9 @@ pub struct Program {
     /// where `Obj::Struct` no longer carries a per-instance `name: Box<str>` (the struct analogue of
     /// `variants_by_id`). Dense and gap-free (tids are assigned `structs.len()` at each insert).
     pub struct_names: Vec<Box<str>>,
+    /// TICKET-262 — the C width of each field of each struct, indexed by `tid` then field index; a
+    /// struct with no width field holds an empty `Vec`. Read only by `Vm::field_fits`.
+    pub struct_widths: Vec<Vec<Option<CType>>>,
     /// Modules in dependency order (deps first, entry last) — the run order.
     pub modules: Vec<ModuleProto>,
     /// Does any declared type have the `Eq` hook? `false` for most programs; lets the hot
@@ -860,13 +864,21 @@ impl Program {
     /// M19 memory-layout lever — (re)build `struct_names` (the dense `tid`→identity-key reverse index)
     /// from `structs`. Called once at program construction, AFTER every struct type is hoisted (tids
     /// are dense `0..structs.len()`, so a flat `Vec` placing each key at `def.tid` is gap-free).
-    pub fn rebuild_struct_names(&mut self) {
+    ///
+    /// TICKET-262: `widths` is the checker's field-width table keyed by the same identity key;
+    /// `struct_widths` is its `tid`-indexed copy, so the field-store check pays one vector index.
+    pub fn rebuild_struct_names(&mut self, widths: &HashMap<String, Vec<Option<CType>>>) {
         let mut names: Vec<Box<str>> = vec![Box::from(""); self.structs.len()];
+        let mut by_tid: Vec<Vec<Option<CType>>> = vec![Vec::new(); self.structs.len()];
         for (key, def) in &self.structs {
             if let Some(slot) = names.get_mut(def.tid as usize) {
                 *slot = Box::from(key.as_str());
             }
+            if let (Some(w), Some(slot)) = (widths.get(key), by_tid.get_mut(def.tid as usize)) {
+                slot.clone_from(w);
+            }
         }
         self.struct_names = names;
+        self.struct_widths = by_tid;
     }
 }

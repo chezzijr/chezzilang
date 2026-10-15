@@ -102,15 +102,6 @@ fn fault(ct: &CType, shown: &str) -> String {
     )
 }
 
-/// A struct-field fault reaches the program through the struct-arg marshaller, which names the
-/// argument: `argument 0 to 's_int8_get': value 300 does not fit int8 (-128..127)`.
-fn field_want(getter: &str, want: &str) -> String {
-    match want.strip_prefix("err ") {
-        Some(msg) => format!("err argument 0 to '{getter}': {msg}"),
-        None => want.to_string(),
-    }
-}
-
 fn cells() -> Vec<Cell> {
     let mut out = Vec::new();
     let mut cell = |name: String, expr: String, want: String| out.push(Cell { name, expr, want });
@@ -163,10 +154,12 @@ fn cells() -> Vec<Cell> {
                 format!("id_{w}(v({e}))"),
                 want.clone(),
             );
+            // TICKET-262: a value outside a width field faults at the constructor, before the struct
+            // reaches the C boundary, with the same text as a param.
             cell(
                 format!("{w}_field_{label}"),
                 format!("s_{w}_get(S_{w}(v({e})))"),
-                field_want(&format!("s_{w}_get"), &want),
+                want.clone(),
             );
             cell(
                 format!("{w}_store_{label}"),
@@ -195,7 +188,7 @@ fn cells() -> Vec<Cell> {
         cell(
             format!("float32_field_{label}"),
             format!("s_float32_get(S_float32(vf({e})))"),
-            field_want("s_float32_get", &want),
+            want.clone(),
         );
         cell(
             format!("float32_store_{label}"),

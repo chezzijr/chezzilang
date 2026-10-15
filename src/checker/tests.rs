@@ -41799,6 +41799,435 @@ fn for_pair_unpacks_a_set_of_tuples() {
     ok("fn main():\n    for a, b in {(1, \"x\")}:\n        print(a, b)\n");
 }
 
+/// TICKET-262 — owner rules 1 and 2 over the whole matrix: every resolver position x every `std.ffi`
+/// width x {in-range constant, out-of-range constant, out-of-range runtime value}, checked and run.
+/// Rule 1: a width type outside a C signature or a struct field's own type is a compile error.
+/// Rule 2: every store into a width slot is range-checked; a constant is a compile error, a runtime
+/// value is a fault with the C boundary's own text. CPython ctypes wraps silently
+/// (`ctypes.c_int8(300).value` -> `44`); Chezzi faults.
+#[test]
+fn width_position_grid() {
+    /// What a run must do: print exactly this, fault with this text, or print a line holding this.
+    enum Ran {
+        Out(String),
+        Fault(String),
+        OutHas(String),
+    }
+    use super::sig::TypePos;
+    use crate::native::cffi::{CType, width_ctype};
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Shape {
+        /// The width type itself is the rule-1 error, whatever the value.
+        Outside,
+        /// `{K}` is stored once: constant out of range = check error, runtime = fault.
+        Store,
+        /// `{K}` is stored the second time round a loop, so the store takes the field IC fast path.
+        Loop,
+        /// A constant default: no runtime value exists.
+        ConstOnly,
+        /// A C call argument: the constant is checked, the runtime value is the C boundary's.
+        Call,
+        /// A signature with no value dimension.
+        CheckOnly,
+        /// `s.q += {K}`: checks clean (DEC-258), faults at run time.
+        Compound,
+        /// `json.decode[S]` with the value in the JSON text: the `Err` holds the fault text.
+        Json,
+        /// A C read: prints the zero that was stored.
+        Read,
+    }
+    use Shape::*;
+
+    // An exhaustive match: a new `TypePos` variant does not compile until it has templates.
+    // `{W}` width, `{K}` value, `{Z}` zero, `{J}` JSON number text.
+    fn templates(pos: TypePos) -> &'static [(&'static str, Shape)] {
+        match pos {
+            TypePos::Value => &[
+                ("x: {W} = {K}\nprint(x)\n", Outside),
+                ("fn f(a: {W}) -> None:\n    print(a)\nf({K})\n", Outside),
+                ("fn f(a: {W} = {K}) -> None:\n    print(a)\nf()\n", Outside),
+                ("c := fn(a: {W}) -> int: 0\nprint(c({K}))\n", Outside),
+                (
+                    "struct M:\n    n: int\n    fn m(self, a: {W}) -> None:\n        print(a)\nM(1).m({K})\n",
+                    Outside,
+                ),
+                ("protocol Pr:\n    fn m(self, a: {W}) -> None\n", Outside),
+                ("enum E:\n    A({W})\nprint(E.A({K}))\n", Outside),
+                ("l: List[{W}] = [{K}]\nprint(l)\n", Outside),
+                ("o: {W}? = ?({K})\nprint(o)\n", Outside),
+                ("t: ({W}, int) = ({K}, 1)\nprint(t)\n", Outside),
+                ("m: Map[str, {W}] = {\"a\": {K}}\nprint(m)\n", Outside),
+                (
+                    "struct Bx[T]:\n    v: T\nb := Bx[{W}]({K})\nprint(b.v)\n",
+                    Outside,
+                ),
+                (
+                    "struct Bx[T]:\n    v: T\n    fn make(x: T) -> Bx[T]:\n        return Bx[T](x)\nprint(Bx[{W}].make({K}).v)\n",
+                    Outside,
+                ),
+                (
+                    "struct Bx[T]:\n    v: T\n    fn make(x: T) -> Bx[T]:\n        return Bx[T](x)\nf := Bx[{W}].make\nprint(f({K}).v)\n",
+                    Outside,
+                ),
+                (
+                    "fn id[T](x: T) -> T:\n    return x\nprint(id[{W}]({K}))\n",
+                    Outside,
+                ),
+                ("type A = {W}\n", Outside),
+                ("x: ffi.{W} = {K}\nprint(x)\n", Outside),
+                (
+                    "G: {W} = {Z}\nfn setg() -> None:\n    G = {K}\nsetg()\nprint(G)\n",
+                    Outside,
+                ),
+            ],
+            TypePos::Void => &[
+                ("fn r() -> {W}:\n    return {K}\nprint(r())\n", Outside),
+                ("fn r() -> {W}!str:\n    return {K}\nprint(r())\n", Outside),
+                ("c := fn() -> {W}: {K}\nprint(c())\n", Outside),
+            ],
+            TypePos::CParam => &[
+                (
+                    "p := ffi.alloc(8)\nffi.store_{W}(p, {K})\nprint(ffi.load_{W}(p))\n",
+                    Store,
+                ),
+                (
+                    "extern \"libc.so.6\":\n    fn abs(x: {W}) -> int\nprint(abs({K}))\n",
+                    Call,
+                ),
+                (
+                    "extern \"libc.so.6\":\n    fn qsort(cb: fn({W}) -> {W}) -> int\n",
+                    CheckOnly,
+                ),
+            ],
+            TypePos::CRet => &[
+                (
+                    "extern \"libc.so.6\":\n    fn abs(x: int) -> {W}\n",
+                    CheckOnly,
+                ),
+                (
+                    "p := ffi.alloc(8)\nffi.store_{W}(p, {Z})\nx := ffi.load_{W}(p)\nprint(x)\n",
+                    Read,
+                ),
+            ],
+            TypePos::Field => &[
+                ("struct S:\n    q: {W}\ns := S({K})\nprint(s.q)\n", Store),
+                ("struct S:\n    q: {W}\ns := S(q={K})\nprint(s.q)\n", Store),
+                (
+                    "struct S:\n    q: {W}\ns := S({Z})\ns.q = {K}\nprint(s.q)\n",
+                    Store,
+                ),
+                (
+                    "struct S:\n    q: {W}\ns := S({Z})\nfor v in [{Z}, {K}]:\n    s.q = v\nprint(s.q)\n",
+                    Loop,
+                ),
+                (
+                    "struct S:\n    q: {W}\ns := S({Z})\ns.q += {K}\nprint(s.q)\n",
+                    Compound,
+                ),
+                (
+                    "struct S:\n    q: {W} = {K}\ns := S()\nprint(s.q)\n",
+                    ConstOnly,
+                ),
+                (
+                    "struct S:\n    q: ffi.{W}\ns := S({K})\nprint(s.q)\n",
+                    Store,
+                ),
+                (
+                    "struct S:\n    q: {W}\ntxt := r'{\"q\": {J}}'\nr := json.decode[S](txt)\nmatch r:\n    ?s: print(\"ok\", s.q)\n    !e: print(\"err\", e)\n",
+                    Json,
+                ),
+                (
+                    "struct S:\n    q: {W}\nextern \"libc.so.6\":\n    fn abs(s: S) -> int\nx := S({K})\nprint(x.q)\n",
+                    Store,
+                ),
+                // A fn type under a field is a program fn type, not a C callback.
+                ("struct S:\n    cb: fn({W}) -> int\n", Outside),
+            ],
+        }
+    }
+
+    // `TypePos::ALL` must hold every variant: the same exhaustive shape as `templates`.
+    let mut seen = [false; 5];
+    for p in TypePos::ALL {
+        let i = match p {
+            TypePos::Value => 0,
+            TypePos::Void => 1,
+            TypePos::CParam => 2,
+            TypePos::CRet => 3,
+            TypePos::Field => 4,
+        };
+        seen[i] = true;
+    }
+    assert!(seen.iter().all(|s| *s), "TypePos::ALL misses a variant");
+
+    let run = |src: &str| -> Result<String, String> {
+        let t = TmpDir::new();
+        let entry = t.write("main.chz", src);
+        let (out, _err, result, _code) = crate::vm::run_file(&entry);
+        match result {
+            Ok(()) => Ok(out.trim().to_string()),
+            Err(e) => Err(format!("{e}")),
+        }
+    };
+    let rule1 = "describes the C boundary only";
+    let mut red: Vec<String> = Vec::new();
+    for d in crate::native::ffi::declared_types() {
+        if d.scalar.is_none() {
+            continue;
+        }
+        let w = d.name.as_str();
+        let ct = width_ctype(w).unwrap();
+        let float = ct == CType::Float32;
+        let (zero, in_k) = if float { ("0.0", "1.5") } else { ("0", "1") };
+        // The out-of-range constant, and the out-of-range runtime value (`uint64` takes any int as
+        // its bit pattern at run time; `int64` has no value out of range).
+        let oor_const: Option<String> = if float {
+            Some("1e39".to_string())
+        } else if ct == CType::Int64 {
+            None
+        } else if ct == CType::UInt64 {
+            Some("-1".to_string())
+        } else {
+            ct.int_range().map(|(_, hi)| (hi + 1).to_string())
+        };
+        let oor_run: Option<String> = if ct == CType::UInt64 {
+            None
+        } else {
+            oor_const.clone()
+        };
+        let big_ty = if float { "float" } else { "int" };
+        let big_val = oor_run.clone().unwrap_or_else(|| in_k.to_string());
+        let prelude = format!(
+            "import std.ffi\nimport std.json\nimport {w} from std.ffi\nfn big() -> {big_ty}:\n    return {big_val}\n"
+        );
+        let fail_const = |k: &str| format!("constant {k} does not fit {w} {}", ct.range_text());
+        let fail_run = |k: &str| format!("value {k} does not fit {w} {}", ct.range_text());
+        for pos in TypePos::ALL {
+            for (tpl, shape) in templates(pos) {
+                if !pos.width_ok() && *shape != Outside {
+                    red.push(format!(
+                        "{tpl:?}: a position that rejects widths has a non-Outside template"
+                    ));
+                    continue;
+                }
+                let build = |k: &str, j: &str| {
+                    let body = tpl
+                        .replace("{W}", w)
+                        .replace("{Z}", zero)
+                        .replace("{K}", k)
+                        .replace("{J}", j);
+                    format!("{prelude}{body}")
+                };
+                let mut cell = |what: &str,
+                                src: String,
+                                check: Result<(), String>,
+                                ran: Option<Ran>| {
+                    // `check`: Ok = must be clean, Err(needle) = an error must contain it.
+                    let errs = check_entry(&src);
+                    let bad = match &check {
+                        Ok(()) if !errs.is_empty() => Some(format!("want clean, got {errs:?}")),
+                        Err(n) if !errs.iter().any(|e| e.message.contains(n.as_str())) => {
+                            Some(format!("want error {n:?}, got {errs:?}"))
+                        }
+                        Ok(()) | Err(_) => None,
+                    };
+                    if let Some(b) = bad {
+                        red.push(format!("{w} {what}: {b}\n{src}"));
+                        return;
+                    }
+                    if check.is_err() {
+                        return;
+                    }
+                    match (ran, run(&src)) {
+                        (None, _) => {}
+                        (Some(Ran::Out(want)), Ok(out)) if out == want => {}
+                        (Some(Ran::Fault(n)), Err(f)) if f.contains(n.as_str()) => {}
+                        (Some(Ran::OutHas(n)), Ok(out)) if out.contains(n.as_str()) => {}
+                        (Some(Ran::Out(want)), got) => {
+                            red.push(format!("{w} {what}: run want {want:?}, got {got:?}\n{src}"))
+                        }
+                        (Some(Ran::Fault(n) | Ran::OutHas(n)), got) => red.push(format!(
+                            "{w} {what}: run want a fault or output containing {n:?}, got {got:?}\n{src}"
+                        )),
+                    }
+                };
+                let uses_k = tpl.contains("{K}");
+                match shape {
+                    Outside => {
+                        let mut vals = vec![("in-range", in_k.to_string())];
+                        if uses_k {
+                            if let Some(k) = &oor_const {
+                                vals.push(("out-of-range constant", k.clone()));
+                            }
+                            vals.push(("runtime", "big()".to_string()));
+                        }
+                        for (what, k) in vals {
+                            cell(
+                                &format!("{tpl:?} {what}"),
+                                build(&k, in_k),
+                                Err(rule1.to_string()),
+                                None,
+                            );
+                        }
+                    }
+                    Store | Loop => {
+                        cell(
+                            &format!("{tpl:?} in-range"),
+                            build(in_k, in_k),
+                            Ok(()),
+                            Some(Ran::Out(in_k.to_string())),
+                        );
+                        if let Some(k) = &oor_const {
+                            // A `Loop` constant rides a list, so it meets the slot at run time.
+                            if *shape == Loop {
+                                if oor_run.is_some() {
+                                    cell(
+                                        &format!("{tpl:?} out-of-range constant"),
+                                        build(k, in_k),
+                                        Ok(()),
+                                        Some(Ran::Fault(fail_run(k))),
+                                    );
+                                }
+                            } else {
+                                cell(
+                                    &format!("{tpl:?} out-of-range constant"),
+                                    build(k, in_k),
+                                    Err(fail_const(k)),
+                                    None,
+                                );
+                            }
+                        }
+                        if let Some(k) = &oor_run {
+                            cell(
+                                &format!("{tpl:?} runtime"),
+                                build("big()", in_k),
+                                Ok(()),
+                                Some(Ran::Fault(fail_run(k))),
+                            );
+                        }
+                    }
+                    Compound => {
+                        if float {
+                            continue;
+                        }
+                        cell(
+                            &format!("{tpl:?} in-range"),
+                            build(in_k, in_k),
+                            Ok(()),
+                            Some(Ran::Out(in_k.to_string())),
+                        );
+                        if let Some(k) = &oor_run {
+                            for v in [k.as_str(), "big()"] {
+                                cell(
+                                    &format!("{tpl:?} {v}"),
+                                    build(v, in_k),
+                                    Ok(()),
+                                    Some(Ran::Fault(fail_run(k))),
+                                );
+                            }
+                        }
+                    }
+                    ConstOnly => {
+                        cell(
+                            &format!("{tpl:?} in-range"),
+                            build(in_k, in_k),
+                            Ok(()),
+                            Some(Ran::Out(in_k.to_string())),
+                        );
+                        if let Some(k) = &oor_const {
+                            cell(
+                                &format!("{tpl:?} out-of-range constant"),
+                                build(k, in_k),
+                                Err(fail_const(k)),
+                                None,
+                            );
+                        }
+                    }
+                    Call => {
+                        cell(
+                            &format!("{tpl:?} in-range"),
+                            build(in_k, in_k),
+                            Ok(()),
+                            None,
+                        );
+                        if let Some(k) = &oor_const {
+                            cell(
+                                &format!("{tpl:?} out-of-range constant"),
+                                build(k, in_k),
+                                Err(fail_const(k)),
+                                None,
+                            );
+                        }
+                        cell(
+                            &format!("{tpl:?} runtime"),
+                            build("big()", in_k),
+                            Ok(()),
+                            None,
+                        );
+                    }
+                    CheckOnly => {
+                        cell(&format!("{tpl:?}"), build(in_k, in_k), Ok(()), None);
+                    }
+                    Json => {
+                        cell(
+                            &format!("{tpl:?} in-range"),
+                            build(in_k, in_k),
+                            Ok(()),
+                            Some(Ran::Out(format!("ok {in_k}"))),
+                        );
+                        if let Some(k) = &oor_run {
+                            cell(
+                                &format!("{tpl:?} out-of-range"),
+                                build(k, k),
+                                Ok(()),
+                                Some(Ran::OutHas(fail_run(k))),
+                            );
+                        }
+                    }
+                    Read => {
+                        cell(
+                            &format!("{tpl:?}"),
+                            build(in_k, in_k),
+                            Ok(()),
+                            Some(Ran::Out(zero.to_string())),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        red.is_empty(),
+        "{} red cells:\n{}",
+        red.len(),
+        red.join("\n")
+    );
+}
+
+/// TICKET-262 — the field-width table is keyed by the runtime identity key, so two modules that both
+/// declare `S` keep separate checks: `lib.S` has an `int8` field and faults on 300, the entry's own
+/// `S` has an `int` field and holds 300. Fails if the table were keyed by the bare name.
+#[test]
+fn width_field_check_follows_the_identity_key_across_a_name_clash() {
+    let t = TmpDir::new();
+    t.write(
+        "lib.chz",
+        "import int8 from std.ffi\n\nstruct S:\n    q: int8\n",
+    );
+    let entry = t.write(
+        "main.chz",
+        "import lib\n\nstruct S:\n    q: int\n\na := S(300)\nprint(a.q)\nb := lib.S(100)\nfor v in [1, 300]:\n    b.q = v\nprint(\"unreached\")\n",
+    );
+    let (out, _err, result, _code) = crate::vm::run_file(&entry);
+    assert_eq!(out.trim(), "300");
+    let fault = format!("{}", result.expect_err("lib.S(int8) must fault on 300"));
+    assert!(
+        fault.contains("value 300 does not fit int8 (-128..127)"),
+        "{fault}"
+    );
+}
+
 #[test]
 fn width_type_local_annotation_rejected() {
     // TICKET-262 rule 1: a width type describes the C boundary only. A local annotation is an error

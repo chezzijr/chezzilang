@@ -1123,6 +1123,12 @@ impl Vm {
                 // ROOT REDESIGN — tag the value with the qualified IDENTITY KEY (so downstream
                 // field/method lookups + `struct_tid` hit the right layout); display renders bare.
                 let tid = self.struct_tid(key);
+                // TICKET-262: a JSON number outside a width field is the decode's `Err`, as Go's
+                // `json.Unmarshal` returns for `int8`; the text is the C boundary's.
+                for (i, (v, field)) in field_vals.iter().zip(fields).enumerate() {
+                    self.field_fits(tid, i, *v)
+                        .map_err(|m| format!("decode: {m} at {path}.{}", field.name))?;
+                }
                 let h = self.heap.alloc(Obj::Struct {
                     tid,
                     fields: Fields::from_vec(field_vals),

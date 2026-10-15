@@ -186,6 +186,7 @@ impl Checker {
             deferred_obligations: None,
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
+            field_widths: crate::checker::FieldWidthTable::new(),
             fresh_subscripts: Default::default(),
             sum_seeds: crate::checker::SumSeedTable::new(),
             crossings: crate::checker::CrossingTable::new(),
@@ -262,6 +263,15 @@ impl Checker {
     /// bare-visible (local / `from`-imported / std), else the name itself — which covers the reserved
     /// built-ins (`Result`/`Option`/`Ref`/…) and a not-bare-visible name (resolution then misses, as
     /// before). Mirrors the compiler's `enum_bare_key` (shared for structs + enums here).
+    /// TICKET-262 — the one writer of [`FieldWidthTable`]: the C width of each field of struct `key`,
+    /// read off the resolved field `Ty`. A struct with no width field gets no entry.
+    pub(super) fn note_field_widths(&mut self, key: &str, fields: &[(String, Ty)]) {
+        let widths: Vec<Option<CType>> = fields.iter().map(|(_, t)| t.width().cloned()).collect();
+        if widths.iter().any(Option::is_some) {
+            self.field_widths.insert(key.to_string(), widths);
+        }
+    }
+
     pub(super) fn bare_key(&self, name: &str) -> String {
         self.bare_types
             .get(name)
@@ -1010,6 +1020,7 @@ impl Checker {
                     })
                     .collect();
                 self.exit_type_params(saved);
+                self.note_field_widths(name, &harvested_fields);
                 let info = StructInfo {
                     type_params: self.resolve_bounds(type_params, *span),
                     fields: harvested_fields,
@@ -4369,6 +4380,7 @@ impl Checker {
                     // carries the key — resolves its fields/methods here and across the module
                     // boundary. `struct_names` (bare-visibility) stays bare; only the layout is keyed.
                     let key = self.bare_key(name);
+                    self.note_field_widths(&key, &fields);
                     let rtps = self.resolve_bounds(type_params, s.span);
                     self.structs.insert(
                         key,

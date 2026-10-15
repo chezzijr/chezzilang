@@ -1773,6 +1773,7 @@ pub(crate) fn empty_program() -> Program {
         variants: Default::default(),
         variants_by_id: Vec::new(),
         struct_names: Vec::new(),
+        struct_widths: Vec::new(),
         any_eq_hook: false,
         hooks_struct: Vec::new(),
         hooks_enum: Vec::new(),

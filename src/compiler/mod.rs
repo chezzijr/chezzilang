@@ -92,10 +92,11 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     // witness params and what fills each witness at each call site. The compiler CONSUMES it — it
     // never re-derives which protocols carry a static requirement (that resolves through
     // imports/aliases/embeds, which is checker work).
-    let (kw, wt, ct, ns, rc, conflicts, fo, rs, nf, gc, wr, ht, hc) = tables;
+    let (kw, wt, ct, ns, rc, conflicts, fo, rs, nf, gc, wr, ht, hc, fw) = tables;
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
     c.hook_calls = hc;
+    c.field_widths = fw;
     c.fall_off = nf;
     c.call_plans = kw;
     c.witnesses = wt;
@@ -140,7 +141,7 @@ pub fn compile_graph(graph: &ModuleGraph) -> Result<Program, CompileError> {
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
     c.program.range_key = c.type_key(0, "Range");
-    c.program.rebuild_struct_names();
+    c.program.rebuild_struct_names(&c.field_widths);
     c.build_hooks();
     c.build_provider_table()?;
     Ok(c.program)
@@ -189,11 +190,12 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     // SINGLE-RESOLVER: extern C types come from the checker's standalone pass — the SAME resolver the
     // multi-file CLI uses (no second backend resolver exists). The backend reads this table verbatim.
     c.extern_sigs = crate::checker::resolve_extern_signatures_standalone(&module.stmts);
-    let (kw, wt, ct, ns, rc, conflicts, fo, rs, nf, gc, wr, ht, hc) =
+    let (kw, wt, ct, ns, rc, conflicts, fo, rs, nf, gc, wr, ht, hc, fw) =
         crate::checker::resolve_call_tables_standalone(&module.stmts);
     reject_table_conflicts(conflicts)?;
     c.hook_table = ht;
     c.hook_calls = hc;
+    c.field_widths = fw;
     c.fall_off = nf;
     c.call_plans = kw;
     c.witnesses = wt;
@@ -225,7 +227,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     c.program.task_entry = c.spawn_entry_proto("<task entry>", None, 0, Span::RUNTIME);
     c.program.method_ic_sites = c.method_ic_next;
     c.program.range_key = c.type_key(0, "Range");
-    c.program.rebuild_struct_names();
+    c.program.rebuild_struct_names(&c.field_widths);
     c.build_provider_table()?;
     c.build_hooks();
     Ok(c.program)
@@ -257,6 +259,8 @@ struct Compiler {
     /// reserved protocol requirement. Consumed verbatim; the compiler decides no hook.
     hook_table: crate::checker::HookTable,
     hook_calls: crate::checker::HookCallTable,
+    /// TICKET-262 — the checker's [`FieldWidthTable`]; read only by `rebuild_struct_names`.
+    field_widths: crate::checker::FieldWidthTable,
     /// Runtime type key → its hooks, gathered at each declaration and materialized into
     /// `Program::hooks_struct` / `hooks_enum` by [`Compiler::build_hooks`].
     hook_sets: HashMap<String, crate::checker::HookSet>,
@@ -520,6 +524,7 @@ impl Compiler {
             variants: HashMap::new(),
             variants_by_id: Vec::new(),
             struct_names: Vec::new(),
+            struct_widths: Vec::new(),
             any_eq_hook: false,
             hooks_struct: Vec::new(),
             hooks_enum: Vec::new(),
@@ -589,6 +594,7 @@ impl Compiler {
             range_free: false,
             hook_table: crate::checker::HookTable::new(),
             hook_calls: crate::checker::HookCallTable::new(),
+            field_widths: crate::checker::FieldWidthTable::new(),
             hook_sets: HashMap::new(),
             globals: HashMap::new(),
             provider_ids: HashMap::new(),

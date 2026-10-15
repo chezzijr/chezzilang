@@ -1379,6 +1379,7 @@ fn compile_tables_pass(
             std::mem::take(&mut c.wraps),
             std::mem::take(&mut c.hook_table),
             std::mem::take(&mut c.hook_calls),
+            std::mem::take(&mut c.field_widths),
         );
         (externs, tables)
     })
@@ -1647,6 +1648,13 @@ pub type HookTable = HashMap<(usize, String), HookSet>;
 /// method-name token. The compiler lowers each to `Op::CallHook`.
 pub type HookCallTable = HashMap<CarrierKey, Hook>;
 
+/// TICKET-262 — the C width of each field of every struct that has one, keyed by the struct's runtime
+/// identity key (`Checker::type_key`), one entry per field in declaration order (`None` = no width).
+/// Built from the resolved field `Ty` (`Ty::width`), so the compiler never re-reads a field's spelling;
+/// the VM range-checks each store into such a field with `CType::check_fits`. A struct with no width
+/// field has no entry.
+pub type FieldWidthTable = HashMap<String, Vec<Option<CType>>>;
+
 /// Every checker-to-compiler side table [`resolve_call_tables`] returns, in this order.
 pub type CallTables = (
     CallPlanTable,
@@ -1662,6 +1670,7 @@ pub type CallTables = (
     WrapTable,
     HookTable,
     HookCallTable,
+    FieldWidthTable,
 );
 
 /// W7-49 — side-table keys asked to hold two different decisions, as `(span, message)`. Empty for
@@ -2787,6 +2796,8 @@ struct Checker {
     hook_table: HookTable,
     /// TICKET-250 — the call sites typed through a reserved requirement. See [`HookCallTable`].
     hook_calls: HookCallTable,
+    /// TICKET-262 — see [`FieldWidthTable`]. Written only by [`Checker::note_field_widths`].
+    field_widths: FieldWidthTable,
     fresh_subscripts: HashSet<CarrierKey>,
     /// Which `.sum()` sites sum a `List[float]` and so need a `0.0` seed, keyed by
     /// [`carrier_key`] on the method-name token and consumed verbatim by the compiler (which cannot

@@ -473,6 +473,30 @@ impl Vm {
 
     // ----- construction / access -----
 
+    /// TICKET-262 — owner rule 2: a value stored into a struct field declared with a `std.ffi` width
+    /// must fit it. It reads `CType::check_fits`, the C boundary's own check, so the fault text is the
+    /// boundary's: `value 300 does not fit int8 (-128..127)`. Every path that writes a struct field
+    /// from a non-struct source calls it: `new_struct`, `set_field` and `coerce_json`.
+    pub(super) fn field_fits(&self, tid: u32, idx: usize, val: Value) -> Result<(), String> {
+        let Some(ct) = self
+            .program
+            .struct_widths
+            .get(tid as usize)
+            .and_then(|w| w.get(idx))
+            .and_then(Option::as_ref)
+        else {
+            return Ok(());
+        };
+        let v = if val.is_float() {
+            crate::native::NativeRet::Float(self.float_of(val))
+        } else if let Some(n) = self.int_val(val) {
+            crate::native::NativeRet::Int(n)
+        } else {
+            return Ok(());
+        };
+        ct.check_fits(&v).map_err(|e| e.message)
+    }
+
     pub(super) fn new_struct(
         &mut self,
         name: &str,
@@ -504,6 +528,10 @@ impl Vm {
         if name == self.program.range_key && fields.get(2).and_then(|s| self.int_val(*s)) == Some(0)
         {
             return Err(self.err("Range() step cannot be zero".to_string(), span));
+        }
+        for (i, v) in fields.iter().enumerate() {
+            self.field_fits(def.tid, i, *v)
+                .map_err(|m| self.err(m, span))?;
         }
         let h = self.heap.alloc(Obj::Struct {
             tid: def.tid,
@@ -1155,7 +1183,13 @@ impl Vm {
         // to the cached index (no field-name re-verify); a miss falls through to the probe + cache-fill.
         if ic != NO_IC {
             let cell = self.field_ic[ic as usize];
+            // TICKET-262: a value outside the field's width skips the fast path; the probe path
+            // below raises the fault. The result matters only on a `tid` hit, so an IC miss on a
+            // struct of another layout never faults here.
+            let fits =
+                cell.tid == TID_NONE || self.field_fits(cell.tid, cell.idx as usize, val).is_ok();
             if cell.tid != TID_NONE
+                && fits
                 && let Obj::Struct { tid, fields, .. } = self.heap.get_mut(h)
                 && *tid == cell.tid
                 && let Some(slot) = fields.get_mut(cell.idx as usize)
@@ -1203,6 +1237,9 @@ impl Vm {
             .map(|t| self.struct_name_of_tid(t))
             .and_then(|n| self.program.structs.get(n))
             .and_then(|d| d.fields.iter().position(|f| f == name));
+        if let (Some(t), Some(i)) = (stid, idx) {
+            self.field_fits(t, i, val).map_err(|m| self.err(m, span))?;
+        }
         let found;
         match self.heap.get_mut(h) {
             Obj::Struct { tid, fields, .. } => {
