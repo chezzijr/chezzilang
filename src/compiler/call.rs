@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::ast::{Chunk, Expr, ExprKind, Span};
+use crate::base::op::{CapEntry, Op, ProtoId};
 use crate::checker::Resolution;
-use crate::vm::op::{CapEntry, Op, ProtoId};
 use std::collections::HashSet;
 
 impl Compiler {
@@ -318,7 +318,9 @@ impl Compiler {
                 self.kw_frag_ord,
                 *name_span,
             );
-            if self.hook_calls.get(&eq_key) == Some(&crate::checker::Hook::Eq) && args.len() == 1 {
+            if self.hook_calls.get(&eq_key) == Some(&crate::base::hooks::Hook::Eq)
+                && args.len() == 1
+            {
                 self.compile_expr(fc, obj)?;
                 self.compile_expr(fc, &args[0])?;
                 fc.emit(Op::Eq, span);
@@ -665,7 +667,7 @@ impl Compiler {
         &mut self,
         fill: &crate::checker::ArgFill,
         span: Span,
-    ) -> Result<crate::json_decode::DefaultThunk, CompileError> {
+    ) -> Result<crate::base::json_desc::DefaultThunk, CompileError> {
         let mut fc = FnComp::new("json.decode".to_string(), 0, false);
         self.compile_default_fill(&mut fc, fill, span)?;
         fc.emit(Op::Return, span);
@@ -676,7 +678,7 @@ impl Compiler {
             | crate::checker::ArgFill::Pack(_)
             | crate::checker::ArgFill::Provider(_) => self.current_module_idx,
         };
-        Ok(crate::json_decode::DefaultThunk { proto, module })
+        Ok(crate::base::json_desc::DefaultThunk { proto, module })
     }
 
     /// The descriptor's coercion of the parsed `Result[Json]` on the stack: the one coercion step
@@ -684,7 +686,7 @@ impl Compiler {
     fn emit_json_decode(
         &mut self,
         fc: &mut FnComp,
-        desc: &crate::json_decode::TypeDescriptor<crate::checker::ArgFill>,
+        desc: &crate::base::json_desc::TypeDescriptor<crate::checker::ArgFill>,
         span: Span,
     ) -> Result<(), CompileError> {
         let desc = desc.try_map_defaults(&mut |f| self.compile_default_thunk(f, span))?;
@@ -699,7 +701,7 @@ impl Compiler {
         &mut self,
         fc: &mut FnComp,
         obj: &Expr,
-        desc: &crate::json_decode::TypeDescriptor<crate::checker::ArgFill>,
+        desc: &crate::base::json_desc::TypeDescriptor<crate::checker::ArgFill>,
         span: Span,
     ) -> Result<(), CompileError> {
         let Resolution::Module(json_idx) = *self.resolution(obj)? else {
@@ -721,7 +723,7 @@ impl Compiler {
     fn build_decode_fn(
         &mut self,
         json_idx: usize,
-        desc: &crate::json_decode::TypeDescriptor<crate::checker::ArgFill>,
+        desc: &crate::base::json_desc::TypeDescriptor<crate::checker::ArgFill>,
     ) -> Result<ProtoId, CompileError> {
         let mut vf = FnComp::new("json.decode".to_string(), 1, false);
         let s = vf.add_local("$s".to_string());

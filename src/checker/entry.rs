@@ -248,7 +248,7 @@ pub fn resolve_extern_signatures(graph: &ModuleGraph) -> ExternTable {
 /// through `build_graph` → `resolve_extern_signatures`.
 #[cfg(test)]
 pub fn resolve_extern_signatures_standalone(stmts: &[Stmt]) -> ExternTable {
-    let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
+    let id = crate::base::module_id::ModuleId(std::path::PathBuf::from("<main>"));
     let graph = ModuleGraph {
         entry: id.clone(),
         range_used: true,

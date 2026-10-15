@@ -88,7 +88,7 @@ const T254_COPY_TEXT: T254Expect =
     T254Expect::Warns("changes a temporary copy", "changes a temporary copy");
 
 /// `kind`: the native method table the receiver belongs to (`""` for none). Every method of it with
-/// `crate::vm::is_mutating_native_kind` true is a write of the row ([`t254_native_calls`]).
+/// `crate::native::is_mutating_native_kind` true is a write of the row ([`t254_native_calls`]).
 /// `writes`: the other statements (stores); `@` is the receiver, `$` the element value.
 struct T254Row {
     name: &'static str,
@@ -161,7 +161,7 @@ fn t254_native_calls(kind: &str) -> Vec<String> {
     methods.dedup();
     methods
         .iter()
-        .filter(|m| crate::vm::is_mutating_native_kind(kind, m))
+        .filter(|m| crate::native::is_mutating_native_kind(kind, m))
         .map(|m| {
             let (_, _, call) = T254_CALLS
                 .iter()

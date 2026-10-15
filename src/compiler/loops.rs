@@ -5,7 +5,7 @@ use super::*;
 use crate::ast::{
     AssignOp, Block, CompClause, CompKind, Expr, ExprKind, Pattern, Span, Stmt, StmtKind,
 };
-use crate::vm::op::Op;
+use crate::base::op::Op;
 
 impl Compiler {
     pub(super) fn compile_if(
@@ -260,7 +260,7 @@ impl Compiler {
                 Op::MatchArm {
                     scrut: opt_slot,
                     variant: "None".to_string(),
-                    variant_id: crate::vm::op::VID_NONE_VARIANT,
+                    variant_id: crate::base::op::VID_NONE_VARIANT,
                     enum_name: None,
                     nbind: 0,
                     bind_start: 0,
@@ -276,7 +276,7 @@ impl Compiler {
                 Op::MatchArm {
                     scrut: opt_slot,
                     variant: "Some".to_string(),
-                    variant_id: crate::vm::op::VID_SOME,
+                    variant_id: crate::base::op::VID_SOME,
                     enum_name: None,
                     nbind: 1,
                     bind_start: elem,

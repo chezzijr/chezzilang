@@ -2,8 +2,8 @@
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
 use super::airlock_out::WireMemo;
-use super::crossing::{self, Fresh, Kids, Route};
 use super::*;
+use crate::base::crossing::{self, Fresh, Kids, Route};
 
 impl Vm {
     /// B3.0 — reconstruct a [`WireValue`] into a heap [`Value`] (the airlock's inbound half). Data

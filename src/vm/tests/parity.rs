@@ -635,7 +635,7 @@ fn enum_variant_id_stamped_at_construction() {
 /// can compare against compile-time constants (JIT-jump-table groundwork). User variants follow.
 #[test]
 fn native_result_option_have_fixed_variant_ids() {
-    use crate::vm::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
+    use crate::base::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
     let tokens = lexer::tokenize("fn main():\n    print(0)\nmain()\n").expect("lex");
     let module = parser::parse(tokens).expect("parse");
     let program = crate::compiler::compile_module_standalone(&module).expect("compile");

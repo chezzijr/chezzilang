@@ -88,7 +88,7 @@ impl Checker {
     /// `MAX_DEPTH` levels a subtree is `Marked`. `live` is false when `e` is read outside the
     /// scope it was checked in: nothing is inferred then, so a `.copy()` stays `Marked`.
     pub(super) fn fresh_shape(&mut self, e: &Expr, depth: usize, live: bool) -> Fresh {
-        if depth >= crate::vm::crossing::MAX_DEPTH {
+        if depth >= crate::base::crossing::MAX_DEPTH {
             return Fresh::Marked;
         }
         let d = depth + 1;

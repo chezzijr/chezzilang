@@ -104,7 +104,7 @@ pub(super) const BYTEARRAY_METHODS: &[&str] = &[
 ];
 
 /// Does `method` mutate its receiver in place (as opposed to returning a new value)? Maps the
-/// receiver's type to its kind and reads the one table, `crate::vm::is_mutating_native_kind`.
+/// receiver's type to its kind and reads the one table, `crate::native::is_mutating_native_kind`.
 ///
 /// The handle types (`Channel`/`Shared`/`RwShared`/`Atomic`/`Executor`/`Socket`/`Listener`/`Writer`/
 /// `Reader`) are absent BY DESIGN and must stay absent: they cross the airlock by handle, so a
@@ -149,7 +149,7 @@ pub(super) fn mutates_receiver(recv: &Ty, method: &str) -> bool {
         | Ty::Unknown
         | Ty::Var(_) => return false,
     };
-    crate::vm::is_mutating_native_kind(kind, method)
+    crate::native::is_mutating_native_kind(kind, method)
 }
 
 // The bespoke `str_method_sig` / `bytes_method_sig` / `bytearray_method_sig` arms are RETIRED (phase

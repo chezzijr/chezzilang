@@ -255,7 +255,7 @@ impl Checker {
         }
         let provider = decl
             .name
-            .starts_with(crate::desugar::PROVIDER_PREFIX)
+            .starts_with(crate::base::provider_name::PROVIDER_PREFIX)
             .then(|| (decl.name.clone(), decl.name_span));
         if let Some((n, sp)) = &provider {
             self.provider_edges
@@ -462,7 +462,8 @@ impl Checker {
         // fn INSIDE a provider clears it and keeps its own `?` diagnostics.
         let saved_in_dflt = std::mem::replace(
             &mut self.in_default_provider,
-            decl.name.starts_with(crate::desugar::PROVIDER_PREFIX),
+            decl.name
+                .starts_with(crate::base::provider_name::PROVIDER_PREFIX),
         );
         // `Self` in this method body resolves to the enclosing type (`None` for a free fn / nested fn,
         // which resets an enclosing method's binding). Restored below beside `current_ret`.
@@ -673,7 +674,7 @@ impl Checker {
                 };
                 let judged_by_provider =
                     self.functions
-                        .contains_key(&crate::desugar::param_provider_name(
+                        .contains_key(&crate::base::provider_name::param_provider_name(
                             def.span.file,
                             &owner,
                             &param.name,

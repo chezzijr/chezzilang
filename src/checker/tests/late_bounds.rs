@@ -256,14 +256,16 @@ fn every_crossing_closure_method_reports_a_captured_write() {
     ];
     for (owner, method, ..) in user_rows {
         assert!(
-            crate::vm::CROSSING_CLOSURE_METHODS.contains(&(owner, method)),
+            crate::base::crossing::CROSSING_CLOSURE_METHODS.contains(&(owner, method)),
             "{owner}.{method} has no row"
         );
     }
     // `_submit_settled` is std-internal: its row exists and its one caller checks clean.
-    assert!(crate::vm::CROSSING_CLOSURE_METHODS.contains(&("Executor", "_submit_settled")));
+    assert!(
+        crate::base::crossing::CROSSING_CLOSURE_METHODS.contains(&("Executor", "_submit_settled"))
+    );
     assert_eq!(
-        crate::vm::CROSSING_CLOSURE_METHODS.len(),
+        crate::base::crossing::CROSSING_CLOSURE_METHODS.len(),
         user_rows.len() + 1
     );
     entry_ok(

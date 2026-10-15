@@ -2,7 +2,7 @@
 //! Split out of `src/vm/arith.rs`. `super::*` is the parent module.
 
 use super::*;
-use crate::checker::Hook;
+use crate::base::hooks::Hook;
 
 impl Vm {
     /// The bytes of a `bytes` or `bytearray` value; `None` for any other value.
@@ -756,7 +756,7 @@ impl Vm {
     /// disjoint from every user variant id). `None` for anything else, so a user enum or a
     /// `Result` never enters the walk.
     pub(super) fn seq_kind(&self, v: Value) -> Option<u8> {
-        use crate::vm::op::{VID_NONE_VARIANT, VID_SOME};
+        use crate::base::op::{VID_NONE_VARIANT, VID_SOME};
         match self.heap.get(v.as_obj()?) {
             Obj::Tuple(_) => Some(0),
             Obj::List(_) => Some(1),
@@ -829,7 +829,7 @@ impl Vm {
         total: bool,
         span: Span,
     ) -> Result<Option<std::cmp::Ordering>, RuntimeError> {
-        use crate::vm::op::VID_SOME;
+        use crate::base::op::VID_SOME;
         use std::cmp::Ordering;
         self.with_roots(&[a, b], |vm| {
             if vm.seq_kind(a) == Some(2) {

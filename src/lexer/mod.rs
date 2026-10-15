@@ -2266,5 +2266,29 @@ pub fn measure_string(chars: &[char], start: usize) -> usize {
     i - start
 }
 
+/// PEP-515: strip single underscores between digits from a numeric string before a Rust `parse`,
+/// so `int()`/`float()`/`to_int`/`to_float`/`parse_int`/`parse_float`/`math.parse_int_base` agree
+/// with the lexer, which already accepts `1_000` and rejects `1__0`/`_1`/`1_`
+/// (`src/lexer/mod.rs:1447`'s predicate). Returns `None` when an `'_'` is not flanked by a digit of
+/// `radix` on both sides.
+pub fn strip_num_underscores_radix(s: &str, radix: u32) -> Option<std::borrow::Cow<'_, str>> {
+    if !s.contains('_') {
+        return Some(std::borrow::Cow::Borrowed(s));
+    }
+    let chars: Vec<char> = s.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '_' {
+            let prev_ok = i > 0 && chars[i - 1].is_digit(radix);
+            let next_ok = chars.get(i + 1).is_some_and(|n| n.is_digit(radix));
+            if !(prev_ok && next_ok) {
+                return None;
+            }
+        }
+    }
+    Some(std::borrow::Cow::Owned(
+        chars.into_iter().filter(|c| *c != '_').collect(),
+    ))
+}
+
 #[cfg(test)]
 mod tests;

@@ -4,16 +4,16 @@
 //! existing (unchanged) lowering.
 
 use super::*;
-use crate::vm::op::Op;
+use crate::base::op::Op;
 
-fn compile(src: &str) -> crate::vm::op::Program {
+fn compile(src: &str) -> crate::base::op::Program {
     let tokens = crate::lexer::tokenize(src).expect("lex");
     let mut module = crate::parser::parse(tokens).expect("parse");
     crate::desugar::run_standalone(&mut module).expect("desugar");
     compile_module_standalone(&module).expect("compile")
 }
 
-fn toplevel(p: &crate::vm::op::Program) -> &crate::vm::op::Proto {
+fn toplevel(p: &crate::base::op::Program) -> &crate::base::op::Proto {
     p.protos
         .iter()
         .find(|q| q.name == "<toplevel>")

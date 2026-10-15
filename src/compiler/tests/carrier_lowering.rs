@@ -3,12 +3,12 @@
 //! `recover:`/`defer:`/nursery interactions are green BY CONSTRUCTION —
 //! there is no second code path to disagree about.
 use super::*;
-use crate::vm::op::Op;
+use crate::base::op::Op;
 
 /// Parse → desugar → compile, i.e. the production pipeline (`resolver::build_graph` always
 /// desugars before the checker/backend). The carrier SURVIVES desugar now; the checker records
 /// the lowering into the `CarrierTable` that `compile_module_standalone` harvests.
-fn compile(src: &str) -> crate::vm::op::Program {
+fn compile(src: &str) -> crate::base::op::Program {
     let tokens = crate::lexer::tokenize(src).expect("lex");
     let mut module = crate::parser::parse(tokens).expect("parse");
     crate::desugar::run_standalone(&mut module).expect("desugar");
@@ -18,7 +18,7 @@ fn compile(src: &str) -> crate::vm::op::Program {
 /// Every proto rendered as `name | opcodes`, in emission order. `Op` has no `PartialEq` (it is a
 /// big hot enum, and deriving one for a test would be the tail wagging the dog), so compare its
 /// `Debug` — which is strictly FINER than `==` would be.
-fn ops(prog: &crate::vm::op::Program) -> Vec<String> {
+fn ops(prog: &crate::base::op::Program) -> Vec<String> {
     prog.protos
         .iter()
         .map(|p| format!("{} | {:?}", p.name, p.code))
@@ -26,7 +26,7 @@ fn ops(prog: &crate::vm::op::Program) -> Vec<String> {
 }
 
 /// The same, plus each op's source span.
-fn ops_and_spans(prog: &crate::vm::op::Program) -> Vec<String> {
+fn ops_and_spans(prog: &crate::base::op::Program) -> Vec<String> {
     prog.protos
         .iter()
         .map(|p| format!("{} | {:?} | {:?}", p.name, p.code, p.lines))

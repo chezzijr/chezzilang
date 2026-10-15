@@ -8,8 +8,8 @@
 //! This orchestration's output is Rust-formatted `PASS/FAIL`, not Chezzi program stdout, so no
 //! golden-output gate applies.
 
+use crate::base::op::Program;
 use crate::vm::Vm;
-use crate::vm::op::Program;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -683,7 +683,7 @@ fn render_json(
 /// message for the whole file). Compilation stays on the caller's thread; the run then dispatches on
 /// a [`crate::vm::on_vm_stack`] thread — a cyclic-key `==` walks to `MAX_STRUCTURAL_DEPTH` = 10000
 /// before faulting recoverably, which overflows the 8 MB main thread but not the 384 MB VM stack.
-/// This matches `chezzi run` (which also runs on [`crate::vm::run_file_with_entry`]'s VM-stack
+/// This matches `chezzi run` (which also runs on [`crate::run::run_file_with_entry`]'s VM-stack
 /// thread), so a `test` verdict mirrors a `run`.
 /// Returns `(per-test outcomes, count filtered out by `--filter`)` or a whole-file [`FileError`].
 fn run_file(
@@ -904,7 +904,7 @@ fn filtered(opts: &RunOpts, name: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn run_suite(
     vm: &mut Vm,
-    suite: &crate::vm::op::SuiteInfo,
+    suite: &crate::base::op::SuiteInfo,
     file: &str,
     out: &mut Vec<Outcome>,
     opts: &RunOpts,
@@ -1063,7 +1063,7 @@ fn run_suite(
 #[allow(clippy::too_many_arguments)]
 fn run_after_all(
     vm: &mut Vm,
-    suite: &crate::vm::op::SuiteInfo,
+    suite: &crate::base::op::SuiteInfo,
     instance: crate::vm::value::Value,
     file: &str,
     out: &mut Vec<Outcome>,

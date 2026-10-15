@@ -167,7 +167,7 @@ impl Checker {
         // TICKET-027: `protocol` may carry a module-qualified KEY (e.g. from a re-keyed stored
         // bound); every user-facing message below renders the BARE name, matching `Ty::Protocol`'s
         // own `Display`.
-        let protocol_display = crate::compiler::bare_display(protocol);
+        let protocol_display = crate::base::words::bare_display(protocol);
         let Some(pinfo) = self.protocol_shape(protocol) else {
             // A `where T: <scalar>` EQUALITY bound: the name is a concrete scalar type, not a
             // protocol, so it constrains `ty` to be EXACTLY that type (e.g. `trip()`'s `where T: bool`).

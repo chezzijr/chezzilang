@@ -10,9 +10,9 @@ use super::core::{
     SharedCore, SocketCore, WriterCore,
 };
 use super::fxhash::FxHashMap;
-use super::op::ProtoId;
 use super::value::{GcRef, Value};
 use super::wire::HashIndex;
+use crate::base::op::ProtoId;
 use crate::lexer::Span;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1781,7 +1781,7 @@ mod iter_obj_tests {
         let before = h.live_bytes();
         // 4-field Spill struct holding the heap Str among its fields.
         let sp = h.alloc(Obj::Struct {
-            tid: crate::vm::op::TID_NONE,
+            tid: crate::base::op::TID_NONE,
             fields: Fields::from_vec(vec![
                 Value::int(1),
                 Value::obj(elem),
@@ -1809,7 +1809,7 @@ mod iter_obj_tests {
         // Inline struct (2 fields) adds only the Obj slot — 0 extra heap.
         let base = h.live_bytes();
         let _inl = h.alloc(Obj::Struct {
-            tid: crate::vm::op::TID_NONE,
+            tid: crate::base::op::TID_NONE,
             fields: Fields::from_vec(vec![Value::int(1), Value::int(2)]),
         });
         assert_eq!(

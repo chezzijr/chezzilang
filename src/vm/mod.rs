@@ -6,10 +6,8 @@
 mod blocking_pool;
 pub mod chzstr;
 pub mod core;
-pub mod crossing;
 mod fxhash;
 pub mod heap;
-pub mod op;
 mod poller;
 mod pool;
 mod quiesce;
@@ -20,6 +18,7 @@ pub mod value;
 mod width;
 pub mod wire;
 
+use crate::base::{crossing, op};
 use core::{
     AtomicCore, AtomicIntCore, Backing, ChannelCore, ExecRegistry, ExecutorCore,
     GUARD_DEMOTE_BUDGET, GuardCycle, ListenerCore, ReaderCore, RwSharedCore, SharedCore,
@@ -306,32 +305,6 @@ pub fn format_frames(trace: &[TraceFrame], files: &[(u32, std::path::PathBuf)]) 
 /// stack overflow.
 const MAX_CALL_DEPTH: usize = 10_000;
 
-/// Maximum structural-recursion depth for value display / equality — a cyclic data structure (e.g.
-/// a struct with a `List[Self]` field forming a cycle) would otherwise recurse unbounded on the
-/// HOST stack and SIGABRT (uncatchable). This bound turns that into a recoverable `RuntimeError`.
-///
-/// `pub(crate)` so `checker::eq::EQ_BOUNDS_MAX_IN_PROGRESS` can tie itself to this value directly
-/// (W7-55 Important 4) instead of repeating the literal — the checker's `Eq`-bound cap and the
-/// runtime's own equality depth cap must agree BY CONSTRUCTION, or the checker can grant a compare
-/// the VM then can't perform (the `checker-superset-of-compiler` soundness class).
-///
-/// **Every FAULTING guard on this constant tests [`Vm::walk_base`] `+ depth`, not `depth` — that is
-/// the whole of W8-43.** The two guards whose over-budget branch DEGRADES instead of faulting
-/// ([`Vm::cyclic_walk`] and [`Vm::snapshot_value`], the map/set key-store pair) stay on the bare
-/// `depth`: charging a degrading guard converts a stack-safety measure into a silent wrong answer
-/// (an ordinary shallow key inserted from inside a hook running at depth would be stored by
-/// reference instead of snapshotted). Only faulting guards may share the budget. The `MAX_CALL_DEPTH` / [`VM_STACK_BYTES`] co-tuning below assumes O(1) native frames
-/// per call-depth level. That holds for `run_until`, and for the `hash`/`compare` hooks (one native
-/// frame per `run_proto`). It does NOT hold for a structural walk started INSIDE a protocol hook: a
-/// user `eq`/`str` that compares or stringifies re-enters the VM, and before `walk_base` existed
-/// each re-entry restarted this counter at 0. Neither guard then fired — call depth stayed far below
-/// 10 000 while the *product* of hook-nesting depth × per-hook walk depth grew without bound — and
-/// checker-clean pure Chezzi killed the process by host stack overflow (rc=134, uncatchable by
-/// `recover:`, measured), which is exactly the outcome this constant's first paragraph promises to
-/// prevent. `walk_base` restores the O(1)-frames-per-level assumption by making the budget ONE
-/// shared allowance across the whole nest, matching CPython's single recursion budget.
-pub(crate) const MAX_STRUCTURAL_DEPTH: usize = 10_000;
-
 // M19 Tier-2 — adaptive opcode quickening (PEP 659) per-site states (see [`Vm::quicken`]).
 /// Never executed yet: on first run, observe operand types and transition to `Q_INT` or `Q_GENERIC`.
 const Q_COLD: u8 = 0;
@@ -375,7 +348,7 @@ const VM_STACK_BYTES: usize = 384 * 1024 * 1024;
 /// several `run_*_parallel` helpers spawn it inline. Exposed so the `chezzi test` runner can run
 /// its M:N test pass on the same footing without duplicating the spawn boilerplate. Panics in `f`
 /// propagate (the join re-panics), matching the run helpers.
-pub(crate) fn on_vm_stack<F, R>(f: F) -> R
+pub fn on_vm_stack<F, R>(f: F) -> R
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
@@ -612,7 +585,7 @@ struct CallFrame {
     call_span: Span,
     /// How many argument values this frame was actually entered with — `stack.len() - base` at
     /// [`Vm::finish_frame`], i.e. BEFORE the remaining local slots are nil-reserved. Read only by
-    /// [`crate::vm::op::Op::JumpIfProvided`], so the callee's own prologue can tell an OMITTED
+    /// [`crate::base::op::Op::JumpIfProvided`], so the callee's own prologue can tell an OMITTED
     /// trailing argument (which it must fill from the parameter's declared default) from one the
     /// caller supplied. Computed at the single shared frame-entry point, so every door —
     /// `push_frame`, `push_frame_in_place`, generators, `spawn`, `defer`, the wire path — gets it
@@ -968,7 +941,7 @@ pub struct Vm {
     /// `String` buffer forced a `from_utf8_lossy` hop. Decoded once, at the Rust capture boundary
     /// ([`Vm::take_out`] and the `run_*` helpers) — and NEVER where a comparison is made: a lossy
     /// decode maps `ff` and `fe` alike and would blind any byte-level comparator, so callers that need
-    /// one (the CPython differential, `src/difftest/`) diff these raw bytes via [`run_file_bytes`]
+    /// one (the CPython differential, `src/difftest/`) diff these raw bytes via `crate::run::run_file_bytes`
     /// ([`RunOutputRaw`]) instead.
     out: Vec<u8>,
     /// Captured stderr (written by `std.io.eprint`). Separate from `out` so streams don't mix.
@@ -1538,7 +1511,8 @@ mod core_method;
 mod json_decode;
 mod list_hof;
 mod method_call;
-pub(crate) use call::is_mutating_native_kind;
+use crate::lexer::strip_num_underscores_radix;
+use crate::native::is_mutating_native_kind;
 mod airlock_in;
 mod airlock_out;
 mod blocking;
@@ -1561,8 +1535,10 @@ mod step;
 mod stmt;
 mod worker_loop;
 mod worker_vm;
-pub(crate) use boxctx::CROSSING_CLOSURE_METHODS;
-pub(crate) use stmt::{COPY_WRITE_TAIL, OPTION_VALUE_WORD, RESULT_VALUE_WORD, carrier_word_for};
+use crate::base::crossing::CROSSING_CLOSURE_METHODS;
+use crate::base::words::{
+    COPY_WRITE_TAIL, MAX_STRUCTURAL_DEPTH, OPTION_VALUE_WORD, RESULT_VALUE_WORD,
+};
 mod sched_types;
 mod stream;
 use sched_types::*;

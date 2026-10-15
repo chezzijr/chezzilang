@@ -813,7 +813,7 @@ fn qualified_generic_fn_turbofish_and_hint() {
 /// AND falls through to `any(args)` + `walk_eq_members`, so it may cost more per level than `cond`
 /// does — the `nonhook` shape below (a plain field wrapped in a struct with no custom `eq` at all, so
 /// every level goes through the unconditional structural path) exists to re-derive the floor against
-/// that shape too. Not re-measured as part of this fix: the cap (`crate::vm::MAX_STRUCTURAL_DEPTH` =
+/// that shape too. Not re-measured as part of this fix: the cap (`crate::base::words::MAX_STRUCTURAL_DEPTH` =
 /// 10 000) sits at roughly 1/12 of the `cond` floor (118 000), so `nonhook` would need to cost >12x
 /// more per Rust stack frame than `cond` to threaten the new cap — implausible for "one more pass
 /// through a few combinators", not a new backend. Left as a probe rather than asserted because

@@ -10,8 +10,8 @@
 //! opcode lost.
 
 use crate::ast::Span;
+use crate::base::module_id::{ModuleId, ResolvedImport};
 use crate::native::cffi::CType;
-use crate::resolver::{ModuleId, ResolvedImport};
 use std::collections::HashMap;
 
 /// Index of a `Proto` in `Program::protos`.
@@ -249,7 +249,7 @@ pub enum Op {
     /// struct or enum receiver runs its method only when the hook table says it is the hook;
     /// otherwise the builtin grant answers (`Vm::call_hook`).
     CallHook {
-        hook: crate::checker::Hook,
+        hook: crate::base::hooks::Hook,
         name: String,
         argc: usize,
         ic: u32,
@@ -268,7 +268,7 @@ pub enum Op {
     /// `type_key` arrives as a VALUE instead of being baked in. Stack: `[arg0, …, witness]` — the
     /// `argc` args, then the type's runtime identity key as a `str` on top (loaded from the callee's
     /// hidden `$w:T` local). Pops the key, leaving the args exactly as `CallStatic` expects, and runs
-    /// the same [`crate::vm::Vm::do_static_call`]. The site is polymorphic by construction, so no
+    /// the same `vm::Vm::do_static_call`. The site is polymorphic by construction, so no
     /// inline cache.
     CallStaticDyn {
         method: String,
@@ -313,7 +313,7 @@ pub enum Op {
     /// `Result[Json]` produced by `json.parse(s)`. Pops it and pushes `Result[T]`: if the parse
     /// errored, the `Err` passes through; otherwise the inner `Json` is coerced against the
     /// descriptor (→ `Ok(value)` or `Err(msg)`).
-    JsonDecode(crate::json_decode::TypeDescriptor<crate::json_decode::DefaultThunk>),
+    JsonDecode(crate::base::json_desc::TypeDescriptor<crate::base::json_desc::DefaultThunk>),
     /// `json.encode(x)`'s runtime seam (`std/json.chz`'s bodyless `native fn _to_json`). Pops one
     /// runtime value and pushes the `Json` enum tree that `std.json`'s own `stringify` then renders
     /// — `encode` is `stringify(_to_json(x))` in Chezzi, so number/string formatting have exactly
@@ -348,7 +348,7 @@ pub enum Op {
         variant_id: u32,
         argc: usize,
     },
-    /// Push the heap's one `Func` for `ProtoId` ([`crate::vm::Vm::fn_value`], TICKET-215), homed in
+    /// Push the heap's one `Func` for `ProtoId` (`vm::Vm::fn_value`, TICKET-215), homed in
     /// the current frame's module on first build.
     MakeFunc(ProtoId),
     /// Build a `Func` for a **default-argument provider declared in ANOTHER module**, resolving its
@@ -360,7 +360,7 @@ pub enum Op {
     /// caller's transitive import closure a synthetic `from` import binds the name and the ordinary
     /// global path is used. When it is NOT — the name-keyed METHOD lookup can reach a definer the
     /// caller has no relation to, which is the ordinary protocol/implementation split — no import may
-    /// be synthesized, because [`crate::vm::Vm::bind_import`] resolves its target when the CALLER's
+    /// be synthesized, because `vm::Vm::bind_import` resolves its target when the CALLER's
     /// module loads and a non-dependency can load later. Resolving lazily, here, has no such
     /// constraint: reaching the method at all requires a VALUE of the implementor's type, so the
     /// definer's module has necessarily run by the time this executes.
@@ -374,7 +374,7 @@ pub enum Op {
     /// `Pt.getx`, TICKET-204), resolving its proto and home module at run time exactly as
     /// `CallStatic` does (`Vm::type_method_proto`). An instance method's receiver is the fn's first
     /// argument.
-    /// The value is the heap's one `Func` for that proto ([`crate::vm::Vm::fn_value`]).
+    /// The value is the heap's one `Func` for that proto (`vm::Vm::fn_value`).
     MakeMethodFunc {
         type_key: String,
         method: String,
@@ -393,7 +393,7 @@ pub enum Op {
     /// Build a `Cffi` value from `Program.cffi_defs[id]`: `dlopen` the library + resolve the symbol
     /// at module init (eager — a missing library/symbol fails here). Pushed onto the stack, then
     /// bound to its global slot by the following `DefineGlobalSlot`.
-    /// The value is the heap's one `Cffi` for that core ([`crate::vm::Vm::fn_value`]).
+    /// The value is the heap's one `Cffi` for that core (`vm::Vm::fn_value`).
     MakeCffi(u32),
     /// Build a `Closure`: snapshot each `CapEntry`'s value from the enclosing frame into the new
     /// closure's captured env, and capture the current frame's home module.
@@ -703,6 +703,15 @@ pub struct ModuleProto {
     /// copied from `resolver::LoadedModule::file`. This is what lets a runtime diagnostic map a
     /// `Span` back to the file it came from. `0` for the synthetic single-module compile path.
     pub file: u32,
+}
+
+/// A compile-time failure (e.g. a malformed string interpolation): the error that stops a
+/// [`Program`] being built. Carries a span so the CLI can report it like any other error. Most user
+/// errors are caught earlier by the type checker; this covers what only the compiler can see.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompileError {
+    pub message: String,
+    pub span: Span,
 }
 
 /// The whole compiled program.

@@ -896,7 +896,7 @@ fn resolution_records_every_pattern_head() {
 /// `main` declares its own `P` too, so the descriptor must carry `lib`'s key and fields.
 #[test]
 fn decode_target_is_recorded_for_an_imported_alias() {
-    use crate::json_decode::{FieldDesc, TypeDescriptor};
+    use crate::base::json_desc::{FieldDesc, TypeDescriptor};
     let t = TmpDir::new();
     t.write("lib.chz", "struct P:\n    x: int\ntype Q = P\n");
     let main = t.write(
@@ -947,7 +947,7 @@ fn decode_target_is_recorded_for_an_imported_alias() {
 /// and one provider (a module-global read).
 #[test]
 fn decode_descriptor_fills_equal_the_ctor_plan_fills() {
-    use crate::json_decode::TypeDescriptor;
+    use crate::base::json_desc::TypeDescriptor;
     let t = TmpDir::new();
     let main = t.write(
         "main.chz",

@@ -49,8 +49,11 @@ impl Vm {
                     && matches!(g.state, GenState::Pending(_))
                 {
                     let p = &self.program.protos[g.proto];
-                    g.stamp |=
-                        m & super::crossing::param_stamp(p.private_slots, p.deep_slots, p.arity);
+                    g.stamp |= m & crate::base::crossing::param_stamp(
+                        p.private_slots,
+                        p.deep_slots,
+                        p.arity,
+                    );
                 }
             }
             Op::Assert { has_msg, cmp } => {
@@ -517,7 +520,9 @@ impl Vm {
                     return Err(self.err(
                         format!(
                             "the module that declares {} has not been initialized yet",
-                            crate::desugar::display_fn_name(&self.program.protos[proto].name)
+                            crate::base::provider_name::display_fn_name(
+                                &self.program.protos[proto].name
+                            )
                         ),
                         span,
                     ));
@@ -532,7 +537,7 @@ impl Vm {
                     return Err(self.err(
                         format!(
                             "internal: no method '{method}' on type {}",
-                            crate::compiler::bare_display(type_key)
+                            crate::base::words::bare_display(type_key)
                         ),
                         span,
                     ));
@@ -541,7 +546,7 @@ impl Vm {
                     return Err(self.err(
                         format!(
                             "the module that declares {} has not been initialized yet",
-                            crate::compiler::bare_display(type_key)
+                            crate::base::words::bare_display(type_key)
                         ),
                         span,
                     ));
@@ -749,7 +754,7 @@ impl Vm {
             }
             Op::HasNextHook => {
                 let v = self.pop();
-                let has = self.hook_of(v, crate::checker::Hook::Next);
+                let has = self.hook_of(v, crate::base::hooks::Hook::Next);
                 self.push(Value::bool(has));
             }
             Op::IsGenerator => {

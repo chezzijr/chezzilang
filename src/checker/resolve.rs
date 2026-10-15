@@ -147,7 +147,7 @@ impl Checker {
 
     fn classify_ident(&self, e: &Expr, n: &str, pos: PathPos) -> Option<Resolution> {
         // A default provider `desugar` synthesized (`$def$…`), unspellable by a user.
-        if n.starts_with(crate::desugar::PROVIDER_PREFIX)
+        if n.starts_with(crate::base::provider_name::PROVIDER_PREFIX)
             && (e.id.0 == crate::ast::NodeId::SYNTH.0 || !self.functions.contains_key(n))
         {
             return Some(Resolution::Provider);
@@ -356,7 +356,7 @@ impl Checker {
                     .collect()
             })
         };
-        match crate::json_decode::from_ty(target, &shape, &mut Vec::new()) {
+        match crate::checker::json_decode::from_ty(target, &shape, &mut Vec::new()) {
             Ok(desc) => {
                 self.commit_resolution(id, Resolution::Decode(desc), span);
                 true

@@ -64,25 +64,6 @@ pub(super) fn slot_is_leaf(heap: &Heap, v: Value) -> bool {
     )
 }
 
-/// The ONE list of native methods whose closure argument CROSSES: it is encoded and runs in
-/// another heap, so its captures are copies (D4). Two readers, one fact:
-///
-/// - the checker (`Checker::check_crossing_closure_call`) puts the capture floor on these calls,
-///   so a direct write to a captured local is the D4 error at check time;
-/// - the run time ([`Vm::cross_closure`]) encodes the closure of exactly these methods, and
-///   asserts the row in a debug build.
-///
-/// A new method that runs its closure in another heap gets a row here and encodes through
-/// `cross_closure`; never an `if method == ..` clause. `RwShared.read` has no row: its closure
-/// runs in the reader's heap.
-pub(crate) const CROSSING_CLOSURE_METHODS: &[(&str, &str)] = &[
-    ("Executor", "submit"),
-    ("Executor", "_submit_settled"),
-    ("Shared", "update"),
-    ("Shared", "read"),
-    ("RwShared", "write"),
-];
-
 /// The pieces of one crossing out of (or into) a box, encoded with one memo. With `prelude` the
 /// first wire is the whole state, which the pieces back-reference; the decoder drops it.
 pub(super) struct BoxPieces {

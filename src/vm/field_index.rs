@@ -2,7 +2,7 @@
 //! Split out of `src/vm/stmt.rs`. `super::*` is the parent module.
 
 use super::*;
-use crate::checker::Hook;
+use crate::base::hooks::Hook;
 
 impl Vm {
     pub(super) fn get_field(

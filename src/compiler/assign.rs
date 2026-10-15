@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::ast::{AssignOp, Expr, ExprKind, Span};
-use crate::vm::op::{NO_IC, Op};
+use crate::base::op::{NO_IC, Op};
 
 impl Compiler {
     pub(super) fn compile_assign(

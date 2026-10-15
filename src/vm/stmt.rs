@@ -4,25 +4,6 @@
 use super::block::Cut;
 use super::*;
 
-/// How a diagnostic or a fault names an optional value: its kind in plain words, then its type as
-/// the user writes it. Never `enum`.
-pub(crate) const OPTION_VALUE_WORD: &str = "an optional value (`T?`)";
-/// How a diagnostic or a fault names a result value.
-pub(crate) const RESULT_VALUE_WORD: &str = "a result value (`T!E`)";
-
-/// `word` (one of the two constants above) with `written` as its quoted type, for a reader that
-/// knows the type the user wrote: ``an optional value (`int?`)``.
-pub(crate) fn carrier_word_for(word: &str, written: &str) -> String {
-    match (word.find('`'), word.rfind('`')) {
-        (Some(a), Some(b)) if a < b => format!("{}{written}{}", &word[..=a], &word[b..]),
-        _ => word.to_string(),
-    }
-}
-
-/// D4 layer C (TICKET-169): the one copy of the fault message text, quoted once here so every
-/// write site stays byte-identical. `copied_write_err` prefixes it with `'<name>'` or `this value`.
-pub(crate) const COPY_WRITE_TAIL: &str = "is this task's copy: a write to it would be lost at the join; share it through Shared/Channel, or make a task-local copy with .copy()";
-
 /// TICKET-246 — appended to the D4 fault when the write happens inside a `Shared` / `RwShared`
 /// closure.
 pub(crate) const BOX_COPY_WRITE_NOTE: &str = " (inside a Shared/RwShared closure this value is a copy of a capture or of a module global; if the box holds a module global's copy, store its .copy() in the box instead)";
@@ -361,7 +342,7 @@ impl Vm {
         // M19 lever #2 — gate on the fixed native variant ids (`VID_OK`/`VID_SOME` unwrap, `VID_ERR`/
         // `VID_NONE_VARIANT` propagate), NOT a name compare. A user enum shadowing `Ok`/`Err`/`Some`/
         // `None` gets distinct ids, so it is correctly NOT treated as a Result/Option by `?`.
-        use crate::vm::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
+        use crate::base::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
         if let Some((variant_id, n, first)) = info {
             if (variant_id == VID_OK || variant_id == VID_SOME) && n == 1 {
                 self.push(first.unwrap());
@@ -549,7 +530,7 @@ impl Vm {
     /// M19 memory-layout lever — resolve a struct `tid` back to its IDENTITY KEY (the `structs` map
     /// key, e.g. `<main>::Point`) on the cold path (method dispatch / Display / arith / hash / wire /
     /// snap), where `Obj::Struct` no longer carries a per-instance `name`. O(1) via `struct_names`.
-    /// Returns `"?"` for [`crate::vm::op::TID_NONE`] / an out-of-range id (defensive — every
+    /// Returns `"?"` for [`crate::base::op::TID_NONE`] / an out-of-range id (defensive — every
     /// source-constructed struct has a registered `def.tid`, so this is unreachable for Display).
     pub(super) fn struct_name_of_tid(&self, tid: u32) -> &str {
         self.walk_src().struct_name_of_tid(tid)
@@ -557,7 +538,7 @@ impl Vm {
 
     /// M19 lever #2 — resolve a `variant_id` back to its `(enum-type, variant)` names on the COLD path
     /// (Display / stringify / error / wire / snap), where the instance no longer carries the strings.
-    /// O(1) via `Program::variants_by_id`. Returns `("?", "?")` for [`crate::vm::op::VID_NONE`] / an
+    /// O(1) via `Program::variants_by_id`. Returns `("?", "?")` for [`crate::base::op::VID_NONE`] / an
     /// out-of-range id (defensive — a registered enum always resolves).
     pub(super) fn enum_names(&self, variant_id: u32) -> (&str, &str) {
         self.program
@@ -577,9 +558,9 @@ impl Vm {
         absent_payload: impl FnOnce() -> bool,
     ) -> Option<&'static str> {
         match variant_id {
-            crate::vm::op::VID_ERR => Some("!"),
-            crate::vm::op::VID_OK => Some(""),
-            crate::vm::op::VID_SOME => Some(if absent_payload() { "?" } else { "" }),
+            crate::base::op::VID_ERR => Some("!"),
+            crate::base::op::VID_OK => Some(""),
+            crate::base::op::VID_SOME => Some(if absent_payload() { "?" } else { "" }),
             _ => None,
         }
     }
@@ -587,8 +568,10 @@ impl Vm {
     /// How a fault names a carrier value: one of the two words above, never `enum`.
     pub(super) fn carrier_word(variant_id: u32) -> Option<&'static str> {
         match variant_id {
-            crate::vm::op::VID_SOME | crate::vm::op::VID_NONE_VARIANT => Some(OPTION_VALUE_WORD),
-            crate::vm::op::VID_OK | crate::vm::op::VID_ERR => Some(RESULT_VALUE_WORD),
+            crate::base::op::VID_SOME | crate::base::op::VID_NONE_VARIANT => {
+                Some(OPTION_VALUE_WORD)
+            }
+            crate::base::op::VID_OK | crate::base::op::VID_ERR => Some(RESULT_VALUE_WORD),
             _ => None,
         }
     }
@@ -597,7 +580,7 @@ impl Vm {
     /// a user enum by `plain` over its display name.
     pub(super) fn enum_subject(variant_id: u32, key: &str, plain: fn(&str) -> String) -> String {
         Self::carrier_word(variant_id).map_or_else(
-            || plain(&crate::compiler::bare_display(key)),
+            || plain(&crate::base::words::bare_display(key)),
             str::to_string,
         )
     }
@@ -612,8 +595,8 @@ impl Vm {
             payload.first().and_then(|v| v.as_obj()).is_some_and(|h| {
                 match self.heap.get(h).as_enum() {
                     Some((inner, inner_payload)) => {
-                        inner == crate::vm::op::VID_NONE_VARIANT
-                            || (inner == crate::vm::op::VID_SOME
+                        inner == crate::base::op::VID_NONE_VARIANT
+                            || (inner == crate::base::op::VID_SOME
                                 && self.carrier_prefix(inner, inner_payload) == Some("?"))
                     }
                     None => false,
@@ -633,8 +616,8 @@ impl Vm {
                 payload: inner_payload,
                 ..
             }) => {
-                *inner == crate::vm::op::VID_NONE_VARIANT
-                    || (*inner == crate::vm::op::VID_SOME
+                *inner == crate::base::op::VID_NONE_VARIANT
+                    || (*inner == crate::base::op::VID_SOME
                         && Self::carrier_prefix_wire(*inner, inner_payload) == Some("?"))
             }
             _ => false,
@@ -646,11 +629,11 @@ impl Vm {
     pub(crate) fn carrier_pattern_text(variant_id: u32) -> Option<&'static str> {
         use crate::ast::CarrierTag;
         match variant_id {
-            crate::vm::op::VID_SOME | crate::vm::op::VID_OK => {
+            crate::base::op::VID_SOME | crate::base::op::VID_OK => {
                 Some(CarrierTag::Present.pattern_text())
             }
-            crate::vm::op::VID_ERR => Some(CarrierTag::Error.pattern_text()),
-            crate::vm::op::VID_NONE_VARIANT => Some(Self::NONE_TEXT),
+            crate::base::op::VID_ERR => Some(CarrierTag::Error.pattern_text()),
+            crate::base::op::VID_NONE_VARIANT => Some(Self::NONE_TEXT),
             _ => None,
         }
     }

@@ -15,12 +15,13 @@ use crate::ast::{
     AssignOp, BinaryOp, Block, Chunk, DeferTarget, Expr, ExprKind, FnDecl, Import, LitPattern,
     MatchArm, MatchExprArm, Module, Pattern, Span, SpawnTarget, Stmt, StmtKind, Type, WaitArmKind,
 };
-use crate::native::cffi::CType;
-use crate::resolver::{ModuleGraph, ResolvedImport};
-use crate::vm::op::{
-    AssertCmp, CapEntry, CapSrc, CffiDef, LIFECYCLE_HOOKS, ModuleProto, NO_IC, Op, Program,
-    ProtoId, StructDef, SuiteInfo, VariantDef,
+use crate::base::module_id::ResolvedImport;
+use crate::base::op::{
+    AssertCmp, CapEntry, CapSrc, CffiDef, CompileError, LIFECYCLE_HOOKS, ModuleProto, NO_IC, Op,
+    Program, ProtoId, StructDef, SuiteInfo, VariantDef,
 };
+use crate::native::cffi::CType;
+use crate::resolver::ModuleGraph;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -39,15 +40,6 @@ mod fncomp;
 use fncomp::*;
 #[cfg(test)]
 mod tests;
-
-/// A compile-time failure (e.g. a malformed string interpolation). Carries a span so the CLI can
-/// report it like any other error. Most user errors are caught earlier by the type checker; this
-/// covers what only the compiler can see.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompileError {
-    pub message: String,
-    pub span: Span,
-}
 
 /// The name a builtin resolves to.
 /// ROOT REDESIGN — the module key used to qualify user-type identity keys in the single-source
@@ -86,6 +78,21 @@ fn reject_table_conflicts(conflicts: crate::checker::TableConflicts) -> Result<(
         Some((span, message)) => Err(CompileError { message, span }),
         None => Ok(()),
     }
+}
+
+/// Resolve the module graph of the file at `entry` (`root` pins the graph root, as in
+/// [`crate::resolver::build_graph_with_entry_source_and_root`]) and compile it. A resolve error
+/// becomes a `CompileError` at its span. The one way from an entry path to a [`Program`].
+pub fn compile_entry_file(
+    entry: &std::path::Path,
+    root: Option<std::path::PathBuf>,
+) -> Result<Program, CompileError> {
+    let graph = crate::resolver::build_graph_with_entry_source_and_root(entry, None, root)
+        .map_err(|e| CompileError {
+            message: e.message,
+            span: e.span,
+        })?;
+    compile_graph(&graph)
 }
 
 /// Compile a whole resolved module graph in dependency order.
@@ -223,7 +230,7 @@ pub fn compile_module_standalone(module: &Module) -> Result<Program, CompileErro
     let let_lines = std::mem::take(&mut c.global_let_lines);
     debug_assert_eq!(let_lines.len(), global_slots.len());
     // A synthetic module id so the run driver has something to key the namespace cache on.
-    let id = crate::resolver::ModuleId(std::path::PathBuf::from("<main>"));
+    let id = crate::base::module_id::ModuleId(std::path::PathBuf::from("<main>"));
     c.program.modules.push(ModuleProto {
         id,
         label: "<main>".to_string(),
@@ -254,7 +261,7 @@ enum SynthFn {
     /// A bound's instance method read through a type parameter (`T.get`): one per (method, arity).
     ParamMethod { method: String, arity: usize },
     /// `json.decode[T]` read as a value (TICKET-214), keyed by the target's shape.
-    Decode(crate::json_decode::TypeDescriptor<()>),
+    Decode(crate::base::json_desc::TypeDescriptor<()>),
 }
 
 /// The provider-table name of a `json.decode[T]` value proto. Unspellable (`$`), so no user decl
@@ -276,7 +283,7 @@ struct Compiler {
     field_widths: crate::checker::FieldWidthTable,
     /// Runtime type key → its hooks, gathered at each declaration and materialized into
     /// `Program::hooks_struct` / `hooks_enum` by [`Compiler::build_hooks`].
-    hook_sets: HashMap<String, crate::checker::HookSet>,
+    hook_sets: HashMap<String, crate::base::hooks::HookSet>,
     /// Default-argument provider NAME → its dense `Op::MakeFuncIn` operand. Ids are handed out at
     /// EMIT sites (a call site in a module that cannot name the provider), which run before the
     /// declaring module is compiled — hence the indirection. See [`Compiler::build_provider_table`].
@@ -482,7 +489,7 @@ impl Compiler {
                 return Err(CompileError {
                     message: format!(
                         "internal: no provider function was compiled for {}",
-                        crate::desugar::display_fn_name(name)
+                        crate::base::provider_name::display_fn_name(name)
                     ),
                     span: Span::RUNTIME,
                 });
@@ -517,7 +524,7 @@ impl Compiler {
             .iter()
             .map(|vd| self.hook_sets.get(&vd.enum_name).map_or(0, |set| set.0))
             .collect();
-        let eq = crate::checker::Hook::Eq.bit();
+        let eq = crate::base::hooks::Hook::Eq.bit();
         self.program.any_eq_hook = self.hook_sets.values().any(|set| set.0 & eq != 0);
         self.program.hooks_struct = by_tid;
         self.program.hooks_enum = by_vid;
@@ -564,12 +571,12 @@ impl Compiler {
         }
         let vid =
             |p: &Program, e: &str, v: &str| p.variants[&(e.to_string(), v.to_string())].variant_id;
-        debug_assert_eq!(vid(&program, "Result", "Ok"), crate::vm::op::VID_OK);
-        debug_assert_eq!(vid(&program, "Result", "Err"), crate::vm::op::VID_ERR);
-        debug_assert_eq!(vid(&program, "Option", "Some"), crate::vm::op::VID_SOME);
+        debug_assert_eq!(vid(&program, "Result", "Ok"), crate::base::op::VID_OK);
+        debug_assert_eq!(vid(&program, "Result", "Err"), crate::base::op::VID_ERR);
+        debug_assert_eq!(vid(&program, "Option", "Some"), crate::base::op::VID_SOME);
         debug_assert_eq!(
             vid(&program, "Option", "None"),
-            crate::vm::op::VID_NONE_VARIANT
+            crate::base::op::VID_NONE_VARIANT
         );
         // M19 memory-layout lever #1 — register the synthetic native std structs (`Match` from
         // `std.regex`, `Response` from `std.request`, `ProcResult` from `std.process`). They have no
@@ -1072,7 +1079,10 @@ impl Compiler {
                 let pid = self.compile_fn(decl, false)?;
                 // A hidden default-argument provider is reachable from a module that cannot name it
                 // (`Op::MakeFuncIn`); record where it lives so `build_provider_table` can resolve it.
-                if decl.name.starts_with(crate::desugar::PROVIDER_PREFIX) {
+                if decl
+                    .name
+                    .starts_with(crate::base::provider_name::PROVIDER_PREFIX)
+                {
                     self.provider_defs
                         .insert(decl.name.clone(), (pid, module_idx));
                 }
@@ -1396,22 +1406,6 @@ struct LoopCtx {
     /// the matching `JoinNursery` runs; the compiler emits one `ReclaimNursery` per such escaped scope
     /// (`fc.nursery_scopes - nursery_floor`), mirroring the `LeaveDeferScope` drain for defers.
     nursery_floor: usize,
-}
-
-/// M-C implicit nurseries: does this body contain a bare `spawn` that is NOT already inside an
-/// explicit `parallel:` (so it would bind to the *implicit* function/module nursery)? Drives the
-/// gate in `compile_fn`/`compile_module` — a body with no such spawn emits byte-identical bytecode to
-/// pre-M-C (zero overhead). Recurses through control flow but **stops** at boundaries that are *their
-/// own* function-like body (and so get their own implicit nursery, gated separately): `parallel:` (its
-/// spawns belong to that explicit nursery), nested `fn`, a `spawn:` block, and a `defer:` block (each
-/// runs in its own frame, so a bare `spawn` inside it joins at *that* body's end, not this one's).
-/// Map an extern fn's surface [`Type`] annotation to its runtime [`CType`]. Only the v1 marshallable
-/// set (`int`/`float`/`bool`/`str`/`ptr`) is supported, resolving transparent type aliases (`type Len = int`)
-/// through `aliases` first. Everything else (incl. a `None` annotation) returns `None`. The checker
-/// ROOT REDESIGN — strip a qualified identity key `<module-key>::Name` back to its bare `Name` for a
-/// display fallback when no `StructDef` is registered (defensive). Splits on the LAST `::`.
-pub(crate) fn bare_display(key: &str) -> String {
-    key.rsplit("::").next().unwrap_or(key).to_string()
 }
 
 /// Render an extern param/return source `Type` for a marshallability error message (the surface

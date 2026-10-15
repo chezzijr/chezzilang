@@ -3,7 +3,7 @@
 //! per rule direction (the cell map is the plan's step 3d).
 
 use super::*;
-use crate::vm::op::Op;
+use crate::base::op::Op;
 
 const MAIN: &str = r#"import h
 struct P:
@@ -249,8 +249,8 @@ fn generator_slot_privacy_grid() {
     assert_eq!(
         stamps(&program.protos[main_top].code),
         vec![
-            crate::vm::crossing::stamp_mask(&[crate::vm::crossing::Fresh::All]),
-            crate::vm::crossing::stamp_mask(&[crate::vm::crossing::Fresh::Marked]),
+            crate::base::crossing::stamp_mask(&[crate::base::crossing::Fresh::All]),
+            crate::base::crossing::stamp_mask(&[crate::base::crossing::Fresh::Marked]),
         ],
         "stamps: main.chz toplevel"
     );
@@ -436,7 +436,7 @@ fn generator_deep_privacy_grid() {
     }
     // The creating call stamps two bits per param: all-fresh, named, fresh root over a named
     // child.
-    use crate::vm::crossing::{Fresh, stamp_mask};
+    use crate::base::crossing::{Fresh, stamp_mask};
     let main_top = program.modules.last().expect("entry module").toplevel;
     let stamps: Vec<u64> = program.protos[main_top]
         .code

@@ -817,7 +817,7 @@ pub struct DeclaredType {
 pub fn declared_types() -> &'static [DeclaredType] {
     static TYPES: std::sync::OnceLock<Vec<DeclaredType>> = std::sync::OnceLock::new();
     TYPES.get_or_init(|| {
-        let src = crate::resolver::std_embed::lookup("ffi.chz").expect("std/ffi.chz is embedded");
+        let src = crate::native::std_embed::lookup("ffi.chz").expect("std/ffi.chz is embedded");
         let tokens = crate::lexer::tokenize(src).expect("std/ffi.chz lexes");
         let module = crate::parser::parse(tokens).expect("std/ffi.chz parses");
         let mut out = Vec::new();

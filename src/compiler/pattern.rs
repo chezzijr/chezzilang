@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::ast::{Expr, MatchArm, Pattern, Span};
+use crate::base::op::{NO_IC, Op};
 use crate::checker::Resolution;
-use crate::vm::op::{NO_IC, Op};
 
 impl Compiler {
     /// True if these arms form a literal/range/wildcard/binding match (no enum or tuple patterns), so
@@ -83,7 +83,7 @@ impl Compiler {
         self.program
             .variants
             .get(&(enum_key.to_string(), name.to_string()))
-            .map_or(crate::vm::op::VID_NONE, |v| v.variant_id)
+            .map_or(crate::base::op::VID_NONE, |v| v.variant_id)
     }
 
     /// The sorted, de-duplicated *binding* names introduced by an or-pattern's first alternative

@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::ast::{Expr, ExprKind, Span};
+use crate::base::op::{CapEntry, Op};
 use crate::checker::Resolution;
-use crate::vm::op::{CapEntry, Op};
 
 impl Compiler {
     /// Compile a positional argument list onto the stack. Replaces the flat
@@ -40,7 +40,7 @@ impl Compiler {
 
     /// The spawn op's operand reference (D4, TICKET-240): the checker's shapes for call `call_id`,
     /// stored once per distinct entry in `Program.fresh_calls` and named through
-    /// [`crate::vm::crossing::operand_ref`], which owns the layout. Witness args sit past the
+    /// [`crate::base::crossing::operand_ref`], which owns the layout. Witness args sit past the
     /// entry's end. A miss, or a call with no fresh operand, is `0`: every operand stays marked (a
     /// false fault, never a lost write).
     pub(super) fn crossing_mask(&mut self, call_id: crate::ast::NodeId) -> u32 {
@@ -59,7 +59,7 @@ impl Compiler {
             table.push(e.clone());
             table.len() - 1
         });
-        crate::vm::crossing::operand_ref(index)
+        crate::base::crossing::operand_ref(index)
     }
 
     /// The seed a `xs.sum()` site needs, per the checker's [`crate::checker::SumSeedTable`] --
@@ -131,7 +131,7 @@ impl Compiler {
         variant: &str,
         span: Span,
     ) -> Result<(), CompileError> {
-        if self.variant_id_of_key(enum_key, variant) == crate::vm::op::VID_NONE {
+        if self.variant_id_of_key(enum_key, variant) == crate::base::op::VID_NONE {
             return Err(CompileError {
                 message: format!(
                     "internal: no '{variant}' variant registered for a carrier value \

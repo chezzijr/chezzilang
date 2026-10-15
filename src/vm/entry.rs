@@ -194,10 +194,9 @@ pub fn run_file_counting_runners(
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
             RUN_PEAK_RUNNERS.with(|p| p.set((0, 0, 0, 0)));
-            let out = to_str_output(run_file_inner(
-                &entry,
+            let out = to_str_output(run_built(
+                || crate::compiler::compile_entry_file(&entry, None),
                 crate::native::HostConfig::default(),
-                None,
                 None,
                 false,
             ));
@@ -221,10 +220,9 @@ pub fn run_file_counting(
         .stack_size(VM_STACK_BYTES)
         .spawn(move || {
             counter.with(|c| c.set(0));
-            let out = to_str_output(run_file_inner(
-                &entry,
+            let out = to_str_output(run_built(
+                || crate::compiler::compile_entry_file(&entry, None),
                 crate::native::HostConfig::default(),
-                None,
                 None,
                 false,
             ));
@@ -469,15 +467,16 @@ pub fn run_file(entry: &std::path::Path) -> RunOutput {
 }
 
 /// Like [`run_file`], but invokes a named top-level entry function after the module loads (the
-/// `module:function` manifest path). Test-only convenience over [`run_file_with_entry`].
+/// `module:function` manifest path; test helper).
 #[cfg(test)]
 pub fn run_file_entry(entry: &std::path::Path, entry_fn: &str) -> RunOutput {
-    run_file_with_entry(
+    to_str_output(run_file_engine(
         entry,
         crate::native::HostConfig::default(),
         Some(entry_fn),
         None,
-    )
+        false,
+    ))
 }
 
 /// A finished run: captured `(stdout, stderr, outcome, exit_code)`. Stderr holds `std.io.eprint`
@@ -495,65 +494,15 @@ pub type RunOutputRaw = (Vec<u8>, Vec<u8>, Result<(), RunError>, Option<i32>);
 
 /// The [`captured`] decode applied to a whole [`RunOutputRaw`] — the one place the `Vec<u8>` sink
 /// becomes the `String` every test helper and embedder consumes.
-pub(super) fn to_str_output((out, err, res, code): RunOutputRaw) -> RunOutput {
+pub fn to_str_output((out, err, res, code): RunOutputRaw) -> RunOutput {
     (captured(out), captured(err), res, code)
 }
 
 /// Like [`run_file`], but with an explicit [`crate::native::HostConfig`] (args/env/stdin) for the
-/// native std modules. Test-only convenience over [`run_file_with_entry`] (entry-fn `None`); the
-/// CLI calls [`run_file_with_entry`] directly so a `module:function` entrypoint can name a function.
+/// native std modules (test helper).
 #[cfg(test)]
 pub fn run_file_with(entry: &std::path::Path, cfg: crate::native::HostConfig) -> RunOutput {
     to_str_output(run_file_engine(entry, cfg, None, None, false))
-}
-
-/// Resolve, compile, and run a program from its entry path on the dedicated VM thread, then — if
-/// `entry_fn` is `Some` — invoke that named top-level function of the entry module (the
-/// `module:function` manifest entrypoint). `None` runs the module top-level only (scripting model).
-/// This is the single entry the CLI's `chezzi run` uses.
-///
-/// `root` pins the module-graph root (the "one root per run" invariant): the bare-`chezzi run`
-/// manifest path passes `Some(root)` — the manifest that declared the entrypoint, computed ONCE by
-/// the CLI — so every `import` resolves against the SAME root that located the entry file. `None`
-/// (the explicit `chezzi run FILE` path) derives the root by walking up from the entry file (nearest
-/// marker, unchanged).
-pub fn run_file_with_entry(
-    entry: &std::path::Path,
-    cfg: crate::native::HostConfig,
-    entry_fn: Option<&str>,
-    root: Option<std::path::PathBuf>,
-) -> RunOutput {
-    to_str_output(run_file_bytes(entry, cfg, entry_fn, root))
-}
-
-/// TICKET-255 — run a graph the CLI already built and checked. `chezzi run` builds the graph one time
-/// for its pre-run check and hands it here, so the prelude and every import parse once. The entry
-/// source the CLI read from a one-shot fd (a pipe, `/dev/stdin`) is already inside the graph.
-pub fn run_graph_with_entry(
-    graph: crate::resolver::ModuleGraph,
-    cfg: crate::native::HostConfig,
-    entry_fn: Option<&str>,
-) -> RunOutput {
-    let entry_fn = entry_fn.map(str::to_string);
-    to_str_output(
-        std::thread::Builder::new()
-            .stack_size(VM_STACK_BYTES)
-            .spawn(move || run_graph_inner(&graph, cfg, entry_fn.as_deref(), false))
-            .expect("failed to spawn VM thread")
-            .join()
-            .expect("VM thread panicked"),
-    )
-}
-
-/// [`run_file_with_entry`] without the lossy decode — the entry point for any caller that needs the
-/// raw bytes (see [`RunOutputRaw`]), e.g. a byte-exact test assertion or the CPython differential.
-pub fn run_file_bytes(
-    entry: &std::path::Path,
-    cfg: crate::native::HostConfig,
-    entry_fn: Option<&str>,
-    root: Option<std::path::PathBuf>,
-) -> RunOutputRaw {
-    run_file_engine(entry, cfg, entry_fn.map(str::to_string), root, false)
 }
 
 /// W7-4a — a MULTI-FILE run under GC stress (collect at every safepoint). The single-source
@@ -570,61 +519,39 @@ pub fn run_file_stress(entry: &std::path::Path) -> RunOutput {
     ))
 }
 
-pub(super) fn run_file_engine(
+/// Resolve, compile and run the file at `entry` on the dedicated VM thread (test helper). The CLI's
+/// own driver is `crate::run::run_file_bytes`, the same two calls.
+#[cfg(test)]
+pub fn run_file_engine(
     entry: &std::path::Path,
     cfg: crate::native::HostConfig,
-    entry_fn: Option<String>,
+    entry_fn: Option<&str>,
     root: Option<std::path::PathBuf>,
     stress: bool,
 ) -> RunOutputRaw {
     let entry = entry.to_path_buf();
-    std::thread::Builder::new()
-        .stack_size(VM_STACK_BYTES)
-        .spawn(move || run_file_inner(&entry, cfg, entry_fn.as_deref(), root, stress))
-        .expect("failed to spawn VM thread")
-        .join()
-        .expect("VM thread panicked")
+    let entry_fn = entry_fn.map(str::to_string);
+    on_vm_stack(move || {
+        run_built(
+            || crate::compiler::compile_entry_file(&entry, root),
+            cfg,
+            entry_fn.as_deref(),
+            stress,
+        )
+    })
 }
 
-pub(super) fn run_file_inner(
-    entry: &std::path::Path,
-    cfg: crate::native::HostConfig,
-    entry_fn: Option<&str>,
-    root: Option<std::path::PathBuf>,
-    stress: bool,
-) -> RunOutputRaw {
-    let build = crate::resolver::build_graph_with_entry_source_and_root(entry, None, root);
-    let graph = match build {
-        Ok(g) => g,
-        Err(e) => {
-            return (
-                Vec::new(),
-                Vec::new(),
-                Err(RunError::plain(RuntimeError {
-                    message: e.message,
-                    span: e.span,
-                    is_assert: false,
-                    is_over_memory: false,
-                    is_timed_out: false,
-                    is_deadlock: false,
-                    is_panic: false,
-                })),
-                None,
-            );
-        }
-    };
-    run_graph_inner(&graph, cfg, entry_fn, stress)
-}
-
-/// Compile `graph` and run it on the current (VM-sized) stack. The one body behind [`run_file_inner`]
-/// and [`run_graph_with_entry`].
-pub(super) fn run_graph_inner(
-    graph: &crate::resolver::ModuleGraph,
+/// Build the program with `make` and run it on the current stack, then — if `entry_fn` is `Some` —
+/// invoke that named top-level function of the entry module (the `module:function` manifest
+/// entrypoint). The caller supplies the front end, so the VM does not depend on it. Call it inside
+/// [`on_vm_stack`]: `make` resolves and compiles on the VM's stack, as the run does.
+pub fn run_built(
+    make: impl FnOnce() -> Result<Program, crate::base::op::CompileError>,
     cfg: crate::native::HostConfig,
     entry_fn: Option<&str>,
     stress: bool,
 ) -> RunOutputRaw {
-    let program = match crate::compiler::compile_graph(graph) {
+    let program = match make() {
         Ok(p) => p,
         Err(e) => {
             return (

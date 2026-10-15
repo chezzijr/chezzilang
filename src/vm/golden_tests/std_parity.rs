@@ -681,12 +681,7 @@ fn parity_full_suite_vm_vs_interp() {
 fn manifest_entrypoint_err_surfaced_both_engines() {
     let dir = TmpDir::new();
     let entry = dir.write("main.chz", "fn main() -> int!:\n    return !\"boom\"\n");
-    let (_out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
-        &entry,
-        crate::native::HostConfig::default(),
-        Some("main"),
-        None,
-    );
+    let (_out, _err, outcome, _rc) = crate::vm::run_file_entry(&entry, "main");
     let e = outcome.expect_err("entry fn returning Err must surface a runtime error");
     assert!(
         e.message.contains("unhandled error: boom"),
@@ -714,12 +709,7 @@ fn manifest_entrypoint_ok_runs_clean_both_engines() {
         "main.chz",
         "fn main() -> int!:\n    print(\"ran\")\n    return ?0\n",
     );
-    let (out, _err, outcome, _rc) = crate::vm::run_file_with_entry(
-        &entry,
-        crate::native::HostConfig::default(),
-        Some("main"),
-        None,
-    );
+    let (out, _err, outcome, _rc) = crate::vm::run_file_entry(&entry, "main");
     assert!(
         outcome.is_ok(),
         "entry fn returning Ok must run clean, got {outcome:?}"

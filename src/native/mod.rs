@@ -33,6 +33,7 @@ pub mod rand;
 pub mod regex;
 pub mod request;
 mod request_head;
+pub mod std_embed;
 pub mod time;
 pub mod uuid;
 
@@ -528,7 +529,7 @@ pub type NativeFn = fn(&mut dyn Host) -> Result<NativeRet, HostError>;
 /// the syscall's duration (the D5 starvation the classification exists to prevent). As a field of
 /// every `MEMBERS` tuple, omitting it is a **compile error** instead.
 ///
-/// It rides the entry → [`crate::vm::heap::Obj::Native`] (bound in `vm/exec.rs`) → `Vm::invoke_native`, so
+/// It rides the entry → `vm::heap::Obj::Native` (bound in `vm/exec.rs`) → `Vm::invoke_native`, so
 /// the dispatch site never compares a name: no lookup, and no bare-name ambiguity (`std.io::_append`
 /// and `std.fs::_append` are distinct entries with different kinds — under the old name-keyed scheme
 /// they collided and were kept apart only by check ORDER plus an exemption list in a test).
@@ -764,6 +765,33 @@ pub fn native_members(module: &str) -> &'static [(&'static str, NativeFn, Kind)]
         // runtime value -- they lower via the compiler name→opcode path.
         "std.concurrency" => concurrency::MEMBERS,
         _ => &[],
+    }
+}
+
+/// D4 (TICKET-169, TICKET-179): the ONE table of native methods that mutate their receiver in place.
+/// Layer C faults a task-side call to one of these on an airlock copy; the checker's
+/// `mutates_receiver` (`src/checker/mod.rs`) reads this function for layer A and the DEC-089
+/// warning. A new mutating native goes here and nowhere else:
+/// `checker::tests::receiver_write_table_matches_observed_behavior` runs every native method and
+/// fails until this table agrees with the observed receiver change.
+pub(crate) fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
+    match kind {
+        "List" => matches!(
+            method,
+            "push"
+                | "pop"
+                | "reverse"
+                | "sort"
+                | "sort_by"
+                | "sort_by_key"
+                | "extend"
+                | "insert"
+                | "remove_at"
+        ),
+        "Map" => matches!(method, "remove" | "update"),
+        "Set" => matches!(method, "add" | "remove"),
+        "bytearray" => matches!(method, "push" | "pop" | "extend" | "reverse"),
+        _ => false,
     }
 }
 

@@ -750,7 +750,8 @@ impl Checker {
         let saved_in_fn = std::mem::replace(&mut self.in_fn_body, true);
         let saved_in_dflt = std::mem::replace(
             &mut self.in_default_provider,
-            decl.name.starts_with(crate::desugar::PROVIDER_PREFIX),
+            decl.name
+                .starts_with(crate::base::provider_name::PROVIDER_PREFIX),
         );
         // …and a fn DECLARED inside a `spawn:` block is not itself the task (W7-48), so it also does
         // not inherit the enclosing frame's W8-3 airlock taint (`enter_own_frame` moves the pair).

@@ -168,7 +168,7 @@ pub enum SumSeed {
 }
 pub type SumSeedTable = HashMap<CarrierKey, Option<SumSeed>>;
 
-pub use crate::vm::crossing::{Fresh, SlotFresh};
+pub use crate::base::crossing::{Fresh, SlotFresh};
 
 /// D4 (TICKET-189, TICKET-240) — the shape each operand of one `spawn` call crosses with: which
 /// objects of its value graph no parent binding can reach ([`Fresh`]). `args` is in bound-slot
@@ -213,7 +213,7 @@ pub struct FnLabels {
     pub names: Vec<Option<String>>,
     /// The FEWEST arguments a call through this value may supply — `Some(n)` when the underlying
     /// declaration's trailing parameters carry defaults the CALLEE fills itself
-    /// (`crate::vm::op::Op::JumpIfProvided`), `None` when nothing is known and every parameter is
+    /// (`crate::base::op::Op::JumpIfProvided`), `None` when nothing is known and every parameter is
     /// required. Lives here rather than as a new `Ty::Func` field so it inherits this wrapper's
     /// equality-neutrality: two function types that differ only in how many arguments may be OMITTED
     /// are still the same type for assignment, unification, protocol conformance and display.
@@ -992,7 +992,7 @@ impl Ty {
             std::collections::BTreeMap::new();
         for k in &keys {
             groups
-                .entry(crate::compiler::bare_display(k))
+                .entry(crate::base::words::bare_display(k))
                 .or_default()
                 .push(k);
         }
@@ -1107,7 +1107,7 @@ impl Ty {
     ) -> fmt::Result {
         match names.and_then(|m| m.get(n)) {
             Some(q) => write!(f, "{q}")?,
-            None => write!(f, "{}", crate::compiler::bare_display(n))?,
+            None => write!(f, "{}", crate::base::words::bare_display(n))?,
         }
         if !args.is_empty() {
             write!(f, "[")?;
@@ -1406,7 +1406,7 @@ pub enum Resolution {
     PatStruct(String),
     /// A `json.decode[T]` call: the descriptor of the target the checker resolved
     /// (`Op::JsonDecode`).
-    Decode(crate::json_decode::TypeDescriptor<ArgFill>),
+    Decode(crate::base::json_desc::TypeDescriptor<ArgFill>),
 }
 
 /// Every [`Resolution`] the checker recorded; see there.

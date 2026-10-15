@@ -1440,7 +1440,8 @@ fn no_diagnostic_leaks_a_provider_symbol() {
     ] {
         for e in check_desugared(src) {
             assert!(
-                !e.message.contains(crate::desugar::PROVIDER_PREFIX),
+                !e.message
+                    .contains(crate::base::provider_name::PROVIDER_PREFIX),
                 "internal provider symbol reached a user-facing message: {}",
                 e.message
             );

@@ -740,7 +740,7 @@ impl Checker {
             .or_else(|| self.enum_type_params_of(key))?;
         tps.iter()
             .any(|tp| tp.name == t)
-            .then(|| crate::compiler::bare_display(key))
+            .then(|| crate::base::words::bare_display(key))
     }
 
     /// M24-3 — **THE shadowing rule, stated once: an in-scope generic type parameter shadows a type

@@ -6,8 +6,8 @@ use super::*;
 use crate::ast::{
     BinaryOp, DeferTarget, Expr, ExprKind, MatchExprArm, Span, Stmt, StmtKind, UnaryOp,
 };
+use crate::base::op::Op;
 use crate::checker::Resolution;
-use crate::vm::op::Op;
 
 impl Compiler {
     /// Compile one value-producing expression, then apply the checker's implicit wrap for its node
@@ -216,7 +216,7 @@ impl Compiler {
                     .calls
                     .get(&(self.current_module_idx, expr.id.0))
                 {
-                    let mask = crate::vm::crossing::stamp_mask(&c.args);
+                    let mask = crate::base::crossing::stamp_mask(&c.args);
                     fc.emit(Op::StampGen(mask), expr.span);
                 }
             }
@@ -310,7 +310,7 @@ impl Compiler {
                     self.kw_frag_ord,
                     index.span,
                 );
-                if self.hook_calls.get(&slice_key) == Some(&crate::checker::Hook::Slice) {
+                if self.hook_calls.get(&slice_key) == Some(&crate::base::hooks::Hook::Slice) {
                     fc.emit(Op::SliceRange, expr.span);
                 } else {
                     // No `AsInt`: the index may be a map key (str/bool), not just a list/str int.
@@ -481,7 +481,7 @@ impl Compiler {
                 Op::MatchArm {
                     scrut: guarded,
                     variant: "Err".to_string(),
-                    variant_id: crate::vm::op::VID_ERR,
+                    variant_id: crate::base::op::VID_ERR,
                     enum_name: None,
                     nbind: 1,
                     bind_start: raw,
@@ -545,7 +545,7 @@ impl Compiler {
         fc.emit(
             Op::NewEnum {
                 variant: "Ok".to_string(),
-                variant_id: crate::vm::op::VID_OK,
+                variant_id: crate::base::op::VID_OK,
                 argc: 1,
             },
             span,

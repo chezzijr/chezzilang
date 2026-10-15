@@ -196,7 +196,7 @@ impl Checker {
         let prefix = if carrier || all_bare {
             String::new()
         } else {
-            crate::compiler::bare_display(key)
+            crate::base::words::bare_display(key)
         };
         let mut members: Vec<(String, Vec<Ty>)> = variants.into_iter().collect();
         members.sort_by(|a, b| a.0.cmp(&b.0));
@@ -453,7 +453,7 @@ fn dom_label(dom: &Dom) -> &str {
 /// ctor name stays empty and `render_wit`'s parenthesised arm still fires.
 fn ctor_display(dom: &Dom, name: &str) -> String {
     match dom {
-        Dom::Prod(_, _) => crate::compiler::bare_display(name),
+        Dom::Prod(_, _) => crate::base::words::bare_display(name),
         Dom::Sum(..) | Dom::Bool | Dom::Open => display_of(dom_label(dom), name),
     }
 }

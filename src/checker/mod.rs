@@ -13,8 +13,10 @@ use crate::ast::{
     Import, LitPattern, MethodSig, NativeDecl, Param, Pattern, Span, SpawnTarget, Stmt, StmtKind,
     Type, TypeParam, UnaryOp, WaitArm, WaitArmKind,
 };
+use crate::base::hooks::{HOOKS, Hook, HookRow, HookSet};
+use crate::base::module_id::{ModuleId, ResolvedImport};
 use crate::native::cffi::CType;
-use crate::resolver::{ModuleGraph, ModuleId, ResolvedImport};
+use crate::resolver::ModuleGraph;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -550,15 +552,15 @@ fn is_reserved_protocol(name: &str) -> bool {
 /// True if the native fn `module_id.member` diverges (never returns), like `panic`. Used to
 /// bottom-type its call so it type-checks in value position (TICKET-077). Keyed on the resolved
 /// module id plus member name, never the bare callee name, so a shadowing local or user method
-/// named `exit` is untouched. A native module's [`crate::resolver::ModuleId`] is the synthetic path
+/// named `exit` is untouched. A native module's [`crate::base::module_id::ModuleId`] is the synthetic path
 /// `<native:std.os>` (see `crate::resolver::native_id`), not the dotted string itself.
-fn is_diverging_native(module_id: &crate::resolver::ModuleId, member: &str) -> bool {
+fn is_diverging_native(module_id: &crate::base::module_id::ModuleId, member: &str) -> bool {
     member == "exit" && module_id.0.to_string_lossy() == "<native:std.os>"
 }
 
 /// True if `name` is one of the four recognized suite lifecycle hooks.
 fn is_lifecycle_hook(name: &str) -> bool {
-    crate::vm::op::LIFECYCLE_HOOKS.contains(&name)
+    crate::base::op::LIFECYCLE_HOOKS.contains(&name)
 }
 
 /// The call [`Checker::infer_call`] is dispatching (see [`Checker::call_ctx`]).
@@ -1320,7 +1322,7 @@ struct Checker {
     /// TICKET-184 — fns proved unable to fall off their end; see [`FallOffTable`].
     fall_off: FallOffTable,
     /// Graph index of every module, so a from-imported fn's [`Resolution::Fn`] names its home.
-    module_idx_of: HashMap<crate::resolver::ModuleId, usize>,
+    module_idx_of: HashMap<crate::base::module_id::ModuleId, usize>,
     /// The current module's from-imported fns: bound name -> (declaring module, declared name).
     fn_homes: HashMap<String, (usize, String)>,
     /// W7-43 — a monotonic counter for the `__opt{n}` binding the Option lowering synthesizes, so a
@@ -1714,6 +1716,7 @@ mod globals;
 mod infer;
 mod infer_access;
 mod infer_ops;
+pub mod json_decode;
 mod method_call;
 mod pattern;
 mod resolve;

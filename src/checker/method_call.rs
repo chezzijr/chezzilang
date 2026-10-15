@@ -393,7 +393,7 @@ impl Checker {
                     // `Type.method(...)`. Reject the instance call with a pointer at the right form.
                     if is_static {
                         self.infer_all(args);
-                        let disp = crate::compiler::bare_display(sname);
+                        let disp = crate::base::words::bare_display(sname);
                         self.error(
                             span,
                             format!("'{method}' is a static method of '{disp}'; call it as `{disp}.{method}(...)`"),
@@ -571,7 +571,7 @@ impl Checker {
                     // value with a pointer at the right form (mirrors the struct arm).
                     if is_static {
                         self.infer_all(args);
-                        let disp = crate::compiler::bare_display(ename);
+                        let disp = crate::base::words::bare_display(ename);
                         self.error(
                             span,
                             format!("'{method}' is a static method of '{disp}'; call it as `{disp}.{method}(...)`"),

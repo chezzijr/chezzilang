@@ -1073,8 +1073,9 @@ fn an_explicit_argument_is_still_type_checked_where_a_default_would_be_relaxed()
         "expected the ordinary argument type error, got: {errs:?}"
     );
     assert!(
-        errs.iter()
-            .all(|e| !e.message.contains(crate::desugar::PROVIDER_PREFIX)),
+        errs.iter().all(|e| !e
+            .message
+            .contains(crate::base::provider_name::PROVIDER_PREFIX)),
         "an internal provider symbol reached a user-facing message: {errs:?}"
     );
 }
@@ -1181,7 +1182,7 @@ fn a_provider_frame_in_a_trace_is_readable() {
             "[{engine}] expected a readable provider frame, got:\n{trace}"
         );
         assert!(
-            !trace.contains(crate::desugar::PROVIDER_PREFIX),
+            !trace.contains(crate::base::provider_name::PROVIDER_PREFIX),
             "[{engine}] the internal `$def$` name must not reach a user-visible trace:\n{trace}"
         );
     }

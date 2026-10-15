@@ -932,7 +932,7 @@ impl Checker {
                             if let Some(written) = self.value_writes(callee).first() {
                                 self.error(
                                     callee.span,
-                                    format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
+                                    format!("'{written}' {}", crate::base::words::COPY_WRITE_TAIL),
                                 );
                             }
                         }

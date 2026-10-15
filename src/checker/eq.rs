@@ -170,7 +170,7 @@ thread_local! {
 /// | two-constant-sibling `W[T]`, either field order | 5 ms | 12 MB | accepted |
 ///
 /// It admits the honest shapes: a plain `S{k}: v: S{k-1}` chain costs ~1 node per level, so a
-/// 10 000-deep chain — the depth the VM's own [`crate::vm::MAX_STRUCTURAL_DEPTH`] equality walks — fits
+/// 10 000-deep chain — the depth the VM's own [`crate::base::words::MAX_STRUCTURAL_DEPTH`] equality walks — fits
 /// five times over.
 ///
 /// **It also subsumes the old depth cap, so there is exactly one number here now.** Every entry costs
@@ -193,7 +193,7 @@ thread_local! {
 /// program (`print(1)`) to harvest a table; they declare no user types and enter no `Eq` obligation.
 ///
 /// **This budget is NOT the VM's `MAX_STRUCTURAL_DEPTH`, and the two are not in the same unit.** An
-/// earlier version of this constant was defined as `crate::vm::MAX_STRUCTURAL_DEPTH` and claimed the
+/// earlier version of this constant was defined as `crate::base::words::MAX_STRUCTURAL_DEPTH` and claimed the
 /// two "literally cannot drift apart again". That claim was false: this counts checker OBLIGATION
 /// NODES on a TYPE graph, the VM counts VALUE nesting depth, and tying the numerals does not tie the
 /// measures. Measured counter-example: `struct Node: v: int; next: Option[Node]` builds a 20 000-deep

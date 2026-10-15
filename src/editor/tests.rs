@@ -1286,7 +1286,7 @@ fn entry_own_error_survives_a_symlinked_project_path() {
 /// must keep parsing it, this one from source text alone.
 #[test]
 fn prelude_source_gets_a_semantic_overlay() {
-    let src = crate::resolver::std_embed::lookup("prelude.chz").unwrap();
+    let src = crate::native::std_embed::lookup("prelude.chz").unwrap();
     assert!(!semantic_overlay(src).is_empty());
 }
 

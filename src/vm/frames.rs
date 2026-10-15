@@ -171,8 +171,10 @@ impl Vm {
             .map(|f| TraceFrame {
                 // Rendered, not raw: a W7-51 default-argument provider's internal name is
                 // deliberately unspellable (`$def$2$f.x$`) and would be unreadable in a trace.
-                function: crate::desugar::display_fn_name(&self.program.protos[f.proto].name)
-                    .into_owned(),
+                function: crate::base::provider_name::display_fn_name(
+                    &self.program.protos[f.proto].name,
+                )
+                .into_owned(),
                 span: f.call_span,
             })
             .collect()
@@ -342,47 +344,47 @@ impl Vm {
                 // which only `run_until` has. The slow path is byte-identical to the kept `step` arms.
                 Op::Add => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
-                    crate::vm::op::BinKind::Add,
+                    crate::base::op::BinKind::Add,
                     span,
                 ),
                 Op::Sub => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
-                    crate::vm::op::BinKind::Sub,
+                    crate::base::op::BinKind::Sub,
                     span,
                 ),
                 Op::Mul => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
-                    crate::vm::op::BinKind::Mul,
+                    crate::base::op::BinKind::Mul,
                     span,
                 ),
                 Op::Div => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
-                    crate::vm::op::BinKind::Div,
+                    crate::base::op::BinKind::Div,
                     span,
                 ),
                 Op::Mod => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
-                    crate::vm::op::BinKind::Mod,
+                    crate::base::op::BinKind::Mod,
                     span,
                 ),
                 Op::Lt => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
-                    crate::vm::op::BinKind::Lt,
+                    crate::base::op::BinKind::Lt,
                     span,
                 ),
                 Op::LtEq => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
-                    crate::vm::op::BinKind::LtEq,
+                    crate::base::op::BinKind::LtEq,
                     span,
                 ),
                 Op::Gt => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
-                    crate::vm::op::BinKind::Gt,
+                    crate::base::op::BinKind::Gt,
                     span,
                 ),
                 Op::GtEq => self.q_arith(
                     self.quicken_base[pid] as usize + ip,
-                    crate::vm::op::BinKind::GtEq,
+                    crate::base::op::BinKind::GtEq,
                     span,
                 ),
                 Op::Eq => self.q_eq(self.quicken_base[pid] as usize + ip, false, span),

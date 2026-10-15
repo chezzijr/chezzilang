@@ -1253,7 +1253,7 @@ impl Checker {
                 format!(
                     "struct '{}' has no fields and cannot be C-marshallable (an extern struct \
                      requires at least one C-marshallable field) in extern fn '{fn_name}'",
-                    crate::compiler::bare_display(name)
+                    crate::base::words::bare_display(name)
                 ),
             );
             visited.remove(name);

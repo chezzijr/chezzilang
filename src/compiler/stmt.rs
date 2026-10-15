@@ -5,7 +5,7 @@ use super::*;
 use crate::ast::{
     Expr, ExprKind, Pattern, Span, SpawnTarget, Stmt, StmtKind, WaitArm, WaitArmKind,
 };
-use crate::vm::op::{Op, ProtoId, WaitMeta};
+use crate::base::op::{Op, ProtoId, WaitMeta};
 
 impl Compiler {
     /// Compile statements into the current scope without opening a new one (used for the toplevel

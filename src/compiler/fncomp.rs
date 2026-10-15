@@ -6,10 +6,10 @@ use super::*;
 pub(super) struct FnComp {
     pub(super) name: String,
     pub(super) arity: usize,
-    /// See [`crate::vm::op::Proto::min_arity`]. Starts at `arity`; only the default prologue lowers it.
+    /// See [`crate::base::op::Proto::min_arity`]. Starts at `arity`; only the default prologue lowers it.
     pub(super) min_arity: usize,
     is_toplevel: bool,
-    /// W13-21 — see [`crate::vm::op::Proto::decl_span`]. Set from `FnDecl::name_span` only in
+    /// W13-21 — see [`crate::base::op::Proto::decl_span`]. Set from `FnDecl::name_span` only in
     /// `Compiler::compile_fn_body`; every other `FnComp::new` site keeps `Span::RUNTIME`.
     pub(super) decl_span: Span,
     pub(super) code: Vec<Op>,
@@ -58,7 +58,7 @@ pub(super) struct FnComp {
     pub(super) is_test: bool,
     /// TICKET-190, TICKET-240 — the checker's verdict per private frame slot name of this
     /// generator body (empty for every other body). Read only by [`FnComp::add_frame_local`].
-    pub(super) gen_slots: HashMap<String, crate::vm::crossing::SlotFresh>,
+    pub(super) gen_slots: HashMap<String, crate::base::crossing::SlotFresh>,
     /// TICKET-190 — per slot, the AND of every binder's privacy claim (`None` = never claimed). A
     /// slot reused by sibling scopes is private only if every binding in it is.
     pub(super) slot_private: Vec<Option<bool>>,
@@ -531,7 +531,7 @@ impl FnComp {
     /// Add a named local, returning its slot. A redeclaration in the same scope shadows by getting
     /// a fresh slot (later lookups find the newest).
     pub(super) fn add_local(&mut self, name: String) -> usize {
-        self.add_local_claiming(name, crate::vm::crossing::SlotFresh::Marked)
+        self.add_local_claiming(name, crate::base::crossing::SlotFresh::Marked)
     }
 
     /// TICKET-190 — [`Self::add_local`] for a declared param or a single-name `let`: the slot is
@@ -542,12 +542,16 @@ impl FnComp {
             .gen_slots
             .get(&name)
             .copied()
-            .unwrap_or(crate::vm::crossing::SlotFresh::Marked);
+            .unwrap_or(crate::base::crossing::SlotFresh::Marked);
         self.add_local_claiming(name, claim)
     }
 
-    fn add_local_claiming(&mut self, name: String, claim: crate::vm::crossing::SlotFresh) -> usize {
-        use crate::vm::crossing::SlotFresh;
+    fn add_local_claiming(
+        &mut self,
+        name: String,
+        claim: crate::base::crossing::SlotFresh,
+    ) -> usize {
+        use crate::base::crossing::SlotFresh;
         let slot = self.slot_count;
         if self.slot_private.len() <= slot {
             self.slot_private.resize(slot + 1, None);

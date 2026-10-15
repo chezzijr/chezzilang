@@ -426,7 +426,7 @@ impl Checker {
         methods: &HashMap<String, FnSig>,
     ) -> Result<(), ReqMiss> {
         // TICKET-027: `protocol` may carry a module-qualified KEY — render the BARE name in messages.
-        let protocol_display = crate::compiler::bare_display(protocol);
+        let protocol_display = crate::base::words::bare_display(protocol);
         let pmap: HashMap<String, Ty> = pinfo
             .type_params
             .iter()
@@ -568,7 +568,7 @@ impl Checker {
                                     why: format!(
                                         "method '{mname}' requires {}: {}",
                                         concrete,
-                                        crate::compiler::bare_display(&bound.name)
+                                        crate::base::words::bare_display(&bound.name)
                                     ),
                                 });
                             }
@@ -618,7 +618,7 @@ impl Checker {
         key: &str,
     ) -> Result<(), String> {
         // TICKET-027: `protocol` may carry a module-qualified KEY — render the BARE name in messages.
-        let protocol_display = crate::compiler::bare_display(protocol);
+        let protocol_display = crate::base::words::bare_display(protocol);
         let native_methods = self.structs.get(key).map(|i| &i.methods);
         let mut table: HashMap<String, FnSig> = HashMap::new();
         for (mname, _) in &pinfo.methods {

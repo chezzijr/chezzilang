@@ -4,7 +4,7 @@
 use super::stmt::BoxCore;
 use super::stmt::BoxSnaps;
 use super::*;
-use crate::checker::Hook;
+use crate::base::hooks::Hook;
 
 impl Vm {
     pub(super) fn type_name(&self, v: Value) -> &'static str {
@@ -141,7 +141,7 @@ impl Vm {
                         .structs
                         .get(name)
                         .map(|d| (d.display_name.clone(), d.fields.clone()))
-                        .unwrap_or_else(|| (crate::compiler::bare_display(name), Vec::new()));
+                        .unwrap_or_else(|| (crate::base::words::bare_display(name), Vec::new()));
                     let mut parts = Vec::with_capacity(vals.len());
                     for (i, v) in vals.iter().enumerate() {
                         let k = names.get(i).cloned().unwrap_or_else(|| i.to_string());
@@ -428,7 +428,7 @@ impl Vm {
                     .structs
                     .get(name.as_ref())
                     .map(|d| d.display_name.clone())
-                    .unwrap_or_else(|| crate::compiler::bare_display(name.as_ref()));
+                    .unwrap_or_else(|| crate::base::words::bare_display(name.as_ref()));
                 format!("{display}({inner})")
             }
             WireValue::Enum {
@@ -831,7 +831,7 @@ impl Vm {
                 let display = def
                     .as_ref()
                     .map(|d| d.display_name.clone())
-                    .unwrap_or_else(|| crate::compiler::bare_display(&name));
+                    .unwrap_or_else(|| crate::base::words::bare_display(&name));
                 // W14-35c: the DEFAULT repr only (a `str` hook returned above and is never guarded,
                 // like CPython's user `__repr__`). CPython's dataclass repr writes `...` for the
                 // whole re-entered object.
@@ -1032,7 +1032,7 @@ impl Vm {
         &mut self,
         out: &mut String,
         h: GcRef,
-        def: Option<&super::op::StructDef>,
+        def: Option<&crate::base::op::StructDef>,
         fields: &[Value],
         span: Span,
         depth: usize,

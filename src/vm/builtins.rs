@@ -2,7 +2,7 @@
 //! Split out of `src/vm/stmt.rs`. `super::*` is the parent module.
 
 use super::*;
-use crate::checker::Hook;
+use crate::base::hooks::Hook;
 
 impl Vm {
     pub(super) fn do_print(&mut self, argc: usize, span: Span) -> Result<(), RuntimeError> {
@@ -372,7 +372,7 @@ impl Vm {
                     return Err(self.bad_next_value(res, span));
                 };
                 match *variant_id {
-                    crate::vm::op::VID_SOME => {
+                    crate::base::op::VID_SOME => {
                         let item = *payload.first().ok_or_else(|| {
                             self.err(
                                 "iterator next() returned a present value with no payload"
@@ -385,7 +385,7 @@ impl Vm {
                         };
                         buf.push(item);
                     }
-                    crate::vm::op::VID_NONE_VARIANT => break,
+                    crate::base::op::VID_NONE_VARIANT => break,
                     _ => {
                         return Err(self.bad_next_value(res, span));
                     }

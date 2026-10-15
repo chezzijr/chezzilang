@@ -16,7 +16,7 @@ impl Vm {
     /// retained in the signature so call sites read self-documentingly, but it is not stored.
     pub(super) fn alloc_enum(&mut self, ty: &str, variant: &str, payload: Vec<Value>) -> Value {
         let _ = ty;
-        use crate::vm::op::{VID_ERR, VID_NONE, VID_NONE_VARIANT, VID_OK, VID_SOME};
+        use crate::base::op::{VID_ERR, VID_NONE, VID_NONE_VARIANT, VID_OK, VID_SOME};
         let variant_id = match variant {
             "Ok" => VID_OK,
             "Err" => VID_ERR,
@@ -36,7 +36,7 @@ impl Vm {
     /// descriptor (passing through an `Err`), push the resulting `Result[T]`.
     pub(super) fn json_decode(
         &mut self,
-        desc: &crate::json_decode::TypeDescriptor<crate::json_decode::DefaultThunk>,
+        desc: &crate::base::json_desc::TypeDescriptor<crate::base::json_desc::DefaultThunk>,
         span: Span,
     ) -> Result<(), RuntimeError> {
         // `res` stays on the operand stack while the coercion runs: a field default re-enters the
@@ -93,7 +93,7 @@ impl Vm {
     /// time, homed in the declaring module. A fault inside it is a fault, never a decode `Err`.
     fn run_decode_default(
         &mut self,
-        t: crate::json_decode::DefaultThunk,
+        t: crate::base::json_desc::DefaultThunk,
         span: Span,
     ) -> Result<Value, DecodeFail> {
         let Some(&home) = self.module_objs.get(t.module) else {
@@ -114,18 +114,18 @@ impl Vm {
     pub(super) fn coerce_json(
         &mut self,
         jv: Value,
-        desc: &crate::json_decode::TypeDescriptor<crate::json_decode::DefaultThunk>,
+        desc: &crate::base::json_desc::TypeDescriptor<crate::base::json_desc::DefaultThunk>,
         path: &str,
         span: Span,
     ) -> Result<Value, DecodeFail> {
-        use crate::json_decode::TypeDescriptor as D;
+        use crate::base::json_desc::TypeDescriptor as D;
         let (_jty, variant, payload) = self
             .enum_parts(jv)
             .ok_or_else(|| format!("decode: expected a JSON value at {path}"))?;
         let mismatch = |want: &str| {
             format!(
                 "decode: expected {want} at {path}, found {}",
-                crate::json_decode::json_kind(&variant)
+                crate::base::json_desc::json_kind(&variant)
             )
         };
         match desc {
@@ -372,7 +372,7 @@ impl Vm {
     /// Accumulates children into a plain `Vec<Value>`/`MapData`, same allocation idiom as
     /// `coerce_json` (no new rooting scheme).
     fn json_of(&mut self, v: Value, depth: usize) -> Result<Value, String> {
-        use crate::vm::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
+        use crate::base::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
         // Peel every `Some` wrapper iteratively: it emits no JSON bracket, so it must charge
         // neither a bracket level (W13-19) nor a Rust stack frame (a recursive arm here would let
         // an `Option`-linked chain reach two Rust frames per bracket level, defeating the reason

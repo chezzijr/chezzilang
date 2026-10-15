@@ -531,7 +531,7 @@ impl Checker {
             &mut self.hook_calls,
             &mut self.table_conflicts,
             key,
-            crate::checker::Hook::Slice,
+            crate::base::hooks::Hook::Slice,
             "subscript",
             index.span,
         );

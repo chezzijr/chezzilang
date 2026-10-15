@@ -14,11 +14,11 @@
 //!   4. Import cycles are a clean error (Go-style), not lazy resolution.
 
 use crate::ast::{Import, Module, Span, StmtKind};
+use crate::base::module_id::{ModuleId, ResolvedImport};
+use crate::native::std_embed;
 use crate::{lexer, parser};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-
-pub mod std_embed;
 
 /// Maximum depth of a transitive import chain before the resolver gives up with a clean diagnostic
 /// instead of recursing further. The DFS `Builder::visit` recurses once per import *edge*; a
@@ -34,11 +34,6 @@ pub mod std_embed;
 /// chain is not a real program). Cycles are caught separately; this backstops the
 /// acyclic-but-very-deep case only.
 const MAX_IMPORT_DEPTH: usize = 256;
-
-/// A module's stable identity: its canonicalized absolute path. De-dupes diamond imports and never
-/// aliases `std.io` with a same-named local file.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ModuleId(pub PathBuf);
 
 /// A resolution failure. `span` anchors at the offending `import` statement (or `{1,1}` for the
 /// entry file itself). `module` is the dotted path being resolved, for context.
@@ -65,14 +60,6 @@ impl std::fmt::Display for ResolveError {
             self.message
         )
     }
-}
-
-/// One import statement resolved to a target module.
-#[derive(Debug, Clone)]
-pub struct ResolvedImport {
-    pub target: ModuleId,
-    pub import: Import,
-    pub span: Span,
 }
 
 /// A parsed module plus its resolved imports.

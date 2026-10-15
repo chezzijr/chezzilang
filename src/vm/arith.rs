@@ -2,7 +2,7 @@
 // Arithmetic, comparison, ordering, hashing, equality.
 
 use super::*;
-use crate::checker::Hook;
+use crate::base::hooks::Hook;
 
 impl Vm {
     // ===== 8-byte `Value` boxing helpers =====
@@ -111,7 +111,7 @@ impl Vm {
     pub(super) fn q_arith(
         &mut self,
         site: usize,
-        kind: crate::vm::op::BinKind,
+        kind: crate::base::op::BinKind,
         span: Span,
     ) -> Result<(), RuntimeError> {
         match self.quicken[site] {
@@ -228,7 +228,7 @@ impl Vm {
         &mut self,
         a: usize,
         b: usize,
-        kind: crate::vm::op::BinKind,
+        kind: crate::base::op::BinKind,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let l = self.stack[self.base() + a];
@@ -250,7 +250,7 @@ impl Vm {
         &mut self,
         slot: usize,
         val: i64,
-        kind: crate::vm::op::BinKind,
+        kind: crate::base::op::BinKind,
         span: Span,
     ) -> Result<(), RuntimeError> {
         let l = self.stack[self.base() + slot];
@@ -305,10 +305,10 @@ impl Vm {
         &mut self,
         x: i64,
         y: i64,
-        kind: crate::vm::op::BinKind,
+        kind: crate::base::op::BinKind,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        use crate::vm::op::BinKind;
+        use crate::base::op::BinKind;
         // Arithmetic is computed in true i64 (overflow still faults past i64), then `make_int` boxes
         // any result outside ±2^62 — the inline↔box fork, invisible to the program.
         let v = match kind {
@@ -362,10 +362,10 @@ impl Vm {
     /// promotion, and fiber parking — anything the unfused op sequence would do).
     pub(super) fn run_bin_kind(
         &mut self,
-        kind: crate::vm::op::BinKind,
+        kind: crate::base::op::BinKind,
         span: Span,
     ) -> Result<(), RuntimeError> {
-        use crate::vm::op::BinKind;
+        use crate::base::op::BinKind;
         match kind {
             BinKind::Add => self.arith(&Op::Add, span),
             BinKind::Sub => self.arith(&Op::Sub, span),

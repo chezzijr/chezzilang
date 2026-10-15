@@ -113,7 +113,7 @@ fn compound_assign_lowers_to_inc_local_end_to_end() {
         main_proto.code.iter().any(|op| matches!(
             op,
             Op::BinLocalLocal {
-                kind: crate::vm::op::BinKind::Add,
+                kind: crate::base::op::BinKind::Add,
                 ..
             }
         )),

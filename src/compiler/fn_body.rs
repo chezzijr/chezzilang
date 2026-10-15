@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::ast::{FnDecl, Span, Stmt, StmtKind};
-use crate::vm::op::{Op, Proto, ProtoId};
+use crate::base::op::{Op, Proto, ProtoId};
 
 impl Compiler {
     /// Compile a named function / method to its own proto. `params` occupy slots `0..arity`.
@@ -237,8 +237,8 @@ impl Compiler {
 
     pub(super) fn finish(&mut self, fc: FnComp) -> ProtoId {
         let claims = |c: &[Option<bool>]| c.iter().map(|&c| c == Some(true)).collect::<Vec<_>>();
-        let private = crate::vm::crossing::slot_bits(&claims(&fc.slot_private));
-        let deep = private & crate::vm::crossing::slot_bits(&claims(&fc.slot_deep));
+        let private = crate::base::crossing::slot_bits(&claims(&fc.slot_private));
+        let deep = private & crate::base::crossing::slot_bits(&claims(&fc.slot_deep));
         let pid = self.program.protos.len();
         // M19: peephole pass — const-fold + superinstruction fusion, with jump relocation.
         let (code, lines) = peephole::optimize(fc.code, fc.lines);

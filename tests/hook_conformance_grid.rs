@@ -62,7 +62,7 @@ fn arith(name: &'static str, proto: &'static str, sym: &str) -> Hook {
     }
 }
 
-/// One row per entry of `chezzi::checker::HOOKS`; `every_hook_row_has_a_grid_row` pins that.
+/// One row per entry of `chezzi::base::hooks::HOOKS`; `every_hook_row_has_a_grid_row` pins that.
 fn hooks() -> Vec<Hook> {
     let idx = m("index(self, k: int) -> int", "return self.n");
     let eq = m("eq(self, other: Self) -> bool", "return true");
@@ -1144,7 +1144,7 @@ fn iterator_bound_failures() -> Vec<String> {
 /// grid row for a method `HOOKS` does not list, fails here.
 #[test]
 fn every_hook_row_has_a_grid_row() {
-    let table: Vec<&str> = chezzi::checker::HOOKS
+    let table: Vec<&str> = chezzi::base::hooks::HOOKS
         .iter()
         .map(|row| row.method)
         .collect();

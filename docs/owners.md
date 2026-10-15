@@ -54,8 +54,8 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Is `a` assignable to `b` | `assignable` (`checker/assignable.rs`) | |
 | Does a type satisfy a protocol | `satisfies` (`checker/satisfies.rs`) | |
 | Does the run time dispatch a hook | `declares_hook` (`checker/hooks.rs`) | |
-| Operator hooks (hook → protocol → method) | `HOOKS` (`checker/tables.rs`), `Hook` (`checker/tables.rs`) | |
-| Operator → hook → protocol and method | `of_binary` (`checker/tables.rs`), `HOOKS` (`checker/tables.rs`) | `binary_protocol` (`checker/ty_util.rs`), the protocol seeds in `prebuilt_protocols` (`checker/ty_util.rs`) and the operator typing in `checker/infer_ops.rs` derive from it. DUPLICATE still: the protocol names in `RESERVED_PROTOCOLS` (`checker/mod.rs`) and the method column of `INTRINSIC_PROTO_METHODS` (`checker/proto.rs`) |
+| Operator hooks (hook → protocol → method) | `HOOKS` (`base/hooks.rs`), `Hook` (`base/hooks.rs`) | |
+| Operator → hook → protocol and method | `of_binary` (`base/hooks.rs`), `HOOKS` (`base/hooks.rs`) | `binary_protocol` (`checker/ty_util.rs`), the protocol seeds in `prebuilt_protocols` (`checker/ty_util.rs`) and the operator typing in `checker/infer_ops.rs` derive from it. DUPLICATE still: the protocol names in `RESERVED_PROTOCOLS` (`checker/mod.rs`) and the method column of `INTRINSIC_PROTO_METHODS` (`checker/proto.rs`) |
 | Which builtin type satisfies which operator protocol | `INTRINSIC_PROTO_METHODS` (`checker/proto.rs`) | `builtin_arith_kind` (`checker/op_sendable.rs`) derives from it (`builtin_operator_protocol_grid`) |
 | Overflow fault label of an arithmetic op | DUPLICATE: `checked` in `ast/consteval.rs`, the op labels in `vm/arith.rs` and `vm/shared_methods.rs` | |
 | What an Iterable yields | DUPLICATE: `iterable_elem` (`checker/iter_index.rs`), `iter_elem` (`checker/iter_index.rs`), `struct_iter_elem` (`checker/iter_index.rs`), `struct_iterable_elem` (`checker/iter_index.rs`), `for_bindings` (`checker/iter_index.rs`), the for-lowering in `compiler/loops.rs` | waits on the U6 design |
@@ -67,7 +67,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Width of a struct field (FFI) | `note_field_widths` (`checker/setup.rs`) | `FieldWidthTable` |
 | C width ranges, vararg promotion | `vararg_promoted` (`native/cffi.rs`), `int_range` (`native/cffi.rs`) | |
 | Builtin method set per type | `std/prelude.chz` native decls | DUPLICATE: the hover lists such as `STR_METHODS` (`checker/builtin_methods.rs`), `builtin_container_sig` (`checker/builtin_methods.rs`), the VM name dispatch in `core_method` (`vm/core_method.rs`), `vm/socket.rs`, `vm/shared_methods.rs` and `vm/fileio.rs` |
-| Native method mutates its receiver | `is_mutating_native_kind` (`vm/call.rs`) | |
+| Native method mutates its receiver | `is_mutating_native_kind` (`native/mod.rs`) | |
 
 ## Patterns and bindings
 
@@ -82,12 +82,12 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Fact | Owner | Notes |
 |---|---|---|
 | Value tag layout | `vm/value.rs` | |
-| Bytecode | `Op` (`vm/op.rs`) | |
+| Bytecode | `Op` (`base/op.rs`) | |
 | `==` between values | `values_equal_guarded` (`vm/equality.rs`) | |
 | May this op block here, and how | `mode` (`vm/block.rs`), `block_ctx` (`vm/block.rs`) | TICKET-181 |
 | CPU width / runner permits | `RUNNERS` (`vm/width.rs`) | TICKET-205/230 |
 | Quiescence verdict | `decide_since` (`vm/quiesce.rs`) | |
-| Airlock crossing policy | `vm/crossing.rs` | D4 |
+| Airlock crossing policy | `base/crossing.rs` | D4 |
 | Cross-heap store check | `ensure_crossable` (`vm/worker_vm.rs`), `to_wire_crossable` (`vm/airlock_out.rs`) | a missed guard is UB |
 | `WireValue` walks | DUPLICATE: `wire_summary` (`vm/core.rs`), `collect_core_gcrefs` (`vm/core.rs`), the `to_wire` budget in `vm/airlock_out.rs` | |
 | Hook calls | `invoke_hook` (`vm/method_call.rs`) | DUPLICATE: direct `run_proto` (`vm/frames.rs`) calls in `vm/call.rs`, `vm/method_call.rs` and `vm/step.rs`; waits on Family D |
@@ -115,8 +115,8 @@ file at 2,500 lines and a test file at 3,500.
 | Lexer | `lexer/mod.rs` (tokens, token extents such as `word_end_col`), `lexer/tests.rs` |
 | Parser | `parser/mod.rs` (entry points, `Parser`, value sites), `parser/cursor.rs` (peek, expect, line and block ends), `parser/stmt.rs` (items, statements, imports), `parser/decl.rs` (fn, protocol, extern, native, struct, enum), `parser/control.rs` (if, for, while, match, else guards), `parser/pattern.rs` (patterns and binding targets), `parser/types.rs` (blocks, types), `parser/expr.rs` (Pratt expressions), `parser/interp.rs` (interpolation, closures), `parser/tests/` |
 | AST | `ast/mod.rs` (node shapes and pure queries), `ast/consteval.rs` |
-| Desugar, resolver | `desugar/mod.rs`, `resolver/mod.rs`, `resolver/std_embed.rs` |
-| Checker: entry and tables | `checker/mod.rs` (`Checker`, reserved names, sig structs), `checker/entry.rs` (check entry points, call/compile table passes), `checker/tables.rs` (`HOOKS`, table types, witness keys), `checker/graph_pass.rs`, `checker/setup.rs` (keys, aliases, names) |
+| Desugar, resolver | `desugar/mod.rs`, `resolver/mod.rs` |
+| Checker: entry and tables | `checker/mod.rs` (`Checker`, reserved names, sig structs), `checker/entry.rs` (check entry points, call/compile table passes), `checker/tables.rs` (table types, witness keys), `checker/json_decode.rs` (the `json.decode` descriptor builder), `checker/graph_pass.rs`, `checker/setup.rs` (keys, aliases, names) |
 | Checker: pass 1 | `checker/harvest.rs` (stdlib and native harvest), `checker/hoist.rs` (collect and hoist decls), `checker/module_imports.rs` (diagnostics, import binding), `checker/scope.rs` (scopes, lookup, heads), `checker/writes.rs` (captures, task writes) |
 | Checker: signatures and types | `checker/sig.rs` (receivers, `fn_sig`), `checker/infer_ret.rs`, `checker/witness_sig.rs`, `checker/resolve_type.rs`, `checker/resolve_ctype.rs`, `checker/ty.rs`, `checker/ty_util.rs`, `checker/tyvar.rs`, `checker/builtin_type.rs`, `checker/builtin_methods.rs` |
 | Checker: protocols | `checker/proto.rs` (intrinsic receivers, protocol hoisting), `checker/assignable.rs`, `checker/satisfies.rs`, `checker/hooks.rs`, `checker/op_sendable.rs`, `checker/eq.rs`, `checker/targs.rs`, `checker/generic_call.rs` |
@@ -126,12 +126,14 @@ file at 2,500 lines and a test file at 3,500.
 | Checker: patterns, names | `checker/pattern.rs`, `checker/exhaust.rs`, `checker/iter_index.rs`, `checker/resolve.rs`, `checker/globals.rs`, `checker/suggest.rs` |
 | Checker tests | `checker/tests/` (one file per topic, helpers in `checker/tests/mod.rs`), `checker/graph_tests.rs` |
 | Compiler | `compiler/mod.rs` (entry, `Compiler`, keys, globals), `compiler/fn_body.rs`, `compiler/stmt.rs`, `compiler/assign.rs`, `compiler/loops.rs`, `compiler/pattern.rs`, `compiler/expr.rs`, `compiler/witness.rs`, `compiler/call.rs`, `compiler/capture.rs` (free variables), `compiler/fncomp.rs`, `compiler/peephole.rs`, `compiler/tests/` |
-| VM: core | `vm/mod.rs` (types, errors, traces, module declarations), `vm/value.rs`, `vm/op.rs`, `vm/heap.rs`, `vm/chzstr.rs`, `vm/entry.rs` (run entry points), `vm/host.rs` |
+| VM: core | `vm/mod.rs` (types, errors, traces, module declarations), `vm/value.rs`, `vm/heap.rs`, `vm/chzstr.rs`, `vm/entry.rs` (`run_built`, test run helpers), `vm/host.rs` |
+| Base (read by the front end and the VM) | `base/op.rs` (bytecode, `Program`, `CompileError`), `base/crossing.rs`, `base/hooks.rs`, `base/json_desc.rs`, `base/module_id.rs`, `base/provider_name.rs`, `base/words.rs` |
+| Run drivers (front end, then VM) | `run.rs` |
 | VM: execution | `vm/exec.rs` (setup, invoke), `vm/frames.rs` (frames, halts), `vm/step.rs` (dispatch loop), `vm/call.rs` (calls, natives), `vm/method_call.rs` (methods, hooks), `vm/json_decode.rs` |
 | VM: values | `vm/arith.rs`, `vm/compare.rs`, `vm/equality.rs`, `vm/hash.rs`, `vm/field_index.rs`, `vm/stmt.rs` (defer, unwind, structs, enums), `vm/builtins.rs`, `vm/globals.rs`, `vm/display.rs`, `vm/core_method.rs`, `vm/list_hof.rs`, `vm/range.rs` |
 | VM: scheduler | `vm/sched_types.rs`, `vm/mnsched.rs`, `vm/mnsched_take.rs`, `vm/mnsched_park.rs`, `vm/mnsched_verdict.rs`, `vm/sched_core.rs`, `vm/sched.rs` (spawn targets, runner guards), `vm/nursery.rs`, `vm/demote.rs`, `vm/worker_loop.rs`, `vm/worker_vm.rs`, `vm/block.rs`, `vm/width.rs`, `vm/quiesce.rs`, `vm/pool.rs`, `vm/blocking_pool.rs`, `vm/runner_cache.rs`, `vm/sched_seed.rs`, `vm/timer.rs` |
 | VM: concurrency values and I/O | `vm/netio.rs` (core accessors, guards), `vm/channel.rs`, `vm/blocking.rs`, `vm/socket.rs`, `vm/shared_methods.rs`, `vm/core.rs`, `vm/boxctx.rs`, `vm/poller.rs`, `vm/fileio.rs`, `vm/stream.rs` |
-| VM: airlock | `vm/airlock_out.rs`, `vm/airlock_in.rs`, `vm/wire.rs`, `vm/crossing.rs` |
+| VM: airlock | `vm/airlock_out.rs`, `vm/airlock_in.rs`, `vm/wire.rs`, `base/crossing.rs` |
 | VM tests | `vm/tests/`, `vm/golden_tests/`, `vm/gc_tests.rs` |
-| Natives | `native/mod.rs` (the seam), one `std.*` module per file such as `native/fs.rs`; `native/cffi.rs` (C FFI) |
+| Natives | `native/mod.rs` (the seam), one `std.*` module per file such as `native/fs.rs`; `native/cffi.rs` (C FFI), `native/std_embed.rs` (the embedded `std/*.chz`) |
 | Tools | `editor/mod.rs`, `test_runner.rs`, `test_support.rs`, `conformance.rs`, `difftest/`, `panicfuzz/`, `schedfuzz/` |

@@ -557,7 +557,7 @@ fn a_declined_licence_latches_nothing() {
 /// TICKET-228 — the `no match arm` fault names a carrier by the pattern that matches it.
 #[test]
 fn no_arm_text_prints_pattern_syntax() {
-    use crate::vm::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
+    use crate::base::op::{VID_ERR, VID_NONE_VARIANT, VID_OK, VID_SOME};
     assert_eq!(Vm::carrier_pattern_text(VID_SOME), Some("?_"));
     assert_eq!(Vm::carrier_pattern_text(VID_OK), Some("?_"));
     assert_eq!(Vm::carrier_pattern_text(VID_ERR), Some("!_"));

@@ -84,7 +84,10 @@ impl Checker {
             }
         }
         if self.in_spawn_block && self.is_captured(name) {
-            self.error(span, format!("'{name}' {}", crate::vm::COPY_WRITE_TAIL));
+            self.error(
+                span,
+                format!("'{name}' {}", crate::base::words::COPY_WRITE_TAIL),
+            );
         }
     }
 
@@ -208,7 +211,7 @@ impl Checker {
             } else {
                 self.error_help(
                     callee.span,
-                    format!("'{name}' {}", crate::vm::COPY_WRITE_TAIL),
+                    format!("'{name}' {}", crate::base::words::COPY_WRITE_TAIL),
                     Some(help),
                 );
             }

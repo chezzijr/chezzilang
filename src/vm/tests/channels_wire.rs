@@ -22,7 +22,7 @@ fn wire_roundtrip_preserves_value_equality() {
     let en = vm.heap.alloc(Obj::Enum {
         // `empty_program` has no variant table, so use the unregistered sentinel (the enum analogue
         // of the struct's `TID_NONE` above) — it round-trips ("?"→VID_NONE→"?") value-equal.
-        variant_id: crate::vm::op::VID_NONE,
+        variant_id: crate::base::op::VID_NONE,
         payload: vec![Value::int(9)],
     });
     let mut m = MapData::default();

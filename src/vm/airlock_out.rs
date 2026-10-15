@@ -512,7 +512,7 @@ impl<'a> WalkSrc<'a> {
     }
 
     /// Resolve a struct instance's `tid` to its type key. Returns `"?"` for
-    /// [`crate::vm::op::TID_NONE`] / an out-of-range id.
+    /// [`crate::base::op::TID_NONE`] / an out-of-range id.
     pub(super) fn struct_name_of_tid(&self, tid: u32) -> &'a str {
         self.program
             .struct_names

@@ -721,8 +721,8 @@ impl Vm {
         // Builtin `Result`/`Option` only — a user enum that shadows `Err`/`None` gets a DISTINCT id
         // (natives hold the fixed `VID_ERR`/`VID_NONE_VARIANT`), so the int compare is exactly the
         // "is this the builtin unhandled-error variant" gate (more precise than the old name compare).
-        let unhandled =
-            *variant_id == crate::vm::op::VID_ERR || *variant_id == crate::vm::op::VID_NONE_VARIANT;
+        let unhandled = *variant_id == crate::base::op::VID_ERR
+            || *variant_id == crate::base::op::VID_NONE_VARIANT;
         if !unhandled {
             return None;
         }
@@ -982,7 +982,7 @@ impl Vm {
     /// The buffered sink is bytes (W6-9); this is one of the CAPTURE boundaries where Rust needs a
     /// `String`, so it decodes lossily here. `chezzi run` (the path a program's stdout actually
     /// reaches an fd) never passes through it and stays byte-exact. Not for a byte-level comparison —
-    /// that takes `vm::run_file_bytes` (see `vm::RunOutputRaw`).
+    /// that takes `run::run_file_bytes` (see `vm::RunOutputRaw`).
     pub fn take_out(&mut self) -> String {
         String::from_utf8_lossy(&self.take_out_bytes()).into_owned()
     }
@@ -1140,7 +1140,7 @@ impl Vm {
     pub(super) fn bind_import(
         &mut self,
         into: GcRef,
-        imp: &crate::resolver::ResolvedImport,
+        imp: &crate::base::module_id::ResolvedImport,
     ) -> Result<(), RuntimeError> {
         use crate::ast::Import;
         let target_idx = self

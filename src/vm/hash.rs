@@ -2,7 +2,7 @@
 //! Split out of `src/vm/arith.rs`. `super::*` is the parent module.
 
 use super::*;
-use crate::checker::Hook;
+use crate::base::hooks::Hook;
 
 impl Vm {
     /// A `u64` hash of `v` for map/set keys, upholding the invariant `values_equal(a,b) ⇒

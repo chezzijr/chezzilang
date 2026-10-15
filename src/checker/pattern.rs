@@ -502,7 +502,7 @@ impl Checker {
                                 span,
                                 format!(
                                     "struct '{}' binds {} field(s), but {} given",
-                                    crate::compiler::bare_display(sname),
+                                    crate::base::words::bare_display(sname),
                                     fields.len(),
                                     bindings.len()
                                 ),
@@ -960,14 +960,14 @@ impl Checker {
                         span,
                         format!(
                             "cannot match a literal against {}",
-                            crate::compiler::bare_display(label.as_str())
+                            crate::base::words::bare_display(label.as_str())
                         ),
                     ),
                     Pattern::Range { .. } => self.error(
                         span,
                         format!(
                             "cannot match a range against {}",
-                            crate::compiler::bare_display(label.as_str())
+                            crate::base::words::bare_display(label.as_str())
                         ),
                     ),
                     Pattern::Ident(..)
@@ -1134,7 +1134,7 @@ impl Checker {
                         enum_name,
                         module_name,
                     } => {
-                        let shown = crate::compiler::bare_display(label.as_str());
+                        let shown = crate::base::words::bare_display(label.as_str());
                         // The constructor spelling: BARE `Point` OR module-qualified `geo.Point` (the
                         // only spelling for a whole-module-imported struct — the bare name isn't in
                         // scope). `resolve_struct_ctor` accepts either against the scrutinee's identity;
@@ -1295,7 +1295,7 @@ impl Checker {
                     let shown = if carrier {
                         scrut.to_string()
                     } else {
-                        crate::compiler::bare_display(label.as_str())
+                        crate::base::words::bare_display(label.as_str())
                     };
                     self.error_help(
                         span,
@@ -1351,7 +1351,7 @@ impl Checker {
         enum_name: Option<&str>,
         module_name: Option<&str>,
     ) -> Result<(), String> {
-        let shown = crate::compiler::bare_display(label);
+        let shown = crate::base::words::bare_display(label);
         if module_name.is_some() {
             return Err(format!(
                 "struct patterns use two-level paths; write `{shown}(...)` or `<module>.{shown}(...)`"
@@ -1508,7 +1508,7 @@ impl Checker {
                             Some(k) => k.clone(),
                             None => match scrut.map(|(k, _)| k) {
                                 Some(s)
-                                    if crate::compiler::bare_display(s) == *en
+                                    if crate::base::words::bare_display(s) == *en
                                         && (self.enum_names.contains(en)
                                             || self.enum_key_imported(s)) =>
                                 {

@@ -201,7 +201,7 @@ impl Checker {
         {
             self.error(
                 callee.span,
-                format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
+                format!("'{written}' {}", crate::base::words::COPY_WRITE_TAIL),
             );
         }
         // What the callee names: ONE answer from the rule table (`resolve.rs`). Every arm below takes
@@ -1453,7 +1453,7 @@ fn type_apply_param_head(obj: &Expr) -> Option<String> {
 
 impl Checker {
     /// Check the arguments of the native handle method `owner.method`. When the pair is a row of
-    /// [`crate::vm::CROSSING_CLOSURE_METHODS`] its closure argument crosses into another heap
+    /// [`crate::base::crossing::CROSSING_CLOSURE_METHODS`] its closure argument crosses into another heap
     /// (an `Executor` job, a `Shared` / `RwShared` box closure), exactly like a `spawn` task's:
     ///
     /// 1. a capture floor at the current scope depth surrounds the argument check, so the closure's
@@ -1472,7 +1472,7 @@ impl Checker {
         args: &[Expr],
         span: Span,
     ) {
-        if !crate::vm::CROSSING_CLOSURE_METHODS.contains(&(owner, method)) {
+        if !crate::base::crossing::CROSSING_CLOSURE_METHODS.contains(&(owner, method)) {
             self.check_args_range(method, params, min_params, args, span);
             return;
         }
@@ -1527,7 +1527,7 @@ impl Checker {
         if let Some(written) = writes.first() {
             self.error(
                 task.span,
-                format!("'{written}' {}", crate::vm::COPY_WRITE_TAIL),
+                format!("'{written}' {}", crate::base::words::COPY_WRITE_TAIL),
             );
         }
     }

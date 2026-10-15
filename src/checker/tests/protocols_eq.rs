@@ -1351,7 +1351,7 @@ fn a_deep_but_finite_chain_stays_within_the_eq_budget() {
 /// [`Checker::eq_bounds_unsatisfied`] directly (`checker/pattern.rs`\'s binary-op arm calls it on both
 /// operands before falling back to `may_be_equal`), the same path the original W7-55 measurement used.
 ///
-/// Deliberately CHECK-only (`check_src`, not a compile+run through [`crate::vm::run_capture`]) — see
+/// Deliberately CHECK-only (`check_src`, not a compile+run through `vm::run_capture`) — see
 /// [`runtime_boundary_is_honoured_at_a_depth_the_old_cap_refused`] below for the "the grant is
 /// honoured at runtime, not just claimed" half at an affordable depth instead.
 #[test]

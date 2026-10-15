@@ -2,7 +2,6 @@
 //! M:N and eager nurseries.
 //! Split out of `src/vm/sched.rs`. `super::*` is the parent module.
 
-use super::crossing::{self};
 use super::sched::JoinCover;
 use super::sched::NestedDrainerSlot;
 use super::sched::SpawnHead;
@@ -11,12 +10,13 @@ use super::sched::cancel_fiber_owned_family;
 use super::sched::join_helpers;
 use super::sched::spawn_worker_thread;
 use super::*;
+use crate::base::crossing::{self};
 
 impl Vm {
     /// `spawn f(args)` / `spawn recv.m(args)` — pop `argc(+1)` operands, deep-copy the args (and, for
     /// the method form, the receiver) across the airlock, and register the task on the innermost
     /// nursery. The callee passes by handle (like `defer`); only data crosses the airlock. `fresh`
-    /// names the checker's operand shapes (see [`super::op::Op::SpawnRecv`]), carried to
+    /// names the checker's operand shapes (see [`crate::base::op::Op::SpawnRecv`]), carried to
     /// [`Vm::rebuild_ready`].
     pub(super) fn do_spawn(
         &mut self,

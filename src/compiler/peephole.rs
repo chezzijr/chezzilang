@@ -17,7 +17,7 @@
 
 use crate::ast::consteval;
 use crate::ast::{BinaryOp, Span};
-use crate::vm::op::{BinKind, Op};
+use crate::base::op::{BinKind, Op};
 
 /// Map a binary-operator op to its `BinKind`, or `None` if it isn't a fusable binop. `Eq`/`NotEq`
 /// are deliberately excluded (they run a different VM path).
@@ -784,7 +784,7 @@ mod tests {
     /// the fold removes 2 ops so the arm bodies move 5→3 and 7→5.
     fn waitpoll(arm_targets: Vec<usize>, else_target: Option<usize>) -> Op {
         let n = arm_targets.len();
-        Op::WaitPoll(Box::new(crate::vm::op::WaitMeta {
+        Op::WaitPoll(Box::new(crate::base::op::WaitMeta {
             n,
             arm_targets,
             else_target,

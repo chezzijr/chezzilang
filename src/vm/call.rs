@@ -22,33 +22,6 @@ pub(super) fn py_blank(c: char) -> bool {
     c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
-/// D4 (TICKET-169, TICKET-179): the ONE table of native methods that mutate their receiver in place.
-/// Layer C faults a task-side call to one of these on an airlock copy; the checker's
-/// `mutates_receiver` (`src/checker/mod.rs`) reads this function for layer A and the DEC-089
-/// warning. A new mutating native goes here and nowhere else:
-/// `checker::tests::receiver_write_table_matches_observed_behavior` runs every native method and
-/// fails until this table agrees with the observed receiver change.
-pub(crate) fn is_mutating_native_kind(kind: &str, method: &str) -> bool {
-    match kind {
-        "List" => matches!(
-            method,
-            "push"
-                | "pop"
-                | "reverse"
-                | "sort"
-                | "sort_by"
-                | "sort_by_key"
-                | "extend"
-                | "insert"
-                | "remove_at"
-        ),
-        "Map" => matches!(method, "remove" | "update"),
-        "Set" => matches!(method, "add" | "remove"),
-        "bytearray" => matches!(method, "push" | "pop" | "extend" | "reverse"),
-        _ => false,
-    }
-}
-
 pub(super) fn is_mutating_native(obj: &Obj, method: &str) -> bool {
     let kind = match obj {
         Obj::List(_) => "List",

@@ -239,7 +239,7 @@ fn parse_int_base_impl(s: &str, base: i64) -> Result<i64, String> {
             "parse_int_base: cannot parse '{s}' in base {radix}"
         ));
     }
-    let Some(digits) = crate::vm::strip_num_underscores_radix(digits, radix) else {
+    let Some(digits) = crate::lexer::strip_num_underscores_radix(digits, radix) else {
         return Err(format!(
             "parse_int_base: cannot parse '{s}' in base {radix}"
         ));

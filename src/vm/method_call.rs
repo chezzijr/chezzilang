@@ -3,7 +3,7 @@
 
 use super::call::is_mutating_native;
 use super::*;
-use crate::checker::Hook;
+use crate::base::hooks::Hook;
 
 impl Vm {
     /// Arity check for a call that enters a compiled PROTO, accepting `min_arity..=arity`.
@@ -853,7 +853,7 @@ impl Vm {
                     .structs
                     .get(name)
                     .map(|d| d.display_name.clone())
-                    .unwrap_or_else(|| crate::compiler::bare_display(name));
+                    .unwrap_or_else(|| crate::base::words::bare_display(name));
                 // W6-3 — a zero-field struct with no `hash` hook is intrinsically `Hashable`
                 // (`proto.rs`), so `x.hash()` in an erased `[T: Hashable]` body must answer with the
                 // SAME constant `declared_hash` gives it as a Map/Set key.
@@ -1010,7 +1010,7 @@ impl Vm {
         let Some((proto, home_idx)) = self.type_method_proto(type_key, method) else {
             let display = match self.program.structs.get(type_key) {
                 Some(def) => format!("'{}'", def.display_name),
-                None => crate::compiler::bare_display(type_key),
+                None => crate::base::words::bare_display(type_key),
             };
             return Err(self.err(
                 format!("type {display} has no static method '{method}'"),

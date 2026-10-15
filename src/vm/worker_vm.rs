@@ -3,9 +3,9 @@
 
 use super::airlock_out::WireMemo;
 use super::airlock_out::ensure_crossable_wire;
-use super::crossing::{self, Route};
 use super::sched::poke_live_scheds;
 use super::*;
+use crate::base::crossing::{self, Route};
 
 impl Vm {
     /// B3.2 — construct a fresh worker `Vm` that shares this VM's compiled program by `Arc`

@@ -1880,7 +1880,7 @@ fn builtin_method_slices_all_resolve() {
     chk_harvested(&harvested(&conc, "Executor"), EXECUTOR_METHODS, "Executor");
 }
 
-/// TICKET-179 grid 1: the receiver-write table (`crate::vm::is_mutating_native_kind`, the one owner
+/// TICKET-179 grid 1: the receiver-write table (`crate::native::is_mutating_native_kind`, the one owner
 /// the checker's `mutates_receiver` reads) is checked against BEHAVIOR. Every harvested native method
 /// of List/Map/Set/bytearray/str/bytes runs on a fresh value, and "did the receiver change" must equal
 /// the table. A harvested method with no sample, or a sample naming an unharvested method, also fails.
@@ -2041,7 +2041,7 @@ fn receiver_write_table_matches_observed_behavior() {
             }
             let src =
                 format!("{setup}\nbefore := \"{{x}}\"\nx.{call}\nprint(\"{{x}}\" != before)\n");
-            let want = crate::vm::is_mutating_native_kind(kind, method);
+            let want = crate::native::is_mutating_native_kind(kind, method);
             match crate::vm::run_capture(&src) {
                 Ok(out) => {
                     let got = out.trim() == "true";

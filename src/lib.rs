@@ -42,13 +42,14 @@ macro_rules! out {
     }};
 }
 
+pub mod base;
 pub mod checker;
 pub mod compiler;
 pub mod desugar;
-pub mod json_decode;
 pub mod manifest;
 pub mod native;
 pub mod resolver;
+pub mod run;
 pub mod test_runner;
 // `Obj::Generator` is a `pub` field wrapping the `pub(crate)` `GeneratorCore`; that is fine for the
 // binary (whose `mod vm` is private) but trips `private_interfaces` once `vm` is `pub`. The VM API is

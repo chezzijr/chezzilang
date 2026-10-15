@@ -59,7 +59,7 @@ impl Checker {
                     self.protocol_method_sig(p, method)
                         .is_some_and(|s| s.is_static)
                 })
-                .map(|p| crate::compiler::bare_display(p))
+                .map(|p| crate::base::words::bare_display(p))
                 .collect();
             hosts.sort();
             let advice = match hosts.first() {

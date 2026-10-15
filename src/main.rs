@@ -12,7 +12,7 @@
 // it just imports the pieces the CLI body drives. (The grammar `conformance` suite and the VM's own
 // golden tests — `src/vm/golden_tests.rs`, the single-engine replacement for the deleted
 // serial-vs-M:N parity tests — now live + run once in the lib's test target, not in this bin.)
-use chezzi::{checker, editor, lexer, manifest, native, parser, resolver, test_runner, vm};
+use chezzi::{checker, editor, lexer, manifest, native, parser, resolver, run, test_runner, vm};
 
 use std::process::ExitCode;
 
@@ -410,7 +410,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let mut cfg = native::HostConfig::from_process(prog_args);
     cfg.stream = true;
     let (errored, exit_code) = {
-        let (_out, _err, result, code) = vm::run_graph_with_entry(graph, cfg, entry_fn.as_deref());
+        let (_out, _err, result, code) = run::run_graph_with_entry(graph, cfg, entry_fn.as_deref());
         (result.err().map(|e| vm::format_trace(&e)), code)
     };
     // Drain + flush the stream writers before ANY exit path, so a trailing `print(…, end="")`, an
@@ -1583,7 +1583,7 @@ mod init_tests {
         // does. Running the FILE directly is scripting-mode (top-level only): it defines `main` but
         // prints nothing.
         let (stdout, stderr, result, _exit) =
-            vm::run_file_with_entry(&main, native::HostConfig::from_process(vec![]), None, None);
+            run::run_file_with_entry(&main, native::HostConfig::from_process(vec![]), None, None);
         assert!(
             result.is_ok(),
             "scaffolded main.chz must load; stderr:\n{stderr}"
@@ -1594,7 +1594,7 @@ mod init_tests {
         );
 
         // Invoking the entry function (what a bare `chezzi run` does) prints the greeting.
-        let (stdout, stderr, result, _exit) = vm::run_file_with_entry(
+        let (stdout, stderr, result, _exit) = run::run_file_with_entry(
             &main,
             native::HostConfig::from_process(vec![]),
             Some("main"),
@@ -1658,7 +1658,7 @@ mod init_tests {
         );
 
         // Calling the named entry function prints the greeting.
-        let (stdout, stderr, result, _exit) = vm::run_file_with_entry(
+        let (stdout, stderr, result, _exit) = run::run_file_with_entry(
             &entry,
             native::HostConfig::from_process(vec![]),
             Some(entry_fn.unwrap()),
@@ -1671,7 +1671,7 @@ mod init_tests {
         );
 
         // A missing entry function is a clear error, not a silent no-op.
-        let (_o, _e, result, _exit) = vm::run_file_with_entry(
+        let (_o, _e, result, _exit) = run::run_file_with_entry(
             &entry,
             native::HostConfig::from_process(vec![]),
             Some("nope"),

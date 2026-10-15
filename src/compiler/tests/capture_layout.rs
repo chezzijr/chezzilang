@@ -1,16 +1,16 @@
 //! M19 lever #3: captures are positional. `GetCaptured` carries a compile-time slot (u32), and
 //! each closure proto records its capture names in slot order (`Proto.capture_names`).
 use super::*;
-use crate::vm::op::Op;
+use crate::base::op::Op;
 
-fn compile(src: &str) -> crate::vm::op::Program {
+fn compile(src: &str) -> crate::base::op::Program {
     let tokens = crate::lexer::tokenize(src).expect("lex");
     let module = crate::parser::parse(tokens).expect("parse");
     compile_module_standalone(&module).expect("compile")
 }
 
 /// Find the first proto that reads a capture, returning its (proto, GetCaptured slots in code order).
-fn captured_slots(prog: &crate::vm::op::Program) -> Vec<u32> {
+fn captured_slots(prog: &crate::base::op::Program) -> Vec<u32> {
     for p in &prog.protos {
         let slots: Vec<u32> = p
             .code
@@ -84,7 +84,7 @@ fn non_closure_proto_has_no_capture_names() {
 /// selected by an ad-hoc match arm (old) or the synthetic `PRELUDE` table (new). This is the
 /// characterization lock the refactor must not move: `print(x)`→`CallPrint(1)`,
 /// `print(x, sep=…)`→`CallPrintSep{argc:1}`, `ord("a")`/`panic("m")`→`CallBuiltin(name, 1)`.
-fn all_ops(prog: &crate::vm::op::Program) -> Vec<Op> {
+fn all_ops(prog: &crate::base::op::Program) -> Vec<Op> {
     prog.protos
         .iter()
         .flat_map(|p| p.code.iter().cloned())

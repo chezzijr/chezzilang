@@ -4,7 +4,7 @@
 use super::arith::cmp_int_f64;
 use super::arith::float_order;
 use super::*;
-use crate::checker::Hook;
+use crate::base::hooks::Hook;
 
 impl Vm {
     pub(super) fn compare(&self, l: Value, r: Value) -> Option<std::cmp::Ordering> {

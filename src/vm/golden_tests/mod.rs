@@ -35,11 +35,12 @@ pub(super) fn golden_entry(src: &str) -> String {
 
 /// Run an entry through the M:N engine with a freshly-built [`crate::native::HostConfig`]. Returns
 /// stdout (raw bytes, W6-9b, decoded here — so a non-UTF-8-emitting program can still be asserted
-/// precisely by a caller that goes through [`crate::vm::run_file_bytes`] directly).
+/// precisely by a caller that goes through [`crate::vm::run_file_engine`] directly).
 fn golden_entry_cfg(src: &str, mk_cfg: impl Fn() -> crate::native::HostConfig) -> String {
     let t = TmpDir::new();
     let entry = t.write("main.chz", src);
-    let (out, _err, _result, _code) = crate::vm::run_file_bytes(&entry, mk_cfg(), None, None);
+    let (out, _err, _result, _code) =
+        crate::vm::run_file_engine(&entry, mk_cfg(), None, None, false);
     captured(out)
 }
 
@@ -77,7 +78,7 @@ pub(super) fn golden_entry_fault(src: &str) -> String {
     e.to_string()
 }
 
-/// Run a multi-file program (one or more `.chz` files) through the M:N engine via `run_file_bytes`,
+/// Run a multi-file program (one or more `.chz` files) through the M:N engine via `run_file_engine`,
 /// and return its stdout. `files` is `(relative_path, contents)`; `entry` names the file to run.
 /// Needed because the single-file `run_capture` can't exercise imports (and std modules require the
 /// import path). RAW BYTES (W6-9b) so a non-UTF-8-emitting program can still be asserted precisely.
@@ -91,11 +92,12 @@ fn golden_file_entry(files: &[(&str, &str)], entry: &str) -> String {
         }
     }
     let entry_path = entry_path.expect("entry must be one of the files");
-    let (out, _err, _result, _code) = crate::vm::run_file_bytes(
+    let (out, _err, _result, _code) = crate::vm::run_file_engine(
         &entry_path,
         crate::native::HostConfig::default(),
         None,
         None,
+        false,
     );
     captured(out)
 }

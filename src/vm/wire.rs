@@ -14,9 +14,9 @@ use super::core::{
     SharedCore, SocketCore, WriterCore,
 };
 use super::fxhash::FxHashMap;
-use super::op::ProtoId;
 use super::value::GcRef;
 use crate::ast::Span;
+use crate::base::op::ProtoId;
 use std::sync::Arc;
 
 /// A single key's position(s) in `entries`. Numeric keys hash injectively (`(n as f64).to_bits()`),

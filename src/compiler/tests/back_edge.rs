@@ -3,7 +3,7 @@
 //! lowering to a BACKWARD `Op::Jump` — pin it here so a future peephole pass cannot thread the
 //! back-edge out of existence and silently make hot loops uncancellable.
 use super::*;
-use crate::vm::op::Op;
+use crate::base::op::Op;
 
 fn has_back_edge(src: &str) -> bool {
     let tokens = crate::lexer::tokenize(src).expect("lex");

@@ -378,7 +378,7 @@ impl Checker {
     /// scalars and `Obj::Str`, then fall through to the error
     /// (`{cast}() cannot convert List`). Catching it here turns a check-OK-then-run-fault into a
     /// clean compile error (the value a statically-typed language adds over Python's runtime `TypeError`).
-    /// Also covers `Ty::Option`/`Ty::Result` (named by `crate::vm::OPTION_VALUE_WORD` / `RESULT_VALUE_WORD` over the written type),
+    /// Also covers `Ty::Option`/`Ty::Result` (named by `crate::base::words::OPTION_VALUE_WORD` / `RESULT_VALUE_WORD` over the written type),
     /// `Ty::Bytes`, `Ty::ByteArray`, and the `Shared`/`Channel` handle family (TICKET-020).
     /// `Ty::Protocol` and `Ty::Module` stay excluded — see `## Decisions` in TICKET-020.
     pub(super) fn reject_non_scalar_cast(&mut self, cast: &str, aty: &Ty, span: Span) {
@@ -395,11 +395,11 @@ impl Checker {
             // as the user wrote it.
             Ty::Option(_) | Ty::Result(..) => {
                 let word = if matches!(aty, Ty::Option(_)) {
-                    crate::vm::OPTION_VALUE_WORD
+                    crate::base::words::OPTION_VALUE_WORD
                 } else {
-                    crate::vm::RESULT_VALUE_WORD
+                    crate::base::words::RESULT_VALUE_WORD
                 };
-                written = crate::vm::carrier_word_for(word, &aty.to_string());
+                written = crate::base::words::carrier_word_for(word, &aty.to_string());
                 &written
             }
             Ty::Bytes => "bytes",

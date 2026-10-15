@@ -25,11 +25,11 @@ impl Vm {
                 Some(Obj::Enum {
                     variant_id,
                     payload,
-                }) if *variant_id == crate::vm::op::VID_SOME => {
+                }) if *variant_id == crate::base::op::VID_SOME => {
                     Some(Some(self.int_val(*payload.first()?)?))
                 }
                 Some(Obj::Enum { variant_id, .. })
-                    if *variant_id == crate::vm::op::VID_NONE_VARIANT =>
+                    if *variant_id == crate::base::op::VID_NONE_VARIANT =>
                 {
                     Some(None)
                 }
