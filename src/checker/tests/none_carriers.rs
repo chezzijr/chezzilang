@@ -1100,7 +1100,7 @@ fn carrier_alias_is_not_a_variant_head() {
 /// TICKET-228 (D6) — hover prints these docs; none names a removed spelling.
 #[test]
 fn module_fn_docs_name_no_removed_spelling() {
-    for (module, docs) in super::MODULE_FN_DOCS {
+    for (module, docs) in crate::checker::graph_pass::MODULE_FN_DOCS {
         for (name, doc) in *docs {
             let hit = doc
                 .split(|c: char| !(c.is_alphanumeric() || c == '_'))

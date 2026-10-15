@@ -2148,7 +2148,7 @@ fn airlock_crossing_grid_compile_cells() {
 /// function that is really exported. A renamed/removed native fn fails here.
 #[test]
 fn module_fn_docs_all_resolve() {
-    for (module, docs) in MODULE_FN_DOCS {
+    for (module, docs) in crate::checker::graph_pass::MODULE_FN_DOCS {
         // Build the EFFECTIVE sig via the graph: math/io/os are file-backed (phase 4d), so their fns
         // are harvested from `std/<M>.chz` and the docs are re-attached by `attach_native_module_metadata`
         // — the graph is the only place their sig exists.
