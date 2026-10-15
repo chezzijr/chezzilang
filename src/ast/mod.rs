@@ -1726,12 +1726,19 @@ impl NodeId {
     }
 }
 
+/// THE one owner of "is this name the blank identifier `_`". `_` binds nothing at every binding
+/// site (a pattern, a target, a wait arm, an `else` guard's error binder) and is never a value;
+/// every reader of that fact calls this, never compares with `"_"` itself.
+pub fn is_blank_name(name: &str) -> bool {
+    name == "_"
+}
+
 impl Expr {
     /// The blank identifier `_` as a plain-`=` assignment target (TICKET-142): evaluate and discard,
     /// never a variable. The one test for it, whether the target stands alone (`_ = e`) or is one
     /// element of a tuple target (`a, _ = t`).
     pub fn is_blank(&self) -> bool {
-        matches!(&self.kind, ExprKind::Ident(n) if n == "_")
+        matches!(&self.kind, ExprKind::Ident(n) if is_blank_name(n))
     }
 
     /// A parser- or desugar-built node with a fresh id.

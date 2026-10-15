@@ -120,7 +120,12 @@ fn every_path_in_the_owner_index_exists() {
             continue;
         };
         named += 1;
-        let path = Path::new("src").join(rel);
+        // `tests/...` names an integration test at the repo root; every other path is under `src/`.
+        let path = if rel.starts_with("tests/") {
+            PathBuf::from(rel)
+        } else {
+            Path::new("src").join(rel)
+        };
         let exists = if rel.ends_with('/') {
             path.is_dir()
         } else {

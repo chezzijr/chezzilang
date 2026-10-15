@@ -122,7 +122,7 @@ impl Checker {
         self.globals.clear();
         for s in stmts {
             let mut add = |name: &str, kind: DeclKind| {
-                if name != "_" {
+                if !crate::ast::is_blank_name(name) {
                     self.globals
                         .entry(name.to_string())
                         .or_default()

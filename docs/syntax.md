@@ -4158,7 +4158,7 @@ fn handle(conn: Conn):
 | `match f(): ?v: … !e: …` | handles every outcome by pattern, and may produce a value | no |
 
 **`else` = handle and leave.** `v := f() else e: <block>` binds `v` on success. On failure the block
-runs with the error bound to `e`, and it MUST leave: `return` (including `return !e`), `break`,
+runs with the error bound to `e` (`else _:` binds nothing, like `else:`), and it MUST leave: `return` (including `return !e`), `break`,
 `continue`, `panic(...)`, `os.exit(n)`, or an `if` / `match` whose every branch leaves. It never
 produces a value; a default comes from `??`, a computed value from `match`.
 

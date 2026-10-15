@@ -285,7 +285,9 @@ impl Parser {
         let err = match self.peek() {
             Token::Ident(_) => {
                 let name_span = self.cur_span();
-                Some((self.expect_ident()?, name_span))
+                let name = self.expect_ident()?;
+                // `else _:` binds nothing, the same as `else:`.
+                (!is_blank_name(&name)).then_some((name, name_span))
             }
             Token::Colon => None,
             t @ Token::Int(_)

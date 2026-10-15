@@ -856,7 +856,7 @@ impl Parser {
             // Bare expr, no `:=`/`=` — a send arm.
             return Ok(WaitArmKind::Send { call: lhs });
         }
-        let target = if matches!(lhs.kind, ExprKind::Ident(ref n) if n == "_") {
+        let target = if lhs.is_blank() {
             Pattern::Wildcard
         } else if is_assign_target(&lhs, listed) {
             let id = crate::ast::NodeId::fresh();

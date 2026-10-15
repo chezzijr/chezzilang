@@ -222,7 +222,7 @@ impl Parser {
             }
             // `_` is an identifier; it's a wildcard unless followed by `(` (a payload, i.e. a
             // variant literally named `_`).
-            Token::Ident(name) if name == "_" && self.peek_at(1) != &Token::LParen => {
+            Token::Ident(name) if is_blank_name(name) && self.peek_at(1) != &Token::LParen => {
                 self.advance();
                 return Ok(Pattern::Wildcard);
             }
@@ -509,7 +509,7 @@ impl Parser {
 /// (`Pattern::Ident`). Every target the parser builds (`:=`, typed let, `for`, comprehension, wait
 /// arm) goes through it, so a blank is encoded one way.
 pub(super) fn bind_leaf(name: String, span: Span) -> Pattern {
-    if name == "_" {
+    if is_blank_name(&name) {
         Pattern::Wildcard
     } else {
         Pattern::Ident(name, span, crate::ast::NodeId::fresh())

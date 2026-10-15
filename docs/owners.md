@@ -19,7 +19,7 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | A removed spelling used as a bare name | `reject_removed_name` (`parser/mod.rs`) | |
 | Constant value of an expression | `eval` (`ast/consteval.rs`) | overflow lint, width check, const |
 | Fewest args a decl may be entered with | `min_callable_params` (`ast/mod.rs`) | DUPLICATE: `optional_tail` (`checker/mod.rs`) and its runtime copy in `native/mod.rs` |
-| `_` wildcard | DUPLICATE: `bind_leaf` (`parser/pattern.rs`), `parse_pattern` (`parser/pattern.rs`) and the wait-arm head in `parser/stmt.rs`, `is_blank` (`ast/mod.rs`), `collect_module_globals` (`checker/globals.rs`), the recover binder in `compiler/expr.rs`, the ident read in `checker/infer_ops.rs` | target: one `ast::is_blank_name` |
+| Is this name the blank `_` | `is_blank_name` (`ast/mod.rs`) | the parser encodes a blank at every binding site (`Pattern::Wildcard`, an `else _:` binder as no binder); `tests/owner_guards.rs` rejects a `== "_"` anywhere else |
 | Valid assignment target | DUPLICATE: `is_assign_target` (`parser/pattern.rs`), `check_assign` (`checker/assign.rs`), the store matches in `compile_assign` (`compiler/assign.rs`) | target: `ExprKind::is_place` |
 | `head[X]` is a type application | `is_named_head` (`ast/mod.rs`) | DUPLICATE: an inline copy in `parse_postfix` (`parser/expr.rs`) and 2 checker probes |
 | Grammar | `docs/grammar.bnf` | DUPLICATE with the hand parser; `conformance.rs` compares accept/reject only; waits on G5 |

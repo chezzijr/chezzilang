@@ -473,9 +473,7 @@ impl Compiler {
         fc.patch_jump(success);
         fc.begin_scope();
         let mut not_err = None;
-        if let Some((name, _)) = err
-            && name != "_"
-        {
+        if let Some((name, _)) = err {
             // `MatchArm` writes a raw value; the named binding (a cell when a closure captures
             // it) is declared from that slot.
             let raw = fc.add_hidden();

@@ -898,3 +898,17 @@ fn width_type_local_annotation_rejected() {
         "describes the C boundary only",
     );
 }
+
+/// `_` is the blank identifier at the `else` guard's error binder too: `else _:` binds nothing, so a
+/// read of `_` in the guard body is the blank-read error. It was check-OK and then a compiler panic
+/// (`global '_' has no slot`): the checker bound `_` as a local and the compiler did not.
+#[test]
+fn else_guard_blank_binder_binds_nothing() {
+    let guarded = |body: &str| {
+        format!(
+            "fn f() -> int!:\n    return !\"boom\"\nfn main():\n    x := f() else _:\n        {body}\n        return\n    print(x)\nmain()\n"
+        )
+    };
+    rejects(&guarded("print(_)"), "cannot use '_' as a value");
+    ok(&guarded("print(\"err\")"));
+}
