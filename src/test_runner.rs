@@ -1154,9 +1154,6 @@ fn is_test_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     /// Process-wide lock serializing the `--max-heap` tests that submit hundreds of jobs to a real
     /// `Executor` (`vm::pool` is a single process-wide `OnceLock`, shared by every test in the
@@ -1177,26 +1174,7 @@ mod tests {
     /// keeps the cap tight AND deterministic.
     static EXEC_MEM_CAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct TmpDir(PathBuf);
-    impl TmpDir {
-        fn new() -> Self {
-            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir =
-                std::env::temp_dir().join(format!("chezzi_test_{}_{}", std::process::id(), n));
-            std::fs::create_dir_all(&dir).unwrap();
-            TmpDir(dir)
-        }
-        fn write(&self, rel: &str, contents: &str) -> PathBuf {
-            let p = self.0.join(rel);
-            std::fs::write(&p, contents).unwrap();
-            p
-        }
-    }
-    impl Drop for TmpDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TmpDir;
 
     #[test]
     fn b4_happy_path_all_pass() {

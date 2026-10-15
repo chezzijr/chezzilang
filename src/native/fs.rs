@@ -637,7 +637,6 @@ pub const MEMBERS: &[(&str, NativeFn, Kind)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A minimal `Host` for exercising the fs natives in isolation. `strs` holds string args by
     /// index; `ints` holds int args by index (only `chmod`'s mode arg today) so the same host serves
@@ -716,25 +715,11 @@ mod tests {
         }
     }
 
-    /// A unique temp subdir per call (mirror the VM `TmpDir` counter pattern), auto-removed on drop.
-    struct TmpDir(std::path::PathBuf);
-    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-    impl TmpDir {
-        fn new() -> Self {
-            let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let mut p = std::env::temp_dir();
-            p.push(format!("chezzi_fs_test_{}_{n}", std::process::id()));
-            std::fs::create_dir_all(&p).unwrap();
-            TmpDir(p)
-        }
-        fn join(&self, name: &str) -> String {
-            self.0.join(name).to_string_lossy().into_owned()
-        }
-    }
-    impl Drop for TmpDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    use crate::test_support::TmpDir;
+
+    /// `rel` inside `tmp`, as the `str` a native fs call takes.
+    fn at(tmp: &TmpDir, rel: &str) -> String {
+        tmp.join(rel).to_string_lossy().into_owned()
     }
 
     fn is_ok(r: NativeRet) -> bool {
@@ -748,26 +733,26 @@ mod tests {
     fn fs_mutations_roundtrip() {
         let tmp = TmpDir::new();
         // mkdir (recursive: creates nested parents).
-        let nested = tmp.join("a/b/c");
+        let nested = at(&tmp, "a/b/c");
         assert!(is_ok(mkdir(&mut host(&[&nested])).unwrap()));
         assert!(Path::new(&nested).is_dir());
         // mkdir is idempotent on an existing dir.
         assert!(is_ok(mkdir(&mut host(&[&nested])).unwrap()));
 
         // append creates the file if absent, then appends (never truncates).
-        let f = tmp.join("a/b/c/log.txt");
+        let f = at(&tmp, "a/b/c/log.txt");
         assert!(is_ok(append(&mut host(&[&f, "hello"])).unwrap()));
         assert!(is_ok(append(&mut host(&[&f, " world"])).unwrap()));
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "hello world");
 
         // rename moves the file.
-        let renamed = tmp.join("a/b/c/moved.txt");
+        let renamed = at(&tmp, "a/b/c/moved.txt");
         assert!(is_ok(rename(&mut host(&[&f, &renamed])).unwrap()));
         assert!(!Path::new(&f).exists());
         assert!(Path::new(&renamed).exists());
 
         // copy duplicates the file contents.
-        let copied = tmp.join("a/b/c/copy.txt");
+        let copied = at(&tmp, "a/b/c/copy.txt");
         assert!(is_ok(copy(&mut host(&[&renamed, &copied])).unwrap()));
         assert_eq!(std::fs::read_to_string(&copied).unwrap(), "hello world");
         assert!(Path::new(&renamed).exists()); // source still there
@@ -786,21 +771,21 @@ mod tests {
     fn fs_mutation_errors_are_recoverable() {
         let tmp = TmpDir::new();
         // remove_file on a missing path → Err (not panic, not Ok).
-        let missing = tmp.join("nope.txt");
+        let missing = at(&tmp, "nope.txt");
         assert!(is_err(remove_file(&mut host(&[&missing])).unwrap()));
         // remove_dir on a non-empty dir → Err (non-recursive).
-        let dir = tmp.join("d");
+        let dir = at(&tmp, "d");
         std::fs::create_dir(&dir).unwrap();
-        std::fs::write(tmp.join("d/x"), "x").unwrap();
+        std::fs::write(at(&tmp, "d/x"), "x").unwrap();
         assert!(is_err(remove_dir(&mut host(&[&dir])).unwrap()));
         // rename / copy from a missing source → Err.
-        let dst = tmp.join("dst.txt");
+        let dst = at(&tmp, "dst.txt");
         assert!(is_err(rename(&mut host(&[&missing, &dst])).unwrap()));
         assert!(is_err(copy(&mut host(&[&missing, &dst])).unwrap()));
         // mkdir where a parent component is a FILE → Err.
-        let file = tmp.join("file");
+        let file = at(&tmp, "file");
         std::fs::write(&file, "x").unwrap();
-        let under_file = tmp.join("file/sub");
+        let under_file = at(&tmp, "file/sub");
         assert!(is_err(mkdir(&mut host(&[&under_file])).unwrap()));
     }
 
@@ -886,9 +871,9 @@ mod tests {
     #[test]
     fn fs_canonicalize_resolves_symlink() {
         let tmp = TmpDir::new();
-        let target = tmp.join("target.txt");
+        let target = at(&tmp, "target.txt");
         std::fs::write(&target, "x").unwrap();
-        let link = tmp.join("link.txt");
+        let link = at(&tmp, "link.txt");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         // canonicalize(link) resolves to the real target path.
         let got = ok_str(canonicalize(&mut host(&[&link])).unwrap());
@@ -896,7 +881,7 @@ mod tests {
         assert_eq!(got, want.to_string_lossy());
         // A nonexistent path errs (canonicalize requires the path to exist).
         assert!(is_err(
-            canonicalize(&mut host(&[&tmp.join("nope")])).unwrap()
+            canonicalize(&mut host(&[&at(&tmp, "nope")])).unwrap()
         ));
     }
 
@@ -906,7 +891,7 @@ mod tests {
     fn fs_chmod_sets_mode() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TmpDir::new();
-        let f = tmp.join("f");
+        let f = at(&tmp, "f");
         std::fs::write(&f, "x").unwrap();
         assert!(is_ok(chmod(&mut host_path_mode(&f, 0o644)).unwrap()));
         assert_eq!(
@@ -920,7 +905,7 @@ mod tests {
         );
         // chmod on a missing path errs.
         assert!(is_err(
-            chmod(&mut host_path_mode(&tmp.join("nope"), 0o644)).unwrap()
+            chmod(&mut host_path_mode(&at(&tmp, "nope"), 0o644)).unwrap()
         ));
     }
 
@@ -928,7 +913,7 @@ mod tests {
     #[test]
     fn fs_atomic_write_writes_and_leaves_no_temp() {
         let tmp = TmpDir::new();
-        let f = tmp.join("out.txt");
+        let f = at(&tmp, "out.txt");
         assert!(is_ok(atomic_write(&mut host(&[&f, "hello"])).unwrap()));
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "hello");
         // Overwrite atomically.
@@ -942,7 +927,7 @@ mod tests {
         assert_eq!(names, vec!["out.txt".to_string()]);
         // A nonexistent parent dir errs.
         assert!(is_err(
-            atomic_write(&mut host(&[&tmp.join("no/dir/x.txt"), "y"])).unwrap()
+            atomic_write(&mut host(&[&at(&tmp, "no/dir/x.txt"), "y"])).unwrap()
         ));
     }
 
@@ -964,7 +949,7 @@ mod tests {
     #[test]
     fn fs_stat_reads_metadata() {
         let tmp = TmpDir::new();
-        let f = tmp.join("hello.txt");
+        let f = at(&tmp, "hello.txt");
         std::fs::write(&f, "hello\n").unwrap(); // 6 bytes
         let (name, fields) = ok_struct_fields(stat(&mut host(&[&f])).unwrap());
         assert_eq!(name, "FileInfo");
@@ -982,12 +967,12 @@ mod tests {
         assert_eq!(fields[5].1, NativeRet::Bool(false)); // is_symlink
 
         // stat a directory → is_dir true / is_file false.
-        let (_, dfields) = ok_struct_fields(stat(&mut host(&[&tmp.join(".")])).unwrap());
+        let (_, dfields) = ok_struct_fields(stat(&mut host(&[&at(&tmp, ".")])).unwrap());
         assert_eq!(dfields[3].1, NativeRet::Bool(true)); // is_dir
         assert_eq!(dfields[4].1, NativeRet::Bool(false)); // is_file
 
         // stat a missing path → Err (recoverable, not a fault).
-        assert!(is_err(stat(&mut host(&[&tmp.join("nope")])).unwrap()));
+        assert!(is_err(stat(&mut host(&[&at(&tmp, "nope")])).unwrap()));
     }
 
     /// `stat` follows symlinks for size/is_file (matches `stat`/os.stat default) but reports
@@ -996,9 +981,9 @@ mod tests {
     #[test]
     fn fs_stat_follows_symlink_but_flags_it() {
         let tmp = TmpDir::new();
-        let target = tmp.join("t.txt");
+        let target = at(&tmp, "t.txt");
         std::fs::write(&target, "abcd").unwrap(); // 4 bytes
-        let link = tmp.join("link.txt");
+        let link = at(&tmp, "link.txt");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (_, fields) = ok_struct_fields(stat(&mut host(&[&link])).unwrap());
         assert_eq!(fields[0].1, NativeRet::Int(4)); // size = target (followed)
@@ -1028,24 +1013,24 @@ mod tests {
     #[test]
     fn fs_walk_recursive_sorted() {
         let tmp = TmpDir::new();
-        let root = tmp.join("root");
+        let root = at(&tmp, "root");
         std::fs::create_dir(&root).unwrap();
-        std::fs::write(tmp.join("root/a.txt"), "a").unwrap();
-        std::fs::write(tmp.join("root/b.txt"), "b").unwrap();
-        std::fs::create_dir(tmp.join("root/sub")).unwrap();
-        std::fs::write(tmp.join("root/sub/c.txt"), "c").unwrap();
+        std::fs::write(at(&tmp, "root/a.txt"), "a").unwrap();
+        std::fs::write(at(&tmp, "root/b.txt"), "b").unwrap();
+        std::fs::create_dir(at(&tmp, "root/sub")).unwrap();
+        std::fs::write(at(&tmp, "root/sub/c.txt"), "c").unwrap();
         let got = ok_str_list(walk(&mut host(&[&root])).unwrap());
         assert_eq!(
             got,
             vec![
-                tmp.join("root/a.txt"),
-                tmp.join("root/b.txt"),
-                tmp.join("root/sub"),
-                tmp.join("root/sub/c.txt"),
+                at(&tmp, "root/a.txt"),
+                at(&tmp, "root/b.txt"),
+                at(&tmp, "root/sub"),
+                at(&tmp, "root/sub/c.txt"),
             ]
         );
         // walk a missing root → Err.
-        assert!(is_err(walk(&mut host(&[&tmp.join("nope")])).unwrap()));
+        assert!(is_err(walk(&mut host(&[&at(&tmp, "nope")])).unwrap()));
     }
 
     /// `walk` lists a symlinked directory entry but does NOT recurse into it (cycle guard).
@@ -1053,20 +1038,20 @@ mod tests {
     #[test]
     fn fs_walk_does_not_follow_symlink_dirs() {
         let tmp = TmpDir::new();
-        let root = tmp.join("r");
+        let root = at(&tmp, "r");
         std::fs::create_dir(&root).unwrap();
-        let real = tmp.join("r/real");
+        let real = at(&tmp, "r/real");
         std::fs::create_dir(&real).unwrap();
-        std::fs::write(tmp.join("r/real/x.txt"), "x").unwrap();
+        std::fs::write(at(&tmp, "r/real/x.txt"), "x").unwrap();
         // A symlink to the sibling dir — must be listed but NOT descended.
-        std::os::unix::fs::symlink(&real, tmp.join("r/lnk")).unwrap();
+        std::os::unix::fs::symlink(&real, at(&tmp, "r/lnk")).unwrap();
         let got = ok_str_list(walk(&mut host(&[&root])).unwrap());
         assert_eq!(
             got,
             vec![
-                tmp.join("r/lnk"), // symlink entry listed, not recursed
-                tmp.join("r/real"),
-                tmp.join("r/real/x.txt"),
+                at(&tmp, "r/lnk"), // symlink entry listed, not recursed
+                at(&tmp, "r/real"),
+                at(&tmp, "r/real/x.txt"),
             ]
         );
     }
@@ -1078,8 +1063,8 @@ mod tests {
     fn fs_walk_error_names_the_failing_subdir_not_the_root() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TmpDir::new();
-        let root = tmp.join("wroot");
-        let sub = tmp.join("wroot/sub");
+        let root = at(&tmp, "wroot");
+        let sub = at(&tmp, "wroot/sub");
         std::fs::create_dir(&root).unwrap();
         std::fs::create_dir(&sub).unwrap();
         std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -1101,7 +1086,7 @@ mod tests {
     fn fs_walk_unreadable_root_still_names_the_root() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TmpDir::new();
-        let root = tmp.join("wroot2");
+        let root = at(&tmp, "wroot2");
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
         let got = walk(&mut host(&[&root])).unwrap();
@@ -1122,7 +1107,7 @@ mod tests {
     fn fs_atomic_write_preserves_target_mode() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TmpDir::new();
-        let f = tmp.join("secret");
+        let f = at(&tmp, "secret");
         std::fs::write(&f, "old").unwrap();
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(is_ok(atomic_write(&mut host(&[&f, "new"])).unwrap()));

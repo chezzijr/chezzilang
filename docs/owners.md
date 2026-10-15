@@ -88,6 +88,12 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Range value at run time | `as_range` — `vm/range.rs` | |
 | How a native fn runs | `Kind` in the `MEMBERS` rows — `native/mod.rs` | |
 
+## Tests
+
+| Fact | Owner | Notes |
+|---|---|---|
+| Unit-test fixture temp directory | `TmpDir` — `test_support.rs` | one counter, so two live fixtures never share a path; `main.rs` and `tests/` are other crates and keep their own |
+
 ## File map
 
 One line per source file: the topic it owns. Put new code in the file that owns its topic.

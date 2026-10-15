@@ -72,6 +72,10 @@ pub mod editor;
 #[cfg(test)]
 mod conformance;
 
+// The lib's shared unit-test helpers (`TmpDir`).
+#[cfg(test)]
+pub(crate) mod test_support;
+
 /// Stack size for the front-end (resolve → desugar → check → compile) thread.
 ///
 /// The front-end walks the AST with several *recursive* tree-walkers — `desugar::walk_expr`, the

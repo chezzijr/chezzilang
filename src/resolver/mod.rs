@@ -1052,36 +1052,8 @@ fn normalize(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    /// A unique temp directory, removed on drop.
-    struct TmpDir(PathBuf);
-    impl TmpDir {
-        fn new() -> Self {
-            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir = std::env::temp_dir().join(format!("chezzi_res_{}_{}", std::process::id(), n));
-            std::fs::create_dir_all(&dir).unwrap();
-            TmpDir(dir)
-        }
-        fn write(&self, rel: &str, contents: &str) -> PathBuf {
-            let p = self.0.join(rel);
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&p, contents).unwrap();
-            p
-        }
-        fn path(&self, rel: &str) -> PathBuf {
-            self.0.join(rel)
-        }
-    }
-    impl Drop for TmpDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TmpDir;
 
     // 0-std. `std.*` module source comes from the EMBEDDED table (an installed binary has no checkout).
     // NOTE: this must never set/unset `$CHEZZI_STD` — it is process-global and every other test in this
@@ -1178,7 +1150,7 @@ mod tests {
         let d = TmpDir::new();
         d.write("chezzi.toml", "[project]\nentrypoint = \"main\"\n");
         let entry = d.write("main.chz", "(((\n");
-        let root = d.path("");
+        let root = d.join("");
         let graph =
             build_graph_with_entry_source_and_root(&entry, Some("x := 1\n".into()), Some(root))
                 .expect("in-memory entry should resolve despite unparseable bytes on disk");
@@ -1265,7 +1237,7 @@ mod tests {
         let t = TmpDir::new();
         let entry = t.write("sub/main.chz", "fn main(): print(1)\n");
         let root = find_root(&entry);
-        assert_eq!(canonical_or_abs(&root), canonical_or_abs(&t.path("sub")));
+        assert_eq!(canonical_or_abs(&root), canonical_or_abs(&t.join("sub")));
     }
 
     // 3. Local dotted path → <root>/a/b/c.chz.
@@ -1543,7 +1515,7 @@ mod tests {
     fn find_root_from_dir_walks_up() {
         let t = TmpDir::new();
         t.write("chezzi.toml", "");
-        let nested = t.path("sub/deep");
+        let nested = t.join("sub/deep");
         std::fs::create_dir_all(&nested).unwrap();
         // From a nested dir we find the root.
         let root = find_root_from_dir(&nested).expect("should find root");
@@ -1557,7 +1529,7 @@ mod tests {
     #[test]
     fn find_root_from_dir_none_without_marker() {
         let t = TmpDir::new();
-        let nested = t.path("a/b");
+        let nested = t.join("a/b");
         std::fs::create_dir_all(&nested).unwrap();
         assert!(
             find_root_from_dir(&nested).is_none(),
@@ -1584,7 +1556,7 @@ mod tests {
         let entry = module_file(&["src".into(), "main".into()], &root, &std_root());
         assert_eq!(
             canonical_or_abs(&entry),
-            canonical_or_abs(&t.path("src/main.chz"))
+            canonical_or_abs(&t.join("src/main.chz"))
         );
 
         let graph = build_graph(&entry).unwrap();
@@ -1597,7 +1569,7 @@ mod tests {
             .expect("lib must resolve");
         assert_eq!(
             canonical_or_abs(&lib.id.0),
-            canonical_or_abs(&t.path("lib.chz")),
+            canonical_or_abs(&t.join("lib.chz")),
             "import lib must be root-relative; labels: {labels:?}"
         );
         // `import src.utils.common` resolves to <root>/src/utils/common.chz.
@@ -1608,7 +1580,7 @@ mod tests {
             .expect("src.utils.common must resolve");
         assert_eq!(
             canonical_or_abs(&common.id.0),
-            canonical_or_abs(&t.path("src/utils/common.chz")),
+            canonical_or_abs(&t.join("src/utils/common.chz")),
             "import src.utils.common must be root-relative; labels: {labels:?}"
         );
         assert!(labels.contains(&"lib".to_string()));
@@ -1671,7 +1643,7 @@ mod tests {
             );
         }
         let entry = t.write("m11.chz", "fn f(): print(1)\n");
-        let entry_id = ModuleId(canonical_or_abs(&t.path("m0.chz")));
+        let entry_id = ModuleId(canonical_or_abs(&t.join("m0.chz")));
         let mut b = deep_chain_builder(t.0.clone(), 8);
         let err = b
             .visit(&entry_id, &[], Span::RUNTIME)
@@ -1696,7 +1668,7 @@ mod tests {
             );
         }
         t.write("m11.chz", "fn f(): print(1)\n");
-        let entry_id = ModuleId(canonical_or_abs(&t.path("m0.chz")));
+        let entry_id = ModuleId(canonical_or_abs(&t.join("m0.chz")));
         let mut b = deep_chain_builder(t.0.clone(), 8);
         let err = b.visit(&entry_id, &[], Span::RUNTIME).unwrap_err();
         // The offending import lives inside a non-entry module, so it carries a module prefix and

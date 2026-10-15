@@ -4830,38 +4830,9 @@ mod tests;
 mod graph_tests {
     //! M4.5 cross-module type-checking tests (`check_graph` over real tempdir fixtures).
     use super::*;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::path::Path;
 
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    pub(super) struct TmpDir(PathBuf);
-    impl TmpDir {
-        pub(super) fn new() -> Self {
-            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir =
-                std::env::temp_dir().join(format!("chezzi_chk_graph_{}_{}", std::process::id(), n));
-            std::fs::create_dir_all(&dir).unwrap();
-            TmpDir(dir)
-        }
-        /// The fixture directory this handle owns, and deletes on drop.
-        pub(super) fn path(&self) -> &Path {
-            &self.0
-        }
-        fn write(&self, rel: &str, contents: &str) -> PathBuf {
-            let p = self.0.join(rel);
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&p, contents).unwrap();
-            p
-        }
-    }
-    impl Drop for TmpDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TmpDir;
 
     fn check_entry(entry: &Path) -> Result<(), Vec<CheckError>> {
         let graph = crate::resolver::build_graph(entry).expect("graph should build");

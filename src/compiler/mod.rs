@@ -8548,33 +8548,8 @@ mod carrier_lowering_tests {
 #[cfg(test)]
 mod file_id_tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    pub(super) struct TmpDir(PathBuf);
-    impl TmpDir {
-        pub(super) fn new() -> Self {
-            let n = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir = std::env::temp_dir().join(format!("chezzi_fid_{}_{}", std::process::id(), n));
-            std::fs::create_dir_all(&dir).unwrap();
-            TmpDir(dir)
-        }
-        pub(super) fn write(&self, rel: &str, contents: &str) -> PathBuf {
-            let p = self.0.join(rel);
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&p, contents).unwrap();
-            p
-        }
-    }
-    impl Drop for TmpDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TmpDir;
 
     /// Entry imports TWO modules (`a`, `b`) that each import a further module (`c`, `d`) — so the
     /// resolver's DFS pre-order `file` id assignment (parent parses before its imports recurse,
@@ -9003,7 +8978,7 @@ hesc := fn(xs: List[int]) -> int: hpush(xs)
 
     #[test]
     fn generator_slot_privacy_grid() {
-        let t = super::file_id_tests::TmpDir::new();
+        let t = crate::test_support::TmpDir::new();
         t.write("chezzi.toml", "[project]\nname = \"g\"\n");
         t.write("h.chz", H);
         let entry = t.write("main.chz", MAIN);
@@ -9210,7 +9185,7 @@ c := d6([xs])
     /// `(name, private_slots, deep_slots)`.
     #[test]
     fn generator_deep_privacy_grid() {
-        let t = super::file_id_tests::TmpDir::new();
+        let t = crate::test_support::TmpDir::new();
         t.write("chezzi.toml", "[project]\nname = \"g\"\n");
         let entry = t.write("main.chz", DEEP);
         let graph = crate::resolver::build_graph(&entry).expect("graph should build");

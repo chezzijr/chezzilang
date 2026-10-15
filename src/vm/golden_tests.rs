@@ -140,30 +140,8 @@ main()
 }
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-static PARITY_TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-struct TmpDir(PathBuf);
-impl TmpDir {
-    fn new() -> Self {
-        let n = PARITY_TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("chezzi_par_{}_{}", std::process::id(), n));
-        std::fs::create_dir_all(&dir).unwrap();
-        TmpDir(dir)
-    }
-    fn write(&self, rel: &str, contents: &str) -> PathBuf {
-        let p = self.0.join(rel);
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&p, contents).unwrap();
-        p
-    }
-}
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use crate::test_support::TmpDir;
 
 /// ONE-WAY RATCHET (supersedes commit 9829f94): a reserved builtin TYPE name used as a user
 /// generic type parameter is REJECTED at check time with `type 'X' is reserved (builtin)` — it is
