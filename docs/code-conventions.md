@@ -41,7 +41,11 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
   Same family as the worktree stale-binary trap: when verifying, also beware that a `cd` into a worktree
   PERSISTS across shell calls, so a later `./target/release/chezzi` silently means the worktree's binary
   — use absolute paths for any main-vs-branch comparison.
-- Unit tests live next to the code in `#[cfg(test)] mod tests`.
+- Unit tests live next to the code in `#[cfg(test)] mod tests`. A large suite is a directory with one
+  file per topic (`src/checker/tests/`, `src/vm/tests/`, `src/vm/golden_tests/`, `src/parser/tests/`,
+  `src/compiler/tests/`): shared helpers live in its `mod.rs`, and **a new test goes in the file that
+  owns its topic, next to its siblings — never appended to the end of an unrelated file** (appends at
+  the end of one 42k-line file were the source of most merge conflicts). No fitting file: add one.
 - **Testing is HYBRID — write the test in Chezzi if you can, fall back to Rust only when you can't.**
   A test that asserts a program's **observable behavior** (a value, a collection, a fault message)
   belongs in the native suite **`tests/chz/`** as `test fn` + `assert` (`spec/` = language behavior,
@@ -63,7 +67,7 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
 - **ONE ENGINE.** The bytecode VM on its M:N scheduler is the sole engine — the tree-walk interpreter
   and the cooperative `--serial` VM are both **removed** (`--serial` since 2026-08-16). There are no
   per-engine test-helper pairs any more: `run_capture`/`run_program`/`run_file` (and the golden
-  helpers — `src/vm/golden_tests.rs`, `assert_golden_out`/`golden_entry*`, renamed from the historical
+  helpers — `src/vm/golden_tests/`, `assert_golden_out`/`golden_entry*`, renamed from the historical
   `parity_tests.rs`/`assert_parity*` on 2026-08-16) all run the one engine and compare against a
   **literal golden**. A helper that runs the program twice and diffs the two runs against each other proves
   nothing — give it a real expectation.

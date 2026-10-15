@@ -121,5 +121,9 @@ One line per source file: the topic it owns. Put new code in the file that owns 
 | `vm/{block,width,quiesce,crossing,boxctx,core,wire,heap,value,op,poller,pool,blocking_pool,runner_cache,sched_seed,range,stream,timer,chzstr,fxhash}.rs` | see each file's `//!` header |
 | `native/*.rs` | one `std.*` module per file; `native/mod.rs` is the seam |
 | `editor/mod.rs` | LSP-independent editor logic |
+| `checker/tests/`, `checker/graph_tests.rs` | checker unit tests, one file per topic; helpers in `tests/mod.rs` |
+| `vm/tests/`, `vm/golden_tests/`, `vm/gc_tests.rs` | VM unit and golden tests, one file per topic; helpers in each `mod.rs` |
+| `parser/tests/`, `compiler/tests/` | parser and compiler unit tests, one file per topic |
+| `test_support.rs` | shared unit-test helpers (`TmpDir`) |
 | `test_runner.rs` | `chezzi test` |
 | `difftest/`, `panicfuzz/`, `schedfuzz/` | fuzz oracles (`#[path]`-included by `src/bin` and `tests/`) |
