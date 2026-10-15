@@ -4,10 +4,15 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
 
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
 - Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` →
-  `desugar` → `checker` → `compiler` → `vm` (the engine of record; its `impl Vm` is split across
-  `vm/{exec,arith,call,sched,netio,stmt}.rs`), plus `gc`, `native` (builtins / std),
-  `resolver` (module paths). (The tree-walk `interp` engine has been removed.)
-- Keep modules small and single-purpose.
+  `desugar` → `checker` → `compiler` → `vm` (the engine of record), plus `native` (builtins / std),
+  `resolver` (module paths). (The tree-walk `interp` engine has been removed.) Each phase is split
+  into one file per topic; `docs/owners.md` maps every file and names the one owner of each fact.
+- Keep modules small and single-purpose. **One topic per file**: the file's first line names the
+  topic, a production file has at most 2,500 lines and a test file at most 3,500
+  (`tests/source_layout.rs`, no exemptions). A big `impl` is split by topic into sibling files, each
+  `use super::*;` + `impl Type { .. }`; a module root re-exports a split-out child with
+  `pub use child::*;` so no caller path changes. Moving an owner means updating its row in
+  `docs/owners.md` in the same commit: the same test checks each row names the file that defines it.
 - **No wildcard arm on an enum in library or binary code.** `Cargo.toml` denies
   `clippy::wildcard_enum_match_arm`; add an exhaustive classifier on the enum first, name the variants
   second, and raise `PINNED_ALLOWS` in `tests/wildcard_enum_lint_gate.rs` for an `#[allow]` (with a

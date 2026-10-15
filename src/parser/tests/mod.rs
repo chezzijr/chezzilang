@@ -1,3 +1,5 @@
+//! Parser unit tests, one file per topic. `super::*` is the `parser` module.
+
 use super::*;
 use crate::lexer;
 

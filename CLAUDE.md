@@ -59,8 +59,8 @@ before you change an area a rule names (native fns, checker warnings, tests, enu
 read that rule's entry there.
 
 - Commits: single-line conventional (`feat:`, `fix:`, `chore:`, `docs:`, `test:`). No body.
-- Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` → `desugar` → `checker` → `compiler` → `vm` (the engine of record; its `impl Vm` is split across `vm/{exec,arith,call,sched,netio,stmt}.rs`), plus `gc`, `native` (builtins / std), `resolver` (module paths).
-- Keep modules small and single-purpose.
+- Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` → `desugar` → `checker` → `compiler` → `vm` (the engine of record), plus `native` (builtins / std), `resolver` (module paths). Each phase is split into one file per topic: `docs/owners.md` maps every file.
+- Keep modules small and single-purpose: one topic per file, a first line that names it, at most 2,500 lines (3,500 for a test file). `cargo test --test source_layout` enforces it and checks `docs/owners.md`.
 - **No wildcard arm on an enum in library or binary code.**
 - **New builtin types/ctors/fns go in their owning `std.*` module (import-gated), NOT the global reserved namespace.**
 - **A new native fn's `MEMBERS` entry is `(name, fn, Kind)` — the third element is not paperwork.**
