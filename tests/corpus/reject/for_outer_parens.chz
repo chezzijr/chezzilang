@@ -1,0 +1,4 @@
+# rule: forStmt
+# expect: outer parentheses
+for (a, b) in xs:
+    f()

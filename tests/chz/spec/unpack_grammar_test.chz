@@ -1,0 +1,90 @@
+# TICKET-261 (U9) — one unpacking grammar at `:=`, `=`, `for`, a comprehension, a wait arm. Outside
+# `match` only tuples unpack; `_` skips a slot; a nested target takes parentheses, the whole target
+# takes none; a bare tuple ends a statement. Each expected value is the CPython 3.14 output of the
+# same program (`for a, (b, c) in [(1, (2, 3))]` -> `1 2 3`, `x = 1, 2` -> `(1, 2)`, ...).
+# Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
+
+fn divmod(a: int, b: int) -> (int, int):
+    return a / b, a % b
+
+fn gen_pairs() -> Iterator[(int, (int, int))]:
+    yield 1, (2, 3)
+    yield 4, (5, 6)
+
+test fn nested_walrus_binds_every_leaf():
+    a, (b, c) := (1, (2, 3))
+    assert a == 1 and b == 2 and c == 3
+
+test fn blank_skips_a_slot():
+    a, _ := (1, 2)
+    assert a == 1
+    x, (_, z) := (1, (2, 3))
+    assert x == 1 and z == 3
+
+test fn nested_for_over_a_list():
+    out := ""
+    for a, (b, c) in [(1, (2, 3))]:
+        out = "{a} {b} {c}"
+    assert out == "1 2 3"
+
+test fn pair_for_over_a_set_of_tuples():
+    out := ""
+    for a, b in {(1, "x")}:
+        out = "{a} {b}"
+    assert out == "1 x"
+
+test fn pair_for_over_a_map_is_the_ordinary_unpack():
+    total := 0
+    for k, v in {1: 10, 2: 20}:
+        total += k * v
+    assert total == 50
+
+test fn nested_for_over_a_generator():
+    total := 0
+    for a, (b, c) in gen_pairs():
+        total += a + b + c
+    assert total == 21
+
+test fn nested_comprehension_target():
+    got := {a: b + c for a, (b, c) in [(1, (2, 3))]}
+    assert got == {1: 5}
+    xs := [a for a, (_, c) in [(1, (2, 3)), (4, (5, 6))] if c > 3]
+    assert xs == [4]
+
+test fn nested_assign():
+    p := 0
+    q := 0
+    r := 0
+    p, (q, r) = (9, (8, 7))
+    assert p == 9 and q == 8 and r == 7
+    p, (q, r) = (r, (p, q))
+    assert p == 7 and q == 9 and r == 8
+
+test fn bare_tuple_ends_a_statement():
+    x := 1, 2
+    assert x == (1, 2)
+    y: (int, int) = 3, 4
+    assert y == (3, 4)
+    y = 5, 6
+    assert y == (5, 6)
+    assert divmod(7, 2) == (3, 1)
+
+test fn nested_wait_arm():
+    ch := Channel[(int, (int, int))](1)
+    ch.send((4, (5, 6)))
+    got := 0
+    wait:
+        e, (f, g) := ch.recv():
+            got = e + f + g
+    assert got == 15
+
+test fn nested_wait_arm_assigns_places():
+    ch := Channel[(int, (int, int))](1)
+    ch.send((4, (5, 6)))
+    a := 0
+    b := 0
+    c := 0
+    wait:
+        a, (b, c) = ch.recv():
+            pass
+    assert a == 4 and b == 5 and c == 6

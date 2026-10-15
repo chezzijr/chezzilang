@@ -1,0 +1,12 @@
+# rule: bindList, bindElem, letLhs, forStmt, compClause, waitArm, lvalue, assignStmt
+t := (1, (2, 3))
+a, (b, c) := t
+x, _ := (1, 2)
+for p, (q, r) in [(1, (2, 3))]:
+    print(p, q, r)
+sums := [i + j + k for i, (j, k) in [(1, (2, 3))]]
+ch := Channel[(int, (int, int))](1)
+wait:
+    d, (e, f) := ch.recv():
+        print(d, e, f)
+a, (b, c) = t

@@ -188,7 +188,20 @@ print(t.1)        # 1
 # t.0 = "b"  → type error: cannot assign to field '0' of (str, int)
 a, b := t         # destructuring is the other way in — see §3
 a, b := 1, 2      # a value list destructures the same way (Go, CPython)
+a, (b, c) := (1, (2, 3))   # a nested target takes parentheses; `_` skips a slot
+x := 1, 2         # a bare tuple ends a statement: `x` is `(1, 2)` (CPython); so do `x = 3, 4`,
+                  # `return a / b, a % b` and `yield a, b`
 ```
+
+**One unpacking grammar (rule U9).** `:=`, `=`, `for`, a comprehension clause and a `wait:` arm share
+one target grammar: names separated by commas, a nested target in parentheses, `_` for a skipped slot
+(`a, (b, c) := t`, `for k, (a, b) in xs`, `[a for a, (_, c) in xs]`). The whole target takes **no outer
+parentheses** (`(a, b) := t` and `for (a, b) in xs` are errors; CPython accepts both — a deliberate
+divergence). Outside `match` only **tuples** unpack, and the element of any iterable unpacks the same
+way: `for a, b in {(1, "x")}` over a Set, a Map's `(key, value)` pair, a generator, a channel. A struct or
+an enum variant unpacks in `match` only; a list pattern and `*rest` do not exist. The checker owns the
+arity (`tuple pattern has 2 element(s), but the value has 3`; `tuple pattern cannot match a value of
+type int`). `_` is never a value: `for _ in xs: print(_)` is `cannot use '_' as a value`.
 
 Destructuring (`a, b := t`, or `for a, b in pairs`) is usually what you want; `.N` matters where you
 can't bind names — inside a single-expression closure, for instance `xs.sort_by_key(fn(p) -> int: p.1)`.
@@ -307,7 +320,9 @@ A `_` element of a multi-target `=` discards its element too: `a, _ = (1, 2)` an
 (Python and Go accept both).
 `_` is never declared, so it has no type to freeze and no global slot, and reading it is an error
 (`cannot use '_' as a value`; Go: `cannot use _ as value or type`). `_ := 5; print(_)` printed `5`
-before. A loop variable, parameter or match pattern named `_` still binds as before. `_ := f()`
+before. A `for` loop variable and a comprehension variable named `_` skip the slot too (rule U9:
+`for _ in xs: print(_)` is `cannot use '_' as a value`, as in Go); a parameter or match pattern named
+`_` still binds as before. `_ := f()`
 stays a `let`, not an expression statement, so it does not fire the discarded-`T!E` warning.
 
 #### Unused locals warn (TICKET-090)
@@ -1657,10 +1672,11 @@ for k in counts.keys():  # the keys are `counts.keys()`
 for k, v in counts:    # two names unpack each (key, value) pair like any tuple element
     print("{k}={v}")
 
-for a, b in pairs:     # destructure a tuple element — N names over any iterable of tupleN: a
-    print("{a}:{b}")   #    List[(A, B)], a generator, an .iter() cursor, a `next` struct, a
+for a, b in pairs:     # destructure a tuple element — a tuple target over any iterable of tuples: a
+    print("{a}:{b}")   #    List[(A, B)], a Set, a generator, an .iter() cursor, a `next` struct, a
                         #    Channel[(A, B)], a Map or an Iterable[(A, B)] value (one name binds the whole
-                        #    tuple). enumerate/zip live in std.iter.
+                        #    tuple; a nested target `for k, (a, b) in xs` unpacks the nested tuple).
+                        #    enumerate/zip live in std.iter.
 
 # `for` over a List/Map/Set iterates a SNAPSHOT of the SPINE, taken once when the loop starts —
 # shallow: the elements are the same objects (mutating a struct element IS visible), but pushing,
@@ -1880,7 +1896,7 @@ and exists on `List` and `bytearray` only. `str.reverse()` is removed.
 [x for x in xs if x > 0 for y in ys]   # a guard may follow ANY clause (filters that clause)
 ```
 
-One or more `for` clauses, each binding one name (or two — `for k, v in m` — over a map's entries)
+One or more `for` clauses, each binding one name (or a tuple target — `for k, v in m`, `for a, (b, c) in xs`)
 and optionally followed by one or more `if` guards. With multiple clauses the iteration nests like
 nested `for` loops — the first clause is outermost, the last innermost — so a later clause may
 reference an earlier clause's binding (`for xs in xss for y in xs`), and a guard after a non-final
@@ -4860,7 +4876,8 @@ fn fetch_all(urls: List[str]):
   satisfaction (TICKET-024) and the module-scoped keying short-circuit (TICKET-027) at once.
 - **`wait:` (select)** — race several channel `recv`s AND `send`s; the first ready arm wins (deterministic
   source-order priority, not Go's random fairness). `wait:` then arms: recv `v := ch.recv():` (or
-  `result = ch.recv():` / `_ := ch.recv():`), **send** `ch.send(v):` (a bare `.send()`, binds nothing —
+  `result = ch.recv():` / `_ := ch.recv():` / a tuple target `a, (b, c) := ch.recv():` or
+  `a, (x.f, ys[0]) = ch.recv():`), **send** `ch.send(v):` (a bare `.send()`, binds nothing —
   ready when the channel can accept the value: bounded-with-space / unbounded / closed→faults), an optional
   non-blocking `else:` (must be last), and `timer` arms for timeouts. A closed+empty *recv*-arm is skipped;
   a closed *send*-arm faults `"send on a closed channel"`; all-closed + no ready send + no `else` faults.

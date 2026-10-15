@@ -1,0 +1,8 @@
+# rule: plainLet, assignStmt, returnStmt, yieldStmt
+x := 1, 2
+y: (int, int) = 3, 4
+x = 5, 6
+fn pair(a: int, b: int) -> (int, int):
+    return a, b
+fn gen() -> Iterator[(int, int)]:
+    yield 1, 2

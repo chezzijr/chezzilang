@@ -51,32 +51,39 @@
 <plainStmt>  ::= <assignStmt> | <returnStmt> | <yieldStmt> | <breakStmt> | <continueStmt> | <passStmt> | <assertStmt> | <spawnCallStmt>
 
 # ===== simple statements =====
-# The third form is a destructuring binding: `a, b, … := expr` binds a tuple's elements positionally.
-# Only `:=` introduces destructuring binds (`a, b = …` is multi-target *re*assignment — see below).
-# A same-arity value list (`a, b := 1, 2`) is the tuple written without parentheses.
+# The third form is a destructuring binding: `a, (b, c) := expr` binds a tuple's elements
+# positionally (U9: one unpacking grammar at `:=`, `for`, a comprehension clause and a wait arm).
+# A nested target takes parentheses and `_` skips a slot; the whole target takes none. Only tuples
+# unpack outside `match`. Only `:=` introduces destructuring binds (`a, b = …` is multi-target
+# *re*assignment — see below). A value list (`x := 1, 2`, `a, b := 1, 2`) is the tuple written
+# without parentheses; the checker owns the arity.
 # An optional `CONST` before the typed-let's <type> is the `const T` immutable-binding modifier
 # (`PI: const int = 3`) — the checker rejects any later reassignment of the name. `CONST` is rejected
-# on a <param> type and on a destructuring (<identList>) let.
+# on a <param> type and on a destructuring (<bindList>) let.
 # The `else` guard (design D4) follows the whole value, a line or a block value: its block runs
 # when the value is absent or an error, and must leave (`return`, `break`, `continue`, `panic`).
 <letStmt>  ::= <plainLet> | <letLhs> <expr> <elseGuard> | <letLhs> <blockValue> <elseGuard>
 # A let with no guard ends as every simple statement does (<value>). A value list
-# (`a, b := 1, 2`) takes no guard and no block value.
+# (`x := 1, 2`, `a, b := 1, 2`) takes no guard and no block value.
 <plainLet> ::= <letLhs> <value>
-             | <identList> "WALRUS" <exprList> "COMMA" <expr> "NEWLINE"
-# On a destructuring (<identList>) the guard takes the call's own error (`a, b := f() else e:`):
+             | <letLhs> <exprList> "COMMA" <expr> "NEWLINE"
+# On a destructuring (<bindList>) the guard takes the call's own error (`a, b := f() else e:`):
 # splitting a tuple cannot fail.
 <letLhs>   ::= "IDENT" "WALRUS"
              | "IDENT" "COLON" <type> <typeAssign>
              | "IDENT" "COLON" "CONST" <type> <typeAssign>
-             | <identList> "WALRUS"
+             | <bindList> "WALRUS"
 # The `=` after a type. `T!= v` lexes `!=` as ONE token and means `T! = v`: the type takes the `!`.
 <typeAssign> ::= "ASSIGN" | "NOTEQ"
 # `else:` handles an absent `T?` (or ignores an error); `else e:` binds the error of a `T!E`.
 <elseGuard> ::= "ELSE" <block> | <errGuard>
 # The guard with a binder. On the line of an inline `if` / `elif` it is the only guard (<ifBlock>).
 <errGuard>  ::= "ELSE" "IDENT" <block>
-<identList> ::= "IDENT" "COMMA" "IDENT" | "IDENT" "COMMA" <identList>
+# A binding target: two or more comma-separated elements, each a name (`_` skips a slot) or a
+# parenthesized nested target. Used at `:=`, `for`, a comprehension clause and a wait arm.
+<bindList>  ::= <bindElem> "COMMA" <bindElems>
+<bindElems> ::= <bindElem> | <bindElem> "COMMA" <bindElems>
+<bindElem>  ::= "IDENT" | "LPAREN" <bindElem> "COMMA" <bindElems> "RPAREN"
 
 # Assignment target is restricted to a name / field / index (the parser's lvalue guard):
 # an lvalue is a bare IDENT, or any postfix expression that *ends* in `.field` or `[index]`
@@ -85,6 +92,7 @@
 # either a same-arity value list (`a, b = b, a`) or a single tuple-valued RHS (`a, b = f()`).
 # Only `=` takes a block value (`x = match n: ...`); a compound assignment takes an expression.
 <assignStmt> ::= <lvalue> "ASSIGN" <value>
+               | <lvalue> "ASSIGN" <exprList> "COMMA" <expr> "NEWLINE"
                | <lvalue> "PLUSEQ" <expr> "NEWLINE"
                | <lvalue> "MINUSEQ" <expr> "NEWLINE"
                | <lvalue> "STAREQ" <expr> "NEWLINE"
@@ -97,18 +105,20 @@
                | <lvalue> "SHREQ" <expr> "NEWLINE"
                | <lvalueList> "ASSIGN" <exprList> "COMMA" <expr> "NEWLINE"
                | <lvalueList> "ASSIGN" <value>
-<lvalueList> ::= <lvalue> "COMMA" <lvalue> | <lvalue> "COMMA" <lvalueList>
+# A multi-target list nests like a binding target: an element is an lvalue or a parenthesized list.
+<lvalueList> ::= <lvalueElem> "COMMA" <lvalueElem> | <lvalueElem> "COMMA" <lvalueList>
+<lvalueElem> ::= <lvalue> | "LPAREN" <lvalueList> "RPAREN"
 <lvalue> ::= "IDENT"
            | <postfix> "DOT" "IDENT"
            | <postfix> "LBRACKET" <expr> "RBRACKET"
 
 # A "RETURN" is legal only inside a fn, method or closure body; at module level the checker reports 'return' outside a function (TICKET-186; CPython's SyntaxError).
-<returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <value>
+<returnStmt> ::= "RETURN" "NEWLINE" | "RETURN" <value> | "RETURN" <exprList> "COMMA" <expr> "NEWLINE"
 
 # `yield <expr>` (generators) — always carries a value. Legal only inside a generator
 # function (one that uses `yield`; the `-> Iterator[T]` return type is required).
 # Checker-enforced, not grammar. Suspends the generator.
-<yieldStmt> ::= "YIELD" <value>
+<yieldStmt> ::= "YIELD" <value> | "YIELD" <exprList> "COMMA" <expr> "NEWLINE"
 
 # `defer <call>` (form 1) — the call-only restriction is enforced by the checker
 # (context-sensitive), not the grammar. `defer:` (form 2) takes an indented block whose body runs
@@ -411,7 +421,7 @@
 <elseFinal> ::= "ELSE" <block>
 
 <forStmt>   ::= "FOR" "IDENT" "IN" <expr> <block>
-            | "FOR" <identList> "IN" <expr> <block>
+            | "FOR" <bindList> "IN" <expr> <block>
 <whileStmt> ::= "WHILE" <expr> <block>
 
 # Concurrency (C1): a `parallel:` nursery and the two `spawn` forms. `parallel:` and the block form
@@ -434,6 +444,7 @@
 <waitStmt> ::= "WAIT" "COLON" "NEWLINE" "INDENT" <waitArms> "DEDENT"
 <waitArms> ::= <waitArm> | <waitArm> <waitArms>
 <waitArm>  ::= <expr> "WALRUS" <expr> <block>
+             | <bindList> "WALRUS" <expr> <block>
              | <expr> "ASSIGN" <expr> <block>
              | <expr> <block>
              | "ELSE" <block>
@@ -749,13 +760,13 @@
 
 # Comprehensions: `[elem for x in it]` (list), `{elem for x in it}` (set), `{k: v for x in it}`
 # (map). One or more `for` clauses (nested/cartesian iteration, first clause outermost — later
-# clauses see earlier clauses' bindings); each clause binds one name (or two, for `for k, v in m`)
+# clauses see earlier clauses' bindings); each clause binds one name (or a tuple target, `for k, (a, b) in m`)
 # and may be followed by zero or more `if` guards (an `if` may follow any clause, even a chain).
 <compClauses> ::= <compClause> | <compClause> <compClauses>
 <compClause>  ::= "FOR" "IDENT" "IN" <expr>
                 | "FOR" "IDENT" "IN" <expr> <compGuards>
-                | "FOR" <identList> "IN" <expr>
-                | "FOR" <identList> "IN" <expr> <compGuards>
+                | "FOR" <bindList> "IN" <expr>
+                | "FOR" <bindList> "IN" <expr> <compGuards>
 <compGuards>  ::= "IF" <expr> | "IF" <expr> <compGuards>
 
 # Expression-position `match`/`if` (value-producing, distinct from the statement forms above).
