@@ -3215,12 +3215,18 @@ pub(super) enum ChainLink {
     Slice,
 }
 
+mod branch;
 mod builtin_type;
+mod closure;
 mod exhaust;
 mod expr;
 mod flow;
+mod fn_value;
 mod fn_writes;
 mod globals;
+mod infer;
+mod infer_access;
+mod infer_ops;
 mod pattern;
 mod resolve;
 // `pub(crate)` for `proto::INTRINSIC_PROTO_METHODS` — the intrinsic-grant ↔ VM-arm pairing table,

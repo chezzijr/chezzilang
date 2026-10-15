@@ -1,7 +1,7 @@
 // checker::expr — split out of checker/mod.rs. `super::*` == the `checker` module.
 // Expression & call inference, keyword calls, type application, indexing.
 
-use super::pattern::WrittenTypeArgs;
+use super::fn_value::WrittenTypeArgs;
 use super::resolve::PathPos;
 use super::setup::{HeadBinding, TypeHead, TypeHeadKind};
 use super::*;
@@ -281,7 +281,7 @@ impl Checker {
             && let ExprKind::Ident(m) = &obj.kind
             && self.json_decode_member(m, name)
         {
-            let sig = super::pattern::json_decode_sig();
+            let sig = super::infer_access::json_decode_sig();
             if args.len() != sig.params.len()
                 || type_args.len() != sig.type_params.len()
                 || !named.is_empty()
