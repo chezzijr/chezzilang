@@ -4,6 +4,9 @@
 
 use super::*;
 
+// ===== Generic fn as a VALUE (scope A + B) — runtime is generic-ERASED, so a RUN test is still
+// required per accepted case (the bind-import trap: a checker-accept that faults at runtime).
+
 #[test]
 fn generic_fn_value_turbofish_parity() {
     // B — turbofish on a fn value.

@@ -1,4 +1,5 @@
-// Extracted from vm/mod.rs (test module). `super::` == the `vm` module.
+//! VM unit tests, one file per topic; shared helpers and fixtures live here. `super::*` is the
+//! `vm` module.
 use super::*;
 
 /// Assert an UNCAUGHT fault yields the expected stdout and that it actually faulted.
@@ -137,12 +138,6 @@ fn ran_standalone(src: &str) -> Vm {
     vm
 }
 
-/// D5 owe #3 Path C (#1) — the deadlock false-positive fix. A demoted (blocked-in-callback) fiber
-/// polls its OWN channel queue; a value a sibling already queued there is invisible to the
-/// counter-only predicate (a `send` `push_back`s + notifies the channel condvar — it does NOT bump
-/// `runnable`). Registering the demoted channel lets `is_deadlocked` peek it: a non-empty queue
-/// means that fiber WILL pop + make progress (possibly waking a parked sibling), so an apparent
-/// all-blocked quiesce is NOT a deadlock — don't fault an innocent parked sibling.
 /// TICKET-181 — a demoted fiber's waiter on an empty `recv` of `core`, watching `cancel`.
 fn recv_waiter(core: &Arc<ChannelCore>, cancel: Vec<Arc<AtomicBool>>) -> Waiter {
     Waiter {
@@ -216,14 +211,14 @@ fn vm_sources() -> Vec<(String, String)> {
 }
 
 /// `text` without its inline test modules: each `#[cfg(test)]` + `mod NAME {` block, through the
-/// closing `}` at column 0. A `mod NAME;` declaration stays.
+/// first line that starts with `}` at column 0 (its closing brace). A `mod NAME;` declaration stays.
 fn strip_inline_test_mods(text: &str) -> String {
     let mut out = String::new();
     let mut skipping = false;
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
         if skipping {
-            if line == "}" {
+            if line.starts_with('}') {
                 skipping = false;
             }
             continue;

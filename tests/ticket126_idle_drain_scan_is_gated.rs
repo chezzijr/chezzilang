@@ -8,7 +8,7 @@
 //! (`tests/no_wall_clock_ratio_gates.rs`) and this needs to be RED on `main`'s production code
 //! unchanged, with no test-only instrumentation.
 //!
-//! Red on base: `take_runnable` calls `c.cancelled_scope_awaiting_drain()` directly. Green once the
+//! Red on base: `take_runnable` calls `c.cancelled_scope_awaiting_drain(self)` directly. Green once the
 //! fix routes that call through a generation gate (e.g. `SchedCore::drain_scan_due`) that skips the
 //! scan while no cancel flag has tripped since the sched's last scan found nothing.
 
@@ -26,11 +26,22 @@ fn take_runnable_gates_the_idle_cancel_drain_scan() {
         }
         let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
         read += 1;
-        assert!(
-            !src.contains("c.cancelled_scope_awaiting_drain()"),
-            "src/vm/{name}: take_runnable still calls `c.cancelled_scope_awaiting_drain()` directly \
-             on every idle pass; it must go through a cancel-generation gate instead (TICKET-126, W13-24)"
-        );
+        // The raw O(scopes) scan is private to `SchedCore`: only its own methods (receiver `self`,
+        // that is `drain_scan_due` and `any_cancelled_scope_awaiting_drain`) may call it. Any
+        // other receiver (`c.` in `take_runnable`) is a direct call on the idle path.
+        const SCAN: &str = "cancelled_scope_awaiting_drain(";
+        for (at, _) in src.match_indices(SCAN) {
+            let before = &src[..at];
+            let allowed =
+                before.ends_with("fn ") || before.ends_with("any_") || before.ends_with("self.");
+            let line = before.lines().count() + usize::from(before.ends_with('\n'));
+            assert!(
+                allowed,
+                "src/vm/{name}:{line}: a call of `{SCAN}..)` outside `SchedCore`'s own methods scans \
+                 every idle pass; it must go through the cancel-generation gate `drain_scan_due` \
+                 (TICKET-126, W13-24)"
+            );
+        }
     }
     assert!(read > 0, "found no source under src/vm");
 }

@@ -1400,6 +1400,41 @@ fn ffi_goldens_are_not_unconditionally_linux_gated() {
             unconditionally_gated.push(fn_name);
         }
     }
+    // The suite is split into topic files: a gate on a whole file switches off every golden in
+    // it. No file opens with an inner `#![cfg(...)]`, and no `mod` line in `golden_tests/mod.rs`
+    // or `vm/mod.rs`'s `mod golden_tests;` carries a `target_os` gate.
+    for entry in std::fs::read_dir(fixture("src/vm/golden_tests")).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        if text.lines().any(|l| l.trim_start().starts_with("#![cfg")) {
+            unconditionally_gated.push("a whole golden_tests file (inner #![cfg])");
+        }
+    }
+    for (file, text) in [
+        (
+            "golden_tests/mod.rs",
+            std::fs::read_to_string(fixture("src/vm/golden_tests/mod.rs")).unwrap(),
+        ),
+        (
+            "vm/mod.rs",
+            std::fs::read_to_string(fixture("src/vm/mod.rs")).unwrap(),
+        ),
+    ] {
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let is_suite_mod =
+                line.starts_with("mod ") && (file != "vm/mod.rs" || *line == "mod golden_tests;");
+            let gated = is_suite_mod
+                && lines[..i]
+                    .iter()
+                    .rev()
+                    .take_while(|l| l.starts_with("#["))
+                    .any(|l| l.contains("target_os"));
+            if gated {
+                unconditionally_gated.push("a golden_tests module declaration (target_os cfg)");
+            }
+        }
+    }
     assert!(
         unconditionally_gated.is_empty(),
         "FFI goldens are unconditionally Linux-gated, so cargo test is green on other \

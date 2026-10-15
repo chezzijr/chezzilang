@@ -4,6 +4,17 @@
 
 use super::*;
 
+// ===== std.cancel TREE PROPAGATION (parent/child derivation) =====
+//
+// A child token derived from a parent observes the parent's cancellation/timeout transitively
+// (root-to-leaves, one-directional). The link is LIVE (each node's `Shared` flag + the immediate
+// parent's `Channel[Token]` registry cross the airlock as live cores), so a parent cancel is pushed
+// into every already-derived descendant — including children that crossed `spawn`/`parallel:`.
+// Cancelling a child never touches the parent.
+//
+// Each test runs an inline Chezzi snippet through the real module graph (`import std.cancel`
+// needs `run_file`, not the standalone compile path). The `print`s are the assertion surface.
+
 /// A derived child observes a manual parent cancel (transitive, live link). Child starts live.
 #[test]
 fn cancel_child_polls_parent_cancel() {

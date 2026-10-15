@@ -3,6 +3,8 @@
 
 use super::*;
 
+// ===== entry points =====
+
 /// W6-9 — the CAPTURE boundary. The buffered sink is BYTES (so `Writer.write_bytes` reaches an
 /// `io.stdout()` backing unchanged), but every test helper and embedder API hands stdout back as a
 /// `String`. Decode lossily here — the ONLY place a `U+FFFD` can now appear. `chezzi run` STREAMS

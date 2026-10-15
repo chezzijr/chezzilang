@@ -6,7 +6,7 @@ The full text of every convention, moved out of `CLAUDE.md` (which every agent t
 - Each compiler phase is its own module under `src/`: `lexer` → `parser` → `ast` →
   `desugar` → `checker` → `compiler` → `vm` (the engine of record), plus `native` (builtins / std),
   `resolver` (module paths). (The tree-walk `interp` engine has been removed.) Each phase is split
-  into one file per topic; `docs/owners.md` maps every file and names the one owner of each fact.
+  into one file per topic; `docs/owners.md` maps each area to its files and names the one owner of each fact.
 - Keep modules small and single-purpose. **One topic per file**: the file's first line names the
   topic, a production file has at most 2,500 lines and a test file at most 3,500
   (`tests/source_layout.rs`, no exemptions). A big `impl` is split by topic into sibling files, each

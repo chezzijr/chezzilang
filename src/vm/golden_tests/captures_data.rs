@@ -1517,6 +1517,3 @@ fn widen_all_int_literal_collection_stays_int() {
 fn widen_mixed_comparisons_pinned() {
     widen_three_engines("print(1 < 2.3)\nprint(1 == 2.3)\n", "true\nfalse\n");
 }
-
-// ===== Generic fn as a VALUE (scope A + B) — runtime is generic-ERASED, so a RUN test is still
-// required per accepted case (the bind-import trap: a checker-accept that faults at runtime).

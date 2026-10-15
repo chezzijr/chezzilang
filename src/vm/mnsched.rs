@@ -1,5 +1,6 @@
-//! VM: the M:N scheduler: `SchedCore` registration and `MnSched` (inject, claim, take, park and
-//! wake, steal, finish, cancel drain, deadlock and quiesce), offload and timer sleeps.
+//! VM: the M:N scheduler core: `SchedCore` scope bookkeeping and `MnSched` setup (scope
+//! registration, injection, slots, runners, bodies, helpers, scope cancel). Taking, parking and the
+//! verdicts are in `mnsched_take.rs`, `mnsched_park.rs` and `mnsched_verdict.rs`.
 //! Split out of `src/vm/mod.rs`. `super::*` is the parent module.
 
 use super::*;

@@ -926,6 +926,12 @@ fn deadlock_predicate_suppressed_by_inflight_offload() {
     );
 }
 
+/// D5 owe #3 Path C (#1) — the deadlock false-positive fix. A demoted (blocked-in-callback) fiber
+/// polls its OWN channel queue; a value a sibling already queued there is invisible to the
+/// counter-only predicate (a `send` `push_back`s + notifies the channel condvar — it does NOT bump
+/// `runnable`). Registering the demoted channel lets `is_deadlocked` peek it: a non-empty queue
+/// means that fiber WILL pop + make progress (possibly waking a parked sibling), so an apparent
+/// all-blocked quiesce is NOT a deadlock — don't fault an innocent parked sibling.
 #[test]
 fn deadlock_predicate_vetoed_by_queued_value_on_demoted_channel() {
     let sched = mk_sched(2);

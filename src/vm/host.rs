@@ -522,5 +522,3 @@ pub(crate) fn parse_i64_pep515(s: &str) -> Result<i64, IntParseErr> {
         | _ => IntParseErr::Malformed,
     })
 }
-
-// ===== entry points =====
