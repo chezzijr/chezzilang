@@ -561,6 +561,11 @@ fn bare_tuple_ends_a_statement() {
         files: vec![("main.chz".to_string(), format!("{body}\nmain()\n"))],
         expect: Expect::Prints(want.to_string()),
     };
+    let reject_cell = |name: &str, body: &str, want: &'static str| Cell {
+        name: name.to_string(),
+        files: vec![("main.chz".to_string(), format!("{body}\nmain()\n"))],
+        expect: Expect::Rejects(want),
+    };
     run_grid(
         "bare-tuple",
         &[
@@ -622,6 +627,32 @@ fn bare_tuple_ends_a_statement() {
                 )],
                 expect: Expect::Rejects("tuple pattern has 2 element(s), but the value has 3"),
             },
+            // U9: a multi-name target takes no outer parentheses, at every site.
+            reject_cell(
+                "outer parens at :=",
+                "fn main():\n    (a, b) := (1, 2)",
+                "left side of ':=' must be a name",
+            ),
+            reject_cell(
+                "outer parens at =",
+                "fn main():\n    a := 0\n    b := 0\n    (a, b) = (1, 2)",
+                "invalid assignment target",
+            ),
+            reject_cell(
+                "outer parens at for",
+                "fn main():\n    for (a, b) in [(1, 2)]:\n        pass",
+                "takes no outer parentheses",
+            ),
+            reject_cell(
+                "outer parens in a comprehension",
+                "fn main():\n    print([a for (a, b) in [(1, 2)]])",
+                "takes no outer parentheses",
+            ),
+            reject_cell(
+                "outer parens in a wait arm",
+                "fn main():\n    ch := Channel[(int, int)](1)\n    ch.send((1, 2))\n    wait:\n        (a, b) := ch.recv():\n            pass",
+                "left side of ':=' in a wait arm must be a name",
+            ),
             Cell {
                 name: "value list takes no else guard".to_string(),
                 files: vec![(

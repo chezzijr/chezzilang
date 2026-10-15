@@ -720,15 +720,15 @@ impl Parser {
         )))
     }
 
-    /// The name a `:=` target binds: an identifier, the one keyword-name error for a literal
-    /// keyword (`None`, `true`, `false`), or `otherwise` for any other expression.
-    fn binder_name(&self, target: Expr, otherwise: &str) -> PResult<String> {
+    /// The error for an expression at `:=` that `try_parse_walrus_target` did not take: the one
+    /// keyword-name error for a literal keyword (`None`, `true`, `false`), else `otherwise`.
+    fn bind_target_error(&self, target: Expr, otherwise: &str) -> ParseError {
         let kw = match target.kind {
-            ExprKind::Ident(n) => return Ok(n),
             ExprKind::NoneLit => Some(Token::NoneKw),
             ExprKind::Bool(true) => Some(Token::True),
             ExprKind::Bool(false) => Some(Token::False),
-            ExprKind::Int(_)
+            ExprKind::Ident(_)
+            | ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::Str(_)
             | ExprKind::Interp(_)
@@ -760,7 +760,7 @@ impl Parser {
             .and_then(|t| self.keyword_name_error(&t))
             .unwrap_or_else(|| self.err(otherwise.to_string()));
         e.span = target.span;
-        Err(e)
+        e
     }
 
     /// Expect an integer literal (used for the `end` of a range pattern `start..end`).
@@ -1866,7 +1866,7 @@ impl Parser {
 
         // A comma after the first lvalue introduces a *multi-target* form. `a, (b, c) := expr`
         // never reaches here (`try_parse_walrus_target` took it); a `:=` here has a target that is
-        // not a name list, and `binder_name` reports it. The other shape is tuple assignment
+        // not a name list, and `bind_target_error` reports it. The other shape is tuple assignment
         // `a, b = b, a` / `data[0], (data[1], x.f) = …` (lvalues, `=`; op==Eq only).
         // `for k, v in m:` never reaches here (parse_for handles it); a parenthesized `(a, b)` is a
         // single expr (no top-level comma).
@@ -1880,15 +1880,13 @@ impl Parser {
             }
             if self.eat_in_line(&Token::Walrus) {
                 let _ = self.parse_value_list(ValueSite::DestructLet)?;
-                for t in targets {
-                    self.binder_name(
-                        t,
-                        "expected an identifier on the left of ':=' (destructuring binds names)",
-                    )?;
-                }
-                // Every target is a name, so `try_parse_walrus_target` declined for another reason
-                // (a nesting past `MAX_DEPTH`).
-                return Err(self.err("a binding target is nested too deeply".to_string()));
+                let msg = "expected an identifier on the left of ':=' (destructuring binds names)";
+                // The first target that is no name; `try_parse_walrus_target` took an all-name list.
+                let at = targets
+                    .iter()
+                    .position(|t| !matches!(t.kind, ExprKind::Ident(_)))
+                    .unwrap_or(0);
+                return Err(self.bind_target_error(targets.swap_remove(at), msg));
             }
             // `a, b = b, a` — tuple assignment. Only `=` is allowed (compound `+=`, … with multiple
             // targets is rejected). The checker owns the arity of the right side.
@@ -1928,8 +1926,7 @@ impl Parser {
         let op = match self.peek() {
             // `try_parse_walrus_target` took every valid `:=` target, so this arm only reports.
             Token::Walrus => {
-                self.binder_name(expr, "left side of ':=' must be a name")?;
-                return Err(self.err("a binding target is nested too deeply".to_string()));
+                return Err(self.bind_target_error(expr, "left side of ':=' must be a name"));
             }
             Token::Assign => AssignOp::Eq,
             Token::PlusEq => AssignOp::PlusEq,
@@ -3782,7 +3779,7 @@ impl Parser {
 
     /// Speculatively read `<target> :=`. Commits (`Some`, the `:=` eaten) only for a name, `_` (each
     /// possibly grouped, `(x)`) or a top-level comma list; every other shape restores `pos`, `depth` and `fold_depth` and
-    /// returns `None`, so the expression path reports the error (`binder_name`).
+    /// returns `None`, so the expression path reports the error (`bind_target_error`).
     fn try_parse_walrus_target(&mut self) -> PResult<Option<Pattern>> {
         if !matches!(self.peek(), Token::Ident(_) | Token::LParen) {
             return Ok(None);
@@ -3958,7 +3955,7 @@ impl Parser {
     }
 
     /// A wait arm whose head is an expression: a `:=` with a target that is not a name list (the
-    /// error path, `binder_name` reports it), a `=` recv arm (`y = ch.recv():`, `a, (b.f, c) =
+    /// error path, `bind_target_error` reports it), a `=` recv arm (`y = ch.recv():`, `a, (b.f, c) =
     /// ch.recv():`), or a bare send arm (`ch.send(v):`).
     /// A `=` arm binds a fresh `$waitN` and sets `assign_first` to the assignment `lhs = $waitN`
     /// for the arm body's first statement (TICKET-227), so the assigned value has a node (it can
@@ -3987,8 +3984,9 @@ impl Parser {
         let lhs_span = lhs.span;
         if self.eat_in_line(&Token::Walrus) {
             // `try_parse_walrus_target` took every valid `:=` target, so this branch only reports.
-            self.binder_name(lhs, "left side of ':=' in a wait arm must be a name")?;
-            return Err(self.err("a binding target is nested too deeply".to_string()));
+            return Err(
+                self.bind_target_error(lhs, "left side of ':=' in a wait arm must be a name")
+            );
         }
         if !self.eat_in_line(&Token::Assign) {
             // Bare expr, no `:=`/`=` — a send arm.

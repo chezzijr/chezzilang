@@ -73,6 +73,7 @@
              | "IDENT" "COLON" <type> <typeAssign>
              | "IDENT" "COLON" "CONST" <type> <typeAssign>
              | <bindList> "WALRUS"
+             | <groupedName> "WALRUS"
 # The `=` after a type. `T!= v` lexes `!=` as ONE token and means `T! = v`: the type takes the `!`.
 <typeAssign> ::= "ASSIGN" | "NOTEQ"
 # `else:` handles an absent `T?` (or ignores an error); `else e:` binds the error of a `T!E`.
@@ -81,9 +82,12 @@
 <errGuard>  ::= "ELSE" "IDENT" <block>
 # A binding target: two or more comma-separated elements, each a name (`_` skips a slot) or a
 # parenthesized nested target. Used at `:=`, `for`, a comprehension clause and a wait arm.
+# A one-name group `(x)` is that name, as a sole target and as an element. A multi-name target
+# takes no outer parentheses (`(a, b) := t`, `for (a, b) in xs` are errors, owner rule U9).
 <bindList>  ::= <bindElem> "COMMA" <bindElems>
 <bindElems> ::= <bindElem> | <bindElem> "COMMA" <bindElems>
-<bindElem>  ::= "IDENT" | "LPAREN" <bindElem> "COMMA" <bindElems> "RPAREN"
+<bindElem>  ::= "IDENT" | <groupedName> | "LPAREN" <bindElem> "COMMA" <bindElems> "RPAREN"
+<groupedName> ::= "LPAREN" "IDENT" "RPAREN" | "LPAREN" <groupedName> "RPAREN"
 
 # Assignment target is restricted to a name / field / index (the parser's lvalue guard):
 # an lvalue is a bare IDENT, or any postfix expression that *ends* in `.field` or `[index]`
@@ -422,6 +426,7 @@
 
 <forStmt>   ::= "FOR" "IDENT" "IN" <expr> <block>
             | "FOR" <bindList> "IN" <expr> <block>
+            | "FOR" <groupedName> "IN" <expr> <block>
 <whileStmt> ::= "WHILE" <expr> <block>
 
 # Concurrency (C1): a `parallel:` nursery and the two `spawn` forms. `parallel:` and the block form
@@ -445,6 +450,7 @@
 <waitArms> ::= <waitArm> | <waitArm> <waitArms>
 <waitArm>  ::= <expr> "WALRUS" <expr> <block>
              | <bindList> "WALRUS" <expr> <block>
+             | <groupedName> "WALRUS" <expr> <block>
              | <expr> "ASSIGN" <expr> <block>
              | <expr> <block>
              | "ELSE" <block>
@@ -767,6 +773,8 @@
                 | "FOR" "IDENT" "IN" <expr> <compGuards>
                 | "FOR" <bindList> "IN" <expr>
                 | "FOR" <bindList> "IN" <expr> <compGuards>
+                | "FOR" <groupedName> "IN" <expr>
+                | "FOR" <groupedName> "IN" <expr> <compGuards>
 <compGuards>  ::= "IF" <expr> | "IF" <expr> <compGuards>
 
 # Expression-position `match`/`if` (value-producing, distinct from the statement forms above).
