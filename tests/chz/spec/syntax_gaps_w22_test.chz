@@ -117,3 +117,13 @@ fn sum_blank(n: int) -> int:
 test fn else_guard_with_a_blank_binder_binds_nothing():
     assert sum_blank(1) == 3
     assert sum_blank(-1) == -1
+
+fn first_or(xs: List[int], d: int) -> int:
+    v := xs.first() else _:
+        return d
+    return v
+
+# `else _:` binds nothing, like `else:`, so it also guards an optional (which has no error to bind).
+test fn else_guard_with_a_blank_binder_on_an_optional():
+    assert first_or([4, 5], 0) == 4
+    assert first_or([], 7) == 7

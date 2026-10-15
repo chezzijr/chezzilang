@@ -9,6 +9,7 @@
 /// index counts from the end (`n + len`). Returns `Some(i)` with `i < len` iff the (normalized)
 /// index is in bounds; `None` otherwise (the caller faults "index out of bounds"). NOTE: unlike
 /// slice bounds, a plain index does NOT clamp — out of range is an error (Python's asymmetry).
+#[inline]
 pub fn norm_index(n: i64, len: usize) -> Option<usize> {
     let i = if n < 0 { n + len as i64 } else { n };
     if i >= 0 && (i as usize) < len {
@@ -36,6 +37,7 @@ pub struct RangeParts {
 /// inclusive end moves one position further in the step's direction, AFTER step 2; (4) both bounds
 /// clamp to the valid positions; (5) a start at or past the end gives an empty result. A zero step is
 /// the one error. For an exclusive range the result equals CPython's `slice.indices` + stepping loop.
+#[inline]
 pub fn range_indices(r: &RangeParts, len: usize) -> Result<Vec<usize>, &'static str> {
     if r.step == 0 {
         return Err("slice step cannot be zero");

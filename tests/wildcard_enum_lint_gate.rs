@@ -12,7 +12,8 @@ const PINNED_ALLOWS: usize = 0;
 
 /// The crate roots whose TEST build is out of scope for the deny. Each one carries the line
 /// `#![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]`.
-const TEST_SCOPE_ROOTS: [&str; 4] = [
+const TEST_SCOPE_ROOTS: [&str; 5] = [
+    "crates/chezzi-syntax/src/lib.rs",
     "src/bin/difffuzz.rs",
     "src/bin/panicfuzz.rs",
     "src/bin/schedfuzz.rs",
@@ -50,6 +51,7 @@ fn wildcard_enum_match_arm_is_denied_in_cargo_toml() {
 fn allows_of_the_lint_in_src_are_pinned() {
     let mut files = Vec::new();
     rust_files(Path::new("src"), &mut files);
+    rust_files(Path::new("crates"), &mut files);
     let mut allows = Vec::new();
     let mut roots = Vec::new();
     for file in files {
