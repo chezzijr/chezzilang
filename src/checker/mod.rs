@@ -3225,13 +3225,21 @@ mod pattern;
 mod resolve;
 // `pub(crate)` for `proto::INTRINSIC_PROTO_METHODS` — the intrinsic-grant ↔ VM-arm pairing table,
 // which `vm::tests::intrinsic_grants_all_have_vm_arms` reads to assert the pairing (W6-3).
+mod assign;
+mod fn_body;
+mod fresh;
+mod infer_ret;
+mod iter_index;
 pub(crate) mod proto;
+mod resolve_type;
 mod self_writes;
 mod setup;
 mod sig;
+mod stmt;
 pub mod suggest;
 mod tyvar;
 mod unused;
+mod witness_sig;
 
 /// Render a resolved type-arg list for a user-facing redirect hint (`int, str`), used by the
 /// removed-gliding-form error to suggest the type-side form `Enum[int, str].Variant(...)`.
