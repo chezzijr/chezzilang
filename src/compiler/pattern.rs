@@ -93,27 +93,15 @@ impl Compiler {
     fn or_binding_names(&self, alts: &[Pattern]) -> Vec<String> {
         let mut names = std::collections::BTreeSet::new();
         if let Some(first) = alts.first() {
-            self.collect_binding_names(first, &mut names);
-        }
-        names.into_iter().collect()
-    }
-
-    fn collect_binding_names(&self, p: &Pattern, out: &mut std::collections::BTreeSet<String>) {
-        match p {
-            Pattern::Ident(n, _, _) if !self.pat_is_variant(p) => {
-                out.insert(n.clone());
-            }
-            Pattern::Ident(..) => {}
-            Pattern::Variant { bindings, .. }
-            | Pattern::Tuple(bindings)
-            | Pattern::Or(bindings) => {
-                for b in bindings {
-                    self.collect_binding_names(b, out);
+            for node in first.bare_names() {
+                if !self.pat_is_variant(node)
+                    && let Pattern::Ident(n, ..) | Pattern::Variant { name: n, .. } = node
+                {
+                    names.insert(n.clone());
                 }
             }
-            Pattern::Carrier { inner, .. } => self.collect_binding_names(inner, out),
-            Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
         }
+        names.into_iter().collect()
     }
 
     /// Whether a single pattern is literal-eligible (literal/range/wildcard/binding-only), recursing

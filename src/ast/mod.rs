@@ -690,36 +690,54 @@ impl Pattern {
     /// comprehension, wait arm) and a `match` arm alike. `Wildcard`, `Literal` and `Range` bind
     /// none. An `Or` lists every alternative.
     pub fn binders(&self) -> Vec<(&str, Span)> {
+        self.bare_names()
+            .into_iter()
+            .map(|node| match node {
+                Pattern::Ident(name, span, _) => (name.as_str(), *span),
+                // The variant head carries no span.
+                Pattern::Variant { name, .. } => (name.as_str(), Span::default()),
+                Pattern::Tuple(_)
+                | Pattern::Or(_)
+                | Pattern::Carrier { .. }
+                | Pattern::Literal(_)
+                | Pattern::Range { .. }
+                | Pattern::Wildcard => unreachable!("bare_names yields name nodes only"),
+            })
+            .collect()
+    }
+
+    /// THE one walk over a pattern's bare-name nodes, in order: each `Ident` and each bare,
+    /// payload-free, unqualified head (`whole:`, TICKET-139/W14-1 + DEC-107). Such a head is a
+    /// whole-value catch-all binder or, when a variant of that name is in scope, the variant
+    /// (Rust's rule); a reader that knows the resolution (the compiler's `pat_is_variant`) filters
+    /// the variants out, and `binders` over-collects them, which capture analysis needs (a missed
+    /// binder is a slot that is never boxed). An `Or` lists every alternative.
+    pub fn bare_names(&self) -> Vec<&Pattern> {
         let mut out = Vec::new();
-        self.collect_binders(&mut out);
+        self.collect_bare_names(&mut out);
         out
     }
 
-    fn collect_binders<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
+    fn collect_bare_names<'a>(&'a self, out: &mut Vec<&'a Pattern>) {
         match self {
-            Pattern::Ident(name, span, _) => out.push((name.as_str(), *span)),
-            // TICKET-139/W14-1 + DEC-107: a bare, payload-free, unqualified name (`whole:`) is a
-            // whole-value catch-all binding (or a nullary variant; over-collecting that is
-            // harmless), so capture analysis must see it or the slot is never boxed. The variant
-            // head carries no span.
+            Pattern::Ident(..) => out.push(self),
             Pattern::Variant {
-                id: _,
-                name,
                 bindings,
                 enum_name: None,
                 module_name: None,
-            } if bindings.is_empty() => out.push((name.as_str(), Span::default())),
+                ..
+            } if bindings.is_empty() => out.push(self),
             Pattern::Variant { bindings, .. } => {
                 for sub in bindings {
-                    sub.collect_binders(out);
+                    sub.collect_bare_names(out);
                 }
             }
             Pattern::Tuple(subs) | Pattern::Or(subs) => {
                 for sub in subs {
-                    sub.collect_binders(out);
+                    sub.collect_bare_names(out);
                 }
             }
-            Pattern::Carrier { inner, .. } => inner.collect_binders(out),
+            Pattern::Carrier { inner, .. } => inner.collect_bare_names(out),
             Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard => {}
         }
     }

@@ -71,8 +71,9 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 
 | Fact | Owner | Notes |
 |---|---|---|
-| Names a pattern binds | DUPLICATE: `binders` (`ast/mod.rs`), `collect_binding_names` (`compiler/pattern.rs`), `first_duplicate_binder` (`checker/ty_util.rs`) | |
-| Bare name: binder or nullary variant | DUPLICATE: `binders` (`ast/mod.rs`) (always a binder), `pat_is_variant` (`compiler/pattern.rs`), `bare_pattern_name` (`checker/pattern.rs`) | target: one `bare_pattern_name` record |
+| The bare-name nodes of a pattern | `bare_names` (`ast/mod.rs`) | `binders` lists them (over-collecting variants, which capture analysis needs); the compiler's or-pattern names filter them through `pat_is_variant` |
+| Bare name in a pattern: binder or variant (Rust's rule) | `bare_pattern_name` (`checker/pattern.rs`) | written to the resolution table the compiler's `pat_is_variant` (`compiler/pattern.rs`) reads |
+| A duplicate binder in one pattern (or-alternatives scoped apart) | `first_duplicate_binder` (`checker/ty_util.rs`) | |
 
 ## Runtime
 
