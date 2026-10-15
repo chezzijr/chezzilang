@@ -46,41 +46,23 @@
 Both seams are the **CPython-built-in-C-module model**: stateless functions, data in / data out. Neither
 can hold a live foreign object across calls.
 
-A marshallable struct or width alias declared in another **module** can be named at an `extern` boundary
-two ways — by **named import** (`import DivT from core.cdefs`, then bare `DivT`) or by the
-**module-qualified spelling** (`import core.cdefs`, then `cdefs.DivT` in the `extern` fn) — and both lower
-to the identical C type (struct-by-value or scalar width). The checker is the marshallability gate for
+A marshallable struct declared in another **module** can be named at an `extern` boundary
+two ways: by **named import** (`import DivT from core.cdefs`, then bare `DivT`) or by the
+**module-qualified spelling** (`import core.cdefs`, then `cdefs.DivT` in the `extern` fn). Both lower
+to the identical struct-by-value C type. The checker is the marshallability gate for
 either spelling; a non-marshallable type is a clean compile error, never a VM panic.
 
-Every qualified/imported/aliased extern type resolves **module-scoped via the checker** — the single
-authority. The checker already resolves each `extern` param/return in its **defining module's**
-import/alias scope (which is why `chezzi check` is always correct); it now records the fully-resolved,
-width-bearing C type per param/return into an extern-signature table, and **both backends consume that
-table** instead of re-resolving alias names themselves. So a module-qualified **width alias** resolves
-to its defining module's width even when the calling module declares a colliding bare alias of the same
-name, and this holds for **every spelling and every depth**:
+Every qualified or imported extern type resolves **module-scoped via the checker**, the single
+authority. The checker resolves each `extern` param and return in its **defining module's**
+import scope, and records the fully-resolved, width-bearing C type per param and return into an
+extern-signature table. **Both backends consume that table** and re-resolve no names themselves. A
+by-value struct keeps each field's exact C width (an `int32` field stays 4 bytes), and each **field's**
+type resolves in the **struct's own defining module's** scope, not the importer's. A width type is legal
+only in an extern signature or a struct field's own type (TICKET-262): a type alias body never carries
+one, so no width alias crosses a module. A cyclic alias chain is a clean "not C-marshallable" error
+(never a hang). There is exactly **one** extern-type resolver, the checker, for single-file source and
+multi-file projects alike.
 
-- a direct alias (`type Len = int64`),
-- a local chain (`type Len = A; type A = B; type B = int64`),
-- a **named-import hop** (the defining module reached the width via `import W from other`, e.g.
-  `core/w3.chz` = `import W from core.widths` + `type Len = W` where `widths` declares `type W = int64`),
-- a **qualified hop** (`type ImpW = base.Base`),
-- and any **mix** of the above across modules.
-
-With colliding `type W = int8` (or `Inner`/`Outer`/…) shadows in the calling module(s), an
-`extern fn abs(n: mod.Len) -> mod.Len` still marshals as **int64** — never the local int8. Because the
-checker walks each module's real import/alias environment, **no hop** can fall back to a flat
-last-write-wins alias-name table; the C ABI can't be hijacked by a same-named local alias at any depth.
-A by-value struct keeps each field's exact C width (an `int32` field stays 4 bytes), and — crucially —
-each **field's** type resolves in the **struct's own defining module's scope**, not the importer's. So a
-qualified/imported return struct whose fields are typed via the defining module's local alias
-(`core/cdefs.chz`: `type Half = int32` + `struct DivT{quot:Half; rem:Half}`; `main`:
-`extern fn div(...) -> cdefs.DivT`) marshals correctly — a colliding/invisible `Half` in the importer
-can't drop the field. A cyclic alias chain is a clean "not C-marshallable" error (never a hang).
-(Verified silent-safe — the prior bug returned void with
-`check` passing.) There is exactly **one** extern-type resolver — the checker — for single-file source
-and multi-file projects alike; the backends do zero type resolution of their own, so a second resolver
-cannot drift.
 
 ## 1b. Deferred FFI-deepening features — design notes (revisit-in-future)
 

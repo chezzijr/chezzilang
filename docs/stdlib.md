@@ -1273,7 +1273,8 @@ import float32 from std.ffi
 ```
 
 None of these are global builtins — a module that uses `ptr` or a width
-type (in an annotation **or an `extern` signature**) must import it from `std.ffi`. The two spellings
+type must import it from `std.ffi`. A width type is legal only in an **`extern` signature or a struct
+field's own type** (TICKET-262); `ptr` has no such limit. The two spellings
 are **not interchangeable for the width names**: whole-module `import std.ffi` licenses the bare `ptr`
 and the qualified `ffi.int32` form, but a bare `int32` needs the per-name `import int32 from std.ffi`
 (measured: `import std.ffi` then `fn abs(n: int32)` is *unknown type 'int32'*, while `ffi.int32` and a

@@ -1,10 +1,26 @@
 # Fixed-width integer C-ABI marshalling through `extern "lib":` — int8..uint64 marshalling type
 # names. They are NOT global builtins: a module that names a width type must import it per-name from
-# `std.ffi` (Chezzi's first type imports), exactly like `null`/`is_null`. To the program each is a
-# plain `int`. Unlike `owned_str`, these are BIDIRECTIONAL (param AND return). A value passed to C must
-# fit its width: a constant outside it is a compile error, a runtime value a recoverable fault, and
-# `ffi.cast_<w>` (here `cast_int8`) wraps it first like a C cast. A return SIGN-extends (signed) or
-# ZERO-extends (unsigned) the C value back to i64.
+# `std.ffi` (Chezzi's first type imports), exactly like `null`/`is_null`. Unlike `owned_str`, these are
+# BIDIRECTIONAL (param AND return). A return SIGN-extends (signed) or ZERO-extends (unsigned) the C
+# value back to i64.
+#
+# RULE 1 (TICKET-262): a width type describes the C boundary only. To the program each is a plain
+# `int` (`float32`: a plain `float`). It may be written in an extern fn param or return (a callback
+# type there included) and as a struct field's own type, and nowhere else:
+#
+#   | position                                              | `int8` written there |
+#   |-------------------------------------------------------|----------------------|
+#   | extern fn param / return                              | allowed              |
+#   | struct field's own type                               | allowed              |
+#   | local / global annotation, normal fn param / return   | error: write `int`   |
+#   | type argument (`List[int8]`, `int8?`), alias body     | error: write `int`   |
+#
+# RULE 2: every store into a width slot is range-checked, and Chezzi never wraps silently (CPython
+# ctypes does: `ctypes.c_int8(300).value` is 44). A constant that does not fit is a compile error
+# (`constant 300 does not fit int8 (-128..127)`); a runtime value that does not fit is a recoverable
+# fault with one text at every store (`value 300 does not fit int8 (-128..127)`): an extern argument,
+# a struct constructor, a field store, a compound field store, an `ffi.store_<w>`, a callback return.
+# `ffi.cast_<w>` (here `cast_int8`) wraps explicitly, like a C cast.
 import int8, int32, uint32, cast_int8 from std.ffi
 
 # `libc` is a LOGICAL library name the loader resolves per host (docs/syntax.md §12b).
@@ -16,8 +32,8 @@ extern "libc":
     # `htonl(uint32)->uint32`: host->network byte order; an UNSIGNED int32 round-trip (param + return
     # zero-extend — a high-bit result stays positive in the i64).
     fn htonl(x: uint32) -> uint32
-    # `abs(int)->int` declared int8 in AND out: exercises a signed round-trip AND param truncation
-    # (a Chezzi i64 too large for int8 wraps per a C cast, never traps).
+    # `abs(int)->int` declared int8 in AND out: exercises a signed round-trip AND the range check
+    # (an int too large for int8 is a compile error as a constant and a fault at run time).
     fn abs(x: int8) -> int8
 
 # int32 return sign-extends a negative C int back to a Chezzi -1 (not 4294967295).

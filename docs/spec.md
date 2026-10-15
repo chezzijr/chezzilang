@@ -498,8 +498,8 @@ changes. JSON *encode* likewise emits the bare field/type naming (no `module::` 
 wire). Reserved/native types (`T!E`/`T?`/…, `Iterator`, the std library type
 surface on `import std.*`, and the FFI width names like `int32`) are **not** module-keyed — they keep
 their bare name globally. An imported `type` alias is **transparent**: its body is resolved in the
-*defining* module's scope, so a cross-module `import Len from sizes` where `type Len = int32` carries
-its FFI-width license.
+*defining* module's scope. An alias body never carries an FFI width type: `type Len = int32` is a
+compile error (a width describes the C boundary only, TICKET-262).
 
 `chezzi init [dir]` scaffolds a new project (`chezzi.toml` + `src/main.chz` + an example `*_test.chz`).
 The generated `chezzi.toml` is **both a root marker and a parsed manifest**: the resolver checks for
@@ -771,8 +771,8 @@ struct Meters:
 > determines `[T]`, and `[1,2,3].fold(0, pick)`, pinned by the accumulator that precedes it, checks.
 > **Untyped constants** (Go's model): a literal or constant expression (one evaluator,
 > `src/ast/consteval.rs`, folds `+ - * / % & | ^ << >>` and unary `-`) meets the slot it lands in, and
-> a value outside a C width there is `constant 256 does not fit int8 (-128..127)`; a constant
-> argument to a generic fn takes the width the expected type pins (`y: int8 = id(300)` rejects). The HOF may be **generic itself**: its own type parameters are pinned first (by the
+> a value outside a C width there is `constant 256 does not fit int8 (-128..127)` (a width type is legal
+> only in an extern signature or a struct field, TICKET-262: `y: int8 = id(300)` is the rule-1 error). The HOF may be **generic itself**: its own type parameters are pinned first (by the
 > other arguments, a call turbofish, or the annotation) and the passed fn then unifies against the
 > concrete slot, so `applyg(ident, 5)` for `fn applyg[U](f: fn(U) -> U, n: U) -> U` infers exactly what
 > Go and Rust infer (see `docs/syntax.md`, "A GENERIC fn as a value").
@@ -873,9 +873,8 @@ struct Meters:
 >     **zero-extends** (unsigned) the C value back to i64 (`int32` `-1` → `-1`; `uint32` `0xFFFFFFFF` →
 >     `4294967295`). `uint64` above `i64::MAX` is not representable in Chezzi's i64 `int` and wraps
 >     negative (a documented v1 limit; the other seven widths fit i64 losslessly). **Aliases:** a
->     `type Len = int32` used in an `extern` sig behaves identically to bare `int32` (`ctype_of`
->     resolves the alias one hop to the width) — but the alias resolves only if its target `int32` is
->     imported in the same module that declares the alias. **No C-spelling aliases** (`c_int`/`c_short`/…) yet —
+>     width type in a `type` alias body is a compile error (`'int8' describes the C boundary only`): a
+>     width is legal only in an `extern` signature or a struct field's own type (TICKET-262). **No C-spelling aliases** (`c_int`/`c_short`/…) yet —
 >     their width is platform-dependent (LP64 vs LLP64); deferred to a future task. See
 >     `src/native/cffi.rs` (`CType::Int8`..`CType::UInt64`) + `examples/ffi_int.chz`. **Non-unix is
 >     unsupported:** on an LLP64 target (Windows x64) C `long` is 32-bit and would truncate bare `int`,

@@ -744,8 +744,7 @@ expected type through one carrier layer, like a list literal: `cb: (fn(int) -> i
 types `a` as `int` and stores a present value, at a binding, an argument, a field, an element and a
 `return` alike. A generic call's slot is known when its type is **written**, by type arguments
 (`Box[int?](5)`, `opt[int?](5)`, `B[int?].mk(5)`, `s.gm[int?](5)`) or by the annotation
-(`c: Box[int?] = Box(5)`): the argument then wraps, meets its width (`b: int8? = id(300)` is
-`constant 300 does not fit int8`) and types its closure parameters exactly as at a non-generic slot.
+(`c: Box[int?] = Box(5)`): the argument then wraps and types its closure parameters exactly as at a non-generic slot.
 With neither written, the type parameter is solved from the arguments and nothing wraps.
 
 **The join rule.** Sibling values (the branches of an `if` / `match` value, the sides of `??`, the
@@ -5204,7 +5203,7 @@ structs** (`Pair[int]`) have no fixed C layout and are rejected. A **zero-field*
 pass`) is rejected too (*struct 'Empty' has no fields and cannot be C-marshallable*) — C has no empty
 struct and libffi cannot build a call interface for one. (A transparent `type P = Point` alias
 to a flat struct works exactly like the bare struct.) The struct may be declared **before or after** the
-`extern` block. A struct (or a width alias like `type Len = int32`) declared in another **module** may be
+`extern` block. A struct declared in another **module** may be
 named at the extern boundary either by **named import** (`import DivT from core.cdefs`, then bare `DivT`)
 or by the **module-qualified spelling** (`import core.cdefs`, then `cdefs.DivT` directly in the `extern`
 fn) — both lower to the same C type. A **`bool` field** marshals as a C `_Bool` (1 byte) — it matches a C struct field
@@ -5465,19 +5464,10 @@ trap (`import int8 as int32`). A redundant **identical** self-rename (`import in
 and accepted — it just imports `int32`. You also can't redefine a
 width name as a user alias (`type int32 = …` is reserved). The import is per-module: a struct's int32 field
 declared (and resolved) in module A is usable from module B with **no** import in B, but a bare `int32`
-*written in B's own source* needs B's own import. **A licensed transparent alias is the opt-in:** a
-`type Len = int32` resolves wherever the alias is used **only if the alias's defining module imported
-`int32`** — that import licenses the alias once, and any later use (including after another module is
-checked) resolves without re-importing. A `type Len = int32` whose defining module never imported `int32`
-does **not** launder the bare width name — it is still *unknown type 'int32'* (a bare `int32` always needs
-the import; only a *licensed* alias indirection bypasses the per-site requirement). Composite alias bodies
-that *embed* widths (`type Pair = (int32, int32)`, `type Buf = List[uint8]`) follow the same rule, and the
-licence is precise: the alias is licensed only if its defining module imported **every** width it embeds —
-a `type Mixed = (int32, int64)` that imported only `int32` is **not** licensed, so `int64` can't ride in on
-`int32`'s opt-in. To your program each
-width name is a plain **`int`** — the width/signedness is a
-runtime-only marshalling distinction. Unlike `owned_str`, these are **bidirectional** (valid as both param
-and return):
+*written in B's own source* needs B's own import. To your program each
+width name is a plain **`int`** (`float32`: a plain **`float`**) — the width/signedness is a
+marshalling distinction at the C boundary. Unlike `owned_str`, these are **bidirectional** (valid as both
+param and return):
 
 | name | C type | libffi type | as a parameter | as a return |
 |------|--------|-------------|----------------|-------------|
@@ -5490,24 +5480,41 @@ and return):
 | `uint32` | `uint32_t` | `uint32` | must fit 0..4294967295      | zero-extend u32 → i64 |
 | `uint64` | `uint64_t` | `uint64` | any int (its bit pattern)   | reinterpret u64 → i64 |
 
-**The range rule (TICKET-218).** A value written for C — an extern param, a struct field passed to C,
-an `ffi.store_<w>` store or a callback's return — must fit its width. Go and Rust reject the same
-programs (`cannot use 300 (untyped int constant) as int8 value … (overflows)`, `literal out of range
-for i8`):
+**Rule 1 — a width type describes the C boundary only (TICKET-262).** A width type may be written in
+exactly two places: a parameter or return type of a fn inside an `extern` block (a fn type written
+there for a callback included), and a struct field's own type (a struct can describe a C struct layout,
+`DivT` above). Everywhere else it is a compile error that names the rule and the fix:
+``'int8' describes the C boundary only: write it in an extern fn signature or a struct field, and use
+`int` here``. To the program a width is a plain `int` / `float`, so write `int` / `float` for a local or
+global annotation, a parameter or return type of a normal fn, method or lambda, a type argument
+(`List[int8]`, `int8?`, a tuple element, a `Map` key or value, a generic argument) and a type alias
+body (`type Len = int32` is rejected at its declaration).
+
+| Position | `int8` written there |
+|----------|----------------------|
+| extern fn param / return, a callback type inside one | allowed |
+| struct field's own type | allowed |
+| local / global annotation (`x: int8 = 5`) | error (rule 1) |
+| param / return of a normal fn, method, lambda (`fn f(a: int8)`) | error (rule 1) |
+| type argument (`List[int8]`, `int8?`, `(int8, int)`, `Map[str, int8]`) | error (rule 1) |
+| type alias body (`type W = int8`) | error (rule 1) |
+
+**Rule 2 — every store into a width slot is range-checked (TICKET-218, TICKET-262).** The slots are an
+extern param, a struct field (constructor, field store, `json.decode`), an `ffi.store_<w>` store and a
+callback's return. Go and Rust reject the same programs (`cannot use 300 (untyped int constant) as int8
+value … (overflows)`, `literal out of range for i8`). Chezzi faults; it never wraps silently. CPython
+ctypes wraps: `ctypes.c_int8(300).value` is `44`.
 
 - A **constant** — a literal or a constant expression (`1 << 8`, `127 | (127 + 1)`, `3e38 + 3e38`) —
   is **untyped** until it meets a slot (Go's model, TICKET-225), and outside the slot's range it is a
-  **compile error** wherever the slot is a width: extern/fn/method params, struct fields, enum
-  payloads, annotated locals, assignments, returns, defaults, closure bodies, `yield`, map
-  keys (`m[300] = "a"` on a `Map[int8, str]`), type arguments (`List[int8] = [300]`,
-  `int8? = ?300`, `b: Bx[int8] = Bx(300)`), a generic return pinned by the expected type
-  (`y: int8 = id(300)`), the branches of `if`/`match` and the right side of `??`:
+  **compile error** at an extern argument, a struct constructor, a struct field store, a struct field
+  default and an `ffi.store_<w>` argument:
   `constant 300 does not fit int8 (-128..127)`, `constant 256 does not fit int8 (-128..127)` for
-  `1 << 8`. The check reads through a carrier: `o: int8? = 300` and `o: int8? = ?300` are rejected
-  with the same text. A non-constant int (`[300].len()`, a call returning `int`) is not checked.
-- A **runtime value** is range-checked only where it crosses into C. Out of range is a recoverable
-  fault, catchable by `recover:`: `value 300 does not fit int8 (-128..127)`. A Chezzi local of a width
-  type holds any int until then.
+  `1 << 8`. A non-constant int (`[300].len()`, a call returning `int`) is not checked at compile time.
+- A **runtime value** that does not fit is a recoverable fault, catchable by `recover:`, with one text
+  at every store: `value 300 does not fit int8 (-128..127)`. The struct constructor (`S(big())`), the
+  field store (`s.q = big()`) and the compound store (`s.q += 300`, which lowers to `s.q = s.q + 300`)
+  fault; `json.decode[S]` returns an `Err` with the same text, as Go's `json.Unmarshal` does.
 - **`uint64`**: a constant must be `0..INT64_MAX`; at run time any int passes as its bit pattern, and a
   value above `INT64_MAX` read back from C arrives negative (`UINT64_MAX` reads as `-1`).
 - **`float32`**: a finite value outside the f32 range is a compile error as a constant and a fault at run
@@ -5519,15 +5526,13 @@ for i8`):
 `std.ffi` also declares the range constants `INT8_MIN`/`INT8_MAX` … `INT64_MIN`/`INT64_MAX`,
 `UINT8_MAX` … `UINT32_MAX`, `UINT64_MAX` (`-1`, the bit pattern) and `FLT_MAX`.
 
-**A width is a tag on `int`/`float`, not a distinct type.** An `int8` value is usable wherever `int` is;
-arithmetic on width values yields plain `int`/`float`; `List[int8]` and `List[int]` are interchangeable.
-Only a constant flowing into an `int8` slot is checked. A compound operand meets no slot: `x += 300` on an `int8` is `x = x + 300`, plain `int` arithmetic (TICKET-258). Two embedded protocols that require
-`m(self, x: int8)` and `m(self, x: int)` conflict (Go: `duplicate method M`).
+**A width is a plain `int`/`float` to the program.** A struct field `q: int8` reads as an `int`:
+arithmetic on it yields a plain `int`, and it is usable wherever `int` is. A compound operand meets no
+slot by itself: `s.q += 300` is `s.q = s.q + 300`, and the store into the field is the checked step
+(TICKET-258).
 
 A **return sign-extends** (signed) or **zero-extends** (unsigned) the C value back to i64: `int32`
-returning `-1` is `-1`, `uint32` returning `0xFFFFFFFF` is `4294967295` (stays positive). A
-`type Len = int32` alias used in an `extern` sig behaves identically to bare `int32` — but the alias only
-resolves if its target `int32` is imported in the **same** module as the alias declaration.
+returning `-1` is `-1`, `uint32` returning `0xFFFFFFFF` is `4294967295` (stays positive).
 
 ```chezzi
 import int32, uint32, int8, cast_int8 from std.ffi
