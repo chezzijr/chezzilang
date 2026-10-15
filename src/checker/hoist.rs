@@ -38,10 +38,7 @@ impl Checker {
                     self.struct_names.insert(name.clone());
                 }
                 StmtKind::TypeAlias { name, ty, .. } => {
-                    if is_reserved_type(name)
-                        || is_reserved_protocol(name)
-                        || crate::native::ffi::is_width(name)
-                    {
+                    if is_reserved_type(name) || is_reserved_protocol(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     } else if self.aliases.contains_key(name)
                         || self.struct_names.contains(name)
@@ -295,7 +292,6 @@ impl Checker {
                     // A std file declares the reserved struct it owns (`Range`, TICKET-253).
                     if (is_reserved_type(name) && !self.current_module_is_stdlib)
                         || is_reserved_protocol(name)
-                        || crate::native::ffi::is_width(name)
                     {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                     }
@@ -426,10 +422,7 @@ impl Checker {
                     methods,
                     ..
                 } => {
-                    if is_reserved_type(name)
-                        || is_reserved_protocol(name)
-                        || crate::native::ffi::is_width(name)
-                    {
+                    if is_reserved_type(name) || is_reserved_protocol(name) {
                         self.error(s.span, format!("type '{name}' is reserved (builtin)"));
                         // A carrier is already registered under this name; keep its tables.
                         if self.enums.contains_key(&self.bare_key(name)) {

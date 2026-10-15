@@ -4826,8 +4826,10 @@ fn fetch_all(urls: List[str]):
   Like `Shared`/`Executor`/`timer`, a bare annotation requires `import std.net` (whole-module, or
   `import Socket from std.net`) — they are NOT global builtins, but stay **reserved names** (no user
   `struct Socket`/`struct Listener`). The builtin SCALAR (`int`/`float`/`str`/…), CONTAINER
-  (`List`/`Set`/`Map`/`Channel`/`Range`), and FFI (`ptr`/`owned_str`) type names are likewise reserved
-  at declaration (a `struct int` / `struct List` is rejected `type 'X' is reserved (builtin)`). The 22
+  (`List`/`Set`/`Map`/`Channel`/`Range`), and FFI (`ptr`/`owned_str` and the widths `int8`…`float32`)
+  type names are likewise reserved at every declaration site — struct, enum, type alias, protocol,
+  type parameter and import alias (a `struct int` / `protocol int32` is rejected
+  `type 'X' is reserved (builtin)`). The 22
   prebuilt PROTOCOL names (`Any`/`Comparable`/`Eq`/`Stringable`/`Hashable`/`Error`/`Add`/`Sub`/`Mul`/`Div`/`Mod`/
   `Neg`/`Arithmetic`/`Num`/`Iterator`/`Iterable`/`Index`/`IndexSet`/`Slice`/`Convert`/`Contains`/`PathLike`) are reserved the same way — usable
   as a bound (`[T: Comparable]`) but not as a `struct`/`enum`/`type` decl name (a user

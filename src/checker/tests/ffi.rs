@@ -1156,14 +1156,16 @@ fn width_name_without_import_rejected() {
 fn ffi_type_import_cannot_be_renamed() {
     // An FFI width type cannot be aliased on import: the backends' `ctype_of` keys off the literal
     // surface name, so a renamed import would resolve to a type the marshaller can't lower. Reject
-    // both `import int32 as W` (name unusable) and `import int8 as int32` (silently wrong width).
+    // both `import int32 as W` (name unusable) and `import int8 as int32` (silently wrong width). The
+    // second alias target, `int32`, is a reserved builtin type name, so the reserved-name rule (one
+    // set at every declaration site) rejects it first.
     entry_rejects(
         "import int32 as W from std.ffi\nfn main():\n    x: W = 5\n    print(x)\n",
         "cannot be renamed on import",
     );
     entry_rejects(
         "import int8 as int32 from std.ffi\nfn main():\n    x: int32 = 5\n    print(x)\n",
-        "cannot be renamed on import",
+        "reserved (builtin)",
     );
 }
 

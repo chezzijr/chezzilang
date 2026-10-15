@@ -658,7 +658,7 @@ impl Checker {
     /// would double-report).
     pub(super) fn reject_reserved_type_params(&mut self, tps: &[TypeParam]) {
         for tp in tps {
-            if is_reserved_type(&tp.name) || crate::native::ffi::is_width(&tp.name) {
+            if is_reserved_type(&tp.name) {
                 self.error(
                     tp.name_span,
                     format!("type '{}' is reserved (builtin)", tp.name),

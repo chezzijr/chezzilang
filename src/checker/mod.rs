@@ -218,14 +218,13 @@ fn module_label(import: &Import) -> String {
 /// found Socket`). So the builtin SCALAR (`int`/`float`/`bool`/`str`/`bytes`/`bytearray`/`None`),
 /// CONTAINER (`List`/`Set`/`Map`/`Channel`/`range`), and HANDLE (`Socket`/`Listener`/`ptr`/
 /// `owned_str`) type names are all reserved at declaration too — `struct X` is rejected with the same
-/// `type 'X' is reserved (builtin)` error `struct Result` already gives. (The fixed-width FFI integer
-/// names like `int32` are reserved via `native::ffi::is_width` at the decl guards, not listed here.)
+/// `type 'X' is reserved (builtin)` error `struct Result` already gives. THE one reserved set for
+/// every declaration site (struct, enum, alias, protocol, type parameter, import alias): every builtin
+/// type name (`is_builtin_type_name`, the `std.ffi` widths and `ptr` included) plus the names below.
 fn is_reserved_type(name: &str) -> bool {
-    // Reserved names that are no `BuiltinType`: `Result`/`Option` are removed spellings the resolver
+    // Reserved names that are no builtin type: `Result`/`Option` are removed spellings the resolver
     // reports; `tuple` resolves no type; `range` (TICKET-253) and `timer` are callables.
-    BuiltinType::from_name(name).is_some()
-        || crate::native::ffi::is_opaque_type(name)
-        || matches!(name, "Result" | "Option" | "tuple" | "range" | "timer")
+    is_builtin_type_name(name) || matches!(name, "Result" | "Option" | "tuple" | "range" | "timer")
 }
 
 /// D3 (TICKET-138): an int NEVER widens into a `float` slot, at any sink. The fix a diagnostic names.

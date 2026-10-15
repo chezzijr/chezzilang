@@ -34,7 +34,8 @@ write a second copy next to it (CLAUDE.md "Derive, don't mirror").
 | Module slot facts (kind, fn decl, keyword labels) | `GlobalBinding` (`checker/globals.rs`), `labels_certain` (`checker/globals.rs`) | TICKET-186 |
 | Does a head name a user type, which kind | `type_head` (`checker/scope.rs`) | |
 | Builtin callable names | `PRELUDE` (`checker/mod.rs`) | DUPLICATE: `RESERVED_CALLABLE` (`checker/mod.rs`), `REMOVED_CALLABLE` (`checker/mod.rs`), `BUILTIN_CALLEES` (`checker/resolve.rs`), the arms of `infer_builtin_call` (`checker/builtin_call.rs`), the VM name matches in `do_builtin` (`vm/builtins.rs`) and `invoke_value` (`vm/call.rs`) |
-| Builtin type names | `from_name` (`checker/builtin_type.rs`) | DUPLICATE: `is_builtin_type_name` (`checker/builtin_type.rs`), `is_reserved_type` (`checker/mod.rs`), the `Option`/`Result` names in `checker/exhaust.rs` |
+| Builtin type names | `is_builtin_type_name` (`checker/builtin_type.rs`), `from_name` (`checker/builtin_type.rs`) | |
+| Names reserved at a declaration site | `is_reserved_type` (`checker/mod.rs`) | every builtin type name plus the removed and callable names; one set at struct, enum, alias, protocol, type-param and import-alias sites (`reserved_type_names_grid`) |
 | Is this name / param the receiver `self` | `is_self_name` (`ast/mod.rs`), `SELF` (`ast/mod.rs`) | `Param::is_self` and `FnDecl::takes_self` read it; whether a `self` param is a VALID receiver is `receiver` (`checker/sig.rs`); `tests/owner_guards.rs` rejects a `== "self"` anywhere else |
 | Checker↔compiler keys (type key, globals, fn names, witness refs) | DUPLICATE: `type_key` (`checker/setup.rs`) and `type_key` (`compiler/mod.rs`), `entry_module_binds` (`checker/tables.rs`) and `collect_globals` (`compiler/mod.rs`) | target: checker tables the compiler reads |
 | Unused local | `unused_locals` (`checker/unused.rs`) | |

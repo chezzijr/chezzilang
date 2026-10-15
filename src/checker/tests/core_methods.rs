@@ -1643,3 +1643,29 @@ fn d3_native_math_float_param_rejects_int() {
     );
     entry_ok("import std.math\nfn main():\n    print(math.sqrt(16.0))\n");
 }
+
+/// One reserved set at every declaration site: a builtin type name (`BuiltinType` or a `std.ffi`
+/// type, widths included) or a removed spelling cannot name a struct, enum, alias, protocol, type
+/// parameter or import alias. `protocol int32` and `import ... as int32` were accepted, because
+/// those two sites read `is_reserved_type` without the width names the other sites added by hand.
+#[test]
+fn reserved_type_names_grid() {
+    let names = ["int", "List", "ptr", "int32", "tuple", "range"];
+    for n in names {
+        let sites = [
+            format!("struct {n}:\n    x: int\n"),
+            format!("enum {n}:\n    A\n"),
+            format!("type {n} = str\n"),
+            format!("protocol {n}:\n    fn f(self) -> int\n"),
+            format!("fn g[{n}](x: {n}) -> int:\n    return 1\n"),
+            format!("import std.math as {n}\n"),
+        ];
+        for src in sites {
+            let errs = check_entry(&src);
+            assert!(
+                errs.iter().any(|e| e.message.contains("reserved")),
+                "{n}: expected a reserved-name error for:\n{src}\ngot: {errs:?}"
+            );
+        }
+    }
+}
