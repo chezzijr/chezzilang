@@ -124,8 +124,6 @@ None open on 2026-10-16.
   Today `enum Z:` + `pass` is a parse error ("empty enums are not supported") while `enum Z:` with
   only methods and no variant is accepted; both forms become the same legal type. Python's
   `class E(Enum): pass` is also legal.
-- **The `json.stringify` timing bound becomes `< 4.0 s`** (`tests/chz/stdlib/json_test.chz:42`,
-  2026-10-16), as its `json.parse` sibling (TICKET-115). Gate runs measured 2.2–2.7 s under load.
 
 ## JIT entry rule
 
