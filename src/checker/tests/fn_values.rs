@@ -2634,3 +2634,18 @@ fn invariance_preserves_legit_container_neighbors() {
         "fn f(xs: List[Any]):\n    xs.push(1)\nfn main():\n    ys: List[Any] = [1, \"a\", true]\n    f(ys)\nmain()\n",
     );
 }
+
+// TICKET-264: `print` as a value keeps its variadic signature, as a user variadic does.
+#[test]
+fn print_fn_value_keeps_variadic_shape() {
+    entry_ok("fn main():\n    f := print\n    f(1)\n    f(1, 2)\n");
+}
+
+// TICKET-264: a call through a fn value names the binding, not `'closure'`.
+#[test]
+fn fn_value_arity_error_names_the_binding() {
+    entry_rejects(
+        "fn g(a: int) -> int:\n    return a\nfn main():\n    h := g\n    h(1, 2)\n",
+        "'h' expects 1 argument(s), got 2",
+    );
+}
