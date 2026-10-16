@@ -700,7 +700,7 @@ struct MemberSig {
 impl MemberSig {
     /// The slot holds a function value.
     fn holds_fn(&self) -> bool {
-        matches!(self.ty, Ty::Func { .. } | Ty::BuiltinFn { .. })
+        matches!(self.ty, Ty::Func { .. })
     }
 }
 

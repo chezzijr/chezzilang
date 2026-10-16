@@ -1061,10 +1061,20 @@ fn a_generic_methods_callee_filled_default_may_be_omitted() {
     );
 }
 
-/// A first-class BUILTIN function value takes NO keyword arguments (labels are a user-fn surface).
+/// A first-class BUILTIN function value takes NO keyword arguments, as the direct call refuses them.
 #[test]
 fn kw_value_builtin_rejects_keywords() {
-    rejects("p := ord\np(x=\"a\")\n", "takes no keyword arguments");
+    rejects("p := ord\np(x=\"a\")\n", "takes no named arguments");
+}
+
+/// A std native fn value takes no named arguments either; `math.sqrt(x=4.0)` refuses them, and the
+/// base binary ran `f(x=4.0)` through the value and printed `2.0`.
+#[test]
+fn a_native_fn_value_takes_no_named_arguments() {
+    entry_rejects(
+        "import std.math\nf := math.sqrt\nprint(f(x=4.0))\n",
+        "'f' takes no named arguments",
+    );
 }
 
 // ----- TICKET-139/W14-2: a keyword call through a fn value needs ONE known callee -----

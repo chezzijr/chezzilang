@@ -387,7 +387,7 @@ impl Checker {
             Ty::Tuple(_) => "tuple",
             Ty::Struct(..) => "struct",
             Ty::Enum(..) => "enum",
-            Ty::Func { .. } | Ty::BuiltinFn { .. } => "function",
+            Ty::Func { .. } => "function",
             // A carrier is named by the word `Vm::type_name` reads for its value, over the type
             // as the user wrote it.
             Ty::Option(_) | Ty::Result(..) => {

@@ -187,7 +187,6 @@ impl Checker {
                     | Ty::Map(..)
                     | Ty::Set(_)
                     | Ty::Func { .. }
-                    | Ty::BuiltinFn { .. }
                     | Ty::Tuple(_)
                     | Ty::Struct(..)
                     | Ty::Enum(..)
@@ -227,7 +226,6 @@ impl Checker {
                     | Ty::Map(..)
                     | Ty::Set(_)
                     | Ty::Func { .. }
-                    | Ty::BuiltinFn { .. }
                     | Ty::Tuple(_)
                     | Ty::Struct(..)
                     | Ty::Enum(..)
@@ -282,7 +280,6 @@ impl Checker {
                 | Ty::Map(..)
                 | Ty::Set(_)
                 | Ty::Func { .. }
-                | Ty::BuiltinFn { .. }
                 | Ty::Tuple(_)
                 | Ty::Struct(..)
                 | Ty::Enum(..)
@@ -394,7 +391,6 @@ impl Checker {
                 | Ty::Map(..)
                 | Ty::Set(_)
                 | Ty::Func { .. }
-                | Ty::BuiltinFn { .. }
                 | Ty::Struct(..)
                 | Ty::Enum(..)
                 | Ty::Param(_)
@@ -433,7 +429,6 @@ impl Checker {
                     | Ty::Map(..)
                     | Ty::Set(_)
                     | Ty::Func { .. }
-                    | Ty::BuiltinFn { .. }
                     | Ty::Tuple(_)
                     | Ty::Struct(..)
                     | Ty::Enum(..)
@@ -493,7 +488,7 @@ impl Checker {
         //
         // Four gates:
         // * kind ≠ `"?"`. That covers every handle (`Channel`/`Shared`/`Executor`/`Socket`/…),
-        //   `Module` and `Ty::Param` (`Func`/`BuiltinFn` graduated into the `"func"` kind in W7-54,
+        //   `Module` and `Ty::Param` (`Func` graduated into the `"func"` kind in W7-54,
         //   `Ty::Protocol` into the `"protocol"` kind in W7-52, so neither lands here any more). The
         //   handles compare by identity but have no constructible probe receiver, so kind `"?"` is
         //   the right refusal for them; `Ty::Param` MUST fall through too — `may_be_equal` treats a
@@ -512,7 +507,7 @@ impl Checker {
         //   explicit `.eq(b)` call — `==` never sees it and stays structural — so such a type is
         //   graded the same as one with no `eq` at all (C1, W7-53 follow-up: before this, `Key` below
         //   had `==` structural and working while `[T: Eq]`/`.eq()` refused it — the exact
-        //   two-spellings-disagree shape Tasks 1/2 closed for `Ty::Func`/`Ty::BuiltinFn`/
+        //   two-spellings-disagree shape Tasks 1/2 closed for `Ty::Func`/
         //   `Ty::Protocol`):
         //   ```text
         //   struct Key: fn hash(self) -> int: return 1
@@ -807,7 +802,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Enum(..)
             | Ty::Param(_)

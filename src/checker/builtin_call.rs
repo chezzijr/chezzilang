@@ -49,7 +49,6 @@ impl Checker {
                         | other @ Ty::Map(..)
                         | other @ Ty::Set(_)
                         | other @ Ty::Func { .. }
-                        | other @ Ty::BuiltinFn { .. }
                         | other @ Ty::Tuple(_)
                         | other @ Ty::Struct(..)
                         | other @ Ty::Enum(..)
@@ -128,7 +127,6 @@ impl Checker {
                         | other @ Ty::Map(..)
                         | other @ Ty::Set(_)
                         | other @ Ty::Func { .. }
-                        | other @ Ty::BuiltinFn { .. }
                         | other @ Ty::Tuple(_)
                         | other @ Ty::Struct(..)
                         | other @ Ty::Enum(..)
@@ -171,7 +169,6 @@ impl Checker {
                         | other @ Ty::Map(..)
                         | other @ Ty::Set(_)
                         | other @ Ty::Func { .. }
-                        | other @ Ty::BuiltinFn { .. }
                         | other @ Ty::Tuple(_)
                         | other @ Ty::Struct(..)
                         | other @ Ty::Enum(..)
@@ -382,7 +379,6 @@ impl Checker {
                             | other @ Ty::Map(..)
                             | other @ Ty::Set(_)
                             | other @ Ty::Func { .. }
-                            | other @ Ty::BuiltinFn { .. }
                             | other @ Ty::Tuple(_)
                             | other @ Ty::Struct(..)
                             | other @ Ty::Enum(..)
@@ -462,7 +458,7 @@ impl Checker {
                     1 => match self.infer_value(&args[0]) {
                         Ty::Int | Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                         Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
-                        other @ Ty::Float | other @ Ty::Bool | other @ Ty::Str | other @ Ty::Nil | other @ Ty::List(_) | other @ Ty::Map(..) | other @ Ty::Set(_) | other @ Ty::Func { .. } | other @ Ty::BuiltinFn { .. } | other @ Ty::Tuple(_) | other @ Ty::Struct(..) | other @ Ty::Enum(..) | other @ Ty::Param(_) | other @ Ty::Result(..) | other @ Ty::Option(_) | other @ Ty::Channel(_) | other @ Ty::Shared(_) | other @ Ty::Atomic(_) | other @ Ty::AtomicInt | other @ Ty::RwShared(_) | other @ Ty::Executor | other @ Ty::Socket | other @ Ty::Listener | other @ Ty::Writer | other @ Ty::Reader | other @ Ty::Ptr | other @ Ty::Width(_) | other @ Ty::Protocol(..) | other @ Ty::Module(_) | other @ Ty::Var(_) => self.error(
+                        other @ Ty::Float | other @ Ty::Bool | other @ Ty::Str | other @ Ty::Nil | other @ Ty::List(_) | other @ Ty::Map(..) | other @ Ty::Set(_) | other @ Ty::Func { .. } | other @ Ty::Tuple(_) | other @ Ty::Struct(..) | other @ Ty::Enum(..) | other @ Ty::Param(_) | other @ Ty::Result(..) | other @ Ty::Option(_) | other @ Ty::Channel(_) | other @ Ty::Shared(_) | other @ Ty::Atomic(_) | other @ Ty::AtomicInt | other @ Ty::RwShared(_) | other @ Ty::Executor | other @ Ty::Socket | other @ Ty::Listener | other @ Ty::Writer | other @ Ty::Reader | other @ Ty::Ptr | other @ Ty::Width(_) | other @ Ty::Protocol(..) | other @ Ty::Module(_) | other @ Ty::Var(_) => self.error(
                             args[0].span,
                             format!("bytearray() expects an int size, a bytes, a bytearray, or a List[int], got {other}"),
                         ),
@@ -488,7 +484,6 @@ impl Checker {
                         | other @ Ty::Map(..)
                         | other @ Ty::Set(_)
                         | other @ Ty::Func { .. }
-                        | other @ Ty::BuiltinFn { .. }
                         | other @ Ty::Tuple(_)
                         | other @ Ty::Struct(..)
                         | other @ Ty::Enum(..)

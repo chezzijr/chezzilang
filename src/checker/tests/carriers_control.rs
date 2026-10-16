@@ -1084,7 +1084,7 @@ fn print_value_not_usable_as_bool_condition() {
     // bool) — it must NOT be silently accepted. Typing `print` as `Ty::Unknown` (an earlier attempt
     // at variadic value-form print) let `if p:` slip through the checker, and then the VM ran the
     // then-branch (an `Obj::Builtin` is truthy) while the interp faulted `expected bool, found
-    // function` — a VM≠interp parity break. `print` now types as the dedicated `Ty::BuiltinFn`, which
+    // function` — a VM≠interp parity break. `print` now types as a `Ty::Func`, which
     // (like the other three) `expect_bool` rejects. `if print:` (the bare form) is rejected too.
     rejects(
         "fn main():\n    p := print\n    if p:\n        print(\"t\")\nmain()\n",
@@ -1129,7 +1129,7 @@ fn container_ctor_not_firstclass_value() {
     // are NOT first-class values — a
     // value-position use stays REJECTED, on the same fall-through path as the scalar ctors (`f := int`)
     // and user struct ctors (`f := Point`). The `first_class == false` gate keeps them off the
-    // `LoadBuiltin`/`Ty::BuiltinFn` arm.
+    // `LoadBuiltin` arm.
     rejects("fn w():\n    f := List\n", "List");
     rejects("fn w():\n    f := Map\n", "Map");
     rejects("fn w():\n    f := Set\n", "Set");
@@ -1150,7 +1150,7 @@ fn scalar_ctor_not_firstclass_value() {
     // The scalar-conversion ctors (int/float/str/bytes/bytearray) are `Builtin` ids with
     // `first_class() == false`, so they are NOT first-class values — a
     // value-position use (`f := int`) stays REJECTED, on the same fall-through path as `f := List`
-    // (the `first_class == false` gate keeps them off the `LoadBuiltin`/`Ty::BuiltinFn` arm).
+    // (the `first_class == false` gate keeps them off the `LoadBuiltin` arm).
     rejects("fn w():\n    f := int\n", "int");
     rejects("fn w():\n    f := float\n", "float");
     rejects("fn w():\n    f := str\n", "str");

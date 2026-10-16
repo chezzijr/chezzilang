@@ -1508,7 +1508,7 @@ fn native_protocol_shapes_match_prebuilt_seed() {
 }
 
 /// Phase 3a — the migrated builtins keep their historical first-classness through the `.chz` decls.
-/// `native fn` (ord/chr/panic) stays a first-class VALUE (binds to a name, types `Ty::BuiltinFn`);
+/// `native fn` (ord/chr/panic) stays a first-class VALUE (binds to a name, types `Ty::Func`);
 /// `native ctor` (int/str/…) stays NON-first-class (value-position use is a checker error). This is
 /// the graph path (prelude always-linked), complementing the single-module `ok()`-based tests.
 #[test]

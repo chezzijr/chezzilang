@@ -187,7 +187,6 @@ impl Checker {
                 | t @ Ty::Map(..)
                 | t @ Ty::Set(_)
                 | t @ Ty::Func { .. }
-                | t @ Ty::BuiltinFn { .. }
                 | t @ Ty::Tuple(_)
                 | t @ Ty::Struct(..)
                 | t @ Ty::Enum(..)
@@ -257,11 +256,6 @@ impl Checker {
             // recoverable safety net — a checker-permissive type here is
             // never UB, at worst a deferred fault.
             Ty::Protocol(..) => true,
-            // A first-class builtin fn value is pure code (no captured environment) — always
-            // sendable, so a `f := ord` captured into a spawned task crosses the airlock (the
-            // `Obj::Builtin`/`SnapValue::Builtin` runtime path), unlike a conservatively-non-sendable
-            // user `Func`. All four builtins (`print`/`ord`/`chr`/`panic`) are covered uniformly.
-            Ty::BuiltinFn { .. } => true,
             Ty::Struct(name, args) => {
                 if !args.iter().all(|a| self.sendable_rec(a, stack)) {
                     return false;

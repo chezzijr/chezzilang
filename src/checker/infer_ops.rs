@@ -129,9 +129,8 @@ impl Checker {
             return fn_value_ty(&sig);
         }
         // A first-class universe builtin fn used in value position (`f := ord`, HOF arg, bare
-        // `defer print(...)`). Typed as the dedicated `Ty::BuiltinFn` from `builtin_sig` — a genuine
-        // callable that is sendable (crosses the spawn airlock) yet, unlike `Ty::Unknown`, is rejected
-        // by `expect_bool` (so `if print:` is a type error, not a VM/interp divergence). Only the four
+        // `defer print(...)`). Its prelude declaration is the one signature, so `p := print` is
+        // `fn(...Any) -> None` and a call through it binds like the direct call. Only the four
         // first-class fns; type/ctor names fall through to the "unknown/not first-class" arms below
         // (uniform with `f := Point`).
         //
@@ -139,21 +138,11 @@ impl Checker {
         // scope 0 before any body (TICKET-183, TICKET-180). At top level a name whose `:=` is below
         // the read is the builtin, as in CPython; the compiler loads it from the checker's `Builtin`
         // record, never from the not-yet-initialized slot.
-        // `print` is an ordinary fn value: its prelude declaration is the one signature, so `p := print`
-        // is `fn(...Any) -> None` and a call through it binds like the direct call.
-        if let Resolution::Builtin(Builtin::Print) = &res
-            && let Some(sig) = self.builtin_sig(name)
-        {
-            return fn_value_ty(&sig);
-        }
         if let Resolution::Builtin(b) = &res
             && b.first_class()
             && let Some(sig) = self.builtin_sig(name)
         {
-            return Ty::BuiltinFn {
-                params: sig.params,
-                ret: Box::new(sig.ret),
-            };
+            return fn_value_ty(&sig);
         }
         // A bare imported variant: the nullary one is its enum's value. A payload one is a
         // constructor, rejected below as a type read (U10).
@@ -1068,7 +1057,6 @@ impl Checker {
                     | other @ Ty::Bool
                     | other @ Ty::Nil
                     | other @ Ty::Func { .. }
-                    | other @ Ty::BuiltinFn { .. }
                     | other @ Ty::Tuple(_)
                     | other @ Ty::Struct(..)
                     | other @ Ty::Enum(..)

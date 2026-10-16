@@ -22,38 +22,7 @@ const IS_A_TYPE: &str = "is a type, not a value";
 const EXPECTED_FN: &str = "expected fn(";
 
 /// Cells red today, by name. A cell that turns green must leave the list.
-const FN_VALUE_PINNED_RED: &[&str] = &[
-    "builtin_chr/-/binding/named",
-    "builtin_chr/-/defer/named",
-    "builtin_chr/-/lib/named",
-    "builtin_chr/-/slot/named",
-    "builtin_chr/-/spawn/named",
-    "builtin_ord/-/binding/named",
-    "builtin_ord/-/defer/named",
-    "builtin_ord/-/lib/named",
-    "builtin_ord/-/slot/named",
-    "builtin_ord/-/spawn/named",
-    "builtin_panic/-/binding/named",
-    "builtin_panic/-/defer/named",
-    "builtin_panic/-/lib/named",
-    "builtin_panic/-/slot/named",
-    "builtin_panic/-/spawn/named",
-    "builtin_print/-/binding/named",
-    "builtin_print/-/defer/named",
-    "builtin_print/-/spawn/named",
-    "extern_snprintf/-/call_result/exact",
-    "extern_snprintf/-/call_result/few",
-    "extern_snprintf/-/call_result/surplus",
-    "extern_snprintf/-/field/exact",
-    "extern_snprintf/-/field/few",
-    "extern_snprintf/-/field/surplus",
-    "extern_snprintf/-/param/exact",
-    "extern_snprintf/-/param/few",
-    "extern_snprintf/-/param/surplus",
-    "native_sqrt/-/binding/named",
-    "native_sqrt/-/defer/named",
-    "native_sqrt/-/spawn/named",
-];
+const FN_VALUE_PINNED_RED: &[&str] = &[];
 
 /// One parameter list a user-declared callee takes, with its arity shapes.
 struct PSet {
@@ -364,13 +333,13 @@ fn callees() -> Vec<Callee> {
     });
     v.push(Callee {
         id: "extern_snprintf/-".to_string(),
-        imports: "import std.ffi\nimport int32 from std.ffi\n".to_string(),
-        decls: "extern \"libc\":\n    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int32\nBUF := ffi.alloc(64)\n"
+        imports: "import std.ffi\n".to_string(),
+        decls: "extern \"libc\":\n    fn snprintf(buf: ffi.ptr, n: int, fmt: str, ...) -> int\nBUF := ffi.alloc(64)\n"
             .to_string(),
         nested: String::new(),
         callee: "snprintf".to_string(),
-        ty: "fn(ffi.ptr, int, str, ...) -> int32".to_string(),
-        ret: "int32".to_string(),
+        ty: "fn(ffi.ptr, int, str, ...) -> int".to_string(),
+        ret: "int".to_string(),
         stmt: false,
         shapes: [("few", "BUF, 64"), ("exact", "BUF, 64, \"plain\""), ("surplus", "BUF, 64, \"%s\", \"x\"")]
             .iter()

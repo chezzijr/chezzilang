@@ -264,7 +264,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Param(_)
             | Ty::Result(..)
@@ -348,7 +347,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Struct(..)
             | Ty::Enum(..)
@@ -398,7 +396,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Enum(..)
             | Ty::Param(_)
@@ -545,7 +542,6 @@ impl Checker {
                 | Ty::Map(..)
                 | Ty::Set(_)
                 | Ty::Func { .. }
-                | Ty::BuiltinFn { .. }
                 | Ty::Tuple(_)
                 | Ty::Struct(..)
                 | Ty::Enum(..)
@@ -817,7 +813,6 @@ pub(super) fn c_vararg_ctype(ty: &Ty) -> Option<CType> {
         | Ty::Map(..)
         | Ty::Set(_)
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Tuple(_)
         | Ty::Struct(..)
         | Ty::Enum(..)
@@ -979,7 +974,6 @@ pub(super) fn alias_type_head(name: &str, spelled: String, body: Ty) -> Option<T
         | other @ Ty::Map(..)
         | other @ Ty::Set(_)
         | other @ Ty::Func { .. }
-        | other @ Ty::BuiltinFn { .. }
         | other @ Ty::Tuple(_)
         | other @ Ty::Enum(..)
         | other @ Ty::Param(_)
@@ -1063,7 +1057,6 @@ pub(super) fn open_binding_message(name: &str, t: &Ty, site: BindSite) -> String
             | other @ Ty::Bytes
             | other @ Ty::ByteArray
             | other @ Ty::Nil
-            | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Param(_)
             | other @ Ty::AtomicInt
             | other @ Ty::Executor
@@ -1099,7 +1092,6 @@ pub(super) fn open_binding_message(name: &str, t: &Ty, site: BindSite) -> String
         | Ty::ByteArray
         | Ty::Nil
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Tuple(_)
         | Ty::Param(_)
         | Ty::AtomicInt

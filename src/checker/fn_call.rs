@@ -243,7 +243,6 @@ impl Checker {
                     | Ty::ByteArray
                     | Ty::Nil
                     | Ty::Func { .. }
-                    | Ty::BuiltinFn { .. }
                     | Ty::Tuple(_)
                     | Ty::Struct(..)
                     | Ty::Enum(..)
@@ -272,7 +271,6 @@ impl Checker {
             | Ty::ByteArray
             | Ty::Nil
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Param(_)
             | Ty::Result(..)

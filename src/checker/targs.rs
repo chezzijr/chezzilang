@@ -33,7 +33,6 @@ impl Checker {
             | Ty::ByteArray
             | Ty::Nil
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Param(_)
             | Ty::Result(..)
@@ -417,7 +416,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Param(_)
             | Ty::Result(..)
@@ -712,7 +710,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Param(_)
             | Ty::Result(..)

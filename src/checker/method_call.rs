@@ -181,7 +181,7 @@ impl Checker {
                 // member's own `Ty::Func` IS what `record_method_hover` would build from an `FnSig`,
                 // so record it directly (no doc — a slot without `certain_fn` carries none).
                 if self.hover_probe.is_some()
-                    && let Some(t @ (Ty::Func { .. } | Ty::BuiltinFn { .. })) = &vty
+                    && let Some(t @ Ty::Func { .. }) = &vty
                 {
                     let t = t.clone();
                     self.hover_record_at(name_span, &t, HoverKind::Func, None);
@@ -193,7 +193,7 @@ impl Checker {
                     // paths: no int→float widening through a function value.
                     // TICKET-196: it has no declaration to bind labels from, so `apply_value_call` with
                     // no callee refuses a keyword call through it.
-                    Some(t @ (Ty::Func { .. } | Ty::BuiltinFn { .. })) => {
+                    Some(t @ Ty::Func { .. }) => {
                         let named = self
                             .call_ctx
                             .as_ref()
@@ -758,7 +758,7 @@ impl Checker {
                         match self.infer_value(a) {
                             Ty::Bytes | Ty::ByteArray | Ty::Unknown => {}
                             Ty::List(elem) if matches!(elem.scalar(), Ty::Int | Ty::Unknown) => {}
-                            other @ Ty::Int | other @ Ty::Float | other @ Ty::Bool | other @ Ty::Str | other @ Ty::Nil | other @ Ty::List(_) | other @ Ty::Map(..) | other @ Ty::Set(_) | other @ Ty::Func { .. } | other @ Ty::BuiltinFn { .. } | other @ Ty::Tuple(_) | other @ Ty::Struct(..) | other @ Ty::Enum(..) | other @ Ty::Param(_) | other @ Ty::Result(..) | other @ Ty::Option(_) | other @ Ty::Channel(_) | other @ Ty::Shared(_) | other @ Ty::Atomic(_) | other @ Ty::AtomicInt | other @ Ty::RwShared(_) | other @ Ty::Executor | other @ Ty::Socket | other @ Ty::Listener | other @ Ty::Writer | other @ Ty::Reader | other @ Ty::Ptr | other @ Ty::Width(_) | other @ Ty::Protocol(..) | other @ Ty::Module(_) | other @ Ty::Var(_) => self.error(
+                            other @ Ty::Int | other @ Ty::Float | other @ Ty::Bool | other @ Ty::Str | other @ Ty::Nil | other @ Ty::List(_) | other @ Ty::Map(..) | other @ Ty::Set(_) | other @ Ty::Func { .. } | other @ Ty::Tuple(_) | other @ Ty::Struct(..) | other @ Ty::Enum(..) | other @ Ty::Param(_) | other @ Ty::Result(..) | other @ Ty::Option(_) | other @ Ty::Channel(_) | other @ Ty::Shared(_) | other @ Ty::Atomic(_) | other @ Ty::AtomicInt | other @ Ty::RwShared(_) | other @ Ty::Executor | other @ Ty::Socket | other @ Ty::Listener | other @ Ty::Writer | other @ Ty::Reader | other @ Ty::Ptr | other @ Ty::Width(_) | other @ Ty::Protocol(..) | other @ Ty::Module(_) | other @ Ty::Var(_) => self.error(
                                 a.span,
                                 format!("extend() expects a bytes, a bytearray, or a List[int], got {other}"),
                             ),
@@ -1017,7 +1017,6 @@ impl Checker {
                     | Ty::ByteArray
                     | Ty::Nil
                     | Ty::Func { .. }
-                    | Ty::BuiltinFn { .. }
                     | Ty::Tuple(_)
                     | Ty::Struct(..)
                     | Ty::Enum(..)
@@ -1302,7 +1301,6 @@ impl Checker {
             | other @ Ty::Bool
             | other @ Ty::Nil
             | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Tuple(_)
             | other @ Ty::Result(..)
             | other @ Ty::Option(_)

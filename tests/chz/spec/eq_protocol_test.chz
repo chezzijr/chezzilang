@@ -151,7 +151,7 @@ test fn a_generic_operand_eq_is_an_ordinary_method():
 # Before this fix, `Key` below had `==`/`Map`/`Set` all working (structural equality, since `eq`'s
 # generic operand means `==` never dispatches it) while `[T: Eq]`/`.eq()` refused it — `==` and a
 # `[T: Eq]` bound disagreeing about the SAME type, the identical defect shape Tasks 1/2 closed for
-# `Ty::Func`/`Ty::BuiltinFn`/`Ty::Protocol`. `k1 == k2` staying `false` while `k1.eq(k2)` answers
+# `Ty::Func`/`Ty::Protocol`. `k1 == k2` staying `false` while `k1.eq(k2)` answers
 # `true` is the proof that `==` really is structural here, not routed through the escape hatch.
 
 struct Key:

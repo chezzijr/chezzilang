@@ -275,7 +275,6 @@ impl Checker {
             | t @ Ty::Map(..)
             | t @ Ty::Set(_)
             | t @ Ty::Func { .. }
-            | t @ Ty::BuiltinFn { .. }
             | t @ Ty::Tuple(_)
             | t @ Ty::Struct(..)
             | t @ Ty::Enum(..)
@@ -701,7 +700,6 @@ impl Checker {
             | other @ Ty::Map(..)
             | other @ Ty::Set(_)
             | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Tuple(_)
             | other @ Ty::Struct(..)
             | other @ Ty::Enum(..)
@@ -824,7 +822,6 @@ fn scalar_kind_of(ty: &Ty) -> Option<crate::fmtspec::ScalarKind> {
         | Ty::Map(..)
         | Ty::Set(_)
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Tuple(_)
         | Ty::Struct(..)
         | Ty::Enum(..)
@@ -866,7 +863,6 @@ fn renders_as_text(ty: &Ty) -> bool {
         | Ty::Option(_)
         | Ty::Result(..)
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Struct(..)
         | Ty::Enum(..)
         | Ty::Channel(_)

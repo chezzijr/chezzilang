@@ -352,7 +352,6 @@ impl Checker {
             | Ty::ByteArray
             | Ty::Nil
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Channel(_)
             | Ty::Shared(_)
             | Ty::Atomic(_)
@@ -373,9 +372,8 @@ impl Checker {
     }
 
     /// The rendered type of the first `fn` value reachable from `ty` by the same structural walk as
-    /// [`Self::reaches_user_eq`] (same cycle guard, same holes), or `None`. Only `Ty::Func` is a hit:
-    /// a `Ty::BuiltinFn` (`ord`, `math.sqrt`) is a bare name that compares equal after an `Atomic`
-    /// round trip, so `cas` on it keeps working. TICKET-144 (W14-24): `Atomic.cas` on a payload
+    /// [`Self::reaches_user_eq`] (same cycle guard, same holes), or `None`. Every `Ty::Func` is a hit,
+    /// a builtin fn value (`ord`) included (owner answer 2026-10-17). TICKET-144 (W14-24): `Atomic.cas` on a payload
     /// holding a closure can never succeed — every `load()` builds a fresh copy and closures compare by
     /// identity. `Param`/`Protocol` payloads hide the fn from this walk; the runtime `cas` backstops
     /// them (`Vm::slot_identity_in`).
@@ -431,7 +429,6 @@ impl Checker {
             | Ty::Bytes
             | Ty::ByteArray
             | Ty::Nil
-            | Ty::BuiltinFn { .. }
             | Ty::Param(_)
             | Ty::Channel(_)
             | Ty::Shared(_)
@@ -632,7 +629,7 @@ impl Checker {
             Ty::Map(k, v) | Ty::Result(k, v) => 1 + Self::ty_nodes(k) + Self::ty_nodes(v),
             // Fn-shaped: params (a `Vec`) + one return type. `labels` is surface-only and
             // equality-neutral (see `FnLabels`), so it carries no size.
-            Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 1 + params.iter().map(Self::ty_nodes).sum::<usize>() + Self::ty_nodes(ret)
             }
             // A `Vec` of children; the name (where present) carries no size.
@@ -817,7 +814,7 @@ impl Checker {
             // protocol arm now closes the hole one step earlier, at the erasure itself, via
             // [`Self::eq_where_bounds_unsatisfied`], so an unsatisfied witness is refused there and
             // never reaches this arm's runtime defer at all.
-            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Nil | Ty::Func { .. } | Ty::BuiltinFn { .. } | Ty::Param(_) | Ty::Channel(_) | Ty::Shared(_) | Ty::Atomic(_) | Ty::AtomicInt | Ty::RwShared(_) | Ty::Executor | Ty::Socket | Ty::Listener | Ty::Writer | Ty::Reader | Ty::Ptr | Ty::Width(_) | Ty::Protocol(..) | Ty::Module(_) | Ty::Unknown | Ty::Var(_) => None,
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes | Ty::ByteArray | Ty::Nil | Ty::Func { .. } | Ty::Param(_) | Ty::Channel(_) | Ty::Shared(_) | Ty::Atomic(_) | Ty::AtomicInt | Ty::RwShared(_) | Ty::Executor | Ty::Socket | Ty::Listener | Ty::Writer | Ty::Reader | Ty::Ptr | Ty::Width(_) | Ty::Protocol(..) | Ty::Module(_) | Ty::Unknown | Ty::Var(_) => None,
         }
     }
 

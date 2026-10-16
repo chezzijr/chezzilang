@@ -221,7 +221,6 @@ impl Checker {
             | other @ Ty::Map(..)
             | other @ Ty::Set(_)
             | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Enum(..)
             | other @ Ty::Param(_)
             | other @ Ty::Result(..)
@@ -375,7 +374,6 @@ impl Checker {
             | other @ Ty::Nil
             | other @ Ty::Set(_)
             | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Tuple(_)
             | other @ Ty::Struct(..)
             | other @ Ty::Enum(..)
@@ -490,7 +488,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Result(..)
             | Ty::Option(_)
@@ -749,7 +746,6 @@ impl Checker {
             | other @ Ty::Map(..)
             | other @ Ty::Set(_)
             | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Tuple(_)
             | other @ Ty::Struct(..)
             | other @ Ty::Enum(..)
@@ -889,7 +885,6 @@ impl Checker {
             | other @ Ty::Map(..)
             | other @ Ty::Set(_)
             | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Tuple(_)
             | other @ Ty::Struct(..)
             | other @ Ty::Enum(..)
@@ -984,7 +979,6 @@ impl Checker {
                 | other @ Ty::Map(..)
                 | other @ Ty::Set(_)
                 | other @ Ty::Func { .. }
-                | other @ Ty::BuiltinFn { .. }
                 | other @ Ty::Tuple(_)
                 | other @ Ty::Struct(..)
                 | other @ Ty::Enum(..)
@@ -1033,7 +1027,6 @@ impl Checker {
                 | other @ Ty::Map(..)
                 | other @ Ty::Set(_)
                 | other @ Ty::Func { .. }
-                | other @ Ty::BuiltinFn { .. }
                 | other @ Ty::Tuple(_)
                 | other @ Ty::Struct(..)
                 | other @ Ty::Enum(..)
@@ -1092,7 +1085,6 @@ impl Checker {
                 | other @ Ty::Map(..)
                 | other @ Ty::Set(_)
                 | other @ Ty::Func { .. }
-                | other @ Ty::BuiltinFn { .. }
                 | other @ Ty::Tuple(_)
                 | other @ Ty::Struct(..)
                 | other @ Ty::Enum(..)
@@ -1163,7 +1155,6 @@ impl Checker {
                     | other @ Ty::Map(..)
                     | other @ Ty::Set(_)
                     | other @ Ty::Func { .. }
-                    | other @ Ty::BuiltinFn { .. }
                     | other @ Ty::Tuple(_)
                     | other @ Ty::Struct(..)
                     | other @ Ty::Enum(..)
@@ -1211,7 +1202,6 @@ impl Checker {
                     | other @ Ty::Map(..)
                     | other @ Ty::Set(_)
                     | other @ Ty::Func { .. }
-                    | other @ Ty::BuiltinFn { .. }
                     | other @ Ty::Tuple(_)
                     | other @ Ty::Struct(..)
                     | other @ Ty::Enum(..)
@@ -1249,7 +1239,6 @@ impl Checker {
             | other @ Ty::Map(..)
             | other @ Ty::Set(_)
             | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Tuple(_)
             | other @ Ty::Struct(..)
             | other @ Ty::Enum(..)
@@ -1327,7 +1316,6 @@ impl Checker {
                 | Ty::Map(..)
                 | Ty::Set(_)
                 | Ty::Func { .. }
-                | Ty::BuiltinFn { .. }
                 | Ty::Tuple(_)
                 | Ty::Struct(..)
                 | Ty::Enum(..)
@@ -1360,7 +1348,6 @@ impl Checker {
             | Ty::List(_)
             | Ty::Map(..)
             | Ty::Set(_)
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Struct(..)
             | Ty::Enum(..)

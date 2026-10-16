@@ -99,7 +99,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Struct(..)
             | Ty::Enum(..)
             | Ty::Param(_)
@@ -395,7 +394,6 @@ impl Checker {
                 | Ty::Map(..)
                 | Ty::Set(_)
                 | Ty::Func { .. }
-                | Ty::BuiltinFn { .. }
                 | Ty::Tuple(_)
                 | Ty::Struct(..)
                 | Ty::Enum(..)
@@ -429,7 +427,6 @@ impl Checker {
                 | Ty::Map(..)
                 | Ty::Set(_)
                 | Ty::Func { .. }
-                | Ty::BuiltinFn { .. }
                 | Ty::Tuple(_)
                 | Ty::Struct(..)
                 | Ty::Enum(..)
@@ -461,7 +458,6 @@ impl Checker {
             | Ty::Option(_)
             | Ty::Result(..)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Protocol(..)
             | Ty::Param(_)
             | Ty::Channel(_)

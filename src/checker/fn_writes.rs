@@ -203,7 +203,6 @@ pub(super) fn ret_may_hold_receiver(ret: &Ty, own: &Ty) -> bool {
         | Ty::Map(..)
         | Ty::Set(_)
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Tuple(_)
         | Ty::Struct(..)
         | Ty::Enum(..)
@@ -241,7 +240,6 @@ pub(super) fn native_receiver(t: &Ty) -> Option<(&'static str, Ty)> {
         | Ty::Bool
         | Ty::Nil
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Tuple(_)
         | Ty::Struct(..)
         | Ty::Enum(..)
@@ -280,7 +278,6 @@ pub(super) fn builtin_slice(t: &Ty) -> bool {
         | Ty::Map(..)
         | Ty::Set(_)
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Tuple(_)
         | Ty::Struct(..)
         | Ty::Enum(..)
@@ -318,7 +315,6 @@ pub(super) fn native_container(t: &Ty) -> bool {
         | Ty::Bool
         | Ty::Nil
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Tuple(_)
         | Ty::Struct(..)
         | Ty::Enum(..)
@@ -2035,7 +2031,6 @@ impl Checker {
                 | Ty::Map(..)
                 | Ty::Set(_)
                 | Ty::Func { .. }
-                | Ty::BuiltinFn { .. }
                 | Ty::Enum(..)
                 | Ty::Param(_)
                 | Ty::Result(..)

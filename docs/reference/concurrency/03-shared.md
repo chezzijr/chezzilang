@@ -222,12 +222,11 @@ by identity, so `cas(a.load(), new)` could never succeed and the standard CAS re
 forever (Go's `atomic.Value.CompareAndSwap` panics `comparing uncomparable type` on the same shape).
 
 - The error is at the `cas` call, so `load`/`store`/`exchange` of a fn stay legal.
-- A builtin fn value (`Atomic(ord)`), which compares equal after a load, keeps `cas`.
-- A named fn, a std native fn (`math.sqrt`) and an `extern` fn load back equal to themselves, but
-  `cas` still rejects them like a closure: their `==` is heap-slot identity.
+- A named fn, a builtin fn (`ord`), a std native fn (`math.sqrt`) and an `extern` fn are fn values
+  like a closure, so `cas` rejects them too.
 - A generic `fn f[T](a: Atomic[T], …)` hides the fn from the checker, so the runtime `cas` faults
   `Atomic.cas: the payload holds a function value, which cas cannot compare` instead of answering
-  `false` forever. An iterator payload faults the same way
+  `false` forever. A builtin fn (`ord`) faults the same way. An iterator payload faults the same way
   (`Atomic.cas: the payload holds an iterator, which cas cannot compare`).
 - A handle payload (`Atomic(ch)`) compares by its core, so `cas(a.load(), …)` on it succeeds.
 

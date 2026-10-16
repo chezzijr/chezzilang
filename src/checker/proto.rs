@@ -73,10 +73,8 @@ pub const INTRINSIC_PROTO_METHODS: &[(&str, &str, RecvKind)] = &[
     // a function value's `==` is IDENTITY (two loads of the same top-level `fn`/nested `fn` def are
     // equal, two calls to a factory are not — W7-54), not a structural walk, but it is still the same
     // `values_equal_guarded` worker `==` uses, so `.eq()` can never disagree with `==`. `func` covers
-    // BOTH `Ty::Func` (a user closure/free fn) and `Ty::BuiltinFn` (`ord`/`chr`/`panic`/first-class
-    // `print`) — they render identically and compare by the same `Obj::Builtin`/`Obj::Func` identity
-    // rule, so one row and one kind speaks for both (W7-54 follow-up: `Ty::BuiltinFn` was the same
-    // defect, just a separate `Ty` variant, and was missed the first time). `protocol` is a SECOND
+    // every `Ty::Func`: a user closure or free fn, and a builtin fn value (`ord`/`chr`/`panic`/
+    // `print`), which compares by the `Obj::Builtin` identity rule. `protocol` is a SECOND
     // exception, and a deliberately open one: a protocol-typed (existential) value's `==` DEFERS to
     // its concrete witness at runtime, exactly as Go's interface `==` defers to the dynamic type and
     // panics if that type is uncomparable — so this row grants the CHECK and the witness settles the
@@ -411,13 +409,9 @@ impl Checker {
             // the checker distinguishes them.
             Ty::Option(_) => Some(RecvKind::Option),
             Ty::Result(..) => Some(RecvKind::Result),
-            // `BuiltinFn` (`ord`/`chr`/`panic`/first-class `print`) renders identically to `Ty::Func`
-            // ("fn(...) -> ..." — see `impl Display for Ty`) and compares by the same runtime
-            // identity (`Obj::Builtin` name-equality, `vm/arith.rs`'s `(Obj::Builtin(a),
-            // Obj::Builtin(b))` arm); it is a DISTINCT `Ty` variant only for sendability
-            // (`docs/reference/syntax/`: all four universe builtins are sendable, a plain closure is not), so
-            // it shares `Ty::Func`'s kind rather than minting a second one (W7-54 follow-up).
-            Ty::Func { .. } | Ty::BuiltinFn { .. } => Some(RecvKind::Func),
+            // A builtin fn value (`ord`/`chr`/`panic`/`print`) is a `Ty::Func` too; at run time it
+            // compares by `Obj::Builtin` name-equality (`vm/arith.rs`).
+            Ty::Func { .. } => Some(RecvKind::Func),
             // A protocol EXISTENTIAL — at runtime this is always its concrete witness object, so
             // `.eq()`/`==`/`[T: Eq]` on it defers to whatever the witness's own `eq` dispatch does
             // (structural derive or a declared `eq`), exactly as Go's interface `==` defers to the
@@ -463,7 +457,6 @@ impl Checker {
             Ty::Bool => Some("bool"),
             Ty::Nil
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Struct(..)
             | Ty::Enum(..)
@@ -946,7 +939,6 @@ pub(super) fn ty_mentions_error_existential(ty: &Ty) -> bool {
         | Ty::ByteArray
         | Ty::Nil
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Param(_)
         | Ty::AtomicInt
         | Ty::Executor

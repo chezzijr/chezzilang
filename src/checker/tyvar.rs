@@ -152,7 +152,6 @@ impl TyVars {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Struct(..)
             | Ty::Enum(..)
@@ -236,10 +235,6 @@ pub(super) fn map_ty(t: &Ty, f: &mut dyn FnMut(&Ty) -> Option<Ty>) -> Ty {
             labels: labels.clone(),
             variadic: *variadic,
         },
-        Ty::BuiltinFn { params, ret } => Ty::BuiltinFn {
-            params: all(params, f),
-            ret: Box::new(map_ty(ret, f)),
-        },
         other @ Ty::Int
         | other @ Ty::Float
         | other @ Ty::Bool
@@ -316,7 +311,6 @@ impl Checker {
                         | Ty::Map(..)
                         | Ty::Set(_)
                         | Ty::Func { .. }
-                        | Ty::BuiltinFn { .. }
                         | Ty::Tuple(_)
                         | Ty::Struct(..)
                         | Ty::Enum(..)
@@ -645,7 +639,6 @@ impl Checker {
                 | z @ Ty::Map(..)
                 | z @ Ty::Set(_)
                 | z @ Ty::Func { .. }
-                | z @ Ty::BuiltinFn { .. }
                 | z @ Ty::Tuple(_)
                 | z @ Ty::Struct(..)
                 | z @ Ty::Enum(..)
@@ -682,7 +675,6 @@ impl Checker {
                 | z @ Ty::Map(..)
                 | z @ Ty::Set(_)
                 | z @ Ty::Func { .. }
-                | z @ Ty::BuiltinFn { .. }
                 | z @ Ty::Tuple(_)
                 | z @ Ty::Struct(..)
                 | z @ Ty::Enum(..)
@@ -739,7 +731,6 @@ impl Checker {
             | t @ Ty::Map(..)
             | t @ Ty::Set(_)
             | t @ Ty::Func { .. }
-            | t @ Ty::BuiltinFn { .. }
             | t @ Ty::Tuple(_)
             | t @ Ty::Struct(..)
             | t @ Ty::Enum(..)

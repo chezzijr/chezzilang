@@ -83,7 +83,6 @@ pub fn from_ty<F: Clone>(
         | other @ Ty::Nil
         | other @ Ty::Set(_)
         | other @ Ty::Func { .. }
-        | other @ Ty::BuiltinFn { .. }
         | other @ Ty::Enum(..)
         | other @ Ty::Param(_)
         | other @ Ty::Result(..)

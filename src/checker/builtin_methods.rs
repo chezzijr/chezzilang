@@ -125,7 +125,6 @@ pub(super) fn mutates_receiver(recv: &Ty, method: &str) -> bool {
         | Ty::Bytes
         | Ty::Nil
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Tuple(_)
         | Ty::Struct(..)
         | Ty::Enum(..)

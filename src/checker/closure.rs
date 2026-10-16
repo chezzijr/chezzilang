@@ -555,12 +555,16 @@ impl Checker {
             }
         };
         // A closure/lambda value carries its param names as labels, so a keyword call through a
-        // closure value (`cb := fn(name: str): …; cb(name="X")`) resolves.
+        // closure value (`cb := fn(name: str): …; cb(name="X")`) resolves. It is the one value with
+        // no declaration to read slots from, so it declares its own: every param named, none
+        // defaulted.
         let labels: Vec<Option<String>> = params.iter().map(|p| Some(p.name.clone())).collect();
+        let n = labels.len();
         Ty::Func {
             params: param_tys,
             ret: Box::new(ret_ty),
-            labels: FnLabels::new(labels),
+            labels: FnLabels::new(labels.clone())
+                .with_slots(Some(super::expr::callable_slots(&labels, n, n, None))),
             variadic: crate::ast::Variadic::No,
         }
     }

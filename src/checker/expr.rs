@@ -744,8 +744,8 @@ impl Checker {
                 let key = callee
                     .and_then(|c| c.kind.as_ident())
                     .and_then(|n| self.labels_certain(n));
-                self.consume_named();
                 let Some(key) = key else {
+                    self.consume_named();
                     for a in args {
                         self.infer(a);
                     }
@@ -762,43 +762,21 @@ impl Checker {
                 if !self.generic_arg_prepass && !self.kw_pending.contains(&pending) {
                     self.kw_pending.push(pending);
                 }
-                // A value read from one declaration binds that declaration's slots (TICKET-197),
-                // so it fills defaults and packs a variadic like a direct call. Any other value's
-                // slots are its labels, callee-filled from `min_params` on (a trailing run).
+                // A value binds the slots of the declaration it was read from (TICKET-197), so it
+                // fills defaults and packs a variadic like a direct call. A value with no
+                // declaration slots takes no keyword arguments, as the direct call does.
                 let minp = labels.min_or(params.len());
                 let all: Vec<Ty> = params.iter().chain(&labels.kw).cloned().collect();
-                let value_slots = match &labels.slots {
-                    Some(slots) => slots.to_vec(),
-                    None => callable_slots(
-                        &labels.names,
-                        minp,
-                        all.len(),
-                        (variadic == crate::ast::Variadic::Pack).then(|| params.len() - 1),
-                    ),
-                };
-                let Some(bound) = self.bind_call(Some(&value_slots), head, args, 0, span) else {
+                let Some(bound) = self.bind_call(
+                    labels.slots.as_ref().map(|s| s.as_slice()),
+                    head,
+                    args,
+                    0,
+                    span,
+                ) else {
                     return *ret;
                 };
                 self.check_args_range(head, &all, minp, &bound, span);
-                *ret
-            }
-            // A first-class builtin fn value (`f := ord; f("a")`) checks its args against the builtin's
-            // canonical signature, exactly like a closure/fn value. `print`'s value form is thus a
-            // fixed 1-arg call — the variadic / `sep=`/`end=` surface stays direct-call-only. Its value
-            // form takes NO keyword arguments (labels are a user-fn surface).
-            Ty::BuiltinFn { params: _, ret } if !named.is_empty() => {
-                self.consume_named();
-                for a in args {
-                    self.infer(a);
-                }
-                for (_, v) in named {
-                    self.infer(v);
-                }
-                self.error(
-                    span,
-                    "a first-class builtin function value takes no keyword arguments (labels apply only to user function values)"
-                        .to_string(),
-                );
                 *ret
             }
             Ty::Func {
@@ -836,10 +814,6 @@ impl Checker {
                         self.check_args_range(head, &params, minp, args, span);
                     }
                 }
-                *ret
-            }
-            Ty::BuiltinFn { params, ret } => {
-                self.check_args(head, &params, args, span);
                 *ret
             }
             Ty::Unknown => {
@@ -1078,7 +1052,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Param(_)
             | Ty::Result(..)
@@ -1289,7 +1262,6 @@ impl Checker {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Enum(..)
             | Ty::Param(_)

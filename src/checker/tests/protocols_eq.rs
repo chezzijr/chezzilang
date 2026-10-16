@@ -145,12 +145,9 @@ fn function_value_satisfies_eq_by_identity() {
     ));
 }
 
-/// **W7-54 follow-up — `Ty::BuiltinFn` is the same defect as `Ty::Func`, same fix.** A first-class
-/// universe builtin (`ord`/`chr`/`panic`/`print`) types as the DISTINCT `Ty::BuiltinFn` variant (kept
-/// apart from `Ty::Func` only so it can be sendable across `spawn`), so `Ty::Func { .. } => "func"`
-/// alone did not cover it — it still fell to `"?"` and the D1 grant still excluded it, even though
-/// `Ty::BuiltinFn` renders identically ("fn(str) -> int") to `Ty::Func` in every diagnostic. Fixed by
-/// classifying both variants to the same `"func"` kind rather than minting a second one.
+/// **W7-54 follow-up — a builtin fn value satisfies `Eq` like any fn value.** A first-class universe
+/// builtin (`ord`/`chr`/`panic`/`print`) is a `Ty::Func`, so the `"func"` kind and the D1 grant
+/// cover it.
 #[test]
 fn builtin_function_value_satisfies_eq_by_identity() {
     ok("fn same[T: Eq](a: T, b: T) -> bool:\n    return a.eq(b)\nprint(same(ord, ord))\n");
@@ -1618,7 +1615,7 @@ fn struct_with_eq_satisfies_eq() {
     // `==` leaves it structural) MUST now be granted `Eq` (C1, W7-53 follow-up review): before this,
     // `==`/`Map`/`Set` all treated such a type as structurally equal (measured, working), while
     // `[T: Eq]`/`.eq()` refused it — the exact two-spellings-disagree defect Tasks 1/2 closed for
-    // `Ty::Func`/`Ty::BuiltinFn`/`Ty::Protocol`. `eq_sig_is_hook` now tells the escape hatch apart
+    // `Ty::Func`/`Ty::Protocol`. `eq_sig_is_hook` now tells the escape hatch apart
     // from the hook BEFORE the D1 gate falls to the structural check, so a non-hook `eq` is judged
     // the same as no `eq` at all — granted here since `Opt2[int]`'s payload (`int`) is trivially
     // `Eq`. `a.eq(b)` dispatches by NAME to the escape-hatch method regardless (unchanged), so the
@@ -1952,7 +1949,7 @@ fn atomic_payload_with_eq_rejected() {
 /// `cas(a.load(), new)` retry loop spins forever. Go's `atomic.Value.CompareAndSwap` panics
 /// `comparing uncomparable type` on the same shape. Rejected at the `cas` CALL (`load`/`store`/
 /// `exchange` of a fn stay legal, as Go's `Value` Store/Load of a func do); a builtin fn value
-/// (`ord`) compares equal after a load and stays allowed.
+/// (`ord`) is rejected like every other fn value.
 #[test]
 fn atomic_cas_on_fn_payload_rejected() {
     let decl = "import std.concurrency\nfn one() -> int:\n    return 1\nstruct H:\n    n: int\n    f: fn() -> int\n";
@@ -1983,13 +1980,15 @@ fn atomic_cas_on_fn_payload_rejected() {
         "import Atomic from std.concurrency\nimport std.math\nfn main():\n    a := Atomic(math.sqrt)\n    print(a.cas(a.load(), math.sqrt))\nmain()\n",
         needle,
     );
-    // MUST STILL PASS: a fn payload with only `store`/`load`/`exchange`, and a builtin fn with `cas`.
+    // A builtin fn (`ord`) is a `fn(str) -> int` like any other fn value, so `cas` rejects it too.
+    entry_rejects(
+        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(ord)\n    print(a.cas(a.load(), ord))\nmain()\n",
+        needle,
+    );
+    // MUST STILL PASS: a fn payload with only `store`/`load`/`exchange`.
     entry_ok(&format!(
         "import Atomic from std.concurrency\n{decl}fn main():\n    a := Atomic[fn() -> int](one)\n    a.store(one)\n    f := a.exchange(one)\n    print(f() + a.load()())\nmain()\n"
     ));
-    entry_ok(
-        "import Atomic from std.concurrency\nfn main():\n    a := Atomic(ord)\n    print(a.cas(a.load(), ord))\nmain()\n",
-    );
     // A payload with no fn in it keeps `cas`.
     entry_ok(&format!(
         "import Atomic from std.concurrency\n{decl}struct Q:\n    x: int\nfn main():\n    a := Atomic(Q(1))\n    print(a.cas(a.load(), Q(2)))\nmain()\n"

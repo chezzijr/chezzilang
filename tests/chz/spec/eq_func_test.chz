@@ -11,11 +11,8 @@
 # `f == g` outright (`func can only be compared to None`). Chezzi now matches CPython/Rust on all four
 # spellings. Gated by `chz_suite_passes` (`tests/chz_suite.rs`).
 #
-# `Ty::BuiltinFn` (a first-class universe builtin value — `ord`/`chr`/`panic`/`print`) is a SEPARATE
-# `Ty` variant from `Ty::Func` (kept apart only for sendability) but renders identically in
-# diagnostics ("fn(str) -> int") and was the SAME defect: missed by the first W7-54 pass because the
-# D1 gate's exclusion list never named it. It now shares `Ty::Func`'s `"func"` `intrinsic_recv_kind`,
-# so it is covered by the same rows below (`two_loads_of_one_builtin_fn_are_equal` etc.) — CPython:
+# A first-class universe builtin value (`ord`/`chr`/`panic`/`print`) is a `Ty::Func` like any fn
+# value, so the same rows cover it (`two_loads_of_one_builtin_fn_are_equal` etc.) — CPython:
 # `ord == ord` -> `True`, matching.
 #
 # The `.eq()` method spelling is exercised through `eqm`'s ERASED `[T: Eq]` bound, not called bare on
@@ -83,12 +80,10 @@ test fn box_over_a_function_payload_satisfies_eq():
     assert (Box(g) == Box(g)) == true
     assert (Box(g) == Box(h)) == false, "different functions, so the dispatched eq must say false"
 
-# ---- W7-54 follow-up: `Ty::BuiltinFn` (ord/chr/panic/print) is the same defect, same fix ----
+# ---- W7-54 follow-up: a builtin fn value (ord/chr/panic/print) is a fn value like any other ----
 #
-# `Ty::BuiltinFn` is a distinct `Ty` variant from `Ty::Func` (kept apart only so it can be sendable
-# across `spawn`), but it renders identically ("fn(str) -> int") and was excluded from the D1 `Eq`
-# gate for the same reason `Ty::Func` was: no `intrinsic_recv_kind` classification. It now shares
-# `Ty::Func`'s `"func"` kind, so `==`, the erased `[T: Eq]` `.eq()` spelling, and `Box[T]` all agree.
+# A builtin fn value is a `Ty::Func` and has the `"func"` kind, so `==`, the erased `[T: Eq]`
+# `.eq()` spelling, and `Box[T]` all agree.
 
 test fn two_loads_of_one_builtin_fn_are_equal():
     a := ord
@@ -109,9 +104,8 @@ fn u(s: str) -> int:
     return s.len()
 
 test fn a_user_fn_and_a_builtin_of_the_same_type_are_unequal():
-    # The only FALSE-direction row available for a builtin, and it pins the cross-variant case the
-    # shared `"func"` kind creates: `u` is a `Ty::Func`, `ord` a `Ty::BuiltinFn`, same rendered type
-    # `fn(str) -> int`. Before the follow-up these DISAGREED — `u == ord` was `false` while
+    # The only FALSE-direction row available for a builtin: `u` (a user fn) and `ord` (a builtin)
+    # have the same type `fn(str) -> int`. Before the follow-up these DISAGREED — `u == ord` was `false` while
     # `eqm(u, ord)` was a type error. CPython agrees they are unequal: a user `def` vs `ord` -> False.
     assert (u == ord) == false
     assert eqm(u, ord) == false

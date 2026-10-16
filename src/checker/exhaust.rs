@@ -81,7 +81,6 @@ fn dom_of_ty(chk: &Checker, ty: &Ty) -> Dom {
         | Ty::Map(..)
         | Ty::Set(_)
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Enum(..)
         | Ty::Param(_)
         | Ty::Result(..)

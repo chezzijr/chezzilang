@@ -520,7 +520,6 @@ impl Checker {
             | Ty::Bytes
             | Ty::ByteArray
             | Ty::Nil
-            | Ty::BuiltinFn { .. }
             | Ty::Param(_)
             | Ty::AtomicInt
             | Ty::Executor

@@ -496,7 +496,6 @@ impl Checker {
                 | Ty::Map(..)
                 | Ty::Set(_)
                 | Ty::Func { .. }
-                | Ty::BuiltinFn { .. }
                 | Ty::Tuple(_)
                 | Ty::Struct(..)
                 | Ty::Enum(..)

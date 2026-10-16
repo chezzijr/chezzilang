@@ -428,7 +428,7 @@ impl Checker {
         match &value.kind {
             ExprKind::Closure { .. } => Some(Vec::new()),
             ExprKind::Ident(n) if self.lookup(n).is_none() => {
-                self.functions.contains_key(n).then(Vec::new)
+                (self.functions.contains_key(n) || self.names_builtin_fn(n)).then(Vec::new)
             }
             ExprKind::Ident(n) => self.labels_certain(n),
             // TICKET-187/204: `g := m.f`, a type-applied fn value (`pair[str, int]`) and a type
@@ -906,10 +906,6 @@ impl Checker {
                 ret: Box::new(self.fill_ret(ret, bad)),
                 labels: labels.clone(),
                 variadic: *variadic,
-            },
-            Ty::BuiltinFn { params, ret } => Ty::BuiltinFn {
-                params: params.iter().map(|x| self.fill_ret(x, bad)).collect(),
-                ret: Box::new(self.fill_ret(ret, bad)),
             },
             // Leaf types carry no inner `Ty` (nothing to fill or flag). `Ty::Param` is intentionally
             // passed through UNTOUCHED — generic fns / the proto.rs HOF loop-back own it, an `Unknown`

@@ -493,15 +493,6 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
             "-",
         ),
-        // SECOND row for the SAME kind, and it is not redundant: `Ty::BuiltinFn` (`ord`/`chr`/
-        // `panic`/`print`) is a DISTINCT `Ty` variant that shares `"func"`'s `intrinsic_recv_kind`
-        // (the W7-54 follow-up). The matrix sweep below loops `for rv in recvs`, so this row is what
-        // actually feeds a `Ty::BuiltinFn` to every protocol's `bound_probe` — without it the sweep
-        // would prove nothing about the variant, and a future protocol arm matching `BuiltinFn` but
-        // not `Func` would get no cell at all. `accepted` is deduped, so the shared ("Eq", "func")
-        // cell still matches `registered` exactly once; `recv_of` returns the FIRST row, so the
-        // runtime probe below stays the `Ty::Func` one.
-        r(RecvKind::Func, "", "ord", "-", "-", "-", "-", "-", "-"),
         // W7-52 — a protocol-typed (existential) value's `Eq` grant. Can't write `a: Sized_ =
         // Tag(1)` (the probe template is a bare `a := {lit}`, no annotation), so the prelude carries
         // a factory whose RETURN type is the protocol — `a := mkp()` then really infers `a: Ty::
@@ -574,7 +565,7 @@ fn intrinsic_grants_all_have_vm_arms() {
             "-",
         ),
     ];
-    // Every `RecvKind` has a receiver (`func` has two: `Ty::Func` and `Ty::BuiltinFn`).
+    // Every `RecvKind` has a receiver.
     for k in RecvKind::ALL {
         assert!(
             recvs.iter().any(|r| r.kind == k),

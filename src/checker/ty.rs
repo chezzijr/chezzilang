@@ -325,19 +325,6 @@ pub enum Ty {
         /// follows it (`C`). PART of the type: `compatible`/`unify` compare it.
         variadic: crate::ast::Variadic,
     },
-    /// A first-class UNIVERSE builtin FUNCTION value (`print`/`ord`/`chr`/`panic`) used in value
-    /// position (`f := ord`, a HOF arg, a bare `defer print(...)`). DISTINCT from [`Ty::Func`] (a user
-    /// closure/free-fn value) so it can be BOTH sendable — pure code, it crosses the spawn airlock
-    /// (`Obj::Builtin`/`Value::Builtin`), whereas a plain `Func` is conservatively non-sendable — AND
-    /// still a genuine callable that (unlike `Ty::Unknown`) `expect_bool` rejects in a condition.
-    /// Carries the builtin's canonical signature (from `builtin_sig`) so it stays HOF-compatible with
-    /// a matching `fn(...)` param. These four builtins are monomorphic (no type params), so it never
-    /// carries a `Ty::Param` — generic substitution over it is a no-op. Never written by the user;
-    /// only produced by `infer_ident`.
-    BuiltinFn {
-        params: Vec<Ty>,
-        ret: Box<Ty>,
-    },
     /// `(T1, T2, …)` — a fixed-arity tuple (always ≥2 elements).
     Tuple(Vec<Ty>),
     /// A struct type, with its generic type arguments (empty for a non-generic struct). E.g.
@@ -485,7 +472,6 @@ impl Ty {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Struct(..)
             | Ty::Param(_)
@@ -541,7 +527,6 @@ impl Ty {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Struct(..)
             | Ty::Enum(..)
@@ -591,7 +576,6 @@ impl Ty {
             | Ty::Map(..)
             | Ty::Set(_)
             | Ty::Func { .. }
-            | Ty::BuiltinFn { .. }
             | Ty::Tuple(_)
             | Ty::Struct(..)
             | Ty::Enum(..)
@@ -635,7 +619,6 @@ impl Ty {
             | other @ Ty::Map(..)
             | other @ Ty::Set(_)
             | other @ Ty::Func { .. }
-            | other @ Ty::BuiltinFn { .. }
             | other @ Ty::Tuple(_)
             | other @ Ty::Struct(..)
             | other @ Ty::Enum(..)
@@ -686,7 +669,11 @@ impl Ty {
                 Ty::Map(k, v) | Ty::Result(k, v) => open(k) || open(v),
                 Ty::Struct(_, a) | Ty::Enum(_, a) | Ty::Protocol(_, a) => a.iter().any(open),
                 Ty::Tuple(ts) => ts.iter().any(open),
-                Ty::Func { params, ret, .. } => params.iter().any(open) || open(ret),
+                // A return of `Unknown` is bottom, a fn that never returns (`panic`), not a hole:
+                // no annotation spells it, and the value `p := panic` is legal.
+                Ty::Func { params, ret, .. } => {
+                    params.iter().any(open) || (!ret.is_unknown() && open(ret))
+                }
                 Ty::Int
                 | Ty::Float
                 | Ty::Bool
@@ -694,7 +681,6 @@ impl Ty {
                 | Ty::Bytes
                 | Ty::ByteArray
                 | Ty::Nil
-                | Ty::BuiltinFn { .. }
                 | Ty::Param(_)
                 | Ty::AtomicInt
                 | Ty::Executor
@@ -711,9 +697,8 @@ impl Ty {
         !self.is_unknown() && open(self)
     }
 
-    /// The parameter and return types of any function value: a user [`Ty::Func`] or a builtin
-    /// [`Ty::BuiltinFn`] (`ord`, `chr`). They differ only in sendability, never in shape, so a
-    /// structural question (generic inference, arity) asks this instead of matching one variant.
+    /// The parameter and return types of a function value, and whether it is variadic. A structural
+    /// question (generic inference, arity) asks this instead of matching the variant.
     pub fn fn_parts(&self) -> Option<(&[Ty], &Ty, crate::ast::Variadic)> {
         match self {
             Ty::Func {
@@ -722,7 +707,6 @@ impl Ty {
                 variadic,
                 ..
             } => Some((params, ret, *variadic)),
-            Ty::BuiltinFn { params, ret } => Some((params, ret, crate::ast::Variadic::No)),
             Ty::Int
             | Ty::Float
             | Ty::Bool
@@ -879,33 +863,6 @@ pub fn compatible(expected: &Ty, actual: &Ty) -> bool {
                 && p1.iter().zip(p2).all(|(a, b)| param_invariant(a, b))
                 && compatible(r1, r2)
         }
-        // A first-class builtin-fn value is signature-compatible with a matching `fn(...)` param (so
-        // `apply(ord)` where `apply` wants `fn(str) -> int` type-checks) and with another builtin-fn
-        // of the same shape. Compared by arity + param/ret compatibility, exactly like `Func`.
-        (
-            Func {
-                params: p1,
-                ret: r1,
-                ..
-            }
-            | BuiltinFn {
-                params: p1,
-                ret: r1,
-            },
-            Func {
-                params: p2,
-                ret: r2,
-                ..
-            }
-            | BuiltinFn {
-                params: p2,
-                ret: r2,
-            },
-        ) => {
-            p1.len() == p2.len()
-                && p1.iter().zip(p2).all(|(a, b)| param_invariant(a, b))
-                && compatible(r1, r2)
-        }
         (Tuple(a), Tuple(b)) => {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| compatible(x, y))
         }
@@ -942,7 +899,7 @@ struct Operand<'a>(&'a Ty, Option<&'a HashMap<String, String>>);
 impl fmt::Display for Operand<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let parens = match self.0 {
-            Ty::Func { .. } | Ty::BuiltinFn { .. } => true,
+            Ty::Func { .. } => true,
             Ty::Result(_, e) => has_explicit_error(e),
             Ty::Int
             | Ty::Float
@@ -1082,7 +1039,7 @@ impl Ty {
                 b.collect_nominal_keys(out);
             }
             Ty::Tuple(ts) => ts.iter().for_each(|t| t.collect_nominal_keys(out)),
-            Ty::Func { params, ret, .. } | Ty::BuiltinFn { params, ret } => {
+            Ty::Func { params, ret, .. } => {
                 params.iter().for_each(|t| t.collect_nominal_keys(out));
                 ret.collect_nominal_keys(out);
             }
@@ -1216,16 +1173,6 @@ impl Ty {
                 }
                 if *variadic == crate::ast::Variadic::C {
                     write!(f, "{}...", if params.is_empty() { "" } else { ", " })?;
-                }
-                write!(f, ") -> {}", Named(ret, names))
-            }
-            Ty::BuiltinFn { params, ret } => {
-                write!(f, "fn(")?;
-                for (i, p) in params.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", Named(p, names))?;
                 }
                 write!(f, ") -> {}", Named(ret, names))
             }

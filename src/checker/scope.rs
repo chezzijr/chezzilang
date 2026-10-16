@@ -615,7 +615,6 @@ impl Checker {
             | want @ Ty::List(_)
             | want @ Ty::Map(..)
             | want @ Ty::Set(_)
-            | want @ Ty::BuiltinFn { .. }
             | want @ Ty::Tuple(_)
             | want @ Ty::Struct(..)
             | want @ Ty::Enum(..)

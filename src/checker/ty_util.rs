@@ -461,7 +461,6 @@ pub(super) fn ty_all_holes(ty: &Ty, ok: &dyn Fn(&Ty) -> bool) -> bool {
         | Ty::Bytes
         | Ty::ByteArray
         | Ty::Nil
-        | Ty::BuiltinFn { .. }
         | Ty::Channel(_)
         | Ty::Shared(_)
         | Ty::Atomic(_)
@@ -590,7 +589,6 @@ pub(super) fn pin_generic_fn_value(
         | Ty::Map(..)
         | Ty::Set(_)
         | Ty::Func { .. }
-        | Ty::BuiltinFn { .. }
         | Ty::Tuple(_)
         | Ty::Struct(..)
         | Ty::Enum(..)
@@ -763,7 +761,6 @@ pub(super) fn subst(ty: &Ty, map: &HashMap<String, Ty>) -> Ty {
         | other @ Ty::Bytes
         | other @ Ty::ByteArray
         | other @ Ty::Nil
-        | other @ Ty::BuiltinFn { .. }
         | other @ Ty::AtomicInt
         | other @ Ty::Executor
         | other @ Ty::Socket
@@ -1064,7 +1061,6 @@ pub(super) fn mask_closure_ret(actual: &Ty) -> Ty {
         | other @ Ty::List(_)
         | other @ Ty::Map(..)
         | other @ Ty::Set(_)
-        | other @ Ty::BuiltinFn { .. }
         | other @ Ty::Tuple(_)
         | other @ Ty::Struct(..)
         | other @ Ty::Enum(..)
@@ -1210,7 +1206,6 @@ pub(super) fn ty_collect_params(
         | Ty::Bytes
         | Ty::ByteArray
         | Ty::Nil
-        | Ty::BuiltinFn { .. }
         | Ty::AtomicInt
         | Ty::Executor
         | Ty::Socket
